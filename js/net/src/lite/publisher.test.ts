@@ -1222,6 +1222,30 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	}
 }
 
+for (const updated of [5_000, 60_000]) {
+	test(`lite draft-07: a held selection keeps its 30000ms budget across an update to ${updated}`, async () => {
+		const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 2 });
+		try {
+			hooks.startTrack(sub.track, { requested: 2 });
+			sub.serve(6);
+			await flush();
+			await new SubscribeUpdate({ priority: 0, startGroup: 2, maxDelay: updated }).encode(
+				sub.client.writer,
+				Version.DRAFT_07,
+			);
+			while (sub.track.subscription.peek()?.maxDelay !== updated) await sub.track.subscription.changed();
+			hooks.startTrack(sub.track, { start: 3, requested: 2 });
+			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(response.start.group).toBe(3);
+			expect(response.start.maxDelay).toBe(TEST_MAX_DELAY_MS);
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+}
+
 // A relay's group stream can beat the upstream START on its own stream. Resolving from that
 // group would give up the backlog the START still promises, so the first group waits for it.
 for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {

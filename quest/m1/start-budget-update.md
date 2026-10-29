@@ -10,14 +10,15 @@ unpublished wire change rather than the originally planned lite-06 fix.
 
 ## Plan
 
-Scope decision pending: the original released-wire Goal is unattainable.
-Recommend keeping this quest for an explicit budget binding on lite-07,
-coordinated with
+Decided 2026-10-29 (explicit implementation brief under `/afk`): keep this
+quest for the draft's recommended unpublished-wire scope. This supersedes
+the earlier investigation-only brief. Echo the selecting Subscriber Max Age
+in lite-07 START in Rust and JS, retaining it alongside a pending selected
+group. Keep published encodings and their conservative ambiguous-budget
+behavior. Do not add per-update STARTs or update revisions; coordinate with
 [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) and
-[Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md).
-The alternative is folding this work into that bookkeeping quest or
-abandoning it and accepting the released-wire limitation. No wire design has
-been approved by this investigation.
+[Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md)
+without taking over their work. Advance the PR only, never merge or enqueue.
 
 ### Ordering evidence
 
@@ -56,7 +57,7 @@ so a later 15-second reader still skips the history this quest sought to
 recover. The same ambiguity applies when a widening crosses START. Do not
 ship either inference as a fix or claim the released-wire Goal is met.
 
-### Remaining implementation after scope approval
+### Implementation and validation
 
 1. Define a response binding the resolved start to the budget used to select
    it on an unpublished wire. Prefer echoing that budget over keeping a

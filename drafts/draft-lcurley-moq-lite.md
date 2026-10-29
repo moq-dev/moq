@@ -1426,7 +1426,7 @@ The name a TRACKS_ADD on the stream listed.
 A SUBSCRIBE_OK message confirms a subscription and resolves its absolute start position.
 It is the first message the publisher sends on the Subscribe Stream, once the start position is known.
 
-This is the trimmed-down counterpart of MoqTransport's SUBSCRIBE_OK: it retains the name and the role of the publisher's positive response, but carries only the resolved start position and the publisher's largest position (all other per-track properties live in [TRACK_INFO](#track-info)).
+This is the trimmed-down counterpart of MoqTransport's SUBSCRIBE_OK: it retains the name and the role of the publisher's positive response, but carries only the resolved start position, its subscriber budget, and the publisher's largest position (all other per-track properties live in [TRACK_INFO](#track-info)).
 
 ~~~
 SUBSCRIBE_OK Message {
@@ -1435,6 +1435,7 @@ SUBSCRIBE_OK Message {
   Group (i)
   Largest Group (i)
   [Largest Frame (i)]
+  Subscriber Max Age (i)
 }
 ~~~
 
@@ -1463,6 +1464,12 @@ The frame offset belonged to group 5 and is gone along with the rest of it; it d
 The largest position the publisher knows of for the track when it answers: the last frame that exists, like moq-transport's Largest Location, including one a relay's source reported that has yet to arrive.
 `Largest Group` is the group sequence plus one, and 0 means the track has nothing yet, in which case `Largest Frame` is absent.
 A subscriber takes it as where the live feed is: a relay holding groups from an earlier subscription serves them from cache only once this says they are current, which a publisher answering promptly lets it do without waiting for a frame.
+
+**Subscriber Max Age**:
+The `Subscriber Max Age` from SUBSCRIBE or SUBSCRIBE_UPDATE used when selecting the start group, in milliseconds.
+The publisher MUST retain it with a selected group while waiting to send this response; a later update does not change it.
+A subscriber MAY give up history below `Group` for readers whose max age is no greater than this value.
+A reader with a greater max age can still request that history.
 
 ## SUBSCRIBE_END {#subscribe-end}
 A SUBSCRIBE_END message is sent by the publisher to signal that no group at or after a given sequence will be produced.
@@ -1792,6 +1799,7 @@ The `Message Length` describes the payload size on the wire.
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
 - Listed the shared EXPIRED_AUTH_TOKEN (0x18) session code. A request that expires on its own resets with the UNAUTHORIZED stream code.
 
+- Added `Subscriber Max Age` to SUBSCRIBE_OK, binding its start to the budget used at selection.
 - SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
 - Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges. Each end is an Anchor: none, an absolute Position (exclusive as an end), a count of Groups back from the latest, or a presentation time.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.

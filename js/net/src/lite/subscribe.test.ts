@@ -227,7 +227,7 @@ test("SubscribeStart round-trips on draft-05", async () => {
 test("SubscribeStart carries the largest position on draft-07", async () => {
 	// Type, length, group, largest group + 1, largest frame.
 	expect(await encode(Version.DRAFT_07, { start: new SubscribeStart(4, { group: 3, frame: 2 }) })).toEqual(
-		new Uint8Array([0, 3, 4, 4, 2]),
+		new Uint8Array([0, 4, 4, 4, 2, 0]),
 	);
 	for (const largest of [undefined, { group: 3, frame: 2 }]) {
 		const got = await responseRoundtrip(Version.DRAFT_07, { start: new SubscribeStart(4, largest) });
@@ -238,6 +238,17 @@ test("SubscribeStart carries the largest position on draft-07", async () => {
 	expect(await encode(Version.DRAFT_06, { start: new SubscribeStart(4, { group: 3, frame: 2 }) })).toEqual(
 		new Uint8Array([0, 1, 4]),
 	);
+});
+
+test("SubscribeStart binds its budget only on the unpublished wire", async () => {
+	const start = new SubscribeStart(4, { group: 3, frame: 2 }, 5000);
+	expect(await encode(Version.DRAFT_07, { start })).toEqual(new Uint8Array([0, 5, 4, 4, 2, 0x93, 0x88]));
+	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+		const got = await responseRoundtrip(version, { start });
+		if (!("start" in got)) throw new Error("expected start");
+		expect(got.start.maxDelay).toBe(version === Version.DRAFT_07 ? 5000 : undefined);
+		if (version !== Version.DRAFT_07) expect(await encode(version, { start })).toEqual(new Uint8Array([0, 1, 4]));
+	}
 });
 
 test("SubscribeEnd round-trips on draft-05", async () => {

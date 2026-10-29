@@ -463,6 +463,7 @@ mod tests {
 
 		writer
 			.buffer(&lite::SubscribeStart {
+				max_delay: Some(std::time::Duration::ZERO),
 				group: 3,
 				largest: None,
 			})

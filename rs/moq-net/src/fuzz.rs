@@ -829,6 +829,7 @@ impl Default for Messages {
 				}],
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
+				max_delay: Some(std::time::Duration::ZERO),
 				group: 1_234,
 				largest: None,
 			}),

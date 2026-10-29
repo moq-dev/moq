@@ -3828,7 +3828,7 @@ struct TrackRun {
 	// Where SUBSCRIBE_START resolved the feed, once sent.
 	start: Option<u64>,
 	// The first servable group, held until the source resolves where its feed starts.
-	first: Option<group::Consumer>,
+	first: Option<(group::Consumer, Duration)>,
 	// Groups given up before the start resolved, which it must not name, with why.
 	skipped: RangeMap<u64, StreamError>,
 	end_sent: bool,
@@ -4054,14 +4054,14 @@ impl TrackRun {
 
 		// The first group waits for the source to resolve where its feed starts; datagrams
 		// keep flowing meanwhile.
-		if let Some(group) = self.first.take() {
+		if let Some((group, max_delay)) = self.first.take() {
 			match self.track.poll_start(waiter) {
 				Poll::Ready(source) => {
-					self.start(group, source, writer)?;
+					self.start((group, max_delay), source, writer)?;
 					return Poll::Ready(Ok(ControlFlow::Continue(())));
 				}
 				Poll::Pending => {
-					self.first = Some(group);
+					self.first = Some((group, max_delay));
 					if self.datagrams
 						&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_stored_datagram(waiter)?
 					{
@@ -4089,6 +4089,12 @@ impl TrackRun {
 		{
 			self.start = Some(start);
 			writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
+				max_delay: Some(
+					self.track
+						.subscription()
+						.max_delay
+						.unwrap_or(Duration::from_millis(super::MAX_SAFE_DELAY_MS)),
+				),
 				group: start,
 				largest: Some(largest),
 			}))?;
@@ -4135,7 +4141,15 @@ impl TrackRun {
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					};
 					match self.emit_range && self.start.is_none() {
-						true => self.first = Some(group),
+						true => {
+							self.first = Some((
+								group,
+								self.track
+									.subscription()
+									.max_delay
+									.unwrap_or(Duration::from_millis(super::MAX_SAFE_DELAY_MS)),
+							))
+						}
 						false => self.serve(group),
 					}
 				}
@@ -4319,7 +4333,7 @@ impl TrackRun {
 	/// drop the older one for good.
 	fn start(
 		&mut self,
-		group: group::Consumer,
+		(group, max_delay): (group::Consumer, Duration),
 		source: Option<u64>,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
@@ -4344,6 +4358,7 @@ impl TrackRun {
 		};
 		let largest = live.max(self.track.peek_largest());
 		writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
+			max_delay: Some(max_delay),
 			group: start,
 			largest,
 		}))?;
@@ -6142,7 +6157,10 @@ mod serve_group_test {
 
 		// SUBSCRIBE_START at 0, a DROP for the skipped group 1 with NOT_FOUND (0x33), which
 		// the end gives up on at once, and SUBSCRIBE_END at 3.
-		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 2, 3, 1, 1, 0x33, 1, 1, 3]);
+		assert_eq!(
+			*log.writes.lock().unwrap(),
+			[0, 4, 0, 1, 0, 0, 2, 3, 1, 1, 0x33, 1, 1, 3]
+		);
 	}
 
 	/// A relay that holds only the first group of a backlog answers with the largest its
@@ -7123,6 +7141,40 @@ mod serve_group_test {
 		assert_eq!(relay.opened(), 3, "group 0 is cached and now in range");
 	}
 
+	/// A selection waiting for upstream START keeps the budget used at the group pop,
+	/// even when a tightening or widening is applied before the response can be written.
+	#[moq_clock::test]
+	async fn a_held_start_keeps_its_selected_budget() {
+		for updated in [5, 60] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let mut relay = RelayRun::new(&mut track, 0);
+			write_group(&mut track, 5, 0);
+			relay.settle();
+			assert!(relay.run.first.is_some(), "selection waits for upstream START");
+			relay.run.update(lite::SubscribeUpdate {
+				wanted_group: None,
+				order: Order::Descending,
+				priority: 0,
+				max_delay: Duration::from_secs(updated),
+				ranges: vec![lite::Range::OLDEST],
+			});
+			relay.settle();
+			track.start_at(0).unwrap();
+			relay.settle();
+			let writes = relay.session.log.writes.lock().unwrap();
+			let (lite::SubscribeResponse::Start(start), _) =
+				lite::SubscribeResponse::decode_slice(&writes, Version::Lite07).unwrap()
+			else {
+				panic!("expected START")
+			};
+			assert_eq!(start.max_delay, Some(Duration::from_secs(30)));
+		}
+	}
+
 	/// A SUBSCRIBE_UPDATE landing while the first group waits on the source's start keeps
 	/// the floor it raised: resolving the start from the held group must not lower it.
 	#[moq_clock::test]
@@ -7276,7 +7328,7 @@ mod serve_group_test {
 		assert_eq!(
 			*log.writes.lock().unwrap(),
 			// The DROP carries OLD (0x34).
-			[0, 3, 0, 1, 0, 2, 3, 0, 0, 0x34, 1, 1, 2],
+			[0, 4, 0, 1, 0, 0, 2, 3, 0, 0, 0x34, 1, 1, 2],
 			"the expired group is dropped and the end precedes stream credit"
 		);
 
@@ -7286,7 +7338,10 @@ mod serve_group_test {
 		*open = true;
 		drop(open);
 		run.await.unwrap();
-		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 2, 3, 0, 0, 0x34, 1, 1, 2]);
+		assert_eq!(
+			*log.writes.lock().unwrap(),
+			[0, 4, 0, 1, 0, 0, 2, 3, 0, 0, 0x34, 1, 1, 2]
+		);
 	}
 }
 

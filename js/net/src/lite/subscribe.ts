@@ -617,9 +617,13 @@ export class SubscribeStart {
 	 */
 	largest?: Position;
 
-	constructor(group: number, largest?: Position) {
+	/** Subscriber Max Age used to select the start, absent before draft-07. */
+	maxDelay?: number;
+
+	constructor(group: number, largest?: Position, maxDelay = 0) {
 		this.group = group;
 		this.largest = largest;
+		this.maxDelay = maxDelay;
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -633,16 +637,21 @@ export class SubscribeStart {
 				await w.u53(this.largest.group + 1);
 				await w.u53(this.largest.frame);
 			}
+			if (this.maxDelay === undefined) throw new Error("missing start budget");
+			await w.u53(this.maxDelay);
 		});
 	}
 
 	static async decode(r: Reader, version: Version): Promise<SubscribeStart> {
 		return Message.decode(r, async (r) => {
 			const group = await r.u53();
-			if (!hasLargest(version)) return new SubscribeStart(group);
+			const start = new SubscribeStart(group);
+			start.maxDelay = undefined;
+			if (!hasLargest(version)) return start;
 			const largest = await r.u53();
-			if (largest === 0) return new SubscribeStart(group);
-			return new SubscribeStart(group, { group: largest - 1, frame: await r.u53() });
+			if (largest !== 0) start.largest = { group: largest - 1, frame: await r.u53() };
+			start.maxDelay = await r.u53();
+			return start;
 		});
 	}
 }

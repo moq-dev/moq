@@ -204,7 +204,7 @@ impl MockSendStream {
 			&& size > 0
 		{
 			if let Some(types) = self.first_byte.take() {
-				types.lock().unwrap().push(first.expect("non-empty write"));
+				types.lock().push(first.expect("non-empty write"));
 			}
 			self.line.arrivals.lock().unwrap().push_back(self.conn.arrival());
 		}
@@ -427,7 +427,7 @@ impl Drop for MockChunks {
 type Resets = Arc<Mutex<Vec<u32>>>;
 
 /// The first byte of each bidi stream one side has opened.
-type StreamTypes = Arc<Mutex<Vec<u8>>>;
+type StreamTypes = Arc<kio::Shared<Vec<u8>>>;
 
 /// One side's knobs.
 struct Side {
@@ -832,7 +832,21 @@ impl MockSession {
 	/// The first byte, the stream type, of every bidi stream this side has written to,
 	/// in the order each was first written.
 	pub fn bidi_types(&self) -> Vec<u8> {
-		self.side.bidi_types.lock().unwrap().clone()
+		self.side.bidi_types.read().clone()
+	}
+
+	/// Wait for `count` streams of `kind` to reach the wire.
+	pub async fn bidi_count(&self, kind: u8, count: usize) {
+		kio::wait(|waiter| {
+			self.side.bidi_types.poll(waiter, |types| {
+				if types.iter().filter(|&&byte| byte == kind).count() >= count {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			})
+		})
+		.await;
 	}
 
 	/// Every code this side has reset a stream with, in order.

@@ -504,6 +504,8 @@ impl<'a> Message<'a> for SubscribeOk {
 /// subscriber that asked for group 5 frame 15 and receives group 6 starts at frame 0.
 #[derive(Clone, Debug)]
 pub struct SubscribeStart {
+	/// The Subscriber Max Age used to select the start, absent before lite-07.
+	pub max_delay: Option<std::time::Duration>,
 	pub group: u64,
 	/// The publisher's largest (group, frame) when it answered, `None` for a track with
 	/// nothing yet. Lite07+ only; not on the wire before, where it decodes as `None`.
@@ -528,7 +530,15 @@ impl<'a> Message<'a> for SubscribeStart {
 			},
 			false => None,
 		};
-		Ok(Self { group, largest })
+		let max_delay = version
+			.has_ranges()
+			.then(|| r.varint().map(std::time::Duration::from_millis))
+			.transpose()?;
+		Ok(Self {
+			group,
+			largest,
+			max_delay,
+		})
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -541,6 +551,10 @@ impl<'a> Message<'a> for SubscribeStart {
 			if let Some(largest) = self.largest {
 				w.varint(largest.frame)?;
 			}
+		}
+		if version.has_ranges() {
+			let max_delay = self.max_delay.ok_or(EncodeError::Version)?;
+			w.varint(u64::try_from(max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
 		}
 		Ok(())
 	}
@@ -839,6 +853,7 @@ mod test {
 	#[test]
 	fn subscribe_start_roundtrips_on_lite05() {
 		let resp = SubscribeResponse::Start(SubscribeStart {
+			max_delay: Some(std::time::Duration::ZERO),
 			group: 42,
 			largest: None,
 		});
@@ -857,7 +872,11 @@ mod test {
 	#[test]
 	fn subscribe_start_carries_the_largest_position_on_lite07() {
 		for largest in [None, Some(crate::track::Position { group: 3, frame: 2 })] {
-			let resp = SubscribeResponse::Start(SubscribeStart { group: 4, largest });
+			let resp = SubscribeResponse::Start(SubscribeStart {
+				group: 4,
+				largest,
+				max_delay: Some(std::time::Duration::ZERO),
+			});
 			let mut buf = Vec::new();
 			resp.encode(
 				&mut crate::coding::Encoder::new(&mut buf, Version::Lite07.into()),
@@ -870,6 +889,7 @@ mod test {
 			}
 		}
 		let resp = SubscribeResponse::Start(SubscribeStart {
+			max_delay: Some(std::time::Duration::ZERO),
 			group: 4,
 			largest: Some(crate::track::Position { group: 3, frame: 2 }),
 		});
@@ -880,6 +900,38 @@ mod test {
 		)
 		.unwrap();
 		assert_eq!(buf, [0, 1, 4], "lite-06 has no largest position");
+	}
+
+	#[test]
+	fn subscribe_start_binds_the_budget_only_on_lite07() {
+		let response = SubscribeResponse::Start(SubscribeStart {
+			group: 4,
+			largest: Some(crate::track::Position { group: 3, frame: 2 }),
+			max_delay: Some(std::time::Duration::from_millis(5000)),
+		});
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut bytes = Vec::new();
+			response
+				.encode(&mut Encoder::new(&mut bytes, version.into()), version)
+				.unwrap();
+			assert_eq!(
+				bytes,
+				if version.has_ranges() {
+					vec![0, 5, 4, 4, 2, 0x93, 0x88]
+				} else {
+					vec![0, 1, 4]
+				}
+			);
+			let (SubscribeResponse::Start(start), _) = SubscribeResponse::decode_slice(&bytes, version).unwrap() else {
+				panic!("expected START")
+			};
+			assert_eq!(
+				start.max_delay,
+				version.has_ranges().then(|| std::time::Duration::from_millis(5000))
+			);
+		}
+		// A lite-07 peer must prove its budget, including when its track is empty.
+		assert!(SubscribeResponse::decode_slice(&[0, 2, 4, 0], Version::Lite07).is_err());
 	}
 
 	#[test]

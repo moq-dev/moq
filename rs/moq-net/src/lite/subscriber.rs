@@ -2143,7 +2143,7 @@ mod tests {
 				.unwrap(),
 			id: 0,
 			max_delay: Duration::ZERO,
-			requested_max_delay: Duration::ZERO,
+			sent_max_delay: Duration::ZERO,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -2279,7 +2279,7 @@ mod tests {
 					.unwrap(),
 				id: 0,
 				max_delay: Duration::ZERO,
-				requested_max_delay: Duration::ZERO,
+				sent_max_delay: Duration::ZERO,
 				start: Some(floor),
 				priority: 0,
 				requested: Some(floor),
@@ -2743,7 +2743,7 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Duration::ZERO,
-			requested_max_delay: Duration::ZERO,
+			sent_max_delay: Duration::ZERO,
 			start: Some(2),
 			priority: 0,
 			requested: Some(2),
@@ -3436,6 +3436,7 @@ mod tests {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut responses = Vec::new();
 			lite::SubscribeResponse::Start(lite::SubscribeStart {
+				max_delay: Some(std::time::Duration::ZERO),
 				group: 0,
 				largest: None,
 			})
@@ -3554,6 +3555,7 @@ mod tests {
 		let mut answer = Vec::new();
 		let mut encoder = crate::coding::Encoder::new(&mut answer, version.into());
 		lite::SubscribeResponse::Start(lite::SubscribeStart {
+			max_delay: Some(std::time::Duration::ZERO),
 			group: 0,
 			largest: None,
 		})
@@ -3608,6 +3610,7 @@ mod tests {
 		let largest = track::Position { group: 4, frame: 2 };
 		let mut responses = Vec::new();
 		lite::SubscribeResponse::Start(lite::SubscribeStart {
+			max_delay: Some(std::time::Duration::ZERO),
 			group: 4,
 			largest: Some(largest),
 		})
@@ -3670,6 +3673,7 @@ mod tests {
 			let code = crate::coding::StreamCodes::encode_stream_code(&Version::Lite07, &crate::StreamError::App(5));
 			for resp in [
 				lite::SubscribeResponse::Start(lite::SubscribeStart {
+					max_delay: Some(std::time::Duration::ZERO),
 					group: 0,
 					largest: None,
 				}),
@@ -3810,6 +3814,7 @@ mod tests {
 		let mut responses = Vec::new();
 		if started {
 			lite::SubscribeResponse::Start(lite::SubscribeStart {
+				max_delay: Some(std::time::Duration::ZERO),
 				group: 0,
 				largest: None,
 			})
@@ -6302,9 +6307,9 @@ struct SubStream {
 	/// start sits elsewhere the request-tracked floor stands instead, and demand
 	/// returning here makes the declaration valid again.
 	requested: Option<u64>,
-	/// The max delay the SUBSCRIBE itself carried, fixed for the stream's life: a lite-06+
-	/// SUBSCRIBE_START resolves the start from it, skipping older groups as stale.
-	requested_max_delay: Duration,
+	/// The loosest budget sent on this stream. Published STARTs cannot identify which
+	/// update selected their group, so only this conservative budget can judge history.
+	sent_max_delay: Duration,
 	/// The groups received for this subscription, shared with its [`TrackEntry`].
 	tail: kio::Producer<Tail>,
 	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
@@ -6953,6 +6958,7 @@ fn wire_max_delay(max_delay: Option<std::time::Duration>) -> std::time::Duration
 
 /// Buffer the current SUBSCRIBE parameters. The caller flushes.
 fn buffer_update(active: &mut SubStream) -> Result<(), Error> {
+	active.sent_max_delay = active.sent_max_delay.max(active.max_delay);
 	active.bounded |= bounded(&active.ranges);
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		wanted_group: active.wanted,
@@ -7065,7 +7071,7 @@ impl Establish {
 			stream,
 			id: self.id,
 			max_delay: wire_max_delay(self.subscription.max_delay),
-			requested_max_delay: wire_max_delay(self.subscription.max_delay),
+			sent_max_delay: wire_max_delay(self.subscription.max_delay),
 			start: self.subscription.start(),
 			ranges: self.ranges.clone(),
 			priority: self.subscription.priority,
@@ -8011,9 +8017,10 @@ impl ServeLoop {
 										// request-tracked floor stands rather than a guess.
 										if active.start == active.requested {
 											let _ = match serve.subscriber.version.resolves_start() {
-												true => {
-													self.serving.start_resolved(start.group, active.requested_max_delay)
-												}
+												true => self.serving.start_resolved(
+													start.group,
+													start.max_delay.unwrap_or(active.sent_max_delay),
+												),
 												false => self.serving.start_at(start.group),
 											};
 										}

@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use moq_net::track::{Info, Range, Subscription};
-use moq_net::{Hop, Timescale, Timestamp, Version, origin, track};
+use moq_net::{Hop, Timescale, Timestamp, Version, kio, origin, track};
 
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, peer, spawn};
 
@@ -45,41 +45,54 @@ struct Chain {
 	source: track::Producer,
 	viewer: origin::Producer,
 	links: Vec<MockPair>,
+	source_gate: kio::Producer<bool>,
 	_hold: Vec<Box<dyn std::any::Any>>,
 }
 
 impl Chain {
 	/// Without `relay`, the viewer reads the publisher directly.
 	async fn new(version: &str, relay: bool) -> Self {
+		let chain = Self::empty(version, relay).await;
+		chain.populate();
+		chain
+	}
+
+	async fn empty(version: &str, relay: bool) -> Self {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let relay = relay.then(|| origin(2));
 		let viewer = origin(3);
 		let mut links = Vec::new();
-		match &relay {
-			Some(relay) => {
-				links.push(peer(version, &publisher, relay).await);
-				links.push(peer(version, relay, &viewer).await);
-			}
-			None => links.push(peer(version, &publisher, &viewer).await),
+		let source_gate = kio::Producer::new(true);
+		let mut options = MockConnectOptions::new(version);
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(relay.as_ref().unwrap_or(&viewer).clone());
+		options.server_gate = Some(source_gate.consume());
+		links.push(connect_mock(options).await);
+		if let Some(relay) = &relay {
+			links.push(peer(version, relay, &viewer).await);
 		}
 		let broadcast = publisher.create_broadcast("live").unwrap();
 		let source = broadcast
 			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
-		for sequence in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
-			group
-				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
-				.unwrap();
-			group.finish().unwrap();
-		}
 		broadcast.announce(Default::default()).unwrap();
 		Self {
 			source,
 			viewer,
 			links,
+			source_gate,
 			_hold: vec![Box::new(publisher), Box::new(relay), Box::new(broadcast)],
+		}
+	}
+
+	fn populate(&self) {
+		for sequence in 0..GROUPS {
+			let mut group = self.source.create_group(moq_net::group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
+				.unwrap();
+			group.finish().unwrap();
 		}
 	}
 
@@ -137,6 +150,48 @@ async fn a_fresh_reader_fills_nothing_below_its_start() {
 				assert_eq!(chain.fetches(), 0, "{version} relay={relay}: fetched below the start");
 			}
 		}
+	}
+}
+
+/// Tighten while no start is selectable, then ask for a budget between the old and
+/// selected ones. Hold the publisher's driver so only an actual fill request, rather
+/// than its live re-offer, can prove the copy retained the selected budget.
+#[moq_clock::test]
+async fn a_tightened_start_leaves_history_fillable_by_an_intermediate_reader() {
+	for relay in [false, true] {
+		let chain = Chain::empty(VERSION, relay).await;
+		let mut first = chain.subscribe(WIDE).await;
+		let mut source = chain.source.clone();
+		while source.subscription_changed().await.unwrap().is_none() {}
+		first
+			.update(
+				Subscription::default()
+					.with_max_delay(NARROW)
+					.with_ranges([Range::oldest()]),
+			)
+			.unwrap();
+		while source.subscription_changed().await.unwrap().and_then(|s| s.max_delay) != Some(NARROW) {}
+		chain.populate();
+		assert_eq!(received(&mut first).await, (6..GROUPS).collect());
+
+		*chain.source_gate.write().ok().unwrap() = false;
+		let before = chain.fetches();
+		let mut intermediate = chain.subscribe(Duration::from_millis(4500)).await;
+		// Drive the reader's miss walk too, with the upstream deliberately parked.
+		let reading = moq_clock::sim::spawn(async move {
+			let mut got = BTreeSet::new();
+			while got.len() < 6 {
+				got.insert(intermediate.recv_group().await.unwrap().unwrap().sequence);
+			}
+			got
+		});
+		let upstream = &chain.links[0].client_transport;
+		moq_clock::timeout(TIMEOUT, upstream.bidi_count(3, before + 1))
+			.await
+			.expect("the proven tighter start allows fills");
+		*chain.source_gate.write().ok().unwrap() = true;
+		// This reader can also receive the feed's re-offer once the source resumes.
+		assert_eq!(reading.await.unwrap(), (4..GROUPS).collect(), "relay={relay}");
 	}
 }
 

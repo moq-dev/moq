@@ -1165,7 +1165,7 @@ export class Publisher {
 		let startSequence: number | undefined;
 		// The first group and the edge seen before it was popped, held until the source
 		// resolves where its feed starts.
-		let first: { group: group.Consumer; largest: track.Position | undefined } | undefined;
+		let first: { group: group.Consumer; largest: track.Position | undefined; maxDelay: number } | undefined;
 		let endSent = false;
 
 		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
@@ -1301,6 +1301,7 @@ export class Publisher {
 					!startSent && hasLargest(this.version)
 						? newer(first?.largest, newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest))
 						: undefined;
+				const maxDelay = first?.maxDelay ?? track.subscription.peek()?.maxDelay ?? Number.MAX_SAFE_INTEGER;
 				const recv = first
 					? ({ kind: "group", group: first.group } as const)
 					: hooks.tryRecvGroup(track, emitRange);
@@ -1327,7 +1328,7 @@ export class Publisher {
 								startSent = true;
 								startSequence = bounds.startGroup;
 								raiseFloor(bounds.startGroup);
-								const start = new SubscribeStart(bounds.startGroup, largest);
+								const start = new SubscribeStart(bounds.startGroup, largest, maxDelay);
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)
@@ -1386,7 +1387,7 @@ export class Publisher {
 					// A group stream can beat the upstream START on its own stream, and resolving
 					// from the group alone would give up the backlog that START still promises.
 					if (source === "pending") {
-						first = { group, largest };
+						first = { group, largest, maxDelay };
 						await waitForSubscription(controls, track, drops);
 						continue;
 					}
@@ -1410,7 +1411,7 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(startSequence, largest) },
+								{ start: new SubscribeStart(startSequence, largest, maxDelay) },
 								this.version,
 							),
 						))
