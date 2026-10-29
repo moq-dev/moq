@@ -454,7 +454,8 @@ export class Decoder {
 			// header). Report it like a decode failure, which also retires the outgoing estimate.
 			const props = { config, failure, path: active.path };
 			spawnFatal(run, failure, async () => {
-				if (config.container.kind === "cmaf") await this.#runCmafDecoder(run, sub, props);
+				const kind = config.container.kind;
+				if (kind === "cmaf" || kind === "locmaf") await this.#runCmafDecoder(run, sub, props);
 				else this.#runLegacyDecoder(run, sub, props);
 			});
 		});
@@ -545,13 +546,16 @@ export class Decoder {
 		sub: Moq.Track.Subscriber,
 		{ config, failure, path }: { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid },
 	): Promise<void> {
-		if (config.container.kind !== "cmaf") return; // just to help typescript
+		const container = config.container;
+		if (container.kind !== "cmaf" && container.kind !== "locmaf") return; // just to help typescript
 
 		const abort = effect.abort;
 		const Cmaf = await import("@moq/hang/cmaf");
+		// LOCMAF shares CMAF's init segment and differs only in how each chunk's moof is carried.
+		const Locmaf = container.kind === "locmaf" ? await import("@moq/hang/locmaf") : undefined;
 		if (abort.aborted) return;
 
-		const initSegment = base64ToBytes(config.container.init);
+		const initSegment = base64ToBytes(container.init);
 		const init = Cmaf.decodeInitSegment(initSegment);
 		const opusDescription = config.description ? Util.Hex.toBytes(config.description) : init.description;
 		const preSkip = config.codec === "opus" && opusDescription ? Util.Opus.preSkip(opusDescription) : 0;
@@ -565,7 +569,12 @@ export class Decoder {
 					? Util.Hex.toBytes(config.description)
 					: init.description;
 
-		const { consumer, read } = this.#consume(effect, sub, new Cmaf.Format(init), { config, path });
+		const { consumer, read } = this.#consume(
+			effect,
+			sub,
+			Locmaf ? new Locmaf.Format(init) : new Cmaf.Format(init),
+			{ config, path },
+		);
 
 		spawnFatal(effect, failure, async () => {
 			const loaded = await Util.Libav.polyfill();
@@ -944,7 +953,7 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	if (config.codec !== "opus") {
 		if (config.description) {
 			description = Util.Hex.toBytes(config.description);
-		} else if (config.container.kind === "cmaf") {
+		} else if (config.container.kind === "cmaf" || config.container.kind === "locmaf") {
 			try {
 				const Cmaf = await import("@moq/hang/cmaf");
 				description = Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
@@ -953,7 +962,7 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 				// description, so we can't probe support reliably. Reject the
 				// track rather than letting isConfigSupported pass on a
 				// description-less config and then having decode() fail later.
-				console.warn(`audio: malformed CMAF init segment for codec ${config.codec}`, err);
+				console.warn(`audio: unusable CMAF init segment for codec ${config.codec}`, err);
 				return false;
 			}
 		}

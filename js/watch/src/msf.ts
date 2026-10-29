@@ -7,6 +7,8 @@ import { base64ToBytes } from "./base64";
 
 const DEFAULT_SAMPLE_RATE = 48000;
 const DEFAULT_NUMBER_OF_CHANNELS = 2;
+// The LOCMAF packaging version hang's "locmaf" container decodes.
+const LOCMAF_VERSION = "0.3";
 
 function bytesToHex(bytes: Uint8Array): string {
 	let hex = "";
@@ -39,6 +41,18 @@ function toContainer(track: Msf.Track): ContainerInfo | undefined {
 			// that segment, so there is no separate description to surface.
 			if (!track.initData || !initBytes) return undefined;
 			return { container: { kind: "cmaf", init: track.initData }, description: undefined };
+		case "locmaf":
+			// draft-einarsson-moq-locmaf-01 Section 5: a receiver MUST NOT subscribe to a version it
+			// does not support, since a new version reinterprets the same wire bytes.
+			if (track.locmafVersion !== LOCMAF_VERSION) {
+				console.warn(
+					`MSF track ${track.name}: unsupported locmafVersion ${JSON.stringify(track.locmafVersion)}, want "${LOCMAF_VERSION}"`,
+				);
+				return undefined;
+			}
+			// The init segment is a cmaf track's, and just as required.
+			if (!track.initData || !initBytes) return undefined;
+			return { container: { kind: "locmaf", init: track.initData }, description: undefined };
 		case "loc":
 			return { container: { kind: "loc" }, description };
 		case "legacy":

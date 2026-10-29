@@ -1,10 +1,13 @@
 /**
- * Sweep CMAF fragment decode over mdat bytes x declared sample count. A valid run reads every
- * declared sample; a hostile run declares 2^32 - 1 defaulted samples over the same bytes, and must
- * cost what its bytes do, not what its count claims.
+ * Sweep CMAF fragment and LOCMAF object decode over mdat bytes x declared sample count. A valid run
+ * reads every declared sample; a hostile run declares 2^32 - 1 defaulted samples over the same
+ * bytes, and must cost what its bytes do, not what its count claims. A LOCMAF row times two
+ * objects: a full header and the empty delta, the steady state, that refers to it.
  */
 
+import { Varint } from "@moq/net";
 import { decodeDataSegment, type InitSegment } from "../src/cmaf/decode.ts";
+import { Format as Locmaf } from "../src/locmaf/format.ts";
 
 const runs = 200;
 
@@ -45,27 +48,54 @@ const init: InitSegment = {
 	defaultSampleFlags: 0,
 };
 
-function time(segment: Uint8Array, hostile: boolean): { samples: number; micros: number } {
+/** A LOCMAF full header (element 2) for `count` samples of the default `size`, then the mdat payload. */
+function locmaf(count: number, size: number, bytes: number): { full: Uint8Array; delta: Uint8Array } {
+	const vi64 = (value: number) => [...Varint.encodeLeadingOnes(value)];
+	// tfhdDefaultSampleSize (6), tfdtBaseMediaDecodeTime (10), trunSampleCount (14).
+	const block = [...vi64(6), ...vi64(size), ...vi64(10), ...vi64(0), ...vi64(14), ...vi64(count)];
+	const mdat = new Uint8Array(bytes);
+	return {
+		full: new Uint8Array([2, ...vi64(block.length), ...block, ...mdat]),
+		// An empty delta (element 3): every field as before.
+		delta: new Uint8Array([3, 0, ...mdat]),
+	};
+}
+
+function time(decode: () => number, hostile: boolean): { samples: number; micros: number } {
 	let samples = 0;
 	const start = performance.now();
 	for (let run = 0; run < runs; run++) {
 		try {
-			samples = decodeDataSegment(segment, init, undefined).length;
+			samples = decode();
 			if (hostile) throw new Error("a hostile count decoded");
 		} catch (err) {
-			if (!hostile || !String(err).includes("past the")) throw err;
+			if (!hostile || !String(err).includes("mdat bytes")) throw err;
 		}
 	}
 	return { samples, micros: ((performance.now() - start) * 1000) / runs };
 }
 
-console.log("mdat_bytes,declared,decoded,us_per_fragment");
-for (const bytes of [1_024, 65_536]) {
-	for (const count of [1, 64, 1_024]) {
-		const { samples, micros } = time(fragment(count, bytes / count, bytes), false);
-		if (samples !== count) throw new Error(`decoded ${samples} of ${count} samples`);
-		console.log(`${bytes},${count},${samples},${micros.toFixed(1)}`);
+const cmaf = (segment: Uint8Array) => () => decodeDataSegment(segment, init, undefined).length;
+const delta = (objects: { full: Uint8Array; delta: Uint8Array }) => {
+	const format = new Locmaf(init);
+	return () => {
+		format.decode(objects.full, undefined);
+		return format.decode(objects.delta, undefined).length;
+	};
+};
+
+console.log("container,mdat_bytes,declared,decoded,us_per_fragment");
+for (const [name, build] of [
+	["cmaf", (count: number, size: number, bytes: number) => cmaf(fragment(count, size, bytes))],
+	["locmaf", (count: number, size: number, bytes: number) => delta(locmaf(count, size, bytes))],
+] as const) {
+	for (const bytes of [1_024, 65_536]) {
+		for (const count of [1, 64, 1_024]) {
+			const { samples, micros } = time(build(count, bytes / count, bytes), false);
+			if (samples !== count) throw new Error(`${name} decoded ${samples} of ${count} samples`);
+			console.log(`${name},${bytes},${count},${samples},${micros.toFixed(1)}`);
+		}
+		const hostile = time(build(0xffff_ffff, 1, bytes), true);
+		console.log(`${name},${bytes},${0xffff_ffff},0,${hostile.micros.toFixed(1)}`);
 	}
-	const hostile = time(fragment(0xffff_ffff, 1, bytes), true);
-	console.log(`${bytes},${0xffff_ffff},0,${hostile.micros.toFixed(1)}`);
 }

@@ -36,6 +36,7 @@ export const DEFAULT_MAX_BUFFER: number;
 export interface Format {
 	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
 	end?(frame: Frame): Micro | undefined;
+	group?(): Format;
 	readonly kind?: "audio" | "video" | "data";
 }
 

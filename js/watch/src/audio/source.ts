@@ -174,7 +174,7 @@ export class Source {
 		}
 
 		for (const [track, config] of entries) {
-			if (config.container.kind === "cmaf") {
+			if (config.container.kind === "cmaf" || config.container.kind === "locmaf") {
 				return { track, config };
 			}
 		}

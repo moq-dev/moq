@@ -4,6 +4,7 @@
  */
 
 import type { Time } from "@moq/net";
+import { isSync, present } from "./sample";
 
 /**
  * One ISO BMFF box: its four-character type and its payload, a view into the input.
@@ -212,6 +213,12 @@ export function decodeInitSegment(init: Uint8Array): InitSegment {
 		throw new Error("No stsd box found in init segment");
 	}
 
+	// A protected track's sample entry is encv or enca (ISO/IEC 23001-7), so its samples are encrypted
+	// and its codec configuration is wrapped: refuse it rather than feed ciphertext to a decoder.
+	if (entries[0].type === "encv" || entries[0].type === "enca") {
+		throw new Error(`Encrypted (CENC) sample entry ${entries[0].type} is unsupported`);
+	}
+
 	// Extract the codec-specific description from the first sample entry.
 	const description = extractDescription(entries[0]);
 
@@ -308,21 +315,6 @@ function extractAudioSpecificConfig(esds: Uint8Array): Uint8Array | undefined {
 	}
 
 	return undefined;
-}
-
-/** `sample_is_non_sync_sample`, bit 16 of the ISO/IEC 14496-12 sample flags. */
-const NON_SYNC = 0x0001_0000;
-
-/** `sample_depends_on == 1`: the sample references others. */
-const DEPENDS_ON_OTHERS = 0x0100_0000;
-
-/**
- * Whether sample flags describe a sync sample: `sample_is_non_sync_sample` clear and not declared to
- * reference other samples, the rule ffmpeg applies and `moq-mux` mirrors. Flags that say nothing
- * (zero) describe a sync sample.
- */
-function isSync(flags: number): boolean {
-	return (flags & (NON_SYNC | DEPENDS_ON_OTHERS)) === 0;
 }
 
 /**
@@ -471,16 +463,8 @@ export function decodeDataSegment(
 		}
 	}
 
-	// A loop, not `Math.min(...ptss)`: a long fragment's sample count can exceed the argument limit.
-	let earliest = 0;
-	if (timestamp !== undefined) {
-		earliest = Number.POSITIVE_INFINITY;
-		for (const pts of ptss) earliest = Math.min(earliest, pts);
-	}
-	const anchor = timestamp?.asMicros() ?? 0;
-	for (const [i, sample] of samples.entries()) {
-		sample.timestamp = Math.round(anchor + ((ptss[i] - earliest) * 1_000_000) / init.timescale);
-	}
+	const timestamps = present(ptss, timestamp, init.timescale);
+	for (const [i, sample] of samples.entries()) sample.timestamp = timestamps[i];
 
 	return samples;
 }

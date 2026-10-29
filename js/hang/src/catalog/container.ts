@@ -1,7 +1,7 @@
 import * as z from "@zod/mini";
 
 /** The container kinds this build knows how to decode. */
-const KNOWN_KINDS = ["legacy", "cmaf", "loc"];
+const KNOWN_KINDS = ["legacy", "cmaf", "loc", "locmaf"];
 
 /**
  * A container this build does not recognize, preserved verbatim.
@@ -36,6 +36,9 @@ export const UnknownContainerSchema = z.pipe(
  *           The init segment (ftyp+moov) is base64-encoded in the catalog.
  * - "loc": Low Overhead Container (draft-ietf-moq-loc). Each frame has a small
  *          property block followed by the codec payload.
+ * - "locmaf": Low Overhead CMAF (draft-einarsson-moq-locmaf, version "0.3"). Each frame is one
+ *             CMAF chunk with its moof compressed into a header, decoded against the same base64
+ *             init segment as "cmaf".
  *
  * Anything else parses as {@link UnknownContainerSchema} instead of throwing, so one rendition
  * using a future container does not take down the rest of the catalog.
@@ -52,6 +55,11 @@ export const ContainerSchema = z._default(
 			}),
 			// Low Overhead Container.
 			z.object({ kind: z.literal("loc") }),
+			// Low Overhead CMAF with base64-encoded init segment (ftyp+moov).
+			z.object({
+				kind: z.literal("locmaf"),
+				init: z.base64(),
+			}),
 		]),
 		UnknownContainerSchema,
 	]),

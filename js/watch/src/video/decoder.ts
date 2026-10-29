@@ -560,7 +560,8 @@ class DecoderTrack {
 
 		// Input processing - depends on container type
 		this.#spawn(effect, async () => {
-			if (this.config.container.kind === "cmaf") await this.#runCmaf(effect, sub, decoder);
+			const kind = this.config.container.kind;
+			if (kind === "cmaf" || kind === "locmaf") await this.#runCmaf(effect, sub, decoder);
 			else this.#runLegacy(effect, sub, decoder);
 		});
 	}
@@ -659,17 +660,19 @@ class DecoderTrack {
 
 	async #runCmaf(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): Promise<void> {
 		const container = this.config.container;
-		if (container.kind !== "cmaf") return;
+		if (container.kind !== "cmaf" && container.kind !== "locmaf") return;
 
 		const abort = effect.abort;
 		const Cmaf = await import("@moq/hang/cmaf");
+		// LOCMAF shares CMAF's init segment and differs only in how each chunk's moof is carried.
+		const Locmaf = container.kind === "locmaf" ? await import("@moq/hang/locmaf") : undefined;
 		if (abort.aborted) return;
 
 		const initSegment = base64ToBytes(container.init);
 		const init = Cmaf.decodeInitSegment(initSegment);
 		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : init.description;
 
-		const consumer = this.#consume(effect, sub, new Cmaf.Format(init));
+		const consumer = this.#consume(effect, sub, Locmaf ? new Locmaf.Format(init) : new Cmaf.Format(init));
 
 		// Combine network jitter buffer with decode buffer
 		effect.run((inner) => {
@@ -881,7 +884,7 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 	let description: Uint8Array | undefined;
 	if (config.description) {
 		description = Util.Hex.toBytes(config.description);
-	} else if (config.container.kind === "cmaf") {
+	} else if (config.container.kind === "cmaf" || config.container.kind === "locmaf") {
 		try {
 			const Cmaf = await import("@moq/hang/cmaf");
 			description = Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
@@ -890,7 +893,7 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 			// description, so we can't probe support reliably. Reject the
 			// track rather than letting isConfigSupported pass on a
 			// description-less config and then having runCmaf fail later.
-			console.warn(`video: malformed CMAF init segment for codec ${config.codec}`, err);
+			console.warn(`video: unusable CMAF init segment for codec ${config.codec}`, err);
 			return false;
 		}
 	}

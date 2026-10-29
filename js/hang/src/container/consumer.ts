@@ -72,6 +72,7 @@ const GROUP_COST = 256;
 
 interface Group {
 	consumer: Moq.Group.Consumer;
+	format: Format; // Decodes this group's payloads, so state one keeps never crosses into another group
 	// From then on, any sequence missing below this group is late: the earliest arrival among it
 	// and the groups past it, kept on insert so a hole reads it without scanning the backlog.
 	late: Instant;
@@ -232,6 +233,7 @@ export class Consumer {
 				// may be is the subscription's own max delay, applied before it ever reaches here.
 				const group: Group = {
 					consumer,
+					format: this.#format.group?.() ?? this.#format,
 					// When the group landed, not when it was pulled: a full max buffer delays pulls.
 					late: consumer.arrived,
 					frames: [],
@@ -341,7 +343,7 @@ export class Consumer {
 		// A malformed payload is not loss: it ends the reader where it sits, rather than truncating the group.
 		let decoded: Frame[];
 		try {
-			decoded = this.#format.decode(wire.payload, wire.timestamp);
+			decoded = group.format.decode(wire.payload, wire.timestamp);
 		} catch (err) {
 			group.fault = err instanceof Error ? err : new Error(String(err));
 			return;

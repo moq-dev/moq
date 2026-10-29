@@ -10,4 +10,6 @@ export interface Format {
 	decode(payload: Uint8Array, timestamp: Time.Timestamp | undefined): Frame[];
 	/** Return the endpoint timestamp carried by empty-payload metadata. */
 	end?(frame: Frame): Micro | undefined;
+	/** A decoder for one group's payloads, for a format whose payloads depend on earlier ones in their group; absent decodes every group through this one. */
+	group?(): Format;
 }

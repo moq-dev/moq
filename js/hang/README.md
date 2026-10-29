@@ -41,6 +41,9 @@ import * as Container from "@moq/hang/container";
 // CMAF decoding is a separate synchronous module, loaded only when needed.
 import * as Cmaf from "@moq/hang/cmaf";
 // Cmaf.decodeInitSegment, Cmaf.decodeDataSegment, Cmaf.Format
+// LOCMAF objects decode against the same init segment.
+import * as Locmaf from "@moq/hang/locmaf";
+// new Locmaf.Format(Cmaf.decodeInitSegment(init))
 // Container.Legacy.Producer writes frames; Container.Consumer reads a Format.
 ```
 

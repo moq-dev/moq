@@ -214,6 +214,33 @@ test("preserves SAP fields through decode and encode", () => {
 	expect(wireTracks[0].jitter).toBe(15);
 });
 
+test("preserves locmafVersion through decode and encode", () => {
+	const catalog = decode(
+		encodeJson({
+			version: "draft-01",
+			initDataList: [{ id: "a0", type: "inline", data: "AQID" }],
+			tracks: [
+				{
+					name: "audio0",
+					packaging: "locmaf",
+					locmafVersion: "0.3",
+					isLive: true,
+					role: "audio",
+					codec: "mp4a.40.2",
+					initRef: "a0",
+				},
+			],
+		}),
+	);
+
+	expect(catalog.tracks[0].locmafVersion).toBe("0.3");
+	expect(catalog.tracks[0].initData).toBe("AQID");
+
+	const wire = decodeJson(encode(catalog));
+	const wireTracks = wire.tracks as { locmafVersion?: string }[];
+	expect(wireTracks[0].locmafVersion).toBe("0.3");
+});
+
 test("preserves delay through decode and encode", () => {
 	const catalog = decode(
 		encodeJson({

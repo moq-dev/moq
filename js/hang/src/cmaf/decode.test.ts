@@ -121,3 +121,14 @@ describe("CMAF untrusted counts and sizes", () => {
 		expect(() => decodeInitSegment(stalled)).toThrow("Invalid free box size 0");
 	});
 });
+
+test("decodeInitSegment refuses an encrypted sample entry", () => {
+	const fixtures = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures.json"), "utf8"));
+	const init = new Uint8Array(Buffer.from(fixtures.videoInit, "base64"));
+	expect(decodeInitSegment(init).kind).toBe("video");
+
+	// The same init with its avc1 sample entry renamed encv, as a CENC-protected track's would be.
+	const at = Buffer.from(init).indexOf("avc1");
+	init.set(new TextEncoder().encode("encv"), at);
+	expect(() => decodeInitSegment(init)).toThrow("Encrypted (CENC) sample entry encv is unsupported");
+});

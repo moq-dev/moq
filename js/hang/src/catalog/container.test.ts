@@ -3,7 +3,12 @@ import { type Container, ContainerSchema, containerSupported } from "./container
 import { RootSchema } from "./root.ts";
 
 test("known containers round-trip", () => {
-	const known: Container[] = [{ kind: "legacy" }, { kind: "cmaf", init: "AAEC" }, { kind: "loc" }];
+	const known: Container[] = [
+		{ kind: "legacy" },
+		{ kind: "cmaf", init: "AAEC" },
+		{ kind: "loc" },
+		{ kind: "locmaf", init: "AAEC" },
+	];
 	for (const container of known) {
 		const parsed = ContainerSchema.parse(container);
 		expect(parsed).toEqual(container);
@@ -55,6 +60,7 @@ test("a malformed known container errors instead of degrading to passthrough", (
 	// `cmaf` without `init` fails its own schema. It must NOT fall through to the passthrough
 	// arm, which would still report kind "cmaf" and hand decoders an undefined init segment.
 	expect(() => ContainerSchema.parse({ kind: "cmaf" })).toThrow();
+	expect(() => ContainerSchema.parse({ kind: "locmaf" })).toThrow();
 
 	// A genuinely unrecognized kind still parses, so one future rendition can't fail the catalog.
 	expect(ContainerSchema.parse({ kind: "future", magic: 7 })).toEqual({

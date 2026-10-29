@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { u53 } from "@moq/hang/catalog";
 import * as Msf from "@moq/msf";
 import { Path } from "@moq/net";
@@ -150,6 +150,40 @@ test("drops a cmaf rendition without a usable init segment", () => {
 
 	expect(toHang({ tracks: [track] }).video?.renditions.video).toBeUndefined();
 	expect(toHang({ tracks: [{ ...track, initData: "not base64!" }] }).video?.renditions.video).toBeUndefined();
+});
+
+test("maps locmaf 0.3 packaging to the locmaf container with its init segment", () => {
+	const track: Msf.Track = {
+		name: "audio",
+		packaging: "locmaf",
+		locmafVersion: "0.3",
+		role: "audio",
+		codec: "mp4a.40.2",
+		initData: "AQID",
+	};
+
+	expect(toHang({ tracks: [track] }).audio?.renditions.audio?.container).toEqual({ kind: "locmaf", init: "AQID" });
+	expect(toHang({ tracks: [{ ...track, initData: undefined }] }).audio?.renditions.audio).toBeUndefined();
+});
+
+// draft-einarsson-moq-locmaf-01 Section 5: a receiver MUST NOT subscribe to a version it does not support.
+test.each([["0.4"], [undefined]])("refuses a locmaf rendition at locmafVersion %p", (locmafVersion) => {
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	try {
+		const track: Msf.Track = {
+			name: "video",
+			packaging: "locmaf",
+			locmafVersion,
+			role: "video",
+			codec: "avc1.640028",
+			initData: "AQID",
+		};
+
+		expect(toHang({ tracks: [track] }).video?.renditions.video).toBeUndefined();
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("unsupported locmafVersion"));
+	} finally {
+		warn.mockRestore();
+	}
 });
 
 test("drops a rendition whose packaging is unknown", () => {

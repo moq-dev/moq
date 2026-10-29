@@ -4,7 +4,7 @@ import * as z from "@zod/mini";
 
 /** Zod schema for a track's wire packaging. Accepts known values or any future string. */
 export const PackagingSchema = z.union([
-	z.enum(["loc", "cmaf", "legacy", "mediatimeline", "eventtimeline"]),
+	z.enum(["loc", "cmaf", "locmaf", "legacy", "mediatimeline", "eventtimeline"]),
 	z.string(),
 ]);
 
@@ -27,6 +27,8 @@ const trackShape = {
 	/** The track's absolute namespace; absent inherits the catalog's namespace. */
 	namespace: z.optional(z.string()),
 	packaging: PackagingSchema,
+	/** The LOCMAF packaging version (draft-einarsson-moq-locmaf), present when `packaging` is "locmaf". */
+	locmafVersion: z.optional(z.string()),
 	// draft-00 marks isLive required but omits it on mediatimeline/eventtimeline
 	// tracks, so accept its absence rather than reject the whole catalog.
 	isLive: z.optional(z.boolean()),

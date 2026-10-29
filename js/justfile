@@ -78,7 +78,7 @@ qmux-record-bench:
     bun install --frozen-lockfile
     bun qmux/bench/record.ts
 
-# Sweep CMAF fragment decode over mdat bytes x declared sample count, including a hostile count.
+# Sweep CMAF fragment and LOCMAF object decode over mdat bytes x declared sample count, including a hostile count.
 cmaf-bench:
     bun install --frozen-lockfile
     bun hang/bench/cmaf.ts

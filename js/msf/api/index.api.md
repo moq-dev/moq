@@ -31,6 +31,7 @@ export const CatalogSchema: ZodMiniObject<{
 		jitter: ZodMiniOptional<ZodMiniNumber<number>>;
 		label: ZodMiniOptional<ZodMiniString<string>>;
 		lang: ZodMiniOptional<ZodMiniString<string>>;
+		locmafVersion: ZodMiniOptional<ZodMiniString<string>>;
 		maxGrpSapStartingType: ZodMiniOptional<ZodMiniNumber<number>>;
 		maxObjSapStartingType: ZodMiniOptional<ZodMiniNumber<number>>;
 		name: ZodMiniString<string>;
@@ -40,6 +41,7 @@ export const CatalogSchema: ZodMiniObject<{
 			eventtimeline: "eventtimeline";
 			legacy: "legacy";
 			loc: "loc";
+			locmaf: "locmaf";
 			mediatimeline: "mediatimeline";
 		}>, ZodMiniString<string>]>;
 		renderGroup: ZodMiniOptional<ZodMiniNumber<number>>;
@@ -63,6 +65,7 @@ export const PackagingSchema: ZodMiniUnion<readonly [ZodMiniEnum<{
 	eventtimeline: "eventtimeline";
 	legacy: "legacy";
 	loc: "loc";
+	locmaf: "locmaf";
 	mediatimeline: "mediatimeline";
 }>, ZodMiniString<string>]>;
 
@@ -92,6 +95,7 @@ export const TrackSchema: ZodMiniObject<{
 	jitter: ZodMiniOptional<ZodMiniNumber<number>>;
 	label: ZodMiniOptional<ZodMiniString<string>>;
 	lang: ZodMiniOptional<ZodMiniString<string>>;
+	locmafVersion: ZodMiniOptional<ZodMiniString<string>>;
 	maxGrpSapStartingType: ZodMiniOptional<ZodMiniNumber<number>>;
 	maxObjSapStartingType: ZodMiniOptional<ZodMiniNumber<number>>;
 	name: ZodMiniString<string>;
@@ -101,6 +105,7 @@ export const TrackSchema: ZodMiniObject<{
 		eventtimeline: "eventtimeline";
 		legacy: "legacy";
 		loc: "loc";
+		locmaf: "locmaf";
 		mediatimeline: "mediatimeline";
 	}>, ZodMiniString<string>]>;
 	renderGroup: ZodMiniOptional<ZodMiniNumber<number>>;

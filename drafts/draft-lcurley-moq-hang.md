@@ -861,7 +861,8 @@ A rendition declares its container via the `container` field of its catalog entr
 type Container =
   { "kind": "legacy" } |
   { "kind": "cmaf", "init": string } |
-  { "kind": "loc" }
+  { "kind": "loc" } |
+  { "kind": "locmaf", "init": string }
 ~~~
 
 The `kind` field selects the framing; a consumer MUST ignore a rendition whose `kind` it does not recognize.
@@ -928,6 +929,11 @@ Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property b
 For audio and video, consumers accept empty codec payload metadata with the same video-duration and audio-terminal-trimming meanings as the legacy container.
 Data tracks retain empty payloads as data.
 A consumer MUST NOT submit it to a decoder.
+
+## locmaf
+Each frame is one LOCMAF Object {{!I-D.einarsson-moq-locmaf}} of `locmafVersion` "0.3": a CMAF chunk whose `moof` travels as a full or delta header ahead of its `mdat` payload.
+The `init` field and the timing rules are those of `cmaf`, applied to the samples each Object describes.
+A delta header refers to the previous Object in its group, so a consumer keeps that reference per group.
 
 
 # Compression {#compression}
@@ -1125,6 +1131,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Added the `locmaf` container: a LOCMAF Object per frame, decoded against a `cmaf` init segment.
 - Removed `catalog.json.z` and the data track `compression` field: compression is a track property the transport carries ({{compression}}), so each compressed track is one name, and the catalog, `stats` and `echo` snapshots, HLS record tracks, and JSON data tracks SHOULD be compressed.
 - Replaced the root `archive` section and its per-track timelines with an optional, per-rendition `hls` field on video and audio ({{hls}}). Each record is a segment's first `group` and `pts` in milliseconds, with an optional `duration` where zero marks a stop; frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone. Each rendition numbers its own segments, and an edge maps a rendition's record `n` to its segment `n`. The record track is named `<track>.hls` and is compressed ({{compression}}).
 - A reader refuses a JSON frame in which an object repeats a member name.
