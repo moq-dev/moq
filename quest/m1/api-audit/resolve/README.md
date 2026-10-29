@@ -47,7 +47,7 @@ across languages, the required Nix gate, and all-language interop
 (`just test interop --all`).
 
 Public API: breaking task shape in moq-net; behavior changes in `@moq/net` and
-the bindings. Final method/epoch naming remains breaking across every wrapper.
+the bindings. The method and epoch renames broke every wrapper.
 Wire: none.
 
 ## Required
