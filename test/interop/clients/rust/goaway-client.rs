@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
 			);
 			let restarted = following.available().await?;
 			ensure!(!restarted.is_clone(&broadcast), "redirect did not restart the instance");
-			track = restarted.track("video")?.subscribe(None).await?;
+			track = restarted.track("video")?.subscribe(None).await?.with_range(1..);
 			input.write_all(b"replacement ready\n").await?;
 		}
 	}
