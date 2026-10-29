@@ -23,27 +23,39 @@ try {
 	await page.goto(`http://127.0.0.1:${server.port}/`);
 	await page.waitForFunction(() => "measure" in globalThis);
 	console.log("tracks,retention,policy,idle_ms,catchup_ms");
-	for (const tracks of [1, 8])
-		for (const seconds of [1, 30])
-			for (const onDemand of [false, true]) {
-				const result = await page.evaluate(
-					async ({ tracks, seconds, onDemand }) => {
-						return (
-							globalThis as unknown as {
-								measure(
-									tracks: number,
-									seconds: number,
-									onDemand: boolean,
-								): Promise<{ idle: number; catchup: number }>;
-							}
-						).measure(tracks, seconds, onDemand);
-					},
-					{ tracks, seconds, onDemand },
-				);
+	for (const tracks of [1, 8]) {
+		for (const seconds of [1, 30]) {
+			const samples = new Map<boolean, { idle: number; catchup: number }[]>([
+				[false, []],
+				[true, []],
+			]);
+			for (let round = 0; round < 3; round++) {
+				for (const onDemand of round % 2 === 0 ? [false, true] : [true, false]) {
+					const result = await page.evaluate(
+						async ({ tracks, seconds, onDemand }) => {
+							return (
+								globalThis as unknown as {
+									measure(
+										tracks: number,
+										seconds: number,
+										onDemand: boolean,
+									): Promise<{ idle: number; catchup: number }>;
+								}
+							).measure(tracks, seconds, onDemand);
+						},
+						{ tracks, seconds, onDemand },
+					);
+					samples.get(onDemand)?.push(result);
+				}
+			}
+			for (const [onDemand, runs] of samples) {
+				const median = (key: "idle" | "catchup") => runs.map((run) => run[key]).sort((a, b) => a - b)[1];
 				console.log(
-					`${tracks},${seconds}s,${onDemand ? "buffered" : "always"},${result.idle.toFixed(2)},${result.catchup.toFixed(2)}`,
+					`${tracks},${seconds}s,${onDemand ? "buffered" : "always"},${median("idle").toFixed(2)},${median("catchup").toFixed(2)}`,
 				);
 			}
+		}
+	}
 } finally {
 	await browser?.close();
 	server.stop(true);

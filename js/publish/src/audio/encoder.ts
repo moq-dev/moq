@@ -442,7 +442,11 @@ export class Encoder {
 			const demanded = track && effect.get(track.demand().wanted) !== undefined;
 			this.#encoding = enabled && !!format && !!track && !fatal && (!onDemand || !!demanded);
 			effect.set(this.#out.active, this.#encoding, false);
-			if (this.#encoding) this.#pipeline?.drain();
+			try {
+				if (this.#encoding) this.#pipeline?.drain();
+			} catch (error) {
+				this.#abort(error);
+			}
 			effect.cleanup(() => {
 				this.#encoding = false;
 			});

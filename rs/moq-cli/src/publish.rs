@@ -594,8 +594,7 @@ impl Publish {
 				// Each enabled medium publishes its own track onto the shared
 				// broadcast + catalog. Both stamp frames on the catalog's
 				// advertised clock, so HLS/DASH wall times match the mapping on
-				// the wire. Both capture for the whole run, or only while
-				// subscribed with `--on-demand`. Both run on this task rather
+				// the wire. Both run on this task rather
 				// than a spawn: on macOS the audio future holds ObjC handles
 				// across an await, so it is `!Send`.
 				let video_fut = {

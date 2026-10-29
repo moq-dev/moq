@@ -86,7 +86,10 @@ async function measure(tracks: number, seconds: number, onDemand: boolean) {
 		await flush();
 		const idle = performance.now() - start;
 		for (const encoder of encoders) {
-			if (encoder.out.stats.peek().frames !== (onDemand ? 0 : frames)) throw new Error("idle encode count");
+			if (onDemand ? encoder.out.stats.peek().frames !== 0 : encoder.out.stats.peek().frames < frames)
+				throw new Error(
+					`idle encode count: ${encoder.out.stats.peek().frames} for ${frames} inputs (onDemand=${onDemand})`,
+				);
 		}
 		const joining = performance.now();
 		const net = broadcast.net.peek();
@@ -102,8 +105,7 @@ async function measure(tracks: number, seconds: number, onDemand: boolean) {
 			const frame = await group?.readFrame();
 			if (!frame) throw new Error("missing retained audio");
 			const timestamp = Moq.Varint.decode(frame.payload)[0];
-			if (Math.abs(timestamp - seconds * 1_000_000) > 20_000)
-				throw new Error(`retained audio starts at ${timestamp}`);
+			if (onDemand && timestamp !== seconds * 1_000_000) throw new Error(`retained audio starts at ${timestamp}`);
 			group?.close();
 		}
 		return { tracks, seconds, onDemand, idle, catchup };

@@ -1015,6 +1015,37 @@ test.each([undefined, false, true])(
 	},
 );
 
+test("a backlog encode refusal aborts its rendition when demand arrives", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("refused.hang") });
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	let subscriber: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		await feed.push({ timestamp: Micro(0), channels: [new Float32Array(960)] });
+		await feed.drain();
+		const live = LaggingAudioEncoder.instances.at(-1);
+		if (!live) throw new Error("expected configured encoder");
+		const failure = new Error("codec refused buffered input");
+		using _encode = spyOn(live, "encode").mockImplementation(() => {
+			throw failure;
+		});
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		subscriber = net.track("audio").subscribe();
+		await settle();
+		expect(encoder.out.error.peek()).toBe(failure);
+		expect(subscriber.closed.peek()).toBe(failure);
+	} finally {
+		subscriber?.close();
+		encoder.close();
+		broadcast.close();
+	}
+});
+
 // Advancing capture and time independently catches a buffer bounded only by incoming timestamps,
 // and forces the on-demand transition to replay history even before another live quantum arrives.
 test("default audio replays the last second after three seconds without a subscriber", async () => {

@@ -423,7 +423,7 @@ impl Producer {
 				discontinuity: std::mem::take(&mut self.pending_discontinuity),
 			};
 			self.decoder_boundary = false;
-			if self.active {
+			if self.active && self.backlog.is_empty() {
 				self.encode_raw(raw)?;
 			} else {
 				self.backlog.push(raw);
@@ -455,12 +455,16 @@ impl Producer {
 			self.pending_discontinuity = true;
 		}
 		self.active = active;
-		if active {
-			while let Some(raw) = self.backlog.pop() {
-				self.encode_raw(raw)?;
-			}
+		// One codec frame per turn lets capture keep draining while catching up.
+		if active && let Some(raw) = self.backlog.pop() {
+			self.encode_raw(raw)?;
 		}
 		Ok(())
+	}
+
+	#[cfg(any(feature = "capture", test))]
+	pub(crate) fn backlog_ready(&self) -> bool {
+		self.active && !self.backlog.is_empty()
 	}
 
 	#[cfg(any(feature = "capture", test))]
@@ -696,9 +700,14 @@ mod tests {
 					let idle = start.elapsed();
 					let start = moq_clock::now();
 					for producer in &mut producers {
-						producer
-							.set_active(true, Timestamp::from_micros(60_000_000).unwrap())
-							.unwrap();
+						loop {
+							producer
+								.set_active(true, Timestamp::from_micros(60_000_000).unwrap())
+								.unwrap();
+							if !producer.backlog_ready() {
+								break;
+							}
+						}
 					}
 					let catchup = start.elapsed();
 					println!(
@@ -751,7 +760,12 @@ mod tests {
 			.unwrap();
 		let mut reader =
 			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
-		producer.set_active(true, at(150)).unwrap();
+		loop {
+			producer.set_active(true, at(150)).unwrap();
+			if !producer.backlog_ready() {
+				break;
+			}
+		}
 		for index in 100..150 {
 			let frame = packet(&mut reader).await.unwrap();
 			assert_eq!(frame.timestamp, at(index));
@@ -769,6 +783,41 @@ mod tests {
 			.unwrap();
 		assert_eq!(packet(&mut reader).await.unwrap().timestamp, at(151));
 		producer.finish().unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn hls_keeps_one_segment_across_buffered_demand_gaps() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let options = Options {
+			track: Some("audio".into()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
+		producer.write(&pcm_frame(&vec![0.1; 1920], 1_000_000)).unwrap();
+		producer
+			.set_active(false, Timestamp::from_micros(1_020_000).unwrap())
+			.unwrap();
+		producer.write(&pcm_frame(&vec![0.1; 1920], 1_020_000)).unwrap();
+		producer
+			.set_active(true, Timestamp::from_micros(1_040_000).unwrap())
+			.unwrap();
+		producer.finish().unwrap();
+		let hls = catalog.snapshot().audio.renditions["audio"].hls.clone().unwrap();
+		catalog.finish().unwrap();
+		let mut records = moq_mux::hls::Consumer::subscribe(&consumer, &hls).await.unwrap();
+		let mut listed = Vec::new();
+		while let Some(event) = records.next().await.unwrap() {
+			match event {
+				moq_mux::hls::Event::Push { entry, .. } => listed.push(entry),
+				other => panic!("unexpected record event {other:?}"),
+			}
+		}
+		assert_eq!(listed.len(), 2, "one segment and its final stop: {listed:?}");
+		assert!(!listed[0].is_stop() && listed[1].is_stop());
+		assert_eq!(listed[0].pts.as_micros(), 1_000_000);
+		assert!(listed[1].pts.as_micros() >= 1_040_000);
 	}
 
 	#[test]
