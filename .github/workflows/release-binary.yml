@@ -1,8 +1,9 @@
 name: release-binary
 
-# Builds, packages, and (on a tag) releases one workspace binary. moq-cli.yml
-# and moq-relay.yml call it; they keep the tag trigger and the workflow name
-# that alert.yml, release-brew.yml, and release-winget.yml match on.
+# Builds, packages, and (on a tag) attests and releases one workspace binary.
+# moq-cli.yml and moq-relay.yml call it; they keep the tag trigger and the
+# workflow name that alert.yml, release-brew.yml, and release-winget.yml match
+# on, and grant the attest job's `id-token` and `attestations` permissions.
 
 on:
   workflow_call:
@@ -205,9 +206,36 @@ jobs:
           name: ${{ inputs.crate }}-${{ matrix.target }}
           path: dist/*
 
+  # Signs a build provenance attestation over every built file, so a user
+  # can check one came from this workflow with `gh attestation verify` instead
+  # of trusting the SHA256SUMS uploaded beside it. Its own job keeps the
+  # signing grant off the build jobs, which run on nightly dry runs too, and
+  # off the release job, which holds `contents: write`.
+  attest:
+    name: Attest
+    needs: [build, build-tarball-macos, build-windows]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: artifacts/*
+
   release:
     name: Release
-    needs: [build, build-tarball-macos, build-windows]
+    needs: [attest]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
