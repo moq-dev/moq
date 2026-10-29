@@ -135,9 +135,10 @@ pub struct CaptureArgs {
 	#[usage(long, conflicts("--microphone", "--system-audio"))]
 	pub no_audio: bool,
 
-	/// Open and encode each source only while its track has a subscriber,
-	/// releasing it when the last one leaves. By default capture runs for the
-	/// whole publish, so a late subscriber can fetch the recent past.
+	/// Capture and encode each source only while its track has a subscriber,
+	/// releasing it when the last one leaves. Video still opens its source once
+	/// at startup to probe the mode. By default capture runs for the whole
+	/// publish, so a late subscriber can fetch the recent past.
 	#[usage(long)]
 	pub on_demand: bool,
 }
