@@ -67,8 +67,9 @@ and their alternatives:
   type-check and borrow-check cost matches hand-written code; it adds about 1.5 ms
   of expansion per machine plus a one-time 1.3 s build of `kio-macros`, below what
   async costs. The cost is a dialect: stored locals need type annotations and are
-  `&mut` inside a wait's poll, and a `!Send` error doesn't name the wait. Its users
-  are moq-net's 23 straight-line multi-await `async fn` bodies and 12 straight-line
+  `&mut` inside a wait's poll, and a `!Send` error names the type and the wait but
+  not the local: the generated state keeps Rust's automatic `Send`, with no
+  `unsafe impl` (decided 2026-10-28). Its users are moq-net's 23 straight-line multi-await `async fn` bodies and 12 straight-line
   hand-written machines; 59 bodies await in loops or selects.
 
 ## Required

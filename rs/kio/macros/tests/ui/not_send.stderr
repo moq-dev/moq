@@ -4,12 +4,10 @@ error[E0277]: `Rc<String>` cannot be sent between threads safely
 26 |     assert_send::<M>();
    |                   ^ `Rc<String>` cannot be sent between threads safely
    |
-   = help: the trait `Send` is not implemented for `Rc<String>`
-note: required for `MStateB` to implement `Send`
+   = help: within `M`, the trait `Send` is not implemented for `Rc<String>`
+note: required because it appears within the type `MStateB`
   --> ${workspace}/rs/kio/macros/tests/ui/not_send.rs:18:22
    |
-17 |         let label: std::rc::Rc<String> = std::rc::Rc::new(format!("m-{a}"));
-   |             ----- unsatisfied trait bound introduced here
 18 |         let b: u64 = wait!(B => self.values.poll_pop(waiter))?;
    |                            ^
 note: required because it appears within the type `MState`

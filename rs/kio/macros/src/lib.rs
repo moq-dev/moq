@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use proc_macro2::{Spacing, Span, TokenStream, TokenTree};
-use quote::{ToTokens, format_ident, quote, quote_spanned};
+use quote::{ToTokens, format_ident, quote};
 use syn::{
 	Expr, Ident, ImplItem, ItemImpl, Macro, Pat, Stmt, Token, Type,
 	parse::{Parse, ParseStream},
@@ -69,8 +69,8 @@ use syn::{
 ///   later binding that reuses a moved local's name, as a closure argument or an inner
 ///   `let`, still stores it and fails as a use after move: rename one of them.
 /// - The body ends in its `Poll::Ready` value. Polling a `Done` machine panics.
-/// - `Name` is `Send` when every stored local is. A `!Send` local reports its `let`
-///   and its wait.
+/// - `Name` is `Send` when every stored local is, by Rust's own auto impl. A `!Send`
+///   local reports its type and its wait (`NameStep`), not the local itself.
 ///
 /// Not supported:
 ///
@@ -186,7 +186,8 @@ fn expand(args: Args, mut item: ItemImpl) -> syn::Result<TokenStream> {
 	})
 }
 
-/// One variant's struct of the locals that live across its wait, with their `Send`.
+/// One variant's struct of the locals that live across its wait. A struct of its own,
+/// rather than a struct variant, so that a `!Send` error names the wait.
 fn storage(variant: &Variant) -> TokenStream {
 	let name = &variant.storage;
 	let doc = format!("The locals stored across `wait!({} => ..)`.", variant.name);
@@ -195,29 +196,9 @@ fn storage(variant: &Variant) -> TokenStream {
 		let ty = &local.ty;
 		quote! { #ident: #ty }
 	});
-	let def = quote! {
+	quote! {
 		#[doc = #doc]
 		struct #name { #(#fields),* }
-	};
-	if variant.stored.is_empty() {
-		return def;
-	}
-
-	// The auto impl, written out so that a `!Send` local reports its own `let` (the
-	// bound) and its wait (the impl) instead of only the enum. Each bound is
-	// higher-ranked so rustc checks it where `Send` is needed, not here.
-	//
-	// SAFETY: the bounds are the auto impl's own conditions, every field's type being
-	// `Send`, and the struct has no fields but these.
-	let bounds = variant.stored.iter().map(|local| {
-		let ty = &local.ty;
-		let send = quote_spanned!(local.ident.span()=> ::core::marker::Send);
-		quote! { for<'__kio> #ty: #send }
-	});
-	let header = quote_spanned!(variant.name.span()=> unsafe impl ::core::marker::Send for #name);
-	quote! {
-		#def
-		#header where #(#bounds),* {}
 	}
 }
 
