@@ -460,6 +460,12 @@ fn render_metrics(
 	);
 	counter(
 		&mut out,
+		"moq_relay_inflated_bytes_total",
+		"Payload bytes inflated from compressed groups for peers that cannot carry compression, once per group.",
+		|c| c.inflated,
+	);
+	counter(
+		&mut out,
 		"moq_relay_stale_bytes_total",
 		"Media payload bytes skipped after drifting beyond a subscriber's latency budget.",
 		|c| c.stale.bytes,
@@ -1430,6 +1436,48 @@ mod tests {
 		assert!(
 			body.contains("moq_relay_sessions_opened_total{tier=\"\"} 1"),
 			"session presence:\n{body}"
+		);
+	}
+
+	/// Two plain egress sessions reading one compressed group share a single inflate.
+	#[tokio::test(start_paused = true)]
+	async fn metrics_count_one_inflate_per_group() {
+		use moq_net::Timestamp;
+		use moq_net::stats::{Registry, Tier};
+
+		let stats = Registry::new(Default::default());
+		let origin = moq_tokio::origin::spawn();
+		let source = origin.create_broadcast("demo/x").unwrap();
+		source.announce(Default::default()).unwrap();
+		let track = source
+			.create_track("catalog.json", timed().with_compress(true))
+			.unwrap();
+		let payload = format!("{{\"pad\":\"{}\"}}", "abc".repeat(300));
+
+		let mut readers = Vec::new();
+		for session in ["a", "b"] {
+			let ctx = stats
+				.tier(Tier::default())
+				.session(moq_net::Path::new(session).unwrap());
+			let egress = origin.consume().with_stats(ctx);
+			let bc = egress.request("demo/x", None).await.unwrap();
+			readers.push(bc.track("catalog.json").unwrap().subscribe(None).await.unwrap());
+		}
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		group.finish().unwrap();
+		for reader in &mut readers {
+			let mut group = reader.recv_group().await.unwrap().unwrap();
+			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, payload.as_bytes());
+		}
+
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(
+			body.contains(&format!(
+				"moq_relay_inflated_bytes_total{{tier=\"\",role=\"publisher\"}} {}",
+				payload.len()
+			)),
+			"one inflated copy:\n{body}"
 		);
 	}
 }
