@@ -28,7 +28,7 @@ test("importing the entrypoint registers <moq-watch> before the import finishes"
 
 test("catalog formats refuse unknown values rather than selecting detection", () => {
 	const { parseCatalogFormat } = require("./element");
-	for (const format of ["hang", "msf", "hangz", "manual"]) expect(parseCatalogFormat(format)).toBe(format);
+	for (const format of ["hang", "msf", "manual"]) expect(parseCatalogFormat(format)).toBe(format);
 	expect(parseCatalogFormat(null)).toBeUndefined();
 	for (const invalid of ["", "guess"]) expect(() => parseCatalogFormat(invalid)).toThrow("catalog-format");
 });

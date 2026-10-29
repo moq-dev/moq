@@ -104,8 +104,7 @@ would be throwaway work.
 
 **moq-uring.** Its driver gets the same names and signatures and passes
 `send::Options` to the open, as moq-tokio's does, instead of applying them
-through setters afterwards. Moved here from
-[drop web-transport-trait](/quest/m1/drop-web-transport-trait.md).
+through setters afterwards. Moved here from drop web-transport-trait.
 
 Update every consumer (`quic::web` in both crates, qmux, the backends,
 moq-relay's tests). `poll_*` forms come in [poll](/quest/m1/quic-api/poll.md). The Impact bullet says how to migrate in moq-quic, moq-tokio, moq-uring, and

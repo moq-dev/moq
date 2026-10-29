@@ -2406,9 +2406,11 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 					moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 				)
 				.unwrap();
-			let mut stream = catalog.binary_stream(track, crate::binary::Config::default()).unwrap();
+			let mut stream = catalog
+				.json_stream::<serde_json::Value>(track, crate::json::Config::default())
+				.unwrap();
 			stream
-				.append(moq_net::Timed::from(&b"before"[..]).at(catalog.clock().now()))
+				.append(moq_net::Timed::from(&serde_json::json!("before")).at(catalog.clock().now()))
 				.unwrap();
 			Some(stream)
 		}
@@ -2425,7 +2427,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 	let after = clock.now().as_micros();
 	if let Some(stream) = data.as_mut() {
 		stream
-			.append(moq_net::Timed::from(&b"after"[..]).at(catalog.clock().now()))
+			.append(moq_net::Timed::from(&serde_json::json!("after")).at(catalog.clock().now()))
 			.unwrap();
 	}
 	fmp4.finish().unwrap();

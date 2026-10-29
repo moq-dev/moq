@@ -19,9 +19,8 @@ and a `Named` or `Requested` target. `NewCatalogProducer` holds its broadcast we
 catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamps use `time.Duration`.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
-`TrackInfo.Compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
-`moq.dev/moq/flate` publishes opaque snapshot and stream payloads; its `Update` / `Append`
-and the JSON producers take a final `*time.Duration` timestamp argument (`nil` for untimed).
+`TrackInfo.Compress` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
+The JSON producers' `Update` / `Append` take a final `*time.Duration` timestamp argument (`nil` for untimed).
 JSON consumers return a `*Timed` holding the value and that timestamp; `SnapshotConsumer.Latest`
 skips to the newest state where `Next` yields each one. Read timestamps are rounded down to a whole microsecond.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
@@ -96,7 +95,8 @@ import (
 
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
-broadcast, _ := client.CreateBroadcast("my-stream.hang")
+publication, _ := client.CreateBroadcast("my-stream.hang")
+broadcast := publication.Broadcast()
 audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusInit})
 timestamp := 20 * time.Millisecond
 _ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: &timestamp})
@@ -111,7 +111,7 @@ video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
 })
 _ = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
 epoch := moq.MintEpoch() // a fresh epoch per run
-_ = broadcast.Announce(moq.AnnounceRoute{Epoch: &epoch})
+_ = publication.Announce(moq.AnnounceRoute{Epoch: &epoch})
 _ = audio.Finish()
 _ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly

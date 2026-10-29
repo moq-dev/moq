@@ -24,9 +24,7 @@ doc/lib/js/api/
 # Quests use a constrained Markdown dialect checked by the quest validator.
 quest/
 
-# Skills are symlinks into the kixelated/skills submodule, which formats its
-# own files; remark would follow them (and .agents, Codex's link to the same
-# directory) and rewrite the pinned checkout.
-.claude/shared/
+# Skills are the stubs `quest init` installs; remark would rewrite them (and
+# follow .agents, Codex's link to the same directory).
 .claude/skills/
 .agents/
