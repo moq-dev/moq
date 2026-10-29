@@ -78,9 +78,9 @@ Implementation:
   ingest over moq-transport: `doc/setup/redundancy.md`,
   `doc/concept/moq-lite.md`, `doc/concept/standard.md`,
   `doc/concept/stats.md`, and `doc/bin/relay/cluster.md`. Remove the
-  `epoch` lines from `doc/bin/relay/config.md`. Add entries to
-  `rs/moq-net/MIGRATE.md`, `rs/moq-relay/MIGRATE.md`, and
-  `js/net/MIGRATE.md`.
+  `epoch` lines from `doc/bin/relay/config.md`. The PR's Impact section says
+  how to migrate (delete any `epoch` extension setting), for the release cut
+  to write into `MIGRATE.md`.
 
 Run `just check`, `just test interop --all`, and the compat lane.
 
