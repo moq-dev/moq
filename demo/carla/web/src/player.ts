@@ -494,19 +494,10 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		(e) => {
 			// The native chooser owns navigation and button activation while it is open.
 			if (cameraChooser) return;
-			// The calibration dialog owns the driving keys while it's up, so that
-			// working the pedals to bind them can't also steer. E-stop is the exception:
-			// an unavailable e-stop is a hazard, while a spurious one is an annoyance,
-			// so E keeps working here and the dialog carries its own button.
-			if (calibration) {
-				if (e.key === "Escape") closeCalibration();
-				if (KEY(e) === "e") safetyTruck()?.emergencyStop();
-				e.preventDefault();
-				return;
-			}
 			const k = KEY(e);
-			// E-stop works from anywhere on the page, but claims the key only while
-			// there is a truck to stop.
+			// E-stop works from anywhere on the page, calibration included: an
+			// unavailable e-stop is a hazard, while a spurious one is an annoyance. It
+			// claims the key only while there is a truck to stop.
 			if (k === "e") {
 				const truck = safetyTruck();
 				if (truck) {
@@ -519,6 +510,13 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 			// inside the shadow root instead.
 			const target = e.composedPath()[0];
 			if (!ownsKey(target, root)) return;
+			// The calibration dialog owns the player's keys while it's up, so that
+			// working the pedals to bind them can't also steer.
+			if (calibration) {
+				if (k === "escape") closeCalibration();
+				e.preventDefault();
+				return;
+			}
 			if (e.metaKey || e.ctrlKey || e.altKey) return;
 			if (k === "tab" && hasTruck(focused.peek())) {
 				const controls = [
