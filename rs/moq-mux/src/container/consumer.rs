@@ -2591,7 +2591,7 @@ mod tests {
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 		let first_track = first.create_track("video", info.clone()).unwrap();
 		first.announce(route(5)).unwrap();
-		let broadcast = origin.consume().request_broadcast("live", None).await.unwrap();
+		let broadcast = origin.consume().request("live", None).await.unwrap();
 		let track = broadcast
 			.track("video")
 			.unwrap()

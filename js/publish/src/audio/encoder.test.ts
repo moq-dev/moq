@@ -788,7 +788,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		await settle();
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		announced = broadcast.in.origin.peek()?.request(broadcast.in.name.peek(), { announced: true });
+		announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
 		const epoch = announced?.active.peek()?.epoch;
 		const sibling = broadcast.video("video");
 		sibling.config.set({ codec: "avc1.640028", container: { kind: "legacy" } });

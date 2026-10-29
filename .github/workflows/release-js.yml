@@ -27,6 +27,11 @@ jobs:
     name: Release JS Packages
     runs-on: ubuntu-latest
     if: github.repository_owner == 'moq-dev'
+    # npm trusted publishing can require this Environment, which only `release`
+    # can deploy to, so a branch's OIDC identity cannot publish. It also holds
+    # the JSR token, since JSR's OIDC trust cannot require an Environment.
+    # Dry-runs skip it.
+    environment: ${{ github.event_name == 'push' && 'npm' || '' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,4 +51,7 @@ jobs:
       - name: Release packages
         env:
           DRY_RUN: ${{ github.event_name != 'push' }}
+          # Only the `npm` Environment holds it, so dry-runs get none.
+          # release.ts hands it to `deno publish` alone.
+          JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
         run: nix develop --command bun --filter '*' release

@@ -585,7 +585,7 @@ class OriginState {
 	// present, not known live, so it must not read as an availability claim.
 	requests = new Signal<Map<Path.Valid, RequestSlot> | undefined>(new Map());
 
-	// Path-local wakeups for announced requests, which survive the end of a resolved instance.
+	// Path-local wakeups for followers, which survive the end of a resolved instance.
 	// A counter rather than the instance: the instance is a plain object, so two epochless
 	// routes with identical metadata compare equal, and a coalesced write could hide a takeover
 	// or the origin closing. Watchers read the table and `closed` themselves when woken.
@@ -668,8 +668,8 @@ class OriginState {
 		return true;
 	}
 
-	// The literal heads readers are watching, counted, as a trie: announcement streams and
-	// announced requests. Sessions ask their peer for announcements under the broadest of
+	// The literal heads readers are watching, counted, as a trie: announcement streams,
+	// requests, and followers. Sessions ask their peer for announcements under the broadest of
 	// these and nothing else, and hear each change to that covering set as it happens, so a
 	// watch coming or going touches only its prefix and the watches directly above or below.
 	#watches: WatchNode = { path: Path.empty(), children: new Map(), count: 0 };
@@ -1119,8 +1119,11 @@ export interface Table {
 	/** Create an unannounced broadcast at `path`; see {@link Producer.createBroadcast}. */
 	createBroadcast(path: Path.Valid): Publication;
 
-	/** Resolve `path`, optionally waiting for an announcement; see {@link Consumer.request}. */
+	/** Resolve one publisher instance at `path`; see {@link Consumer.request}. */
 	request(path: Path.Valid, options?: RequestOptions): Requesting;
+
+	/** Follow `path` across publisher instances; see {@link Consumer.follow}. */
+	follow(path: Path.Valid, options?: RequestOptions): Requesting;
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
 	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
@@ -1135,13 +1138,8 @@ export interface Table {
 	): Requests;
 }
 
-/** Options for resolving a broadcast path. */
+/** Options for resolving a broadcast path, by {@link Consumer.request} or {@link Consumer.follow}. */
 export interface RequestOptions {
-	/**
-	 * Follow announced instances, pinned to one epoch when provided. Requires discovery;
-	 * never falls back to a blind request when discovery is unavailable.
-	 */
-	announced?: boolean;
 	/** Refuse a different publisher instance, including an asynchronous answer or a retry. */
 	epoch?: Epoch.Valid;
 }
@@ -1522,9 +1520,14 @@ export class Producer implements Table {
 		return this.#reader.discovery;
 	}
 
-	/** Resolve `path`, optionally waiting for an announcement; see {@link Consumer.request}. */
+	/** Resolve one publisher instance at `path`; see {@link Consumer.request}. */
 	request(path: Path.Valid, options?: RequestOptions): Requesting {
 		return this.#reader.request(path, options);
+	}
+
+	/** Follow `path` across publisher instances; see {@link Consumer.follow}. */
+	follow(path: Path.Valid, options?: RequestOptions): Requesting {
+		return this.#reader.follow(path, options);
 	}
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
@@ -1614,7 +1617,7 @@ let publishPrepared: (request: Request, publication: Publication, epoch: Epoch.V
 let rejectPrepared: (request: Request, err: Error) => void;
 
 /**
- * An owned request for a broadcast path; see {@link Consumer.request}.
+ * An owned request for a broadcast path; see {@link Consumer.request} and {@link Consumer.follow}.
  *
  * @public
  */
@@ -1624,8 +1627,8 @@ export class Requesting {
 
 	/**
 	 * The current broadcast, or undefined while nothing provides the path.
-	 * Announced requests follow publisher instances, pinned to one when requested.
-	 * Plain requests retain their accepted instance. Another route of the same epoch taking over keeps
+	 * A followed path moves to each publisher instance, pinned to one when requested.
+	 * A request retains its accepted instance. Another route of the same epoch taking over keeps
 	 * this handle: its tracks resume on that route from the first group each reader lacks.
 	 * Closing this handle affects only this request.
 	 */
@@ -1633,9 +1636,9 @@ export class Requesting {
 
 	/**
 	 * Settles on refusal, origin shutdown, or explicit close.
-	 * A plain request also ends when its accepted instance stops serving, and fails
+	 * A request also ends when its accepted instance stops serving, and fails
 	 * `Unroutable` while pending once discovery syncs without a route for it;
-	 * an announced request waits for a later start, even when pinned.
+	 * a followed path waits for a later start, even when pinned.
 	 */
 	readonly closed: GetPromise<Error | null>;
 
@@ -1741,18 +1744,28 @@ export class Consumer {
 	}
 
 	/**
-	 * Resolve one publisher instance, or follow announcements when `announced` is true.
-	 * Every request owns discovery of its path until closed. A pending plain request fails
-	 * `Unroutable` once every session's discovery has synced without a route for it, and can
-	 * use a session without discovery instead. A follower requires discovery and waits for its
-	 * pinned instance to return instead of closing on a gap.
+	 * Resolve one publisher instance serving `path`, pinned to `epoch` when given.
+	 *
+	 * The request owns discovery of its path until closed and retries route churn while
+	 * pending. It fails `Unroutable` once every session's discovery has synced without a
+	 * route for it, and can use a session without discovery instead. Once resolved it keeps
+	 * that instance, ending when the instance stops serving. Use {@link follow} to move on
+	 * to the next one.
 	 */
 	request(path: Path.Valid, options: RequestOptions = {}): Requesting {
-		if (options.announced) return this.#following(path, options);
-		return this.#resolve(path, options);
+		return this.#resolve(path, options.epoch, false);
 	}
 
-	#following(path: Path.Valid, options: RequestOptions): Requesting {
+	/**
+	 * Follow `path` across publisher instances, pinned to `epoch` when given.
+	 *
+	 * `active` moves to each instance announced at the path, clears between them, and never
+	 * closes on a gap: a pinned follower waits for its instance to return. Owns discovery of
+	 * its path until closed. Requires discovery: a session without it never serves a follower.
+	 * A selected handler's refusal or the origin closing ends it.
+	 */
+	follow(path: Path.Valid, options: RequestOptions = {}): Requesting {
+		const epoch = options.epoch;
 		const absolute = this.#scope.path(path);
 		Path.Pattern.literal(path);
 		let watch = this.#state.watchers.get(absolute);
@@ -1827,7 +1840,7 @@ export class Consumer {
 			ended(next.closed.peek(), next);
 		};
 		try {
-			replace(this.#resolve(path, options));
+			replace(this.#resolve(path, epoch, true));
 		} catch (error) {
 			finish(error instanceof Error ? error : new Error(String(error)));
 			throw error;
@@ -1846,8 +1859,9 @@ export class Consumer {
 			const same = previous && next && sameInstance(previous, next);
 			previous = next;
 			if (!next) {
-				if (had) replace(this.#resolve(path, options));
-			} else if (!same || !current || current.closed.peek() !== undefined) replace(this.#resolve(path, options));
+				if (had) replace(this.#resolve(path, epoch, true));
+			} else if (!same || !current || current.closed.peek() !== undefined)
+				replace(this.#resolve(path, epoch, true));
 		};
 		if (!disposed) {
 			unwatch = watched.version.subscribe(changed);
@@ -1857,9 +1871,10 @@ export class Consumer {
 		return makeRequesting(path, active, closed, () => finish(null));
 	}
 
-	#resolve(path: Path.Valid, options: RequestOptions): Requesting {
+	// One resolution of `path`. A follower's (`announced`) takes only an announced front and
+	// never reports absence: {@link follow} retries it on the next instance instead.
+	#resolve(path: Path.Valid, epoch: Epoch.Valid | undefined, announced: boolean): Requesting {
 		Path.Pattern.literal(path);
-		const epoch = options.epoch;
 		const relative = path;
 		path = this.#scope.path(path);
 		const requests = this.#state.requests.peek();
@@ -1891,7 +1906,6 @@ export class Consumer {
 		const closed = new Once<Error | null>();
 		slot.handles.add(closed);
 		// Counted, not subscribed: serving sessions decide blindness from the live discovery state.
-		const announced = options.announced === true;
 		if (!announced) slot.blind += 1;
 		// Resolution owns discovery from the first ask, not just after a route arrives.
 		const unwatch = this.#state.watch([path]);

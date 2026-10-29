@@ -35,8 +35,13 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			} else {
 				None
 			};
-			client.consume().routed("ladder").await.unwrap();
-			let remote = client.consume().request_broadcast("ladder", None).await.unwrap();
+			let remote = client
+				.consume()
+				.follow("ladder", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap();
 			let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
 			for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
 				// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame.
@@ -100,14 +105,18 @@ async fn wide_sequence_fails_only_its_subscription() {
 	let _downstream = connect_mock(options).await;
 
 	// lite-07 carries the full 64 bits, so the relay holds the group.
-	relay.consume().routed("bench").await.unwrap();
-	let cached = relay.consume().request_broadcast("bench", None).await.unwrap();
+	let cached = relay
+		.consume()
+		.follow("bench", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
 	let mut sub = cached.track("wide").unwrap().subscribe(None).await.unwrap();
 	assert_eq!(sub.recv_group().await.unwrap().unwrap().sequence, WIDE);
 
 	let consumer = client.consume();
-	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench", None).await.unwrap();
+	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
 
 	let result = moq_clock::timeout(Duration::from_secs(5), async {
 		let mut sub = remote.track("wide").unwrap().subscribe(None).await?;
@@ -156,8 +165,7 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	let _downstream = connect_mock(options).await;
 
 	let consumer = client.consume();
-	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench", None).await.unwrap();
+	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
 
 	let mut sub = remote.track("wide").unwrap().subscribe(None).await.unwrap();
 	let mut group = sub.recv_group().await.unwrap().unwrap();
