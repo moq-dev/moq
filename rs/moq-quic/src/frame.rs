@@ -573,7 +573,12 @@ impl Iter {
 		let ty = self.bytes.get::<FrameType>()?;
 		self.last_ty = Some(ty);
 		Ok(match ty {
-			FrameType::PADDING => Frame::Padding,
+			FrameType::PADDING => {
+				// Each zero byte is its own PADDING frame, so yield the whole run as one
+				let run = self.bytes.iter().position(|&b| b != 0).unwrap_or(self.bytes.len());
+				self.bytes.advance(run);
+				Frame::Padding
+			}
 			FrameType::RESET_STREAM => Frame::ResetStream(ResetStream {
 				id: self.bytes.get()?,
 				error_code: self.bytes.get()?,
@@ -983,6 +988,15 @@ mod test {
 			.unwrap()
 			.collect::<Result<Vec<_>, _>>()
 			.unwrap()
+	}
+
+	#[test]
+	fn padding_runs_decode_as_one_frame() {
+		let mut iter = Iter::new(Bytes::from_static(&[0, 0, 0, 0x01, 0, 0])).unwrap();
+		assert_matches!(iter.next_with_size(), Some((Ok(Frame::Padding), 3)));
+		assert_matches!(iter.next_with_size(), Some((Ok(Frame::Ping), 1)));
+		assert_matches!(iter.next_with_size(), Some((Ok(Frame::Padding), 2)));
+		assert!(iter.next().is_none());
 	}
 
 	#[test]

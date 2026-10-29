@@ -564,9 +564,14 @@ impl<T> Read<'_, T> {
 
 #[cfg(all(test, not(loom)))]
 mod test {
-	use std::sync::Arc as StdArc;
+	use std::sync::{Arc as StdArc, Mutex};
 
 	use super::*;
+
+	// Crossbeam shares its collector across logs. Keep unrelated tests from holding
+	// pins or queuing garbage while another test checks reclamation. Nextest isolates
+	// tests in processes, but libtest runs them concurrently in one process.
+	static COLLECTOR: Mutex<()> = Mutex::new(());
 
 	/// The `[start, end)` of each live segment, oldest first.
 	fn layout<T: Send + Sync + 'static>(writer: &Writer<T>) -> Vec<(u64, u64)> {
@@ -578,8 +583,7 @@ mod test {
 			.collect()
 	}
 
-	/// Run the epoch collector until whatever was retired is freed. Each test runs in its
-	/// own process, so no other thread holds a pin.
+	/// Drive reclamation without unrelated pins or garbage, under `COLLECTOR`.
 	fn collect() {
 		for _ in 0..8 {
 			epoch::pin().flush();
@@ -594,6 +598,7 @@ mod test {
 	/// reader that started before any of them existed or one that jumps.
 	#[test]
 	fn reads_every_entry_across_segments() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
 		assert_eq!(get(&mut reader, 0), Ok(None));
@@ -618,6 +623,7 @@ mod test {
 	/// is allocated.
 	#[test]
 	fn segments_double_up_to_the_largest() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::<u64>::new(0);
 		assert_eq!(writer.heap(), Writer::<u64>::SHARED);
 		writer.reserve();
@@ -655,6 +661,7 @@ mod test {
 	/// A segment's heap is its allocation's real size.
 	#[test]
 	fn heap_matches_layout() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let header = Layout::new::<Segment<StdArc<()>>>();
 		let slots = Layout::array::<Slot<StdArc<()>>>(4).unwrap();
 		let layout = header.extend(slots).unwrap().0.pad_to_align();
@@ -664,6 +671,7 @@ mod test {
 	/// A log can start past zero; nothing below its start is readable.
 	#[test]
 	fn starts_past_zero() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(10);
 		let mut reader = writer.reader();
 		writer.push("a");
@@ -676,6 +684,7 @@ mod test {
 	/// [`Evicted`] rather than a stale entry, even in the segment it last read.
 	#[test]
 	fn eviction_retires_whole_segments() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
 		for i in 0..10u64 {
@@ -705,6 +714,7 @@ mod test {
 	/// and that reader finds them evicted if it does.
 	#[test]
 	fn eviction_frees_whatever_readers_do() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let entry = StdArc::new(());
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
@@ -722,6 +732,7 @@ mod test {
 	/// A read in progress keeps what it can reach until it ends.
 	#[test]
 	fn a_read_outlasts_eviction() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let entry = StdArc::new(());
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
@@ -740,6 +751,7 @@ mod test {
 	/// entry, though the segment it last read was cut off from the new one.
 	#[test]
 	fn a_read_spans_a_full_eviction() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
 		writer.push(0u64);
@@ -756,6 +768,7 @@ mod test {
 	/// misread.
 	#[test]
 	fn evicting_the_tail_starts_a_new_segment() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
 		for i in 0..2u64 {
@@ -783,6 +796,7 @@ mod test {
 	/// Evicting past the end skips those indices: the next entry lands at the new base.
 	#[test]
 	fn evicting_past_the_end_skips() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
 		writer.reserve();
@@ -801,6 +815,7 @@ mod test {
 	/// A clone reads independently from where the original's segment was.
 	#[test]
 	fn clones_read_independently() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
 		for i in 0..20u64 {
@@ -817,6 +832,7 @@ mod test {
 	/// alive for it.
 	#[test]
 	fn reader_outlives_writer() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let entry = StdArc::new(());
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
@@ -835,6 +851,7 @@ mod test {
 	/// it evicts behind them.
 	#[test]
 	fn concurrent_readers_see_every_entry() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let readers: Vec<_> = (0..4)
 			.map(|_| {

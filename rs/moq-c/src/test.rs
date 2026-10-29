@@ -374,6 +374,7 @@ fn publish_audio(broadcast: u32, format: moq_audio_format, init: &[u8], label: O
 		init_len: init.len(),
 		label,
 		label_len,
+		hint: moq_audio_hint::default(),
 	};
 
 	unsafe { moq_publish_audio(broadcast, &config) }
@@ -2671,6 +2672,7 @@ fn unknown_format() {
 		init_len: 0,
 		label: std::ptr::null(),
 		label_len: 0,
+		hint: moq_audio_hint::default(),
 	};
 	let ret = unsafe { moq_publish_audio(broadcast, &config) };
 	assert!(ret < 0, "an out-of-range format code should fail");
@@ -3445,6 +3447,7 @@ fn dynamic_track_request_publishes_media() {
 		init_len: init.len(),
 		label: std::ptr::null(),
 		label_len: 0,
+		hint: moq_audio_hint::default(),
 	};
 	let media = id(unsafe { moq_track_request_audio(request, &config) });
 
@@ -6641,4 +6644,364 @@ unsafe fn encoded_frame(id: u32, dst: *mut moq_frame) -> i32 {
 		}
 	}
 	status
+}
+
+/// An audio rendition as the publisher currently lists it.
+fn audio_rendition(broadcast: u32, name: &str) -> hang::catalog::AudioConfig {
+	published_catalog(broadcast).audio.renditions[name].clone()
+}
+
+/// Publish `count` 20 ms Opus packets of `size` bytes from `start_us`, one group each.
+fn write_opus(media: u32, start_us: u64, count: u64, size: usize) {
+	let payload = vec![0u8; size];
+	for i in 0..count {
+		let ts = start_us + i * 20_000;
+		assert_eq!(
+			unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), ts) },
+			0
+		);
+		assert_eq!(moq_publish_media_cut(media), 0);
+	}
+}
+
+/// A supplied audio bitrate is published as given and never estimated: writes that measure a
+/// different one leave the rendition unchanged, while an unhinted track still measures its own.
+#[test]
+fn audio_hint_is_authoritative() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"audio-hint");
+	let init = opus_head();
+
+	let free = id(publish_audio(
+		broadcast,
+		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
+		&init,
+		None,
+	));
+	let before: Vec<String> = published_catalog(broadcast).audio.renditions.keys().cloned().collect();
+
+	let config = moq_audio_init {
+		format: moq_audio_format::MOQ_AUDIO_FORMAT_OPUS as u32,
+		init: init.as_ptr(),
+		init_len: init.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		hint: moq_audio_hint {
+			bitrate: 64_000,
+			has_bitrate: true,
+			..moq_audio_hint::default()
+		},
+	};
+	let hinted = id(unsafe { moq_publish_audio(broadcast, &config) });
+	let name = (published_catalog(broadcast).audio.renditions.keys())
+		.find(|name| !before.contains(name))
+		.expect("hinted rendition listed")
+		.clone();
+
+	assert_eq!(audio_rendition(broadcast, &name).bitrate, Some(64_000));
+
+	// 1000-byte packets every 20 ms measure 400 kb/s.
+	write_opus(free, 0, 75, 1000);
+	write_opus(hinted, 0, 75, 1000);
+
+	assert_eq!(
+		audio_rendition(broadcast, &name).bitrate,
+		Some(64_000),
+		"a supplied bitrate is never re-estimated"
+	);
+	assert_eq!(
+		audio_rendition(broadcast, &before[0]).bitrate,
+		Some(400_000),
+		"an unhinted track still measures its bitrate"
+	);
+
+	assert_eq!(moq_publish_media_finish(hinted), 0);
+	assert_eq!(moq_publish_media_finish(free), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A zeroed audio hint behaves as before: the bitrate is measured.
+#[test]
+fn zeroed_audio_hint_measures() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"audio-hint-zeroed");
+	let media = id(publish_audio(
+		broadcast,
+		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
+		&opus_head(),
+		None,
+	));
+	let name = published_catalog(broadcast)
+		.audio
+		.renditions
+		.keys()
+		.next()
+		.unwrap()
+		.clone();
+	assert_eq!(audio_rendition(broadcast, &name).bitrate, None);
+
+	write_opus(media, 0, 75, 1000);
+	assert_eq!(audio_rendition(broadcast, &name).bitrate, Some(400_000));
+
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A video group duration hint declares the HLS duration up front, as the smallest multiple of the
+/// hint at or above the grid.
+#[test]
+fn video_group_duration_hint_declares_hls() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-group-duration");
+	let init = h264_init();
+	let config = moq_video_init {
+		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+		init: init.as_ptr(),
+		init_len: init.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		hint: moq_video_hint {
+			group_duration_us: 3_000_000,
+			has_group_duration: true,
+			..moq_video_hint::default()
+		},
+	};
+	let media = id(unsafe { moq_publish_video(broadcast, &config) });
+
+	let catalog = published_catalog(broadcast);
+	let rendition = catalog.video.renditions.values().next().expect("rendition listed");
+	let hls = rendition.hls.clone().expect("records listed before any frame");
+	assert_eq!(hls.duration, std::time::Duration::from_secs(6));
+
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Hints reach a track published for a request, as for moq_publish_audio and moq_publish_video.
+#[test]
+fn track_request_media_carries_hints() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"dynamic-hints");
+	let request_cb = Callback::new();
+	let _dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
+	let consume = consume_local(broadcast);
+
+	let audio_cb = Callback::new();
+	let audio_consumer = consume_track(consume, b"audio", &audio_cb);
+	let request = id(request_cb.recv());
+	let opus = opus_head();
+	let audio_config = moq_audio_init {
+		format: moq_audio_format::MOQ_AUDIO_FORMAT_OPUS as u32,
+		init: opus.as_ptr(),
+		init_len: opus.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		hint: moq_audio_hint {
+			bitrate: 96_000,
+			has_bitrate: true,
+			group_duration_us: 100_000,
+			has_group_duration: true,
+		},
+	};
+	let audio = id(unsafe { moq_track_request_audio(request, &audio_config) });
+
+	let video_cb = Callback::new();
+	let video_consumer = consume_track(consume, b"video", &video_cb);
+	let request = id(request_cb.recv());
+	let h264 = h264_init();
+	let video_config = moq_video_init {
+		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+		init: h264.as_ptr(),
+		init_len: h264.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		hint: moq_video_hint {
+			bitrate: 2_000_000,
+			has_bitrate: true,
+			group_duration_us: 3_000_000,
+			has_group_duration: true,
+			..moq_video_hint::default()
+		},
+	};
+	let video = id(unsafe { moq_track_request_video(request, &video_config) });
+
+	let catalog = published_catalog(broadcast);
+	let audio_rendition = catalog.audio.renditions.values().next().expect("audio listed");
+	assert_eq!(audio_rendition.bitrate, Some(96_000));
+	assert_eq!(
+		audio_rendition.hls.as_ref().map(|hls| hls.duration),
+		Some(std::time::Duration::from_secs(4))
+	);
+	let video_rendition = catalog.video.renditions.values().next().expect("video listed");
+	assert_eq!(video_rendition.bitrate, Some(2_000_000));
+	assert_eq!(
+		video_rendition.hls.as_ref().map(|hls| hls.duration),
+		Some(std::time::Duration::from_secs(6))
+	);
+
+	assert_eq!(moq_consume_track_cancel(audio_consumer), 0);
+	assert_eq!(audio_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_track_cancel(video_consumer), 0);
+	assert_eq!(video_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_media_finish(audio), 0);
+	assert_eq!(moq_publish_media_finish(video), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(request_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A hint flag set with a 0 value, or a group duration past what milliseconds hold for a
+/// JavaScript reader, is an invalid config rather than a second encoding of "absent".
+#[test]
+fn invalid_hints_are_refused() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"invalid-hints");
+	let opus = opus_head();
+	let h264 = h264_init();
+	let audio = |hint: moq_audio_hint| {
+		let config = moq_audio_init {
+			format: moq_audio_format::MOQ_AUDIO_FORMAT_OPUS as u32,
+			init: opus.as_ptr(),
+			init_len: opus.len(),
+			label: std::ptr::null(),
+			label_len: 0,
+			hint,
+		};
+		unsafe { moq_publish_audio(broadcast, &config) }
+	};
+	let video = |hint: moq_video_hint| {
+		let config = moq_video_init {
+			format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+			init: h264.as_ptr(),
+			init_len: h264.len(),
+			label: std::ptr::null(),
+			label_len: 0,
+			hint,
+		};
+		unsafe { moq_publish_video(broadcast, &config) }
+	};
+
+	let invalid = MOQ_ERROR_INVALID_CONFIG;
+	assert_eq!(
+		audio(moq_audio_hint {
+			has_bitrate: true,
+			..moq_audio_hint::default()
+		}),
+		invalid,
+		"bitrate 0"
+	);
+	assert_eq!(
+		audio(moq_audio_hint {
+			has_group_duration: true,
+			..moq_audio_hint::default()
+		}),
+		invalid,
+		"audio group duration 0"
+	);
+	assert_eq!(
+		audio(moq_audio_hint {
+			group_duration_us: u64::MAX,
+			has_group_duration: true,
+			..moq_audio_hint::default()
+		}),
+		invalid,
+		"audio group duration past milliseconds"
+	);
+	assert_eq!(
+		video(moq_video_hint {
+			has_group_duration: true,
+			..moq_video_hint::default()
+		}),
+		invalid,
+		"video group duration 0"
+	);
+	assert_eq!(
+		video(moq_video_hint {
+			has_bitrate: true,
+			..moq_video_hint::default()
+		}),
+		invalid,
+		"video bitrate 0"
+	);
+
+	let catalog = published_catalog(broadcast);
+	assert!(catalog.audio.renditions.is_empty(), "no audio published");
+	assert!(catalog.video.renditions.is_empty(), "no video published");
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A group duration hint lists the track's HLS records in the first catalog, so the first group
+/// doesn't republish it; without one they arrive once a group has been written.
+#[test]
+fn group_duration_hint_lists_hls_up_front() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"group-duration");
+	let init = opus_head();
+
+	let free = id(publish_audio(
+		broadcast,
+		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
+		&init,
+		None,
+	));
+	let free_name = published_catalog(broadcast)
+		.audio
+		.renditions
+		.keys()
+		.next()
+		.unwrap()
+		.clone();
+	assert!(
+		audio_rendition(broadcast, &free_name).hls.is_none(),
+		"unhinted: no records yet"
+	);
+
+	let config = moq_audio_init {
+		format: moq_audio_format::MOQ_AUDIO_FORMAT_OPUS as u32,
+		init: init.as_ptr(),
+		init_len: init.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		hint: moq_audio_hint {
+			group_duration_us: 100_000,
+			has_group_duration: true,
+			..moq_audio_hint::default()
+		},
+	};
+	let hinted = id(unsafe { moq_publish_audio(broadcast, &config) });
+	let name = (published_catalog(broadcast).audio.renditions.keys())
+		.find(|name| **name != free_name)
+		.expect("hinted rendition listed")
+		.clone();
+	let listed = audio_rendition(broadcast, &name);
+	let hls = listed.hls.clone().expect("hinted: records listed before any frame");
+	// The smallest multiple of the 100 ms hint at or above the 4 s grid.
+	assert_eq!(hls.duration, std::time::Duration::from_secs(4));
+
+	// 100 ms groups of five 20 ms packets.
+	let payload = [0u8; 100];
+	for i in 0..20u64 {
+		assert_eq!(
+			unsafe { moq_publish_media_frame(hinted, payload.as_ptr(), payload.len(), i * 20_000) },
+			0
+		);
+		if i % 5 == 4 {
+			assert_eq!(moq_publish_media_cut(hinted), 0);
+		}
+	}
+	assert_eq!(
+		audio_rendition(broadcast, &name).hls,
+		listed.hls,
+		"the first groups don't change the listed records"
+	);
+
+	assert_eq!(moq_publish_media_finish(hinted), 0);
+	assert_eq!(moq_publish_media_finish(free), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
 }
