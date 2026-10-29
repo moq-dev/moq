@@ -45,7 +45,7 @@ function provesOther(active: Moq.Broadcast.Consumer | undefined, epoch: Moq.Epoc
 // Whether an announced route covers `path`, until closed. Hidden routes count: a service claim
 // under a `.`-named prefix is kept out of listings, but it still covers the renditions it would
 // produce, and this is never shown to anyone.
-function watchCovered(origin: Moq.Origin.Table, path: Moq.Path.Valid): { covered: Getter<boolean>; close: () => void } {
+function watchCovered(origin: Origin, path: Moq.Path.Valid): { covered: Getter<boolean>; close: () => void } {
 	const announced = origin.announced(Path.Pattern.literal(path), { hidden: true });
 	const covered = new Signal(false);
 	const active = new Set<Moq.Path.Valid>();
@@ -100,9 +100,9 @@ export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
  * another component whose output is wired in) does the writing.
  */
 export type BroadcastInput = {
-	// The origin to consume from. Independent of any connection: whichever sessions feed
+	// The read-side origin to borrow. Independent of any connection: whichever sessions feed
 	// the origin resolve the broadcast, and the handle spans their reconnects.
-	origin: Getter<Moq.Origin.Table | undefined>;
+	origin: Getter<Pick<Moq.Origin.Consumer, "closed" | "discovery" | "request" | "follow" | "announced"> | undefined>;
 
 	// Whether to start downloading the broadcast. Defaults to true.
 	enabled: Getter<boolean>;
@@ -125,6 +125,8 @@ export type BroadcastInput = {
 	// ignored otherwise. Read `output.catalog` for the effective catalog in any mode.
 	catalog: Getter<Catalog.Root | undefined>;
 };
+
+type Origin = NonNullable<GetterType<BroadcastInput["origin"]>>;
 
 /** Signals the component derives. */
 export type BroadcastOutput = {
@@ -163,13 +165,13 @@ export class Broadcast {
 	// its relay about the broadcasts a catalog actually references.
 	readonly #watches = new Map<
 		Moq.Path.Valid,
-		{ origin: Moq.Origin.Table; covered: Getter<boolean>; close: () => void; users: number }
+		{ origin: Origin; covered: Getter<boolean>; close: () => void; users: number }
 	>();
 
 	// Requests are shared by callers; each owns its restart watch in the origin.
 	readonly #references = new Map<
 		Moq.Path.Valid,
-		{ origin: Moq.Origin.Table; follow: boolean; request: Moq.Origin.Requesting; users: number }
+		{ origin: Origin; follow: boolean; request: Moq.Origin.Requesting; users: number }
 	>();
 
 	// The catalog as published, before renditions this consumer cannot use are dropped. Kept
@@ -221,7 +223,7 @@ export class Broadcast {
 	// gets selected: its service claims a covering prefix, and nothing announces the exact path
 	// until this subscribes. Watches exactly `path`, shared by every caller asking about it.
 	// The blind cases (announcement gate off, no discovery) never reach here; see `#relativeTarget`.
-	#isPathAnnounced(effect: Effect, origin: Moq.Origin.Table, path: Moq.Path.Valid): boolean {
+	#isPathAnnounced(effect: Effect, origin: Origin, path: Moq.Path.Valid): boolean {
 		let entry = this.#watches.get(path);
 		if (!entry || entry.origin !== origin) {
 			entry?.close();
@@ -244,11 +246,7 @@ export class Broadcast {
 	}
 
 	// Share one origin request across callers reading the same referenced broadcast.
-	#requestBroadcast(
-		effect: Effect,
-		origin: Moq.Origin.Table,
-		path: Moq.Path.Valid,
-	): Moq.Broadcast.Consumer | undefined {
+	#requestBroadcast(effect: Effect, origin: Origin, path: Moq.Path.Valid): Moq.Broadcast.Consumer | undefined {
 		const follow = effect.get(this.in.follow);
 		let entry = this.#references.get(path);
 		if (!entry || entry.origin !== origin || entry.follow !== follow) {

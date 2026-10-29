@@ -1,4 +1,5 @@
 import { expect, mock, test } from "bun:test";
+import { Origin, Path } from "@moq/net";
 import { Signal } from "@moq/signals";
 
 // Bun does not run Vite's worklet loader; these tests never create an AudioContext.
@@ -13,6 +14,41 @@ async function flush() {
 test("Player refuses the renamed reload and announced inputs", () => {
 	expect(() => new Player({ reload: true } as never)).toThrow("`reload` was renamed to `follow`");
 	expect(() => new Player({ announced: true } as never)).toThrow("`announced` was renamed to `follow`");
+});
+
+test.each(["table", "consumer", "structural"] as const)("Player borrows a %s origin", async (role) => {
+	const producer = new Origin.Producer();
+	const consumer = producer.consume();
+	const table: Origin.Table = producer;
+	const origins = {
+		table,
+		consumer,
+		structural: {
+			closed: consumer.closed,
+			discovery: consumer.discovery,
+			request: consumer.request.bind(consumer),
+			follow: consumer.follow.bind(consumer),
+			announced: consumer.announced.bind(consumer),
+		},
+	};
+	const name = Path.from("live.hang");
+	const player = new Player({ origin: origins[role], name, catalogFormat: "manual", catalog: {} });
+	try {
+		const active = player.broadcast.out.active.changed();
+		const publication = producer.createBroadcast(name);
+		publication.announce();
+		expect((await active)?.path).toBe(name);
+		expect(player.in.origin.peek()).toBe(origins[role]);
+		expect(player.broadcast.in.origin.peek()).toBe(origins[role]);
+
+		player.close();
+		await flush();
+		expect(producer.closed.peek()).toBeUndefined();
+		expect(publication.broadcast.closed.peek()).toBeUndefined();
+	} finally {
+		player.close();
+		producer.close();
+	}
 });
 
 test("Player owns the shared pipeline and feeds output policy into decoders", async () => {

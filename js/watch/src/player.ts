@@ -4,15 +4,15 @@ import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import * as Audio from "./audio";
-import { Broadcast, type CatalogFormat } from "./broadcast";
+import { Broadcast, type BroadcastInput, type CatalogFormat } from "./broadcast";
 import { type Delay, Sync } from "./sync";
 import * as Text from "./text";
 import * as Video from "./video";
 
 /** Inputs for a complete broadcast playback pipeline. */
 export type PlayerInput = {
-	/** Origin that supplies the broadcast. */
-	origin: Getter<Moq.Origin.Table | undefined>;
+	/** Read-side origin that supplies the broadcast, borrowed without its lifecycle. */
+	origin: BroadcastInput["origin"];
 	/** Broadcast path relative to the origin. */
 	name: Getter<Moq.Path.Valid>;
 	/** Whether the pipeline may subscribe. */
