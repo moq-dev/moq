@@ -2150,6 +2150,7 @@ mod tests {
 			ranges: vec![lite::Range::OLDEST],
 			tail: tail.clone(),
 			served: None,
+			starts: Vec::new(),
 			end: None,
 			wanted: None,
 			unanswered: None,
@@ -2205,6 +2206,34 @@ mod tests {
 
 		active.served = Some(0);
 		assert_eq!(active.covered(), Some(std::iter::once(0..2).collect()));
+	}
+
+	/// A covered FIN owes a relative range only from its own SUBSCRIBE_START, not from the
+	/// lowest start of a disjoint range below it.
+	#[moq_clock::test]
+	async fn a_covered_fin_owes_each_range_from_its_own_start() {
+		let tail = kio::Producer::new(Tail::default());
+		let Sub::Active(mut active) = feed_sub(&tail).await else {
+			unreachable!("feed_sub is active")
+		};
+		let end = |group| Some(lite::Anchor::Absolute(crate::track::Position { group, frame: 0 }));
+		active.ranges = vec![
+			lite::Range::span(Some(0), 0, Some(0), None),
+			lite::Range {
+				start: Some(lite::Anchor::Relative(0)),
+				end: end(11),
+			},
+			lite::Range {
+				start: Some(lite::Anchor::Relative(0)),
+				end: end(20),
+			},
+		];
+		active.served = Some(0);
+		active.starts = vec![Some(0), Some(10), None];
+		assert_eq!(active.covered(), Some(vec![0..1, 10..11, 20..20]));
+
+		active.updated = true;
+		assert_eq!(active.covered(), Some(vec![0..1, 0..11, 0..20]), "an update leaves only the lowest");
 	}
 
 	/// QUIC does not order streams, so group 2's header can reach the relay before group 1's.
@@ -2286,6 +2315,7 @@ mod tests {
 				ranges: vec![lite::Range::span(Some(floor), 0, None, None)],
 				tail: Default::default(),
 				served: None,
+				starts: Vec::new(),
 				end: None,
 				wanted: None,
 				unanswered: None,
@@ -2750,6 +2780,7 @@ mod tests {
 			ranges: vec![lite::Range::span(Some(2), 0, None, None)],
 			tail: Default::default(),
 			served: None,
+			starts: Vec::new(),
 			end: Some(lite::SubscribeEnd { group: 10 }),
 			wanted: None,
 			unanswered: None,
@@ -6309,6 +6340,9 @@ struct SubStream {
 	tail: kio::Producer<Tail>,
 	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
 	served: Option<u64>,
+	/// Where SUBSCRIBE_START says each range's delivery starts, `None` for one with nothing
+	/// to deliver. It matches `ranges` until an update changes them.
+	starts: Vec<Option<u64>>,
 	/// The track's exclusive end (SUBSCRIBE_END), once declared.
 	end: Option<lite::SubscribeEnd>,
 	/// The refresh join's wanted group, restated in every SUBSCRIBE_UPDATE.
@@ -6358,14 +6392,20 @@ impl SubStream {
 		};
 		self.ranges
 			.iter()
-			.map(|range| {
+			.enumerate()
+			.map(|(index, range)| {
 				// Our absolute ends name a group's first frame (see `wire_ranges`).
 				let Some(lite::Anchor::Absolute(end)) = range.end else {
 					return None;
 				};
 				let start = match range.start {
 					Some(lite::Anchor::Absolute(start)) => start.group,
-					_ => served,
+					// The range's own start, so a gap below it isn't owed; after an
+					// update only the lowest start is known.
+					_ => match self.starts.get(index) {
+						Some(start) if !self.updated => start.unwrap_or(end.group),
+						_ => served,
+					},
 				};
 				Some(start..end.group)
 			})
@@ -7073,6 +7113,7 @@ impl Establish {
 			requested: self.subscription.start(),
 			tail: self.tail.clone(),
 			served: None,
+			starts: Vec::new(),
 			end: None,
 			wanted: None,
 			bounded: bounded(&self.ranges),
@@ -8027,6 +8068,7 @@ impl ServeLoop {
 											};
 										}
 										active.served = served;
+										active.starts = start.starts.clone();
 										// The groups the SUBSCRIBE asked for below it are not
 										// waited for, whatever the demand asks later. One that
 										// still arrives is delivered, so they are not dropped.

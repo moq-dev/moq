@@ -1474,6 +1474,9 @@ export class Subscriber {
 
 			if ("ok" in resp) throw new ProtocolViolation("duplicate SUBSCRIBE_OK");
 			if ("start" in resp) {
+				// Every SUBSCRIBE and update we send carries one range, so one start answers it.
+				if (hasRanges(this.version) && resp.start.starts.length !== 1)
+					throw new ProtocolViolation(`SUBSCRIBE_START resolves ${resp.start.starts.length} ranges, not 1`);
 				// The lowest range start is the first group served; none leaves nothing owed.
 				entry.start = resp.start.starts.reduce<number | undefined>(
 					(lowest, start) =>

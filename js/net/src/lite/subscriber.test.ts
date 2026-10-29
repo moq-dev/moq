@@ -2221,6 +2221,28 @@ test("a publisher FIN without SUBSCRIBE_END still violates an open subscription"
 	}
 });
 
+// Our SUBSCRIBE carries one range, so a lite-07 SUBSCRIBE_START with any other count is malformed.
+test.each([[[]], [[0, 5]]])("a lite-07 SUBSCRIBE_START resolving %j violates the protocol", async (starts) => {
+	const { quic, streams, opened, closes } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], Version.DRAFT_07);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, Version.DRAFT_07, [{ start: new SubscribeStart(starts) }]);
+		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
+		await drainReactions();
+		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A lite-07 publisher FINs a bounded subscription without SUBSCRIBE_END once it covered the range,
 // which ends the subscription cleanly rather than violating the protocol. Covering a range is
 // not ending the track, so no end is declared.
