@@ -2529,25 +2529,45 @@ mod tests {
 		);
 	}
 
+	/// Wide ranges cost one held entry per model fill, shared until the last reader leaves.
 	#[moq_clock::test]
-	async fn the_feed_track_backstop_refuses_the_next_group() {
+	async fn held_feed_fills_follow_shared_demand() {
+		const WIDTH: u64 = 1 << 40;
 		let start = crate::time::Instant::now();
 		let clock = crate::time::Deadlines::new(start);
 		let tail = kio::Producer::new(Tail::default());
 		let sub = feed_sub(&tail).await;
-		let (track, mut callers, requests) = feed_batch([1, 2, 3]);
+		let info = track::Info::default().with_timescale(None);
+		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+		let dynamic = track.requests();
 		let mut fetches = FeedFetches::new(&clock);
-		fetches.max = 2;
-		for req in requests {
-			fetches.push(req, &track.consume());
+		let mut callers = Vec::new();
+		for span in [1..WIDTH, WIDTH..WIDTH * 2, WIDTH * 2..WIDTH * 3] {
+			callers.push(track.consume().fill_groups(span, 0));
+			let fill = dynamic.requested_fill().now_or_never().expect("queued").unwrap();
+			fetches.push(fill, &track.consume());
 		}
-		fetches.poll(&sub, start, &kio::Waiter::noop());
-		assert_eq!(fetches.held.len(), 2);
-		assert!(matches!(
-			callers.pop().unwrap().now_or_never(),
-			Some(Err(Error::TooManyRequests))
-		));
+		let waiter = kio::Waiter::noop();
+		fetches.poll(&sub, start, &waiter);
+		assert_eq!(fetches.held.len(), 3, "one entry per fill, independent of its width");
 		assert!(callers.iter_mut().all(|caller| caller.now_or_never().is_none()));
+
+		let mut joined = track.consume().fill_groups(1..WIDTH * 3, 0);
+		assert!(
+			dynamic.requested_fill().now_or_never().is_none(),
+			"joins existing fills"
+		);
+		drop(callers);
+		fetches.poll(&sub, start, &waiter);
+		assert_eq!(fetches.held.len(), 3, "the joined reader still owns the demand");
+		assert!((&mut joined).now_or_never().is_none());
+
+		drop(joined);
+		fetches.poll(&sub, start, &waiter);
+		assert!(fetches.held.is_empty(), "last reader leaving releases every fill");
+		assert!(fetches.ready.read().is_empty());
+		assert_eq!(fetches.fold.deadline(), None);
+		assert!(dynamic.requested_fill().now_or_never().is_none());
 	}
 
 	#[moq_clock::test]
@@ -2571,37 +2591,6 @@ mod tests {
 		fetches.push(req, &track.consume());
 		fetches.poll(&sub, start, &kio::Waiter::noop());
 		assert_eq!(fetches.held.len(), 1);
-		arrive(&track, &tail, 1, start);
-		fetches.poll(&sub, start, &kio::Waiter::noop());
-		assert!(next.now_or_never().unwrap().is_ok());
-	}
-
-	/// A replacement takes the place of the attempt it replaces under the limit, before any
-	/// poll releases that one.
-	#[moq_clock::test]
-	async fn a_feed_fetch_replaces_an_abandoned_attempt_at_the_limit() {
-		let start = crate::time::Instant::now();
-		let clock = crate::time::Deadlines::new(start);
-		let tail = kio::Producer::new(Tail::default());
-		let sub = feed_sub(&tail).await;
-		let (track, mut callers, requests) = feed_batch([1, 2]);
-		let dynamic = track.requests();
-		let mut fetches = FeedFetches::new(&clock);
-		fetches.max = 2;
-		for req in requests {
-			fetches.push(req, &track.consume());
-		}
-		fetches.poll(&sub, start, &kio::Waiter::noop());
-		drop(callers.remove(0));
-		let mut next = track.consume().fetch_group(1, None);
-		let req = dynamic
-			.requested_fill()
-			.now_or_never()
-			.expect("replacement queued")
-			.unwrap();
-		fetches.push(req, &track.consume());
-		assert!((&mut next).now_or_never().is_none(), "held, not refused");
-		assert_eq!(fetches.held.len(), 2);
 		arrive(&track, &tail, 1, start);
 		fetches.poll(&sub, start, &kio::Waiter::noop());
 		assert!(next.now_or_never().unwrap().is_ok());
@@ -7489,6 +7478,11 @@ enum ServeMode {
 /// A fill waits on one group at a time, the next it still owes. Each verdict on that group
 /// also settles, by run, every group of the fill the feed gave up on, so a fill a peer
 /// made wide costs what the cache and ledger hold rather than its width.
+///
+/// There is at most one held entry per model fill, shared by its readers. Network readers
+/// own request streams (bounded by their downstream transport's credit); local readers
+/// own their demand. The last reader leaving wakes `poll` to release the fill, so holding
+/// it adds state proportional to existing demand, not another allowance on this upstream.
 struct FeedFetches {
 	/// Each fill, by the group it waits on.
 	held: BTreeMap<u64, HeldFetch>,
@@ -7496,8 +7490,6 @@ struct FeedFetches {
 	arrivals: Option<track::Arrivals>,
 	/// Only gaps containing a held group arm the earliest fold.
 	fold: crate::time::Deadline,
-	/// An additional track backstop, above one peer's default FETCH allowance.
-	max: usize,
 	#[cfg(test)]
 	polled: usize,
 }
@@ -7530,7 +7522,6 @@ impl FeedFetches {
 			ready: Default::default(),
 			arrivals: None,
 			fold: crate::time::Deadline::new(clock),
-			max: crate::session::Limits::default().announces,
 			#[cfg(test)]
 			polled: 0,
 		}
@@ -7550,8 +7541,7 @@ impl FeedFetches {
 		self.hold(fill, true);
 	}
 
-	/// Wait on the next group `fill` still owes, if any. A fresh fill counts against the
-	/// limit, once what nobody waits on any more is released.
+	/// Wait on the next group `fill` still owes, if any.
 	fn hold(&mut self, fill: track::Fill, fresh: bool) {
 		let mut next = Some((fill, fresh));
 		while let Some((fill, fresh)) = next.take() {
@@ -7564,16 +7554,6 @@ impl FeedFetches {
 				&& previous.fill.is_used()
 			{
 				next = Some((previous.fill, false));
-			}
-			if fresh {
-				let moving = usize::from(next.is_some());
-				if self.held.len() + moving >= self.max {
-					self.held.retain(|_, held| held.fill.is_used());
-				}
-				if self.held.len() + moving >= self.max {
-					fill.refuse(Error::TooManyRequests);
-					continue;
-				}
 			}
 			let waiter = kio::Waiter::new(std::task::Waker::from(Arc::new(FetchWake {
 				sequence,

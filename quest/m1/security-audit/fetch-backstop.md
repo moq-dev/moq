@@ -8,15 +8,21 @@ session's configured limits, not by `Limits::default().announces`.
 
 ## Plan
 
-From the 2026-10-27 audit (NET-2). `FeedFetches::new` sets `max` from
-`crate::session::Limits::default().announces` (100,000), an unrelated field's
-default that ignores a session configured with tighter limits for untrusted
-peers.
+The implementation removes the unrelated announcement backstop. `FeedFetches`
+holds at most one entry per existing model fill; overlapping readers share
+fills, range width does not allocate one entry per group, and cancellation
+wakes the holder to release unused fills on its next poll. Network demand
+belongs to downstream request streams and their transport credit or legacy
+request window, while local callers own their demand handles. An upstream
+track aggregates that demand, so its announcement allowance is not the bound.
 
-Prefer deleting the backstop if the held fills are already bounded by what
-the cache and ledger hold (the comment says wide fills cost that); a refusal
-constant whose only effect is a runtime refusal is what AGENTS.md forbids.
-Otherwise thread the session's `Limits` into `FeedFetches`. Show which in the
-PR with the bound's derivation.
+Remaining before completion:
 
-Public API: none. Wire: none.
+- Run the new shared-demand/wide-range test and the existing feed tests.
+  The attempted pre-fix reproduction could not start: `quest gate` waited
+  over ten minutes for host admission, then was stopped before compilation.
+- Run `just ci`, resolve any findings, then delete this quest and its links
+  and mark the PR ready. Formatting and quest validation can run without
+  waiting for host admission.
+
+Public API: none. Wire format: none. The legacy-only runtime refusal is removed.
