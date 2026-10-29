@@ -157,12 +157,21 @@ pub(super) struct Timing {
 	pub decode: u128,
 }
 
-/// Program tables to go out ahead of the next unit pushed ([`Schedule::lead`]).
-pub(super) struct Tables {
+/// The program tables as they stand ([`Schedule::set_psi`]), which each unit of them lays when
+/// it begins to go out.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct Psi {
 	/// The PAT and PMT packets.
 	pub packets: Vec<u8>,
+	/// The same tables flagging a break, for the first unit of them to go out after a switch to
+	/// another instance.
+	pub flagged: Option<Vec<u8>>,
 	/// The PID every slot's clock rides once they have gone out.
 	pub clock: u16,
+}
+
+/// Program tables to go out ahead of the next unit pushed ([`Schedule::lead`]).
+pub(super) struct Tables {
 	/// The multiplex rate from the slot after the one they finish in.
 	pub rate: Option<u64>,
 	/// The PIDs they list that the tables before them did not. Their units wait for them, and
@@ -431,6 +440,9 @@ pub(super) struct Slot {
 	/// How many units of program tables finish in the slot ([`Schedule::lead`]), which go
 	/// out in the order they were pushed.
 	pub tables: usize,
+	/// How many units of program tables begin in the slot, each laying the tables as they
+	/// stood ([`Schedule::set_psi`]).
+	pub begun: usize,
 }
 
 impl Slot {
@@ -593,6 +605,8 @@ pub(super) struct Schedule {
 	ended: bool,
 	/// The sequence number of the next unit pushed.
 	seq: u64,
+	/// The program tables as they stand, from [`Self::set_psi`].
+	psi: Option<Psi>,
 	/// Tables to go out ahead of the next unit pushed.
 	lead: Option<Tables>,
 	/// The timeline opens ([`Self::open`]) and its first tables are still to go out.
@@ -626,6 +640,7 @@ impl Schedule {
 			mb: FxHashMap::default(),
 			ended: false,
 			seq: 0,
+			psi: None,
 			lead: None,
 			opening: false,
 			clocked: 0,
@@ -763,10 +778,41 @@ impl Schedule {
 		self.units.iter().any(|unit| unit.pid == pid && unit.tables.is_none())
 	}
 
-	/// Send `tables` ahead of the next unit pushed, under its deadline. Program tables ride
-	/// one lane, so each version goes out after the one before it, and a revision is one
-	/// boundary: no unit of a stream they add goes out before them, and their clock PID and
-	/// multiplex rate take over only once they have gone out.
+	/// Set the program tables as they stand. Every unit of them still to begin lays them, and
+	/// takes over their clock PID, so a change reaches each copy not yet on its way.
+	pub fn set_psi(&mut self, psi: Psi) {
+		if self.psi.as_ref() != Some(&psi) {
+			self.psi = Some(psi);
+			self.retable();
+		}
+	}
+
+	/// Lay the tables as they stand in each unit of them still to begin, the first flagging
+	/// the break when they do ([`Psi::flagged`]).
+	fn retable(&mut self) {
+		let Some(psi) = &self.psi else {
+			return;
+		};
+		let mut flagged = psi.flagged.as_ref();
+		let mut units = std::mem::take(&mut self.units);
+		for unit in units.iter_mut().filter(|unit| unit.sent == 0) {
+			let Some(program) = &mut unit.tables else {
+				continue;
+			};
+			program.clock = psi.clock;
+			let packets = flagged.take().unwrap_or(&psi.packets);
+			if unit.packets != *packets {
+				unit.packets.clone_from(packets);
+				unit.runs = self.runs(&unit.packets);
+			}
+		}
+		self.units = units;
+	}
+
+	/// Send the program tables ahead of the next unit pushed, under its deadline. Program
+	/// tables ride one lane, so each version goes out after the one before it, and a revision
+	/// is one boundary: no unit of a stream they add goes out before them, and their clock PID
+	/// and multiplex rate take over only once they have gone out.
 	pub fn lead(&mut self, tables: Tables) {
 		self.lead = Some(tables);
 	}
@@ -826,11 +872,12 @@ impl Schedule {
 	) -> anyhow::Result<()> {
 		if let Some(tables) = self.lead.take() {
 			let pmt = self.pmt.context("program tables without a PMT PID")?;
+			let clock = self.psi.as_ref().context("program tables never set")?.clock;
 			// Later tables wait too, so each version follows the one before it.
 			let mut holds = tables.added;
 			holds.extend([pid, pmt]);
 			let program = Program {
-				clock: tables.clock,
+				clock,
 				rate: tables.rate,
 				holds,
 				leads: pid,
@@ -843,8 +890,9 @@ impl Schedule {
 			};
 			// The unit they lead keeps its own start.
 			let last = self.last;
-			self.enqueue(pmt, lead, tables.packets, Some(program));
+			self.enqueue(pmt, lead, Vec::new(), Some(program));
 			self.last = last;
+			self.retable();
 		}
 		if packets.is_empty() {
 			return Ok(());
@@ -1111,12 +1159,14 @@ impl Schedule {
 		let mut packets = Vec::new();
 		let mut keyframe = false;
 		let mut units = Vec::new();
+		let mut begun = 0;
 		for (unit, take) in self.units.iter_mut().zip(take) {
 			if take == 0 {
 				continue;
 			}
 			if unit.sent == 0 {
 				keyframe |= unit.keyframe;
+				begun += usize::from(unit.tables.is_some());
 				// Only the tables muxed ahead of a frame that wrote nothing are no access unit.
 				if unit.tables.is_none() && unit.packets_on(0..unit.count(), unit.pid) > 0 {
 					units.extend(std::iter::repeat_n(unit.pid, unit.frames.len().max(1)));
@@ -1144,6 +1194,7 @@ impl Schedule {
 			clocked: false,
 			clock,
 			tables,
+			begun,
 		}))
 	}
 
@@ -1167,6 +1218,7 @@ impl Schedule {
 			clocked: false,
 			clock: self.clock,
 			tables: 0,
+			begun: 0,
 		};
 		let clock = self.clock.filter(|pid| self.buffers.contains_key(pid));
 		let mut holding = self.holding(|i| self.units[i].remaining());
@@ -1430,6 +1482,7 @@ impl Schedule {
 				let unit = &mut self.units[i];
 				if unit.sent == 0 {
 					out.keyframe |= unit.keyframe;
+					out.begun += usize::from(unit.tables.is_some());
 					if unit.tables.is_none() && unit.packets_on(0..unit.count(), unit.pid) > 0 {
 						out.units
 							.extend(std::iter::repeat_n(unit.pid, unit.frames.len().max(1)));
@@ -1626,6 +1679,15 @@ mod tests {
 		ms * 1_000_000
 	}
 
+	/// A PAT and a PMT on PID 100 of a packet each, the clock on PID 1.
+	fn set_psi(schedule: &mut Schedule) {
+		schedule.set_psi(Psi {
+			packets: [unit(0, 1), unit(100, 1)].concat(),
+			flagged: None,
+			clock: 1,
+		});
+	}
+
 	/// 40 packets per slot, the clock packet included.
 	const RATE: u64 = 40 * PACKET;
 	/// A decoder buffer's reach past every window here, so the window bounds how far ahead a
@@ -1736,11 +1798,10 @@ mod tests {
 		let mut schedule = Schedule::new(Duration::from_millis(25));
 		schedule.set_rate(Some(RATE));
 		schedule.set_tables(100);
+		set_psi(&mut schedule);
 		schedule.set_clock(1);
 		schedule.set_buffer(1, VIDEO);
 		let tables = || Tables {
-			packets: [unit(0, 1), unit(100, 1)].concat(),
-			clock: 1,
 			rate: Some(RATE),
 			added: Vec::new(),
 		};
@@ -1776,6 +1837,7 @@ mod tests {
 				let mut schedule = Schedule::new(Duration::ZERO);
 				schedule.set_rate(rate);
 				schedule.set_tables(100);
+				set_psi(&mut schedule);
 				schedule.set_clock(1);
 				schedule.set_buffer(1, VIDEO);
 				if open {
@@ -1785,12 +1847,7 @@ mod tests {
 				let mut section = unit(7, 1);
 				section[1] |= 0x40;
 				schedule.push_placed(7, (0, 0), 1, section, false, Vec::new()).unwrap();
-				schedule.lead(Tables {
-					packets: [unit(0, 1), unit(100, 1)].concat(),
-					clock: 1,
-					rate,
-					added: vec![1],
-				});
+				schedule.lead(Tables { rate, added: vec![1] });
 				schedule.push(1, timing(10), unit(1, 3), true).unwrap();
 				let slots = drain(&mut schedule);
 				assert!(!schedule.clocking());
@@ -1818,17 +1875,13 @@ mod tests {
 			let mut schedule = Schedule::new(Duration::ZERO);
 			schedule.set_rate(rate);
 			schedule.set_tables(100);
+			set_psi(&mut schedule);
 			schedule.set_clock(1);
 			schedule.set_buffer(1, VIDEO);
 			schedule.set_buffer(0x11, Buffer::SYSTEM);
 			schedule.open();
 			schedule.push_clocked(unit(0x11, 1));
-			schedule.lead(Tables {
-				packets: [unit(0, 1), unit(100, 1)].concat(),
-				clock: 1,
-				rate,
-				added: vec![1],
-			});
+			schedule.lead(Tables { rate, added: vec![1] });
 			schedule.push(1, timing(10), unit(1, 3), true).unwrap();
 			assert!(schedule.clocking());
 			let slots = drain(&mut schedule);
@@ -1853,17 +1906,13 @@ mod tests {
 			let mut schedule = Schedule::new(Duration::ZERO);
 			schedule.set_rate(rate);
 			schedule.set_tables(100);
+			set_psi(&mut schedule);
 			schedule.set_clock(1);
 			schedule.set_buffer(1, VIDEO);
 			schedule.set_buffer(0x11, Buffer::SYSTEM);
 			schedule.open();
 			schedule.push_clocked(unit(0x11, 1));
-			schedule.lead(Tables {
-				packets: [unit(0, 1), unit(100, 1)].concat(),
-				clock: 1,
-				rate,
-				added: vec![1],
-			});
+			schedule.lead(Tables { rate, added: vec![1] });
 			schedule.push(1, timing(10), unit(1, 1), true).unwrap();
 			// The next frame is ten seconds out, far past a skip.
 			let known = Some(400);
@@ -1890,6 +1939,92 @@ mod tests {
 		}
 	}
 
+	/// A PAT and a PMT on PID 100 of `count` packets, each packet marked `mark`.
+	fn marked_tables(mark: u8, count: usize) -> Vec<u8> {
+		let mut packets = [unit(0, 1), unit(100, count)].concat();
+		for packet in packets.as_chunks_mut::<{ TsPacket::SIZE }>().0 {
+			packet[4] = mark;
+		}
+		packets
+	}
+
+	/// The mark of each table packet laid in `slot`.
+	fn table_marks(slot: &Slot) -> Vec<u8> {
+		slot.packets
+			.as_chunks::<{ TsPacket::SIZE }>()
+			.0
+			.iter()
+			.filter(|packet| matches!(pid(*packet), 0 | 100))
+			.map(|packet| packet[4])
+			.collect()
+	}
+
+	/// Each copy of the tables lays them as they stand when it begins: a change reaches every
+	/// copy still to begin, and never one already on its way, which goes out whole as it began.
+	#[test]
+	fn the_tables_lay_as_they_stand_when_they_begin() {
+		let mut schedule = Schedule::new(Duration::from_secs(1));
+		schedule.set_rate(Some(RATE));
+		schedule.set_tables(100);
+		schedule.set_clock(1);
+		schedule.set_buffer(1, VIDEO);
+		let psi = |mark: u8| Psi {
+			packets: marked_tables(mark, 12),
+			flagged: None,
+			clock: 1,
+		};
+		schedule.set_psi(psi(1));
+		for ms in [500, 600] {
+			schedule.lead(Tables {
+				rate: Some(RATE),
+				added: Vec::new(),
+			});
+			schedule.push(1, timing(ms), unit(1, 1), true).unwrap();
+		}
+		schedule.set_psi(psi(2));
+		let mut marks = Vec::new();
+		let mut begun = 0;
+		while let Some(slot) = schedule.next(None).unwrap() {
+			marks.extend(table_marks(&slot));
+			begun += slot.begun;
+			// Too large for Bsys to take at once, the first copy spans slots.
+			if begun == 1 && slot.tables == 0 {
+				schedule.set_psi(psi(3));
+			}
+		}
+		assert_eq!(begun, 2);
+		assert_eq!(marks, [[2; 13], [3; 13]].concat());
+	}
+
+	/// Only the first copy of the tables to go out after a switch flags the break.
+	#[test]
+	fn only_the_first_tables_flag_the_break() {
+		for rate in [None, Some(RATE)] {
+			let mut schedule = Schedule::new(Duration::ZERO);
+			schedule.set_rate(rate);
+			schedule.set_tables(100);
+			schedule.set_clock(1);
+			schedule.set_buffer(1, VIDEO);
+			schedule.set_psi(Psi {
+				packets: marked_tables(1, 1),
+				flagged: Some(marked_tables(2, 1)),
+				clock: 1,
+			});
+			for ms in [10, 20] {
+				schedule.lead(Tables {
+					rate,
+					added: Vec::new(),
+				});
+				schedule.push(1, timing(ms), unit(1, 1), true).unwrap();
+			}
+			let mut marks = Vec::new();
+			while let Some(slot) = schedule.next(None).unwrap() {
+				marks.extend(table_marks(&slot));
+			}
+			assert_eq!(marks, [2, 2, 1, 1], "{rate:?}");
+		}
+	}
+
 	/// Packets held for the opening that take more than one slot to go out keep SI muxed after
 	/// them held behind them until the last has, padded or not.
 	#[test]
@@ -1898,17 +2033,13 @@ mod tests {
 			let mut schedule = Schedule::new(Duration::ZERO);
 			schedule.set_rate(rate);
 			schedule.set_tables(100);
+			set_psi(&mut schedule);
 			schedule.set_clock(1);
 			schedule.set_buffer(1, VIDEO);
 			schedule.set_buffer(0x11, Buffer::SYSTEM);
 			schedule.open();
 			schedule.push_clocked(unit(0x11, 100));
-			schedule.lead(Tables {
-				packets: [unit(0, 1), unit(100, 1)].concat(),
-				clock: 1,
-				rate,
-				added: vec![1],
-			});
+			schedule.lead(Tables { rate, added: vec![1] });
 			schedule.push(1, timing(10), unit(1, 3), true).unwrap();
 			let mut sent = 0;
 			let mut slots = Vec::new();
@@ -3087,6 +3218,7 @@ mod tests {
 			clocked: false,
 			clock: None,
 			tables: 0,
+			begun: 0,
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
@@ -3127,6 +3259,7 @@ mod tests {
 			clocked: false,
 			clock: None,
 			tables: 0,
+			begun: 0,
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);

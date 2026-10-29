@@ -465,6 +465,9 @@ FLV, MKV and RTMP refuse the released `--max-age` spelling with a migration
 message. The output follows the source's clock within what ISO/IEC 13818-1
 allows a TS PCR. A source further off fails the export, naming its rate, once
 it has used half the delay; a brief network stall only drops what it made late.
+A timeline that steps further than the delay absorbs with no restart marker, as
+a changeover between two encoders whose clocks disagree, re-acquires the clock
+as at startup rather than read the step as drift.
 
 `export ts --passthrough` reads the track an `import ts --passthrough` published
 and writes its packets back out unchanged, from its first group on, each run

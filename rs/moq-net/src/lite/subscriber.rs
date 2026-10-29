@@ -2143,6 +2143,7 @@ mod tests {
 				.unwrap(),
 			id: 0,
 			max_delay: Duration::ZERO,
+			requested_max_delay: Duration::ZERO,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -2278,6 +2279,7 @@ mod tests {
 					.unwrap(),
 				id: 0,
 				max_delay: Duration::ZERO,
+				requested_max_delay: Duration::ZERO,
 				start: Some(floor),
 				priority: 0,
 				requested: Some(floor),
@@ -2741,6 +2743,7 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Duration::ZERO,
+			requested_max_delay: Duration::ZERO,
 			start: Some(2),
 			priority: 0,
 			requested: Some(2),
@@ -6299,6 +6302,9 @@ struct SubStream {
 	/// start sits elsewhere the request-tracked floor stands instead, and demand
 	/// returning here makes the declaration valid again.
 	requested: Option<u64>,
+	/// The max delay the SUBSCRIBE itself carried, fixed for the stream's life: a lite-06+
+	/// SUBSCRIBE_START resolves the start from it, skipping older groups as stale.
+	requested_max_delay: Duration,
 	/// The groups received for this subscription, shared with its [`TrackEntry`].
 	tail: kio::Producer<Tail>,
 	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
@@ -7059,6 +7065,7 @@ impl Establish {
 			stream,
 			id: self.id,
 			max_delay: wire_max_delay(self.subscription.max_delay),
+			requested_max_delay: wire_max_delay(self.subscription.max_delay),
 			start: self.subscription.start(),
 			ranges: self.ranges.clone(),
 			priority: self.subscription.priority,
@@ -8003,7 +8010,12 @@ impl ServeLoop {
 										// moved back restores it); elsewhere the
 										// request-tracked floor stands rather than a guess.
 										if active.start == active.requested {
-											let _ = self.serving.start_at(start.group);
+											let _ = match serve.subscriber.version.resolves_start() {
+												true => {
+													self.serving.start_resolved(start.group, active.requested_max_delay)
+												}
+												false => self.serving.start_at(start.group),
+											};
 										}
 										active.served = Some(start.group);
 										// The groups the SUBSCRIBE asked for below it are not
