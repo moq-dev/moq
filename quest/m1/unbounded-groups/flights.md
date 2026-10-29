@@ -37,11 +37,15 @@ never does.
   (decided 2026-10-24). Byte streams register no handler, so they never
   start a flight.
 - Admission: a reader joins an existing flight only if that copy holds its
-  frame within 16 MB, half the tail, of the flight's fastest rider.
+  frame within 16 MB, half the tail, of the flight's fastest rider, less one
+  shedding unit (a log segment). Judge it against the worst-case front:
+  the ahead window is capped at 16 MB
+  ([Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md)),
+  so filling all outstanding credit still leaves an admitted reader held.
   Otherwise it starts its own flight, so it never boards at a front about to
   be shed.
-- Handover: a rider whose frame the flight ahead holds within 16 MB of that
-  flight's fastest rider switches to that copy at the same frame, the way
+- Handover: a rider whose frame the flight ahead holds within the same
+  admission bound of that flight's fastest rider switches to that copy at the same frame, the way
   route failover's `Recover` continues a group from another copy. A
   flight's fill is cancelled when its last rider leaves. A merge costs at
   most 16 MB of duplicate transfer, and the budget never grows. Rejected:
@@ -59,8 +63,9 @@ never does.
   frame 0 gets the decoder state its plain riders need.
 - Tests through a two-relay chain: a late joiner of a group many times the
   tail reads it from frame 0 through a flight and hands over to the live
-  copy, with memory near 32 MB per flight; joiners within 16 MB of each
-  other share one upstream fill; a slow rider falls off and starts its own
+  copy, with memory near 32 MB per flight; a rider that just handed over
+  survives the copy ahead filling its whole ahead window at once; joiners
+  within 16 MB of each other share one upstream fill; a slow rider falls off and starts its own
   flight without slowing the fast one; no flight fetches a frame twice; a
   track with no handler refreshes.
 - Benchmarks: a case swept over readers and how far apart they join.

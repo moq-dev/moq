@@ -34,12 +34,16 @@ Decided 2026-10-28 (maintainer, after an audit of the plan):
   [front eviction](/quest/m1/unbounded-groups/front-eviction.md) holds is
   "ahead" (bytes the fastest reader has not read, bounded by pacing) plus
   "behind" (bytes it has read, kept for slower readers). Shedding never
-  passes the fastest reader, and the ahead window stays below 32 MB, so a
-  writer more than the window ahead waits instead of shedding unread bytes.
+  passes the fastest reader, and the ahead window is at most 16 MB, half
+  the tail, so a writer more than the window ahead waits instead of
+  shedding unread bytes, and at least 16 MB always stays behind.
   The behind window then slides at the fastest reader's pace with no pacing
   of its own: a reader falls off once it trails the fastest by more than
   32 MB minus the ahead window. The ahead window is each hop's QUIC stream
-  receive window, capped below 32 MB.
+  receive window, capped at 16 MB. The cap keeps
+  [flight](/quest/m1/unbounded-groups/flights.md) admission sound: a reader
+  admitted within the behind half is not shed when outstanding credit fills
+  the ahead half.
 - Reader progress is measured in bytes, not whole frames. Otherwise a frame
   larger than the ahead window deadlocks a writer against a reader that
   advances only on a finished frame. Until

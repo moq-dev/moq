@@ -36,8 +36,8 @@ Decided 2026-10-28 (maintainer, after an audit of the plan and
   the 32 MB is one budget split between "ahead" (bytes the fastest reader has
   not read, bounded by pacing) and "behind" (bytes it has read, kept for
   slower readers). Shedding never passes the fastest reader, and the ahead
-  window stays below 32 MB, so a reader within the remainder of the fastest
-  one keeps up and a slower one falls off.
+  window is at most 16 MB, so a reader within the behind half of the
+  fastest one keeps up and a slower one falls off.
 - A reader at a shed frame, a late joiner or one that fell off, is served by
   a [flight](/quest/m1/unbounded-groups/flights.md) when the publisher has a
   refill handler: a separate copy with its own upstream fill and 32 MB tail,
