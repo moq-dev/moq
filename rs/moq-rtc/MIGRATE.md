@@ -4,11 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `Client::publish` takes a resolved source
-
-`Client::publish(url, origin, path)` is `Client::publish(url, source)`: resolve the broadcast yourself, with `origin.request(path, None)` or `origin.follow(path, None)?.available()`, and pass `moq_mux::Source::new(origin, broadcast)`.
-The push no longer resolves the path a second time, so it reads the instance you resolved.
-
 ### `moq_net::Path` has no lifetime
 
 `server::{whip, whep}::accept` take `impl Into<moq_net::Path>`: pass a `Path`, from `moq_net::Path::new(s)?` or `moq_net::Path::from_static`. See moq-net's migration for the rest.
