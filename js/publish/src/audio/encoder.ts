@@ -176,6 +176,11 @@ export class Encoder {
 	// The exact encoder settings and probed decoder description advertised before demand arrives.
 	#config = new Signal<(Resolved & { encoder: AudioEncoderConfig }) | undefined>(undefined);
 
+	// The last Opus probe: the encoder settings it ran with, serialized, and the description it
+	// produced. Kept across a disable so re-enabling with the same capture format and settings
+	// republishes at once instead of probing again.
+	#probed?: { key: string; description?: Catalog.Hex };
+
 	readonly #out: EncoderOutput = {
 		error: new Signal<Error | undefined>(undefined),
 		catalog: new Signal<Catalog.AudioConfig | undefined>(undefined),
@@ -453,7 +458,8 @@ export class Encoder {
 	// codec update (bitrate, frame duration) reconfigures without waiting for a channel-count change.
 	//
 	// Gated on `enabled` the same way the video encoder is: a disabled rendition stops resolving a
-	// config, and a sample source keeps its format while muted rather than tearing down.
+	// config, and a sample source keeps its format while muted rather than tearing down. Re-enabling
+	// with the settings last probed reuses that probe, so the catalog flips back without waiting on one.
 	#runConfig(effect: Effect): void {
 		const groupDuration = effect.get(this.groupDuration);
 		if (!Number.isFinite(groupDuration) || groupDuration < 0)
@@ -473,6 +479,12 @@ export class Encoder {
 		const encoderConfig = toEncoderConfig(resolved, kind, this.#opusOptions(effect));
 		if (resolved.catalog.codec !== "opus") {
 			this.#config.set({ ...resolved, encoder: encoderConfig });
+			return;
+		}
+
+		const key = JSON.stringify(encoderConfig);
+		if (this.#probed?.key === key) {
+			this.#config.set(withDescription(resolved, encoderConfig, this.#probed.description));
 			return;
 		}
 
@@ -520,11 +532,8 @@ export class Encoder {
 				if (superseded.aborted) return;
 				if (failure) throw failure;
 				encoder.close();
-				this.#config.set({
-					...resolved,
-					catalog: { ...resolved.catalog, ...(description === undefined ? {} : { description }) },
-					encoder: encoderConfig,
-				});
+				this.#probed = { key, description };
+				this.#config.set(withDescription(resolved, encoderConfig, description));
 			} catch (error) {
 				if (superseded.aborted) return;
 				this.#config.set(undefined);
@@ -818,6 +827,19 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 			container: { kind: "legacy" } as const,
 		},
 		frameDuration: Micro.fromMilli(frameDuration),
+	};
+}
+
+// The resolved config with the encoder settings and the probed decoder description, if the codec emitted one.
+function withDescription(
+	resolved: Resolved,
+	encoder: AudioEncoderConfig,
+	description: Catalog.Hex | undefined,
+): Resolved & { encoder: AudioEncoderConfig } {
+	return {
+		...resolved,
+		catalog: { ...resolved.catalog, ...(description === undefined ? {} : { description }) },
+		encoder,
 	};
 }
 
