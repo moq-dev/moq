@@ -733,7 +733,6 @@ fn spawn_import(
 		name,
 		max_age,
 		linger,
-		hls: import.hls,
 		bandwidth: bandwidth.clone(),
 	};
 
@@ -743,8 +742,7 @@ fn spawn_import(
 		warn_if_missing_format(&name);
 		let config = moq_mux::catalog::Config::default()
 			.with_max_age(max_age)
-			.with_bandwidth(bandwidth.clone())
-			.with_hls(import.hls.then(moq_mux::hls::Config::default));
+			.with_bandwidth(bandwidth.clone());
 		let mut publish = if let ImportSource::Ts(TsImport {
 			program: Some(TsProgram::All),
 			..
@@ -811,7 +809,7 @@ fn spawn_import(
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
 				let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-				let mut publish = Publish::capture(broadcast, &capture, bandwidth.clone(), max_age, import.hls)?;
+				let mut publish = Publish::capture(broadcast, &capture, bandwidth.clone(), max_age)?;
 				publish.announce(epoch)?;
 				local = Some(publish);
 			}
@@ -926,9 +924,10 @@ async fn run_stdout(
 	// resolves it, and any sibling broadcast a rendition's `broadcast` field references
 	// (e.g. "./source") through the same origin.
 	consumer
-		.routed(&name)
+		.follow(name.as_str(), None)?
+		.available()
 		.await
-		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
+		.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
 
 	let subscribe = Subscribe::new(consumer, &name, catalog, args).await?;
 	let Some(echo) = echo else {
@@ -1267,7 +1266,13 @@ mod tests {
 					.unwrap();
 				// Media proves the CLI admitted the session, even on a transport that establishes early.
 				let payload = tokio::time::timeout(TIMEOUT, async {
-					let broadcast = listening.consumer.routed_broadcast("probe").await.unwrap();
+					let broadcast = listening
+						.consumer
+						.follow("probe", None)
+						.unwrap()
+						.available()
+						.await
+						.unwrap();
 					let mut track = broadcast
 						.track("status")
 						.unwrap()
@@ -1362,9 +1367,10 @@ mod tests {
 		group.finish().unwrap();
 
 		let reader = relay.consume();
-		reader.routed("demo").await.unwrap();
 		let mut live = reader
-			.request_broadcast("demo", None)
+			.follow("demo", None)
+			.unwrap()
+			.available()
 			.await
 			.unwrap()
 			.track("live")

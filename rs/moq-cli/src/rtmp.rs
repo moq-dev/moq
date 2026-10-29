@@ -71,7 +71,6 @@ pub async fn listen_import(target: ImportTarget, addr: SocketAddr) -> anyhow::Re
 		name,
 		max_age,
 		linger,
-		hls: _,
 		bandwidth,
 	} = target;
 	let name = moq_net::Path::new(&name)?;
@@ -174,9 +173,10 @@ pub async fn connect_export(
 	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;
 	// the FLV export re-resolves it (and any referenced sibling broadcast) through the origin.
 	origin
-		.routed(&name)
+		.follow(&name, None)?
+		.available()
 		.await
-		.with_context(|| format!("origin closed before broadcast `{name}` was announced"))?;
+		.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
 
 	// The stream key is the ingest credential, so log the dial target and app instead.
 	tracing::info!(%addr, %app, %name, "RTMP client pushing");

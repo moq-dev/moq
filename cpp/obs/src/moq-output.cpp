@@ -168,17 +168,18 @@ bool MoQOutput::Start()
 	}
 
 	// Create the broadcast on an origin of our own, then announce it so subscribers
-	// can discover it. Stop() finishes it, so each Start creates a fresh one.
+	// can discover it. Stop() finishes it, so each Start creates a fresh one. Only the
+	// broadcast is kept: the route outlives the publication until the broadcast closes.
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
 	auto next_origin = moq::OriginProducer::init(moq::OriginConfig{});
-	auto next_broadcast = next_origin->create_broadcast(path);
-	if (!next_broadcast) {
-		LOG_ERROR("Failed to create broadcast: %s", next_broadcast.error().to_string().c_str());
+	auto publication = next_origin->create_broadcast(path);
+	if (!publication) {
+		LOG_ERROR("Failed to create broadcast: %s", publication.error().to_string().c_str());
 		return false;
 	}
 	moq::AnnounceRoute route;
 	route.epoch = moq::mint_epoch();
-	if (auto announced = (*next_broadcast)->announce(route); !announced) {
+	if (auto announced = (*publication)->announce(route); !announced) {
 		LOG_ERROR("Failed to announce broadcast: %s", announced.error().to_string().c_str());
 		return false;
 	}
@@ -234,7 +235,7 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
 		origin = next_origin;
-		broadcast = *next_broadcast;
+		broadcast = (*publication)->broadcast();
 	}
 
 	// NOTE: You could publish the same broadcasts to multiple sessions if you want (redundant ingest).

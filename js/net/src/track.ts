@@ -386,14 +386,10 @@ export class Request {
 		};
 	}
 
-	/** Reject the request, closing the track optionally with an error. */
-	reject(err?: Error): void {
+	/** Reject the request with the error its subscribers receive. */
+	reject(err: Error): void {
 		this.#pending.delete(this);
-		if (err) this.#producer.abort(err);
-		else {
-			this.#producer.finish();
-			this.#producer.close();
-		}
+		this.#producer.abort(err);
 	}
 }
 
@@ -1698,13 +1694,15 @@ export class Producer {
 		if (abort && (this.#state.outcome.peek() === null || this.#settled())) abort = undefined;
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
-		const open = abort ? this.#cache.filter((entry) => entry.group.closed.peek() === undefined) : [];
+		const open = this.#cache.filter((entry) => entry.group.closed.peek() === undefined);
 		closeTrackState(this.#state, abort);
 		if (this.#state.outcome.peek() === undefined) this.#state.outcome.set(abort ?? null);
-		for (const { group } of this.#cache) {
-			if (abort) group.abort(abort);
-			else group.finish();
-		}
+		// Closing a copy never supplies the missing tail of a group. Already finished groups
+		// ignore the abort and stay readable; unfinished ones retain their truncation cause.
+		const groupError =
+			abort ??
+			new StreamError(StreamCode.Cancel, { message: `track ${this.name} closed with unfinished groups` });
+		for (const { group } of this.#cache) group.abort(groupError);
 		for (const entry of open) {
 			this.#unlink(entry);
 			this.#uncache(entry);
@@ -2089,11 +2087,6 @@ export class Subscriber {
 		for (const [sequence, judged] of this.#skipped) {
 			if (judged >= budget) {
 				narrowest = Math.min(narrowest, judged);
-				continue;
-			}
-			// A sequence already reported dropped stays dropped.
-			if (runGaps(this.#reported, sequence, sequence + 1).length === 0) {
-				this.#skipped.delete(sequence);
 				continue;
 			}
 			this.#skipped.set(sequence, budget);
@@ -2532,12 +2525,6 @@ export class Subscriber {
 			const group = groups[index];
 			if (!group || (end !== undefined && group.sequence >= end)) break;
 			groups.splice(index, 1);
-			// A sequence this cursor already reported dropped stays dropped: the subscriber
-			// accounted for it, so a group re-created under it is not served.
-			if (dispositions && runGaps(this.#reported, group.sequence, group.sequence + 1).length === 0) {
-				group.close();
-				continue;
-			}
 			const failed = group.closed.peek();
 			if (dispositions && failed instanceof Error) {
 				const dropped = this.#report(group.sequence, group.sequence + 1, failed);
@@ -2589,10 +2576,7 @@ export class Subscriber {
 	// one reports what its routes' copies gave up.
 	#tryDrop(): (Recv & { kind: "drop" }) | undefined {
 		if (this.#resume) {
-			const dropped = this.#resume.tryDrop(this.#delivered);
-			// Accounted for as #tryResumed does, so no copy serves it later.
-			if (dropped) this.#delivered.addRun(dropped.start, dropped.end);
-			return dropped;
+			return this.#resume.tryDrop(this.#delivered);
 		}
 		const { start, end } = this.#cursor.peek();
 		// Rescanned only after it changed, so an idle poll costs nothing per drop held.
@@ -2620,8 +2604,6 @@ export class Subscriber {
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		const recv = resume.tryGroup(ordered, this.#delivered, dispositions);
 		if (recv.kind === "group") this.#handOut(recv.group.sequence, ordered);
-		// Accounted for as a group handed out is, so no copy serves it later.
-		else if (recv.kind === "drop") this.#delivered.addRun(recv.start, recv.end);
 		return recv;
 	}
 

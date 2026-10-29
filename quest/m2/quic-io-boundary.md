@@ -32,6 +32,23 @@ bound. Per-packet ownership could let large frames skip the copy, which costs
 up to 70% of `wire_decode` (16 datagrams a packet) and 20% of `receive_lease`
 under the benches' plaintext crypto.
 
+The receive path copies at several seams, listed in the 2026-10-27 audit,
+and removing one in isolation can leave a small retained slice pinning a
+whole GRO allocation or an unavailable ring slot. Profile copied bytes across
+all of them together, sweeping payload size × fragments × concurrent readers,
+including a stalled reader:
+
+- moq-uring's `Endpoint::demux` copies each completion out of the receive
+  pool into a `BytesMut`.
+- moq-tokio's endpoint receive copies each batch out of its reusable iovecs.
+- moq-quic's lease `extend` copies out of datagram backing to bound what a
+  slice retains (deliberate), and `fill` builds a temporary `Vec` of chunks
+  per call.
+- A partial MoQ frame copies into canonical frame storage, which
+  `Segment::new` zero-fills first
+  ([streaming frame read owners](/quest/m2/perf/frame-read-owners.md) owns
+  that fill). Whole-frame `Bytes` writes skip this copy.
+
 Decided 2026-10-08: `SENDMSG_ZC`
 ([#3201](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md))
 and registered TX buffers

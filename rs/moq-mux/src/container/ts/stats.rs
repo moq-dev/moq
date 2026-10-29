@@ -55,8 +55,8 @@ pub struct Snapshot {
 	/// PID's row names no track, is [`Class::Data`], and counts its packets in
 	/// [`Stream::refused`]. A PID keeps one row for its life: a PMT that claims it, releases it,
 	/// or claims it again moves the row with its counters, and while dropped it names no track.
-	/// Packets before every listed PMT has arrived, or lapsed past 0.5 s, are acquisition and
-	/// not counted; so are null packets. An import of one program from a multiplex that lists
+	/// Packets before every listed PMT has arrived are acquisition and not counted; so are null
+	/// packets. An import of one program from a multiplex that lists
 	/// others counts no PID no table claims, since another program's PMT may. An SI PID has a
 	/// `.si` row only once it counts [`Stream::unplaced`] sections.
 	// Keys read from strings: a flattened section loses JSON's integer-key parsing.
@@ -212,6 +212,23 @@ impl Stream {
 		self.resyncs += current.resyncs;
 		self.discarded += current.discarded;
 		self.unconfirmed += current.unconfirmed;
+	}
+
+	/// Set each delivery, damage and frame-sync count to `f` of it and `other`'s, keeping this
+	/// row's track, class and quiet. The TR 101 290 shares are left alone: they are written
+	/// from the merged checks.
+	pub(super) fn combine(&mut self, other: &Self, f: impl Fn(u64, u64) -> u64) {
+		for (ours, theirs) in [
+			(&mut self.units, other.units),
+			(&mut self.resyncs, other.resyncs),
+			(&mut self.discarded, other.discarded),
+			(&mut self.unconfirmed, other.unconfirmed),
+			(&mut self.damaged, other.damaged),
+			(&mut self.unplaced, other.unplaced),
+			(&mut self.refused, other.refused),
+		] {
+			*ours = f(*ours, theirs);
+		}
 	}
 }
 
