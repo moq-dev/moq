@@ -161,9 +161,49 @@ fn announce_info(announced: u32) -> moq_announce_event {
 		captures_len: 0,
 		has_captures: false,
 		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_START,
+		route: moq_route {
+			hops: std::ptr::null(),
+			hops_len: 0,
+			cost: 0,
+			epoch: moq_string {
+				data: std::ptr::null(),
+				len: 0,
+			},
+		},
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
 	info
+}
+
+/// Mint an epoch through the C ABI.
+fn mint_epoch() -> String {
+	let mut buf = [0u8; MOQ_EPOCH_LEN];
+	assert_eq!(
+		unsafe { moq_mint_epoch(buf.as_mut_ptr().cast(), buf.len()) },
+		MOQ_EPOCH_LEN as i32
+	);
+	String::from_utf8(buf.to_vec()).unwrap()
+}
+
+/// An announce route at `cost` under `epoch`, borrowing it.
+fn announce_route(cost: u64, epoch: &str) -> moq_announce_route {
+	moq_announce_route {
+		cost,
+		epoch: epoch.as_ptr().cast(),
+		epoch_len: epoch.len(),
+	}
+}
+
+/// The epoch a received route carries, or None when unknown.
+fn route_epoch(route: &moq_route) -> Option<String> {
+	(route.epoch.len > 0).then(|| unsafe {
+		std::str::from_utf8(std::slice::from_raw_parts(
+			route.epoch.data.cast::<u8>(),
+			route.epoch.len,
+		))
+		.unwrap()
+		.to_string()
+	})
 }
 
 impl Drop for Callback {
@@ -804,6 +844,74 @@ fn publish_video_config_replaces_its_own_rendition() {
 		"the name is free once the caller removes its rendition"
 	);
 
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Manual catalog metadata cannot redefine the decoder identity of an existing raw track.
+#[test]
+fn manual_video_identity_change_is_refused() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"catalog-identity-refusal");
+	let name = "authored";
+	let codec = "vp8";
+	let mut video = moq_video_config {
+		name: name.as_ptr().cast(),
+		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: codec.as_ptr().cast(),
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 640,
+		coded_height: 360,
+		container: moq_container::default(),
+		preference: 0,
+	};
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
+	let next = "vp09.00.10.08";
+	video.codec = next.as_ptr().cast();
+	video.codec_len = next.len();
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &video) },
+		crate::error::MOQ_ERROR_MUX
+	);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Manual catalog metadata cannot redefine the decoder identity of an existing audio track, while
+/// a live field such as the label still updates in place.
+#[test]
+fn manual_audio_identity_change_is_refused() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"catalog-audio-identity-refusal");
+	let name = "authored";
+	let codec = "opus";
+	let label = "English";
+	let mut audio = moq_audio_config {
+		name: name.as_ptr().cast(),
+		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: codec.as_ptr().cast(),
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 48_000,
+		channel_count: 2,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
+	audio.label = label.as_ptr().cast();
+	audio.label_len = label.len();
+	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
+	audio.channel_count = 1;
+	assert_eq!(
+		unsafe { moq_publish_audio_config(broadcast, &audio) },
+		crate::error::MOQ_ERROR_MUX
+	);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -2192,10 +2300,7 @@ fn json_snapshot_publish_consume() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let track_name = b"meta";
-	let config = moq_json_snapshot_config {
-		deltas: true,
-		compression: true,
-	};
+	let config = moq_json_snapshot_config { deltas: true };
 	let producer = id(unsafe {
 		moq_publish_json_snapshot(
 			broadcast,
@@ -2213,7 +2318,6 @@ fn json_snapshot_publish_consume() {
 			consume,
 			track_name.as_ptr() as *const c_char,
 			track_name.len(),
-			&config,
 			Some(channel_callback),
 			value_cb.ptr,
 		)
@@ -2265,15 +2369,8 @@ fn json_stream_publish_consume() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let track_name = b"events";
-	let config = moq_json_stream_config { compression: true };
-	let producer = id(unsafe {
-		moq_publish_json_stream(
-			broadcast,
-			track_name.as_ptr() as *const c_char,
-			track_name.len(),
-			&config,
-		)
-	});
+	let producer =
+		id(unsafe { moq_publish_json_stream(broadcast, track_name.as_ptr() as *const c_char, track_name.len()) });
 
 	let consume = request_broadcast(origin, path);
 
@@ -2283,7 +2380,6 @@ fn json_stream_publish_consume() {
 			consume,
 			track_name.as_ptr() as *const c_char,
 			track_name.len(),
-			&config,
 			Some(channel_callback),
 			value_cb.ptr,
 		)
@@ -2766,17 +2862,100 @@ fn create_broadcast_is_unroutable_until_announced() {
 }
 
 #[test]
-fn announce_accepts_an_anonymous_hop() {
+fn mint_epoch_writes_ordered_uuidv7_text() {
+	let epoch = mint_epoch();
+	let parsed: moq_net::Epoch = epoch.parse().expect("a minted epoch parses");
+	assert_eq!(parsed.as_str(), epoch);
+	assert!(mint_epoch() > epoch, "a later mint orders newer");
+
+	let mut short = [0u8; MOQ_EPOCH_LEN - 1];
+	assert!(unsafe { moq_mint_epoch(short.as_mut_ptr().cast(), short.len()) } < 0);
+	assert!(unsafe { moq_mint_epoch(std::ptr::null_mut(), MOQ_EPOCH_LEN) } < 0);
+}
+
+/// A locally announced route carries its cost and epoch, and no hops: the hop chain is
+/// the origin's to build.
+#[test]
+fn announce_route_carries_cost_and_epoch_without_hops() {
 	let origin = id(moq_origin_create());
-	let path = b"anon";
-	let (publication, broadcast) = create_broadcast(origin, path);
-	let hops = [0u64];
-	let route = moq_route {
-		hops: hops.as_ptr(),
-		hops_len: hops.len(),
-		cost: 1,
-	};
+	let cb = Callback::new();
+	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
+	let (publication, broadcast) = create_broadcast(origin, b"routed");
+
+	let epoch = mint_epoch();
+	let route = announce_route(7, &epoch);
 	assert_eq!(unsafe { moq_publication_announce(publication, &route) }, 0);
+
+	let (announced, info) = cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
+	assert_eq!(info.route.hops_len, 0, "a local route claims no hops");
+	assert_eq!(info.route.cost, 7);
+	assert_eq!(route_epoch(&info.route), Some(epoch));
+	assert_eq!(moq_origin_announced_free(announced), 0);
+
+	// A zeroed route is the default: cost 0 and no epoch.
+	let zeroed = moq_announce_route {
+		cost: 0,
+		epoch: std::ptr::null(),
+		epoch_len: 0,
+	};
+	let (publication2, broadcast2) = create_broadcast(origin, b"plain");
+	assert_eq!(unsafe { moq_publication_announce(publication2, &zeroed) }, 0);
+	let (announced, info) = cb.recv_route();
+	assert_eq!(info.route.cost, 0);
+	assert_eq!(route_epoch(&info.route), None);
+	assert_eq!(moq_origin_announced_free(announced), 0);
+
+	// Anything but canonical UUIDv7 text is refused.
+	let upper = mint_epoch().to_uppercase();
+	for bad in ["6ba7b810-9dad-41d1-80b4-00c04fd430c8", upper.as_str(), "not-an-epoch"] {
+		let route = announce_route(0, bad);
+		assert!(
+			unsafe { moq_publication_announce(publication, &route) } < 0,
+			"{bad:?} is not an epoch"
+		);
+	}
+
+	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
+	assert_eq!(cb.recv_announce_terminal(), 0);
+	assert_eq!(moq_publication_free(publication), 0);
+	assert_eq!(moq_publication_free(publication2), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_close(broadcast2), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Announcing under a fresh epoch is a new publisher instance: subscribers see a restart
+/// rather than a stalled broadcast.
+#[test]
+fn announce_under_a_new_epoch_restarts() {
+	let origin = id(moq_origin_create());
+	let cb = Callback::new();
+	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
+	let (publication, broadcast) = create_broadcast(origin, b"restarted");
+
+	let first = mint_epoch();
+	assert_eq!(
+		unsafe { moq_publication_announce(publication, &announce_route(0, &first)) },
+		0
+	);
+	let (announced, info) = cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
+	assert_eq!(route_epoch(&info.route), Some(first));
+	assert_eq!(moq_origin_announced_free(announced), 0);
+
+	let second = mint_epoch();
+	assert_eq!(
+		unsafe { moq_publication_announce(publication, &announce_route(0, &second)) },
+		0
+	);
+	let (announced, info) = cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_RESTART);
+	assert_eq!(route_epoch(&info.route), Some(second));
+	assert_eq!(moq_origin_announced_free(announced), 0);
+
+	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
+	assert_eq!(cb.recv_announce_terminal(), 0);
 	assert_eq!(moq_publication_free(publication), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -3845,7 +4024,7 @@ fn consume_announced_close_cancels() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Publish `path` on `origin` through `route`, which the C ABI cannot set.
+/// Publish `path` on `origin` through `route` from Rust, keeping the Rust publication.
 fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::origin::Publication {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();
@@ -6327,48 +6506,6 @@ fn server_keylog_requires_sslkeylogfile() {
 	assert!(msg.contains("SSLKEYLOGFILE"), "{msg}");
 }
 
-/// Subscribe to `name` on `consume` as a raw track and return the payloads of its first `count`
-/// frames.
-fn read_raw_frames(consume: u32, name: &[u8], count: usize) -> Vec<Vec<u8>> {
-	let frame_cb = Callback::new();
-	let subscription = moq_subscription {
-		priority: 0,
-		max_delay_us: 1_000_000,
-		max_delay_present: true,
-		ranges: std::ptr::null(),
-		ranges_len: 0,
-		order: 0,
-	};
-	let track = id(unsafe {
-		moq_consume_track(
-			consume,
-			name.as_ptr() as *const c_char,
-			name.len(),
-			&subscription,
-			Some(channel_callback),
-			frame_cb.ptr,
-		)
-	});
-	let mut payloads = Vec::with_capacity(count);
-	for _ in 0..count {
-		let frame_id = id(frame_cb.recv());
-		let mut frame = moq_frame {
-			payload: std::ptr::null(),
-			payload_size: 0,
-			timestamp_us: 0,
-			timestamp_present: false,
-			keyframe: false,
-		};
-		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
-		payloads.push(unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) }.to_vec());
-		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
-	}
-	assert_eq!(moq_consume_track_cancel(track), 0);
-	// The callback context must outlive moq-c's last call into it: wait for the terminal.
-	assert_eq!(frame_cb.recv_terminal(), 0, "clean cancel delivers terminal 0");
-	payloads
-}
-
 /// The broadcast's current catalog, read on the publish side.
 fn published_catalog(broadcast: u32) -> moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra> {
 	let id = crate::Id::try_from(broadcast).expect("valid broadcast id");
@@ -6389,29 +6526,17 @@ fn json_tracks_are_advertised_in_the_catalog() {
 			broadcast,
 			status.as_ptr() as *const c_char,
 			status.len(),
-			&moq_json_snapshot_config {
-				deltas: true,
-				compression: true,
-			},
+			&moq_json_snapshot_config { deltas: true },
 		)
 	});
 	let events = b"events";
-	let stream = id(unsafe {
-		moq_publish_json_stream(
-			broadcast,
-			events.as_ptr() as *const c_char,
-			events.len(),
-			&moq_json_stream_config { compression: false },
-		)
-	});
+	let stream = id(unsafe { moq_publish_json_stream(broadcast, events.as_ptr() as *const c_char, events.len()) });
 
 	let catalog = published_catalog(broadcast);
 	let entry = catalog.json.tracks.get("status").expect("snapshot track advertised");
 	assert_eq!(entry.mode, hang::catalog::Mode::Snapshot);
-	assert_eq!(entry.compression, Some(hang::catalog::Compression::Deflate));
 	let entry = catalog.json.tracks.get("events").expect("stream track advertised");
 	assert_eq!(entry.mode, hang::catalog::Mode::Stream);
-	assert_eq!(entry.compression, None);
 
 	// Finishing a track retires its entry; the other stays.
 	assert_eq!(moq_publish_json_snapshot_finish(snapshot), 0);
@@ -6430,100 +6555,6 @@ fn json_tracks_are_advertised_in_the_catalog() {
 }
 
 #[test]
-fn binary_snapshot_is_advertised_and_delivered() {
-	let origin = id(moq_origin_create());
-	let path = b"binary-snapshot";
-	let broadcast = publish_broadcast(origin, path);
-
-	let name = b"thumbnail";
-	let mime = b"image/jpeg";
-	let producer = id(unsafe {
-		moq_publish_binary_snapshot(
-			broadcast,
-			name.as_ptr() as *const c_char,
-			name.len(),
-			&moq_binary_config {
-				compression: false,
-				mime: mime.as_ptr() as *const c_char,
-				mime_len: mime.len(),
-			},
-		)
-	});
-
-	let catalog = published_catalog(broadcast);
-	let entry = catalog.binary.tracks.get("thumbnail").expect("binary track advertised");
-	assert_eq!(entry.mode, hang::catalog::Mode::Snapshot);
-	assert_eq!(entry.mime.as_deref(), Some("image/jpeg"));
-
-	// The payload reaches a raw subscriber of the same track name, untouched.
-	let payload = [0xff_u8, 0xd8, 0xff, 0xe0, 1, 2, 3];
-	assert_eq!(
-		unsafe { moq_publish_binary_snapshot_update(producer, payload.as_ptr(), payload.len()) },
-		0
-	);
-	let consume = request_broadcast(origin, path);
-	let frames = read_raw_frames(consume, name, 1);
-	assert_eq!(frames, vec![payload.to_vec()]);
-
-	assert_eq!(moq_publish_binary_snapshot_finish(producer), 0);
-	assert!(
-		moq_publish_binary_snapshot_finish(producer) < 0,
-		"double-finish should fail"
-	);
-	assert!(published_catalog(broadcast).binary.tracks.is_empty());
-
-	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-#[test]
-fn binary_stream_is_advertised_and_delivered() {
-	let origin = id(moq_origin_create());
-	let path = b"binary-stream";
-	let broadcast = publish_broadcast(origin, path);
-
-	// A NULL mime leaves the media type unstated.
-	let name = b"blobs";
-	let producer = id(unsafe {
-		moq_publish_binary_stream(
-			broadcast,
-			name.as_ptr() as *const c_char,
-			name.len(),
-			&moq_binary_config {
-				compression: false,
-				mime: std::ptr::null(),
-				mime_len: 0,
-			},
-		)
-	});
-
-	let catalog = published_catalog(broadcast);
-	let entry = catalog.binary.tracks.get("blobs").expect("binary stream advertised");
-	assert_eq!(entry.mode, hang::catalog::Mode::Stream);
-	assert_eq!(entry.mime, None);
-
-	// Every appended payload is delivered, in order.
-	let payloads: [&[u8]; 2] = [b"first", b"second"];
-	for payload in payloads {
-		assert_eq!(
-			unsafe { moq_publish_binary_stream_append(producer, payload.as_ptr(), payload.len()) },
-			0
-		);
-	}
-	let consume = request_broadcast(origin, path);
-	let frames = read_raw_frames(consume, name, payloads.len());
-	assert_eq!(frames, payloads.map(<[u8]>::to_vec));
-
-	assert_eq!(moq_publish_binary_stream_finish(producer), 0);
-	assert!(published_catalog(broadcast).binary.tracks.is_empty());
-
-	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-#[test]
 fn data_track_names_cannot_collide() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"data-collide");
@@ -6534,27 +6565,13 @@ fn data_track_names_cannot_collide() {
 			broadcast,
 			name.as_ptr() as *const c_char,
 			name.len(),
-			&moq_json_snapshot_config {
-				deltas: false,
-				compression: false,
-			},
+			&moq_json_snapshot_config { deltas: false },
 		)
 	});
 	// A second data track under the same name is refused rather than silently replacing the
 	// first entry.
 	assert!(
-		unsafe {
-			moq_publish_binary_stream(
-				broadcast,
-				name.as_ptr() as *const c_char,
-				name.len(),
-				&moq_binary_config {
-					compression: false,
-					mime: std::ptr::null(),
-					mime_len: 0,
-				},
-			)
-		} < 0,
+		unsafe { moq_publish_json_stream(broadcast, name.as_ptr() as *const c_char, name.len()) } < 0,
 		"a duplicate data track name should fail"
 	);
 	assert_eq!(
@@ -6571,7 +6588,7 @@ fn data_track_names_cannot_collide() {
 	let other = b"other";
 	assert!(
 		unsafe {
-			moq_publish_binary_stream(
+			moq_publish_json_snapshot(
 				broadcast,
 				other.as_ptr() as *const c_char,
 				other.len(),

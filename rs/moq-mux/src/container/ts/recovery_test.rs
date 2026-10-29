@@ -1603,10 +1603,10 @@ async fn a_join_starts_on_a_whole_group() {
 }
 
 /// The catalog names the tracks only 2.3 s in, while the group in flight is cut short: the export
-/// waits for it, starts on the next whole group with the tables ahead of it, and loses nothing
-/// after.
+/// starts on what arrived of it, from its keyframe with the tables ahead of it, and loses
+/// nothing after the cut.
 #[tokio::test(start_paused = true)]
-async fn a_late_catalog_starts_on_a_whole_group() {
+async fn a_late_catalog_starts_on_the_group_in_flight() {
 	let run = recover(Arm {
 		catalog: Duration::from_millis(2300),
 		..arm(Profile::Closed, |slot| {
@@ -1619,7 +1619,7 @@ async fn a_late_catalog_starts_on_a_whole_group() {
 	.await;
 	let video = run.ledger(true);
 	let first = video.units.iter().find(|unit| unit.output).unwrap().group;
-	assert_eq!(first, 5, "the export starts on the first whole group after the catalog");
+	assert_eq!(first, 4, "the export starts on the group in flight");
 	assert_eq!(run.stats.release.dropped, 0);
 }
 

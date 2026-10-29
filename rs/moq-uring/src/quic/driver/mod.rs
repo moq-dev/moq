@@ -3,7 +3,7 @@
 //! TLS goes through rustls, which is what the rest of this workspace speaks,
 //! so a build selecting this backend links one TLS stack instead of two.
 //!
-//! [`moq_quic::Endpoint`] holds the connection-id routing table, mints and
+//! [`moq_quic::endpoint::Endpoint`] holds the connection-id routing table, mints and
 //! retires ids, answers unsupported versions, and buffers half-open
 //! handshakes. So [`Endpoint`] here is mostly the socket plumbing around it,
 //! plus the parts that are ours: the accept backlog, shard steering, and the
@@ -21,7 +21,7 @@ pub use stream::{Lease, RecvStream, SendStream};
 
 pub(crate) use connection::{End, Shared};
 
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 
 use moq_quic::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::pem::PemObject;
@@ -29,9 +29,11 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 #[cfg(feature = "qlog")]
 use super::qlog;
-use super::{Congestion, Error, Identity, Transport, client, server};
+use super::{Congestion, Error, Identity, client, server, transport};
 use crate::udp;
 
+/// Streams of each kind a peer may have open at once.
+const MAX_STREAMS: u64 = 1024;
 /// Per-stream flow control credit, which returns as bytes are read, so it only paces a stream.
 const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 /// Per-connection flow control credit, which also bounds incomplete messages, so it has to fit
@@ -60,24 +62,28 @@ fn ecn_from_quic(ecn: moq_quic::EcnCodepoint) -> udp::Ecn {
 	}
 }
 
-impl From<moq_quic::ConnectionError> for Error {
-	fn from(err: moq_quic::ConnectionError) -> Self {
-		use moq_quic::ConnectionError;
+impl From<moq_quic::connection::Error> for Error {
+	fn from(err: moq_quic::connection::Error) -> Self {
+		use moq_quic::connection::Error as ConnectionError;
 		match err {
 			ConnectionError::ApplicationClosed(close) => Self::App {
 				code: close.error_code.into_inner(),
-				reason: String::from_utf8_lossy(&close.reason).into_owned(),
+				reason: close.reason,
+			},
+			// A local close reports the code it sent, as the peer sees it.
+			ConnectionError::LocallyClosed { code, reason } => Self::App {
+				code: code.into_inner(),
+				reason,
 			},
 			ConnectionError::ConnectionClosed(close) => Self::Transport {
 				code: close.error_code.into(),
-				reason: String::from_utf8_lossy(&close.reason).into_owned(),
+				reason: close.reason,
 			},
 			ConnectionError::TransportError(err) => Self::Transport {
 				code: err.code.into(),
-				reason: err.reason.clone(),
+				reason: err.reason,
 			},
-			ConnectionError::TimedOut => Self::TimedOut,
-			ConnectionError::LocallyClosed => Self::Closed,
+			ConnectionError::TimedOut | ConnectionError::HandshakeTimeout => Self::TimedOut,
 			// The rest (a stateless reset, an unsupported version, exhausted
 			// ids) have no code to report.
 			err => Self::Quic(err.to_string()),
@@ -96,33 +102,34 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 		.clone()
 }
 
-/// The endpoint-wide configuration: how connection ids are minted and the reset key.
+/// The endpoint-wide configuration: how connection ids are minted, the reset key, and what to
+/// serve.
 pub(crate) fn endpoint_config(
 	shard: Option<moq_sock::shard::Shard>,
-	reset_secret: Option<&[u8; 32]>,
-) -> Arc<moq_quic::EndpointConfig> {
-	let mut config = moq_quic::EndpointConfig::default();
+	reset_secret: Option<[u8; 32]>,
+	server: Option<moq_quic::server::Config>,
+) -> moq_quic::endpoint::Config {
+	let mut config = moq_quic::endpoint::Config::default();
+	config.server = server;
 	// The random ids below validate a predecessor's too, so the reset reaches them.
-	if let Some(secret) = reset_secret {
-		config.reset_secret(secret);
-	}
+	config.reset_secret = reset_secret;
 	// The steering filter recognizes short headers by their fixed bit.
-	config.grease_quic_bit(shard.is_none());
+	config.grease_quic_bit = shard.is_none();
 	// moq-quic asks its generator for every id it issues, dials and rotations
 	// alike, so naming the shard here steers all of them. Random rather than
 	// hashed ids, so neither path gives up nonce bytes to a signature.
-	config.cid_generator(Arc::new(move || {
+	config.cid_generator = Some(Arc::new(move || {
 		let mut cids = moq_quic::RandomConnectionIdGenerator::default();
 		if let Some(shard) = shard {
 			cids.set_shard(shard.index(), shard.count());
 		}
 		Box::new(cids)
 	}));
-	Arc::new(config)
+	config
 }
 
 /// Dial as `config` says.
-pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::ClientConfig, Error> {
+pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::client::Config, Error> {
 	let provider = provider();
 	let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
 		.with_protocol_versions(&[&rustls::version::TLS13])
@@ -165,22 +172,20 @@ pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::ClientC
 	tls.alpn_protocols = alpn(&config.alpn);
 
 	let crypto = QuicClientConfig::try_from(tls).map_err(|err| Error::Tls(err.to_string()))?;
-	let mut client = moq_quic::ClientConfig::new(Arc::new(crypto));
-	let transport = transport_config(&config.transport)?;
+	let mut client = moq_quic::client::Config::new(Arc::new(crypto));
+	client.transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
-	let transport = with_qlog(transport, &config.transport, qlog::Side::Client);
-	client.transport_config(Arc::new(transport));
+	with_qlog(&mut client.transport, &config.transport, qlog::Side::Client);
 	Ok(client)
 }
 
 /// Serve as `config` says.
-pub(crate) fn server_config(config: &server::Config) -> Result<moq_quic::ServerConfig, Error> {
+pub(crate) fn server_config(config: &server::Config) -> Result<moq_quic::server::Config, Error> {
 	let crypto = QuicServerConfig::try_from(config.tls.clone()).map_err(|err| Error::Tls(err.to_string()))?;
-	let mut server = moq_quic::ServerConfig::with_crypto(Arc::new(crypto));
-	let transport = transport_config(&config.transport)?;
+	let mut server = moq_quic::server::Config::new(Arc::new(crypto));
+	server.transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
-	let transport = with_qlog(transport, &config.transport, qlog::Side::Server);
-	server.transport_config(Arc::new(transport));
+	with_qlog(&mut server.transport, &config.transport, qlog::Side::Server);
 	Ok(server)
 }
 
@@ -232,70 +237,43 @@ pub(crate) fn identity_server_config(
 /// accept side and per dial on the connect side; its events carry the
 /// connection's qlog `group_id` either way.
 #[cfg(feature = "qlog")]
-fn with_qlog(
-	mut transport: moq_quic::TransportConfig,
-	config: &Transport,
-	side: qlog::Side,
-) -> moq_quic::TransportConfig {
+fn with_qlog(transport: &mut moq_quic::transport::Config, config: &transport::Config, side: qlog::Side) {
 	let Some(sink) = config.qlog.clone() else {
-		return transport;
+		return;
 	};
 
-	let mut qlog = moq_quic::QlogConfig::default();
-	qlog.writer(sink.trace(side));
-	transport.qlog_stream(qlog.into_stream());
-
-	transport
+	let mut qlog = moq_quic::transport::qlog::Config::default();
+	qlog.writer = Some(sink.trace(side));
+	transport.qlog = qlog.into_stream();
 }
 
 /// The per-connection knobs both roles share.
-fn transport_config(config: &Transport) -> Result<moq_quic::TransportConfig, Error> {
-	use moq_quic::VarInt;
-
-	let idle = moq_quic::IdleTimeout::try_from(config.idle_timeout)
-		.map_err(|_| Error::Quic(format!("idle timeout out of range: {:?}", config.idle_timeout)))?;
-	let streams = VarInt::from_u64(config.max_streams)
-		.map_err(|_| Error::Quic(format!("stream limit out of range: {}", config.max_streams)))?;
-
-	let mut transport = moq_quic::TransportConfig::default();
-	transport.max_idle_timeout(Some(idle));
-	transport.keep_alive_interval(config.keep_alive);
-	transport.max_concurrent_bidi_streams(streams);
-	transport.max_concurrent_uni_streams(streams);
-	// A value that cannot go on the wire is an error: clamping it would ignore
-	// what was set.
-	let connection_window = match config.receive_window {
-		Some(window) => varint_window("receive window", window)?,
-		None => CONNECTION_WINDOW.into(),
-	};
-	let stream_window = match config.stream_receive_window {
-		Some(window) => varint_window("stream receive window", window)?,
-		None => STREAM_WINDOW.into(),
-	};
-	let send_window = config.send_window.unwrap_or(u64::from(SEND_WINDOW));
-	transport.stream_receive_window(stream_window);
-	transport.receive_window(connection_window);
-	transport.send_window(send_window);
-	transport.datagram_receive_buffer_size(Some(DATAGRAM_WINDOW));
-	transport.datagram_send_buffer_size(DATAGRAM_WINDOW);
+fn transport_config(config: &transport::Config) -> Result<moq_quic::transport::Config, Error> {
+	let mut transport = moq_quic::transport::Config::default();
+	transport.idle_timeout = Some(config.idle_timeout);
+	transport.keep_alive = config.keep_alive;
+	// Our defaults where the caller set none, rather than moq-quic's.
+	let limits = config.limits;
+	transport.limits.max_streams = limits.max_streams.or(NonZeroU64::new(MAX_STREAMS));
+	transport.limits.receive_window = limits.receive_window.or(NonZeroU64::new(CONNECTION_WINDOW.into()));
+	transport.limits.stream_receive_window = limits.stream_receive_window.or(NonZeroU64::new(STREAM_WINDOW.into()));
+	transport.limits.send_window = limits.send_window.or(NonZeroU64::new(SEND_WINDOW.into()));
+	transport.datagram.receive_buffer = Some(DATAGRAM_WINDOW);
+	transport.datagram.send_buffer = DATAGRAM_WINDOW;
 	// moq-quic probes by default; the 1200-byte floor reaches every path.
 	if !config.mtu_discovery {
-		transport.mtu_discovery_config(None);
+		transport.mtu = None;
 	}
-	transport.congestion_controller_factory(match config.congestion {
+	transport.congestion = match config.congestion {
 		Congestion::Loss => {
 			Arc::new(moq_congestion::CubicConfig::default()) as Arc<dyn moq_congestion::ControllerFactory + Send + Sync>
 		}
 		Congestion::Delay => Arc::new(moq_congestion::Bbr3Config::default()),
 		Congestion::None => Arc::new(moq_congestion::Unlimited),
-	});
+	};
+	// A value that cannot go on the wire is an error: clamping it would ignore what was set.
+	transport.validate()?;
 	Ok(transport)
-}
-
-/// A receive window on the wire is a QUIC varint. One that does not fit cannot
-/// be applied, so it is an error rather than a smaller window than was asked.
-fn varint_window(name: &str, value: u64) -> Result<moq_quic::VarInt, Error> {
-	moq_quic::VarInt::from_u64(value).map_err(|_| Error::Quic(format!("{name} out of range: {value}")))
 }
 
 /// ALPN protocols on the wire, which is a length-prefixed list of byte
@@ -387,74 +365,44 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
 
 #[cfg(test)]
 mod tests {
-	use super::{CONNECTION_WINDOW, SEND_WINDOW, STREAM_WINDOW, Transport, transport_config};
+	use std::num::NonZeroU64;
 
-	/// moq-quic keeps the windows private, but its `Debug` prints them. The leading
-	/// space keeps `receive_window` from matching `stream_receive_window`, and
-	/// the trailing comma keeps a shorter value from matching a longer one.
-	fn has_window(config: &moq_quic::TransportConfig, name: &str, value: u64) -> bool {
-		format!("{config:?}").contains(&format!(" {name}: {value},"))
+	use super::{CONNECTION_WINDOW, MAX_STREAMS, SEND_WINDOW, STREAM_WINDOW, transport, transport_config};
+
+	#[test]
+	fn limits_default_to_the_fixed_credits() {
+		let limits = transport_config(&transport::Config::default())
+			.expect("defaults")
+			.limits;
+		assert_eq!(limits.max_streams, NonZeroU64::new(MAX_STREAMS));
+		assert_eq!(limits.stream_receive_window, NonZeroU64::new(STREAM_WINDOW.into()));
+		assert_eq!(limits.receive_window, NonZeroU64::new(CONNECTION_WINDOW.into()));
+		assert_eq!(limits.send_window, NonZeroU64::new(SEND_WINDOW.into()));
 	}
 
 	#[test]
-	fn windows_default_to_the_fixed_credits() {
-		let transport = transport_config(&Transport::default()).expect("defaults");
-		assert!(has_window(
-			&transport,
-			"stream_receive_window",
-			u64::from(STREAM_WINDOW)
-		));
-		assert!(has_window(&transport, "receive_window", u64::from(CONNECTION_WINDOW)));
-		assert!(has_window(&transport, "send_window", u64::from(SEND_WINDOW)));
-	}
+	fn configured_limits_replace_the_defaults() {
+		let mut config = transport::Config::default();
+		config.limits.receive_window = NonZeroU64::new(256 << 20);
+		config.limits.stream_receive_window = NonZeroU64::new(8 << 20);
+		config.limits.send_window = NonZeroU64::new(32 << 20);
 
-	#[test]
-	fn configured_windows_replace_the_defaults() {
-		let config = Transport {
-			receive_window: Some(256 << 20),
-			stream_receive_window: Some(8 << 20),
-			send_window: Some(32 << 20),
-			..Default::default()
-		};
-
-		let transport = transport_config(&config).expect("windows");
-		assert!(has_window(&transport, "receive_window", 256 << 20));
-		assert!(has_window(&transport, "stream_receive_window", 8 << 20));
-		assert!(has_window(&transport, "send_window", 32 << 20));
-		assert!(!has_window(&transport, "receive_window", u64::from(CONNECTION_WINDOW)));
-	}
-
-	#[test]
-	fn the_largest_representable_windows_are_applied() {
-		let max_varint = (1u64 << 62) - 1;
-		// The send window is local bookkeeping, so it is not a varint.
-		let config = Transport {
-			receive_window: Some(max_varint),
-			stream_receive_window: Some(max_varint),
-			send_window: Some(u64::MAX),
-			..Default::default()
-		};
-
-		let transport = transport_config(&config).expect("max windows");
-		assert!(has_window(&transport, "receive_window", max_varint));
-		assert!(has_window(&transport, "stream_receive_window", max_varint));
-		assert!(has_window(&transport, "send_window", u64::MAX));
+		let limits = transport_config(&config).expect("windows").limits;
+		assert_eq!(limits.receive_window, NonZeroU64::new(256 << 20));
+		assert_eq!(limits.stream_receive_window, NonZeroU64::new(8 << 20));
+		assert_eq!(limits.send_window, NonZeroU64::new(32 << 20));
 	}
 
 	#[test]
 	fn a_receive_window_past_a_varint_is_an_error() {
-		let over = Transport {
-			receive_window: Some(1u64 << 62),
-			..Default::default()
-		};
+		let mut over = transport::Config::default();
+		over.limits.receive_window = NonZeroU64::new(1 << 62);
 		let err = transport_config(&over).expect_err("past a varint");
-		assert!(err.to_string().contains("receive window"), "{err}");
+		assert!(err.to_string().contains("receive_window"), "{err}");
 
-		let over = Transport {
-			stream_receive_window: Some(u64::MAX),
-			..Default::default()
-		};
+		let mut over = transport::Config::default();
+		over.limits.stream_receive_window = NonZeroU64::new(u64::MAX);
 		let err = transport_config(&over).expect_err("past a varint");
-		assert!(err.to_string().contains("stream receive window"), "{err}");
+		assert!(err.to_string().contains("stream_receive_window"), "{err}");
 	}
 }

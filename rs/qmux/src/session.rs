@@ -14,7 +14,9 @@ use std::time::Duration;
 use bytes::{Buf, Bytes};
 use moq_clock::Instant;
 use moq_net::transport::{self as net, Address, poll};
-use moq_quic::{Dir, Side, StreamId, TransportError, TransportErrorCode, VarInt, mux};
+use moq_quic::{
+	Dir, Side, StreamId, TransportError, TransportErrorCode, VarInt, connection::Error as ConnectionError, mux,
+};
 use rustc_hash::FxHashMap;
 
 use crate::transport::{Reader, Transport, Writer};
@@ -121,10 +123,12 @@ impl State {
 				mux::Event::DatagramReceived => self.datagram_waiters.wake(),
 				mux::Event::ConnectionLost { reason } => {
 					self.reader.wake();
-					// The writer publishes a local close once its frame is out.
-					if !matches!(reason, moq_quic::ConnectionError::LocallyClosed) {
-						let err = Error::lost(reason, self.established);
-						self.fail(err);
+					let local = matches!(reason, ConnectionError::LocallyClosed { .. });
+					let err = Error::lost(reason);
+					match local {
+						// The writer publishes a local close once its frame is out.
+						true => self.local_close = Some(err),
+						false => self.fail(err),
 					}
 				}
 			}
@@ -183,17 +187,15 @@ impl Inner {
 		self.state.lock().unwrap()
 	}
 
-	/// Close with an APPLICATION_CLOSE, reporting `err` once it is out.
-	fn close(&self, code: u64, reason: &str, err: Error) {
+	/// Close with an APPLICATION_CLOSE, reporting it once it is out.
+	fn close(&self, code: u64, reason: &str) {
 		let mut state = self.lock();
 		if state.closed.is_some() || state.conn.is_closed() {
 			return;
 		}
-		state.conn.close(
-			VarInt::from_u64(code).unwrap_or(VarInt::MAX),
-			Bytes::copy_from_slice(reason.as_bytes()),
-		);
-		state.local_close = Some(err);
+		state
+			.conn
+			.close(VarInt::from_u64(code).unwrap_or(VarInt::MAX), reason.to_string());
 		state.sweep();
 		state.driver.wake();
 		// A closing connection ignores whatever else the peer sends.
@@ -435,7 +437,7 @@ struct Guard(Arc<Inner>);
 
 impl Drop for Guard {
 	fn drop(&mut self) {
-		self.0.close(0, "", Error::Closed);
+		self.0.close(0, "");
 	}
 }
 
@@ -720,11 +722,7 @@ impl poll::Session for Session {
 	}
 
 	fn close(&self, code: u32, reason: &str) {
-		let err = Error::ConnectionClosed {
-			code: code.into(),
-			reason: reason.to_string(),
-		};
-		self.inner.close(code.into(), reason, err);
+		self.inner.close(code.into(), reason);
 	}
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {

@@ -104,6 +104,9 @@ export class Connection implements Established {
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
 
+	// The received unidirectional streams still being read, which a closing session drains.
+	#unis = new Set<Promise<void>>();
+
 	/** The peer's PROBE estimates; see {@link Established.probe}. */
 	readonly probe: Getter<Probe>;
 
@@ -265,6 +268,10 @@ export class Connection implements Established {
 		this.#publisher.close();
 		this.#subscriber.close();
 
+		this.#closeTransport();
+	}
+
+	#closeTransport(): void {
 		try {
 			// TODO: For whatever reason, this try/catch doesn't seem to work..?
 			this.#quic.close();
@@ -316,9 +323,16 @@ export class Connection implements Established {
 			probes.close();
 			// A session that ends before the peer's SETUP never learns its implementation.
 			this.#peerImplementation.resolve(undefined);
+			const err = fatal ?? (await closeError(this.#quic));
+			// A failed task can end the session over a live transport. Closing it first ends
+			// every read the drain waits on.
+			this.#closeTransport();
+			// The peer's close can overtake the group streams and SUBSCRIBE FIN it sent first.
+			// Read what already arrived, so a track its publisher ended finishes rather than aborts.
+			await Promise.all([...this.#unis, this.#subscriber.drain()]);
 			// The session died under every track it was receiving, so they end with its
 			// error. A deliberate close() already ended them cleanly, which makes this a no-op.
-			this.#fail(fatal ?? (await closeError(this.#quic)));
+			this.#fail(err);
 		}
 	}
 
@@ -448,7 +462,7 @@ export class Connection implements Established {
 			const stream = await readers.next();
 			if (!stream) break;
 
-			this.#runUni(stream)
+			const task = this.#runUni(stream)
 				.then(() => {
 					stream.stop(StreamCode.Cancel);
 				})
@@ -458,7 +472,9 @@ export class Connection implements Established {
 						closeViolation(this.#quic, err);
 						this.#fail(err);
 					}
-				});
+				})
+				.finally(() => this.#unis.delete(task));
+			this.#unis.add(task);
 		}
 	}
 

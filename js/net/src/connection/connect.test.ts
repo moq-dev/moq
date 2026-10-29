@@ -1,4 +1,4 @@
-import { expect, jest, spyOn, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep } from "@moq/clock";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
@@ -300,7 +300,8 @@ test("connect without a signal still works", async () => {
 // A session-level stream failure promises an authoritative session close, even when the
 // browser publishes that close after the reset-only fallback would otherwise fire.
 test("SETUP preserves a delayed session close code", async () => {
-	jest.useFakeTimers();
+	const clock = new Manual();
+	const installed = clock.install();
 	const closed = Promise.withResolvers<WebTransportCloseInfo>();
 	let localCloses = 0;
 	const transport = {
@@ -319,10 +320,7 @@ test("SETUP preserves a delayed session close code", async () => {
 		(cause: unknown) => cause,
 	);
 	try {
-		// Drain the finite async setup chain before advancing the mocked clock.
-		for (let i = 0; i < 64; i++) await Promise.resolve();
-		jest.advanceTimersByTime(1_000);
-		for (let i = 0; i < 64; i++) await Promise.resolve();
+		await clock.advance(Nano.fromMilli(Milli(1_000)));
 		expect(localCloses).toBe(0);
 		closed.resolve({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
 		const cause = await result;
@@ -331,7 +329,7 @@ test("SETUP preserves a delayed session close code", async () => {
 	} finally {
 		closed.resolve({ closeCode: 0, reason: "test cleanup" });
 		await result;
-		jest.useRealTimers();
+		installed.close();
 	}
 });
 
@@ -470,8 +468,8 @@ test("a client refuses an IETF version selected in the moql SETUP", async () => 
 test("a server refuses a client offering only IETF versions in the moql SETUP", async () => {
 	const pair = createMockTransportPair("");
 	const accepting = accept({ url, transport: pair.server });
-	// The SETUP write may yield a task, during which the refusal can already land.
-	void accepting.catch(() => {});
+	// Handled now, since the refusal can land while the write below yields.
+	accepting.catch(() => {});
 	const stream = await Stream.open(pair.client, { version: Lite.DRAFT_02 });
 	await new ClientSetup([DRAFT_14]).encode(stream.writer);
 	await expect(accepting).rejects.toThrow("no common version found; client offered: ff00000e");
