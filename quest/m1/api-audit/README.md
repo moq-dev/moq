@@ -78,6 +78,7 @@ Rejected in planning:
 - [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
 - [One strict path rule](/quest/m1/api-audit/strict-paths.md) - `Relative` refuses empty segments, `Path` refuses non-canonical escapes, the error is `path::Error`, and auth mints only strict paths
 - [QMux datagrams obey or refuse their policy](/quest/m1/api-audit/qmux-datagrams.md) - `Session.datagrams` is the DOM interface, its high-water mark is live, and the inert settings throw
+- [Validate private JS constructors](/quest/m1/api-audit/internal-constructors.md) - finish the local consumer and runtime gate for private construction
 - [moq-congestion's first-publish names](/quest/m1/api-audit/congestion-names.md) - `bbr3::Config`, `cubic::Config`, `Metrics`, `Factory`, and no `into_any`
 
 ## Related
