@@ -27,7 +27,7 @@ const connection = await Moq.Connection.connect({
 	consume: origin,
 });
 try {
-	const request = origin.request(Moq.Path.from(path), { announced: true });
+	const request = origin.follow(Moq.Path.from(path));
 	try {
 		let broadcast = request.active.peek();
 		while (!broadcast) {

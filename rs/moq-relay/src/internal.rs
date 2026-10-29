@@ -1460,7 +1460,7 @@ mod tests {
 				.tier(Tier::default())
 				.session(moq_net::Path::new(session).unwrap());
 			let egress = origin.consume().with_stats(ctx);
-			let bc = egress.request_broadcast("demo/x", None).await.unwrap();
+			let bc = egress.request("demo/x", None).await.unwrap();
 			readers.push(bc.track("catalog.json").unwrap().subscribe(None).await.unwrap());
 		}
 		let mut group = track.append_group().unwrap();
