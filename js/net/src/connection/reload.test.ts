@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Instant, Manual, Milli, Nano } from "@moq/clock";
+import { Instant, Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -13,7 +13,6 @@ import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { closeUnwanted } from "../util/announce.ts";
-import { nextTask } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
@@ -269,7 +268,7 @@ test("an ended auth handle gives up instead of retrying", async () => {
 	// so a reconnect, if the loop tried one, would be dialed well within the bound.
 	const until = async (done: () => boolean) => {
 		for (let i = 0; i < 100 && !done(); i++) {
-			await nextTask();
+			await yieldNow();
 			await clock.advance(Nano.fromMilli(Milli(1)));
 		}
 		expect(done()).toBe(true);

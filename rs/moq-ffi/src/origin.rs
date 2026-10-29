@@ -211,7 +211,7 @@ impl Announced {
 
 /// Follows one exact path, resolving each publisher instance that serves it.
 struct AnnouncedBroadcast {
-	inner: moq_net::origin::AnnouncedBroadcast,
+	inner: moq_net::origin::Following,
 	origin: moq_net::origin::Consumer,
 	driver: Background,
 }
@@ -471,7 +471,7 @@ impl MoqOriginConsumer {
 		self.driver.check()?;
 		// Following checks the permission eagerly, so an unreachable path fails here rather
 		// than surfacing later as a `Closed` the caller can't tell from the origin ending.
-		let inner = self.inner.announced_broadcast(path.as_str(), None)?;
+		let inner = self.inner.follow(path.as_str(), None)?;
 
 		Ok(Arc::new(MoqAnnouncedBroadcast {
 			task: Task::new(AnnouncedBroadcast {
@@ -493,7 +493,7 @@ impl MoqOriginConsumer {
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self
 			.driver
-			.watch(async { Ok(self.inner.request_broadcast(path.as_str(), None).await?) })
+			.watch(async { Ok(self.inner.request(path.as_str(), None).await?) })
 			.await?;
 		Ok(Arc::new(MoqBroadcastConsumer::routed(
 			broadcast,

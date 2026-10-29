@@ -37,7 +37,7 @@ in sync at the latency you ask for.
 | `captions` | The caption track to show. |
 | `visible` | Only download video while the element is on screen (or near it). |
 | `backend` | How the canvas is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
-| `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can mount before the stream exists. |
+| `follow` | Follow the broadcast's announcements (default on): wait for one before subscribing, so a player can mount before the stream exists, and move to each restart. Off requests the name once. |
 | `catalog-format` | `hang`, `msf`, or `manual`; detected from the name by default. |
 
 Every attribute is also a reactive property, and property or UI changes reflect
@@ -126,7 +126,7 @@ const dispose = el.signals.run((effect) => {
 
 Call `dispose()` on unmount. The effect re-runs when the catalog or the
 active broadcast changes, so a reconnect resubscribes on its own: the
-broadcast's announced request moves to each start or restart, and switches only
+broadcast's follower moves to each start or restart, and switches only
 when that resolves another broadcast. A request ending is never the trigger, so
 following a restart needs a relay with discovery.
 

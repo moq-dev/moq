@@ -11,17 +11,17 @@ broadcast is absent. Each first-party caller resolves with `request` or
 Split from [Two broadcast resolutions](/quest/m1/api-audit/resolve/README.md)
 on 2026-10-28 (maintainer).
 
-- Remove the racy two-step lookup and its hidden error in moq-wasm.
-- Replace the route waits in moq-cli's subscribe and report.
+- Remove the hidden error in moq-wasm's resolve, which follows the path but
+  still discards why it failed.
+- Replace moq-cli's resolve-and-drop waits before its stdout, RTMP, and WHIP
+  exports, which follow the path only to wait for its announcement and then
+  resolve it again.
 - Review SRT, transcode, the benchmark connections, relay HTTP fetch
-  deadlines, the e2ee epoch advice, and the demo's announce-derived epoch pin;
-  fix each that hand-rolls resolution or decides absence by time.
+  deadlines, the moq-hls server's `RESOLVE_TIMEOUT` handler-stall bound, the
+  e2ee epoch advice, and the demo's announce-derived epoch pin; fix each that
+  hand-rolls resolution or decides absence by time.
 
 List every caller in the PR with what it now uses. Run the affected packages'
 tests and `just test interop --all`.
 
 Public API: none beyond the callers' own surfaces. Wire: none.
-
-## Required
-
-- [Rust request and follow](/quest/m1/api-audit/resolve/rust.md) - the Rust names the callers move to

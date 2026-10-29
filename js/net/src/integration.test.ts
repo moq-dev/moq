@@ -1,5 +1,5 @@
-import { afterEach, expect, jest, mock, spyOn, test } from "bun:test";
-import { Milli, Nano } from "@moq/clock";
+import { afterEach, expect, mock, onTestFinished, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import type * as Announce from "./announce.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
@@ -2280,6 +2280,9 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 	for (const method of ["request", "follow"] as const) {
 		test(`${alpn}: a ${method} outlives the listing it resolved through`, async () => {
+			const clock = new Manual();
+			const installed = clock.install();
+			onTestFinished(() => installed.close());
 			const run = LitePublisher.prototype.runAnnounce;
 			let started = 0;
 			let ended = 0;
@@ -2318,12 +2321,8 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 
 			// The listing leaves. Its announce request stays open for the request beneath it rather
 			// than handing the route to a narrower one, so the instance never changes.
-			jest.useFakeTimers();
 			listing.close();
-			for (let i = 0; i < 64; i++) await new Promise((resolve) => setImmediate(resolve));
-			jest.advanceTimersByTime(2000);
-			jest.useRealTimers();
-			await sleep(20);
+			await clock.advance(Nano.fromMilli(Milli(2000)));
 			expect([started, ended]).toEqual([1, 0]);
 			expect(request.closed.peek()).toBeUndefined();
 			expect(request.active.peek()).toBe(front);
@@ -2332,12 +2331,9 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 			track?.close();
 
 			// Once the request goes too, the announce request lingers out.
-			jest.useFakeTimers();
 			request.close();
-			for (let i = 0; i < 64; i++) await new Promise((resolve) => setImmediate(resolve));
-			jest.advanceTimersByTime(2000);
-			jest.useRealTimers();
-			await until(() => ended === 1);
+			await clock.advance(Nano.fromMilli(Milli(2000)));
+			expect(ended).toBe(1);
 
 			broadcast.close();
 			await serving;

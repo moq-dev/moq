@@ -240,7 +240,7 @@ impl Origin {
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// An unreachable path and a closed origin both mean no broadcast can ever arrive here.
-		let mut announced = match consumer.announced_broadcast(path.as_str(), None) {
+		let mut announced = match consumer.follow(path.as_str(), None) {
 			Ok(announced) => announced,
 			Err(moq_net::Error::Unauthorized) => return Err(Error::BroadcastNotFound),
 			Err(err) => return Err(err.into()),
@@ -299,7 +299,7 @@ impl Origin {
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// Resolves to an error when no announced route can serve the path.
-		let pending = consumer.request_broadcast(path.as_str(), None);
+		let pending = consumer.request(path.as_str(), None);
 
 		// `biased` so a pending close always wins over a ready broadcast.
 		let broadcast = tokio::select! {
