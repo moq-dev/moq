@@ -171,7 +171,8 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::BinaryConfig {
 /// dimensions from an SPS, ...) always wins, so a detected change just updates the catalog. A
 /// [`codec`](Self::codec) alone is enough to publish the catalog before the first keyframe (the
 /// decoder config then arrives in band). Use it for fields the stream can't reveal (bitrate) or to
-/// skip that wait.
+/// skip that wait. The MSF catalog declares only hinted estimates (`bitrate`, `framerate`, `jitter`,
+/// `delay`), never measured ones, so an MSF track carries only those set here.
 ///
 /// Video importers take one because they build the [`VideoConfig`](hang::catalog::VideoConfig)
 /// themselves, out of the bitstream, so the caller never holds the config to set these on. An audio
@@ -367,6 +368,21 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 	}
 }
 
+/// How far short of a whole frame duration a value still counts as reaching it, as a fraction of the
+/// period: a reorder of exactly one frame must not miss its step to rounding in the frame duration.
+const STEP_SLACK: u32 = 100;
+
+/// `measured` if it reaches a whole `period` beyond the one `published` sits in, else `published`.
+fn quantize(published: Option<Duration>, measured: Option<Duration>, period: Duration) -> Option<Duration> {
+	let step =
+		|value: Option<Duration>| value.map_or(0, |value| (value + period / STEP_SLACK).as_nanos() / period.as_nanos());
+	if step(measured) > step(published) {
+		measured
+	} else {
+		published
+	}
+}
+
 /// Refuse an edit that redefines rendition `name`'s track identity in place: a publisher whose
 /// decoder identity changed publishes under a new name instead.
 fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name: &str) -> crate::Result<()> {
@@ -549,7 +565,7 @@ pub(crate) struct Rendition<E: CatalogExt, C: RenditionConfig<E>> {
 	/// SPS) holds the handle without a catalog entry, and drops without a spurious removal.
 	present: bool,
 	/// The fields the config carried at [`set`](Self::set): authoritative, never overwritten by
-	/// detection. Whatever is absent here is what detection fills.
+	/// detection. Whatever is absent here is what detection fills, and stays absent from MSF.
 	supplied: Estimate,
 	/// The last estimate handed to [`estimate`](Self::estimate), kept so a config set afterwards
 	/// starts from whatever was already measured.
@@ -632,9 +648,9 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	///
 	/// Whatever [`Estimate`] fields `config` already carries are authoritative and left alone; the
 	/// rest are filled by [`estimate`](Self::estimate), seeded with anything already measured before
-	/// the rendition existed (a dirty start or a B-frame reorder). A caller who wants to pre-empt
-	/// detection sets the field on the config, or (for a config an importer builds out of the
-	/// bitstream) hands the importer a hint like [`VideoHint`].
+	/// the rendition existed (a dirty start or a B-frame reorder). Only the authoritative ones reach
+	/// the MSF catalog. A caller who wants to pre-empt detection sets the field on the config, or (for
+	/// a config an importer builds out of the bitstream) hands the importer a hint like [`VideoHint`].
 	pub(crate) fn set(&mut self, mut config: C) -> crate::Result<()> {
 		let supplied = config.estimate();
 		let resolved = Self::resolved(&supplied, &self.detected);
@@ -650,6 +666,9 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			self.present = true;
 			*guard = next;
 			guard.list::<C>(&self.name);
+			if C::detects() {
+				guard.hint::<C>(&self.name, supplied.clone());
+			}
 			guard.commit()?;
 		}
 		self.supplied = supplied;
@@ -679,15 +698,17 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// Publish a measured [`Estimate`], filling only the fields the config didn't supply at
 	/// [`set`](Self::set).
 	///
-	/// Mint the estimate from an [`Estimator`](super::Estimator), usually the one owned by a
+	/// Mint the reading from an [`Estimator`](super::Estimator), usually the one owned by a
 	/// [`container::Producer`](crate::container::Producer). Call it after every write: an estimate
-	/// that resolves to what the catalog already carries doesn't republish it, and a `jitter` or
-	/// `delay` rise republishes at most once a second (see
-	/// [`Guard::commit_estimate`](super::Guard::commit_estimate)), going out on a later call.
+	/// that resolves to what the catalog already carries doesn't republish it. A `jitter` or `delay`
+	/// rise republishes only once it reaches the next whole frame duration above the published value,
+	/// and then at most once a second (see [`Guard::commit_estimate`](super::Guard::commit_estimate)),
+	/// going out on a later call.
 	///
 	/// Calling this before [`set`](Self::set) is not wasted: the measurement is remembered and seeds
 	/// the config once it lands.
-	pub(crate) fn estimate(&mut self, estimate: Estimate) -> crate::Result<()> {
+	pub(crate) fn estimate(&mut self, reading: impl Into<super::Reading>) -> crate::Result<()> {
+		let super::Reading { estimate, period } = reading.into();
 		if !C::detects() {
 			return Ok(());
 		}
@@ -702,6 +723,18 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let published = config.estimate();
 		resolved.jitter = resolved.jitter.max(published.jitter);
 		resolved.delay = resolved.delay.max(published.delay);
+		// Measurement creeps up as the encoder's latency does, a step per frame at worst; only a whole
+		// frame's rise is worth a republish. Until a period is known the throttle alone paces it.
+		let period = resolved
+			.framerate
+			.filter(|framerate| *framerate > 0.0)
+			.and_then(|framerate| Duration::try_from_secs_f64(framerate.recip()).ok())
+			.or(period)
+			.filter(|period| !period.is_zero());
+		if let Some(period) = period {
+			resolved.jitter = quantize(published.jitter, resolved.jitter, period);
+			resolved.delay = quantize(published.delay, resolved.delay, period);
+		}
 		self.detected = estimate;
 		if self.published.as_ref() == Some(&resolved) {
 			// Still an observation: it releases a rise held back until its window ended. A closed
@@ -757,8 +790,15 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let mut estimate = config.estimate();
 		estimate.bitrate = Some(bitrate);
 		config.set_estimate(estimate);
-		self.replace(config)?;
-		self.supplied.bitrate = Some(bitrate);
+		let mut supplied = self.supplied.clone();
+		supplied.bitrate = Some(bitrate);
+		let name = self.name.clone();
+		let mut guard = self.stage(config)?;
+		if C::detects() {
+			guard.hint::<C>(&name, supplied.clone());
+		}
+		guard.commit()?;
+		self.supplied = supplied;
 		Ok(())
 	}
 
@@ -1092,7 +1132,7 @@ mod tests {
 			let t = ts(i * 40_000);
 			estimator.cut(Some(t));
 			estimator.write(t, 100_000);
-			rendition.estimate(estimator.estimate()).unwrap();
+			rendition.estimate(estimator.reading()).unwrap();
 		}
 	}
 

@@ -228,6 +228,7 @@ pub struct MoqDatagram {
 /// Caller-provided video catalog fields for [`MoqVideoInit`].
 ///
 /// Every field is optional and fills only a gap the stream leaves; a value the stream detects wins.
+/// The MSF catalog declares a bitrate or frame rate only when it is hinted here.
 /// Publishing the catalog before the first keyframe needs at least the codec, which comes from the
 /// [`MoqVideoInit`] format. Audio has no equivalent: it resolves entirely from its init bytes.
 #[derive(Clone, Default, uniffi::Record)]

@@ -52,6 +52,7 @@ Wire: none.
 
 - [Rust request and follow](/quest/m1/api-audit/resolve/rust.md) - Rust names the two resolutions `request` and `follow`, deletes `routed` and `routed_broadcast`, and makes the route-level `Follow` private
 - [Bindings request and follow](/quest/m1/api-audit/resolve/bindings.md) - moq-ffi, the C ABI, and every wrapper mirror `request` and `follow` with an optional epoch
+- [The watch player's follow prop](/quest/m1/api-audit/resolve/watch.md) - `@moq/watch`'s `Broadcast` names its resolution choice `follow` instead of `announced`
 - [Callers resolve once](/quest/m1/api-audit/resolve/callers.md) - no caller hand-rolls synced resolution or decides table absence by wall clock
 
 ## Related

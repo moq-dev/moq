@@ -160,7 +160,6 @@ removed).
 - [JS FETCH timeout test](/quest/m1/js-fetch-timeout-test.md) - a JS joining FETCH still waiting on its SUBSCRIBE at the deadline is refused with TIMEOUT
 - [JS joins at the current group](/quest/m1/ietf-js-join.md) - a late JS moq-transport subscriber gets the group in progress whole through a joining FETCH or fill, as Rust does
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - Rust honors native FILL_TIMEOUT to bound upstream waiting on drafts 18 and 22, alongside local content-age enforcement
-- [Catalog estimates settle](/quest/m1/catalog-estimates.md) - hang quantizes jitter and delay rises, and MSF publishes once its estimates are made and then only for track changes
 - [IETF takeover](/quest/m1/ietf-takeover.md) - carry the shared takeover contract through the negotiated IETF epoch extension
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explain epochs, pinned catalogs, lazy jobs, restart and version compatibility as they exist; takeover adds its own section
 - [Native rung disable](/quest/m1/simulcast-rung-disable.md) - OBS stops sending the top renditions its grant cannot fund, as the Rust/FFI publishers do, and a shaped uplink through moq-ffi proves the resume
