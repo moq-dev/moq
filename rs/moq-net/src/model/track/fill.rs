@@ -1028,8 +1028,13 @@ impl Inner {
 			return Err(Error::Duplicate);
 		}
 		// Cache the group before answering: readers resolve an accept through the cache.
-		let res =
-			TrackState::modify(&self.state).and_then(|mut state| state.insert_group_request(sequence, frames, info));
+		let res = TrackState::modify(&self.state).and_then(|mut state| {
+			let res = state.insert_group_request(sequence, frames, info);
+			let deferred = state.deferred();
+			drop(state);
+			deferred.wake();
+			res
+		});
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(sequence..end);
 			if let Ok(group) = &res

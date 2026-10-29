@@ -1460,9 +1460,13 @@ export class Publisher {
 						: { group: fill.end.group, object: 0n },
 			});
 			for (const sequence of sequences) {
-				const group = hooks.cachedGroup(cache, sequence);
-				if (!group) continue;
 				const slice = groupSlice(fill, sequence);
+				const group = hooks.cachedGroup(cache, sequence);
+				// Evicted since it was listed: unknown, where a skip would say it never existed.
+				if (!group) {
+					await out.unknown(sequence, slice, cancelled);
+					continue;
+				}
 				try {
 					await this.#writeFillGroup({ out, group, slice, deadline, cancelled });
 				} finally {
@@ -3087,8 +3091,9 @@ export class Publisher {
 				{ start: { included: safe(range.start.group) }, end: { included: safe(range.end.group) } },
 				priority,
 			);
-			// A group gone or never cached is absent from the answer, as the response skips it,
-			// unless it is the only one.
+			// The answer ends at the newest group still readable, so one gone from the top of the
+			// range moves FETCH_OK's end below it rather than leaving it a gap, unless it is the
+			// only one.
 			let last: FetchedGroup | undefined;
 			while (!last) {
 				const sequence = groups.pop();
@@ -3317,11 +3322,14 @@ export class Publisher {
 					if (last.timedOut) await out.timedOut(sequence, fetchSlice(range, sequence), stop);
 					continue;
 				}
-				// Gone since it was listed: absent from the answer, which says it does not exist.
+				const slice = fetchSlice(range, sequence);
 				const group = hooks.cachedGroup(cache, sequence);
-				if (!group) continue;
+				// Evicted since it was listed: unknown, where a skip would say it never existed.
+				if (!group) {
+					await out.unknown(sequence, slice, stop);
+					continue;
+				}
 				try {
-					const slice = fetchSlice(range, sequence);
 					await this.#writeFillGroup({ out, group, slice, deadline, cancelled: stop });
 				} finally {
 					group.close();
@@ -3667,11 +3675,27 @@ class FetchWriter {
 	 * Mark the rest of group `sequence`'s `slice` as timed out, its objects having not
 	 * arrived before the FILL_TIMEOUT ran out. Draft-18 has no such marker; its FILL_TIMEOUT
 	 * reports them unknown.
+	 */
+	timedOut(sequence: number, slice: GroupSlice, stop: AbortSignal): Promise<void> {
+		const reason = Filter.isDraft22(this.#version) ? EndOfRange.TimedOut : EndOfRange.Unknown;
+		return this.#gap(reason, sequence, slice, stop);
+	}
+
+	/**
+	 * Mark group `sequence`'s whole `slice` as unknown: the cache evicted the group after it
+	 * was listed, so whether its objects exist is no longer known here.
+	 */
+	unknown(sequence: number, slice: GroupSlice, stop: AbortSignal): Promise<void> {
+		return this.#gap(EndOfRange.Unknown, sequence, slice, stop);
+	}
+
+	/**
+	 * End the rest of group `sequence`'s `slice` with an End of Range for `reason`.
 	 *
 	 * A marker covers everything since the prior one, so when nothing of this group went
 	 * out, the groups skipped before it are first marked as what they otherwise imply: gone.
 	 */
-	async timedOut(sequence: number, slice: GroupSlice, stop: AbortSignal): Promise<void> {
+	async #gap(reason: EndOfRange, sequence: number, slice: GroupSlice, stop: AbortSignal): Promise<void> {
 		const group = BigInt(sequence);
 		const prior = this.#prior;
 		if (prior?.group !== group) {
@@ -3679,7 +3703,6 @@ class FetchWriter {
 			if (before && (prior ? this.#precedes(prior, before) : !this.#precedes(before, this.#start)))
 				await this.#end(EndOfRange.NonExistent, before, stop);
 		}
-		const reason = Filter.isDraft22(this.#version) ? EndOfRange.TimedOut : EndOfRange.Unknown;
 		const object = slice.until === undefined ? MAX_OBJECT : BigInt(slice.until - 1);
 		await this.#end(reason, { group, object }, stop);
 	}
