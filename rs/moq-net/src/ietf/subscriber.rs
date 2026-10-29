@@ -14322,8 +14322,18 @@ mod stitch_tests {
 				let mut run = GroupFetchRun::new(version, objects).await;
 				let dynamic = run.track.requests();
 				let consumer = run.track.consume();
-				let mut filling = Box::pin(consumer.fill_groups(SEQUENCE..last + 1, 0));
-				assert!(futures::poll!(filling.as_mut()).is_pending());
+				run.track.start_at(last + 1).unwrap();
+				run.track.create_group((last + 1).into()).unwrap().finish().unwrap();
+				let mut reading = consumer
+					.subscribe(Some(
+						track::Subscription::default()
+							.with_range(SEQUENCE..last + 1)
+							.with_order(crate::track::Order::Ascending)
+							.with_max_delay(None),
+					))
+					.await
+					.unwrap();
+				assert!(futures::FutureExt::now_or_never(reading.recv_group()).is_none());
 				let fill = dynamic.requested_fill().await.unwrap();
 				let bounded = consumer.fetch_group(last, None);
 				let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
@@ -14389,103 +14399,29 @@ mod stitch_tests {
 		assert!(run.track.consume().peek_group(SEQUENCE).is_none(), "nothing is cached");
 	}
 
-	/// A run of missing groups goes upstream as one FETCH, whose single stream our publisher
-	/// answers with every group it holds. The next relay caches those, and answers the readers
-	/// of the groups between them, which do not exist, with a miss.
+	/// A third-party publisher may answer a range even though ours refuses it. The subscriber
+	/// caches the supplied groups and reports the gaps between them as misses.
 	#[moq_clock::test]
-	async fn a_range_fetch_round_trips_with_the_groups_between_dropped() {
-		use crate::lite::test_transport::Sent;
+	async fn a_range_fetch_caches_the_groups_with_the_groups_between_dropped() {
 		for version in [Version::Draft18, Version::Draft22] {
-			let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
-			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let track = broadcast
-				.create_track("video", track::Info::default().with_timescale(None))
-				.unwrap();
-			for sequence in [4, 6] {
-				let mut group = track.create_group(group::Info { sequence }).unwrap();
-				for object in 0..2 {
-					group
-						.write_frame(None, format!("{sequence}-{object}").into_bytes())
-						.unwrap();
-				}
-				group.finish().unwrap();
-			}
-			track.finish().unwrap();
-
-			// The FETCH a relay sends for the run 3..=6.
-			let namespace = Path::from_static("room");
-			let fetch_type = match Filter::is_draft22(version) {
-				true => ietf::FetchType::Filtered {
-					namespace,
-					track: "video".into(),
-					filter: Filter::Absolute {
-						start: ietf::Location { group: 3, object: 0 },
-						end: Some(ietf::EndLocation { group: 6, object: None }),
-					},
-				},
-				false => ietf::FetchType::Standalone {
-					namespace,
-					track: "video".into(),
-					start: ietf::Location { group: 3, object: 0 },
-					end: ietf::Location { group: 6, object: 0 },
-				},
-			};
-			let mut body = Vec::new();
-			ietf::Fetch {
-				request_id: RequestId(3),
-				subscriber_priority: 128,
-				group_order: ietf::GroupOrder::Ascending,
-				fetch_type,
-				range_filters: false,
-				fill_timeout: false,
-				properties_wanted: false,
-				epoch: None,
-			}
-			.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
-			.unwrap();
-			let downstream = ScriptedSession::per_stream(vec![vec![]]);
-			let peer = peer::PeerSetup::default();
-			peer.set(peer::Peer::default());
-			let publisher = crate::ietf::Publisher::new(
-				crate::time::sim(),
-				crate::driver::Transport::new(downstream.clone()),
-				origin.consume(),
-				Control::new(false),
-				None,
-				peer,
-				version,
-			);
-			let stream = Stream::open(&mut crate::driver::Transport::new(downstream.clone()), version)
-				.await
-				.unwrap();
-			moq_clock::timeout(
-				Duration::from_secs(1),
-				publisher
-					.handle_stream(ietf::Fetch::ID, ietf::Body(body.into()), stream, false)
-					.unwrap(),
-			)
-			.await
-			.expect("publisher");
-			let mut streams = std::collections::BTreeMap::<usize, Vec<u8>>::new();
-			for (id, event) in downstream.log.trail() {
-				if let Sent::Write(bytes) = event {
-					streams.entry(id).or_default().extend(bytes);
-				}
-			}
-			let bytes: Vec<u8> = streams.into_values().flatten().collect();
-			let mut decoder = Decoder::new(&bytes, version.into());
-			assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::ID, "{version}");
-			let ok = ietf::FetchOk::decode(&mut decoder, version).unwrap();
-			assert!(ok.end_of_track, "{version}");
-			assert_eq!(decoder.varint().unwrap(), ietf::FetchHeader::TYPE);
-			ietf::FetchHeader::decode(&mut decoder, version).unwrap();
-
-			// The next relay's fill of the same run reads that one stream.
-			let mut run = GroupFetchRun::new(version, decoder.rest().to_vec()).await;
+			let mut objects = group_fetch_objects(4, 0, &[b"4-0", b"4-1"]);
+			// Later Group IDs are deltas, so 1 advances from group 4 to group 6.
+			objects.extend(group_fetch_objects(1, 0, &[b"6-0", b"6-1"]));
+			let mut run = GroupFetchRun::new(version, objects).await;
 			let dynamic = run.track.requests();
 			let consumer = run.track.consume();
-			let mut filling = Box::pin(consumer.fill_groups(3..7, 0));
-			assert!(futures::poll!(filling.as_mut()).is_pending());
+			run.track.start_at(7).unwrap();
+			run.track.create_group(7u64.into()).unwrap().finish().unwrap();
+			let mut reading = consumer
+				.subscribe(Some(
+					track::Subscription::default()
+						.with_range(3..7)
+						.with_order(crate::track::Order::Ascending)
+						.with_max_delay(None),
+				))
+				.await
+				.unwrap();
+			assert!(futures::FutureExt::now_or_never(reading.recv_group()).is_none());
 			let fill = dynamic.requested_fill().await.unwrap();
 			assert_eq!(
 				(fill.start().group, fill.end()),
@@ -14509,10 +14445,7 @@ mod stitch_tests {
 			.await
 			.expect("recv");
 			assert!(res.is_ok(), "{version}: {res:?}");
-			let _filled = moq_clock::timeout(Duration::from_secs(1), filling)
-				.await
-				.expect("filled");
-			assert_eq!(consumer.cached_groups(0..10), [4, 6], "{version}");
+			assert_eq!(consumer.cached_groups(0..7), [4, 6], "{version}");
 			for sequence in [4, 6] {
 				let mut group = consumer.fetch_group(sequence, None).await.unwrap();
 				for object in 0..2 {
