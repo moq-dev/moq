@@ -401,7 +401,7 @@ ANNOUNCE_OK carries metadata that applies to every announcement on the stream: t
 The publisher MUST send [SYNCED](#synced) exactly once, after the initial set.
 The subscriber MAY batch announcements until SYNCED; subsequent announcements are live updates.
 The initial set is relative to this hop: a relay answers with what it holds without waiting for upstreams.
-The publisher MAY coalesce changes to a route it has not yet sent, and sends SYNCED after no more events than the initial set holds routes.
+The publisher MAY coalesce changes to a route it has not yet sent, and sends no more events before SYNCED than the initial set holds routes.
 A retraction of a route already sent MAY precede SYNCED.
 
 Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream: a counter starting at 0 that increments by 1 per advertisement.
@@ -558,7 +558,7 @@ A subscriber SHOULD hold at most one Tracks Stream per Broadcast, since each cos
 A publisher MAY reset an older Tracks Stream for the same Broadcast with CANCELLED once a newer one opens.
 
 The publisher MAY coalesce changes to a name it has not yet sent, but never omits the removal of a name it has sent.
-It sends SYNCED exactly once, after no more events than the Tracks it listed when the stream opened.
+It sends SYNCED exactly once, after every Track it listed when the stream opened and still lists, and sends no more events before SYNCED than it listed then.
 A removal of a Track already sent MAY precede SYNCED.
 
 The subscriber MUST close the session with a PROTOCOL_VIOLATION on a TRACKS_ADD for a name already listed on the stream, a TRACKS_REMOVE or TRACKS_FINISH for a name not listed, a second SYNCED, or an unknown event type.
@@ -1774,7 +1774,7 @@ The `Message Length` describes the payload size on the wire.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME and datagrams carry an `Inflated Size` when it is not none.
-- SUBSCRIBE may start at any frame, including when the subscriber no longer holds the prefix. Relays widen a cold Group request upstream to frame 0 and cut locally.
+- SUBSCRIBE may start at any frame, including when the subscriber no longer holds the prefix.
 
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 
@@ -1784,7 +1784,7 @@ The `Message Length` describes the payload size on the wire.
 
 - Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
 
-- Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1). A relay requests descending upstream unless every subscription it serves is ascending.
+- Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
 - Listed the shared EXPIRED_AUTH_TOKEN (0x18) session code. A request that expires on its own resets with the UNAUTHORIZED stream code.
 
 - SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
@@ -1825,7 +1825,7 @@ The `Message Length` describes the payload size on the wire.
 - Capped the Message Length of every message except FRAME at 65,535 bytes.
 - Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
 - Added the MALFORMED_AUTH_TOKEN (0x16) session code, with moq-transport's meaning.
-- Removed KEY_VALUE_FORMATTING_ERROR (0x6) from the session codes: moq-lite has no key-value pairs, and a repeated SETUP parameter is a PROTOCOL_VIOLATION.
+- Removed KEY_VALUE_FORMATTING_ERROR (0x6) from the session codes; a repeated SETUP parameter is a PROTOCOL_VIOLATION.
 - Removed the standby-ordering deployment requirements on Route Cost seeds and bounds.
 - Removed rules for mapping onto earlier versions and moq-transport, and guidance on relay internals that no peer observes, such as announce and listing queues, TRACK_INFO caching, upstream requests, and GOAWAY route costs. Coalescing announce and listing changes is now a MAY, bounded only by when SYNCED arrives, and a publisher MAY, rather than MUST, reset an older Tracks Stream for the same Broadcast.
 - Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
