@@ -546,6 +546,10 @@ pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<P
 		reader.set_priority(crate::priority::RECV_CONTROL);
 		let (setup, size) = reader.decode_sized::<setup::Setup>().await?;
 		let (params, _) = ietf::Parameters::decode_slice(&setup.parameters, version)?;
+		if session.address() == crate::transport::Address::Uri && params.get_bytes(ietf::ParameterBytes::Path).is_some()
+		{
+			return Err(Error::ProtocolViolation);
+		}
 		let path = match params.get_bytes(ietf::ParameterBytes::Path) {
 			Some(bytes) => Some(
 				std::str::from_utf8(bytes)

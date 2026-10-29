@@ -29,7 +29,7 @@ const TABLE_LIMIT: u64 = PCR_HZ / 2;
 /// left TS 101 154 in 2005.
 const PCR_LIMIT: u64 = PCR_HZ / 10;
 /// `PTS_error`: 700 ms.
-const PTS_LIMIT: u64 = PCR_HZ * 7 / 10;
+pub(super) const PTS_LIMIT: u64 = PCR_HZ * 7 / 10;
 /// ISO/IEC 13818-1 G.1: sync is lost after two consecutive corrupt sync bytes, and acquired
 /// after five consecutive correct ones.
 const SYNC_LOST: u8 = 2;
@@ -241,14 +241,14 @@ impl Health {
 		let Some(last) = self.pcr.replace(value) else {
 			return;
 		};
-		let step = (value + PCR_WRAP - last) % PCR_WRAP;
-		let forward = step <= PCR_WRAP / 2;
 		let errors = self.errors.pid(pid);
-		if forward && step > PCR_LIMIT {
-			errors.pcr_repetition_error += 1;
-		}
-		if !forward || step > PCR_LIMIT {
-			errors.pcr_discontinuity_indicator_error += 1;
+		match Delta::between(last, value, PCR_WRAP) {
+			Delta::Forward(step) if step > PCR_LIMIT => {
+				errors.pcr_repetition_error += 1;
+				errors.pcr_discontinuity_indicator_error += 1;
+			}
+			Delta::Forward(_) => {}
+			Delta::Back(_) => errors.pcr_discontinuity_indicator_error += 1,
 		}
 	}
 
@@ -300,6 +300,28 @@ impl Health {
 	/// `pid` changed route: stop grading its PTS until it has one.
 	pub(super) fn restart(&mut self, pid: u16) {
 		self.pts.remove(&pid);
+	}
+}
+
+/// The step between two readings of a clock that wraps: forward by up to half the range,
+/// otherwise back, so a wrap reads as the small forward step it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Delta {
+	/// Ahead by this many ticks.
+	Forward(u64),
+	/// Behind by this many ticks.
+	Back(u64),
+}
+
+impl Delta {
+	/// From `last` to `value`, both below `wrap`.
+	pub(super) fn between(last: u64, value: u64, wrap: u64) -> Self {
+		let step = (value % wrap + wrap - last % wrap) % wrap;
+		if step <= wrap / 2 {
+			Self::Forward(step)
+		} else {
+			Self::Back(wrap - step)
+		}
 	}
 }
 
@@ -679,7 +701,7 @@ mod test {
 		/// The feed from `from` to `to` ms on a clock reading `clock(t)` PCR ticks at `t` ms: the
 		/// PAT and PMT every 100 ms, a PCR every 10 ms, a PES on each video PID every 40 ms
 		/// stamped on the same clock, and a null packet closing each 10 ms. `keep` drops parts.
-		fn run(&mut self, from: u64, to: u64, clock: impl Fn(u64) -> u64, keep: impl Fn(u64, Part) -> bool) {
+		fn run(&mut self, from: u64, to: u64, clock: impl Fn(u64, Part) -> u64, keep: impl Fn(u64, Part) -> bool) {
 			for t in (from..to).step_by(10) {
 				if t % 100 == 0 {
 					if keep(t, Part::Pat) {
@@ -690,12 +712,12 @@ mod test {
 					}
 				}
 				if keep(t, Part::Pcr) {
-					self.pcr(clock(t) % PCR_WRAP, false);
+					self.pcr(clock(t, Part::Pcr) % PCR_WRAP, false);
 				}
 				if t % 40 == 0 {
 					for pid in [VIDEO, PEER] {
 						if keep(t, Part::Pes(pid)) {
-							self.pes(pid, clock(t) / 300, false);
+							self.pes(pid, clock(t, Part::Pes(pid)) / 300, false);
 						}
 					}
 				}
@@ -704,7 +726,7 @@ mod test {
 		}
 
 		fn clean(&mut self, from: u64, to: u64) {
-			self.run(from, to, |t| t * MS, |_, _| true);
+			self.run(from, to, |t, _| t * MS, |_, _| true);
 		}
 
 		/// Where each null packet starts.
@@ -762,15 +784,16 @@ mod test {
 	}
 
 	/// The PCR is graded on its values: a gap over 100 ms counts under both checks, a shorter
-	/// one under neither, the wrap is no gap, and a step back is a discontinuity only.
+	/// one under neither, the wrap is no gap, and a step back is a discontinuity only. The clock
+	/// steps back alone: the media stepping with it would restart the import instead.
 	#[test]
 	fn pcr_gaps_are_graded_on_their_values() {
-		let stats = |clock: &dyn Fn(u64) -> u64, keep: &dyn Fn(u64, Part) -> bool| {
+		let stats = |clock: &dyn Fn(u64, Part) -> u64, keep: &dyn Fn(u64, Part) -> bool| {
 			let mut feed = Feed::default();
 			feed.run(0, 2_000, clock, keep);
 			feed.stats()
 		};
-		let pcr = |clock: &dyn Fn(u64) -> u64, keep: &dyn Fn(u64, Part) -> bool| {
+		let pcr = |clock: &dyn Fn(u64, Part) -> u64, keep: &dyn Fn(u64, Part) -> bool| {
 			let stats = stats(clock, keep);
 			let health = stats.health();
 			assert_eq!(
@@ -780,20 +803,27 @@ mod test {
 			);
 			(stats.pcr_repetition_error, stats.pcr_discontinuity_indicator_error)
 		};
-		let steady = |t| t * MS;
+		let steady = |t: u64, _: Part| t * MS;
 		assert_eq!(pcr(&steady, &gap(Part::Pcr, 150)), (1, 1), "a 150 ms gap");
 		assert_eq!(pcr(&steady, &gap(Part::Pcr, 80)), (0, 0), "an 80 ms gap");
 		assert_eq!(pcr(&steady, &gap(Part::Pcr, 100)), (0, 0), "a gap of exactly 100 ms");
-		assert_eq!(pcr(&|t| PCR_WRAP - 1_000 * MS + t * MS, &all), (0, 0), "the wrap");
+		assert_eq!(pcr(&|t, _| PCR_WRAP - 1_000 * MS + t * MS, &all), (0, 0), "the wrap");
 		assert_eq!(
-			pcr(&|t| if t < 1_000 { t * MS } else { (t - 500) * MS }, &all),
+			pcr(
+				&|t, part| if t < 1_000 || part != Part::Pcr {
+					t * MS
+				} else {
+					(t - 500) * MS
+				},
+				&all
+			),
 			(0, 1),
 			"an unsignalled step back"
 		);
 
 		// An unsignalled 500 ms jump also stretches the program clock by 510 ms, which makes
 		// the PAT and the PMT each just late. The 40 ms PES cadence absorbs it.
-		let jump = stats(&|t| if t < 1_000 { t * MS } else { (t + 500) * MS }, &all);
+		let jump = stats(&|t, _| if t < 1_000 { t * MS } else { (t + 500) * MS }, &all);
 		assert_eq!(
 			(jump.pcr_repetition_error, jump.pcr_discontinuity_indicator_error),
 			(1, 1),
@@ -809,7 +839,7 @@ mod test {
 		let mut feed = Feed::default();
 		feed.clean(0, 1_000);
 		feed.pcr(1_500 * MS, true);
-		feed.run(1_000, 2_000, |t| (t + 500) * MS, all);
+		feed.run(1_000, 2_000, |t, _| (t + 500) * MS, all);
 		let stats = feed.stats();
 		assert_eq!(stats.health(), [0; 9], "{stats:?}");
 	}
@@ -820,7 +850,7 @@ mod test {
 	fn a_late_pat_counts_once_per_half_second() {
 		for (len, count) in [(400, 0), (500, 0), (800, 1), (1_200, 2)] {
 			let mut feed = Feed::default();
-			feed.run(0, 3_000, |t| t * MS, gap(Part::Pat, len));
+			feed.run(0, 3_000, |t, _| t * MS, gap(Part::Pat, len));
 			let stats = feed.stats();
 			assert_eq!(stats.pat_error, count, "PAT missing for {len} ms");
 			assert_eq!(stats.pmt_error, 0, "PAT missing for {len} ms");
@@ -843,7 +873,7 @@ mod test {
 	#[test]
 	fn a_late_pmt_counts_on_its_own_check() {
 		let mut feed = Feed::default();
-		feed.run(0, 3_000, |t| t * MS, gap(Part::Pmt, 800));
+		feed.run(0, 3_000, |t, _| t * MS, gap(Part::Pmt, 800));
 		let stats = feed.stats();
 		assert_eq!((stats.pmt_error, stats.pat_error), (1, 0), "{stats:?}");
 	}
@@ -852,7 +882,7 @@ mod test {
 	#[test]
 	fn a_pts_gap_counts_on_its_own_pid() {
 		let mut feed = Feed::default();
-		feed.run(0, 3_000, |t| t * MS, gap(Part::Pes(PEER), 1_000));
+		feed.run(0, 3_000, |t, _| t * MS, gap(Part::Pes(PEER), 1_000));
 		let stats = feed.stats();
 		assert_eq!(stats.pts_error, 1, "{stats:?}");
 		assert_eq!(stats.streams[&PEER].pts_error, 1);
@@ -869,7 +899,7 @@ mod test {
 			feed.run(
 				t,
 				t + 100,
-				|t| t * MS,
+				|t, _| t * MS,
 				|_, part| part != Part::Pmt && part != Part::Pes(PEER),
 			);
 		}
