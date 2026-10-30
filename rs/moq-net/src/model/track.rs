@@ -4499,6 +4499,7 @@ impl Consumer {
 	}
 
 	/// The error the declared end carries, reached or not.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn declared_error(&self) -> Option<Error> {
 		self.with_state(|state| state?.read().end_error.clone())
 	}
@@ -7216,6 +7217,7 @@ impl Subscriber {
 	}
 
 	/// The error the track's declared end carries, if it does not end cleanly.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn end_error(&self) -> Option<Error> {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.state.read().end_error.clone(),
@@ -7224,6 +7226,7 @@ impl Subscriber {
 	}
 
 	/// Whether this reader ran out at an end declared with an error, rather than an abort.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn ended_with_error(&self) -> bool {
 		self.ended::<()>().is_err()
 	}

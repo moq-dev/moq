@@ -799,6 +799,7 @@ impl Subscriber {
 	}
 
 	/// The error the serving copy's declared end carries, reached or not.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn declared_error(&self) -> Option<Error> {
 		self.reader().copies.last()?.track.declared_error()
 	}

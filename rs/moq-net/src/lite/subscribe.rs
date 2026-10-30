@@ -1,11 +1,9 @@
 use std::borrow::Cow;
 
 use crate::{
-	Path,
-	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
+	Path, StreamError,
+	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, StreamCodes},
 };
-#[cfg(feature = "async")]
-use crate::{StreamError, coding::StreamCodes};
 
 use super::{Message, Version};
 use crate::track::Order;
