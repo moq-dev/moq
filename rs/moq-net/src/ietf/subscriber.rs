@@ -357,10 +357,12 @@ impl Fill {
 	/// head was being written, and its teardown could not reach a producer the fetch stream
 	/// still owned. Settle the head as that teardown would have rather than installing it
 	/// for a tail that is never coming, or it outlives the subscription unfinished.
+	/// [`Fill::Failed`] is too: its request failed while the stream was still writing, and
+	/// a tail that arrived meanwhile was already dropped as headless.
 	fn install(&mut self, head: Fill) {
 		let mut head = head;
 		match self {
-			Fill::Done => head.cancel(),
+			Fill::Done | Fill::Failed { .. } => head.cancel(),
 			Fill::Ended => head.release(),
 			_ => *self = head,
 		}
@@ -14061,6 +14063,34 @@ mod stitch_tests {
 			producer,
 		});
 		assert!(matches!(fill, Fill::Done), "Done is terminal");
+
+		assert!(matches!(group.read_frame().await, Err(Error::Cancel)));
+	}
+
+	/// A joining FETCH whose request fails while its stream is still writing has already
+	/// dropped the headless tail, so a head landing afterwards is cancelled, not installed
+	/// for a tail that is gone.
+	#[moq_clock::test]
+	async fn a_head_finishing_after_its_fill_failed_is_cancelled() {
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			track::Info::default().with_timescale(Timescale::MICRO),
+		);
+		let mut producer = track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+		producer.write_frame(timestamp(0), b"head-0".as_slice()).unwrap();
+		let mut group = producer.consume();
+
+		let mut fill = Fill::Failed { sequence: SEQUENCE };
+		fill.install(Fill::Ready {
+			sequence: SEQUENCE,
+			next: 1,
+			producer,
+		});
+		assert!(
+			matches!(fill, Fill::Failed { sequence: SEQUENCE }),
+			"Failed is terminal"
+		);
 
 		assert!(matches!(group.read_frame().await, Err(Error::Cancel)));
 	}
