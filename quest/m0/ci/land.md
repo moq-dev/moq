@@ -52,8 +52,7 @@ Decided 2026-10-26 (maintainer):
   moq.pro, and kixelated/rust2. This repository adds a thin workflow, as
   moq.pro's `gate.yml` and `queue.yml` do today.
 - The gate lands by fast-forward. For each PR it writes the squash commit
-  onto the chain (subject is the PR title, body keeps the co-author
-  trailers, as CONTRIBUTING describes), and resolves quest-file conflicts
+  onto the chain, with the engine's default message, and resolves quest-file conflicts
   with quest's merge driver. It force-pushes each PR's branch, with a lease
   on the head it tested, to that PR's commit, then fast-forwards `main` to
   the tip in one push. GitHub marks a PR merged once its head is on the base,
@@ -101,12 +100,8 @@ Remaining before completion:
   pinned to an app that never reports it on PR heads. Coordinate source
   installation with that ruleset change: removing `merge_group` cannot
   pass the old queue, and changing protection first stops that queue.
-- **Squash body policy.** The pinned engine is available, but
-  [its message builder](https://github.com/kixelated/quest/blob/fd1d88fb19317afc1c0cbca34cc23e9cf4d32375/src/cli/land.ts#L511)
-  preserves individual commit messages as well as co-author trailers.
-  This quest and CONTRIBUTING require only the trailers. Align the
-  upstream engine with that settled policy before deployment, rather than
-  silently changing repository history policy in the workflow.
+- Decided 2026-10-29 (maintainer): CONTRIBUTING no longer prescribes the
+  squash commit body; the engine's default message stands.
 - **Live evidence.** Exercise the gate and its ejections after the
   maintainer's cutover, including an editable fork, and measure a busy
   day's merged PRs/hour and enqueue-to-merged latency against the baseline.

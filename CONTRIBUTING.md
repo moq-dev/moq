@@ -9,7 +9,7 @@ under the files they change.
 
 # Commits
 
-PRs into `main` are squashed through the batched landing gate, so the PR title becomes the commit subject in `git log`; the body keeps only the co-author trailers, not the PR description.
+PRs into `main` are squashed through the batched landing gate, so the PR title becomes the commit subject in `git log`.
 The one exception is the maintainer's pre-release merge of `release` into `main`, which lands as a merge commit (see [Releases](#releases)).
 PRs into `release` use a merge commit, so their history survives until they land.
 
