@@ -2848,9 +2848,8 @@ impl Handle {
 				raw: false,
 				compressed: self.track.compress,
 				cache: self.cache.clone(),
-				access: self.alive.access.clone(),
+				alive: self.alive.clone(),
 				refreshed: self.cache.pool().now(),
-				pace: self.alive.pace.clone(),
 			},
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
 			// when it hands the consumer to a subscriber/fetch.
@@ -3030,8 +3029,6 @@ struct Prefetch {
 	inflated: Option<Box<[u64; Self::CAP]>>,
 	pos: usize,
 	len: usize,
-	// Where the last frame buffered ends on the group's pace scale.
-	end: u64,
 }
 
 impl Prefetch {
@@ -3106,8 +3103,9 @@ impl Prefetch {
 		}
 	}
 
-	/// Buffer `entry` at the end of the batch, with its inflated size if `inflated`.
-	fn push(&mut self, entry: &Entry, inflated: bool) {
+	/// Buffer `entry` at the end of the batch, with its inflated size if `inflated`,
+	/// returning where it ends on the group's pace scale.
+	fn push(&mut self, entry: &Entry, inflated: bool) -> u64 {
 		let at = self.len;
 		let frames = self
 			.frames
@@ -3137,8 +3135,8 @@ impl Prefetch {
 		if inflated {
 			self.inflated.get_or_insert_default()[at] = entry.inflated;
 		}
-		self.end = self.end.max(entry.end);
 		self.len += 1;
+		entry.end
 	}
 
 	/// Refill with up to `budget` of the completed frames from `index` on, under the
@@ -3175,25 +3173,39 @@ impl Prefetch {
 			Some(flate) if !raw && count > 0 => Some(state.inflate(flate, index, index + count - 1)?),
 			_ => None,
 		};
+		let mut end = 0;
 		for entry in state.entries(index, index + count) {
-			self.push(entry, compressed && raw);
+			end = self.push(entry, compressed && raw);
 		}
+		// The batch is the reader's whatever the group sheds, so it counts as taken.
+		state.pace.took(end);
 		Ok(job)
 	}
 
 	/// Refill with up to `budget` of the completed frames from `index` on, reading the
 	/// log without the group's guard, and return how many. A plain read of a `compressed`
 	/// group inflates under the guard instead, through [`Self::fill`].
-	fn fill_log(&mut self, log: &mut kio::log::Reader<Entry>, index: usize, budget: usize, compressed: bool) -> usize {
+	///
+	/// The batch is the reader's whatever the group sheds, so it reports it taken to `pace`.
+	fn fill_log(
+		&mut self,
+		log: &mut kio::log::Reader<Entry>,
+		pace: &Pace,
+		index: usize,
+		budget: usize,
+		compressed: bool,
+	) -> usize {
 		self.reset(compressed);
 		let mut read = log.read();
+		let mut end = 0;
 		for index in (index as u64..).take(budget.min(Self::CAP)) {
 			// Evicted or not yet committed: the guard resolves which.
 			let Ok(Some(entry)) = read.get(index) else {
 				break;
 			};
-			self.push(entry, compressed);
+			end = self.push(entry, compressed);
 		}
+		pace.took(end);
 		self.len
 	}
 
@@ -3339,13 +3351,11 @@ struct Cursor {
 	// Whether the group is compressed, so a plain read inflates under the state's lock.
 	compressed: bool,
 
-	// Record prefetched reads without entering the group's state on every frame.
+	// Record prefetched reads without entering the group's state on every frame, through
+	// the group's access stamp, and report the frames taken to its pace.
 	cache: Arc<cache::Track>,
-	access: Arc<cache::Access>,
+	alive: Arc<Alive>,
 	refreshed: u64,
-
-	// Where this cursor reports the frames it takes, pacing the group's writer.
-	pace: Arc<Pace>,
 }
 
 impl Clone for Cursor {
@@ -3361,9 +3371,8 @@ impl Clone for Cursor {
 			raw: self.raw,
 			compressed: self.compressed,
 			cache: self.cache.clone(),
-			access: self.access.clone(),
+			alive: self.alive.clone(),
 			refreshed: self.refreshed,
-			pace: self.pace.clone(),
 		}
 	}
 }
@@ -3969,7 +3978,7 @@ impl Cursor {
 
 	/// Record prefetched reads, updating the eviction rank once per sampled tick.
 	fn refresh_if_stale(&mut self) {
-		self.access.touch();
+		self.alive.access.touch();
 		let tick = self.cache.pool().now();
 		if tick != self.refreshed {
 			self.state.read().charge.refresh();
@@ -4054,7 +4063,7 @@ impl Cursor {
 		// compressed group has to inflate it under the lock.
 		let committed = match !self.compressed || raw {
 			true => self.log.read().get(index as u64).ok().flatten().map(|entry| {
-				self.pace.took(entry.end);
+				self.alive.pace.took(entry.end);
 				entry.read(self.compressed)
 			}),
 			false => None,
@@ -4127,9 +4136,12 @@ impl Cursor {
 
 		// The batch is drained: refill it from the log without the lock, unless a plain
 		// read of a compressed group has to inflate under it.
-		if (!self.compressed || self.raw) && self.prefetch.fill_log(&mut self.log, index, budget, self.compressed) > 0 {
-			// The batch is this cursor's whatever the group sheds, so it counts as taken.
-			self.pace.took(self.prefetch.end);
+		if (!self.compressed || self.raw)
+			&& self
+				.prefetch
+				.fill_log(&mut self.log, &self.alive.pace, index, budget, self.compressed)
+				> 0
+		{
 			self.refresh_if_stale();
 			let (frames, bytes) = self.prefetch.buffered();
 			stats.frames(frames);
@@ -4171,7 +4183,6 @@ impl Cursor {
 
 		// The refill already updated the eviction rank under the group lock.
 		self.refreshed = self.cache.pool().now();
-		self.pace.took(self.prefetch.end);
 
 		// A fresh batch was just filled (empty only on a clean end). Count the whole
 		// batch once here, under no lock, so the drained pops that follow stay free.
