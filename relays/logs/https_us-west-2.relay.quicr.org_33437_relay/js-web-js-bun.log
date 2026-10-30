@@ -3,17 +3,17 @@ https://us-west-2.relay.quicr.org:33437/relay negotiated ALPN: moqt-18
 connected version=moq-transport-18
 subscribe_namespace written: requestId=0
 announced: broadcast=metrics/us-west-2.relay.public active=true
-announced: broadcast=smoke-js-web-4922-1307.hang active=true
-subscribe start: id=2 broadcast=smoke-js-web-4922-1307.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-js-web-4922-1307.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-js-web-4922-1307.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-js-web-4922-1307.hang track=video
-subscribe written: id=4 broadcast=smoke-js-web-4922-1307.hang track=video
-subscribe ok: id=4 broadcast=smoke-js-web-4922-1307.hang track=video
-received 7804 bytes from smoke-js-web-4922-1307.hang
+announced: broadcast=smoke-js-web-4954-1968.hang active=true
+subscribe start: id=2 broadcast=smoke-js-web-4954-1968.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-js-web-4954-1968.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-js-web-4954-1968.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-js-web-4954-1968.hang track=video
+subscribe written: id=4 broadcast=smoke-js-web-4954-1968.hang track=video
+subscribe ok: id=4 broadcast=smoke-js-web-4954-1968.hang track=video
+received 6916 bytes from smoke-js-web-4954-1968.hang
 subscribe_namespace error: connection error: closed (source=session)
 announced: broadcast=metrics/us-west-2.relay.public active=false
-announced: broadcast=smoke-js-web-4922-1307.hang active=false
+announced: broadcast=smoke-js-web-4954-1968.hang active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,
@@ -47,5 +47,5 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=4 broadcast=smoke-js-web-4922-1307.hang track=video error=remote error: 0 (connection error: closed)
-subscribe error: id=2 broadcast=smoke-js-web-4922-1307.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-js-web-4954-1968.hang track=video error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-js-web-4954-1968.hang track=catalog.json error=remote error: 0 (connection error: closed)

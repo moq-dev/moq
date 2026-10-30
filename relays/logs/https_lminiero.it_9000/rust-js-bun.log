@@ -2,15 +2,4 @@ https://lminiero.it:9000/ connected via WebTransport
 https://lminiero.it:9000/ negotiated ALPN: moqt-22
 connected version=moq-transport-22
 subscribe_namespace written: requestId=0
-announced: broadcast=smoke-rust-4922-11335.hang active=true
-subscribe start: id=2 broadcast=smoke-rust-4922-11335.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-rust-4922-11335.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-rust-4922-11335.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-rust-4922-11335.hang track=0.avc3
-subscribe written: id=4 broadcast=smoke-rust-4922-11335.hang track=0.avc3
-subscribe ok: id=4 broadcast=smoke-rust-4922-11335.hang track=0.avc3
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 4
-received 7641 bytes from smoke-rust-4922-11335.hang
-announced: broadcast=smoke-rust-4922-11335.hang active=false
-subscribe error: id=4 broadcast=smoke-rust-4922-11335.hang track=0.avc3 error=remote error: 0 (connection error: closed)
-subscribe error: id=2 broadcast=smoke-rust-4922-11335.hang track=catalog.json error=remote error: 0 (connection error: closed)
+error: timed out waiting for data
