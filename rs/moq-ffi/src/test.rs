@@ -222,7 +222,7 @@ fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
 /// A local reference published asynchronously may appear after discovery has synced empty.
 /// These tests wait for that future announcement before resolving the reference.
 async fn await_announced(consumer: &MoqOriginConsumer, path: &str) -> Arc<MoqBroadcastConsumer> {
-	let announced = consumer.announced_broadcast(path.into()).unwrap();
+	let announced = consumer.follow(path.into(), None).unwrap();
 	tokio::time::timeout(TIMEOUT, announced.available())
 		.await
 		.unwrap_or_else(|_| panic!("timed out waiting for {path} to be announced"))
@@ -3019,21 +3019,21 @@ fn audio_rejects_bad_init_bytes() {
 
 /// Creating a broadcast does not make it exist for anyone: nothing crosses the
 /// announce cursor and nothing resolves until `announce`, locally exactly as for a
-/// peer. `announced_broadcast` waits for the announcement.
+/// peer. `follow` waits for the announcement.
 #[tokio::test]
 async fn create_broadcast_is_invisible_until_announced() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let publication = origin.create_broadcast("live".into()).unwrap();
 
-	let unroutable = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
+	let unroutable = tokio::time::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("an unroutable request answers at once");
 	assert!(unroutable.is_err(), "an unannounced broadcast is unroutable");
 
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let pending = tokio::spawn(async move { announced.next().await });
-	let waiting = consumer.announced_broadcast("live".into()).unwrap();
+	let waiting = consumer.follow("live".into(), None).unwrap();
 	let waited = tokio::spawn(async move { waiting.available().await });
 	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 	assert!(!pending.is_finished(), "create_broadcast must not advertise the path");
@@ -3063,12 +3063,12 @@ async fn create_broadcast_is_invisible_until_announced() {
 /// rooting the cursor *at* the path would name it "", making the broadcast its own root, so
 /// a legal `../sibling` reference would read as escaping for every binding built on this.
 #[tokio::test]
-async fn announced_broadcast_keeps_the_requested_path() {
+async fn follow_keeps_the_requested_path() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let broadcast = create_announced(&origin, "a/pub");
 
-	let announced = consumer.announced_broadcast("a/pub".into()).unwrap();
+	let announced = consumer.follow("a/pub".into(), None).unwrap();
 	let waited = tokio::time::timeout(TIMEOUT, announced.available())
 		.await
 		.expect("timed out waiting for the announcement")
@@ -3076,7 +3076,7 @@ async fn announced_broadcast_keeps_the_requested_path() {
 	assert_eq!(waited.inner().info().path.as_str(), "a/pub");
 
 	// The same broadcast reached by request names itself identically.
-	let requested = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("a/pub".into()))
+	let requested = tokio::time::timeout(TIMEOUT, consumer.request("a/pub".into(), None))
 		.await
 		.expect("timed out requesting the broadcast")
 		.unwrap();
@@ -3228,7 +3228,7 @@ async fn media_consumers_follow_a_rendition_track_in_a_sibling_broadcast() {
 /// Announcement filters do not re-root the origin, so relative broadcast references
 /// keep the same meaning as they have on the unfiltered consumer.
 #[tokio::test]
-async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
+async fn followed_broadcasts_resolve_siblings_under_the_prefix() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let announced = consumer
@@ -3486,7 +3486,7 @@ async fn announce_and_unannounce_toggles_discovery() {
 	wait_live(&announced, false).await;
 
 	// Unannounced for local consumers exactly as for peers.
-	let unroutable = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
+	let unroutable = tokio::time::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("an unroutable request answers at once");
 	assert!(unroutable.is_err(), "an unannounced broadcast is unroutable");
@@ -3494,7 +3494,7 @@ async fn announce_and_unannounce_toggles_discovery() {
 	// Announcing again brings it back.
 	publication.announce(MoqAnnounceRoute::default()).unwrap();
 	wait_live(&announced, true).await;
-	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
+	tokio::time::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("timed out requesting the reannounced broadcast")
 		.expect("a reannounced broadcast resolves");
@@ -3523,7 +3523,7 @@ async fn dropping_a_publication_keeps_its_route() {
 	broadcast.close().unwrap();
 	publication.broadcast().close().unwrap();
 	for path in ["live", "held"] {
-		let unroutable = tokio::time::timeout(TIMEOUT, consumer.request_broadcast(path.into()))
+		let unroutable = tokio::time::timeout(TIMEOUT, consumer.request(path.into(), None))
 			.await
 			.expect("an unroutable request answers at once");
 		assert!(unroutable.is_err(), "a closed broadcast is unroutable");
@@ -3547,7 +3547,7 @@ async fn a_stale_publication_leaves_its_replacement_alone() {
 		Err(MoqError::Closed)
 	));
 	assert!(matches!(stale.unannounce(), Err(MoqError::Closed)));
-	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
+	tokio::time::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("timed out requesting the replacement")
 		.expect("the replacement still resolves");
@@ -3561,7 +3561,7 @@ async fn finish_unpublishes() {
 	let consumer = origin.consume();
 	let broadcast = create_announced(&origin, "live");
 
-	let announced = consumer.announced_broadcast("live".into()).unwrap();
+	let announced = consumer.follow("live".into(), None).unwrap();
 	tokio::time::timeout(TIMEOUT, announced.available())
 		.await
 		.expect("timed out waiting for the announcement")
@@ -3572,7 +3572,7 @@ async fn finish_unpublishes() {
 	broadcast.close().unwrap();
 	let removed = tokio::time::timeout(TIMEOUT, async {
 		loop {
-			if consumer.request_broadcast("live".into()).await.is_err() {
+			if consumer.request("live".into(), None).await.is_err() {
 				return;
 			}
 			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -4567,7 +4567,7 @@ async fn accepting_a_request_after_close_is_refused() {
 }
 
 #[tokio::test]
-async fn announced_broadcast() {
+async fn follow() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let _broadcast = create_announced(&origin, "test/broadcast");
 
@@ -4595,9 +4595,9 @@ async fn dynamic_broadcast_request() {
 	let dynamic = serve(&origin, "");
 	let consumer = origin.consume();
 
-	let request_broadcast = {
+	let requesting = {
 		let consumer = consumer.clone();
-		tokio::spawn(async move { consumer.request_broadcast("dynamic/broadcast".into()).await })
+		tokio::spawn(async move { consumer.request("dynamic/broadcast".into(), None).await })
 	};
 
 	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
@@ -4622,7 +4622,7 @@ async fn dynamic_broadcast_request() {
 		.unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
-	let broadcast = tokio::time::timeout(TIMEOUT, request_broadcast)
+	let broadcast = tokio::time::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for requested broadcast result")
 		.expect("request task panicked")
@@ -4657,9 +4657,9 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 	let consumer = origin.consume();
 	let dynamic = serve(&origin, "live");
 
-	let request_broadcast = {
+	let requesting = {
 		let consumer = consumer.clone();
-		tokio::spawn(async move { consumer.request_broadcast("live/cam".into()).await })
+		tokio::spawn(async move { consumer.request("live/cam".into(), None).await })
 	};
 	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
@@ -4669,14 +4669,14 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
 	let served = prepared.broadcast();
 	prepared.publish().unwrap();
-	tokio::time::timeout(TIMEOUT, request_broadcast)
+	tokio::time::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for the request to resolve")
 		.expect("request task panicked")
 		.expect("the handler served the path");
 
 	dynamic.cancel();
-	let err = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live/other".into()))
+	let err = tokio::time::timeout(TIMEOUT, consumer.request("live/other".into(), None))
 		.await
 		.expect("timed out waiting for the retraction to reject the request")
 		.err()
@@ -4700,9 +4700,9 @@ async fn dynamic_keeps_the_origin_alive() {
 	let dynamic = serve(&origin, "");
 	drop(origin);
 
-	let request_broadcast = {
+	let requesting = {
 		let consumer = consumer.clone();
-		tokio::spawn(async move { consumer.request_broadcast("live".into()).await })
+		tokio::spawn(async move { consumer.request("live".into(), None).await })
 	};
 	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
@@ -4711,7 +4711,7 @@ async fn dynamic_keeps_the_origin_alive() {
 	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
 	let served = prepared.broadcast();
 	prepared.publish().unwrap();
-	tokio::time::timeout(TIMEOUT, request_broadcast)
+	tokio::time::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for the request to resolve")
 		.expect("request task panicked")
@@ -5430,9 +5430,9 @@ async fn dynamic_broadcast_request_can_reject() {
 	let dynamic = serve(&origin, "");
 	let consumer = origin.consume();
 
-	let request_broadcast = {
+	let requesting = {
 		let consumer = consumer.clone();
-		tokio::spawn(async move { consumer.request_broadcast("missing".into()).await })
+		tokio::spawn(async move { consumer.request("missing".into(), None).await })
 	};
 
 	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
@@ -5444,7 +5444,7 @@ async fn dynamic_broadcast_request_can_reject() {
 	request.reject(404).unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
-	let result = tokio::time::timeout(TIMEOUT, request_broadcast)
+	let result = tokio::time::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for rejected broadcast")
 		.expect("request task panicked");
@@ -5460,7 +5460,7 @@ async fn cancelling_dynamic_broadcasts_unregisters_the_handler() {
 	dynamic.cancel();
 	assert!(matches!(dynamic.requested_broadcast().await, Err(MoqError::Closed)));
 
-	let result = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("missing".into()))
+	let result = tokio::time::timeout(TIMEOUT, consumer.request("missing".into(), None))
 		.await
 		.expect("request stayed pending after the dynamic handler was cancelled");
 	let err = match result {
@@ -5501,7 +5501,7 @@ fn without_runtime() {
 			other => panic!("expected an announcement, got {other:?}"),
 		};
 		assert_eq!(announcement.prefix, "test");
-		let _bc = pollster::block_on(consumer.request_broadcast("test".into())).unwrap();
+		let _bc = pollster::block_on(consumer.request("test".into(), None)).unwrap();
 
 		let client = MoqClient::new(MoqClientConfig {
 			tls: insecure_tls(),
@@ -5689,7 +5689,7 @@ async fn roundtrip(media: &MoqMediaTrackProducer, track: &MoqMediaTrackConsumer,
 /// is still open, as a GOAWAY drain does. Without an epoch that is another instance: the
 /// next `available()` hands it out, and reading it carries on past the old session's close.
 #[tokio::test]
-async fn announced_broadcast_follows_an_epochless_replacement() {
+async fn follow_follows_an_epochless_replacement() {
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some("127.0.0.1:0".into()),
@@ -5736,7 +5736,7 @@ async fn announced_broadcast_follows_an_epochless_replacement() {
 	};
 
 	let first = connect().await;
-	let followed = viewer.consume().announced_broadcast("cam".into()).unwrap();
+	let followed = viewer.consume().follow("cam".into(), None).unwrap();
 	let old = tokio::time::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out waiting for the broadcast")
@@ -5767,10 +5767,10 @@ async fn announced_broadcast_follows_an_epochless_replacement() {
 /// keeps the same handle. Dropped while the instance is covered but not yet served, the retry
 /// must still hand that instance out rather than wait for another.
 #[tokio::test]
-async fn announced_broadcast_retries_a_dropped_wait() {
+async fn follow_retries_a_dropped_wait() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, "");
-	let followed = origin.consume().announced_broadcast("live".into()).unwrap();
+	let followed = origin.consume().follow("live".into(), None).unwrap();
 
 	let waiting = followed.clone();
 	let dropped = tokio::spawn(async move { waiting.available().await });
@@ -5796,10 +5796,10 @@ async fn announced_broadcast_retries_a_dropped_wait() {
 /// is where the route the wait first resolves through covers the path: above it, the takeover's
 /// restart lands while resolving; at it, the origin holds that restart for
 /// the default [`moq_net::origin::Config::update_hold`].
-async fn announced_broadcast_hands_out_a_takeover_once(dynamic_at: &str) {
+async fn follow_hands_out_a_takeover_once(dynamic_at: &str) {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, dynamic_at);
-	let followed = origin.consume().announced_broadcast("live".into()).unwrap();
+	let followed = origin.consume().follow("live".into(), None).unwrap();
 
 	let waiting = followed.clone();
 	let first = tokio::spawn(async move { waiting.available().await });
@@ -5823,22 +5823,22 @@ async fn announced_broadcast_hands_out_a_takeover_once(dynamic_at: &str) {
 }
 
 #[tokio::test]
-async fn announced_broadcast_hands_out_a_takeover_once_while_resolving() {
-	announced_broadcast_hands_out_a_takeover_once("").await;
+async fn follow_hands_out_a_takeover_once_while_resolving() {
+	follow_hands_out_a_takeover_once("").await;
 }
 
 #[tokio::test]
-async fn announced_broadcast_hands_out_a_held_takeover_once() {
-	announced_broadcast_hands_out_a_takeover_once("live").await;
+async fn follow_hands_out_a_held_takeover_once() {
+	follow_hands_out_a_takeover_once("live").await;
 }
 
 /// An end is a gap that ended every request on the old route, even when a claim above the path
 /// answers under the same epoch. So the instance serving the path afterwards is handed out
 /// again, though its epoch is the one the caller still holds.
 #[tokio::test]
-async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
+async fn follow_hands_out_the_instance_again_after_an_end() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let followed = origin.consume().announced_broadcast("live".into()).unwrap();
+	let followed = origin.consume().follow("live".into(), None).unwrap();
 	let route = MoqAnnounceRoute {
 		epoch: Some(moq_mint_epoch()),
 		..Default::default()
@@ -5875,14 +5875,85 @@ async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
 	publication.broadcast().close().unwrap();
 }
 
+/// An epoch pins both resolutions to one publisher instance: a request for another one is
+/// unroutable, and a follower never hands out another one taking over.
+#[tokio::test]
+async fn an_epoch_pins_request_and_follow() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let epoch = moq_mint_epoch();
+	let first = origin.create_broadcast("live".into()).unwrap();
+	first
+		.announce(MoqAnnounceRoute {
+			epoch: Some(epoch.clone()),
+			..Default::default()
+		})
+		.unwrap();
+
+	let pinned = tokio::time::timeout(TIMEOUT, consumer.request("live".into(), Some(epoch.clone())))
+		.await
+		.expect("timed out requesting the pinned instance")
+		.unwrap();
+	assert_eq!(
+		pinned.inner().info().epoch.as_ref().map(ToString::to_string),
+		Some(epoch.clone())
+	);
+	let err = tokio::time::timeout(TIMEOUT, consumer.request("live".into(), Some(moq_mint_epoch())))
+		.await
+		.expect("timed out requesting another instance")
+		.err()
+		.expect("another instance is unroutable");
+	assert_protocol(
+		&err,
+		crate::error::MoqErrorScope::Stream,
+		crate::error::MoqProtocolKind::Unroutable,
+	);
+	assert!(matches!(
+		consumer.follow("live".into(), Some("not-an-epoch".into())),
+		Err(MoqError::InvalidEpoch { .. })
+	));
+
+	let followed = consumer.follow("live".into(), Some(epoch.clone())).unwrap();
+	tokio::time::timeout(TIMEOUT, followed.available())
+		.await
+		.expect("timed out following the pinned instance")
+		.unwrap();
+	let second = origin.create_broadcast("live".into()).unwrap();
+	second
+		.announce(MoqAnnounceRoute {
+			epoch: Some(moq_mint_epoch()),
+			..Default::default()
+		})
+		.unwrap();
+	// An unpinned request resolves the takeover and holds it, so a follower resolving it joins
+	// that answer at once: one poll, which applies the takeover first, would hand it out.
+	let takeover = tokio::time::timeout(TIMEOUT, consumer.request("live".into(), None))
+		.await
+		.expect("timed out requesting the takeover")
+		.unwrap();
+	assert_ne!(
+		takeover.inner().info().epoch.as_ref().map(ToString::to_string),
+		Some(epoch)
+	);
+	let next = std::pin::pin!(followed.available());
+	assert!(
+		next.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+			.is_pending(),
+		"the follower handed out another instance"
+	);
+	drop(takeover);
+	first.broadcast().close().unwrap();
+	second.broadcast().close().unwrap();
+}
+
 /// The route a wait resolves through leaving, and another instance arriving before it resolves,
 /// reach the follower as an end and a start after the wait hands the newcomer out. That start
 /// must not hand it out again.
 #[tokio::test]
-async fn announced_broadcast_hands_out_a_gap_while_resolving_once() {
+async fn follow_hands_out_a_gap_while_resolving_once() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, "");
-	let followed = origin.consume().announced_broadcast("live".into()).unwrap();
+	let followed = origin.consume().follow("live".into(), None).unwrap();
 
 	let waiting = followed.clone();
 	let first = tokio::spawn(async move { waiting.available().await });
@@ -5909,10 +5980,10 @@ async fn announced_broadcast_hands_out_a_gap_while_resolving_once() {
 /// A handle the caller dropped no longer counts as handed out, so the restart that names it
 /// hands it out again rather than leaving the caller with nothing.
 #[tokio::test]
-async fn announced_broadcast_hands_out_a_dropped_takeover_again() {
+async fn follow_hands_out_a_dropped_takeover_again() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, "live");
-	let followed = origin.consume().announced_broadcast("live".into()).unwrap();
+	let followed = origin.consume().follow("live".into(), None).unwrap();
 
 	let waiting = followed.clone();
 	let first = tokio::spawn(async move { waiting.available().await });
@@ -6004,7 +6075,7 @@ async fn server_client_roundtrip_auto_origin() {
 	// session's publisher is discoverable through its own consumer.
 	let local_broadcast = create_announced(&publisher, "local-only");
 	// Visibility is asynchronous, so wait for the announcement rather than requesting.
-	let local_announced = consumer.announced_broadcast("local-only".into()).unwrap();
+	let local_announced = consumer.follow("local-only".into(), None).unwrap();
 	tokio::time::timeout(TIMEOUT, local_announced.available())
 		.await
 		.expect("timed out waiting for the loopback broadcast")

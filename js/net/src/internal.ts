@@ -405,10 +405,10 @@ export const hooks: {
 	 * Declare the first group a wire subscription's live feed serves (lite SUBSCRIBE_START, or
 	 * IETF SUBSCRIBE_OK's Largest) for the floor its SUBSCRIBE requested: while the demand keeps
 	 * that floor, a pending tail owes nothing below it. Mirrors the Rust `start_at`; assigned by
-	 * `track.ts`. Without `start`, the SUBSCRIBE is still waiting on the START that resolves it,
-	 * as the Rust `request_start`.
+	 * `track.ts`. A null `start` resolves an empty range; without `start`, the SUBSCRIBE still
+	 * waits on its START, as the Rust `request_start`.
 	 */
-	startTrack: (producer: Producer, served: { start?: number; requested?: number }) => void;
+	startTrack: (producer: Producer, served: { start?: number | null; requested?: number }) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**

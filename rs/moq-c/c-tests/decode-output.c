@@ -252,7 +252,7 @@ int main(void) {
         fail("error: moq_encode_video_cut failed (%s)\n", moq_error());
     publish_frames(producer, 5);
 
-    int32_t request = moq_origin_request((uint32_t)origin, path, strlen(path), on_broadcast, &c);
+    int32_t request = moq_origin_request((uint32_t)origin, path, strlen(path), NULL, 0, on_broadcast, &c);
     if (request <= 0) fail("error: moq_origin_request failed: %d\n", request);
 
     pthread_mutex_lock(&c.mu);

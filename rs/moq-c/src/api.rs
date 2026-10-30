@@ -2179,16 +2179,20 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 ///
 /// Resolves against future announcements: it waits for the announcement to arrive (e.g. over the
 /// network) and then delivers the broadcast handle via `on_broadcast`. Use it right after
-/// [moq_session_connect] to avoid racing announcement gossip. To resolve against only what is
-/// reachable now, use [moq_origin_request] instead. A broadcast created on this origin
-/// resolves once it is announced, like a remote one.
+/// [moq_session_connect] to avoid racing announcement gossip. To resolve one publisher instance
+/// instead, use [moq_origin_request]. A broadcast created on this origin resolves once it is
+/// announced, like a remote one.
+///
+/// `epoch` is the UUIDv7 text of the only publisher instance to follow, or NULL (or empty) to
+/// follow every instance. A pinned follow never delivers another instance taking over, and
+/// delivers its own instance again if it returns after an end.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once announced, and again with a
 /// new handle each time another publisher instance takes over (a restarted publisher, or a
 /// replacement session) or the broadcast returns after it went offline. Drop what was read
 /// from the previous handle then: its tracks end when its session does. The wait ends with
-/// exactly one terminal code: `0` (after [moq_origin_announced_broadcast_cancel], or the origin
-/// closing once a handle was delivered) or a negative error. After the terminal (`<= 0`) callback,
+/// exactly one terminal code: `0` (after [moq_origin_follow_cancel], or the origin closing
+/// once a handle was delivered) or a negative error. After the terminal (`<= 0`) callback,
 /// `on_broadcast` is never called again and `user_data` is never touched again, so release
 /// `user_data` there. The broadcast handle is usable with [moq_consume_catalog] / [moq_consume_track]
 /// and must be freed separately with [moq_consume_close].
@@ -2197,44 +2201,52 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
+/// - `epoch` may be NULL, or must point at `epoch_len` readable bytes.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_broadcast` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_announced_broadcast(
+pub unsafe extern "C" fn moq_origin_follow(
 	origin: u32,
 	path: *const c_char,
 	path_len: usize,
+	epoch: *const c_char,
+	epoch_len: usize,
 	on_broadcast: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
+		let epoch = unsafe { parse_epoch(epoch, epoch_len)? };
 		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast)? };
-		State::lock().origin.consume_announced(origin, path, on_broadcast)
+		State::lock().origin.follow(origin, path, epoch, on_broadcast)
 	})
 }
 
-/// Abort a wait started by [moq_origin_announced_broadcast].
+/// Abort a wait started by [moq_origin_follow].
 ///
 /// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
-/// `user_data`. The [moq_origin_announced_broadcast] `on_broadcast` callback still fires once more
+/// `user_data`. The [moq_origin_follow] `on_broadcast` callback still fires once more
 /// with a terminal `0` (or a negative error), and that final callback is where `user_data` should
 /// be released. Any broadcast handle already delivered is unaffected and must still be freed with
 /// [moq_consume_close].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_origin_announced_broadcast_cancel(task: u32) -> i32 {
+pub extern "C" fn moq_origin_follow_cancel(task: u32) -> i32 {
 	ffi::enter(move || {
 		let task = ffi::parse_id(task)?;
-		State::lock().origin.consume_announced_close(task)
+		State::lock().origin.resolve_close(task)
 	})
 }
 
-/// Request a broadcast from an origin by path, resolving as soon as it can be served.
+/// Request a broadcast from an origin by path, resolving one publisher instance as soon as it
+/// can be served.
 ///
 /// Owns discovery of the path and retries route churn while resolving one publisher instance.
 /// It fails as unroutable once discovery has synced without a covering route, including a
 /// broadcast created but not announced. No separate announcement stream is needed.
 /// Serve on-demand paths with [moq_origin_requests].
+///
+/// `epoch` is the UUIDv7 text of the only publisher instance to accept, or NULL (or empty) for
+/// any instance. A request pinned to an instance that does not serve the path is unroutable.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
 /// with a terminal code: `0` (finished, including after [moq_origin_request_cancel]) or a negative
@@ -2246,20 +2258,24 @@ pub extern "C" fn moq_origin_announced_broadcast_cancel(task: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
+/// - `epoch` may be NULL, or must point at `epoch_len` readable bytes.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_broadcast` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_request(
 	origin: u32,
 	path: *const c_char,
 	path_len: usize,
+	epoch: *const c_char,
+	epoch_len: usize,
 	on_broadcast: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
+		let epoch = unsafe { parse_epoch(epoch, epoch_len)? };
 		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast)? };
-		State::lock().origin.request(origin, path, on_broadcast)
+		State::lock().origin.request(origin, path, epoch, on_broadcast)
 	})
 }
 
@@ -2273,8 +2289,18 @@ pub unsafe extern "C" fn moq_origin_request(
 pub extern "C" fn moq_origin_request_cancel(task: u32) -> i32 {
 	ffi::enter(move || {
 		let task = ffi::parse_id(task)?;
-		State::lock().origin.consume_announced_close(task)
+		State::lock().origin.resolve_close(task)
 	})
+}
+
+/// Parse an optional publisher epoch, where NULL or empty means unpinned.
+///
+/// # Safety
+/// - `epoch` may be NULL, or must point at `epoch_len` readable bytes.
+unsafe fn parse_epoch(epoch: *const c_char, epoch_len: usize) -> Result<Option<moq_net::Epoch>, Error> {
+	unsafe { ffi::parse_str_optional(epoch, epoch_len)? }
+		.map(|epoch| epoch.parse().map_err(|_| Error::InvalidCode))
+		.transpose()
 }
 
 /// Close an origin and clean up its resources.

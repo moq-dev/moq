@@ -829,8 +829,8 @@ impl Default for Messages {
 				}],
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
-				group: 1_234,
 				largest: None,
+				starts: vec![Some(1_234)],
 			}),
 			lite_info: lite::TrackInfo {
 				refresh: None,

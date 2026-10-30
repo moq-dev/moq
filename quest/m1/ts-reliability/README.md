@@ -73,7 +73,7 @@ refused means an error or a counted drop.
 | DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |
 | Program identity, program and ES descriptors | Preserved: descriptors follow each PMT revision; an identity change refuses | landed |
 | PMT add, remove, retype; PID reuse | Normalized without a new epoch: a changed or reused PID ends its track and continues under a fresh name, and the export rebuilds the PMT at the next `version_number` | landed |
-| PAT changes: moved PMT PID, programs added or removed | Normalized: followed; a removed program retires, and returns as a new epoch. Today a running export keeps the PMT on its first PID | [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) |
+| PAT changes: moved PMT PID, programs added or removed | Normalized: followed; a removed program retires, and returns as a new epoch, and a running export moves the PMT behind a PAT at the next `version_number` | landed |
 | Programs without video | Preserved when the PMT names a PCR PID; refused without one | landed |
 | PCR | Normalized: rebased, carried on the first video PID, else audio, else a dedicated PCR-only PID | landed |
 | Mux rate, null stuffing | Normalized: re-padded to `muxRate` while the source is CBR | landed |
@@ -100,7 +100,6 @@ catalog linger (#5305).
 ## Required
 
 - [A restart keeps its catalog](/quest/m1/ts-reliability/restart-catalog.md) - a restarted import publishes its catalog with its first media
-- [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a running export follows a moved PMT PID
 - [A small step back keeps the TS export's video](/quest/m1/ts-reliability/step-back.md) - the export re-acquires on a sub-group step back from any source instead of dropping its video
 - [A stitched export survives a cancelled replacement](/quest/m1/ts-reliability/follow-cancel.md) - a follow window that ran out, then a cancelled replacement, ends cleanly without the selected-catalog panic
 - [Decide whether a stitched export demotes its old leg](/quest/m1/ts-reliability/stitch-catch-up.md) - measure on the bufferbloat fixture whether demoting the old leg while the replacement acquires shrinks the switch's output hole, and land it if so

@@ -44,6 +44,8 @@ fn request_broadcast(origin: u32, path: &[u8]) -> u32 {
 				origin,
 				path.as_ptr() as *const c_char,
 				path.len(),
+				std::ptr::null(),
+				0,
 				Some(channel_callback),
 				cb.ptr,
 			)
@@ -71,6 +73,8 @@ fn request_once(origin: u32, path: &[u8]) -> i32 {
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
+			std::ptr::null(),
+			0,
 			Some(channel_callback),
 			cb.ptr,
 		)
@@ -2985,6 +2989,8 @@ fn dynamic_serves_a_request_under_a_prefix() {
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
+			std::ptr::null(),
+			0,
 			Some(channel_callback),
 			req_cb.ptr,
 		)
@@ -3839,17 +3845,19 @@ fn local_publish_consume() {
 }
 
 #[test]
-fn consume_announced_local() {
+fn follow_local() {
 	let origin = id(moq_origin_create());
 
 	// Start waiting before the broadcast exists: the announcement arrives afterwards.
 	let cb = Callback::new();
 	let path = b"live";
 	let task = id(unsafe {
-		moq_origin_announced_broadcast(
+		moq_origin_follow(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
+			std::ptr::null(),
+			0,
 			Some(channel_callback),
 			cb.ptr,
 		)
@@ -3862,7 +3870,7 @@ fn consume_announced_local() {
 
 	// The broadcast handle; the wait carries on for the next instance until cancelled.
 	let consume = id(cb.recv());
-	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
 
 	// The delivered handle behaves like one from moq_origin_request.
@@ -4001,28 +4009,27 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 }
 
 #[test]
-fn consume_announced_close_cancels() {
+fn follow_close_cancels() {
 	let origin = id(moq_origin_create());
 
 	// Wait for a broadcast that never arrives, then cancel it.
 	let cb = Callback::new();
 	let path = b"never";
 	let task = id(unsafe {
-		moq_origin_announced_broadcast(
+		moq_origin_follow(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
+			std::ptr::null(),
+			0,
 			Some(channel_callback),
 			cb.ptr,
 		)
 	});
 
-	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "close delivers terminal 0");
-	assert!(
-		moq_origin_announced_broadcast_cancel(task) < 0,
-		"double-close should fail"
-	);
+	assert!(moq_origin_follow_cancel(task) < 0, "double-close should fail");
 
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -4045,15 +4052,17 @@ fn publish_run(origin: u32, path: &str) -> moq_net::origin::Publication {
 
 /// Another publisher instance taking the path delivers a fresh handle on the same wait.
 #[test]
-fn consume_announced_follows_a_restart() {
+fn follow_delivers_a_restart() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let path = b"live";
 	let task = id(unsafe {
-		moq_origin_announced_broadcast(
+		moq_origin_follow(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
+			std::ptr::null(),
+			0,
 			Some(channel_callback),
 			cb.ptr,
 		)
@@ -4067,7 +4076,7 @@ fn consume_announced_follows_a_restart() {
 
 	assert_eq!(moq_consume_close(first), 0);
 	assert_eq!(moq_consume_close(second), 0);
-	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
 	drop((first_run, second_run));
 	assert_eq!(moq_origin_close(origin), 0);
@@ -4077,7 +4086,7 @@ fn consume_announced_follows_a_restart() {
 /// that announced it must not deliver it again. `dynamic_at` is where the route the wait first
 /// resolves through covers the path: above it, the takeover's restart lands while resolving;
 /// at it, the origin holds that restart for the default [`moq_net::origin::Config::update_hold`].
-fn consume_announced_delivers_a_takeover_once(dynamic_at: &str) {
+fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 	let origin = id(moq_origin_create());
 	let dynamic = {
 		let _runtime = crate::ffi::RUNTIME.enter();
@@ -4087,10 +4096,12 @@ fn consume_announced_delivers_a_takeover_once(dynamic_at: &str) {
 	let cb = Callback::new();
 	let path = b"live";
 	let task = id(unsafe {
-		moq_origin_announced_broadcast(
+		moq_origin_follow(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
+			std::ptr::null(),
+			0,
 			Some(channel_callback),
 			cb.ptr,
 		)
@@ -4108,20 +4119,98 @@ fn consume_announced_delivers_a_takeover_once(dynamic_at: &str) {
 	);
 
 	assert_eq!(moq_consume_close(delivered), 0);
-	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
 	drop((takeover, dynamic));
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
 #[test]
-fn consume_announced_delivers_a_takeover_once_while_resolving() {
-	consume_announced_delivers_a_takeover_once("");
+fn follow_delivers_a_takeover_once_while_resolving() {
+	follow_delivers_a_takeover_once("");
 }
 
 #[test]
-fn consume_announced_delivers_a_held_takeover_once() {
-	consume_announced_delivers_a_takeover_once("live");
+fn follow_delivers_a_held_takeover_once() {
+	follow_delivers_a_takeover_once("live");
+}
+
+/// `moq_origin_request` and `moq_origin_follow` share one signature.
+type Resolve = unsafe extern "C" fn(
+	u32,
+	*const c_char,
+	usize,
+	*const c_char,
+	usize,
+	crate::ffi::moq_status_callback,
+	*mut c_void,
+) -> i32;
+
+/// Resolve `live` on `origin` through `call`, pinned to `epoch`.
+fn resolve_pinned(call: Resolve, origin: u32, epoch: &str, cb: &Callback) -> i32 {
+	let path = b"live";
+	unsafe {
+		call(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			epoch.as_ptr() as *const c_char,
+			epoch.len(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	}
+}
+
+/// An epoch pins both resolutions to one publisher instance: a request for another one fails,
+/// a follower never delivers another one taking over but delivers its own once it serves again,
+/// and malformed epoch text is refused.
+#[test]
+fn an_epoch_pins_request_and_follow() {
+	let origin = id(moq_origin_create());
+	let epoch = moq_net::Epoch::mint();
+	let first = publish(
+		origin,
+		"live",
+		moq_net::origin::Route::default().with_epoch(epoch.clone()),
+	);
+	let epoch = epoch.to_string();
+
+	let cb = Callback::new();
+	id(resolve_pinned(moq_origin_request, origin, &epoch, &cb));
+	assert_eq!(moq_consume_close(id(cb.recv())), 0);
+	assert_eq!(cb.recv_terminal(), 0);
+	let cb = Callback::new();
+	id(resolve_pinned(
+		moq_origin_request,
+		origin,
+		moq_net::Epoch::mint().as_ref(),
+		&cb,
+	));
+	assert!(cb.recv() < 0, "another instance resolved");
+	assert!(resolve_pinned(moq_origin_follow, origin, "not-an-epoch", &Callback::new()) < 0);
+
+	// Another instance takes over before the follow starts. An unpinned request resolves it and
+	// holds the answer, so a follower resolving it joins that answer within its first pass.
+	let second = publish_run(origin, "live");
+	let takeover = id(request_once(origin, b"live"));
+	let cb = Callback::new();
+	let task = id(resolve_pinned(moq_origin_follow, origin, &epoch, &cb));
+	// The runtime is one thread running the tasks spawned from outside it in order, so this one
+	// reports only after the follower's first pass has applied the takeover.
+	let tx = unsafe { &*(cb.ptr as *const mpsc::Sender<i32>) }.clone();
+	crate::ffi::RUNTIME.spawn(async move { tx.send(i32::MAX).unwrap() });
+	assert_eq!(cb.recv(), i32::MAX, "the follower delivered another instance");
+	// Once the takeover goes, the pinned instance serves the path again and is delivered.
+	assert_eq!(moq_consume_close(takeover), 0);
+	second.unannounce();
+	let delivered = id(cb.recv());
+
+	assert_eq!(moq_consume_close(delivered), 0);
+	assert_eq!(moq_origin_follow_cancel(task), 0);
+	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
+	drop((first, second));
+	assert_eq!(moq_origin_close(origin), 0);
 }
 
 /// Serve `prefix` on `origin` dynamically.
@@ -4132,12 +4221,14 @@ fn serve_dynamic(origin: u32, prefix: &str) -> moq_net::origin::Requests {
 }
 
 /// Wait for the broadcast at `path` on `origin`, delivering each instance through `cb`.
-fn consume_announced(origin: u32, path: &[u8], cb: &Callback) -> u32 {
+fn follow(origin: u32, path: &[u8], cb: &Callback) -> u32 {
 	id(unsafe {
-		moq_origin_announced_broadcast(
+		moq_origin_follow(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
+			std::ptr::null(),
+			0,
 			Some(channel_callback),
 			cb.ptr,
 		)
@@ -4164,7 +4255,7 @@ extern "C" fn gated_callback(user_data: *mut c_void, code: i32) {
 /// answers under the same epoch. So the instance serving the path afterwards is delivered again,
 /// though the caller still holds a handle to its epoch.
 #[test]
-fn consume_announced_delivers_the_instance_again_after_an_end() {
+fn follow_delivers_the_instance_again_after_an_end() {
 	let origin = id(moq_origin_create());
 	let (tx, rx) = mpsc::channel();
 	let (release, hold) = mpsc::channel();
@@ -4174,10 +4265,12 @@ fn consume_announced_delivers_the_instance_again_after_an_end() {
 	});
 	let path = b"live";
 	let task = id(unsafe {
-		moq_origin_announced_broadcast(
+		moq_origin_follow(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
+			std::ptr::null(),
+			0,
 			Some(gated_callback),
 			&*gate as *const Gate as *mut c_void,
 		)
@@ -4206,7 +4299,7 @@ fn consume_announced_delivers_the_instance_again_after_an_end() {
 
 	assert_eq!(moq_consume_close(first), 0);
 	assert_eq!(moq_consume_close(again), 0);
-	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(recv(), 0, "cancel delivers terminal 0");
 	drop((run, dynamic, served, gate));
 	assert_eq!(moq_origin_close(origin), 0);
@@ -4215,11 +4308,11 @@ fn consume_announced_delivers_the_instance_again_after_an_end() {
 /// A handle the caller freed no longer counts as delivered, so the restart that names its
 /// instance delivers it again rather than leaving the caller with nothing.
 #[test]
-fn consume_announced_delivers_a_freed_takeover_again() {
+fn follow_delivers_a_freed_takeover_again() {
 	let origin = id(moq_origin_create());
 	let dynamic = serve_dynamic(origin, "live");
 	let cb = Callback::new();
-	let task = consume_announced(origin, b"live", &cb);
+	let task = follow(origin, b"live", &cb);
 
 	// Without an epoch, the origin holds the takeover's restart past its resolution.
 	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
@@ -4228,7 +4321,7 @@ fn consume_announced_delivers_a_freed_takeover_again() {
 	let again = id(cb.recv());
 
 	assert_eq!(moq_consume_close(again), 0);
-	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
 	drop((takeover, dynamic));
 	assert_eq!(moq_origin_close(origin), 0);
@@ -4238,11 +4331,11 @@ fn consume_announced_delivers_a_freed_takeover_again() {
 /// reach the follower as an end and a start after the wait delivers the newcomer. That start
 /// must not deliver it again.
 #[test]
-fn consume_announced_delivers_a_gap_while_resolving_once() {
+fn follow_delivers_a_gap_while_resolving_once() {
 	let origin = id(moq_origin_create());
 	let dynamic = serve_dynamic(origin, "");
 	let cb = Callback::new();
-	let task = consume_announced(origin, b"live", &cb);
+	let task = follow(origin, b"live", &cb);
 
 	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
 	{
@@ -4260,7 +4353,7 @@ fn consume_announced_delivers_a_gap_while_resolving_once() {
 	);
 
 	assert_eq!(moq_consume_close(delivered), 0);
-	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
 	drop(arrival);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -6371,16 +6464,18 @@ fn server_accepts_a_session() {
 	let path = b"demo";
 	let announced_cb = Callback::new();
 	let task = id(unsafe {
-		moq_origin_announced_broadcast(
+		moq_origin_follow(
 			received,
 			path.as_ptr() as *const c_char,
 			path.len(),
+			std::ptr::null(),
+			0,
 			Some(channel_callback),
 			announced_cb.ptr,
 		)
 	});
 	let consumed = id(announced_cb.recv());
-	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(announced_cb.recv_terminal(), 0);
 	// Prime the subscription, then queue a finished tail before closing the accepted
 	// session. Its terminal callback must not report success after aborting the tail.

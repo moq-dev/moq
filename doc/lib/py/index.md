@@ -51,7 +51,7 @@ async def main():
                 continue  # AnnounceEventUpdate or AnnounceEventEnd
             announcement = event.announce
             print(announcement.captures)  # what * matched, or None for a partial overlap
-            broadcast = await client.request_broadcast(announcement.prefix)
+            broadcast = await client.request(announcement.prefix)
             catalog = await moq.media.catalog(broadcast)
             id, audio = next(iter(catalog.audio.items()))
             async for frame in await moq.media.TrackConsumer.subscribe(broadcast, id, audio):

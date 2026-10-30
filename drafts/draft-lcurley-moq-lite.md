@@ -491,16 +491,16 @@ An advertiser signals capacity through its route alone, withdrawing or re-pricin
 A subscriber opens Subscribe Streams to request a Track.
 
 The subscriber MUST start a Subscribe Stream with a SUBSCRIBE message followed by any number of SUBSCRIBE_UPDATE messages.
-The publisher replies with a SUBSCRIBE_OK message once the start group is resolved, followed by a SUBSCRIBE_END message once the subscription ends.
+The publisher replies with a SUBSCRIBE_OK message once each Range's start is resolved, followed by a SUBSCRIBE_END message once the subscription ends.
 For a live track the publisher MAY withhold SUBSCRIBE_OK until the first matching group resolves the start; if the track has already ended with no matching groups, it sends SUBSCRIBE_END with no preceding SUBSCRIBE_OK.
-A requested start past the publisher's largest position is the exception: the publisher MUST send SUBSCRIBE_OK without waiting, with `Group` set to the requested start group, so a subscriber resuming just past what it holds learns where the live feed is from the answer alone (a quiet track may not reach the start for a long time).
+A requested start past the publisher's largest position is the exception: the publisher MUST send SUBSCRIBE_OK without waiting, so a subscriber resuming just past what it holds learns where the live feed is from the answer alone (a quiet track may not reach the start for a long time).
 A rejection is a stream reset: a publisher that cannot serve the subscription (no such track, an ended broadcast, or any other refusal) MUST promptly reset the stream rather than leave it pending, so a subscriber distinguishes "pending" from "refused" by the reset, not by a timeout.
 A route claims capability rather than inventory, so a subscription for a covered path that names nothing is refused this way too.
 
 The track's immutable publisher properties are not carried here; they are fetched once via a [Track Stream](#track-stream).
 The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret FRAME messages, and MAY open the Track and Subscribe streams concurrently, buffering frames until it arrives.
 
-The publisher sends SUBSCRIBE_OK once the absolute start position is resolved, and SUBSCRIBE_END as soon as the exclusive final group is known (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
+The publisher sends SUBSCRIBE_OK once the start is resolved, and SUBSCRIBE_END as soon as the exclusive final group is known (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
 The publisher closes its side of the stream (FIN) after SUBSCRIBE_END, once every Group Stream has finished or been reset.
 A subscription whose every Range has an `End` other than None is covered once every Group in its Ranges has been sent as a Group Stream or a datagram, or named by SUBSCRIBE_DROP.
 The publisher MAY then close its side (FIN) without SUBSCRIBE_END, once every Group Stream has finished or been reset, rather than wait for a SUBSCRIBE_UPDATE to widen it.
@@ -1423,46 +1423,36 @@ TRACKS_FINISH Message {
 The name a TRACKS_ADD on the stream listed.
 
 ## SUBSCRIBE_OK {#subscribe-ok}
-A SUBSCRIBE_OK message confirms a subscription and resolves its absolute start position.
-It is the first message the publisher sends on the Subscribe Stream, once the start position is known.
+A SUBSCRIBE_OK message confirms a subscription and resolves where each Range starts.
+It is the first message the publisher sends on the Subscribe Stream, once those starts are known.
 
-This is the trimmed-down counterpart of MoqTransport's SUBSCRIBE_OK: it retains the name and the role of the publisher's positive response, but carries only the resolved start position and the publisher's largest position (all other per-track properties live in [TRACK_INFO](#track-info)).
+This is the trimmed-down counterpart of MoqTransport's SUBSCRIBE_OK: it retains the name and the role of the publisher's positive response, but carries only the publisher's largest position and where each Range starts (all other per-track properties live in [TRACK_INFO](#track-info)).
 
 ~~~
 SUBSCRIBE_OK Message {
   Type (i) = 0x0
   Message Length (i)
-  Group (i)
   Largest Group (i)
   [Largest Frame (i)]
+  Range Start Count (i)
+  Range Start (i) ...
 }
 ~~~
 
 **Type**:
 Set to 0x0 to indicate a SUBSCRIBE_OK message.
 
-**Group**:
-The absolute sequence number where delivery starts when the subscription resolves.
-Group streams can arrive out of order, so it need not be the first group sent.
-It MUST be greater than or equal to the lowest requested `Start`, as resolved for a Relative or Time Anchor.
-This group is not a new floor.
-A subscriber SHOULD NOT wait for a group between the requested floor and this group.
-The publisher still delivers such a group if it is created or becomes available later, while it is within `Subscriber Max Age`.
-A subscriber whose `Subscriber Max Age` resolves the start to the latest group learns that sequence here.
-
-There is no matching frame field, because the start frame is never in doubt: a partial group is only delivered when it was asked for, so the subscription starts either exactly where it asked or at the beginning of a later group (see [Positions](#positions)).
-The subscriber derives the start frame from `Group` and its own request:
-
-- `Group` equals the requested start group: delivery begins at the requested start frame.
-- `Group` is greater: delivery begins at frame 0.
-
-The second case is easy to get wrong, so to be explicit: a subscriber that requested group 5 frame 15 and receives `Group` = 6 starts at **frame 0** of group 6, not frame 15.
-The frame offset belonged to group 5 and is gone along with the rest of it; it does not carry forward to whichever group the publisher resolved to.
-
 **Largest Group** and **Largest Frame**:
 The largest position the publisher knows of for the track when it answers: the last frame that exists, like moq-transport's Largest Location, including one a relay's source reported that has yet to arrive.
 `Largest Group` is the group sequence plus one, and 0 means the track has nothing yet, in which case `Largest Frame` is absent.
 A subscriber takes it as where the live feed is: a relay holding groups from an earlier subscription serves them from cache only once this says they are current, which a publisher answering promptly lets it do without waiting for a frame.
+
+**Range Start**:
+One per Range the publisher is serving, in order: the Group where the Range's delivery starts, plus one, so a subscriber learns where a Relative or Time Anchor landed.
+0 means the Range has no Group to deliver.
+The Range's Groups from this one are owed as described in [SUBSCRIBE_DROP](#subscribe-drop); an earlier one is not, though it MAY still arrive.
+A Range whose `Range Start` is its requested start Group begins at the requested frame, and otherwise at frame 0 (see [Positions](#positions)).
+The Ranges are those of the SUBSCRIBE unless the publisher applied a SUBSCRIBE_UPDATE before answering; a subscriber that sent none MUST treat a count other than its number of Ranges as a PROTOCOL_VIOLATION.
 
 ## SUBSCRIBE_END {#subscribe-end}
 A SUBSCRIBE_END message is sent by the publisher to signal that no group at or after a given sequence will be produced.
@@ -1792,7 +1782,7 @@ The `Message Length` describes the payload size on the wire.
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
 - Listed the shared EXPIRED_AUTH_TOKEN (0x18) session code. A request that expires on its own resets with the UNAUTHORIZED stream code.
 
-- SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
+- Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
 - Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges. Each end is an Anchor: none, an absolute Position (exclusive as an end), a count of Groups back from the latest, or a presentation time.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
