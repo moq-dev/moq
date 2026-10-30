@@ -495,7 +495,7 @@ pub struct Config {
 	/// The URL to dial.
 	///
 	/// Supports WebTransport (`https`/`http`), WebSocket (`ws`/`wss`), raw QUIC
-	/// (`moqt`/`moql`), qmux over `tcp`/`unix`, and `iroh`. The URL path is the
+	/// (`moqt`/`moql`), and qmux over `tcp`/`unix`. The URL path is the
 	/// request/auth path (e.g. `/anon` for a public relay) and `?jwt=` supplies a
 	/// token. `http://` first fetches `/certificate.sha256` for the (insecure)
 	/// self-signed fingerprint; `https://` connects directly.
@@ -775,7 +775,7 @@ mod addr_tests {
 	#[test]
 	fn fixed_addresses_require_a_supported_nonempty_target() {
 		let peer: net::SocketAddr = "127.0.0.1:443".parse().unwrap();
-		for scheme in ["http", "ws", "tcp", "unix", "iroh"] {
+		for scheme in ["http", "ws", "tcp", "unix"] {
 			let url = format!("{scheme}://relay.example/path").parse().unwrap();
 			assert_eq!(Addr::pinned(url, [peer]), Err(Error::UnsupportedScheme(scheme.into())));
 		}

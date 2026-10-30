@@ -27,8 +27,6 @@ doc = false
 
 [features]
 default = ["cluster-lan", "quic", "websocket", "nvidia", "s3", "gcs", "azure"]
-# Experimental transport with a heavy dependency tree, enabled only on request.
-iroh = ["moq-relay/iroh", "moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
 cluster-lan = ["moq-relay/cluster-lan"]
 jemalloc = ["moq-tokio/jemalloc"]
@@ -117,7 +115,7 @@ moq-hls = { workspace = true, features = ["server"] }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
 # Cluster, LAN mesh, and inbound `/.cluster` auth. default-features off so the
-# CLI's own feature set (iroh, quic, cluster-lan) is what selects them.
+# CLI's own feature set (quic, cluster-lan) is what selects them.
 moq-relay = { workspace = true }
 moq-rtc = { workspace = true }
 moq-rtmp = { workspace = true }

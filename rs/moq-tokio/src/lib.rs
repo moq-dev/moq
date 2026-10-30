@@ -6,7 +6,6 @@
 //! - WebSocket (fallback via [web-transport-ws](https://crates.io/crates/web-transport-ws))
 //! - TCP via the `tcp://` (plaintext) and `tls://` schemes (qmux; requires `tcp` feature)
 //! - Unix domain socket via the `unix://` scheme (qmux, peer-credential aware; requires `uds` feature, unix-only)
-//! - Iroh P2P (requires `iroh` feature)
 //! - A WebRTC data channel with a browser peer, signaled by the caller (qmux; requires `webrtc` feature)
 //!
 //! See [`Client`] for connecting to relays and [`Server`] for accepting
@@ -130,9 +129,6 @@ pub use notify;
 /// `jni` bump is therefore a breaking change for this crate.
 #[cfg(target_os = "android")]
 pub use jni;
-
-#[cfg(feature = "iroh")]
-pub mod iroh;
 
 #[cfg(feature = "mdns")]
 pub mod mdns;

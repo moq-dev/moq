@@ -53,7 +53,7 @@ Decided 2026-09-30:
 - moq-net's `transport::poll` traits gain an unordered chunk read and an
   offset write whose defaults report unsupported, and moq-net falls back to
   ordered I/O. Only the
-  `moq-quic` backends implement them; browsers, qmux, and iroh keep the defaults.
+  `moq-quic` backends implement them; browsers and qmux keep the defaults.
   Additive, so it lands on `main`.
 - Always on wherever both of the relay's streams support it. No config knob.
 - The relay's own egress is `moq-quic` for every native and browser viewer, so browser

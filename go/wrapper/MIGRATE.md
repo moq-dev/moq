@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `TransportIroh` is removed
+
+No session arrives over iroh any more, so drop that case from a `switch` on `Transport`.
+
 ### Compression moves to the track
 
 `moq.dev/moq/flate` is removed: publish opaque bytes on a `TrackProducer`.

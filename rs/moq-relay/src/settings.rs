@@ -56,10 +56,6 @@ pub struct Settings {
 
 	#[usage(env = "MOQ_DRAIN_TIMEOUT", cli("--drain-timeout"))]
 	drain_timeout: Option<String>,
-
-	#[cfg(feature = "iroh")]
-	#[usage(flatten)]
-	iroh: moq_tokio::settings::Iroh,
 }
 
 #[derive(usage_rs::Config)]

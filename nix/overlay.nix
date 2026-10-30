@@ -31,7 +31,7 @@ let
   };
 
   # `[patch.crates-io] kio = { path = "rs/kio" }` in the root Cargo.toml points
-  # registry crates (web-transport-iroh) at the workspace
+  # registry crates (the moq-auth 0.2.1 fixture) at the workspace
   # member. crane's dependency-only stage stubs every workspace crate down to an
   # empty lib.rs, so those registry crates no longer find kio's API and fail to
   # compile. Put kio's real source back into the dummy tree, but keep crane's

@@ -63,7 +63,7 @@ features:
   - icon:
       src: /emoji/link.svg
     title: Decentralized
-    details: Host your own CDN, use a 3rd party service, and/or connect P2P via Iroh (native only). Broadcasts are automatically discovered and gossiped.
+    details: Host your own CDN and/or use a 3rd party service. Broadcasts are automatically discovered and gossiped.
 ---
 
 ## What is MoQ?

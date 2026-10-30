@@ -26,6 +26,3 @@ noq.
   [n0-computer/noq#800](https://github.com/n0-computer/noq/issues/800),
   [n0-computer/noq#852](https://github.com/n0-computer/noq/issues/852), and
   [n0-computer/noq#819](https://github.com/n0-computer/noq/issues/819).
-- Once iroh ships it, `moq-tokio`'s iroh path (its noq `ControllerFactory`)
-  runs the same controllers; bumping that pin is a separate quest if it
-  needs code.

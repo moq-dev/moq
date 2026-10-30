@@ -20,7 +20,7 @@ see [Applications](/bin/). [Examples](/setup/examples) links runnable consumers;
 | --- | --- |
 | [moq-net](/lib/rs/moq-net) | The pub/sub layer: sessions, origins, broadcasts, tracks, groups, frames. Transport-agnostic. |
 | [moq-pattern](https://docs.rs/moq-pattern) | Path patterns such as `room/**`. Re-exported by moq-net and moq-auth. |
-| [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebSocket, or iroh, from config or CLI flags. Its `driver` feature alone is a tokio QUIC stack without MoQ. |
+| [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebTransport, WebSocket, TCP, or Unix sockets, from config or CLI flags. Its `driver` feature alone is a tokio QUIC stack without MoQ. |
 | [qmux](https://docs.rs/qmux) | QUIC streams, datagrams, and flow control over TCP, TLS, WebSocket, and Unix sockets, on moq-quic's state machine. |
 | [moq-sock](https://docs.rs/moq-sock) | Socket binding and CPU pinning for thread-per-core listeners. |
 | [moq-ice](https://github.com/moq-dev/moq/tree/main/rs/moq-ice) | Internal infrastructure with no stability promise; the ICE agent behind native WebRTC: drives a str0m connection over UDP, with a STUN client. |
@@ -42,7 +42,7 @@ see [Applications](/bin/). [Examples](/setup/examples) links runnable consumers;
 | [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtsp](https://github.com/moq-dev/moq/tree/main/rs/moq-rtsp), [moq-rtc](https://docs.rs/moq-rtc) | The [gateways](/bin/), as libraries you can embed with your own auth. |
 | [moq-ffi](https://docs.rs/moq-ffi), [moq-c](/lib/c/) | The UniFFI core behind the language bindings, and the C ABI. |
 | [moq-relay](/bin/relay/), [moq-cli](/bin/cli) | The binaries, also usable as crates. |
-| [web-transport](https://github.com/moq-dev/web-transport) | The WebTransport traits and the browser and iroh transports, in a sibling repository. |
+| [web-transport](https://github.com/moq-dev/web-transport) | The WebTransport traits and the browser transport, in a sibling repository. |
 
 ## Quick start
 
@@ -91,7 +91,8 @@ already queued, then `Client::close` sends the QUIC close. Runnable examples:
 [`subscribe.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs).
 
 URLs may be `https://` (QUIC or WebTransport, with a WebSocket fallback),
-`moql://`/`moqt://` (raw QUIC), or `iroh://`. Put credentials in
+`moql://`/`moqt://` (raw QUIC), `ws://`/`wss://` (WebSocket), or
+`tcp://`/`tls://`/`unix://` (qmux). Put credentials in
 `connect::Config::tokens` rather than the URL: the first rides SETUP (and
 `?jwt=` while an offered version needs it), each other widens the grant in band,
 and `Connection::tokens().set(...)` replaces them before they expire, with

@@ -42,11 +42,8 @@ Rejected: a public `Connection::idle_timeout()` and a live per-connection
 has a consumer, and each is another divergence from quinn for the fork to
 carry.
 
-iroh stays on upstream noq. The iroh backend wires `quic.keep_alive` into
-iroh's `keep_alive_interval`; with no explicit value, iroh gets the same
-derivation from its idle timeout. The qmux WebSocket keep-alive
-(`qmux::ws::KeepAlive`, a fixed 5 s ping and 30 s deadline) is a different
-mechanism and stays as is.
+The qmux WebSocket keep-alive (`qmux::ws::KeepAlive`, a fixed 5 s ping and
+30 s deadline) is a different mechanism and stays as is.
 
 The acceptance test: a connection whose peer advertises a shorter idle
 timeout than ours stays up while idle, its PINGs spaced below the negotiated

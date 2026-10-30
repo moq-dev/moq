@@ -368,7 +368,7 @@ fn fingerprint_pins(scheme: &str) -> bool {
 /// Unknown schemes rank lowest, so a forgotten classification is refused.
 fn scheme_tier(scheme: &str) -> u8 {
 	match scheme {
-		"https" | "moqt" | "moql" | "wss" | "iroh" | "tls" => 2,
+		"https" | "moqt" | "moql" | "wss" | "tls" => 2,
 		"tcp" | "ws" | "http" => 1,
 		// `unix` lands here deliberately: local IPC is not an upgrade over a
 		// network transport, it is a different reachability class (see `is_local`).
@@ -1157,7 +1157,7 @@ impl Connection {
 					// won't go, so redialing the old address or a fallback would ignore it.
 					let assigned = match &ended {
 						// A fingerprint only checked the dial that installed the Rustls
-						// verifier. tcp, unix, iroh, and plaintext WebSocket never consult it.
+						// verifier. tcp, unix, and plaintext WebSocket never consult it.
 						Ended::Goaway(msg) => {
 							goaway
 								.redirect
@@ -2112,7 +2112,7 @@ mod tests {
 	/// forgot to add is refused rather than trusted.
 	#[test]
 	fn scheme_tiers_rank_encrypted_above_plaintext() {
-		for scheme in ["https", "moqt", "moql", "wss", "iroh", "tls"] {
+		for scheme in ["https", "moqt", "moql", "wss", "tls"] {
 			assert_eq!(scheme_tier(scheme), 2, "{scheme} is encrypted");
 		}
 		for scheme in ["tcp", "ws", "http"] {
@@ -2266,7 +2266,7 @@ mod tests {
 		for scheme in ["https", "wss", "moqt", "moql", "tls"] {
 			assert!(fingerprint_pins(scheme), "{scheme}");
 		}
-		for scheme in ["http", "ws", "tcp", "unix", "iroh"] {
+		for scheme in ["http", "ws", "tcp", "unix"] {
 			assert!(!fingerprint_pins(scheme), "{scheme}");
 		}
 	}

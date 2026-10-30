@@ -5,6 +5,11 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### iroh is removed
+
+The `iroh` feature, the `[iroh]` table, the `--iroh-*` flags and `MOQ_IROH_*` variables, `Cluster::with_iroh`, and `iroh://` cluster peers are gone.
+Startup now refuses an `[iroh]` table, an `--iroh-*` flag, or a `MOQ_IROH_*` variable; remove them and connect over QUIC or WebTransport.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 A session dialed at a URL path with a trailing or doubled `/`, such as `/room/` or `/room//cam`, is refused as a bad request instead of collapsed; dial `/room`. An auth grant whose `root`, `mounts`, `tier`, or `label` has one is refused as forbidden, and `stats.prefix`, `stats.node`, and `--cluster-tier` with one refuse to start.
@@ -104,7 +109,7 @@ Add `--quic-keylog` (`MOQ_QUIC_KEYLOG`, `[quic] keylog = true`) to capture them;
 ### Cluster dials build from a template (#5674)
 
 `Relay::client()` and `Cluster::with_client` are removed.
-Give the cluster `with_connect(connect, quic)`, plus `with_iroh(endpoint)` for `iroh://` peers, and build your own `moq_tokio::Client` for other outbound dials.
+Give the cluster `with_connect(connect, quic)`, and build your own `moq_tokio::Client` for other outbound dials.
 
 ### `max_streams = 0` is refused (#5871)
 
@@ -126,11 +131,6 @@ Set it to keep the old placement.
 [runtime]
 pin = true
 ```
-
-### iroh is opt-in (#5223)
-
-The default build has no iroh listener and no `--iroh-*` flags or `[iroh]` table.
-Build with `--features iroh` to keep it.
 
 ### The `noq` cargo feature is `quic`
 

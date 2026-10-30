@@ -33,7 +33,7 @@ watched at 100 ms by one viewer and 10 s by another.
 
 ## Sections
 
-- [Transport](/concept/transport): why QUIC, and the WebTransport, WebSocket, raw QUIC, and iroh paths onto it.
+- [Transport](/concept/transport): why QUIC, and the WebTransport, WebSocket, and raw QUIC paths onto it.
 - [moq-lite](/concept/moq-lite): the pub/sub protocol, discovery, path patterns, subscriptions, and congestion behavior.
 - [Identity and recovery](/concept/identity): choosing publisher epochs, following restarts, and answering work on demand without mixing instances.
 - [hang](/concept/hang): the media catalog, containers, encryption, and how to extend both.

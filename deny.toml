@@ -15,8 +15,7 @@ ignore = [
     "RUSTSEC-2023-0071",
 
     # paste is unmaintained (proc-macro, build-time only). Pulled by
-    # tikv-jemalloc-ctl (moq-tokio's `jemalloc` feature; 0.7 still uses it) and
-    # by iroh's netwatch via netlink-packet-core 0.8, which 0.9 drops.
+    # tikv-jemalloc-ctl (moq-tokio's `jemalloc` feature; 0.7 still uses it).
     "RUSTSEC-2024-0436",
 
     # ttf-parser is unmaintained, with no upgrade available. Reachable only via

@@ -4,6 +4,11 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### iroh is removed
+
+The `iroh` feature, the `--iroh-*` flags and `MOQ_IROH_*` variables, and `iroh://` URLs are gone.
+Remove them and connect over QUIC or WebTransport.
+
 ### `--broadcast` refuses empty segments ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 A broadcast name or prefix with a leading, trailing, or doubled `/` is an error instead of being collapsed: pass `--broadcast room/cam`, not `/room/cam/`.
@@ -22,10 +27,6 @@ A reconnect at the same path no longer ends the wait. `import rtsp`, `import arc
 ### The `nvenc` and `nvdec` Cargo features are removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
 
 Enable `nvidia` instead; the old names were aliases for it.
-
-### Iroh is opt-in
-
-The default source-build features no longer include `iroh`. Add `--features iroh` when building a binary that must use Iroh endpoints.
 
 ### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 

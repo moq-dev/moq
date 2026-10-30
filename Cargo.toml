@@ -63,7 +63,7 @@ resolver = "2"
 ignored = ["getrandom"]
 
 [workspace.package]
-# Floor for the library surface: iroh 1.0 (via moq-tokio) needs 1.91. This is
+# Floor for the library surface: usage-rs 7.1 (via moq-tokio) needs 1.91. This is
 # what consumers of moq-net / hang / moq-tokio / etc. see. moq-relay overrides
 # it to 1.95 (sysinfo 0.39), and moq-cli does too because it depends on that
 # library. Those crates are applications; the point of the per-crate override
@@ -191,8 +191,6 @@ moq-vaapi = "0.1.0"
 # through their own `openh264` feature, which release builds enable).
 moq-video = { version = "0.1.10", path = "rs/moq-video", default-features = false }
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
-# Upstream noq-proto, only for iroh's controller factory types.
-noq-proto = { version = "1.2", default-features = false }
 num_enum = "0.7"
 objc2 = "0.6.4"
 objc2-av-foundation = "0.3.2"
@@ -249,7 +247,6 @@ url = "2"
 usage-rs = "7.1.0"
 uuid = { version = "1.26", features = ["v7"] }
 web-async = { version = "0.1.5", features = ["tracing"] }
-web-transport-iroh = "0.8.3"
 web-transport-proto = "0.6"
 web-transport-trait = "0.5"
 web-transport-wasm = "0.8"
@@ -258,9 +255,10 @@ x509-parser = "0.18"
 zeroize = { version = "1", features = ["derive"] }
 
 [patch.crates-io]
-# web-transport-iroh depends on kio from crates.io. Without
-# this, the lock carries a second kio whose pin drifts behind the member, and the
-# next publish that reaches both fails to resolve a single version (#3551).
+# The published moq-auth 0.2.1 compatibility fixture depends on kio from
+# crates.io. Without this, the lock carries a second kio whose pin drifts behind
+# the member, and the next publish that reaches both fails to resolve a single
+# version (#3551).
 kio = { path = "rs/kio" }
 
 [profile.dev]

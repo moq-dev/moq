@@ -269,8 +269,8 @@ it.
 
 QUIC uses the smaller of the two endpoints' idle timeouts
 ([RFC 9000 section 10.1](https://www.rfc-editor.org/rfc/rfc9000#section-10.1)),
-so either relay on a link can shorten it for both. iroh links use the same
-timeout; WebSocket links keep their own 30s deadline.
+so either relay on a link can shorten it for both. WebSocket links keep their
+own 30s deadline.
 
 ## Authentication
 

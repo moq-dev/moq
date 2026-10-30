@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### `MoqTransport::Iroh` is removed
+
+No session arrives over iroh any more, so drop that case from a `match` on `MoqTransport`.
+
 ### Compression moves to the track
 
 The `MoqFlate*` producers and `MoqFlateConfig` are deleted: publish opaque bytes on a `MoqTrackProducer`.

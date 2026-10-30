@@ -161,11 +161,6 @@ pub enum Error {
 		websocket: Arc<Error>,
 	},
 
-	/// An `iroh://` URL was dialed but the client was built without an Iroh endpoint.
-	#[cfg(feature = "iroh")]
-	#[error("Iroh support is not enabled")]
-	IrohDisabled,
-
 	/// A client CA or pinned peers were configured on a stream-only server, which has no QUIC listener to verify them.
 	#[error(
 		"mTLS (--listen-tls-root or tls.peers) needs a QUIC listener (--listen); the TCP and Unix listeners never ask for a client certificate"
@@ -239,11 +234,6 @@ pub enum Error {
 	#[error(transparent)]
 	Quic(Arc<crate::quic::Error>),
 
-	/// The Iroh backend failed.
-	#[cfg(feature = "iroh")]
-	#[error(transparent)]
-	Iroh(Arc<crate::iroh::Error>),
-
 	/// The WebSocket fallback transport failed.
 	#[cfg(feature = "websocket")]
 	#[error(transparent)]
@@ -303,17 +293,6 @@ impl Error {
 			),
 			#[cfg(all(feature = "uds", unix))]
 			Self::Unix(err) => matches!(err.as_ref(), crate::unix::Error::MissingPath),
-			#[cfg(feature = "iroh")]
-			Self::IrohDisabled => true,
-			#[cfg(feature = "iroh")]
-			Self::Iroh(err) => matches!(
-				err.as_ref(),
-				crate::iroh::Error::MissingHost
-					| crate::iroh::Error::InvalidEndpointId(_)
-					| crate::iroh::Error::InvalidUrl
-					| crate::iroh::Error::Url(_)
-					| crate::iroh::Error::NoVersions
-			),
 			_ => self.is_auth(),
 		}
 	}
@@ -405,13 +384,6 @@ impl From<crate::quic::Error> for Error {
 		}
 
 		Self::Quic(Arc::new(err))
-	}
-}
-
-#[cfg(feature = "iroh")]
-impl From<crate::iroh::Error> for Error {
-	fn from(err: crate::iroh::Error) -> Self {
-		Self::Iroh(Arc::new(err))
 	}
 }
 

@@ -8,10 +8,10 @@ real send groups. Their `web_transport_trait` impls, the sealed
 `Grouped`/`GroupedSend` pair, and the generic adapters over
 `web_transport_trait` are gone: moq-tokio's async-to-poll
 `transport::Session<S>` and moq-uring's `transport::Session<S>`, which serve
-only native QUIC now that iroh, moq-wasm and moq-ffi implement moq-net's
+only native QUIC now that moq-wasm and moq-ffi implement moq-net's
 traits themselves. moq-tokio, moq-uring and moq-relay then no longer depend on
 `web-transport-trait`; qmux keeps it as a dev-dependency for its 0.6 interop
-tests, and web-transport-iroh still pulls it in transitively.
+tests.
 
 ## Plan
 
@@ -54,8 +54,8 @@ Align the two stacks while each gets its impl:
   only for a reset, so a peer's clean FIN never returns it
   ([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950) fixed the same
   bug in moq-uring). Test a FIN on both stacks (maintainer, 2026-10-30).
-- `transport::poll_op` and `OpSlot` move to `moq_tokio::iroh`, their last
-  user, when moq-tokio's adapter goes.
+- `transport::poll_op` and `OpSlot` go with moq-tokio's adapter, their last
+  user.
 - moq-relay's io_uring server and its tests call the uring session through
   `web_transport_trait` (`uring.rs`, `tests/integration/runtime_uring.rs`);
   move them to the new impls.

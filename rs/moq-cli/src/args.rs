@@ -207,15 +207,11 @@ impl Invocation {
 
 	/// Refuse every MoQ-side flag but the dial and those in `allow`, on a verb that
 	/// only reads from a relay: a listener, cluster, or auth policy it would never
-	/// serve is not silently ignored. The dial is `--connect*` and the `--quic-*` and
-	/// `--iroh-*` settings it dials with. Answered from the command line, like
+	/// serve is not silently ignored. The dial is `--connect*` and the `--quic-*`
+	/// settings it dials with. Answered from the command line, like
 	/// [`Self::reject`].
 	pub fn dial_only(&self, command: &str, allow: &[&str]) -> anyhow::Result<()> {
 		let dials = |flag: &&&usage_rs::Flag<'_>| {
-			#[cfg(feature = "iroh")]
-			if owns::<moq_tokio::iroh::Config>(flag) {
-				return true;
-			}
 			owns::<moq_tokio::connect::Config>(flag)
 				|| owns::<moq_tokio::quic::Config>(flag)
 				|| allow
@@ -505,11 +501,6 @@ pub struct MoqSide {
 	/// `--listen-unix-bind`, `--listen-tls-*`).
 	#[usage(flatten)]
 	pub server: moq_tokio::listen::Config,
-
-	/// Iroh transport config (`--iroh-*`), used by both the client and server.
-	#[cfg(feature = "iroh")]
-	#[usage(flatten)]
-	pub iroh: moq_tokio::iroh::Config,
 
 	/// Clustering config (`--cluster-*`, including LAN). The same flags as
 	/// `moq-relay`, so a CLI process and a relay on the same network mesh
@@ -2636,8 +2627,6 @@ mod tests {
 			&["--connect-tls-insecure"],
 			&["--connect-backoff-initial", "2s"],
 			&["--quic-idle-timeout", "10s"],
-			#[cfg(feature = "iroh")]
-			&["--iroh-enabled"],
 			&["--broadcast", "room"],
 		];
 

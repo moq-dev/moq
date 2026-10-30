@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Transport.iroh` is removed
+
+No session arrives over iroh any more, so drop that case from a `switch` on `Transport`.
+
 ### Compression moves to the track
 
 `package:moq/flate.dart` is removed: publish opaque bytes on a `TrackProducer`.
