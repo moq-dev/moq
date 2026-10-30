@@ -15,26 +15,26 @@ quinn advisory in in-tree code, so checking upstream is recurring work.
 
 Each run:
 
-- Compare quinn-rs/quinn `main` against the last checked commit (the fork
-  point [`7616e6b2`](https://github.com/quinn-rs/quinn/commit/7616e6b2782722f3ce4a1b181ef08817d7f545e4)
-  for the first run), plus quinn's GitHub security advisories.
+- Compare quinn-rs/quinn `main` against the last checked commit, recorded
+  in the README's Upstream section (`main` at
+  [`2697de1e`](https://github.com/quinn-rs/quinn/commit/2697de1e1314cb9f98502b7323acd5bdd836b582)
+  and `0.11.x` at
+  [`4b84837d`](https://github.com/quinn-rs/quinn/commit/4b84837df1d25424bc37b0ed990e7b376d40a9c0)
+  after the first run), plus quinn's GitHub security advisories.
 - Port each fix that applies to code the fork still carries, with its
   regression test, and list it under the README's ported commits. Record
   one that does not apply with its reason, as the README already does.
-  Skip dependency bumps.
+  Skip dependency bumps and new features.
 - Record the newest upstream commit checked in the README, so the next run
   starts there.
 
-First run: three fixes on quinn `main` are not in the ledger yet. Check
-each against the fork's code before porting, since a missing ledger entry
-does not prove the bug remains:
-[`f233510c`](https://github.com/quinn-rs/quinn/commit/f233510c) (honor a
-disabled idle timeout when accepting),
-[`6c69f9f4`](https://github.com/quinn-rs/quinn/commit/6c69f9f4) (don't
-credit a reset stream's unread data twice on stop; the fork rewrote `stop`
-under the README's "Stream credit on stop", so it may already hold), and
-[`623a0369`](https://github.com/quinn-rs/quinn/commit/623a0369) (don't make
-specific IPv6 endpoints dual-stack).
+Learned in the first run: a fix missing from the ledger is often already
+held, since the fork reworked the same code (`stop` under
+`RESET_STREAM_AT`, the stale-accept check under `handshake_timeout`, and
+socket setup in `moq_sock::bind`), so check the fork's code before porting.
+A fix to quinn's `Endpoint::client` or `server` lands in `moq_sock::bind`,
+which the driver's test helpers bind through. Most of `0.11.x` is
+backports of `main`; compare its commits by subject.
 
 Recurrence: the PR that finishes a run deletes this file and creates the
 next run at `/quest/m2/quinn-sync.md`, linked from `/quest/m2/README.md`'s
@@ -46,6 +46,10 @@ next run becomes ready in the new m1, once per release cycle. Only
 
 Public API: none expected; a ported fix that changes one says so. Wire:
 QUIC behavior follows upstream's fixes.
+
+## Required
+
+- [Release cut](/quest/m2/release/cut.md) - the release in flight ships before this run starts
 
 ## Related
 

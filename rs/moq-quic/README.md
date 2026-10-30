@@ -20,6 +20,11 @@ Ported since the fork point:
 - [`f74e6a8a`](https://github.com/quinn-rs/quinn/commit/f74e6a8a15e5aa980044b7fa03a31878c6a8c65c): check a DATAGRAM frame's encoded size against `max_datagram_frame_size`, and drop rather than refuse one whose queue metadata overflows the receive buffer, so a datagram of the advertised maximum size no longer closes the connection.
 - [`17596dde`](https://github.com/quinn-rs/quinn/commit/17596ddefb09dae895129520824055d0ac8da5d5) (`moq_sock::udp`): on Windows, query `IPV6_V6ONLY` only on IPv6 sockets, so Winsock refusing the option on an IPv4 socket cannot fail endpoint creation.
 - [`d3174f1e`](https://github.com/quinn-rs/quinn/commit/d3174f1e77e093ceadfe0edff865fdd92d51a03c): a `wasm32-unknown-unknown` build pulls in ring only through the `ring` feature.
+- [`f233510c`](https://github.com/quinn-rs/quinn/commit/f233510cf37e1be9511070bf743151736d621a5e): a disabled idle timeout no longer abandons every accept as stale. Does not apply: the fork drops a stale Initial after `transport::Config::handshake_timeout`, which cannot be disabled, rather than the idle timeout.
+- [`6c69f9f4`](https://github.com/quinn-rs/quinn/commit/6c69f9f4ed2362002a0e2e5312a6dfa3ceb31c1d): stopping a reset stream no longer credits its unread data twice. Already held: `Recv::unread_credit` counts only what a reset still owes below its Reliable Size (see `RESET_STREAM_AT` below), and `stop_after_reset_credits_once` covers it.
+- [`623a0369`](https://github.com/quinn-rs/quinn/commit/623a0369536b9a1e731a8629c80c164eb8f2e637) (moq-tokio's `quic::driver`): an endpoint on a specific IPv6 address is not made dual-stack, so Windows does not refuse the driver's IPv4 socket options. `moq_sock::bind::udp` already did this; the driver's tests now bind through it, with upstream's `specific_v6_addr`.
+
+Checked through quinn `main` at [`2697de1e`](https://github.com/quinn-rs/quinn/commit/2697de1e1314cb9f98502b7323acd5bdd836b582) (2026-10-28), and the `0.11.x` branch through [`4b84837d`](https://github.com/quinn-rs/quinn/commit/4b84837df1d25424bc37b0ed990e7b376d40a9c0); start the next sync there.
 
 The fork never merges upstream, and takes the workspace's formatting and names, so upstream patches no longer apply.
 Upstream fixes are ported by hand, together with their regression tests.

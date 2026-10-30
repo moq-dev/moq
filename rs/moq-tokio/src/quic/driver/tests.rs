@@ -268,7 +268,7 @@ fn endpoint() -> Endpoint {
 	EndpointFactory::new().endpoint()
 }
 
-/// A dial-only endpoint on `addr`, dual-stack when the platform allows it for an IPv6 `addr`
+/// A dial-only endpoint on `addr`, dual-stack when the platform allows it for an IPv6 wildcard
 fn client_endpoint(addr: SocketAddr) -> Result<Endpoint, endpoint::Error> {
 	Endpoint::new(endpoint::Config::default(), bind(addr)?)
 }
@@ -279,12 +279,7 @@ fn server_endpoint(config: server::Config, addr: SocketAddr) -> Result<Endpoint,
 }
 
 fn bind(addr: SocketAddr) -> io::Result<UdpSocket> {
-	let socket = socket2::Socket::new(socket2::Domain::for_address(addr), socket2::Type::DGRAM, None)?;
-	if addr.is_ipv6() {
-		let _ = socket.set_only_v6(false);
-	}
-	socket.bind(&addr.into())?;
-	Ok(socket.into())
+	moq_sock::bind::udp(moq_sock::bind::Udp::new(addr))
 }
 
 fn endpoint_with_config(transport_config: transport::Config) -> Endpoint {
@@ -686,6 +681,34 @@ fn echo_v6() {
 		receive_window: None,
 		stream_receive_window: None,
 	});
+}
+
+/// Windows rejects the IPv4 options the driver sets on a dual-stack socket, so an endpoint on a
+/// specific IPv6 address must be bound v6-only.
+#[tokio::test]
+#[cfg_attr(
+	any(target_os = "solaris", target_os = "illumos"),
+	ignore = "Fails on Solaris and Illumos"
+)]
+async fn specific_v6_addr() {
+	let _guard = subscribe();
+	let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0);
+
+	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+	let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
+	let cert = CertificateDer::from(cert.cert);
+	let server_config = server::Config::with_single_cert(vec![cert.clone()], key.into()).unwrap();
+	let server = server_endpoint(server_config, addr).unwrap();
+
+	let mut roots = RootCertStore::empty();
+	roots.add(cert).unwrap();
+	let client = client_endpoint(addr).unwrap();
+	client.set_default_client_config(client::Config::with_root_certificates(Arc::new(roots)).unwrap());
+
+	tokio::join!(
+		async { server.accept().await.unwrap().accept().unwrap().await.unwrap() },
+		async { client.dial(server.local_addr(), "localhost").unwrap().await.unwrap() },
+	);
 }
 
 #[test]
