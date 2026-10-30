@@ -59,17 +59,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1793286109,
-        "narHash": "sha256-er9ekp0xFZGY2EA/D+01UsbLL3i3H2lMmEYSCUNF7OY=",
+        "lastModified": 1793347757,
+        "narHash": "sha256-OwNHBC48+Ggx9xP6SxmyeVgaGolGIuHhk01WgPcq8aM=",
         "owner": "moq-dev",
         "repo": "quest",
-        "rev": "01d051cf5dca8cd29c664bf8bcbcab63cdc76445",
+        "rev": "1ef2ca70053ed8bc4785ddaaafb2a6c445e87614",
         "type": "github"
       },
       "original": {
         "owner": "moq-dev",
         "repo": "quest",
-        "rev": "01d051cf5dca8cd29c664bf8bcbcab63cdc76445",
+        "rev": "1ef2ca70053ed8bc4785ddaaafb2a6c445e87614",
         "type": "github"
       }
     },
