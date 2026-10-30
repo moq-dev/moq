@@ -1480,4 +1480,273 @@ mod tests {
 			"one inflated copy:\n{body}"
 		);
 	}
+
+	/// Every family header and sample in an exposition, as `# TYPE family kind` and
+	/// `kind name{labels} value`, sorted, so the comparison holds across text formats:
+	/// only a renamed, relabeled, retyped, or revalued series changes it. Bucket
+	/// bounds and values compare as numbers.
+	fn series(body: &str) -> Vec<String> {
+		let mut types = std::collections::HashMap::new();
+		let mut rows = Vec::new();
+		for line in body.lines() {
+			if let Some(header) = line.strip_prefix("# TYPE ") {
+				let (family, kind) = header.split_once(' ').unwrap();
+				types.insert(family.to_string(), kind.to_string());
+				// A counter family may be named with or without its `_total` sample suffix.
+				let family = match kind {
+					"counter" => format!("{}_total", family.strip_suffix("_total").unwrap_or(family)),
+					_ => family.to_string(),
+				};
+				rows.push(format!("# TYPE {family} {kind}"));
+				continue;
+			}
+			if line.starts_with('#') || line.is_empty() {
+				continue;
+			}
+			let (sample, value) = line.rsplit_once(' ').unwrap();
+			let (name, labels) = sample.split_once('{').unwrap_or((sample, ""));
+			let kind = std::iter::once(name)
+				.chain(["_total", "_bucket", "_sum", "_count"].map(|suffix| name.strip_suffix(suffix).unwrap_or(name)))
+				.find_map(|family| types.get(family))
+				.unwrap_or_else(|| panic!("no TYPE for {name}"));
+
+			let mut normalized = Vec::new();
+			let mut rest = labels.strip_suffix('}').unwrap_or(labels);
+			while let Some((key, tail)) = rest.split_once("=\"") {
+				let mut end = 0;
+				let mut escaped = false;
+				for (i, c) in tail.char_indices() {
+					match c {
+						_ if escaped => escaped = false,
+						'\\' => escaped = true,
+						'"' => {
+							end = i;
+							break;
+						}
+						_ => {}
+					}
+				}
+				let value = &tail[..end];
+				let value = match (key, value.parse::<f64>()) {
+					("le", Ok(bound)) => bound.to_string(),
+					_ => value.to_string(),
+				};
+				normalized.push(format!("{key}=\"{value}\""));
+				rest = tail[end + 1..].trim_start_matches(',');
+			}
+
+			let value: f64 = value.parse().unwrap();
+			rows.push(format!("{kind} {name}{{{}}} {value}", normalized.join(",")));
+		}
+		rows.sort();
+		rows
+	}
+
+	/// The whole `/metrics` series set for one fixture of every source, pinned so a
+	/// renamed, relabeled, or retyped series fails here rather than on a dashboard.
+	#[tokio::test]
+	async fn metrics_series_are_pinned() {
+		let stats = moq_net::stats::Registry::new(Default::default());
+		let edge = stats.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("edge")));
+		let origin = moq_tokio::origin::spawn().with_stats(edge.session(moq_net::Path::from_static("root")));
+		let broadcast = origin.create_broadcast("demo").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		drop(edge.request(moq_net::Path::from_static("root")));
+		let refusals = crate::refusals::Refusals::default();
+		refusals.record(crate::refusals::RefusalKind::Unavailable);
+		let (_trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(1));
+
+		let state = InternalState {
+			stats,
+			nodes: None,
+			refusals: Some(refusals),
+			sessions: crate::session::Registry::new(),
+			listeners: vec![moq_tokio::accept::Health::new("tcp")],
+			#[cfg(all(target_os = "linux", feature = "_uring"))]
+			uring: vec![moq_uring::metrics::Metrics::default()],
+			#[cfg(not(all(target_os = "linux", feature = "_uring")))]
+			uring: Vec::new(),
+			stun: Some(crate::stun::Counters::default()),
+			shutdown: Some(shutdown),
+		};
+		let response = serve_metrics(State(state)).await;
+		let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+		let body = std::str::from_utf8(&body).unwrap();
+
+		// Panics are counted process-wide, so only the series is pinned, not its value.
+		let mut actual = series(body);
+		let panics = actual
+			.iter()
+			.position(|row| row.starts_with("counter moq_relay_panics_total{} "))
+			.unwrap_or_else(|| panic!("no panic counter in:\n{body}"));
+		actual.remove(panics);
+
+		let mut expected: Vec<String> = EXPECTED_SERIES.trim().lines().map(str::to_string).collect();
+		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		expected.extend(EXPECTED_URING_SERIES.trim().lines().map(str::to_string));
+		expected.sort();
+		assert_eq!(actual, expected, "{body}");
+	}
+
+	const EXPECTED_SERIES: &str = r#"
+# TYPE moq_relay_accept_failures_total counter
+# TYPE moq_relay_accept_stalled_seconds gauge
+# TYPE moq_relay_announces_ended_total counter
+# TYPE moq_relay_announces_started_total counter
+# TYPE moq_relay_bytes_total counter
+# TYPE moq_relay_control_rx_bytes_total counter
+# TYPE moq_relay_control_tx_bytes_total counter
+# TYPE moq_relay_datagrams_total counter
+# TYPE moq_relay_draining_sessions gauge
+# TYPE moq_relay_fetches_total counter
+# TYPE moq_relay_frames_total counter
+# TYPE moq_relay_groups_total counter
+# TYPE moq_relay_inflated_bytes_total counter
+# TYPE moq_relay_panics_total counter
+# TYPE moq_relay_requests_total counter
+# TYPE moq_relay_sessions_closed_total counter
+# TYPE moq_relay_sessions_failed_total counter
+# TYPE moq_relay_sessions_opened_total counter
+# TYPE moq_relay_sessions_refused_total counter
+# TYPE moq_relay_stale_bytes_total counter
+# TYPE moq_relay_stale_datagrams_total counter
+# TYPE moq_relay_stale_frames_total counter
+# TYPE moq_relay_stale_groups_total counter
+# TYPE moq_relay_stun_dropped_total counter
+# TYPE moq_relay_stun_io_errors_total counter
+# TYPE moq_relay_stun_replies_total counter
+# TYPE moq_relay_subscriptions_closed_total counter
+# TYPE moq_relay_subscriptions_opened_total counter
+# TYPE moq_relay_viewers_closed_total counter
+# TYPE moq_relay_viewers_opened_total counter
+# TYPE moq_relay_wire_rx_bytes_total counter
+# TYPE moq_relay_wire_tx_bytes_total counter
+counter moq_relay_accept_failures_total{listener="tcp",class="connection"} 0
+counter moq_relay_accept_failures_total{listener="tcp",class="exhausted"} 0
+counter moq_relay_accept_failures_total{listener="tcp",class="unknown"} 0
+counter moq_relay_announces_ended_total{tier="edge",role="publisher"} 0
+counter moq_relay_announces_ended_total{tier="edge",role="subscriber"} 0
+counter moq_relay_announces_started_total{tier="edge",role="publisher"} 0
+counter moq_relay_announces_started_total{tier="edge",role="subscriber"} 1
+counter moq_relay_bytes_total{tier="edge",role="publisher"} 0
+counter moq_relay_bytes_total{tier="edge",role="subscriber"} 0
+counter moq_relay_datagrams_total{tier="edge",role="publisher"} 0
+counter moq_relay_datagrams_total{tier="edge",role="subscriber"} 0
+counter moq_relay_fetches_total{tier="edge",role="publisher"} 0
+counter moq_relay_fetches_total{tier="edge",role="subscriber"} 0
+counter moq_relay_frames_total{tier="edge",role="publisher"} 0
+counter moq_relay_frames_total{tier="edge",role="subscriber"} 0
+counter moq_relay_groups_total{tier="edge",role="publisher"} 0
+counter moq_relay_groups_total{tier="edge",role="subscriber"} 0
+counter moq_relay_inflated_bytes_total{tier="edge",role="publisher"} 0
+counter moq_relay_inflated_bytes_total{tier="edge",role="subscriber"} 0
+counter moq_relay_requests_total{tier="edge"} 1
+counter moq_relay_sessions_closed_total{tier="edge"} 0
+counter moq_relay_sessions_failed_total{tier="edge",kind="application"} 0
+counter moq_relay_sessions_failed_total{tier="edge",kind="expired"} 0
+counter moq_relay_sessions_failed_total{tier="edge",kind="idle_timeout"} 0
+counter moq_relay_sessions_failed_total{tier="edge",kind="transport"} 0
+counter moq_relay_sessions_opened_total{tier="edge"} 1
+counter moq_relay_sessions_refused_total{reason="expired"} 0
+counter moq_relay_sessions_refused_total{reason="forbidden"} 0
+counter moq_relay_sessions_refused_total{reason="lan"} 0
+counter moq_relay_sessions_refused_total{reason="refused"} 0
+counter moq_relay_sessions_refused_total{reason="request"} 0
+counter moq_relay_sessions_refused_total{reason="unavailable"} 1
+counter moq_relay_stale_bytes_total{tier="edge",role="publisher"} 0
+counter moq_relay_stale_bytes_total{tier="edge",role="subscriber"} 0
+counter moq_relay_stale_datagrams_total{tier="edge",role="publisher"} 0
+counter moq_relay_stale_datagrams_total{tier="edge",role="subscriber"} 0
+counter moq_relay_stale_frames_total{tier="edge",role="publisher"} 0
+counter moq_relay_stale_frames_total{tier="edge",role="subscriber"} 0
+counter moq_relay_stale_groups_total{tier="edge",role="publisher"} 0
+counter moq_relay_stale_groups_total{tier="edge",role="subscriber"} 0
+counter moq_relay_stun_dropped_total{reason="capacity"} 0
+counter moq_relay_stun_dropped_total{reason="global"} 0
+counter moq_relay_stun_dropped_total{reason="invalid"} 0
+counter moq_relay_stun_dropped_total{reason="io"} 0
+counter moq_relay_stun_dropped_total{reason="source"} 0
+counter moq_relay_stun_io_errors_total{} 0
+counter moq_relay_stun_replies_total{} 0
+counter moq_relay_subscriptions_closed_total{tier="edge",role="publisher"} 0
+counter moq_relay_subscriptions_closed_total{tier="edge",role="subscriber"} 0
+counter moq_relay_subscriptions_opened_total{tier="edge",role="publisher"} 0
+counter moq_relay_subscriptions_opened_total{tier="edge",role="subscriber"} 0
+counter moq_relay_viewers_closed_total{tier="edge",role="publisher"} 0
+counter moq_relay_viewers_closed_total{tier="edge",role="subscriber"} 0
+counter moq_relay_viewers_opened_total{tier="edge",role="publisher"} 0
+counter moq_relay_viewers_opened_total{tier="edge",role="subscriber"} 0
+counter moq_relay_wire_rx_bytes_total{tier="edge"} 0
+counter moq_relay_wire_tx_bytes_total{tier="edge"} 0
+gauge moq_relay_accept_stalled_seconds{listener="tcp"} 0
+gauge moq_relay_draining_sessions{} 0
+"#;
+
+	#[cfg(all(target_os = "linux", feature = "_uring"))]
+	const EXPECTED_URING_SERIES: &str = r#"
+# TYPE moq_relay_uring_completions_total counter
+# TYPE moq_relay_uring_cqes_per_enter histogram
+# TYPE moq_relay_uring_enters_total counter
+# TYPE moq_relay_uring_parks_total counter
+# TYPE moq_relay_uring_rx_datagrams_total counter
+# TYPE moq_relay_uring_rx_enobufs_total counter
+# TYPE moq_relay_uring_rx_exhausted_total counter
+# TYPE moq_relay_uring_rx_receives_total counter
+# TYPE moq_relay_uring_sq_full_enters_total counter
+# TYPE moq_relay_uring_sqes_per_enter histogram
+# TYPE moq_relay_uring_submissions_total counter
+# TYPE moq_relay_uring_timers_active gauge
+# TYPE moq_relay_uring_timers_armed_total counter
+# TYPE moq_relay_uring_timers_cancelled_total counter
+# TYPE moq_relay_uring_timers_fired_total counter
+# TYPE moq_relay_uring_turns_total counter
+# TYPE moq_relay_uring_tx_datagrams_total counter
+# TYPE moq_relay_uring_tx_sends_total counter
+# TYPE moq_relay_uring_tx_stalls_total counter
+# TYPE moq_relay_uring_wakes_total counter
+counter moq_relay_uring_completions_total{worker="0"} 0
+counter moq_relay_uring_enters_total{worker="0"} 0
+counter moq_relay_uring_parks_total{worker="0"} 0
+counter moq_relay_uring_rx_datagrams_total{worker="0"} 0
+counter moq_relay_uring_rx_enobufs_total{worker="0"} 0
+counter moq_relay_uring_rx_exhausted_total{worker="0"} 0
+counter moq_relay_uring_rx_receives_total{worker="0"} 0
+counter moq_relay_uring_sq_full_enters_total{worker="0"} 0
+counter moq_relay_uring_submissions_total{worker="0"} 0
+counter moq_relay_uring_timers_armed_total{worker="0"} 0
+counter moq_relay_uring_timers_cancelled_total{worker="0"} 0
+counter moq_relay_uring_timers_fired_total{worker="0"} 0
+counter moq_relay_uring_turns_total{worker="0"} 0
+counter moq_relay_uring_tx_datagrams_total{worker="0"} 0
+counter moq_relay_uring_tx_sends_total{worker="0"} 0
+counter moq_relay_uring_tx_stalls_total{worker="0"} 0
+counter moq_relay_uring_wakes_total{worker="0"} 0
+gauge moq_relay_uring_timers_active{worker="0"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="0"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="1"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="128"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="16"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="2"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="256"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="32"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="4"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="64"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="8"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="inf"} 0
+histogram moq_relay_uring_cqes_per_enter_count{worker="0"} 0
+histogram moq_relay_uring_cqes_per_enter_sum{worker="0"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="0"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="1"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="128"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="16"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="2"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="256"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="32"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="4"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="64"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="8"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="inf"} 0
+histogram moq_relay_uring_sqes_per_enter_count{worker="0"} 0
+histogram moq_relay_uring_sqes_per_enter_sum{worker="0"} 0
+"#;
 }
