@@ -197,6 +197,19 @@ async fn resets_and_stops_carry_their_codes() {
 	assert!(matches!(send.closed().await, Err(Error::StreamStop(11))));
 }
 
+/// A send stream dropped before `finish` resets with code 0, so its reader learns it ended.
+#[tokio::test(start_paused = true)]
+async fn dropping_an_unfinished_send_resets_it() {
+	let (client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
+
+	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+	write_all(&mut send, Bytes::from_static(b"partial")).await;
+	drop(send);
+	let mut recv = server.accept_uni().await.unwrap();
+	let read = moq_clock::timeout(Duration::from_secs(5), read_all(&mut recv)).await;
+	assert!(matches!(read, Ok(Err(Error::StreamReset(0)))), "{read:?}");
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_peer_limits_concurrent_streams() {
 	let mut server = config(Version::QMux02);

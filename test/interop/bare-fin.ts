@@ -52,7 +52,7 @@ if (version !== undefined) {
 	assert(peer);
 	assert.equal(await peer.reader.u53(), StreamId.Subscribe);
 	await Subscribe.decode(peer.reader, version);
-	if (input.started) await encodeSubscribeResponse(output, { start: new SubscribeStart(0) }, version);
+	if (input.started) await encodeSubscribeResponse(output, { start: new SubscribeStart([0]) }, version);
 	if (input.clean) await encodeSubscribeResponse(output, { end: new SubscribeEnd(0) }, version);
 } else {
 	assert.equal(input.version, "moqt-18");

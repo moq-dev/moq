@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use super::state::StreamsState;
-use super::{SendGroup, SendGroups, SendOptions, SendStream, Streams};
+use super::{Streams, send};
 use crate::{
 	Dir, Side, StreamId, VarInt,
 	connection::{State as ConnState, spaces::Retransmits},
@@ -83,16 +83,16 @@ impl Sender {
 		}
 	}
 
-	fn groups(&mut self) -> SendGroups<'_> {
-		SendGroups { state: &mut self.state }
+	fn groups(&mut self) -> send::Groups<'_> {
+		send::Groups { state: &mut self.state }
 	}
 
-	fn group(&mut self, priority: i64) -> SendGroup {
+	fn group(&mut self, priority: i64) -> send::Group {
 		self.groups().open(priority)
 	}
 
-	fn send(&mut self, id: StreamId) -> SendStream<'_> {
-		SendStream {
+	fn send(&mut self, id: StreamId) -> send::Stream<'_> {
+		send::Stream {
 			id,
 			state: &mut self.state,
 			pending: &mut self.pending,
@@ -101,32 +101,32 @@ impl Sender {
 	}
 
 	/// Open a stream in `group` at `priority` and queue `bytes` on it.
-	fn open(&mut self, group: Option<&SendGroup>, priority: i64, bytes: usize) -> StreamId {
+	fn open(&mut self, group: Option<&send::Group>, priority: i64, bytes: usize) -> StreamId {
 		let id = Streams {
 			state: &mut self.state,
 			conn_state: &self.conn,
 		}
-		.open(Dir::Uni, SendOptions { group, priority })
+		.open(Dir::Uni, send::Options { group, priority })
 		.unwrap();
 		self.write(id, bytes);
 		id
 	}
 
 	fn write(&mut self, id: StreamId, bytes: usize) {
-		assert_eq!(self.send(id).write(&vec![0; bytes]), Ok(bytes));
+		assert_eq!(self.send(id).write(&mut &vec![0; bytes][..]), Ok(bytes));
 	}
 
 	/// Queue a `bytes` payload datagram in `group` at `priority`, returning its tag.
-	fn datagram(&mut self, group: Option<&SendGroup>, priority: i64, bytes: usize) -> u64 {
+	fn datagram(&mut self, group: Option<&send::Group>, priority: i64, bytes: usize) -> u64 {
 		let tag = self.tag;
 		self.tag += 1;
 		let mut data = BytesMut::with_capacity(bytes);
 		data.put_u64(tag);
 		data.resize(bytes, 0);
-		let datagram = frame::Datagram { data: data.freeze() };
+		let datagram = frame::OutgoingDatagram::new(data.freeze());
 		assert!(
 			self.state
-				.queue_datagram(datagram, SendOptions { group, priority }, usize::MAX)
+				.queue_datagram(datagram, send::Options { group, priority }, usize::MAX)
 		);
 		tag
 	}
@@ -159,7 +159,7 @@ impl Sender {
 			match frame.unwrap() {
 				Frame::Stream(stream) => self.order.push(Sent::Stream(stream.id)),
 				Frame::Datagram(datagram) => {
-					let wire = datagram.size(true) as u64;
+					let wire = frame::OutgoingDatagram::new(datagram.data.clone()).size() as u64;
 					let tag = u64::from_be_bytes(datagram.data[..8].try_into().unwrap());
 					*self.datagram_wire.entry(tag).or_default() += wire;
 					datagram_bytes += wire;
@@ -441,7 +441,9 @@ fn reliable_reset_sends_its_prefix_then_frees_its_group() {
 	sender.send(finished).finish().unwrap();
 	sender.groups().close(group);
 
-	sender.send(reset).reset_at(3_000, 0u32.into()).unwrap();
+	let mut stream = sender.send(reset);
+	let at = stream.offset().rewind(3_000);
+	stream.reset_at(at, 0u32.into()).unwrap();
 	assert!(sender.state.can_send_stream_data());
 	sender.drain(100);
 	assert_eq!(sender.bytes(&[reset]), 3_000, "only the reliable prefix");
@@ -470,7 +472,9 @@ fn stop_sending_drops_a_reliable_prefix_from_the_schedule() {
 	let mut sender = Sender::new();
 	let group = sender.group(0);
 	let reset = sender.open(Some(&group), 0, 10_000);
-	sender.send(reset).reset_at(3_000, 0u32.into()).unwrap();
+	let mut stream = sender.send(reset);
+	let at = stream.offset().rewind(3_000);
+	stream.reset_at(at, 0u32.into()).unwrap();
 	assert!(sender.state.can_send_stream_data());
 
 	assert_eq!(sender.state.received_stop_sending(reset, 0u32.into()), Ok(Some(0)));

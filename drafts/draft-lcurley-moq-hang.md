@@ -685,6 +685,7 @@ By default a rendition's track lives in the same broadcast that served the catal
 The `broadcast` field overrides that, naming a different broadcast that publishes the track.
 
 The value is a relative path, resolved against the path of the broadcast that served the catalog.
+It is spelled like a path {{moql}}, so a consumer MUST reject a catalog whose reference has a leading, trailing, or doubled `/`, or a `\` before anything but `\` or `/`.
 It uses relative reference resolution ({{!RFC3986, Section 5.2}}): a non-empty reference replaces the catalog broadcast's last path segment before applying `.` and `..` segments.
 For example, `./source` in a catalog served by `room/transcode` resolves to `room/source`, while `.` resolves to `room`.
 An empty reference resolves to the catalog broadcast itself.
@@ -789,7 +790,8 @@ For example, with video at 20 millisecond intervals and audio at 15 written as v
 
 ### enabled {#field-enabled}
 The `enabled` field says whether a consumer may select an audio or video rendition; a text rendition does not carry it.
-When `enabled` is false, no frames are coming, and a consumer MUST NOT select the rendition.
+When `enabled` is false, no frames are coming, and a consumer SHOULD NOT select the rendition.
+A consumer MAY keep a rendition it already selected while that rendition is disabled and no enabled one it can decode remains, so a re-enable needs no new subscription.
 If absent, `enabled` defaults to true; a publisher SHOULD only write it when false.
 
 Earlier versions defined a video `stalled` field instead.
@@ -801,7 +803,7 @@ The optional catalog `stats` section names the publisher's snapshot track in the
 A publisher snapshot covers only renditions that publisher writes, omitting references to another broadcast.
 
 The optional catalog `echo` section solicits feedback: `{ "path": "viewers" }`.
-The path is relative to the broadcast serving the catalog, with the same URL-style resolution and root containment as {{field-broadcast}}.
+The path is relative to the broadcast serving the catalog, with the same spelling, URL-style resolution, and root containment as {{field-broadcast}}.
 For example, from `room/live`, `viewers` resolves to `room/viewers`, and `live/viewers` resolves to `room/live/viewers`.
 A consumer MUST reject a catalog whose echo path resolves above its connection root.
 After reading the soliciting catalog, a viewer MAY announce one broadcast under that prefix at an application-assigned name plus `.echo`, for example `room/viewers/alice.echo`.
@@ -1141,6 +1143,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- A `broadcast` reference and an echo `path` are spelled like a path: one with an empty segment or a lone `\` refuses the catalog instead of collapsing.
 - Removed `catalog.json.z` and the data track `compression` field: compression is a track property the transport carries ({{compression}}), so each compressed track is one name, and the catalog, `stats` and `echo` snapshots, HLS record tracks, and JSON data tracks SHOULD be compressed.
 - Replaced the root `archive` section and its per-track timelines with an optional, per-rendition `hls` field on video and audio ({{hls}}). Each record is a segment's first `group` and `pts` in milliseconds, with an optional `duration` where zero marks a stop; frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone. Each rendition numbers its own segments, and an edge maps a rendition's record `n` to its segment `n`. The record track is named `<track>.hls` and is compressed ({{compression}}).
 - A reader refuses a JSON frame in which an object repeats a member name.
@@ -1166,7 +1169,7 @@ This document has no IANA actions.
 - Added the optional `delay` rendition field: how far a rendition's timestamps trail those other renditions already wrote, never lowered once advertised and never subtracted across renditions.
 - Recommended namespaced keys for application root sections.
 - Added the optional `delay` field to `json` and `binary` track entries, measured only from payloads stamped with their capture time on the broadcast clock.
-- Replaced the video `stalled` field with an optional `enabled` field on audio and video renditions. A consumer MUST NOT select a disabled rendition and ignores `stalled`. A consumer that predates `enabled` keeps selecting a disabled rendition.
+- Replaced the video `stalled` field with an optional `enabled` field on audio and video renditions. A consumer SHOULD NOT select a disabled rendition, MAY keep one it already selected while no enabled alternative remains, and ignores `stalled`. A consumer that predates `enabled` keeps selecting a disabled rendition.
 - Audio `sampleRate` and `numberOfChannels` describe the decoded output, so HE-AAC names its SBR rate and parametric stereo names two channels.
 - Added an optional `track` field to video, audio, text, `json`, and `binary` entries naming the track in its broadcast; the entry's key is its ID and names the track when `track` is absent. A consumer MUST reject a catalog using one ID for both a video and an audio rendition.
 - Defined video `displayAspectWidth` and `displayAspectHeight` as the whole picture's display aspect, not the sample aspect.

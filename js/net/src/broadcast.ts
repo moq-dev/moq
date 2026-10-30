@@ -217,7 +217,7 @@ function logical(state: BroadcastState, name: string): { producer: track.Produce
 	return { producer, requested: true };
 }
 
-function subscribe(state: BroadcastState, name: string, options: track.Subscription = {}): track.Subscriber {
+function subscribe(state: BroadcastState, name: string, options?: track.Subscription): track.Subscriber {
 	return logical(state, name).producer.subscribe(options);
 }
 
@@ -279,7 +279,7 @@ async function fetchGroup(
 	options: track.FetchGroupOptions = {},
 ): Promise<GroupConsumer> {
 	options.signal?.throwIfAborted();
-	const subscriber = subscribe(state, name, { priority: options.priority });
+	const subscriber = subscribe(state, name, { ...track.Subscription.default(), priority: options.priority });
 	hooks.fetchBudget(subscriber, options.maxDelay);
 	try {
 		for (;;) {

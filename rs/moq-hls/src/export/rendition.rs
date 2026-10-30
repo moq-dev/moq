@@ -1,7 +1,7 @@
 //! One rendition: playlists from its own HLS records, and segments fetched on demand.
 
 use moq_clock::Wall;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::task::Poll;
 use std::time::Duration;
@@ -259,6 +259,12 @@ fn normalize_audio(config: &AudioConfig) -> AudioConfig {
 	config
 }
 
+/// `duration` in whole seconds, rounded up, and at least one: the smallest
+/// `EXT-X-TARGETDURATION` that segments of that declared duration fit.
+fn whole_seconds(duration: Duration) -> u64 {
+	(duration.as_secs() + u64::from(duration.subsec_nanos() > 0)).max(1)
+}
+
 /// The segment [tag](segments::tag) of `track` muxed under the normalized `config`, hashing its
 /// catalog JSON, which every edge encodes alike.
 fn tag<T: serde::Serialize>(track: &str, config: &T) -> Arc<str> {
@@ -273,6 +279,8 @@ pub(crate) struct Handoff {
 	track: String,
 	/// The first record it will not list.
 	next: u64,
+	/// Its `EXT-X-TARGETDURATION`, which a replacement serving the same playlist URI keeps.
+	target_duration: u64,
 }
 
 /// Which records a rendition lists, shared by its records watcher and [`Rendition::retire`] so a
@@ -318,6 +326,12 @@ pub struct Rendition {
 	/// The [tag](segments::tag) of [`hls`](Self::hls)'s record track muxed under this config, in
 	/// every segment URL.
 	tag: Arc<str>,
+	/// `EXT-X-TARGETDURATION`, in whole seconds: [`hls`](Self::hls)'s duration rounded up, or a
+	/// predecessor's (see [`after`](Self::after)), until [`pin`](Self::pin) sets the one its
+	/// playlist URI keeps while it stays in the catalog.
+	target_duration: u64,
+	/// Segments listed past the target duration, counted to rate-limit their warning.
+	overruns: AtomicU64,
 	/// The catalog's root broadcast clock: the wall anchor record times map through. Absent when
 	/// the publisher exposes none.
 	clock: Option<Clock>,
@@ -437,6 +451,8 @@ impl Rendition {
 			codec: config.codec.to_string(),
 			config: Config::Video(config.clone()),
 			tag: tag(&hls.track, &normalize_video(config)),
+			target_duration: whole_seconds(hls.duration),
+			overruns: AtomicU64::new(0),
 			hls,
 			clock,
 			live: Arc::new(segments::Producer::new(0)),
@@ -475,6 +491,8 @@ impl Rendition {
 			codec: config.codec.to_string(),
 			config: Config::Audio(config.clone()),
 			tag: tag(&hls.track, &normalize_audio(config)),
+			target_duration: whole_seconds(hls.duration),
+			overruns: AtomicU64::new(0),
 			hls,
 			clock,
 			live: Arc::new(segments::Producer::new(0)),
@@ -502,12 +520,18 @@ impl Rendition {
 		*self.watcher.lock().expect("watcher lock poisoned") = Some(watcher);
 	}
 
-	/// Take over from a retired predecessor (see [`retire`](Self::retire)): list only the records
-	/// it won't. One reading another record track shares no numbering with it, so it lists all.
+	/// Take over from a retired predecessor (see [`retire`](Self::retire)): keep its target
+	/// duration and list only the records it won't. One reading another record track shares no
+	/// numbering with it, so it lists all.
 	pub(crate) fn after(mut self, handoff: Option<&Handoff>) -> Self {
-		let Some(handoff) = handoff.filter(|handoff| handoff.track == self.hls.track) else {
+		let Some(handoff) = handoff else {
 			return self;
 		};
+		// The playlist URI stays the same, so it keeps its target duration (RFC 8216 6.2.1).
+		self.target_duration = handoff.target_duration;
+		if handoff.track != self.hls.track {
+			return self;
+		}
 		let start = handoff.next;
 		self.claim = Mutex::new(Claim {
 			start,
@@ -534,6 +558,42 @@ impl Rendition {
 		Handoff {
 			track: self.hls.track.clone(),
 			next,
+			target_duration: self.target_duration,
+		}
+	}
+
+	/// Advertise `target_duration` seconds as `EXT-X-TARGETDURATION`: the one this rendition's
+	/// playlist URI keeps while it stays in the catalog.
+	pub(crate) fn pin(mut self, target_duration: u64) -> Self {
+		self.target_duration = target_duration;
+		self
+	}
+
+	/// The `EXT-X-TARGETDURATION` of this rendition's media playlist, in whole seconds.
+	pub(crate) fn target_duration(&self) -> u64 {
+		self.target_duration
+	}
+
+	/// How many segments were listed past the target duration.
+	#[cfg(test)]
+	pub(crate) fn overruns(&self) -> u64 {
+		self.overruns.load(Ordering::Relaxed)
+	}
+
+	/// Warn that segment `segment`, `duration` long, is listed past the target duration. Only on
+	/// the 1st, 2nd, 4th, 8th... overrun, so a publisher whose every GOP overruns can't flood the
+	/// log.
+	fn overrun(&self, segment: u64, duration: Duration) {
+		let overruns = self.overruns.fetch_add(1, Ordering::Relaxed) + 1;
+		if overruns.is_power_of_two() {
+			tracing::warn!(
+				rendition = %self.name,
+				segment,
+				?duration,
+				target_duration = self.target_duration,
+				overruns,
+				"segment overruns the declared HLS duration; listing it past EXT-X-TARGETDURATION"
+			);
 		}
 	}
 
@@ -773,17 +833,6 @@ impl Rendition {
 	}
 
 	fn snapshot_from_window(&self, window: segments::Window, finished: bool, generation: Option<Arc<str>>) -> Snapshot {
-		// HLS requires EXT-X-TARGETDURATION to be at least every EXTINF, rounded to the nearest
-		// whole second; it is at least the declared duration, which every segment aims for.
-		let target_duration = window
-			.segments
-			.iter()
-			.map(|s| s.duration)
-			.chain([self.hls.duration])
-			.map(|duration| duration.as_secs_f64().round() as u64)
-			.max()
-			.unwrap_or(0)
-			.max(1);
 		let mut previous = None;
 		let segments = window
 			.segments
@@ -801,7 +850,7 @@ impl Rendition {
 			})
 			.collect();
 		Snapshot {
-			target_duration,
+			target_duration: self.target_duration,
 			media_sequence: window.sequence,
 			discontinuity_sequence: window.discontinuity,
 			segments,
@@ -1312,6 +1361,12 @@ fn row(
 		return None;
 	}
 	let duration = record.duration.unwrap_or(Duration::from(next.pts) - pts);
+	// RFC 8216 4.3.3.1 requires every EXTINF, rounded to the nearest second, to fit the target
+	// duration. A GOP that overran the declared duration is listed anyway: refusing it loses
+	// content, and splitting or skipping it renumbers the segments after it (RFC 8216 6.2.2).
+	if duration.as_secs_f64().round() as u64 > rendition.target_duration {
+		rendition.overrun(record.sequence, duration);
+	}
 	let end = pts + duration;
 	Some(segments::Row {
 		index: record.sequence,

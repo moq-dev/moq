@@ -32,4 +32,3 @@ Public API: none. Wire: none.
 ## Required
 
 - [Browser tests expect current behavior](/quest/m0/interop-green/stale-browser-tests.md) - the renderer and element version tests match the shipped validation and version list
-- [Remeasure the planned wire break](/quest/m0/interop-green/wire-compat-remeasure.md) - the lite-07-wip planned break is measured against `@moq/net` 0.4.6

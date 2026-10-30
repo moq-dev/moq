@@ -56,7 +56,3 @@ Keep this quest open for the published release input:
 
 Follow-up to [#5549](https://github.com/moq-dev/moq/pull/5549), which shared
 the default FFI build across Go, Kotlin and Swift.
-
-## Related
-
-- [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - confirms the shared build in production first

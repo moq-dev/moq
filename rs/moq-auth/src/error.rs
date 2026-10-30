@@ -88,6 +88,10 @@ pub enum Error {
 	#[error("no publish or subscribe allowed; token is useless")]
 	UselessToken,
 
+	/// A root being minted into a token or key scope is not spelled as a path must be.
+	#[error("invalid root {0}")]
+	InvalidRoot(String),
+
 	/// The path does not overlap the token's root.
 	#[error("path `{0}` does not overlap the token root")]
 	RootMismatch(String),

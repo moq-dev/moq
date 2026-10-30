@@ -24,9 +24,8 @@ const GROUPS: u64 = 10;
 /// Reaches every group, however long the readers take.
 const BUDGET: Duration = Duration::from_secs(100);
 
-/// Moq-transport-22 is left out: its cold relay serves an absolute floor only from the
-/// live edge.
-const VERSIONS: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip", "moq-transport-18"];
+/// Moq-transport publishers refuse multi-group history; the live subscription still works.
+const VERSIONS: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
@@ -82,5 +81,41 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 		let mut second = moq_clock::timeout(TIMEOUT, subscribe(&relay)).await.unwrap();
 		let warm = moq_clock::timeout(TIMEOUT, received(&mut second)).await.unwrap();
 		assert_eq!(warm, cold, "{version}: warm");
+	}
+}
+
+/// A refused history fill or FETCH never ends its live subscription.
+#[moq_clock::test]
+async fn a_refused_transport_backfill_keeps_delivering_live() {
+	for version in ["moq-transport-18", "moq-transport-22"] {
+		let publisher = origin(1);
+		let relay = origin(2);
+		let _link = peer(version.parse::<Version>().unwrap(), &publisher, &relay).await;
+		let broadcast = publisher.create_broadcast("live").unwrap();
+		let source = broadcast
+			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
+			.unwrap();
+		for sequence in 0..GROUPS {
+			let mut group = source.create_group(sequence.into()).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
+				.unwrap();
+			group.finish().unwrap();
+		}
+		broadcast.announce(Default::default()).unwrap();
+		let mut subscriber = moq_clock::timeout(TIMEOUT, subscribe(&relay)).await.unwrap();
+		let got = moq_clock::timeout(TIMEOUT, received(&mut subscriber)).await.unwrap();
+		assert_eq!(got, BTreeSet::from([GROUPS - 1]), "{version}: only the live edge");
+		let mut group = source.create_group(GROUPS.into()).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(GROUPS * 1000).unwrap(), &b"live"[..])
+			.unwrap();
+		group.finish().unwrap();
+		let got = moq_clock::timeout(TIMEOUT, subscriber.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(got.sequence, GROUPS, "{version}: still live after the refused backfill");
 	}
 }

@@ -24,7 +24,7 @@ from .types import AnnounceRoute
 
 Announce = MoqAnnounce
 """A route over a prefix: the origin-relative ``prefix``, what each filter wildcard
-matched (``captures``, ``None`` for a partial overlap), and the ``route`` serving it.
+matched (``captures``), and the ``route`` serving it.
 
 It carries no broadcast. Resolve a specific path with
 :meth:`OriginConsumer.request`. By convention a publisher announces
