@@ -26,7 +26,9 @@ the relay knows: a session id, its own `node` name, the transport, addresses,
 SNI and ALPN, the path and query exactly as dialed, a moq-transport SETUP
 token, the declared role and implementation, and the verified client
 certificate. Nothing is parsed on the server's behalf: the `jwt` query parameter is a convention of
-`moq auth serve`, not of the relay. The grant answers with `publish` and
+`moq auth serve`, not of the relay. A path with a `.` or `..` segment is refused
+before the server is asked: a URL transport resolves those away, but a SETUP
+path arrives verbatim. The grant answers with `publish` and
 `subscribe` pattern unions and optionally a `root` alias, read-only `mounts`,
 `expires`, a `revalidate` cadence, a stats `tier` and `label`, and `peer` / `upstream` to
 mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
