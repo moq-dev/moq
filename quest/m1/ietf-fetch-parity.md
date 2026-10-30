@@ -17,7 +17,7 @@ three FETCH behaviors:
    the requester has no timescale to read.
 
 Non-goals: answering a joining FETCH that arrives after its subscription
-ended ([Join after a quick finish](/quest/m2/ietf-join-after-finish.md)),
+ended ([moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306)),
 and draft-22 fills.
 
 ## Plan
@@ -32,9 +32,9 @@ publishers answer FETCH the same way at the cut.
   held and the requester can still cancel, so the FETCH keeps its own
   lifetime instead of the subscription's. It holds nothing a hostile peer
   could not already make it hold through an open FETCH. Check whether this
-  is part of the draft-18 `tail` flake with a Rust publisher that
-  [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) describes,
-  and note the result there.
+  is part of the draft-18 `tail` flake with a Rust publisher. That flake was a
+  joining FETCH arriving after PUBLISH_DONE, fixed in
+  [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306).
 - **Lost head.** Refuse with DOES_NOT_EXIST, as a missing prefix already is
   (`a_joining_fetch_refuses_a_missing_prefix_before_fetch_ok`). Update
   `a_joining_fetch_refuses_a_prefix_group_it_lost`.
@@ -51,5 +51,4 @@ Properties.
 
 ## Related
 
-- [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - the late joining FETCH this leaves out
 - [Headless moq-transport groups](/quest/m2/ietf-headless-group.md) - what a subscriber does with a tail whose head never comes

@@ -835,13 +835,40 @@ enum Joined<G> {
 	},
 }
 
-/// One subscription's entry in [`Publisher::joins`], removed when the subscription ends.
+/// One subscription's entry in [`Publisher::joins`], removed when the subscription ends, or
+/// for a track that ended cleanly, once its [`Retain`] lets go.
 ///
 /// A fetch that arrives afterwards then finds nothing and is refused, rather than being
 /// answered from a group that is no longer the edge of anything.
 struct Join<G> {
 	joins: kio::Shared<HashMap<RequestId, Option<Joined<G>>>>,
 	request_id: RequestId,
+}
+
+impl<G> Join<G> {
+	/// Whether a joining FETCH would be answered from this entry rather than refused.
+	fn answers(&self) -> bool {
+		matches!(
+			self.joins.read().get(&self.request_id),
+			Some(Some(Joined::Group { .. }))
+		)
+	}
+}
+
+/// A cleanly finished draft-18 subscription's join, kept past PUBLISH_DONE.
+///
+/// The subscriber sends its joining FETCH once SUBSCRIBE_OK arrives, so on a track that ends
+/// within about an RTT of it the FETCH reaches us after PUBLISH_DONE, and would lose the
+/// Largest group's head. The entry holds the track's cache, which a peer controls, so it is
+/// bounded by the request: kept until the subscriber closes its side (ours holds it open until
+/// the FETCH's head lands or its settle grace ends), and no longer than what authorized the
+/// subscription, since a late FETCH reads the cache on that authority. The open request still takes its stream
+/// credit and subscription slot meanwhile.
+struct Retain {
+	_join: Join<GroupOf<Transport>>,
+	grant: Option<crate::auth::RequestGrant>,
+	gate: crate::auth::Gate,
+	_slot: crate::auth::Hold,
 }
 
 impl<G> Drop for Join<G> {
@@ -1338,6 +1365,8 @@ impl Publisher {
 			// releasing what it holds upstream, and only then is the peer told. `acked` holds the
 			// group stream count once SUBSCRIBE_OK is buffered, which decides how.
 			let mut acked: Option<Arc<AtomicU64>> = None;
+			// Set once the track ran to its end, which is all that leaves a join worth keeping.
+			let mut track_ended = false;
 			// An instance never comes back, so a request pinned to a gone one is missing, not
 			// worth waiting for.
 			let rendezvous = msg.rendezvous && msg.epoch.is_none();
@@ -1535,6 +1564,7 @@ impl Publisher {
 					let served = served.unwrap_or(Served::Track(Ok(())));
 
 					if completed && matches!(served, Served::Track(Ok(()))) {
+						track_ended = true;
 						self.write_end_of_track(&mut stream, &mut track_serve, &mut request_finished, &mut goaways)
 							.await;
 					}
@@ -1562,10 +1592,24 @@ impl Publisher {
 				})
 				.await
 			};
-			// A FETCH joining this subscription ends with it, before the peer reads a word.
-			drop(_join);
-			// The subscription's demand is gone; only its credit may still wait on a verification.
-			drop((request_grant, _slot));
+			// A track that ended cleanly keeps what a joining FETCH needs (see [`Retain`]); any
+			// other end takes the join with it, before the peer reads a word.
+			let retain = match (&subscribed, _join) {
+				(Ok(Ok(Subscribed::Served(Served::Track(Ok(())), _))), Some(join)) if track_ended && join.answers() => {
+					Some(Retain {
+						_join: join,
+						grant: request_grant,
+						gate,
+						_slot,
+					})
+				}
+				_ => {
+					// The subscription's demand is gone; only its credit may still wait on a
+					// verification.
+					drop((request_grant, _slot));
+					None
+				}
+			};
 
 			let (served, streams) = match subscribed {
 				Ok(Ok(Subscribed::Served(served, streams))) => (served, streams),
@@ -1585,7 +1629,8 @@ impl Publisher {
 					}
 				},
 			};
-			self.write_publish_done(stream, served, streams, Some(&credit)).await
+			self.write_publish_done(stream, served, streams, Some(&credit), retain)
+				.await
 		}
 	}
 
@@ -1668,13 +1713,14 @@ impl Publisher {
 
 	/// End a subscription on the wire with the PUBLISH_DONE `served` reports, after `streams`
 	/// group streams, returning how serving ended. The stream closes only once no verification
-	/// holds `credit`'s request, if it has one.
+	/// holds `credit`'s request, if it has one, and once `retain` lets go of its join.
 	async fn write_publish_done(
 		&self,
 		mut stream: Stream<Transport, Version>,
 		served: Served,
 		streams: u64,
 		credit: Option<&kio::Producer<()>>,
+		retain: Option<Retain>,
 	) -> Result<(), Error> {
 		let (status, reason) = served.status();
 		let res = match served {
@@ -1692,6 +1738,10 @@ impl Publisher {
 			})
 			.await;
 
+		if let Some(retain) = retain {
+			self.retain_join(&mut stream, retain).await;
+		}
+
 		// The peer learns the subscription ended at once, but the stream holds its credit until
 		// the application lets go of every token it took for it.
 		if let Some(credit) = credit {
@@ -1701,6 +1751,33 @@ impl Publisher {
 		let _ = stream.writer.close().await;
 
 		res
+	}
+
+	/// Keep a finished subscription's join until the subscriber closes the request, the
+	/// session closes, or what authorized the subscription stops covering it.
+	async fn retain_join(&self, stream: &mut Stream<Transport, Version>, mut retain: Retain) {
+		let session = self.session.clone();
+		kio::wait(|waiter| {
+			if session.poll_closed(waiter).is_ready() || stream.writer.poll_closed(waiter).is_ready() {
+				return Poll::Ready(());
+			}
+			// An update that crossed PUBLISH_DONE is skipped, since nothing answers it now; the
+			// subscriber's FIN or a reset ends the request.
+			loop {
+				match stream.reader.poll_read_chunk(waiter, usize::MAX) {
+					Poll::Ready(Ok(Some(_))) => continue,
+					Poll::Ready(_) => return Poll::Ready(()),
+					Poll::Pending => break,
+				}
+			}
+			if let Some(grant) = &retain.grant
+				&& grant.poll_ended(waiter).is_ready()
+			{
+				return Poll::Ready(());
+			}
+			retain.gate.poll_denied(waiter)
+		})
+		.await;
 	}
 
 	async fn run_subscription(
@@ -6722,7 +6799,7 @@ mod subscribe_cursor_test {
 mod serve_tests {
 	use super::*;
 	use crate::coding::{Decode, Decoder};
-	use crate::lite::test_transport::{Log, ScriptedSession, Sent, SinkSession};
+	use crate::lite::test_transport::{Close, Log, ScriptedSession, Sent, SinkSession};
 	use crate::model::ProduceTest;
 
 	#[moq_clock::test]
@@ -8389,7 +8466,20 @@ mod serve_tests {
 		}
 
 		h.track.finish().unwrap();
-		serve.await.unwrap();
+		// A draft-18 subscription whose track ended keeps its join until the subscriber
+		// closes the request, so close it once PUBLISH_DONE is out.
+		while futures::poll!(serve.as_mut()).map(Result::unwrap).is_pending() {
+			if publish_done_sent(h) {
+				h.session.close(Close::Fin);
+			}
+			moq_clock::sim::yield_now().await;
+		}
+		h.session.reopen();
+	}
+
+	/// Whether the subscription's request stream carries PUBLISH_DONE yet.
+	fn publish_done_sent(h: &Serve) -> bool {
+		!h.log.trail().is_empty() && Wire::read(&h.log, h.publisher.version).publish_done.is_some()
 	}
 
 	/// A subscribe for a broadcast we do not serve is refused with the negotiated draft's own
@@ -9868,8 +9958,13 @@ mod serve_tests {
 
 	/// Drive a subscription until its snapshot is available, failing if it ends first.
 	async fn registered(h: &Serve, serving: impl std::future::Future<Output = Result<(), Error>>) {
+		registered_as(h, RequestId(REQUEST_ID), serving).await
+	}
+
+	/// [`registered`], for the subscription with request id `id`.
+	async fn registered_as(h: &Serve, id: RequestId, serving: impl std::future::Future<Output = Result<(), Error>>) {
 		let joined = h.publisher.joins.wait(|joins| {
-			if matches!(joins.get(&RequestId(REQUEST_ID)), Some(Some(_))) {
+			if matches!(joins.get(&id), Some(Some(_))) {
 				Poll::Ready(())
 			} else {
 				Poll::Pending
@@ -10193,8 +10288,9 @@ mod serve_tests {
 		);
 	}
 
-	/// A joining FETCH that arrives after its subscription ended has no live edge to name, so
-	/// it is refused rather than answered from a group that is no longer the edge of anything.
+	/// A joining FETCH that arrives after its subscription ended and the subscriber closed the
+	/// request has no live edge to name, so it is refused rather than answered from a group
+	/// that is no longer the edge of anything.
 	#[moq_clock::test]
 	async fn a_joining_fetch_without_its_subscription_is_refused() {
 		for version in JOINING_DRAFTS {
@@ -10214,6 +10310,255 @@ mod serve_tests {
 			);
 			assert!(buf.is_empty());
 			assert!(h.log.resets().is_empty());
+		}
+	}
+
+	/// The refusal code of the REQUEST_ERROR a joining FETCH is answered with, failing on a
+	/// FETCH_OK.
+	async fn joining_refusal(h: &Serve, version: Version) -> u64 {
+		let mark = h.log.writes.lock().unwrap().len();
+		let mut buf = bytes::Bytes::from(joining_fetch(h, mark).await.unwrap());
+		assert_eq!(
+			crate::coding::decode_varint(&mut buf, version).unwrap(),
+			ietf::RequestError::ID,
+			"{version}: the joining FETCH was answered"
+		);
+		crate::coding::decode_buf(&mut buf, version, |r, v| {
+			Ok(ietf::RequestError::decode(r, v)?.error_code)
+		})
+		.unwrap()
+	}
+
+	/// Finish the track and drive `serving` until its PUBLISH_DONE is out, failing if the
+	/// request ends with it: a finished subscription keeps its join until the subscriber
+	/// closes the request.
+	async fn finish_and_retain(h: &Serve, mut serving: std::pin::Pin<&mut impl Future<Output = Result<(), Error>>>) {
+		h.track.finish().unwrap();
+		for _ in 0..200 {
+			assert!(
+				futures::poll!(serving.as_mut()).is_pending(),
+				"the request ended with the subscription"
+			);
+			if publish_done_sent(h) {
+				return;
+			}
+			moq_clock::sim::yield_now().await;
+		}
+		panic!("PUBLISH_DONE never went out");
+	}
+
+	/// A track that ends within an RTT of SUBSCRIBE_OK ends its subscription before the
+	/// joining FETCH sent on that SUBSCRIBE_OK arrives. The FETCH is still answered with the
+	/// Largest group's head, until the subscriber closes the request.
+	#[moq_clock::test]
+	async fn a_joining_fetch_after_the_track_ends_is_answered() {
+		for version in JOINING_DRAFTS {
+			let mut h = serve(version);
+			publish_groups(&mut h, 4);
+			let mut group = h.track.create_group(group::Info { sequence: 5 }).unwrap();
+			group.write_frame(timestamp(), b"the-head".as_slice()).unwrap();
+			group.finish().unwrap();
+			settle().await;
+
+			let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let mut serving = std::pin::pin!(
+				h.publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+			);
+			registered(&h, serving.as_mut()).await;
+			finish_and_retain(&h, serving.as_mut()).await;
+
+			// The FETCH lands an RTT after PUBLISH_DONE.
+			moq_clock::sleep(Duration::from_millis(100)).await;
+			let mark = h.log.writes.lock().unwrap().len();
+			let mut buf = bytes::Bytes::from(joining_fetch(&h, mark).await.unwrap());
+			assert_eq!(
+				crate::coding::decode_varint(&mut buf, version).unwrap(),
+				ietf::FetchOk::ID,
+				"{version}: the joining FETCH was refused"
+			);
+			let ok = crate::coding::decode_buf(&mut buf, version, |r, v| ietf::FetchOk::decode(r, v)).unwrap();
+			assert_eq!(ok.end_location, Location { group: 5, object: 1 }, "{version}");
+			assert_eq!(
+				occurrences(&h.log, b"the-head"),
+				1,
+				"{version}: the head was not served"
+			);
+			assert!(h.log.resets().is_empty(), "{version}");
+
+			// Closing the request drops the join, and a FETCH after that is refused.
+			assert!(futures::poll!(serving.as_mut()).is_pending(), "{version}");
+			assert!(!h.publisher.joins.read().is_empty(), "{version}");
+			h.session.close(Close::Fin);
+			serving.await.unwrap();
+			assert!(
+				h.publisher.joins.read().is_empty(),
+				"{version}: the join outlived its request"
+			);
+			h.session.reopen();
+			assert_eq!(joining_refusal(&h, version).await, INVALID_JOINING_REQUEST_ID);
+		}
+	}
+
+	/// A REQUEST_UPDATE that crossed PUBLISH_DONE is skipped, not taken as a protocol
+	/// violation, and the join stays until the subscriber's FIN.
+	#[moq_clock::test]
+	async fn an_update_after_publish_done_keeps_the_join() {
+		for version in JOINING_DRAFTS {
+			// One script shared by every stream, so the update can arrive after PUBLISH_DONE.
+			let mut h = serve_session(
+				version,
+				crate::track::Info::timed(),
+				crate::origin::Route::default(),
+				ScriptedSession::new(Vec::new()),
+			);
+			publish_groups(&mut h, 5);
+			settle().await;
+			let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let mut serving = std::pin::pin!(
+				h.publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+			);
+			registered(&h, serving.as_mut()).await;
+			finish_and_retain(&h, serving.as_mut()).await;
+
+			// REQUEST_UPDATE, Request ID 2, no parameters.
+			h.session.push(&[0x02, 0, 2, 2, 0]);
+			for _ in 0..10 {
+				assert!(futures::poll!(serving.as_mut()).is_pending(), "{version}");
+				moq_clock::sim::yield_now().await;
+			}
+			assert!(h.log.closes().is_empty(), "{version}: the update closed the session");
+			assert!(
+				!h.publisher.joins.read().is_empty(),
+				"{version}: the update dropped the join"
+			);
+
+			h.session.close(Close::Fin);
+			serving.await.unwrap();
+			assert!(h.publisher.joins.read().is_empty(), "{version}");
+		}
+	}
+
+	/// A subscription the subscriber cancels before the track ends keeps nothing for a later
+	/// joining FETCH.
+	#[moq_clock::test]
+	async fn an_unsubscribed_join_is_not_kept() {
+		for version in JOINING_DRAFTS {
+			let mut h = serve(version);
+			publish_groups(&mut h, 5);
+			settle().await;
+			let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let mut serving = std::pin::pin!(
+				h.publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+			);
+			registered(&h, serving.as_mut()).await;
+			h.session.close(Close::Fin);
+			serving.await.unwrap();
+			assert!(h.publisher.joins.read().is_empty(), "{version}");
+			h.session.reopen();
+			assert_eq!(joining_refusal(&h, version).await, INVALID_JOINING_REQUEST_ID);
+		}
+	}
+
+	/// The session closing frees every join a finished subscription kept.
+	#[moq_clock::test]
+	async fn a_session_close_frees_every_kept_join() {
+		for version in JOINING_DRAFTS {
+			let mut h = serve(version);
+			publish_groups(&mut h, 5);
+			settle().await;
+			let mut servings = Vec::new();
+			for id in [REQUEST_ID, REQUEST_ID + 2] {
+				let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+					.await
+					.unwrap();
+				let mut msg = subscribe(Filter::NextObject, None);
+				msg.request_id = RequestId(id);
+				let mut serving = Box::pin(h.publisher.clone().run_subscribe_stream(stream, msg));
+				registered_as(&h, RequestId(id), serving.as_mut()).await;
+				servings.push(serving);
+			}
+			h.track.finish().unwrap();
+			for _ in 0..50 {
+				for serving in &mut servings {
+					assert!(futures::poll!(serving.as_mut()).is_pending(), "{version}");
+				}
+				moq_clock::sim::yield_now().await;
+			}
+			assert_eq!(
+				h.publisher.joins.read().len(),
+				2,
+				"{version}: the finished joins were not kept"
+			);
+
+			crate::transport::poll::Session::close(&h.session, 0, "done");
+			for serving in servings {
+				serving.await.unwrap();
+			}
+			assert!(h.publisher.joins.read().is_empty(), "{version}");
+		}
+	}
+
+	/// How a token subscription's grant ends after its track did.
+	#[derive(Clone, Copy, Debug)]
+	enum GrantEnd {
+		Expired,
+		Revoked,
+	}
+
+	/// A join kept past the track's end reads the cache on the subscription's request token,
+	/// so it goes once that grant expires or is revoked, and a late FETCH is refused.
+	#[moq_clock::test]
+	async fn a_kept_join_ends_with_its_request_token() {
+		const VERSION: Version = Version::Draft18;
+		for end in [GrantEnd::Expired, GrantEnd::Revoked] {
+			let (auth, mut requests, _cred) = auth_covering_other();
+			let mut h = serve_with_auth(VERSION, auth, Vec::new());
+			let rt = h.publisher.runtime.clone();
+			publish_groups(&mut h, 5);
+			settle().await;
+
+			let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), VERSION)
+				.await
+				.unwrap();
+			let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
+			let accepted = async { requests.next().await.expect("a request") };
+			let request = match futures::future::select(std::pin::pin!(accepted), serving.as_mut()).await {
+				futures::future::Either::Left((request, _)) => request,
+				futures::future::Either::Right((res, _)) => panic!("{end:?}: ended unverified: {res:?}"),
+			};
+			let enforced = request.accept(grant_all_expiring(&rt, Some(60)));
+			registered(&h, serving.as_mut()).await;
+			finish_and_retain(&h, serving.as_mut()).await;
+
+			match end {
+				GrantEnd::Expired => moq_clock::sleep(Duration::from_secs(61)).await,
+				GrantEnd::Revoked => {
+					moq_clock::sleep(Duration::from_secs(1)).await;
+					assert!(futures::poll!(serving.as_mut()).is_pending(), "{end:?}");
+					enforced.revoke(crate::SessionError::Unauthorized, "revoked");
+				}
+			}
+			let _ = moq_clock::timeout(Duration::from_secs(1), serving.as_mut())
+				.await
+				.unwrap_or_else(|_| panic!("{end:?}: the join outlived its grant"));
+			assert!(h.publisher.joins.read().is_empty(), "{end:?}");
+			assert_eq!(
+				joining_refusal(&h, VERSION).await,
+				INVALID_JOINING_REQUEST_ID,
+				"{end:?}"
+			);
 		}
 	}
 

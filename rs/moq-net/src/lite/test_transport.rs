@@ -1083,6 +1083,11 @@ impl ScriptedSession {
 		*self.close.lock().unwrap() = Some(close);
 	}
 
+	/// Undo [`Self::close`], so streams opened from here park once their script runs out.
+	pub fn reopen(&self) {
+		*self.close.lock().unwrap() = None;
+	}
+
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
 	/// replies normally after its transport header gets send capacity.
 	pub fn gated_open(scripts: Vec<Vec<u8>>, gate: kio::Consumer<bool>) -> Self {

@@ -975,7 +975,7 @@ impl Publisher {
 
 		if let Some(done) = refused {
 			drop(join);
-			return self.write_publish_done(stream, done, 0, None).await;
+			return self.write_publish_done(stream, done, 0, None, None).await;
 		}
 
 		// Group streams opened over every time the subscription forwarded, which
@@ -1109,7 +1109,7 @@ impl Publisher {
 		};
 
 		drop(join);
-		self.write_publish_done(stream, done, opened, None).await
+		self.write_publish_done(stream, done, opened, None, None).await
 	}
 
 	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one

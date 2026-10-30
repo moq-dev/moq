@@ -68,7 +68,7 @@ verdicts:
   broadcast` (`remote error: code=0`). Bisected to
   [moq-dev/moq#6348](https://github.com/moq-dev/moq/pull/6348): the harness
   finishes its track before the pre-draft-22 joining FETCH arrives, which
-  [join after a quick finish](/quest/m2/ietf-join-after-finish.md) owns. The
+  [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306) fixes on the Rust publisher; recheck it on Nightly. The
   merge queue does not run the browser harness, so only Nightly sees it.
   - Audio quality: two Chromium Opus `wide` rows exceed their `target_ms_p95`
     budget. The [audio jitter target](/quest/m1/audio-jitter-target/README.md)
@@ -92,8 +92,8 @@ verdicts:
   [#6317](https://github.com/moq-dev/moq/pull/6317)). The moq-mux large-enum
   and moq-net minimal-feature lints pass on main `f42b336f0e`.
 - Interop's finite-track tails fail before draft 22 (`Error: old`, a JS
-  `RESET_STREAM`); [join after a quick finish](/quest/m2/ietf-join-after-finish.md)
-  owns them. TS fails T-STD overflow and late audio starts; the TS reliability
+  `RESET_STREAM`); [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306) fixes the Rust publisher's
+  half, and [JS joining FETCH](/quest/m2/ietf-js-joining-fetch.md) owns the JS one. TS fails T-STD overflow and late audio starts; the TS reliability
   quests own them. The relay-log `FAIL` lines in Interop's self-test are
   negative controls, not failures.
 - Infrastructure flakes in the sample: DNS failures installing Nix
