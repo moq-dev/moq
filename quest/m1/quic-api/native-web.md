@@ -36,7 +36,7 @@ Align the two stacks while each gets its impl:
   it has two `send_datagram`s with different framing: its own prefixes the
   WebTransport session id, the driver's does not. Drop the `Deref`.
 - The session id is chained onto each datagram with `send(impl Buf)`
-  ([streams](/quest/m1/quic-api/streams.md)) instead of allocated and copied
+  ([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)) instead of allocated and copied
   per datagram (quinn-rs/quinn#1724).
 - `quic::web` is supported API in both crates (maintainer, 2026-10-23): a
   WebTransport-over-moq-quic library usable without MoQ, documented, no

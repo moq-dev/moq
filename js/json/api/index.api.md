@@ -23,6 +23,7 @@ export namespace Snapshot {
 	export interface Config<T> {
 		deltas?: boolean;
 		initial?: T;
+		maxGroupBytes?: number;
 		schema?: ZodMiniType<T>;
 	}
 	export namespace Consumer {

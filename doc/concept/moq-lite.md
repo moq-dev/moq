@@ -209,7 +209,13 @@ a literal `*`. The empty pattern matches the empty path.
 
 A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route
-its scope can use.
+its scope can use. A listing reports only routes whose literal name matches its
+patterns: under `**/*.chat`, a claim at `room` is left out even though it could
+serve `room/lobby.chat`, and so is a route above the root. Requests still
+resolve through such covering routes, and a session still forwards them to its
+peer, which routes through them. Code that routes or forwards opts in with the
+origin consumer's covering view: `covering()` in Rust, `{ covering: true }` in
+JS.
 
 ## Authorization
 
