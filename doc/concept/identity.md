@@ -182,10 +182,12 @@ Within one instance, recovery is about which groups are still worth having.
 - **Duplicates are dropped.** A reader receives each group sequence once,
   however many routes deliver it or however often a producer re-creates it. A
   sequence names one group, so resending one cannot correct it.
-- **A drop is terminal for that group.** Where the wire reports drops, the
-  publisher names each group it will not deliver, and every reader of that
-  group, even one still arriving, ends with the publisher's error. Elsewhere a
-  reader gives a missing group up after a grace. The
+- **A drop ends the subscription's copy of a group.** Where the wire reports
+  drops, the publisher names each group a subscription will not get, and every
+  reader of the live copy, even one still arriving, ends with the publisher's
+  error. A fetched copy of that group may still complete, so a drop is no
+  reason to discard one. Elsewhere a reader gives a missing group up after a
+  grace. The
   [moq-lite draft](/draft/moq-lite) lists which versions report drops and why.
 
 moq-transport's FETCH `FILL_TIMEOUT` bounds how long a hop waits on upstream,
