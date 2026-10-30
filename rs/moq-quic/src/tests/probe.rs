@@ -63,7 +63,8 @@ fn measure(row: &str) -> bool {
 	};
 	use std::io::Write as _;
 	let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
-	writeln!(file, "{row}").unwrap();
+	// One write per row, so concurrent appends stay whole
+	file.write_all(format!("{row}\n").as_bytes()).unwrap();
 	true
 }
 

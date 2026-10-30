@@ -111,7 +111,11 @@ impl BandwidthProbe {
 	/// controller's probe now
 	fn judge(&mut self, probing: bool, estimate: Option<u64>, rtt: Duration, now: Instant) -> bool {
 		let estimate = estimate.unwrap_or(0);
-		if estimate >= self.target {
+		self.judge_reached(probing, estimate >= self.target, estimate, rtt, now)
+	}
+
+	fn judge_reached(&mut self, probing: bool, reached: bool, estimate: u64, rtt: Duration, now: Instant) -> bool {
+		if reached {
 			self.attempt = None;
 			self.misses = 0;
 			self.resume = None;
@@ -171,8 +175,50 @@ impl Connection {
 			return Ready::Idle;
 		}
 		let metrics = self.path.congestion.metrics();
-		let probing = metrics.probe_inflight.is_some();
 		let rtt = self.path.rtt.get();
+		let (gate, phase) = variant();
+		if gate != Gate::Pr {
+			// SCRATCH VARIANTS: fill to the pacer and window, with no inflight cap
+			let in_phase = !phase || metrics.probe_inflight.is_some();
+			let estimate = metrics.bandwidth_estimate.unwrap_or(0);
+			let reached = match gate {
+				Gate::Pacing => {
+					let Some(pacing) = metrics.pacing_rate else {
+						return Ready::Idle;
+					};
+					pacing >= target
+				}
+				Gate::Hybrid => {
+					let Some(pacing) = metrics.pacing_rate else {
+						return Ready::Idle;
+					};
+					// Startup's 2.77 gain is the only one past 2x the estimate
+					let startup = pacing > 2 * estimate;
+					if startup { estimate >= target } else { pacing >= target }
+				}
+				_ => estimate >= target,
+			};
+			if !self
+				.bandwidth_probe
+				.judge_reached(in_phase, reached, estimate, rtt, now)
+			{
+				return Ready::Idle;
+			}
+			if !self.find_bandwidth_probe_source() {
+				return Ready::Idle;
+			}
+			if gate != Gate::Pacing {
+				let mtu = self.path.current_mtu();
+				if let Some(at) = self.bandwidth_probe.pacing.delay(target, bytes, mtu, now) {
+					return Ready::Blocked(Some(at));
+				}
+			}
+			self.bandwidth_probe
+				.attempt
+				.get_or_insert(Attempt { since: now, estimate });
+			return Ready::Send;
+		}
+		let probing = metrics.probe_inflight.is_some();
 		if !self
 			.bandwidth_probe
 			.judge(probing, metrics.bandwidth_estimate, rtt, now)
@@ -245,6 +291,28 @@ impl Connection {
 			.filter(|(_, packet)| packet.bandwidth_probe)
 			.flat_map(|(_, packet)| packet.stream_frames.iter().map(|frame| (packet.time_sent, frame.id)))
 	}
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gate {
+	Pr,
+	Pacing,
+	Estimate,
+	Hybrid,
+}
+
+/// SCRATCH: `MOQ_PROBE_GATE=pr|pacing|estimate`, `MOQ_PROBE_PHASE=1|0`
+fn variant() -> (Gate, bool) {
+	static VARIANT: std::sync::OnceLock<(Gate, bool)> = std::sync::OnceLock::new();
+	*VARIANT.get_or_init(|| {
+		let gate = match std::env::var("MOQ_PROBE_GATE").as_deref() {
+			Ok("pacing") => Gate::Pacing,
+			Ok("estimate") => Gate::Estimate,
+			Ok("hybrid") => Gate::Hybrid,
+			_ => Gate::Pr,
+		};
+		(gate, std::env::var("MOQ_PROBE_PHASE").as_deref() != Ok("0"))
+	})
 }
 
 /// A token bucket refilled at the probe's target
