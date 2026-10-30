@@ -363,6 +363,11 @@ send-depth:
 cli-export *args:
     just rs test -p moq-cli --test integration --run-ignored only -E 'test(/^export::/)' "$@"
 
+# Probe every segment moq-hls serves with ffprobe against its HLS playlists and DASH manifest.
+[positional-arguments]
+hls-conformance *args:
+    just rs test -p moq-hls --test integration --run-ignored only -E 'test(/^conformance::/)' "$@"
+
 # Exercise small connection and stream receive windows over real QUIC sockets.
 quic-stress:
     just rs test -p moq-tokio --lib --run-ignored only -E 'test(/^quic::driver::tests::stress_/)'
