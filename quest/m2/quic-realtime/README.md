@@ -26,13 +26,20 @@ spike assumed no consumer; teleoperation uplinks are one):
   ACKs are unchanged.
 - Win on queuing delay, not fairness: a queue near empty at the bottleneck,
   accepting a smaller share against loss-based cross traffic.
-- [The receive-ts spike](/quest/m2/quic-realtime/receive-ts.md) gates the
-  candidates. A negative verdict on the forward-delay signal switches the
-  candidates to RTT gradients rather than abandoning the epic.
+- The receive-ts spike ([moq-dev/moq#7334](https://github.com/moq-dev/moq/pull/7334))
+  landed draft-ietf-quic-receive-ts-03 in `moq-quic`: a session that sets
+  `transport::Config::receive_timestamps` hands each controller the peer's
+  receive time as `moq_congestion::Acked::received`. Its verdict was positive.
+  A trendline over forward delay caught a capacity drop sooner than one over
+  RTT, with fewer false alarms, whenever the ACK path added variance. Over
+  `cellular-bursty` it was noisier than RTT, because per-packet delay sees the
+  scheduler's grants. So the candidates group arrivals into bursts before
+  fitting a trend, as GoogCC does. Reproduce it with `just rs quic-sim`.
 - Bake-off: all three candidates in parallel, each a controller
-  in `moq-congestion`. The spike's moq-shaper uplink
-  presets decide it; the report states the shaper's timing jitter as the
-  noise floor of the delay signal.
+  in `moq-congestion`. The moq-shaper presets `cellular-step`,
+  `cellular-bursty` and `cellular-deep` decide it. The report states the
+  shaper's timing jitter, measured over `near-zero`, as the noise floor of the
+  delay signal.
 - Native probing is required (decided 2026-10-25, maintainer). Every
   candidate implements `moq_congestion::Controller::probes` and reports
   `probe_inflight`, so moq-quic's native probing
@@ -73,7 +80,6 @@ owns that feedback.
 
 ## Required
 
-- [Receive-ts spike](/quest/m2/quic-realtime/receive-ts.md) - the extension in `moq-quic` and a verdict on its forward-delay signal
 - [GCC candidate](/quest/m2/quic-realtime/gcc.md) - libwebrtc's GoogCC vendored into `moq-congestion` and refreshed to current WebRTC
 - [BBR3 delay bound](/quest/m2/quic-realtime/bbr-delay-bound.md) - BBR3 with inflight capped when the forward delay gradient shows queue growth
 - [SCReAMv2 candidate](/quest/m2/quic-realtime/scream.md) - the RFC 8298bis delay path ported to `moq-congestion`

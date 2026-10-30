@@ -1,6 +1,6 @@
 # A cellular uplink whose capacity arrives in scheduler grants: 2 Mbit/s with
-# five datagrams, or 20ms, bunched into each grant, down to 1 Mbit/s at twenty
-# seconds and back at forty.
+# five datagrams, or 20ms, bunched into each grant, down to 1 Mbit/s at ten
+# seconds and back at twenty.
 #
 # The bunching hides the queue's growth from a delay read off any one datagram.
 # The way back is a plain delay.
@@ -23,11 +23,11 @@ count = 5
 window = "20ms"
 
 [[up.steps]]
-at = "20s"
+at = "10s"
 bits_per_second = 1000000
 
 [[up.steps]]
-at = "40s"
+at = "20s"
 bits_per_second = 2000000
 
 [down]

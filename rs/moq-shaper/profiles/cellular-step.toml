@@ -1,5 +1,5 @@
 # A cellular uplink whose capacity drops and comes back: 2 Mbit/s behind a
-# 500ms queue, down to 500 kbit/s at twenty seconds and back at forty.
+# 500ms queue, down to 500 kbit/s at ten seconds and back at twenty.
 #
 # A sender has to see the queue build after the drop before it overflows, and
 # find the capacity again after the recovery. The way back is a plain delay.
@@ -18,11 +18,11 @@ burst = 1500
 queue = "500ms"
 
 [[up.steps]]
-at = "20s"
+at = "10s"
 bits_per_second = 500000
 
 [[up.steps]]
-at = "40s"
+at = "20s"
 bits_per_second = 2000000
 
 [down]

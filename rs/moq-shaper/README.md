@@ -156,9 +156,9 @@ audio-quality lane (`test/audio-quality/`) uses `bursty` and `step`, plus its ow
 | `mild` | A healthy wired LAN: 5ms delay, 5ms sigma, in order. |
 | `bursty` | A paced hop: seven datagrams per 160ms window, released together. |
 | `step` | 5ms for thirty seconds, then 60ms, with no recovery. |
-| `cellular-step` | A 2 Mbit/s uplink behind a 500ms queue that drops to 500 kbit/s at 20s and recovers at 40s. |
-| `cellular-bursty` | A 2 Mbit/s uplink released in scheduler grants of five datagrams or 20ms, at 1 Mbit/s from 20s to 40s. |
-| `cellular-deep` | A 1 Mbit/s uplink behind a 2s queue that drops to 300 kbit/s at 20s and recovers at 40s. |
+| `cellular-step` | A 2 Mbit/s uplink behind a 500ms queue that drops to 500 kbit/s at 10s and recovers at 20s. |
+| `cellular-bursty` | A 2 Mbit/s uplink released in scheduler grants of five datagrams or 20ms, at 1 Mbit/s from 10s to 20s. |
+| `cellular-deep` | A 1 Mbit/s uplink behind a 2s queue that drops to 300 kbit/s at 10s and recovers at 20s. |
 
 Each built-in is a shared path, as a browser page's sessions on one host would be. The `cellular-*` ones
 shape only the uplink and keep a plain delay on the way back, so the acknowledgments are not impaired.

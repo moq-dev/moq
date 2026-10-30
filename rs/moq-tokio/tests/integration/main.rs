@@ -14,6 +14,7 @@ mod close_code;
 mod keylog;
 mod max_age;
 mod receive_credit;
+mod receive_ts;
 mod reconnect;
 mod reset_secret;
 mod runtime;

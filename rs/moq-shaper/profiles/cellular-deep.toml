@@ -1,5 +1,5 @@
 # A cellular uplink with a deep buffer: 1 Mbit/s behind a 2s queue, down to
-# 300 kbit/s at twenty seconds and back at forty.
+# 300 kbit/s at ten seconds and back at twenty.
 #
 # A sender that waits for loss fills the buffer before it sees a drop, so this is
 # where one that reads delay keeps its latency and one that waits does not. The
@@ -19,11 +19,11 @@ burst = 1500
 queue = "2s"
 
 [[up.steps]]
-at = "20s"
+at = "10s"
 bits_per_second = 300000
 
 [[up.steps]]
-at = "40s"
+at = "20s"
 bits_per_second = 1000000
 
 [down]

@@ -938,7 +938,7 @@ async fn benchmark_receive_windows() {
 
 /// Accepts any server certificate: the test dials its own self-signed server.
 #[derive(Debug)]
-struct AnyCert;
+pub(crate) struct AnyCert;
 
 impl rustls::client::danger::ServerCertVerifier for AnyCert {
 	fn verify_server_cert(
