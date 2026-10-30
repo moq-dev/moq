@@ -243,6 +243,18 @@ impl Recording {
 				})
 			}
 		};
+		// A reconfigure keeps the exporter's target, but a rendition removed and re-added derives
+		// its own, while the recording's header can't change: the exporter judges overruns
+		// against a target this playlist doesn't carry.
+		if rendition.target_duration() != slot.playlist.target {
+			tracing::warn!(
+				kind = rendition.kind.as_str(),
+				rendition = %rendition.name,
+				served = rendition.target_duration(),
+				recorded = slot.playlist.target,
+				"rendition returned with another HLS target duration; the recording keeps its own"
+			);
+		}
 		slot.rendition = Some(rendition);
 		slot.queued.push_back((track, cursor));
 		Ok(match slot.recording {
