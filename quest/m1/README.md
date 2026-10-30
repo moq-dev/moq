@@ -185,6 +185,7 @@ removed).
 - [moqsrc max-delay](/quest/m1/gst-max-delay.md) - GStreamer's `moqsrc` takes a `max-delay` property instead of a hard-coded 1 s budget
 - [moq-clock moves into kio::clock](/quest/m1/kio-clock.md) - moq-clock and its test macro become `kio::clock` and `#[kio::test]` before the cut publishes them
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
+- [Binding announcements always carry captures](/quest/m1/ffi-required-captures.md) - moq-ffi and its generated bindings make `captures` a required list once #7266 merges
 
 ## Related
 
