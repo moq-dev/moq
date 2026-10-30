@@ -134,6 +134,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// Frames the input [`decode`](Self::decode) reads. [`Programs`](super::Programs) runs one
 	/// parser for every program instead and hands each its packets.
 	demux: Demux,
+	/// Watches the input [`decode`](Self::decode) reads for a clock step that ends the instance.
+	steps: super::step::Steps,
 	/// PIDs whose route changed while handling the current packet, for the parser to restart.
 	restarts: Vec<u16>,
 	/// Whether a PAT moved the PMT, or a PMT was handled, since
@@ -270,6 +272,7 @@ impl<E: catalog::Catalog> Import<E> {
 			held: std::time::Duration::ZERO,
 			held_edge: None,
 			demux: Demux::new(supports_mpegts),
+			steps: Default::default(),
 			restarts: Vec::new(),
 			claims_changed: false,
 			pmt: None,
@@ -372,6 +375,14 @@ impl<E: catalog::Catalog> Import<E> {
 	/// Append `buf` to the internal scratch and demux every whole TS packet it
 	/// now completes. The buffer is fully consumed; a trailing partial packet
 	/// (< 188 bytes) is retained for the next call.
+	///
+	/// A step of the source's clock onto another timeline ends the instance with
+	/// [`Restart`](super::Restart): the program clock and every timed stream stepping together
+	/// without `discontinuity_indicator`, forward by more than 10 s or back, or the streams
+	/// stepping back after a flagged break. Until the streams have spoken, which a cadenced one
+	/// does within 0.7 s, the input after a suspected step is held rather than published, up to
+	/// half a group's bytes. Every later call repeats the restart; [`finish`](Self::finish) ends
+	/// the instance before the step.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
 		let mut demux = std::mem::take(&mut self.demux);
 		let result = self.decode_with(&mut demux, data);
@@ -386,6 +397,29 @@ impl<E: catalog::Catalog> Import<E> {
 		loop {
 			for pid in self.restarts.drain(..) {
 				demux.restart(pid);
+				self.steps.forget(pid);
+			}
+			let streams = &self.streams;
+			let timed = |pid: u16| {
+				Pid::new(pid)
+					.ok()
+					.and_then(|pid| streams.get(&pid))
+					.is_some_and(|stream| !matches!(stream, Stream::Ignored))
+			};
+			let routes = super::step::Routes {
+				pcr_pid: self.pcr_pid.map(|pid| pid.as_u16()),
+				timed: &timed,
+				now: self.liveness.now(),
+			};
+			match self.steps.judge(demux, &routes) {
+				super::step::Verdict::Route => {}
+				super::step::Verdict::Hold => break,
+				super::step::Verdict::Restart(step) => {
+					let remainder = demux.remainder();
+					demux.drain();
+					self.flush_batch()?;
+					return Err(super::Restart { step, remainder }.into());
+				}
 			}
 			let Some(packet) = demux.next() else { break };
 			self.packet(&packet)?;
@@ -1801,6 +1835,10 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Flush any buffered PES and finish every track.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
+		// A step still being judged never completed: what it held routes as read.
+		if !self.finished && self.steps.settle() {
+			self.decode(&[])?;
+		}
 		self.finished = true;
 		self.demux.finish();
 		for pid in self.headers.keys().copied().collect::<Vec<_>>() {
@@ -1985,7 +2023,7 @@ fn section_framed(stream_type: u8, cuei: bool) -> bool {
 }
 
 // Match the raw TS accumulator: half a MoQ group bounds one program's staged input.
-const STAGING_BYTES_MAX: usize = (moq_net::group::MAX_CACHE_BYTES / 2) as usize;
+pub(super) const STAGING_BYTES_MAX: usize = (moq_net::group::MAX_CACHE_BYTES / 2) as usize;
 const STAGING_UNITS_MAX: usize = moq_net::group::MAX_GROUP_FRAMES / 2;
 
 #[derive(Default)]
@@ -2829,7 +2867,7 @@ impl Liveness {
 ///
 /// 0x47 is the packet sync byte but also occurs freely in payload (TS has no byte
 /// stuffing), so a lone 0x47 isn't a boundary.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(super) struct Framer {
 	/// False until a candidate is confirmed by the next packet's sync byte; once true we
 	/// stride 188 at a time and trust the per-packet check. Persists across calls so a
@@ -6019,10 +6057,11 @@ pub(super) mod test {
 	}
 
 	// A looping publisher plays part of a file and wraps to the top (#2729). The wrap rewinds
-	// the audio PTS, which is an encoder restart, so the import ends and the caller publishes
-	// a new broadcast. Every frame published before it is still a whole AC-3 frame.
+	// the PCR and the audio PTS together, which is an encoder restart, so the instance ends at
+	// the wrap and the caller publishes the rest as a new broadcast. Every frame published
+	// before it is still a whole AC-3 frame.
 	#[tokio::test(start_paused = true)]
-	async fn legacy_refuses_a_looping_file_wrap() {
+	async fn legacy_restarts_at_a_looping_file_wrap() {
 		let data = include_bytes!("test_data/ac3.ts");
 
 		// Wrap mid-file on a packet boundary, so the TS layer stays aligned.
@@ -6037,7 +6076,16 @@ pub(super) mod test {
 		let err = import
 			.decode(&bytes::BytesMut::from(&looped[..]))
 			.expect_err("a loop wrap is a restart");
-		assert!(is_rewind(&err), "{err:?}");
+		let restart = err.downcast_ref::<crate::container::ts::Restart>().expect("a restart");
+		assert!(
+			matches!(restart.step, crate::container::ts::Step::Rewind { flagged: false, .. }),
+			"{restart:?}"
+		);
+		assert!(
+			looped.ends_with(&restart.remainder) && restart.remainder.len() <= data.len(),
+			"the new instance starts at the wrap"
+		);
+		import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert!(!frames.is_empty(), "the pass before the wrap published");
@@ -8037,7 +8085,11 @@ pub(super) mod test {
 			.unwrap();
 		assert!(!import.published);
 		assert!(!import.pending.is_empty());
+		// The break routes once the stream shows it is no rewind.
 		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
+		import
+			.decode(mp2_pes(PEER_PID, 1, 20 * 90_000, [0xCC, 0xDD]).as_slice())
+			.unwrap();
 		assert!(import.pending.is_empty(), "old PES survived the timebase reset");
 	}
 
@@ -8280,11 +8332,12 @@ pub(super) mod test {
 		}
 	}
 
-	/// A backwards restart is the same signal, but a rewind: a new broadcast, so the import
-	/// ends. The unwrapper must not read the step back as the 33-bit field wrapping, which
-	/// would put the new timeline 26 hours out and publish it.
+	/// A backwards restart is the same signal, but a rewind: a new broadcast, so the instance
+	/// ends at the break, once every stream stepped back, and hands the input from there on.
+	/// The unwrapper must not read the step back as the 33-bit field wrapping, which would put
+	/// the new timeline 26 hours out and publish it.
 	#[tokio::test(start_paused = true)]
-	async fn a_flagged_backwards_restart_is_refused() {
+	async fn a_flagged_backwards_restart_ends_the_instance() {
 		let (_consumer, _catalog, mut import) = two_stream_import();
 
 		for pid in [PCR_PID, PEER_PID] {
@@ -8292,13 +8345,24 @@ pub(super) mod test {
 				.decode(mp2_pes(pid, 0, 45 * 90_000, [0xAA, 0xBB]).as_slice())
 				.unwrap();
 		}
-		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
-		let err = [PCR_PID, PEER_PID]
-			.into_iter()
-			.try_for_each(|pid| import.decode(mp2_pes(pid, 1, 90_000, [0xCC, 0xDD]).as_slice()))
-			.and_then(|()| import.finish())
+		let mut after = clock_break_packet(PCR_PID);
+		import.decode(&after).unwrap();
+		after.extend(mp2_pes(PCR_PID, 1, 90_000, [0xCC, 0xDD]));
+		import.decode(&after[188..]).unwrap();
+		after.extend(mp2_pes(PEER_PID, 1, 90_000, [0xCC, 0xDD]));
+		let err = import
+			.decode(&after[2 * 188..])
 			.expect_err("a restart below the live edge is a new broadcast");
-		assert!(is_rewind(&err), "{err:?}");
+		let restart = err.downcast_ref::<crate::container::ts::Restart>().expect("a restart");
+		assert_eq!(
+			restart.step,
+			crate::container::ts::Step::Rewind {
+				by: Duration::from_secs(44),
+				flagged: true
+			}
+		);
+		assert_eq!(restart.remainder, after, "the new instance starts at the break");
+		import.finish().unwrap();
 	}
 
 	/// Adaptation stuffing leaves exactly these bytes in a TS payload.
@@ -9790,17 +9854,26 @@ pub(super) mod test {
 	}
 
 	/// An encoder restart that declares the new clock on the PCR PID still restarts lower
-	/// than the live edge: a new broadcast, not a continuation.
+	/// than the live edge: a new broadcast, not a continuation, from the break on.
 	#[tokio::test(start_paused = true)]
-	async fn h264_flagged_backward_restart_is_refused() {
+	async fn h264_flagged_backward_restart_ends_the_instance() {
 		let mut mux = Mux {
 			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
 			..Default::default()
 		};
 		mux.gops(VIDEO, 45 * 90_000, 2);
+		let at = mux.out.len();
 		mux.out.extend_from_slice(&clock_break_packet(VIDEO));
 		mux.gops(VIDEO, 90_000, 2);
-		import_refused(&mux.out);
+		let Err(err) = import_all(&mux.out) else {
+			panic!("the import carried on past a rewind");
+		};
+		let restart = err.downcast_ref::<crate::container::ts::Restart>().expect("a restart");
+		assert!(
+			matches!(restart.step, crate::container::ts::Step::Rewind { flagged: true, .. }),
+			"{restart:?}"
+		);
+		assert_eq!(restart.remainder, mux.out[at..]);
 	}
 
 	/// The same restart unflagged, as a looping playout wraps to the top of its file.
@@ -10040,10 +10113,13 @@ pub(super) mod test {
 			.decode(&synth_pmt(&[(StreamType::H264, PCR_PID)], false))
 			.unwrap();
 		let waiter = kio::Waiter::noop();
-		// Each epoch carries 0.96 s of media, then a flagged PCR restarts the clock.
+		// Each epoch carries 0.96 s of media, then a flagged PCR restarts the clock, which the
+		// media leaps forward from: a rewind would end the instance.
 		for epoch in 0..6 {
 			for frame in 0..25 {
-				import.decode(&pes_packet(PCR_PID, 90_000 + frame * 3_600)).unwrap();
+				import
+					.decode(&pes_packet(PCR_PID, 90_000 + epoch * 60 * 90_000 + frame * 3_600))
+					.unwrap();
 			}
 			import.decode(&flag_discontinuity(pcr_packet(PCR_PID, 0))).unwrap();
 			assert!(

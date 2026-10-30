@@ -176,6 +176,76 @@ pub struct moq_audio_init {
 	pub label: *const c_char,
 	/// Length of `label` in bytes.
 	pub label_len: usize,
+
+	/// Catalog fields the init bytes cannot reveal. Zeroed means none.
+	pub hint: moq_audio_hint,
+}
+
+/// Optional catalog fields for [moq_audio_init::hint].
+///
+/// Zero the struct and set only the `has_*` flags you want. A supplied field is
+/// published as given and is never re-estimated. An absent one is measured from
+/// the frames, as without a hint. A flag set with a 0 value is an invalid config.
+///
+/// New optional fields are appended so existing initializers keep their meaning.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct moq_audio_hint {
+	/// Maximum bitrate in bits per second when `has_bitrate` is true.
+	pub bitrate: u64,
+	/// Whether `bitrate` is present.
+	pub has_bitrate: bool,
+
+	/// The longest span between two group starts on this track, in
+	/// microseconds, when `has_group_duration` is true: a video GOP, or the span
+	/// between the audio cuts you make. An upper bound, so a broadcast may take
+	/// the largest across its tracks. Must be at least 1 and at most
+	/// 2^53 - 1 milliseconds.
+	pub group_duration_us: u64,
+	/// Whether `group_duration_us` is present.
+	pub has_group_duration: bool,
+}
+
+impl moq_audio_hint {
+	/// Copy the supplied fields onto the importer's init.
+	fn apply(&self, init: &mut moq_mux::import::AudioInit) -> Result<(), Error> {
+		init.bitrate = supplied_bitrate(self.has_bitrate, self.bitrate)?;
+		Ok(())
+	}
+
+	/// The supplied group duration, for the track's HLS records.
+	fn group_duration(&self) -> Result<Option<std::time::Duration>, Error> {
+		group_duration(self.has_group_duration, self.group_duration_us)
+	}
+}
+
+/// The longest group duration a hint may give: 2^53 - 1 milliseconds, the largest
+/// integer a JavaScript reader of the catalog holds exactly.
+const MAX_GROUP_DURATION_US: u64 = ((1 << 53) - 1) * 1000;
+
+/// A supplied group duration, `None` when absent, or an error for 0 or past
+/// [MAX_GROUP_DURATION_US].
+fn group_duration(present: bool, us: u64) -> Result<Option<std::time::Duration>, Error> {
+	if !present {
+		return Ok(None);
+	}
+	if us == 0 || us > MAX_GROUP_DURATION_US {
+		return Err(Error::InvalidConfig(format!(
+			"group_duration_us must be 1..={MAX_GROUP_DURATION_US}, got {us}"
+		)));
+	}
+	Ok(Some(std::time::Duration::from_micros(us)))
+}
+
+/// A supplied bitrate, `None` when absent, or an error for 0.
+fn supplied_bitrate(present: bool, bitrate: u64) -> Result<Option<u64>, Error> {
+	match (present, bitrate) {
+		(false, _) => Ok(None),
+		(true, 0) => Err(Error::InvalidConfig(
+			"bitrate must not be 0 when has_bitrate is set".into(),
+		)),
+		(true, bitrate) => Ok(Some(bitrate)),
+	}
 }
 
 /// Configuration for [moq_publish_video].
@@ -218,7 +288,7 @@ pub struct moq_video_hint {
 	/// Whether `coded_width` and `coded_height` are present.
 	pub has_coded: bool,
 
-	/// Maximum bitrate in bits per second when `has_bitrate` is true.
+	/// Maximum bitrate in bits per second when `has_bitrate` is true; it must not be 0.
 	pub bitrate: u64,
 	/// Whether `bitrate` is present.
 	pub has_bitrate: bool,
@@ -232,26 +302,38 @@ pub struct moq_video_hint {
 	pub optimize_for_latency: bool,
 	/// Whether `optimize_for_latency` is present.
 	pub has_optimize_for_latency: bool,
+
+	/// The longest span between two group starts on this track, in
+	/// microseconds, when `has_group_duration` is true: a video GOP, or the span
+	/// between the audio cuts you make. An upper bound, so a broadcast may take
+	/// the largest across its tracks. Must be at least 1 and at most
+	/// 2^53 - 1 milliseconds.
+	pub group_duration_us: u64,
+	/// Whether `group_duration_us` is present.
+	pub has_group_duration: bool,
 }
 
 impl moq_video_hint {
-	/// The catalog hint these flags describe.
-	fn resolve(&self) -> moq_mux::catalog::VideoHint {
+	/// The catalog hint these flags describe, or an error for a bitrate flag set with 0.
+	fn resolve(&self) -> Result<moq_mux::catalog::VideoHint, Error> {
 		let mut out = moq_mux::catalog::VideoHint::default();
 		if self.has_coded {
 			out.coded_width = Some(self.coded_width);
 			out.coded_height = Some(self.coded_height);
 		}
-		if self.has_bitrate {
-			out.bitrate = Some(self.bitrate);
-		}
+		out.bitrate = supplied_bitrate(self.has_bitrate, self.bitrate)?;
 		if self.has_framerate {
 			out.framerate = Some(self.framerate);
 		}
 		if self.has_optimize_for_latency {
 			out.optimize_for_latency = Some(self.optimize_for_latency);
 		}
-		out
+		Ok(out)
+	}
+
+	/// The supplied group duration, for the track's HLS records.
+	fn group_duration(&self) -> Result<Option<std::time::Duration>, Error> {
+		group_duration(self.has_group_duration, self.group_duration_us)
 	}
 }
 
@@ -2097,16 +2179,20 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 ///
 /// Resolves against future announcements: it waits for the announcement to arrive (e.g. over the
 /// network) and then delivers the broadcast handle via `on_broadcast`. Use it right after
-/// [moq_session_connect] to avoid racing announcement gossip. To resolve against only what is
-/// reachable now, use [moq_origin_request] instead. A broadcast created on this origin
-/// resolves once it is announced, like a remote one.
+/// [moq_session_connect] to avoid racing announcement gossip. To resolve one publisher instance
+/// instead, use [moq_origin_request]. A broadcast created on this origin resolves once it is
+/// announced, like a remote one.
+///
+/// `epoch` is the UUIDv7 text of the only publisher instance to follow, or NULL (or empty) to
+/// follow every instance. A pinned follow never delivers another instance taking over, and
+/// delivers its own instance again if it returns after an end.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once announced, and again with a
 /// new handle each time another publisher instance takes over (a restarted publisher, or a
 /// replacement session) or the broadcast returns after it went offline. Drop what was read
 /// from the previous handle then: its tracks end when its session does. The wait ends with
-/// exactly one terminal code: `0` (after [moq_origin_announced_broadcast_cancel], or the origin
-/// closing once a handle was delivered) or a negative error. After the terminal (`<= 0`) callback,
+/// exactly one terminal code: `0` (after [moq_origin_follow_cancel], or the origin closing
+/// once a handle was delivered) or a negative error. After the terminal (`<= 0`) callback,
 /// `on_broadcast` is never called again and `user_data` is never touched again, so release
 /// `user_data` there. The broadcast handle is usable with [moq_consume_catalog] / [moq_consume_track]
 /// and must be freed separately with [moq_consume_close].
@@ -2115,44 +2201,52 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
+/// - `epoch` may be NULL, or must point at `epoch_len` readable bytes.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_broadcast` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_announced_broadcast(
+pub unsafe extern "C" fn moq_origin_follow(
 	origin: u32,
 	path: *const c_char,
 	path_len: usize,
+	epoch: *const c_char,
+	epoch_len: usize,
 	on_broadcast: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
+		let epoch = unsafe { parse_epoch(epoch, epoch_len)? };
 		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast)? };
-		State::lock().origin.consume_announced(origin, path, on_broadcast)
+		State::lock().origin.follow(origin, path, epoch, on_broadcast)
 	})
 }
 
-/// Abort a wait started by [moq_origin_announced_broadcast].
+/// Abort a wait started by [moq_origin_follow].
 ///
 /// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
-/// `user_data`. The [moq_origin_announced_broadcast] `on_broadcast` callback still fires once more
+/// `user_data`. The [moq_origin_follow] `on_broadcast` callback still fires once more
 /// with a terminal `0` (or a negative error), and that final callback is where `user_data` should
 /// be released. Any broadcast handle already delivered is unaffected and must still be freed with
 /// [moq_consume_close].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_origin_announced_broadcast_cancel(task: u32) -> i32 {
+pub extern "C" fn moq_origin_follow_cancel(task: u32) -> i32 {
 	ffi::enter(move || {
 		let task = ffi::parse_id(task)?;
-		State::lock().origin.consume_announced_close(task)
+		State::lock().origin.resolve_close(task)
 	})
 }
 
-/// Request a broadcast from an origin by path, resolving as soon as it can be served.
+/// Request a broadcast from an origin by path, resolving one publisher instance as soon as it
+/// can be served.
 ///
 /// Owns discovery of the path and retries route churn while resolving one publisher instance.
 /// It fails as unroutable once discovery has synced without a covering route, including a
 /// broadcast created but not announced. No separate announcement stream is needed.
 /// Serve on-demand paths with [moq_origin_requests].
+///
+/// `epoch` is the UUIDv7 text of the only publisher instance to accept, or NULL (or empty) for
+/// any instance. A request pinned to an instance that does not serve the path is unroutable.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
 /// with a terminal code: `0` (finished, including after [moq_origin_request_cancel]) or a negative
@@ -2164,20 +2258,24 @@ pub extern "C" fn moq_origin_announced_broadcast_cancel(task: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
+/// - `epoch` may be NULL, or must point at `epoch_len` readable bytes.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_broadcast` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_request(
 	origin: u32,
 	path: *const c_char,
 	path_len: usize,
+	epoch: *const c_char,
+	epoch_len: usize,
 	on_broadcast: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
+		let epoch = unsafe { parse_epoch(epoch, epoch_len)? };
 		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast)? };
-		State::lock().origin.request(origin, path, on_broadcast)
+		State::lock().origin.request(origin, path, epoch, on_broadcast)
 	})
 }
 
@@ -2191,8 +2289,18 @@ pub unsafe extern "C" fn moq_origin_request(
 pub extern "C" fn moq_origin_request_cancel(task: u32) -> i32 {
 	ffi::enter(move || {
 		let task = ffi::parse_id(task)?;
-		State::lock().origin.consume_announced_close(task)
+		State::lock().origin.resolve_close(task)
 	})
+}
+
+/// Parse an optional publisher epoch, where NULL or empty means unpinned.
+///
+/// # Safety
+/// - `epoch` may be NULL, or must point at `epoch_len` readable bytes.
+unsafe fn parse_epoch(epoch: *const c_char, epoch_len: usize) -> Result<Option<moq_net::Epoch>, Error> {
+	unsafe { ffi::parse_str_optional(epoch, epoch_len)? }
+		.map(|epoch| epoch.parse().map_err(|_| Error::InvalidCode))
+		.transpose()
 }
 
 /// Close an origin and clean up its resources.
@@ -2308,21 +2416,26 @@ pub extern "C" fn moq_publish_catalog_finish(broadcast: u32) -> i32 {
 pub unsafe extern "C" fn moq_publish_audio(broadcast: u32, config: *const moq_audio_init) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		let audio = unsafe { parse_audio_init(config)? };
-		State::lock().publish.audio(broadcast, audio)
+		let (audio, hls) = unsafe { parse_audio_init(config)? };
+		State::lock().publish.audio(broadcast, audio, hls)
 	})
 }
 
+/// Returns the init and the track's group duration hint.
+///
 /// # Safety
 /// - As [moq_publish_audio], for `config`.
-unsafe fn parse_audio_init(config: *const moq_audio_init) -> Result<moq_mux::import::AudioInit, Error> {
+unsafe fn parse_audio_init(
+	config: *const moq_audio_init,
+) -> Result<(moq_mux::import::AudioInit, Option<std::time::Duration>), Error> {
 	let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
 	let init = unsafe { ffi::parse_slice(config.init, config.init_len)? };
 	let label = unsafe { ffi::parse_str_optional(config.label, config.label_len)? };
 
 	let mut audio = moq_mux::import::AudioInit::new(audio_format_from_u32(config.format)?, init.to_vec());
 	audio.label = label.map(str::to_string);
-	Ok(audio)
+	config.hint.apply(&mut audio)?;
+	Ok((audio, config.hint.group_duration()?))
 }
 
 /// Publish one video codec as a new media track.
@@ -2338,22 +2451,26 @@ unsafe fn parse_audio_init(config: *const moq_audio_init) -> Result<moq_mux::imp
 pub unsafe extern "C" fn moq_publish_video(broadcast: u32, config: *const moq_video_init) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		let video = unsafe { parse_video_init(config)? };
-		State::lock().publish.video(broadcast, video)
+		let (video, hls) = unsafe { parse_video_init(config)? };
+		State::lock().publish.video(broadcast, video, hls)
 	})
 }
 
+/// Returns the init and the track's group duration hint.
+///
 /// # Safety
 /// - As [moq_publish_audio], for a [moq_video_init].
-unsafe fn parse_video_init(config: *const moq_video_init) -> Result<moq_mux::import::VideoInit, Error> {
+unsafe fn parse_video_init(
+	config: *const moq_video_init,
+) -> Result<(moq_mux::import::VideoInit, Option<std::time::Duration>), Error> {
 	let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
 	let init = unsafe { ffi::parse_slice(config.init, config.init_len)? };
 	let label = unsafe { ffi::parse_str_optional(config.label, config.label_len)? };
 
 	let mut video = moq_mux::import::VideoInit::new(video_format_from_u32(config.format)?, init.to_vec());
 	video.label = label.map(str::to_string);
-	video.hint = config.hint.resolve();
-	Ok(video)
+	video.hint = config.hint.resolve()?;
+	Ok((video, config.hint.group_duration()?))
 }
 
 /// Publish a container, which demuxes and publishes its own tracks.
@@ -3134,8 +3251,8 @@ pub unsafe extern "C" fn moq_track_request_accept(request: u32, info: *const moq
 pub unsafe extern "C" fn moq_track_request_audio(request: u32, config: *const moq_audio_init) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let audio = unsafe { parse_audio_init(config)? };
-		State::lock().publish.track_request_audio(request, audio)
+		let (audio, hls) = unsafe { parse_audio_init(config)? };
+		State::lock().publish.track_request_audio(request, audio, hls)
 	})
 }
 
@@ -3150,8 +3267,8 @@ pub unsafe extern "C" fn moq_track_request_audio(request: u32, config: *const mo
 pub unsafe extern "C" fn moq_track_request_video(request: u32, config: *const moq_video_init) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let video = unsafe { parse_video_init(config)? };
-		State::lock().publish.track_request_video(request, video)
+		let (video, hls) = unsafe { parse_video_init(config)? };
+		State::lock().publish.track_request_video(request, video, hls)
 	})
 }
 
@@ -3492,10 +3609,11 @@ pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst:
 	})
 }
 
-/// Query whether a video rendition may be selected.
+/// Query whether the publisher is serving a video rendition.
 ///
-/// False means no frames are coming and the rendition must not be selected. A catalog that
-/// omits the optional field reads as true.
+/// False means no frames are coming until it re-enables. Pick an enabled rendition, but keep one
+/// already playing while every video rendition is disabled, so a re-enable plays without a
+/// resubscribe. A catalog that omits the optional field reads as true.
 ///
 /// Returns zero on success, or a negative code on failure.
 ///

@@ -87,7 +87,7 @@ void ok(moq::expected<void> result) {
 // Subscribe.
 auto client = ok(moq::Client::init({}));   // a moq::ClientConfig; {} takes every default
 auto session = ok(client->connect("https://relay.example.com").get());
-auto announced = ok(session->consume()->announced_broadcast("my-stream.hang"));
+auto announced = ok(session->consume()->follow("my-stream.hang", std::nullopt));
 auto broadcast = ok(announced->available().get());
 auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
@@ -197,7 +197,7 @@ future completed, which is the executor thread.
 
 ## Disabled renditions
 
-Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
+A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 
 ## Bandwidth estimates
 
@@ -261,7 +261,7 @@ kind `ProtocolKind::kTooManyRequests`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
-A session closed because its credential expired reports `ProtocolKind::kExpired`, and a request refused for an expired token is `moq::Error::kExpired`; refresh the token before retrying.
+A session closed because its credential expired reports `ProtocolKind::kExpired`, and a request refused for an expired token is `moq::Error::kExpired`; refresh the token before retrying. Malformed credentials report `ProtocolKind::kMalformedAuthToken`; correct the token before reconnecting with it.
 A catalog that needs a newer moq-hang draft than this build reads is `moq::Error::kUnsupportedCatalog`; upgrade the library to read it.
 
 Check a result before reading it. `moq::expected` is a bundled `tl::expected`

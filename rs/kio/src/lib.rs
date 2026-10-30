@@ -23,6 +23,9 @@
 //!
 //! [`clock`] is the time those waits run on: logical instants, wall time,
 //! deadlines, timers, and a deterministic simulator for tests.
+//!
+//! With the `macros` feature, `#[kio::machine]` writes a `poll_*` state machine from
+//! straight-line code with explicit waits.
 
 #![warn(missing_docs)]
 
@@ -55,6 +58,9 @@ mod weak;
 mod loom;
 #[cfg(all(test, not(loom)))]
 mod tests;
+
+#[cfg(feature = "macros")]
+pub use kio_macros::machine;
 
 pub use bridge::Bridge;
 pub use consumer::Consumer;

@@ -483,6 +483,21 @@ package-gst *args:
 gst-smoke *args:
     rs/moq-gst/smoke.sh "$@"
 
+# Build the Criterion benches CodSpeed simulates; CI runs them with `cargo codspeed run`.
+# Only single-threaded benches without I/O, whose instruction counts repeat. CodSpeed skips
+# `iter_custom`, so targets made only of it are left out too. Nightly still measures them all.
+codspeed:
+    cargo codspeed build --locked -m simulation \
+        -p kio -p moq-audio -p moq-e2ee -p moq-json -p moq-mux -p moq-net -p moq-pattern -p moq-quic -p moq-rtmp \
+        --features moq-audio/bus,moq-net/fuzz,moq-quic/fuzz \
+        --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
+        --bench catalog --bench containers --bench decode_clock --bench export --bench jitter \
+        --bench parameter_sets --bench ts_programs --bench ts_schedule --bench ts_video \
+        --bench announce --bench auth --bench bandwidth --bench canonical --bench frame --bench interests \
+        --bench priority --bench retirement --bench schedule --bench stats --bench synced --bench tail \
+        --bench tracks --bench varint --bench viewers --bench matching \
+        --bench endpoint --bench receive --bench sent_packets --bench streams --bench chunk_interleaving
+
 # Held feed FETCH readiness across independent request and track counts.
 [positional-arguments]
 bench-feed-fetch *args:

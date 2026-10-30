@@ -34,7 +34,7 @@ flate2 = { workspace = true, features = ["zlib-rs", "runtime_detection"] }
 futures = { workspace = true, optional = true }
 hashbrown = { workspace = true }
 hashlink = { workspace = true }
-kio = { workspace = true }
+kio = { workspace = true, features = ["macros"] }
 moq-pattern = { workspace = true, features = ["serde"] }
 num_enum = { workspace = true }
 rand = { workspace = true }
@@ -52,7 +52,7 @@ uuid = { workspace = true, features = ["js"] }
 loom = { workspace = true }
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 # The tests' executor, with simulated time.
 kio = { path = "../kio", features = ["runtime", "sim"] }
@@ -113,6 +113,12 @@ required-features = ["fuzz"]
 # Reaches the private message codecs through the hidden `fuzz` module.
 [[bench]]
 name = "codec"
+harness = false
+required-features = ["fuzz"]
+
+# Isolates the full fuzz round trip from the message-codec executable.
+[[bench]]
+name = "parameters"
 harness = false
 required-features = ["fuzz"]
 

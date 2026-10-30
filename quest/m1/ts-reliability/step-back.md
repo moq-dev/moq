@@ -23,8 +23,8 @@ The fix belongs where video decode time is reconstructed, not in the jitter
 buffer: the step has to reach the jitter buffer as a regression it can act
 on.
 
-[A timebase step restarts the TS import](/quest/m1/ts-reliability/step-restart.md)
-turns any rewind from a TS or SRT import into a new epoch, so this remains
+Since [moq-dev/moq#7144](https://github.com/moq-dev/moq/pull/7144), a TS or SRT
+import turns any rewind into a new epoch, so this remains
 for every other source (fMP4, MKV, FLV, RTMP, hang publishers). Kept a
 separate quest for that reason.
 
@@ -32,7 +32,3 @@ Tests: an end-to-end TS export of an H.264 + AAC source with the −560 ms
 step, which fails on main and keeps video rendering with the fix.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [A timebase step restarts the TS import](/quest/m1/ts-reliability/step-restart.md) - handles a TS or SRT source's rewind at import

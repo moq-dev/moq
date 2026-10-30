@@ -749,33 +749,20 @@ fn poll_session_stream(stream: &mut Stream<Transport, Version>, waiter: &kio::Wa
 struct SendSetup {
 	stats: crate::stats::Session,
 	version: Version,
+	session: Transport,
+	setup: Box<Setup>,
 	state: SendSetupState,
 }
 
-enum SendSetupState {
-	/// Waiting for stream credit on our own session handle.
-	Open {
-		session: Transport,
-		setup: Box<Setup>,
-	},
-	/// Flushing the buffered SETUP, then FIN and wait for the acknowledgement (a
-	/// reset racing the FIN would discard the unacked message).
-	Send {
-		writer: Writer<crate::transport::boxed::SendStream, Version>,
-		finished: bool,
-	},
-	Done,
-}
-
+#[kio::machine(self.state: SendSetupState)]
 impl SendSetup {
 	fn new(session: Transport, setup: Setup, version: Version, stats: crate::stats::Session) -> Self {
 		Self {
 			stats,
 			version,
-			state: SendSetupState::Open {
-				session,
-				setup: Box::new(setup),
-			},
+			session,
+			setup: Box::new(setup),
+			state: SendSetupState::Start,
 		}
 	}
 
@@ -784,35 +771,22 @@ impl SendSetup {
 			Ok(()) => {}
 			Err(err) => tracing::debug!(%err, "failed to send setup"),
 		}
-		self.state = SendSetupState::Done;
 		Poll::Ready(())
 	}
 
 	fn poll_send(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		loop {
-			match &mut self.state {
-				SendSetupState::Open { session, setup } => {
-					let stream = ready!(session.poll_open_uni(waiter, Default::default()))
-						.map_err(crate::lite::error::from_transport)?;
-					let mut writer = Writer::new(stream, self.version).with_stats(&self.stats);
-					writer.buffer(&super::DataType::Setup)?;
-					writer.buffer(&**setup)?;
-					self.state = SendSetupState::Send {
-						writer,
-						finished: false,
-					};
-				}
-				SendSetupState::Send { writer, finished } => {
-					if !*finished {
-						ready!(writer.poll_flush(waiter))?;
-						writer.finish()?;
-						*finished = true;
-					}
-					return writer.poll_closed(waiter);
-				}
-				SendSetupState::Done => return Poll::Ready(Ok(())),
-			}
-		}
+		// Waiting for stream credit on our own session handle.
+		let stream = wait!(Open => self.session.poll_open_uni(waiter, Default::default()))
+			.map_err(crate::lite::error::from_transport)?;
+		let mut writer: Writer<crate::transport::boxed::SendStream, Version> =
+			Writer::new(stream, self.version).with_stats(&self.stats);
+		writer.buffer(&super::DataType::Setup)?;
+		writer.buffer(&*self.setup)?;
+		// Flushing the buffered SETUP, then FIN and wait for the acknowledgement (a
+		// reset racing the FIN would discard the unacked message).
+		wait!(Flush => writer.poll_flush(waiter))?;
+		writer.finish()?;
+		Poll::Ready(wait!(Close => writer.poll_closed(waiter)))
 	}
 }
 
@@ -828,18 +802,7 @@ struct SendGoaway {
 	state: SendGoawayState,
 }
 
-enum SendGoawayState {
-	Waiting,
-	Open {
-		payload: crate::goaway::Goaway,
-	},
-	/// Keep the writer through FIN acknowledgement, since dropping it resets the stream.
-	Send {
-		stream: Stream<Transport, Version>,
-		finished: bool,
-	},
-}
-
+#[kio::machine(self.state: SendGoawayState)]
 impl SendGoaway {
 	fn new(
 		session: Transport,
@@ -853,73 +816,55 @@ impl SendGoaway {
 			goaway,
 			closed: session.clone(),
 			session,
-			state: SendGoawayState::Waiting,
+			state: SendGoawayState::Start,
 		}
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		loop {
-			if self.closed.poll_closed(waiter).is_ready() {
+		#[every_poll]
+		if self.closed.poll_closed(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+
+		let payload: crate::goaway::Goaway = match wait!(Trigger => self.goaway.poll_triggered(waiter)) {
+			Some(payload) => payload,
+			None => return Poll::Ready(()),
+		};
+		if !self.version.has_goaway() {
+			return Poll::Ready(());
+		}
+		let mut stream: Stream<Transport, Version> = match wait!(Open => Stream::poll_open(&self.session, self.version, waiter))
+		{
+			Ok(stream) => stream,
+			Err(err) => {
+				tracing::warn!(%err, "failed to send goaway");
 				return Poll::Ready(());
 			}
-			match &mut self.state {
-				SendGoawayState::Waiting => {
-					let Some(payload) = ready!(self.goaway.poll_triggered(waiter)) else {
-						return Poll::Ready(());
-					};
-					if !self.version.has_goaway() {
-						return Poll::Ready(());
-					}
-					self.state = SendGoawayState::Open { payload };
-				}
-				SendGoawayState::Open { payload } => {
-					let mut stream = match ready!(Stream::poll_open(&self.session, self.version, waiter)) {
-						Ok(stream) => stream,
-						Err(err) => {
-							tracing::warn!(%err, "failed to send goaway");
-							return Poll::Ready(());
-						}
-					};
-					stream = stream.with_stats(&self.stats);
-					let msg = super::Goaway {
-						uri: std::borrow::Cow::Borrowed(payload.uri.as_str()),
-					};
-					if let Err(err) = stream
-						.writer
-						.buffer(&super::ControlType::Goaway)
-						.and_then(|()| stream.writer.buffer(&msg))
-					{
-						tracing::warn!(%err, "failed to send goaway");
-						return Poll::Ready(());
-					}
-					self.state = SendGoawayState::Send {
-						stream,
-						finished: false,
-					};
-				}
-				SendGoawayState::Send { stream, finished } => {
-					let result = if !*finished {
-						match ready!(stream.writer.poll_flush(waiter)) {
-							Ok(()) => {
-								*finished = true;
-								stream.writer.finish()
-							}
-							Err(err) => Err(err),
-						}
-					} else {
-						Ok(())
-					};
-					let result = match result {
-						Ok(()) => ready!(stream.writer.poll_closed(waiter)),
-						Err(err) => Err(err),
-					};
-					if let Err(err) = result {
-						tracing::warn!(%err, "failed to send goaway");
-					}
-					return Poll::Ready(());
-				}
-			}
+		};
+		stream = stream.with_stats(&self.stats);
+		let msg = super::Goaway {
+			uri: std::borrow::Cow::Borrowed(payload.uri.as_str()),
+		};
+		if let Err(err) = stream
+			.writer
+			.buffer(&super::ControlType::Goaway)
+			.and_then(|()| stream.writer.buffer(&msg))
+		{
+			tracing::warn!(%err, "failed to send goaway");
+			return Poll::Ready(());
 		}
+
+		// Keep the writer through FIN acknowledgement, since dropping it resets the stream.
+		let finished: Result<(), Error> =
+			wait!(Flush => stream.writer.poll_flush(waiter)).and_then(|()| stream.writer.finish());
+		let closed = wait!(Close => match finished {
+			Ok(()) => stream.writer.poll_closed(waiter),
+			Err(_) => Poll::Ready(Ok(())),
+		});
+		if let Err(err) = finished.and(closed) {
+			tracing::warn!(%err, "failed to send goaway");
+		}
+		Poll::Ready(())
 	}
 }
 

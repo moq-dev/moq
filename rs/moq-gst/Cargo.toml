@@ -36,7 +36,7 @@ url = { workspace = true }
 gst-plugin-version-helper = "0.8"
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 # Decodes the OpusHead the sink publishes, so the surround regression checks playback.
 moq-audio = { path = "../moq-audio", default-features = false }

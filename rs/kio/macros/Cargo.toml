@@ -1,8 +1,9 @@
-# The `#[kio::test]` attribute. A separate crate only because a proc macro
-# must be; `kio` re-exports it behind its `sim` feature.
+# The `#[kio::machine]` and `#[kio::test]` attributes. A separate crate only
+# because a proc macro must be; `kio` re-exports them behind its `macros` and
+# `sim` features.
 [package]
 name = "kio-macros"
-description = "The #[kio::test] attribute; use it through kio's sim feature."
+description = "The #[kio::machine] and #[kio::test] attributes; use them through kio's macros and sim features."
 authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -11,11 +12,25 @@ version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
 
-keywords = ["async", "test", "simulation"]
-categories = ["development-tools::testing"]
+keywords = ["async", "poll", "state-machine", "test", "simulation"]
+categories = ["asynchronous", "development-tools::testing"]
 
 [lib]
 proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+# syn 2, not 3: moq-net's graph already builds syn 2 with `full` and `visit-mut`
+# (thiserror, tracing), so the macro adds no syn build of its own there.
+syn = { version = "2", features = ["full", "visit-mut"] }
+
+[dev-dependencies]
+kio = { path = "..", features = ["macros"] }
+# Runs the UI cases outside clippy, which would print their types with full paths.
+test-env = { path = "../../test-env" }
+# Compiles each mistake in `tests/ui/` and checks the diagnostic it reports.
+trybuild = "1"
 
 [lints]
 workspace = true

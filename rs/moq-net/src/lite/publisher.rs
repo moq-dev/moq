@@ -841,94 +841,81 @@ struct AnnounceServe {
 	state: AnnounceState,
 }
 
-#[expect(
-	clippy::large_enum_variant,
-	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk"
-)]
-enum AnnounceState {
-	/// Reading the ANNOUNCE_REQUEST.
-	Decode,
-	/// Waiting on the peer's SETUP for the session-wide excluded origin
-	/// (lite-05, whose wire carries no per-stream exclude_hop).
-	ExcludeHop { prefix: crate::Path, hidden: bool },
-	/// Streaming announce updates.
-	Run {
-		origin: origin::Consumer,
-		announced: announce::Consumer,
-		run: AnnounceRun,
-	},
-}
-
+#[kio::machine(self.state: AnnounceState)]
 impl AnnounceServe {
 	fn new(shared: Arc<Shared>, stream: Stream<Transport, Version>) -> Self {
 		Self {
 			_withdrawing: shared.withdrawal.register(),
 			shared,
 			stream: Some(stream),
-			state: AnnounceState::Decode,
+			state: AnnounceState::Start,
 		}
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		loop {
-			match &mut self.state {
-				AnnounceState::Decode => {
-					let stream = self.stream.as_mut().expect("stream present");
-					let interest = ready!(stream.reader.poll_decode::<lite::AnnounceRequest>(waiter))?;
-					let prefix = interest.prefix.clone();
-					let hidden = interest.hidden;
+		// Reading the ANNOUNCE_REQUEST.
+		let interest = wait!(Decode => {
+			let stream = self.stream.as_mut().expect("stream present");
+			stream.reader.poll_decode::<lite::AnnounceRequest>(waiter)
+		})?;
+		let prefix: crate::Path = interest.prefix.clone();
+		let hidden: bool = interest.hidden;
 
-					// The identity whose routes we filter out. Lite-04/05 carry it per
-					// announce stream; lite-06+ reads the session-wide SETUP Hop
-					// parameter, the same identity the subscribe path excludes. A peer that
-					// declares nothing falls back to the identity the session assigned it.
-					let assigned = self.shared.peer_hop.unwrap_or(Hop::UNKNOWN);
-					if self.shared.version.has_exclude_hop() {
-						let exclude_hop = match interest.exclude_hop {
-							Hop::UNKNOWN => assigned,
-							hop => hop,
-						};
-						self.start(prefix, exclude_hop, hidden);
-					} else if self.shared.version.has_setup_stream() {
-						self.state = AnnounceState::ExcludeHop { prefix, hidden };
-					} else {
-						self.start(prefix, assigned, hidden);
-					}
-				}
-				AnnounceState::ExcludeHop { prefix, hidden } => {
-					let assigned = self.shared.peer_hop.unwrap_or(Hop::UNKNOWN);
-					let exclude_hop = ready!(self.shared.peer_setup.poll_hop(waiter)).unwrap_or(assigned);
-					let (prefix, hidden) = (prefix.clone(), *hidden);
-					self.start(prefix, exclude_hop, hidden);
-				}
-				AnnounceState::Run { origin, announced, run } => {
-					let stream = self.stream.as_mut().expect("stream present");
-					if self.shared.withdrawal.poll(waiter).is_ready() {
-						run.withdraw(stream, origin, announced)?;
-					}
-					let res = ready!(run.poll(stream, origin, announced, waiter));
-					if let Err(err) = res {
-						match &err {
-							Error::Cancel
-							| Error::Stream(crate::StreamError::Cancel)
-							| Error::Session(crate::SessionError::Cancel)
-							| Error::Transport(_)
-							| Error::IdleTimeout => {
-								tracing::debug!(prefix = %origin.root(), "announcing cancelled");
-							}
-							err => {
-								tracing::warn!(%err, prefix = %origin.root(), "announcing error");
-							}
-						}
-						self.stream.take().expect("stream present").writer.abort(&err);
-					}
-					return Poll::Ready(Ok(()));
-				}
+		// The identity whose routes we filter out. Lite-04/05 carry it per
+		// announce stream; lite-06+ reads the session-wide SETUP Hop
+		// parameter, the same identity the subscribe path excludes. A peer that
+		// declares nothing falls back to the identity the session assigned it.
+		let assigned: Hop = self.shared.peer_hop.unwrap_or(Hop::UNKNOWN);
+		let exclude_hop: Option<Hop> = match self.shared.version.has_exclude_hop() {
+			true => Some(match interest.exclude_hop {
+				Hop::UNKNOWN => assigned,
+				hop => hop,
+			}),
+			// Waits on the peer's SETUP below (lite-05, whose wire carries no
+			// per-stream exclude_hop).
+			false if self.shared.version.has_setup_stream() => None,
+			false => Some(assigned),
+		};
+		let exclude_hop = wait!(ExcludeHop => match exclude_hop {
+			Some(hop) => Poll::Ready(*hop),
+			None => self.shared.peer_setup.poll_hop(waiter).map(|hop| hop.unwrap_or(*assigned)),
+		});
+		let (origin, announced, run): (origin::Consumer, announce::Consumer, AnnounceRun) =
+			self.start(prefix, exclude_hop, hidden);
+
+		// Streaming announce updates.
+		wait!(Run => {
+			let stream = self.stream.as_mut().expect("stream present");
+			if self.shared.withdrawal.poll(waiter).is_ready() {
+				run.withdraw(stream, origin, announced)?;
 			}
-		}
+			let res = ready!(run.poll(stream, origin, announced, waiter));
+			if let Err(err) = res {
+				match &err {
+					Error::Cancel
+					| Error::Stream(crate::StreamError::Cancel)
+					| Error::Session(crate::SessionError::Cancel)
+					| Error::Transport(_)
+					| Error::IdleTimeout => {
+						tracing::debug!(prefix = %origin.root(), "announcing cancelled");
+					}
+					err => {
+						tracing::warn!(%err, prefix = %origin.root(), "announcing error");
+					}
+				}
+				self.stream.take().expect("stream present").writer.abort(&err);
+			}
+			Poll::Ready(())
+		});
+		Poll::Ready(Ok(()))
 	}
 
-	fn start(&mut self, prefix: crate::Path, exclude_hop: Hop, hidden: bool) {
+	fn start(
+		&self,
+		prefix: crate::Path,
+		exclude_hop: Hop,
+		hidden: bool,
+	) -> (origin::Consumer, announce::Consumer, AnnounceRun) {
 		// If the requested prefix is outside our scope (an empty origin, or a token
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
 		// empty set and keep the stream open (the subscriber treats a FIN here as a
@@ -969,7 +956,7 @@ impl AnnounceServe {
 			run.prefix.clone(),
 			crate::auth::Direction::Publish,
 		));
-		self.state = AnnounceState::Run { origin, announced, run };
+		(origin, announced, run)
 	}
 }
 

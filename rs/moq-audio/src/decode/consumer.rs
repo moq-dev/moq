@@ -51,8 +51,8 @@ pub enum Start {
 	/// Decode every cached group.
 	#[default]
 	Oldest,
-	/// Start at the newest group, including earlier groups for decoder warmup. Opening
-	/// waits for the track's live edge, or its end.
+	/// Start at the newest group, skipping whatever is already cached. Opening waits for
+	/// the track's live edge, or its end.
 	Latest,
 }
 
@@ -114,8 +114,6 @@ pub struct Consumer {
 	warmup: Duration,
 	warmup_pending: bool,
 	warmup_until: Option<moq_net::Timestamp>,
-	/// Initial subscription reaches only the warmup window before restoring the skip budget.
-	joining_latest: bool,
 	resolved_sample_rate: u32,
 	resolved_layout: Layout,
 	/// Where the next packet's timestamp should land: the last packet's timestamp
@@ -176,27 +174,23 @@ impl Consumer {
 
 		let name = name.into();
 		let warmup = catalog.warmup.unwrap_or_default();
-		let joining_latest = options.start == Start::Latest && !warmup.is_zero();
-		let budget = if joining_latest {
-			warmup
-		} else {
-			options.max_delay.saturating_add(warmup)
-		};
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, &name))?;
+		// The whole budget from the start: the transport enforces it too, so a narrower one
+		// while joining would drop the groups queued behind a reader slow to take its first.
 		let mut subscriber = track
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.audio)
-					.with_max_delay(budget),
+					.with_max_delay(options.max_delay.saturating_add(warmup)),
 			)
 			.await?;
-		// Latest skips cached history unless decoder warmup needs it. Move the
-		// local cursor, not Subscription::ranges: the latter is aggregated
-		// across subscribers and can ask the publisher to rewind for everyone. The live edge
-		// is known only once the feed is live, so wait for it rather than read the backlog
-		// of a warm copy still waiting on its source; the wait ends with the track.
+		// Latest skips cached history; a warmup is primed by trimming the newest group's
+		// start, like any other join. Move the local cursor, not Subscription::ranges: the
+		// latter is aggregated across subscribers and can ask the publisher to rewind for
+		// everyone. The live edge is known only once the feed is live, so wait for it rather
+		// than read the backlog of a warm copy still waiting on its source; the wait ends
+		// with the track.
 		if options.start == Start::Latest
-			&& warmup.is_zero()
 			&& let Some(live_edge) = subscriber.largest().await
 		{
 			subscriber = subscriber.with_range(live_edge.group..);
@@ -230,7 +224,6 @@ impl Consumer {
 			warmup,
 			warmup_pending: !warmup.is_zero(),
 			warmup_until: None,
-			joining_latest,
 			resolved_sample_rate: sample_rate,
 			resolved_layout: layout,
 			next_start: None,
@@ -337,11 +330,6 @@ impl Consumer {
 			// decoder is about to refuse, so it is observed before anything can fail.
 			let arrival = jitter::millis(now().duration_since(self.origin));
 			let timestamp = mux_frame.timestamp;
-			if self.joining_latest {
-				self.track
-					.set_max_delay(self.options.max_delay.saturating_add(self.warmup));
-				self.joining_latest = false;
-			}
 			let media = timestamp.value() as f64 * 1000.0 / timestamp.scale().as_u64() as f64;
 			self.target.observe(arrival, media);
 
@@ -797,7 +785,7 @@ mod tests {
 		}
 	}
 
-	async fn warmup_output(start: Start, declared: bool) -> (Vec<u128>, usize) {
+	async fn warmup_output(declared: bool) -> (Vec<u128>, usize) {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
@@ -830,7 +818,6 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				start,
 				max_delay: Duration::from_secs(10),
 				..Options::new()
 			},
@@ -960,7 +947,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn warmup_trims_the_join_without_trimming_groups_or_declared_returns() {
-		let (stamps, frames) = warmup_output(Start::Oldest, true).await;
+		let (stamps, frames) = warmup_output(true).await;
 		assert_eq!(
 			stamps,
 			[
@@ -972,16 +959,64 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn warmup_restarts_after_an_undeclared_gap() {
-		let (stamps, frames) = warmup_output(Start::Oldest, false).await;
+		let (stamps, frames) = warmup_output(false).await;
 		assert_eq!(stamps, [80_000, 100_000, 1_080_000, 1_100_000]);
 		assert_eq!(frames, 4 * 960);
 	}
 
+	/// A latest join skips the cached backlog and primes the decoder on the live edge's own
+	/// group, as any other join does, while asking the publisher for its whole budget: the
+	/// transport enforces it too, so a narrower one would drop the groups queued behind a
+	/// reader slow to take its first.
 	#[tokio::test(start_paused = true)]
-	async fn warmup_latest_joins_early_without_replaying_the_skip_budget() {
-		let (stamps, frames) = warmup_output(Start::Latest, true).await;
-		assert_eq!(stamps, [1_100_000]);
-		assert_eq!(frames, 960);
+	async fn warmup_latest_joins_at_the_live_edge_with_its_whole_budget() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(
+			track.clone(),
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		for (start, packets) in [(0, 5), (1_000_000, 6)] {
+			for packet in 0..packets {
+				producer
+					.write(moq_mux::container::Frame {
+						timestamp: Timestamp::from_micros(start + packet * 20_000).unwrap(),
+						duration: None,
+						payload: vec![0; 960 * size_of::<f32>()].into(),
+						keyframe: packet == 0,
+					})
+					.unwrap();
+			}
+			producer.cut(None).unwrap();
+		}
+		producer.finish().unwrap();
+
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		catalog.warmup = Some(Duration::from_millis(80));
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"audio",
+			Options {
+				start: Start::Latest,
+				max_delay: Duration::from_secs(10),
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		assert_eq!(
+			track.subscription().unwrap().max_delay,
+			Some(Duration::from_millis(10_080))
+		);
+
+		let mut stamps = Vec::new();
+		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
+			stamps.push(frame.timestamp.as_micros());
+		}
+		assert_eq!(stamps, [1_080_000, 1_100_000]);
 	}
 
 	#[tokio::test(start_paused = true)]

@@ -58,7 +58,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	}
 	requested := make(chan result, 1)
 	go func() {
-		broadcast, err := origin.Consume().RequestBroadcast(ctx, "dynamic/broadcast")
+		broadcast, err := origin.Consume().Request(ctx, "dynamic/broadcast", nil)
 		requested <- result{broadcast: broadcast, err: err}
 	}()
 
@@ -274,7 +274,7 @@ func TestAudioConsumerDelay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bc, err := origin.Consume().RequestBroadcast(ctx, "audio-delay")
+	bc, err := origin.Consume().Request(ctx, "audio-delay", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +449,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 		}
 	}
 
-	bc, err := origin.Consume().RequestBroadcast(ctx, "video-decode-frame")
+	bc, err := origin.Consume().Request(ctx, "video-decode-frame", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,7 +664,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("route hops = %v, want empty for local origin", ann.Route.Hops)
 	}
 
-	bc, err := consumer.RequestBroadcast(ctx, ann.Prefix)
+	bc, err := consumer.Request(ctx, ann.Prefix, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1173,10 +1173,10 @@ func TestConsumerCancelConcurrent(t *testing.T) {
 	wg.Wait()
 }
 
-// TestRequestBroadcastCancelKeepsTheOrigin cancels a RequestBroadcast parked on a
+// TestRequestCancelKeepsTheOrigin cancels a Request parked on a
 // dynamic handler, then proves the origin still resolves: the cancel has to abort
 // that one request rather than the consumer it was made on.
-func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
+func TestRequestCancelKeepsTheOrigin(t *testing.T) {
 	origin := newOrigin(t)
 	dynamic, err := origin.Requests("")
 	if err != nil {
@@ -1191,7 +1191,7 @@ func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	requested := make(chan error, 1)
 	go func() {
-		_, err := consumer.RequestBroadcast(ctx, "never/served")
+		_, err := consumer.Request(ctx, "never/served", nil)
 		requested <- err
 	}()
 
@@ -1209,7 +1209,7 @@ func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
 			t.Fatalf("err = %v, want context.Canceled", err)
 		}
 	case <-waitCtx.Done():
-		t.Fatal("RequestBroadcast did not return after its context was cancelled")
+		t.Fatal("Request did not return after its context was cancelled")
 	}
 	_ = pending.Reject(0)
 
@@ -1217,7 +1217,7 @@ func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
 	// cancel had torn the origin down.
 	resolved := make(chan error, 1)
 	go func() {
-		_, err := consumer.RequestBroadcast(waitCtx, "later/served")
+		_, err := consumer.Request(waitCtx, "later/served", nil)
 		resolved <- err
 	}()
 
@@ -1448,7 +1448,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 		t.Fatal(err)
 	}
 	consumer := origin.Consume()
-	if _, err := consumer.RequestBroadcast(ctx, "live"); err == nil {
+	if _, err := consumer.Request(ctx, "live", nil); err == nil {
 		t.Fatal("an unannounced broadcast must be unroutable")
 	}
 
@@ -1472,7 +1472,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	if retracted, ok := event.(moq.AnnounceEventEnd); !ok || retracted.Announce.Prefix != "live" {
 		t.Fatalf("unannounce: event=%+v", event)
 	}
-	if _, err := consumer.RequestBroadcast(ctx, "live"); err == nil {
+	if _, err := consumer.Request(ctx, "live", nil); err == nil {
 		t.Fatal("an unannounced broadcast must be unroutable")
 	}
 
@@ -1480,7 +1480,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 		t.Fatal(err)
 	}
 	nextAnnounced(t, ctx, announced)
-	if _, err := consumer.RequestBroadcast(ctx, "live"); err != nil {
+	if _, err := consumer.Request(ctx, "live", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := broadcast.Close(); err != nil {
@@ -1520,8 +1520,8 @@ func TestStalePublicationLeavesItsReplacementAlone(t *testing.T) {
 	if err := stale.Unannounce(); !errors.Is(err, moq.ErrClosed) {
 		t.Fatalf("stale Unannounce = %v, want ErrClosed", err)
 	}
-	if _, err := origin.Consume().RequestBroadcast(ctx, "live"); err != nil {
-		t.Fatalf("RequestBroadcast = %v, want the replacement", err)
+	if _, err := origin.Consume().Request(ctx, "live", nil); err != nil {
+		t.Fatalf("Request = %v, want the replacement", err)
 	}
 }
 
@@ -1671,7 +1671,7 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	consumer := origin.Consume()
 	done := make(chan error, 1)
 	go func() {
-		_, err := consumer.RequestBroadcast(ctx, "live/cam")
+		_, err := consumer.Request(ctx, "live/cam", nil)
 		done <- err
 	}()
 
@@ -1711,7 +1711,7 @@ func TestClosingAPreparedAnswerRefusesTheRequest(t *testing.T) {
 	consumer := origin.Consume()
 	done := make(chan error, 1)
 	go func() {
-		_, err := consumer.RequestBroadcast(ctx, "live/cam")
+		_, err := consumer.Request(ctx, "live/cam", nil)
 		done <- err
 	}()
 
@@ -1728,10 +1728,10 @@ func TestClosingAPreparedAnswerRefusesTheRequest(t *testing.T) {
 	select {
 	case err := <-done:
 		if err == nil {
-			t.Fatal("RequestBroadcast succeeded, want the abandoned answer refused")
+			t.Fatal("Request succeeded, want the abandoned answer refused")
 		}
 		if ctx.Err() != nil {
-			t.Fatalf("RequestBroadcast err = %v, want a refusal before the deadline", err)
+			t.Fatalf("Request err = %v, want a refusal before the deadline", err)
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
