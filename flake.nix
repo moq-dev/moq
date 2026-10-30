@@ -323,6 +323,8 @@
         ktDeps = with pkgs; [
           jdk17
           gradle_8
+          # `just kt check` fails on Kotlin it would reformat; `just kt fix` applies it.
+          ktfmt
         ];
 
         # uniffi-bindgen-go renders rs/moq-ffi into the generated half of
