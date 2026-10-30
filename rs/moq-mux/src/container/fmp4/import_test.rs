@@ -884,7 +884,7 @@ async fn unwrapped_samples_present_at_their_composition_time() {
 						duration: Some(tick as u32),
 						size: Some(2),
 						flags: Some(flags),
-						cts: Some(cts as i32),
+						cts: Some(cts as i64),
 					})
 					.collect::<Vec<_>>()
 					.into(),
@@ -1075,7 +1075,7 @@ fn video_fragment(track_id: u32, dts: u64, tick: u64, entries: &[(u64, u32, u8)]
 						duration: Some(tick as u32),
 						size: Some(2),
 						flags: Some(flags),
-						cts: Some(cts as i32),
+						cts: Some(cts as i64),
 					})
 					.collect::<Vec<_>>()
 					.into(),

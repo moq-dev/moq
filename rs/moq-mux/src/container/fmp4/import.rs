@@ -1096,7 +1096,7 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 			let duration = sample.duration;
 
 			// Checked: a negative composition offset must not wrap into a huge u64 PTS.
-			let pts = dts.checked_add_signed(cts as i64).ok_or(Error::PtsOverflow)?;
+			let pts = dts.checked_add_signed(cts).ok_or(Error::PtsOverflow)?;
 			let duration_ts = duration
 				.map(|duration| Timestamp::new(duration as u64, timescale))
 				.transpose()?;
@@ -1259,7 +1259,7 @@ fn kept(traf: &mp4_atom::Traf, run: &Run) -> Result<mp4_atom::Traf> {
 			duration,
 			size: Some(sample.range.len() as u32),
 			flags: Some(sample.flags),
-			cts: Some(i32::try_from(cts).map_err(|_| Error::PtsOverflow)?),
+			cts: Some(i64::try_from(cts).map_err(|_| Error::PtsOverflow)?),
 		});
 	}
 	let first = run.samples.first().ok_or(Error::MissingTrun)?;

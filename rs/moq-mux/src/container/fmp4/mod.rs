@@ -693,7 +693,7 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 				duration,
 				size: Some(f.payload.len() as u32),
 				flags: Some(flags),
-				cts: (cts != 0).then_some(cts),
+				cts: (cts != 0).then_some(cts.into()),
 			})
 		})
 		.collect::<Result<_>>()?;
@@ -1010,7 +1010,7 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 							avg_bitrate,
 							dec_specific: Some(dec_specific),
 						},
-						sl_config: Default::default(),
+						..Default::default()
 					},
 				},
 				btrt: None,
@@ -1187,7 +1187,7 @@ fn build_mdia(timescale: u32, handler: &[u8; 4], is_video: bool, sample_entry: m
 			smhd: (!is_video).then(mp4_atom::Smhd::default),
 			dinf: mp4_atom::Dinf {
 				dref: mp4_atom::Dref {
-					urls: vec![mp4_atom::Url::default()],
+					entries: vec![mp4_atom::DrefEntry::Url(mp4_atom::Url::default())],
 				},
 			},
 			stbl: mp4_atom::Stbl {
@@ -1321,7 +1321,7 @@ fn gcd(mut a: u128, mut b: u128) -> u128 {
 /// The decode timeline a fragment actually carries: its `tfdt` and each sample's composition
 /// offset. This is what a player reads, as opposed to the PTS [`decode`] reconstructs from it.
 #[cfg(test)]
-pub(crate) fn timeline(fragment: &Bytes) -> (u64, Vec<i32>) {
+pub(crate) fn timeline(fragment: &Bytes) -> (u64, Vec<i64>) {
 	let traf = first_traf(fragment);
 	let cts = traf.trun[0].samples.iter().map(|e| e.cts.unwrap_or_default()).collect();
 	(traf.tfdt.as_ref().unwrap().base_media_decode_time, cts)

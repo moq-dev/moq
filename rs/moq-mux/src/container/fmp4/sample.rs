@@ -84,7 +84,7 @@ pub(crate) struct Resolver {
 /// A sample whose byte range and duration have been validated.
 pub(crate) struct Resolved {
 	pub sample: Sample,
-	pub cts: i32,
+	pub cts: i64,
 	pub range: std::ops::Range<usize>,
 }
 
