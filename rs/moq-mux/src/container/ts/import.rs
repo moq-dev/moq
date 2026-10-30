@@ -362,15 +362,20 @@ impl<E: catalog::Catalog> Import<E> {
 		self.sections.contains_key(&pid) || Pid::new(pid).is_ok_and(|pid| self.streams.contains_key(&pid))
 	}
 
-	/// Carry the TR 101 290 intervals this importer has timed on `pid` over to `to`, which counts
-	/// the PID from here on. See [`Health::hand_over`].
-	pub(super) fn hand_over(&self, pid: u16, to: &mut Self) {
+	/// The TR 101 290 intervals this importer times, and its clock, for another to take over.
+	pub(super) fn timing(&self) -> (&Health, Option<u64>) {
+		(&self.health, self.liveness.now())
+	}
+
+	/// Take over the TR 101 290 intervals `health` timed on `pid` at clock reading `now`, from a
+	/// program that read the same packets, to count the PID from here on. See
+	/// [`Health::hand_over`].
+	pub(super) fn take_over(&mut self, pid: u16, (health, now): (&Health, Option<u64>)) {
 		let cadenced = Pid::new(pid)
 			.ok()
-			.and_then(|pid| to.streams.get(&pid))
+			.and_then(|pid| self.streams.get(&pid))
 			.is_some_and(Stream::cadenced);
-		self.health
-			.hand_over(pid, &mut to.health, cadenced, self.liveness.now(), to.liveness.now());
+		health.hand_over(pid, &mut self.health, cadenced, now, self.liveness.now());
 	}
 
 	/// A reservation on this program's timebase, so every stream shifts by its offset.

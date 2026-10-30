@@ -210,7 +210,7 @@ impl Multiplex {
 }
 
 /// The TR 101 290 checks timed on one program's clock: table, PCR and PTS intervals.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Health {
 	errors: Errors,
 	pcr_pid: Option<u16>,

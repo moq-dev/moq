@@ -6,7 +6,7 @@ use anyhow::Context;
 use mpeg2ts::ts::Pid;
 
 use super::demux::{Demux, Packet};
-use super::health::Checks;
+use super::health::{Checks, Health};
 use super::import::SectionReassembler;
 use super::unclaimed::Unclaimed;
 use super::{Ext, Import, catalog::SI_PIDS, health, psi, stats};
@@ -197,6 +197,27 @@ impl Count {
 	}
 }
 
+/// A program's counts and timers just before it read a packet on its PMT PID, which may move
+/// its counts to another program.
+struct Before {
+	stats: stats::Snapshot,
+	errors: health::Errors,
+	health: Health,
+	now: Option<u64>,
+}
+
+impl Before {
+	fn of(import: &Import<Ext>) -> Self {
+		let (health, now) = import.timing();
+		Self {
+			stats: import.stats(),
+			errors: import.errors().clone(),
+			health: health.clone(),
+			now,
+		}
+	}
+}
+
 /// One PID's counts in one way for the multiplex.
 #[derive(Default)]
 struct Tally {
@@ -333,9 +354,10 @@ impl Programs {
 				}
 				let import = &mut program.import;
 				// A PMT moves counts between programs as it stood before the PMT, so a tail its
-				// end flushes or a refusal on the way to a PID counts once.
+				// end flushes or a refusal on the way to a PID counts once, and an interval the
+				// PMT stops timing carries on.
 				let before = (self.pmt_pids[usize::from(packet.pid)] && import.pmt_pid() == Some(packet.pid))
-					.then(|| (import.stats(), import.errors().clone()));
+					.then(|| Before::of(import));
 				import.packet(&packet)?;
 				self.clock.offer(index, import);
 				if import.claims_changed() {
@@ -580,7 +602,7 @@ impl Programs {
 			tally.release(ended);
 			if let Some(next) = next {
 				let to = &mut self.programs[next].import;
-				program.import.hand_over(read.0, to);
+				to.take_over(read.0, program.import.timing());
 				let reading = readings.entry(next).or_insert_with(|| to.stats());
 				tally.owner = Some((next, Count::read(reading, to.errors(), read)));
 			}
@@ -718,7 +740,7 @@ impl Programs {
 	/// Move program `index` in [`Self::readers`] to the PIDs it claims now, and settle who
 	/// counts each PID in each way it reads it now or did, given its counts `before` the packet
 	/// that moved them, if that was a PMT.
-	fn reclaim(&mut self, index: usize, before: Option<&(stats::Snapshot, health::Errors)>) {
+	fn reclaim(&mut self, index: usize, before: Option<&Before>) {
 		let program = &mut self.programs[index];
 		let claims = program.import.claims();
 		for &pid in program.claims.iter().filter(|pid| claims.binary_search(pid).is_err()) {
@@ -750,7 +772,7 @@ impl Programs {
 		&mut self,
 		read: (u16, Checks),
 		index: usize,
-		before: Option<&(stats::Snapshot, health::Errors)>,
+		before: Option<&Before>,
 		readings: &mut HashMap<usize, stats::Snapshot>,
 	) {
 		let tally = self.tallies.entry(read).or_default();
@@ -761,7 +783,7 @@ impl Programs {
 		}
 		let programs = &self.programs;
 		let mut reading = |at: usize, earlier: bool| match before.filter(|_| earlier && at == index) {
-			Some((stats, errors)) => Count::read(stats, errors, read),
+			Some(before) => Count::read(&before.stats, &before.errors, read),
 			None => {
 				let import = &programs[at].import;
 				let stats = readings.entry(at).or_insert_with(|| import.stats());
@@ -776,12 +798,18 @@ impl Programs {
 			return;
 		};
 		tally.owner = Some((next, reading(next, true)));
-		if let Some(current) = current {
-			let [from, to] = self
-				.programs
-				.get_disjoint_mut([current, next])
-				.expect("a count moves to another program");
-			from.import.hand_over(read.0, &mut to.import);
+		let Some(current) = current else {
+			return;
+		};
+		match before.filter(|_| current == index) {
+			Some(before) => (self.programs[next].import).take_over(read.0, (&before.health, before.now)),
+			None => {
+				let [from, to] = self
+					.programs
+					.get_disjoint_mut([current, next])
+					.expect("a count moves to another program");
+				to.import.take_over(read.0, from.import.timing());
+			}
 		}
 	}
 
@@ -1181,12 +1209,18 @@ mod test {
 	}
 
 	/// A PTS outage on a shared PID counts the same whether or not the program timing it retires
-	/// partway: the program reading on takes over the interval running since the last PTS, which
-	/// it never saw and which began before its own clock started, rather than timing the PID
-	/// only from its own next PTS.
+	/// or drops the PID partway: the program reading on takes over the interval running since
+	/// the last PTS, which it never saw and which began before its own clock started, rather
+	/// than timing the PID only from its own next PTS.
 	#[test]
-	fn a_pts_outage_counts_on_across_a_retirement() {
-		let outage = |retire: bool| {
+	fn a_pts_outage_counts_on_across_a_handover() {
+		#[derive(PartialEq)]
+		enum Leave {
+			Stay,
+			Retire,
+			Drop,
+		}
+		let outage = |leave: Leave| {
 			let origin = crate::source::produce_origin();
 			let mut programs = Programs::new(
 				origin,
@@ -1202,19 +1236,29 @@ mod test {
 			// Program 2 starts 0.5 s after the last PTS on the PID they share, and program 1
 			// leaves before that PTS is late.
 			for ms in (100..=1_500).step_by(100) {
-				let listed = if retire && ms >= 700 { &both[1..] } else { &both[..] };
-				mux.pat(listed).pmt(0x100, 1, 0x1ff, &[(MP2, 0x61)], 0);
+				let left = ms >= 700;
+				let listed = if left && leave == Leave::Retire {
+					&both[1..]
+				} else {
+					&both[..]
+				};
+				mux.pat(listed);
+				match left && leave == Leave::Drop {
+					true => mux.pmt_at(1, 0x100, 1, 0x1ff, &[(MP2, 0x62, &[])], 0),
+					false => mux.pmt(0x100, 1, 0x1ff, &[(MP2, 0x61)], 0),
+				};
 				if ms >= 500 {
 					mux.pmt(0x200, 2, 0x1ff, &[(MP2, 0x61)], 0);
 				}
 				mux.packet(0x1ff, Flags::pcr(27_000_000 + ms * MS));
 				programs.decode(&std::mem::take(&mut mux.out)).unwrap();
 			}
-			assert_eq!(programs.programs.len(), if retire { 1 } else { 2 });
+			assert_eq!(programs.programs.len(), if leave == Leave::Retire { 1 } else { 2 });
 			programs.stats().streams[&0x61].pts_error
 		};
-		assert_eq!(outage(false), 2, "the 1.5 s since the PTS");
-		assert_eq!(outage(true), 2, "counted on by the program left");
+		assert_eq!(outage(Leave::Stay), 2, "the 1.5 s since the PTS");
+		assert_eq!(outage(Leave::Retire), 2, "counted on by the program left");
+		assert_eq!(outage(Leave::Drop), 2, "counted on by the program still carrying it");
 	}
 
 	/// A section stream refused for want of a PCR keeps its refusal in the totals once, though
