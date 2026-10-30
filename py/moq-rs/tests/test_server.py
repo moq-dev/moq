@@ -74,7 +74,7 @@ async def test_server_client_roundtrip():
                 async for announcement in routes(client.announced()):
                     assert announcement.prefix == "hello"
 
-                    broadcast_consumer = await client.request_broadcast(announcement.prefix)
+                    broadcast_consumer = await client.request(announcement.prefix)
                     catalog = await moq.media.catalog(broadcast_consumer)
                     track_name, audio = next(iter(catalog.audio.items()))
                     assert audio.codec == "opus"
@@ -535,7 +535,7 @@ async def test_client_context_keeps_the_body_error():
                     async for announcement in routes(consume.announced()):
                         assert announcement.prefix == "live"
                         break
-                    consumer = await asyncio.wait_for(consume.request_broadcast("live"), timeout=5.0)
+                    consumer = await asyncio.wait_for(consume.request("live"), timeout=5.0)
                     reader = await asyncio.wait_for(consumer.subscribe_track("data"), timeout=5.0)
                     reading.append(asyncio.create_task(drain(reader)))
                     demand = track.demand()

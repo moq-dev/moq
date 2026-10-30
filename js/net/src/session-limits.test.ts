@@ -93,7 +93,7 @@ test.each(["lite", "ietf"] as const)("%s closes on the first advertisement beyon
 		expect((ended as SessionError).code).toBe(SessionCode.TooManyRequests);
 		expect(closing.mock.calls[0]?.[0]?.closeCode).toBe(SessionCode.TooManyRequests);
 	} finally {
-		subscriber.close();
+		if (subscriber instanceof LiteSubscriber) subscriber.close();
 		pair.client.close();
 		pair.server.close();
 		closing.mockRestore();

@@ -419,11 +419,12 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<cr
 				Ok(()) => Error::Cancel,
 				Err(err) => err.clone(),
 			});
-			if !closing.is_local() {
-				kio::wait(|waiter| unis.poll_drain(waiter)).await;
-			}
+			// Whichever side closed it, read what already arrived.
+			kio::wait(|waiter| unis.poll_drain(waiter)).await;
+			// Closed cleanly by dropping or draining: readers see what the peer's clean
+			// close would have shown them.
 			if closing.is_local() {
-				subscriber.close();
+				subscriber.abort(&Error::Session(SessionError::Cancel));
 			} else if let Err(err) = &res {
 				// Every track this session was receiving ends with its error.
 				subscriber.abort(err);
@@ -966,10 +967,11 @@ impl Uni {
 				let res = subscriber.recv_fill(&mut reader).await;
 				stop_on_error(&mut reader, res)?;
 			}
-			// The receiver MUST discard padding. We read it to the end rather than cancel,
-			// so a peer probing for bandwidth gets the throughput it is measuring.
+			// The receiver MUST discard padding. One that dies is not the session's failure.
 			UniType::Padding => {
-				while let Ok(Some(_)) = kio::wait(|waiter| reader.poll_read_chunk(waiter, usize::MAX)).await {}
+				if let Err(err) = kio::wait(|waiter| reader.poll_discard(waiter)).await {
+					tracing::debug!(%err, "padding stream ended");
+				}
 			}
 		}
 		Ok(())
@@ -998,7 +1000,10 @@ async fn run_datagrams(session: Transport, subscriber: Subscriber) -> Result<(),
 	if session.max_datagram_size() == 0 {
 		return Ok(());
 	}
+	// A peer keeping datagrams ready must not hold the session's other tasks.
+	let mut budget = kio::coop::Budget::new(32);
 	loop {
+		kio::wait(|waiter| budget.poll_yield(waiter)).await;
 		let payload = session.recv_datagram().await.map_err(Error::from_transport)?;
 		subscriber.recv_datagram(payload)?;
 	}

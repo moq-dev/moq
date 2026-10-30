@@ -247,7 +247,7 @@ impl<S: wt::RecvStream + 'static> poll::Chunks for super::RecvStream<S> {
 #[cfg(feature = "quic")]
 impl poll::RecvStream for crate::quic::web::RecvStream {
 	type Error = Error<crate::quic::web::ReadError>;
-	type Lease<'a> = crate::quic::driver::Lease<'a>;
+	type Lease<'a> = crate::quic::driver::recv::Lease<'a>;
 
 	fn poll_lease(&mut self, waiter: &moq_net::kio::Waiter, want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
 		crate::quic::web::RecvStream::poll_lease(self, &mut waiter.context(), want).map_err(Error)
@@ -257,20 +257,20 @@ impl poll::RecvStream for crate::quic::web::RecvStream {
 	}
 	fn stop(&mut self, code: u32) {
 		// A stream already closed has nobody left to tell.
-		crate::quic::web::RecvStream::stop(self, code).ok();
+		crate::quic::web::RecvStream::stop(self, code);
 	}
 }
 
 #[cfg(feature = "quic")]
-impl poll::Lease for crate::quic::driver::Lease<'_> {
+impl poll::Lease for crate::quic::driver::recv::Lease<'_> {
 	fn is_fin(&self) -> bool {
-		crate::quic::driver::Lease::is_fin(self)
+		crate::quic::driver::recv::Lease::is_fin(self)
 	}
 	fn chunks(&self) -> impl Iterator<Item = &[u8]> {
-		crate::quic::driver::Lease::chunks(self)
+		crate::quic::driver::recv::Lease::chunks(self)
 	}
 	fn release(self) {
-		crate::quic::driver::Lease::release(self)
+		crate::quic::driver::recv::Lease::release(self)
 	}
 }
 

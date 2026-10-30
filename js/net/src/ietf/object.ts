@@ -289,8 +289,14 @@ export class Frame {
 		if (payload !== undefined && payload.byteLength > 0) await w.write(payload);
 	}
 
-	/** Decode a frame using the group flags, at the cursor's negotiated IETF version. */
-	static decode(c: Cursor, flags: GroupFlags, timescale: Timescale | undefined): Frame {
+	/**
+	 * Decode a frame using the group flags, at the cursor's negotiated IETF version.
+	 *
+	 * `offset` lets a stream's first object start past zero, reporting its absolute Object ID
+	 * in `idDelta` rather than throwing {@link ObjectIdGap}: that is the live tail of a group
+	 * whose head a joining FETCH or a fill brings.
+	 */
+	static decode(c: Cursor, flags: GroupFlags, timescale: Timescale | undefined, offset = false): Frame {
 		// The first object's delta is its absolute Object ID; every later one is the prior ID
 		// plus the delta plus one. moq-lite groups start at object 0 and never skip one, so
 		// a sequential group is a zero delta throughout, and any other value means the group
@@ -326,9 +332,11 @@ export class Frame {
 		const payloadLength = c.u53();
 
 		if (payloadLength > 0) {
-			if (delta !== 0) throw new ObjectIdGap(delta);
+			if (delta !== 0 && !offset) throw new ObjectIdGap(delta);
 			const payload = c.read(payloadLength);
-			return new Frame({ payload, timestamp });
+			const frame = new Frame({ payload, timestamp });
+			frame.idDelta = delta;
+			return frame;
 		}
 
 		const status = c.u53();
@@ -343,12 +351,20 @@ export class Frame {
 			frame.hasProperties = hasProperties;
 			return frame;
 		}
-		if (delta !== 0) throw new ObjectIdGap(delta);
+		if (delta !== 0 && !(offset && (status === 0 || status === GROUP_END))) throw new ObjectIdGap(delta);
 		// Allowed even when the header marks the group's end: that bit only lets a FIN imply it,
 		// and imquic sends both.
-		if (status === GROUP_END) return new Frame();
+		if (status === GROUP_END) {
+			const frame = new Frame();
+			frame.idDelta = delta;
+			return frame;
+		}
 
-		if (status === 0) return new Frame({ payload: new Uint8Array(0), timestamp });
+		if (status === 0) {
+			const frame = new Frame({ payload: new Uint8Array(0), timestamp });
+			frame.idDelta = delta;
+			return frame;
+		}
 
 		throw new Error(`Unsupported object status: ${status}`);
 	}
@@ -483,4 +499,94 @@ export class FetchEndOfRange {
 		await w.u62(this.group);
 		await w.u62(this.object);
 	}
+}
+
+const END_OF_RANGE: readonly number[] = Object.values(EndOfRange);
+
+// Serialization Flags at or above this are named values, not a set of flags.
+const FETCH_NAMED = 0x80;
+// The flag of an object published as a datagram, whose low bits then mean nothing.
+const FETCH_DATAGRAM = 0x40;
+// The low bits, which spell the Subgroup ID.
+const FETCH_SUBGROUP = 0x03;
+
+/** How a fetched object names its Subgroup ID. */
+export type FetchSubgroup = "zero" | "prior" | "next" | "explicit" | "datagram";
+
+/** One object read off a fetch stream, the inverse of {@link FetchFrame.encode}. */
+export type FetchedObject =
+	| {
+			kind: "object";
+			/** The Group ID field: absolute on the first object, a delta to a different group after. */
+			group?: number;
+			/** How the Subgroup ID is spelled. */
+			subgroup: FetchSubgroup;
+			/** The explicit Subgroup ID, for `subgroup: "explicit"`. */
+			subgroupId?: number;
+			/** The Object ID field: absolute with `group`, otherwise a delta from the prior one. */
+			object?: number;
+			/** The Publisher Priority, absent when it repeats the prior object's. */
+			priority?: number;
+			/** The Timestamp in the track's units, when it declared some. */
+			timestamp?: Timestamp;
+			/** The object payload; empty for an empty object. */
+			payload: Uint8Array;
+	  }
+	| { kind: "endOfRange"; reason: EndOfRange; group: number; object: number };
+
+/**
+ * Decode the next object on a fetch stream, in the track's `timescale`, or not at all when
+ * it declared none.
+ */
+export function decodeFetchObject(c: Cursor, timescale: Timescale | undefined): FetchedObject {
+	const flags = c.u53();
+	if (flags >= FETCH_NAMED) {
+		if (!END_OF_RANGE.includes(flags)) {
+			throw new ProtocolViolation(`unknown fetch serialization flags: 0x${flags.toString(16)}`);
+		}
+		return { kind: "endOfRange", reason: flags as EndOfRange, group: c.u53(), object: c.u53() };
+	}
+
+	// Wire order: Group ID, Subgroup ID, Object ID, Priority, Properties.
+	const group = flags & FETCH_GROUP_ID ? c.u53() : undefined;
+	let subgroup: FetchSubgroup;
+	let subgroupId: number | undefined;
+	if (flags & FETCH_DATAGRAM) {
+		subgroup = "datagram";
+	} else {
+		switch (flags & FETCH_SUBGROUP) {
+			case 0:
+				subgroup = "zero";
+				break;
+			case 1:
+				subgroup = "prior";
+				break;
+			case 2:
+				subgroup = "next";
+				break;
+			default:
+				subgroup = "explicit";
+				subgroupId = c.u53();
+		}
+	}
+	const object = flags & FETCH_OBJECT_ID ? c.u53() : undefined;
+	const priority = flags & FETCH_PRIORITY ? c.u8() : undefined;
+
+	let timestamp: Timestamp | undefined;
+	if (flags & FETCH_PROPERTIES) {
+		const length = c.u53();
+		if (length > MAX_OBJECT_EXTENSIONS) {
+			throw new StreamError(StreamCode.MalformedTrack, { message: "object extensions exceed 64 KiB" });
+		}
+		if (timescale !== undefined) {
+			timestamp = c.exact(length, (e) => decodeObjectTime(e, timescale));
+		} else {
+			c.read(length);
+		}
+	}
+
+	// A fetch stream carries no Object Status: a zero length is simply an empty object.
+	const length = c.u53();
+	const payload = length > 0 ? c.read(length) : new Uint8Array(0);
+	return { kind: "object", group, subgroup, subgroupId, object, priority, timestamp, payload };
 }

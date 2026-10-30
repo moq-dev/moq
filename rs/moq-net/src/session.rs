@@ -34,7 +34,7 @@ struct Ended {
 /// task sent it, including one ending the session from inside a single request.
 #[derive(Default)]
 pub(crate) struct Closing {
-	/// The handles closed it by dropping or draining, so received streams are not drained.
+	/// The handles closed it by dropping or draining: a clean close, whatever the protocol reports.
 	local: std::sync::atomic::AtomicBool,
 	/// The first close this side sent: its code, and the error behind it when the closer had one.
 	sent: std::sync::Mutex<Option<(u32, Option<Error>)>>,
