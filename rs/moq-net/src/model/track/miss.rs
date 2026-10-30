@@ -1003,7 +1003,7 @@ mod tests {
 		misses.ask(
 			&track.state.consume(),
 			&fills,
-			&RangeSet::from_iter([0..3]),
+			&RangeSet::from_iter(std::iter::once(0..3)),
 			&Asking {
 				priority: 0,
 				max_delay: None,
@@ -1014,7 +1014,7 @@ mod tests {
 		assert_eq!(misses.joins.len(), 1, "one fill covers the whole run");
 
 		// Refusing the middle group splits the join's holder in two.
-		misses.release(&RangeSet::from_iter([1..2]));
+		misses.release(&RangeSet::from_iter(std::iter::once(1..2)));
 		assert_eq!(misses.joins.len(), 1);
 		misses.release(&RangeSet::from_iter([0..1, 2..3]));
 		assert!(misses.joins.is_empty(), "the join goes with its last piece");
