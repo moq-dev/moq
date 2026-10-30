@@ -604,16 +604,27 @@ mod tests {
 		let mut tasks = Tasks::new();
 		let gate = crate::Producer::new(false);
 		for id in 0..3 {
-			tasks.push(Tagged { id, gate: gate.consume() });
+			tasks.push(Tagged {
+				id,
+				gate: gate.consume(),
+			});
 		}
 
 		let waiter = Waiter::noop();
 		let mut done = Vec::new();
-		assert!(tasks.poll_each(&waiter, |task, out| done.push((task.id, out))).is_pending());
+		assert!(
+			tasks
+				.poll_each(&waiter, |task, out| done.push((task.id, out)))
+				.is_pending()
+		);
 		assert!(done.is_empty());
 
 		open(&gate);
-		assert!(tasks.poll_each(&waiter, |task, out| done.push((task.id, out))).is_ready());
+		assert!(
+			tasks
+				.poll_each(&waiter, |task, out| done.push((task.id, out)))
+				.is_ready()
+		);
 		done.sort();
 		assert_eq!(done, [(0, 0), (1, 10), (2, 20)]);
 	}
