@@ -60,7 +60,7 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [The export clock keeps only the rules admission still needs](/quest/m1/cut-audit/jitter-admission.md) - the clock rules the time and byte admission bound made redundant are measured and removed
 - [Stream-accept loops yield on a per-poll budget](/quest/m1/cut-audit/accept-budget.md) - a peer opening many streams cannot monopolize a session driver
 - [Rust and JS skip a backlog by the same measure](/quest/m1/cut-audit/catalog-parity.md) - a backlog join starts at the same group in every player
-- [Every catalog section skips a malformed entry](/quest/m1/cut-audit/catalog-section-skip.md) - text and data entries follow the video and audio skip rule, `__proto__` included
+- [Text and data sections keep a prototype-named ID](/quest/m1/cut-audit/catalog-proto-ids.md) - text and data entries keep the ID JS's `z.record` drops
 - [Every relay runtime honors or refuses each listen setting](/quest/m1/cut-audit/uring-listen-config.md) - io_uring stops ignoring preferred addresses
 
 ## Related

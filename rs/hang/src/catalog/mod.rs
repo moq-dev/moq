@@ -87,17 +87,16 @@ where
 	serde_json::from_value(serde_json::Value::Object(object)).map_err(serde::de::Error::custom)
 }
 
-/// A media rendition config, decoded on its own so a malformed one costs only itself.
+/// A media rendition config, checked as it decodes.
 pub(crate) trait Rendition: serde::de::DeserializeOwned {
 	/// Refuse a field out of the range its type allows.
 	fn check(&self) -> crate::Result<()>;
 }
 
-/// Decode a media section's renditions, skipping each malformed one instead of refusing the catalog.
+/// Decode a media section's renditions, refusing the catalog if any one is malformed.
 ///
-/// A rendition this build cannot read can't be played anyway, so dropping it keeps its siblings
-/// playable, the same as a rendition with an unknown container. The map itself must decode, so a
-/// section that isn't one is still refused.
+/// Each rendition must be an object whose fields are in range; the error names the rendition.
+/// An unknown container or extension field is not malformed, so it never refuses the catalog.
 pub(crate) fn deserialize_renditions<'de, D, T>(
 	deserializer: D,
 ) -> Result<std::collections::BTreeMap<String, T>, D::Error>
@@ -114,16 +113,13 @@ where
 		Ok(config)
 	};
 
-	Ok(renditions
+	renditions
 		.into_iter()
-		.filter_map(|(id, value)| match decode(value) {
-			Ok(config) => Some((id, config)),
-			Err(err) => {
-				tracing::warn!(%id, %err, "skipping malformed rendition");
-				None
-			}
+		.map(|(id, value)| match decode(value) {
+			Ok(config) => Ok((id, config)),
+			Err(err) => Err(serde::de::Error::custom(format!("malformed rendition {id}: {err}"))),
 		})
-		.collect())
+		.collect()
 }
 
 /// A catalog section: a map of track name to config, published under one well-known root key.

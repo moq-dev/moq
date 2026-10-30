@@ -35,11 +35,11 @@ export function section<T extends z.ZodMiniType>(schema: T, map: string) {
 }
 
 /**
- * A media section's renditions, skipping each malformed one instead of refusing the catalog.
+ * A media section's renditions, refusing the catalog if any one is malformed.
  *
- * A rendition this build cannot read can't be played anyway, so dropping it keeps its siblings
- * playable, the same as a rendition with an unknown container. The map itself must be an object,
- * so a section that isn't one is still refused. Mirrors the Rust `deserialize_renditions`.
+ * Each rendition must parse with `schema`; the issue names the rendition. An unknown container
+ * or extension field is not malformed, so it never refuses the catalog. Mirrors the Rust
+ * `deserialize_renditions`.
  *
  * @param schema - one rendition's schema.
  */
@@ -49,12 +49,17 @@ export function renditions<T extends z.ZodMiniType>(schema: T) {
 		z.custom<Record<string, unknown>>(
 			(value) => typeof value === "object" && value !== null && !Array.isArray(value),
 		),
-		z.transform((raw) => {
+		z.transform((raw, ctx) => {
 			const kept: [string, z.infer<T>][] = [];
 			for (const [id, value] of Object.entries(raw)) {
 				const result = schema.safeParse(value);
 				if (result.success) kept.push([id, result.data]);
-				else console.warn(`skipping malformed rendition ${id}: ${result.error.message}`);
+				else
+					ctx.issues.push({
+						code: "custom",
+						message: `malformed rendition ${id}: ${result.error.message}`,
+						input: value,
+					});
 			}
 			// fromEntries defines each key as its own property, so `__proto__` stays an ID.
 			return Object.fromEntries(kept) as Record<string, z.infer<T>>;

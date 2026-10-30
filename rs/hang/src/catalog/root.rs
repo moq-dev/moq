@@ -259,7 +259,7 @@ impl<E> Catalog<E> {
 	/// Refuse a catalog with an ID naming both a video and an audio rendition, or with a
 	/// rendition field out of range, such as a zero sample rate or a projection out of bounds.
 	///
-	/// Decoding already skips an out-of-range rendition, so this catches a catalog built by hand.
+	/// Decoding already refuses an out-of-range rendition, so this catches a catalog built by hand.
 	pub fn check_renditions(&self) -> Result<()> {
 		use crate::catalog::Rendition;
 
@@ -559,7 +559,7 @@ mod test {
 		));
 	}
 
-	/// A publisher building the catalog by hand is caught before it writes a value every reader skips.
+	/// A publisher building the catalog by hand is caught before it writes a value every reader refuses.
 	#[test]
 	fn fields_out_of_range_are_refused() {
 		use crate::catalog::{AudioLayout, Projection, VideoCodec, VideoConfig};
@@ -856,9 +856,9 @@ mod test {
 	}
 
 	#[test]
-	fn rendition_with_misspelled_broadcast_is_skipped() {
-		// Spelled like a path, so an empty segment or a lone backslash makes the rendition
-		// malformed. Mirrors the JS `rendition broadcast reference is parsed and normalized`.
+	fn rendition_with_misspelled_broadcast_is_refused() {
+		// Spelled like a path, so an empty segment or a lone backslash makes the rendition malformed,
+		// which refuses the catalog. Mirrors the JS `rendition broadcast reference is parsed and normalized`.
 		for broadcast in ["./source/", "/source", "a//b", r"a\b"] {
 			let encoded = serde_json::json!({
 				"video": {"renditions": {"video": {
@@ -869,8 +869,7 @@ mod test {
 			})
 			.to_string();
 
-			let parsed = Catalog::<()>::from_str(&encoded).expect("failed to decode");
-			assert!(parsed.video.renditions.is_empty(), "{broadcast:?} should be skipped");
+			Catalog::<()>::from_str(&encoded).expect_err(&format!("{broadcast:?} should be refused"));
 		}
 	}
 

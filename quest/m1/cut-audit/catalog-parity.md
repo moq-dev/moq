@@ -9,7 +9,10 @@ consumers' skip measurements, with a test in each.
 ## Plan
 
 Found by the 2026-10-24 pre-cut audit at 151a529670. The catalog half of
-this quest (Rust and JS accept the same catalogs) landed separately.
+this quest (Rust and JS accept the same catalogs) landed separately in
+[moq-dev/moq#7035](https://github.com/moq-dev/moq/pull/7035): any malformed
+rendition refuses the whole catalog in both languages (maintainer,
+2026-10-30).
 
 Rust measures newest content minus the next group's start
 (`rs/moq-mux/src/container/consumer.rs`, the `should_skip` check in the

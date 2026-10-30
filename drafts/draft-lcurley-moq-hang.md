@@ -227,8 +227,9 @@ A track name removed from the catalog MUST NOT return with a different identity.
 A consumer MAY configure a decoder once per track from the catalog.
 
 ## Malformed Renditions {#malformed}
-A consumer MUST ignore a malformed audio or video rendition and keep the rest of the catalog, while a `renditions` value that is not an object refuses the catalog.
-A rendition is malformed when it is not an object or a field this document defines has the wrong type or is out of range.
+A consumer MUST refuse a catalog with a malformed audio or video rendition, or with a `renditions` value that is not an object, rather than play the rest of it.
+A rendition is malformed when it is not an object or a field this document defines has the wrong type or is out of range, unless this document says to treat that field as absent, as it does for `hls` ({{hls}}).
+An unknown field never makes a rendition malformed.
 
 `codedWidth`, `codedHeight`, `displayAspectWidth`, `displayAspectHeight`, `sampleRate`, and `numberOfChannels` are integers from 1 to 2^32 - 1, and `bitrate`, `jitter`, `warmup`, and `delay` are integers from 0 to 2^53 - 1.
 
@@ -1143,11 +1144,11 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
-- A `broadcast` reference and an echo `path` are spelled like a path instead of collapsing: a reference with an empty segment or a lone `\` makes its rendition malformed ({{malformed}}), and such an echo `path` refuses the catalog.
+- A `broadcast` reference and an echo `path` are spelled like a path: one with an empty segment or a lone `\` refuses the catalog instead of collapsing.
 - Removed `catalog.json.z` and the data track `compression` field: compression is a track property the transport carries ({{compression}}), so each compressed track is one name, and the catalog, `stats` and `echo` snapshots, HLS record tracks, and JSON data tracks SHOULD be compressed.
 - Replaced the root `archive` section and its per-track timelines with an optional, per-rendition `hls` field on video and audio ({{hls}}). Each record is a segment's first `group` and `pts` in milliseconds, with an optional `duration` where zero marks a stop; frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone. Each rendition numbers its own segments, and an edge maps a rendition's record `n` to its segment `n`. The record track is named `<track>.hls` and is compressed ({{compression}}).
 - A reader refuses a JSON frame in which an object repeats a member name.
-- A consumer ignores a malformed audio or video rendition ({{malformed}}) and keeps the rest of the catalog: a known codec string without valid parameters, a zero or out-of-range dimension, sample rate, or channel count, a bitrate or duration above 2^53 - 1, or a container without a string `kind`.
+- A malformed audio or video rendition ({{malformed}}) refuses the catalog: a known codec string without valid parameters, a zero or out-of-range dimension, sample rate, or channel count, a bitrate or duration above 2^53 - 1, or a container without a string `kind`.
 - Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Removed the Recording section: the store layout is a moq-archive format, documented with that crate, not part of this draft.

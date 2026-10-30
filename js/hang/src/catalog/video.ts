@@ -235,7 +235,7 @@ export const VideoConfigSchema = z.object({
  * Renditions mirror WebCodecs VideoDecoderConfig (https://w3c.github.io/webcodecs/#video-decoder-config).
  */
 export const VideoSchema = z.object({
-	// A map of track name to rendition configuration, skipping a malformed rendition.
+	// A map of track name to rendition configuration; a malformed rendition refuses the catalog.
 	// This is not an array in order for it to work with JSON Merge Patch.
 	renditions: renditions(VideoConfigSchema),
 

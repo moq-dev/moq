@@ -45,7 +45,7 @@ pub struct Video {
 	/// This is not an array in order for it to work with JSON Merge Patch.
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
 	///
-	/// A malformed rendition is skipped when decoding rather than refusing the catalog.
+	/// A malformed rendition refuses the whole catalog when decoding.
 	#[serde(deserialize_with = "crate::catalog::deserialize_renditions")]
 	pub renditions: BTreeMap<String, VideoConfig>,
 

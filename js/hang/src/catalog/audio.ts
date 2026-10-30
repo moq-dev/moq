@@ -120,7 +120,7 @@ function isAmbisonic(channels: number): boolean {
 
 /** Schema for the catalog audio section: a map of track name to rendition config. */
 export const AudioSchema = z.object({
-	// A map of track name to rendition configuration, skipping a malformed rendition.
+	// A map of track name to rendition configuration; a malformed rendition refuses the catalog.
 	// This is not an array so it will work with JSON Merge Patch.
 	renditions: renditions(AudioConfigSchema),
 });

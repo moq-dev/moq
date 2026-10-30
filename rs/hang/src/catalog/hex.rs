@@ -39,14 +39,14 @@ mod test {
 	fn base64_description() {
 		let json = r#"{"video":{"renditions":{"video/0":{"codec":"avc1.42e02a","container":{"kind":"legacy"},"description":"AUIAKv/hABtnQgAq"}}}}"#;
 
-		// The malformed rendition is skipped, with a warning naming the encoding it expected.
-		assert!(Catalog::<()>::from_str(json).unwrap().video.renditions.is_empty());
+		let err = Catalog::<()>::from_str(json).unwrap_err().to_string();
+		assert!(err.contains("expected hex"), "{err}");
 
+		// Also from an already-parsed Value, which is what a consumer deserializes: moq-json
+		// reconstructs one from the frames. That carries no line or column, so this message is
+		// all a consumer gets (moq-json prefixes the field path on its own side).
 		let value: serde_json::Value = serde_json::from_str(json).unwrap();
-		let rendition = value["video"]["renditions"]["video/0"].clone();
-		let err = serde_json::from_value::<crate::catalog::VideoConfig>(rendition)
-			.unwrap_err()
-			.to_string();
+		let err = serde_json::from_value::<Catalog>(value).unwrap_err().to_string();
 		assert!(err.contains("expected hex"), "{err}");
 	}
 

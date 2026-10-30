@@ -51,9 +51,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'avc1.64001g'",
@@ -69,9 +67,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'avc1.64001f.00'",
@@ -87,9 +83,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'avc1.'",
@@ -105,9 +99,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'avc1'",
@@ -275,9 +267,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'hvc1.1.6.X93'",
@@ -293,9 +283,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'hvc1.1.6'",
@@ -311,9 +299,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'hvc1.x.6.L93'",
@@ -329,9 +315,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'hvc1.+1.6.L93'",
@@ -347,9 +331,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'hvc1.1.6.L93..B0'",
@@ -365,9 +347,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'hvc1.1.6.L93.B0.0.0.0.0.0.0'",
@@ -383,9 +363,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'hvc1.1.6.L256'",
@@ -401,9 +379,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'hvc1.1.123456789.L93'",
@@ -419,9 +395,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'hvc1.1.6.L93.100'",
@@ -437,9 +411,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'vp8'",
@@ -512,9 +484,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'vp09.00.10'",
@@ -530,9 +500,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'vp09.00.10.08.01'",
@@ -548,9 +516,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'vp09.00.10.08.01.09.16.09.01.00'",
@@ -566,9 +532,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'vp09.+0.10.08'",
@@ -584,9 +548,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'av01.0.04M.08'",
@@ -640,9 +602,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'av01.0.4M.08'",
@@ -658,9 +618,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'av01.0.04X.08'",
@@ -676,9 +634,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'av01.0.04M.08.0.110'",
@@ -694,9 +650,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codec 'future'",
@@ -823,9 +777,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio codec 'mp4a.40.x'",
@@ -845,9 +797,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio codec 'mp4a.40.256'",
@@ -867,9 +817,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio codec 'mp4a.40.+2'",
@@ -889,9 +837,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio codec 'mp4a.40.2.1'",
@@ -911,9 +857,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio codec 'mp4a.67'",
@@ -1177,9 +1121,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codedWidth 5000000000",
@@ -1196,9 +1138,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codedWidth 0",
@@ -1215,9 +1155,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codedWidth -1",
@@ -1234,9 +1172,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codedWidth 1.5",
@@ -1253,9 +1189,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codedWidth '1280'",
@@ -1272,9 +1206,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codedHeight 1",
@@ -1331,9 +1263,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codedHeight 5000000000",
@@ -1350,9 +1280,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codedHeight 0",
@@ -1369,9 +1297,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codedHeight -1",
@@ -1388,9 +1314,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codedHeight 1.5",
@@ -1407,9 +1331,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video codedHeight '1280'",
@@ -1426,9 +1348,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video displayAspectWidth 1",
@@ -1485,9 +1405,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video displayAspectWidth 5000000000",
@@ -1504,9 +1422,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video displayAspectWidth 0",
@@ -1523,9 +1439,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video displayAspectWidth -1",
@@ -1542,9 +1456,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video displayAspectWidth 1.5",
@@ -1561,9 +1473,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video displayAspectWidth '1280'",
@@ -1580,9 +1490,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video displayAspectHeight 1",
@@ -1639,9 +1547,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video displayAspectHeight 5000000000",
@@ -1658,9 +1564,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video displayAspectHeight 0",
@@ -1677,9 +1581,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video displayAspectHeight -1",
@@ -1696,9 +1598,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video displayAspectHeight 1.5",
@@ -1715,9 +1615,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video displayAspectHeight '1280'",
@@ -1734,9 +1632,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio sampleRate 1",
@@ -1802,9 +1698,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio sampleRate 0",
@@ -1824,9 +1718,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio sampleRate -1",
@@ -1846,9 +1738,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio sampleRate 1.5",
@@ -1868,9 +1758,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio numberOfChannels 1",
@@ -1936,9 +1824,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio numberOfChannels 0",
@@ -1958,9 +1844,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio numberOfChannels -1",
@@ -1980,9 +1864,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio numberOfChannels 1.5",
@@ -2002,9 +1884,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video bitrate 0",
@@ -2109,9 +1989,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio bitrate 9007199254740992",
@@ -2132,9 +2010,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video bitrate -1",
@@ -2151,9 +2027,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio bitrate -1",
@@ -2174,9 +2048,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video bitrate 1.5",
@@ -2193,9 +2065,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio bitrate 1.5",
@@ -2216,9 +2086,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video jitter 0",
@@ -2323,9 +2191,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio jitter 9007199254740992",
@@ -2346,9 +2212,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video jitter -1",
@@ -2365,9 +2229,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio jitter -1",
@@ -2388,9 +2250,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video jitter 1.5",
@@ -2407,9 +2267,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio jitter 1.5",
@@ -2430,9 +2288,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video warmup 0",
@@ -2537,9 +2393,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio warmup 9007199254740992",
@@ -2560,9 +2414,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video warmup -1",
@@ -2579,9 +2431,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio warmup -1",
@@ -2602,9 +2452,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video warmup 1.5",
@@ -2621,9 +2469,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio warmup 1.5",
@@ -2644,9 +2490,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video delay 0",
@@ -2751,9 +2595,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio delay 9007199254740992",
@@ -2774,9 +2616,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video delay -1",
@@ -2793,9 +2633,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio delay -1",
@@ -2816,9 +2654,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video delay 1.5",
@@ -2835,9 +2671,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio delay 1.5",
@@ -2858,9 +2692,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video reorder 0",
@@ -2917,9 +2749,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video reorder -1",
@@ -2936,9 +2766,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video preference -2147483648",
@@ -2995,9 +2823,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video preference -2147483649",
@@ -3014,9 +2840,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video preference 0.5",
@@ -3033,9 +2857,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video container {\"kind\": \"legacy\"}",
@@ -3250,9 +3072,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio container {\"kind\": \"cmaf\"}",
@@ -3275,9 +3095,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video container {}",
@@ -3294,9 +3112,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio container {}",
@@ -3317,9 +3133,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video container {\"kind\": 5}",
@@ -3338,9 +3152,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio container {\"kind\": 5}",
@@ -3363,9 +3175,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video container {\"kind\": null}",
@@ -3384,9 +3194,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio container {\"kind\": null}",
@@ -3409,9 +3217,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video container \"legacy\"",
@@ -3428,9 +3234,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio container \"legacy\"",
@@ -3451,9 +3255,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video description odd hex",
@@ -3470,9 +3272,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video description base64",
@@ -3489,9 +3289,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video description uppercase hex",
@@ -3527,9 +3325,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video label not a string",
@@ -3546,9 +3342,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video enabled not a boolean",
@@ -3565,9 +3359,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video malformed epoch",
@@ -3584,9 +3376,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video projection fov out of range",
@@ -3606,9 +3396,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video projection unknown kind",
@@ -3673,9 +3461,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio ambisonic with 4 channels",
@@ -3737,9 +3523,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio rendition not an object",
@@ -3755,9 +3539,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "video rendition missing codec",
@@ -3771,9 +3553,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
 		"name": "audio rendition missing sampleRate",
@@ -3792,12 +3572,10 @@
 				}
 			}
 		},
-		"audio": [
-			"ok"
-		]
+		"refused": true
 	},
 	{
-		"name": "every rendition malformed leaves empty sections",
+		"name": "every rendition malformed refuses the catalog",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -3815,7 +3593,8 @@
 					}
 				}
 			}
-		}
+		},
+		"refused": true
 	},
 	{
 		"name": "rendition IDs are any string",
