@@ -5633,6 +5633,53 @@ mod tests {
 		(subscriber, consumer)
 	}
 
+	/// A takeover in place keeps the sources the predecessor minted open: they serve the
+	/// instance it continues. A restart in place closes them.
+	#[moq_clock::test]
+	async fn a_takeover_in_place_keeps_the_predecessors_sources() {
+		for takeover in [true, false] {
+			let (mut subscriber, _consumer) = restart_subscriber(SinkSession::new(Default::default()));
+			let mut announced = Announced::default();
+			let path = Path::from_static("room/host");
+			let hop = Some(crate::Hop::new(7).unwrap());
+			subscriber
+				.start_announce(
+					path.clone(),
+					None,
+					crate::Hops::new(),
+					crate::origin::Cost::UNKNOWN,
+					0,
+					hop,
+					&mut announced,
+				)
+				.unwrap();
+			let minted = announced.attached(&path).unwrap().live.consume();
+
+			match takeover {
+				true => subscriber.takeover_announce(
+					path.clone(),
+					path.clone(),
+					None,
+					crate::Hops::new(),
+					crate::origin::Cost::UNKNOWN,
+					0,
+					hop,
+					&mut announced,
+				),
+				false => subscriber.restart_announce(
+					path.clone(),
+					crate::Hops::new(),
+					crate::origin::Cost::UNKNOWN,
+					0,
+					hop,
+					&mut announced,
+				),
+			}
+			.unwrap();
+			assert_eq!(minted.is_closed(), !takeover, "takeover: {takeover}");
+		}
+	}
+
 	/// A restart re-prices the announced route in place: consumers observe another
 	/// active update with the new metadata rather than a retract-and-announce.
 	#[moq_clock::test]
@@ -6469,6 +6516,7 @@ impl Announced {
 			self.routes.insert(path, Held::Withheld(route));
 			return false;
 		}
+		let in_place = predecessor == Some(&path);
 		// An error means the prefix is outside our origin's scope, so don't serve it.
 		let predecessor = predecessor.and_then(|previous| match self.routes.get(previous)? {
 			Held::Attached(attached) => Some(&attached.dynamic),
@@ -6476,7 +6524,15 @@ impl Announced {
 		});
 		match subscriber.origin.requests_route(&path, route.clone(), predecessor) {
 			Ok(dynamic) => {
-				self.attach(path, route, dynamic);
+				// In place, the successor continues the instance the predecessor's sources
+				// serve: they live on with it rather than closing with the advertisement.
+				let live = in_place
+					.then(|| self.attached(&path).map(|previous| std::mem::take(&mut previous.live)))
+					.flatten();
+				self.attach(path.clone(), route, dynamic);
+				if let (Some(live), Some(attached)) = (live, self.attached(&path)) {
+					attached.live = live;
+				}
 				true
 			}
 			Err(_) => {
