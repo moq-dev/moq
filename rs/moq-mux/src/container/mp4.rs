@@ -177,7 +177,7 @@ impl<S: Stream> Export<S> {
 			trak.mdia.mdhd.duration = timeline.deltas.iter().map(|&delta| u64::from(delta)).sum();
 			trak.tkhd.duration = delay + presented;
 			trak.edts = edits(delay, timeline.media_time, presented);
-			trak.mdia.minf.stbl = sample_table(&trak.mdia.minf.stbl.stsd, track, &timeline.deltas);
+			trak.mdia.minf.stbl = sample_table(&trak.mdia.minf.stbl.stsd, track, &timeline);
 			traks.push(trak);
 		}
 		traks.sort_by_key(|trak| (trak.mdia.hdlr.handler != b"vide".into(), trak.tkhd.track_id));
@@ -316,6 +316,8 @@ struct Timeline {
 	/// Each sample's `stts` delta: up to the next sample's decode time, which stretches a
 	/// sample over any gap after it, and the last sample's own duration.
 	deltas: Vec<u32>,
+	/// Each sample's composition offset from its decode time on this timeline.
+	offsets: Vec<i32>,
 	/// Where presentation starts on the media timeline, past the first decode time.
 	media_time: u64,
 	/// When presentation starts, in the media ticks the fragments were written in.
@@ -326,31 +328,47 @@ struct Timeline {
 
 impl Timeline {
 	fn new(id: u32, trak: &mp4_atom::Trak, track: &Track) -> Result<Self> {
-		let mut decode_times = Vec::with_capacity(track.samples.len());
+		// Each fragment's decode time is its first sample's presentation time, so fragments
+		// shorter than a GOP of reordered video step back and forth. Decode on one clock that
+		// a sync sample moves ahead to its fragment's time, which keeps a real gap, and keep
+		// every presentation time by recomputing the composition offsets against it.
+		let mut decode_times: Vec<u64> = Vec::with_capacity(track.samples.len());
+		let mut presentations: Vec<i128> = Vec::with_capacity(track.samples.len());
+		let mut clock: Option<u64> = None;
 		let mut samples = track.samples.iter();
 		for run in &track.chunks {
-			let mut time = run.decode_time;
+			let mut written = run.decode_time;
 			for sample in samples.by_ref().take(run.count as usize) {
+				presentations.push(i128::from(written) + i128::from(sample.cts));
+				let time = match clock {
+					Some(clock) if sample.sync => clock.max(written),
+					Some(clock) => clock,
+					None => written,
+				};
 				decode_times.push(time);
-				time += u64::from(sample.duration);
+				clock = Some(time.checked_add(u64::from(sample.duration)).ok_or(Error::PtsOverflow)?);
+				written += u64::from(sample.duration);
 			}
 		}
 
 		let mut deltas = Vec::with_capacity(decode_times.len());
+		let mut offsets = Vec::with_capacity(decode_times.len());
 		for (i, &time) in decode_times.iter().enumerate() {
 			let delta = match decode_times.get(i + 1) {
-				Some(&next) if next <= time => return Err(unindexable(id, "decode time stops advancing").into()),
 				Some(&next) => {
 					u32::try_from(next - time).map_err(|_| unindexable(id, "a gap overflows a sample delta"))?
 				}
 				None => track.samples[i].duration,
 			};
 			deltas.push(delta);
+			let offset = presentations[i] - i128::from(time);
+			offsets.push(i32::try_from(offset).map_err(|_| unindexable(id, "a composition offset overflows 32 bits"))?);
 		}
 
 		let Some(&first) = decode_times.first() else {
 			return Ok(Self {
 				deltas,
+				offsets,
 				media_time: 0,
 				start: 0,
 				duration: 0,
@@ -358,10 +376,9 @@ impl Timeline {
 		};
 		let mut presented = i128::MAX;
 		let mut end = i128::MIN;
-		for ((&time, sample), &delta) in decode_times.iter().zip(&track.samples).zip(&deltas) {
-			let pts = i128::from(time) + i128::from(sample.cts);
+		for (&pts, sample) in presentations.iter().zip(&track.samples) {
 			presented = presented.min(pts);
-			end = end.max(pts + i128::from(delta));
+			end = end.max(pts + i128::from(sample.duration));
 		}
 		// An Opus track presents one pre-skip into its first packet, and nothing is presented
 		// before the first decode time.
@@ -370,6 +387,7 @@ impl Timeline {
 		let duration = u64::try_from((end - i128::from(start)).max(0)).map_err(|_| Error::PtsOverflow)?;
 		Ok(Self {
 			deltas,
+			offsets,
 			media_time: start - first,
 			start,
 			duration,
@@ -402,9 +420,9 @@ fn edits(delay: u64, media_time: u64, presented: u64) -> Option<mp4_atom::Edts> 
 }
 
 /// The sample tables indexing `track` where its samples lie, each `trun` one chunk.
-fn sample_table(stsd: &mp4_atom::Stsd, track: &Track, deltas: &[u32]) -> mp4_atom::Stbl {
+fn sample_table(stsd: &mp4_atom::Stsd, track: &Track, timeline: &Timeline) -> mp4_atom::Stbl {
 	let mut stts: Vec<mp4_atom::SttsEntry> = Vec::new();
-	for &delta in deltas {
+	for &delta in &timeline.deltas {
 		match stts.last_mut() {
 			Some(last) if last.sample_delta == delta => last.sample_count += 1,
 			_ => stts.push(mp4_atom::SttsEntry {
@@ -415,8 +433,8 @@ fn sample_table(stsd: &mp4_atom::Stsd, track: &Track, deltas: &[u32]) -> mp4_ato
 	}
 
 	let mut ctts: Vec<mp4_atom::CttsEntry> = Vec::new();
-	for sample in &track.samples {
-		let offset = i64::from(sample.cts);
+	for &offset in &timeline.offsets {
+		let offset = i64::from(offset);
 		match ctts.last_mut() {
 			Some(last) if last.sample_offset == offset => last.sample_count += 1,
 			_ => ctts.push(mp4_atom::CttsEntry {
@@ -728,6 +746,51 @@ mod tests {
 			.collect();
 		assert_eq!(deltas.len(), 4);
 		assert_eq!(deltas[1], timescale, "the frame before the gap lasts through it");
+	}
+
+	/// Fragments shorter than a GOP of reordered video each start their decode time at their
+	/// own presentation time, which steps backwards; the index still decodes in order and
+	/// presents every frame at its time.
+	#[tokio::test(start_paused = true)]
+	async fn reordered_video_in_short_fragments_keeps_its_times() {
+		let mut live = Live::avc3();
+		let presentations: [i64; 5] = [0, 120_000, 40_000, 80_000, 160_000];
+		for (i, &timestamp) in presentations.iter().enumerate() {
+			live.track.write(video_frame(timestamp as u64, i % 4 == 0)).unwrap();
+		}
+		live.track.finish().unwrap();
+
+		let mut export = export(&live).await.with_fragment_duration(Duration::ZERO);
+		let mut file = Vec::new();
+		record(&mut export, &mut file).await;
+		finish(export, &mut file);
+		let moov = moov(atoms(&file));
+		let video = trak(&moov, b"vide");
+		let stbl = &video.mdia.minf.stbl;
+
+		let deltas = stbl
+			.stts
+			.entries
+			.iter()
+			.flat_map(|entry| std::iter::repeat_n(i64::from(entry.sample_delta), entry.sample_count as usize));
+		let offsets: Vec<i64> = match &stbl.ctts {
+			Some(ctts) => ctts
+				.entries
+				.iter()
+				.flat_map(|entry| std::iter::repeat_n(entry.sample_offset, entry.sample_count as usize))
+				.collect(),
+			None => vec![0; presentations.len()],
+		};
+		let mut decode = 0;
+		let mut presented = Vec::new();
+		for (delta, offset) in deltas.zip(offsets) {
+			assert!(delta > 0, "decode time advances");
+			presented.push(decode + offset);
+			decode += delta;
+		}
+		let timescale = i64::from(video.mdia.mdhd.timescale);
+		let expected: Vec<i64> = presentations.iter().map(|&us| us * timescale / 1_000_000).collect();
+		assert_eq!(presented, expected);
 	}
 
 	/// Nothing to finish before the header is written.
