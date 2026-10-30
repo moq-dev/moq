@@ -6,6 +6,7 @@
 use std::{
 	io,
 	pin::Pin,
+	sync::{Arc, Mutex, PoisonError},
 	task::{Context, Poll},
 };
 
@@ -51,8 +52,12 @@ impl AsyncWrite for Stream {
 }
 
 /// Where the listeners send classified RTMP connections; empty refuses them.
+///
+/// Connections still classifying hold clones of this, so the sender sits behind
+/// one shared slot that [`Close`] empties when serving stops, ending
+/// [`Incoming::accept`] regardless of them.
 #[derive(Clone, Default)]
-pub(crate) struct Handoff(Option<mpsc::Sender<Stream>>);
+pub(crate) struct Handoff(Arc<Mutex<Option<mpsc::Sender<Stream>>>>);
 
 impl Handoff {
 	/// A handoff and the consumer it feeds.
@@ -61,7 +66,12 @@ impl Handoff {
 	/// which the listener's idle deadline bounds like any other stalled handshake.
 	pub(crate) fn new() -> (Self, Incoming) {
 		let (tx, rx) = mpsc::channel(1);
-		(Self(Some(tx)), Incoming(rx))
+		(Self(Arc::new(Mutex::new(Some(tx)))), Incoming(rx))
+	}
+
+	/// Refuse every later connection once the returned guard drops.
+	pub(crate) fn close_on_drop(&self) -> Close {
+		Close(self.clone())
 	}
 
 	/// Give `stream` to the consumer, or close it when there is none.
@@ -69,12 +79,22 @@ impl Handoff {
 		// The embedder owns an RTMP session's lifetime, so the drain stops counting it here.
 		drop(stream.admission().as_ref().and_then(crate::listener::Admission::take));
 		let peer = stream.tcp().peer_addr().ok();
-		let refused = match &self.0 {
+		let tx = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
+		let refused = match tx {
 			Some(tx) => tx.send(Stream(stream)).await.is_err(),
 			None => true,
 		};
 		if refused {
 			tracing::debug!(?peer, "closed an RTMP connection: nothing serves RTMP here");
 		}
+	}
+}
+
+/// Empties a [`Handoff`] when dropped.
+pub(crate) struct Close(Handoff);
+
+impl Drop for Close {
+	fn drop(&mut self) {
+		self.0.0.lock().unwrap_or_else(PoisonError::into_inner).take();
 	}
 }

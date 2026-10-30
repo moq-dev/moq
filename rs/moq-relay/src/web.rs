@@ -462,6 +462,9 @@ impl Web {
 			.layer(axum::middleware::from_fn(get_cors))
 			.into_make_service_with_connect_info::<net::SocketAddr>();
 		let ws = config.resolved_ws();
+		// Connections still classifying outlive this future, and must not keep the
+		// RTMP consumer waiting once it returns.
+		let _rtmp = rtmp.close_on_drop();
 		// Each request is admitted on its own, so a connection may have as many in flight
 		// as a session may have credentials verifying; the client queues the rest.
 		let streams = u32::try_from(state.auth.verifications()).unwrap_or(u32::MAX);
@@ -1934,7 +1937,8 @@ mod tests {
 
 	/// Each web listener splits its connections by their first bytes: HTTP reaches the
 	/// router, while plaintext RTMP and RTMPS (TLS with no ALPN) reach the RTMP
-	/// consumer with the classifying byte intact. Untaken, RTMP is closed.
+	/// consumer with the classifying byte intact, until serving stops. Untaken, RTMP
+	/// is closed.
 	#[tokio::test]
 	async fn web_listeners_hand_rtmp_to_its_consumer() {
 		use rustls::pki_types::{CertificateDer, pem::PemObject};
@@ -1971,7 +1975,11 @@ mod tests {
 			.unwrap();
 			let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
 			let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
-			let mut web = Web::new(auth, cluster, certificates, config).bind().unwrap();
+			// No idle deadline, so a stalled connection outlives serving below.
+			let mut web = Web::new(auth, cluster, certificates, config)
+				.with_timeout(None)
+				.bind()
+				.unwrap();
 			let incoming = rtmp.then(|| web.rtmp());
 			let Addrs {
 				http: Some(http),
@@ -2014,6 +2022,8 @@ mod tests {
 			rtmp.read_exact(&mut c0).await.unwrap();
 			assert_eq!(c0, [3, 1, 2, 3], "addr={addr} tls={}", alpn.is_some());
 		}
+		// Silent, so it stays classifying; the requests below are accepted after it.
+		let _stalled = tokio::net::TcpStream::connect(http).await.unwrap();
 		for (addr, alpn) in [
 			(http, None),
 			(https, Some(&[b"http/1.1".as_slice()][..])),
@@ -2031,7 +2041,11 @@ mod tests {
 				"addr={addr} alpn={alpn:?}: {response}"
 			);
 		}
+		// The connection still classifying does not keep the consumer open past serving.
 		serving.abort();
+		let _ = serving.await;
+		let ended = tokio::time::timeout(std::time::Duration::from_secs(10), incoming.accept()).await;
+		assert!(matches!(ended, Ok(None)), "the consumer ends with serving");
 
 		let (serving, http, https, _) = serve(false);
 		for (addr, alpn) in [(http, None), (https, Some(&[][..]))] {
