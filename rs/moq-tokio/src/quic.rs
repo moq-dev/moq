@@ -661,10 +661,7 @@ impl Resolved {
 	/// Delay-based unless the operator says otherwise: BBR keeps queues short and the
 	/// send rate steady enough for a live encoder to track, which is what this stack
 	/// carries.
-	#[cfg_attr(
-		not(feature = "quic"),
-		allow(dead_code, reason = "only the QUIC backend uses it")
-	)]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the QUIC backend uses it"))]
 	pub(crate) fn congestion(&self) -> CongestionControl {
 		self.congestion_control.unwrap_or(CongestionControl::Delay)
 	}

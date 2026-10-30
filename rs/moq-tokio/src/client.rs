@@ -340,12 +340,7 @@ impl Client {
 	/// Dial the given URL and complete the MoQ handshake.
 	///
 	/// Errors if no transport feature is compiled in.
-	#[cfg(not(any(
-		feature = "quic",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	)))]
+	#[cfg(not(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds")))]
 	pub(crate) async fn dial(
 		&self,
 		_addr: crate::connect::Addr,
@@ -362,12 +357,7 @@ impl Client {
 	/// WebSocket fallback so a blocked UDP path still connects. The session's
 	/// protocol driver is spawned on the current tokio runtime, else the fallback; the session
 	/// closes once the last returned handle drops.
-	#[cfg(any(
-		feature = "quic",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	pub(crate) async fn dial(
 		&self,
 		addr: crate::connect::Addr,
@@ -406,12 +396,7 @@ impl Client {
 		Ok(dialed)
 	}
 
-	#[cfg(any(
-		feature = "quic",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	async fn connect_inner(&self, addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		let url = addr.url().clone();
 		// Each session's transport says whether its own request URI carries the target or
@@ -560,12 +545,7 @@ pub(crate) struct Dialed {
 
 impl Dialed {
 	#[cfg_attr(
-		not(any(
-			feature = "quic",
-			feature = "websocket",
-			feature = "tcp",
-			feature = "uds"
-		)),
+		not(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds")),
 		allow(dead_code, reason = "only a transport feature dials")
 	)]
 	fn new(session: moq_net::Session, transport: crate::Transport) -> Self {

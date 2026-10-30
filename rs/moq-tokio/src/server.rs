@@ -18,12 +18,7 @@ use url::Url;
 use futures::FutureExt;
 // The pending handshakes of the transports `Server` accepts itself; WebRTC
 // signaling is the caller's, so a WebRTC-only build has none.
-#[cfg(any(
-	feature = "quic",
-	feature = "websocket",
-	feature = "tcp",
-	all(feature = "uds", unix)
-))]
+#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 use futures::{
 	future::BoxFuture,
 	stream::{FuturesUnordered, StreamExt},
@@ -224,12 +219,7 @@ pub struct Server {
 	versions: moq_net::Versions,
 	/// From [`crate::listen::Config::resolved_timeout`].
 	timeout: Option<std::time::Duration>,
-	#[cfg(any(
-		feature = "quic",
-		feature = "websocket",
-		feature = "tcp",
-		all(feature = "uds", unix)
-	))]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 	accept: FuturesUnordered<BoxFuture<'static, crate::Result<Request>>>,
 	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 	streams: StreamListeners,
@@ -410,12 +400,7 @@ impl Server {
 
 		Ok(Server {
 			activity,
-			#[cfg(any(
-				feature = "quic",
-				feature = "websocket",
-				feature = "tcp",
-				all(feature = "uds", unix)
-			))]
+			#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 			accept: Default::default(),
 			moq,
 			versions,
@@ -503,12 +488,7 @@ impl Server {
 		crate::tls::Certificates::empty()
 	}
 
-	#[cfg(not(any(
-		feature = "quic",
-		feature = "websocket",
-		feature = "tcp",
-		all(feature = "uds", unix)
-	)))]
+	#[cfg(not(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix))))]
 	/// Returns the next partially established session: none, since no compiled
 	/// transport is one this server listens on (WebRTC sessions arrive through
 	/// [`Listener::accept_webrtc`]).
@@ -599,12 +579,7 @@ impl Server {
 
 	/// The body of [`Listener::accept`]. Stream accept loops start here if
 	/// [`Server::bind`] left them stopped; [`Server::listen`] already started them.
-	#[cfg(any(
-		feature = "quic",
-		feature = "websocket",
-		feature = "tcp",
-		all(feature = "uds", unix)
-	))]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 	async fn accept_next(&mut self) -> Option<Request> {
 		// A `bind` (rather than `listen`) leaves the stream loops stopped so an
 		// embedder can read the port before it is willing to take sessions.
@@ -933,12 +908,7 @@ async fn serve_session(request: Request) -> crate::Result<()> {
 }
 
 /// The MoQ server an accepted connection handshakes against, and how long it has.
-#[cfg(any(
-	feature = "quic",
-	feature = "websocket",
-	feature = "tcp",
-	all(feature = "uds", unix)
-))]
+#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 #[derive(Clone)]
 struct Setup {
 	activity: moq_net::server::Activity,
@@ -946,12 +916,7 @@ struct Setup {
 	timeout: Option<std::time::Duration>,
 }
 
-#[cfg(any(
-	feature = "quic",
-	feature = "websocket",
-	feature = "tcp",
-	all(feature = "uds", unix)
-))]
+#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 impl Setup {
 	/// When a connection accepted now must finish its handshake, or `None` to wait
 	/// forever, including past the clock's range.
