@@ -36,11 +36,13 @@ class QueryTests(unittest.TestCase):
             CI_STRICT="1",
         )
         # The runner's own Actions variables would move the run's error
-        # annotations to stdout and append to the real job summary.
+        # annotations to stdout and append to the real job summary, and a
+        # gate's CHECK_MODULES split would skip the modules these tests expect.
         for key in (
             "IN_MOQ_DEV_SHELL",
             "ALLOW_HOST_TOOLCHAIN",
             "CHECK_JOBS",
+            "CHECK_MODULES",
             "GITHUB_BASE_REF",
             "GITHUB_ACTIONS",
             "GITHUB_STEP_SUMMARY",
@@ -226,6 +228,7 @@ class QueryTests(unittest.TestCase):
             "bun",
             "python3",
             "cargo",
+            "cargo-hack",
             "wasm-bindgen",
             "jq",
             "shellcheck",
@@ -455,13 +458,19 @@ esac
                     ["bash", "sh/dispatch.sh", "ci", "origin/main"],
                     cwd=self.repo,
                     env=dict(self.env, CHECK_JOBS=jobs),
-                    text=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                 )
                 started.read_text()
+                # A job timeout can kill the run without a signal it traps, so
+                # a buffered lane names its running phase before the phase ends.
+                os.set_blocking(run.stderr.fileno(), False)
+                live = (run.stderr.read() or b"").decode()
+                if jobs != "1":
+                    self.assertIn("ci: check rs started", live)
                 run.terminate()
-                _, stderr = run.communicate(timeout=60)
+                os.set_blocking(run.stderr.fileno(), True)
+                stderr = live + run.communicate(timeout=60)[1].decode()
                 self.assertEqual(run.returncode, 143, stderr)
                 self.assertRegex(stderr, r"\d+  check rs \(cancelled\)")
                 with self.assertRaises(ProcessLookupError):
@@ -478,6 +487,30 @@ esac
             next(i for i, call in enumerate(calls) if call.startswith("rs lint-changed ")),
             next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")),
         )
+
+    def test_feature_shapes_follow_the_rust_tests_in_their_lane(self):
+        self.change("rs/moq-clock/src/lib.rs")
+        calls = [call.split()[1] for call in self.run_ci() if call.startswith("rs ")]
+        self.assertEqual(calls, ["lint-changed", "test-changed", "feature-shapes-changed"])
+
+    def test_module_filter_splits_the_gate(self):
+        modules = {
+            "rs_shapes": ["rs feature-shapes-changed --all"],
+            "-rs_shapes": ["rs lint-changed --all", "rs test-changed --all"],
+        }
+        for filter, expected in modules.items():
+            with self.subTest(filter=filter):
+                self.env["CHECK_MODULES"] = filter
+                calls = self.run_ci("--all")
+                self.assertEqual([call for call in calls if call.startswith("rs ")], expected)
+                # Every other module runs in the job that does not name one.
+                self.assertEqual("gh check" in calls, filter.startswith("-"))
+        self.env["CHECK_MODULES"] = "rs_shape"
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "ci", "--all"], cwd=self.repo, env=self.env, text=True, capture_output=True
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("CHECK_MODULES names 'rs_shape'", result.stderr)
 
     def test_flake_checks_follow_nix_inputs_instead_of_rust_source(self):
         for path, expected in (
