@@ -131,6 +131,9 @@ impl Followed {
 	///
 	/// One still open is being replaced: its playlists and recordings end at what it listed so
 	/// far, even while its publisher keeps sending. The replacement never waits on that drain.
+	/// If that instance takes the path back, it is served afresh under the same id: it reads the
+	/// same records, so its segment URLs name the same bytes, and playlists are never cached, so
+	/// only a player that reloads its ended playlist sees it go on.
 	fn start(&self, broadcaster: Arc<Broadcaster>) {
 		let replaced = {
 			let mut instances = self.instances.lock().unwrap();
