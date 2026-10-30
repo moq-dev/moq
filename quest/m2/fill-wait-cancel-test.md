@@ -23,3 +23,7 @@ that group is the documented contract and a late FETCH risks the duplicate
 group #7135 fixed.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - its PR, #7135, adds the wait this tests

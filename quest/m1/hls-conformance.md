@@ -29,6 +29,15 @@ coverage. Decided with the maintainer on 2026-10-24:
 
 Public API: none. Wire: none.
 
+Decided 2026-10-30 (maintainer): fix first. The two bugs the test found
+are their own quests, required below, and the test lands once it passes
+with both checks intact.
+
+## Required
+
+- [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - the conformance test's same-codec switch fails until it lands
+- [The last AAC segment advertises its full duration](/quest/m1/hls-final-aac-segment.md) - the conformance test's audio check fails until it lands
+
 ## Related
 
 - [Export sync flags](/quest/m2/intra-refresh/export-sync-flags.md) - the sync flags a refresh rendition should advertise

@@ -58,6 +58,6 @@ settled once; registering buffers stays with #3204, which measures whether
 it pays. Report relay CPU per Gbps before and after on
 the same workloads.
 
-## Related
+## Required
 
-- [Relay egress profile](/quest/m2/quic-egress-profile.md) - its send-buffer pool lever touches the same `SendBuffer` seam
+- [Relay egress profile](/quest/m2/quic-egress-profile.md) - its moq-quic profile ranks this quest's candidates, and its send-buffer pool shares the `SendBuffer` seam
