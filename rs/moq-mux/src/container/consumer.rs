@@ -762,13 +762,8 @@ impl<F: Container> Consumer<F> {
 			return false;
 		}
 
-		// Media time: the newest content is a budget past where the anchor group starts.
-		let start = self
-			.pending
-			.iter()
-			.find(|group| group.sequence == anchor)
-			.and_then(|group| group.min_timestamp)
-			.map(std::time::Duration::from);
+		// Media time: the newest content is a budget past where the anchor group starts, read once
+		// looking ahead has decoded it.
 		let mut newest = None;
 		for group in self.pending.iter_mut().rev() {
 			if let Poll::Ready(Some(ts)) = group.poll_max_timestamp(waiter, &self.format) {
@@ -776,6 +771,12 @@ impl<F: Container> Consumer<F> {
 				break;
 			}
 		}
+		let start = self
+			.pending
+			.iter()
+			.find(|group| group.sequence == anchor)
+			.and_then(|group| group.min_timestamp)
+			.map(std::time::Duration::from);
 		if let (Some(start), Some(newest)) = (start, newest)
 			&& newest.saturating_sub(start) >= self.max_delay
 		{
