@@ -364,18 +364,30 @@ The matrix asks "did bytes arrive and did a pixel light up". That passes on a
 frozen picture, on silence, and on audio a second out of step, so
 `just test media` measures the media itself, browser to browser.
 Use `just test media --media-engines chromium,firefox,webkit` to run each pinned
-Playwright player against a Chromium publisher. Chromium comes from the root devShell;
+Playwright player against a Chromium publisher, and `--media-publisher firefox` to
+publish from Firefox instead. Chromium comes from the root devShell;
 the dedicated Firefox CI job provides its other engines. The harness runs the same
 lifecycle cases, content tolerances, and five negative controls per engine. A missing runtime or required API fails that engine by name.
-Firefox and WebKit players explicitly use WebSocket; Chromium keeps normal
+Firefox and WebKit pages explicitly use WebSocket; Chromium keeps normal
 transport selection. This does not measure Firefox's QUIC path.
 
 The capability report names the engine version and separately lists missing
-publisher and player APIs. Firefox 157 in Playwright 1.64 exposes WebTransport and
-WebCodecs but lacks `MediaStreamTrackProcessor`, so it can play this fixture but
-cannot publish it. Capabilities are measured on every run rather than assumed
-from an engine name. Playwright WebKit is not Safari; Safari device/transport
+publisher and player APIs. Capabilities are measured on every run rather than assumed
+from an engine name. A publisher needs one of the capture paths `@moq/publish` tries,
+in order: a window `MediaStreamTrackProcessor` (Chromium), one in a worker the track
+is transferred to (Safari), or a `<video>` element sampled per presented frame.
+Firefox 157 in Playwright 1.64 has neither `MediaStreamTrackProcessor` nor a
+transferable `MediaStreamTrack`, so a Firefox publisher takes the `<video>`
+fallback. The fixture must log that fallback exactly when the probe predicts it,
+or the run fails `capture path`. No Playwright engine on Linux takes the worker
+path. Playwright WebKit is not Safari; Safari device/transport
 bugs and real Firefox transport negotiation still require manual evidence.
+
+A Firefox publisher does not pass yet, so no CI job runs one. Under load its runs
+fail audio/video sync by about one 200 ms tone step (audio ahead of the picture),
+and late joins land 1.8 s behind live against the 1.5 s bound. Chromium forced onto
+the same `<video>` fallback stays in sync, so the cause is Firefox's. The capture
+case also fails, since Firefox has no fake camera configured.
 
 Firefox only resumes Web Audio on an output device, so each Linux run gets a
 private null sink from `test/lib/pulse.py`. That sink renders in 50 ms blocks, so a fresh
@@ -484,8 +496,8 @@ The leaked-session control waits for an extra `AudioContext` rather than an extr
 session: every player on one relay URL shares a transport, so a session count
 cannot move.
 
-Not covered yet: other browser engines (the capability probe is the groundwork)
-and any claim about physical playback.
+Not covered yet: publishing from engines other than Chromium in CI, the worker
+capture path, and any claim about physical playback.
 
 The relay's port is reserved for the run rather than fixed, so two checkouts can
 run the interop test at once; `INTEROP_PORT` pins one instead. A failing run keeps its

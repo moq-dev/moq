@@ -854,7 +854,11 @@ export class Encoder {
 			};
 
 			const { supported } = await VideoEncoder.isConfigSupported(config);
-			if (supported) return { config, reported: await reportedCodec(config) };
+			if (!supported) continue;
+
+			const reported = await reportedCodec(config);
+			if (reported !== undefined) return { config, reported };
+			console.warn(`moq-publish: skipping ${codec}: its encoder reorders frames despite realtime latency`);
 		}
 
 		throw new Error("no supported codec");
@@ -967,16 +971,27 @@ function black(config: VideoEncoderConfig, timestamp: number): VideoFrame {
 	return new VideoFrame(data, { format: "I420", codedWidth: width, codedHeight: height, timestamp });
 }
 
-// Encode one frame with a throwaway encoder and return the codec string it reports, like
+// How many frames the probe encodes. Three are enough for a B-frame to come out of order; one more
+// is headroom.
+const PROBE_FRAMES = 4;
+
+// Encode a few frames with a throwaway encoder and return the codec string it reports, like
 // moq-video's `Config::probe`. The encoder picks the profile and level it actually writes, so reading
 // them back lets the rendition be advertised before a subscriber starts the real encoder, without a
 // claim the first keyframe would contradict. It closes before the config resolves, so it never
 // overlaps the first real encoder; only a re-probe while serving briefly holds two sessions.
-async function reportedCodec(config: VideoEncoderConfig): Promise<string> {
+//
+// Returns undefined when the encoder reorders its output. The catalog declares none, but Firefox's
+// software H.264 still emits B-frames for High and Main under realtime latency.
+async function reportedCodec(config: VideoEncoderConfig): Promise<string | undefined> {
 	let reported: string | undefined;
+	let reordered = false;
+	let last: number | undefined;
 	const encoder = new VideoEncoder({
-		output: (_chunk, metadata) => {
+		output: (chunk, metadata) => {
 			reported ??= metadata?.decoderConfig?.codec;
+			if (last !== undefined && chunk.timestamp <= last) reordered = true;
+			last = chunk.timestamp;
 		},
 		// flush() rejects with the same error.
 		error: () => {},
@@ -985,18 +1000,21 @@ async function reportedCodec(config: VideoEncoderConfig): Promise<string> {
 	try {
 		encoder.configure(config);
 
-		// Mid-gray, since the picture only has to make the encoder emit its config.
+		// Mid-gray, since the pictures only have to make the encoder emit its config and pick an order.
 		const { width, height } = config;
-		const frame = new VideoFrame(new Uint8Array((width * height * 3) / 2).fill(0x80), {
-			format: "I420",
-			codedWidth: width,
-			codedHeight: height,
-			timestamp: 0,
-		});
-		try {
-			encoder.encode(frame, { keyFrame: true });
-		} finally {
-			frame.close();
+		const data = new Uint8Array((width * height * 3) / 2).fill(0x80);
+		for (let i = 0; i < PROBE_FRAMES; i++) {
+			const frame = new VideoFrame(data, {
+				format: "I420",
+				codedWidth: width,
+				codedHeight: height,
+				timestamp: Math.round((i * 1_000_000) / (config.framerate ?? 30)),
+			});
+			try {
+				encoder.encode(frame, { keyFrame: i === 0 });
+			} finally {
+				frame.close();
+			}
 		}
 
 		await encoder.flush();
@@ -1005,7 +1023,7 @@ async function reportedCodec(config: VideoEncoderConfig): Promise<string> {
 	}
 
 	if (!reported) throw new Error(`${config.codec} encoder reported no codec string`);
-	return reported;
+	return reordered ? undefined : reported;
 }
 
 // Scale the bitrate for more efficient codecs, relative to H.264.

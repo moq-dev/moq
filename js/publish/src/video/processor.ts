@@ -18,8 +18,9 @@ export function TrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 		return input.pipeThrough(rewrite());
 	}
 
-	// Safari and Firefox expose it only inside a dedicated worker, which means spawning one to find
-	// out. Defer the choice to the first pull instead of making every caller await it.
+	// Safari exposes it only inside a dedicated worker, which means spawning one to find out; Firefox
+	// (157) has none and falls back to a <video>. Defer the choice to the first pull instead of making
+	// every caller await it.
 	return deferred(async () => (await workerProcessor(track)) ?? videoProcessor(track));
 }
 
@@ -229,6 +230,11 @@ function videoProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 	return new ReadableStream<VideoFrame>({
 		async start() {
 			video = document.createElement("video") as HTMLVideoElement;
+			// Autoplay policies refuse play() on an unmuted element without a user gesture, even one
+			// with no audio track, so mute it: it carries the video track alone. Inline keeps iOS from
+			// taking it fullscreen.
+			video.muted = true;
+			video.playsInline = true;
 			video.srcObject = new MediaStream([track]);
 			await Promise.all([
 				video.play(),

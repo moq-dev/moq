@@ -1,11 +1,11 @@
 // Role logic for the browser client: read ?role= and wire up a publisher, the real
 // <moq-watch-ui> player, or a refused session. The Playwright drivers (driver.ts for the interop
 // matrix, media.ts for the media-output and lifecycle checks, close.ts for the close code) poll the
-// state each role mirrors onto the DOM.
+// state each role reports over the console or mirrors onto the DOM.
 import type MoqPublish from "@moq/publish/element";
 import type MoqWatch from "@moq/watch/element";
 import { refused, refusedWebSocket } from "./close";
-import { type CaptureState, FAULTS, type Fault, publish, SAMPLE_MS } from "./contract";
+import { CAPTURE_EVENT, type CaptureState, FAULTS, type Fault, publish, SAMPLE_MS } from "./contract";
 import { finish } from "./finish";
 import { Fixture } from "./fixture";
 import { attach, watchResources } from "./probe";
@@ -60,7 +60,7 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 	document.body.appendChild(el);
 	// So the driver can wait for the session to close before closing the browser.
 	watchResources();
-	// Playwright reads the shared DOM, so mirror the public source state onto the element.
+	// Report the public source state the way players report samples. See CAPTURE_EVENT.
 	const sample = () => {
 		type CaptureSource = { out: { source: { peek(): unknown }; error?: { peek(): Error | undefined } } };
 		const video = el.sources.video.peek() as CaptureSource | undefined;
@@ -71,7 +71,7 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 			videoActive: video?.out.source.peek() !== undefined,
 			audioActive: audio?.out.source.peek() !== undefined,
 		};
-		el.dataset.interopCapture = JSON.stringify(state);
+		console.debug(CAPTURE_EVENT + JSON.stringify(state));
 	};
 	sample();
 	self.setInterval(sample, SAMPLE_MS);

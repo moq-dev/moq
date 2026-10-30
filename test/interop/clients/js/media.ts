@@ -10,8 +10,11 @@
  *
  * Launches with Chromium's gesture-required autoplay policy. The capture case adds a fake device
  * while Playwright controls permission. No page reloads: the publisher reports when it is ready.
+ * `--publisher-engine` and `--player-engine` pick each role's engine, so a Firefox publisher takes
+ * the capture path Chromium never does.
  *
  *     bun media.ts --url http://127.0.0.1:4443 [--timeout 30] [--cases pause,detach]
+ *     bun media.ts --url ... --publisher-engine firefox --player-engine chromium
  *     bun media.ts --url ... --fault silent-audio --cases none --expect-fail "audio tone"
  *     bun media.ts --url ... --lag --cases late-join --expect-fail "late join reaches live"
  *
@@ -27,12 +30,12 @@ import {
 	type Engine,
 	Failure,
 	finishTraces,
-	inspect,
 	launch,
 	open,
 	POLL_INTERVAL_MS,
 	pageUrl,
 	pause,
+	readCaptureState,
 	readFixtureState,
 	readPlayerState,
 	SELECTORS,
@@ -46,9 +49,8 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import { type Capabilities, missing, probe, type Role } from "./src/capabilities";
+import { type Capabilities, capturePath, missing, probe, type Role } from "./src/capabilities";
 import {
-	type CaptureState,
 	FAULTS,
 	KEYFRAME_INTERVAL_MS,
 	LONG_FRAMES,
@@ -79,6 +81,7 @@ type Case = (typeof CASES)[number];
 const { values } = parseArgs({
 	options: {
 		url: { type: "string" },
+		"publisher-engine": { type: "string", default: "chromium" },
 		"player-engine": { type: "string", default: "chromium" },
 		timeout: { type: "string", default: "30" },
 		fault: { type: "string", default: "none" },
@@ -94,7 +97,9 @@ const url = values.url;
 const timeoutMs = Number.parseFloat(values.timeout ?? "30") * 1000;
 const fault = values.fault ?? "none";
 const expectFail = values["expect-fail"];
-const requestedEngine = values["player-engine"] ?? "chromium";
+const isEngine = (name: string): name is Engine => ENGINES.some((engine) => engine === name);
+const requestedPublisher = values["publisher-engine"] ?? "chromium";
+const requestedPlayer = values["player-engine"] ?? "chromium";
 const selected = new Set<string>(
 	values.cases === undefined ? CASES : values.cases === "none" ? [] : values.cases.split(","),
 );
@@ -105,19 +110,34 @@ if (
 	timeoutMs <= 0 ||
 	!FAULTS.some((f) => f === fault) ||
 	unknown.length > 0 ||
-	!ENGINES.some((engine) => engine === requestedEngine) ||
+	!isEngine(requestedPublisher) ||
+	!isEngine(requestedPlayer) ||
 	(values.focused && (values.cases === undefined || selected.size === 0))
 ) {
 	console.error(
-		`usage: media.ts --url U [--player-engine ${ENGINES.join("|")}] [--timeout S>0] [--fault ${FAULTS.join("|")}] [--cases none|${CASES.join(",")}] [--focused] [--leak] [--lag] [--expect-fail TEXT]`,
+		`usage: media.ts --url U [--publisher-engine ${ENGINES.join("|")}] [--player-engine ${ENGINES.join("|")}] [--timeout S>0] [--fault ${FAULTS.join("|")}] [--cases none|${CASES.join(",")}] [--focused] [--leak] [--lag] [--expect-fail TEXT]`,
 	);
 	process.exit(2);
 }
-const playerEngine = requestedEngine as Engine;
+const publisherEngine = requestedPublisher as Engine;
+const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
 
 // process.exit narrows `url` above, but not inside the function declarations below.
 const relay: string = url;
+
+/**
+ * The relay URL a page in `engine` dials. Chromium keeps normal transport selection; the others
+ * explicitly use WebSocket, so a run never measures their QUIC paths.
+ */
+function relayFor(engine: Engine): string {
+	const address = new URL(relay);
+	if (engine !== "chromium") address.protocol = address.protocol === "https:" ? "wss:" : "ws:";
+	return address.toString();
+}
+
+/** What `@moq/publish` logs when it captures through a `<video>` element; see its `processor.ts`. */
+const CAPTURE_FALLBACK_WARNING = "MediaStreamTrackProcessor polyfill";
 
 /** How long each media measurement window runs. Long enough to cover several tone cycles. */
 const WINDOW_MS = 4000;
@@ -629,7 +649,7 @@ const browsers: Browser[] = [];
 // its fake output clock: on the private null sink interop.sh provides for Firefox, Chromium's graph
 // barely advances.
 async function browserFor(role: Role, args: string[] = []): Promise<Browser> {
-	const engine = role === "publisher" ? "chromium" : playerEngine;
+	const engine = role === "publisher" ? publisherEngine : playerEngine;
 	console.error(`=== launching ${engine} ${role} ===`);
 	const browser = await launch(
 		engine === "chromium"
@@ -661,10 +681,8 @@ async function subscriber(
 ): Promise<[Page, BrowserErrors]> {
 	// visible="always" because the window is never frontmost in a headless run, and the default
 	// policy would stop downloading video and leave the canvas black.
-	const address = new URL(relay);
-	if (playerEngine !== "chromium") address.protocol = address.protocol === "https:" ? "wss:" : "ws:";
 	const params: Record<string, string> = {
-		url: address.toString(),
+		url: relayFor(playerEngine),
 		broadcast,
 		visible: "always",
 		muted: String(muted),
@@ -684,29 +702,19 @@ async function subscriber(
 // A real click, so the page carries user activation. Every audio path is gated on it.
 const gesture = (page: Page) => page.mouse.click(1, 1);
 
-async function readCapture(page: Page): Promise<CaptureState> {
-	const state = await inspect(
-		page,
-		() => document.querySelector<HTMLElement>("moq-publish")?.dataset.interopCapture,
-		undefined,
-	);
-	if (!state) throw new Error("the publisher has not published its capture state");
-	return JSON.parse(state) as CaptureState;
-}
-
 /** A denied browser permission is visible, silent to discovery, and revives on a later grant. */
 async function captureDenial(broadcast: string): Promise<void> {
 	console.error("=== capture denial and grant ===");
 	const [viewer, viewerErrors] = await subscriber(broadcast, "capture viewer", { muted: true });
 	const [publisher, publisherErrors] = await open(
 		await browserFor("publisher", ["--use-fake-device-for-media-stream"]),
-		pageUrl(server.origin, "publish", { url: relay, broadcast }),
+		pageUrl(server.origin, "publish", { url: relayFor(publisherEngine), broadcast }),
 		"capture publisher",
 		false,
 		{ permissions: [] },
 	);
 
-	const denied = await waitFor(publisher, publisherErrors, readCapture, {
+	const denied = await waitFor(publisher, publisherErrors, readCaptureState, {
 		deadline: Date.now() + timeoutMs,
 		assertion: "capture denial is visible",
 		description: "both refused capture sources to report NotAllowedError",
@@ -733,7 +741,7 @@ async function captureDenial(broadcast: string): Promise<void> {
 	);
 
 	await publisher.context().grantPermissions(["camera"]);
-	const partial = await waitFor(publisher, publisherErrors, readCapture, {
+	const partial = await waitFor(publisher, publisherErrors, readCaptureState, {
 		deadline: Date.now() + timeoutMs,
 		assertion: "partial capture is withheld",
 		description: "camera capture while microphone permission remains denied",
@@ -750,7 +758,7 @@ async function captureDenial(broadcast: string): Promise<void> {
 	);
 
 	await publisher.context().grantPermissions(["camera", "microphone"]);
-	await waitFor(publisher, publisherErrors, readCapture, {
+	await waitFor(publisher, publisherErrors, readCaptureState, {
 		deadline: Date.now() + timeoutMs,
 		assertion: "capture grant recovers",
 		description: "camera and microphone to capture after permission changes without a reload",
@@ -774,7 +782,7 @@ try {
 	// ── publisher ────────────────────────────────────────────────────────────
 	const [publisher, publisherErrors] = await open(
 		await browserFor("publisher"),
-		pageUrl(server.origin, "fixture", { url: relay, broadcast, fault }),
+		pageUrl(server.origin, "fixture", { url: relayFor(publisherEngine), broadcast, fault }),
 		"fixture",
 	);
 	fixturePage = publisher;
@@ -796,6 +804,18 @@ try {
 		predicate: (state) => state.ready && state.frameId > 0,
 	});
 	console.error(`  announced ${broadcast}, painting from frame ${ready.frameId}`);
+
+	// The fixture must capture the way the probe says production would on this engine. Only the
+	// <video> fallback announces itself, so a fallback taken by mistake, or a missed one, fails here.
+	const publisherCapture = capturePath(observed.get(publisherEngine)?.found ?? {});
+	const fellBack = publisherErrors.warnings.some((warning) => warning.includes(CAPTURE_FALLBACK_WARNING));
+	check(
+		fellBack === (publisherCapture === "element"),
+		"capture path",
+		() =>
+			`probed ${publisherCapture} capture, but the fixture ${fellBack ? "fell back" : "did not fall back"} to <video>`,
+	);
+	console.error(`  captured through the ${publisherCapture} path`);
 
 	// ── cold start ───────────────────────────────────────────────────────────
 	// No reload anywhere below. The publisher is known ready, so a subscriber that needs a second
@@ -1059,7 +1079,7 @@ try {
 			const [old, oldErrors] = await open(
 				sourceBrowser,
 				pageUrl(server.origin, "fixture", {
-					url: relay,
+					url: relayFor(publisherEngine),
 					broadcast: name,
 					versions: "moq-lite-07-wip",
 					generation: "0",
@@ -1097,7 +1117,7 @@ try {
 				const [replacement, replacementErrors] = await open(
 					sourceBrowser,
 					pageUrl(server.origin, "fixture", {
-						url: relay,
+						url: relayFor(publisherEngine),
 						broadcast: name,
 						versions: "moq-lite-07-wip",
 						generation: "1",
@@ -1237,7 +1257,7 @@ if (expectFail !== undefined) {
 	code = 1;
 } else {
 	console.error(
-		`media: ${playerEngine} player over ${playerEngine === "chromium" ? "automatic transport selection" : "WebSocket fallback"} measured; all checks passed (Chromium publisher)`,
+		`media: ${playerEngine} player over ${playerEngine === "chromium" ? "automatic transport selection" : "WebSocket fallback"} measured; all checks passed (${publisherEngine} publisher, ${capturePath(observed.get(publisherEngine)?.found ?? {})} capture)`,
 	);
 }
 
