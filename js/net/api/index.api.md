@@ -60,15 +60,18 @@ export namespace Bandwidth {
 		constructor(estimate?: Signals.Getter<number | undefined>);
 		close(): void;
 		reserve(track: Track.Demand, max: number): Bandwidth.Reservation;
+		setTarget(target: number | undefined): void;
 		static unlimited(): Bandwidth.Allocator;
 	}
 	export interface Handle {
 		reserve(track: Track.Demand, max: number): Bandwidth.Reservation;
+		setTarget(target: number | undefined): void;
 	}
 	export class Reservation implements Disposable {
 		[Symbol.dispose](): void;
 		close(): void;
 		peek(): number | undefined;
+		get probed(): Signals.Getter<boolean>;
 		get rate(): Signals.Getter<number | undefined>;
 		update(max: number): void;
 	}
