@@ -45,7 +45,7 @@ pub struct Auth {
 	pub token: Bytes,
 }
 
-impl Message for Auth {
+impl<'a> Message<'a> for Auth {
 	const ID: u64 = 0x40B61;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -53,7 +53,7 @@ impl Message for Auth {
 		w.bytes(&self.token)
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		Ok(Self {
 			request_id: RequestId::decode(r, version)?,
 			token: Bytes::copy_from_slice(r.bytes()?),
@@ -75,7 +75,7 @@ pub struct AuthOk {
 /// Largest millisecond count every implementation carries losslessly.
 const MAX_EXPIRES_MS: u64 = (1 << 53) - 1;
 
-impl Message for AuthOk {
+impl<'a> Message<'a> for AuthOk {
 	const ID: u64 = 0x40B62;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -90,7 +90,7 @@ impl Message for AuthOk {
 		w.varint(expires)
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let publish = Patterns::decode(r, version)?;
 		let subscribe = Patterns::decode(r, version)?;
 		let expires = match r.varint()? {
@@ -118,7 +118,7 @@ pub struct AuthError {
 /// length prefix alone.
 const MAX_REASON: usize = 8192;
 
-impl Message for AuthError {
+impl<'a> Message<'a> for AuthError {
 	const ID: u64 = 0x40B63;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
@@ -129,7 +129,7 @@ impl Message for AuthError {
 		w.string(&self.reason)
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let code = r.varint()?;
 		if code > u32::MAX as u64 {
 			return Err(DecodeError::InvalidValue);
@@ -403,7 +403,7 @@ impl Present {
 }
 
 /// Decode a reply that must fill its whole body, as every framed message does.
-fn decode_reply<T: Message>(body: &super::Body, version: Version) -> Result<T, Error> {
+fn decode_reply<'m, T: Message<'m>>(body: &'m super::Body, version: Version) -> Result<T, Error> {
 	let mut data = body.decoder(version);
 	let msg = T::decode_msg(&mut data, version)?;
 	if !data.is_empty() {
@@ -497,7 +497,7 @@ impl Serve {
 struct Unexpected;
 
 #[cfg(feature = "async")]
-impl crate::coding::Decode<Version> for Unexpected {
+impl<'a> crate::coding::Decode<'a, Version> for Unexpected {
 	fn decode(r: &mut crate::coding::Decoder<'_>, _: Version) -> Result<Self, crate::coding::DecodeError> {
 		Err(crate::coding::DecodeError::InvalidMessage(r.varint()?))
 	}
@@ -521,9 +521,8 @@ async fn serve_issue(
 
 	loop {
 		let next = kio::wait(|waiter| {
-			let mut cx = std::task::Context::from_waker(waiter.waker());
 			if let Poll::Ready(res) = goaways
-				.poll_next::<Unexpected, _>(&mut stream.reader, &mut cx)
+				.poll_next::<Unexpected, _>(&mut stream.reader, waiter)
 				.map(|res| res.map(|_| ()))
 			{
 				return Poll::Ready(Next::Withdrawn(res));
@@ -627,13 +626,13 @@ mod tests {
 		texts.iter().map(|text| Pattern::try_from(*text).unwrap()).collect()
 	}
 
-	fn encode_msg<T: Message>(msg: &T, version: Version) -> Result<Vec<u8>, EncodeError> {
+	fn encode_msg<'m, T: Message<'m>>(msg: &T, version: Version) -> Result<Vec<u8>, EncodeError> {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)?;
 		Ok(buf)
 	}
 
-	fn round_trip<T: Message + PartialEq>(msg: &T) -> T {
+	fn round_trip<T: for<'m> Message<'m> + PartialEq>(msg: &T) -> T {
 		let buf = encode_msg(msg, VERSION).unwrap();
 		let mut r = Decoder::new(&buf, VERSION.into());
 		let got = T::decode_msg(&mut r, VERSION).unwrap();

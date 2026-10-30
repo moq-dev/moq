@@ -4,11 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A compressed group is held to the group budget
+### Compression moves to the track
 
-A compressed group may inflate to at most `Group.MAX_GROUP_CACHE_BYTES` (32 MiB), the most a plain group carries.
-The encoders charge each frame its plaintext: a compressed snapshot over 32 MiB throws `FrameTooLarge` (it used to pass up to 64 MiB), a window header over it throws, and deltas and ops roll a new group once a group's plaintext would pass the budget.
-A compressed stream's budget is 32 MiB of record plaintext.
+The `Compression` type, every `compression` option, `Desync`, `Stream.Decoder.reset`, and `Window.DecoderConfig` are gone, along with the `@moq/flate` dependency.
+Frames are plain JSON: create the track with `compress: true` instead, and `@moq/net` compresses each group on the wire and hands every reader plain frames.
+Drop `compression` from producer and consumer options, and construct `Window.Decoder` with no arguments. A consumer reads a compressed track with no option of its own.
+Every frame is charged its JSON size against `Group.MAX_GROUP_CACHE_BYTES`, as a compressed one already was.
 
 ### Groups roll on joiner demand
 

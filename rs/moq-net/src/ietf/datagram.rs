@@ -137,8 +137,8 @@ impl Encode<Version> for ObjectDatagram {
 	}
 }
 
-impl Decode<Version> for ObjectDatagram {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for ObjectDatagram {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let kind = r.varint()?;
 		if !Self::valid(kind) {
 			return Err(DecodeError::InvalidValue);

@@ -76,8 +76,18 @@ Decided 2026-10-26 (maintainer):
   `release`), `dependabot.yml`, and `smoke-toolchain.yml` that use it
   reference the Environment. Only the hosted land job reads it, never the job
   that runs PR code.
+- Open question, added 2026-10-29 (maintainer) from
+  [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166): the `publish`
+  Environment admits `main`, whose ruleset lets repository role 2 bypass
+  review, and moq-bot joins that bypass list here. Decide with the bypass list
+  whether `main` keeps deploying to `publish`, or publishing narrows to
+  `release` and release tags. Ask the maintainer; settings changes are theirs.
+- The gate tests each PR on the latest `main`, not the PR's own base. On
+  2026-10-29 [moq-dev/moq#7162](https://github.com/moq-dev/moq/pull/7162)
+  passed its own CI but broke in the queue on API renames that landed after
+  its last base merge; that is the case the gate must catch before `main`.
 
-Work in this repository, once [the bump](/quest/m0/ci/land-bump.md) lands:
+Work in this repository:
 
 - The workflow: queue events (landing requested through `quest merge
   --land`, a push dequeuing), one concurrency group, inputs resolved on a
@@ -101,7 +111,3 @@ Work in this repository, once [the bump](/quest/m0/ci/land-bump.md) lands:
   against the baseline, and record both in the PR.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Bump quest to `quest land`](/quest/m0/ci/land-bump.md) - kixelated/quest shipped `quest land` in kixelated/quest#229; bump the flake input

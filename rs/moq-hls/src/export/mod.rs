@@ -2197,7 +2197,13 @@ mod tests {
 		let audio_muxer =
 			moq_mux::container::fmp4::Muxer::audio(snapshot.audio.renditions.values().next().unwrap()).unwrap();
 		let consuming = remote.as_ref().unwrap_or(&origin);
-		consuming.consume().routed("live").await.unwrap();
+		consuming
+			.consume()
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let source = crate::resolved(consuming, "live").await;
 		let broadcaster = (!late).then(|| Broadcaster::new(source.clone(), Config::default()));
 		for i in 0..20u64 {

@@ -97,7 +97,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -206,7 +206,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -320,7 +320,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -430,7 +430,7 @@ async fn transport_fetch_roundtrip(version: &str) {
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -555,7 +555,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -661,7 +661,7 @@ async fn broadcast_moq_lite_05_untimed_track() {
 		.expect("announce timeout")
 		.expect("origin closed");
 	assert!(active, "expected announce");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(&update.prefix, None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request(&update.prefix, None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -756,7 +756,7 @@ async fn broadcast_moq_transport_22_current_group_join() {
 	let (announced, announced_active) = next_announce(&mut announcements).await;
 	assert_eq!(announced.prefix.as_str(), "test");
 	assert!(announced_active, "expected an announce");
-	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(&announced.prefix, None))
+	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request(&announced.prefix, None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -1073,7 +1073,7 @@ async fn broadcast_route_migration() {
 	let subscription = moq_net::track::Subscription::default()
 		.with_range(1..)
 		.with_max_delay(Duration::from_secs(10));
-	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("routed broadcast resolves");
@@ -1201,7 +1201,7 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 		.expect("connect failed");
 
 	assert!(next_announce(&mut announcements).await.1);
-	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("broadcast resolves");
@@ -1325,7 +1325,7 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 		.expect("connect failed");
 
 	assert!(next_announce(&mut announcements).await.1);
-	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("broadcast resolves");
@@ -1459,7 +1459,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	assert!(active, "expected announce");
 	let initial = update.route;
 
-	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("routed broadcast resolves");
@@ -1668,7 +1668,7 @@ async fn max_age_test(version: &str, published: Option<Duration>) -> Option<Dura
 	let (update, active) = next_announce(&mut announcements).await;
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce");
-	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -1888,7 +1888,7 @@ async fn broadcast_websocket() {
 
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -2012,7 +2012,7 @@ async fn broadcast_websocket_fallback() {
 
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -2203,7 +2203,7 @@ async fn quic_driver_task_inherits_connection_span() {
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(&update.prefix, None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request(&update.prefix, None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -2319,7 +2319,7 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -2459,7 +2459,7 @@ async fn idle_subscription_releases_the_viewer_count() {
 		.expect("announce timeout")
 		.expect("origin closed");
 	assert!(active, "expected announce");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(&update.prefix, None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request(&update.prefix, None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -2917,7 +2917,7 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 	);
 
 	// The granted path serves; the excluded ones are refused before the wire.
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("room/alice/chat", None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("room/alice/chat", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -2935,10 +2935,10 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 	assert_eq!(frame.payload.as_ref(), b"room/alice/chat");
 	// The server grant excludes bob's chat, so that otherwise-authorized request is
 	// unroutable. Audio and lobby never pass the client's own scope and are unauthorized.
-	let refused = sub_consumer.request_broadcast("room/bob/chat", None).await.err();
+	let refused = sub_consumer.request("room/bob/chat", None).await.err();
 	assert!(matches!(refused, Some(moq_net::Error::Unroutable)), "{refused:?}");
 	for path in ["room/alice/audio", "lobby/alice/chat"] {
-		let refused = sub_consumer.request_broadcast(path, None).await.err();
+		let refused = sub_consumer.request(path, None).await.err();
 		assert!(
 			matches!(refused, Some(moq_net::Error::Unauthorized)),
 			"{path}: {refused:?}"
@@ -3019,7 +3019,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "allowed/test");
 		assert!(active, "expected announce, got retraction");
-		let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("allowed/test", None))
+		let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("allowed/test", None))
 			.await
 			.expect("request timed out")
 			.expect("announced broadcast resolves");
@@ -3204,7 +3204,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
