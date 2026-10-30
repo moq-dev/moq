@@ -4003,7 +4003,7 @@ mod tests {
 				let dynamic = track.requests();
 				let fetch = track.consume().fetch_group(4, None);
 				let request = dynamic.requested_fill_group().await.unwrap();
-				let mut run = FetchServeRun::new(serve, request, info);
+				let mut run = FetchServeRun::new(serve, request, FetchInfo::Known(info));
 				let waiter = kio::Waiter::noop();
 				assert!(kio::Task::poll(&mut run, &waiter).is_pending(), "{version}: {end}");
 				assert_eq!(session.log.bi_opens(), 0);
@@ -7063,10 +7063,14 @@ struct TrackServeRun {
 enum TrackRunState {
 	/// Lite05+ learns the track's immutable properties once, up front, via a
 	/// TRACK stream. The timescale then flows into every SUBSCRIBE and FETCH
-	/// without a per-response header.
+	/// without a per-response header. Fetches go out meanwhile, and read their
+	/// response only once the info lands.
 	Info {
 		request: Option<track::Request>,
 		info: TrackInfoFetch,
+		dynamic: track::Requests,
+		fetches: kio::Tasks<FillServeRun>,
+		known: crate::util::Learning<track::Info>,
 	},
 	Serve(ServeLoop),
 	/// Preserve the lite07 completion FIN until the publisher acknowledges it.
@@ -7078,8 +7082,13 @@ impl TrackServeRun {
 	fn new(serve: TrackServe, request: track::Request) -> Self {
 		let state = if serve.subscriber.version.has_track_stream() {
 			TrackRunState::Info {
+				// Registered before accepting: `accept` releases the request's own fetch gate,
+				// and a cache-miss fetch queued in the gap would be drained as NotFound.
+				dynamic: request.requests(),
 				request: Some(request),
 				info: TrackInfoFetch::new(&serve),
+				fetches: kio::Tasks::new(),
+				known: crate::util::Learning::new(),
 			}
 		} else {
 			// Older wires declare no publisher retention limit, and no timeline: their
@@ -7096,7 +7105,9 @@ impl TrackServeRun {
 	fn revoke(&mut self) {
 		tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, "subscription no longer authorized");
 		match std::mem::replace(&mut self.state, TrackRunState::Done) {
-			TrackRunState::Info { request, .. } => {
+			TrackRunState::Info { request, known, .. } => {
+				// Each fetch sent alongside resets itself as it drops, seeing the denial.
+				known.resolve(Err(Error::Unauthorized));
 				if let Some(request) = request {
 					request.reject(Error::Unauthorized);
 				}
@@ -7132,7 +7143,9 @@ impl TrackServeRun {
 			let pending = request.as_ref().expect("request pending");
 			ready!(crate::util::poll_unwanted(&mut pending.demand(), waiter));
 			if pending.reject_unused(Error::Cancel) {
-				self.state = TrackRunState::Done;
+				if let TrackRunState::Info { known, .. } = std::mem::replace(&mut self.state, TrackRunState::Done) {
+					known.resolve(Err(Error::Cancel));
+				}
 				return Poll::Ready(());
 			}
 			// Demand returned in the gap and won inside `reject_unused`: poll again so the
@@ -7162,10 +7175,31 @@ impl kio::Task for TrackServeRun {
 		}
 		loop {
 			match &mut self.state {
-				TrackRunState::Info { request, info } => {
+				TrackRunState::Info {
+					request: _,
+					info,
+					dynamic,
+					fetches,
+					known,
+				} => {
+					// A fetch needs nothing from TRACK_INFO to go out, only to read its answer.
+					while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(waiter) {
+						fetches.push(FillServeRun::new(self.serve.clone(), fill, known.later()));
+					}
+					let _ = fetches.poll(waiter);
 					// Abandonment was checked at the top of this poll, arming its wait.
 					let res = ready!(info.poll_fetch(&self.serve, waiter));
-					let request = request.take().expect("request pending");
+					let TrackRunState::Info {
+						request,
+						dynamic,
+						fetches,
+						known,
+						..
+					} = std::mem::replace(&mut self.state, TrackRunState::Done)
+					else {
+						unreachable!()
+					};
+					let request = request.expect("request pending");
 					match res {
 						Ok((mut info, held)) => {
 							// Lite05/06 timestamps may be send times, so the copy is untimed
@@ -7173,18 +7207,22 @@ impl kio::Task for TrackServeRun {
 							if !self.serve.subscriber.version.has_media_time() {
 								info.timescale = None;
 							}
-							let mut serve_loop = ServeLoop::new(&self.serve, request, info);
+							let mut serve_loop = ServeLoop::adopt(&self.serve, request, info.clone(), dynamic, fetches);
 							serve_loop.held = Some(held);
+							// Only once accepted: a fetch answered now caches into the accepted copy.
+							known.resolve(Ok(info));
 							self.state = TrackRunState::Serve(serve_loop);
 						}
 						Err(err) => {
 							let err = lite::error::control(&mut self.serve.subscriber.session.clone(), err);
 							tracing::warn!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, %err, "track info failed");
+							// The fetches sent alongside fail with it, resetting their streams.
+							known.resolve(Err(err.clone()));
+							drop(fetches);
 							// Rejecting the request lets the origin retry (bounded) on
 							// another source; waiting subscribers stall rather than error
 							// meanwhile.
 							request.reject(err);
-							self.state = TrackRunState::Done;
 							return Poll::Ready(());
 						}
 					}
@@ -7243,13 +7281,15 @@ impl Drop for TrackServeRun {
 	fn drop(&mut self) {
 		// Still waiting on TRACK_INFO: the request never reached the subscribe map,
 		// so the driver's abort cannot see it. Reject with the session's error.
-		let TrackRunState::Info { request, .. } = &mut self.state else {
+		let TrackRunState::Info { request, known, .. } = &mut self.state else {
 			return;
 		};
 		let Some(request) = request.take() else {
 			return;
 		};
-		request.reject(self.serve.subscriber.end_reason());
+		let err = self.serve.subscriber.end_reason();
+		known.resolve(Err(err.clone()));
+		request.reject(err);
 	}
 }
 
@@ -7621,10 +7661,21 @@ impl FeedFetches {
 
 impl ServeLoop {
 	fn new(serve: &TrackServe, request: track::Request, info: track::Info) -> Self {
-		// Register the fetch handler before accepting: `accept` releases the
-		// request's own fetch gate, and a cache-miss fetch queued while TRACK_INFO
-		// was in flight would be drained as NotFound in the gap.
+		// Register the fetch handler before accepting: `accept` releases the request's own
+		// fetch gate, and a cache-miss fetch queued in the gap would be drained as NotFound.
 		let dynamic = request.requests();
+		Self::adopt(serve, request, info, dynamic, kio::Tasks::new())
+	}
+
+	/// Accept `request` with `info`, serving fetches through `dynamic`, registered before the
+	/// accept, and carrying on with the `fetches` already in flight.
+	fn adopt(
+		serve: &TrackServe,
+		request: track::Request,
+		info: track::Info,
+		dynamic: track::Requests,
+		fetches: kio::Tasks<FillServeRun>,
+	) -> Self {
 		// Lite-06+ resolves each subscription's start from its budget, so the floor
 		// the SUBSCRIBE asks for is not where delivery begins until SUBSCRIBE_START says.
 		let request = match serve.subscriber.version.resolves_start() {
@@ -7648,7 +7699,7 @@ impl ServeLoop {
 			serving,
 			dynamic,
 			sub: Sub::None,
-			fetches: kio::Tasks::new(),
+			fetches,
 			feed_fetches: FeedFetches::new(&serve.subscriber.runtime),
 			closed: serve.subscriber.session.clone(),
 			supports_update: !matches!(serve.subscriber.version, Version::Lite01 | Version::Lite02),
@@ -7808,8 +7859,11 @@ impl ServeLoop {
 					match self.dynamic.poll_requested_fill(waiter) {
 						Poll::Ready(Ok(fill)) => {
 							if self.supports_fetch {
-								self.fetches
-									.push(FillServeRun::new(serve.clone(), fill, self.serving.info().clone()));
+								self.fetches.push(FillServeRun::new(
+									serve.clone(),
+									fill,
+									FetchInfo::Known(self.serving.info().clone()),
+								));
 							} else {
 								// No FETCH on the wire: wait for the live feed, which a
 								// subscription arriving alongside may still be opening.
@@ -8066,17 +8120,36 @@ impl ServeLoop {
 	}
 }
 
+/// The track's info for a fetch: known, or still in the TRACK_INFO sent alongside it, which
+/// the fetch's response waits for unread in the stream.
+type FetchInfo = crate::util::Later<track::Info>;
+
+/// Why the TRACK_INFO a fetch was sent alongside failed, once it has.
+fn info_failed(info: &FetchInfo) -> Option<Error> {
+	info.peek()?.err()
+}
+
 /// Serves one fill a group at a time, newest first for a descending reader, each with its
 /// own [`FetchServeRun`], until it is answered or nobody waits on it.
 struct FillServeRun {
 	serve: TrackServe,
 	fill: track::Fill,
-	info: track::Info,
+	info: FetchInfo,
 	run: Option<(u64, FetchServeRun)>,
 }
 
+impl Drop for FillServeRun {
+	fn drop(&mut self) {
+		// The fetch went out before TRACK_INFO, which failed: that is the answer for every
+		// group still owed, not a miss.
+		if let Some(err) = info_failed(&self.info) {
+			self.fill.refuse(err);
+		}
+	}
+}
+
 impl FillServeRun {
-	fn new(serve: TrackServe, fill: track::Fill, info: track::Info) -> Self {
+	fn new(serve: TrackServe, fill: track::Fill, info: FetchInfo) -> Self {
 		Self {
 			serve,
 			fill,
@@ -8121,14 +8194,14 @@ impl kio::Task for FillServeRun {
 
 /// Serves one downstream fetch end-to-end on its own bidi stream: send FETCH,
 /// then fill the group from the bare FRAME messages that follow. The track's
-/// info comes from its TRACK_INFO (already known), and the group sequence
-/// is implicit from the request.
+/// info comes from its TRACK_INFO, which the response waits for unread if it
+/// is still in flight, and the group sequence is implicit from the request.
 struct FetchServeRun {
 	validity: crate::model::broadcast::RequestValidity,
 	gate: crate::auth::Gate,
 	serve: TrackServe,
 	session: Transport,
-	info: track::Info,
+	info: FetchInfo,
 	group: u64,
 	state: FetchRunState,
 }
@@ -8172,7 +8245,7 @@ impl FetchRunState {
 }
 
 impl FetchServeRun {
-	fn new(serve: TrackServe, request: track::GroupFill, info: track::Info) -> Self {
+	fn new(serve: TrackServe, request: track::GroupFill, info: FetchInfo) -> Self {
 		let session = serve.subscriber.session.clone();
 		let group = request.sequence();
 		Self {
@@ -8189,19 +8262,25 @@ impl FetchServeRun {
 
 impl Drop for FetchServeRun {
 	fn drop(&mut self) {
-		// Dropped because the session stopped allowing the broadcast: reset with that
-		// reason, so neither the publisher nor the waiting reader reads a routine cancel.
-		// Any other drop keeps the default cancel.
-		if matches!(self.state, FetchRunState::Done)
-			|| self
-				.serve
-				.subscriber
-				.auth
-				.allows(crate::auth::Direction::Subscribe, self.serve.path.as_str())
-		{
+		// Dropped because the session stopped allowing the broadcast, or because the
+		// TRACK_INFO sent alongside failed: reset with that reason, so neither the publisher
+		// nor the waiting reader reads a routine cancel. Any other drop keeps the default
+		// cancel.
+		if matches!(self.state, FetchRunState::Done) {
 			return;
 		}
-		let err = Error::Unauthorized;
+		let err = match self
+			.serve
+			.subscriber
+			.auth
+			.allows(crate::auth::Direction::Subscribe, self.serve.path.as_str())
+		{
+			false => Error::Unauthorized,
+			true => match info_failed(&self.info) {
+				Some(err) => err,
+				None => return,
+			},
+		};
 		match std::mem::replace(&mut self.state, FetchRunState::Done) {
 			FetchRunState::Open { request } => {
 				if let Some(request) = request {
@@ -8289,13 +8368,16 @@ impl kio::Task for FetchServeRun {
 					// consumer), and is more reusable in the cache than the tail would have
 					// been. Asking for the offset anyway would fail to encode and reject a
 					// fetch we can serve.
+					// Until TRACK_INFO says, the group may be compressed, which only a whole
+					// group decodes: ask for all of it.
+					let plain = matches!(self.info.peek(), Some(Ok(info)) if !info.compress);
 					let frame_start = match self.serve.subscriber.version.has_frame_bounds() {
-						true if !self.info.compress => request.frame_start(),
+						true if plain => request.frame_start(),
 						true => 0,
 						false => 0,
 					};
 
-					let frame_end = if self.serve.subscriber.version.has_frame_bounds() && !self.info.compress {
+					let frame_end = if self.serve.subscriber.version.has_frame_bounds() && plain {
 						request.frame_end()
 					} else {
 						None
@@ -8362,6 +8444,23 @@ impl kio::Task for FetchServeRun {
 					};
 				}
 				FetchRunState::Answer { stream, .. } => {
+					// The answer is framed in the track's units: it stays unread in the stream
+					// until the TRACK_INFO sent alongside lands.
+					let info = match ready!(self.info.poll(waiter)) {
+						Ok(info) => info,
+						Err(err) => {
+							let FetchRunState::Answer {
+								request, mut stream, ..
+							} = std::mem::replace(&mut self.state, FetchRunState::Done)
+							else {
+								unreachable!()
+							};
+							stream.writer.abort(&err);
+							stream.reader.abort(&err);
+							request.expect("request pending").reject(err);
+							return Poll::Ready(());
+						}
+					};
 					let ietf = ready!(self.serve.subscriber.peer_setup.poll_ietf(waiter));
 					// Lite has no FETCH_OK: a publisher without the group resets the
 					// stream instead. Accepting before the first byte (or a FIN, for an
@@ -8389,7 +8488,7 @@ impl kio::Task for FetchServeRun {
 					// it. The track::Info only takes effect if the track isn't accepted yet
 					// (a fetch with no live subscription); otherwise the group inherits the
 					// accepted info.
-					let group_info = self.info.clone();
+					let group_info = info.clone();
 					// The group's readers pick it up from the cache only when next polled,
 					// so their demand outlives the request until then.
 					let readers = request.readers();
@@ -8414,7 +8513,7 @@ impl kio::Task for FetchServeRun {
 						producer: Box::new(crate::recv::Group::new(producer)),
 						readers,
 						ingest: Box::new(FrameIngest::new(
-							lite::Framing::new(&self.info, self.serve.subscriber.version),
+							lite::Framing::new(&info, self.serve.subscriber.version),
 							self.serve.subscriber.version,
 							ietf,
 							frame_start,

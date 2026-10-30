@@ -3122,6 +3122,9 @@ struct Asked {
 	/// query. Kept once spliced until the last reader leaves, so the copy is never left
 	/// with nobody subscribed while readers are still subscribing to it on their own.
 	sub: Option<kio::Pending<track::Subscribing>>,
+	/// The copy staged for fetches while its info is in flight, withdrawn if it is never
+	/// spliced.
+	staged: super::resume::Staged,
 }
 
 /// The driver's side of one logical track: the handles behind the names the
@@ -3157,9 +3160,9 @@ impl TrackIo {
 		self.ready.wake_by_ref();
 		if let Some(request) = self.request.take() {
 			let info = asked.info.clone().unwrap_or_default();
-			self.accepted = Some(request.routes(self.routes.consume()).accept(info));
+			self.accepted = Some(request.accept(info));
 		}
-		self.routes.serve(asked.copy.clone());
+		self.routes.splice(asked.copy.clone(), asked.staged);
 		self.copy = Some((asked.source, asked.copy, asked.query));
 		self.held = asked.sub;
 	}
@@ -3173,8 +3176,11 @@ impl TrackIo {
 		self.copy = None;
 		self.held = None;
 		match self.request.take() {
-			// Ended before any route served it: nothing to read.
-			Some(request) => request.reject(result.err().unwrap_or(Error::NotFound)),
+			// Ended before any route served it: nothing to read, nor to fetch.
+			Some(request) => {
+				self.routes.end(result.clone());
+				request.reject(result.err().unwrap_or(Error::NotFound));
+			}
 			None => {
 				if let Some(accepted) = self.accepted.take() {
 					let _ = match &result {
@@ -3657,6 +3663,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 								let copy = query.track();
 								io.query = Some(Asked {
 									source,
+									staged: io.routes.stage(copy.clone()),
 									copy,
 									query,
 									info: None,
@@ -3922,15 +3929,16 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 				let name: Arc<str> = request.name().into();
 				let track_ready = crate::util::QueueWake::new(name.clone(), ready.clone());
 				track_ready.wake_by_ref();
+				let routes = super::resume::Producer::new();
 				tracks.insert(
 					name.clone(),
 					TrackIo {
 						ready: track_ready,
 						park: Default::default(),
 						weak: request.weak(),
-						request: Some(request),
+						request: Some(request.routes(routes.consume())),
 						accepted: None,
-						routes: super::resume::Producer::new(),
+						routes,
 						query: None,
 						staged: None,
 						copy: None,
