@@ -22,6 +22,7 @@ on:
       - moq-relay
       - moq.sh
       - Nightly
+      - Pullfrog
       - release-brew
       - Release C
       - Release Cpp
