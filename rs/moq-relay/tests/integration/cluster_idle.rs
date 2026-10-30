@@ -103,10 +103,9 @@ async fn silent_peer_detected() {
 
 	let mut config = cluster::Config::default();
 	config.connect = vec![Peer::new(format!("https://127.0.0.1:{port}/"))];
-	// Keep-alives under the idle timeout, so only the silenced peer idles out.
+	// The keep-alive derives from the idle timeout, so only the silenced peer idles out.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.idle_timeout = Some((IDLE).into());
-	quic.keep_alive = Some((IDLE / 4).into());
 	let cluster = cluster::Cluster::new(cluster::Options::new(config))
 		.expect("cluster init")
 		.with_connect(connect, quic);

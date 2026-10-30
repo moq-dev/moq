@@ -79,8 +79,8 @@ Include idle connections and stalled
 readers as well as high-bandwidth, high-RTT relay links before recommending
 smaller windows. Receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)) own budget
 correctness; settings must preserve useful bandwidth-delay product and
-failover behavior. [Keepalive](/quest/m2/quic-keep-alive.md) already owns timer
-policy. Do not add a generic tuning surface without a measured consumer.
+failover behavior. The keep-alive already derives from the negotiated idle
+timeout, so leave timer policy alone. Do not add a generic tuning surface without a measured consumer.
 
 Reuse [the benchmark harness](/bench/README.md). Criterion's
 [timing-loop guidance](https://bheisler.github.io/criterion.rs/book/user_guide/timing_loops.html)

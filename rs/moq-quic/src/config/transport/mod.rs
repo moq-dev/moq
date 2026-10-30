@@ -65,12 +65,18 @@ pub struct Config {
 	/// `HandshakeIdleTimeoutMs`.
 	pub handshake_timeout: Duration,
 
-	/// Period of inactivity before sending a keep-alive packet, or `None` (the default) to send
-	/// none
+	/// Period of inactivity before sending a keep-alive packet, `None` (the default) to derive it
+	/// from the negotiated idle timeout, or zero to send none
 	///
 	/// Keep-alive packets prevent an inactive but otherwise healthy connection from timing out.
 	/// Only one side of any given connection needs keep-alive enabled for the connection to be
-	/// preserved. Must be set lower than the idle timeout of both peers to be effective.
+	/// preserved. The derived interval is under a third of the idle timeout both peers settled
+	/// on, so a lost keep-alive and its probe land before either times out, and it follows a peer
+	/// that advertises a shorter timeout than ours. With no idle timeout at all it sends none.
+	///
+	/// An explicit interval wins, for a NAT binding that lives shorter than the idle timeout,
+	/// except one no shorter than the negotiated idle timeout, which could never keep the
+	/// connection up and is capped at the derived interval. See [`keep_alive_interval`].
 	pub keep_alive: Option<Duration>,
 
 	/// Whether to implement fair queuing for send streams having the same priority, on by default
@@ -248,6 +254,21 @@ impl Config {
 		return self.qlog.clone().into();
 		#[cfg(not(feature = "qlog"))]
 		QlogSink::default()
+	}
+}
+
+/// The keep-alive interval a connection runs with, or `None` to send no keep-alives
+///
+/// `keep_alive` is the configured [`Config::keep_alive`] and `idle_timeout` the negotiated idle
+/// timeout (RFC 9000 section 10.1), the smaller of both peers' `max_idle_timeout`.
+pub fn keep_alive_interval(keep_alive: Option<Duration>, idle_timeout: Option<Duration>) -> Option<Duration> {
+	// 3/10 leaves a lost keep-alive room for another and its probe retransmits.
+	let derived = idle_timeout.map(|timeout| timeout * 3 / 10);
+	match (keep_alive, idle_timeout) {
+		(Some(interval), _) if interval.is_zero() => None,
+		(Some(interval), Some(timeout)) if interval >= timeout => derived,
+		(Some(interval), _) => Some(interval),
+		(None, _) => derived,
 	}
 }
 

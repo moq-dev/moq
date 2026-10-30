@@ -76,7 +76,8 @@ reports `failed` on an answer redialing can't change, such as a rejected token.
 Both elements accept the same connection properties. `connect-version` is a
 comma-separated list, matching the CLI's repeatable `--connect-version`;
 unknown versions fail startup. QUIC durations are milliseconds, with zero
-disabling the local idle timeout or keep-alive.
+disabling the local idle timeout or keep-alive. An unset keep-alive derives
+from the idle timeout and reads back as that interval.
 Each run from `READY` publishes under a fresh
 [publisher epoch](/concept/moq-lite#publisher-epochs), so on moq-lite 07 (opt-in)
 or moq-transport, viewers switch to a restarted pipeline at once instead of stalling on the old

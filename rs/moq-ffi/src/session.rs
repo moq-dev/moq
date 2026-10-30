@@ -125,7 +125,7 @@ pub struct MoqQuicConfig {
 	/// How long an idle connection survives before it is dropped.
 	#[uniffi(default = None)]
 	pub idle_timeout: Option<Duration>,
-	/// Keep-alive ping interval. 0 disables it.
+	/// Keep-alive ping interval. 0 disables it; unset derives it from the idle timeout.
 	#[uniffi(default = None)]
 	pub keep_alive: Option<Duration>,
 	/// UDP generic segmentation offload: batches sends into one syscall.
@@ -266,7 +266,8 @@ pub fn moq_client_defaults() -> MoqClientConfig {
 			quic: MoqQuicConfig {
 				max_streams: Some(quic.max_streams),
 				idle_timeout: Some(quic.idle_timeout),
-				keep_alive: Some(quic.keep_alive.unwrap_or_default()),
+				// Unset: derived from the idle timeout the peers negotiate.
+				keep_alive: quic.keep_alive,
 				..Default::default()
 			},
 			websocket: MoqWebSocketConfig {

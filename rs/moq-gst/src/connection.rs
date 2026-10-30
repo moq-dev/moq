@@ -40,8 +40,8 @@ pub(crate) fn properties() -> Vec<glib::ParamSpec> {
 			.build(),
 		glib::ParamSpecUInt64::builder("quic-keep-alive")
 			.nick("QUIC keep-alive")
-			.blurb("QUIC keep-alive interval in milliseconds, 0 to disable; iroh still pings at least every 5s")
-			.default_value(quic.keep_alive.map(duration_millis).unwrap_or(0))
+			.blurb("QUIC keep-alive interval in milliseconds, 0 to disable; unset derives it from the idle timeout; iroh still pings at least every 5s")
+			.default_value(quic.keep_alive_interval().map(duration_millis).unwrap_or(0))
 			.mutable_ready()
 			.build(),
 		glib::ParamSpecBoolean::builder("quic-keylog")
@@ -73,9 +73,14 @@ impl Settings {
 					.unwrap_or_else(|| moq_tokio::quic::Resolved::default().idle_timeout),
 			)
 			.to_value(),
+			// Unset reads as what it derives to against a peer that does not shorten the idle timeout.
 			"quic-keep-alive" => self
 				.quic_keep_alive
-				.or_else(|| moq_tokio::quic::Resolved::default().keep_alive)
+				.or_else(|| {
+					let mut quic = moq_tokio::quic::Resolved::default();
+					quic.idle_timeout = self.quic_idle_timeout.unwrap_or(quic.idle_timeout);
+					quic.keep_alive_interval()
+				})
 				.map(duration_millis)
 				.unwrap_or(0)
 				.to_value(),
@@ -136,6 +141,16 @@ mod tests {
 		}
 	}
 
+	/// An unset keep-alive reads as what it derives to, following the idle timeout.
+	#[test]
+	fn unset_keep_alive_reads_as_derived() {
+		let mut settings = Settings::default();
+		assert_eq!(settings.get("quic-keep-alive").get::<u64>().unwrap(), 3_000);
+		settings.set("quic-idle-timeout", &30_000u64.to_value());
+		assert_eq!(settings.get("quic-keep-alive").get::<u64>().unwrap(), 9_000);
+		assert_eq!(settings.resolve().unwrap().1.resolve().keep_alive, None);
+	}
+
 	#[test]
 	fn properties_reach_versions_tls_and_quic_config() {
 		let mut settings = Settings::default();
@@ -157,7 +172,7 @@ mod tests {
 		assert_eq!(connect.backoff.timeout, Some(Duration::ZERO.into()));
 		let quic = quic.resolve();
 		assert_eq!(quic.idle_timeout, Duration::from_secs(15));
-		assert_eq!(quic.keep_alive, None);
+		assert_eq!(quic.keep_alive, Some(Duration::ZERO));
 		assert!(quic.keylog.is_some());
 		settings.set("connect-version", &"moq-lite-99".to_value());
 		assert!(settings.resolve().unwrap_err().to_string().contains("moq-lite-99"));
