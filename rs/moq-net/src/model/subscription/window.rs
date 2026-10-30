@@ -1216,7 +1216,7 @@ mod tests {
 	#[test]
 	fn a_time_start_the_groups_cant_place_is_looked_up() {
 		let mut groups = Groups::new([Groups::started(4, 4000), Groups::started(9, 9000)]);
-		groups.gone = vec![5..9];
+		groups.gone.push(5..9);
 		groups.looks_up = true;
 		let mut window = Window::new(&[range(time(8500), None)], Some(9), &groups).unwrap();
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(at(8500), 9)]);
