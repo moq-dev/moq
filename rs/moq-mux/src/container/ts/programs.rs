@@ -33,6 +33,13 @@ use crate::catalog;
 /// PID no program reads, the PAT's PMT PIDs, the SI PIDs and the null PID aside, is counted once
 /// for the multiplex (see [`stats::Snapshot::streams`]). Counting waits until every program the
 /// PAT lists has its PMT, since until then a PID may be a program's still to come.
+///
+/// Each PID is counted once, so a PID several programs read has one continuous set of
+/// counters while they start and retire. The PMT sections are reassembled here, once per PMT
+/// PID, so a bad CRC counts once however many programs read the PID. Every other count of a PID
+/// is taken from one program at a time, the first to read it. When that one stops reading it,
+/// the earliest running program still reading it takes over the TR 101 290 intervals it was
+/// timing there, and counts on from the total it leaves.
 pub struct Programs {
 	origin: moq_net::origin::Producer,
 	name: moq_net::Path,
@@ -41,10 +48,16 @@ pub struct Programs {
 	/// The latest whole PAT, from the first that lists a program, which seeds every program.
 	pat: Option<psi::Pat>,
 	/// The programs the latest PAT lists and no PMT has started yet, by the PMT PID it names
-	/// for them.
-	waiting: HashMap<u16, Waiting>,
-	/// PMT sections dropped for a bad CRC on a PID no program read, by PID.
+	/// for them, with how long each has waited.
+	waiting: HashMap<u16, HashMap<u16, Wait>>,
+	/// The PMT sections on each PMT PID the latest PAT lists, reassembled once for every program.
+	pmts: HashMap<u16, SectionReassembler>,
+	/// Whether each PID, by index, is one of [`Self::pmts`], read without hashing every packet.
+	pmt_pids: Vec<bool>,
+	/// PMT sections dropped for a bad CRC, by PID.
 	crc_errors: BTreeMap<u16, u64>,
+	/// Each PID's counts, but for its PMT sections' CRC.
+	tallies: BTreeMap<u16, Tally>,
 	/// Empty until a PMT starts a program, and again once a PAT retires every one.
 	programs: Vec<Program>,
 	/// The programs reading each PID they claim, indexed by PID, in program order. The PAT and
@@ -54,28 +67,16 @@ pub struct Programs {
 	touched: Vec<usize>,
 	/// Whether a retired program had announced.
 	announced: bool,
-	/// What retired programs counted beyond the programs still running.
-	retired: Counts,
 	/// Times the programs waiting for their PMT.
 	clock: Clock,
 	/// The [`Clock`] reading past which the longest-waiting program is late, while one waits.
 	deadline: Option<u64>,
-	/// Every PMT PID the latest PAT lists, which the PAT claims whether or not a program reads it.
-	pmt_pids: HashSet<u16>,
 	/// The packets on PIDs no program reads.
 	unclaimed: Unclaimed,
 }
 
 /// `PMT_error_2`: a PMT recurs at least every 0.5 s of program clock.
 const PMT_LIMIT: u64 = super::passthrough::PCR_HZ / 2;
-
-/// The programs waiting for their PMT on one PID.
-#[derive(Default)]
-struct Waiting {
-	sections: SectionReassembler,
-	/// Each program's number, with how long it has waited.
-	programs: HashMap<u16, Wait>,
-}
 
 /// How long a listed program has waited for its PMT, on the [`Clock`].
 #[derive(Clone, Copy)]
@@ -128,6 +129,8 @@ struct Program {
 	pending: Option<(moq_net::origin::Route, moq_net::track::Consumer)>,
 	/// The PIDs this program is listed under in [`Programs::readers`], sorted.
 	claims: Vec<u16>,
+	/// Its reading of each PID it claimed once and claims no longer, when it stopped.
+	stopped: HashMap<u16, Count>,
 	/// Whether the current [`Programs::decode`] call routed it a packet.
 	touched: bool,
 }
@@ -152,59 +155,90 @@ impl Program {
 	}
 }
 
-/// Counters merged across programs.
-#[derive(Default)]
-struct Counts {
-	streams: BTreeMap<u16, stats::Stream>,
-	/// PMT sections dropped for a bad CRC, by PID.
-	crc_errors: BTreeMap<u16, u64>,
+/// What one program counted on one PID: its row, and the TR 101 290 intervals it timed there.
+#[derive(Clone, Default)]
+struct Count {
+	row: Option<stats::Stream>,
 	errors: health::Errors,
 }
 
-impl Counts {
-	/// Fold in a program's counters. Programs sharing a PMT, PCR or elementary PID count the
-	/// same sections and packets, each since it started, so each count takes the larger.
-	fn merge(&mut self, import: &Import<Ext>) {
-		for (pid, row) in import.stats().streams {
-			self.streams
-				.entry(pid)
-				.and_modify(|ours| ours.combine(&row, u64::max))
-				.or_insert(row);
+impl Count {
+	/// `pid`'s counts in a program's `stats` and `errors`.
+	fn read(stats: &stats::Snapshot, errors: &health::Errors, pid: u16) -> Self {
+		Self {
+			row: stats.streams.get(&pid).cloned(),
+			errors: errors.only(pid),
 		}
-		for (&pid, &count) in import.crc_errors() {
-			let merged = self.crc_errors.entry(pid).or_default();
-			*merged = (*merged).max(count);
-		}
-		self.errors.max(import.errors());
 	}
 
-	/// Add what `earlier` counted on input these counts never read. A row both hold keeps this
-	/// one's track.
-	fn add(&mut self, earlier: &Self) {
-		for (&pid, row) in &earlier.streams {
-			self.streams
-				.entry(pid)
-				.and_modify(|ours| ours.combine(row, u64::saturating_add))
-				.or_insert_with(|| row.clone());
+	/// What these counts gained since `from`, an earlier reading of the same program.
+	fn since(mut self, from: &Self) -> Self {
+		if let (Some(row), Some(from)) = (&mut self.row, &from.row) {
+			row.combine(from, u64::saturating_sub);
 		}
-		for (&pid, &count) in &earlier.crc_errors {
-			*self.crc_errors.entry(pid).or_default() += count;
+		self.errors.combine(&from.errors, u64::saturating_sub);
+		self
+	}
+
+	/// Add what `earlier` counted, keeping this row's track, class and quiet.
+	fn after(mut self, earlier: &Self) -> Self {
+		match (&mut self.row, &earlier.row) {
+			(Some(row), Some(earlier)) => row.combine(earlier, u64::saturating_add),
+			(None, Some(earlier)) => self.row = Some(earlier.clone()),
+			_ => {}
 		}
 		self.errors.combine(&earlier.errors, u64::saturating_add);
+		self
+	}
+}
+
+/// One PID's counts for the multiplex.
+#[derive(Default)]
+struct Tally {
+	/// What the programs that counted the PID before the current one counted.
+	kept: Count,
+	/// The program counting the PID now, by index, with its reading when it took over.
+	owner: Option<(usize, Count)>,
+}
+
+impl Tally {
+	/// The PID's counts, given its owner's reading now.
+	fn total(&self, now: Option<Count>) -> Count {
+		match (&self.owner, now) {
+			(Some((_, from)), Some(now)) => now.since(from).after(&self.kept),
+			_ => self.kept.clone(),
+		}
 	}
 
-	/// What these counts hold beyond `running`'s, which read the same multiplex.
-	fn beyond(mut self, running: &Self) -> Self {
-		for (pid, row) in &mut self.streams {
-			if let Some(theirs) = running.streams.get(pid) {
-				row.combine(theirs, u64::saturating_sub);
-			}
+	/// The owner stops counting the PID, its reading at the end `ended`.
+	fn release(&mut self, ended: Count) {
+		self.kept = self.total(Some(ended));
+		self.owner = None;
+		// Nothing is expected on a PID no program counts, so it is not quiet.
+		if let Some(row) = &mut self.kept.row {
+			row.quiet = None;
 		}
-		for (pid, count) in &mut self.crc_errors {
-			*count = count.saturating_sub(running.crc_errors.get(pid).copied().unwrap_or(0));
-		}
-		self.errors.combine(&running.errors, u64::saturating_sub);
-		self
+	}
+}
+
+/// The PIDs of sorted `pids` not in sorted `other`.
+fn difference(pids: &[u16], other: &[u16]) -> Vec<u16> {
+	(pids.iter())
+		.filter(|pid| other.binary_search(pid).is_err())
+		.copied()
+		.collect()
+}
+
+/// Whether every program reads `pid`: the PAT, and the SI PIDs.
+fn everyone(pid: u16) -> bool {
+	pid == Pid::PAT || SI_PIDS.contains(&pid)
+}
+
+/// The earliest running program reading `pid`, which counts it next.
+fn next_reader(readers: &[Vec<usize>], programs: usize, pid: u16) -> Option<usize> {
+	match everyone(pid) {
+		true => (programs > 0).then_some(0),
+		false => readers[usize::from(pid)].first().copied(),
 	}
 }
 
@@ -218,15 +252,16 @@ impl Programs {
 			demux: Demux::new(true),
 			pat: None,
 			waiting: HashMap::new(),
+			pmts: HashMap::new(),
+			pmt_pids: vec![false; 1 << 13],
 			crc_errors: BTreeMap::new(),
+			tallies: BTreeMap::new(),
 			programs: Vec::new(),
 			readers: vec![Vec::new(); 1 << 13],
 			touched: Vec::new(),
 			announced: false,
-			retired: Counts::default(),
 			clock: Clock::default(),
 			deadline: None,
-			pmt_pids: HashSet::new(),
 			unclaimed: Unclaimed::default(),
 		}
 	}
@@ -244,7 +279,7 @@ impl Programs {
 		while let Some(packet) = demux.next() {
 			if let Some(pat) = &packet.pat {
 				self.follow(pat)?;
-			} else if !self.waiting.is_empty() {
+			} else if self.pmt_pids[usize::from(packet.pid)] {
 				self.describe(&packet)?;
 			}
 			// Every program reads the PAT, and the SI sections the parser reassembled.
@@ -329,7 +364,7 @@ impl Programs {
 		self.retire(&listed)?;
 		let mut moved = Vec::new();
 		self.waiting.retain(|pid, waiting| {
-			waiting.programs.retain(|number, _| match listed.get(number) {
+			waiting.retain(|number, _| match listed.get(number) {
 				Some(listed) if listed == pid => true,
 				Some(&listed) => {
 					moved.push((*number, listed));
@@ -337,12 +372,12 @@ impl Programs {
 				}
 				None => false,
 			});
-			!waiting.programs.is_empty()
+			!waiting.is_empty()
 		});
 		// A PMT on a new PID is due 0.5 s from the PAT that names it.
 		let now = Wait::Since(self.clock.ticks);
 		for (number, pid) in moved {
-			self.waiting.entry(pid).or_default().programs.insert(number, now);
+			self.waiting.entry(pid).or_default().insert(number, now);
 		}
 		let known: HashSet<u16> = self
 			.programs
@@ -351,7 +386,7 @@ impl Programs {
 			.chain(
 				self.waiting
 					.values()
-					.flat_map(|waiting| waiting.programs.keys().copied()),
+					.flat_map(|waiting| waiting.keys().copied()),
 			)
 			.collect();
 		for (&number, &pid) in &listed {
@@ -361,9 +396,18 @@ impl Programs {
 			if self.pat.is_some() {
 				tracing::info!(program = number, pmt_pid = pid, "TS program joined the PAT");
 			}
-			self.waiting.entry(pid).or_default().programs.insert(number, now);
+			self.waiting.entry(pid).or_default().insert(number, now);
 		}
-		self.pmt_pids = listed.values().copied().collect();
+		// A PMT PID the PAT now names starts reassembling at its next section.
+		let named: HashSet<u16> = listed.values().copied().collect();
+		for &pid in self.pmts.keys() {
+			self.pmt_pids[usize::from(pid)] = false;
+		}
+		self.pmts.retain(|pid, _| named.contains(pid));
+		for pid in named {
+			self.pmts.entry(pid).or_default();
+			self.pmt_pids[usize::from(pid)] = true;
+		}
 		self.pat = Some(pat.clone());
 		self.time_waits();
 		Ok(())
@@ -374,7 +418,7 @@ impl Programs {
 		self.deadline = self
 			.waiting
 			.values()
-			.flat_map(|waiting| waiting.programs.values())
+			.flat_map(HashMap::values)
 			.filter_map(|wait| match wait {
 				Wait::Since(since) => Some(since + PMT_LIMIT),
 				Wait::Described => None,
@@ -388,7 +432,7 @@ impl Programs {
 		let mut late: Vec<u16> = self
 			.waiting
 			.values()
-			.flat_map(|waiting| &waiting.programs)
+			.flat_map(|waiting| waiting.iter())
 			.filter(|(_, wait)| matches!(wait, Wait::Since(since) if self.clock.ticks > since + PMT_LIMIT))
 			.map(|(&number, _)| number)
 			.collect();
@@ -403,9 +447,8 @@ impl Programs {
 	/// End every started program `listed` no longer names: finish its tracks, announcing it
 	/// as the end of the input would, then its catalog, and close its broadcast, so it is
 	/// unannounced now rather than lingering. Subscribers already reading a track read it to
-	/// its end, and the other programs carry on. What the retired counted beyond them is kept,
-	/// a PID one of them still carries as it stood before the finish: that program holds the
-	/// tail the finish flushed, and counts it when it delivers it.
+	/// its end, and the other programs carry on. Each PID a retired program counted stays
+	/// counted, and its next reader counts on from there.
 	///
 	/// The programs and the PIDs they read are rebuilt once, so a PAT costs what the programs
 	/// claim however many it drops. Fails when a program cannot finish, as an import does at
@@ -415,10 +458,11 @@ impl Programs {
 		if !self.programs.iter().any(leaving) {
 			return Ok(());
 		}
-		let mut before = Counts::default();
-		for program in self.programs.iter().filter(|program| leaving(program)) {
-			before.merge(&program.import);
-		}
+		// What each leaver had counted before its finish, by index.
+		let before: HashMap<usize, (stats::Snapshot, health::Errors)> = (self.programs.iter().enumerate())
+			.filter(|(_, program)| leaving(program))
+			.map(|(index, program)| (index, (program.import.stats(), program.import.errors().clone())))
+			.collect();
 		// A refusal leaves every program listed, so the caller's abort reaches them all.
 		for program in self.programs.iter_mut().filter(|program| leaving(program)) {
 			tracing::info!(
@@ -445,10 +489,15 @@ impl Programs {
 				self.readers[usize::from(pid)].clear();
 			}
 		}
-		let (gone, programs): (Vec<_>, Vec<_>) = std::mem::take(&mut self.programs)
-			.into_iter()
-			.partition(|program| leaving(program));
-		self.programs = programs;
+		let mut gone = HashMap::new();
+		for (index, program) in std::mem::take(&mut self.programs).into_iter().enumerate() {
+			match moved[index] {
+				Some(_) => self.programs.push(program),
+				None => {
+					gone.insert(index, (program, None));
+				}
+			}
+		}
 		for (index, program) in self.programs.iter().enumerate() {
 			for &pid in &program.claims {
 				self.readers[usize::from(pid)].push(index);
@@ -466,33 +515,43 @@ impl Programs {
 			.clock
 			.reference
 			.and_then(|(index, last)| Some((moved[index]?, last)));
-		let mut counts = Counts::default();
-		for program in &gone {
-			program.broadcast.close();
-			counts.merge(&program.import);
-		}
-		counts.streams.retain(|&pid, row| {
+		// Each PID a leaver counted passes to its next reader. A PID a running program carries
+		// ends at the leaver's count before its finish: that program holds the tail the finish
+		// flushed, and counts it when it delivers it.
+		let mut readings = HashMap::new();
+		for (&pid, tally) in &mut self.tallies {
+			let Some((owner, _)) = &mut tally.owner else {
+				continue;
+			};
+			if let Some(to) = moved[*owner] {
+				*owner = to;
+				continue;
+			}
+			let (program, after) = gone.get_mut(owner).expect("a leaver counted it");
 			let carried = self.readers[usize::from(pid)]
 				.iter()
 				.any(|&index| self.programs[index].import.carries(pid));
-			if !carried {
-				return true;
-			}
-			match before.streams.remove(&pid) {
-				Some(earlier) => {
-					*row = earlier;
-					true
+			let ended = match carried {
+				true => {
+					let (stats, errors) = &before[owner];
+					Count::read(stats, errors, pid)
 				}
-				None => false,
+				false => {
+					let stats = after.get_or_insert_with(|| program.import.stats());
+					Count::read(stats, program.import.errors(), pid)
+				}
+			};
+			tally.release(ended);
+			if let Some(next) = next_reader(&self.readers, self.programs.len(), pid) {
+				let to = &mut self.programs[next].import;
+				program.import.hand_over(pid, to);
+				let reading = readings.entry(next).or_insert_with(|| to.stats());
+				tally.owner = Some((next, Count::read(reading, to.errors(), pid)));
 			}
-		});
-		let mut retired = counts.beyond(&self.running());
-		retired.add(&self.retired);
-		// Nothing is expected on a retired PID, so it is not quiet.
-		for row in retired.streams.values_mut() {
-			row.quiet = None;
 		}
-		self.retired = retired;
+		for (program, _) in gone.values() {
+			program.broadcast.close();
+		}
 		Ok(())
 	}
 
@@ -500,7 +559,7 @@ impl Programs {
 	/// PMT may still claim it.
 	fn unclaimed(&mut self, packet: &Packet) {
 		// A packet flagged corrupt may carry another PID's number.
-		if packet.pkt[1] & 0x80 != 0 || Unclaimed::fixed(packet.pid, true) || self.pmt_pids.contains(&packet.pid) {
+		if packet.pkt[1] & 0x80 != 0 || Unclaimed::fixed(packet.pid, true) || self.pmt_pids[usize::from(packet.pid)] {
 			return;
 		}
 		// A program still waiting for its PMT may claim it, and a late one refuses the multiplex.
@@ -509,71 +568,64 @@ impl Programs {
 		}
 	}
 
-	/// Read a packet on a waiting PMT PID, and start each program whose PMT it completes with a
-	/// stream listed.
+	/// Reassemble a packet on a PMT PID, count the PMT sections it completes with a bad CRC, and
+	/// start each waiting program whose PMT it completes with a stream listed.
 	///
 	/// A started program reads this packet itself, from the reassembler as it stood before it,
-	/// so its own PMT path applies the PMT, counts the packet's corrupt sections, and starts its
-	/// clock from the PCR already seen. Of several revisions in the packet, the last decides.
+	/// so its own PMT path applies the PMT and starts its clock from the PCR already seen. Of
+	/// several revisions in the packet, the last decides.
 	fn describe(&mut self, packet: &Packet) -> anyhow::Result<()> {
-		let Some(waiting) = self.waiting.get_mut(&packet.pid) else {
+		let Some(sections) = self.pmts.get_mut(&packet.pid) else {
 			return Ok(());
 		};
-		let before = waiting.sections.clone();
-		let readers = &self.readers[usize::from(packet.pid)];
-		// A program reading the PMT here reads this packet next, so counts what it begins. One
-		// already assembling a section read its start, so counts that one when it ends here.
-		let read = readers
-			.iter()
-			.any(|&index| self.programs[index].import.reads_pmt(packet.pid));
-		let began = readers
-			.iter()
-			.any(|&index| self.programs[index].import.assembling_pmt(packet.pid));
-		let mut sections = Vec::new();
-		waiting.sections.push(packet.pkt, &mut sections);
-		let resumed = waiting.sections.resumed();
-		// Corrupt sections no program read from their start.
+		let mut waiting = self.waiting.get_mut(&packet.pid);
+		let before = waiting.is_some().then(|| sections.clone());
+		let mut completed = Vec::new();
+		sections.push(packet.pkt, &mut completed);
 		let mut corrupt = 0;
 		let mut latest: Vec<psi::Pmt> = Vec::new();
-		for (index, section) in sections.into_iter().enumerate() {
+		for section in completed {
 			// Other tables may share the PID.
 			if section.first() != Some(&psi::PMT_TABLE_ID) {
 				continue;
 			}
 			if !psi::crc_ok(&section) {
-				let read = if index == 0 && resumed { began } else { read };
-				corrupt += u64::from(!read);
+				corrupt += 1;
 				continue;
 			}
-			if let Some(pmt) = psi::Pmt::parse(&section)
-				&& waiting.programs.contains_key(&pmt.program_number)
+			if let Some(waiting) = &waiting
+				&& let Some(pmt) = psi::Pmt::parse(&section)
+				&& waiting.contains_key(&pmt.program_number)
 			{
 				latest.retain(|seen| seen.program_number != pmt.program_number);
 				latest.push(pmt);
 			}
 		}
+		if corrupt > 0 {
+			*self.crc_errors.entry(packet.pid).or_default() += corrupt;
+			tracing::warn!(pid = packet.pid, "dropped a PSI section with a bad CRC");
+		}
+		let (Some(waiting), Some(before)) = (waiting.as_mut(), before) else {
+			return Ok(());
+		};
 		let mut described = false;
 		for pmt in latest.iter().filter(|pmt| pmt.streams.is_empty()) {
 			described |= matches!(
-				waiting.programs.insert(pmt.program_number, Wait::Described),
+				waiting.insert(pmt.program_number, Wait::Described),
 				Some(Wait::Since(_))
 			);
 		}
 		latest.retain(|pmt| !pmt.streams.is_empty());
 		if latest.is_empty() {
-			if corrupt > 0 {
-				*self.crc_errors.entry(packet.pid).or_default() += corrupt;
-				tracing::warn!(pid = packet.pid, "dropped a PSI section with a bad CRC");
-			}
 			if described {
 				self.time_waits();
 			}
 			return Ok(());
 		}
 		for pmt in &latest {
-			waiting.programs.remove(&pmt.program_number);
+			waiting.remove(&pmt.program_number);
 		}
-		if waiting.programs.is_empty() {
+		if waiting.is_empty() {
 			self.waiting.remove(&packet.pid);
 		}
 		for pmt in latest {
@@ -615,60 +667,111 @@ impl Programs {
 			catalog,
 			pending: Some((route, listed)),
 			claims: Vec::new(),
+			stopped: HashMap::new(),
 			touched: false,
 		});
-		self.reclaim(self.programs.len() - 1);
+		let index = self.programs.len() - 1;
+		self.reclaim(index);
+		self.adopt(index, std::iter::once(Pid::PAT).chain(SI_PIDS.iter().copied()));
 		Ok(())
 	}
 
-	/// Move program `index` in [`Self::readers`] to the PIDs it claims now.
+	/// Move program `index` in [`Self::readers`] to the PIDs it claims now, handing each PID it
+	/// counted and reads no longer to the next reader, and counting each it reads first.
 	fn reclaim(&mut self, index: usize) {
 		let program = &mut self.programs[index];
 		let claims = program.import.claims();
-		for &pid in program.claims.iter().filter(|pid| claims.binary_search(pid).is_err()) {
+		let dropped = difference(&program.claims, &claims);
+		let added = difference(&claims, &program.claims);
+		program.claims = claims;
+		for &pid in &dropped {
 			self.readers[usize::from(pid)].retain(|&reader| reader != index);
 		}
-		for &pid in claims.iter().filter(|pid| program.claims.binary_search(pid).is_err()) {
+		for &pid in &added {
 			let readers = &mut self.readers[usize::from(pid)];
 			let at = readers.partition_point(|&reader| reader < index);
 			readers.insert(at, index);
 		}
-		program.claims = claims;
+		self.release(index, &dropped);
+		self.adopt(index, added);
 	}
 
-	/// Every program's counters in one map, a PID several programs read counted once.
+	/// Count each of `pids` no program counts yet on program `index`, from where it last stopped
+	/// reading it, so what it counted on the way to reading the PID, such as a refusal, counts.
+	fn adopt(&mut self, index: usize, pids: impl IntoIterator<Item = u16>) {
+		let program = &mut self.programs[index];
+		for pid in pids {
+			let from = program.stopped.remove(&pid).unwrap_or_default();
+			let tally = self.tallies.entry(pid).or_default();
+			if tally.owner.is_none() {
+				tally.owner = Some((index, from));
+			}
+		}
+	}
+
+	/// Note where program `index` stopped reading each of `pids`, and hand each it counted for
+	/// the multiplex to the next reader.
+	fn release(&mut self, index: usize, pids: &[u16]) {
+		if pids.is_empty() {
+			return;
+		}
+		let import = &self.programs[index].import;
+		let stats = import.stats();
+		let ended: Vec<(u16, Count)> = (pids.iter())
+			.map(|&pid| (pid, Count::read(&stats, import.errors(), pid)))
+			.collect();
+		let mut readings = HashMap::new();
+		for (pid, ended) in ended {
+			self.programs[index].stopped.insert(pid, ended.clone());
+			let Some(tally) = self.tallies.get_mut(&pid) else {
+				continue;
+			};
+			if tally.owner.as_ref().is_none_or(|(owner, _)| *owner != index) {
+				continue;
+			}
+			tally.release(ended);
+			let Some(next) = next_reader(&self.readers, self.programs.len(), pid) else {
+				continue;
+			};
+			let [from, to] = self
+				.programs
+				.get_disjoint_mut([index, next])
+				.expect("a PID's next reader is another program");
+			from.import.hand_over(pid, &mut to.import);
+			let reading = readings.entry(next).or_insert_with(|| to.import.stats());
+			tally.owner = Some((next, Count::read(reading, to.import.errors(), pid)));
+		}
+	}
+
+	/// Every program's counters in one map, each PID counted once.
 	///
 	/// The multiplex is graded once. Programs sharing a PMT PID read the same PMT sections, so
-	/// a dropped section counts once however many read it, and programs sharing a PCR PID
-	/// count its faults once too. PMT sections dropped before any program read their PID are
-	/// counted here, and so is what a retired program counted beyond the programs still
-	/// running, so no total goes back when a program leaves or returns. So are the packets on
-	/// PIDs no program reads, in the row of the program that reads the PID whenever one does.
+	/// a dropped section counts once however many read it, and a PID several programs read is
+	/// counted by one of them at a time. What a retired program counted stays in the totals, so
+	/// no total goes back when a program leaves or returns. So are the packets on PIDs no
+	/// program reads, in the row of the program that reads the PID whenever one does.
 	pub fn stats(&self) -> stats::Snapshot {
-		let mut counts = self.running();
-		counts.add(&self.retired);
+		let mut readings: Vec<Option<stats::Snapshot>> = (0..self.programs.len()).map(|_| None).collect();
 		let mut errors = self.demux.errors().clone();
-		errors.max(&counts.errors);
-		let mut stats = stats::Snapshot {
-			streams: counts.streams,
-			..Default::default()
-		};
+		let mut stats = stats::Snapshot::default();
+		for (&pid, tally) in &self.tallies {
+			let now = tally.owner.as_ref().map(|&(index, _)| {
+				let import = &self.programs[index].import;
+				let reading = readings[index].get_or_insert_with(|| import.stats());
+				Count::read(reading, import.errors(), pid)
+			});
+			let count = tally.total(now);
+			if let Some(row) = count.row {
+				stats.streams.insert(pid, row);
+			}
+			errors.combine(&count.errors, u64::saturating_add);
+		}
 		self.unclaimed.report(&mut stats.streams, |pid| {
-			Unclaimed::fixed(pid, true) || self.pmt_pids.contains(&pid) || !self.readers[usize::from(pid)].is_empty()
+			Unclaimed::fixed(pid, true) || self.pmt_pids[usize::from(pid)] || !self.readers[usize::from(pid)].is_empty()
 		});
-		stats.crc_error =
-			counts.crc_errors.values().chain(self.crc_errors.values()).sum::<u64>() + self.demux.pat_crc_error();
+		stats.crc_error = self.crc_errors.values().sum::<u64>() + self.demux.pat_crc_error();
 		errors.report(&mut stats);
 		stats
-	}
-
-	/// The running programs' counters, merged.
-	fn running(&self) -> Counts {
-		let mut counts = Counts::default();
-		for program in &self.programs {
-			counts.merge(&program.import);
-		}
-		counts
 	}
 
 	/// Finish each program's tracks, then its catalog while it still lists them.
@@ -1032,6 +1135,65 @@ mod test {
 			programs.decode(&std::mem::take(&mut mux.out)).unwrap();
 			assert_eq!(programs.programs.len(), listed.len());
 			assert_eq!(programs.stats().streams[&0x61].units, 6, "{} running", listed.len());
+		}
+	}
+
+	/// A PTS outage on a shared PID counts the same whether or not the program timing it retires
+	/// partway: the program reading on takes over the interval running since the last PTS, which
+	/// it never saw, rather than timing the PID only from its own next PTS.
+	#[test]
+	fn a_pts_outage_counts_on_across_a_retirement() {
+		let outage = |retire: bool| {
+			let origin = crate::source::produce_origin();
+			let mut programs = Programs::new(
+				origin,
+				moq_net::Path::from_static("event.hang"),
+				catalog::Config::default(),
+			);
+			let both = [(1, 0x100), (2, 0x200)];
+			let mut mux = Mux::default();
+			mux.pat(&both)
+				.pmt(0x100, 1, 0x1ff, &[(MP2, 0x61)], 0)
+				.packet(0x1ff, Flags::pcr(27_000_000));
+			mux.out.extend(mp2_pes(0x61, 0, 90_000, [0x61; 2]));
+			// Program 2 starts after the last PTS on the PID they share.
+			for ms in (100..=3_000).step_by(100) {
+				let listed = if retire && ms > 1_000 { &both[1..] } else { &both[..] };
+				mux.pat(listed)
+					.pmt(0x100, 1, 0x1ff, &[(MP2, 0x61)], 0)
+					.pmt(0x200, 2, 0x1ff, &[(MP2, 0x61)], 0)
+					.packet(0x1ff, Flags::pcr(27_000_000 + ms * MS));
+				programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+			}
+			assert_eq!(programs.programs.len(), if retire { 1 } else { 2 });
+			programs.stats().streams[&0x61].pts_error
+		};
+		assert_eq!(outage(false), 4, "the 2.9 s since the PTS");
+		assert_eq!(outage(true), 4, "counted on by the program left");
+	}
+
+	/// A section stream refused for want of a PCR keeps its refusal in the totals once, though
+	/// the PMT that adds it counts it before its program reads the PID, while the programs
+	/// listing it run and as one leaves.
+	#[test]
+	fn a_stream_refused_without_a_pcr_counts_once() {
+		const SECTIONS: u8 = 0x05;
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
+		let both = [(1, 0x100), (2, 0x200)];
+		let mut mux = Mux::default();
+		for listed in [&both[..], &both[1..]] {
+			mux.pat(listed);
+			for (program, pid) in both {
+				mux.pmt(pid, program, 0x1fff, &[(MP2, 0x61), (SECTIONS, 0x72)], 0);
+			}
+			programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+			assert_eq!(programs.programs.len(), listed.len());
+			assert_eq!(programs.stats().streams[&0x72].refused, 1, "{} running", listed.len());
 		}
 	}
 

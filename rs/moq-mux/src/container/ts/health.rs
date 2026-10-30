@@ -83,6 +83,15 @@ impl Errors {
 		}
 	}
 
+	/// The counts on `pid` alone, the PAT's timing with PID 0's.
+	pub(super) fn only(&self, pid: u16) -> Self {
+		Self {
+			pat_error: if pid == Pid::PAT { self.pat_error } else { 0 },
+			pids: self.pids.get(&pid).map(|&errors| (pid, errors)).into_iter().collect(),
+			..Default::default()
+		}
+	}
+
 	/// Write the stream-wide totals into `stats`, and each elementary stream's own counts into
 	/// its row.
 	pub(super) fn report(&self, stats: &mut Snapshot) {
@@ -300,6 +309,29 @@ impl Health {
 	/// `pid` changed route: stop grading its PTS until it has one.
 	pub(super) fn restart(&mut self, pid: u16) {
 		self.pts.remove(&pid);
+	}
+
+	/// Carry what this checker has timed on `pid` over to `to`, which reads the same packets and
+	/// counts `pid` from here on: the PAT's interval on PID 0, the PMT's on a PMT PID `to` reads,
+	/// and the PTS cadence when `to` grades one there, so an interval running across the
+	/// handover counts once, from where it began. `now` and `then` are this checker's clock and
+	/// `to`'s; nothing carries over before both run.
+	pub(super) fn hand_over(&self, pid: u16, to: &mut Self, pts: bool, now: Option<u64>, then: Option<u64>) {
+		let (Some(now), Some(then)) = (now, then) else {
+			return;
+		};
+		let carry = |timer: &Timer| Timer {
+			last: timer.last.map(|last| (last + then).saturating_sub(now)),
+		};
+		if pid == Pid::PAT {
+			to.pat = carry(&self.pat);
+		}
+		if let (Some(timer), Some(theirs)) = (self.pmt.get(&pid), to.pmt.get_mut(&pid)) {
+			*theirs = carry(timer);
+		}
+		if pts && let Some(timer) = self.pts.get(&pid) {
+			to.pts.insert(pid, carry(timer));
+		}
 	}
 }
 
