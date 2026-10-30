@@ -406,9 +406,8 @@ async fn read_fetch(
 struct Watched {
 	/// The route last announced for this namespace, as the origin delivered it.
 	route: crate::origin::Route,
-	/// What the peer currently holds for this namespace, or [`Advert::None`] while it
-	/// is filtered. A selection that differs is worth a wire message; one that matches
-	/// is not.
+	/// The advertisement last buffered for this namespace, or [`Advert::None`] while
+	/// filtered. A different selection needs another message once this one is answered.
 	sent: Advert,
 	/// The peer should hold this namespace but does not: it refused the request, or we
 	/// could not get a stream to make it on. Nothing about that clears on its own, so the
@@ -5683,7 +5682,7 @@ struct NamespaceRequest {
 	queued: bool,
 	/// The one message still writing or awaiting an answer.
 	pending: Option<NamespacePending>,
-	/// Marks this request woken when its stream has an answer.
+	/// Marks this request woken when its stream can write or has an answer.
 	waiter: Option<kio::Waiter>,
 }
 
