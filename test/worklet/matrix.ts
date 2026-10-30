@@ -1,19 +1,22 @@
-// Manual check that `?worklet` output survives consumer bundlers: `just js worklet-matrix`.
+// Checks that `?worklet` output survives consumer bundlers: `just js worklet-matrix`, nightly.
 //
 // Builds a library around the real render worklet, capture worklet, and capture worker, installs it
 // into an app, bundles the app with each bundler, and loads every script in Chromium. Default mode
 // uses blob: URLs with no CSP, and hosted mode serves the copied assets under a strict CSP. A control
-// run of blob: URLs under that CSP must fail, proving the CSP applies. Not in CI.
+// run of blob: URLs under that CSP must fail, proving the CSP applies. The bundlers are pinned in this
+// package's manifest, so the lockfile decides their versions.
 import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { build } from "vite";
-import { worklet } from "./vite-plugin-worklet";
+import { worklet } from "../../js/common/vite-plugin-worklet";
 
 const root = mkdtempSync(join(tmpdir(), "worklet-matrix-"));
-const js = resolve(import.meta.dir, "..");
+const js = resolve(import.meta.dir, "../../js");
 const lib = join(root, "node_modules/worklet-lib");
+const webpack = Bun.resolveSync("webpack-cli/bin/cli.js", import.meta.dir);
+const esbuild = Bun.resolveSync("esbuild/bin/esbuild", import.meta.dir);
 
 const run = (cmd: string[]) => {
 	const result = Bun.spawnSync(cmd, { cwd: root, stdout: "pipe", stderr: "pipe" });
@@ -24,9 +27,7 @@ const page = (script: string, module: boolean) =>
 	`<!doctype html><script${module ? ' type="module"' : ""} src="${script}"></script>`;
 
 try {
-	// Before the library lands in node_modules, which an install would prune.
 	writeFileSync(join(root, "package.json"), JSON.stringify({ private: true, type: "module" }));
-	run(["bun", "add", "webpack", "webpack-cli"]);
 
 	writeFileSync(
 		join(root, "lib.js"),
@@ -80,17 +81,11 @@ window.result = (async () => {
 		vite: () =>
 			build({ configFile: false, root, logLevel: "silent", build: { outDir: "out/vite" } }).then(() => {}),
 		webpack: () => {
-			run(["bunx", "webpack", "--mode", "production", "--entry", "./main.js", "-o", "out/webpack"]);
+			run([webpack, "--mode", "production", "--entry", "./main.js", "-o", "out/webpack"]);
 			writeFileSync(join(root, "out/webpack/index.html"), page("./main.js", false));
 		},
 		"esbuild iife": () => {
-			run([
-				`${js}/../node_modules/.bin/esbuild`,
-				"main.js",
-				"--bundle",
-				"--format=iife",
-				"--outdir=out/esbuild iife",
-			]);
+			run([esbuild, "main.js", "--bundle", "--format=iife", "--outdir=out/esbuild iife"]);
 			writeFileSync(join(root, "out/esbuild iife/index.html"), page("./main.js", false));
 		},
 		bun: () => {
