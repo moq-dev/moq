@@ -129,3 +129,59 @@ async fn a_refused_info_fails_the_fetch_sent_with_it() {
 		}
 	}
 }
+
+/// How long a fetch-only reader `relays` hops from a publisher waits for its first fetched
+/// group over links of `rtt`, counted from the fetch once the broadcast resolved.
+async fn first_fetch(version: &str, relays: u64, rtt: Duration) -> Duration {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let mut track = broadcast.create_track("video", timed()).unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	let mut group = track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
+	group.finish().unwrap();
+
+	let mut links = Vec::new();
+	let mut upstream = publisher.clone();
+	for hop in 0..=relays {
+		let next = produce_origin(hop + 2);
+		let mut options = MockConnectOptions::new(version);
+		options.server_publish = Some(upstream.consume());
+		options.client_subscribe = Some(next.clone());
+		options.latency = rtt / 2;
+		links.push(connect_mock(options).await);
+		upstream = next;
+	}
+	let remote = moq_clock::timeout(TIMEOUT, upstream.consume().follow("bcast", None).unwrap().available())
+		.await
+		.expect("resolve timeout")
+		.expect("broadcast resolves");
+	let start = moq_clock::now();
+	let mut fetched = moq_clock::timeout(TIMEOUT, remote.track("video").unwrap().fetch_group(0, None))
+		.await
+		.expect("fetch timeout")
+		.unwrap_or_else(|err| panic!("{version}: {err:?}"));
+	moq_clock::timeout(TIMEOUT, fetched.read_frame())
+		.await
+		.expect("read timeout")
+		.unwrap()
+		.expect("a frame");
+	let elapsed = moq_clock::now() - start;
+	drop((links, track, broadcast, publisher));
+	elapsed
+}
+
+/// The first fetch costs one round trip per hop, not the two of asking for the track's info
+/// first: the info and the fetch travel together.
+#[moq_clock::test]
+async fn the_first_fetch_takes_one_round_trip_per_hop() {
+	const RTT: Duration = Duration::from_millis(100);
+	for version in VERSIONS {
+		for relays in [0, 1] {
+			let elapsed = first_fetch(version, relays, RTT).await;
+			let hops = u32::try_from(relays + 1).unwrap();
+			assert!(elapsed <= RTT * hops, "{version}, {relays} relays: {elapsed:?}");
+		}
+	}
+}

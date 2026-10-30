@@ -25,4 +25,3 @@ and two relay hops, before and after the line.
 ## Required
 
 - [SUBSCRIBE goes out with TRACK](/quest/m2/pipeline-requests/subscribe.md) - subscribers open TRACK and SUBSCRIBE together in Rust and JS
-- [Pipelined first FETCH](/quest/m2/pipeline-requests/fetch.md) - a fetch-only reader's first FETCH goes out with the info request, on lite and moq-transport

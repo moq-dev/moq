@@ -4318,7 +4318,6 @@ impl Subscriber {
 
 	/// [`Self::track_status`]'s exchange, failing with why the request was refused or
 	/// abandoned.
-
 	async fn learn_track_status(
 		&mut self,
 		broadcast_path: &Path,
