@@ -11,6 +11,9 @@ const BUILTIN: &[(&str, &str)] = &[
 	("mild", include_str!("../profiles/mild.toml")),
 	("bursty", include_str!("../profiles/bursty.toml")),
 	("step", include_str!("../profiles/step.toml")),
+	("cellular-step", include_str!("../profiles/cellular-step.toml")),
+	("cellular-bursty", include_str!("../profiles/cellular-bursty.toml")),
+	("cellular-deep", include_str!("../profiles/cellular-deep.toml")),
 ];
 
 /// A named, seeded treatment of both directions, loaded from a TOML profile.

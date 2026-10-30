@@ -1,0 +1,34 @@
+# A cellular uplink whose capacity arrives in scheduler grants: 2 Mbit/s with
+# five datagrams, or 20ms, bunched into each grant, down to 1 Mbit/s at twenty
+# seconds and back at forty.
+#
+# The bunching hides the queue's growth from a delay read off any one datagram.
+# The way back is a plain delay.
+name = "cellular-bursty"
+seed = 6
+shared = true
+
+[up]
+delay = "20ms"
+jitter = "5ms"
+jitter_model = "gaussian"
+
+[up.rate]
+bits_per_second = 2000000
+burst = 1500
+queue = "500ms"
+
+[up.batch]
+count = 5
+window = "20ms"
+
+[[up.steps]]
+at = "20s"
+bits_per_second = 1000000
+
+[[up.steps]]
+at = "40s"
+bits_per_second = 2000000
+
+[down]
+delay = "20ms"

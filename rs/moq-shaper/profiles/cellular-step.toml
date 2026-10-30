@@ -1,0 +1,29 @@
+# A cellular uplink whose capacity drops and comes back: 2 Mbit/s behind a
+# 500ms queue, down to 500 kbit/s at twenty seconds and back at forty.
+#
+# A sender has to see the queue build after the drop before it overflows, and
+# find the capacity again after the recovery. The way back is a plain delay.
+name = "cellular-step"
+seed = 5
+shared = true
+
+[up]
+delay = "20ms"
+jitter = "3ms"
+jitter_model = "gaussian"
+
+[up.rate]
+bits_per_second = 2000000
+burst = 1500
+queue = "500ms"
+
+[[up.steps]]
+at = "20s"
+bits_per_second = 500000
+
+[[up.steps]]
+at = "40s"
+bits_per_second = 2000000
+
+[down]
+delay = "20ms"

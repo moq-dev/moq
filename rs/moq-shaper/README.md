@@ -93,10 +93,12 @@ since the datagram that fills a batch never waits.
 
 ## Steps
 
-A step changes a direction's delay, jitter, loss or reorder once the run reaches `at`, counted from when
-forwarding started. It changes only what it names, so a later step puts one knob back. The rate limit
-never steps, since datagrams already queued behind it would keep the old rate's departures and a new
-rate would reorder them. A step that leaves the profile as it was, or comes at zero, is refused. Steps
+A step changes a direction's delay, jitter, loss, reorder or rate once the run reaches `at`, counted from
+when forwarding started. It changes only what it names, so a later step puts one knob back. A rate step
+sets the rate limit's `bits_per_second`, so it needs a direction with a rate limit. It keeps the order:
+datagrams already queued keep their departures, and those after the step queue behind them at the new
+rate, with the same `queue` limit on how long they wait. A step that leaves the profile as it was, or comes
+at zero, is refused. Steps
 come from a profile file. `verify` holds each phase's impairments only to the traffic that phase treated.
 A direction that carried traffic fails `verify` unless some datagram saw each phase: the profile before
 the first step and after every step. Traffic that starts late, ends early, or goes quiet across a step
@@ -137,6 +139,10 @@ delay = "60ms"
 at = "60s"
 delay = "5ms"
 
+[[up.steps]]               # at 90s the rate drops
+at = "90s"
+bits_per_second = 500000
+
 [down]
 delay = "5ms"
 ```
@@ -150,8 +156,12 @@ audio-quality lane (`test/audio-quality/`) uses `bursty` and `step`, plus its ow
 | `mild` | A healthy wired LAN: 5ms delay, 5ms sigma, in order. |
 | `bursty` | A paced hop: seven datagrams per 160ms window, released together. |
 | `step` | 5ms for thirty seconds, then 60ms, with no recovery. |
+| `cellular-step` | A 2 Mbit/s uplink behind a 500ms queue that drops to 500 kbit/s at 20s and recovers at 40s. |
+| `cellular-bursty` | A 2 Mbit/s uplink released in scheduler grants of five datagrams or 20ms, at 1 Mbit/s from 20s to 40s. |
+| `cellular-deep` | A 1 Mbit/s uplink behind a 2s queue that drops to 300 kbit/s at 20s and recovers at 40s. |
 
-Each built-in is a shared path, as a browser page's sessions on one host would be.
+Each built-in is a shared path, as a browser page's sessions on one host would be. The `cellular-*` ones
+shape only the uplink and keep a plain delay on the way back, so the acknowledgments are not impaired.
 
 ## Counters
 

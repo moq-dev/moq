@@ -32,11 +32,10 @@ its `moq_video_encode_options`.
   encoder or force a keyframe per rung mid-stream, so decide between dropping
   packets while disabled and resuming at the next natural keyframe, or
   restarting the encoder.
-- Shaped uplink: `moq-shaper` never steps its rate limit (queued datagrams
-  would reorder), so a run whose bottleneck opens back up needs either a
-  rate step the shaper can apply without reordering, or a second shaper the
-  first retargets to. Run it nightly with an `#[ignore]` test and a recipe in
-  `rs/justfile`, beside `quic-sim`.
+- Shaped uplink: a `moq-shaper` profile whose rate steps down and back up
+  (like the `cellular-step` built-in) opens the bottleneck back up mid-run.
+  Run it nightly with an `#[ignore]` test and a recipe in `rs/justfile`,
+  beside `quic-sim`.
 
 ## Related
 

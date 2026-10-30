@@ -1,0 +1,30 @@
+# A cellular uplink with a deep buffer: 1 Mbit/s behind a 2s queue, down to
+# 300 kbit/s at twenty seconds and back at forty.
+#
+# A sender that waits for loss fills the buffer before it sees a drop, so this is
+# where one that reads delay keeps its latency and one that waits does not. The
+# way back is a plain delay.
+name = "cellular-deep"
+seed = 7
+shared = true
+
+[up]
+delay = "30ms"
+jitter = "5ms"
+jitter_model = "gaussian"
+
+[up.rate]
+bits_per_second = 1000000
+burst = 1500
+queue = "2s"
+
+[[up.steps]]
+at = "20s"
+bits_per_second = 300000
+
+[[up.steps]]
+at = "40s"
+bits_per_second = 1000000
+
+[down]
+delay = "30ms"
