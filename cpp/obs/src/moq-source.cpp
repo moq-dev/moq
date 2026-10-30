@@ -864,12 +864,13 @@ static void moq_source_on_audio_subscribed(struct moq_source *ctx, const std::sh
 	moq_source_read_audio(ctx, conn, track);
 }
 
-// Whether moq-ffi's AudioConsumer takes the codec: Opus, AAC, or PCM, the gate it applies
-// before subscribing. moq-audio may still refuse one of these once subscribed, such as an
-// AAC profile it has no decoder for.
+// Whether moq-audio decodes the codec: Opus, AAC-LC (the one AAC profile it has), or PCM.
+// moq-ffi reports a refusal only once the subscribe fails, as an audio error with no kind,
+// so check here to let an unsupported rendition fall through. A configuration moq-audio
+// still refuses, such as a malformed OpusHead, discards the candidate when it subscribes.
 static bool moq_source_audio_codec_supported(const std::string &codec)
 {
-	return codec == "opus" || codec == "pcm" || codec.rfind("mp4a.40.", 0) == 0;
+	return codec == "opus" || codec == "pcm" || codec == "mp4a.40.2";
 }
 
 // The channels moq-audio should remix a rendition to, and where OBS puts them. A count

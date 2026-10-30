@@ -1225,6 +1225,12 @@ int main()
 		flac_audio.codec = "flac";
 		flac_audio.bitrate = 6000000;
 		catalog.audio.emplace("flac", flac_audio);
+		// HE-AAC: moq-ffi takes any AAC, but moq-audio decodes only AAC-LC.
+		auto he_aac_audio = audio;
+		he_aac_audio.codec = "mp4a.40.5";
+		he_aac_audio.description.reset();
+		he_aac_audio.bitrate = 5500000;
+		catalog.audio.emplace("he-aac", he_aac_audio);
 		auto unplaceable_audio = audio;
 		unplaceable_audio.channel_count = 9;
 		unplaceable_audio.bitrate = 5000000;
