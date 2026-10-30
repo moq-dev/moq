@@ -461,13 +461,14 @@ pub(crate) struct TrackState {
 	drops_revision: u64,
 	drops_changes: ledger::Changes,
 	// Sequences evicted while servable, indexed by when each run last changed, so a reader
-	// that judged one cached judges it again. Kept only until every reader that judged
-	// before an eviction has seen it: the slowest reader bounds it, not the cache.
+	// that judged one cached judges it again. Kept only within what a reader judged, until
+	// every reader that judged before an eviction has seen it: the slowest reader bounds
+	// it, not the cache, and a stalled one pins no eviction past what it judged.
 	evictions: RangeSet<u64>,
 	eviction_changes: ledger::Changes,
-	// How many readers judged up to each eviction revision, the lowest being the slowest.
-	// Its own lock, so a reader moves through the read guard it judges under.
-	eviction_readers: Mutex<BTreeMap<u64, usize>>,
+	// Where each reader judged up to. Its own lock, so a reader moves through the read guard
+	// it judges under.
+	eviction_readers: Mutex<EvictionReaders>,
 
 	// Whether the cache reflects the live feed: readers get nothing from it while it does
 	// not, since how stale it is cannot be told; fetches still do. A track is live from
@@ -946,47 +947,54 @@ impl TrackState {
 	/// it for the readers that judged it cached to judge again.
 	fn evict_group(&mut self, sequence: u64, err: Error) {
 		self.uncache(sequence).expect("a cached group").abort(err);
-		let Some(end) = sequence.checked_add(1) else {
-			return;
+		let (slowest, top) = {
+			let readers = self.eviction_readers.lock().unwrap_or_else(PoisonError::into_inner);
+			(readers.slowest(), readers.top())
 		};
-		self.evictions.insert(sequence..end);
-		let run = self
-			.evictions
-			.get(&sequence)
-			.cloned()
-			.expect("the eviction was just recorded");
-		// The neighbours it coalesced with retire their entries.
-		for old in [run.start, end] {
-			self.eviction_changes.remove(old);
+		// No reader judged a group above every reader's newest, so none needs it again.
+		if let Some(end) = sequence.checked_add(1)
+			&& top.is_some_and(|top| sequence <= top)
+		{
+			self.evictions.insert(sequence..end);
+			let run = self
+				.evictions
+				.get(&sequence)
+				.cloned()
+				.expect("the eviction was just recorded");
+			// The neighbours it coalesced with retire their entries.
+			for old in [run.start, end] {
+				self.eviction_changes.remove(old);
+			}
+			self.eviction_changes.insert(run);
 		}
-		self.eviction_changes.insert(run);
 		// Readers registered after a run last changed judged it as it is: only one that
 		// judged earlier still needs it.
-		let slowest = self
-			.eviction_readers
-			.lock()
-			.unwrap_or_else(PoisonError::into_inner)
-			.first_key_value()
-			.map(|(revision, _)| *revision);
 		let seen = slowest.unwrap_or(self.eviction_changes.revision());
 		for run in self.eviction_changes.trim(seen) {
+			self.evictions.remove(run);
+		}
+		// A run past every reader's newest, once the reader that judged it left.
+		let above = top.map_or(0, |top| top.saturating_add(1));
+		let past: Vec<_> = self
+			.evictions
+			.overlapping(&(above..u64::MAX))
+			.filter(|run| run.start >= above)
+			.cloned()
+			.collect();
+		for run in past {
+			self.eviction_changes.remove(run.start);
 			self.evictions.remove(run);
 		}
 	}
 
 	/// Move one reader's eviction registration from `from`, if it had one, to `to`.
-	pub(super) fn judged_evictions(&self, from: Option<u64>, to: Option<u64>) {
+	pub(super) fn judged_evictions(&self, from: Option<Judged>, to: Option<Judged>) {
 		let mut readers = self.eviction_readers.lock().unwrap_or_else(PoisonError::into_inner);
-		if let Some(from) = from
-			&& let btree_map::Entry::Occupied(mut entry) = readers.entry(from)
-		{
-			*entry.get_mut() -= 1;
-			if *entry.get() == 0 {
-				entry.remove();
-			}
+		if let Some(from) = from {
+			readers.remove(from);
 		}
 		if let Some(to) = to {
-			*readers.entry(to).or_default() += 1;
+			readers.add(to);
 		}
 	}
 
@@ -5908,6 +5916,45 @@ impl PresentationEdge {
 	/// Whether a group that can present until `reach` is a full `budget` behind this edge.
 	fn behind(&self, reach: Option<Timestamp>, budget: Duration) -> bool {
 		reach.is_some_and(|reach| matches!(self.timestamp.checked_sub(reach), Ok(age) if Duration::from(age) >= budget))
+	}
+}
+
+/// Where a reader judged evictions up to: the track's eviction revision and the newest
+/// sequence it judged.
+pub(super) type Judged = (u64, u64);
+
+/// Where every reader judged evictions up to, counted.
+#[derive(Default)]
+struct EvictionReaders {
+	revisions: BTreeMap<u64, usize>,
+	tops: BTreeMap<u64, usize>,
+}
+
+impl EvictionReaders {
+	fn add(&mut self, (revision, top): Judged) {
+		*self.revisions.entry(revision).or_default() += 1;
+		*self.tops.entry(top).or_default() += 1;
+	}
+
+	fn remove(&mut self, (revision, top): Judged) {
+		for (counts, key) in [(&mut self.revisions, revision), (&mut self.tops, top)] {
+			if let btree_map::Entry::Occupied(mut entry) = counts.entry(key) {
+				*entry.get_mut() -= 1;
+				if *entry.get() == 0 {
+					entry.remove();
+				}
+			}
+		}
+	}
+
+	/// The lowest revision a reader judged up to.
+	fn slowest(&self) -> Option<u64> {
+		self.revisions.first_key_value().map(|(revision, _)| *revision)
+	}
+
+	/// The newest sequence any reader judged.
+	fn top(&self) -> Option<u64> {
+		self.tops.last_key_value().map(|(top, _)| *top)
 	}
 }
 
@@ -18734,7 +18781,8 @@ mod test {
 	}
 
 	/// The track keeps an eviction run only while a reader that judged before its last change
-	/// has yet to see it: the slowest reader bounds the record, and none keeps nothing.
+	/// has yet to see it, and only within what a reader judged: the slowest reader bounds the
+	/// record, a stalled one pins nothing it never judged, and none keeps nothing.
 	#[test]
 	#[cfg(feature = "async")]
 	fn the_slowest_reader_bounds_the_eviction_record() {
@@ -18767,6 +18815,13 @@ mod test {
 		drain_groups(&mut fast);
 		evict(&producer, 4);
 		assert_eq!(recorded(), [(4, 5)], "the fast reader saw every earlier run");
+		// Stalled, it judged nothing past group 5: what the feed evicts beyond is not kept.
+		for sequence in (6..20).step_by(2) {
+			write_group(&producer, sequence);
+			write_group(&producer, sequence + 1);
+			evict(&producer, sequence);
+		}
+		assert_eq!(recorded(), [(4, 5)], "nothing past what the stalled reader judged");
 		drop(fast);
 		evict(&producer, 3);
 		assert!(recorded().is_empty(), "no reader is left");

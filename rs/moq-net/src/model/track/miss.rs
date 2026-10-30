@@ -28,7 +28,7 @@ use rangemap::{RangeInclusiveSet, RangeSet};
 use super::super::delivered::Delivered;
 pub(super) use super::fill::Asking;
 use super::fill::{Ask, FillState, Join};
-use super::{Drift, Order, Position, TrackState};
+use super::{Drift, Judged, Order, Position, TrackState};
 use crate::Error;
 
 /// What a probe judges against: the span read, the feed's newest group, where the feed
@@ -62,8 +62,9 @@ pub(super) struct Misses {
 	filled: BTreeSet<u64>,
 	/// Never asked again: named dropped to the reader.
 	given_up: RangeSet<u64>,
-	/// The track's eviction revision this reader judged up to, registered with the track.
-	evicted: Option<u64>,
+	/// The track's eviction revision and newest sequence this reader judged up to,
+	/// registered with the track.
+	evicted: Option<Judged>,
 	/// Judged again after an eviction, within the judged span: never refilled twice.
 	refilled: RangeSet<u64>,
 }
@@ -196,8 +197,8 @@ impl Misses {
 		&self.given_up
 	}
 
-	/// The eviction revision this reader is registered at with its track, if any.
-	pub fn evicted(&self) -> Option<u64> {
+	/// Where this reader is registered with its track as having judged evictions up to.
+	pub fn evicted(&self) -> Option<Judged> {
 		self.evicted
 	}
 
@@ -408,7 +409,7 @@ impl Misses {
 			&& self.ended == ended
 			&& self.ledger_revision == ledger.revision()
 			&& self.drops_revision == drops.revision()
-			&& self.evicted == Some(evictions.revision());
+			&& self.evicted.map(|(revision, _)| revision) == Some(evictions.revision());
 		// The grace only times deferred gaps, so with none a new one has nothing to move.
 		// It is judged once something else changes.
 		if unchanged && self.deferred.runs.is_empty() {
@@ -520,7 +521,7 @@ impl Misses {
 		}
 		// What was judged cached and evicted since, before this reader took it, is a miss now.
 		let mut refills = RangeSet::new();
-		if let Some(seen) = self.evicted
+		if let Some((seen, _)) = self.evicted
 			&& seen != evictions.revision()
 			&& low <= top
 		{
@@ -541,9 +542,10 @@ impl Misses {
 				}
 			}
 		}
-		if self.evicted != Some(evictions.revision()) {
-			state.judged_evictions(self.evicted, Some(evictions.revision()));
-			self.evicted = Some(evictions.revision());
+		let judged = Some((evictions.revision(), top));
+		if self.evicted != judged {
+			state.judged_evictions(self.evicted, judged);
+			self.evicted = judged;
 		}
 		for run in refills.iter() {
 			self.refilled.insert(run.clone());
