@@ -12539,7 +12539,13 @@ mod stitch_tests {
 
 		/// Name `sequence` as the Largest Group the fill answers, so it owes that group's head.
 		fn with_largest(self, sequence: u64) -> Self {
-			self.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().fill_largest = Some(sequence);
+			self.subscriber
+				.state
+				.lock()
+				.subscribes
+				.get_mut(&REQUEST)
+				.unwrap()
+				.fill_largest = Some(sequence);
 			self
 		}
 
