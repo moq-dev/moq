@@ -16,9 +16,10 @@ categories = ["asynchronous", "date-and-time", "development-tools::testing"]
 [package.metadata.docs.rs]
 features = ["manual", "sim", "serde"]
 
-# The self dev-dependency below only enables a feature; no code names it.
+# The self dev-dependency below only enables a feature, and getrandom only picks the
+# browser backend for the wasm tests; no code names either.
 [package.metadata.cargo-shear]
-ignored = ["moq-clock"]
+ignored = ["getrandom", "moq-clock"]
 
 [features]
 default = ["runtime"]
@@ -36,6 +37,7 @@ manual = ["runtime"]
 futures = { workspace = true, optional = true }
 kio = { workspace = true }
 moq-clock-macros = { workspace = true, optional = true }
+rand = { workspace = true }
 serde = { workspace = true, optional = true }
 serde_with = { workspace = true, optional = true }
 web-async = { workspace = true, optional = true }
@@ -55,6 +57,8 @@ moq-clock = { path = ".", default-features = false, features = ["sim", "serde"] 
 serde_json = { workspace = true }
 
 [target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dev-dependencies]
+# rand's OS source in the browser. Dev only, so downstream binaries pick their own backend.
+getrandom = { workspace = true }
 # Match the wasm-bindgen CLI schema used by the browser runner.
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-test = "=0.3.79"

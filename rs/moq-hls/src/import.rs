@@ -787,7 +787,7 @@ impl Import {
 					// Jittered so a fleet of importers pointed at one origin doesn't retry in
 					// lockstep, and never past the deadline the budget promised.
 					let wait = delay
-						.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)
+						.mul_f64(0.5 + moq_clock::rng().random::<f64>() / 2.0)
 						.min(deadline - now);
 					delay = (delay * 2).min(STEP_RETRY_MAX);
 					moq_clock::sleep(wait).await;

@@ -67,8 +67,7 @@ impl Hop {
 	/// and reject values above 2^53-1. Keep generated IDs in that range while
 	/// [`Self::new`] accepts any non-zero 64-bit id.
 	pub fn random() -> Self {
-		let mut rng = rand::rng();
-		let id = rng.random_range(1..(1u64 << 53));
+		let id = moq_clock::rng().random_range(1..(1u64 << 53));
 		Self { id }
 	}
 

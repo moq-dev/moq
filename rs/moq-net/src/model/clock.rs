@@ -7,11 +7,10 @@
 //! each frame it caches, and the cache's wall-clock staleness, so a port swaps this
 //! module for its platform's clock.
 
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::hash::{Hash, Hasher};
+#[cfg(any(test, loom))]
+use std::sync::LazyLock;
 use std::time::Duration;
-
-use rand::RngExt;
 
 /// The current instant on the model's clock.
 pub(super) fn now() -> crate::time::Instant {
@@ -50,19 +49,19 @@ pub(super) fn wall() -> crate::time::Instant {
 /// timestamp it maps to.
 ///
 /// A timestamp isn't a real clock; it only needs to be non-negative and roughly
-/// monotonic with wall time. A random per-process jitter makes it read late, which
-/// deters using it as a wall clock and catches implementations that assume
+/// monotonic with wall time. A random jitter per ambient clock makes it read late,
+/// which deters using it as a wall clock and catches implementations that assume
 /// unrelated broadcasts are synchronized.
+///
+/// The jitter is derived from the ambient seed and the clock's origin rather than
+/// drawn, so it stays fixed for the clock without a cache that simulated runs, which
+/// all share one origin, would leak into each other.
 pub(super) fn anchor() -> (crate::time::Instant, Duration) {
-	static ANCHORS: LazyLock<Mutex<HashMap<(crate::time::Instant, moq_clock::Wall), Duration>>> =
-		LazyLock::new(Default::default);
 	let (instant, wall) = moq_clock::origin();
-	let mut anchors = ANCHORS.lock().unwrap();
-	let offset = *anchors.entry((instant, wall)).or_insert_with(|| {
-		let jitter = Duration::from_millis(rand::rng().random_range(1..69_420));
-		offset(wall, jitter)
-	});
-	(instant, offset)
+	let mut hasher = std::hash::DefaultHasher::new();
+	(moq_clock::seed(), instant, wall).hash(&mut hasher);
+	let jitter = Duration::from_millis(1 + hasher.finish() % 69_419);
+	(instant, offset(wall, jitter))
 }
 
 /// Wall time since 2020-01-01T00:00:00Z, less the jitter.
