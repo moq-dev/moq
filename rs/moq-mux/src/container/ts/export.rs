@@ -449,12 +449,12 @@ impl Track {
 					&& !radl(stream_type, self.source.description(), &pending.frame)
 			}
 			None => {
-				let picture = Mpeg2Picture::read(&pending.frame.payload);
+				let pictures = Mpeg2Picture::read(&pending.frame.payload);
 				if pending.frame.keyframe {
-					self.open_gop = picture
+					self.open_gop = (pictures.first())
 						.filter(|picture| picture.gop == Some(false))
 						.map(|picture| picture.temporal_reference);
-				} else if picture.is_some_and(|picture| picture.gop.is_some()) {
+				} else if pictures.iter().any(|picture| picture.gop.is_some()) {
 					// A GOP inside the group: its leading pictures reference only the group's own.
 					self.open_gop = None;
 				}
@@ -499,13 +499,11 @@ impl Track {
 		self.release(name, jitter, false)
 	}
 
-	/// Whether an MPEG-1/2 video PES is a B-picture presented before the I-picture of the open
-	/// GOP its group opened on, so it references the group before. A PES holding more than one
-	/// picture is judged by its first.
+	/// Whether an MPEG-1/2 video PES holds only B-pictures presented before the I-picture of the
+	/// open GOP its group opened on, so they reference the group before. A PES that also holds
+	/// a picture others reference goes out whole, its orphans with it.
 	fn leads_gop(&self, frame: &Frame) -> bool {
-		!frame.keyframe
-			&& (self.open_gop.zip(Mpeg2Picture::read(&frame.payload)))
-				.is_some_and(|(opened, picture)| picture.bidirectional && picture.temporal_reference < opened)
+		!frame.keyframe && (self.open_gop).is_some_and(|opened| Mpeg2Picture::orphaned(&frame.payload, opened))
 	}
 
 	/// Read within the jitter window, or hold the first frame until the program tables are built.
@@ -4550,7 +4548,7 @@ fn stream_id(kind: &Kind) -> Option<u8> {
 	matches!(kind, Kind::Opus { .. }).then_some(StreamId::PRIVATE_STREAM_1)
 }
 
-/// Where an MPEG-1/2 video PES's first picture sits in its GOP (ISO 13818-2 6.2.2.6, 6.2.3).
+/// Where a picture of an MPEG-1/2 video PES sits in its GOP (ISO 13818-2 6.2.2.6, 6.2.3).
 #[derive(Clone, Copy)]
 struct Mpeg2Picture {
 	/// Whether a GOP header leads the picture, and if so whether it sets `closed_gop`. A leading
@@ -4563,27 +4561,35 @@ struct Mpeg2Picture {
 }
 
 impl Mpeg2Picture {
-	/// Read the whole PES `pes`, if it holds a picture header. `broken_link` is the encoder's
-	/// own mark of an edit, so an open GOP is judged by `closed_gop` alone.
-	fn read(pes: &[u8]) -> Option<Self> {
-		let es = psi::PesStart::parse(pes).ok()?.data;
-		let mut gop = None;
+	/// Read every picture header of the whole PES `pes`, in order. `broken_link` is the
+	/// encoder's own mark of an edit, so an open GOP is judged by `closed_gop` alone.
+	fn read(pes: &[u8]) -> Vec<Self> {
+		let Ok(start) = psi::PesStart::parse(pes) else {
+			return Vec::new();
+		};
+		let es = start.data;
+		let (mut pictures, mut gop) = (Vec::new(), None);
 		for at in memchr::memmem::find_iter(es, &[0, 0, 1]) {
-			let header = es.get(at + 3..)?;
-			match header {
+			match &es[at + 3..] {
 				// time_code is 25 bits, then closed_gop.
 				[0xb8, _, _, _, flags, ..] => gop = Some(flags & 0x40 != 0),
-				[0x00, high, low, ..] => {
-					return Some(Self {
-						gop,
-						temporal_reference: u16::from(*high) << 2 | u16::from(low >> 6),
-						bidirectional: (low >> 3) & 0x07 == 3,
-					});
-				}
+				[0x00, high, low, ..] => pictures.push(Self {
+					gop: gop.take(),
+					temporal_reference: u16::from(*high) << 2 | u16::from(low >> 6),
+					bidirectional: (low >> 3) & 0x07 == 3,
+				}),
 				_ => {}
 			}
 		}
-		None
+		pictures
+	}
+
+	/// Whether the PES `pes` holds pictures and only B-pictures presented before the I-picture
+	/// at temporal reference `opened`.
+	fn orphaned(pes: &[u8], opened: u16) -> bool {
+		let pictures = Self::read(pes);
+		!pictures.is_empty()
+			&& (pictures.iter()).all(|picture| picture.bidirectional && picture.temporal_reference < opened)
 	}
 }
 
@@ -4846,8 +4852,8 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::{
-		Buffer, DecodeClock, Dolby, Kind, Laid, PSI_INTERVAL, PesPacket, Psi, Settle, dolby_removals, due,
-		is_complete_section, si_due, slot, unwrap_pts, verbatim_buffer,
+		Buffer, DecodeClock, Dolby, Kind, Laid, Mpeg2Picture, PSI_INTERVAL, PesPacket, Psi, Settle, dolby_removals,
+		due, is_complete_section, si_due, slot, unwrap_pts, verbatim_buffer,
 	};
 
 	/// The tables as they stand take the version after the last laid, whatever was set on the
@@ -5474,6 +5480,33 @@ mod tests {
 		pes.extend_from_slice(fields);
 		pes.extend_from_slice(payload);
 		pes
+	}
+
+	#[test]
+	fn mpeg2_orphans_are_whole_pes_of_leading_b_pictures() {
+		// A picture header: temporal_reference, then picture_coding_type (1 I, 2 P, 3 B).
+		let picture = |reference: u16, coding: u8| {
+			[
+				0,
+				0,
+				1,
+				0,
+				(reference >> 2) as u8,
+				((reference & 3) as u8) << 6 | coding << 3,
+				0,
+				0,
+			]
+		};
+		let video = |pictures: &[[u8; 8]]| pes(0xe0, 0x00, &[], &pictures.concat());
+		assert!(Mpeg2Picture::orphaned(&video(&[picture(0, 3), picture(1, 3)]), 2));
+		// A B-picture presented after the I-picture references only its own GOP.
+		assert!(!Mpeg2Picture::orphaned(&video(&[picture(3, 3)]), 2));
+		// The P-picture later pictures reference keeps its PES, orphans and all.
+		assert!(!Mpeg2Picture::orphaned(
+			&video(&[picture(0, 3), picture(1, 3), picture(5, 2)]),
+			2
+		));
+		assert!(!Mpeg2Picture::orphaned(&video(&[]), 2));
 	}
 
 	#[test]
