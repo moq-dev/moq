@@ -40,20 +40,16 @@ where
 	K: Eq + Hash,
 	V: WeakEntry + Clone,
 {
-	/// Return a live handle for `key`, dropping and ignoring a closed one.
-	pub fn get<Q>(&mut self, key: &Q) -> Option<V>
+	/// Return a live handle for `key`, ignoring a closed one.
+	///
+	/// Takes `&self` so a hit read through a shared guard writes nothing; a caller
+	/// reclaims a closed entry it finds with [`Self::remove`].
+	pub fn get<Q>(&self, key: &Q) -> Option<V>
 	where
 		K: Borrow<Q>,
 		Q: Hash + Eq + ?Sized,
 	{
-		match self.map.get(key) {
-			Some(v) if !v.is_closed() => Some(v.clone()),
-			Some(_) => {
-				self.map.remove(key);
-				None
-			}
-			None => None,
-		}
+		self.map.get(key).filter(|v| !v.is_closed()).cloned()
 	}
 
 	/// Insert `value` under `key`, unless a *live* entry already holds it.
@@ -178,7 +174,7 @@ mod tests {
 	}
 
 	#[test]
-	fn get_drops_closed() {
+	fn get_ignores_closed() {
 		let mut cache = WeakCache::default();
 		let entry = Fake::open();
 		cache.insert("a", entry.clone());
@@ -186,7 +182,6 @@ mod tests {
 
 		entry.close();
 		assert!(cache.get("a").is_none(), "a closed entry must not resolve");
-		assert_eq!(cache.len(), 0, "the closed entry is dropped on lookup");
 	}
 
 	#[test]
