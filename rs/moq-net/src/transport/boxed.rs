@@ -364,8 +364,10 @@ impl<S: poll::Boxable> ErasedSession for S {
 		options: SendOptions<'_, Group>,
 		budget: Budget,
 	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
-		poll::Session::poll_open_request(self, waiter, unbox(options))
-			.map(|res| res.map(|streams| streams.map(|bis| bi::<S>(bis, budget))).map_err(Error::new))
+		poll::Session::poll_open_request(self, waiter, unbox(options)).map(|res| {
+			res.map(|streams| streams.map(|bis| bi::<S>(bis, budget)))
+				.map_err(Error::new)
+		})
 	}
 
 	fn send_group(&self, priority: i64) -> Option<Group> {
@@ -703,9 +705,8 @@ mod test {
 	#[test]
 	fn paused_streams_hold_at_most_half_the_connection_window() {
 		let gate = kio::Producer::new(true);
-		let session = Session::new(
-			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(100, 20)),
-		);
+		let session =
+			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(100, 20)));
 		let mut streams: Vec<_> = (0..3).map(|_| accept(&session)).collect();
 		assert!(streams[0].pause());
 		assert!(streams[0].pause(), "a paused stream reserves once");
@@ -726,9 +727,8 @@ mod test {
 		let session = Session::new(SinkSession::accepted_bi(gate.consume()));
 		assert!(!accept(&session).pause());
 
-		let session = Session::new(
-			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(100, 20)),
-		);
+		let session =
+			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(100, 20)));
 		let mut stream = accept(&session);
 		drop(session);
 		assert!(!stream.pause());
