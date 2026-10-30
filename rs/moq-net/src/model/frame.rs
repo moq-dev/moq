@@ -1188,6 +1188,14 @@ impl Producer {
 		}
 	}
 
+	/// Poll until the group's writer may take more of this frame from upstream; see
+	/// [`group::Producer::poll_ready`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let written = self.buf.written(Ordering::Acquire) as u64;
+		self.group.as_mut().expect("frame owns its group").poll_ready(waiter, written)
+	}
+
 	/// Publish what has been written so far, waking consumers parked on the group.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn notify(&self) {

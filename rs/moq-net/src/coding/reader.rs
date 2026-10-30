@@ -359,7 +359,9 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		}
 	}
 
-	/// Fill a frame's payload from the stream, returning `Pending` once it would block.
+	/// Fill a frame's payload from the stream, returning `Pending` once it would block or
+	/// the group's writer is paced by its fastest reader (see
+	/// [`crate::frame::Producer::poll_ready`]).
 	///
 	/// The payload reaches the frame as it arrives, but keeps its receive credit until the
 	/// segment it lands in seals, so an incomplete frame holds at most one segment of the
@@ -386,7 +388,14 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		let mut owed = 0;
 
 		let result = loop {
-			let mut lease = match self.poll_lease(waiter, frame.remaining().min(1)) {
+			// A writer too far ahead of the group's fastest reader leaves the rest in the
+			// stream, so flow control pushes back upstream.
+			let paced = frame.poll_ready(waiter);
+			let lease = match paced {
+				Poll::Ready(()) => self.poll_lease(waiter, frame.remaining().min(1)),
+				Poll::Pending => Poll::Pending,
+			};
+			let mut lease = match lease {
 				Poll::Pending => {
 					if owed > 0 {
 						frame.notify();

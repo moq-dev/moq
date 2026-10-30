@@ -19,6 +19,7 @@
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use super::flate;
+use super::pace::{self, Pace};
 mod content;
 use crate::cache;
 use crate::frame::{self, Cached, FrameBuf, Payload};
@@ -57,6 +58,9 @@ pub(super) const CACHE_OVERHEAD: u64 = (kio::Producer::<GroupState>::HEAP
 	// straight after.
 	+ 2 * size_of::<usize>()
 	+ size_of::<Alive>()
+	// The `Pace` its writer and readers share, behind its own `Arc`.
+	+ 2 * size_of::<usize>()
+	+ size_of::<Pace>()
 	+ kio::log::Writer::<Entry>::HEAP) as u64;
 
 /// A group contains a sequence number because they can arrive out of order.
@@ -143,6 +147,8 @@ pub(super) struct Entry {
 	fields: Option<Arc<super::object::Fields>>,
 	// A compressed group's inflated size of the stored slice; zero on a plain group.
 	inflated: u64,
+	// Where the frame ends on its copy's [`Pace`] scale, set as it enters the log.
+	end: u64,
 }
 
 impl Clone for Entry {
@@ -152,6 +158,7 @@ impl Clone for Entry {
 			frame: self.frame.clone(),
 			fields: self.fields.clone(),
 			inflated: self.inflated,
+			end: self.end,
 		}
 	}
 }
@@ -164,6 +171,7 @@ impl Entry {
 			frame,
 			fields: None,
 			inflated,
+			end: 0,
 		}
 	}
 
@@ -258,6 +266,9 @@ pub(super) struct GroupState {
 	// Whether an adopted head (see [`Handle::adopt_head`]) begins at the group's first
 	// object, for a wire header that arrives after it.
 	adopted: Option<bool>,
+
+	// How far readers got, which each frame entering the log is measured against.
+	pace: Arc<Pace>,
 }
 
 /// The frames a copy of a group holds, from where it starts, which a successor copy of
@@ -652,6 +663,7 @@ impl Inflate {
 						},
 						fields: slice.fields.clone(),
 						inflated: 0,
+						end: 0,
 					};
 					let cost = Plain::cost(&entry);
 					self.plain.bill.add(cost);
@@ -953,8 +965,12 @@ impl GroupState {
 	}
 
 	/// Append a completed frame, returning the slot growth it charged.
-	fn push(&mut self, entry: Entry) -> u64 {
+	///
+	/// The frame's place on the pace scale costs its payload and its slot, as the live
+	/// tail does, so a paced writer of tiny frames is bounded too.
+	fn push(&mut self, mut entry: Entry) -> u64 {
 		let slots = self.reserve_frame();
+		entry.end = self.pace.commit(entry.frame.payload.len() as u64 + size_of::<Entry>() as u64);
 		self.log.push(entry);
 		slots
 	}
@@ -1366,6 +1382,39 @@ fn modify(state: &kio::Producer<GroupState>) -> Result<kio::Mut<'_, GroupState>>
 pub struct Producer {
 	handle: Handle,
 	stats: stats::Meter,
+	// Where the fastest reader's next frame starts, for [`Self::poll_ready`].
+	ahead: Ahead,
+}
+
+/// A paced writer's view of the frame log, measuring how far it runs ahead of its
+/// fastest reader without the group's lock.
+struct Ahead {
+	log: kio::log::Reader<Entry>,
+	// The fastest reader's next frame and where it starts, while the copy holds it.
+	start: Option<(usize, u64)>,
+}
+
+impl Ahead {
+	/// Whether the writer, `partial` bytes into its open frame, is more than
+	/// [`pace::AHEAD`] past the start of frame `read`.
+	///
+	/// Not while the log holds no frame `read`: either it is not committed yet, so the
+	/// fastest reader is waiting on the writer, or it was shed, so that reader fell off.
+	fn paced(&mut self, pace: &Pace, read: usize, partial: u64) -> bool {
+		let start = match self.start {
+			Some((index, start)) if index == read => start,
+			_ => {
+				let mut log = self.log.read();
+				let Ok(Some(entry)) = log.get(read as u64) else {
+					return false;
+				};
+				let start = entry.end - (entry.frame.payload.len() + size_of::<Entry>()) as u64;
+				self.start = Some((read, start));
+				start
+			}
+		};
+		pace.written().saturating_add(partial).saturating_sub(start) > pace::AHEAD
+	}
 }
 
 /// Shared group state without permission to write frames or finish the group.
@@ -1446,6 +1495,8 @@ struct Alive {
 	// A reader of the frame log, cloned into each cursor so it reads frames without the
 	// group lock.
 	log: kio::log::Reader<Entry>,
+	// The `GroupState::pace` cursors report their reads to.
+	pace: Arc<Pace>,
 	// When the group was created here, on the ambient clock; see [`Consumer::arrived`].
 	arrived: crate::time::Instant,
 }
@@ -1558,7 +1609,7 @@ impl Producer {
 		let state = kio::Producer::<GroupState>::default();
 		let charge = cache.charge();
 		let access = charge.access();
-		let log = {
+		let (log, pace) = {
 			let mut state = state.write().ok().expect("a new group is open");
 			if track.compress {
 				state.flate = Some(Box::new(Flate::new(
@@ -1567,7 +1618,7 @@ impl Producer {
 				)));
 			}
 			state.charge = charge;
-			state.log.reader()
+			(state.log.reader(), state.pace.clone())
 		};
 		let alive = Arc::new(Alive {
 			aborted: AtomicBool::new(false),
@@ -1576,7 +1627,8 @@ impl Producer {
 			failed: AtomicBool::new(false),
 			started: AtomicBool::new(false),
 			access,
-			log,
+			log: log.clone(),
+			pace,
 			arrived: super::clock::now(),
 		});
 		Self {
@@ -1588,6 +1640,7 @@ impl Producer {
 				alive,
 			},
 			stats: stats::Meter::default(),
+			ahead: Ahead { log, start: None },
 		}
 	}
 
@@ -1652,6 +1705,8 @@ impl Producer {
 		state.offset = index;
 		state.next_index = index;
 		state.log.evict(index as u64);
+		// The frames below are not this copy's, so no reader of it is behind them.
+		state.pace.took(index);
 		Ok(())
 	}
 
@@ -2090,6 +2145,7 @@ impl Producer {
 			frame,
 			fields,
 			inflated,
+			end: 0,
 		};
 		if !owned {
 			state.canonicalize(state.next_index - 1, &mut entry)?;
@@ -2181,6 +2237,33 @@ impl Producer {
 	pub async fn closed(&self) -> Result<()> {
 		kio::wait(|waiter| self.handle.poll_closed(waiter)).await
 	}
+	/// Poll until the writer may take more from upstream, `partial` bytes into a frame
+	/// it has not committed: until it is at most [`pace::AHEAD`] past the start of the
+	/// first frame its fastest reader has not taken.
+	///
+	/// Ready at once while no reader holds the group, so a group nobody watches keeps
+	/// writing and sheds its front, and once it is closed, so the next write surfaces why.
+	/// A reader that took every committed frame is waiting on the writer, so a frame
+	/// larger than the window never stalls it, and one whose next frame was shed has
+	/// fallen off the group and is not waited on.
+	///
+	/// Only a paced writer, a session's ingest, waits on this; a local write never does.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_ready(&mut self, waiter: &kio::Waiter, partial: u64) -> Poll<()> {
+		let pace = &self.handle.alive.pace;
+		if !self.ahead.paced(pace, pace.read(), partial) {
+			return Poll::Ready(());
+		}
+		// Either wakes the writer: the last reader leaving, or the group closing.
+		if self.handle.poll_unused(waiter).is_ready() || self.handle.state.poll_closed(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		match self.ahead.paced(pace, pace.park(waiter), partial) {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
+		}
+	}
+
 	/// The non-writing observer used by the cache and built-in sessions.
 	// Sessions need an abortable observer while public callers use Demand.
 	pub(crate) fn handle(&self) -> Handle {
@@ -2792,6 +2875,7 @@ impl Handle {
 				cache: self.cache.clone(),
 				access: self.alive.access.clone(),
 				refreshed: self.cache.pool().now(),
+				pace: self.alive.pace.clone(),
 			},
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
 			// when it hands the consumer to a subscriber/fetch.
@@ -3281,6 +3365,9 @@ struct Cursor {
 	cache: Arc<cache::Track>,
 	access: Arc<cache::Access>,
 	refreshed: u64,
+
+	// Where this cursor reports the frames it takes, pacing the group's writer.
+	pace: Arc<Pace>,
 }
 
 impl Clone for Cursor {
@@ -3298,6 +3385,7 @@ impl Clone for Cursor {
 			cache: self.cache.clone(),
 			access: self.access.clone(),
 			refreshed: self.refreshed,
+			pace: self.pace.clone(),
 		}
 	}
 }
@@ -4030,6 +4118,9 @@ impl Cursor {
 		};
 
 		self.index += 1;
+		// Taking the in-flight frame counts as taking it whole: a reader streaming it is
+		// at the writer's edge, which a paced writer never waits on.
+		self.pace.took(self.index);
 		// A direct read (not prefetched): count the frame here; the frame::Consumer
 		// counts its bytes per chunk as they're read out.
 		stats.frames(1);
@@ -4065,6 +4156,8 @@ impl Cursor {
 		// The batch is drained: refill it from the log without the lock, unless a plain
 		// read of a compressed group has to inflate under it.
 		if (!self.compressed || self.raw) && self.prefetch.fill_log(&mut self.log, index, budget, self.compressed) > 0 {
+			// The batch is this cursor's whatever the group sheds, so it counts as taken.
+			self.pace.took(index + self.prefetch.len);
 			self.refresh_if_stale();
 			let (frames, bytes) = self.prefetch.buffered();
 			stats.frames(frames);
@@ -4106,6 +4199,7 @@ impl Cursor {
 
 		// The refill already updated the eviction rank under the group lock.
 		self.refreshed = self.cache.pool().now();
+		self.pace.took(index + self.prefetch.len);
 
 		// A fresh batch was just filled (empty only on a clean end). Count the whole
 		// batch once here, under no lock, so the drained pops that follow stay free.
@@ -4863,6 +4957,7 @@ mod test {
 					frame: Frame::new(None, Bytes::from_static(b"b")).into(),
 					fields: fields(1),
 					inflated: 0,
+					end: 0,
 				},
 			],
 			compressed: false,
