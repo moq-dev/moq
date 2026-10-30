@@ -105,7 +105,8 @@ fn dial_and_accept_share_one_socket() {
 		.expect("worker");
 }
 
-/// A session owns the connection independently of the driver and stream handles.
+/// A session closes once its last clone and the last stream it handed out are
+/// gone, whatever background tasks still hold the connection.
 #[test]
 fn dropping_the_last_raw_session_closes_the_connection() {
 	dropped_raw_session_closes(false);
@@ -163,13 +164,74 @@ fn dropped_raw_session_closes(explicit: bool) {
 				0
 			};
 			drop(remaining);
-			// Stream handles intentionally survive the final session handle.
+			if !explicit {
+				// The stream outlives every session clone and keeps it open.
+				std::future::poll_fn(|cx| send.poll_write(cx, b"still"))
+					.await
+					.expect("the stream keeps the session open");
+				let read = std::future::poll_fn(|cx| recv.poll_read(cx, &mut payload))
+					.await
+					.expect("read");
+				assert_eq!(read, Some(5));
+				assert_eq!(&payload, b"still");
+			}
+			drop(send);
 			let error = std::future::poll_fn(|cx| peer.poll_closed(cx)).await;
 			assert!(
 				matches!(error, quic::Error::App { code: actual, .. } if actual == code),
 				"peer saw {error:?}"
 			);
-			drop((send, recv));
+			drop(recv);
+		})
+		.expect("worker");
+}
+
+/// A raw connection closes with code 0 once its last handle and stream are
+/// gone, rather than leaving the peer to idle out.
+#[test]
+fn dropping_the_last_connection_handle_closes_it() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let socket = || {
+		handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket")
+	};
+	let server = quic::Endpoint::new(
+		socket(),
+		quic::endpoint::Config::default().with_server(server_config(&certs)),
+	)
+	.expect("server endpoint");
+	let client = quic::Endpoint::new(socket(), quic::endpoint::Config::default()).expect("client endpoint");
+	worker
+		.block_on(async move {
+			let mut conn = client
+				.connect(&dial_config(), server.local_addr(), "localhost")
+				.await
+				.expect("dial");
+			let mut peer = server.accept().await.expect("accept");
+			let mut send = std::future::poll_fn(|cx| conn.poll_open_uni(cx)).await.expect("open");
+			let clone = conn.clone();
+			drop(conn);
+			drop(clone);
+
+			// The stream outlives every connection handle and keeps it open.
+			std::future::poll_fn(|cx| send.poll_write(cx, b"alive"))
+				.await
+				.expect("the stream keeps the connection open");
+			let mut recv = std::future::poll_fn(|cx| peer.poll_accept_uni(cx))
+				.await
+				.expect("accept stream");
+			let mut payload = [0; 5];
+			let read = std::future::poll_fn(|cx| recv.poll_read(cx, &mut payload))
+				.await
+				.expect("read");
+			assert_eq!(read, Some(5));
+
+			drop(send);
+			let error = std::future::poll_fn(|cx| peer.poll_closed(cx)).await;
+			assert!(matches!(error, quic::Error::App { code: 0, .. }), "peer saw {error:?}");
 		})
 		.expect("worker");
 }

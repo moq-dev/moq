@@ -32,6 +32,7 @@ impl SendStream {
 		// The driver records how this stream ends only while a handle holds
 		// it, so the handle is what announces itself.
 		shared.track(id);
+		shared.hold();
 		Self {
 			shared,
 			id,
@@ -214,6 +215,7 @@ impl Drop for SendStream {
 				.reset(VarInt::from_u32(0));
 			self.shared.kick();
 		}
+		self.shared.release();
 	}
 }
 
@@ -248,6 +250,7 @@ pub struct RecvStream {
 
 impl RecvStream {
 	pub(crate) fn new(shared: Shared, id: StreamId) -> Self {
+		shared.hold();
 		Self {
 			shared,
 			id,
@@ -463,6 +466,7 @@ impl Drop for RecvStream {
 				.stop(VarInt::from_u32(0));
 			self.shared.kick();
 		}
+		self.shared.release();
 	}
 }
 
