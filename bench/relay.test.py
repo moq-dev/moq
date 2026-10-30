@@ -5,11 +5,11 @@ import os
 import random
 import signal
 import socket
-import sys
-from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -92,7 +92,7 @@ source "$ROOT/bench/relay.sh"
 start_relay() { RELAY_PID=$$; RELAY_PORT=4500; }
 stop_relay() { RELAY_PID=; }
 run_workload fixture ignored video
-"""
+"""  # noqa: E501
             result = subprocess.run(
                 ["bash", "-c", script, "test", str(ROOT), str(run), str(fake)],
                 env=dict(os.environ, READY=str(run / "ready")),
@@ -178,7 +178,7 @@ relay_config() {
     RANDOM=$SEED
 }
 start_relay "$3" "$RUN"
-"""
+"""  # noqa: E501
             result = self.run_shell(script, run, relay, SEED=str(random.randrange(32768)))
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("relay failed to start", result.stderr)
@@ -210,7 +210,7 @@ source "$ROOT/bench/relay.sh"
 start_relay "$3" "$RUN"
 relay_owns_port "$RELAY_PID" "$RELAY_PORT"
 stop_relay
-"""
+"""  # noqa: E501
             result = self.run_shell(script, run, relay)
             self.assertEqual(result.returncode, 0, result.stderr)
 

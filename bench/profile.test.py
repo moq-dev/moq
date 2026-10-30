@@ -285,16 +285,16 @@ class Reduce(unittest.TestCase):
 
 CPU_FIXTURE = """\
 11 100.000000001: cpu-clock:
-	    ffffffff81000000 [unknown] ([kernel.kallsyms])
-	    ffffffff81000100 [unknown] ([kernel.kallsyms])
-	    7ffff7d2c07a sendmsg (/nix/store/glibc/lib/libc.so.6)
-	    5555569d8ae4 <moq_quic::Endpoint>::send (/moq/moq-relay)
-	    5555569d8608 std::thread::run (/moq/moq-relay)
+\t    ffffffff81000000 [unknown] ([kernel.kallsyms])
+\t    ffffffff81000100 [unknown] ([kernel.kallsyms])
+\t    7ffff7d2c07a sendmsg (/nix/store/glibc/lib/libc.so.6)
+\t    5555569d8ae4 <moq_quic::Endpoint>::send (/moq/moq-relay)
+\t    5555569d8608 std::thread::run (/moq/moq-relay)
 12 100.001000001: cpu-clock:
-	    5555569d8ae4 <moq_net::Session>::poll (/moq/moq-relay)
-	    5555569d8608 std::thread::run (/moq/moq-relay)
+\t    5555569d8ae4 <moq_net::Session>::poll (/moq/moq-relay)
+\t    5555569d8608 std::thread::run (/moq/moq-relay)
 13 100.002000001: cpu-clock:
-	    5555569d8608 std::thread::run (/moq/moq-relay)
+\t    5555569d8608 std::thread::run (/moq/moq-relay)
 """
 
 

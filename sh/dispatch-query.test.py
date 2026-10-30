@@ -2,15 +2,14 @@
 """Exercise pre-setup selection with real diffs and no development toolchain."""
 
 import os
-from pathlib import Path
 import shutil
-import subprocess
 import statistics
+import subprocess
 import sys
-import time
 import tempfile
+import time
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 

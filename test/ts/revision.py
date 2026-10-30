@@ -135,12 +135,16 @@ def layouts(data):
 
 def grade(source, capture):
     """Grade `capture` against `source`, returning a report; raises Failure on the first miss."""
-    types = lambda streams: {route: kind for route, (kind, _) in streams.items()}
+
+    def types(streams):
+        return {route: kind for route, (kind, _) in streams.items()}
+
     src, cap = layouts(source), layouts(capture)
     if [types(streams) for _, _, streams in cap] != [types(streams) for _, _, streams in src]:
         raise Failure(
             "layouts",
-            f"the capture's PMTs list {[sorted(types(s).items()) for _, _, s in cap]}, the source's {[sorted(types(s).items()) for _, _, s in src]}",
+            f"the capture's PMTs list {[sorted(types(s).items()) for _, _, s in cap]}, "
+            f"the source's {[sorted(types(s).items()) for _, _, s in src]}",
         )
     for (_, newest, _), (index, version, _) in zip(cap, cap[1:]):
         if version != (newest + 1) % 32:

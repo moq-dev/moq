@@ -5,11 +5,10 @@ import argparse
 import copy
 import html
 import json
-from pathlib import Path
 import shutil
 import subprocess
 import time
-
+from pathlib import Path
 
 OWN = ("moq-dev-rs", "moq-dev-js")
 RELAY_IMAGE = "moq-interop-relay:local"

@@ -12,12 +12,12 @@ OUT receives index.html and a copy of the records as results.jsonl.
 """
 
 import argparse
-from collections import OrderedDict
 import html
 import json
-from pathlib import Path
 import shutil
+from collections import OrderedDict
 from datetime import datetime, timezone
+from pathlib import Path
 
 FIELDS = ("suite", "case", "publisher", "subscriber", "transport", "version", "outcome", "seconds", "detail", "log")
 OUTCOMES = ("pass", "fail", "skip", "not run")
@@ -214,7 +214,7 @@ td.none { background: repeating-linear-gradient(45deg, transparent 0 4px, var(--
 </style>
 {body}
 </html>
-"""
+"""  # noqa: E501
 
 
 def main():

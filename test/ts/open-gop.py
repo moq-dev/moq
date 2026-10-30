@@ -286,7 +286,10 @@ def main():
         found = sum(1 for i, lead in kept.items() for j in lead if delta(cap[j].pts, cap[i].pts) < 0)
         crossed = sum(bool(lead) and not src[indices[i]].idr for i, lead in kept.items())
         ok = not moved and found == owed and crossed >= MIN_RECOVERY_POINTS
-        detail = f"{found}/{owed} continuous leading picture(s) across {crossed} recovery point(s); {len(recoveries)} orphan sets trimmed"
+        detail = (
+            f"{found}/{owed} continuous leading picture(s) across {crossed} recovery point(s); "
+            f"{len(recoveries)} orphan sets trimmed"
+        )
         if moved:
             detail += f"; {len(moved)} AU(s) presented away from the source offset, first at {moved[0]}"
         if crossed < MIN_RECOVERY_POINTS:

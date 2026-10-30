@@ -2,12 +2,11 @@
 """Check the binary size cap against real diffs in a scratch repository."""
 
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CAP = 500 * 1024

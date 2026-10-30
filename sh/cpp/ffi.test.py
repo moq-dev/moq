@@ -238,7 +238,10 @@ class Configure(unittest.TestCase):
             tools.mkdir()
             generator = tools / "uniffi-bindgen-cpp"
             generator.write_text(
-                "#!/usr/bin/env python3\nimport pathlib, sys\nout=pathlib.Path(sys.argv[sys.argv.index('--out-dir')+1]); out.mkdir(parents=True)\nfor name in ('moq.hpp','moq.cpp','moq_scaffolding.hpp','uniffi_expected.hpp'): (out/name).touch()\n"
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "out=pathlib.Path(sys.argv[sys.argv.index('--out-dir')+1]); out.mkdir(parents=True)\n"
+                "for name in ('moq.hpp','moq.cpp','moq_scaffolding.hpp','uniffi_expected.hpp'): (out/name).touch()\n"
             )
             generator.chmod(0o755)
             cargo = tools / "cargo"

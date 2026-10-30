@@ -2,15 +2,15 @@
 
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import shutil
 import subprocess
 import tempfile
-import tomllib
 import unittest
+from pathlib import Path
 
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -258,7 +258,8 @@ class FuzzTest(unittest.TestCase):
             binary.mkdir()
             rustup = binary / "rustup"
             rustup.write_text(
-                '#!/bin/sh\nif [ "$*" = "run nightly rustc --print sysroot" ]; then printf "%s\\n" "$FUZZ_SYSROOT"; fi\n'
+                "#!/bin/sh\n"
+                'if [ "$*" = "run nightly rustc --print sysroot" ]; then printf "%s\\n" "$FUZZ_SYSROOT"; fi\n'
             )
             rustup.chmod(0o755)
             cargo = binary / "cargo"
@@ -279,7 +280,8 @@ class FuzzTest(unittest.TestCase):
             calls,
             [
                 "run --locked -q -p moq-net --features fuzz --example fuzz-seeds -- rs/moq-net/fuzz/seeds",
-                "fuzz run --fuzz-dir rs/moq-net/fuzz lite rs/moq-net/fuzz/corpus/lite rs/moq-net/fuzz/seeds/lite -- -runs=2",
+                "fuzz run --fuzz-dir rs/moq-net/fuzz lite rs/moq-net/fuzz/corpus/lite rs/moq-net/fuzz/seeds/lite "
+                "-- -runs=2",
             ],
         )
 

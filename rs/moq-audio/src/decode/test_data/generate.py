@@ -5,9 +5,9 @@ See README.md for the source recording, license and pinned tool version.
 """
 
 import hashlib
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 source = Path(sys.argv[1])
 expected = "9c2146638c3acba0c05643d18ee3a03fd2d5c167f89cf160579f97266b368cd2"

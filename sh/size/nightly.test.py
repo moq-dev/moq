@@ -3,10 +3,10 @@
 
 import json
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("nightly.sh").resolve()
 REPORT = Path(__file__).with_name("report.py").resolve()

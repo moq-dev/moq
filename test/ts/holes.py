@@ -9,12 +9,13 @@ capture's step past one and a half of its source's is a hole: media the round-tr
 the path dropped it, the relay evicted it, or the exporter missed its deadline. Presentation
 timestamps, because the export keeps them while it derives each group's decode timestamps from
 that group's frames alone: a reordered group's first frames decode just before its earliest
-presentation, not a frame apart, which leaves a decode step at every group with nothing lost. A lost prefix or tail leaves no step behind, so each
-source stream must also be in the capture, on its PID, ending where the source's does: the
-export keeps the source's timestamps. It may start later, by up to JOIN: the subscriber joins
-at the relay's latest group once the catalog is out, which skips the first second or two of
-a generated clip on a clean path. The compliance checks grade only the access units that
-arrived, so a capture missing most of its video still passes them.
+presentation, not a frame apart, which leaves a decode step at every group with nothing lost. A
+lost prefix or tail leaves no step behind, so each source stream must also be in the capture, on
+its PID, ending where the source's does: the export keeps the source's timestamps. It may start
+later, by up to JOIN: the subscriber joins at the relay's latest group once the catalog is out,
+which skips the first second or two of a generated clip on a clean path. The compliance checks
+grade only the access units that arrived, so a capture missing most of its video still passes
+them.
 
 Under `--shed` the path was narrower than the media, so losing media is expected and reported,
 but only by whole groups: of each group of the source, from a sync frame to the next, the
@@ -68,7 +69,8 @@ class Shed:
 
 
 def shed(pts: list[int], sync: list[bool], kept: list[int]) -> Shed:
-    """Grade the capture's `kept` PTS, in its order, against the source's frames, in decode order with their sync flags."""
+    """Grade the capture's `kept` PTS, in its order, against the source's frames, in decode order with
+    their sync flags."""
     result = Shed(missing=0, mid_group=[], tail=0, unmatched=[])
     joined = lost = False
     i = 0

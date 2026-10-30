@@ -2,10 +2,10 @@
 
 import importlib.util
 import math
-from pathlib import Path
 import struct
 import tempfile
 import unittest
+from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("tone", HERE / "tone.py")

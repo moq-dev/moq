@@ -1,11 +1,10 @@
 """Plugin discovery consumes inspection output and checks both factories."""
 
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-
+from pathlib import Path
 
 SMOKE = Path(__file__).with_name("smoke.sh")
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Select shared native libraries and check an independent FFI publisher."""
 
-from datetime import datetime
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
+from datetime import datetime
+from pathlib import Path
 
 LANGUAGES = {
     "go": ("Release Go FFI", "Publish to Go module mirror"),

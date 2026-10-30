@@ -30,12 +30,12 @@ import argparse
 import bisect
 import json
 import re
-from fractions import Fraction
 import subprocess
 import sys
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+from fractions import Fraction
 
 # PCR runs on the 27 MHz system clock; PTS/DTS on the 90 kHz clock.
 PCR_HZ = 27_000_000

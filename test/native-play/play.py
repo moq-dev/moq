@@ -2,18 +2,18 @@
 
 import argparse
 import array
-from contextlib import ExitStack
-from datetime import datetime
 import json
 import math
 import os
-from pathlib import Path
 import re
 import selectors
 import signal
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
+from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "interop"))
 from tone import MIN_RMS, MIN_SHARE, WINDOW_MS, goertzel_share

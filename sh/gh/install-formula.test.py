@@ -2,9 +2,9 @@
 
 import importlib.util
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("install_formula", Path(__file__).with_name("install-formula.py"))
 module = importlib.util.module_from_spec(spec)

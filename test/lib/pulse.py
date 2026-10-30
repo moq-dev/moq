@@ -11,13 +11,13 @@ clocks it in real time. Exits with the command's status.
 
 import argparse
 import os
-from pathlib import Path
 import selectors
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 
 def run():

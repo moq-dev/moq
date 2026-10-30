@@ -86,9 +86,8 @@ def check(source, target):
             timestamps.setdefault(index, set()).add(pts * time_bases[index])
     target_index = len(source_media["streams"])
     assert timestamps[source_stream["index"]] == timestamps[target_index], "Renditions drift across loops"
-    print(
-        f"Verified {len(source_frames)} frames, {sum(key for _, key in source_frames)} keyframes, and three aligned loops"
-    )
+    keyframes = sum(key for _, key in source_frames)
+    print(f"Verified {len(source_frames)} frames, {keyframes} keyframes, and three aligned loops")
 
 
 def encode(source, target):

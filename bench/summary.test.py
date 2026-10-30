@@ -3,10 +3,10 @@
 
 import importlib.util
 import json
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("summary", Path(__file__).with_name("summary.py"))
 summary_module = importlib.util.module_from_spec(spec)

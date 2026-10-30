@@ -1,13 +1,14 @@
-"""The interop report keeps unreached cases red, lays out publisher by subscriber grids, and refuses malformed records."""
+"""The interop report keeps unreached cases red, lays out publisher by subscriber grids, and refuses
+malformed records."""
 
-from datetime import datetime, timezone
 import importlib.util
 import json
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
+from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("report", HERE / "report.py")

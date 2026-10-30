@@ -5,9 +5,9 @@ import importlib.util
 import json
 import subprocess
 import tempfile
-from unittest.mock import patch
-from pathlib import Path
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("runner", Path(__file__).with_name("runner.py"))
 runner = importlib.util.module_from_spec(spec)

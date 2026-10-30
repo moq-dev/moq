@@ -1,8 +1,8 @@
 """Map cargo tree output to workspace crate directories whatever the checkout path looks like."""
 
 import importlib.util
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("ts_paths", Path(__file__).with_name("ts-paths.py"))
 module = importlib.util.module_from_spec(spec)

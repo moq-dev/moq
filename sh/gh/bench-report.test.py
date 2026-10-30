@@ -1,14 +1,14 @@
 """Nightly reports accept measurements, refuse malformed data, flag regressions, and share one history branch."""
 
-from datetime import datetime, timezone
 import importlib.util
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DAY = 86400

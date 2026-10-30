@@ -3,9 +3,9 @@
 
 import hashlib
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 version, target, release_dir = sys.argv[1:]
 if target != "aarch64-apple-darwin":

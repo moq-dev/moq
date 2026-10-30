@@ -2,12 +2,11 @@
 """Check base selection against a real local history and a stub GitHub CLI."""
 
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
-
+from pathlib import Path
 
 CHANGED = Path(__file__).with_name("changed.sh").resolve()
 

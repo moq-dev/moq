@@ -76,19 +76,15 @@ dev := "uv run --project ../../.. --isolated --only-group dev"
 # None of these need CARLA or a GPU. `just js` and `just rs` cover the player and
 # the bridge.
 #
-# Lint and test the worker and its launchers.
+# Type-check and test the worker and its launchers; the root `python` module in
+# `just check` lints and formats it.
 check:
-    cd sim && {{ dev }} --locked ruff check .
     cd sim && {{ dev }} --locked pyright
     cd sim && {{ dev }} --locked pytest -q
     sim/python.test.sh
     sim/server.test.sh
     sim/systemd/install-user-service.test.sh
     bridge/gpu.test.sh
-
-# Auto-fix the worker's lint; `just fix` formats it with the rest of the repo's Python.
-fix:
-    cd sim && {{ dev }} ruff check --fix .
 
 # A Vulkan stand-in plays the CARLA plugin. A host with no NVIDIA GPU skips, and
 # one whose NVIDIA driver is not loaded fails.

@@ -1,9 +1,8 @@
 """Probe whether one guest can impersonate a peer in a host UDP flow."""
 
-from pathlib import Path
 import socket
 import sys
-
+from pathlib import Path
 
 role = sys.argv[1]
 host = ("10.231.1.1", 45678)

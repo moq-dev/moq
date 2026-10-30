@@ -2,11 +2,11 @@
 """Reduce paired relay rounds and Criterion runs; retain dispersion instead of implying single-run precision."""
 
 import argparse
-from collections import Counter
 import json
 import math
 import shutil
 import statistics
+from collections import Counter
 from pathlib import Path
 
 METRICS = (

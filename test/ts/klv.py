@@ -404,7 +404,8 @@ def grade(source, capture, probe=None):
         if late > holes.JOIN:
             raise Failure(
                 "join",
-                f"PID {route:#x}: starts {float(late):.3f}s after the source's first PES, past the {float(holes.JOIN)}s join",
+                f"PID {route:#x}: starts {float(late):.3f}s after the source's first PES, "
+                f"past the {float(holes.JOIN)}s join",
             )
         matched[route] = [(pes, src_pes[route][k]) for pes, k in zip(cap_pes[route], found)]
 

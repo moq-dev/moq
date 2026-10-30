@@ -3,17 +3,16 @@
 
 import argparse
 import csv
-from datetime import datetime, timezone
 import html
 import json
 import math
 import os
-from pathlib import Path
 import re
 import statistics
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote
-
 
 BIGGER = {"MB/s", "MiB/s", "B/s", "ops/s", "frames/s"}
 SMALLER = {"ns", "us", "µs", "ms", "s", "ms/MB", "x", "bytes", "B", "MiB"}

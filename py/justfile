@@ -27,7 +27,8 @@ _develop *args:
     cd .. && CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/py" bash sh/local.sh uv run --no-sync maturin develop --locked --uv {{ args }}
     uv pip install --no-deps -e moq-rs
 
-# Lint + format + editable build + pyright + doc samples + docs. `--no-install-workspace`
+# Editable build + pyright + doc samples + docs; the root `python` module in
+# `just check` lints and formats every Python file. `--no-install-workspace`
 # installs the root dev group (ruff, maturin, pyright, pytest) without trying to
 # pip-build the workspace members; `_develop` then installs them editable, which
 # is also what `build` does, so there is no separate build gate here.
@@ -38,10 +39,9 @@ _develop *args:
 # The build has `test`'s features, so `just check` running both compiles moq-ffi
 # once. The release builds compile the default features.
 
-# Lint, type-check, editable-build, check the doc samples, and render the docs.
+# Type-check, editable-build, check the doc samples, and render the docs.
 check:
     uv sync --locked --no-install-workspace
-    uv run --no-sync ruff check .
     just _develop {{ test_features }}
     uv run --no-sync pyright
     just samples
@@ -50,11 +50,6 @@ check:
 # Type-check every Python sample in the docs against the installed wrapper.
 samples:
     ../sh/py/samples.sh
-
-# Auto-fix lint issues; `just fix` formats them with the rest of the repo's Python.
-fix:
-    uv sync --no-install-workspace
-    uv run --no-sync ruff check --fix .
 
 # Run the unit tests, on a build with the test clock (`moq.testing`).
 test:
