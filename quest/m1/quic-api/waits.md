@@ -12,6 +12,29 @@ moq-quic still does no I/O and reads no clock.
 
 ## Plan
 
+Landed in [moq-dev/moq#7391](https://github.com/moq-dev/moq/pull/7391): moq-quic
+owns the lists and wakes them, over QUIC and QMux alike, alongside the events.
+`connection/waits.rs` holds them, owned by `StreamsState`; `StreamsState::notify`
+wakes the list matching each `StreamEvent` it queues, and `StreamsState::unblock`
+wakes connection-blocked writers as soon as the window has room rather than when
+`poll` runs. The poll forms are `recv::Chunks::poll_next`,
+`recv::Stream::poll_lease`, `send::Stream::poll_write`, `poll_end`, and
+`poll_acked`, `Streams::poll_accept` and `poll_open`, `Datagrams::poll_recv`, and
+`Connection::poll_connected`, `poll_handshake_confirmed`, and `poll_closed`, with
+`ConnectionLost` on `send::Error` and `recv::Error` for a stream wait that
+outlives its connection. Counting-waiter tests cover each wait, two waiters on
+one condition, a dropped waiter, and draining after a loss.
+
+What remains:
+
+- Move moq-tokio's `quic::driver`, moq-uring's driver, and qmux onto the poll
+  forms, deleting their waiter tables, `Notify`s, and `stopped` map.
+- Delete `StreamEvent` and the waiting `Event` variants, turning `notify`'s
+  event-to-list mapping into direct wakes, and move each `Event` test that
+  asserted a wait to a counting waiter.
+- Make `poll_transmit` the driver's wait, below.
+- The close-while-output-blocked qmux test and the benches, below.
+
 Decided with the maintainer on 2026-10-25, from "would moq-quic benefit from
 kio?":
 

@@ -1,7 +1,9 @@
+use std::task::Poll;
+
 use tracing::trace;
 
 use super::spaces::{Retransmits, ThinRetransmits};
-use crate::{Dir, StreamId, VarInt, frame};
+use crate::{Dir, StreamId, VarInt, connection::Error, frame};
 
 mod lease;
 pub mod recv;
@@ -80,6 +82,46 @@ impl<'a> Streams<'a> {
 		}
 
 		Some(StreamId::new(!self.state.side, dir, x))
+	}
+
+	/// [`Self::open`], or wait for the peer to allow another stream
+	///
+	/// Pending registers `waiter` until the peer raises the stream limit in `dir`. Fails once
+	/// the connection is lost.
+	///
+	/// # Panics
+	/// - when `options.group` was opened on another connection
+	pub fn poll_open(
+		&mut self,
+		waiter: &kio::Waiter,
+		dir: Dir,
+		options: send::Options<'_>,
+	) -> Poll<Result<StreamId, Error>> {
+		if let Some(err) = self.state.waits.lost() {
+			return Poll::Ready(Err(err.clone()));
+		}
+		match self.open(dir, options) {
+			Some(id) => Poll::Ready(Ok(id)),
+			None => {
+				self.state.waits.register_open(dir, waiter);
+				Poll::Pending
+			}
+		}
+	}
+
+	/// [`Self::accept`], or wait for the peer to open a stream
+	///
+	/// Pending registers `waiter` until the peer opens a stream in `dir`. Streams the peer opened
+	/// stay acceptable after the connection is lost, and only then does this fail.
+	pub fn poll_accept(&mut self, waiter: &kio::Waiter, dir: Dir) -> Poll<Result<StreamId, Error>> {
+		if let Some(id) = self.accept(dir) {
+			return Poll::Ready(Ok(id));
+		}
+		if let Some(err) = self.state.waits.lost() {
+			return Poll::Ready(Err(err.clone()));
+		}
+		self.state.waits.register_accept(dir, waiter);
+		Poll::Pending
 	}
 
 	/// The number of streams that may have unacknowledged data.

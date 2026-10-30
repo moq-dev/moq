@@ -12,7 +12,7 @@
 //! [`Connection::poll_transmit`] returns, run [`Connection::handle_timeout`] at
 //! [`Connection::poll_timeout`], and drain [`Connection::poll`] for events.
 
-use std::{collections::VecDeque, num::NonZeroU64};
+use std::{collections::VecDeque, num::NonZeroU64, task::Poll};
 
 use bytes::{Buf, Bytes};
 use tracing::{debug, trace};
@@ -245,6 +245,19 @@ impl Connection {
 	/// Why the connection ended, if it has
 	pub fn error(&self) -> Option<&ConnectionError> {
 		self.error.as_ref()
+	}
+
+	/// Wait for the peer's transport parameters
+	///
+	/// Ready once they arrived, even if the connection ended since, or with the reason the
+	/// connection ended first.
+	pub fn poll_connected(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), ConnectionError>> {
+		self.streams.waits.poll_connected(waiter)
+	}
+
+	/// Wait for the connection to end, returning why
+	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<ConnectionError> {
+		self.streams.waits.poll_closed(waiter)
 	}
 
 	/// The application protocol negotiated in-band, once the peer's parameters arrive
@@ -719,6 +732,7 @@ impl Connection {
 					.received(datagram, &Some(self.config.datagram_receive_buffer_size))?
 				{
 					self.events.push_back(Event::DatagramReceived);
+					self.streams.waits.wake_datagram();
 				}
 			}
 			// ACK, PING, CRYPTO, NEW_TOKEN, connection ID and path management, ACK_FREQUENCY,
@@ -781,6 +795,7 @@ impl Connection {
 		self.timer.established(idle, self.config.rtt_interval, now);
 		self.peer = Some(peer);
 		self.events.push_back(Event::Connected);
+		self.streams.waits.connected();
 		Ok(())
 	}
 
@@ -790,6 +805,7 @@ impl Connection {
 			return;
 		}
 		self.error = Some(reason.clone());
+		self.streams.waits.lose(reason.clone());
 		self.conn_state = ConnectionState::Draining;
 		self.events.push_back(Event::ConnectionLost { reason });
 	}
@@ -850,5 +866,21 @@ impl Datagrams<'_> {
 	/// Receive the next datagram
 	pub fn recv(&mut self) -> Option<Bytes> {
 		self.conn.datagrams.recv()
+	}
+
+	/// [`Self::recv`], or wait for a datagram to arrive
+	///
+	/// Datagrams that arrived stay receivable after the connection ends, and only then does
+	/// this fail.
+	pub fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, ConnectionError>> {
+		if let Some(datagram) = self.recv() {
+			return Poll::Ready(Ok(datagram));
+		}
+		let waits = &mut self.conn.streams.waits;
+		if let Some(err) = waits.lost() {
+			return Poll::Ready(Err(err.clone()));
+		}
+		waits.register_datagram(waiter);
+		Poll::Pending
 	}
 }

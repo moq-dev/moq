@@ -1,9 +1,9 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, task::Poll};
 
 use bytes::{Buf, Bytes};
 use tracing::{debug, trace};
 
-use super::{Connection, send};
+use super::{Connection, Error, send};
 use crate::{
 	TransportError,
 	frame::{Datagram, FrameStruct, OutgoingDatagram},
@@ -84,6 +84,22 @@ impl Datagrams<'_> {
 	/// Receive an unreliable, unordered datagram
 	pub fn recv(&mut self) -> Option<Bytes> {
 		self.conn.datagrams.recv()
+	}
+
+	/// [`Self::recv`], or wait for a datagram to arrive
+	///
+	/// Datagrams that arrived stay receivable after the connection is lost, and only then does
+	/// this fail.
+	pub fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+		if let Some(datagram) = self.recv() {
+			return Poll::Ready(Ok(datagram));
+		}
+		let waits = &mut self.conn.streams.waits;
+		if let Some(err) = waits.lost() {
+			return Poll::Ready(Err(err.clone()));
+		}
+		waits.register_datagram(waiter);
+		Poll::Pending
 	}
 
 	/// Bytes available in the outgoing datagram buffer
