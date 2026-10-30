@@ -1048,6 +1048,43 @@ fn regressions() {
 			],
 			finish: false,
 		},
+		// A group below the resume point lands late once the route flapped back.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					epoch: 0,
+					slot: 0,
+					group: Some(1),
+					frames: 1,
+				},
+				Op::Up { epoch: 0, slot: 1 },
+				Op::Down { epoch: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// Ranges widened past a route change owe what they newly cover below the resume point.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, Some((4, 10)), false),
+				},
+				Op::Write {
+					epoch: 0,
+					slot: 0,
+					group: Some(4),
+					frames: 1,
+				},
+				Op::Up { epoch: 0, slot: 1 },
+				Op::Ranges { reader: 1, range: None },
+				Op::Down { epoch: 0, slot: 0 },
+			],
+			finish: false,
+		},
 	];
 	for case in cases {
 		if let Err(err) = run(&case) {

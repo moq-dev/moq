@@ -963,6 +963,18 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// A widened cursor owes a group below where a route change resumed, landing late.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 2], false) },
+				{ kind: "up", epoch: 1, slot: 0 },
+				{ kind: "up", epoch: 0, slot: 1 },
+				{ kind: "bounds", reader: 0, range: undefined },
+				{ kind: "write", epoch: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "down", epoch: 0, slot: 0 },
+			],
+			finish: false,
+		},
 	];
 	const failures: string[] = [];
 	for (const [i, c] of regressions.entries()) {

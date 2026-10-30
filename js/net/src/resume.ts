@@ -298,10 +298,10 @@ class Reader implements ResumeSource {
 	/** The newest group handed out: where a new copy is asked to start. */
 	#newest?: number;
 	/**
-	 * The newest group handed out when the route last changed, until the gaps below it are
-	 * backfilled; see {@link #backfillGaps}.
+	 * Set once the route changed, so the serving copy's resume point may pass over groups the
+	 * reader lacks. Kept until the gaps are backfilled; see {@link #backfillGaps}.
 	 */
-	#resumed?: number;
+	#resumed = false;
 	/** The last datagram handed out, which never ages until another supersedes it. */
 	#datagram?: number;
 	/**
@@ -388,7 +388,7 @@ class Reader implements ResumeSource {
 		if (!source) return;
 		// The new copy starts at the newest group handed out, so a lower one still missing is
 		// asked of its route once a read says which; see #backfillGaps.
-		this.#resumed = this.#newest;
+		this.#resumed = true;
 		// The replaced copies keep delivering until the new one delivers its first group: a
 		// group they get meanwhile may be one the new route never has. See #observe.
 		for (const copy of this.#copies) copy.replaced = true;
@@ -543,19 +543,19 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * Ask the serving route for the groups below where the route last changed that the reader
-	 * still lacks: a late or reordered one, or one in flight on the route it replaced, as one
-	 * cursor on the logical track would still get. From the lowest gap within the reader's
-	 * groups, so groups already handed out are not asked for again below it. A gap past the
-	 * reader's budget was already forgotten as handed out. Mirrors the Rust `Reader::backfill_gaps`.
+	 * Ask the serving route for the groups below its copy's resume point that the reader still
+	 * lacks: a late or reordered one, or one in flight on the route it replaced, as one cursor on
+	 * the logical track would still get. From the lowest gap within the reader's cursor, which
+	 * decides what it reads, so groups already handed out are not asked for again below it. A gap
+	 * past the reader's budget was already forgotten as handed out. A lowered cursor asks through
+	 * {@link #backfill} itself. Mirrors the Rust `Reader::backfill_gaps`.
 	 */
 	#backfillGaps(delivered: Delivered): void {
-		const resumed = this.#resumed;
+		if (!this.#resumed) return;
+		this.#resumed = false;
+		const resumed = this.#copies.at(-1)?.floor;
 		if (resumed === undefined) return;
-		this.#resumed = undefined;
-		const preferences = this.#shell.subscription.peek() ?? track.Subscription.default();
-		const from = Math.max(groupBounds(preferences.groups).start, this.#shell.cursor.peek().start);
-		const [gap] = delivered.gaps(from, resumed);
+		const [gap] = delivered.gaps(this.#shell.cursor.peek().start, resumed);
 		if (gap) this.#backfill(gap.start, resumed);
 	}
 
