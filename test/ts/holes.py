@@ -123,12 +123,27 @@ def probe(path: str) -> dict[str, Stream]:
     # Probe the whole file, not FFmpeg's first 5 MB: a stream whose first frame comes after that
     # is never described, so the second frame of its first PES repeats the first's timestamp
     # and every later one in that PES runs a frame behind, which reads as a hole.
-    report = json.loads(subprocess.run(
-        ["ffprobe", "-v", "error", "-probesize", str(os.path.getsize(path)), "-analyzeduration", str(2**62),
-         "-show_entries", "stream=index,id,codec_type,codec_name,time_base:packet=stream_index,dts,pts,flags",
-         "-of", "json", path],
-        check=True, capture_output=True, text=True,
-    ).stdout)
+    report = json.loads(
+        subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-probesize",
+                str(os.path.getsize(path)),
+                "-analyzeduration",
+                str(2**62),
+                "-show_entries",
+                "stream=index,id,codec_type,codec_name,time_base:packet=stream_index,dts,pts,flags",
+                "-of",
+                "json",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
     streams = {s["index"]: s for s in report["streams"] if s.get("codec_type") in ("audio", "video")}
     dts: dict[int, list[int]] = {index: [] for index in streams}
     pts: dict[int, list[int]] = {index: [] for index in streams}
@@ -140,9 +155,15 @@ def probe(path: str) -> dict[str, Stream]:
             pts[index].append(int(packet.get("pts", packet["dts"])))
             sync[index].append("K" in packet.get("flags", ""))
     return {
-        s["id"]: Stream(s, dts[index], pts[index], sync[index],
-                        tuple(t * Fraction(s["time_base"]) for t in (min(pts[index]), max(pts[index]), dts[index][-1])))
-        for index, s in streams.items() if pts[index]
+        s["id"]: Stream(
+            s,
+            dts[index],
+            pts[index],
+            sync[index],
+            tuple(t * Fraction(s["time_base"]) for t in (min(pts[index]), max(pts[index]), dts[index][-1])),
+        )
+        for index, s in streams.items()
+        if pts[index]
     }
 
 
@@ -170,8 +191,10 @@ def main() -> None:
             continue
         got = capture[pid]
         base = Fraction(got.info["time_base"])
-        span = (f"from {float(got.span[0]):.3f}s to {float(got.span[1]):.3f}s "
-                f"of {float(src.span[0]):.3f}s to {float(src.span[1]):.3f}s")
+        span = (
+            f"from {float(got.span[0]):.3f}s to {float(got.span[1]):.3f}s "
+            f"of {float(src.span[0]):.3f}s to {float(src.span[1]):.3f}s"
+        )
         if args.shed:
             expected = src.pts
             if src.info["codec_name"] in ("mp2", "ac3", "eac3"):
@@ -181,8 +204,10 @@ def main() -> None:
             graded = shed(expected, src.sync, got.pts)
             reasons = [f"resumes mid-group at {float(t * base):.3f}s" for t in graded.mid_group[:5]]
             if graded.unmatched:
-                reasons.append(f"{len(graded.unmatched)} frames from {float(graded.unmatched[0] * base):.3f}s "
-                               "are out of the source's order, repeated, or not in it")
+                reasons.append(
+                    f"{len(graded.unmatched)} frames from {float(graded.unmatched[0] * base):.3f}s "
+                    "are out of the source's order, repeated, or not in it"
+                )
             if graded.tail:
                 reasons.append(f"lost {graded.tail} frames of the source's last group")
             late = got.span[0] - src.span[0]
@@ -196,8 +221,10 @@ def main() -> None:
             missing = sum(gap - frame for _, gap in found) * base
             summary = f"{len(found)} holes, {float(missing) * 1000:.0f} ms missing"
         failed |= bool(reasons)
-        print(f"  {'FAIL' if reasons else 'PASS'}  {label}: {len(got.dts)} frames of "
-              f"{float(frame * base) * 1000:.2f} ms, {summary}, {span}")
+        print(
+            f"  {'FAIL' if reasons else 'PASS'}  {label}: {len(got.dts)} frames of "
+            f"{float(frame * base) * 1000:.2f} ms, {summary}, {span}"
+        )
         for reason in reasons:
             print(f"        {reason}")
     sys.exit(1 if failed else 0)

@@ -210,7 +210,10 @@ def align(source, captured, leads):
             while position in omitted:
                 position += 1
             if position >= len(source) or source[position].key != unit.key:
-                resume = next((i for i in range(position + 1, len(source)) if source[i].key == unit.key and is_rap(source[i])), None)
+                resume = next(
+                    (i for i in range(position + 1, len(source)) if source[i].key == unit.key and is_rap(source[i])),
+                    None,
+                )
                 if resume is None:
                     break
                 position = resume
@@ -249,7 +252,9 @@ def main():
 
     matched = align(src, cap, src_leading)
     if matched is None:
-        check("decode-order", HARD, False, "capture differs from source beyond orphan leading pictures at delivery breaks")
+        check(
+            "decode-order", HARD, False, "capture differs from source beyond orphan leading pictures at delivery breaks"
+        )
     else:
         indices, recoveries = matched
         backwards = [i for i in range(1, len(cap)) if delta(cap[i].dts, cap[i - 1].dts) <= 0]
@@ -265,7 +270,10 @@ def main():
         for i, original in enumerate(indices):
             if i in recoveries:
                 anchor = i
-            if abs(delta(cap[i].pts, cap[anchor].pts) - delta(src[original].pts, src[indices[anchor]].pts)) > PTS_TOLERANCE:
+            if (
+                abs(delta(cap[i].pts, cap[anchor].pts) - delta(src[original].pts, src[indices[anchor]].pts))
+                > PTS_TOLERANCE
+            ):
                 moved.append(i)
         positions = {original: i for i, original in enumerate(indices)}
         recovery_groups = set(recoveries.values())

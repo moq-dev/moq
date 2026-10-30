@@ -58,11 +58,18 @@ def run():
     # milliseconds, as a real device does.
     pulse = subprocess.Popen(
         [
-            "pulseaudio", "--daemonize=no", "--use-pid-file=no", "--exit-idle-time=-1",
-            "--log-level=info", "--log-target=stderr", "-n",
+            "pulseaudio",
+            "--daemonize=no",
+            "--use-pid-file=no",
+            "--exit-idle-time=-1",
+            "--log-level=info",
+            "--log-target=stderr",
+            "-n",
             f"--load=module-native-protocol-unix socket={socket} auth-anonymous=1",
             "--load=module-null-sink sink_name=moq-null rate=48000 channels=2 norewinds=1",
-        ], env=env, stderr=subprocess.PIPE,
+        ],
+        env=env,
+        stderr=subprocess.PIPE,
     )
     try:
         assert pulse.stderr is not None

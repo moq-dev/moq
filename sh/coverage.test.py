@@ -24,7 +24,7 @@ class CoverageTest(unittest.TestCase):
             shutil.copyfile(ROOT / script, target)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        stub = '''#!/usr/bin/env python3
+        stub = """#!/usr/bin/env python3
 import json, os
 from pathlib import Path
 import sys
@@ -37,14 +37,20 @@ if "report" in sys.argv and any(arg in sys.argv for arg in ("--workspace", "--ex
 for arg in sys.argv:
     if arg.startswith("--coverage-dir="):
         (Path(arg.split("=", 1)[1]) / "lcov.info").write_text("fresh")
-'''
+"""
         for name in ("bun", "cargo"):
             target = self.bin / name
             target.write_text(stub)
             target.chmod(0o755)
         self.calls = self.root / "calls"
-        self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
-                        COVERAGE_CALLS=str(self.calls), BASH_ENV="/dev/null", GITHUB_ACTIONS="", LOCAL_SUPERVISED="1")
+        self.env = dict(
+            os.environ,
+            PATH=f"{self.bin}:{os.environ['PATH']}",
+            COVERAGE_CALLS=str(self.calls),
+            BASH_ENV="/dev/null",
+            GITHUB_ACTIONS="",
+            LOCAL_SUPERVISED="1",
+        )
 
     def javascript(self, name="", fail=False):
         directories = ["js/first", "js/second", "js/empty"]
@@ -54,9 +60,13 @@ for arg in sys.argv:
             source.mkdir(parents=True, exist_ok=True)
             if directory != "js/empty":
                 (source / "case.test.ts").touch()
-        return subprocess.run(["python3", "sh/js/coverage.py", name], cwd=self.root,
-                              env=dict(self.env, COVERAGE_FAIL="1" if fail else ""),
-                              capture_output=True, text=True)
+        return subprocess.run(
+            ["python3", "sh/js/coverage.py", name],
+            cwd=self.root,
+            env=dict(self.env, COVERAGE_FAIL="1" if fail else ""),
+            capture_output=True,
+            text=True,
+        )
 
     def recorded(self):
         return [json.loads(line) for line in self.calls.read_text().splitlines()]
@@ -91,10 +101,10 @@ for arg in sys.argv:
         source = self.root / "js/first/src/source.ts"
         source.touch()
         (source.parent / "unloaded.ts").touch()
-        for package, path, hits in (("first", "src/source.ts", 0),
-                                    ("second", "../first/src/source.ts", 1)):
+        for package, path, hits in (("first", "src/source.ts", 0), ("second", "../first/src/source.ts", 1)):
             (self.root / f"target/coverage/js/{package}/lcov.info").write_text(
-                f"SF:{path}\nDA:1,{hits}\nDA:2,0\nend_of_record\n")
+                f"SF:{path}\nDA:1,{hits}\nDA:2,0\nend_of_record\n"
+            )
         spec = importlib.util.spec_from_file_location("coverage_report", ROOT / "sh/js/coverage.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -102,9 +112,13 @@ for arg in sys.argv:
         self.assertEqual(summary["first"], {"lines": 2, "covered": 1, "unloaded": ["src/unloaded.ts"]})
 
     def rust(self, name="workspace", fail=False):
-        return subprocess.run(["bash", "sh/rs/coverage.sh", name], cwd=self.root,
-                              env=dict(self.env, COVERAGE_FAIL="1" if fail else ""),
-                              capture_output=True, text=True)
+        return subprocess.run(
+            ["bash", "sh/rs/coverage.sh", name],
+            cwd=self.root,
+            env=dict(self.env, COVERAGE_FAIL="1" if fail else ""),
+            capture_output=True,
+            text=True,
+        )
 
     def test_rust_measures_native_workspace_without_fuzz_targets(self):
         result = self.rust()

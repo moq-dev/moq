@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise history recovery without network access or native builds."""
+
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ class History(unittest.TestCase):
             (root / "sh/size").mkdir(parents=True)
             (root / "sh/size/report.py").symlink_to(REPORT)
             gh = root / "bin/gh"
-            gh.write_text('''#!/usr/bin/env python3
+            gh.write_text("""#!/usr/bin/env python3
 import json, pathlib, sys
 args = sys.argv[1:]
 if args[:2] == ['run', 'list']:
@@ -35,22 +36,24 @@ elif args[:2] == ['run', 'download']:
         (out / 'sizes.json').write_text('{}')
 else:
     raise SystemExit(args)
-''')
+""")
             gh.chmod(0o755)
             collect = root / "sh/size/collect.sh"
-            collect.write_text('''#!/usr/bin/env bash
+            collect.write_text("""#!/usr/bin/env bash
 set -eu
 printf '%s' '{"version":1,"date":"2026-10-10","bytes":{"a":100}}' >"$1/sizes.json"
 printf 'attribution' >"$1/ffi-bloat.txt"
-''')
+""")
             collect.chmod(0o755)
-            env = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
-                       GITHUB_STEP_SUMMARY=str(root / "summary"))
-            result = subprocess.run(["bash", str(SCRIPT), "out", "3"], cwd=root,
-                                    env=env, capture_output=True, text=True)
+            env = dict(
+                os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}", GITHUB_STEP_SUMMARY=str(root / "summary")
+            )
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "out", "3"], cwd=root, env=env, capture_output=True, text=True
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             history = json.loads((root / "out/history.json").read_text())
-            self.assertEqual([row['date'] for row in history], ['2026-10-09', '2026-10-10'])
+            self.assertEqual([row["date"] for row in history], ["2026-10-09", "2026-10-10"])
 
 
 unittest.main()

@@ -107,7 +107,9 @@ def completed(language):
     # A single query after workflow_run completion, never a publication poll.
     result = subprocess.run(
         ["gh", "api", f"repos/{repo}/actions/runs/{run}/jobs?filter=all", "--paginate", "--slurp"],
-        check=True, stdout=subprocess.PIPE, text=True,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
     )
     pages = json.loads(result.stdout)
     jobs = [job for page in pages for job in page["jobs"]]

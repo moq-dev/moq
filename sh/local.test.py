@@ -26,22 +26,27 @@ class LocalGate(unittest.TestCase):
         return env
 
     def run_command(self, script, **changes):
-        return subprocess.run([BASH, str(LAUNCHER), sys.executable, "-c", script],
-                              env=self.env(**changes), text=True, capture_output=True)
+        return subprocess.run(
+            [BASH, str(LAUNCHER), sys.executable, "-c", script], env=self.env(**changes), text=True, capture_output=True
+        )
 
     def test_hosted_ci_bypasses_admission_and_worker_defaults(self):
-        result = self.run_command('import os; print(os.getenv("NEXTEST_TEST_THREADS")); exit(7)',
-                                  GITHUB_ACTIONS="true", PATH="")
+        result = self.run_command(
+            'import os; print(os.getenv("NEXTEST_TEST_THREADS")); exit(7)', GITHUB_ACTIONS="true", PATH=""
+        )
         self.assertEqual(result.returncode, 7, result.stderr)
         self.assertEqual(result.stdout.strip(), "None")
 
     def test_nested_admission_preserves_failures_and_worker_override(self):
-        result = self.run_command('import os; print(os.environ["NEXTEST_TEST_THREADS"]); exit(9)',
-                                  LOCAL_SUPERVISED="1", NEXTEST_TEST_THREADS="2", PATH="")
+        result = self.run_command(
+            'import os; print(os.environ["NEXTEST_TEST_THREADS"]); exit(9)',
+            LOCAL_SUPERVISED="1",
+            NEXTEST_TEST_THREADS="2",
+            PATH="",
+        )
         self.assertEqual(result.returncode, 9, result.stderr)
         self.assertEqual(result.stdout.strip(), "2")
-        result = self.run_command('import os; print(os.environ["NEXTEST_TEST_THREADS"])',
-                                  LOCAL_SUPERVISED="1", PATH="")
+        result = self.run_command('import os; print(os.environ["NEXTEST_TEST_THREADS"])', LOCAL_SUPERVISED="1", PATH="")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLessEqual(int(result.stdout), 4)
         self.assertGreater(int(result.stdout), 0)
@@ -50,16 +55,20 @@ class LocalGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "bun").symlink_to(BUN)
             quest = Path(directory) / "quest"
-            quest.write_text(f'#!{sys.executable}\n'
-                             'import os, sys\n'
-                             'assert sys.argv[1] == "gate"\n'
-                             'print("admitted", flush=True)\n'
-                             'os.environ["QUEST_GATE_ADMITTED"] = "1"\n'
-                             'os.execvp(sys.argv[2], sys.argv[2:])\n')
+            quest.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys\n"
+                'assert sys.argv[1] == "gate"\n'
+                'print("admitted", flush=True)\n'
+                'os.environ["QUEST_GATE_ADMITTED"] = "1"\n'
+                "os.execvp(sys.argv[2], sys.argv[2:])\n"
+            )
             quest.chmod(0o755)
-            script = ('import subprocess, sys; print("outer", flush=True); '
-                      f'sys.exit(subprocess.call([{BASH!r}, {str(LAUNCHER)!r}, '
-                      'sys.executable, "-c", "print(\'inner\'); exit(11)"]))')
+            script = (
+                'import subprocess, sys; print("outer", flush=True); '
+                f"sys.exit(subprocess.call([{BASH!r}, {str(LAUNCHER)!r}, "
+                'sys.executable, "-c", "print(\'inner\'); exit(11)"]))'
+            )
             result = self.run_command(script, PATH=directory)
             self.assertEqual(result.returncode, 11, result.stderr)
             self.assertEqual(result.stdout.splitlines(), ["admitted", "outer", "inner"])
@@ -67,8 +76,9 @@ class LocalGate(unittest.TestCase):
     def test_external_admission_keeps_descendant_supervision(self):
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "bun").symlink_to(BUN)
-            result = self.run_command('import os; print(os.environ["LOCAL_SUPERVISED"])',
-                                      QUEST_GATE_ADMITTED="1", PATH=directory)
+            result = self.run_command(
+                'import os; print(os.environ["LOCAL_SUPERVISED"])', QUEST_GATE_ADMITTED="1", PATH=directory
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "1")
 
@@ -79,9 +89,13 @@ class LocalGate(unittest.TestCase):
 child = subprocess.Popen([sys.executable, "-c", "import signal; print('ready', flush=True); signal.pause()"])
 signal.pause()
 """
-        process = subprocess.Popen([BUN, "--no-orphans", str(SUPERVISOR), sys.executable, "-c", script],
-                                   env=self.env(QUEST_GATE_ADMITTED="1"),
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process = subprocess.Popen(
+            [BUN, "--no-orphans", str(SUPERVISOR), sys.executable, "-c", script],
+            env=self.env(QUEST_GATE_ADMITTED="1"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         try:
             self.assertEqual(process.stdout.readline().strip(), "ready")
             process.send_signal(signal.SIGTERM)
@@ -101,9 +115,13 @@ subprocess.Popen([sys.executable, "-c", "import signal; signal.pause()"])
 print("ready", flush=True)
 sys.exit(5)
 """
-        process = subprocess.Popen([BUN, "--no-orphans", str(SUPERVISOR), sys.executable, "-c", script],
-                                   env=self.env(QUEST_GATE_ADMITTED="1"),
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process = subprocess.Popen(
+            [BUN, "--no-orphans", str(SUPERVISOR), sys.executable, "-c", script],
+            env=self.env(QUEST_GATE_ADMITTED="1"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         try:
             output, error = process.communicate(timeout=30)
             self.assertEqual(process.returncode, 5, error)

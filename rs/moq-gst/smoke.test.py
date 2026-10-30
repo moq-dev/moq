@@ -15,7 +15,7 @@ class SmokeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
             inspect = scratch / "gst-inspect-1.0"
-            inspect.write_text('''#!/usr/bin/env python3
+            inspect.write_text("""#!/usr/bin/env python3
 import os
 import signal
 import sys
@@ -37,15 +37,20 @@ for _ in range(16):
     sys.stdout.flush()
 if sys.argv[1] == "moq" and os.environ["INSPECT_MODE"] == "error":
     sys.exit(1)
-''')
+""")
             inspect.chmod(0o755)
-            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}", BASH_ENV=os.devnull,
-                       PLUGIN_DIR=str(scratch), INSPECT_MODE=mode,
-                       GST_PLUGIN_PATH_1_0="inherited", GST_PLUGIN_SYSTEM_PATH_1_0="inherited",
-                       GST_REGISTRY_1_0=str(scratch / "inherited-registry"),
-                       INHERITED_REGISTRY=str(scratch / "inherited-registry"))
-            return subprocess.run(["bash", str(SMOKE), str(scratch)], env=env,
-                                  text=True, capture_output=True)
+            env = dict(
+                os.environ,
+                PATH=f"{scratch}:{os.environ['PATH']}",
+                BASH_ENV=os.devnull,
+                PLUGIN_DIR=str(scratch),
+                INSPECT_MODE=mode,
+                GST_PLUGIN_PATH_1_0="inherited",
+                GST_PLUGIN_SYSTEM_PATH_1_0="inherited",
+                GST_REGISTRY_1_0=str(scratch / "inherited-registry"),
+                INHERITED_REGISTRY=str(scratch / "inherited-registry"),
+            )
+            return subprocess.run(["bash", str(SMOKE), str(scratch)], env=env, text=True, capture_output=True)
 
     def test_large_inspection_completes(self):
         result = self.inspect("complete")

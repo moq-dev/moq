@@ -82,6 +82,7 @@ async def _print_grant(client: moq.Client, timeout: float) -> None:
     """Wait for the relay's grant and print it, in the Rust client's `auth granted` shape."""
     session = client.session
     assert session is not None
+
     async def first() -> moq.Grant:
         async with session.grants() as grants:
             async for grant in grants:

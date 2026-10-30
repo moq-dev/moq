@@ -43,7 +43,9 @@ else:
     def run_update(self, hook, **env):
         return subprocess.run(
             ["python3", str(self.root / "update.py")],
-            env={**self.env, "HOOK": hook, **env}, text=True, capture_output=True
+            env={**self.env, "HOOK": hook, **env},
+            text=True,
+            capture_output=True,
         )
 
     def test_updates_both_files_and_preserves_latest_moq(self):
@@ -54,8 +56,11 @@ else:
         self.assertEqual(json.loads(self.manifest.read_text()), self.package)
 
     def test_refuses_missing_ambiguous_or_unstable_version(self):
-        for hook in ["", 'export PLAYWRIGHT_VERSION="1.65.2-beta"',
-                     'export PLAYWRIGHT_VERSION="1.65.2"\nexport PLAYWRIGHT_VERSION="1.65.3"']:
+        for hook in [
+            "",
+            'export PLAYWRIGHT_VERSION="1.65.2-beta"',
+            'export PLAYWRIGHT_VERSION="1.65.2"\nexport PLAYWRIGHT_VERSION="1.65.3"',
+        ]:
             with self.subTest(hook=hook):
                 result = self.run_update(hook)
                 self.assertNotEqual(result.returncode, 0)

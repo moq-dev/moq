@@ -45,11 +45,19 @@ def stage(release, target, library, output):
     for filename in (static, metadata):
         shutil.copyfile(library / filename, output / "lib" / filename)
     shutil.copyfile(ROOT / f"rs/moq-c/native-libs/{platform}.txt", output / "native-libs.txt")
-    (output / "manifest.json").write_text(json.dumps({
-        "version": version(release), "target": target, "features": "default",
-        "profile": "release", "source": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-    }, indent=2) + "\n")
+    (output / "manifest.json").write_text(
+        json.dumps(
+            {
+                "version": version(release),
+                "target": target,
+                "features": "default",
+                "profile": "release",
+                "source": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
 
 
 def archive(directory, output):
@@ -74,8 +82,11 @@ def archive(directory, output):
 
 
 def fetch(target, output):
-    pins = [line.strip() for line in (ROOT / "cpp/moq/FFI_VERSION").read_text().splitlines()
-            if line.strip() and not line.strip().startswith("#")]
+    pins = [
+        line.strip()
+        for line in (ROOT / "cpp/moq/FFI_VERSION").read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
     if len(pins) != 1:
         raise ValueError("FFI_VERSION must select one published version before fetching")
     release = version(pins[0])
@@ -91,7 +102,8 @@ def fetch(target, output):
     with tempfile.TemporaryDirectory() as tmp:
         path = pathlib.Path(tmp) / filename
         urllib.request.urlretrieve(
-            f"https://github.com/moq-dev/moq/releases/download/moq-ffi-v{release}/{filename}", path)
+            f"https://github.com/moq-dev/moq/releases/download/moq-ffi-v{release}/{filename}", path
+        )
         unpack(path, output, release, target, expected)
 
 
@@ -106,13 +118,21 @@ def unpack(path, output, release, target, expected):
         with tarfile.open(path) as tar:
             for member in tar.getmembers():
                 rel = pathlib.PurePosixPath(member.name)
-                if rel.is_absolute() or ".." in rel.parts or "\\" in member.name or not (member.isfile() or member.isdir()):
+                if (
+                    rel.is_absolute()
+                    or ".." in rel.parts
+                    or "\\" in member.name
+                    or not (member.isfile() or member.isdir())
+                ):
                     raise ValueError(f"unsupported archive member: {member.name}")
             extracted.mkdir()
             tar.extractall(extracted, filter="data")
         manifest = json.loads((extracted / "manifest.json").read_text())
         if (manifest["version"], manifest["target"], manifest["features"], manifest["profile"]) != (
-            release, target, "default", "release"
+            release,
+            target,
+            "default",
+            "release",
         ):
             raise ValueError("downloaded native manifest disagrees with the selected release input")
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -146,12 +166,15 @@ def publish(release, directory, prev_tag):
             raise RuntimeError(result.stderr.decode())
         # Match the other moq-ffi publishers (sh/gh/release.sh) so the notes never depend on who wins the race.
         notes = ["--generate-notes"] + (["--notes-start-tag", prev_tag] if prev_tag else [])
-        created = subprocess.run(["gh", "release", "create", tag, "--verify-tag", "--title", f"moq-ffi v{release}", *notes])
+        created = subprocess.run(
+            ["gh", "release", "create", tag, "--verify-tag", "--title", f"moq-ffi v{release}", *notes]
+        )
         if created.returncode:
             # Another language publisher can create the same release concurrently.
             subprocess.run(["gh", "release", "view", tag], check=True)
-    assets = json.loads(subprocess.check_output(
-        ["gh", "release", "view", tag, "--json", "assets"], text=True))["assets"]
+    assets = json.loads(subprocess.check_output(["gh", "release", "view", tag, "--json", "assets"], text=True))[
+        "assets"
+    ]
     existing = {asset["name"] for asset in assets}
     with tempfile.TemporaryDirectory() as tmp:
         for path in files:

@@ -17,28 +17,36 @@ class PagesCleanTest(unittest.TestCase):
             calls = scratch / "calls"
             stub = scratch / "gh"
             stub.write_text(
-                '#!/usr/bin/env bash\n'
+                "#!/usr/bin/env bash\n"
                 'printf "%s\\n" "$*" >> "$PAGES_CALLS"\n'
                 'if [[ "$*" == "$PAGES_FAIL" ]]; then exit 1; fi\n'
                 'if [[ "$2" == --paginate ]]; then printf "%s\\n" "$PAGES_ARTIFACTS"; fi\n'
             )
             stub.chmod(0o755)
-            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
-                       GITHUB_REPOSITORY="owner/repo", GITHUB_RUN_ID="123",
-                       PAGES_CALLS=str(calls), PAGES_ARTIFACTS=artifacts,
-                       PAGES_FAIL=fail, BASH_ENV="/dev/null")
-            result = subprocess.run(["bash", "sh/gh/pages-clean.sh"], cwd=ROOT,
-                                    env=env, capture_output=True, text=True)
+            env = dict(
+                os.environ,
+                PATH=f"{scratch}:{os.environ['PATH']}",
+                GITHUB_REPOSITORY="owner/repo",
+                GITHUB_RUN_ID="123",
+                PAGES_CALLS=str(calls),
+                PAGES_ARTIFACTS=artifacts,
+                PAGES_FAIL=fail,
+                BASH_ENV="/dev/null",
+            )
+            result = subprocess.run(["bash", "sh/gh/pages-clean.sh"], cwd=ROOT, env=env, capture_output=True, text=True)
             return result, calls.read_text().splitlines()
 
     def test_rerun_deletes_all_prior_attempts_in_this_run(self):
         result, calls = self.run_clean("41\n42")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls, [
-            "api --paginate repos/owner/repo/actions/runs/123/artifacts?name=github-pages --jq .artifacts[].id",
-            "api -X DELETE repos/owner/repo/actions/artifacts/41",
-            "api -X DELETE repos/owner/repo/actions/artifacts/42",
-        ])
+        self.assertEqual(
+            calls,
+            [
+                "api --paginate repos/owner/repo/actions/runs/123/artifacts?name=github-pages --jq .artifacts[].id",
+                "api -X DELETE repos/owner/repo/actions/artifacts/41",
+                "api -X DELETE repos/owner/repo/actions/artifacts/42",
+            ],
+        )
 
     def test_first_attempt_has_nothing_to_delete(self):
         result, calls = self.run_clean()

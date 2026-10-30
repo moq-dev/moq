@@ -24,11 +24,22 @@ class SelectTest(unittest.TestCase):
             just.chmod(0o755)
             changed = scratch / "changed"
             changed.write_text("\n".join(paths) + "\n")
-            env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
-                       SELECT_CALLS=str(calls), BASH_ENV=os.devnull,
-                       GITHUB_ACTIONS=str(github_actions).lower())
-            subprocess.run(["bash", "sh/rs/select.sh", action, str(changed)],
-                           cwd=ROOT, env=env, check=True, capture_output=True, text=True)
+            env = dict(
+                os.environ,
+                LOCAL_SUPERVISED="1",
+                PATH=f"{scratch}:{os.environ['PATH']}",
+                SELECT_CALLS=str(calls),
+                BASH_ENV=os.devnull,
+                GITHUB_ACTIONS=str(github_actions).lower(),
+            )
+            subprocess.run(
+                ["bash", "sh/rs/select.sh", action, str(changed)],
+                cwd=ROOT,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
@@ -37,9 +48,10 @@ class SelectTest(unittest.TestCase):
                 with self.subTest(action=action, github_actions=github_actions):
                     suffix = f" --features {DEVICE_FEATURES} moq-tokio/webrtc" if action == "test" else ""
                     suffix += " --timings" if github_actions and action == "test" else ""
-                    self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz{suffix}",
-                                  self.selected("sh/rs/nextest.sh", action=action,
-                                                github_actions=github_actions))
+                    self.assertIn(
+                        f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz{suffix}",
+                        self.selected("sh/rs/nextest.sh", action=action, github_actions=github_actions),
+                    )
         selected = self.selected("sh/rs/nextest.sh")
         for recipe in ("wasm", "uring-check"):
             self.assertIn(f"rs {recipe}", selected)
@@ -53,8 +65,13 @@ class SelectTest(unittest.TestCase):
                     self.assertTrue(any(call.startswith(f"rs {action} --workspace ") for call in calls), calls)
 
     def test_queue_checks_selected_feature_shapes(self):
-        for path in ("rs/kio/src/lib.rs", "rs/moq-tokio/src/lib.rs",
-                     "rs/moq-video/src/lib.rs", "Cargo.lock", "sh/rs/nextest.sh"):
+        for path in (
+            "rs/kio/src/lib.rs",
+            "rs/moq-tokio/src/lib.rs",
+            "rs/moq-video/src/lib.rs",
+            "Cargo.lock",
+            "sh/rs/nextest.sh",
+        ):
             for action in ("check", "check-test", "lint"):
                 with self.subTest(path=path, action=action):
                     calls = self.selected(path, action=action)
@@ -86,8 +103,10 @@ class SelectTest(unittest.TestCase):
         self.assertNotIn("rs loom --no-run", self.selected("rs/moq-net/src/lib.rs", action="test"))
 
     def test_device_features_join_the_one_test_build(self):
-        for path, features in (("rs/moq-audio/src/lib.rs", DEVICE_FEATURES),
-                               ("rs/moq-cli/src/main.rs", "moq-cli/play moq-cli/openh264")):
+        for path, features in (
+            ("rs/moq-audio/src/lib.rs", DEVICE_FEATURES),
+            ("rs/moq-cli/src/main.rs", "moq-cli/play moq-cli/openh264"),
+        ):
             with self.subTest(path=path):
                 calls = self.selected(path, action="test")
                 self.assertEqual(len(calls), 1, calls)
@@ -101,8 +120,7 @@ class SelectTest(unittest.TestCase):
         self.assertIn("--package moq-video --package moq-audio", calls[0])
 
     def test_net_session_tests_follow_the_library(self):
-        for path in ("rs/moq-net/src/lib.rs", "rs/moq-json/src/lib.rs",
-                     "rs/moq-net-tests/tests/integration/main.rs"):
+        for path in ("rs/moq-net/src/lib.rs", "rs/moq-json/src/lib.rs", "rs/moq-net-tests/tests/integration/main.rs"):
             with self.subTest(path=path):
                 calls = self.selected(path, action="test")
                 self.assertTrue(any("/rs/moq-net-tests#" in call for call in calls), calls)
@@ -120,14 +138,16 @@ class SelectTest(unittest.TestCase):
             for action in ("lint", "fix"):
                 with self.subTest(path=path, action=action):
                     calls = self.selected(path, action=action)
-                    self.assertTrue(any(call.startswith(f"rs {action} ") and "/rs/moq-cli#" in call
-                                        for call in calls), calls)
+                    self.assertTrue(
+                        any(call.startswith(f"rs {action} ") and "/rs/moq-cli#" in call for call in calls), calls
+                    )
         self.assertEqual(self.selected("test/interop/compat/container.rs"), [])
 
     def test_dispatch_scope_covers_out_of_crate_targets(self):
         scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
-        metadata = json.loads(subprocess.check_output(
-            ["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT, text=True))
+        metadata = json.loads(
+            subprocess.check_output(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT, text=True)
+        )
         root = Path(metadata["workspace_root"])
         directories = set()
         for package in metadata["packages"]:
@@ -152,7 +172,6 @@ class SelectTest(unittest.TestCase):
         self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
 
 
-
 class RecipeTest(unittest.TestCase):
     def test_feature_shapes_isolate_selected_crates(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -160,15 +179,12 @@ class RecipeTest(unittest.TestCase):
             for package in ("feature-owner", "feature-consumer"):
                 (scratch / package / "src").mkdir(parents=True)
             manifest = scratch / "Cargo.toml"
-            manifest.write_text(
-                '[workspace]\nresolver = "2"\nmembers = ["feature-owner", "feature-consumer"]\n'
-            )
+            manifest.write_text('[workspace]\nresolver = "2"\nmembers = ["feature-owner", "feature-consumer"]\n')
             (scratch / "feature-owner/Cargo.toml").write_text(
-                '[package]\nname = "feature-owner"\nversion = "0.0.0"\nedition = "2024"\n'
-                '[features]\nenabled = []\n'
+                '[package]\nname = "feature-owner"\nversion = "0.0.0"\nedition = "2024"\n[features]\nenabled = []\n'
             )
             (scratch / "feature-owner/src/lib.rs").write_text(
-                'fn needs_feature() -> bool { true }\n'
+                "fn needs_feature() -> bool { true }\n"
                 '#[cfg(feature = "enabled")]\npub fn enabled() -> bool { needs_feature() }\n'
             )
             (scratch / "feature-consumer/Cargo.toml").write_text(
@@ -176,29 +192,61 @@ class RecipeTest(unittest.TestCase):
                 '[dependencies]\nfeature-owner = { path = "../feature-owner", features = ["enabled"] }\n'
             )
             (scratch / "feature-consumer/src/lib.rs").write_text(
-                'pub fn enabled() -> bool { feature_owner::enabled() }\n'
+                "pub fn enabled() -> bool { feature_owner::enabled() }\n"
             )
-            env = dict(os.environ, LOCAL_SUPERVISED="1", BASH_ENV=os.devnull,
-                       CARGO_TARGET_DIR=str(scratch / "target"), CARGO_NET_OFFLINE="true",
-                       CARGO_TERM_COLOR="never")
-            subprocess.run(["cargo", "generate-lockfile", "--manifest-path", str(manifest)],
-                           cwd=ROOT, env=env, check=True, capture_output=True, text=True)
+            env = dict(
+                os.environ,
+                LOCAL_SUPERVISED="1",
+                BASH_ENV=os.devnull,
+                CARGO_TARGET_DIR=str(scratch / "target"),
+                CARGO_NET_OFFLINE="true",
+                CARGO_TERM_COLOR="never",
+            )
+            subprocess.run(
+                ["cargo", "generate-lockfile", "--manifest-path", str(manifest)],
+                cwd=ROOT,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             unified = subprocess.run(
-                ["cargo", "clippy", "--locked", "--tests", "--no-default-features",
-                 "--workspace", "--manifest-path", str(manifest), "--", "-D", "warnings"],
-                cwd=ROOT, env=env, capture_output=True, text=True,
+                [
+                    "cargo",
+                    "clippy",
+                    "--locked",
+                    "--tests",
+                    "--no-default-features",
+                    "--workspace",
+                    "--manifest-path",
+                    str(manifest),
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
             )
             self.assertEqual(unified.returncode, 0, unified.stdout + unified.stderr)
-            metadata = json.loads(subprocess.check_output(
-                ["cargo", "metadata", "--format-version", "1", "--no-deps",
-                 "--manifest-path", str(manifest)], cwd=ROOT, env=env, text=True,
-            ))
+            metadata = json.loads(
+                subprocess.check_output(
+                    ["cargo", "metadata", "--format-version", "1", "--no-deps", "--manifest-path", str(manifest)],
+                    cwd=ROOT,
+                    env=env,
+                    text=True,
+                )
+            )
             selected = [arg for package in metadata["workspace_members"] for arg in ("--package", package)]
             for flags, succeeds in ((["--workspace", "--exclude", "feature-owner"], True), (selected, False)):
                 with self.subTest(flags=flags):
                     result = subprocess.run(
                         ["just", "rs", "feature-shapes", "--manifest-path", str(manifest), *flags],
-                        cwd=ROOT, env=env, capture_output=True, text=True,
+                        cwd=ROOT,
+                        env=env,
+                        capture_output=True,
+                        text=True,
                     )
                     output = result.stdout + result.stderr
                     if succeeds:
@@ -222,19 +270,22 @@ class RecipeTest(unittest.TestCase):
                     'version = 4\n[[package]]\nname = "nextest-target-probe"\nversion = "0.0.0"\n'
                 )
                 (scratch / "src" / source).write_text(
-                    '#[test] fn runs() { assert_eq!(1 + 1, 2); }\n' +
-                    ('fn main() {}\n' if source == "main.rs" else '')
+                    "#[test] fn runs() { assert_eq!(1 + 1, 2); }\n" + ("fn main() {}\n" if source == "main.rs" else "")
                 )
                 (scratch / "benches/unexecuted.rs").write_text(
                     'compile_error!("nextest must not compile a benchmark it never runs");\nfn main() {}\n'
                 )
-                env = dict(os.environ, LOCAL_SUPERVISED="1", BASH_ENV=os.devnull, TMPDIR="/tmp",
-                           NEXTEST_PROFILE="default")
+                env = dict(
+                    os.environ, LOCAL_SUPERVISED="1", BASH_ENV=os.devnull, TMPDIR="/tmp", NEXTEST_PROFILE="default"
+                )
                 for recipe in ("test", "feature-shapes"):
                     with self.subTest(recipe=recipe):
                         result = subprocess.run(
                             ["just", "rs", recipe, "--manifest-path", str(scratch / "Cargo.toml")],
-                            cwd=ROOT, env=env, capture_output=True, text=True,
+                            cwd=ROOT,
+                            env=env,
+                            capture_output=True,
+                            text=True,
                         )
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -247,10 +298,17 @@ class FeatureTest(unittest.TestCase):
             cargo = scratch / "cargo"
             cargo.write_text(CARGO_STUB)
             cargo.chmod(0o755)
-            env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
-                       FEATURE_CALLS=str(calls), FEATURE_NET_FEATURES=net_features, BASH_ENV=os.devnull)
-            result = subprocess.run(["bash", f"sh/rs/{owner}-features.sh", *args],
-                                    cwd=ROOT, env=env, capture_output=True, text=True)
+            env = dict(
+                os.environ,
+                LOCAL_SUPERVISED="1",
+                PATH=f"{scratch}:{os.environ['PATH']}",
+                FEATURE_CALLS=str(calls),
+                FEATURE_NET_FEATURES=net_features,
+                BASH_ENV=os.devnull,
+            )
+            result = subprocess.run(
+                ["bash", f"sh/rs/{owner}-features.sh", *args], cwd=ROOT, env=env, capture_output=True, text=True
+            )
             self.assertEqual(result.returncode, expected_returncode, result.stdout + result.stderr)
             return calls.read_text().splitlines()
 
@@ -267,8 +325,7 @@ class FeatureTest(unittest.TestCase):
     def test_net_rejects_async_from_test_dependencies(self):
         for feature in ("async", "default", "fuzz"):
             with self.subTest(feature=feature):
-                calls = self.trace("net", net_features=f'moq-net feature "{feature}"',
-                                   expected_returncode=1)
+                calls = self.trace("net", net_features=f'moq-net feature "{feature}"', expected_returncode=1)
                 self.assertTrue(all(call.startswith("tree ") for call in calls), calls)
 
     def test_tokio_keeps_extremes_and_crypto_contracts(self):
@@ -279,8 +336,10 @@ class FeatureTest(unittest.TestCase):
         self.assertTrue(any(" --tests " in call for call in boundary))
         self.assertFalse(any(" --all-targets " in call for call in boundary))
         self.assertTrue(any(" --all-targets " in call for call in exhaustive))
-        self.assertEqual([call for call in boundary if not call.startswith("clippy ")],
-                         [call for call in exhaustive if not call.startswith("clippy ")])
+        self.assertEqual(
+            [call for call in boundary if not call.startswith("clippy ")],
+            [call for call in exhaustive if not call.startswith("clippy ")],
+        )
 
     def test_media_keeps_dependency_contracts_and_vpx_tests(self):
         boundary = self.trace("media")
@@ -289,8 +348,10 @@ class FeatureTest(unittest.TestCase):
         self.assertEqual(sum(call.startswith("check ") for call in exhaustive), 10)
         self.assertFalse(any(" --all-targets " in call for call in boundary))
         self.assertTrue(any(" --all-targets " in call for call in exhaustive))
-        self.assertEqual([call for call in boundary if not call.startswith("check ")],
-                         [call for call in exhaustive if not call.startswith("check ")])
+        self.assertEqual(
+            [call for call in boundary if not call.startswith("check ")],
+            [call for call in exhaustive if not call.startswith("check ")],
+        )
 
 
 CARGO_STUB = r"""#!/usr/bin/env bash

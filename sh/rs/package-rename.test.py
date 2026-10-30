@@ -26,24 +26,37 @@ class PackageRenameTest(unittest.TestCase):
                     outputs = {}
                     for config, packager in (("nfpm", "deb"), ("transition", "deb"), ("nfpm", "rpm")):
                         output = scratch / f"{name}-{config}.{packager}"
-                        subprocess.run([
-                            "bash", "sh/rs/package-nfpm.sh",
-                            f"packaging/{old}/{config}.yaml", packager, str(output),
-                        ], env=env, cwd=ROOT, check=True)
+                        subprocess.run(
+                            [
+                                "bash",
+                                "sh/rs/package-nfpm.sh",
+                                f"packaging/{old}/{config}.yaml",
+                                packager,
+                                str(output),
+                            ],
+                            env=env,
+                            cwd=ROOT,
+                            check=True,
+                        )
                         outputs[config, packager] = output
 
                     rpm = str(outputs["nfpm", "rpm"])
-                    for flag, expected in (("--provides", f"{old} = 99.0.0"),
-                                           ("--obsoletes", f"{old} < 99.0.0")):
+                    for flag, expected in (("--provides", f"{old} = 99.0.0"), ("--obsoletes", f"{old} < 99.0.0")):
                         metadata = subprocess.check_output([*rpm_query, "-qp", flag, rpm], text=True)
                         self.assertIn(expected, metadata.splitlines())
                     payload = subprocess.check_output([*rpm_query, "-qpl", rpm], text=True)
                     self.assertEqual(payload.splitlines(), [f"/usr/bin/{name}"])
 
                     def field(config, key):
-                        return subprocess.check_output([
-                            "dpkg-deb", "--field", str(outputs[config, "deb"]), key,
-                        ], text=True).strip()
+                        return subprocess.check_output(
+                            [
+                                "dpkg-deb",
+                                "--field",
+                                str(outputs[config, "deb"]),
+                                key,
+                            ],
+                            text=True,
+                        ).strip()
 
                     self.assertEqual(field("nfpm", "Package"), name)
                     self.assertEqual(field("nfpm", "Breaks"), f"{old} (<< 99.0.0)")
@@ -52,9 +65,15 @@ class PackageRenameTest(unittest.TestCase):
                     self.assertEqual(field("transition", "Depends"), f"{name} (>= 99.0.0)")
                     for config in ("nfpm", "transition"):
                         destination = scratch / f"{name}-{config}"
-                        subprocess.run([
-                            "dpkg-deb", "--extract", str(outputs[config, "deb"]), str(destination),
-                        ], check=True)
+                        subprocess.run(
+                            [
+                                "dpkg-deb",
+                                "--extract",
+                                str(outputs[config, "deb"]),
+                                str(destination),
+                            ],
+                            check=True,
+                        )
                         files = [p for p in destination.rglob("*") if p.is_file()]
                         if config == "transition":
                             self.assertEqual(files, [])

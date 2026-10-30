@@ -14,8 +14,14 @@ ROOT = Path(__file__).resolve().parents[2]
 def packages(root):
     directories = json.loads((root / "package.json").read_text())["workspaces"]
     # Shared tooling has tests but is not a published workspace.
-    return [root / "js/common", *(root / directory for directory in directories
-            if directory.startswith("js/") and any((root / directory / "src").glob("**/*.test.ts")))]
+    return [
+        root / "js/common",
+        *(
+            root / directory
+            for directory in directories
+            if directory.startswith("js/") and any((root / directory / "src").glob("**/*.test.ts"))
+        ),
+    ]
 
 
 def report(root, directories):
@@ -34,8 +40,11 @@ def report(root, directories):
     summary = {}
     manifest = json.loads((root / "package.json").read_text())
     for directory in [root / "js/common", *(root / path for path in manifest["workspaces"] if path.startswith("js/"))]:
-        sources = [path for path in (directory / "src").rglob("*")
-                   if path.suffix in (".ts", ".tsx") and not path.name.endswith((".test.ts", ".d.ts"))]
+        sources = [
+            path
+            for path in (directory / "src").rglob("*")
+            if path.suffix in (".ts", ".tsx") and not path.name.endswith((".test.ts", ".d.ts"))
+        ]
         if directory.name == "common":
             sources = [path for path in directory.glob("*.ts") if not path.name.endswith(".test.ts")]
         measured = {path: hits for path, hits in lines.items() if path in sources}
@@ -64,16 +73,30 @@ def main():
         out.mkdir(parents=True, exist_ok=True)
         print(f"coverage: {directory.relative_to(ROOT)}", flush=True)
         with (out / "test.log").open("w") as log:
-            result = subprocess.run(["bun", "test", "--only-failures", "--coverage",
-                                     "--coverage-reporter=text", "--coverage-reporter=lcov",
-                                     f"--coverage-dir={out}"], cwd=directory,
-                                    stdout=log, stderr=subprocess.STDOUT)
+            result = subprocess.run(
+                [
+                    "bun",
+                    "test",
+                    "--only-failures",
+                    "--coverage",
+                    "--coverage-reporter=text",
+                    "--coverage-reporter=lcov",
+                    f"--coverage-dir={out}",
+                ],
+                cwd=directory,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
         print((out / "test.log").read_text(), flush=True)
         result.check_returncode()
     summary = report(ROOT, selected)
     (ROOT / "target/coverage/js/summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    rows = ["## JS unit coverage", "", "| Package | Covered lines | Measured lines | Unloaded sources |",
-            "| --- | ---: | ---: | ---: |"]
+    rows = [
+        "## JS unit coverage",
+        "",
+        "| Package | Covered lines | Measured lines | Unloaded sources |",
+        "| --- | ---: | ---: | ---: |",
+    ]
     for name, entry in summary.items():
         rows.append(f"| {name} | {entry['covered']} | {entry['lines']} | {len(entry['unloaded'])} |")
         print(f"{name}: {entry['covered']}/{entry['lines']} measured lines, {len(entry['unloaded'])} unloaded sources")

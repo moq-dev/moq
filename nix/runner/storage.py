@@ -22,9 +22,7 @@ with tempfile.TemporaryDirectory(dir=sys.argv[1]) as directory:
             os.fdatasync(output.fileno())
         for mode in ("never", "always"):
             started = time.perf_counter()
-            subprocess.run(
-                ["cp", f"--reflink={mode}", source, destination], check=True
-            )
+            subprocess.run(["cp", f"--reflink={mode}", source, destination], check=True)
             with destination.open("r+b") as output:
                 os.fdatasync(output.fileno())
                 elapsed = time.perf_counter() - started

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Reduce paired relay rounds and Criterion runs; retain dispersion instead of implying single-run precision."""
+
 import argparse
 from collections import Counter
 import json
@@ -8,28 +9,51 @@ import shutil
 import statistics
 from pathlib import Path
 
-METRICS = ("recv_mbps", "send_mbps", "recv_fps", "send_fps", "cpu_cores", "generator_cpu_cores", "loss_pct", "latency_p99_ms")
+METRICS = (
+    "recv_mbps",
+    "send_mbps",
+    "recv_fps",
+    "send_fps",
+    "cpu_cores",
+    "generator_cpu_cores",
+    "loss_pct",
+    "latency_p99_ms",
+)
 
 
 def value(row, metric):
-    return row.get('generator', {}).get('cpu_cores') if metric == 'generator_cpu_cores' else row.get(metric)
+    return row.get("generator", {}).get("cpu_cores") if metric == "generator_cpu_cores" else row.get(metric)
 
 
 def summarize(deltas):
     """The median paired percent delta, its median absolute deviation, and whether every pair agreed."""
     median = statistics.median(deltas)
     mad = statistics.median(abs(value - median) for value in deltas)
-    return {"delta_pct": median, "mad_pct": mad, "range_pct": [min(deltas), max(deltas)], "paired_deltas_pct": deltas,
-            "status": "insufficient samples" if len(deltas) < 3 else
-                      "sign varies across pairs" if min(deltas) < 0 < max(deltas) else "consistent sign"}
+    return {
+        "delta_pct": median,
+        "mad_pct": mad,
+        "range_pct": [min(deltas), max(deltas)],
+        "paired_deltas_pct": deltas,
+        "status": "insufficient samples"
+        if len(deltas) < 3
+        else "sign varies across pairs"
+        if min(deltas) < 0 < max(deltas)
+        else "consistent sign",
+    }
 
 
 def reduce(pairs):
     if not pairs:
         raise ValueError("no paired rounds")
-    result = {"pairs": len(pairs), "estimate": "median paired percent delta; dispersion is median absolute deviation", "metrics": {}}
+    result = {
+        "pairs": len(pairs),
+        "estimate": "median paired percent delta; dispersion is median absolute deviation",
+        "metrics": {},
+    }
     for metric in METRICS:
-        if metric in ("cpu_cores", "generator_cpu_cores") and all(value(pair[label], metric) is None for pair in pairs for label in ("base", "current")):
+        if metric in ("cpu_cores", "generator_cpu_cores") and all(
+            value(pair[label], metric) is None for pair in pairs for label in ("base", "current")
+        ):
             result["metrics"][metric] = {"delta_pct": None, "status": "unavailable: no host CPU samples"}
             continue
         deltas = []
@@ -37,30 +61,47 @@ def reduce(pairs):
         for pair in pairs:
             for label in ("base", "current"):
                 sample = value(pair[label], metric)
-                if not isinstance(sample, (int, float)) or isinstance(sample, bool) or not math.isfinite(sample) or sample < 0:
+                if (
+                    not isinstance(sample, (int, float))
+                    or isinstance(sample, bool)
+                    or not math.isfinite(sample)
+                    or sample < 0
+                ):
                     raise ValueError(f"invalid or missing {label}.{metric}: {sample}")
             base, current = value(pair["base"], metric), value(pair["current"], metric)
             absolute.append(current - base)
             if base == 0:
-                continue # A ratio to zero is undefined, including zero loss on both sides.
+                continue  # A ratio to zero is undefined, including zero loss on both sides.
             deltas.append(100 * (current / base - 1))
         if not deltas:
-            result["metrics"][metric] = {"delta_pct": None, "status": "undefined ratio to zero", "paired_absolute_deltas": absolute}
+            result["metrics"][metric] = {
+                "delta_pct": None,
+                "status": "undefined ratio to zero",
+                "paired_absolute_deltas": absolute,
+            }
             continue
         result["metrics"][metric] = {**summarize(deltas), "paired_absolute_deltas": absolute}
     # Keep offered load and delivery/loss next to CPU; no normalized CPU claim when windows differ.
-    result["cpu_efficiency"] = "not estimated: verify offered load, delivery/loss and host/load window alignment before normalizing CPU"
+    result["cpu_efficiency"] = (
+        "not estimated: verify offered load, delivery/loss and host/load window alignment before normalizing CPU"
+    )
     return result
 
 
 def load(directory, workload):
     """Pair base/current summaries in numeric round order, matching execution-order.tsv."""
-    rounds = {label: {path.name for path in (directory / "relay" / label).glob("round-*")} for label in ("base", "current")}
+    rounds = {
+        label: {path.name for path in (directory / "relay" / label).glob("round-*")} for label in ("base", "current")
+    }
     if rounds["base"] != rounds["current"]:
         raise ValueError(f"unpaired rounds: base {sorted(rounds['base'])}, current {sorted(rounds['current'])}")
-    return [{label: json.loads((directory / "relay" / label / name / workload / "summary.json").read_text())
-             for label in ("base", "current")}
-            for name in sorted(rounds["base"], key=lambda name: int(name.removeprefix("round-")))]
+    return [
+        {
+            label: json.loads((directory / "relay" / label / name / workload / "summary.json").read_text())
+            for label in ("base", "current")
+        }
+        for name in sorted(rounds["base"], key=lambda name: int(name.removeprefix("round-")))
+    ]
 
 
 def criterion_cases(directory):
@@ -78,10 +119,16 @@ def criterion_cases(directory):
 
 def criterion_baseline(directory, discovery, benchmark):
     """Place the exact baseline at the current revision's Criterion directory."""
-    sources = [path.parent for path in directory.glob("**/base/benchmark.json")
-               if json.loads(path.read_text())["full_id"] == benchmark]
-    targets = [path.parent.parent.relative_to(discovery) for path in discovery.glob("**/discovery/benchmark.json")
-               if json.loads(path.read_text())["full_id"] == benchmark]
+    sources = [
+        path.parent
+        for path in directory.glob("**/base/benchmark.json")
+        if json.loads(path.read_text())["full_id"] == benchmark
+    ]
+    targets = [
+        path.parent.parent.relative_to(discovery)
+        for path in discovery.glob("**/discovery/benchmark.json")
+        if json.loads(path.read_text())["full_id"] == benchmark
+    ]
     if len(sources) != 1 or len(targets) != 1:
         raise ValueError(f"expected one baseline and discovery case for {benchmark!r}")
     destination = directory / targets[0] / "base"
@@ -143,8 +190,10 @@ def criterion_paired(run):
             continue
         deltas = []
         for number in range(1, rounds + 1):
-            sides = [criterion_means(run / "confirm" / str(index) / f"round-{number}" / side).get(key)
-                     for side in ("base", "current")]
+            sides = [
+                criterion_means(run / "confirm" / str(index) / f"round-{number}" / side).get(key)
+                for side in ("base", "current")
+            ]
             if None in sides:
                 raise ValueError(f"confirmation round {number} did not measure {key}")
             deltas.append(percent(*sides))
@@ -171,16 +220,29 @@ def criterion_paired(run):
             else:
                 case["verdict"] = "unchanged"
         cases.append(case)
-    return {"commit": metadata["revision"], "base": metadata["base"], "threshold_pct": THRESHOLD_PCT,
-            "rounds": rounds, "unavailable": unavailable, "cases": cases}
+    return {
+        "commit": metadata["revision"],
+        "base": metadata["base"],
+        "threshold_pct": THRESHOLD_PCT,
+        "rounds": rounds,
+        "unavailable": unavailable,
+        "cases": cases,
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--criterion-cases", action="store_true", help="list full IDs from isolated discovery samples")
-    parser.add_argument("--criterion-baseline", nargs=2, metavar=("DISCOVERY", "ID"), help="align an exact baseline with current discovery")
+    parser.add_argument(
+        "--criterion-baseline",
+        nargs=2,
+        metavar=("DISCOVERY", "ID"),
+        help="align an exact baseline with current discovery",
+    )
     parser.add_argument("--criterion-screen", action="store_true", help="list a paired run's slowdowns to confirm")
-    parser.add_argument("--criterion-paired", action="store_true", help="classify a paired run's cases into paired.json")
+    parser.add_argument(
+        "--criterion-paired", action="store_true", help="classify a paired run's cases into paired.json"
+    )
     parser.add_argument("directory", type=Path)
     args = parser.parse_args()
     if args.criterion_cases:
@@ -194,12 +256,16 @@ def main():
         result = criterion_paired(args.directory)
         (args.directory / "paired.json").write_text(json.dumps(result, indent=2) + "\n")
         verdicts = Counter(case["verdict"] for case in result["cases"])
-        print(f"\nPaired comparison against {result['base']}: "
-              + ", ".join(f"{count} {verdict}" for verdict, count in sorted(verdicts.items())))
+        print(
+            f"\nPaired comparison against {result['base']}: "
+            + ", ".join(f"{count} {verdict}" for verdict, count in sorted(verdicts.items()))
+        )
         for case in result["cases"]:
             if case["verdict"] == "regression":
-                print(f"REGRESSION {case['target']} {case['id']}: "
-                      f"{case['rounds']['delta_pct']:+.1f}% over {result['rounds']} rounds")
+                print(
+                    f"REGRESSION {case['target']} {case['id']}: "
+                    f"{case['rounds']['delta_pct']:+.1f}% over {result['rounds']} rounds"
+                )
         for entry in result["unavailable"]:
             print(f"UNAVAILABLE {entry['target']}: {entry['reason']}")
         return

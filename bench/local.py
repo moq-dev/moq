@@ -39,8 +39,10 @@ def main():
         parser.error("each checkout must be a distinct existing directory")
     # Every checkout runs solo, so a concurrent run is compared against its own baseline.
     groups = [[checkout] for checkout in checkouts] + ([checkouts] if len(checkouts) > 1 else [])
+
     def cancel(number, _frame):
         raise SystemExit(128 + number)
+
     for number in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, cancel)
     # Alternating the order spreads drift in host load or thermals over solo and concurrent runs.
@@ -65,29 +67,61 @@ def main():
                             env.pop("LOCAL_SUPERVISED", None)
                             env.pop("GITHUB_ACTIONS", None)
                             began = time.monotonic()
-                            process = subprocess.Popen(["bash", str(ROOT / "sh/local.sh"), sys.executable,
-                                                        str(Path(__file__).resolve()), "--started", str(stamp),
-                                                        *command], cwd=checkout, env=env, stdout=log, stderr=log)
+                            process = subprocess.Popen(
+                                [
+                                    "bash",
+                                    str(ROOT / "sh/local.sh"),
+                                    sys.executable,
+                                    str(Path(__file__).resolve()),
+                                    "--started",
+                                    str(stamp),
+                                    *command,
+                                ],
+                                cwd=checkout,
+                                env=env,
+                                stdout=log,
+                                stderr=log,
+                            )
                             processes.append((process, began, stamp))
                     results = []
                     for process, began, stamp in processes:
                         _, status, usage = os.wait4(process.pid, 0)
                         process.returncode = os.waitstatus_to_exitcode(status)
                         if process.returncode:
-                            raise RuntimeError(f"command failed ({process.returncode}); see {stamp.with_suffix('.log')}")
+                            raise RuntimeError(
+                                f"command failed ({process.returncode}); see {stamp.with_suffix('.log')}"
+                            )
                         timing = json.loads(stamp.read_text())
                         started, ended = timing["start"], timing["end"]
-                        results.append({"admission_s": started - began, "work_s": ended - started,
-                                        "total_s": ended - began, "cpu_s": usage.ru_utime + usage.ru_stime})
+                        results.append(
+                            {
+                                "admission_s": started - began,
+                                "work_s": ended - started,
+                                "total_s": ended - began,
+                                "cpu_s": usage.ru_utime + usage.ru_stime,
+                            }
+                        )
                 finally:
                     for process, _, _ in processes:
                         if process.returncode is None:
                             process.terminate()
                             process.wait()
-                print(json.dumps({"copies": len(group), "checkouts": [str(checkout) for checkout in group],
-                                  "nextest_workers": workers, "check_jobs": jobs, "sample": sample,
-                                  "cache": args.cache, "host_load": load, "command": command,
-                                  "runs": results}), flush=True)
+                print(
+                    json.dumps(
+                        {
+                            "copies": len(group),
+                            "checkouts": [str(checkout) for checkout in group],
+                            "nextest_workers": workers,
+                            "check_jobs": jobs,
+                            "sample": sample,
+                            "cache": args.cache,
+                            "host_load": load,
+                            "command": command,
+                            "runs": results,
+                        }
+                    ),
+                    flush=True,
+                )
 
 
 if __name__ == "__main__":

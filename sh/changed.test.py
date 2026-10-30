@@ -30,20 +30,27 @@ class ChangedTests(unittest.TestCase):
         self.timeout.chmod(0o755)
         self.gh = self.bin / "gh"
         self.gh.write_text(
-            '#!/usr/bin/env bash\n'
+            "#!/usr/bin/env bash\n"
             'printf "%s\\n" "$@" >>"$GH_LOG"\n'
             'if [[ "$GH_STATUS" != 0 ]]; then\n'
             '    echo "offline or unauthenticated" >&2\n'
             '    exit "$GH_STATUS"\n'
-            'fi\n'
+            "fi\n"
             '[[ -z "$GH_HEAD" || "$3" == "$GH_HEAD" ]] || exit 1\n'
             'printf "%s\\n" "$GH_BASE"\n'
         )
         self.gh.chmod(0o755)
-        self.env = dict(os.environ, PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
-                        GIT_CONFIG_GLOBAL=os.devnull, GH_BASE="", GH_STATUS="0", GH_HEAD="",
-                        GH_LOG=str(self.root / "gh.log"),
-                        TIMEOUT_LOG=str(self.root / "timeout.log"))
+        self.env = dict(
+            os.environ,
+            PATH=str(self.bin),
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GH_BASE="",
+            GH_STATUS="0",
+            GH_HEAD="",
+            GH_LOG=str(self.root / "gh.log"),
+            TIMEOUT_LOG=str(self.root / "timeout.log"),
+        )
         self.env.pop("GITHUB_BASE_REF", None)
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "test")
@@ -61,8 +68,9 @@ class ChangedTests(unittest.TestCase):
         self.git("update-ref", "refs/remotes/origin/local-name", "HEAD")
 
     def git(self, *args):
-        return subprocess.run(["git", *args], cwd=self.repo, env=self.env,
-                              text=True, capture_output=True, check=True).stdout.strip()
+        return subprocess.run(
+            ["git", *args], cwd=self.repo, env=self.env, text=True, capture_output=True, check=True
+        ).stdout.strip()
 
     def commit(self, name):
         (self.repo / name).write_text(name)
@@ -73,8 +81,9 @@ class ChangedTests(unittest.TestCase):
         self.git("branch", "--set-upstream-to", branch)
 
     def expect(self, base, files, *args):
-        result = subprocess.run([str(CHANGED), *args], cwd=self.repo, env=self.env,
-                                text=True, capture_output=True, check=True)
+        result = subprocess.run(
+            [str(CHANGED), *args], cwd=self.repo, env=self.env, text=True, capture_output=True, check=True
+        )
         self.assertEqual(result.stderr, f"changed: base {base}\n")
         self.assertEqual(result.stdout.splitlines(), sorted(files))
 
@@ -87,12 +96,25 @@ class ChangedTests(unittest.TestCase):
         self.env["GH_BASE"] = "stack"
         self.env["GH_HEAD"] = "quest/m1/pr-name"
         self.expect("origin/stack", ["feature.txt"])
-        self.assertEqual((self.root / "gh.log").read_text().splitlines(), [
-            "pr", "view", "local-name", "--json", "baseRefName,state", "--jq",
-            'select(.state == "OPEN") | .baseRefName',
-            "pr", "view", "quest/m1/pr-name", "--json", "baseRefName,state", "--jq",
-            'select(.state == "OPEN") | .baseRefName',
-        ])
+        self.assertEqual(
+            (self.root / "gh.log").read_text().splitlines(),
+            [
+                "pr",
+                "view",
+                "local-name",
+                "--json",
+                "baseRefName,state",
+                "--jq",
+                'select(.state == "OPEN") | .baseRefName',
+                "pr",
+                "view",
+                "quest/m1/pr-name",
+                "--json",
+                "baseRefName,state",
+                "--jq",
+                'select(.state == "OPEN") | .baseRefName',
+            ],
+        )
         self.assertEqual((self.root / "timeout.log").read_text(), "3s\n")
 
     def test_base_upstream_looks_up_local_head(self):
@@ -181,8 +203,7 @@ class ChangedTests(unittest.TestCase):
         self.expect("origin/main", ["base.txt", "moved.txt", "stack.txt", "feature.txt"])
 
     def test_invalid_explicit_base_is_an_error(self):
-        result = subprocess.run([str(CHANGED), "missing"], cwd=self.repo, env=self.env,
-                                text=True, capture_output=True)
+        result = subprocess.run([str(CHANGED), "missing"], cwd=self.repo, env=self.env, text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot resolve merge-base against missing", result.stderr)
 

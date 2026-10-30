@@ -62,22 +62,28 @@ class SelectionTest(unittest.TestCase):
         just = tools / "just"
         subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
         calls = self.root / "calls"
-        env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", ALLOW_HOST_TOOLCHAIN="1",
-                   SELECT_CALLS=str(calls))
+        env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", ALLOW_HOST_TOOLCHAIN="1", SELECT_CALLS=str(calls))
         for script in ("markdown.sh", "shell.sh", "large-files.sh"):
             path = sh / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
-        just.write_text('#!/bin/sh\nif [ "$1 $2" = "js test-changed" ]; then\n'
-                        'printf "%s\\n" "$1 $2" > "$SELECT_CALLS"\ncat "$3" >> "$SELECT_CALLS"\nfi\n')
+        just.write_text(
+            '#!/bin/sh\nif [ "$1 $2" = "js test-changed" ]; then\n'
+            'printf "%s\\n" "$1 $2" > "$SELECT_CALLS"\ncat "$3" >> "$SELECT_CALLS"\nfi\n'
+        )
         just.chmod(0o755)
         subprocess.run(["bash", "sh/dispatch.sh", "ci", "base"], cwd=self.root, env=env, check=True)
-        self.assertEqual(calls.read_text().splitlines(),
-                         ["js test-changed", "js/auth/src/token.ts", "demo/pub/worker.ts"])
+        self.assertEqual(
+            calls.read_text().splitlines(), ["js test-changed", "js/auth/src/token.ts", "demo/pub/worker.ts"]
+        )
 
     def test_cli_loads_without_shadowing_standard_library_modules(self):
-        result = subprocess.run([sys.executable, str(Path(__file__).with_name("workspace.py")),
-                                 "plan", "--all"], capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("workspace.py")), "plan", "--all"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
         plan = json.loads(result.stdout)
         self.assertTrue(plan["all"])
         self.assertTrue(plan["wasm"])
@@ -91,15 +97,24 @@ class SelectionTest(unittest.TestCase):
 
     def test_a_bench_selects_only_its_workspace(self):
         self.assertEqual(list(self.plan(["js/core/bench/frames.ts"])["packages"]), ["@example/core"])
-        self.assertEqual(set(self.plan(["js/core/bench/frames.ts", "js/core/src/index.ts"])["packages"]),
-                         {"@example/core", "@example/view", "docs"})
+        self.assertEqual(
+            set(self.plan(["js/core/bench/frames.ts", "js/core/src/index.ts"])["packages"]),
+            {"@example/core", "@example/view", "docs"},
+        )
 
     def test_leaf_does_not_select_its_dependencies(self):
         self.assertEqual(list(self.plan(["doc/index.md"])["packages"]), ["docs"])
 
     def test_shared_and_deleted_workspaces_fall_back(self):
-        for path in ("js/common/deps.ts", "js/justfile", "test/tsconfig.json", "drafts/spec.md",
-                     "package.json", "bun.lock", "js/removed/src/index.ts"):
+        for path in (
+            "js/common/deps.ts",
+            "js/justfile",
+            "test/tsconfig.json",
+            "drafts/spec.md",
+            "package.json",
+            "bun.lock",
+            "js/removed/src/index.ts",
+        ):
             with self.subTest(path=path):
                 plan = self.plan([path])
                 self.assertTrue(plan["all"])
@@ -112,20 +127,19 @@ class SelectionTest(unittest.TestCase):
         self.assertTrue(plan["wasm"])
 
     def test_wasm_change_selects_transitive_consumers(self):
-        self.assertEqual(set(self.plan(["js/wasm/README.md"])["packages"]),
-                         {"@moq/wasm", "browser", "demo"})
+        self.assertEqual(set(self.plan(["js/wasm/README.md"])["packages"]), {"@moq/wasm", "browser", "demo"})
 
     def test_multiple_seeds_and_empty_diff(self):
-        self.assertEqual(set(self.plan(["doc/index.md", "test/browser/src/index.ts"])["packages"]),
-                         {"docs", "browser", "demo"})
+        self.assertEqual(
+            set(self.plan(["doc/index.md", "test/browser/src/index.ts"])["packages"]), {"docs", "browser", "demo"}
+        )
         self.assertEqual(self.plan([])["packages"], {})
         self.assertEqual(len(self.plan(None)["packages"]), len(self.packages))
 
     def test_manifest_changes_drive_new_dependency_edges(self):
         self.packages["doc"]["devDependencies"] = {"browser": "workspace:*"}
         self.write()
-        self.assertEqual(set(self.plan(["test/browser/src/index.ts"])["packages"]),
-                         {"browser", "demo", "docs"})
+        self.assertEqual(set(self.plan(["test/browser/src/index.ts"])["packages"]), {"browser", "demo", "docs"})
 
     def reader(self, source):
         self.packages["js/reader"] = {"name": "reader"}
@@ -137,23 +151,25 @@ class SelectionTest(unittest.TestCase):
         (self.root / "doc/corpus").mkdir()
         (self.root / "js/view/src").mkdir()
         (self.root / "js/view/src/index.ts").touch()
-        self.reader('const corpus = join(import.meta.dir, "../../../doc/corpus");\n'
-                    'import { view } from "../../view/src/index";\n'
-                    'expect(resolve("../../..", "../../../missing")).toBe(`../${name}`);\n')
+        self.reader(
+            'const corpus = join(import.meta.dir, "../../../doc/corpus");\n'
+            'import { view } from "../../view/src/index";\n'
+            'expect(resolve("../../..", "../../../missing")).toBe(`../${name}`);\n'
+        )
         self.assertEqual(self.plan(None)["inputs"], ["doc/corpus", "js/view/src/index", "missing"])
         self.assertEqual(set(self.plan(["doc/corpus/case.json"])["packages"]), {"docs", "reader"})
-        self.assertEqual(set(self.plan(["js/view/src/index.ts"])["packages"]),
-                         {"@example/view", "docs", "reader"})
+        self.assertEqual(set(self.plan(["js/view/src/index.ts"])["packages"]), {"@example/view", "docs", "reader"})
         self.assertEqual(list(self.plan(["doc/index.md"])["packages"]), ["docs"])
         self.assertEqual(selector.unmapped(self.root, ["doc/corpus", "js/view/src/index", "missing"]), [])
 
     def test_deleted_cross_tree_inputs_keep_their_readers(self):
         # The diff removed the directory and the file, but the reader still names them.
-        self.reader('const corpus = join(import.meta.dir, "../../../doc/corpus");\n'
-                    'import { view } from "../../view/src/index";\n')
+        self.reader(
+            'const corpus = join(import.meta.dir, "../../../doc/corpus");\n'
+            'import { view } from "../../view/src/index";\n'
+        )
         self.assertEqual(set(self.plan(["doc/corpus/case.json"])["packages"]), {"docs", "reader"})
-        self.assertEqual(set(self.plan(["js/view/src/index.ts"])["packages"]),
-                         {"@example/view", "docs", "reader"})
+        self.assertEqual(set(self.plan(["js/view/src/index.ts"])["packages"]), {"@example/view", "docs", "reader"})
 
     def test_unowned_cross_tree_input_still_falls_back(self):
         (self.root / "rs").mkdir()
@@ -171,49 +187,73 @@ class SelectionTest(unittest.TestCase):
     def test_cycles_terminate(self):
         self.packages["js/core"]["dependencies"] = {"docs": "workspace:*"}
         self.write()
-        self.assertEqual(set(self.plan(["js/view/src/index.ts"])["packages"]),
-                         {"@example/core", "@example/view", "docs"})
+        self.assertEqual(
+            set(self.plan(["js/view/src/index.ts"])["packages"]), {"@example/core", "@example/view", "docs"}
+        )
 
     def calls(self, paths, action="check", github_actions=False):
         calls = []
         self.configurations = []
+
         def invoke(args, **kwargs):
             calls.append(list(args))
             if args[:2] == ("bunx", "tsc") and args[-1] != "test/tsconfig.json":
                 self.configurations.append(json.loads(Path(args[-1]).read_text()))
             return type("Result", (), {"returncode": 1 if args[0] == "grep" else 0})()
-        with patch.dict(selector.os.environ, GITHUB_ACTIONS=str(github_actions).lower()), \
-                patch.object(selector, "ROOT", self.root), patch.object(selector.os, "chdir"), \
-                patch.object(selector.subprocess, "run", side_effect=invoke), \
-                patch.object(selector.shutil, "which", return_value="tool"):
+
+        with (
+            patch.dict(selector.os.environ, GITHUB_ACTIONS=str(github_actions).lower()),
+            patch.object(selector, "ROOT", self.root),
+            patch.object(selector.os, "chdir"),
+            patch.object(selector.subprocess, "run", side_effect=invoke),
+            patch.object(selector.shutil, "which", return_value="tool"),
+        ):
             selector.run(action, self.plan(paths))
         return calls
 
     def test_executor_runs_only_selected_package_scripts_without_wasm(self):
         calls = self.calls(["doc/index.md"])
         scripts = [c for c in calls if c[:2] == ["bun", "run"]]
-        self.assertEqual(scripts, [["bun", "run", "--sequential", "--filter=docs", "--elide-lines=0", action]
-                                  for action in ("check", "build")])
+        self.assertEqual(
+            scripts,
+            [
+                ["bun", "run", "--sequential", "--filter=docs", "--elide-lines=0", action]
+                for action in ("check", "build")
+            ],
+        )
         self.assertNotIn(["just", "js", "wasm", "dev"], calls)
         self.assertTrue(any(c[:2] == ["bunx", "tsc"] for c in calls))
-        self.assertEqual(self.configurations, [{"extends": "./tsconfig.json", "exclude":
-                          ["**/dist", str(self.root / "test/browser")]}])
+        self.assertEqual(
+            self.configurations,
+            [{"extends": "./tsconfig.json", "exclude": ["**/dist", str(self.root / "test/browser")]}],
+        )
         self.assertEqual(list((self.root / "test").glob("tmp*.json")), [])
 
     def test_biome_covers_unowned_js_files_in_fallback(self):
         def biome(paths):
             return next(c for c in self.calls(paths) if c[:3] == ["bun", "biome", "check"])
-        self.assertEqual(biome(["js/tsconfig.json"]),
-                         ["bun", "biome", "check", "--error-on-warnings", "js", "bench/browser", "test", "doc", "demo"])
+
+        self.assertEqual(
+            biome(["js/tsconfig.json"]),
+            ["bun", "biome", "check", "--error-on-warnings", "js", "bench/browser", "test", "doc", "demo"],
+        )
         self.assertEqual(biome(["doc/index.md"]), ["bun", "biome", "check", "--error-on-warnings", "doc", "js/common"])
-        self.assertEqual(biome(["demo/nested/src/index.ts"]),
-                         ["bun", "biome", "check", "--error-on-warnings", "demo/nested", "js/common"])
-        self.assertEqual(biome(["demo/pub/src/index.ts"]),
-                         ["bun", "biome", "check", "--error-on-warnings", "js", "bench/browser", "test", "doc", "demo"])
-        self.assertEqual(biome(["js/core/src/index.ts"]),
-                         ["bun", "biome", "check", "--error-on-warnings", "js/core", "js/view", "doc", "js/common"])
-        self.assertEqual(biome(["js/wasm/src/index.ts"]),
-                         ["bun", "biome", "check", "--error-on-warnings", "js/wasm", "test/browser", "demo/nested", "js/common"])
+        self.assertEqual(
+            biome(["demo/nested/src/index.ts"]),
+            ["bun", "biome", "check", "--error-on-warnings", "demo/nested", "js/common"],
+        )
+        self.assertEqual(
+            biome(["demo/pub/src/index.ts"]),
+            ["bun", "biome", "check", "--error-on-warnings", "js", "bench/browser", "test", "doc", "demo"],
+        )
+        self.assertEqual(
+            biome(["js/core/src/index.ts"]),
+            ["bun", "biome", "check", "--error-on-warnings", "js/core", "js/view", "doc", "js/common"],
+        )
+        self.assertEqual(
+            biome(["js/wasm/src/index.ts"]),
+            ["bun", "biome", "check", "--error-on-warnings", "js/wasm", "test/browser", "demo/nested", "js/common"],
+        )
 
     def test_build_never_generates_wasm(self):
         self.assertNotIn(["just", "js", "wasm", "dev"], self.calls(None, "build"))
@@ -221,8 +261,9 @@ class SelectionTest(unittest.TestCase):
 
     def test_executor_builds_wasm_before_consumer_check(self):
         calls = self.calls(["demo/nested/src/index.ts"])
-        self.assertLess(calls.index(["just", "js", "wasm", "dev"]),
-                        next(i for i, c in enumerate(calls) if c[:2] == ["bun", "run"]))
+        self.assertLess(
+            calls.index(["just", "js", "wasm", "dev"]), next(i for i, c in enumerate(calls) if c[:2] == ["bun", "run"])
+        )
 
     def test_tests_do_not_build_wasm_or_unselected_packages(self):
         calls = self.calls(["doc/index.md"], "test")

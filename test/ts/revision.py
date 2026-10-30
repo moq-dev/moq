@@ -45,7 +45,10 @@ def revise(packet, version, streams):
     start = len(packet) - len(body) + 1 + body[0]
     section = bytearray(klv.single_section(packet))
     section[5] = (section[5] & 0xC1) | version << 1
-    entries = b"".join(bytes([kind, 0xE0 | route >> 8, route & 0xFF, 0xF0 | len(info) >> 8, len(info) & 0xFF]) + info for kind, route, info in streams)
+    entries = b"".join(
+        bytes([kind, 0xE0 | route >> 8, route & 0xFF, 0xF0 | len(info) >> 8, len(info) & 0xFF]) + info
+        for kind, route, info in streams
+    )
     section = section[:-4] + entries
     length = len(section) + 4 - 3
     section[1] = (section[1] & 0xF0) | length >> 8
@@ -135,7 +138,10 @@ def grade(source, capture):
     types = lambda streams: {route: kind for route, (kind, _) in streams.items()}
     src, cap = layouts(source), layouts(capture)
     if [types(streams) for _, _, streams in cap] != [types(streams) for _, _, streams in src]:
-        raise Failure("layouts", f"the capture's PMTs list {[sorted(types(s).items()) for _, _, s in cap]}, the source's {[sorted(types(s).items()) for _, _, s in src]}")
+        raise Failure(
+            "layouts",
+            f"the capture's PMTs list {[sorted(types(s).items()) for _, _, s in cap]}, the source's {[sorted(types(s).items()) for _, _, s in src]}",
+        )
     for (_, newest, _), (index, version, _) in zip(cap, cap[1:]):
         if version != (newest + 1) % 32:
             raise Failure("version", f"version {version} at packet {index} follows version {newest}")
@@ -149,11 +155,15 @@ def grade(source, capture):
     closed = cap[listed + 1][0] if listed + 1 < len(cap) else None
     for index, packet in enumerate(klv.packets(capture)):
         if klv.pid(packet) == PID and not (opened < index and (closed is None or index < closed)):
-            raise Failure("window", f"a packet on PID {PID:#x} at {index}, outside the PMTs listing it ({opened} to {closed})")
+            raise Failure(
+                "window", f"a packet on PID {PID:#x} at {index}, outside the PMTs listing it ({opened} to {closed})"
+            )
     src_pes = [pes.data for pes in klv.private_pes(source, [PID])[PID]]
     cap_pes = [pes.data for pes in klv.private_pes(capture, [PID])[PID]]
     if cap_pes != src_pes:
-        raise Failure("pes", f"PID {PID:#x}: {len(cap_pes)} PES in the capture, not the source's {len(src_pes)} in order")
+        raise Failure(
+            "pes", f"PID {PID:#x}: {len(cap_pes)} PES in the capture, not the source's {len(src_pes)} in order"
+        )
     return {"versions": [version for _, version, _ in cap], "pes": len(cap_pes), "opened": opened, "closed": closed}
 
 
@@ -186,8 +196,10 @@ def main():
         return 1
     if args.report_json:
         args.report_json.write_text(json.dumps(report, indent=2) + "\n")
-    print(f"  PASS  versions {report['versions']}; {report['pes']} PES on PID {PID:#x}, "
-          f"between the PMTs at packets {report['opened']} and {report['closed']}")
+    print(
+        f"  PASS  versions {report['versions']}; {report['pes']} PES on PID {PID:#x}, "
+        f"between the PMTs at packets {report['opened']} and {report['closed']}"
+    )
     return 0
 
 

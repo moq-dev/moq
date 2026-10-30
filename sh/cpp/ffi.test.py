@@ -34,10 +34,14 @@ class Inputs(unittest.TestCase):
         (self.root / "cpp/moq/FFI_SHA256.json").write_text("{}")
 
     def pin(self, path):
-        (self.root / "cpp/moq/FFI_SHA256.json").write_text(json.dumps({
-            ffi.name("1.2.3", target) + ".tar.gz": hashlib.sha256(path.read_bytes()).hexdigest()
-            for target in ffi.TARGETS
-        }))
+        (self.root / "cpp/moq/FFI_SHA256.json").write_text(
+            json.dumps(
+                {
+                    ffi.name("1.2.3", target) + ".tar.gz": hashlib.sha256(path.read_bytes()).hexdigest()
+                    for target in ffi.TARGETS
+                }
+            )
+        )
 
     def test_fetch_requires_a_real_pin_before_network(self):
         with patch.object(ffi.urllib.request, "urlretrieve") as download:
@@ -58,9 +62,11 @@ class Inputs(unittest.TestCase):
         path.write_bytes(b"changed")
         self.pin(path)
         path.write_bytes(b"replacement")
+
         def download(url, dest):
             self.assertIn("moq-ffi-v1.2.3/moq-ffi-default-1.2.3-", url)
             shutil.copyfile(path, dest)
+
         with patch.object(ffi.urllib.request, "urlretrieve", side_effect=download):
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 ffi.fetch("x86_64-unknown-linux-gnu", self.root / "out")
@@ -76,7 +82,9 @@ class Inputs(unittest.TestCase):
                     info.linkname = "../escape"
                 tar.addfile(info, io.BytesIO(b""))
             self.pin(path)
-            with patch.object(ffi.urllib.request, "urlretrieve", side_effect=lambda url, dest: shutil.copyfile(path, dest)):
+            with patch.object(
+                ffi.urllib.request, "urlretrieve", side_effect=lambda url, dest: shutil.copyfile(path, dest)
+            ):
                 with self.assertRaisesRegex(ValueError, "archive member"):
                     ffi.fetch("x86_64-unknown-linux-gnu", self.root / "out")
             self.assertFalse((self.root / "out").exists())
@@ -84,7 +92,11 @@ class Inputs(unittest.TestCase):
     def test_reproducible_archive_roundtrip(self):
         directory = self.root / "input"
         directory.mkdir()
-        (directory / "manifest.json").write_text(json.dumps({"version": "1.2.3", "target": "x86_64-unknown-linux-gnu", "features": "default", "profile": "release"}))
+        (directory / "manifest.json").write_text(
+            json.dumps(
+                {"version": "1.2.3", "target": "x86_64-unknown-linux-gnu", "features": "default", "profile": "release"}
+            )
+        )
         (directory / "library").write_bytes(b"static native library")
         ffi.archive(directory, self.root / "archives")
         path = next((self.root / "archives").glob("*.tar.gz"))
@@ -100,7 +112,12 @@ class Inputs(unittest.TestCase):
     def test_same_run_extract_checks_sidecar_and_manifest(self):
         directory = self.root / "input"
         directory.mkdir()
-        manifest = {"version": "1.2.3", "target": "x86_64-unknown-linux-gnu", "features": "default", "profile": "release"}
+        manifest = {
+            "version": "1.2.3",
+            "target": "x86_64-unknown-linux-gnu",
+            "features": "default",
+            "profile": "release",
+        }
         (directory / "manifest.json").write_text(json.dumps(manifest))
         ffi.archive(directory, self.root / "archives")
         ffi.extract("1.2.3", manifest["target"], self.root / "archives", self.root / "good")
@@ -114,15 +131,27 @@ class Inputs(unittest.TestCase):
     def test_checksummed_archive_must_match_selected_manifest(self):
         directory = self.root / "input"
         directory.mkdir()
-        manifest = {"version": "9.9.9", "target": "x86_64-unknown-linux-gnu", "features": "default", "profile": "release"}
-        for field, value in (("version", "9.9.9"), ("target", "aarch64-unknown-linux-gnu"), ("features", "minimal"), ("profile", "debug")):
+        manifest = {
+            "version": "9.9.9",
+            "target": "x86_64-unknown-linux-gnu",
+            "features": "default",
+            "profile": "release",
+        }
+        for field, value in (
+            ("version", "9.9.9"),
+            ("target", "aarch64-unknown-linux-gnu"),
+            ("features", "minimal"),
+            ("profile", "debug"),
+        ):
             current = dict(manifest, version="1.2.3", **{field: value}) if field != "version" else manifest
             (directory / "manifest.json").write_text(json.dumps(current))
             ffi.archive(directory, self.root / "archives")
             path = self.root / "archives" / (ffi.name(current["version"], current["target"]) + ".tar.gz")
             self.pin(path)
             output = self.root / ("out-" + field)
-            with patch.object(ffi.urllib.request, "urlretrieve", side_effect=lambda url, dest: shutil.copyfile(path, dest)):
+            with patch.object(
+                ffi.urllib.request, "urlretrieve", side_effect=lambda url, dest: shutil.copyfile(path, dest)
+            ):
                 with self.assertRaisesRegex(ValueError, "manifest disagrees"):
                     ffi.fetch("x86_64-unknown-linux-gnu", output)
             self.assertFalse(output.exists())
@@ -146,16 +175,19 @@ class Inputs(unittest.TestCase):
             (directory / filename).write_bytes(b"new")
             (directory / (filename + ".sha256")).write_text(f"{hashlib.sha256(b'new').hexdigest()}  {filename}\n")
         existing = next(directory.iterdir()).name
+
         def run(args, **kwargs):
             if args[2] == "download":
                 (pathlib.Path(args[-1]) / existing).write_bytes(b"old")
             return subprocess.CompletedProcess(args, 0)
-        with patch.object(ffi.subprocess, "run", side_effect=run) as calls, patch.object(
-            ffi.subprocess, "check_output", return_value=json.dumps({"assets": [{"name": existing}]})):
+
+        with (
+            patch.object(ffi.subprocess, "run", side_effect=run) as calls,
+            patch.object(ffi.subprocess, "check_output", return_value=json.dumps({"assets": [{"name": existing}]})),
+        ):
             with self.assertRaisesRegex(ValueError, "refusing to replace"):
                 ffi.publish("1.2.3", directory, "")
             self.assertFalse(any(call.args[0][2] == "upload" for call in calls.call_args_list))
-
 
     def test_publish_creates_release_like_other_ffi_publishers(self):
         directory = self.root / "assets"
@@ -164,17 +196,22 @@ class Inputs(unittest.TestCase):
             filename = ffi.name("1.2.3", target) + ".tar.gz"
             (directory / filename).write_bytes(b"new")
             (directory / (filename + ".sha256")).write_text(f"{hashlib.sha256(b'new').hexdigest()}  {filename}\n")
+
         def run(args, **kwargs):
             if args[2] == "view":
                 return subprocess.CompletedProcess(args, 1, b"", b"release not found")
             return subprocess.CompletedProcess(args, 0)
-        with patch.object(ffi.subprocess, "run", side_effect=run) as calls, patch.object(
-            ffi.subprocess, "check_output", return_value=json.dumps({"assets": []})):
+
+        with (
+            patch.object(ffi.subprocess, "run", side_effect=run) as calls,
+            patch.object(ffi.subprocess, "check_output", return_value=json.dumps({"assets": []})),
+        ):
             ffi.publish("1.2.3", directory, "moq-ffi-v1.2.2")
         create = next(call.args[0] for call in calls.call_args_list if call.args[0][2] == "create")
         self.assertEqual(create[-3:], ["--generate-notes", "--notes-start-tag", "moq-ffi-v1.2.2"])
         self.assertNotIn("--notes", create)
         self.assertEqual(sum(call.args[0][2] == "upload" for call in calls.call_args_list), 8)
+
 
 @unittest.skipUnless(platform.system() == "Linux", "Linux CMake input fixtures")
 class Configure(unittest.TestCase):
@@ -188,27 +225,48 @@ class Configure(unittest.TestCase):
             for name in ("libmoq_ffi.a", "libmoq_ffi.so"):
                 (native / "lib" / name).touch()
             (native / "native-libs.txt").write_text("# no linker inputs needed by this fixture\n")
-            manifest = {"version": "1.2.3", "target": "aarch64-unknown-linux-gnu" if platform.machine() == "aarch64" else "x86_64-unknown-linux-gnu",
-                        "features": "default", "profile": "release", "source": "a" * 40}
+            manifest = {
+                "version": "1.2.3",
+                "target": "aarch64-unknown-linux-gnu"
+                if platform.machine() == "aarch64"
+                else "x86_64-unknown-linux-gnu",
+                "features": "default",
+                "profile": "release",
+                "source": "a" * 40,
+            }
             tools = root / "tools"
             tools.mkdir()
             generator = tools / "uniffi-bindgen-cpp"
-            generator.write_text("#!/usr/bin/env python3\nimport pathlib, sys\nout=pathlib.Path(sys.argv[sys.argv.index('--out-dir')+1]); out.mkdir(parents=True)\nfor name in ('moq.hpp','moq.cpp','moq_scaffolding.hpp','uniffi_expected.hpp'): (out/name).touch()\n")
+            generator.write_text(
+                "#!/usr/bin/env python3\nimport pathlib, sys\nout=pathlib.Path(sys.argv[sys.argv.index('--out-dir')+1]); out.mkdir(parents=True)\nfor name in ('moq.hpp','moq.cpp','moq_scaffolding.hpp','uniffi_expected.hpp'): (out/name).touch()\n"
+            )
             generator.chmod(0o755)
             cargo = tools / "cargo"
             cargo.write_text("#!/usr/bin/env bash\necho unexpected Rust build >&2\nexit 99\n")
             cargo.chmod(0o755)
             env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"])
+
             def configure():
-                return subprocess.run(["cmake", "-S", str(source), "-B", str(root / "good"),
-                                       f"-DMOQ_FFI_DIR={native}"], env=env, capture_output=True, text=True)
+                return subprocess.run(
+                    ["cmake", "-S", str(source), "-B", str(root / "good"), f"-DMOQ_FFI_DIR={native}"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+
             (native / "manifest.json").write_text(json.dumps(manifest))
             configured = configure()
             self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
-            built = subprocess.run(["cmake", "--build", str(root / "good"), "--target", "moq_ffi"],
-                                   env=env, capture_output=True, text=True)
+            built = subprocess.run(
+                ["cmake", "--build", str(root / "good"), "--target", "moq_ffi"], env=env, capture_output=True, text=True
+            )
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
-            for field, value in (("target", "unsupported"), ("features", "minimal"), ("profile", "debug"), ("version", "unsupported")):
+            for field, value in (
+                ("target", "unsupported"),
+                ("features", "minimal"),
+                ("profile", "debug"),
+                ("version", "unsupported"),
+            ):
                 (native / "manifest.json").write_text(json.dumps(dict(manifest, **{field: value})))
                 self.assertNotEqual(configure().returncode, 0)
 

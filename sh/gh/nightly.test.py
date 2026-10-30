@@ -23,7 +23,7 @@ class NightlyTest(unittest.TestCase):
             for command in ("just", "cargo"):
                 stub = scratch / command
                 stub.write_text(
-                    '#!/usr/bin/env bash\n'
+                    "#!/usr/bin/env bash\n"
                     'printf "%s %s\n" "${0##*/}" "$*" >> "$NIGHTLY_CALLS"\n'
                     'printf "%s\n" "${BENCH_BASE:-}" >> "$NIGHTLY_CALLS.base"\n'
                     '[[ "$*" != "$NIGHTLY_FAIL" ]]\n'
@@ -31,40 +31,66 @@ class NightlyTest(unittest.TestCase):
                 stub.chmod(0o755)
             # Answers `gh run list` by applying its --jq filter to NIGHTLY_RUNS.
             gh = scratch / "gh"
-            gh.write_text('#!/usr/bin/env bash\nwhile [[ $1 != --jq ]]; do shift; done\n'
-                          'printf "%s" "$NIGHTLY_RUNS" | jq -r "$2"\n')
+            gh.write_text(
+                "#!/usr/bin/env bash\nwhile [[ $1 != --jq ]]; do shift; done\n"
+                'printf "%s" "$NIGHTLY_RUNS" | jq -r "$2"\n'
+            )
             gh.chmod(0o755)
-            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
-                       BENCH_RESULTS=str(scratch / "results"), NIGHTLY_CALLS=str(calls), NIGHTLY_FAIL=fail, BASH_ENV="/dev/null")
+            env = dict(
+                os.environ,
+                PATH=f"{scratch}:{os.environ['PATH']}",
+                BENCH_RESULTS=str(scratch / "results"),
+                NIGHTLY_CALLS=str(calls),
+                NIGHTLY_FAIL=fail,
+                BASH_ENV="/dev/null",
+            )
             env.pop("BENCH_BASE", None)
             env.update(environment)
-            result = subprocess.run(["bash", ROOT / "sh/gh/nightly.sh", group], cwd=cwd,
-                                    env=env, capture_output=True, text=True)
+            result = subprocess.run(
+                ["bash", ROOT / "sh/gh/nightly.sh", group], cwd=cwd, env=env, capture_output=True, text=True
+            )
             self.bases = set(Path(f"{calls}.base").read_text().splitlines()) if calls.exists() else set()
             return result, calls.read_text().splitlines() if calls.exists() else []
 
     def test_paired_base_is_the_previous_scheduled_nightly(self):
         # Nightly checks out shallowly, so the test builds the history it resolves against.
         with tempfile.TemporaryDirectory() as repo:
-            git = ["git", "-C", repo, "-c", "user.name=nightly", "-c", "user.email=nightly@example.com",
-                   "-c", "commit.gpgsign=false"]
+            git = [
+                "git",
+                "-C",
+                repo,
+                "-c",
+                "user.name=nightly",
+                "-c",
+                "user.email=nightly@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ]
             subprocess.run([*git, "init", "-q"], check=True)
             for message in ("parent", "head"):
                 subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", message], check=True)
-            head, parent = (subprocess.run([*git, "rev-parse", revision], capture_output=True, text=True,
-                                           check=True).stdout.strip() for revision in ("HEAD", "HEAD~1"))
+            head, parent = (
+                subprocess.run([*git, "rev-parse", revision], capture_output=True, text=True, check=True).stdout.strip()
+                for revision in ("HEAD", "HEAD~1")
+            )
             # This run is the newest scheduled one; the previous run's commit is the base.
             runs = json.dumps([{"databaseId": 2, "headSha": parent}, {"databaseId": 1, "headSha": head}])
-            result, _ = self.run_group("rust-uring", cwd=repo, BENCH_BASE="previous-nightly", GITHUB_RUN_ID="2",
-                                       NIGHTLY_RUNS=runs)
+            result, _ = self.run_group(
+                "rust-uring", cwd=repo, BENCH_BASE="previous-nightly", GITHUB_RUN_ID="2", NIGHTLY_RUNS=runs
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.bases, {head})
             # A named revision reaches the runner as its commit.
             result, _ = self.run_group("rust-uring", cwd=repo, BENCH_BASE="HEAD~1")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.bases, {parent})
-            result, calls = self.run_group("rust-uring", cwd=repo, BENCH_BASE="previous-nightly",
-                                           GITHUB_RUN_ID="1", NIGHTLY_RUNS=json.dumps([{"databaseId": 1, "headSha": head}]))
+            result, calls = self.run_group(
+                "rust-uring",
+                cwd=repo,
+                BENCH_BASE="previous-nightly",
+                GITHUB_RUN_ID="1",
+                NIGHTLY_RUNS=json.dumps([{"databaseId": 1, "headSha": head}]),
+            )
             self.assertEqual(result.returncode, 1)
             self.assertIn("no previous scheduled Nightly", result.stderr)
             self.assertEqual(calls, [])
@@ -97,8 +123,12 @@ class NightlyTest(unittest.TestCase):
         release = [call for call in calls if call.startswith("just gh criterion")]
         self.assertEqual(len(release), 4)  # moq-net, its CPU clock, kio, then GStreamer.
         # The CPU clock reuses moq-net's build instead of rebuilding it without fuzz.
-        self.assertTrue(any("-p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu" in call
-                            for call in release))
+        self.assertTrue(
+            any(
+                "-p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu" in call
+                for call in release
+            )
+        )
         self.assertEqual(release[-1], "just gh criterion -p moq-gst --bench catalog")
         self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "))
         result, calls = self.run_group("rust-shared")
@@ -138,9 +168,11 @@ class NightlyTest(unittest.TestCase):
                             covered.add((package, bench["name"]))
                 # Cargo rejects the whole invocation when any named target is missing.
                 self.assertEqual(set(targets) - names - {"*"}, set(), call)
-        declared = {(manifest.parent.name, bench["name"])
-                    for manifest in (ROOT / "rs").glob("*/Cargo.toml")
-                    for bench in tomllib.loads(manifest.read_text()).get("bench", [])}
+        declared = {
+            (manifest.parent.name, bench["name"])
+            for manifest in (ROOT / "rs").glob("*/Cargo.toml")
+            for bench in tomllib.loads(manifest.read_text()).get("bench", [])
+        }
         self.assertEqual(declared - covered, set(), "Cargo bench targets missing from Nightly")
 
     def test_every_js_bench_runs_nightly(self):
@@ -161,8 +193,9 @@ class NightlyTest(unittest.TestCase):
             for path in recipes[args[2]]:
                 entries.add(ROOT / "js" / path.replace("{{ name }}", args[-1]))
         # Bundled helpers only run through the entry that names them.
-        helpers = {path for entry in entries for path in entry.parent.glob("*.ts")
-                   if f"/{path.name}" in entry.read_text()}
+        helpers = {
+            path for entry in entries for path in entry.parent.glob("*.ts") if f"/{path.name}" in entry.read_text()
+        }
         declared = {path for path in (ROOT / "js").glob("*/bench/*.ts") if not path.name.endswith(".test.ts")}
         missing = {str(path.relative_to(ROOT)) for path in declared - entries - helpers}
         self.assertEqual(missing, set(), "JS benches missing from Nightly")
@@ -188,8 +221,11 @@ class NightlyTest(unittest.TestCase):
 
     def test_failed_release_build_does_not_hide_later_work(self):
         _, calls = self.run_group("rust-bench")
-        build = next(call.removeprefix("just ") for call in calls
-                     if call.startswith("just gh criterion") and "-p moq-net" in call)
+        build = next(
+            call.removeprefix("just ")
+            for call in calls
+            if call.startswith("just gh criterion") and "-p moq-net" in call
+        )
         result, calls = self.run_group("rust-bench", build)
         self.assertEqual(result.returncode, 1)
         # A failed group publishes no report, but every later target still runs.
@@ -221,17 +257,17 @@ class FuzzTest(unittest.TestCase):
             binary = root / "bin"
             binary.mkdir()
             rustup = binary / "rustup"
-            rustup.write_text('#!/bin/sh\nif [ "$*" = "run nightly rustc --print sysroot" ]; then printf "%s\\n" "$FUZZ_SYSROOT"; fi\n')
+            rustup.write_text(
+                '#!/bin/sh\nif [ "$*" = "run nightly rustc --print sysroot" ]; then printf "%s\\n" "$FUZZ_SYSROOT"; fi\n'
+            )
             rustup.chmod(0o755)
             cargo = binary / "cargo"
             cargo.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$FUZZ_CALLS"\n')
             cargo.chmod(0o755)
             (binary / "cargo-fuzz").symlink_to(cargo)
             calls = root / "calls"
-            env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}",
-                       FUZZ_SYSROOT=str(root), FUZZ_CALLS=str(calls))
-            result = subprocess.run(["bash", str(script), *args], cwd=root, env=env,
-                                    capture_output=True, text=True)
+            env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}", FUZZ_SYSROOT=str(root), FUZZ_CALLS=str(calls))
+            result = subprocess.run(["bash", str(script), *args], cwd=root, env=env, capture_output=True, text=True)
             self.assertEqual((corpus / "discovery").read_bytes(), b"from the previous run")
             self.assertEqual((seeds / "generated").read_bytes(), b"generated seed")
             return result, calls.read_text().splitlines() if calls.exists() else []
@@ -239,10 +275,13 @@ class FuzzTest(unittest.TestCase):
     def test_run_keeps_discoveries_writable_and_seeds_separate(self):
         result, calls = self.run_fuzz("lite", "--", "-runs=2")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls, [
-            "run --locked -q -p moq-net --features fuzz --example fuzz-seeds -- rs/moq-net/fuzz/seeds",
-            "fuzz run --fuzz-dir rs/moq-net/fuzz lite rs/moq-net/fuzz/corpus/lite rs/moq-net/fuzz/seeds/lite -- -runs=2",
-        ])
+        self.assertEqual(
+            calls,
+            [
+                "run --locked -q -p moq-net --features fuzz --example fuzz-seeds -- rs/moq-net/fuzz/seeds",
+                "fuzz run --fuzz-dir rs/moq-net/fuzz lite rs/moq-net/fuzz/corpus/lite rs/moq-net/fuzz/seeds/lite -- -runs=2",
+            ],
+        )
 
     def test_minimization_only_rewrites_the_evolved_corpus(self):
         result, calls = self.run_fuzz("--minimize", "lite")

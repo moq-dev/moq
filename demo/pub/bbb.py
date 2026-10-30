@@ -8,11 +8,22 @@ from pathlib import Path
 
 
 def probe(path):
-    return json.loads(subprocess.check_output([
-        "ffprobe", "-v", "error", "-show_streams", "-show_packets",
-        "-show_entries", "stream=index,codec_type,codec_name,width,height,time_base,duration_ts:packet=stream_index,pts,duration,flags",
-        "-of", "json", str(path),
-    ]))
+    return json.loads(
+        subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_streams",
+                "-show_packets",
+                "-show_entries",
+                "stream=index,codec_type,codec_name,width,height,time_base,duration_ts:packet=stream_index,pts,duration,flags",
+                "-of",
+                "json",
+                str(path),
+            ]
+        )
+    )
 
 
 def video(media):
@@ -37,11 +48,32 @@ def check(source, target):
 
     # Map audio too: it determines the source's loop period. A video-only probe
     # would miss the 39 ms/loop drift caused by the longer audio track.
-    output = subprocess.check_output([
-        "ffmpeg", "-v", "error", "-copyts", "-stream_loop", "2", "-i", str(source),
-        "-stream_loop", "2", "-i", str(target), "-map", "0", "-map", "1:v",
-        "-c", "copy", "-f", "framecrc", "-",
-    ], text=True)
+    output = subprocess.check_output(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-copyts",
+            "-stream_loop",
+            "2",
+            "-i",
+            str(source),
+            "-stream_loop",
+            "2",
+            "-i",
+            str(target),
+            "-map",
+            "0",
+            "-map",
+            "1:v",
+            "-c",
+            "copy",
+            "-f",
+            "framecrc",
+            "-",
+        ],
+        text=True,
+    )
     timestamps = {}
     time_bases = {}
     for line in output.splitlines():
@@ -54,7 +86,9 @@ def check(source, target):
             timestamps.setdefault(index, set()).add(pts * time_bases[index])
     target_index = len(source_media["streams"])
     assert timestamps[source_stream["index"]] == timestamps[target_index], "Renditions drift across loops"
-    print(f"Verified {len(source_frames)} frames, {sum(key for _, key in source_frames)} keyframes, and three aligned loops")
+    print(
+        f"Verified {len(source_frames)} frames, {sum(key for _, key in source_frames)} keyframes, and three aligned loops"
+    )
 
 
 def encode(source, target):
@@ -67,16 +101,56 @@ def encode(source, target):
     loop_ticks = int(duration / base + Fraction(1, 2))
     final_duration = loop_ticks - (packets[-1]["pts"] - packets[0]["pts"])
     assert final_duration > 0, "Source duration ends before its final video frame"
-    subprocess.run([
-        "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin", "-n", "-copyts", "-i", str(source),
-        "-map", "0:v:0", "-an", "-vf", "scale=-2:360", "-fps_mode", "passthrough",
-        "-enc_time_base", "demux", "-c:v", "libx264", "-preset", "slow",
-        "-b:v", "600k", "-maxrate", "600k", "-bufsize", "1200k", "-bf", "0",
-        "-g", "2147483647", "-sc_threshold", "0", "-force_key_frames", "source",
-        "-bsf:v", f"setts=duration=if(eq(N\\,{len(packets) - 1})\\,{final_duration}\\,DURATION)",
-        "-f", "mp4", "-movflags", "cmaf+separate_moof+delay_moov+skip_trailer",
-        "-frag_duration", "1000", str(target),
-    ], check=True)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-nostdin",
+            "-n",
+            "-copyts",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-vf",
+            "scale=-2:360",
+            "-fps_mode",
+            "passthrough",
+            "-enc_time_base",
+            "demux",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "slow",
+            "-b:v",
+            "600k",
+            "-maxrate",
+            "600k",
+            "-bufsize",
+            "1200k",
+            "-bf",
+            "0",
+            "-g",
+            "2147483647",
+            "-sc_threshold",
+            "0",
+            "-force_key_frames",
+            "source",
+            "-bsf:v",
+            f"setts=duration=if(eq(N\\,{len(packets) - 1})\\,{final_duration}\\,DURATION)",
+            "-f",
+            "mp4",
+            "-movflags",
+            "cmaf+separate_moof+delay_moov+skip_trailer",
+            "-frag_duration",
+            "1000",
+            str(target),
+        ],
+        check=True,
+    )
     check(source, target)
 
 

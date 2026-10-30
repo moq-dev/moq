@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+
 spec = importlib.util.spec_from_file_location("compare", Path(__file__).with_name("compare.py"))
 compare = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(compare)
@@ -12,7 +13,7 @@ spec.loader.exec_module(compare)
 def pair(delta=0):
     result = {"base": dict.fromkeys(compare.METRICS, 100), "current": dict.fromkeys(compare.METRICS, 100 + delta)}
     for row in result.values():
-        row['generator'] = {'cpu_cores': row.pop('generator_cpu_cores')}
+        row["generator"] = {"cpu_cores": row.pop("generator_cpu_cores")}
     return result
 
 
@@ -43,7 +44,8 @@ class Paired(unittest.TestCase):
 
     def test_missing_invalid(self):
         for value in [None, -1, float("nan"), float("inf"), True]:
-            p = pair(); p["base"]["recv_mbps"] = value
+            p = pair()
+            p["base"]["recv_mbps"] = value
             with self.assertRaises(ValueError):
                 compare.reduce([p])
         with self.assertRaises(ValueError):
@@ -51,10 +53,10 @@ class Paired(unittest.TestCase):
 
     def test_zero_baseline_keeps_absolute_regression(self):
         p = pair()
-        p['base']['loss_pct'] = 0
-        p['current']['loss_pct'] = 2
-        metric = compare.reduce([p] * 3)['metrics']['loss_pct']
-        self.assertEqual(metric['paired_absolute_deltas'], [2, 2, 2])
+        p["base"]["loss_pct"] = 0
+        p["current"]["loss_pct"] = 2
+        metric = compare.reduce([p] * 3)["metrics"]["loss_pct"]
+        self.assertEqual(metric["paired_absolute_deltas"], [2, 2, 2])
 
 
 class Load(unittest.TestCase):
@@ -137,7 +139,9 @@ class Criterion(unittest.TestCase):
     def test_screen_confirms_the_worst_slowdowns_within_budget(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            cases = {("moq-net/session", f"case/{index}"): (100, 111 + index) for index in range(compare.CONFIRMATIONS + 5)}
+            cases = {
+                ("moq-net/session", f"case/{index}"): (100, 111 + index) for index in range(compare.CONFIRMATIONS + 5)
+            }
             cases[("moq-net/session", "steady")] = (100, 109)
             cases[("kio/lock", "faster")] = (100, 50)
             self.paired_run(root, cases)
@@ -150,10 +154,20 @@ class Criterion(unittest.TestCase):
         regressed, noisy, tied, beyond = ("t/a", "regressed"), ("t/a", "noisy"), ("t/a", "tied"), ("t/a", "beyond")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self.paired_run(root, {regressed: (100, 150), noisy: (100, 150), tied: (100, 150), beyond: (100, 115),
-                                   ("t/a", "faster"): (100, 80), ("t/a", "same"): (100, 105),
-                                   ("t/a", "added"): (None, 10), ("t/a", "dropped"): (10, None),
-                                   ("t/broken", "base failed"): (None, 10)})
+            self.paired_run(
+                root,
+                {
+                    regressed: (100, 150),
+                    noisy: (100, 150),
+                    tied: (100, 150),
+                    beyond: (100, 115),
+                    ("t/a", "faster"): (100, 80),
+                    ("t/a", "same"): (100, 105),
+                    ("t/a", "added"): (None, 10),
+                    ("t/a", "dropped"): (10, None),
+                    ("t/broken", "base failed"): (None, 10),
+                },
+            )
             (root / "confirm.tsv").write_text("t/a\tregressed\nt/a\tnoisy\nt/a\ttied\n")
             self.confirm(root, 1, regressed, [(100, 120), (100, 130), (100, 125)])
             # A bimodal case: slower in two rounds, faster in one.
@@ -163,9 +177,20 @@ class Criterion(unittest.TestCase):
             (root / "paired-unavailable.tsv").write_text("t/broken\tbase run failed\n")
             result = compare.criterion_paired(root)
         verdicts = {case["id"]: case["verdict"] for case in result["cases"]}
-        self.assertEqual(verdicts, {"regressed": "regression", "noisy": "noise", "tied": "noise", "beyond": "unconfirmed",
-                                    "faster": "faster", "same": "unchanged", "added": "new", "dropped": "removed",
-                                    "base failed": "unavailable"})
+        self.assertEqual(
+            verdicts,
+            {
+                "regressed": "regression",
+                "noisy": "noise",
+                "tied": "noise",
+                "beyond": "unconfirmed",
+                "faster": "faster",
+                "same": "unchanged",
+                "added": "new",
+                "dropped": "removed",
+                "base failed": "unavailable",
+            },
+        )
         regression = next(case for case in result["cases"] if case["id"] == "regressed")
         self.assertEqual([round(delta) for delta in regression["rounds"]["paired_deltas_pct"]], [20, 30, 25])
         self.assertEqual(result["unavailable"], [{"target": "t/broken", "reason": "base run failed"}])

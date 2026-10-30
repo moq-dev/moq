@@ -15,7 +15,8 @@ DEPENDENCIES = ("dependencies", "devDependencies", "peerDependencies", "optional
 def check(root, version):
     files = subprocess.check_output(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", "package.json", "**/package.json"],
-        cwd=root, text=True
+        cwd=root,
+        text=True,
     ).splitlines()
     problems = []
     for name in files:

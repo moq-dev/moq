@@ -440,7 +440,12 @@ HEVC_NAL_FACTOR = 1100
 
 # H.262 Tables 8-13 and 8-14: level (the low nibble of profile_and_level_indication) ->
 # (Rmax bit/s, VBV_max bits), the same for every profile that has the level.
-MPEG2_LEVELS = {10: (4_000_000, 475_136), 8: (15_000_000, 1_835_008), 6: (60_000_000, 7_340_032), 4: (80_000_000, 9_781_248)}
+MPEG2_LEVELS = {
+    10: (4_000_000, 475_136),
+    8: (15_000_000, 1_835_008),
+    6: (60_000_000, 7_340_032),
+    4: (80_000_000, 9_781_248),
+}
 MPEG2_LEVEL_NAMES = {10: "Low", 8: "Main", 6: "High-1440", 4: "High"}
 
 # H.222.0 2.4.2.3: ADTS (Rx, BSn) by channels, the LFE not counted.
@@ -564,9 +569,14 @@ def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
             names = {d["#name"] for d in descriptors}
             names |= {f"registration:{d['format_identifier']}" for d in descriptors if "format_identifier" in d}
             names |= {"hrd_management_valid" for d in descriptors if d.get("hrd_management_valid") is True}
-            names |= {"leak_invalid" for d in descriptors if d["#name"] == "STD_descriptor" and d.get("leak_valid") is False}
-            names |= {"temporal_poc_clock" for d in descriptors
-                      if d.get("fixed_frame_rate") is True and d.get("temporal_poc") is True}
+            names |= {
+                "leak_invalid" for d in descriptors if d["#name"] == "STD_descriptor" and d.get("leak_valid") is False
+            }
+            names |= {
+                "temporal_poc_clock"
+                for d in descriptors
+                if d.get("fixed_frame_rate") is True and d.get("temporal_poc") is True
+            }
             names |= {
                 f"tag{d['tag']}:" + "".join(d.get("#nodes", [])).replace(" ", "").lower()
                 for d in descriptors
@@ -952,7 +962,9 @@ VCL = {"avc": set(range(1, 6)), "hevc": set(range(0, 32)), "mpeg2-video": set(ra
 DELIMITER = {"avc": 9, "hevc": 35, "mpeg2-video": 0x00}
 
 
-def proportional_video_clock(stream: Stream, kind: str, count: int) -> list[tuple[int, Fraction, bool, tuple[int, Fraction] | None]]:
+def proportional_video_clock(
+    stream: Stream, kind: str, count: int
+) -> list[tuple[int, Fraction, bool, tuple[int, Fraction] | None]]:
     """Frame-only POC clocks and HRD output delays, parsed by FFmpeg.
 
     POC plus VUI supplies presentation time; picture-timing SEI's DPB output
@@ -961,9 +973,30 @@ def proportional_video_clock(stream: Stream, kind: str, count: int) -> list[tupl
     """
     if kind == "avc" and "temporal_poc_clock" not in stream.descriptors:
         raise Refused("several access units have no declared proportional POC timestamp clock")
-    proc = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "trace", "-f", "h264" if kind == "avc" else "hevc",
-                           "-i", "pipe:0", "-map", "0:v:0", "-c", "copy", "-bsf:v", "trace_headers", "-f", "null", "-"],
-                          input=bytes(stream.es), capture_output=True, check=False)
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "trace",
+            "-f",
+            "h264" if kind == "avc" else "hevc",
+            "-i",
+            "pipe:0",
+            "-map",
+            "0:v:0",
+            "-c",
+            "copy",
+            "-bsf:v",
+            "trace_headers",
+            "-f",
+            "null",
+            "-",
+        ],
+        input=bytes(stream.es),
+        capture_output=True,
+        check=False,
+    )
     if proc.returncode:
         raise Refused("cannot parse the video timing headers")
     blocks: list[tuple[str, dict[str, int]]] = []
@@ -996,8 +1029,11 @@ def proportional_video_clock(stream: Stream, kind: str, count: int) -> list[tupl
         if kind == "avc":
             if fields.get("first_mb_in_slice") != 0:
                 continue
-            if (sps.get("frame_mbs_only_flag") != 1 or sps.get("pic_struct_present_flag", 0)
-                    or sps.get("fixed_frame_rate_flag") != 1):
+            if (
+                sps.get("frame_mbs_only_flag") != 1
+                or sps.get("pic_struct_present_flag", 0)
+                or sps.get("fixed_frame_rate_flag") != 1
+            ):
                 raise Refused("missing DTS outside the frame-only video clock profile")
             units, scale = sps.get("num_units_in_tick", 0), sps.get("time_scale", 0)
             if units <= 0 or scale <= 0:
@@ -1031,8 +1067,11 @@ def proportional_video_clock(stream: Stream, kind: str, count: int) -> list[tupl
         else:
             if fields.get("first_slice_segment_in_pic_flag") != 1:
                 continue
-            if (sps.get("field_seq_flag", 0) or sps.get("sub_pic_hrd_params_present_flag", 0)
-                    or sps.get("vui_poc_proportional_to_timing_flag") != 1):
+            if (
+                sps.get("field_seq_flag", 0)
+                or sps.get("sub_pic_hrd_params_present_flag", 0)
+                or sps.get("vui_poc_proportional_to_timing_flag") != 1
+            ):
                 raise Refused("missing DTS outside the frame-only proportional HEVC clock profile")
             units, scale = sps.get("vui_num_units_in_tick", 0), sps.get("vui_time_scale", 0)
             if units <= 0 or scale <= 0:

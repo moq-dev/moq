@@ -10,6 +10,7 @@ its outcome, so a suite that never started, or failed outside any case, shows to
 
 OUT receives index.html and a copy of the records as results.jsonl.
 """
+
 import argparse
 from collections import OrderedDict
 import html
@@ -18,31 +19,30 @@ from pathlib import Path
 import shutil
 from datetime import datetime, timezone
 
-FIELDS = ('suite', 'case', 'publisher', 'subscriber', 'transport', 'version',
-          'outcome', 'seconds', 'detail', 'log')
-OUTCOMES = ('pass', 'fail', 'skip', 'not run')
+FIELDS = ("suite", "case", "publisher", "subscriber", "transport", "version", "outcome", "seconds", "detail", "log")
+OUTCOMES = ("pass", "fail", "skip", "not run")
 # GitHub's step outcomes, as the page names them.
-STEP_OUTCOMES = {'success': 'pass', 'failure': 'fail', 'cancelled': 'fail', 'skipped': 'skip'}
+STEP_OUTCOMES = {"success": "pass", "failure": "fail", "cancelled": "fail", "skipped": "skip"}
 
 
 def load(path):
     """The final record for each case, in the order the cases were first recorded."""
     cases = OrderedDict()
-    text = path.read_text() if path.exists() else ''
+    text = path.read_text() if path.exists() else ""
     for number, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
         try:
             record = json.loads(line)
         except json.JSONDecodeError as err:
-            raise ValueError(f'{path}:{number}: {err}') from None
+            raise ValueError(f"{path}:{number}: {err}") from None
         if not isinstance(record, dict) or set(record) != set(FIELDS):
-            raise ValueError(f'{path}:{number}: expected the fields {", ".join(FIELDS)}')
-        if record['outcome'] not in OUTCOMES:
-            raise ValueError(f'{path}:{number}: unknown outcome {record["outcome"]!r}')
-        if not record['suite'] or not record['case']:
-            raise ValueError(f'{path}:{number}: suite and case are required')
-        key = tuple(record[field] for field in ('suite', 'case', 'publisher', 'subscriber', 'transport', 'version'))
+            raise ValueError(f"{path}:{number}: expected the fields {', '.join(FIELDS)}")
+        if record["outcome"] not in OUTCOMES:
+            raise ValueError(f"{path}:{number}: unknown outcome {record['outcome']!r}")
+        if not record["suite"] or not record["case"]:
+            raise ValueError(f"{path}:{number}: suite and case are required")
+        key = tuple(record[field] for field in ("suite", "case", "publisher", "subscriber", "transport", "version"))
         cases[key] = record
     return list(cases.values())
 
@@ -53,11 +53,11 @@ def steps(text):
         return OrderedDict()
     parsed = json.loads(text, object_pairs_hook=OrderedDict)
     if not isinstance(parsed, dict):
-        raise ValueError('--steps must be a JSON object')
+        raise ValueError("--steps must be a JSON object")
     result = OrderedDict()
     for name, outcome in parsed.items():
         if outcome not in STEP_OUTCOMES:
-            raise ValueError(f'step {name!r} has unknown outcome {outcome!r}')
+            raise ValueError(f"step {name!r} has unknown outcome {outcome!r}")
         result[name] = STEP_OUTCOMES[outcome]
     return result
 
@@ -67,102 +67,125 @@ def passed(records, suites):
 
     A run that recorded no case (a lost HARNESS_RESULTS) or skipped every step is not green.
     """
-    outcomes = [record['outcome'] for record in records] + list(suites.values())
-    return bool(records) and 'pass' in outcomes and all(outcome in ('pass', 'skip') for outcome in outcomes)
+    outcomes = [record["outcome"] for record in records] + list(suites.values())
+    return bool(records) and "pass" in outcomes and all(outcome in ("pass", "skip") for outcome in outcomes)
 
 
 def label(outcome, seconds=None):
-    if outcome == 'pass' and seconds is not None:
-        return f'pass {seconds}s'
+    if outcome == "pass" and seconds is not None:
+        return f"pass {seconds}s"
     return outcome
 
 
 def cell(record, links):
     """One outcome, linking a red one to its run and the failure artifact holding its logs."""
-    outcome = record['outcome']
-    tip = '; '.join(part for part in (record['detail'], record['log'] and f'log: {record["log"]}') if part)
-    text = html.escape(label(outcome, record['seconds']))
-    if outcome in ('fail', 'not run'):
+    outcome = record["outcome"]
+    tip = "; ".join(part for part in (record["detail"], record["log"] and f"log: {record['log']}") if part)
+    text = html.escape(label(outcome, record["seconds"]))
+    if outcome in ("fail", "not run"):
         if links.run:
             text = f'<a href="{html.escape(links.run)}">{text}</a>'
         if links.artifact:
             text += f' <a class="logs" href="{html.escape(links.artifact)}">logs</a>'
-    title = f' title="{html.escape(tip)}"' if tip else ''
+    title = f' title="{html.escape(tip)}"' if tip else ""
     return f'<td class="{outcome.replace(" ", "-")}"{title}>{text}</td>'
 
 
 def grid(records, links):
     """Publisher rows by subscriber columns."""
-    publishers = list(OrderedDict.fromkeys(record['publisher'] for record in records))
-    subscribers = list(OrderedDict.fromkeys(record['subscriber'] for record in records))
-    by_pair = {(record['publisher'], record['subscriber']): record for record in records}
-    rows = ['<tr><th>publisher \\ subscriber</th>' + ''.join(f'<th>{html.escape(s)}</th>' for s in subscribers) + '</tr>']
+    publishers = list(OrderedDict.fromkeys(record["publisher"] for record in records))
+    subscribers = list(OrderedDict.fromkeys(record["subscriber"] for record in records))
+    by_pair = {(record["publisher"], record["subscriber"]): record for record in records}
+    rows = [
+        "<tr><th>publisher \\ subscriber</th>" + "".join(f"<th>{html.escape(s)}</th>" for s in subscribers) + "</tr>"
+    ]
     for publisher in publishers:
         cells = []
         for subscriber in subscribers:
             record = by_pair.get((publisher, subscriber))
             cells.append(cell(record, links) if record else '<td class="none"></td>')
-        rows.append(f'<tr><th>{html.escape(publisher)}</th>' + ''.join(cells) + '</tr>')
-    return '<table class="grid">' + ''.join(rows) + '</table>'
+        rows.append(f"<tr><th>{html.escape(publisher)}</th>" + "".join(cells) + "</tr>")
+    return '<table class="grid">' + "".join(rows) + "</table>"
 
 
 def listing(records, links):
     """One row per case, for cases without a publisher by subscriber pairing."""
-    rows = ['<tr><th>case</th><th>publisher</th><th>subscriber</th><th>transport</th><th>version</th><th>outcome</th><th>detail</th></tr>']
+    rows = [
+        "<tr><th>case</th><th>publisher</th><th>subscriber</th><th>transport</th><th>version</th><th>outcome</th><th>detail</th></tr>"
+    ]
     for record in records:
-        rows.append('<tr>' + ''.join(f'<td>{html.escape(record[field])}</td>' for field in
-                                     ('case', 'publisher', 'subscriber', 'transport', 'version'))
-                    + cell(record, links) + f'<td>{html.escape(record["detail"])}</td></tr>')
-    return '<table class="list">' + ''.join(rows) + '</table>'
+        rows.append(
+            "<tr>"
+            + "".join(
+                f"<td>{html.escape(record[field])}</td>"
+                for field in ("case", "publisher", "subscriber", "transport", "version")
+            )
+            + cell(record, links)
+            + f"<td>{html.escape(record['detail'])}</td></tr>"
+        )
+    return '<table class="list">' + "".join(rows) + "</table>"
 
 
 def suite(name, records, links):
     """A suite's grids, one per case, transport, and version, then its remaining cases."""
     groups = OrderedDict()
     for record in records:
-        groups.setdefault((record['case'], record['transport'], record['version']), []).append(record)
+        groups.setdefault((record["case"], record["transport"], record["version"]), []).append(record)
     parts, singles = [], []
     for (case, transport, version), members in groups.items():
-        paired = all(record['publisher'] and record['subscriber'] for record in members)
+        paired = all(record["publisher"] and record["subscriber"] for record in members)
         if not paired or len(members) == 1:
             singles.extend(members)
             continue
-        axes = ', '.join(f'{axis} {value}' for axis, value in (('transport', transport), ('version', version)) if value)
-        parts.append(f'<h3>{html.escape(case)}{f" <small>{html.escape(axes)}</small>" if axes else ""}</h3>')
+        axes = ", ".join(f"{axis} {value}" for axis, value in (("transport", transport), ("version", version)) if value)
+        parts.append(f"<h3>{html.escape(case)}{f' <small>{html.escape(axes)}</small>' if axes else ''}</h3>")
         parts.append(grid(members, links))
     if singles:
         parts.append(listing(singles, links))
-    verdict = 'pass' if passed(records, {}) else 'fail'
-    return f'<section><h2><span class="badge {verdict}">{verdict}</span> {html.escape(name)}</h2>' + ''.join(parts) + '</section>'
+    verdict = "pass" if passed(records, {}) else "fail"
+    return (
+        f'<section><h2><span class="badge {verdict}">{verdict}</span> {html.escape(name)}</h2>'
+        + "".join(parts)
+        + "</section>"
+    )
 
 
 class Links:
-    def __init__(self, run='', artifact='', commit=''):
+    def __init__(self, run="", artifact="", commit=""):
         self.run, self.artifact, self.commit = run, artifact, commit
 
 
 def render(records, suites, links, now):
-    verdict = 'pass' if passed(records, suites) else 'fail'
-    meta = [f'generated {now:%Y-%m-%d %H:%M} UTC']
+    verdict = "pass" if passed(records, suites) else "fail"
+    meta = [f"generated {now:%Y-%m-%d %H:%M} UTC"]
     if links.commit:
-        meta.append(f'commit <a href="{html.escape(links.commit)}">{html.escape(links.commit.rsplit("/", 1)[-1][:12])}</a>')
+        meta.append(
+            f'commit <a href="{html.escape(links.commit)}">{html.escape(links.commit.rsplit("/", 1)[-1][:12])}</a>'
+        )
     if links.run:
         meta.append(f'<a href="{html.escape(links.run)}">workflow run</a>')
     if links.artifact:
         meta.append(f'<a href="{html.escape(links.artifact)}">failure logs</a>')
-    body = [f'<h1><span class="badge {verdict}">{verdict}</span> MoQ interop</h1>', f'<p class="meta">{" · ".join(meta)}</p>']
+    body = [
+        f'<h1><span class="badge {verdict}">{verdict}</span> MoQ interop</h1>',
+        f'<p class="meta">{" · ".join(meta)}</p>',
+    ]
     if suites:
-        rows = ''.join(f'<tr><td>{html.escape(name)}</td><td class="{outcome}">{outcome}</td></tr>'
-                       for name, outcome in suites.items())
-        body.append(f'<section><h2>Steps</h2><table class="list"><tr><th>step</th><th>outcome</th></tr>{rows}</table></section>')
+        rows = "".join(
+            f'<tr><td>{html.escape(name)}</td><td class="{outcome}">{outcome}</td></tr>'
+            for name, outcome in suites.items()
+        )
+        body.append(
+            f'<section><h2>Steps</h2><table class="list"><tr><th>step</th><th>outcome</th></tr>{rows}</table></section>'
+        )
     by_suite = OrderedDict()
     for record in records:
-        by_suite.setdefault(record['suite'], []).append(record)
+        by_suite.setdefault(record["suite"], []).append(record)
     body.extend(suite(name, members, links) for name, members in by_suite.items())
-    return TEMPLATE.replace('{body}', '\n'.join(body))
+    return TEMPLATE.replace("{body}", "\n".join(body))
 
 
-TEMPLATE = '''<!doctype html>
+TEMPLATE = """<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -191,26 +214,26 @@ td.none { background: repeating-linear-gradient(45deg, transparent 0 4px, var(--
 </style>
 {body}
 </html>
-'''
+"""
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('results', type=Path)
-    parser.add_argument('out', type=Path)
-    parser.add_argument('--steps', default='')
-    parser.add_argument('--run-url', default='')
-    parser.add_argument('--artifact-url', default='')
-    parser.add_argument('--commit-url', default='')
+    parser.add_argument("results", type=Path)
+    parser.add_argument("out", type=Path)
+    parser.add_argument("--steps", default="")
+    parser.add_argument("--run-url", default="")
+    parser.add_argument("--artifact-url", default="")
+    parser.add_argument("--commit-url", default="")
     args = parser.parse_args()
     records = load(args.results)
     suites = steps(args.steps)
     links = Links(args.run_url, args.artifact_url, args.commit_url)
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / 'index.html').write_text(render(records, suites, links, datetime.now(timezone.utc)))
+    (args.out / "index.html").write_text(render(records, suites, links, datetime.now(timezone.utc)))
     if args.results.exists():
-        shutil.copyfile(args.results, args.out / 'results.jsonl')
+        shutil.copyfile(args.results, args.out / "results.jsonl")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

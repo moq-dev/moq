@@ -69,10 +69,19 @@ def run():
             children.append(child)
             return child
 
-        monitor = spawn("monitor", [
-            "parec", "--raw", "--format=float32le", f"--rate={RATE}", f"--channels={CHANNELS}",
-            f"--latency-msec={MONITOR_LATENCY_MS}", "--device=moq-null.monitor",
-        ], stdout=subprocess.PIPE)
+        monitor = spawn(
+            "monitor",
+            [
+                "parec",
+                "--raw",
+                "--format=float32le",
+                f"--rate={RATE}",
+                f"--channels={CHANNELS}",
+                f"--latency-msec={MONITOR_LATENCY_MS}",
+                "--device=moq-null.monitor",
+            ],
+            stdout=subprocess.PIPE,
+        )
         assert monitor.stdout is not None
         output = resources.enter_context(selectors.DefaultSelector())
         output.register(monitor.stdout, selectors.EVENT_READ)
@@ -99,12 +108,34 @@ def run():
             """Start a tone publisher; once it is connected with media to send, return its
             processes and the monotonic time its log stamped the connection."""
             deadline = time.monotonic() + SETUP_S
-            encoded = spawn(name + "-encoder", [
-                "ffmpeg", "-hide_banner", "-v", "error", "-re", "-f", "lavfi",
-                "-i", f"sine=frequency={hz}:sample_rate={RATE}", "-ac", str(CHANNELS),
-                "-c:a", "libopus", "-b:a", "128k", "-f", "mp4", "-movflags",
-                "cmaf+separate_moof+delay_moov+skip_trailer", "-frag_duration", "1000", "-",
-            ], stdout=subprocess.PIPE)
+            encoded = spawn(
+                name + "-encoder",
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-v",
+                    "error",
+                    "-re",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    f"sine=frequency={hz}:sample_rate={RATE}",
+                    "-ac",
+                    str(CHANNELS),
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "128k",
+                    "-f",
+                    "mp4",
+                    "-movflags",
+                    "cmaf+separate_moof+delay_moov+skip_trailer",
+                    "-frag_duration",
+                    "1000",
+                    "-",
+                ],
+                stdout=subprocess.PIPE,
+            )
             assert encoded.stdout is not None
             started = [(encoded, f"{name} encoder")]
             # Encoder startup is preparation, not routing: wait for its first output.
@@ -115,10 +146,22 @@ def run():
                         raise RuntimeError(f"{name}: encoder produced nothing")
                     drain(deadline, live + started)
             log = root / f"{name}-publisher.log"
-            imported = spawn(name + "-publisher", [
-                args.moq, "--connect", args.url, "--connect-version", VERSIONS[0],
-                "--broadcast", "tone.hang", "import", "fmp4",
-            ], stdin=encoded.stdout, stdout=subprocess.DEVNULL)
+            imported = spawn(
+                name + "-publisher",
+                [
+                    args.moq,
+                    "--connect",
+                    args.url,
+                    "--connect-version",
+                    VERSIONS[0],
+                    "--broadcast",
+                    "tone.hang",
+                    "import",
+                    "fmp4",
+                ],
+                stdin=encoded.stdout,
+                stdout=subprocess.DEVNULL,
+            )
             encoded.stdout.close()
             encoded.stdout = None
             started.append((imported, f"{name} publisher"))
@@ -142,22 +185,36 @@ def run():
                     samples = array.array("f", pcm)
                     if not all(math.isfinite(sample) for sample in samples):
                         raise RuntimeError("native playback emitted non-finite PCM")
-                    shares = [goertzel_share(samples[channel::CHANNELS], RATE, hz)
-                              for channel in range(CHANNELS)]
+                    shares = [goertzel_share(samples[channel::CHANNELS], RATE, hz) for channel in range(CHANNELS)]
                     rms = math.sqrt(sum(x * x for x in samples) / len(samples))
                     if min(shares) >= MIN_SHARE and rms >= MIN_RMS:
                         (root / f"{phase}.f32le").write_bytes(pcm)
                         return {"toneHz": hz, "shares": shares, "rms": rms}
                     rejected.append({"share": round(min(shares), 3), "rms": round(rms, 3)})
-            raise RuntimeError(f"{phase}: no {hz}Hz decoded within {seconds * 1000:.0f}ms; "
-                               f"rejected windows {rejected}; see the player log")
+            raise RuntimeError(
+                f"{phase}: no {hz}Hz decoded within {seconds * 1000:.0f}ms; "
+                f"rejected windows {rejected}; see the player log"
+            )
 
         for version in VERSIONS:
             first, _ = publisher(version + "-first", 440, [])
-            player = spawn(version + "-player", [
-                args.moq, "--connect", args.url, "--connect-version", version,
-                "--broadcast", "tone.hang", "play", "--no-video", "--delay", f"{DELAY_MS}ms",
-            ], stdout=subprocess.DEVNULL)
+            player = spawn(
+                version + "-player",
+                [
+                    args.moq,
+                    "--connect",
+                    args.url,
+                    "--connect-version",
+                    version,
+                    "--broadcast",
+                    "tone.hang",
+                    "play",
+                    "--no-video",
+                    "--delay",
+                    f"{DELAY_MS}ms",
+                ],
+                stdout=subprocess.DEVNULL,
+            )
             live = first + [(player, f"{version} player")]
             hear(440, f"{version}-initial", SETUP_S, live)
 
@@ -175,11 +232,21 @@ def run():
             for child, _ in reversed(second):
                 stop(child)
             opens = (root / f"{version}-player.log").read_bytes().count(b"opened audio output")
-            print(json.dumps({"version": version, "replacementMs": replacement_ms,
-                              "fallbackMs": fallback_ms, "boundMs": SWITCH_S * 1000,
-                              "outputOpens": opens,
-                              "replacement": replaced, "fallback": fallback,
-                              "backend": "private PulseAudio null sink via production ALSA/cpal"}), flush=True)
+            print(
+                json.dumps(
+                    {
+                        "version": version,
+                        "replacementMs": replacement_ms,
+                        "fallbackMs": fallback_ms,
+                        "boundMs": SWITCH_S * 1000,
+                        "outputOpens": opens,
+                        "replacement": replaced,
+                        "fallback": fallback,
+                        "backend": "private PulseAudio null sink via production ALSA/cpal",
+                    }
+                ),
+                flush=True,
+            )
             player.send_signal(signal.SIGINT)
             if player.wait(timeout=10) != 0:
                 raise RuntimeError(f"{version}: player did not shut down cleanly on Ctrl-C")

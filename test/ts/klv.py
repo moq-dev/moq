@@ -87,13 +87,15 @@ def clock_value(field):
 
 
 def clock_field(prefix, ticks):
-    return bytes([
-        prefix << 4 | (ticks >> 29 & 0x0E) | 1,
-        ticks >> 22 & 0xFF,
-        (ticks >> 14 & 0xFE) | 1,
-        ticks >> 7 & 0xFF,
-        (ticks << 1 & 0xFE) | 1,
-    ])
+    return bytes(
+        [
+            prefix << 4 | (ticks >> 29 & 0x0E) | 1,
+            ticks >> 22 & 0xFF,
+            (ticks >> 14 & 0xFE) | 1,
+            ticks >> 7 & 0xFF,
+            (ticks << 1 & 0xFE) | 1,
+        ]
+    )
 
 
 def packets(data):
@@ -119,7 +121,13 @@ def split(route, pes, counter):
 
 
 def pes_with(stream_id, flags, fields, data):
-    return bytes([0, 0, 1, stream_id]) + (3 + len(fields) + len(data)).to_bytes(2, "big") + bytes([0x84, flags, len(fields)]) + fields + data
+    return (
+        bytes([0, 0, 1, stream_id])
+        + (3 + len(fields) + len(data)).to_bytes(2, "big")
+        + bytes([0x84, flags, len(fields)])
+        + fields
+        + data
+    )
 
 
 def async_klv(index):
@@ -194,7 +202,10 @@ def add_streams(packet):
     body = payload(packet)
     start = len(packet) - len(body) + 1 + body[0]
     section = bytearray(single_section(packet))
-    entries = b"".join(bytes([kind, 0xE0 | route >> 8, route & 0xFF, 0xF0 | len(info) >> 8, len(info) & 0xFF]) + info for kind, route, info in STREAMS)
+    entries = b"".join(
+        bytes([kind, 0xE0 | route >> 8, route & 0xFF, 0xF0 | len(info) >> 8, len(info) & 0xFF]) + info
+        for kind, route, info in STREAMS
+    )
     section = section[:-4] + entries
     length = len(section) + 4 - 3
     section[1] = (section[1] & 0xF0) | length >> 8
@@ -318,11 +329,27 @@ def masked(pes):
 
 def ffprobe_klv(path):
     """FFmpeg's KLV streams by PID: their codec, and each packet's PTS (None without)."""
-    report = json.loads(subprocess.run(
-        ["ffprobe", "-v", "error", "-probesize", str(Path(path).stat().st_size), "-analyzeduration", str(2**62),
-         "-show_entries", "stream=index,id,codec_name:packet=stream_index,pts", "-of", "json", str(path)],
-        check=True, capture_output=True, text=True,
-    ).stdout)
+    report = json.loads(
+        subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-probesize",
+                str(Path(path).stat().st_size),
+                "-analyzeduration",
+                str(2**62),
+                "-show_entries",
+                "stream=index,id,codec_name:packet=stream_index,pts",
+                "-of",
+                "json",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
     streams = {s["index"]: (int(s["id"], 16), s.get("codec_name")) for s in report["streams"]}
     found = {route: (codec, []) for route, codec in streams.values() if route in (ASYNC_PID, SYNC_PID)}
     for packet in report.get("packets", []):
@@ -359,17 +386,26 @@ def grade(source, capture, probe=None):
         for pes in cap_pes[route]:
             k = index.get(masked(pes.data))
             if k is None:
-                raise Failure("bytes", f"PID {route:#x}: a PES at byte {pes.at} matches none of the source's outside its PTS and DTS")
+                raise Failure(
+                    "bytes",
+                    f"PID {route:#x}: a PES at byte {pes.at} matches none of the source's outside its PTS and DTS",
+                )
             found.append(k)
         if not found:
             raise Failure("missing", f"PID {route:#x}: no PES in the capture")
         first, last = found[0], len(src_pes[route]) - 1
         if found != list(range(first, last + 1)):
             gaps = sorted(set(range(first, last + 1)) - set(found))
-            raise Failure("missing", f"PID {route:#x}: not the source's PES {first}..{last} in order: missing {gaps[:5]}, got {len(found)}")
+            raise Failure(
+                "missing",
+                f"PID {route:#x}: not the source's PES {first}..{last} in order: missing {gaps[:5]}, got {len(found)}",
+            )
         late = Fraction(src_at(src_pes[route][first].at) - src_at(src_pes[route][0].at), 27_000_000)
         if late > holes.JOIN:
-            raise Failure("join", f"PID {route:#x}: starts {float(late):.3f}s after the source's first PES, past the {float(holes.JOIN)}s join")
+            raise Failure(
+                "join",
+                f"PID {route:#x}: starts {float(late):.3f}s after the source's first PES, past the {float(holes.JOIN)}s join",
+            )
         matched[route] = [(pes, src_pes[route][k]) for pes, k in zip(cap_pes[route], found)]
 
     # Every PTS and DTS moves by the one shift the importer's timebase gives the media.
@@ -391,7 +427,10 @@ def grade(source, capture, probe=None):
             ahead = cap_at(pes.at) - (src_at(src.at) + shift * 300)
             ahead = (ahead + PCR_WRAP // 2) % PCR_WRAP - PCR_WRAP // 2
             if ahead < -packet:
-                raise Failure("early", f"PID {route:#x}: capture PES {k} goes out {float(-ahead) / 27_000:.3f} ms before its placement")
+                raise Failure(
+                    "early",
+                    f"PID {route:#x}: capture PES {k} goes out {float(-ahead) / 27_000:.3f} ms before its placement",
+                )
             lateness.append(ahead)
             if clocks(pes.data):
                 due = clock_value(pes.data[9:14]) * 300 - cap_at(pes.at)
@@ -412,7 +451,10 @@ def grade(source, capture, probe=None):
                 raise Failure("ffmpeg", f"PID {route:#x}: FFmpeg reads {codec}, not SMPTE KLV")
             ours = [clock_value(pes.data[9:14]) if clocks(pes.data) else None for pes in cap_pes[route]]
             if pts != ours:
-                raise Failure("ffmpeg", f"PID {route:#x}: FFmpeg reads {len(pts)} PES, the grader {len(ours)}, or their PTS differ")
+                raise Failure(
+                    "ffmpeg",
+                    f"PID {route:#x}: FFmpeg reads {len(pts)} PES, the grader {len(ours)}, or their PTS differ",
+                )
     report["shift"] = shift
     return report
 
@@ -448,8 +490,10 @@ def main():
         args.report_json.write_text(json.dumps(report, indent=2) + "\n")
     for route, row in report.items():
         if route != "shift":
-            print(f"  PASS  PID {route}: {row['pes']} PES of {row['source']} from #{row['first']}, "
-                  f"at most {row['late_ms_max']:.3f} ms after placement")
+            print(
+                f"  PASS  PID {route}: {row['pes']} PES of {row['source']} from #{row['first']}, "
+                f"at most {row['late_ms_max']:.3f} ms after placement"
+            )
     print(f"  PTS and DTS moved {report['shift']} ticks")
     return 0
 

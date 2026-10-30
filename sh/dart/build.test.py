@@ -13,31 +13,36 @@ ROOT = Path(__file__).resolve().parents[2]
 class BuildTest(unittest.TestCase):
     def test_generator_profiles(self):
         # Only the dev build carries the test hooks, which would skew a benchmark.
-        for profile, release, features in (("debug", False, ["--features", "testing"]),
-                                           ("release", True, [])):
+        for profile, release, features in (("debug", False, ["--features", "testing"]), ("release", True, [])):
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory:
                 scratch = Path(directory)
                 calls = scratch / "calls"
                 for name, source in {
                     "cargo": f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{calls}"\n',
                     "rustc": '#!/bin/sh\necho "host: x86_64-unknown-linux-gnu"\n',
-                    "dart": '#!/bin/sh\nexit 0\n',
+                    "dart": "#!/bin/sh\nexit 0\n",
                     "uniffi_bindgen_dart": '#!/bin/sh\nwhile [ "$1" != --out-dir ]; do shift; done\n'
-                        'mkdir -p "$2"\nfor name in moq.dart uniffi_runtime.dart; do '
-                        'echo "// ignore_for_file: unused_import" > "$2/$name"; done\n',
+                    'mkdir -p "$2"\nfor name in moq.dart uniffi_runtime.dart; do '
+                    'echo "// ignore_for_file: unused_import" > "$2/$name"; done\n',
                 }.items():
                     tool = scratch / name
                     tool.write_text(source)
                     tool.chmod(0o755)
-                env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
-                           MOQ_FFI_PROFILE=profile, BASH_ENV=os.devnull)
-                result = subprocess.run(["bash", "sh/dart/generate.sh", str(scratch / "generated")],
-                                        cwd=ROOT, env=env, text=True, capture_output=True)
+                env = dict(
+                    os.environ, PATH=f"{scratch}:{os.environ['PATH']}", MOQ_FFI_PROFILE=profile, BASH_ENV=os.devnull
+                )
+                result = subprocess.run(
+                    ["bash", "sh/dart/generate.sh", str(scratch / "generated")],
+                    cwd=ROOT,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 args = calls.read_text().split()
                 self.assertEqual(args[0], "build-ffi")
                 self.assertEqual("--release" in args, release)
-                self.assertEqual(args[1:args.index("--target")], [*features, *(["--release"] if release else [])])
+                self.assertEqual(args[1 : args.index("--target")], [*features, *(["--release"] if release else [])])
 
     def test_failed_benchmark_restores_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -56,14 +61,18 @@ class BuildTest(unittest.TestCase):
                 "git": f'#!/bin/sh\necho "{root}"\n',
                 "rustc": '#!/bin/sh\necho "host: x86_64-unknown-linux-gnu"\n',
                 "dart": '#!/bin/sh\nif [ "$1" = run ]; then '
-                    'grep -q "release/libmoq_ffi.so" pubspec.yaml || exit 2; exit 7; fi\n',
+                'grep -q "release/libmoq_ffi.so" pubspec.yaml || exit 2; exit 7; fi\n',
             }.items():
                 tool = tools / name
                 tool.write_text(source)
                 tool.chmod(0o755)
-            result = subprocess.run(["bash", "sh/dart/bench.sh"], cwd=root,
-                                    env=dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}",
-                                             BASH_ENV=os.devnull), capture_output=True, text=True)
+            result = subprocess.run(
+                ["bash", "sh/dart/bench.sh"],
+                cwd=root,
+                env=dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", BASH_ENV=os.devnull),
+                capture_output=True,
+                text=True,
+            )
             self.assertEqual(result.returncode, 7, result.stderr)
             self.assertEqual(manifest.read_text(), "name: fixture\n")
             self.assertEqual(list((root / ".tmp").iterdir()), [])

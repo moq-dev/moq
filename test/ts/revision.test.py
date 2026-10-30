@@ -34,7 +34,10 @@ def picture(counter, pcr):
 
 NULL = bytes([0x47, 0x1F, 0xFF, 0x10]) + b"\xff" * 184
 PAT = psi(0, section(0x00, 1, bytes([0, 1, 0xE0 | PMT >> 8, PMT & 0xFF])))
-TABLE = psi(PMT, section(0x02, 1, bytes([0xE0 | VIDEO >> 8, VIDEO & 0xFF, 0xF0, 0, 0x1B, 0xE0 | VIDEO >> 8, VIDEO & 0xFF, 0xF0, 0])))
+TABLE = psi(
+    PMT,
+    section(0x02, 1, bytes([0xE0 | VIDEO >> 8, VIDEO & 0xFF, 0xF0, 0, 0x1B, 0xE0 | VIDEO >> 8, VIDEO & 0xFF, 0xF0, 0])),
+)
 
 
 def media(pictures=150):
