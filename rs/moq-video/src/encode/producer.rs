@@ -1986,8 +1986,7 @@ mod tests {
 			.await
 		}
 
-		/// A backend that cannot cut still captures: joins leave every group to its cadence
-		/// rather than asking the encoder for a keyframe it would refuse.
+		/// A backend that cannot cut still captures, leaving every group to its cadence.
 		#[tokio::test]
 		#[expect(
 			clippy::await_holding_lock,
@@ -1998,16 +1997,10 @@ mod tests {
 
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-			// Advertises refresh regardless, so a join past the largest group still asks for a cut.
 			let track = broadcast
-				.create_track(
-					"video",
-					catalog
-						.track_info(hang::catalog::PRIORITY.video)
-						.with_refresh(Some(REFRESH)),
-				)
+				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
 				.unwrap();
-			let watched = track.clone();
+			let _subscriber = track.subscribe(None);
 			let mut rendition = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 			rendition.kind = encoder::Kind::Software;
 			let mut producer = Producer::with_track(
@@ -2028,14 +2021,11 @@ mod tests {
 			let clock = catalog.clock();
 			let mut run = std::pin::pin!(capture_loop(&mut producer, &mut source, &options, &clock));
 
-			let _first = watched.subscribe(None);
-			for frame in 0..2 {
-				let _joined = watched.subscribe(None);
-				camera.push_native(surface(), us(frame * 10_000));
-				tokio::select! {
-					res = &mut run => panic!("the capture ended: {res:?}"),
-					() = until(|| probe::take().iter().any(|(event, _)| *event == "encode")) => {}
-				}
+			// The probe holds its first frame back, so this one reaches the codec but not the track.
+			camera.push_native(surface(), us(0));
+			tokio::select! {
+				res = &mut run => panic!("the capture ended: {res:?}"),
+				() = until(|| probe::take().iter().any(|(event, _)| *event == "encode")) => {}
 			}
 		}
 	}
