@@ -4365,7 +4365,8 @@ impl Resolve {
 			return Poll::Ready(Ok(None));
 		};
 		// The immediate lookup: answering a peer never starts discovery of its own.
-		let requesting: kio::Pending<crate::model::origin::Lookup> = origin.lookup(self.path.clone(), self.epoch.as_ref());
+		let requesting: kio::Pending<crate::model::origin::Lookup> =
+			origin.lookup(self.path.clone(), self.epoch.as_ref());
 		let found = wait!(Lookup => match publisher.poll_withdrawn(&mut self.session, stream, waiter) {
 			Poll::Ready(()) => Poll::Ready(None),
 			Poll::Pending => requesting.poll_ok(waiter).map(Some),
@@ -5085,10 +5086,12 @@ impl EndOfTrack {
 			group: self.end.group,
 			object: self.end.frame,
 		});
-		let stream = wait!(Open => serve.session.poll_open_uni(waiter, rank.options())).map_err(Error::from_transport)?;
+		let stream =
+			wait!(Open => serve.session.poll_open_uni(waiter, rank.options())).map_err(Error::from_transport)?;
 		serve.opened.fetch_add(1, Ordering::Relaxed);
 		let stream = Ranked::new(stream, Some(rank));
-		let mut writer: Writer<Ranked<crate::transport::boxed::SendStream>, Version> = Writer::new(stream, serve.version);
+		let mut writer: Writer<Ranked<crate::transport::boxed::SendStream>, Version> =
+			Writer::new(stream, serve.version);
 		writer.buffer(&ietf::GroupHeader {
 			track_alias: serve.request_id.0,
 			group_id: self.end.group,
