@@ -88,7 +88,9 @@ public enum Media {
         /// Read the broadcast clock in microseconds, fixing it for subsequent media producers.
         public func now() throws -> UInt64 { try ffi.now() }
         /// Replace the video properties shared by every rendition.
-        public func setVideoProperties(_ properties: VideoProperties) throws { try ffi.setVideoProperties(properties: properties) }
+        public func setVideoProperties(_ properties: VideoProperties) throws {
+            try ffi.setVideoProperties(properties: properties)
+        }
         /// Set an application catalog section from its serialized JSON value.
         public func setSection(name: String, json: String) throws { try ffi.setSection(name: name, json: json) }
         /// Remove an application catalog section if present.
@@ -222,11 +224,15 @@ public enum Media {
         let ffi: MoqMediaTrackProducer
 
         /// Import complete audio frames on a named or requested track.
-        public static func audio(broadcast: BroadcastProducer, initData: AudioInit, target: Target = .named(name: nil)) throws -> TrackProducer {
+        public static func audio(broadcast: BroadcastProducer, initData: AudioInit, target: Target = .named(name: nil))
+            throws -> TrackProducer
+        {
             TrackProducer(try MoqMediaTrackProducer.audio(broadcast: broadcast.ffi, target: target.ffi, init: initData))
         }
         /// Import complete video frames on a named or requested track.
-        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil)) throws -> TrackProducer {
+        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil))
+            throws -> TrackProducer
+        {
             TrackProducer(try MoqMediaTrackProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
         }
         init(_ ffi: MoqMediaTrackProducer) {
@@ -319,8 +325,11 @@ public enum Media {
         let ffi: MoqMediaTrackStreamProducer
 
         /// Import a video byte stream, inferring frame boundaries.
-        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil)) throws -> TrackStreamProducer {
-            TrackStreamProducer(try MoqMediaTrackStreamProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
+        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil))
+            throws -> TrackStreamProducer
+        {
+            TrackStreamProducer(
+                try MoqMediaTrackStreamProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
         }
         init(_ ffi: MoqMediaTrackStreamProducer) {
             self.ffi = ffi

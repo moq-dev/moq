@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+
 @testable import Moq
 
 /// The next announce event.
@@ -18,7 +19,9 @@ final class SmokeTests: XCTestCase {
         let owner = try BroadcastProducer()
         let other = try BroadcastProducer()
         let timebase = try Media.Timebase(broadcast: owner)
-        XCTAssertThrowsError(try Media.ContainerProducer(broadcast: other, initData: Media.ContainerInit(format: .fmp4, data: Data(), timebase: timebase)))
+        XCTAssertThrowsError(
+            try Media.ContainerProducer(
+                broadcast: other, initData: Media.ContainerInit(format: .fmp4, data: Data(), timebase: timebase)))
         try owner.close()
         XCTAssertThrowsError(try Media.Timebase(broadcast: owner))
         try other.close()
@@ -50,11 +53,12 @@ final class SmokeTests: XCTestCase {
             try group.writeFrame(Data("x".utf8), timestampUs: ms * 1_000)
             try group.finish()
         }
-        let consumer = try track.consume(subscription: Subscription(
-            maxDelay: 10,
-            ranges: [Subscription.Range(start: .relative(groups: 2))],
-            order: .ascending
-        ))
+        let consumer = try track.consume(
+            subscription: Subscription(
+                maxDelay: 10,
+                ranges: [Subscription.Range(start: .relative(groups: 2))],
+                order: .ascending
+            ))
         var sequences: [UInt64] = []
         for _ in 0..<3 {
             let group = try await consumer.recvGroup()
@@ -80,11 +84,11 @@ final class SmokeTests: XCTestCase {
             XCTFail("expected error from cancelled client")
         } catch let error as MoqError {
             XCTAssertTrue(
-                error.isShutdown ||
-                    {
+                error.isShutdown
+                    || {
                         if case .Connect = error { return true } else { return false }
-                    }() ||
-                    {
+                    }()
+                    || {
                         if case .Url = error { return true } else { return false }
                     }(),
                 "expected shutdown/connect/url error, got: \(error)"
@@ -120,7 +124,9 @@ final class SmokeTests: XCTestCase {
         let session = try await client.connect(to: "https://\(addr)")
         guard let request = try await accepted else { return XCTFail("server closed before accept") }
         // The wrapper names itself ahead of moq-ffi, so a server can tell bindings apart.
-        XCTAssertTrue(request.peerImplementation?.hasPrefix("moq-swift/") == true, "\(String(describing: request.peerImplementation))")
+        XCTAssertTrue(
+            request.peerImplementation?.hasPrefix("moq-swift/") == true,
+            "\(String(describing: request.peerImplementation))")
         let peer = try await request.accept()
 
         // Ending both sessions ends any wait below, so a grant that never arrives fails
@@ -298,7 +304,6 @@ final class SmokeTests: XCTestCase {
         dynamic.cancel()
     }
 
-
     func testBroadcastProducerOpensTracks() throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events")
@@ -334,7 +339,8 @@ final class SmokeTests: XCTestCase {
             framerate: 60,
             optimizeForLatency: true
         )
-        let media = try Media.TrackProducer.video(broadcast: broadcast, initData: Media.VideoInit(format: .avc3, data: Data(), hint: hint))
+        let media = try Media.TrackProducer.video(
+            broadcast: broadcast, initData: Media.VideoInit(format: .avc3, data: Data(), hint: hint))
         try media.finish()
         try broadcast.close()
     }
@@ -572,7 +578,7 @@ final class SmokeTests: XCTestCase {
         let fine = try Audio.Producer(
             catalog: catalog,
             input: input,
-            output: AudioEncoderOutput(codec: AudioCodec.opus(),  frameDuration: 0.0025),
+            output: AudioEncoderOutput(codec: AudioCodec.opus(), frameDuration: 0.0025),
             track: "fine"
         )
         // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
@@ -583,7 +589,7 @@ final class SmokeTests: XCTestCase {
             try Audio.Producer(
                 catalog: catalog,
                 input: input,
-                output: AudioEncoderOutput(codec: AudioCodec.opus(),  frameDuration: 0.002),
+                output: AudioEncoderOutput(codec: AudioCodec.opus(), frameDuration: 0.002),
                 track: "coarse"
             )
         ) { error in
@@ -652,7 +658,8 @@ final class SmokeTests: XCTestCase {
         let broadcast = publication.broadcast
         let video = try Video.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
-            input: VideoEncoderInput(format: .rgba, width: 320, height: 240, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
+            input: VideoEncoderInput(
+                format: .rgba, width: 320, height: 240, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
             output: VideoEncoderOutput(codec: .h264, kind: .software),
             track: "camera"
         )
@@ -684,7 +691,6 @@ final class SmokeTests: XCTestCase {
             return XCTFail("expected a decoded frame")
         }
         decoder.cancel()
-
 
         let planar = try frame.pixels(format: .i420)
         XCTAssertEqual(planar.count, Int(frame.width()) * Int(frame.height()) * 3 / 2)

@@ -118,12 +118,13 @@ public enum Video {
             rendition: Media.Video,
             output: DecoderOutput = DecoderOutput()
         ) async throws -> Consumer {
-            Consumer(try await MoqVideoConsumer.subscribe(
-                broadcast: broadcast.ffi,
-                id: id,
-                catalogVideo: rendition,
-                output: output
-            ))
+            Consumer(
+                try await MoqVideoConsumer.subscribe(
+                    broadcast: broadcast.ffi,
+                    id: id,
+                    catalogVideo: rendition,
+                    output: output
+                ))
         }
 
         /// The next frame, gap, or end, or `nil` once the track ends or is closed.

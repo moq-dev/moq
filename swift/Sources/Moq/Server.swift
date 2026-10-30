@@ -25,15 +25,16 @@ public final class Server: Sendable {
         publish: OriginProducer? = nil,
         consume: OriginProducer? = nil
     ) throws {
-        ffi = try MoqServer(config: MoqServerConfig(
-            bind: bind,
-            versions: versions,
-            tls: tls,
-            quic: quic,
-            implementation: implementation,
-            publish: publish?.ffi,
-            consume: consume?.ffi
-        ))
+        ffi = try MoqServer(
+            config: MoqServerConfig(
+                bind: bind,
+                versions: versions,
+                tls: tls,
+                quic: quic,
+                implementation: implementation,
+                publish: publish?.ffi,
+                consume: consume?.ffi
+            ))
     }
 
     /// Bind the listening socket. Returns the bound local address, useful when
