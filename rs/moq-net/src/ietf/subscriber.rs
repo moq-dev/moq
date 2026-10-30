@@ -285,10 +285,16 @@ enum Fill {
 		producer: group::Producer,
 	},
 
-	/// No head is coming: none was requested, the fill failed, the tail already claimed it,
-	/// or we stopped reading. A subgroup stream that starts mid-group is then unstitchable
-	/// and gets dropped, which degrades the join to the next group boundary.
+	/// No head is coming, and none is owed: none was requested, the tail already claimed
+	/// it, or we stopped reading. A subgroup stream starting mid-group then stands alone,
+	/// since only a requested head says where its group begins.
 	Done,
+
+	/// The head of `sequence` was requested and is never coming: the fill was refused,
+	/// failed, or ended without it. That group's mid-group stream has a hole at the front,
+	/// so it gets dropped whether it arrives before this settles or after, which degrades
+	/// the join to the next group boundary.
+	Failed { sequence: u64 },
 
 	/// The publisher ended the subscription cleanly, so no tail is coming. Unlike
 	/// [`Fill::Done`], a head still being written is the whole group once it lands: a
@@ -301,7 +307,21 @@ impl Fill {
 	/// Whether a head might still arrive or is waiting to be claimed, which is what makes a
 	/// subgroup stream worth peeking before its group is created.
 	fn outstanding(&self) -> bool {
-		!matches!(self, Fill::Done | Fill::Ended)
+		!matches!(self, Fill::Done | Fill::Failed { .. } | Fill::Ended)
+	}
+
+	/// No head is coming for the fill whose Largest Group is `largest`, which is the group
+	/// it would have headed. Without one, the fill was owed nothing.
+	fn failed(largest: Option<u64>) -> Self {
+		match largest {
+			Some(sequence) => Fill::Failed { sequence },
+			None => Fill::Done,
+		}
+	}
+
+	/// Whether a stream for `sequence` starting mid-group is missing the head it was owed.
+	fn headless(&self, sequence: u64) -> bool {
+		matches!(*self, Fill::Failed { sequence: s } if s == sequence)
 	}
 
 	/// Take the head for `sequence`, if this is one and it ends where the tail begins.
@@ -4110,9 +4130,9 @@ impl Subscriber {
 	/// it: an earlier start's groups are the copy's fills, one FETCH per run of them. The
 	/// subscribe's request id names the FETCH. The data
 	/// arrives on its own fetch stream and [`Self::recv_fill`] stitches it. A refusal or a
-	/// failed send settles the fill as [`Fill::Done`], as a failed draft-22 fill does: only
-	/// the head is lost, and a whole group still stands alone. A malformed answer closes
-	/// the session.
+	/// failed send settles the fill as [`Fill::Failed`], as a failed draft-22 fill does: only
+	/// the head's group is lost, and a whole group still stands alone. A malformed answer
+	/// closes the session.
 	fn start_joining_fetch(&self, subscribe_id: RequestId, track: &track::Producer) -> Option<JoiningTask> {
 		let fill = self.state.lock().subscribes.get(&subscribe_id)?.fill.clone();
 		let track = track.clone();
@@ -4180,11 +4200,18 @@ impl Subscriber {
 			}
 			// Release a mid-group tail parked on the head, including one still being written:
 			// a request that failed after FETCH_OK cannot be trusted to finish its stream.
-			if res.is_err()
-				&& let Ok(mut state) = fill.write()
-				&& matches!(*state, Fill::Requested | Fill::Serving(_) | Fill::Active)
-			{
-				*state = Fill::Done;
+			if res.is_err() {
+				let largest = this
+					.state
+					.lock()
+					.subscribes
+					.get(&subscribe_id)
+					.and_then(|track| track.fill_largest);
+				if let Ok(mut state) = fill.write()
+					&& matches!(*state, Fill::Requested | Fill::Serving(_) | Fill::Active)
+				{
+					*state = Fill::failed(largest);
+				}
 			}
 			res
 		}
@@ -4856,9 +4883,16 @@ impl Subscriber {
 		}
 
 		// Without a fill, a relay preserves the subgroup's first Object ID and FIRST_OBJECT
-		// claim independently. Plain readers see only frame ordinals.
+		// claim independently. Plain readers see only frame ordinals. A head that was owed
+		// and never came is the exception: the stream is the same unstitchable tail it is
+		// when it arrives before the fill settles, below.
 		if !fill.read().outstanding() {
-			return Ok(Opened::Group(create(track)?, first.map_or(0, |first| first.id)));
+			let start = first.map_or(0, |first| first.id);
+			if start != 0 && fill.read().headless(sequence) {
+				tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
+				return Err(Error::Unsupported);
+			}
+			return Ok(Opened::Group(create(track)?, start));
 		}
 
 		// The first object's ID delta is its absolute Object ID (see `next_object_id`).
@@ -4928,7 +4962,7 @@ impl Subscriber {
 
 			let settled = fill.poll(waiter, |fill| match **fill {
 				Fill::Requested | Fill::Serving(_) | Fill::Active => Poll::Pending,
-				Fill::Ready { .. } | Fill::Done | Fill::Ended => Poll::Ready(()),
+				Fill::Ready { .. } | Fill::Done | Fill::Failed { .. } | Fill::Ended => Poll::Ready(()),
 			});
 
 			match settled {
@@ -5114,7 +5148,7 @@ impl Subscriber {
 			Ok(head) => head,
 			Err(err) => {
 				if let Ok(mut state) = fill.write() {
-					*state = Fill::Done;
+					*state = Fill::failed(largest);
 				}
 				// As for a subgroup object: the track is malformed, not just this fill.
 				if matches!(err, Error::MalformedTrack) {
@@ -5126,6 +5160,10 @@ impl Subscriber {
 
 		if matches!(head, Fill::Ready { sequence, .. } if largest.is_some_and(|largest| sequence < largest)) {
 			head.release();
+		}
+		// A fill that ended without reaching the Largest Group still owed that group's head.
+		if matches!(head, Fill::Done) {
+			head = Fill::failed(largest);
 		}
 		// The subscription can end while the head is being written, and its teardown cannot
 		// reach a producer this task still owns. So the handoff is where that is settled.
@@ -5941,7 +5979,7 @@ fn poll_settled(settle: &mut Settle, waiter: &kio::Waiter, fill: &kio::Producer<
 fn poll_headed(fill: &kio::Producer<Fill>, waiter: &kio::Waiter) -> Poll<()> {
 	let headed = fill.poll(waiter, |fill| match **fill {
 		Fill::Requested | Fill::Serving(_) | Fill::Active => Poll::Pending,
-		Fill::Ready { .. } | Fill::Done | Fill::Ended => Poll::Ready(()),
+		Fill::Ready { .. } | Fill::Done | Fill::Failed { .. } | Fill::Ended => Poll::Ready(()),
 	});
 	match headed {
 		Poll::Pending => Poll::Pending,
@@ -12499,6 +12537,12 @@ mod stitch_tests {
 			self
 		}
 
+		/// Name `sequence` as the Largest Group the fill answers, so it owes that group's head.
+		fn with_largest(self, sequence: u64) -> Self {
+			self.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().fill_largest = Some(sequence);
+			self
+		}
+
 		fn with_update(self, request_id: RequestId) -> Self {
 			let mut state = self.subscriber.state.lock();
 			state.fetches.insert(request_id, FillRequest::Update(REQUEST));
@@ -13915,6 +13959,79 @@ mod stitch_tests {
 		assert_eq!(frames.len(), 2, "the head is the whole group");
 	}
 
+	/// A fill that ends without the head it owed settles before the mid-group tail arrives.
+	/// The tail then has a hole at the front, so it is dropped as it would be had it waited
+	/// on the fill, rather than cached as a whole group starting at its first object.
+	#[moq_clock::test]
+	async fn a_headless_tail_after_the_fill_settles_is_dropped() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![
+				fill_stream_for::<&[u8]>(REQUEST, &[]),
+				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
+				tail_stream(SEQUENCE + 1, 0, &[b"next-0"]),
+			],
+		)
+		.with_largest(SEQUENCE);
+		let mut consumer = h.track.subscribe(None);
+
+		let mut fill = h.stream().await;
+		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
+		assert!(matches!(*h.fill.read(), Fill::Failed { sequence: SEQUENCE }));
+
+		h.dispatch_refused().await;
+
+		let mut next = h.stream().await;
+		h.subscriber.clone().recv_group(&mut next).await.expect("next group");
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, SEQUENCE + 1, "the headless group was dropped");
+		assert_eq!(frames.len(), 1);
+	}
+
+	/// The same headless tail arriving first waits on the fill, and is dropped once the fill
+	/// ends without the head.
+	#[moq_clock::test]
+	async fn a_headless_tail_before_the_fill_settles_is_dropped() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![
+				fill_stream_for::<&[u8]>(REQUEST, &[]),
+				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
+				tail_stream(SEQUENCE + 1, 0, &[b"next-0"]),
+			],
+		)
+		.with_largest(SEQUENCE);
+		let mut consumer = h.track.subscribe(None);
+
+		let mut fill = h.stream().await;
+		let mut tail = h.stream().await;
+		let mut serve_tail = h.subscriber.clone();
+		let mut serve_fill = h.subscriber.clone();
+		let (tail, head) = futures::join!(serve_tail.recv_group(&mut tail), serve_fill.recv_fill(&mut fill));
+		head.expect("fill");
+		assert!(matches!(tail, Err(Error::Unsupported)), "{tail:?}");
+
+		let mut next = h.stream().await;
+		h.subscriber.clone().recv_group(&mut next).await.expect("next group");
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, SEQUENCE + 1, "the headless group was dropped");
+		assert_eq!(frames.len(), 1);
+	}
+
+	/// A subscription that requested no head was owed none, so a stream starting mid-group
+	/// still stands alone.
+	#[moq_clock::test]
+	async fn a_mid_group_stream_without_a_fill_stands_alone() {
+		let h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 2, &[b"tail-2"])]);
+		let mut consumer = h.track.subscribe(None);
+
+		let mut tail = h.stream().await;
+		h.subscriber.clone().recv_group(&mut tail).await.expect("tail");
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, SEQUENCE);
+		assert_eq!(frames.len(), 1);
+	}
+
 	/// The subscription can end while the fetch stream is still writing, and that teardown
 	/// cannot reach a producer the fetch stream still owns. The handoff has to settle it, or
 	/// the head outlives the subscription unfinished and a consumer blocks on it. It is
@@ -15068,6 +15185,16 @@ mod joining_fetch_tests {
 				.expect("the subscription is registered");
 			track.fill.read().outstanding()
 		}
+
+		fn fill_headless(&self, sequence: u64) -> bool {
+			let state = self.subscriber.state.lock();
+			let track = state
+				.subscribes
+				.values()
+				.next()
+				.expect("the subscription is registered");
+			track.fill.read().headless(sequence)
+		}
 	}
 
 	impl Drop for JoinRun {
@@ -15362,6 +15489,7 @@ mod joining_fetch_tests {
 				"{version}: the track is still live"
 			);
 			assert!(!run.fill_outstanding(), "{version}: no head is coming");
+			assert!(run.fill_headless(4), "{version}: the Largest Group's tail is dropped");
 			assert!(run.session.log.closes().is_empty(), "{version}: the session stays up");
 		}
 	}
@@ -16476,8 +16604,8 @@ mod new_group_tests {
 		let mut current = header(newest.request_id).await;
 		relay.probe.clone().recv_fill(&mut current).await.unwrap();
 		assert!(
-			matches!(*fill.read(), Fill::Done),
-			"only the current header claimed the slot"
+			matches!(*fill.read(), Fill::Failed { sequence: 5 }),
+			"only the current header claimed the slot, and it carried no head"
 		);
 		relay.serving.abort();
 	}
