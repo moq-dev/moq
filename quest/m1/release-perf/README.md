@@ -7,11 +7,10 @@ Before the next release cut, every benchmark where `main` is slower than
 is fixed. Cost that pays for a feature `main` deliberately added is accepted,
 and the reason is written here.
 
-This epic's own work: once every child has landed, confirm the sparse rows
-and the relay fanout load against `release` (see the 2026-10-25 decisions).
-The browser frame path needs no repeat; the
-[performance audit](/quest/m2/audit-perf.md) now pairs every later cut with
-`release`.
+This epic's own work: settle the relay fanout regression and the sparse rows
+that the 2026-10-30 re-run found (see that section). The browser frame path
+needs no repeat; the [performance audit](/quest/m2/audit-perf.md) now pairs
+every later cut with `release`.
 
 ## Plan
 
@@ -226,6 +225,40 @@ Decided 2026-10-25 (maintainer), in
   `BENCH_ARTIFACTS=<scratch> just bench origin/release` (it also re-checks
   the sparse rows). Fix it if the relay
   CPU still rises with consistent sign; otherwise this epic is done.
+
+### Re-run (2026-10-30)
+
+`release` (`de0a2b0534`) against `main` (`7c8e255304`). The host was shared
+with other agents: 1-minute load 11 to 29 on 24 cores. Rather than the full
+`just bench origin/release`, this run paired only the relay workloads (the
+tail of `bench/run.sh`, seven alternating rounds) and `track_sparse_read`
+(three alternating rounds). Release's `track` bench has no `async` feature, so
+`run.sh --criterion` cannot build both sides with one set of arguments.
+
+Relay fanout is bimodal on `main`. Release's relay used 0.062 to 0.082 cores
+in all seven rounds. Main's used 0.062 to 0.072 in three rounds and 0.157 to
+0.241 in four, with the same delivery (640 frames/s, p99 within 2%). The
+comparator calls the sign mixed (paired deltas -15% to +218%, median +119%),
+but the high runs share a mechanism. In them, 21 to 24 Tokio workers are busy
+and the relay makes 9,400 to 12,600 voluntary context switches/s, against 2
+to 6 busy workers and 400 to 1,300 switches/s otherwise. Release never
+exceeded 4 busy workers or 2,800 switches/s. Eight CPU-profiled runs of
+`main` reproduced it in five. In a high run, 54% of samples end in a syscall
+(3 of 227 in a low run). Most are futex waits on the track's shared
+`kio::Lock`, taken by every subscriber's `read` in
+`poll_recv_next → poll_peek_group` and
+`poll_forward_drop → poll_drop`, plus the wakes that follow. When the 64
+subscriber tasks land on many workers, every frame makes them contend that
+one lock; packed onto a few workers, they never contend. Video used 9.7% less
+CPU (MAD 7.1%), with 1.4% more frames delivered.
+
+`track_sparse_read/timed` is flat now that
+[moq-dev/moq#6921](https://github.com/moq-dev/moq/pull/6921) has landed:
+release 2.42, 2.49, 2.64 us and main 5.33, 5.98, 6.42 us at 16, 256, 4096
+gaps (medians of three rounds). From 16 to 4096 gaps, main grows 20% and
+release 9%. The 2.2 to 2.4x gap is per iteration, not per gap. Each iteration
+creates, writes, finishes, and receives two groups, so this is the per-group
+model cost accepted above.
 
 ## Related
 
