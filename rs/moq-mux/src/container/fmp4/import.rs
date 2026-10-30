@@ -841,18 +841,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			mp4_atom::Codec::Opus(opus) => {
 				// dOps carries the OpusHead fields in ISOBMFF byte order; republish them as the
-				// OpusHead description so decoders apply its pre-skip and gain. The head built here
-				// is family 0, so refuse a mapping table rather than drop it.
+				// OpusHead description so decoders apply its pre-skip, gain, and channel mapping.
 				let dops = &opus.dops;
-				if let Some(mapping) = &dops.channel_mapping {
-					return Err(
-						Error::Opus(crate::codec::opus::Error::UnsupportedMappingFamily(mapping.family)).into(),
-					);
-				}
 				let mut head =
 					crate::codec::opus::Config::new(dops.input_sample_rate, dops.output_channel_count as u32)
 						.with_pre_skip(dops.pre_skip);
 				head.output_gain = dops.output_gain;
+				head.mapping = dops.channel_mapping.as_ref().map(super::opus_mapping).transpose()?;
 
 				// The shared conversion sets the decoder's 48 kHz output rate and Opus warmup,
 				// whatever the sample entry or the informational input rate claims.

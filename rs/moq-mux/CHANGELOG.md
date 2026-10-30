@@ -10,11 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - MP4 and Matroska import fill a video rendition's `projection` and `stereo` from Spherical Video V2's `sv3d`/`st3d` boxes and Matroska's `Projection`/`StereoMode`, and Opus channel mapping family 2 (raw Opus, Matroska, and other OpusHead sources) imports with `layout: "ambisonic"`. What the catalog cannot describe is refused with `fmp4::Error::UnsupportedSpatial`, `mkv::Error::UnsupportedSpatial`, or `opus::Error::UnsupportedChannelCount`: a cubemap or mesh projection, a nonzero pose, uncentred or vertically cropped equirectangular bounds, a stereo packing other than mono, left-right, or top-bottom with the left eye first, and family 2 at zeroth order or with RFC 8486's non-diegetic stereo pair.
+- fMP4 carries surround Opus: a `dOps` channel mapping table (family 1, 2, or 255) imports into the OpusHead description, and an exported `dOps` writes the description's table back instead of refusing it with `opus::Error::UnsupportedMappingFamily`. Family 3, whose OpusHead carries a demixing matrix rather than a table, is still refused both ways.
 
 ### Changed
 
 - [**breaking**] Declare per-track archive durations from GOP hints or the first completed record.
-- [**breaking**] Update the re-exported `mp4_atom` to 0.17, whose `Trun.entries` is now `Trun.samples`: a run without per-sample fields decodes as a count, so a moof of field-less runs no longer materializes an entry per sample before import refuses it. Read entries with `trun.samples.iter()` and build them with `samples: entries.into()`. `TrunEntry::cts` widens to `i64` (a version 0 offset is unsigned), `EsDescriptor` gains its optional fields, and `Dref.urls` becomes typed `entries`. `Dops` gains `channel_mapping: Option<OpusChannelMapping>` (`None` for family 0); the fMP4 importer still refuses a nonzero family.
+- [**breaking**] Update the re-exported `mp4_atom` to 0.17, whose `Trun.entries` is now `Trun.samples`: a run without per-sample fields decodes as a count, so a moof of field-less runs no longer materializes an entry per sample before import refuses it. Read entries with `trun.samples.iter()` and build them with `samples: entries.into()`. `TrunEntry::cts` widens to `i64` (a version 0 offset is unsigned), `EsDescriptor` gains its optional fields, and `Dref.urls` becomes typed `entries`. `Dops` gains `channel_mapping: Option<OpusChannelMapping>` (`None` for family 0).
 
 ### Fixed
 

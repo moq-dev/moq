@@ -1,4 +1,4 @@
-# [S] fMP4 import fills the ambisonic layout
+# [XS] fMP4 import fills the ambisonic layout
 
 ## Goal
 
@@ -12,13 +12,10 @@ catalog cannot carry, and the OpusHead's `AudioConfig` sets the layout).
 Split from the VR fields quest on 2026-10-22 (maintainer), which landed the
 Matroska and raw Opus side: only this part needs the `dOps` channel mapping
 table.
-Read the mapping from the `dOps` that
-[CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) carries through the
-OpusHead, and reuse that family 2 validation. Test with an fMP4
-first-order ambisonic fixture and a refused non-diegetic stereo one.
+The fMP4 importer carries the `dOps` mapping table into the OpusHead since
+CMAF surround Opus (`fmp4::opus_mapping`), so a family 2 `dOps` should
+already import as `ambisonic` through that family 2 validation. What remains
+is proving it: test with an fMP4 first-order ambisonic fixture and a refused
+non-diegetic stereo one.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) - the `dOps` mapping table an ambisonic fMP4 track needs

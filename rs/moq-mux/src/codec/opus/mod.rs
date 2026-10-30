@@ -50,7 +50,7 @@ pub enum Error {
 
 	/// A channel mapping family the operation cannot carry: family 0 given to
 	/// [`Mapping::new`], which has no table, or a container with no room for
-	/// the table.
+	/// the mapping, such as family 3's demixing matrix in an fMP4 `dOps`.
 	#[error("unsupported channel mapping family {0}")]
 	UnsupportedMappingFamily(u8),
 }
