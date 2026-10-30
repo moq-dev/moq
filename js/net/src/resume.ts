@@ -1081,6 +1081,12 @@ class Reader implements ResumeSource {
 		return this.#learnEnd();
 	}
 
+	/** The error the serving copy's end carries, if the track does not end cleanly. */
+	endError(): Error | undefined {
+		const serving = this.#serving();
+		return serving && hooks.subscriberEndError(serving.sub);
+	}
+
 	async finished(): Promise<track.Position> {
 		for (;;) {
 			this.sync();

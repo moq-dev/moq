@@ -282,6 +282,15 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE_END carries the error the track ended with, so an errored end
+	/// keeps its history across a hop. Added in lite-07; earlier versions can only reset.
+	pub(crate) fn has_end_error(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether announcements and track requests carry the publisher epoch, the
 	/// identity that says two routes serve the same bytes. Added in lite-07.
 	/// Older versions carry nothing, so a received route has no epoch and is

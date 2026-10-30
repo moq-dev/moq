@@ -730,7 +730,7 @@ async fn markers_wait_for_the_listing_to_end() {
 	last.write_frame(ms(1000), "b").unwrap();
 	last.write_frame(ms(1100), "c").unwrap();
 	// A mid-group end: frames 0 and 1 of group 1.
-	video.finish_at(Position { group: 1, frame: 2 }).unwrap();
+	video.finish_at(Position { group: 1, frame: 2 }, None).unwrap();
 	last.finish().unwrap();
 	settle().await;
 	sleep(SECOND).await;

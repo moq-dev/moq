@@ -349,7 +349,6 @@ impl Subscription {
 	/// from the latest group. An empty list is the empty range, ending at group 0.
 	///
 	/// The form a wire without ranges carries, alongside [`Self::start`].
-	#[cfg(any(feature = "async", test))]
 	pub(crate) fn end(&self) -> Option<u64> {
 		let mut end = Some(0);
 		for range in &self.ranges {

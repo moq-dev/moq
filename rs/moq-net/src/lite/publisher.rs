@@ -2543,7 +2543,7 @@ mod test {
 			.unwrap()
 			.finish()
 			.unwrap();
-		producer.finish_at(track::Position::group(7)).unwrap();
+		producer.finish_at(track::Position::group(7), None).unwrap();
 
 		// Group 5 is delivered first.
 		match recv_next(&mut subscriber, false, true).await.unwrap() {
@@ -2554,7 +2554,7 @@ mod test {
 		// With no more groups ready yet, the declared boundary surfaces even though the
 		// track isn't finished (group 6 is still outstanding).
 		match recv_next(&mut subscriber, false, true).await.unwrap() {
-			Recv::Boundary(group) => assert_eq!(group, 7),
+			Recv::Boundary(end) => assert_eq!(end.group, 7),
 			_ => panic!("expected the future boundary"),
 		}
 
@@ -2609,7 +2609,7 @@ mod test {
 
 		// Staleness is the max delay window's job, not arrival order's: the track
 		// still finishes normally afterward.
-		producer.finish_at(track::Position::group(3)).unwrap();
+		producer.finish_at(track::Position::group(3), None).unwrap();
 		match recv_next(&mut subscriber, false, false).await.unwrap() {
 			Recv::Finished => {}
 			_ => panic!("expected finished"),
@@ -3397,7 +3397,7 @@ fn buffer_zigzag_delta<W: crate::transport::poll::SendStream>(
 enum Recv {
 	Group(group::Consumer),
 	Datagram(crate::model::datagram::Stored),
-	Boundary(u64),
+	Boundary(lite::SubscribeEnd),
 	Finished,
 }
 
@@ -3424,22 +3424,28 @@ fn final_sequence(end: track::Position) -> u64 {
 /// [`Recv::Boundary`] in an idle moment (after groups and datagrams), so the caller can send
 /// SUBSCRIBE_END as soon as the ending is known rather than waiting for the live edge to reach
 /// it. The caller clears `emit_boundary` after the first boundary so it fires once.
+///
+/// When `end_error` is set, the boundary carries the error an errored end has, and reaching
+/// that end finishes like a clean one. Otherwise reaching it is the error, which resets.
 fn poll_recv_next(
 	track: &mut track::Subscriber,
 	groups: bool,
 	datagrams: bool,
 	emit_boundary: bool,
+	end_error: bool,
 	waiter: &kio::Waiter,
 ) -> Poll<Result<Recv, Error>> {
 	{
 		let mut groups_finished = false;
 		let next = match groups {
-			true => track.poll_recv_group(waiter)?,
+			true => track.poll_recv_group(waiter),
 			false => Poll::Pending,
 		};
 		match next {
-			Poll::Ready(Some(group)) => return Poll::Ready(Ok(Recv::Group(group))),
-			Poll::Ready(None) => groups_finished = true,
+			Poll::Ready(Ok(Some(group))) => return Poll::Ready(Ok(Recv::Group(group))),
+			Poll::Ready(Ok(None)) => groups_finished = true,
+			Poll::Ready(Err(_)) if end_error && track.ended_with_error() => groups_finished = true,
+			Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 			Poll::Pending => {}
 		}
 		if datagrams {
@@ -3453,7 +3459,13 @@ fn poll_recv_next(
 		// No live data ready: report the boundary (if declared) before signalling Finished, so a
 		// future boundary reaches the subscriber while the trailing groups are still in flight.
 		if emit_boundary && let Poll::Ready(res) = track.poll_finished(waiter) {
-			return Poll::Ready(res.map(|end| Recv::Boundary(final_sequence(end))));
+			let error = end_error.then(|| track.end_error()).flatten();
+			return Poll::Ready(res.map(|end| {
+				Recv::Boundary(lite::SubscribeEnd {
+					group: final_sequence(end),
+					error: error.as_ref().map(StreamError::from),
+				})
+			}));
 		}
 		if groups_finished {
 			return Poll::Ready(Ok(Recv::Finished));
@@ -3465,7 +3477,7 @@ fn poll_recv_next(
 /// The async form of [`poll_recv_next`], for callers with nothing else to poll.
 #[cfg(test)]
 async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary: bool) -> Result<Recv, Error> {
-	kio::wait(|waiter| poll_recv_next(track, true, datagrams, emit_boundary, waiter)).await
+	kio::wait(|waiter| poll_recv_next(track, true, datagrams, emit_boundary, true, waiter)).await
 }
 
 /// Bound `group` to what this subscription asked for, or `None` when it cannot be served
@@ -4119,7 +4131,15 @@ impl TrackRun {
 		// group is ready (including while groups are parked above the cap).
 		let emit_boundary = self.emit_range && !self.end_sent;
 		let groups = self.opening.is_none();
-		if let Poll::Ready(res) = poll_recv_next(&mut self.track, groups, self.datagrams, emit_boundary, waiter) {
+		let end_error = self.ctx.version.has_end_error();
+		if let Poll::Ready(res) = poll_recv_next(
+			&mut self.track,
+			groups,
+			self.datagrams,
+			emit_boundary,
+			end_error,
+			waiter,
+		) {
 			match res? {
 				Recv::Group(group) => {
 					// Never a second stream for a sequence this subscription already accounted
@@ -4157,12 +4177,12 @@ impl TrackRun {
 					}
 				}
 				Recv::Datagram(datagram) => self.serve_datagram(datagram),
-				Recv::Boundary(group) => {
+				Recv::Boundary(end) => {
 					// The track declared its exclusive final sequence. Forward it now,
-					// even if trailing groups (below `group`) are still in flight, then
+					// even if trailing groups (below it) are still in flight, then
 					// keep serving them until the live edge reaches the boundary.
 					self.end_sent = true;
-					writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group }))?;
+					writer.buffer(&lite::SubscribeResponse::End(end))?;
 				}
 				Recv::Finished => {
 					if !self.children.is_empty() {
@@ -6334,7 +6354,7 @@ mod serve_group_test {
 			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 			{
 				let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
-				track.finish_at(track::Position::group(4)).unwrap();
+				track.finish_at(track::Position::group(4), None).unwrap();
 				write_group(&mut track, 0, 0);
 				assert!(futures::poll!(run.as_mut()).is_pending());
 				write_group(&mut track, 2, 2);
@@ -6367,7 +6387,7 @@ mod serve_group_test {
 			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
 			assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)], "{version:?}");
 
-			track.finish_at(track::Position::group(2)).unwrap();
+			track.finish_at(track::Position::group(2), None).unwrap();
 			drop(track);
 			let Poll::Ready(result) = run.poll(&mut writer, &kio::Waiter::noop()) else {
 				panic!("run did not finish");
@@ -6399,7 +6419,7 @@ mod serve_group_test {
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
 
 		write_group(&mut track, 2, 2);
-		track.finish_at(track::Position::group(3)).unwrap();
+		track.finish_at(track::Position::group(3), None).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
@@ -6487,7 +6507,7 @@ mod serve_group_test {
 		// before this run looks.
 		track.drop_groups(1..2, crate::StreamError::NotFound);
 		write_group(&mut track, 1, 1);
-		track.finish_at(track::Position::group(2)).unwrap();
+		track.finish_at(track::Position::group(2), None).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		assert_eq!(drops(&mut writer, &log, version).await, []);
@@ -6516,7 +6536,7 @@ mod serve_group_test {
 
 		write_group(&mut track, 1, 1);
 		write_group(&mut track, 2, 2);
-		track.finish_at(track::Position::group(3)).unwrap();
+		track.finish_at(track::Position::group(3), None).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
@@ -6825,7 +6845,7 @@ mod serve_group_test {
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 2, 2);
 		write_group(&mut track, 5, 5);
-		track.finish_at(track::Position::group(7)).unwrap();
+		track.finish_at(track::Position::group(7), None).unwrap();
 		// Serve group 5, which resolves SUBSCRIBE_START.
 		while run.start.is_none() {
 			let step = run.poll_step(&mut writer, &kio::Waiter::noop());
@@ -6888,7 +6908,7 @@ mod serve_group_test {
 			write_group(&mut track, 4, 0);
 			write_group(&mut track, 2, 0);
 			assert!(futures::poll!(run.as_mut()).is_pending());
-			track.finish_at(track::Position::group(6)).unwrap();
+			track.finish_at(track::Position::group(6), None).unwrap();
 			drop(track);
 			run.await.unwrap();
 		}
@@ -6935,7 +6955,7 @@ mod serve_group_test {
 		moq_clock::sim::advance(Duration::from_millis(900)).await;
 		run.update(update(2));
 		moq_clock::sim::advance(Duration::from_millis(200)).await;
-		track.finish_at(track::Position::group(6)).unwrap();
+		track.finish_at(track::Position::group(6), None).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		// The feed gives up on 2..5 once its grace passes, a miss nothing fills.
@@ -6977,7 +6997,7 @@ mod serve_group_test {
 		for sequence in 1..5 {
 			write_group(&mut track, sequence, 0);
 		}
-		track.finish_at(track::Position::group(5)).unwrap();
+		track.finish_at(track::Position::group(5), None).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		assert_eq!(drops(&mut writer, &log, version).await, []);
@@ -7076,7 +7096,7 @@ mod serve_group_test {
 			moq_clock::sim::advance(Duration::from_secs(2)).await;
 			write_group(&mut track, 4, 0);
 			assert!(futures::poll!(run.as_mut()).is_pending());
-			track.finish_at(track::Position::group(5)).unwrap();
+			track.finish_at(track::Position::group(5), None).unwrap();
 			drop(track);
 			run.await.unwrap();
 		}

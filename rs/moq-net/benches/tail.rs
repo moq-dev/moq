@@ -39,7 +39,7 @@ impl Held {
 				track.start_at(0).unwrap();
 				let end = track::Position::group(groups as u64 + 1);
 				moq_net::fuzz::received(&track);
-				track.finish_at(end).unwrap();
+				track.finish_at(end, None).unwrap();
 				// Group 0 never arrives: the hole that holds the reader.
 				for sequence in 1..=groups as u64 {
 					track.create_group(group::Info { sequence }).unwrap().finish().unwrap();

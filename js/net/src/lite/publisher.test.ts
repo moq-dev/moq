@@ -190,9 +190,13 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 	},
 );
 
-// Delivers `sequences` in the given order, finishes the track, and returns the
-// SUBSCRIBE_END the publisher put on the wire.
-async function subscribeEnd(sequences: number[], version: Version = Version.DRAFT_05): Promise<SubscribeEnd> {
+// Delivers `sequences` in the given order, finishes the track (with `error`, if given), and
+// returns the SUBSCRIBE_END the publisher put on the wire.
+async function subscribeEnd(
+	sequences: number[],
+	version: Version = Version.DRAFT_05,
+	error?: Error,
+): Promise<SubscribeEnd> {
 	const pair = createMockTransportPair(version === Version.DRAFT_07 ? ALPN_07_WIP : ALPN_05);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
@@ -219,7 +223,8 @@ async function subscribeEnd(sequences: number[], version: Version = Version.DRAF
 		// arrives late opens no stream at all, so there is nothing firmer to wait on.
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
-	track.finish();
+	if (error) track.finishAt({ group: Math.max(-1, ...sequences) + 1, frame: 0 }, error);
+	else track.finish();
 	track.close();
 
 	try {
@@ -1727,6 +1732,13 @@ test("lite draft-05: subscribe end clears the max sequence when groups arrive ou
 // without colliding with a track whose sole group was sequence 0.
 test("lite draft-05: subscribe end is 0 when no groups were produced", async () => {
 	expect((await subscribeEnd([])).group).toBe(0);
+});
+
+// Lite-07 forwards an errored end's error with its boundary, so the subscriber keeps the history.
+test("lite draft-07: subscribe end carries the track's error", async () => {
+	const end = await subscribeEnd([0, 1], Version.DRAFT_07, new StreamError(StreamCode(71)));
+	expect([end.group, end.error]).toEqual([2, 71]);
+	expect((await subscribeEnd([0, 1], Version.DRAFT_07)).error).toBeUndefined();
 });
 
 // The boundary clears every produced group even when a sequence was skipped.

@@ -787,6 +787,22 @@ impl Subscriber {
 		route.poll_largest(seen, bounds, waiter)
 	}
 
+	/// The final sequence and the error the track ended with, once the serving copy drained
+	/// to that end.
+	pub(super) fn end_error(&self) -> Option<(u64, Error)> {
+		let reader = self.reader();
+		let serving = reader
+			.copies
+			.last()
+			.filter(|copy| Some(copy.generation) == reader.generation && matches!(copy.done, Some(Ok(()))))?;
+		serving.track.end_error()
+	}
+
+	/// The error the serving copy's declared end carries, reached or not.
+	pub(super) fn declared_error(&self) -> Option<Error> {
+		self.reader().copies.last()?.track.declared_error()
+	}
+
 	/// The local group filter, as [`track::Subscriber::poll_largest`] reports within it.
 	pub(super) fn bounds(&self) -> track::Bounds {
 		let mut reader = self.reader();
@@ -2365,7 +2381,7 @@ mod test {
 		let mut sub = subscribe(&logical, Duration::ZERO);
 		assert!(sub.poll_finished(&kio::Waiter::noop()).is_pending());
 		let end = Position { group: 5, frame: 5 };
-		source.finish_at(end).unwrap();
+		source.finish_at(end, None).unwrap();
 		assert_eq!(
 			sub.poll_finished(&kio::Waiter::noop()).map(|result| result.unwrap()),
 			Poll::Ready(end)
@@ -2380,7 +2396,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, HOUR);
 		let end = Position { group: 4, frame: 3 };
-		a.finish_at(end).unwrap();
+		a.finish_at(end, None).unwrap();
 		let b = copy();
 		routes.serve(b.consume());
 		assert_eq!(
@@ -2404,9 +2420,9 @@ mod test {
 			let mut a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, HOUR);
-			a.finish_at(Position::group(5)).unwrap();
+			a.finish_at(Position::group(5), None).unwrap();
 			let mut b = copy();
-			b.finish_at(next).unwrap();
+			b.finish_at(next, None).unwrap();
 			routes.serve(b.consume());
 			let result = sub.poll_finished(&kio::Waiter::noop());
 			if next == Position::group(6) {
@@ -2434,7 +2450,7 @@ mod test {
 			let mut a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, HOUR);
-			a.finish_at(Position::group(5)).unwrap();
+			a.finish_at(Position::group(5), None).unwrap();
 			let mut b = copy();
 			routes.serve(b.consume());
 			write(&b, 4);
@@ -2469,7 +2485,7 @@ mod test {
 		let mut a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, HOUR);
-		a.finish_at(Position { group: 4, frame: 2 }).unwrap();
+		a.finish_at(Position { group: 4, frame: 2 }, None).unwrap();
 		let b = copy();
 		routes.serve(b.consume());
 		let mut group = b.create_group(group::Info { sequence: 4 }).unwrap();
@@ -2505,7 +2521,7 @@ mod test {
 			}
 			let mut b = copy();
 			routes.serve(b.consume());
-			b.finish_at(Position::group(3)).unwrap();
+			b.finish_at(Position::group(3), None).unwrap();
 			assert!(matches!(
 				sub.poll_finished(&kio::Waiter::noop()),
 				Poll::Ready(Err(Error::ProtocolViolation))
@@ -2557,7 +2573,7 @@ mod test {
 			};
 			let mut b = copy();
 			routes.serve(b.consume());
-			b.finish_at(Position { group: 4, frame: 2 }).unwrap();
+			b.finish_at(Position { group: 4, frame: 2 }, None).unwrap();
 			let res = sub.poll_finished(&kio::Waiter::noop());
 			assert!(
 				matches!(res, Poll::Ready(Err(Error::ProtocolViolation))),
@@ -2583,7 +2599,7 @@ mod test {
 		moq_clock::sleep(Duration::from_secs(2)).await;
 		assert!(sub.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
 		assert_eq!(copies(&routes), 1);
-		b.finish_at(Position::group(5)).unwrap();
+		b.finish_at(Position::group(5), None).unwrap();
 		assert!(matches!(
 			sub.poll_finished(&kio::Waiter::noop()),
 			Poll::Ready(Err(Error::ProtocolViolation))
