@@ -5453,8 +5453,9 @@ impl Subscriber {
 				range_filters: false,
 				fill_timeout: false,
 				// The copy learned the track before any fetch, from SUBSCRIBE_OK or
-				// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste.
-				properties_wanted: false,
+				// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste, except that only its
+				// TIMESCALE opts the answer into the timestamps a timed copy needs.
+				properties_wanted: timescale.is_some(),
 				epoch: self.epoch.clone(),
 			},
 		);
