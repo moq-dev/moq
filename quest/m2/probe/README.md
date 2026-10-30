@@ -92,6 +92,5 @@ This README's own work, once the children land:
 
 ## Related
 
-- [A finished PROBE stops reporting](/quest/m2/probe-end-stale.md) - the receive estimate this epic raises reads unknown once its stream ends
 - [BBR media study](/quest/m2/quic-bbr-study.md) - preserving an estimate and discovering spare capacity are separate problems
 - [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - a delay-based alternative to BBR3 on native uplinks; it must implement native probing to ship (decided 2026-10-25)
