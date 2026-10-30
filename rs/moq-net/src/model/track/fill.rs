@@ -870,9 +870,11 @@ impl Fill {
 	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		// Arm every input of `wanted` before reading it, so a change in between still wakes:
-		// the readers leaving, narrowing, or taking a group, the answers, and the order.
+		// the readers leaving, narrowing, or taking a group, the answers, the order, and a
+		// group arriving through the live feed, which the cache then answers.
 		let _ = self.inner.result.poll_wanted_changed(waiter, true);
 		let _ = self.inner.result.poll_ref(waiter, |_| Poll::<()>::Pending);
+		let _ = self.inner.state.poll_ref(waiter, |_| Poll::<()>::Pending);
 		let _ = self.inner.fills.poll(waiter, |_| Poll::Pending);
 		let _ = self.inner.asks.poll(waiter, |_| Poll::Pending);
 		let wanted = self.wanted();

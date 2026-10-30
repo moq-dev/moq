@@ -18567,6 +18567,33 @@ mod test {
 		assert_eq!(fill.wanted(), None);
 	}
 
+	/// The owed group arriving through the live feed wakes a parked
+	/// [`Fill::poll_wanted_changed`]: the cache answers it, so the fill no longer owes it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn fill_wanted_changed_follows_a_live_arrival() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
+		let mut subscriber = producer.subscribe(ascending(9..));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let noop = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&noop) {}
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&noop) else {
+			panic!("below the start is a miss");
+		};
+		let (flag, waiter) = Flag::waiter();
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(9)));
+		assert!(fill.poll_wanted_changed(&waiter).is_pending());
+
+		write_group(&producer, 9);
+		assert!(flag.take(), "the owed group arriving live woke the parked poll");
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(None));
+		assert_eq!(fill.wanted(), None);
+		drop(subscriber);
+	}
+
 	/// A reader narrowing its ranges leaves the part of its fill it no longer reads: the
 	/// handler is not asked for it, a fetch of it in flight is cancelled, and neither a bulk
 	/// refusal nor dropping the fill names it dropped.

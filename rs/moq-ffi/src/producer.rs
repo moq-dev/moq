@@ -448,12 +448,12 @@ impl MoqTrackRequests {
 pub struct MoqFill {
 	inner: moq_net::track::Fill,
 	// The watcher `wanted_changed` advances, kept apart so concurrent waits queue in turn.
-	changes: Arc<tokio::sync::Mutex<moq_net::track::Fill>>,
+	changes: crate::ffi::Task<moq_net::track::Fill>,
 }
 
 impl MoqFill {
 	fn new(inner: moq_net::track::Fill) -> Self {
-		let changes = Arc::new(tokio::sync::Mutex::new(inner.clone()));
+		let changes = crate::ffi::Task::new(inner.clone());
 		Self { inner, changes }
 	}
 }
@@ -499,8 +499,9 @@ impl MoqFill {
 
 	/// Wait for `wanted` to change and return the new value. The first call returns at once.
 	pub async fn wanted_changed(&self) -> Result<Option<u64>, MoqError> {
-		let changes = self.changes.clone();
-		crate::ffi::detached(async move { Ok::<_, MoqError>(changes.lock().await.wanted_changed().await) }).await
+		// Driven in place, not detached: a cancelled call left unfreed must not advance the
+		// watcher and swallow the change the next call waits for.
+		self.changes.run(|mut fill| async move { Ok(fill.wanted_changed().await) }).await
 	}
 
 	/// Insert group `sequence` and return a producer for filling it. The first group starts

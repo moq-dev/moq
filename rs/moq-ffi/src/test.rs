@@ -2624,6 +2624,41 @@ async fn fill_goes_unwanted_when_the_fetcher_leaves() {
 	assert!(!fill.is_wanted(5));
 }
 
+/// A foreign cancel only stops polling `wanted_changed`; uniffi drops it later, at
+/// `rust_future_free`. Until then the cancelled call must not consume the change the next
+/// call is waiting for.
+#[tokio::test]
+async fn fill_wanted_changed_cancelled_before_free_leaves_the_change() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let dynamic = track.requests().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
+	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
+		.await
+		.expect("timed out waiting for fill")
+		.unwrap();
+	assert_eq!(fill.wanted_changed().await.unwrap(), Some(5));
+
+	// Poll once, then stop without dropping, which is all `rust_future_cancel` does.
+	let mut cancelled = Box::pin(fill.wanted_changed());
+	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(cancelled.as_mut().poll(cx))).await;
+	assert!(first.is_pending());
+
+	fetch.abort();
+	// Give anything still driving the cancelled call the chance to take the change.
+	ffi_caught_up().await;
+
+	let next = fill.wanted_changed();
+	drop(cancelled);
+	let wanted = tokio::time::timeout(TIMEOUT, next)
+		.await
+		.expect("the cancelled call took the change")
+		.unwrap();
+	assert_eq!(wanted, None);
+}
+
 #[tokio::test]
 async fn dynamic_track_rejects_fetch_miss() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
