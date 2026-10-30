@@ -161,7 +161,9 @@ pub fn annexb(data: &[u8]) -> bool {
 	};
 	let format = STREAMS[selector as usize % STREAMS.len()];
 	let (broadcast, catalog) = broadcast();
-	let request = broadcast.reserve_track("video").expect("a fresh broadcast has no video track");
+	let request = broadcast
+		.reserve_track("video")
+		.expect("a fresh broadcast has no video track");
 	let Ok(mut import) = TrackStream::video(request, catalog.reserve(), VideoInit::new(format, Bytes::new())) else {
 		return false;
 	};
@@ -193,7 +195,9 @@ pub fn catalog(data: &[u8]) -> bool {
 	};
 	// Uncompressed: inflating a compressed group is moq-net's, ahead of any catalog parser.
 	let info = hang::Catalog::default_track_info().with_compress(false);
-	let track = broadcast.create_track(name, info).expect("a fresh broadcast has no catalog");
+	let track = broadcast
+		.create_track(name, info)
+		.expect("a fresh broadcast has no catalog");
 	let subscriber = track.subscribe(None);
 	let mut next: Box<dyn FnMut() -> Poll<crate::Result<Option<crate::catalog::hang::Catalog<()>>>>> =
 		if selector & 1 == 0 {
@@ -299,7 +303,10 @@ pub fn seeds() -> Vec<Seed> {
 	let mut add = |selector: u8, frames: &[&[u8]]| {
 		let mut data = vec![selector];
 		data.extend_from_slice(&frames.join(&0));
-		seeds.push(Seed { target: "catalog", data });
+		seeds.push(Seed {
+			target: "catalog",
+			data,
+		});
 	};
 	for (cmaf, catalog) in [(false, imported(false)), (true, imported(true))] {
 		let hang = catalog.to_json().expect("a published catalog serializes");
@@ -356,7 +363,10 @@ fn h264_stream() -> Vec<u8> {
 	let mp4_atom::Codec::Avc1(avc1) = codec(include_bytes!("container/fmp4/test_data/bbb.mp4")) else {
 		panic!("bbb.mp4 opens with its H.264 track");
 	};
-	let (sps, pps) = (&avc1.avcc.sequence_parameter_sets[0], &avc1.avcc.picture_parameter_sets[0]);
+	let (sps, pps) = (
+		&avc1.avcc.sequence_parameter_sets[0],
+		&avc1.avcc.picture_parameter_sets[0],
+	);
 	start_codes(&[&[0x09, 0xf0], sps, pps, &[0x65, 0x88, 0x84, 0x21]])
 }
 
@@ -417,7 +427,11 @@ mod tests {
 			assert!(seeds.iter().any(|seed| seed.target == *name), "no seed for {name}");
 		}
 		for (index, seed) in seeds.iter().enumerate() {
-			assert!(run(target(seed.target), &seed.data), "{} seed {index} refused", seed.target);
+			assert!(
+				run(target(seed.target), &seed.data),
+				"{} seed {index} refused",
+				seed.target
+			);
 		}
 	}
 

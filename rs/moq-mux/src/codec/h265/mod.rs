@@ -643,7 +643,10 @@ pub(crate) fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] 
 /// Real parameter sets, mostly from a single-frame x265 encode (1280x720, Main profile),
 /// for tests that need an SPS rather than hand-built bytes, and the fuzz seeds.
 #[cfg(any(test, feature = "fuzz"))]
-#[cfg_attr(not(test), allow(dead_code, reason = "the fuzz seeds use only the Main parameter sets"))]
+#[cfg_attr(
+	not(test),
+	allow(dead_code, reason = "the fuzz seeds use only the Main parameter sets")
+)]
 pub(crate) mod fixtures {
 	use bytes::Bytes;
 

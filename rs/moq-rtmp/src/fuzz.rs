@@ -108,7 +108,10 @@ pub fn seeds() -> Vec<Seed> {
 			("app", string("live")),
 			("tcUrl", string("rtmp://localhost/live")),
 			("fpad", Amf0Value::Boolean(false)),
-			("fourCcList", Amf0Value::StrictArray(vec![string("av01"), string("hvc1")])),
+			(
+				"fourCcList",
+				Amf0Value::StrictArray(vec![string("av01"), string("hvc1")]),
+			),
 		]),
 	];
 	let publish = vec![
@@ -132,7 +135,13 @@ pub fn seeds() -> Vec<Seed> {
 	];
 
 	let mut seeds = Vec::new();
-	for (selector, values) in [(1u8, &connect), (3, &connect), (3, &publish), (0, &metadata), (2, &metadata)] {
+	for (selector, values) in [
+		(1u8, &connect),
+		(3, &connect),
+		(3, &publish),
+		(0, &metadata),
+		(2, &metadata),
+	] {
 		let mut data = vec![selector];
 		// An AMF3 command wraps its AMF0 behind a zero byte.
 		if TYPES[selector as usize] == 17 {

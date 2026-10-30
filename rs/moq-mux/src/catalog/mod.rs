@@ -43,9 +43,9 @@ pub use entry::Entry;
 pub(crate) use estimate::Reading;
 pub use estimate::{Estimate, Estimator};
 pub use format::*;
-pub use producer::{Config, Guard, Producer};
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) use producer::to_msf;
+pub use producer::{Config, Guard, Producer};
 pub use select::Select;
 pub use stream::Stream;
 pub(crate) use timebase::Offset;
