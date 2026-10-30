@@ -33,7 +33,9 @@ maintainer away; the agent took the recommended option for each:
 - One quest for both sides so the semantics match: the Rust opt-in in
   `moq_mux::container::Consumer`, used by `decode::Consumer`'s max-delay
   decoder, and the same opt-in in `js/hang`'s `Container.Consumer`, used by
-  the browser dual decoder. Mirror the name across Rust and JS.
+  the browser dual decoder. Mirror the name across Rust and JS. `moq play`'s
+  max-delay decoder (`rs/moq-cli/src/play/media.rs`) subscribes the same way
+  and takes the opt-in too.
 - Open, the maintainer's call: the opt-in's name and shape. Options are a
   builder such as `with_lookback(groups)`, a count of earlier groups to wait
   for; a bool such as `with_earlier_group()`; or a config field. Recommend
@@ -44,7 +46,3 @@ maintainer away; the agent took the recommended option for each:
   one budget of wall time; consumers without the opt-in are unchanged; a
   `decode::Consumer` cold join whose live edge arrives first hands over to a
   max-delay decoder that started a group earlier.
-
-## Related
-
-- [Play dual decoder](/quest/m2/intra-refresh/play-dual-decoder.md) - `moq play` reuses the native pair, so it inherits this

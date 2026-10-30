@@ -11,6 +11,11 @@
 //! in order with whichever lane is the source. Both lanes read the same track, so
 //! the first copy of an end returned stands for both, and a loss the output has
 //! already moved past is no loss in it.
+//!
+//! [`Consumer`](super::Consumer) runs both decoders and this selector for you. A
+//! player that paces its own decoding, such as `moq play`, drives a [`Selector`]
+//! directly: it pushes each lane's output and returns whatever [`Selector::next`]
+//! hands back.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -20,9 +25,14 @@ use moq_clock::Instant;
 use super::Read;
 
 /// One of the two decoders.
+///
+/// The discriminant indexes a two-element array, so a caller may keep its own
+/// per-lane state as `[T; 2]` indexed by `lane as usize`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Lane {
+pub enum Lane {
+	/// Skips at the caller's latency target, and may show stripes after a join or a skip.
 	Min = 0,
+	/// Tolerates one more sweep, joining a group earlier, so its pictures stay clean.
 	Max = 1,
 }
 
@@ -36,10 +46,12 @@ pub(super) enum Lane {
 const QUEUE: usize = 2;
 
 /// What [`Selector::next`] decided.
-pub(super) enum Next {
+pub enum Next {
+	/// Show or apply this next.
 	Read(Read),
 	/// Nothing to show until a lane produces more, or until the deadline passes.
 	Wait(Option<Instant>),
+	/// Both lanes finished and nothing is left to show.
 	Done,
 }
 
@@ -69,7 +81,12 @@ impl State {
 	}
 }
 
-pub(super) struct Selector {
+/// Chooses between a min-delay and a max-delay decoder's pictures.
+///
+/// The max-delay picture is shown once that decoder has caught up to the
+/// min-delay one, a newer min-delay picture waits at most one frame interval for
+/// it, and with two lanes the returned picture timestamps strictly increase.
+pub struct Selector {
 	lanes: [State; 2],
 	source: Lane,
 	/// Whether there are two lanes to choose between.
@@ -89,7 +106,11 @@ pub(super) struct Selector {
 
 impl Selector {
 	/// A selector for one lane, or for both when `dual`.
-	pub(super) fn new(dual: bool, interval: Option<Duration>) -> Self {
+	///
+	/// `interval` is the catalog's frame interval, how long a newer min-delay
+	/// picture waits for the max-delay decoder. Without one, the selector uses
+	/// the smallest step the min-delay lane decodes.
+	pub fn new(dual: bool, interval: Option<Duration>) -> Self {
 		let mut lanes: [State; 2] = Default::default();
 		lanes[Lane::Max as usize].done = !dual;
 		Self {
@@ -111,7 +132,7 @@ impl Selector {
 	}
 
 	/// Whether `lane` can take another decoded picture.
-	pub(super) fn wants(&self, lane: Lane) -> bool {
+	pub fn wants(&self, lane: Lane) -> bool {
 		let state = &self.lanes[lane as usize];
 		!state.done && state.pictures < QUEUE
 	}
@@ -121,7 +142,7 @@ impl Selector {
 	/// Between two pictures a lane keeps one gap, spanning every loss there, and its
 	/// first end, where the pictures before it stop. Marker-only groups read while this
 	/// lane waits behind the source then cost a bounded queue, not an entry each.
-	pub(super) fn push(&mut self, lane: Lane, read: Read, now: Instant) {
+	pub fn push(&mut self, lane: Lane, read: Read, now: Instant) {
 		let state = &mut self.lanes[lane as usize];
 		let mut run = state
 			.queue
@@ -161,13 +182,24 @@ impl Selector {
 		state.queue.push_back((read, now));
 	}
 
+	/// Forget every queued picture and what each lane has decoded, as after a
+	/// break that discards both decoders' output. What was already returned is
+	/// kept, so the output still never rewinds.
+	pub fn clear(&mut self) {
+		for state in &mut self.lanes {
+			state.queue.clear();
+			state.pictures = 0;
+			state.newest = None;
+		}
+	}
+
 	/// `lane` ended and will decode nothing more.
-	pub(super) fn finish(&mut self, lane: Lane) {
+	pub fn finish(&mut self, lane: Lane) {
 		self.lanes[lane as usize].done = true;
 	}
 
 	/// The next item to return at `now`, or what to wait for.
-	pub(super) fn next(&mut self, now: Instant) -> Next {
+	pub fn next(&mut self, now: Instant) -> Next {
 		if self.dual {
 			self.prune();
 		}
