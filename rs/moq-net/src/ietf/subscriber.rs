@@ -2951,7 +2951,9 @@ impl Subscriber {
 		// the live join that names it goes first and the answer resolves the anchor. No Group ID
 		// arithmetic spells it upstream. A time anchor names no group the answer settles.
 		let deferred = matches!(subscription, Err(Error::Unsupported))
-			&& target.subscription().is_some_and(|subscription| !has_time(&subscription));
+			&& target
+				.subscription()
+				.is_some_and(|subscription| !has_time(&subscription));
 		let subscription = match subscription {
 			Ok(subscription) => subscription,
 			Err(_) if deferred => None,
@@ -12045,9 +12047,10 @@ fn settle_bounds(
 }
 
 fn has_time(subscription: &track::Subscription) -> bool {
-	subscription.ranges.iter().any(|range| {
-		matches!(range.start, track::Anchor::Time(_)) || matches!(range.end, Some(track::Anchor::Time(_)))
-	})
+	subscription
+		.ranges
+		.iter()
+		.any(|range| matches!(range.start, track::Anchor::Time(_)) || matches!(range.end, Some(track::Anchor::Time(_))))
 }
 
 fn needs_resolution(subscription: &track::Subscription) -> bool {
