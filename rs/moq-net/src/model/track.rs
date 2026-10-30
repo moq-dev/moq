@@ -446,7 +446,8 @@ pub(crate) struct TrackState {
 	// Whether a received copy's wire tells it what relative and time anchors resolve
 	// against, so they resolve here as at the publisher.
 	anchored: bool,
-	// This copy can translate only anchors its cache has already settled.
+	// This copy can translate only time anchors its cache has already settled. A relative one
+	// waits for the live edge its wire reports, as on an `anchored` copy.
 	cached_anchors: bool,
 	// Whether readers ask no fills below `start_sequence`: its publisher resolved it from the
 	// budget, but neither this copy's timestamps nor a fill can judge an older group against
@@ -3311,7 +3312,8 @@ impl Producer {
 		}
 	}
 
-	/// Let readers use only anchors this cache can already translate to group bounds.
+	/// Let readers use only time anchors this cache can already translate to group bounds. A
+	/// relative anchor counts back from the live edge the wire reports, once it does.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn anchored_cached(&self) {
 		if let Ok(mut state) = self.modify() {
@@ -6970,9 +6972,9 @@ impl Control {
 	}
 }
 
-/// A group-only wire refuses an unresolved anchor before changing shared demand.
+/// A group-only wire refuses an unresolved time anchor before changing shared demand.
 fn refuse_cached_anchors(state: &TrackState, subscription: &Subscription) -> Result<()> {
-	if state.cached_anchors && subscription.ranges.iter().any(|range| !range.is_wire()) {
+	if state.cached_anchors && subscription.has_time() {
 		let window = Window::new(&subscription.ranges, state.latest_live(), state)?;
 		if !window.is_settled() {
 			return Err(Error::Unsupported);
