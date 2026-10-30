@@ -44,10 +44,10 @@ use tracing::{error_span, info};
 use tracing_subscriber::EnvFilter;
 
 use super::{
-	ReadError, ReadToEndError, RecvStream, SendStream, VarInt, client,
+	VarInt, client,
 	connection::Connection,
 	endpoint::{self, Endpoint},
-	server, transport,
+	recv, send, server, transport,
 };
 
 #[test]
@@ -159,7 +159,7 @@ fn read_after_close() {
 			.expect("connection");
 		let mut s = new_conn.open_uni(Default::default()).await.unwrap();
 		s.write_all(MSG).await.unwrap();
-		s.finish().unwrap();
+		let s = s.finish();
 		// Wait for the stream to be closed, one way or another.
 		_ = s.stopped().await;
 	});
@@ -851,8 +851,8 @@ fn run_echo(args: EchoArgs) {
 					let msg = gen_data(args.stream_size, SEED);
 
 					let send_task = async {
-						send.write_all(&msg).await.expect("write");
-						send.finish().unwrap();
+						send.write_all(&msg[..]).await.expect("write");
+						send.finish();
 					};
 					let recv_task = async { recv.read_to_end(usize::MAX).await.expect("read") };
 
@@ -879,9 +879,9 @@ struct EchoArgs {
 	stream_receive_window: Option<u64>,
 }
 
-async fn echo((mut send, mut recv): (SendStream, RecvStream)) {
+async fn echo((mut send, mut recv): (send::Stream, recv::Stream)) {
 	while let Some(chunk) = recv.read_chunk(32 << 10).await.expect("read chunk") {
-		send.write_chunk(chunk.bytes).await.expect("write chunk");
+		send.write_all(chunk).await.expect("write chunk");
 	}
 
 	let _ = send.finish();
@@ -985,8 +985,8 @@ async fn rebind_recv() {
 		connected_send.notify_one();
 		write_recv.notified().await;
 		let mut stream = connection.open_uni(Default::default()).await.unwrap();
-		stream.write_all(MSG).await.unwrap();
-		stream.finish().unwrap();
+		stream.write_all(MSG.as_slice()).await.unwrap();
+		let stream = stream.finish();
 		// Wait for the stream to be closed, one way or another.
 		_ = stream.stopped().await;
 	});
@@ -1309,8 +1309,8 @@ async fn remote_address_follows_migration() {
 
 		// send data from the new socket to trigger migration on the server
 		let mut stream = client_conn.open_uni(Default::default()).await.unwrap();
-		stream.write_all(b"hello").await.unwrap();
-		stream.finish().unwrap();
+		stream.write_all(&b"hello"[..]).await.unwrap();
+		stream.finish();
 	};
 
 	trigger_migration.notified().await;
@@ -1341,7 +1341,7 @@ async fn foreign_send_group_panics_cleanly() {
 	let (conn, server_conn) = connect().await;
 	let (other, _other_server) = connect().await;
 	let group = other.send_group(0);
-	let options = super::SendOptions {
+	let options = super::send::Options {
 		group: Some(&group),
 		priority: 0,
 	};
@@ -1359,8 +1359,8 @@ async fn foreign_send_group_panics_cleanly() {
 	assert!(set.is_err(), "set_group accepted a foreign group");
 
 	// The connection still works, and its handles drop without panicking.
-	send.write_all(b"after").await.unwrap();
-	send.finish().unwrap();
+	send.write_all(&b"after"[..]).await.unwrap();
+	send.finish();
 	let mut recv = server_conn.accept_uni().await.unwrap();
 	assert_eq!(recv.read_to_end(usize::MAX).await.unwrap(), b"after");
 }
@@ -1420,9 +1420,9 @@ async fn two_datagram_readers() {
 			x
 		},
 		async {
-			server.send_datagram(b"one"[..].into(), Default::default()).unwrap();
+			server.send_datagram(&b"one"[..], Default::default()).unwrap();
 			done.notified().await;
-			server.send_datagram(b"two"[..].into(), Default::default()).unwrap();
+			server.send_datagram(&b"two"[..], Default::default()).unwrap();
 		}
 	);
 	assert!(*a == *b"one" || *b == *b"one");
@@ -1492,7 +1492,7 @@ async fn stream_stopped() {
 		let stopped2 = stream.stopped();
 		let stopped3 = stream.stopped();
 
-		stream.write_all(b"hi").await.unwrap();
+		stream.write_all(&b"hi"[..]).await.unwrap();
 		// spawn one of the futures into a task
 		let stopped1 = tokio::task::spawn(stopped1);
 		// verify that both futures resolved
@@ -1511,7 +1511,7 @@ async fn stream_stopped() {
 		let mut stream = conn.accept_uni().await.unwrap();
 		let mut buf = [0u8; 2];
 		stream.read_exact(&mut buf).await.unwrap();
-		stream.stop(42u32.into()).unwrap();
+		stream.stop(42u32.into());
 		conn
 	}
 	.instrument(error_span!("server"));
@@ -1529,7 +1529,7 @@ async fn stream_stopped_2() {
 		endpoint.accept().await.unwrap().accept().unwrap().await
 	})
 	.unwrap();
-	let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
+	let send_stream = conn.open_uni(Default::default()).await.unwrap();
 	let stopped = timeout(Duration::from_millis(100), send_stream.stopped()).instrument(error_span!("stopped"));
 	tokio::pin!(stopped);
 	// poll the future once so that the waker is registered.
@@ -1539,7 +1539,7 @@ async fn stream_stopped_2() {
 		_x = std::future::ready(()) => {}
 	}
 	// finish and drop the send stream, since dropping it unfinished would reset it
-	send_stream.finish().unwrap();
+	let send_stream = send_stream.finish();
 	drop(send_stream);
 	// make sure the stopped future still resolves
 	let res = stopped.await;
@@ -1558,13 +1558,13 @@ async fn dropped_send_stream_resets() {
 	})
 	.unwrap();
 	let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
-	send_stream.write_all(b"truncated").await.unwrap();
+	send_stream.write_all(&b"truncated"[..]).await.unwrap();
 	drop(send_stream);
 
 	let mut recv_stream = server_conn.accept_uni().await.unwrap();
 	let res = recv_stream.read_to_end(usize::MAX).await;
 	assert!(
-		matches!(res, Err(ReadToEndError::Read(ReadError::Reset(code))) if code == VarInt::from_u32(0)),
+		matches!(res, Err(recv::Error::Reset(code)) if code == VarInt::from_u32(0)),
 		"{res:?}"
 	);
 }
@@ -1580,8 +1580,8 @@ async fn finished_send_stream_survives_drop() {
 	})
 	.unwrap();
 	let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
-	send_stream.write_all(b"complete").await.unwrap();
-	send_stream.finish().unwrap();
+	send_stream.write_all(&b"complete"[..]).await.unwrap();
+	let send_stream = send_stream.finish();
 	drop(send_stream);
 
 	let mut recv_stream = server_conn.accept_uni().await.unwrap();
@@ -1615,13 +1615,14 @@ async fn stream_stop_before_reset_wins() {
 	let endpoint = endpoint();
 	let (conn, server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
-	let mut recv = server.accept_uni().await.unwrap();
-	recv.stop(5u32.into()).unwrap();
+	send.write_all(&b"hello"[..]).await.unwrap();
+	let recv = server.accept_uni().await.unwrap();
+	recv.stop(5u32.into());
 	stop_sending_received(&conn).await;
 
-	send.reset(7u32.into()).unwrap();
-	let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+	let stopped = send.stopped();
+	send.reset(7u32.into());
+	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(Some(5u32.into()))));
 }
 
@@ -1632,14 +1633,15 @@ async fn stream_stop_after_reset_is_ignored() {
 	let endpoint = endpoint();
 	let (conn, server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
-	let mut recv = server.accept_uni().await.unwrap();
+	send.write_all(&b"hello"[..]).await.unwrap();
+	let recv = server.accept_uni().await.unwrap();
 	// Neither side runs in between, so the peer stops a stream it hasn't seen reset yet.
-	send.reset(7u32.into()).unwrap();
-	recv.stop(5u32.into()).unwrap();
+	let stopped = send.stopped();
+	send.reset(7u32.into());
+	recv.stop(5u32.into());
 	stop_sending_received(&conn).await;
 
-	let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(None)));
 }
 
@@ -1650,16 +1652,15 @@ async fn stream_stop_survives_freed_reset() {
 	let endpoint = endpoint();
 	let (conn, server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
+	send.write_all(&b"hello"[..]).await.unwrap();
 	let stopped = send.stopped();
-	let mut recv = server.accept_uni().await.unwrap();
-	recv.stop(5u32.into()).unwrap();
+	let recv = server.accept_uni().await.unwrap();
+	recv.stop(5u32.into());
 	stop_sending_received(&conn).await;
 
-	send.reset(7u32.into()).unwrap();
-	let id = send.id();
+	send.reset(7u32.into());
 	timeout(Duration::from_secs(10), async {
-		while !conn.send_stream_freed(id) {
+		while conn.send_streams() > 0 {
 			tokio::task::yield_now().await;
 		}
 	})
@@ -1676,9 +1677,10 @@ async fn stream_reset_resolves_stopped() {
 	let endpoint = endpoint();
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
-	send.reset(7u32.into()).unwrap();
-	let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+	send.write_all(&b"hello"[..]).await.unwrap();
+	let stopped = send.stopped();
+	send.reset(7u32.into());
+	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(None)));
 }
 
@@ -1688,9 +1690,12 @@ async fn stream_reset_at_resolves_stopped() {
 	let endpoint = endpoint();
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
-	send.reset_at(2, 7u32.into()).unwrap();
-	let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+	send.write_all(&b"he"[..]).await.unwrap();
+	let offset = send.offset();
+	send.write_all(&b"llo"[..]).await.unwrap();
+	let stopped = send.stopped();
+	send.reset_at(offset, 7u32.into());
+	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(None)));
 }
 
@@ -1701,12 +1706,12 @@ async fn stream_stopped_pending_across_reset() {
 	let endpoint = endpoint();
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
+	send.write_all(&b"hello"[..]).await.unwrap();
 	let unpolled = send.stopped();
 	let polled = tokio::spawn(send.stopped());
 	tokio::task::yield_now().await;
 	assert!(!polled.is_finished());
-	send.reset(7u32.into()).unwrap();
+	send.reset(7u32.into());
 	let polled = timeout(Duration::from_secs(10), polled).await;
 	assert_eq!(polled.expect("polled never resolved").unwrap(), Ok(None));
 	let unpolled = timeout(Duration::from_secs(10), unpolled).await;
@@ -1720,7 +1725,7 @@ async fn dropped_stream_resolves_stopped() {
 	let endpoint = endpoint();
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"truncated").await.unwrap();
+	send.write_all(&b"truncated"[..]).await.unwrap();
 	let stopped = send.stopped();
 	drop(send);
 	let stopped = timeout(Duration::from_secs(10), stopped).await;
@@ -1735,17 +1740,14 @@ async fn stream_reset_releases_stopped() {
 	let endpoint = endpoint();
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
+	send.write_all(&b"hello"[..]).await.unwrap();
 	{
 		let mut stopped = pin!(send.stopped());
 		let poll = std::future::poll_fn(|cx| Poll::Ready(stopped.as_mut().poll(cx))).await;
 		assert!(poll.is_pending());
 	}
 	assert_eq!(conn.stopped_waiters(), 1);
-	send.reset(7u32.into()).unwrap();
-	assert_eq!(conn.stopped_waiters(), 0);
-	// Answered at once, without registering a waiter for a stream that will never report
-	drop(send.stopped());
+	send.reset(7u32.into());
 	assert_eq!(conn.stopped_waiters(), 0);
 }
 
@@ -1772,6 +1774,7 @@ async fn stream_drop_removes_blocked_reader() {
 			// do a blocking read which will add the stream in conn.blocked_readers
 			{
 				let mut buf = [0u8; 64];
+				let mut buf = &mut buf[..];
 				let read_fut = stream.read(&mut buf);
 				tokio::pin!(read_fut);
 				assert!(matches!(read_fut.as_mut().poll(&mut cx), Poll::Pending));
@@ -1796,7 +1799,7 @@ async fn stream_drop_removes_blocked_reader() {
 		let conn = client.dial(server_address, "localhost").unwrap().await.unwrap();
 		let mut stream = conn.open_uni(Default::default()).await.unwrap();
 		// need to send some data to actually start the stream
-		stream.write_all(b"hello").await.unwrap();
+		stream.write_all(&b"hello"[..]).await.unwrap();
 
 		server_task.await.unwrap();
 	}
@@ -1830,12 +1833,12 @@ async fn recv_stream_cancel_stop_drop() {
 				assert!(fut.poll(&mut cx).is_pending());
 			}
 			recv_dropped.set(()).unwrap();
-			recv.stop(0u32.into()).unwrap();
+			recv.stop(0u32.into());
 		},
 		async {
 			let conn = client.dial(server_addr, "localhost").unwrap().await.unwrap();
 			let mut send = conn.open_uni(Default::default()).await.unwrap();
-			_ = send.write_all(b"hello").await;
+			_ = send.write_all(&b"hello"[..]).await;
 			// Don't drop (finish) the send stream until the read has been
 			// cancelled by the server, ensuring that read_to_end can't complete
 			// immediately.
@@ -1919,8 +1922,8 @@ async fn leases_spend_the_connection_window() {
 	.unwrap();
 	let mut send = client.open_uni(Default::default()).await.unwrap();
 	let writer = tokio::spawn(async move {
-		send.write_all(&[7; WINDOW + 500]).await.unwrap();
-		send.finish().unwrap();
+		send.write_all(&[7; WINDOW + 500][..]).await.unwrap();
+		send.finish();
 	});
 
 	let mut recv = server.accept_uni().await.unwrap();
@@ -1968,10 +1971,11 @@ async fn stuck_window_evicts_the_lower_priority() {
 		let id = send.id();
 		let writer = tokio::spawn(async move {
 			// Keep the low stream open: an acknowledged FIN wins over a later STOP_SENDING.
-			if send.write_all(&[7; WINDOW]).await.is_ok() && id != low_id {
-				send.finish().unwrap();
+			if send.write_all(&[7; WINDOW][..]).await.is_ok() && id != low_id {
+				send.finish().stopped().await.unwrap()
+			} else {
+				send.stopped().await.unwrap()
 			}
-			send.stopped().await.unwrap()
 		});
 		(id, writer)
 	});
@@ -1992,7 +1996,7 @@ async fn stuck_window_evicts_the_lower_priority() {
 			len
 		})),
 	);
-	assert_eq!(leased, (Err(ReadError::Evicted), Ok(WINDOW)));
+	assert_eq!(leased, (Err(recv::Error::Evicted), Ok(WINDOW)));
 
 	// The peer hears of the eviction once the stream is stopped. Drain the survivor to FIN
 	// instead of dropping unread data, which would stop that stream too.
@@ -2008,14 +2012,14 @@ async fn stuck_window_evicts_the_lower_priority() {
 }
 
 /// Wait until `recv` leases at least `want` bytes, returning how many it leased.
-async fn leased(recv: &mut RecvStream, want: usize) -> usize {
+async fn leased(recv: &mut recv::Stream, want: usize) -> usize {
 	poll_fn(|cx| recv.poll_lease(cx, want).map_ok(|lease| lease.remaining()))
 		.await
 		.unwrap()
 }
 
 /// Consume the first `n` leased bytes of `recv`.
-async fn consume(recv: &mut RecvStream, n: usize) {
+async fn consume(recv: &mut recv::Stream, n: usize) {
 	poll_fn(|cx| {
 		recv.poll_lease(cx, n).map_ok(|mut lease| {
 			lease.advance(n);
@@ -2024,6 +2028,55 @@ async fn consume(recv: &mut RecvStream, n: usize) {
 	})
 	.await
 	.unwrap()
+}
+
+/// A lease owns its bytes and holds no lock, so the connection keeps moving its other streams
+/// while one is held, and the lease may cross an await in a spawned task.
+#[tokio::test]
+async fn held_lease_does_not_stall_the_connection() {
+	fn assert_send<T: Send>() {}
+	assert_send::<recv::Lease<'static>>();
+
+	let _guard = subscribe();
+	let endpoint = endpoint();
+	let (client, server) = connect_self(&endpoint).await;
+	let mut held = client.open_uni(Default::default()).await.unwrap();
+	held.write_all(&b"held"[..]).await.unwrap();
+	let mut recv = server.accept_uni().await.unwrap();
+	let lease = recv.lease(4).await.unwrap();
+
+	let mut other = client.open_uni(Default::default()).await.unwrap();
+	other.write_all(&b"other"[..]).await.unwrap();
+	other.finish();
+	let mut other = server.accept_uni().await.unwrap();
+	let read = timeout(Duration::from_secs(10), other.read_to_end(64)).await;
+	assert_eq!(read.unwrap().unwrap(), b"other");
+
+	assert_eq!(lease.chunk(), b"held");
+	lease.release();
+}
+
+/// Once `received_reset` reports a reset, moq-quic has freed the stream, so later reads and
+/// leases fail with the same reset instead of finding no stream.
+#[tokio::test]
+async fn reads_after_a_received_reset_fail_with_it() {
+	let _guard = subscribe();
+	let endpoint = endpoint();
+	let (client, server) = connect_self(&endpoint).await;
+	let mut send = client.open_uni(Default::default()).await.unwrap();
+	send.write_all(&b"x"[..]).await.unwrap();
+	let mut recv = server.accept_uni().await.unwrap();
+	send.reset(VarInt::from_u32(7));
+
+	let reset = timeout(Duration::from_secs(10), recv.received_reset()).await.unwrap();
+	assert_eq!(reset.unwrap(), Some(VarInt::from_u32(7)));
+	let lease = recv.lease(1).await.err();
+	assert!(matches!(lease, Some(recv::Error::Reset(code)) if code == VarInt::from_u32(7)));
+	let read = recv.read(&mut Vec::new()).await;
+	assert!(
+		matches!(read, Err(recv::Error::Reset(code)) if code == VarInt::from_u32(7)),
+		"{read:?}"
+	);
 }
 
 /// A tiny datagram, and a tiny stream frame taken from a lease, each reach the application in
@@ -2041,7 +2094,7 @@ async fn tiny_frames_do_not_pin_receive_batches() {
 	assert!(owns_exactly(server.read_datagram().await.unwrap()));
 
 	let mut send = client.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"y").await.unwrap();
+	send.write_all(&b"y"[..]).await.unwrap();
 	let mut recv = server.accept_uni().await.unwrap();
 	let taken = poll_fn(|cx| {
 		recv.poll_lease(cx, 1).map_ok(|mut lease| {
@@ -2187,8 +2240,8 @@ async fn unreachable_sends_are_loss_once_established() {
 
 	outage.active.store(true, Ordering::SeqCst);
 	let mut send = client_conn.open_uni(Default::default()).await.unwrap();
-	send.write_all(b"hello").await.unwrap();
-	send.finish().unwrap();
+	send.write_all(&b"hello"[..]).await.unwrap();
+	send.finish();
 	outage.dropped.notified().await;
 	outage.active.store(false, Ordering::SeqCst);
 

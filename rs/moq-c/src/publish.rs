@@ -74,6 +74,7 @@ pub(crate) enum Child {
 	Video(Id),
 	JsonSnapshot(Id),
 	JsonStream(Id),
+	JsonWindow(Id),
 }
 
 /// A child's handle, which ends what it still publishes when its broadcast closes.
@@ -210,7 +211,13 @@ impl Abort for Container {
 	}
 }
 
-impl Abort for JsonSnapshot {
+impl Abort for Refreshed<moq_mux::json::Snapshot<serde_json::Value>> {
+	fn abort(self, err: moq_net::Error) {
+		let _ = self.data.producer.abort(err);
+	}
+}
+
+impl Abort for Refreshed<moq_json::window::Producer<serde_json::Value>> {
 	fn abort(self, err: moq_net::Error) {
 		let _ = self.data.producer.abort(err);
 	}
@@ -253,9 +260,10 @@ struct Data<T> {
 	children: Children,
 }
 
-/// A JSON snapshot producer, kept beside the signal that stops its refresh task.
-struct JsonSnapshot {
-	data: Data<moq_mux::json::Snapshot<serde_json::Value>>,
+/// A data producer that restates its track for joiners, kept beside the signal that stops its
+/// refresh task.
+struct Refreshed<T> {
+	data: Data<T>,
 
 	/// Closed when the entry is removed, which wakes the refresh task to stop.
 	_alive: kio::Producer<()>,
@@ -289,10 +297,14 @@ pub struct Publish {
 
 	/// JSON snapshot producers (lossy latest-value tracks), each advertised in its broadcast's
 	/// catalog for as long as it lives.
-	json_snapshot: NonZeroSlab<JsonSnapshot>,
+	json_snapshot: NonZeroSlab<Refreshed<moq_mux::json::Snapshot<serde_json::Value>>>,
 
 	/// JSON stream producers (lossless append-log tracks), advertised the same way.
 	json_stream: NonZeroSlab<Data<moq_mux::json::Stream<serde_json::Value>>>,
+
+	/// JSON window producers (sliding runs of records), not advertised: the catalog has no window
+	/// mode.
+	json_window: NonZeroSlab<Refreshed<moq_json::window::Producer<serde_json::Value>>>,
 
 	/// Demand watchers. Close signals shutdown; the task delivers a final callback, then removes itself.
 	demand: NonZeroSlab<DemandEntry>,
@@ -1217,41 +1229,55 @@ impl Publish {
 		let data = self.data_track(broadcast, name, refresh, |catalog, track| {
 			catalog.json_snapshot(track, config, options)
 		})?;
+		self.refreshed(
+			data,
+			|publish| &mut publish.json_snapshot,
+			Child::JsonSnapshot,
+			|publish, id, waiter| {
+				let json = publish.json_snapshot.get(id)?;
+				Some(json.data.producer.poll_refresh(waiter).map(|res| res.is_err()))
+			},
+		)
+	}
+
+	/// Insert `data` into the table `slab` picks, then answer its joiners with a task until it is
+	/// removed or a refresh fails.
+	///
+	/// `poll` polls the entry's refresh, `None` once it is gone, and is ready with `true` when the
+	/// refresh failed. A failed restatement only stops the refreshes: the error that caused it (a
+	/// closed track, a rejected write) reaches the caller through its next edit.
+	fn refreshed<T>(
+		&mut self,
+		data: Data<T>,
+		slab: fn(&mut Self) -> &mut NonZeroSlab<Refreshed<T>>,
+		child: fn(Id) -> Child,
+		poll: fn(&Self, Id, &kio::Waiter) -> Option<std::task::Poll<bool>>,
+	) -> Result<Id, Error>
+	where
+		Refreshed<T>: Abort,
+	{
 		let alive = kio::Producer::new(());
 		let closed = alive.consume();
 		let children = data.children.clone();
-		let snapshot = JsonSnapshot { data, _alive: alive };
-		let id = children.insert(&mut self.json_snapshot, snapshot, Child::JsonSnapshot)?;
+		let id = children.insert(slab(self), Refreshed { data, _alive: alive }, child)?;
 		crate::ffi::Background::new(async move {
-			Self::json_snapshot_refresh(id, closed).await;
-			Ok(())
+			loop {
+				let stop = kio::wait(|waiter| {
+					// Check under the state lock that removes the entry, so a removal never slips
+					// between the check and the lookup.
+					let state = State::lock();
+					if closed.poll_closed(waiter).is_ready() {
+						return std::task::Poll::Ready(true);
+					}
+					poll(&state.publish, id, waiter).unwrap_or(std::task::Poll::Ready(true))
+				})
+				.await;
+				if stop {
+					return Ok(());
+				}
+			}
 		});
 		Ok(id)
-	}
-
-	/// Answer joiners of the JSON snapshot `id` until it is removed, or a refresh fails.
-	///
-	/// A failed restatement only stops the refreshes: the error that caused it (a closed track, a
-	/// rejected write) reaches the caller through its next update.
-	async fn json_snapshot_refresh(id: Id, closed: kio::Consumer<()>) {
-		loop {
-			let stop = kio::wait(|waiter| {
-				// Check under the state lock that removes the entry, so a removal never slips between
-				// the check and the lookup.
-				let state = State::lock();
-				if closed.poll_closed(waiter).is_ready() {
-					return std::task::Poll::Ready(true);
-				}
-				match state.publish.json_snapshot.get(id) {
-					Some(json) => json.data.producer.poll_refresh(waiter).map(|res| res.is_err()),
-					None => std::task::Poll::Ready(true),
-				}
-			})
-			.await;
-			if stop {
-				return;
-			}
-		}
 	}
 
 	/// Publish a new value to a JSON snapshot track. A no-op if unchanged.
@@ -1297,6 +1323,71 @@ impl Publish {
 		let producer = self.json_stream.remove(stream).ok_or(Error::TrackNotFound)?;
 		producer.children.forget(Child::JsonStream(stream));
 		producer.producer.finish()?;
+		Ok(())
+	}
+
+	/// Create a JSON window track (a sliding run of records) on a broadcast.
+	///
+	/// Not advertised in the catalog, which has no window mode. The track carries a refresh ratio
+	/// of 8: a join after more than eight headers' worth of edits asks for the window restated in a
+	/// fresh group, which a task answers until the track is finished.
+	pub fn json_window(
+		&mut self,
+		broadcast: Id,
+		name: &str,
+		config: moq_json::window::ProducerConfig,
+	) -> Result<Id, Error> {
+		let data = self.data_track(broadcast, name, Some(8), |_, track| {
+			Ok(moq_json::window::Producer::new(track, config))
+		})?;
+		self.refreshed(
+			data,
+			|publish| &mut publish.json_window,
+			Child::JsonWindow,
+			|publish, id, waiter| {
+				let window = publish.json_window.get(id)?;
+				Some(window.data.producer.poll_refresh(waiter).map(|res| res.is_err()))
+			},
+		)
+	}
+
+	/// Append one record to the back of a JSON window.
+	pub fn json_window_push(&mut self, window: Id, value: serde_json::Value) -> Result<(), Error> {
+		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
+		window
+			.producer
+			.push(moq_net::Timed::from(&value).at(window.clock.now()))?;
+		Ok(())
+	}
+
+	/// Drop `count` records from the front of a JSON window, clamped to what it holds.
+	pub fn json_window_pop(&mut self, window: Id, count: u64) -> Result<(), Error> {
+		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
+		window
+			.producer
+			.pop(moq_net::Timed::from(count).at(window.clock.now()))?;
+		Ok(())
+	}
+
+	/// Close a JSON window's open group, so the next edit opens one restating the window.
+	pub fn json_window_cut(&mut self, window: Id) -> Result<(), Error> {
+		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
+		window.producer.cut()?;
+		Ok(())
+	}
+
+	/// Finish a JSON window track, keeping it so a late subscriber still finds it.
+	pub fn json_window_finish(&mut self, window: Id) -> Result<(), Error> {
+		let id = window;
+		let window = self.json_window.remove(id).ok_or(Error::TrackNotFound)?;
+		let Data {
+			mut producer, children, ..
+		} = window.data;
+		if let Err(err) = producer.finish() {
+			children.forget(Child::JsonWindow(id));
+			return Err(err.into());
+		}
+		children.keep(Child::JsonWindow(id), producer);
 		Ok(())
 	}
 
@@ -1356,6 +1447,7 @@ impl State {
 					.remove(id)
 					.map(|json| json.abort(err.clone())),
 				Child::JsonStream(id) => self.publish.json_stream.remove(id).map(|json| json.abort(err.clone())),
+				Child::JsonWindow(id) => self.publish.json_window.remove(id).map(|json| json.abort(err.clone())),
 			};
 		}
 		Ok(Closing { encoders, broadcast })

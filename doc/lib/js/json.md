@@ -36,9 +36,9 @@ for await (const { value, at } of consumer) {
 
 `next()` buffers every state it has not yielded and skips a group once the
 subscription's `maxDelay` proves it stale. The budget counts media time and
-wall time, or wall time alone for an untimed track. The default of zero keeps
-only the newest group, so subscribe with a `maxDelay` covering how far the
-playhead trails the live edge. Use `latest()` to skip straight to the head.
+wall time, or wall time alone for an untimed track. The default subscription's
+zero keeps only the newest group, so subscribe with a `maxDelay` covering how
+far the playhead trails the live edge. Use `latest()` to skip straight to the head.
 
 A stream rides one group, so the whole log shares `@moq/net`'s group budget:
 32 MiB of payload and 8192 records. An append that might not fit is refused

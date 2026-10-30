@@ -64,7 +64,7 @@ moq-clock = { path = "../moq-clock", features = ["sim"] }
 # what hid moq-tokio's backend-less build from the nightly feature matrix.
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["aws-lc-rs", "net"] }
 tokio = { workspace = true, features = ["test-util"] }
-tracing-test = { workspace = true, features = ["no-env-filter"] }
+tracing-test = { workspace = true }
 
 # Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
 # `--all-targets` build skips it rather than failing to find the module.

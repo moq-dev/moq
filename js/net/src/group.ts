@@ -666,6 +666,8 @@ export class Consumer {
 	readonly sequence: number;
 
 	#state: GroupState;
+	// The copy it was mirrored from, which that copy's cache evicts.
+	readonly #mirrored: GroupState;
 	#expiry?: Expiry;
 	// Carries the group across its logical track's route changes; see `resume.ts`.
 	#recover?: GroupRecover;
@@ -685,6 +687,7 @@ export class Consumer {
 
 	private constructor(state: GroupState) {
 		this.#state = state;
+		this.#mirrored = state;
 		this.sequence = state.sequence;
 	}
 
@@ -746,6 +749,7 @@ export class Consumer {
 	static {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
+		hooks.readsMirrored = (group) => group.#state === group.#mirrored;
 		hooks.groupTimestamp = (group) =>
 			group.#state.unverified || group.#state.offset !== 0 ? undefined : group.#state.timestamp;
 		hooks.groupLatest = (group) => (group.#state.unverified ? undefined : group.#state.latest);
@@ -777,9 +781,7 @@ export class Consumer {
 				group.#closed = undefined;
 		};
 		hooks.readGroupFrame = (group, compressed) => group.#readFrame(0, compressed);
-		hooks.evictGroup = (group) => {
-			group.#evict();
-		};
+		hooks.evictGroup = (group) => group.#evict();
 	}
 
 	// Evaluate the drift budget for a read that has nothing buffered and is about to
@@ -801,7 +803,9 @@ export class Consumer {
 		return true;
 	}
 
-	#evict() {
+	#evict(): boolean {
+		// A group read on from another copy is that copy's to reclaim.
+		if (this.#state !== this.#mirrored) return false;
 		const frames = this.#bufferedFrames();
 		if (frames.length > 0) {
 			// Unread content is going away either way. If the budget had already given up
@@ -819,6 +823,9 @@ export class Consumer {
 		this.#state.cacheBytes = 0;
 		this.#state.flate = undefined;
 		this.#state.frames.set([]);
+		// A failed copy holds nothing more to reclaim, and its recovery may still continue the group.
+		const closed = this.#state.closed.peek();
+		return !(closed instanceof Error && this.#recovers(closed));
 	}
 
 	// The next change a parked read waits for.

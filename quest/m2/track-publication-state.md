@@ -22,7 +22,3 @@ acceptance, and the `arrival` and `evict` indexes stay distinct.
 - Readers: `poll_info` hides `info` while staged, and the reject check treats
   anything but pending as answered.
 - Waits for front eviction, which is rewriting the same file.
-
-## Required
-
-- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - lands its `track.rs` rewrite first
