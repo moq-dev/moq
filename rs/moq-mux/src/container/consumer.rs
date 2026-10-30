@@ -3297,6 +3297,10 @@ mod tests {
 				min: Duration::from_millis(500),
 				max: Some(Duration::from_millis(500)),
 			});
+		assert!(
+			consumer.startup,
+			"a local range names no start, so the start still reaches back"
+		);
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);
 		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
