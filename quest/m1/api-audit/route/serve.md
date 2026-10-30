@@ -30,6 +30,10 @@ before the larger rework.
   bytes, re-announce the route rather than serving new bytes under it. A
   job that may restart per path answers with `prepare`/`publish`, and takes
   the cold-start reset.
+- Served-answer cache: an answer that `prepare`/`publish` stored in the
+  prefix route's served cache must not serve a later request once its
+  exact route is withdrawn. Check `ServeState`'s cache on withdrawal, fix
+  it if the answer survives, and test it.
 - Tests: turn the reproduction from planning into an integration test in
   `rs/moq-net-tests/tests/integration/`. A server origin `requests("")`
   linked over `transport::memory`; the handler serves a held broadcast; the

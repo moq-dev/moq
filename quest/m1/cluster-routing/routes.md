@@ -239,8 +239,9 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
 - Claim freshness follows the handoff contract below, independently of the
   requested path's forwarding choice.
 - Only the first hop selects the origin. It keeps `route_order`'s shape over
-  the origin nodes announcing the path: longest prefix, newest epoch, the
-  link's priority (`origin::Producer::with_preference`), seed plus route
+  the origin nodes announcing the path: longest prefix, newest epoch (within
+  one identity only, per [Identity and epoch](/quest/m1/api-audit/route/identity.md),
+  decided 2026-10-30), the link's priority (`origin::Producer::with_preference`), seed plus route
   metric, then a rendezvous hash of the path and the identity, and the newest
   connection only for an otherwise identical route. The hash drops the hop
   chain, which differs per node, so every node agrees on a pool member

@@ -26,7 +26,12 @@ while let Some(request) = claim.requested().await {
 
 Apps pass only options: `cost`, `auth`, and an `Instance` override for
 re-publishing a run they did not start (a mirror, archive resume, FFI
-pass-through). Without the override, `announce` mints a new instance under
+pass-through). The override grants no more than a minted instance does:
+publishing still requires the path's grant, as an explicit epoch does today
+through `Route::with_epoch`. Only an app that may already publish the path
+can claim continuity with a run on it. Binding identities to keys is the
+later public-key option in
+[Identity and epoch](/quest/m1/api-audit/route/identity.md). Without the override, `announce` mints a new instance under
 the origin's identity on every call, so re-announcing a broadcast is a
 restart and never a splice. Hops, via, source and the anonymous mark become
 read-only facts on a received announcement; `Hop`, `Hops` and `HopLimit`

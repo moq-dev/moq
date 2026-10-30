@@ -27,14 +27,15 @@ epochless. A job answers with `request.announce` from
 [One Route handle](/quest/m1/api-audit/route/handle.md) in place of
 `Request::prepare` then `publish`. Continuity stays inside `follow` and
 `request` ([Listing and follow](/quest/m1/api-audit/route/events.md)), so
-the `Takeover` event bullet below is superseded. Below, read "epoch" as the
-job's `Instance` and "epochless prefix" as the worker's prefix route. A job
+the bullets below use those names. Where they still say "epoch", read the
+job's `Instance`. A job
 that serves a held broadcast through
 [serve](/quest/m1/api-audit/route/serve.md) needs no takeover.
 
-- A worker advertises `transcode/` without an epoch. Demand for a path starts
-  one job, which announces `transcode/path` with its own freshly minted epoch
-  through `Request::prepare` then `publish`, the claim-to-route operation.
+- A worker advertises `transcode/` as a prefix route under its own
+  instance. Demand for a path starts one job, which announces
+  `transcode/path` with its own freshly minted instance through
+  `request.announce`, the claim-to-route operation.
   Lazy catalog references and initial requests need no anticipated epoch.
   Identical encoder settings do not make two workers the same instance.
 - TAKEOVER is START plus a predecessor Announce ID: it carries the child
@@ -69,12 +70,11 @@ that serves a held broadcast through
   A takeover from A cannot adopt B's readers. Forward TAKEOVER only where
   its continuity assertion remains true; otherwise use ordinary Start/Restart.
   Initial snapshots can use START without replaying historical takeovers.
-- Add an explicit `Takeover` announcement event carrying the new announcement
-  and predecessor identity, mirrored in Rust, JS and exposed bindings. Use
-  model identity rather than leaking stream-local wire IDs. This replaces
-  expanding Update, whose existing meaning is an in-place metadata change.
-  Relays preserve the relationship and applications distinguish continuity
-  from replacement. A proven takeover does not renew a composed catalog.
+- Applications see no takeover event: a reader holding `follow` or `request`
+  simply continues across a proven takeover, and sees a restart otherwise.
+  Relays preserve the predecessor relationship in model identity rather than
+  leaking stream-local wire IDs. A proven takeover does not renew a composed
+  catalog.
 - An epoch-bound request still requires a matching advertised epoch; response
   metadata alone does not make an epochless route eligible. Legacy best-effort
   catalog verification remains weaker and never authorizes implicit stitching.
@@ -86,7 +86,7 @@ Decided 2026-10-27 (maintainer): this no longer waits on
 relay-minted route epochs, only the job's own epoch above: an epochless
 route stays ineligible for an epoch-bound request, as above. Takeover builds on
 what lite-07-wip and `main` already have: stream-local Announce IDs,
-ANNOUNCE_RESTART, Base compression, `Request::prepare`/`publish`, and the
+ANNOUNCE_RESTART, Base compression, the claim-to-route answer, and the
 claim helpers. Its ANNOUNCE_START field layout overlaps with routes (hops
 become a Route ID), so whichever of the two lands second rebases onto the
 other.

@@ -63,7 +63,8 @@ the decisions:
   the `Consumer::request` rustdoc, and the `Route.cost` doc. None of them
   says that a more specific prefix outranks the epoch.
 
-Decision prompts:
+Decision prompts (options separated by semicolons; the chosen one is marked ✅,
+and every option after it was rejected):
 
 - Goal for the user's question: add a same-origin resolve; keep the reset;
   fold it into takeover. The maintainer instead asked for the API audit.

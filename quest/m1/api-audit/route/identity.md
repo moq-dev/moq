@@ -36,7 +36,13 @@ Decided 2026-10-30 (maintainer); every prompt is in the
 - **Default identity.** It is random, minted once per process (per origin
   in JS) and kept for that process's lifetime, so reconnects within the
   process supersede their own stale routes. A process restart is a new
-  identity until its old route is withdrawn. Services set a stable one
+  identity until its old route is withdrawn. A stable identity orders its
+  runs by wall-clock start time, as UUIDv7 epochs do today. If a restart's
+  clock rolls back, or lands on an equal epoch, the stale route keeps
+  winning until it is withdrawn, and never splices: an equal epoch from a
+  restarted process is refused as a conflicting copy, as differing track
+  info is today ([moq-dev/moq#6460](https://github.com/moq-dev/moq/pull/6460)).
+  Test both cases. Services set a stable one
   (`--identity` on the CLI and relay, an origin config field in the
   libraries), for example a hostname. The default is never a hostname,
   since routes reach every relay and subscriber.
