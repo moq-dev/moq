@@ -126,6 +126,12 @@ impl std::fmt::Debug for Limit {
 }
 
 /// A token bucket over received media payload: full at the burst, refilled at the rate.
+///
+/// It charges whole frames as str0m completes them, stamped with their first packet's
+/// arrival, so a frame that completes after a later one earns no credit for its assembly
+/// time. That makes the meter stricter than a per-packet one by at most the cap's rate
+/// over a frame's assembly time, a few hundredths of the default one-second burst. str0m
+/// 0.24 surfaces individual RTP packets only in `rtp_mode`, which gives up depacketization.
 pub(crate) struct Meter {
 	cap: Option<Cap>,
 	/// Bytes still allowed before the cap plus burst is exceeded.
