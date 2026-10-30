@@ -1,4 +1,4 @@
-# [M] Main is no slower than release
+# Main is no slower than release
 
 ## Goal
 
@@ -7,8 +7,9 @@ Before the next release cut, every benchmark where `main` is slower than
 is fixed. Cost that pays for a feature `main` deliberately added is accepted,
 and the reason is written here.
 
-This epic's own work: settle the relay fanout regression and the sparse rows
-that the 2026-10-30 re-run found (see that section). The browser frame path
+This epic's own work: once its child has landed, re-pair the relay `fanout`
+workload against `release` and confirm main's relay CPU is no higher in every
+round. The sparse rows are accepted (2026-10-30). The browser frame path
 needs no repeat; the [performance audit](/quest/m2/audit-perf.md) now pairs
 every later cut with `release`.
 
@@ -259,6 +260,17 @@ gaps (medians of three rounds). From 16 to 4096 gaps, main grows 20% and
 release 9%. The 2.2 to 2.4x gap is per iteration, not per gap. Each iteration
 creates, writes, finishes, and receives two groups, so this is the per-group
 model cost accepted above.
+
+Decided 2026-10-30 (maintainer), in
+[moq-dev/moq#7299](https://github.com/moq-dev/moq/pull/7299):
+
+- The sparse rows are accepted as that per-group model cost.
+- The fanout mode is accidental and is fixed before the cut, in
+  [Fanout lock contention](/quest/m1/release-perf/fanout-lock.md).
+
+## Required
+
+- [Fanout lock contention](/quest/m1/release-perf/fanout-lock.md) - relay fanout subscribers stop contending one track lock, so main's relay CPU matches release's in every round
 
 ## Related
 
