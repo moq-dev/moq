@@ -315,8 +315,8 @@ fn audio_output() -> crate::audio::MoqAudioDecoderOutput {
 		format: MoqAudioSampleFormat::F32,
 		sample_rate: None,
 		channels: None,
-		max_delay: None,
 		delay: None,
+		estimate: true,
 	}
 }
 
@@ -709,7 +709,10 @@ async fn audio_subscribes_a_held_disabled_rendition() {
 		"voice".into(),
 		muted,
 		MoqAudioDecoderOutput {
-			max_delay: Some(Duration::from_secs(30)),
+			delay: Some(crate::media::MoqDelay {
+				min: Duration::ZERO,
+				max: Some(Duration::from_secs(30)),
+			}),
 			..audio_output()
 		},
 	)
@@ -773,7 +776,10 @@ async fn audio_raw_publish_from_many_threads() {
 		MoqAudioDecoderOutput {
 			// The track's whole retention: reading starts only after finish, and the budget
 			// ages groups by wall clock, so a stalled host would otherwise skip the start.
-			max_delay: Some(Duration::from_secs(30)),
+			delay: Some(crate::media::MoqDelay {
+				min: Duration::ZERO,
+				max: Some(Duration::from_secs(30)),
+			}),
 			..audio_output()
 		},
 	)
@@ -907,13 +913,14 @@ async fn raw_audio_decode_delay() {
 		.expect("expected a raw audio catalog");
 	let rendition = catalog.audio.get("microphone").unwrap().clone();
 
-	let subscribe = |delay| {
+	let subscribe = |delay: Option<Duration>| {
 		MoqAudioConsumer::subscribe(
 			&consumer,
 			"microphone".into(),
 			rendition.clone(),
 			MoqAudioDecoderOutput {
-				delay,
+				delay: delay.map(|min| crate::media::MoqDelay { min, max: Some(Duration::ZERO) }),
+				estimate: delay.is_none(),
 				..audio_output()
 			},
 		)
@@ -1008,7 +1015,10 @@ async fn raw_audio_decode_reports_encoder_ends() {
 		snapshot.audio["microphone"].clone(),
 		MoqAudioDecoderOutput {
 			// Reading starts only after finish, so keep every group.
-			max_delay: Some(Duration::from_secs(30)),
+			delay: Some(crate::media::MoqDelay {
+				min: Duration::ZERO,
+				max: Some(Duration::from_secs(30)),
+			}),
 			..audio_output()
 		},
 	)

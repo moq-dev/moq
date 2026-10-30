@@ -1043,11 +1043,13 @@ pub struct MoqVideoDecoderOutput {
 	/// dimensions rather than assuming this took. Both dimensions must be even.
 	#[uniffi(default = None)]
 	pub resize: Option<crate::media::MoqDimensions>,
-	/// Upper bound on buffering before skipping a stalled group. Same knob as
-	/// [`MoqAudioDecoderOutput::max_delay`](crate::audio::MoqAudioDecoderOutput::max_delay).
-	/// `None` keeps the moq-mux default of zero (skip aggressively).
+	/// How far behind the live edge to play: where a cold join starts and when a
+	/// stalled group is skipped. Same knob as
+	/// [`MoqAudioDecoderOutput::delay`](crate::audio::MoqAudioDecoderOutput::delay).
+	/// `None` keeps the moq-mux default of zero for both (start at the newest group,
+	/// skip aggressively).
 	#[uniffi(default = None)]
-	pub max_delay: Option<std::time::Duration>,
+	pub delay: Option<crate::media::MoqDelay>,
 	/// Keep each frame in the surface its decoder produced, for
 	/// [`MoqVideoDecodedFrame::surface`]. `false`, the default, downloads every
 	/// frame to CPU memory as it is decoded, so
@@ -1305,7 +1307,7 @@ impl MoqVideoConsumer {
 		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 
 		options.decoder.scale_hint = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
-		options.max_delay = output.max_delay.unwrap_or_default();
+		options.delay = output.delay.map(Into::into).unwrap_or_default();
 
 		let consumer = broadcast
 			.driver
