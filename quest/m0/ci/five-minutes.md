@@ -32,8 +32,9 @@ agents, so this is an observation, not a controlled benchmark.
 | `just check` | 1,961 | 0.9 min | 4.5 min | 24% |
 | `just test` | 459 | 2.2 min | 8.5 min | 40% |
 
-177 check and 44 test runs reached the agent's 10-minute command limit, so the
-tail is longer than shown.
+Every column leaves out the 177 check and 44 test runs that reached the
+agent's 10-minute command limit, so the percentiles and shares over 5 minutes
+understate the tail.
 
 - First find which routes and steps exceed 5 minutes on representative diffs,
   separating admission wait, compile, and test time.
