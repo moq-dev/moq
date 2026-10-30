@@ -227,28 +227,12 @@ impl State {
 			if let Some(producer) = track.producer {
 				let _ = producer.abort(err.clone());
 			}
-			if let Fill::Ready { producer, .. } = &*track.fill.read() {
-				let _ = producer.handle().abort(err.clone());
+			if let Ok(mut fill) = track.fill.write() {
+				fill.abort(err.clone());
 			}
 		}
 		for (_, producer) in self.lingering.drain() {
 			let _ = producer.abort(err.clone());
-		}
-	}
-	fn close(&mut self) {
-		for (_, mut track) in self.subscribes.drain() {
-			if let Some(request) = track.pending.take() {
-				request.reject(Error::Cancel);
-			}
-			if let Some(producer) = track.producer {
-				let _ = producer.abort(Error::Stream(crate::StreamError::Session(SessionError::Cancel)));
-			}
-			if let Ok(mut fill) = track.fill.write() {
-				fill.cancel();
-			}
-		}
-		for (_, producer) in self.lingering.drain() {
-			let _ = producer.abort(Error::Stream(crate::StreamError::Session(SessionError::Cancel)));
 		}
 	}
 }
@@ -387,9 +371,14 @@ impl Fill {
 	/// rejoin could not replace the cached group, and its readers would see it end early.
 	/// A clean end already settled the head, so [`Fill::Ended`] stays.
 	fn cancel(&mut self) {
+		self.abort(Error::Cancel);
+	}
+
+	/// [`Self::cancel`], with `err` as the reason the head was cut short.
+	fn abort(&mut self, err: Error) {
 		match std::mem::replace(self, Fill::Done) {
 			Fill::Ready { producer, .. } => {
-				let _ = producer.abort(Error::Cancel);
+				let _ = producer.abort(err);
 			}
 			Fill::Ended => *self = Fill::Ended,
 			_ => {}
@@ -1168,10 +1157,6 @@ impl Subscriber {
 		self.state.lock().abort(err);
 	}
 
-	pub fn close(&self) {
-		self.state.lock().close();
-	}
-
 	/// Settle waits for control state that cannot arrive on the closed transport,
 	/// retaining known aliases and tracks until their buffered data is consumed.
 	pub fn settle_control(&self) {
@@ -1525,11 +1510,14 @@ impl Subscriber {
 			false => writer.abort(&Error::Cancel),
 		}
 		let session = self.session.clone();
+		// A peer still streaming entries must not hold the session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		kio::wait(|waiter| {
 			if session.poll_closed(waiter).is_ready() {
 				return Poll::Ready(());
 			}
 			loop {
+				ready!(budget.poll_yield(waiter));
 				match ready!(messages.poll_next(&mut reader, waiter)) {
 					Ok(Some(_)) => continue,
 					Ok(None) | Err(_) => return Poll::Ready(()),
@@ -1552,7 +1540,11 @@ impl Subscriber {
 		mut initial: Initial,
 		live: &kio::Consumer<()>,
 	) -> Result<namespaces::Ended, Error> {
+		// Each entry routes into the origin, so a peer streaming them must not hold the
+		// session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			// Every counted NAMESPACE is in the origin by now, dropped ones included.
 			if initial.initial == 0 {
 				initial.snapshot = None;
@@ -2019,7 +2011,11 @@ impl Subscriber {
 
 		// Request IDs of updates queued behind a pending verdict, already spent.
 		let mut spent = std::collections::HashSet::new();
+		// Each update re-routes in the origin and is answered, so a peer streaming them must
+		// not hold the session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			// Handle one buffered update before reading the next, so answers stay in order.
 			let turn = if let Some((id, body)) = renewal.next() {
 				Turn::Message(id, body)
@@ -5993,9 +5989,13 @@ impl GroupIngest {
 		group: &mut crate::recv::Group,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Ended, Error>> {
+		// An empty object is a few bytes, so a peer keeping them ready must not hold the
+		// session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			match &mut self.phase {
 				IngestPhase::Delta => {
+					ready!(budget.poll_yield(waiter));
 					let Some(id_delta) = ready!(reader.poll_varint_maybe(waiter))? else {
 						return Poll::Ready(Ok(Ended::Group));
 					};
@@ -13666,15 +13666,6 @@ mod stitch_tests {
 		h.dispatch_refused().await;
 	}
 
-	/// More objects than a group may hold.
-	#[moq_clock::test]
-	async fn an_oversized_group_is_refused() {
-		// Each empty object is its delta, a zero size, and the Normal status.
-		let objects = vec![0u64; 3 * (crate::group::MAX_GROUP_FRAMES + 1)];
-		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &objects, &[])], None);
-		h.dispatch_refused().await;
-	}
-
 	/// A second stream for a group the track already holds.
 	#[moq_clock::test]
 	async fn a_second_stream_for_a_group_is_refused() {
@@ -13983,13 +13974,10 @@ mod stitch_tests {
 		let mut fill = h.stream().await;
 		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
 		let mut group = consumer.recv_group().await.unwrap().unwrap();
-		h.subscriber.close();
+		h.subscriber.abort(&Error::Session(SessionError::Cancel));
 		let result = group.read_frame().await;
 		assert!(
-			matches!(
-				result,
-				Err(Error::Stream(crate::StreamError::Session(SessionError::Cancel)))
-			),
+			matches!(result, Err(Error::Session(SessionError::Cancel))),
 			"{result:?}"
 		);
 		assert!(

@@ -2428,6 +2428,239 @@ fn json_stream_publish_consume() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A JSON window event as Rust values: the kind, its index range, the pushed record, and the
+/// frame timestamp.
+type WindowEvent = (
+	moq_json_window_kind,
+	std::ops::Range<u64>,
+	Option<serde_json::Value>,
+	Option<u64>,
+);
+
+/// Read and free the next event delivered to a JSON window consumer.
+fn recv_window(cb: &Callback) -> WindowEvent {
+	let event_id = id(cb.recv());
+	let mut event = moq_json_window_event {
+		kind: moq_json_window_kind::MOQ_JSON_WINDOW_KIND_PUSH,
+		start: 0,
+		end: 0,
+		json: std::ptr::null(),
+		json_len: 0,
+		timestamp_us: 0,
+		timestamp_present: false,
+	};
+	assert_eq!(unsafe { moq_consume_json_window_event(event_id, &mut event) }, 0);
+	let json = (!event.json.is_null()).then(|| {
+		let json = unsafe { std::slice::from_raw_parts(event.json.cast::<u8>(), event.json_len) };
+		serde_json::from_slice(json).unwrap()
+	});
+	let timestamp = event.timestamp_present.then_some(event.timestamp_us);
+	assert_eq!(moq_consume_json_window_event_free(event_id), 0);
+	assert!(
+		moq_consume_json_window_event_free(event_id) < 0,
+		"double-free should fail"
+	);
+	(event.kind, event.start..event.end, json, timestamp)
+}
+
+fn window_push(handle: u32, n: u64) {
+	let value = format!(r#"{{"n":{n}}}"#);
+	assert_eq!(
+		unsafe { moq_publish_json_window_push(handle, value.as_ptr() as *const c_char, value.len()) },
+		0
+	);
+}
+
+fn window_consume(consume: u32, name: &[u8], cb: &Callback) -> u32 {
+	id(unsafe {
+		moq_consume_json_window(
+			consume,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	})
+}
+
+/// A live reader sees each push and pop in order, stamped by the broadcast clock, and closing the
+/// broadcast ends a window still open.
+#[test]
+fn json_window_publish_consume() {
+	use moq_json_window_kind::*;
+
+	let origin = id(moq_origin_create());
+	let path = b"json-window";
+	let broadcast = publish_broadcast(origin, path);
+
+	let name = b"log";
+	let config = moq_json_window_config { checkpoint_records: 0 };
+	let producer =
+		id(unsafe { moq_publish_json_window(broadcast, name.as_ptr() as *const c_char, name.len(), &config) });
+	assert!(
+		!published_catalog(broadcast).json.tracks.contains_key("log"),
+		"the catalog has no window mode"
+	);
+
+	let consume = request_broadcast(origin, path);
+	let event_cb = Callback::new();
+	let consumer = window_consume(consume, name, &event_cb);
+
+	for n in 0..3 {
+		window_push(producer, n);
+	}
+	assert_eq!(moq_publish_json_window_pop(producer, 2), 0);
+
+	let mut last_us = 0;
+	for n in 0..3 {
+		let (kind, range, json, timestamp) = recv_window(&event_cb);
+		assert_eq!(
+			(kind, range, json),
+			(MOQ_JSON_WINDOW_KIND_PUSH, n..n + 1, Some(serde_json::json!({ "n": n })))
+		);
+		let timestamp = timestamp.expect("the producer stamps each edit with the broadcast clock");
+		assert!(timestamp >= last_us);
+		last_us = timestamp;
+	}
+	let (kind, range, json, timestamp) = recv_window(&event_cb);
+	assert_eq!((kind, range, json), (MOQ_JSON_WINDOW_KIND_POP, 0..2, None));
+	assert!(timestamp.expect("the pop is stamped too") >= last_us);
+
+	// Closing the broadcast ends the open window and releases its handle.
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert!(event_cb.recv_terminal() < 0, "an aborted window is not a clean end");
+	assert!(moq_consume_json_cancel(consumer) < 0, "the task removed itself");
+	assert!(moq_publish_json_window_pop(producer, 1) < 0, "the handle was released");
+	assert!(moq_publish_json_window_finish(producer) < 0, "the handle was released");
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A join past the refresh ratio gets the window restated in a fresh group holding only the
+/// checkpoint's records, and a finished window still serves a reader joining afterwards, which
+/// learns of the older records as a skip.
+#[test]
+fn json_window_refreshes_a_bounded_checkpoint() {
+	use moq_json_window_kind::*;
+
+	let origin = id(moq_origin_create());
+	let path = b"json-window-refresh";
+	let broadcast = publish_broadcast(origin, path);
+
+	let name = b"log";
+	let config = moq_json_window_config { checkpoint_records: 2 };
+	let producer =
+		id(unsafe { moq_publish_json_window(broadcast, name.as_ptr() as *const c_char, name.len(), &config) });
+	// Enough ops that a joiner crosses the ratio of 8 headers.
+	const RECORDS: u64 = 40;
+	for n in 0..RECORDS {
+		window_push(producer, n);
+	}
+
+	// A raw joiner reads the cached group, then the restatement its join asked for.
+	let consume = request_broadcast(origin, path);
+	let frame_cb = Callback::new();
+	let raw = id(unsafe {
+		moq_consume_track(
+			consume,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			std::ptr::null(),
+			Some(channel_callback),
+			frame_cb.ptr,
+		)
+	});
+	let mut payload = Vec::new();
+	for _ in 0..=RECORDS {
+		let frame_id = id(frame_cb.recv());
+		let mut frame = moq_frame {
+			payload: std::ptr::null(),
+			payload_size: 0,
+			timestamp_us: 0,
+			timestamp_present: false,
+			keyframe: false,
+		};
+		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+		payload = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) }.to_vec();
+		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	}
+	let header: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+	assert_eq!(header["records"], serde_json::json!([{ "n": 38 }, { "n": 39 }]));
+	assert_eq!(moq_consume_track_cancel(raw), 0);
+	frame_cb.recv_terminal();
+
+	assert_eq!(moq_publish_json_window_finish(producer), 0);
+	assert!(
+		moq_publish_json_window_finish(producer) < 0,
+		"double-finish should fail"
+	);
+
+	let event_cb = Callback::new();
+	window_consume(consume, name, &event_cb);
+	let events: Vec<_> = (0..3)
+		.map(|_| {
+			let (kind, range, json, _) = recv_window(&event_cb);
+			(kind, range, json)
+		})
+		.collect();
+	assert_eq!(
+		events,
+		[
+			(MOQ_JSON_WINDOW_KIND_SKIP, 0..38, None),
+			(MOQ_JSON_WINDOW_KIND_PUSH, 38..39, Some(serde_json::json!({ "n": 38 }))),
+			(MOQ_JSON_WINDOW_KIND_PUSH, 39..40, Some(serde_json::json!({ "n": 39 }))),
+		]
+	);
+	assert_eq!(event_cb.recv_terminal(), 0, "a finished window ends cleanly");
+
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Cancelling a JSON consumer whose subscription the publisher has not answered still delivers
+/// the terminal callback, for every JSON mode.
+#[test]
+fn json_cancel_while_subscribing() {
+	type Consumer = unsafe extern "C" fn(u32, *const c_char, usize, ffi::moq_status_callback, *mut c_void) -> i32;
+	let consumers: [(&[u8], Consumer); 3] = [
+		(b"snapshot", moq_consume_json_snapshot),
+		(b"stream", moq_consume_json_stream),
+		(b"window", moq_consume_json_window),
+	];
+
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"json-cancel-subscribing");
+	// Unknown tracks become requests, which leave each subscribe pending until answered.
+	let request_cb = Callback::new();
+	let dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
+	let consume = consume_local(broadcast);
+
+	for (name, consumer) in consumers {
+		let cb = Callback::new();
+		let task = id(unsafe {
+			consumer(
+				consume,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				Some(channel_callback),
+				cb.ptr,
+			)
+		});
+		let request = id(request_cb.recv());
+
+		assert_eq!(moq_consume_json_cancel(task), 0);
+		assert_eq!(cb.recv_terminal(), 0, "a cancelled subscribe ends cleanly");
+		assert_eq!(moq_track_request_free(request), 0);
+	}
+
+	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
+	assert_eq!(request_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn close_invalid_or_zero_ids() {
 	assert!(moq_origin_close(9999) < 0);
@@ -5751,6 +5984,18 @@ fn a_zeroed_config_is_the_defaults() {
 	assert!(parsed.quic.gso.is_none());
 	assert!(parsed.quic.mtu_discovery.is_none());
 	assert!(parsed.quic.resolve().keylog.is_none());
+}
+
+/// `moq_subscription_defaults` reads back as moq-net's defaults, while a zeroed struct
+/// sets no subscriber limit.
+#[test]
+fn subscription_defaults_are_moq_net_defaults() {
+	let defaults = unsafe { crate::api::parse_subscription(&moq_subscription_defaults()) }.unwrap();
+	assert_eq!(defaults, moq_net::track::Subscription::default());
+
+	let zeroed: moq_subscription = unsafe { std::mem::zeroed() };
+	let zeroed = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
+	assert_eq!(zeroed.max_delay, None);
 }
 
 /// `moq_client_defaults` has to agree with what a zeroed struct actually dials,

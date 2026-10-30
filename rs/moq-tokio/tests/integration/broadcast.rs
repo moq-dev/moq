@@ -243,7 +243,6 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_05_timestamps_webtransport() {
 	lite05_timestamp_roundtrip("https").await;
@@ -360,7 +359,6 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_05_fetch_webtransport() {
 	// Exercises the WebTransport path; lite-05 is forced via config on both ends.
@@ -470,13 +468,11 @@ async fn transport_fetch_roundtrip(version: &str) {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn fetch_moq_transport_18() {
 	transport_fetch_roundtrip("moq-transport-18").await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn fetch_moq_transport_22() {
 	transport_fetch_roundtrip("moq-transport-22").await;
@@ -602,7 +598,6 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_05_fetch_during_subscribe_webtransport() {
 	lite05_fetch_during_subscribe("https").await;
@@ -611,7 +606,6 @@ async fn broadcast_moq_lite_05_fetch_during_subscribe_webtransport() {
 /// Lite05 can't declare an untimed track, so a track that sets no timescale goes out
 /// in milliseconds, its frames stamped with their send time. The subscriber drops them,
 /// so the track arrives untimed.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_05_untimed_track() {
 	let pub_origin = moq_tokio::origin::spawn();
@@ -703,7 +697,6 @@ async fn broadcast_moq_lite_05_untimed_track() {
 /// Both halves have to land in one group, in order and exactly once. Without the fill the
 /// publisher delivers nothing before the live edge, so the join would start at the next
 /// group boundary instead.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_transport_22_current_group_join() {
 	let pub_origin = moq_tokio::origin::spawn();
@@ -810,7 +803,6 @@ async fn next_announce(announcements: &mut moq_net::announce::Consumer) -> (moq_
 /// re-announce, and replacement. On lite-06 every retraction references the implicit
 /// announce id rather than repeating the path (the path form doesn't even encode), so
 /// this exercises the id bookkeeping on both sides of the session.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_06_announce_lifecycle() {
 	announce_lifecycle_test("moq-lite-06").await;
@@ -819,7 +811,6 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 /// The same lifecycle on lite-07, where every path shares its head with a live one,
 /// so the announcements after the first copy it from a base that the retractions
 /// keep moving.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_07_announce_lifecycle() {
 	announce_lifecycle_test("moq-lite-07-wip").await;
@@ -945,7 +936,6 @@ async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Ve
 /// re-splices through the standby at a group boundary, without the path ever
 /// being retracted: both routes carry the same epoch over lite-07, so they serve
 /// the same bytes and the subscription rides the failover.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_migration() {
 	use moq_net::Timestamp;
@@ -1125,7 +1115,6 @@ async fn broadcast_route_migration() {
 /// rejoining player seconds behind live.
 ///
 /// Pre-06 lite is skipped: nothing on those wires says where a subscription starts.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_rejoin_skips_a_stale_warm_cache() {
 	let pre06 = [
@@ -1263,7 +1252,6 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 /// publisher answers at once. Asking past it would wait for a group that a quiet track (a
 /// catalog) may never send. Covers a finished newest group (a catalog) and one that stays
 /// open (a JSON log appending frames to group 0), on every version.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_rejoin_replays_a_current_warm_cache() {
 	for version in (0xff0dad00..=0xff0dadff)
@@ -1503,14 +1491,12 @@ async fn route_reannounce_test(version: Option<&str>) {
 }
 
 /// Route re-advertisement on the default version (lite-06: ANNOUNCE_RESTART by id).
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_reannounce() {
 	route_reannounce_test(None).await;
 }
 
 /// Route re-advertisement on the opt-in lite-07-wip (an explicit ANNOUNCE_RESTART by id).
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_reannounce_lite_07() {
 	route_reannounce_test(Some("moq-lite-07-wip")).await;
@@ -1518,43 +1504,36 @@ async fn broadcast_route_reannounce_lite_07() {
 
 // ── Raw QUIC (moqt://) – same version on both sides ─────────────────
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_01() {
 	broadcast_test("moqt", Some("moq-lite-01"), Some("moq-lite-01")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_02() {
 	broadcast_test("moqt", Some("moq-lite-02"), Some("moq-lite-02")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_03() {
 	broadcast_test("moqt", Some("moq-lite-03"), Some("moq-lite-03")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_06() {
 	broadcast_test("moqt", Some("moq-lite-06"), Some("moq-lite-06")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_07() {
 	broadcast_test("moqt", Some("moq-lite-07-wip"), Some("moq-lite-07-wip")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_transport_18() {
 	broadcast_test("moqt", Some("moq-transport-18"), Some("moq-transport-18")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_transport_22() {
 	broadcast_test("moqt", Some("moq-transport-22"), Some("moq-transport-22")).await;
@@ -1562,25 +1541,21 @@ async fn broadcast_moq_transport_22() {
 
 // ── Raw QUIC – server supports all versions, client pins one ─────────
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_server_all_client_lite_01() {
 	broadcast_test("moqt", Some("moq-lite-01"), None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_server_all_client_lite_02() {
 	broadcast_test("moqt", Some("moq-lite-02"), None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_server_all_client_lite_03() {
 	broadcast_test("moqt", Some("moq-lite-03"), None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_server_all_client_transport_18() {
 	broadcast_test("moqt", Some("moq-transport-18"), None).await;
@@ -1588,25 +1563,21 @@ async fn broadcast_negotiate_server_all_client_transport_18() {
 
 // ── Raw QUIC – client supports all versions, server pins one ─────────
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_lite_01() {
 	broadcast_test("moqt", None, Some("moq-lite-01")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_lite_02() {
 	broadcast_test("moqt", None, Some("moq-lite-02")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_lite_03() {
 	broadcast_test("moqt", None, Some("moq-lite-03")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_transport_18() {
 	broadcast_test("moqt", None, Some("moq-transport-18")).await;
@@ -1716,37 +1687,31 @@ async fn broadcast_max_age_legacy_omits_property() {
 
 // ── WebTransport (https://) – same version on both sides ────────────
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport() {
 	broadcast_test("https", None, None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_lite_01() {
 	broadcast_test("https", Some("moq-lite-01"), Some("moq-lite-01")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_lite_02() {
 	broadcast_test("https", Some("moq-lite-02"), Some("moq-lite-02")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_lite_03() {
 	broadcast_test("https", Some("moq-lite-03"), Some("moq-lite-03")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_transport_18() {
 	broadcast_test("https", Some("moq-transport-18"), Some("moq-transport-18")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_transport_22() {
 	broadcast_test("https", Some("moq-transport-22"), Some("moq-transport-22")).await;
@@ -1754,25 +1719,21 @@ async fn broadcast_webtransport_moq_transport_22() {
 
 // ── WebTransport – server supports all, client pins one ─────────────
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_server_all_client_lite_01() {
 	broadcast_test("https", Some("moq-lite-01"), None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_server_all_client_lite_02() {
 	broadcast_test("https", Some("moq-lite-02"), None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_server_all_client_lite_03() {
 	broadcast_test("https", Some("moq-lite-03"), None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_server_all_client_transport_18() {
 	broadcast_test("https", Some("moq-transport-18"), None).await;
@@ -1780,25 +1741,21 @@ async fn broadcast_webtransport_negotiate_server_all_client_transport_18() {
 
 // ── WebTransport – client supports all, server pins one ─────────────
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_client_all_server_lite_01() {
 	broadcast_test("https", None, Some("moq-lite-01")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_client_all_server_lite_02() {
 	broadcast_test("https", None, Some("moq-lite-02")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_client_all_server_lite_03() {
 	broadcast_test("https", None, Some("moq-lite-03")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_client_all_server_transport_18() {
 	broadcast_test("https", None, Some("moq-transport-18")).await;
@@ -1810,7 +1767,6 @@ async fn broadcast_webtransport_negotiate_client_all_server_transport_18() {
 ///
 /// The server binds a WebSocket TCP listener on a separate port.
 /// The client connects directly via ws://, bypassing QUIC entirely.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_websocket() {
 	// ── publisher (server) ──────────────────────────────────────────
@@ -1929,7 +1885,6 @@ async fn broadcast_websocket() {
 /// The client connects via `http://` to the WebSocket port. QUIC tries to
 /// reach that port over UDP and fails (no QUIC listener there). The WebSocket
 /// fallback converts `http://` → `ws://` and connects over TCP, succeeding.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_websocket_fallback() {
 	// ── publisher (server) ──────────────────────────────────────────
@@ -2060,7 +2015,6 @@ const NEWEST_LITE: &str = "moq-lite-06";
 /// the qmux subprotocol negotiation produced a bare `moql` (or no match)
 /// instead of the newest lite ALPN, which falls through to legacy SETUP negotiation
 /// and picks Lite02. This test fails immediately if that happens.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_websocket_uses_newest_version() {
 	let pub_origin = moq_tokio::origin::spawn();
@@ -2134,14 +2088,11 @@ async fn broadcast_websocket_uses_newest_version() {
 /// (subscribe/track/announce) silently loses that span's fields. Mirrors
 /// `moq-relay`'s `Connection::run`, whose `#[instrument("conn", fields(addr =
 /// ...))]` span is exactly what this depends on for a QUIC connection.
-///
-/// Needs the crate's `tracing-test/no-env-filter` feature: plain `traced_test`
-/// scopes its `EnvFilter` to this test binary's own crate name, which never
-/// matches `moq-net`, the crate whose log lines this test inspects.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_driver_task_inherits_connection_span() {
 	use tracing::Instrument;
+
+	let logs = crate::Logs::capture();
 
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
@@ -2237,19 +2188,15 @@ async fn quic_driver_task_inherits_connection_span() {
 	// not enough for the marker to appear *somewhere* in the logs; it must be on
 	// the exact line moq-net emits from inside the driver task the runtime
 	// spawns, or the assertion would pass even without the fix.
-	logs_assert(|lines| {
-		let subscribed = lines
-			.iter()
-			.find(|line| line.contains("subscribed started"))
-			.ok_or("\"subscribed started\" not logged")?;
-		if subscribed.contains("203.0.113.1:56789") {
-			Ok(())
-		} else {
-			Err(format!(
-				"subscribe log lost the connection span's addr field, the runtime isn't instrumenting the driver task\nline: {subscribed}"
-			))
-		}
-	});
+	let logs = logs.text();
+	let subscribed = logs
+		.lines()
+		.find(|line| line.contains("subscribed started"))
+		.expect("\"subscribed started\" not logged");
+	assert!(
+		subscribed.contains("203.0.113.1:56789"),
+		"subscribe log lost the connection span's addr field, the runtime isn't instrumenting the driver task\nline: {subscribed}"
+	);
 
 	drop(session);
 	server_handle
@@ -2502,7 +2449,6 @@ async fn idle_subscription_releases_the_viewer_count() {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn websocket_unauthorized_handshake_is_explicit() {
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2539,7 +2485,6 @@ async fn websocket_unauthorized_handshake_is_explicit() {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn reconnect_stops_on_websocket_unauthorized() {
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2587,7 +2532,6 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 ///
 /// The assertion is that `closed()` resolves at all; before the fix the GOAWAY
 /// arm was not polled without reconnecting, and this hung until the test timeout.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn one_shot_goaway_ends_the_connection() {
 	let (mut server, addr) = test_server().await;
@@ -2623,7 +2567,6 @@ async fn one_shot_goaway_ends_the_connection() {
 
 /// With reconnecting disabled, the session ending ends the connection: its close
 /// reason surfaces through `closed()` and the loop never dials again.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn one_shot_connect_surfaces_the_session_close() {
 	use std::sync::Arc;
@@ -2684,7 +2627,6 @@ async fn one_shot_connect_surfaces_the_session_close() {
 /// retries forever, which used to keep them announced forever). The reconnect
 /// exists to restore service, not to hide the outage: the application observes
 /// the loss, and a successful redial re-announces.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 	let (mut server, addr) = test_server().await;
@@ -2746,7 +2688,6 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 /// A peer that expresses announce-interest in a prefix the publisher can't serve (e.g. a
 /// subscribe-restricted token) must not tear down the whole session. The publisher FINs that
 /// announce stream cleanly; the connection and other announce streams keep working.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn announce_interest_unauthorized_keeps_session_alive() {
 	// ── publisher (server): only allowed to announce under "allowed" ──
@@ -2952,27 +2893,23 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_wildcard_scopes_lite_05() {
 	wildcard_scope_test("moq-lite-05", "room/alice/**").await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_wildcard_scopes_lite_06() {
 	wildcard_scope_test("moq-lite-06", "room/alice/**").await;
 }
 
 /// A leading-wildcard server grant still filters literal prefix announcements.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_wildcard_server_scope_lite_06() {
 	wildcard_scope_test("moq-lite-06", "*/alice/chat").await;
 }
 
 /// Older wires use the same literal-head interest and local filtering.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_wildcard_server_scope_lite_05() {
 	wildcard_scope_test("moq-lite-05", "*/alice/chat").await;
@@ -2982,7 +2919,6 @@ async fn broadcast_wildcard_server_scope_lite_05() {
 /// serving a subscribe-only server (`with_subscriber`, no `with_publisher`). The server is also
 /// interested in a disjoint "denied" prefix the client can't serve, so the server's
 /// subscriber must survive that FIN and still receive the served broadcast.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn publish_only_client_to_subscribe_only_server() {
 	// ── subscriber (server): interested in both "allowed" and "denied" ──
@@ -3366,7 +3302,6 @@ async fn connect_once(
 /// `initial` is both the first delay and the bar a session must clear to count as
 /// healthy, so at zero every session looked healthy, which reset the give-up
 /// window on every pass. The loop then redialed forever, timeout or not.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 	let (mut server, addr) = test_server().await;
@@ -3402,7 +3337,6 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 /// rides the specified UNAUTHORIZED session code, so it decodes back into a typed
 /// error rather than an opaque transport string, even in one-shot mode where the
 /// session ending is what ends the connection.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn session_close_surfaces_a_rejection_code() {
 	let (mut server, addr) = test_server().await;
@@ -3431,7 +3365,6 @@ async fn session_close_surfaces_a_rejection_code() {
 /// The same rejection under the reconnect loop: each auth code is specified, so
 /// the loop treats it as terminal instead of retrying the same credentials with
 /// backoff until the give-up timeout.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn reconnect_stops_on_a_session_level_rejection() {
 	for code in [
@@ -3470,7 +3403,6 @@ async fn reconnect_stops_on_a_session_level_rejection() {
 
 /// One-shot mode is the other way a caller observes the rejection: with no
 /// reconnect loop in the way, the session's close is the terminal error.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn one_shot_surfaces_a_session_level_rejection() {
 	let (mut server, addr) = test_server().await;
@@ -3499,7 +3431,6 @@ async fn one_shot_surfaces_a_session_level_rejection() {
 /// This covers the ordinary path, where a session is live when `abort` runs. The
 /// race it is paired with (a redial landing inside the abort window) is not
 /// reachable from here, since it turns on when tokio cancels the loop task.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn abort_carries_its_code_to_the_peer() {
 	let (mut server, addr) = test_server().await;
