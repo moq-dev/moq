@@ -136,6 +136,7 @@ export type BroadcastInput = {
 	flip: Signals.Getter<boolean>;
 	maxAge: Signals.Getter<Clock.Milli | undefined>;
 	name: Signals.Getter<Net.Path.Valid>;
+	onDemand: Signals.Getter<boolean>;
 	origin: Signals.Getter<Net.Origin.Table | undefined>;
 	rotation: Signals.Getter<number>;
 };

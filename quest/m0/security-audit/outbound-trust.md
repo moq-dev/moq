@@ -1,40 +1,29 @@
-# [S] Outbound HTTP clients verify their peer
+# [S] Backport outbound HTTP trust to release
 
 ## Goal
 
-On `main` and on `release`, the relay's two outbound HTTP clients cannot be
-steered by a network attacker:
-
-- The auth client (`--auth-url`) verifies its server with its own trust
-  settings, so `--connect-tls-insecure`, fingerprints, or roots meant for the
-  cluster mesh never apply to it.
-- The cluster API client (`--cluster-connect-api`) refuses redirects and
-  refuses `http://` except to loopback, so an injected peer list cannot
-  collect the shared cluster token.
+On `release`, outbound relay HTTP clients cannot be steered by a network
+attacker: auth verifies its server independently from mesh TLS, and the cluster
+API refuses redirects and remote plaintext HTTP.
 
 ## Plan
 
-From the 2026-10-27 audit (AUTH-1, RELAY-2), verified at
-[8d2fa6653a](https://github.com/moq-dev/moq/commit/8d2fa6653a):
+The main fix is [moq-dev/moq#7199](https://github.com/moq-dev/moq/pull/7199).
+It adds `--auth-root` / `auth.root`, shares only the mesh client identity,
+refuses cluster API redirects including redirect response bodies, and permits
+plaintext API URLs only on loopback.
 
-- `rs/moq-relay/src/relay.rs` passes `config.connect.tls` to
-  `config.auth.init`, and the auth client builds its TLS from it. With
-  `--connect-tls-insecure` (documented for a self-signed mesh), a MITM on an
-  `https://` auth server can answer `{"publish":["**"],"subscribe":["**"]}`
-  and every client is admitted with full access.
-- `rs/moq-relay/src/http_client.rs` keeps reqwest's default redirect policy,
-  and `connect_api_is_http` accepts any `http://`. The cluster token is then
-  appended to every peer the API lists.
+After that PR lands, backport these fixes in a separate PR against `release`,
+as `CONTRIBUTING.md` requires. Preserve the published Rust API and released
+cluster config spellings. Unlike main, release's cluster HTTP client also
+inherits mesh server trust; isolate it too, retaining the client identity and
+support for a private API CA. Build trust before background polling starts so
+malformed roots fail startup.
 
-Fix by copying the patterns that already exist: the cluster API client's own
-server trust (`api_tls` in `http_client.rs`) for the auth client, sharing
-only the client identity; and moq-auth's client policy
-([moq-dev/moq#6384](https://github.com/moq-dev/moq/pull/6384): no redirects,
-loopback-only plaintext) for the cluster API client. Update
-`doc/bin/relay/auth.md` and the cluster docs for the new trust option.
+The original 2026-10-27 audit findings (AUTH-1, RELAY-2) were verified at
+[8d2fa6653a](https://github.com/moq-dev/moq/commit/8d2fa6653a). Release has the
+same auth coupling (`config.auth.init(node, &config.connect.tls)`) and no
+cluster API redirect policy.
 
-Backport: `release` has the same coupling (`config.auth.init(node,
-&config.connect.tls)`) and a cluster API client with no redirect policy;
-backport in a separate PR against `release`.
-
-Public API: a new auth trust option in relay config and CLI. Wire: none.
+Public API: additive auth and cluster API trust options, with the existing
+release method signatures preserved. Wire: none.

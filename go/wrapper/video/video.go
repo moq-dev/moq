@@ -7,7 +7,6 @@ import (
 	"iter"
 	"time"
 
-
 	"moq.dev/moq"
 	ffi "moq.dev/moq-ffi/moq"
 	"moq.dev/moq/internal/bridge"
