@@ -48,10 +48,13 @@ The `rust-swapped -> js` and `rust -> js` browser audio timeouts were a lite-06
 catalog group dropped mid-read ending the player's catalog, fixed by
 [moq-dev/moq#6820](https://github.com/moq-dev/moq/pull/6820).
 
+moq-rtc's session-end test was never load-bound: on the paused clock, dimpl's
+randomly jittered DTLS handshake give-up raced ICE's establishment deadline,
+fixed by [moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379).
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Tests own their temp directories](/quest/m0/test-flakes-2/temp-paths.md) - concurrent test processes stop overwriting each other's fixed temp files
-- [moq-rtc's session-end test survives load](/quest/m0/test-flakes-2/rtc-dtls.md) - its DTLS handshake stops timing out on a busy host
