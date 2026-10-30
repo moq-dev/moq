@@ -97,7 +97,6 @@ for (const [version, alpn] of versions) {
 		} finally {
 			for (const track of tracks) track.close();
 			broadcast.close();
-			subscriber.close();
 			pair.client.close();
 			pair.server.close();
 		}
@@ -157,7 +156,6 @@ for (const [version, alpn] of versions) {
 			expect((await pair.client.closed).closeCode).toBe(SessionCode.TooManyRequests);
 		} finally {
 			acquiring.mockRestore();
-			subscriber.close();
 			pair.client.close();
 			pair.server.close();
 		}
@@ -255,7 +253,6 @@ for (const [version, alpn] of versions) {
 				}
 			} finally {
 				announced.close();
-				subscriber.close();
 				pair.client.close();
 				pair.server.close();
 			}
@@ -289,7 +286,6 @@ for (const [version, alpn] of versions) {
 			peer.close();
 		} finally {
 			announced.close();
-			subscriber.close();
 			pair.client.close();
 			pair.server.close();
 		}

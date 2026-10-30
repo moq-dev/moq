@@ -1,20 +1,15 @@
 name: Dependabot
 
-# Enables auto-merge on Dependabot pull requests, so a bump lands on its own
-# once the merge queue's Check and Test pass. The main ruleset requires both
-# (a main PR reports them skipped, so auto-merge enqueues it), and dependabot.yml
-# holds every new version for 7 days, so nothing merges unreviewed by CI or the
-# moment it is published.
+# Requests landing for Dependabot updates through the same pinned-head gate
+# as other PRs. dependabot.yml holds new versions for seven days.
 #
 # `pull_request_target` rather than `pull_request`: Dependabot runs with a
 # read-only token and no access to secrets, so a `pull_request` run could
-# neither read APP_PRIVATE_KEY nor enable auto-merge. That trigger is only safe
+# neither read APP_PRIVATE_KEY nor request landing. That trigger is only safe
 # because this job never checks out or executes the pull request's code; it
-# queries the pull request files and enables auto-merge through `gh`.
+# reads the pull request files and runs Quest from main, never from its head.
 #
-# The moq-bot token rather than GITHUB_TOKEN: a merge enabled by GITHUB_TOKEN
-# does not trigger further workflow runs, which would silently skip
-# release-rs and release-js on every auto-merged bump.
+# The moq-bot token triggers the Land workflow when it enables auto-merge.
 
 permissions: {}
 
@@ -23,10 +18,15 @@ on:
     types: [opened, reopened, synchronize]
 
 jobs:
-  auto-merge:
-    name: Auto-merge
+  request-landing:
+    name: Request landing
+    # github.token reads the queue, including check results, which moq-bot's
+    # installation has no permission for.
     permissions:
+      contents: read
       pull-requests: read
+      checks: read
+      statuses: read
     # head.repo guards the `pull_request_target` trigger: Dependabot pushes its
     # branches to this repository, so a pull request from a fork claiming to be
     # Dependabot is not one.
@@ -34,11 +34,21 @@ jobs:
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    # The moq-bot key lives in the `publish` Environment, which only protected
+    # The moq-bot key lives in the `bot` Environment, which only protected
     # refs can deploy to; pull_request_target runs on the base branch.
-    environment: publish
+    environment: bot
 
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - name: Install trusted quest
+        run: |
+          mkdir -p .tmp
+          nix build --out-link .tmp/quest-cli .#quest
+          echo "$PWD/.tmp/quest-cli/bin" >> "$GITHUB_PATH"
       # Smoke's flake and npm Playwright pin move together through its updater.
       # A lock-only Dependabot PR is discovery, not a change safe to auto-enqueue.
       - name: Require a coupled smoke update
@@ -49,7 +59,7 @@ jobs:
           gh pr view "$PR_URL" --json files --jq
           'if any(.files[]; .path == "test/smoke/flake.lock") then
           error("Use the Smoke toolchain update workflow for the coupled lock and Playwright bump")
-          else "Update can auto-merge" end'
+          else "Update can request landing" end'
 
       - name: Generate moq-bot token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
@@ -59,15 +69,21 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: moq-dev
           repositories: moq
-          # Narrow the minted token to only what `gh pr merge --auto` needs.
+          # Only the permissions needed to pin and request a landing.
           permission-contents: write
           permission-pull-requests: write
 
-      - name: Enable auto-merge
+      - name: Request checked landing
         env:
           # Token is minted fresh per run, expires in 1 hour, never at rest.
-          GH_TOKEN: ${{ steps.token.outputs.token }}
+          BOT_TOKEN: ${{ steps.token.outputs.token }}
+          READ_TOKEN: ${{ github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-        # Squash to match the rest of the history; the ruleset requires a
-        # linear one. Re-running on a later push is a no-op.
-        run: gh pr merge --auto --squash "$PR_URL"
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Refuse until the maintainer has installed the gate's ruleset.
+          GH_TOKEN="$READ_TOKEN" quest land resolve --base main > .tmp/land-plan.json
+          # moq-bot enables auto-merge, so the Land workflow hears about it.
+          export GH_TOKEN="$BOT_TOKEN"
+          hold=$(quest merge "$PR_URL")
+          quest merge "$PR_URL" "$hold" --land "$PR_HEAD"

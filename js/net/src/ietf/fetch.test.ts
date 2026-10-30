@@ -124,19 +124,6 @@ function at(group: number, object: number): Location {
 	return { group: BigInt(group), object: BigInt(object) };
 }
 
-/** The last Object ID a varint holds, where a gap ends in a group whose end is unknown. */
-const MAX_OBJECT = 2n ** 62n - 1n;
-
-/** An End of Range as {@link readObjects} reports it, closing at `group`/`object`. */
-function gap(group: number, object: number | bigint, reason: string): [number, number, string] {
-	return [group, Number(object), `end ${reason}`];
-}
-
-/** What a FILL_TIMEOUT that ran out leaves: Unknown before draft-22 and Timed-Out from it. */
-function timedOut(version: IetfVersion): string {
-	return version === D18 ? "10c" : "20c";
-}
-
 /** A manual clock installed until disposed, so no wait can lapse on its own. */
 function manual(): Manual & Disposable {
 	const clock = new Manual();
@@ -323,18 +310,17 @@ test("a FETCH stops at its end object", async () => {
 	}
 });
 
-// The groups that do not exist are left out, and the rest go out in the order asked for.
-test("a FETCH serves several groups in order", async () => {
+test("a FETCH spanning groups is refused before FETCH_OK", async () => {
 	for (const version of VERSIONS) {
 		for (const order of ["ascending", "descending"] as const) {
 			using fx = serve(version);
 			publishPairs(fx.track, 5, 2);
-			const type = range(version, at(0, 1), at(3, 1));
-			const answer = served(await fetch(fx, new Fetch({ requestId: FETCH_ID, type, groupOrder: order })));
-			expect(answer.ok.endLocation).toEqual(endAt(version, 3, 0));
-			const groups = [pairs([0]).slice(1), pairs([1]), pairs([3]).slice(0, 1)];
-			if (order === "descending") groups.reverse();
-			expect(answer.objects).toEqual(groups.flat());
+			for (const end of [3, 9]) {
+				const type = range(version, at(0, 1), at(end, 0));
+				expect(refused(await fetch(fx, new Fetch({ requestId: FETCH_ID, type, groupOrder: order })))).toBe(
+					NOT_SUPPORTED,
+				);
+			}
 		}
 	}
 });
@@ -353,14 +339,6 @@ test("a FETCH through the final object reports the end of track", async () => {
 		expect(last.ok.endOfTrack).toBe(true);
 		expect(last.objects).toEqual(pairs([4]).slice(1));
 
-		// Capped at the track's last group, so the End Location names its last object.
-		const past = served(
-			await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(3, 0), at(9, 0)) })),
-		);
-		expect(past.ok.endLocation).toEqual(endAt(version, 4, 1));
-		expect(past.ok.endOfTrack).toBe(true);
-		expect(past.objects).toEqual(pairs([3, 4]));
-
 		// A shorter prefix must not claim the track ends there.
 		const prefix = served(
 			await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(4, 0), at(4, 1)) })),
@@ -377,7 +355,7 @@ test("a FETCH waits for the Largest Object's open group", async () => {
 		publishPairs(fx.track, 4);
 		const live = writeGroup(fx.track, 4, ["4-0"], false);
 		let answered = false;
-		const answering = fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(3, 0), at(9, 0)) }));
+		const answering = fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(4, 0), at(4, 0)) }));
 		void answering.finally(() => {
 			answered = true;
 		});
@@ -386,9 +364,9 @@ test("a FETCH waits for the Largest Object's open group", async () => {
 		live.writeFrame({ payload: new TextEncoder().encode("4-1"), timestamp: new Timestamp(1, Timescale.MILLI) });
 		live.finish();
 		const answer = served(await answering);
-		expect(answer.ok.endLocation).toEqual(endAt(version, 4, 1));
+		expect(answer.ok.endLocation).toEqual(version === D18 ? at(4, 0) : at(4, 1));
 		expect(answer.ok.endOfTrack).toBe(false);
-		expect(answer.objects).toEqual(pairs([3, 4]));
+		expect(answer.objects).toEqual(pairs([4]));
 	}
 });
 
@@ -413,19 +391,12 @@ test("a FETCH the cache cannot answer is refused before FETCH_OK", async () => {
 });
 
 // Datagrams are never cached, so a FETCH reaching one finds no group there.
-test("a FETCH skips a datagram", async () => {
+test("a FETCH of a datagram is refused", async () => {
 	for (const version of VERSIONS) {
 		using fx = serve(version);
 		publishPairs(fx.track, 3);
 		expect(fx.track.appendDatagram(new Timestamp(0, Timescale.MILLI), new Uint8Array([1]))).toBe(3);
 		writeGroup(fx.track, 4, ["4-0"]);
-
-		const answer = served(
-			await fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(1, 0), at(3, 0)) })),
-		);
-		// The End Location names the last object sent rather than promising the datagram.
-		expect(answer.ok.endLocation).toEqual(endAt(version, 2, 1));
-		expect(answer.objects).toEqual(pairs([1, 2]));
 
 		const only = new Fetch({ requestId: FETCH_ID, type: range(version, at(3, 0), at(3, 0)) });
 		expect(refused(await fetch(fx, only))).toBe(DOES_NOT_EXIST);
@@ -435,9 +406,10 @@ test("a FETCH skips a datagram", async () => {
 // A filter other than a bounded absolute one resolves against Largest Object.
 test("draft-22: a FETCH filter resolves against Largest Object", async () => {
 	const cases: [Filter.Filter, number[] | number][] = [
-		[{ kind: "unfiltered" }, [0, 1, 2]],
+		[{ kind: "unfiltered" }, NOT_SUPPORTED],
 		[{ kind: "nextObject" }, INVALID_RANGE],
-		[{ kind: "relative", groups: 2n }, [1, 2]],
+		[{ kind: "relative", groups: 2n }, NOT_SUPPORTED],
+		[{ kind: "relative", groups: 1n }, [2]],
 		[{ kind: "absolute", startGroup: 2n, startObject: 0n }, [2]],
 	];
 	for (const [filter, expected] of cases) {
@@ -491,175 +463,27 @@ test("a cancelled FETCH stops waiting", async () => {
 	}
 });
 
-// FILL_TIMEOUT=0 asks for only what is cached. The open group's missing tail is a marked gap
-// rather than an end the requester would take for the group's, or a wait.
-test("a zero FILL_TIMEOUT serves only what is cached", async () => {
+// FILL_TIMEOUT is accepted without truncating a one-group answer, including zero.
+test("FILL_TIMEOUT is ignored while a group finishes", async () => {
 	for (const version of VERSIONS) {
-		using _clock = manual();
-		using fx = serve(version);
-		publishPairs(fx.track, 4);
-		const live = writeGroup(fx.track, 4, ["4-0"], false);
-		const type = range(version, at(3, 0), at(9, 0));
-		const answer = served(await fetch(fx, new Fetch({ requestId: FETCH_ID, type, fillTimeout: Milli(0) })));
-		// Where the open group ends is unknown, so the gap and the End Location reach the last
-		// Object ID there could be: Object 0 covers the whole group before draft-22.
-		expect(answer.ok.endLocation).toEqual({ group: 4n, object: version === D18 ? 0n : MAX_OBJECT });
-		expect(answer.ok.endOfTrack).toBe(false);
-		expect(answer.objects).toEqual([...pairs([3]), [4, 0, "4-0"], gap(4, MAX_OBJECT, timedOut(version))]);
-
-		// A range ending inside the group ends its gap there.
-		const bounded = range(version, at(4, 0), at(4, 3));
-		const short = served(await fetch(fx, new Fetch({ requestId: FETCH_ID, type: bounded, fillTimeout: Milli(0) })));
-		expect(short.ok.endLocation).toEqual(endAt(version, 4, 2));
-		expect(short.objects).toEqual([[4, 0, "4-0"], gap(4, 2, timedOut(version))]);
-		live.finish();
-	}
-});
-
-// The budget bounds the total wait: what arrives within it is served, and the rest of the
-// group becomes a gap once it runs out, even though the group never finishes.
-test("a FILL_TIMEOUT bounds the wait and keeps what arrived within it", async () => {
-	for (const version of VERSIONS) {
-		using clock = manual();
-		using fx = serve(version);
-		publishPairs(fx.track, 4);
-		const live = writeGroup(fx.track, 4, ["4-0"], false);
-		let answered = false;
-		const type = range(version, at(3, 0), at(9, 0));
-		const answering = fetch(fx, new Fetch({ requestId: FETCH_ID, type, fillTimeout: Milli(100) }));
-		void answering.finally(() => {
-			answered = true;
-		});
-		await clock.advance(ms(60));
-		live.writeFrame({ payload: new TextEncoder().encode("4-1"), timestamp: new Timestamp(1, Timescale.MILLI) });
-		// An object arriving does not restart the budget.
-		await clock.advance(ms(39));
-		expect(answered).toBe(false);
-		await clock.advance(ms(1));
-		const answer = served(await answering);
-		expect(answer.ok.endOfTrack).toBe(false);
-		expect(answer.objects).toEqual([...pairs([3, 4]), gap(4, MAX_OBJECT, timedOut(version))]);
-		live.finish();
-	}
-});
-
-// Groups can arrive out of order. The Largest Object's group is read before FETCH_OK and an
-// older open one after it, and both waits draw on the one budget.
-test("a FILL_TIMEOUT is one budget across an answer's groups", async () => {
-	for (const version of VERSIONS) {
-		using clock = manual();
-		using fx = serve(version);
-		const late = writeGroup(fx.track, 2, ["2-0"], false);
-		const newest = writeGroup(fx.track, 3, ["3-0"], false);
-		let answered = false;
-		const type = range(version, at(2, 0), at(9, 0));
-		const answering = fetch(fx, new Fetch({ requestId: FETCH_ID, type, fillTimeout: Milli(100) }));
-		void answering.finally(() => {
-			answered = true;
-		});
-		await clock.advance(ms(60));
-		newest.writeFrame({ payload: new TextEncoder().encode("3-1"), timestamp: new Timestamp(1, Timescale.MILLI) });
-		newest.finish();
-		await clock.advance(ms(39));
-		expect(answered).toBe(false);
-		await clock.advance(ms(1));
-		const answer = served(await answering);
-		expect(answer.ok.endLocation).toEqual(endAt(version, 3, 1));
-		// The object after a gap counts its group from the gap's.
-		expect(answer.objects).toEqual([[2, 0, "2-0"], gap(2, MAX_OBJECT, timedOut(version)), ...pairs([3])]);
-		late.finish();
-	}
-});
-
-// A gap covers every Location since the prior object, so a group with nothing to send yet
-// first marks the groups skipped before it as what their absence otherwise says: gone.
-test("a timed-out group with nothing yet keeps the groups before it nonexistent", async () => {
-	for (const version of VERSIONS) {
-		for (const order of ["ascending", "descending"] as const) {
-			using _clock = manual();
-			using fx = serve(version);
-			// Group 1 never existed.
-			writeGroup(fx.track, 0, ["0-0", "0-1"]);
-			const empty = writeGroup(fx.track, 2, [], false);
-			writeGroup(fx.track, 3, ["3-0", "3-1"]);
-			const type = range(version, at(0, 0), at(3, 0));
-			const answer = served(
-				await fetch(fx, new Fetch({ requestId: FETCH_ID, type, groupOrder: order, fillTimeout: Milli(0) })),
-			);
-			expect(answer.ok.endLocation).toEqual(version === D18 ? at(3, 0) : at(3, 1));
-			const missing = gap(2, MAX_OBJECT, timedOut(version));
-			expect(answer.objects).toEqual(
-				order === "ascending"
-					? [...pairs([0]), gap(1, MAX_OBJECT, "8c"), missing, ...pairs([3])]
-					: [...pairs([3]), gap(3, MAX_OBJECT, "8c"), missing, ...pairs([0])],
-			);
-			empty.finish();
-		}
-	}
-});
-
-// A group the cache evicts between listing it for the answer and writing it is unknown, not
-// skipped, which would say it never existed. Waiting on the open Largest Object's group, before
-// FETCH_OK, gives the older groups time to age out of the cache; the newer one stays.
-test("a group evicted after it was listed is unknown", async () => {
-	for (const version of VERSIONS) {
-		for (const order of ["ascending", "descending"] as const) {
+		for (const fillTimeout of [Milli(0), Milli(100)]) {
 			using clock = manual();
 			using fx = serve(version);
-			// Group 0 never existed; groups 1 and 2 age out.
-			writeGroup(fx.track, 1, ["1-0", "1-1"]);
-			writeGroup(fx.track, 2, ["2-0", "2-1"]);
-			await clock.advance(ms(25_000));
-			writeGroup(fx.track, 3, ["3-0", "3-1"]);
 			const live = writeGroup(fx.track, 4, ["4-0"], false);
-
-			const type = range(version, at(0, 0), at(4, 0));
-			const msg = new Fetch({ requestId: FETCH_ID, type, groupOrder: order, fillTimeout: Milli(20_000) });
-			const answer = served(await clock.drive(fetch(fx, msg)));
-			expect(answer.ok.endLocation).toEqual({ group: 4n, object: version === D18 ? 0n : MAX_OBJECT });
-
-			const newest: [number, number, string][] = [[4, 0, "4-0"], gap(4, MAX_OBJECT, timedOut(version))];
-			expect(answer.objects).toEqual(
-				order === "ascending"
-					? [
-							gap(0, MAX_OBJECT, "8c"),
-							gap(1, MAX_OBJECT, "10c"),
-							gap(2, MAX_OBJECT, "10c"),
-							...pairs([3]),
-							...newest,
-						]
-					: [
-							...newest,
-							...pairs([3]),
-							gap(3, MAX_OBJECT, "8c"),
-							gap(2, MAX_OBJECT, "10c"),
-							gap(1, MAX_OBJECT, "10c"),
-						],
+			let answered = false;
+			const answering = fetch(
+				fx,
+				new Fetch({ requestId: FETCH_ID, type: range(version, at(4, 0), at(4, 0)), fillTimeout }),
 			);
+			void answering.then(() => {
+				answered = true;
+			});
+			await clock.advance(ms(1000));
+			expect(answered).toBe(false);
+			live.writeFrame({ payload: new TextEncoder().encode("4-1"), timestamp: new Timestamp(1, Timescale.MILLI) });
 			live.finish();
+			expect(served(await answering).objects).toEqual(pairs([4]));
 		}
-	}
-});
-
-// Every FETCH keeps its own budget, even for the same open group, and one without FILL_TIMEOUT,
-// as an older peer sends, waits for the group as it always has.
-test("each FETCH keeps its own FILL_TIMEOUT", async () => {
-	for (const version of VERSIONS) {
-		using clock = manual();
-		using fx = serve(version);
-		publishPairs(fx.track, 4);
-		const live = writeGroup(fx.track, 4, ["4-0"], false);
-		const type = range(version, at(4, 0), at(9, 0));
-		const waiting = fetch(fx, new Fetch({ requestId: FETCH_ID, type }));
-		const cached = served(await fetch(fx, new Fetch({ requestId: FETCH_ID + 1n, type, fillTimeout: Milli(0) })));
-		expect(cached.objects).toEqual([[4, 0, "4-0"], gap(4, MAX_OBJECT, timedOut(version))]);
-
-		await clock.advance(ms(10_000));
-		live.writeFrame({ payload: new TextEncoder().encode("4-1"), timestamp: new Timestamp(1, Timescale.MILLI) });
-		live.finish();
-		const full = served(await waiting);
-		expect(full.ok.endLocation).toEqual(endAt(version, 4, 1));
-		expect(full.objects).toEqual(pairs([4]));
 	}
 });
 

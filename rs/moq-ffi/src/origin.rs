@@ -236,7 +236,7 @@ impl Following {
 pub struct MoqAnnounce {
 	/// The covered prefix, relative to the origin.
 	pub prefix: String,
-	/// What each wildcard matched, or `None` when the route only overlaps the scope.
+	/// What each wildcard matched. Only full matches are listed, so it is always set.
 	pub captures: Option<Vec<String>>,
 	/// The route serving the prefix: its epoch, hops, and a static cost.
 	pub route: MoqRoute,
@@ -441,7 +441,7 @@ impl MoqOriginProducer {
 
 #[uniffi::export]
 impl MoqOriginConsumer {
-	/// Subscribe to routes matching a pattern scope; updates stay relative to the origin.
+	/// Subscribe to routes whose names match a pattern scope; updates stay relative to the origin.
 	pub fn announced(&self, config: MoqAnnounceConfig) -> Result<Arc<MoqAnnounceConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;

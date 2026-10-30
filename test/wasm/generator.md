@@ -5,13 +5,13 @@ Which Rust binding `@moq/net` wraps in the browser: moq-ffi through UniFFI (ubrn
 This compares them on the [baseline harness](README.md#backend-baseline).
 
 BoltFFI cannot bind moq-ffi as written (see [What blocks BoltFFI](#what-blocks-boltffi)),
-so its network numbers come from the [BoltFFI spike](https://github.com/kixelated/rust2/blob/main/bench/ffi/README.md#boltffi-comparison)'s slice with a browser client added. The
+so its network numbers come from the [BoltFFI spike](https://github.com/moq-dev/rust2/blob/main/bench/ffi/README.md#boltffi-comparison)'s slice with a browser client added. The
 same slice also runs through UniFFI, so the two generators compare on identical Rust.
 
 **Decision** (maintainer, 2026-10-17, [#5838](https://github.com/moq-dev/moq/pull/5838)):
 moq-ffi through UniFFI over ubrn. It keeps one binding surface for every language with no
 API break, and passes every parity case. Its two measured costs have follow-ups:
-[size](/quest/m2/rs2ts/net-only.md) and [payload copies](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md).
+[size](/quest/m2/rs2ts/net-only.md) and [payload copies](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md).
 [Complete WASM bindings](/quest/m2/rs2ts/wasm-bindings.md) builds on this harness.
 
 ## Reproduce
@@ -151,7 +151,7 @@ The slice, six ABBA rounds:
 Both generators resolve one JS Promise per `rust_future_poll` wakeup; BoltFFI's async
 path is 1.4 to 2.1 times cheaper. UniFFI's bytes cost about 7 ns per byte written and 8 ns
 per byte read, from its per-element `Vec<u8>` lift and lower in Rust, against BoltFFI's
-bulk copies at 0.5 and 1.3. That is [Payload bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md)'s target.
+bulk copies at 0.5 and 1.3. That is [Payload bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md)'s target.
 `@ubjs/core` also arms and clears a `setTimeout` on every async call, a Node.js keep-alive
 that runs in the browser too.
 

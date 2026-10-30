@@ -47,12 +47,8 @@ for (const name of ["check"]) {
 		}
 	});
 
-	test(`${name} uses the configured runner only for merge groups`, () => {
-		const expression = workflow.jobs[name]["runs-on"].replace(/^\$\{\{\s*|\s*\}\}$/g, "");
-		const runner = new Function("github", "vars", `return (${expression});`);
-		expect(runner({ event_name: "merge_group" }, { MOQ_QUEUE_RUNNER: "moq-queue" })).toBe("moq-queue");
-		expect(runner({ event_name: "merge_group" }, {})).toBe("ubuntu-24.04-arm");
-		expect(runner({ event_name: "pull_request" }, { MOQ_QUEUE_RUNNER: "moq-queue" })).toBe("ubuntu-24.04-arm");
+	test(`${name} keeps release checks on a hosted runner`, () => {
+		expect(workflow.jobs[name]["runs-on"]).toBe("ubuntu-24.04-arm");
 	});
 }
 
@@ -65,9 +61,12 @@ test("self-hosted queue jobs use local caches without R2 credentials", async () 
 		.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
 	const backend = new Function("runner", "inputs", `return (${expression});`);
 	const guard = new Function("runner", "github", `return (${action.runs.steps[0].if});`);
-	for (const event_name of ["merge_group", "pull_request", "pull_request_target", "push", "workflow_dispatch"]) {
-		expect(guard({ environment: "self-hosted" }, { event_name })).toBe(event_name !== "merge_group");
-		expect(guard({ environment: "github-hosted" }, { event_name })).toBe(false);
+	for (const name of ["Land", "Check", "Untrusted"]) {
+		for (const ref of ["refs/heads/main", "refs/heads/feature", "refs/pull/1/merge"]) {
+			const github = { workflow: name, ref };
+			expect(guard({ environment: "self-hosted" }, github)).toBe(name !== "Land" || ref !== "refs/heads/main");
+			expect(guard({ environment: "github-hosted" }, github)).toBe(false);
+		}
 	}
 	for (const credentials of [
 		{ "access-key-id": "key", "secret-access-key": "secret" },
