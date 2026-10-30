@@ -220,7 +220,14 @@ pub struct Config {
 	/// [`Sink`](super::Sink) is its own thread: a caller fanning one decoded
 	/// picture out to several encoders (a transcode ladder) hands each the
 	/// native frame and keeps the per-encoder pixel work off its own threads.
-	/// External Vulkan inputs the backend scales on the GPU are left to it.
+	/// On Apple platforms a `Sink` encodes inline, so the scale runs on the
+	/// caller there. External Vulkan inputs the backend scales on the GPU are
+	/// left to it.
+	///
+	/// A scaled frame keeps its source's space, and an unlabelled one is labelled
+	/// with what [`Color::infer`] guesses for its original size. Set
+	/// [`color`](Self::color) to match, or a frame scaled across 576 lines is
+	/// refused with [`Error::ColorMismatch`].
 	pub resize: Option<crate::resize::Config>,
 	/// External Vulkan input device, required before opening a GPU-only encoder.
 	/// `None` retains selection for CPU and native decoder/capture surfaces.

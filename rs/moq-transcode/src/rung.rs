@@ -119,12 +119,12 @@ impl Rung {
 	/// backend's COM apartment is per-thread, so that would leak the opening
 	/// worker's initialization and uninitialize COM on one that never initialized
 	/// it. The sink owns a thread and stays on it.
-	async fn encode(&self, color: Option<moq_video::Color>) -> Result<moq_video::encode::Sink, Error> {
+	async fn encode(&self, color: moq_video::Color) -> Result<moq_video::encode::Sink, Error> {
 		let framerate = self.info.framerate.unwrap_or(moq_video::FrameRate::new(30, 1).unwrap());
 		let mut config = moq_video::encode::Config::new(self.info.size.width, self.info.size.height, framerate);
 		config.bitrate = Some(self.info.bitrate);
 		config.kind = self.encoder.clone();
-		config.color = color;
+		config.color = Some(color);
 		config.resize = Some(self.resize);
 		// Every source group boundary is a cut; the keyframe interval is only a
 		// backstop against pathologically long source groups.
@@ -841,7 +841,7 @@ impl Pipeline {
 #[derive(Default)]
 struct Encoder {
 	/// The open encoder and the space it signals.
-	open: Option<(moq_video::encode::Sink, Option<moq_video::Color>)>,
+	open: Option<(moq_video::encode::Sink, moq_video::Color)>,
 	/// A cut asked for while no encoder was open, applied when one opens.
 	pending_cut: bool,
 }
@@ -865,7 +865,14 @@ impl Encoder {
 		frame: impl Into<Arc<moq_video::Frame>>,
 	) -> Result<Vec<moq_video::encode::Encoded>, Error> {
 		let frame = frame.into();
-		let color = frame.surface.color();
+		// The space the encoder will see, after it scales the frame: an unlabelled
+		// source means what its own size implies, and the resize labels it so.
+		// Left to the encoder's own guess, an HD frame scaled below 576 lines would
+		// arrive as BT.709 at an encoder signalling BT.601 and be refused.
+		let color = frame
+			.surface
+			.color()
+			.unwrap_or_else(|| moq_video::Color::infer(frame.size()));
 		let mut encoded = Vec::new();
 		if let Some((_, signalled)) = &self.open
 			&& *signalled != color
@@ -1092,6 +1099,27 @@ mod tests {
 
 		assert!(encoded.first().expect("the first frame").keyframe);
 		assert!(switched.last().expect("the switched frame").keyframe);
+	}
+
+	/// An unlabelled HD frame means BT.709, and scaling it to an SD rung keeps
+	/// that label. The rung's encoder has to signal it too, rather than the
+	/// BT.601 its own size implies, or it refuses the frame it scaled.
+	#[tokio::test]
+	#[cfg(feature = "openh264")]
+	async fn an_unlabelled_hd_frame_encodes_on_an_sd_rung() {
+		let (rung, _source, _retire) = idle_rung();
+		let hd = moq_video::Size::new(1280, 720);
+		let i420 = moq_video::I420::new(hd, vec![128; hd.pixels() as usize * 3 / 2]).unwrap();
+		let frame = moq_video::Frame::new(
+			moq_video::Surface::I420(i420),
+			moq_net::Timestamp::from_micros(0).unwrap(),
+		);
+
+		let mut encoder = Encoder::default();
+		encoder.cut().await.unwrap();
+		let mut encoded = encoder.encode(&rung, frame).await.unwrap();
+		encoded.extend(encoder.finish().await.unwrap());
+		assert!(encoded.first().expect("the frame").keyframe);
 	}
 
 	/// A fetched NVDEC group reaches the encoder at native size when
