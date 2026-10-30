@@ -1,5 +1,6 @@
 import { expect, jest, onTestFinished, test } from "bun:test";
 import * as Connection from "../connection/index.ts";
+import { StreamCode } from "../error.ts";
 import { GRACE } from "../ledger.ts";
 import { createMockTransportPair, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -330,6 +331,20 @@ test("SUBSCRIPTION_ENDED cancels a head nothing claimed", async () => {
 	await done.encode(peer.writer, VERSION);
 	expect(await consumer.closed).toBeInstanceOf(Error);
 	await expect(frames(group)).rejects.toThrow();
+});
+
+test("MALFORMED_TRACK fails the track as malformed, not as a relay bug", async () => {
+	const { consumer, fetching, peer } = await join();
+	await accept(fetching);
+
+	await peer.writer.u53(PublishDone.id);
+	const done = new PublishDone({
+		statusCode: PublishDoneStatus.MALFORMED_TRACK,
+		streamCount: 0n,
+		reasonPhrase: "malformed track",
+	});
+	await done.encode(peer.writer, VERSION);
+	expect(await consumer.closed).toMatchObject({ code: StreamCode.MalformedTrack });
 });
 
 test("a whole group that precedes the head wins the sequence", async () => {

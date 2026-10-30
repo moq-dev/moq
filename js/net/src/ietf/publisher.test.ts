@@ -4,7 +4,7 @@ import { Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
-import { error, ProtocolViolation, SessionCode, SessionError, StreamCode, unauthorized } from "../error.ts";
+import { error, ProtocolViolation, SessionCode, SessionError, StreamCode, Stream as StreamError, unauthorized } from "../error.ts";
 import { MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
 import { hooks } from "../internal.ts";
@@ -2276,6 +2276,8 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 			[new Error("failed"), 0x0],
 			[unauthorized("test"), 0x1],
 			[new SessionError(SessionCode.Expired), 0x1],
+			// So does a malformed upstream: MALFORMED_TRACK, so the subscriber can tell it from a bug here.
+			[new StreamError(StreamCode.MalformedTrack), 0x12],
 		] as const) {
 			const pair = createMockTransportPair(ALPN.DRAFT_18);
 			const session = new NativeSession(pair.server, version, true);
