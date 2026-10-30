@@ -939,7 +939,9 @@ impl<F: Container> Consumer<F> {
 		// tolerance set here has to reach it: otherwise moq-net skips the very groups
 		// this consumer was told to wait for, before they ever get here. It keeps the
 		// warmup too, as `with_warmup` asks of the subscription.
-		let subscription = track.subscription().with_max_delay(max_delay.saturating_add(self.warmup));
+		let subscription = track
+			.subscription()
+			.with_max_delay(max_delay.saturating_add(self.warmup));
 		let _ = track.update(subscription);
 	}
 
