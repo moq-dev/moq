@@ -45,6 +45,40 @@ const SEEDS: ops::RangeInclusive<u64> = 1..=8;
 /// The seed the merge gate runs
 const GATE: ops::RangeInclusive<u64> = 1..=1;
 
+/// MEASUREMENT HARNESS (scratch only): `MOQ_PROBE_SEEDS=a-b` overrides [`SEEDS`], and
+/// `MOQ_PROBE_MEASURE=<csv>` appends one row per trial and turns each budget into a logged row
+fn seeds() -> ops::RangeInclusive<u64> {
+	match std::env::var("MOQ_PROBE_SEEDS") {
+		Ok(range) => {
+			let (a, b) = range.split_once('-').expect("a-b");
+			a.parse().unwrap()..=b.parse().unwrap()
+		}
+		Err(_) => SEEDS,
+	}
+}
+
+fn measure(row: &str) -> bool {
+	let Ok(path) = std::env::var("MOQ_PROBE_MEASURE") else {
+		return false;
+	};
+	use std::io::Write as _;
+	let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+	writeln!(file, "{row}").unwrap();
+	true
+}
+
+/// Asserts `cond`, or records its failure while measuring
+macro_rules! budget {
+	($cond:expr, $($arg:tt)+) => {
+		if !$cond {
+			let msg = format!($($arg)+);
+			if !measure(&format!("FAIL,{}", msg.replace(',', ";"))) {
+				panic!("{msg}");
+			}
+		}
+	};
+}
+
 /// The congestion controller of a bulk upload sharing the bottleneck
 #[derive(Clone, Copy)]
 enum Upload {
@@ -544,6 +578,7 @@ fn receive(
 
 /// One seed's probing run and its baseline
 struct Trial {
+	label: String,
 	seed: u64,
 	probing: Outcome,
 	baseline: Outcome,
@@ -561,24 +596,60 @@ fn mean(trials: &[Trial], f: impl Fn(&Outcome) -> f64) -> (f64, f64) {
 /// holding the probing runs to every budget on the mean across seeds
 fn compare(label: &str, scenario: Scenario, seeds: ops::RangeInclusive<u64>) -> Vec<Trial> {
 	let rtt = 2 * scenario.latency;
-	let trials: Vec<_> = seeds
-		.map(|seed| {
-			let scenario = Scenario {
-				seed,
-				..scenario.clone()
-			};
-			let probing = run(&scenario);
-			probing.report(&format!("{label} seed {seed} probing"));
-			let baseline = run(&Scenario { target: 0, ..scenario });
-			baseline.report(&format!("{label} seed {seed} baseline"));
-			assert_eq!(baseline.redundant, 0);
-			Trial {
-				seed,
-				probing,
-				baseline,
-			}
-		})
-		.collect();
+	let seeds: Vec<u64> = if seeds == SEEDS { self::seeds().collect() } else { seeds.collect() };
+	let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(seeds.len().max(1));
+	let next = std::sync::atomic::AtomicUsize::new(0);
+	let mut trials: Vec<Trial> = std::thread::scope(|scope| {
+		let handles: Vec<_> = (0..threads)
+			.map(|_| {
+				scope.spawn(|| {
+					let mut out = Vec::new();
+					loop {
+						let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+						let Some(&seed) = seeds.get(i) else { break };
+						let scenario = Scenario {
+							seed,
+							..scenario.clone()
+						};
+						let probing = run(&scenario);
+						let baseline = run(&Scenario { target: 0, ..scenario });
+						out.push(Trial {
+							label: label.to_string(),
+							seed,
+							probing,
+							baseline,
+						});
+					}
+					out
+				})
+			})
+			.collect();
+		handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+	});
+	trials.sort_by_key(|t| t.seed);
+	for trial in &trials {
+		trial.probing.report(&format!("{label} seed {} probing", trial.seed));
+		trial.baseline.report(&format!("{label} seed {} baseline", trial.seed));
+		assert_eq!(trial.baseline.redundant, 0);
+		let (p, b) = (&trial.probing, &trial.baseline);
+		measure(&format!(
+			"TRIAL,{label},{},{},{},{},{},{:.3},{:.3},{},{},{},{:.3},{:.3},{:.3},{:.3}",
+			trial.seed,
+			p.frames,
+			p.late,
+			b.late,
+			p.unique,
+			p.percentile(0.99).as_secs_f64() * 1e3,
+			b.percentile(0.99).as_secs_f64() * 1e3,
+			p.redundant,
+			p.competitor,
+			b.competitor,
+			p.queue.mean_delay().as_secs_f64() * 1e3,
+			b.queue.mean_delay().as_secs_f64() * 1e3,
+			p.queue.max_delay.as_secs_f64() * 1e3,
+			b.queue.max_delay.as_secs_f64() * 1e3,
+		));
+	}
 
 	let (overhead, _) = mean(&trials, |o| o.redundant as f64 / o.unique as f64);
 	let (late, baseline_late) = mean(&trials, |o| o.late as f64);
@@ -597,16 +668,16 @@ fn compare(label: &str, scenario: Scenario, seeds: ops::RangeInclusive<u64>) -> 
 		baseline_competitor,
 		"mean across seeds"
 	);
-	assert!(overhead <= OVERHEAD, "{label}: overhead {overhead:.3} over {OVERHEAD}");
-	assert!(
+	budget!(overhead <= OVERHEAD, "{label}: overhead {overhead:.3} over {OVERHEAD}");
+	budget!(
 		late <= baseline_late + frames * LATE,
 		"{label}: {late:.1} late frames, {baseline_late:.1} for the baseline"
 	);
-	assert!(
+	budget!(
 		p99 <= baseline_p99 + rtt.as_secs_f64() * 1e3,
 		"{label}: p99 {p99:.1}ms, {baseline_p99:.1}ms for the baseline"
 	);
-	assert!(
+	budget!(
 		competitor >= baseline_competitor * FAIRNESS,
 		"{label}: competitor got {competitor:.0} bytes, {baseline_competitor:.0} beside the baseline"
 	);
@@ -615,17 +686,24 @@ fn compare(label: &str, scenario: Scenario, seeds: ops::RangeInclusive<u64>) -> 
 
 /// Asserts the probing runs' estimate reaches the target within [`RISE`] of `from` on the mean
 fn rises(trials: &[Trial], from: Duration) {
-	let rises = trials.iter().map(|Trial { seed, probing, .. }| {
-		let rise = probing.rise(from).unwrap_or_else(|| {
-			panic!(
-				"seed {seed}: estimate {} B/s never reached {TARGET} B/s after {from:?}",
-				probing.samples.last().expect("sampled").estimate
-			)
-		});
-		rise.as_secs_f64()
+	let rises = trials.iter().map(|Trial { label, seed, probing, .. }| {
+		let rise = match probing.rise(from) {
+			Some(rise) => rise.as_secs_f64(),
+			None => {
+				budget!(
+					false,
+					"{label} seed {seed}: estimate {} B/s never reached {TARGET} B/s after {from:?}",
+					probing.samples.last().expect("sampled").estimate
+				);
+				// Counted as the rest of the run
+				(probing.samples.last().expect("sampled").at.saturating_sub(from)).as_secs_f64()
+			}
+		};
+		measure(&format!("RISE,{label},{seed},{rise:.3}"));
+		rise
 	});
 	let rise = rises.sum::<f64>() / trials.len() as f64;
-	assert!(
+	budget!(
 		rise <= RISE.as_secs_f64(),
 		"estimate reached {TARGET} B/s {rise:.1}s after {from:?} on the mean"
 	);
@@ -643,17 +721,20 @@ fn falls(trials: &[Trial], from: Duration, rate: u64) {
 			let fell = outcome
 				.first(from..Duration::MAX, |estimate| estimate <= rate * 5 / 4)
 				.unwrap_or_else(|| {
-					panic!(
-						"seed {} {run}: estimate {} B/s never fell to {rate} B/s after {from:?}",
+					budget!(
+						false,
+						"{} seed {} {run}: estimate {} B/s never fell to {rate} B/s after {from:?}",
+						trial.label,
 						trial.seed,
 						outcome.samples.last().expect("sampled").estimate
-					)
+					);
+					outcome.samples.last().expect("sampled").at
 				});
 			(fell - from).as_secs_f64()
 		});
 		let fall = falls.sum::<f64>() / trials.len() as f64;
 		info!(run, fall, "estimate fell to {rate} B/s on the mean");
-		assert!(
+		budget!(
 			fall <= FALL.as_secs_f64(),
 			"{run}: estimate fell to {rate} B/s {fall:.1}s after {from:?} on the mean"
 		);
@@ -885,7 +966,7 @@ fn idle_restart() {
 	for Trial { seed, probing, .. } in &trials {
 		// The last frames drain within a second
 		let drained = probing.at(idle.0 + Duration::from_secs(1)).redundant;
-		assert_eq!(probing.at(idle.1).redundant, drained, "seed {seed} probed while idle");
+		budget!(probing.at(idle.1).redundant == drained, "idle seed {seed} probed while idle");
 	}
 }
 
@@ -906,7 +987,7 @@ fn stale_estimate() {
 		let trials = compare(&format!("stale {rate}"), scenario, SEEDS);
 		falls(&trials, Duration::ZERO, rate);
 		for outcome in trials.iter().flat_map(|t| [&t.probing, &t.baseline]) {
-			assert!(rate > MEDIA || outcome.queue.dropped > 0, "the queue never overflowed");
+			budget!(rate > MEDIA || outcome.queue.dropped > 0, "stale {rate}: the queue never overflowed");
 		}
 	}
 }
