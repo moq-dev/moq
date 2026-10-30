@@ -4,26 +4,17 @@ permissions:
   id-token: write
   contents: read
 
-# Main PRs report Check as skipped; the merge queue runs the Linux gate once.
-# Release PRs run the same gate over every package. The maintainer must remove
-# Test from the main ruleset before this change enters the queue.
+# Main PRs report Check as skipped; Land tests their combined prefix.
+# Release PRs run the same gate over every package.
 on:
   pull_request:
     # `closed` only cancels an in-flight run. `edited` runs the jobs when a main
     # PR is retargeted to release. Any edit reruns them, since a skipped rerun
     # would post a passing context over a failed one; on main PRs that is free.
     types: [opened, synchronize, reopened, edited, closed]
-  merge_group:
-    # `destroyed` only cancels the dead group's in-flight run, like `closed`.
-    # GitHub keeps that run queued when the group is rebuilt behind a departed
-    # entry, where it holds the queue runner ahead of the live groups until they
-    # time out. Actions delivers this type although its docs omit it.
-    types: [checks_requested, destroyed]
 
 # Cancel in-flight runs when a new commit lands on the same PR, or when the PR
 # is merged/closed (the close event shares this group and supersedes the build).
-# Each merge group has its own queue ref, shared by its `destroyed` event and
-# separate from the PR ref.
 concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
@@ -32,27 +23,19 @@ jobs:
   # One checkout, dev shell, cache restore, and dispatcher for lints and tests.
   check:
     name: Check
-    # A close/merge or destroyed-group run exists only to cancel the superseded
-    # in-flight build via the concurrency group above.
-    if: github.event.action != 'closed' && github.event.action != 'destroyed' && (github.event_name != 'pull_request' || github.base_ref == 'release')
-    # Leave the variable unset until the local runner is online and verified.
-    runs-on: ${{ github.event_name == 'merge_group' && vars.MOQ_QUEUE_RUNNER || 'ubuntu-24.04-arm' }}
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    if: github.event.action != 'closed' && github.base_ref == 'release'
+    runs-on: ubuntu-24.04-arm
     # Backstop a hang instead of holding the runner for the 6-hour default.
     timeout-minutes: 60
     env:
-      # Diff a merge group from main, not from the entry ahead of it: when the
-      # queue requires only a group's head to pass, that run vouches for every
-      # entry it merges. Building one entry at a time, the base is main anyway.
-      CI_BASE: ${{ github.base_ref == 'release' && '--all' || 'origin/main' }}
+      CI_BASE: --all
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Full history so `just ci` can diff against main.
+          # Full history for the dispatcher's base comparison.
           fetch-depth: 0
 
       - uses: ./.github/actions/just
@@ -68,9 +51,7 @@ jobs:
       - uses: DeterminateSystems/flake-checker-action@786422608c7bded2bbc9741ad9f91356842bf520 # main
         if: steps.scope.outputs.needed == 'true'
 
-      # The merge queue writes what it compiles, so the cache follows what lands
-      # on `main` without a second build after it; release pull requests read.
-      # A selection of lints alone compiles no Rust, so it skips the cache.
+      # Release pull requests read the hosted cache; lint-only changes skip it.
       - name: Rust cache
         if: steps.scope.outputs.rust == 'true'
         uses: ./.github/actions/rust-cache
@@ -78,16 +59,11 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
-      # The pre-setup query and execution use the same impact map. A
-      # self-hosted runner keeps target/, so drop the previous job's build
-      # timings first.
+      # The pre-setup query and execution use the same impact map.
       - name: Check
         if: steps.scope.outputs.needed == 'true'
         run: |
           rm -rf target/cargo-timings
-          if [[ "$GITHUB_EVENT_NAME" == merge_group ]]; then
-            export NEXTEST_TEST_THREADS=24
-          fi
           nix develop --command just ci "$CI_BASE"
 
       # Cargo's per-crate timings for the Rust test builds, so a slow crate

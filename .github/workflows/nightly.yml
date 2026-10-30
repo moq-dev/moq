@@ -27,7 +27,7 @@ name: Nightly
 # exception: deterministic and seconds long, so audio-quality.yml also gates
 # release PRs on them.
 #
-# Main PRs run no cloud CI beyond the merge queue's Check, so every
+# Main PRs run no cloud CI beyond the landing gate's checks, so every
 # path-filtered gate (Android, C, C++, WASM, X11, the audio replays, the OSS
 # Scanner image, platform.yml and the release dry-runs) runs here on main too,
 # and release-gate.yml runs them on release PRs.
@@ -98,8 +98,8 @@ jobs:
   nightly:
     name: Nightly (${{ matrix.name }})
     runs-on: ${{ matrix.runner || 'ubuntu-24.04-arm' }}
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     timeout-minutes: 60
     permissions:
       contents: read
@@ -342,8 +342,8 @@ jobs:
   tests:
     name: Tests (${{ matrix.recipe }})
     runs-on: ubuntu-24.04-arm
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -400,8 +400,8 @@ jobs:
   media-firefox:
     name: Media (firefox player)
     runs-on: ubuntu-24.04-arm
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -448,8 +448,8 @@ jobs:
   audio-quality:
     name: Audio quality
     runs-on: ubuntu-24.04-arm
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     # Twenty-four rows at a minute each, plus the relay, CLI, and shaper built from source.
     timeout-minutes: 90
     steps:
@@ -631,8 +631,8 @@ jobs:
     # Measures what these release jobs upload rather than rebuilding it.
     needs: [release-py-ffi, release-shared-ffi, release-moq-c, release-moq-relay, release-moq-cli]
     runs-on: ubuntu-24.04-arm
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     timeout-minutes: 120
     permissions:
       contents: read

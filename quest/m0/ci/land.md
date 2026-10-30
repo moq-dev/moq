@@ -52,8 +52,7 @@ Decided 2026-10-26 (maintainer):
   moq.pro, and kixelated/rust2. This repository adds a thin workflow, as
   moq.pro's `gate.yml` and `queue.yml` do today.
 - The gate lands by fast-forward. For each PR it writes the squash commit
-  onto the chain (subject is the PR title, body keeps the co-author
-  trailers, as CONTRIBUTING describes), and resolves quest-file conflicts
+  onto the chain, with the engine's default message, and resolves quest-file conflicts
   with quest's merge driver. It force-pushes each PR's branch, with a lease
   on the head it tested, to that PR's commit, then fast-forwards `main` to
   the tip in one push. GitHub marks a PR merged once its head is on the base,
@@ -76,38 +75,55 @@ Decided 2026-10-26 (maintainer):
   `release`), `dependabot.yml`, and `smoke-toolchain.yml` that use it
   reference the Environment. Only the hosted land job reads it, never the job
   that runs PR code.
-- Open question, added 2026-10-29 (maintainer) from
-  [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166): the `publish`
-  Environment admits `main`, whose ruleset lets repository role 2 bypass
-  review, and moq-bot joins that bypass list here. Decide with the bypass list
-  whether `main` keeps deploying to `publish`, or publishing narrows to
-  `release` and release tags. Ask the maintainer; settings changes are theirs.
+- Decided 2026-10-29 (maintainer), answering the question raised in
+  [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166): the moq-bot
+  key moves to its own `bot` Environment, for `main`, `release`, and
+  `moq-ffi-v*`. Dependabot, the Smoke toolchain update, and the moq-bot-only
+  publishers name it. `publish` keeps the key too, for release-rs, which also needs the
+  crates.io token. Narrowing `publish` to release refs waits on
+  [its own quest](/quest/m0/ci/publish-release-only.md), since `workflow_run`
+  publishers run as `main`.
+- Decided 2026-10-30 (maintainer): the land job holds no key. It trades its
+  GitHub ID token at `token.moq.dev` ([moq-dev/moq#7275](https://github.com/moq-dev/moq/pull/7275)),
+  which issues a moq-bot token scoped to the calling repository only for its
+  `land.yml` on `main`, so opting another moq-dev repository into the gate
+  needs no secret. No other job in `land.yml` may request an ID token or call
+  another workflow.
+- Open, found 2026-10-29: `APP_CLIENT_ID` and `APP_PRIVATE_KEY` are moq-dev
+  organization secrets visible to this repository, so any workflow on a
+  pushed branch can read the moq-bot key, not only jobs in `bot`. Once
+  moq-bot bypasses `main`, that branch could push to `main`. Before cutover,
+  the maintainer deletes the organization secrets and this repository's own
+  copies; `bot` and `publish` already hold the key under the same names.
 - The gate tests each PR on the latest `main`, not the PR's own base. On
   2026-10-29 [moq-dev/moq#7162](https://github.com/moq-dev/moq/pull/7162)
   passed its own CI but broke in the queue on API renames that landed after
   its last base merge; that is the case the gate must catch before `main`.
 
-Work in this repository:
+Draft source in [moq-dev/moq#7024](https://github.com/moq-dev/moq/pull/7024)
+prepares the three phases, trusted Quest installation, the read-only worker,
+head-pinned Dependabot requests, bot-key Environment declarations, and the
+event policy and setup tests. No workflow was deployed, queue entry changed,
+ruleset written, or credential moved. `release` keeps its own PR checks.
 
-- The workflow: queue events (landing requested through `quest merge
-  --land`, a push dequeuing), one concurrency group, inputs resolved on a
-  hosted job, the chain built and tested on `vars.MOQ_QUEUE_RUNNER` with a
-  read-only token, and the land job on a hosted runner.
-- The main ruleset drops its `merge_queue` rule. It requires a check that PR
-  heads never carry, so GitHub's merge button and auto-merge cannot land
-  around the gate. The admin role keeps its emergency bypass. Ruleset writes
-  are the maintainer's; agents only read.
-- `check.yml` and `alert.yml` stop listing `merge_group`, and Check runs
-  inside the gate. `.github/actions/rust-cache`, `.github/actionlint.yaml`,
-  and `sh/gh/queue.test.ts` follow, and the test asserts the new event policy.
-- `dependabot.yml` requests landing through the gate instead of
-  `gh pr merge --auto`, which the new ruleset leaves with no path to `main`,
-  and keeps its coupled smoke update guard.
-- Docs that describe the queue: `CONTRIBUTING.md` (its merge queue section
-  and priority rule), `README.md`, `doc/setup/dev.md`, `infra/README.md`,
-  `justfile`, `sh/kt/check.sh`, and `test/drill/README.md`.
-- `release` keeps its own ruleset and PR checks. It has no queue.
-- Measure merged PRs per hour and enqueue-to-merged latency for a busy day
-  against the baseline, and record both in the PR.
+Remaining before completion:
+
+- **Maintainer cutover.** On 2026-10-27 the main ruleset still requires
+  `Check`, contains `merge_queue`, and admits only the administrator bypass.
+  Add the bot bypass and replace those two requirements with `quest land`,
+  pinned to an app that never reports it on PR heads. Coordinate source
+  installation with that ruleset change: removing `merge_group` cannot
+  pass the old queue, and changing protection first stops that queue.
+- Decided 2026-10-29 (maintainer): CONTRIBUTING no longer prescribes the
+  squash commit body; the engine's default message stands.
+- **Forks.** The land job's moq-bot token is scoped to this repository, and
+  whether an installation token can push to an editable fork's branch is
+  unverified (moq-dev/quest's land-adopt quest tests it live). Until then a
+  fork PR may be ejected as `push_failed`, which CONTRIBUTING's fallback
+  covers. Forks were 2 of the last 200 merged PRs on 2026-10-30.
+- **Live evidence.** Exercise the gate and its ejections after the
+  maintainer's cutover, including an editable fork, and measure a busy
+  day's merged PRs/hour and enqueue-to-merged latency against the baseline.
+  Local event-policy tests do not establish those outcomes.
 
 Public API: none. Wire: none.
