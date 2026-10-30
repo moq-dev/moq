@@ -31,4 +31,10 @@ or holds.
   unprofiled 1-worker throughput swung from 11k to 30k fps between runs, and
   the 16-worker capture failed on perf dropping events or recording
   nonalternating switches. Profiling `d854bf98b1` as the base as well isolates
-  #6782 from later changes. Rerun both bases while the host is quiet.
+  #6782 from later changes.
+- Decided 2026-10-30 (maintainer): keep this quest and rerun both bases on a
+  quiet `desktop`; the noisy attempt does not finish it. On `main` (4 workers)
+  that attempt also showed `GroupState` waits under
+  `group::Consumer::poll_read_frame_once` → `Prefetch::pop_cached`, which
+  #6782 alone did not. If they persist on the quiet rerun, suggest a follow-up
+  quest profiling `d854bf98b1` against `main`.
