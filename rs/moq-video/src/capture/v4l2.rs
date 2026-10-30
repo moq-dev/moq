@@ -896,21 +896,18 @@ mod tests {
 
 		/// The same through the public API: the pump thread opens the camera, and
 		/// dropping the stream joins it and closes the device.
-		#[test]
+		#[tokio::test]
 		#[ignore = "needs the vivid kernel module; run with just rs v4l2 (also run nightly)"]
-		fn streams_through_the_pump() {
+		async fn streams_through_the_pump() {
 			let Some(node) = node() else { return };
-			let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-			runtime.block_on(async {
-				for _ in 0..2 {
-					let mut capture = open(&config(640, 480), Some(&node)).await.expect("open vivid");
-					assert_eq!((capture.width(), capture.height()), (640, 480));
-					for index in 0..FRAMES {
-						let frame = capture.read().await.expect("read").expect("a live stream");
-						assert_eq!(frame.size(), Size::new(640, 480), "frame {index}");
-					}
+			for _ in 0..2 {
+				let mut capture = open(&config(640, 480), Some(&node)).await.expect("open vivid");
+				assert_eq!((capture.width(), capture.height()), (640, 480));
+				for index in 0..FRAMES {
+					let frame = capture.read().await.expect("read").expect("a live stream");
+					assert_eq!(frame.size(), Size::new(640, 480), "frame {index}");
 				}
-			});
+			}
 		}
 	}
 }

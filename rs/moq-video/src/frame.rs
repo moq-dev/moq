@@ -2963,8 +2963,14 @@ mod tests {
 			"red decodes to low U and high V"
 		);
 
-		assert!(super::I420::from_mjpeg(RED, Size::new(16, 16)).is_err(), "size mismatch");
-		assert!(super::I420::from_mjpeg(&RED[..RED.len() / 2], size).is_err(), "truncated");
+		assert!(
+			super::I420::from_mjpeg(RED, Size::new(16, 16)).is_err(),
+			"size mismatch"
+		);
+		assert!(
+			super::I420::from_mjpeg(&RED[..RED.len() / 2], size).is_err(),
+			"truncated"
+		);
 	}
 
 	/// A short buffer is rejected at construction rather than panicking later: the
