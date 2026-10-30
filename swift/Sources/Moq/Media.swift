@@ -29,6 +29,10 @@ public enum Media {
     public typealias Audio = MoqFFI.MoqAudio
     /// A width and height in pixels.
     public typealias Dimensions = MoqFFI.MoqDimensions
+    /// How far behind the live edge a decoder plays: `min` is the playout delay and where a
+    /// cold join starts, and `max`, nil for no limit, is how far a stalled group may fall
+    /// behind before it is skipped. `min` stays on the consumer; a `min` past `max` starts at `max`.
+    public typealias Delay = MoqFFI.MoqDelay
     /// How a track's frames are packaged (Legacy, CMAF, or LOC), as advertised in
     /// the catalog.
     public typealias Container = MoqFFI.MoqContainer

@@ -51,17 +51,32 @@ type DecoderOutput struct {
 	Format     SampleFormat
 	SampleRate *uint32
 	Channels   *uint32
-	// MaxDelay bounds how stale a group may get before it is skipped; it adds no buffering.
-	MaxDelay *time.Duration
-	// Delay fixes the jitter buffer to hold ahead of the playhead; nil estimates it from arrival timing.
-	Delay *time.Duration
+	// Delay.Min is the jitter buffer to hold ahead of the playhead, and where a cold join starts;
+	// Delay.Max bounds how stale a group may get before it is skipped, and adds no buffering. nil
+	// is zero for both.
+	Delay *media.Delay
+	// Estimate measures the playout delay from arrival timing, never below Delay.Min; false holds
+	// exactly Delay.Min. nil estimates.
+	Estimate *bool
 }
 
 func (o DecoderOutput) ffi() (ffi.MoqAudioDecoderOutput, error) {
-	if err := bridge.NonNegative(o.MaxDelay, "audio max delay"); err != nil {
+	if err := delay(o.Delay, "audio"); err != nil {
 		return ffi.MoqAudioDecoderOutput{}, err
 	}
-	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, MaxDelay: o.MaxDelay, Delay: o.Delay}, bridge.NonNegative(o.Delay, "audio delay")
+	estimate := o.Estimate == nil || *o.Estimate
+	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, Delay: o.Delay, Estimate: estimate}, nil
+}
+
+// delay refuses a negative bound, which the FFI cannot carry.
+func delay(d *media.Delay, kind string) error {
+	if d == nil {
+		return nil
+	}
+	if err := bridge.NonNegative(&d.Min, kind+" min delay"); err != nil {
+		return err
+	}
+	return bridge.NonNegative(d.Max, kind+" max delay")
 }
 
 // Frame is interleaved PCM with its presentation timestamp.

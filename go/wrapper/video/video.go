@@ -59,15 +59,24 @@ func packet(raw ffi.MoqVideoPacket) Packet {
 	return Packet{Timestamp: time.Duration(raw.TimestampUs) * time.Microsecond, Data: raw.Data, Keyframe: raw.Keyframe}
 }
 
-// DecoderOutput configures an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only).
+// DecoderOutput configures an optional resize, a delay, and whether frames keep the decoder's surface (macOS only).
 type DecoderOutput struct {
-	Resize   *media.Dimensions
-	MaxDelay *time.Duration
-	Surface  bool
+	Resize *media.Dimensions
+	// Delay.Min is the playout delay, where a cold join starts; Delay.Max is how far a stalled
+	// group may fall behind before it is skipped. nil is zero for both.
+	Delay   *media.Delay
+	Surface bool
 }
 
 func (o DecoderOutput) ffi() (ffi.MoqVideoDecoderOutput, error) {
-	return ffi.MoqVideoDecoderOutput{Resize: o.Resize, MaxDelay: o.MaxDelay, Surface: o.Surface}, bridge.NonNegative(o.MaxDelay, "video max delay")
+	out := ffi.MoqVideoDecoderOutput{Resize: o.Resize, Delay: o.Delay, Surface: o.Surface}
+	if o.Delay == nil {
+		return out, nil
+	}
+	if err := bridge.NonNegative(&o.Delay.Min, "video min delay"); err != nil {
+		return out, err
+	}
+	return out, bridge.NonNegative(o.Delay.Max, "video max delay")
 }
 
 // Producer encodes raw pictures and publishes them as a track in a broadcast's catalog.

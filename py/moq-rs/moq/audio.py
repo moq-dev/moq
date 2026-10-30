@@ -21,7 +21,7 @@ from moq_ffi import (
 from ._read import End, Gap, _end, _gap
 from ._records import _from_us, _to_us
 from ._stream import _Stream
-from .media import Audio, AudioInit, CatalogProducer
+from .media import Audio, AudioInit, CatalogProducer, Delay
 from .publish import TrackDemand
 from .session import Allocator, Reservation
 from .subscribe import BroadcastConsumer
@@ -83,24 +83,25 @@ class EncoderOutput:
 class DecoderOutput:
     """The PCM layout a :class:`Consumer` delivers, how stale a group may get, and its playout delay.
 
-    ``delay`` fixes the jitter buffer to hold ahead of the playhead; ``None``
-    estimates it from arrival timing. ``max_delay`` only bounds how stale a
-    group may get before it is skipped, and adds no buffering.
+    ``delay.min`` is the jitter buffer to hold ahead of the playhead, and where a
+    cold join starts; with ``estimate`` (the default) it floors the delay measured
+    from arrival timing instead. ``delay.max`` only bounds how stale a group may
+    get before it is skipped, and adds no buffering. ``None`` is zero for both.
     """
 
     format: SampleFormat
     sample_rate: int | None = None
     channels: int | None = None
-    max_delay: timedelta | None = None
-    delay: timedelta | None = None
+    delay: Delay | None = None
+    estimate: bool = True
 
     def _ffi(self) -> MoqAudioDecoderOutput:
         return MoqAudioDecoderOutput(
             format=self.format,
             sample_rate=self.sample_rate,
             channels=self.channels,
-            max_delay=self.max_delay,
             delay=self.delay,
+            estimate=self.estimate,
         )
 
 

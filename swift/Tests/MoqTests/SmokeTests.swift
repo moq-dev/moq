@@ -612,7 +612,7 @@ final class SmokeTests: XCTestCase {
 
         let fixed = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
-            output: AudioDecoderOutput(format: .f32, delay: 0.08)
+            output: AudioDecoderOutput(format: .f32, delay: Media.Delay(min: 0.08, max: 0), estimate: false)
         )
         let estimated = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
