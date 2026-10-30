@@ -1037,7 +1037,10 @@ mod tests {
 		partial.push(0xfd);
 		assert!(matches!(Avcc::parse(&partial), Err(Error::AvccTruncated)));
 
-		assert!(matches!(Avcc::parse(&avcc[..avcc.len() - 1]), Err(Error::AvccTruncated)));
+		assert!(matches!(
+			Avcc::parse(&avcc[..avcc.len() - 1]),
+			Err(Error::AvccTruncated)
+		));
 		assert!(matches!(Avcc::parse(&avcc[..6]), Err(Error::AvccTooShort)));
 	}
 
