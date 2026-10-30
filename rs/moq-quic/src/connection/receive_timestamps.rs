@@ -71,14 +71,13 @@ impl Log {
 			.map(|&(packet, at)| (packet, ((at - basis).as_micros() as u64) >> self.exponent));
 		let mut reported = frame::ReceiveTimestamps::encode(largest, received, space, buf);
 
-		// The reported arrivals are the newest the ACK covers
-		let mut i = self.received.len();
+		// The reported arrivals are the newest the ACK covers. One it skipped among them is out
+		// of the ranges for good, as pending ranges only drop their oldest, so cut them all.
+		let mut cut = self.received.len();
 		while reported > 0 {
-			i -= 1;
-			if ranges.contains(self.received[i].0) {
-				self.received.remove(i);
-				reported -= 1;
-			}
+			cut -= 1;
+			reported -= usize::from(ranges.contains(self.received[cut].0));
 		}
+		self.received.truncate(cut);
 	}
 }

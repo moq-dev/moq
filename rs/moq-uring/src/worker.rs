@@ -676,6 +676,15 @@ impl Owner {
 			.map_or_else(|| self.deadlines.now(), |shared| shared.now())
 	}
 
+	/// The worker's clock read now, mid-turn, rather than the turn's instant: for pairing with a
+	/// wall clock read at the same moment.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
+	pub fn read_clock(&self) -> Instant {
+		self.shared
+			.upgrade()
+			.map_or_else(|| self.deadlines.now(), |shared| shared.clock.now())
+	}
+
 	/// The worker's core while it is still allocated, torn down or not.
 	pub fn upgrade(&self) -> Option<Rc<Shared>> {
 		self.shared.upgrade()

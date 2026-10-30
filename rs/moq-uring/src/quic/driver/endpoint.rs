@@ -290,12 +290,14 @@ impl Inner {
 		// The last one is taken whole, since a split makes the allocation
 		// shared, which a lone datagram has no use for.
 		let now = self.owner.now();
+		// The clocks read together, since the turn's instant may be well behind the wall clock
+		let read = self.owner.read_clock();
 		let mut wall = self.wall.get();
-		wall.sample(now, moq_clock::Wall::now());
+		wall.sample(read, moq_clock::Wall::now());
 		self.wall.set(wall);
 		// The kernel's stamp, or the receive's own instant without one. One stamp covers a GRO
 		// coalesce, so only its first datagram reports an arrival.
-		let mut arrival = Some(packet.timestamp().and_then(|at| wall.map(at)).unwrap_or(now));
+		let mut arrival = Some(packet.timestamp().and_then(|at| wall.map(at)).unwrap_or(read));
 
 		let mut payload = BytesMut::from(packet.payload());
 		let stride = packet.stride();
