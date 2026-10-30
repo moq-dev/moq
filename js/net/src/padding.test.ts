@@ -102,6 +102,25 @@ describe("Schedule", () => {
 		expect(pads[start]).toBe(Math.floor(fill(1.2 * MBPS, 0.5 * MBPS)));
 	});
 
+	test("a cluster follows a target lowered under it", () => {
+		const clock = new Manual();
+		installed = clock.install();
+		const schedule = new Schedule();
+		let sent = 0;
+		let bytes = 0;
+		let target = 10 * MBPS;
+		for (let i = 0; i < 100 && !schedule.padding; i++) {
+			bytes = schedule.tick({ target, estimate: MBPS, sent });
+			schedule.padded(bytes);
+			clock.jump(TICK);
+			sent += (0.5 * MBPS) / 8 / 10 + bytes;
+		}
+		expect(bytes).toBe(Math.floor(fill(2 * MBPS, 0.5 * MBPS)));
+
+		target = 1.2 * MBPS;
+		expect(schedule.tick({ target, estimate: MBPS, sent })).toBe(Math.floor(fill(1.2 * MBPS, 0.5 * MBPS)));
+	});
+
 	test("a validated cluster follows up before the next period", () => {
 		// The path had room: the first cluster lifts the estimate past its validation threshold.
 		const pads = simulate(

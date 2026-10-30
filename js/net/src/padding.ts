@@ -165,7 +165,8 @@ export class Schedule {
 				this.#stop();
 				return 0;
 			}
-			const bytes = this.#pad(cluster.rate);
+			// The target may have dropped since the cluster started.
+			const bytes = this.#pad(Math.min(cluster.rate, target));
 			if (Instant.durationSince(at, cluster.start) < CLUSTER && bytes > 0) return bytes;
 			this.#cluster = undefined;
 			this.#validating = { until: Instant.add(at, VALIDATE), rate: cluster.rate };
@@ -274,35 +275,12 @@ export class Padding implements Sender {
 				end();
 			});
 
-			const open = async () => {
-				opening = true;
-				try {
-					const writer = await Writer.tryOpen(quic, {
-						version,
-						sendOrder: ORDER,
-						waitUntilAvailable: false,
-						cancel: effect.closed,
-					});
-					if (!writer) return;
-					await writer.u62(type);
-					// The cluster, or the whole run, may have ended while the stream opened.
-					if (schedule.padding && !done) stream = writer;
-					else writer.close();
-				} catch {
-					// No slot, or the session is going away: this cluster pads nothing.
-				} finally {
-					opening = false;
-				}
-			};
-
-			const write = async (writer: Writer, bytes: number) => {
+			// Write on the cluster's stream, marked busy so ending the cluster resets whatever
+			// flow control still holds, the header included.
+			const send = async (writer: Writer, f: () => Promise<void>) => {
 				writing = true;
 				try {
-					while (bytes > 0) {
-						const size = Math.min(bytes, CHUNK.byteLength);
-						await writer.write(CHUNK.subarray(0, size));
-						bytes -= size;
-					}
+					await f();
 				} catch {
 					// The peer stopped it or the cluster reset it; the next cluster opens another.
 					if (stream === writer) stream = undefined;
@@ -310,6 +288,40 @@ export class Padding implements Sender {
 					writing = false;
 				}
 			};
+
+			const open = async () => {
+				opening = true;
+				let writer: Writer | undefined;
+				try {
+					writer = await Writer.tryOpen(quic, {
+						version,
+						sendOrder: ORDER,
+						waitUntilAvailable: false,
+						cancel: effect.closed,
+					});
+				} catch {
+					// No slot, or the session is going away: this cluster pads nothing.
+				} finally {
+					opening = false;
+				}
+				if (!writer) return;
+				// The cluster, or the whole run, may have ended while the stream opened.
+				if (!schedule.padding || done) {
+					writer.close();
+					return;
+				}
+				stream = writer;
+				await send(writer, () => writer.u62(type));
+			};
+
+			const write = (writer: Writer, bytes: number) =>
+				send(writer, async () => {
+					while (bytes > 0) {
+						const size = Math.min(bytes, CHUNK.byteLength);
+						await writer.write(CHUNK.subarray(0, size));
+						bytes -= size;
+					}
+				});
 
 			const tick = async () => {
 				if (sampling) return;
