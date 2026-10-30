@@ -6,15 +6,17 @@ import { encodeFrame, Format } from "./legacy.ts";
 
 const BUDGET = 500;
 
-function setup(maxDelay = BUDGET, warmup = 0) {
+// A consumer that starts `min` plus `warmup` behind the live edge and skips at `max`, `null` for no limit.
+function setup(delay = BUDGET, warmup = 0, min = delay, max: number | null = delay) {
 	const clock = new Manual();
 	const installed = clock.install();
 	// Drain the in-memory readers and their continuations without moving time.
 	const flush = () => clock.advance(Nano.zero);
 	const track = new Track.Producer("video");
-	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(maxDelay + warmup) }), {
+	// A subscription has no unlimited budget, so an unlimited consumer takes the track's whole retention.
+	const consumer = new Consumer(track.subscribe({ maxDelay: Milli((max ?? 30_000) + warmup) }), {
 		format: new Format("video"),
-		maxDelay: Milli(maxDelay),
+		delay: { min: Milli(min), max: max === null ? null : Milli(max) },
 		warmup: Milli(warmup),
 	});
 	const results: Read[] = [];
@@ -130,4 +132,51 @@ test("the age skip still drops a group its successor covers", async () => {
 	group(track, 7, [5_000_000 + (2 * BUDGET + 200) * 1000]);
 	await flush();
 	expect(frames(results)[0]).toEqual("6@5600000");
+});
+
+test("a large max delay alone starts at a live edge that arrives first", async () => {
+	const { track, results, flush } = setup(0, 0, 0, 10_000);
+	group(track, 5, [5_000_000]);
+	await flush();
+	expect(frames(results)).toEqual(["5@5000000"]);
+});
+
+test("a min delay past the max delay reaches only the max delay", async () => {
+	const { clock, track, results, flush } = setup(200, 0, 2_000);
+	group(track, 5, [5_000_000]);
+	await flush();
+	await clock.advance(Nano.fromMilli(Milli(150)));
+	expect(frames(results)).toEqual([]);
+
+	await clock.advance(Nano.fromMilli(Milli(50)));
+	expect(frames(results)).toEqual(["5@5000000"]);
+});
+
+test("an unlimited max delay still reaches the min delay", async () => {
+	const { track, results, flush } = setup(BUDGET, 0, BUDGET, null);
+	group(track, 5, [5_000_000]);
+	await flush();
+	expect(frames(results)).toEqual([]);
+
+	group(track, 4, [4_500_000]).finish();
+	await flush();
+	expect(frames(results)).toEqual(["4@4500000", "5@5000000"]);
+});
+
+test("the covering group is kept while its warmup arrives after the first read", async () => {
+	const { track, results, flush } = setup(200, 300);
+	group(track, 5, [5_000_000]);
+	await flush();
+	// Group 4 covers the 4.5s target, and its first frame is read before the rest of it lands.
+	const covering = group(track, 4, [4_400_000]);
+	await flush();
+	expect(frames(results)).toEqual(["4@4400000"]);
+
+	for (const timestamp of [4_420_000, 4_700_000, 4_900_000]) {
+		write(covering, timestamp);
+		await flush();
+	}
+	covering.finish();
+	await flush();
+	expect(frames(results)).toEqual(["4@4400000", "4@4420000", "4@4700000", "4@4900000", "5@5000000"]);
 });

@@ -141,7 +141,9 @@ export class Decoder {
 
 	// The subscription's max delay: the shared budget, raised to the estimator's ceiling in "auto".
 	#subscribeMaxDelay = new Signal<Milli>(Milli.zero);
-	#maxDelay = new Signal<Milli>(Milli.zero);
+	// The container consumer's delay: the playout delay to start at and the shared budget, each plus
+	// the warmup, so the start reaches the media the decoder primes on.
+	#delay = new Signal<Container.Delay>({});
 
 	// The codec's frame duration: the catalog constant, refined by each frame's own duration.
 	#frame = new Signal<Milli | undefined>(undefined);
@@ -220,10 +222,11 @@ export class Decoder {
 	// estimate at the target it already holds. The container consumer keeps the shared budget as its
 	// local skip, since it observes each frame before applying it. See doc/concept/audio-jitter.md.
 	#runSubscribeMaxDelay(effect: Effect): void {
+		const delay = effect.get(this.sync.out.delay);
 		const maxDelay = effect.get(this.sync.out.maxDelay);
 		const auto = effect.get(this.sync.in.delay) === "auto";
 		const warmup = Milli(effect.get(this.source.out.config)?.warmup ?? 0);
-		this.#maxDelay.set(Milli(maxDelay + warmup));
+		this.#delay.set({ min: Milli(delay + warmup), max: Milli(maxDelay + warmup) });
 		this.#subscribeMaxDelay.set(Milli((auto ? Math.max(maxDelay, AUTO_MAX_DELAY) : maxDelay) + warmup));
 	}
 
@@ -706,7 +709,7 @@ export class Decoder {
 		const continues = outgoing?.path === path;
 		const consumer = new Container.Consumer(sub, {
 			format,
-			maxDelay: this.#maxDelay,
+			delay: this.#delay,
 			predecessor: continues ? outgoing.consumer : undefined,
 		});
 		effect.cleanup(() => consumer.close());

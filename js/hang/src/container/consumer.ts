@@ -5,21 +5,36 @@ import type { Format } from "./format";
 import { Jitter } from "./jitter";
 import type { BufferedRanges, Frame, ReceivedFrame } from "./types";
 
-/** Options for constructing a {@link Consumer}. */
-export interface ConsumerProps {
-	/** The container format used to decode each MoQ frame. */
-	format: Format;
+/** How far behind the live edge a {@link Consumer} plays, in milliseconds. Mirrors Rust's `Delay`. */
+export interface Delay {
 	/**
-	 * How stale a group may get before it is skipped, in milliseconds (default: 0).
+	 * The target latency: the playout or jitter-buffer delay a player holds behind the live edge
+	 * (default: 0).
+	 *
+	 * The start is the group covering the live edge less `min`, plus any {@link ConsumerProps.warmup},
+	 * waiting for it when the newest group arrives first. Consumer-only: it never reaches the
+	 * subscription. A `min` past `max` starts at `max`, since the publisher serves nothing older.
+	 */
+	min?: Milli;
+	/**
+	 * How stale a group may get before it is skipped (default: 0), or `null` for no limit.
 	 *
 	 * Measured as the span from the oldest buffered frame to the newest, so it bounds how long a
 	 * late group is waited for. A missing sequence also expires this much monotonic time after
 	 * the first group past it arrived, even when the next group is a marker on a paused track.
-	 * The local half of the subscription's
-	 * `maxDelay`; both measure the same budget, one on the wire and one as frames are read.
+	 * The local half of the subscription's `maxDelay`; both measure the same budget, one on the wire
+	 * and one as frames are read. It bounds lateness only: it never moves the start.
 	 */
+	max?: Milli | null;
+}
+
+/** Options for constructing a {@link Consumer}. */
+export interface ConsumerProps {
+	/** The container format used to decode each MoQ frame. */
+	format: Format;
+	/** How far behind the live edge to play (default: zero for both bounds). See {@link Delay}. */
 	// Read-only: a Getter (e.g. another component's output) is accepted directly.
-	maxDelay?: GetterInit<Milli>;
+	delay?: GetterInit<Delay>;
 	/**
 	 * Cap the bytes of decoded frames held ahead of the reader, counting the whole wire payload they
 	 * share and each frame's and group's own overhead (default: {@link DEFAULT_MAX_BUFFER}). Mirrors
@@ -33,21 +48,21 @@ export interface ConsumerProps {
 	 */
 	maxBuffer?: number;
 	/**
-	 * How much further than `maxDelay` the start reaches, in milliseconds (default: 0), so a decoder
-	 * that needs that much media before its output is clean starts early enough, such as an Opus
-	 * decoder or the max-delay decoder of an intra-refresh rendition. Pass the catalog rendition's
-	 * `warmup`. Mirrors Rust's `Consumer::with_warmup`.
+	 * How much further than the min delay the start reaches, in milliseconds (default: 0), so a
+	 * decoder that needs that much media before its output is clean starts early enough, such as an
+	 * Opus decoder or the max-delay decoder of an intra-refresh rendition. Pass the catalog
+	 * rendition's `warmup`. Mirrors Rust's `Consumer::with_warmup`.
 	 *
-	 * Put `maxDelay` plus the warmup on the subscription, since the publisher skips what falls outside
-	 * that budget. The start is no later than the group covering the live edge less `maxDelay` and the
-	 * warmup: one that starts at or before that point. Both default to zero, which the newest group
-	 * covers. Groups can arrive newest first, so when none that arrived covers that point the start
-	 * waits for an earlier one, until one covers it, group 0 arrived, the track finishes, the max
-	 * buffer fills, or the newest group's arrival is that whole reach ago. The wall clock bounds a
-	 * quiet or paused track, which never ages out in media time. Delivery then starts at the lowest
-	 * group that arrived. The age skip also tolerates the warmup until the reader is that far past
-	 * its first frame, so the warming media is not dropped as stale. After that, `maxDelay` alone
-	 * governs it.
+	 * Put the max delay plus the warmup on the subscription, since the publisher skips what falls
+	 * outside that budget. The start is no later than the group covering the live edge less
+	 * {@link Delay.min} and the warmup: one that starts at or before that point. Both default to zero,
+	 * which the newest group covers, so the start waits for nothing. Otherwise groups can arrive
+	 * newest first, so when none that arrived covers that point the start waits for an earlier one,
+	 * until one covers it, group 0 arrived, the track finishes, the max buffer fills, or the newest
+	 * group's arrival is that whole reach ago. The wall clock bounds a quiet or paused track, which
+	 * never ages out in media time. Delivery then starts at the lowest group that arrived. The age
+	 * skip also tolerates the warmup until the reader is that far past its first frame, so the
+	 * warming media is not dropped as stale. After that, the max delay alone governs it.
 	 */
 	warmup?: Milli;
 	/**
@@ -141,13 +156,18 @@ function continues(prev: Group, next: Group | undefined): next is Group {
 	);
 }
 
-/** Reads frames from a MoQ track in order, buffering groups and skipping ones that fall `maxDelay` behind. */
+// The max delay in microseconds, infinite when unlimited.
+function maxMicros(delay: Delay): number {
+	return delay.max === null ? Number.POSITIVE_INFINITY : Micro.fromMilli(delay.max ?? Milli.zero);
+}
+
+/** Reads frames from a MoQ track in order, buffering groups and skipping ones that fall the max delay behind. */
 export class Consumer {
 	#track: Moq.Track.Subscriber;
 	#format: Format;
-	#maxDelay: Getter<Milli>;
+	#delay: Getter<Delay>;
 	#maxBuffer: number;
-	// How much further than the max delay the start reaches, and the age skip tolerates while warming.
+	// How much further than the min delay the start reaches, and the age skip tolerates while warming.
 	#warmup: Milli;
 	// The start may still wait for a group covering the reach, until that wait ends for good.
 	#starting = true;
@@ -208,7 +228,7 @@ export class Consumer {
 	constructor(track: Moq.Track.Subscriber, props: ConsumerProps) {
 		this.#track = track;
 		this.#format = props.format;
-		this.#maxDelay = getter(props.maxDelay ?? Milli.zero);
+		this.#delay = getter(props.delay ?? {});
 		this.#maxBuffer = props.maxBuffer ?? DEFAULT_MAX_BUFFER;
 		this.#warmup = props.warmup ?? Milli.zero;
 		this.#jitter = props.predecessor ? props.predecessor.#jitter.fork() : new Jitter();
@@ -487,9 +507,9 @@ export class Consumer {
 
 			const age = max - min;
 			if (age <= threshold) break;
-			// Before the first frame, a group may cover the start's reach though it began before it: it
+			// Until the warmup is read, a group may cover the start's reach though it began before it: it
 			// is stale only once its successor starts a whole budget behind the newest content.
-			if (this.#warmed === undefined) {
+			if (this.#warming()) {
 				const nextStart = this.#groups[1].start;
 				if (nextStart === undefined || max - nextStart < threshold) break;
 			}
@@ -703,7 +723,7 @@ export class Consumer {
 				}
 			}
 
-			// The start may wait for a group covering the reach, the max delay plus the warmup.
+			// The start may wait for a group covering the reach, the min delay plus the warmup.
 			const starting = this.#reachStart(ended !== undefined);
 
 			// If #active points below all buffered groups -- e.g. a finished group's `+ 1`
@@ -729,14 +749,14 @@ export class Consumer {
 					const startup = this.#start === undefined;
 					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp);
 					const empty = head.empty && head.consumer.done;
-					const maxDelay = Micro.fromMilli(this.#maxDelay.peek());
+					const maxDelay = maxMicros(this.#delay.peek());
 					const skipHole =
 						head.frames.length > 0 &&
 						(maxDelay === 0 ||
 							(this.#presentedEnd !== undefined &&
 								head.latest !== undefined &&
 								head.latest - this.#presentedEnd > maxDelay));
-					const elapsed = Instant.durationSince(now(), this.#hole) >= Nano.fromMicro(maxDelay);
+					const elapsed = Instant.durationSince(now(), this.#hole) >= maxDelay * 1000;
 					// The groups past the hole already fill the max buffer, so it can hold none of what would arrive into it.
 					const full = this.#full();
 					if (startup || empty || contiguous || skipHole || elapsed || full || ended !== undefined) {
@@ -847,12 +867,14 @@ export class Consumer {
 			let timer: Effect | undefined;
 			const since = starting ?? this.#hole;
 			if (since !== undefined) {
-				const warmup = starting === undefined ? 0 : this.#warmup;
 				timer = new Effect();
 				timer.run((effect) => {
-					const budget = Nano.fromMilli(Milli(effect.get(this.#maxDelay) + warmup));
+					const delay = effect.get(this.#delay);
+					// The start waits out its reach, and a hole the max delay, which an unlimited one never does.
+					const budget = starting === undefined ? maxMicros(delay) : this.#reach(delay);
+					if (!Number.isFinite(budget)) return;
 					const elapsed = Instant.durationSince(now(), since);
-					effect.timer(() => this.#notify?.(), Nano(Math.max(0, budget - elapsed)));
+					effect.timer(() => this.#notify?.(), Nano(Math.max(0, budget * 1000 - elapsed)));
 				});
 			}
 
@@ -871,7 +893,13 @@ export class Consumer {
 		}
 	}
 
-	// While the start still waits for a group covering the live edge less the max delay and the
+	// How far behind the live edge the start reaches, in microseconds: the min delay plus the warmup.
+	// The publisher serves nothing older than the max delay, so a min delay past it reaches no further.
+	#reach(delay: Delay): number {
+		return Math.min(Micro.fromMilli(delay.min ?? Milli.zero), maxMicros(delay)) + Micro.fromMilli(this.#warmup);
+	}
+
+	// While the start still waits for a group covering the live edge less the min delay and the
 	// warmup, when the newest group had landed as the first one arrived: the wait ends a reach after
 	// it. Undefined once the start is free to go, for good.
 	#reachStart(ended: boolean): Instant | undefined {
@@ -879,7 +907,12 @@ export class Consumer {
 		// Nothing has a wire frame yet, so nothing can start either.
 		if (!this.#groups.some((group) => !group.empty)) return undefined;
 
-		const reach = Micro.fromMilli(Milli(this.#maxDelay.peek() + this.#warmup));
+		const reach = this.#reach(this.#delay.peek());
+		// The newest group covers a zero reach.
+		if (reach === 0) {
+			this.#starting = false;
+			return undefined;
+		}
 		this.#anchor ??= this.#groups[this.#groups.length - 1].consumer.arrived;
 		// The live edge: the newest content. Untimed content, such as a marker, has none to reach back from.
 		let edge: number | undefined;
@@ -893,7 +926,7 @@ export class Consumer {
 		// Nothing earlier can arrive or be held.
 		const lowest = this.#groups[0].consumer.sequence === 0;
 		// Wall time: the newest group landed a whole reach ago.
-		const elapsed = Instant.durationSince(now(), this.#anchor) >= Nano.fromMicro(reach);
+		const elapsed = Instant.durationSince(now(), this.#anchor) >= reach * 1000;
 		if (ended || this.#full() || edge === undefined || covered || lowest || elapsed) {
 			this.#starting = false;
 			return undefined;
@@ -901,12 +934,16 @@ export class Consumer {
 		return this.#anchor;
 	}
 
-	// How stale the buffered span may get before the age skip drops its oldest group: the max delay,
-	// plus the warmup until the reader is that far past its first frame.
-	#ageBudget(): Micro {
-		const maxDelay = Micro.fromMilli(this.#maxDelay.peek());
-		const warming = this.#warmed === undefined || (this.#edge ?? 0) < this.#warmed;
-		return warming ? Micro(maxDelay + Micro.fromMilli(this.#warmup)) : maxDelay;
+	// How stale the buffered span may get before the age skip drops its oldest group, in microseconds:
+	// the max delay, plus the warmup until the reader is that far past its first frame.
+	#ageBudget(): number {
+		const maxDelay = maxMicros(this.#delay.peek());
+		return this.#warming() ? maxDelay + Micro.fromMilli(this.#warmup) : maxDelay;
+	}
+
+	// The reader has not yet read the warmup past its first frame.
+	#warming(): boolean {
+		return this.#warmed === undefined || (this.#edge ?? 0) < this.#warmed;
 	}
 
 	// Return `read`, or a gap ahead of it when media went missing after an earlier item.

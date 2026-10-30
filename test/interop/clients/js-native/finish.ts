@@ -38,7 +38,7 @@ export async function readFinish(
 			const subscription = broadcast
 				.track(Catalog.track(name, config))
 				.subscribe({ maxDelay, groups: { start: { included: 0 } } });
-			const media = new Container.Consumer(subscription, { format, maxDelay });
+			const media = new Container.Consumer(subscription, { format, delay: { max: maxDelay } });
 			let count = 0;
 			try {
 				for (;;) {
