@@ -12,17 +12,15 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Require merge queue on self-hosted runners
-      if: runner.environment == 'self-hosted' && github.event_name != 'merge_group'
+    - name: Require the landing gate on self-hosted runners
+      if: runner.environment == 'self-hosted' && (github.workflow != 'Land' || github.ref != 'refs/heads/main')
       shell: bash
       run: |
-        echo "::error::Persistent self-hosted caches require a merge_group job." >&2
+        echo "::error::Persistent self-hosted caches require Land on main." >&2
         exit 1
 
-    # Runs on `main` and in its merge queue write; everything else reads. A
-    # queued pull request is about to become `main`, so its code is trusted
-    # like `main`'s, and publishing from the queue keeps the cache current
-    # with what lands without building it again after the merge.
+    # Hosted runs on `main` write; everything else reads. The landing worker
+    # uses only its local store and receives no remote credentials.
     #
     # The write key is the boundary. It lives in the `cache-write`
     # Environment, whose branch policy admits exactly the refs `WRITE` names,
@@ -40,7 +38,7 @@ runs:
       env:
         KEY_ID: ${{ inputs.access-key-id }}
         SECRET: ${{ inputs.secret-access-key }}
-        WRITE: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/') }}
+        WRITE: ${{ github.ref == 'refs/heads/main' }}
       run: |
         if [ -z "$KEY_ID" ] && [ -z "$SECRET" ]; then
           if [ "$WRITE" = "true" ]; then
@@ -62,7 +60,7 @@ runs:
           if [ "$WRITE" = "true" ]; then
             echo "MBX_REMOTE_MODE=read-write"
             # mbx trusts only a push to a protected branch, which leaves out
-            # the merge queue and Nightly's schedule. Its guess is bypassed on
+            # Nightly's schedule. Its guess is bypassed on
             # purpose: the Environment already decided who holds the write key.
             echo "MBX_REMOTE_TRUST_WRITES=true"
           else

@@ -176,7 +176,8 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::BinaryConfig {
 ///
 /// Video importers take one because they build the [`VideoConfig`](hang::catalog::VideoConfig)
 /// themselves, out of the bitstream, so the caller never holds the config to set these on. An audio
-/// importer publishes a complete config from its init bytes, so audio has no equivalent.
+/// importer publishes a complete config from its init bytes, so the field those bytes can't carry
+/// (bitrate) rides on [`AudioInit`](crate::import::AudioInit) instead.
 #[derive(Clone, Default, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct VideoHint {

@@ -309,7 +309,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 		return err
 	}
 	defer announcements.Cancel()
-	announced, err := client.AnnouncedBroadcast(broadcast)
+	announced, err := client.Follow(broadcast, nil)
 	if err != nil {
 		return err
 	}
@@ -406,7 +406,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 			break
 		}
 	}
-	healthAnnounced, err := client.AnnouncedBroadcast(broadcast + ".health")
+	healthAnnounced, err := client.Follow(broadcast + ".health", nil)
 	if err != nil {
 		return err
 	}
@@ -537,7 +537,7 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 		return finishSubscribe(readCtx, client, broadcast, frames)
 	}
 
-	announced, err := client.AnnouncedBroadcast(broadcast)
+	announced, err := client.Follow(broadcast, nil)
 	if err != nil {
 		return err
 	}

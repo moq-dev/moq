@@ -46,7 +46,7 @@ for try await event in announced {
     print("got broadcast \(announcement.prefix)")
     print("captures \(announcement.captures ?? [])")
 
-    let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
+    let broadcast = try await session.consume.request(path: announcement.prefix)
     let catalog = try await Media.CatalogConsumer.subscribe(broadcast: broadcast)
     for try await update in catalog {
         print("catalog: \(update)")
