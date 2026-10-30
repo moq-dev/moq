@@ -590,17 +590,17 @@ impl Window {
 	/// The lookup of time start `pts` answered with the group containing it, or the oldest
 	/// group of the history when `pts` is older than all of it: its spans start there, once
 	/// that group has started. `None`, or an answer that never started, means the history
-	/// couldn't tell, so they reach back to the oldest group held. Returns whether the groups
-	/// in range moved.
+	/// couldn't tell, so they start where the groups held say. Returns whether the groups in
+	/// range moved.
 	pub fn found(&mut self, pts: Timestamp, group: Option<u64>, holdings: &impl Holdings) -> bool {
 		let mut moved = false;
 		for span in self.spans.iter_mut().filter(|span| span.looking == Some(pts)) {
 			span.looking = None;
 			moved = true;
 			let started = group.filter(|group| holdings.next_start(*group).is_some_and(|(found, _)| found == *group));
-			(span.start, span.floored, span.reach) = match started {
-				Some(group) => (group, true, group),
-				None => (
+			(span.start, span.floored, span.reach) = match (started, holdings.containing(pts)) {
+				(Some(group), _) | (None, Containing::Group(group)) => (group, true, group),
+				(None, _) => (
 					0,
 					false,
 					holdings.next_start(0).map_or(span.reach, |(oldest, _)| oldest),
@@ -647,10 +647,11 @@ impl Window {
 				end => end,
 			};
 			let (reach, looking) = match range.start {
-				Anchor::Time(pts) if !floored => (
-					holdings.next_start(0).map_or(start, |(oldest, _)| oldest),
-					holdings.looks_up().then_some(pts),
-				),
+				Anchor::Time(pts) => match unresolved(start, floored, holdings) {
+					Some(searched) => (searched, Some(pts)),
+					None if floored => (start, None),
+					None => (holdings.next_start(0).map_or(start, |(oldest, _)| oldest), None),
+				},
 				_ => (start, None),
 			};
 			self.spans.push(Span {
@@ -707,6 +708,22 @@ fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Optio
 			Containing::Unknown => Some((latest?, true)),
 		},
 	}
+}
+
+/// The exclusive end of the run a lookup of a time start resolved to `start` searches, when
+/// the groups held can't tell which group contains it and a handler may: it is before every
+/// group known to start, or in a gap after `start`, the newest known to start at or before it,
+/// that nothing says is gone.
+fn unresolved(start: u64, floored: bool, holdings: &impl Holdings) -> Option<u64> {
+	if !holdings.looks_up() {
+		return None;
+	}
+	if !floored {
+		return holdings.next_start(0).map(|(oldest, _)| oldest);
+	}
+	let next = start.checked_add(1)?;
+	let (after, _) = holdings.next_start(next)?;
+	(after > next && holdings.gone(next).is_none_or(|end| end < after)).then_some(after)
 }
 
 /// Where a range stops, or `None` while it waits on a latest group. A time end's walk

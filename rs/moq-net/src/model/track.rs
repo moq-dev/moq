@@ -6718,7 +6718,7 @@ impl Cursor {
 
 	/// Whether a fill still owes this cursor a group, so the end of the feed is not its end.
 	fn awaits_fill(&self) -> bool {
-		self.misses.as_ref().is_some_and(|misses| misses.is_waiting())
+		self.misses.as_ref().is_some_and(|misses| misses.is_waiting()) || self.filter.window.lookups().next().is_some()
 	}
 
 	fn poll_recv_group(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {

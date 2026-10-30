@@ -790,6 +790,11 @@ async fn a_time_range_resolves_from_the_archive() {
 		read_range(&broadcast, "video", range(track::Anchor::Absolute(0), Some(at(1_200)))).await,
 		[0, 1]
 	);
+	// The cache now holds groups 6 and 9, but not what lies between: still looked up.
+	assert_eq!(
+		read_range(&broadcast, "video", range(at(8_500), Some(at(8_600)))).await,
+		[8]
+	);
 
 	// A start alone reads on through the live edge.
 	let track = broadcast.consume().track("video").unwrap();
@@ -801,6 +806,24 @@ async fn a_time_range_resolves_from_the_archive() {
 	for expected in 7..10 {
 		assert_eq!(sequence(&mut reader).await, Some(expected));
 	}
+}
+
+/// A completed archive's track ends only once a time range's lookup answers, so the range
+/// still reads its history.
+#[tokio::test(start_paused = true)]
+async fn a_completed_archive_reads_a_time_range() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	stored(&archive, 0..6).await;
+	archive.end("video", End::Finish(At { group: 6, frame: 0 })).await;
+	archive.complete().await;
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let range = track::Range {
+		start: at(2_500),
+		end: None,
+	};
+	assert_eq!(read_range(&broadcast, "video", range).await, [2, 3, 4, 5]);
 }
 
 /// A time older than every stored object reaches back to the oldest stored group.
