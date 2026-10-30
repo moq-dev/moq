@@ -97,6 +97,5 @@ surface and zero-copy texture import, land before the cut.
 ## Related
 
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - the OBS plugin stays the path for creators who stay on OBS
-- [Hang contribution references](/quest/m2/contribution-ref.md) - composed rooms naming each guest feed
 - [Linux capture](/quest/m2/capture-linux.md) - Wayland window, system audio, and app capture the studio's sources inherit
 - [Windows capture](/quest/m2/capture-windows.md) - app capture and system audio the studio's sources inherit

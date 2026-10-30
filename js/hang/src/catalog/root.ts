@@ -5,6 +5,7 @@ import * as z from "@zod/mini";
 import { AudioSchema } from "./audio";
 import { BinarySchema } from "./binary";
 import { ClockSchema } from "./clock";
+import { ContributionSchema } from "./contribution";
 import { EchoSchema } from "./echo";
 import { TRACK } from "./format";
 import { JsonSchema } from "./json";
@@ -48,8 +49,9 @@ const VersionSchema = z.number().check(
  * The media sections are `video`, `audio`, and `text`, alongside the broadcast's `clock` (the
  * one wall-clock mapping);
  * `json` and `binary` list application data tracks that aren't media. A section is omitted
- * when it holds no tracks. `stats` names the publisher's media snapshot track, and `echo`
- * solicits viewer feedback under a relative broadcast prefix.
+ * when it holds no tracks. `stats` names the publisher's media snapshot track, `echo`
+ * solicits viewer feedback under a relative broadcast prefix, and `contributions` lists whole
+ * broadcasts without opening them.
  *
  * This is a *loose* object: unknown root sections pass through validation untouched, so an
  * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer
@@ -79,6 +81,8 @@ export const RootSchema = z.looseObject({
 	text: section(TextSchema, "renditions"),
 	json: section(JsonSchema, "tracks"),
 	binary: section(BinarySchema, "tracks"),
+	// A new key, so a malformed entry fails the catalog, the same as Rust.
+	contributions: z.optional(z.record(z.string(), ContributionSchema)),
 });
 
 /** The root catalog object: the media sections, the clock, the data track sections, plus any app extensions. */
@@ -163,6 +167,7 @@ export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
 		root.text?.renditions,
 		root.json?.tracks,
 		root.binary?.tracks,
+		root.contributions,
 	];
 	for (const section of sections) {
 		for (const { broadcast } of Object.values(section ?? {})) {
