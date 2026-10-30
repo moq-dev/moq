@@ -140,7 +140,8 @@ fi
 # The tools each module needs. A module missing one is skipped locally, so an
 # incomplete toolchain checks less; under CI_STRICT (CI) it is an error, up
 # front, because there a skip is indistinguishable from a pass. swift needs
-# none: it skips off macOS by design, and platform.yml is its real gate.
+# none: it skips off macOS by design, and platform.yml is its real gate. Its
+# formatter is absent where nixpkgs cannot build it (see flake.nix).
 declare -A tools=(
     [js]='bun python3'
     [workers]='bun'
@@ -187,7 +188,7 @@ declare -A compiles=(
 # below), so it waits for the rest.
 case "$action" in
     check | ci) modules=(py rs c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
-    fix) modules=(js rs py carla dart go kt obs markdown shell toml nix justfile) ;;
+    fix) modules=(js rs py carla dart go kt swift obs markdown shell toml nix justfile) ;;
 esac
 
 # Modules that share mutable state run in one lane, in module order; every

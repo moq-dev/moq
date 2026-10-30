@@ -307,13 +307,21 @@
         # skip a module whose tools aren't on $PATH. CI sets CI_STRICT=1,
         # which turns that skip into an error (see the tools map in
         # sh/dispatch.sh), so this list and that one have to stay in step.
-        lintDeps = with pkgs; [
-          shellcheck
-          shfmt
-          actionlint
-          taplo
-          nixfmt
-        ];
+        lintDeps =
+          with pkgs;
+          [
+            shellcheck
+            shfmt
+            actionlint
+            taplo
+            nixfmt
+          ]
+          # Apple's formatter, so `just swift check` checks formatting off macOS
+          # too. nixpkgs marks the Swift compiler it builds with broken on
+          # aarch64-linux, where the check skips instead.
+          ++ lib.optionals (!(stdenv.hostPlatform.isLinux && stdenv.hostPlatform.isAarch64)) [
+            swift-format
+          ];
 
         # Kotlin wrapper (kt/) toolchain so `just kt check` actually compiles
         # the wrapper and runs :moq:jvmTest instead of silently skipping.
