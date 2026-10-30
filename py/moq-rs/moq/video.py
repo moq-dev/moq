@@ -66,14 +66,15 @@ class Packet:
 class DecoderOutput:
     """What a :class:`Consumer` delivers: an optional resize, a max delay, and the decoder's surface (macOS only).
 
-    ``start`` picks where to begin on a track that already holds groups: a live
-    player passes ``DecodeStart.LATEST`` so a reopened decoder skips the cached backlog.
+    ``start`` picks where to begin on a track that already holds groups, ``None`` for the
+    oldest: a live player passes ``DecodeStart.LATEST`` so a reopened decoder skips the
+    cached backlog.
     """
 
     resize: Dimensions | None = None
     max_delay: timedelta | None = None
     surface: bool = False
-    start: DecodeStart = DecodeStart.OLDEST
+    start: DecodeStart | None = None
 
     def _ffi(self) -> MoqVideoDecoderOutput:
         return MoqVideoDecoderOutput(

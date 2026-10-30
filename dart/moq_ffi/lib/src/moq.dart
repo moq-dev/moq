@@ -18,12 +18,14 @@ class MoqAudioDecoderOutput {
   final int? channels;
   final Duration? maxDelay;
   final Duration? delay;
+  final MoqDecodeStart? start;
   MoqAudioDecoderOutput({
     required this.format,
     this.sampleRate = null,
     this.channels = null,
     this.maxDelay = null,
     this.delay = null,
+    this.start = null,
   });
 }
 
@@ -59,6 +61,11 @@ class FfiConverterMoqAudioDecoderOutput {
     );
     final delay = delay_lifted.value;
     new_offset += delay_lifted.bytesRead;
+    final start_lifted = FfiConverterOptionalMoqDecodeStart.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final start = start_lifted.value;
+    new_offset += start_lifted.bytesRead;
     return LiftRetVal(
       MoqAudioDecoderOutput(
         format: format,
@@ -66,6 +73,7 @@ class FfiConverterMoqAudioDecoderOutput {
         channels: channels,
         maxDelay: maxDelay,
         delay: delay,
+        start: start,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -78,6 +86,7 @@ class FfiConverterMoqAudioDecoderOutput {
         FfiConverterOptionalUInt32.allocationSize(value.channels) +
         FfiConverterOptionalDuration.allocationSize(value.maxDelay) +
         FfiConverterOptionalDuration.allocationSize(value.delay) +
+        FfiConverterOptionalMoqDecodeStart.allocationSize(value.start) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -106,6 +115,10 @@ class FfiConverterMoqAudioDecoderOutput {
       value.delay,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalMoqDecodeStart.write(
+      value.start,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -115,6 +128,7 @@ class FfiConverterMoqAudioDecoderOutput {
         FfiConverterOptionalUInt32.allocationSize(value.channels) +
         FfiConverterOptionalDuration.allocationSize(value.maxDelay) +
         FfiConverterOptionalDuration.allocationSize(value.delay) +
+        FfiConverterOptionalMoqDecodeStart.allocationSize(value.start) +
         0;
   }
 }
@@ -4125,10 +4139,12 @@ class MoqVideoDecoderOutput {
   final MoqDimensions? resize;
   final Duration? maxDelay;
   final bool surface;
+  final MoqDecodeStart? start;
   MoqVideoDecoderOutput({
     this.resize = null,
     this.maxDelay = null,
     this.surface = false,
+    this.start = null,
   });
 }
 
@@ -4154,11 +4170,17 @@ class FfiConverterMoqVideoDecoderOutput {
     );
     final surface = surface_lifted.value;
     new_offset += surface_lifted.bytesRead;
+    final start_lifted = FfiConverterOptionalMoqDecodeStart.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final start = start_lifted.value;
+    new_offset += start_lifted.bytesRead;
     return LiftRetVal(
       MoqVideoDecoderOutput(
         resize: resize,
         maxDelay: maxDelay,
         surface: surface,
+        start: start,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -4169,6 +4191,7 @@ class FfiConverterMoqVideoDecoderOutput {
         FfiConverterOptionalMoqDimensions.allocationSize(value.resize) +
         FfiConverterOptionalDuration.allocationSize(value.maxDelay) +
         FfiConverterBool.allocationSize(value.surface) +
+        FfiConverterOptionalMoqDecodeStart.allocationSize(value.start) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -4189,6 +4212,10 @@ class FfiConverterMoqVideoDecoderOutput {
       value.surface,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalMoqDecodeStart.write(
+      value.start,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -4196,6 +4223,7 @@ class FfiConverterMoqVideoDecoderOutput {
     return FfiConverterOptionalMoqDimensions.allocationSize(value.resize) +
         FfiConverterOptionalDuration.allocationSize(value.maxDelay) +
         FfiConverterBool.allocationSize(value.surface) +
+        FfiConverterOptionalMoqDecodeStart.allocationSize(value.start) +
         0;
   }
 }
@@ -7117,6 +7145,42 @@ class FfiConverterMoqContainerFormat {
   }
 
   static int write(MoqContainerFormat value, Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, value.index + 1);
+    return 4;
+  }
+}
+
+enum MoqDecodeStart { oldest, latest }
+
+class FfiConverterMoqDecodeStart {
+  static LiftRetVal<MoqDecodeStart> read(Uint8List buf) {
+    final index = buf.buffer.asByteData(buf.offsetInBytes).getInt32(0);
+    switch (index) {
+      case 1:
+        return LiftRetVal(MoqDecodeStart.oldest, 4);
+      case 2:
+        return LiftRetVal(MoqDecodeStart.latest, 4);
+      default:
+        throw UniffiInternalError(
+          UniffiInternalError.unexpectedEnumCase,
+          "Unable to determine enum variant",
+        );
+    }
+  }
+
+  static MoqDecodeStart lift(RustBuffer buffer) {
+    return FfiConverterMoqDecodeStart.read(buffer.asUint8List()).value;
+  }
+
+  static RustBuffer lower(MoqDecodeStart input) {
+    return toRustBuffer(createUint8ListFromInt(input.index + 1));
+  }
+
+  static int allocationSize(MoqDecodeStart _value) {
+    return 4;
+  }
+
+  static int write(MoqDecodeStart value, Uint8List buf) {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, value.index + 1);
     return 4;
   }
@@ -15189,6 +15253,53 @@ class FfiConverterOptionalMoqDatagram {
     }
     buf[0] = 1;
     return FfiConverterMoqDatagram.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
+class FfiConverterOptionalMoqDecodeStart {
+  static MoqDecodeStart? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqDecodeStart.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqDecodeStart?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqDecodeStart.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqDecodeStart?>(result.value, result.bytesRead + 1);
+  }
+
+  static int allocationSize([MoqDecodeStart? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqDecodeStart.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqDecodeStart? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(
+      FfiConverterOptionalMoqDecodeStart.allocationSize(value),
+    );
+    FfiConverterOptionalMoqDecodeStart.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqDecodeStart? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqDecodeStart.write(
           value,
           Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
         ) +

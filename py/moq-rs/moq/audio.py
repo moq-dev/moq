@@ -86,8 +86,9 @@ class DecoderOutput:
     ``delay`` fixes the jitter buffer to hold ahead of the playhead; ``None``
     estimates it from arrival timing. ``max_delay`` only bounds how stale a
     group may get before it is skipped, and adds no buffering. ``start`` picks
-    where to begin on a track that already holds groups: a live player passes
-    ``DecodeStart.LATEST`` so a reopened decoder skips the cached backlog.
+    where to begin on a track that already holds groups, ``None`` for the oldest:
+    a live player passes ``DecodeStart.LATEST`` so a reopened decoder skips the
+    cached backlog.
     """
 
     format: SampleFormat
@@ -95,7 +96,7 @@ class DecoderOutput:
     channels: int | None = None
     max_delay: timedelta | None = None
     delay: timedelta | None = None
-    start: DecodeStart = DecodeStart.OLDEST
+    start: DecodeStart | None = None
 
     def _ffi(self) -> MoqAudioDecoderOutput:
         return MoqAudioDecoderOutput(

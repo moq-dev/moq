@@ -1058,10 +1058,10 @@ pub struct MoqVideoDecoderOutput {
 	/// [`MoqError::Unsupported`] elsewhere.
 	#[uniffi(default = false)]
 	pub surface: bool,
-	/// Where to start on a track that already holds groups. Same knob as
-	/// [`MoqAudioDecoderOutput::start`](crate::audio::MoqAudioDecoderOutput::start).
-	#[uniffi(default)]
-	pub start: crate::media::MoqDecodeStart,
+	/// Where to start on a track that already holds groups, or `None` for the oldest. Same
+	/// knob as [`MoqAudioDecoderOutput::start`](crate::audio::MoqAudioDecoderOutput::start).
+	#[uniffi(default = None)]
+	pub start: Option<crate::media::MoqDecodeStart>,
 }
 
 /// A borrowed platform handle to a decoded frame's surface, from
@@ -1310,7 +1310,7 @@ impl MoqVideoConsumer {
 
 		options.decoder.scale_hint = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
 		options.max_delay = output.max_delay.unwrap_or_default();
-		options.start = match output.start {
+		options.start = match output.start.unwrap_or_default() {
 			crate::media::MoqDecodeStart::Oldest => moq_video::decode::Start::Oldest,
 			crate::media::MoqDecodeStart::Latest => moq_video::decode::Start::Latest,
 		};

@@ -70,10 +70,10 @@ type DecoderOutput struct {
 }
 
 func (o DecoderOutput) ffi() (ffi.MoqVideoDecoderOutput, error) {
-	// Go's zero value is the native default: the oldest group.
-	start := o.Start
-	if start == 0 {
-		start = media.DecodeStartOldest
+	// Go's zero value is the native null: the oldest group.
+	var start *media.DecodeStart
+	if o.Start != 0 {
+		start = &o.Start
 	}
 	return ffi.MoqVideoDecoderOutput{Resize: o.Resize, MaxDelay: o.MaxDelay, Surface: o.Surface, Start: start}, bridge.NonNegative(o.MaxDelay, "video max delay")
 }

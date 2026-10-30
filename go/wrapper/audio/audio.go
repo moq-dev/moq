@@ -64,10 +64,10 @@ func (o DecoderOutput) ffi() (ffi.MoqAudioDecoderOutput, error) {
 	if err := bridge.NonNegative(o.MaxDelay, "audio max delay"); err != nil {
 		return ffi.MoqAudioDecoderOutput{}, err
 	}
-	// Go's zero value is the native default: the oldest group.
-	start := o.Start
-	if start == 0 {
-		start = media.DecodeStartOldest
+	// Go's zero value is the native null: the oldest group.
+	var start *media.DecodeStart
+	if o.Start != 0 {
+		start = &o.Start
 	}
 	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, MaxDelay: o.MaxDelay, Delay: o.Delay, Start: start}, bridge.NonNegative(o.Delay, "audio delay")
 }

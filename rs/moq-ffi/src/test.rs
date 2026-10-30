@@ -317,7 +317,7 @@ fn audio_output() -> crate::audio::MoqAudioDecoderOutput {
 		channels: None,
 		max_delay: None,
 		delay: None,
-		start: Default::default(),
+		start: None,
 	}
 }
 
@@ -4058,7 +4058,8 @@ async fn video_decode_start() {
 		.expect("timed out")
 		.unwrap()
 		.expect("the track ended early")
-		.sequence() == 0
+		.sequence()
+		== 0
 	{}
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
@@ -4083,8 +4084,8 @@ async fn video_decode_start() {
 		.await
 		.unwrap()
 	};
-	let oldest = subscribe(MoqDecodeStart::default()).await;
-	let latest = subscribe(MoqDecodeStart::Latest).await;
+	let oldest = subscribe(None).await;
+	let latest = subscribe(Some(MoqDecodeStart::Latest)).await;
 	video.finish().unwrap();
 
 	let timestamps = async |decoder: Arc<MoqVideoConsumer>| {
@@ -4098,7 +4099,11 @@ async fn video_decode_start() {
 		}
 		timestamps
 	};
-	assert_eq!(timestamps(oldest).await.first(), Some(&0), "the default starts at the oldest group");
+	assert_eq!(
+		timestamps(oldest).await.first(),
+		Some(&0),
+		"the default starts at the oldest group"
+	);
 	assert_eq!(
 		timestamps(latest).await.first(),
 		Some(&NEWEST_US),
