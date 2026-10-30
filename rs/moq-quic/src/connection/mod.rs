@@ -630,9 +630,7 @@ impl Connection {
 					&& !close && match self.bandwidth_probe_ready(now, segment_size as u64 + untracked_bytes) {
 					bandwidth_probe::Ready::Idle => false,
 					bandwidth_probe::Ready::Blocked(until) => {
-						if let Some(until) = until {
-							self.timers.set(Timer::Pacing, until);
-						}
+						self.timers.set(Timer::Pacing, until);
 						send_blocked = true;
 						false
 					}
@@ -1499,11 +1497,10 @@ impl Connection {
 	/// Probe the path's bandwidth up to `bytes_per_second` while the application sends less
 	///
 	/// A congestion controller stops raising its estimate once the application sends less than
-	/// the path carries. While the controller probes for bandwidth below this target, the sender
-	/// fills the inflight it allows
-	/// ([`probe_inflight`](crate::congestion::ControllerMetrics::probe_inflight)) with duplicates
-	/// of STREAM data still in flight, sending no more than the target in all, so the probe
-	/// measures the path. Duplicates count against congestion control, as
+	/// the path carries. While the controller probes for bandwidth
+	/// ([`probing`](crate::congestion::ControllerMetrics::probing)) below this target, the sender
+	/// fills what its pacer and window allow with duplicates of STREAM data still in flight,
+	/// sending no more than the target in all, so the probe measures the path. Duplicates count against congestion control, as
 	/// [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. An
 	/// attempt that misses the target sits out a few seconds before retrying it, and a changed
 	/// target is retried at once. A controller that never probes ([`Controller::probes`])

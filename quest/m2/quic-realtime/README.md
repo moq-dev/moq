@@ -35,7 +35,7 @@ spike assumed no consumer; teleoperation uplinks are one):
   noise floor of the delay signal.
 - Native probing is required (decided 2026-10-25, maintainer). Every
   candidate implements `moq_congestion::Controller::probes` and reports
-  `probe_inflight`, so moq-quic's native probing
+  `probing`, so moq-quic's native probing
   ([moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)) still
   raises its estimate, and the bake-off measures probing alongside queuing
   delay. Reason: the [native rung disable](/quest/m1/simulcast-rung-disable.md)

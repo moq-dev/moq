@@ -24,7 +24,7 @@ fork.
   window and `ControllerMetrics::{pacing_rate, bandwidth_estimate}`, keeping
   its congestion-window pushback as the inflight bound.
 - Keep the BSD license and PATENTS file with the vendored code.
-- Implement `Controller::probes` and report `probe_inflight` so moq-quic's
+- Implement `Controller::probes` and report `probing` so moq-quic's
   native probing still raises the estimate (decided 2026-10-25, maintainer;
   see the [epic](/quest/m2/quic-realtime/README.md)). Measure that a stopped
   rung recovers under it.

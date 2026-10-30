@@ -708,7 +708,7 @@ impl Controller for Unlimited {
 	fn metrics(&self) -> ControllerMetrics {
 		ControllerMetrics {
 			congestion_window: WINDOW,
-			probe_inflight: self.probe.then_some(WINDOW),
+			probing: self.probe,
 			..Default::default()
 		}
 	}

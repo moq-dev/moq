@@ -1743,35 +1743,21 @@ impl Bbr3 {
         self.next_round_delivered = self.rate.delivered();
     }
 
-    /// The inflight an application-limited sender may fill with redundant data, so the probe's
-    /// samples measure the path rather than the application.
-    ///
-    /// The probe fills to `BBRInflight(BBR.bw, ProbeBwUpPacingGain)`, the inflight ProbeBW_UP
-    /// sustains over BBR.bw. Past that the probe only queues at the bottleneck, which Linux
-    /// BBRv3 takes as its cue to leave PROBE_UP. Startup gets the same bound rather than its own
-    /// gain: an application-limited flow never leaves Startup, so ProbeBW_UP alone would never
-    /// probe, and Startup's own gain would queue nearly twice the BDP at the bottleneck.
+    /// Whether an application-limited sender may fill its pacing with redundant data, so the
+    /// probe's samples measure the path rather than the application: in Startup, as an
+    /// application-limited flow never leaves it, and in ProbeBW_UP.
     ///
     /// At most one ProbeBW_UP per `bw_probe_wait` is filled. Reno coexistence begins one every
     /// BDP's worth of rounds, about a second on a 3 Mbit/s, 40ms path: filling each would cost a
     /// sender the path holds below its target a seventh of its media in redundant data, to keep
     /// pace with Reno, which only a bulk flow needs.
-    fn probe_inflight(&self) -> Option<u64> {
+    fn probing(&self) -> bool {
         let probing = match self.state {
             BbrState::Startup => true,
             BbrState::ProbeBw(ProbeBwSubstate::Up) => self.bw_probe_fill,
             _ => false,
         };
-        if !probing || self.min_rtt == Duration::from_secs(u64::MAX) {
-            return None;
-        }
-        let bdp = self.bw * self.min_rtt.as_secs_f64();
-        let inflight = (self.probe_bw_up_pacing_gain * bdp) as u64;
-        // BBRQuantizationBudget, without the side effects `get_inflight` has on BBR.bdp, nor the
-        // 2 SMSS ProbeBW_UP adds: the gain already reaches past BBR.bw, and on a small BDP two
-        // more packets only queue ahead of the next frame, over a round trip at 10ms
-        let inflight = Ord::max(inflight, self.offload_budget);
-        Some(Ord::max(inflight, self.min_pipe_cwnd))
+        probing && self.min_rtt != Duration::from_secs(u64::MAX)
     }
 }
 
@@ -1943,7 +1929,7 @@ impl Controller for Bbr3 {
             ssthresh: None,
             pacing_rate: Some(self.pacing_rate.round() as u64),
             bandwidth_estimate: (self.max_bw > 0.0).then_some(self.max_bw.round() as u64),
-            probe_inflight: self.probe_inflight(),
+            probing: self.probing(),
         }
     }
 
@@ -7211,18 +7197,17 @@ mod test {
     }
 
     /// An application-limited sender may fill Startup, and the first ProbeBW_UP each
-    /// `bw_probe_wait`, up to the inflight ProbeBW_UP sustains; a ProbeBW_UP begun sooner waits
-    /// for the rest of the wait.
+    /// `bw_probe_wait`; a ProbeBW_UP begun sooner waits for the rest of the wait.
     #[test]
-    fn probe_inflight_fills_one_up_per_probe_wait() {
+    fn probing_fills_one_up_per_probe_wait() {
         let mut sim = scripted();
-        assert_eq!(sim.bbr.probe_inflight(), None, "no RTT sample yet");
+        assert!(!sim.bbr.probing(), "no RTT sample yet");
         sim.round(0, 100, 10 * MS);
         assert_eq!(sim.bbr.state, BbrState::Startup);
-        assert!(sim.bbr.probe_inflight().is_some());
+        assert!(sim.bbr.probing());
 
         let mut sim = probed();
-        assert_eq!(sim.bbr.probe_inflight(), None, "ProbeBW_DOWN");
+        assert!(!sim.bbr.probing(), "ProbeBW_DOWN");
         let wait = Duration::from_secs(2);
         let up = |sim: &mut Sim, at_ms: u64| {
             sim.bbr.bw_probe_fill = false;
@@ -7230,19 +7215,13 @@ mod test {
             sim.bbr.bw_probe_wait = wait;
             let at = sim.at(at_ms * MS);
             sim.bbr.maybe_fill_probe_bw_up(at);
-            sim.bbr.probe_inflight()
+            sim.bbr.probing()
         };
-        let bdp = (sim.bbr.bw * sim.bbr.min_rtt.as_secs_f64() * 1.25) as u64;
-        let inflight = Ord::max(bdp, sim.bbr.min_pipe_cwnd);
-        assert_eq!(up(&mut sim, 100), Some(inflight));
-        assert_eq!(up(&mut sim, 1100), None, "within the wait");
+        assert!(up(&mut sim, 100));
+        assert!(!up(&mut sim, 1100), "within the wait");
         let at = sim.at(2200 * MS);
         sim.bbr.maybe_fill_probe_bw_up(at);
-        assert_eq!(
-            sim.bbr.probe_inflight(),
-            Some(inflight),
-            "once the wait passes"
-        );
+        assert!(sim.bbr.probing(), "once the wait passes");
     }
 
     /// Finishing a probe ages the max-bw window once, so cruise rounds keep the probe's maximum,

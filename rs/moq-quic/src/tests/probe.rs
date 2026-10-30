@@ -62,7 +62,11 @@ fn measure(row: &str) -> bool {
 		return false;
 	};
 	use std::io::Write as _;
-	let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+	let mut file = std::fs::OpenOptions::new()
+		.create(true)
+		.append(true)
+		.open(path)
+		.unwrap();
 	// One write per row, so concurrent appends stay whole
 	file.write_all(format!("{row}\n").as_bytes()).unwrap();
 	true
@@ -401,7 +405,7 @@ fn run(scenario: &Scenario) -> Outcome {
 
 		if now >= next_sample {
 			let estimate = conn.stats().path.bandwidth_estimate.unwrap_or(0);
-			outcome.probing += conn.congestion_state().metrics().probe_inflight.is_some() as u64;
+			outcome.probing += conn.congestion_state().metrics().probing as u64;
 			let bbr = conn
 				.congestion_state()
 				.clone_box()
@@ -597,8 +601,14 @@ fn mean(trials: &[Trial], f: impl Fn(&Outcome) -> f64) -> (f64, f64) {
 /// holding the probing runs to every budget on the mean across seeds
 fn compare(label: &str, scenario: Scenario, seeds: ops::RangeInclusive<u64>) -> Vec<Trial> {
 	let rtt = 2 * scenario.latency;
-	let seeds: Vec<u64> = if seeds == SEEDS { self::seeds().collect() } else { seeds.collect() };
-	let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(seeds.len().max(1));
+	let seeds: Vec<u64> = if seeds == SEEDS {
+		self::seeds().collect()
+	} else {
+		seeds.collect()
+	};
+	let threads = std::thread::available_parallelism()
+		.map_or(4, |n| n.get())
+		.min(seeds.len().max(1));
 	let next = std::sync::atomic::AtomicUsize::new(0);
 	let mut trials: Vec<Trial> = std::thread::scope(|scope| {
 		let handles: Vec<_> = (0..threads)
@@ -687,22 +697,26 @@ fn compare(label: &str, scenario: Scenario, seeds: ops::RangeInclusive<u64>) -> 
 
 /// Asserts the probing runs' estimate reaches the target within [`RISE`] of `from` on the mean
 fn rises(trials: &[Trial], from: Duration) {
-	let rises = trials.iter().map(|Trial { label, seed, probing, .. }| {
-		let rise = match probing.rise(from) {
-			Some(rise) => rise.as_secs_f64(),
-			None => {
-				budget!(
-					false,
-					"{label} seed {seed}: estimate {} B/s never reached {TARGET} B/s after {from:?}",
-					probing.samples.last().expect("sampled").estimate
-				);
-				// Counted as the rest of the run
-				(probing.samples.last().expect("sampled").at.saturating_sub(from)).as_secs_f64()
-			}
-		};
-		measure(&format!("RISE,{label},{seed},{rise:.3}"));
-		rise
-	});
+	let rises = trials.iter().map(
+		|Trial {
+		     label, seed, probing, ..
+		 }| {
+			let rise = match probing.rise(from) {
+				Some(rise) => rise.as_secs_f64(),
+				None => {
+					budget!(
+						false,
+						"{label} seed {seed}: estimate {} B/s never reached {TARGET} B/s after {from:?}",
+						probing.samples.last().expect("sampled").estimate
+					);
+					// Counted as the rest of the run
+					(probing.samples.last().expect("sampled").at.saturating_sub(from)).as_secs_f64()
+				}
+			};
+			measure(&format!("RISE,{label},{seed},{rise:.3}"));
+			rise
+		},
+	);
 	let rise = rises.sum::<f64>() / trials.len() as f64;
 	budget!(
 		rise <= RISE.as_secs_f64(),
@@ -855,80 +869,32 @@ fn single_packet_writes() {
 	assert!(pair.client_conn_mut(client_ch).stats().path.sent_bandwidth_probes > 0);
 }
 
-/// A batch of probe packets stays within the inflight the controller allows a probe, counting the
-/// packet still being built
+/// A batch of probe packets stays within the congestion window, counting the packet still being
+/// built
 #[test]
-fn batch_within_probe_inflight() {
+fn batch_within_window() {
 	let _guard = subscribe();
 	let mut pair = Pair::default();
 	pair.latency = Duration::from_millis(20);
 	let (client_ch, _) = pair.connect();
-	// Far above the path, so only the inflight bound holds the probe back
+	// Far above the path, so only the pacer and window hold the probe back
 	pair.client_conn_mut(client_ch).set_probe_target(1000 * TARGET);
 	let id = pair
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
 	pair.client_send(client_ch, id).write(&[0; 1400]).unwrap();
-	pair.drive_client();
-
-	let conn = pair.client_conn_mut(client_ch);
-	let inflight = conn
-		.congestion_state()
-		.metrics()
-		.probe_inflight
-		.expect("probing in Startup");
-	assert!(conn.stats().path.sent_bandwidth_probes > 1);
-	assert!(
-		conn.bytes_in_flight() <= inflight,
-		"{} bytes in flight past the probe's {inflight}",
-		conn.bytes_in_flight()
-	);
-}
-
-/// The inflight the controller allows a probe holds the sender back only once an attempt has
-/// sent a duplicate: media alone past it leaves the sender application-limited
-#[test]
-fn probe_inflight_limits_only_an_attempt() {
-	let _guard = subscribe();
-	let mut pair = Pair::default();
-	pair.latency = Duration::from_millis(20);
-	let (client_ch, _) = pair.connect();
-	pair.client_conn_mut(client_ch).set_probe_target(1000 * TARGET);
-	let inflight = pair
-		.client_conn_mut(client_ch)
-		.congestion_state()
-		.metrics()
-		.probe_inflight
-		.expect("probing in Startup");
-
-	// More media than the probe may fill, within the initial window
-	let media = pair
-		.client_streams(client_ch)
-		.open(Dir::Uni, Default::default())
-		.unwrap();
-	pair.client_send(client_ch, media)
-		.write(&vec![0; inflight as usize + 2400])
-		.unwrap();
-	// Past the pacer's bursts, short of the first ACK
 	for _ in 0..10 {
 		pair.drive_client();
 		pair.time += Duration::from_millis(1);
 	}
 	let conn = pair.client_conn_mut(client_ch);
-	assert!(conn.bytes_in_flight() > inflight);
-	assert_eq!(conn.stats().path.sent_bandwidth_probes, 0);
-	assert!(conn.app_limited(), "media alone past the bound held the sender back");
-
-	// Once the media drains, an attempt fills up to the bound, which then holds it back
-	pair.drive();
-	pair.client_send(client_ch, media).write(&[0; 1400]).unwrap();
-	pair.drive_client();
-	let conn = pair.client_conn_mut(client_ch);
-	assert!(conn.stats().path.sent_bandwidth_probes > 0);
+	let window = conn.congestion_state().window();
+	assert!(conn.stats().path.sent_bandwidth_probes > 1);
 	assert!(
-		!conn.app_limited(),
-		"an attempt held back by the bound was application-limited"
+		conn.bytes_in_flight() <= window,
+		"{} bytes in flight past the window's {window}",
+		conn.bytes_in_flight()
 	);
 }
 
@@ -967,7 +933,10 @@ fn idle_restart() {
 	for Trial { seed, probing, .. } in &trials {
 		// The last frames drain within a second
 		let drained = probing.at(idle.0 + Duration::from_secs(1)).redundant;
-		budget!(probing.at(idle.1).redundant == drained, "idle seed {seed} probed while idle");
+		budget!(
+			probing.at(idle.1).redundant == drained,
+			"idle seed {seed} probed while idle"
+		);
 	}
 }
 
@@ -988,7 +957,10 @@ fn stale_estimate() {
 		let trials = compare(&format!("stale {rate}"), scenario, SEEDS);
 		falls(&trials, Duration::ZERO, rate);
 		for outcome in trials.iter().flat_map(|t| [&t.probing, &t.baseline]) {
-			budget!(rate > MEDIA || outcome.queue.dropped > 0, "stale {rate}: the queue never overflowed");
+			budget!(
+				rate > MEDIA || outcome.queue.dropped > 0,
+				"stale {rate}: the queue never overflowed"
+			);
 		}
 	}
 }

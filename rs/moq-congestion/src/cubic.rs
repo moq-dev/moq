@@ -294,7 +294,7 @@ impl Controller for Cubic {
             pacing_rate: None,
             bandwidth_estimate: None,
             // CUBIC has no probing phase to fill
-            probe_inflight: None,
+            probing: false,
         }
     }
 

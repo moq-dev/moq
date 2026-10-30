@@ -3,9 +3,9 @@
 //! Congestion controllers stop learning once the application sends less than the path carries:
 //! BBR3 only raises its estimate from an application-limited sample above the current one. So a
 //! session that wants more than it sends, to resume a stopped rendition, would never find out
-//! the path has room. While the controller probes, this fills the pacing headroom it opens with
-//! duplicates of STREAM data already in flight, up to the session's target, so the probe's
-//! samples measure the path. A duplicate needs no wire change, and repairs a loss of its
+//! the path has room. While the controller probes, this fills what its pacer and window allow
+//! with duplicates of STREAM data already in flight, up to the session's target, so the sender
+//! is not application-limited and the probe's samples measure the path. A duplicate needs no wire change, and repairs a loss of its
 //! original. It is never retransmitted, and a reset stream's data is never sent again, so a
 //! probe never sends past a group's expiry.
 //!
@@ -70,10 +70,8 @@ pub(super) enum Ready {
 	/// Not probing, or nothing in flight to resend: the application is all that limits the
 	/// sender
 	Idle,
-	/// Held back by the target, or once an attempt has begun by the inflight the controller
-	/// allows a probe, which limit the sender as pacing does; a held-back pace ends at the
-	/// instant given
-	Blocked(Option<Instant>),
+	/// Held back by the target, which limits the sender as pacing does, until the instant given
+	Blocked(Instant),
 	/// Send one
 	Send,
 }
@@ -111,11 +109,7 @@ impl BandwidthProbe {
 	/// controller's probe now
 	fn judge(&mut self, probing: bool, estimate: Option<u64>, rtt: Duration, now: Instant) -> bool {
 		let estimate = estimate.unwrap_or(0);
-		self.judge_reached(probing, estimate >= self.target, estimate, rtt, now)
-	}
-
-	fn judge_reached(&mut self, probing: bool, reached: bool, estimate: u64, rtt: Duration, now: Instant) -> bool {
-		if reached {
+		if estimate >= self.target {
 			self.attempt = None;
 			self.misses = 0;
 			self.resume = None;
@@ -175,74 +169,20 @@ impl Connection {
 			return Ready::Idle;
 		}
 		let metrics = self.path.congestion.metrics();
+		let probing = metrics.probing;
 		let rtt = self.path.rtt.get();
-		let (gate, phase) = variant();
-		if gate != Gate::Pr {
-			// SCRATCH VARIANTS: fill to the pacer and window, with no inflight cap
-			let in_phase = !phase || metrics.probe_inflight.is_some();
-			let estimate = metrics.bandwidth_estimate.unwrap_or(0);
-			let reached = match gate {
-				Gate::Pacing => {
-					let Some(pacing) = metrics.pacing_rate else {
-						return Ready::Idle;
-					};
-					pacing >= target
-				}
-				Gate::Hybrid => {
-					let Some(pacing) = metrics.pacing_rate else {
-						return Ready::Idle;
-					};
-					// Startup's 2.77 gain is the only one past 2x the estimate
-					let startup = pacing > 2 * estimate;
-					if startup { estimate >= target } else { pacing >= target }
-				}
-				_ => estimate >= target,
-			};
-			if !self
-				.bandwidth_probe
-				.judge_reached(in_phase, reached, estimate, rtt, now)
-			{
-				return Ready::Idle;
-			}
-			if !self.find_bandwidth_probe_source() {
-				return Ready::Idle;
-			}
-			if gate != Gate::Pacing {
-				let mtu = self.path.current_mtu();
-				if let Some(at) = self.bandwidth_probe.pacing.delay(target, bytes, mtu, now) {
-					return Ready::Blocked(Some(at));
-				}
-			}
-			self.bandwidth_probe
-				.attempt
-				.get_or_insert(Attempt { since: now, estimate });
-			return Ready::Send;
-		}
-		let probing = metrics.probe_inflight.is_some();
 		if !self
 			.bandwidth_probe
 			.judge(probing, metrics.bandwidth_estimate, rtt, now)
 		{
 			return Ready::Idle;
 		}
-		let Some(inflight) = metrics.probe_inflight else {
-			return Ready::Idle;
-		};
 		if !self.find_bandwidth_probe_source() {
 			return Ready::Idle;
 		}
-		if self.path.in_flight.bytes + bytes > inflight {
-			// Before the first duplicate, media alone past the bound, as when another flow's queue
-			// inflates the round trip over BBR.min_rtt, is all the sender has: taking its samples
-			// as the path's would age BBR3's model down to the media
-			if self.bandwidth_probe.attempt.is_none() {
-				return Ready::Idle;
-			}
-			return Ready::Blocked(None);
-		}
 		let mtu = self.path.current_mtu();
 		if let Some(at) = self.bandwidth_probe.pacing.delay(target, bytes, mtu, now) {
-			return Ready::Blocked(Some(at));
+			return Ready::Blocked(at);
 		}
 		let estimate = metrics.bandwidth_estimate.unwrap_or(0);
 		self.bandwidth_probe
@@ -276,12 +216,6 @@ impl Connection {
 		found.is_some()
 	}
 
-	/// Whether the last transmit reported the sender application-limited
-	#[cfg(test)]
-	pub(crate) fn app_limited(&self) -> bool {
-		self.app_limited
-	}
-
 	/// When each probe packet still in flight was sent, and the streams it resends data of
 	#[cfg(test)]
 	pub(crate) fn bandwidth_probes_in_flight(&self) -> impl Iterator<Item = (Instant, crate::StreamId)> + '_ {
@@ -291,28 +225,6 @@ impl Connection {
 			.filter(|(_, packet)| packet.bandwidth_probe)
 			.flat_map(|(_, packet)| packet.stream_frames.iter().map(|frame| (packet.time_sent, frame.id)))
 	}
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Gate {
-	Pr,
-	Pacing,
-	Estimate,
-	Hybrid,
-}
-
-/// SCRATCH: `MOQ_PROBE_GATE=pr|pacing|estimate`, `MOQ_PROBE_PHASE=1|0`
-fn variant() -> (Gate, bool) {
-	static VARIANT: std::sync::OnceLock<(Gate, bool)> = std::sync::OnceLock::new();
-	*VARIANT.get_or_init(|| {
-		let gate = match std::env::var("MOQ_PROBE_GATE").as_deref() {
-			Ok("pacing") => Gate::Pacing,
-			Ok("estimate") => Gate::Estimate,
-			Ok("hybrid") => Gate::Hybrid,
-			_ => Gate::Pr,
-		};
-		(gate, std::env::var("MOQ_PROBE_PHASE").as_deref() != Ok("0"))
-	})
 }
 
 /// A token bucket refilled at the probe's target
