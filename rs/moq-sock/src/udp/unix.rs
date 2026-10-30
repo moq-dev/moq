@@ -5,7 +5,10 @@ use std::{
 	mem::{self, MaybeUninit},
 	net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
 	os::fd::AsRawFd,
-	sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+	sync::{
+		Once,
+		atomic::{AtomicBool, AtomicUsize, Ordering},
+	},
 	time::Duration,
 };
 
@@ -51,13 +54,7 @@ impl UdpSocketState {
 	/// Configures `sock` for this platform's offloads and ancillary data and returns its state.
 	pub fn new(sock: UdpSockRef<'_>) -> io::Result<Self> {
 		let io = sock.0;
-		let mut cmsg_platform_space = 0;
-		#[cfg(not(any(target_os = "redox", target_os = "hurd")))]
-		if cfg!(target_os = "linux") || cfg!(bsd) || cfg!(apple) || cfg!(target_os = "android") || cfg!(solarish) {
-			cmsg_platform_space += unsafe { libc::CMSG_SPACE(size_of::<libc::in6_pktinfo>() as _) as usize };
-		}
-
-		assert!(cmsg::LEN >= unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as _) as usize } + cmsg_platform_space);
+		// `cmsg::LEN` is sized at compile time for the options enabled below.
 		assert!(
 			align_of::<libc::cmsghdr>() <= align_of::<cmsg::Aligned<[u8; 0]>>(),
 			"control message buffers will be misaligned"
@@ -597,7 +594,8 @@ fn recv_via_recvmmsg(io: SockRef<'_>, bufs: &mut [IoSliceMut<'_>], meta: &mut [R
 		) as isize
 	})?;
 	for i in 0..(msg_count as usize) {
-		meta[i] = decode_recv(&names[i], &hdrs[i].msg_hdr, hdrs[i].msg_len as usize)?;
+		let hdr = &hdrs[i].msg_hdr;
+		meta[i] = decode_recv(&names[i], hdr, hdr.msg_flags, hdrs[i].msg_len as usize)?;
 	}
 	Ok(msg_count as usize)
 }
@@ -626,7 +624,7 @@ pub(crate) fn recv_single(io: SockRef<'_>, bufs: &mut [IoSliceMut<'_>], meta: &m
 			break n;
 		}
 	};
-	meta[0] = decode_recv(&name, &hdr, n as usize)?;
+	meta[0] = decode_recv(&name, &hdr, hdr.msg_flags, n as usize)?;
 	Ok(1)
 }
 
@@ -738,11 +736,22 @@ fn prepare_recv(
 	hdr.msg_flags = 0;
 }
 
+/// Decodes a received datagram's address and control messages
+///
+/// `flags` are the `msg_flags` the kernel returned. `MSG_CTRUNC` keeps the datagram with the
+/// metadata that fit: losing metadata beats losing the packet.
 pub(crate) fn decode_recv<M: cmsg::MsgHdr<ControlMessage = libc::cmsghdr>>(
 	name: &MaybeUninit<libc::sockaddr_storage>,
 	hdr: &M,
+	flags: libc::c_int,
 	len: usize,
 ) -> io::Result<RecvMeta> {
+	if flags & libc::MSG_CTRUNC != 0 {
+		static CTRUNC: Once = Once::new();
+		CTRUNC.call_once(|| {
+			crate::udp::log::warn!("control messages truncated to {} bytes; some receive metadata is lost", cmsg::LEN);
+		});
+	}
 	let name = unsafe { name.assume_init() };
 	let mut ctrl = ControlMetadata {
 		ecn_bits: 0,
@@ -779,11 +788,16 @@ struct ControlMetadata {
 
 impl ControlMetadata {
 	/// Decodes a control message and updates the metadata state
+	///
+	/// A message too short for its type is skipped.
 	fn decode(&mut self, cmsg: cmsg::CMsg<'_, libc::cmsghdr>) {
+		// SAFETY: each payload type below is plain data, valid for any bytes.
 		match (cmsg.cmsg_level, cmsg.cmsg_type) {
-			(libc::IPPROTO_IP, libc::IP_TOS) => unsafe {
-				self.ecn_bits = cmsg.decode::<u8>();
-			},
+			(libc::IPPROTO_IP, libc::IP_TOS) => {
+				if let Some(bits) = unsafe { cmsg.decode::<u8>() } {
+					self.ecn_bits = bits;
+				}
+			}
 			// FreeBSD uses IP_RECVTOS here, and we can be liberal because cmsgs are opt-in.
 			#[cfg(not(any(
 				target_os = "openbsd",
@@ -792,56 +806,67 @@ impl ControlMetadata {
 				target_os = "hurd",
 				solarish
 			)))]
-			(libc::IPPROTO_IP, libc::IP_RECVTOS) => unsafe {
-				self.ecn_bits = cmsg.decode::<u8>();
-			},
+			(libc::IPPROTO_IP, libc::IP_RECVTOS) => {
+				if let Some(bits) = unsafe { cmsg.decode::<u8>() } {
+					self.ecn_bits = bits;
+				}
+			}
 			#[cfg(not(target_os = "redox",))]
-			(libc::IPPROTO_IPV6, libc::IPV6_TCLASS) => unsafe {
+			(libc::IPPROTO_IPV6, libc::IPV6_TCLASS) => {
 				// Temporary hack around broken macos ABI. Remove once upstream fixes it.
 				// https://bugreport.apple.com/web/?problemID=48761855
 				#[allow(
 					clippy::unnecessary_cast,
 					reason = "`cmsg_len` is `size_t` on glibc but narrower on other libcs"
 				)]
-				if cfg!(apple) && cmsg.cmsg_len as usize == libc::CMSG_LEN(size_of::<u8>() as _) as usize {
-					self.ecn_bits = cmsg.decode::<u8>();
+				let bits = if cfg!(apple) && cmsg.cmsg_len as usize == unsafe { libc::CMSG_LEN(size_of::<u8>() as _) } as usize {
+					unsafe { cmsg.decode::<u8>() }
 				} else {
-					self.ecn_bits = cmsg.decode::<libc::c_int>() as u8;
+					unsafe { cmsg.decode::<libc::c_int>() }.map(|tclass| tclass as u8)
+				};
+				if let Some(bits) = bits {
+					self.ecn_bits = bits;
 				}
-			},
+			}
 			#[cfg(any(target_os = "linux", target_os = "android"))]
 			(libc::IPPROTO_IP, libc::IP_PKTINFO) => {
-				let pktinfo = unsafe { cmsg.decode::<libc::in_pktinfo>() };
-				self.dst_ip = Some(IpAddr::V4(Ipv4Addr::from(pktinfo.ipi_addr.s_addr.to_ne_bytes())));
-				self.interface_index = Some(pktinfo.ipi_ifindex as u32);
+				if let Some(pktinfo) = unsafe { cmsg.decode::<libc::in_pktinfo>() } {
+					self.dst_ip = Some(IpAddr::V4(Ipv4Addr::from(pktinfo.ipi_addr.s_addr.to_ne_bytes())));
+					self.interface_index = Some(pktinfo.ipi_ifindex as u32);
+				}
 			}
 			#[cfg(any(bsd, apple))]
 			(libc::IPPROTO_IP, libc::IP_RECVDSTADDR) => {
-				let in_addr = unsafe { cmsg.decode::<libc::in_addr>() };
-				self.dst_ip = Some(IpAddr::V4(Ipv4Addr::from(in_addr.s_addr.to_ne_bytes())));
+				if let Some(in_addr) = unsafe { cmsg.decode::<libc::in_addr>() } {
+					self.dst_ip = Some(IpAddr::V4(Ipv4Addr::from(in_addr.s_addr.to_ne_bytes())));
+				}
 			}
 			#[cfg(not(any(target_os = "redox", target_os = "hurd")))]
 			(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) => {
-				let pktinfo = unsafe { cmsg.decode::<libc::in6_pktinfo>() };
-				self.dst_ip = Some(IpAddr::V6(Ipv6Addr::from(pktinfo.ipi6_addr.s6_addr)));
-				#[cfg_attr(
-					not(target_os = "android"),
-					expect(clippy::unnecessary_cast, reason = "`ipi6_ifindex` is already `u32` off Android")
-				)]
-				{
-					self.interface_index = Some(pktinfo.ipi6_ifindex as u32);
+				if let Some(pktinfo) = unsafe { cmsg.decode::<libc::in6_pktinfo>() } {
+					self.dst_ip = Some(IpAddr::V6(Ipv6Addr::from(pktinfo.ipi6_addr.s6_addr)));
+					#[cfg_attr(
+						not(target_os = "android"),
+						expect(clippy::unnecessary_cast, reason = "`ipi6_ifindex` is already `u32` off Android")
+					)]
+					{
+						self.interface_index = Some(pktinfo.ipi6_ifindex as u32);
+					}
 				}
 			}
 			#[cfg(any(target_os = "linux", target_os = "android"))]
-			(libc::SOL_UDP, libc::UDP_GRO) => unsafe {
-				self.stride = cmsg.decode::<libc::c_int>() as usize;
-			},
+			(libc::SOL_UDP, libc::UDP_GRO) => {
+				if let Some(stride) = unsafe { cmsg.decode::<libc::c_int>() } {
+					self.stride = stride as usize;
+				}
+			}
 			#[cfg(any(target_os = "linux", target_os = "android"))]
 			(libc::SOL_SOCKET, libc::SCM_TIMESTAMPNS) => {
-				let ts = unsafe { cmsg.decode::<libc::timespec>() };
-				let secs = u64::try_from(ts.tv_sec).unwrap_or(0);
-				let nsecs = u32::try_from(ts.tv_nsec).unwrap_or(0);
-				self.timestamp = Some(Duration::new(secs, nsecs));
+				if let Some(ts) = unsafe { cmsg.decode::<libc::timespec>() } {
+					let secs = u64::try_from(ts.tv_sec).unwrap_or(0);
+					let nsecs = u32::try_from(ts.tv_nsec).unwrap_or(0);
+					self.timestamp = Some(Duration::new(secs, nsecs));
+				}
 			}
 			_ => {}
 		}
@@ -1028,6 +1053,77 @@ mod tests {
 		}
 		worker.join().unwrap();
 		assert!(matches!(result, Ok(Err(error)) if error.kind() == io::ErrorKind::WouldBlock));
+	}
+
+	/// A coalesced ECT(0) GSO train brings every receive message at once, the GRO one included,
+	/// and they all fit `cmsg::LEN` over both `recvmsg` and `recvmmsg`.
+	#[test]
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	fn gro_train_keeps_every_cmsg() {
+		const SEGMENT: usize = 128;
+		const SEGMENTS: usize = 4;
+		let loopback = unsafe { libc::if_nametoindex(c"lo".as_ptr()) };
+		assert_ne!(loopback, 0, "no loopback interface");
+
+		for ip in [IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)] {
+			for batch in [false, true] {
+				let receiver = match UdpSocket::bind((ip, 0)) {
+					Err(err) if ip.is_ipv6() && err.kind() == io::ErrorKind::AddrNotAvailable => continue,
+					receiver => receiver.unwrap(),
+				};
+				let sender = UdpSocket::bind((ip, 0)).unwrap();
+				let send_state = UdpSocketState::new((&sender).into()).unwrap();
+				let recv_state = UdpSocketState::new((&receiver).into()).unwrap();
+				assert!(send_state.max_gso_segments() >= SEGMENTS, "no GSO");
+				assert!(recv_state.gro_segments() > 1, "no GRO");
+				// Block instead of polling, since loopback delivery can be asynchronous.
+				receiver.set_nonblocking(false).unwrap();
+				receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+				let contents = [0xab; SEGMENT * SEGMENTS];
+				send_state
+					.try_send(
+						(&sender).into(),
+						&Transmit {
+							destination: receiver.local_addr().unwrap(),
+							ecn: Some(EcnCodepoint::Ect0),
+							contents: &contents,
+							segment_size: Some(SEGMENT),
+							src_ip: None,
+						},
+					)
+					.unwrap();
+
+				let mut buf = [0u8; SEGMENT * SEGMENTS];
+				let mut iov = IoSliceMut::new(&mut buf);
+				let mut name = MaybeUninit::<libc::sockaddr_storage>::uninit();
+				let mut ctrl = cmsg::Aligned(MaybeUninit::<[u8; cmsg::LEN]>::uninit());
+				let mut msg = unsafe { mem::zeroed::<libc::mmsghdr>() };
+				prepare_recv(&mut iov, &mut name, &mut ctrl, &mut msg.msg_hdr);
+				let fd = receiver.as_raw_fd();
+				let len = if batch {
+					let n = retry_if_interrupted(|| unsafe {
+						libc::recvmmsg(fd, &mut msg, 1, 0, ptr::null_mut()) as isize
+					})
+					.unwrap();
+					assert_eq!(n, 1);
+					msg.msg_len as usize
+				} else {
+					retry_if_interrupted(|| unsafe { libc::recvmsg(fd, &mut msg.msg_hdr, 0) }).unwrap() as usize
+				};
+
+				let hdr = &msg.msg_hdr;
+				let case = format!("{ip}, batch {batch}");
+				assert_eq!(hdr.msg_flags & libc::MSG_CTRUNC, 0, "{case}");
+				let meta = decode_recv(&name, hdr, hdr.msg_flags, len).unwrap();
+				assert_eq!(meta.len, contents.len(), "{case}");
+				assert_eq!(meta.stride, SEGMENT, "{case}");
+				assert_eq!(meta.ecn, Some(EcnCodepoint::Ect0), "{case}");
+				assert!(meta.timestamp.is_some(), "{case}");
+				assert_eq!(meta.dst_ip, Some(ip), "{case}");
+				assert_eq!(meta.interface_index, Some(loopback), "{case}");
+			}
+		}
 	}
 
 	#[test]

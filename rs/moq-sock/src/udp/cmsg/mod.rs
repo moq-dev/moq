@@ -141,17 +141,22 @@ pub(crate) struct CMsg<'a, C: CMsgHdr> {
 }
 
 impl<C: CMsgHdr> CMsg<'_, C> {
-	/// Reads the payload of this control message
+	/// Reads the payload of this control message, or `None` if it is shorter than a `T`
 	///
 	/// # Safety
 	///
-	/// The control message must contain a payload of type `T`
-	pub(crate) unsafe fn decode<T: Copy>(&self) -> T {
-		debug_assert_eq!(self.len(), C::cmsg_len(size_of::<T>()));
+	/// Any `size_of::<T>()` initialized bytes must be a valid `T`, as for the plain-data payloads
+	/// the kernel writes.
+	pub(crate) unsafe fn decode<T: Copy>(&self) -> Option<T> {
+		// A truncated or malformed message would otherwise have the read run past its end.
+		if self.len() < C::cmsg_len(size_of::<T>()) {
+			return None;
+		}
 		// The payload is only aligned for `C`, which on musl is less strict than payloads such as
 		// `libc::timespec`, so it cannot be read through an aligned `ptr::read`.
-		// SAFETY: caller guarantees that the payload is a readable, initialized value of type `T`
-		unsafe { ptr::read_unaligned(self.data().cast::<T>()) }
+		// SAFETY: `Iter` bounds the message to the buffer, and the check above keeps a `T` inside
+		// it; the caller guarantees those bytes are a valid `T`.
+		Some(unsafe { ptr::read_unaligned(self.data().cast::<T>()) })
 	}
 
 	/// Returns a pointer to the payload of this control message
@@ -221,7 +226,7 @@ pub(crate) trait CMsgHdr {
 }
 
 #[cfg(unix)]
-pub(crate) const LEN: usize = 96;
+pub(crate) use imp::LEN;
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -250,17 +255,35 @@ mod tests {
 		let mut iter = unsafe { Iter::new(&hdr) };
 		let cmsg = iter.next().unwrap();
 		assert_eq!((cmsg.cmsg_level, cmsg.cmsg_type), (1, 2));
-		assert_eq!(unsafe { cmsg.decode::<u32>() }, 0x1234_5678);
+		assert_eq!(unsafe { cmsg.decode::<u32>() }, Some(0x1234_5678));
 
 		let cmsg = iter.next().unwrap();
 		assert_eq!((cmsg.cmsg_level, cmsg.cmsg_type), (3, 4));
-		assert_eq!(unsafe { cmsg.decode::<[u8; 5]>() }, [0xab; 5]);
+		assert_eq!(unsafe { cmsg.decode::<[u8; 5]>() }, Some([0xab; 5]));
 
 		let cmsg = iter.next().unwrap();
 		assert_eq!((cmsg.cmsg_level, cmsg.cmsg_type), (5, 6));
-		assert_eq!(unsafe { cmsg.decode::<u16>() }, 0x0102);
+		assert_eq!(unsafe { cmsg.decode::<u16>() }, Some(0x0102));
 
 		assert!(iter.next().is_none());
+	}
+
+	/// A payload shorter than the requested type decodes to `None` instead of reading past it.
+	#[test]
+	fn short_payload_decodes_to_none() {
+		let mut buf = Aligned([0u8; LEN]);
+		let mut hdr = unsafe { mem::zeroed::<libc::msghdr>() };
+		hdr.msg_control = buf.0.as_mut_ptr() as _;
+		hdr.msg_controllen = LEN as _;
+
+		let mut encoder = unsafe { Encoder::new(&mut hdr) };
+		encoder.push(1, 2, 0x12u8);
+		encoder.finish();
+
+		let cmsg = unsafe { Iter::new(&hdr) }.next().unwrap();
+		assert_eq!(unsafe { cmsg.decode::<libc::c_int>() }, None);
+		assert_eq!(unsafe { cmsg.decode::<libc::timespec>() }.map(|ts| ts.tv_sec), None);
+		assert_eq!(unsafe { cmsg.decode::<u8>() }, Some(0x12));
 	}
 
 	/// A malformed length after a valid message ends the walk with that message.
@@ -282,7 +305,7 @@ mod tests {
 
 			let mut iter = unsafe { Iter::new(&hdr) };
 			let first = iter.next().unwrap();
-			assert_eq!(unsafe { first.decode::<u32>() }, 0x1234_5678);
+			assert_eq!(unsafe { first.decode::<u32>() }, Some(0x1234_5678));
 			// SAFETY: the second header lies inside the buffer, after the first message.
 			unsafe {
 				let second = first.ptr.as_ptr().byte_add(space);
