@@ -309,7 +309,7 @@ impl<F: Container> Consumer<F> {
 	/// Start up to `groups` groups below the live edge, even when the live edge arrives first.
 	///
 	/// Applies only where delivery would start wherever the publisher does: a subscription that names
-	/// a start already waits for it, and [`live`](Self::live) starts at the newest group. Without
+	/// a start already waits for it, and a live start takes the newest group. Without
 	/// this, the start is the lowest group that has arrived when the first one does, so a newer
 	/// group whose stream wins the race (newest-first delivery makes that likely) drops the earlier
 	/// ones as old. With it, once the first group arrives, the start waits for the group `groups`
