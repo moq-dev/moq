@@ -30,8 +30,8 @@ func TestOriginEndsWithItsProducer(t *testing.T) {
 	if update != nil || err != nil {
 		t.Fatalf("Next = (%v, %v), want the end of the stream", update, err)
 	}
-	if _, err := consumer.RequestBroadcast(ctx, "live"); !errors.Is(err, ErrClosed) {
-		t.Fatalf("RequestBroadcast err = %v, want ErrClosed", err)
+	if _, err := consumer.Request(ctx, "live", nil); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Request err = %v, want ErrClosed", err)
 	}
 }
 
@@ -58,7 +58,7 @@ func TestRequestsKeepTheOrigin(t *testing.T) {
 	}
 	requested := make(chan result, 1)
 	go func() {
-		broadcast, err := consumer.RequestBroadcast(ctx, "live")
+		broadcast, err := consumer.Request(ctx, "live", nil)
 		requested <- result{broadcast: broadcast, err: err}
 	}()
 
@@ -74,7 +74,7 @@ func TestRequestsKeepTheOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = served.Close() }()
+	defer func() { _ = served.Broadcast().Close() }()
 
 	var res result
 	select {
@@ -83,6 +83,38 @@ func TestRequestsKeepTheOrigin(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	if res.err != nil {
-		t.Fatalf("RequestBroadcast err = %v, want the served broadcast", res.err)
+		t.Fatalf("Request err = %v, want the served broadcast", res.err)
+	}
+}
+
+// Releasing a publication, which is what its finalizer does, keeps the route:
+// only closing the broadcast retracts it.
+func TestReleasingAPublicationKeepsItsRoute(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	origin := NewOriginProducer()
+	consumer := origin.Consume()
+	publication, err := origin.CreateBroadcast("live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publication.Announce(AnnounceRoute{}); err != nil {
+		t.Fatal(err)
+	}
+	broadcast := publication.Broadcast()
+	if broadcast != publication.Broadcast() {
+		t.Fatal("Broadcast must return the same producer on every call")
+	}
+	publication.inner.Destroy()
+
+	if _, err := consumer.Request(ctx, "live", nil); err != nil {
+		t.Fatalf("Request = %v, want the released publication's broadcast", err)
+	}
+	if err := broadcast.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := consumer.Request(ctx, "live", nil); err == nil {
+		t.Fatal("a closed broadcast must be unroutable")
 	}
 }

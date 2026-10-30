@@ -21,7 +21,7 @@ use std::{
 use rangemap::{RangeMap, RangeSet};
 
 use super::{Info, Order, Position, TrackState, clamp_max_delay};
-use crate::{Error, Result, StreamError, group};
+use crate::{Error, Result, StreamError, group, util::SendCell};
 
 /// The fills a track's readers asked for, queued or taken by a handler, under one lock.
 #[derive(Default)]
@@ -665,7 +665,7 @@ pub(super) fn poll_requested(
 			result,
 		};
 		return Poll::Ready(Ok(Fill {
-			inner: Arc::new(inner),
+			inner: Arc::new(SendCell::new(inner)),
 			prev: None,
 		}));
 	}
@@ -697,7 +697,9 @@ pub(super) fn poll_requested(
 /// clone watches on its own, so its first [`poll_wanted_changed`](Self::poll_wanted_changed)
 /// reports the current value.
 pub struct Fill {
-	inner: Arc<Inner>,
+	// Its track state reaches every group of the track, so the cell proves `Send` once
+	// here instead of inside every session machine holding a fill.
+	inner: Arc<SendCell<Inner>>,
 	// The value `poll_wanted_changed` last returned, or `None` before it returned any.
 	prev: Option<Option<u64>>,
 }
@@ -1062,8 +1064,13 @@ impl Inner {
 			return Err(Error::Duplicate);
 		}
 		// Cache the group before answering: readers resolve an accept through the cache.
-		let res =
-			TrackState::modify(&self.state).and_then(|mut state| state.insert_group_request(sequence, frames, info));
+		let res = TrackState::modify(&self.state).and_then(|mut state| {
+			let res = state.insert_group_request(sequence, frames, info);
+			let deferred = state.deferred();
+			drop(state);
+			deferred.wake();
+			res
+		});
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(sequence..end);
 			if let Ok(group) = &res
@@ -1273,7 +1280,7 @@ impl Readers {
 /// that group of the fill; dropping it unanswered leaves the group to the fill.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct GroupFill {
-	inner: Arc<Inner>,
+	inner: Arc<SendCell<Inner>>,
 	sequence: u64,
 	frame_start: u64,
 	frame_end: Option<u64>,

@@ -54,11 +54,12 @@ gen._uniffi_continuation_callback = _preempted_continuation
 
 async def main() -> None:
     origin = moq_ffi.MoqOriginProducer(moq_ffi.MoqOriginConfig())
-    broadcast = origin.create_broadcast("exit")
-    broadcast.announce(moq_ffi.MoqAnnounceRoute())
+    publication = origin.create_broadcast("exit")
+    publication.announce(moq_ffi.MoqAnnounceRoute())
+    broadcast = publication.broadcast()
     track = broadcast.publish_track("data", moq_ffi.MoqTrackInfo(timescale=1_000_000))
 
-    consumer = await origin.consume().request_broadcast("exit")
+    consumer = await origin.consume().request("exit")
     subscriber = await consumer.subscribe_track("data", None)
 
     # Written once the read is parked, so the runtime thread delivers the wake.

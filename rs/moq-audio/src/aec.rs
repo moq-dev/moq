@@ -176,9 +176,10 @@ impl Control {
 	/// Attach the adaptive state to a microphone with this format.
 	///
 	/// Called when `capture` opens a device, so the allocation lands there
-	/// rather than in the first callback. Capture is demand-gated, so this runs
-	/// again every time a listener comes back: the adaptive filter survives that
-	/// as long as the format hasn't changed, since it is still the same room.
+	/// rather than in the first callback. This runs again every time capture
+	/// reopens, after a stop, a device failure, or an on-demand listener coming
+	/// back: the adaptive filter survives that as long as the format hasn't
+	/// changed, since it is still the same room.
 	pub(crate) fn attach(&self, sample_rate: u32, channels: u32) -> Result<Attachment, Error> {
 		// sonora reports a bad format per call, by which point we are on the
 		// audio thread and can only log it. Reject it while there is still a

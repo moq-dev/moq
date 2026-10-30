@@ -21,7 +21,9 @@ software profiles below; it does not certify a hardware IRD or every TS layout.
 - `overhead.py` counts the packets a capture spends on clocks and audio framing
   against its source.
 - `holes.py` finds media missing from a generated clip's capture, from its
-  timestamps against the source's.
+  presentation timestamps against the source's. The export derives each group's
+  decode timestamps from that group alone, so they step at group boundaries with
+  nothing lost.
 - `passthrough.py` places every packet of an `export ts --passthrough` capture
   at its source position and compares the compliance verdicts.
 
@@ -892,9 +894,9 @@ the same access unit: AAC overlap and perceptual-noise state differ between a
 cold decoder and a decoder that saw earlier frames. No arbitrary warmup samples
 are discarded. PES boundaries and TS packetization may change.
 
-The suffix is the exporter's to choose, and it starts on a whole group: a join
-whose first group is cut short before anything of it went out starts at the next
-one. Anything lost after that fails. When it does, the harness prints what the
+The suffix is the exporter's to choose, and it starts on a keyframe: a join
+whose start group went stale before anything of it went out starts at the next
+one. Anything lost after the first frame out fails, a group cut short included. When it does, the harness prints what the
 exporter reported: the `TS export release clock` counts (`dropped` late,
 `trimmed` before the output began, `gaps` skipped upstream) and each loss it
 logged.

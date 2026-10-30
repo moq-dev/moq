@@ -1029,8 +1029,6 @@ mod tests {
 
 	/// A source that resizes mid-stream takes the ladder with it.
 	///
-	/// `moq_video::encode::publish_capture` opens its source twice by design (once
-	/// to probe the mode, once when the first subscriber arrives), and a window
 	/// A source that changes aspect ratio keeps every rung height while moving
 	/// every rung width, so a rung retires and its replacement serves the same
 	/// height. That replacement must not reuse the retired track's name: it is a
@@ -1517,11 +1515,10 @@ mod tests {
 	}
 
 	/// A fetch is demand, so it starts the live path, which claims the group the
-	/// source has open. A reader that picked that group up from the cache is not
-	/// demand, so when the fetch ends the live path is left mid-group with
+	/// source has open. When the fetch ends, the live path is left mid-group with
 	/// nobody asking. It finishes the group before leaving its source: a group
-	/// name always means the same content, so the reader gets the whole group
-	/// rather than one aborted under it.
+	/// name always means the same content, so a later reader of that sequence
+	/// gets the whole group rather than one aborted under it.
 	///
 	/// Paused so the runtime settles before the source group ends: the live path
 	/// has seen the demand go away by then, which is the moment that used to
@@ -1587,9 +1584,6 @@ mod tests {
 		let mut edge = rung.clone();
 		while edge.largest().await.map(|position| (position.group, position.frame)) != Some((0, 1)) {}
 
-		// Read straight from the cache while the group is still being written.
-		let mut fetched = rung.fetch_group(0, None).await.unwrap();
-
 		// The only demand ends with output group 0 still open.
 		drop(fetching);
 		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -1602,6 +1596,8 @@ mod tests {
 		group.finish().unwrap();
 		while source_demand.wanted_changed().await.unwrap().is_some() {}
 
+		// Read from the cache after the live path left.
+		let mut fetched = rung.fetch_group(0, None).await.unwrap();
 		let mut frames = 0;
 		while fetched.read_frame().await.expect("group 0 was aborted").is_some() {
 			frames += 1;

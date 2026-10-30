@@ -115,19 +115,22 @@ takes only the track. Producers accept any `encoding/json` value; consumers retu
 `Update` / `Append` / `Push` / `Pop` take a final `*time.Duration` on the broadcast clock; nil publishes untimed.
 Raw tracks with a nil timescale are untimed; timed tracks require matching timestamps.
 `media.CatalogProducer.Now()` samples and fixes the catalog clock for explicit local-event stamps.
-`moq.dev/moq/flate` provides the matching snapshot and stream producers for opaque bytes.
+Opaque bytes go on a plain `TrackProducer`.
 
 ```go
 import moqjson "moq.dev/moq/json"
 
-broadcast, _ := client.CreateBroadcast("room")
-track, _ := broadcast.PublishTrack("status", nil)
-status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
+publication, _ := client.CreateBroadcast("room")
+broadcast := publication.Broadcast()
+// JSON is small and repetitive, so compress the track on the wire.
+track, _ := broadcast.PublishTrack("status", &moq.TrackInfo{Compress: true})
+status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{})
 _ = status.Update(map[string]any{"viewers": 42}, nil)
+_ = publication.Announce(moq.AnnounceRoute{})
 ```
 
-Producers take `SnapshotOptions` or `StreamOptions`; both consumers take
-`ConsumerOptions`, where only `Compression` has to match the producer.
+Snapshot and window producers take `SnapshotOptions` or `WindowOptions`; the stream producer and
+every consumer take only the track, and a consumer reads a compressed track like a plain one.
 
 ## Errors
 
@@ -140,7 +143,7 @@ the session closed, i.e. not a real failure) and `moq.IsAuthError(err)` (HTTP
 
 Every call that can block takes a `context.Context` and aborts cleanly when it is
 cancelled, leaving nothing running in the background. A one-shot call (a subscribe,
-a fetch, `RequestBroadcast`, `Resolve`, `WantedChanged`, `Unwanted`, `Server.Accept`) aborts on
+a fetch, `Request`, `Resolve`, `WantedChanged`, `Server.Accept`) aborts on
 its own and leaves the object usable; a stream read cancels the stream it reads.
 See the package doc for details.
 

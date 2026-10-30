@@ -1,4 +1,4 @@
-import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
+import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
@@ -1475,6 +1475,7 @@ test("an advertisement carries its epoch only once negotiated", async () => {
 test.each([true, false])(
 	"an epoch change advertises the new epoch before withdrawing the old (negotiated: %p)",
 	async (negotiated) => {
+		using clock = manual();
 		const pair = createMockTransportPair(ALPN.DRAFT_18);
 		const { pub, origin } = publisher(pair.server, { epoch: negotiated });
 		const streams = accepted(pair.client);
@@ -1484,7 +1485,7 @@ test.each([true, false])(
 			broadcast.announce({ epoch: first });
 			void pub.runPublishNamespaces();
 
-			const old = await take(streams);
+			const old = await take(clock, streams);
 			expect(await old.reader.u53()).toBe(PublishNamespace.id);
 			expect((await PublishNamespace.decode(old.reader, VERSION, EPOCH)).params.epoch).toBe(
 				negotiated ? first : undefined,
@@ -1495,12 +1496,12 @@ test.each([true, false])(
 			broadcast.announce({ ...broadcast.route, epoch: second });
 			const withdrawn = watch(old.reader.done());
 
-			const next = await take(streams);
+			const next = await take(clock, streams);
 			expect(await next.reader.u53()).toBe(PublishNamespace.id);
 			expect((await PublishNamespace.decode(next.reader, VERSION, EPOCH)).params.epoch).toBe(
 				negotiated ? second : undefined,
 			);
-			await flush();
+			await clock.advance(Nano.zero);
 			expect(withdrawn.state).toBe(negotiated ? "pending" : "rejected");
 
 			await acceptPublishNamespace(next);
@@ -1513,6 +1514,7 @@ test.each([true, false])(
 
 /** On a SUBSCRIBE_NAMESPACE stream, another epoch is one NAMESPACE and no NAMESPACE_DONE. */
 test("a solicited namespace takes another epoch as one NAMESPACE and no NAMESPACE_DONE", async () => {
+	using clock = manual();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true, epoch: true });
 	try {
@@ -1538,7 +1540,7 @@ test("a solicited namespace takes another epoch as one NAMESPACE and no NAMESPAC
 		expect(await entry()).toMatchObject({ suffix: Path.from("mine"), params: { epoch: second } });
 
 		const more = watch(subscription.reader.u53());
-		await flush();
+		await clock.advance(Nano.zero);
 		expect(more.state).toBe("pending");
 		subscription.close();
 	} finally {
@@ -1646,25 +1648,11 @@ test("EPOCH on a request without MoQ Epoch is a protocol violation", async () =>
 	origin.close();
 });
 
-/** Let every pending promise chain run without letting a faked timer fire. */
-async function flush() {
-	for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
-}
-
-/** Advance faked time in steps, letting the loop react between them as it would in real time. */
-async function advance(ms: number, step = 50) {
-	for (let elapsed = 0; elapsed < ms; elapsed += step) {
-		jest.advanceTimersByTime(step);
-		await flush();
-	}
-}
-
-/** Advance faked time until `done` holds, failing once `limit` has passed without it. */
-async function advanceUntil(done: () => boolean, limit: number, step = 50) {
+/** Advance time in steps until `done` holds, failing once `limit` has passed without it. */
+async function advanceUntil(clock: Manual, done: () => boolean, limit: number, step = 50) {
 	for (let elapsed = 0; !done(); elapsed += step) {
 		if (elapsed >= limit) throw new Error(`still waiting after ${limit}ms`);
-		jest.advanceTimersByTime(step);
-		await flush();
+		await clock.advance(Nano.fromMilli(Milli(step)));
 	}
 }
 
@@ -1701,8 +1689,8 @@ function accepted(transport: WebTransport): Stream[] {
 }
 
 /** Take the next stream the publisher opened, failing if it has not opened one. */
-async function take(queue: Stream[]): Promise<Stream> {
-	await flush();
+async function take(clock: Manual, queue: Stream[]): Promise<Stream> {
+	await clock.advance(Nano.zero);
 	const stream = queue.shift();
 	if (!stream) throw new Error("expected the publisher to open a stream");
 	return stream;
@@ -1722,9 +1710,10 @@ async function readUpdate(stream: Stream): Promise<Cluster.Update> {
 	return (await PublishNamespaceUpdate.decode(stream.reader, VERSION)).update;
 }
 
-/** A clustered publisher on fake time, with every stream it opens collected. */
+/** A clustered publisher on a manual clock, with every stream it opens collected. */
 function clustered(requiresSolicitation = false, auth?: Tokens) {
-	jest.useFakeTimers();
+	const clock = new Manual();
+	const installed = clock.install();
 	const self: Hop = HopSchema.parse(7n);
 	const peer: Hop = HopSchema.parse(9n);
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
@@ -1732,9 +1721,9 @@ function clustered(requiresSolicitation = false, auth?: Tokens) {
 	const streams = accepted(pair.client);
 	const close = () => {
 		origin.close();
-		jest.useRealTimers();
+		installed.close();
 	};
-	return { self, pair, pub, origin, streams, close };
+	return { clock, self, pair, pub, origin, streams, close };
 }
 
 const VIA: Hop = HopSchema.parse(3n);
@@ -1747,13 +1736,13 @@ const OTHER: Hop = HopSchema.parse(5n);
  * parameter, so leaving it out would leave the peer holding the old price.
  */
 test("a price change on a held namespace is one REQUEST_UPDATE, not a withdrawal", async () => {
-	const { self, pub, origin, streams, close } = clustered();
+	const { clock, self, pub, origin, streams, close } = clustered();
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
 		broadcast.announce({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
-		const stream = await take(streams);
+		const stream = await take(clock, streams);
 		expect(await acceptClustered(stream)).toEqual({ hops: [VIA, self], cost: 4n });
 
 		broadcast.announce({ hops: [VIA], cost: 8n });
@@ -1766,7 +1755,7 @@ test("a price change on a held namespace is one REQUEST_UPDATE, not a withdrawal
 
 		// Still the one request, still open: nothing was withdrawn or advertised again.
 		const more = watch(stream.reader.done());
-		await flush();
+		await clock.advance(Nano.zero);
 		expect(more.state).toBe("pending");
 		expect(streams).toHaveLength(0);
 	} finally {
@@ -1775,13 +1764,13 @@ test("a price change on a held namespace is one REQUEST_UPDATE, not a withdrawal
 });
 
 test("a hop path change behind the same publisher is one REQUEST_UPDATE carrying HOP_PATH", async () => {
-	const { self, pub, origin, streams, close } = clustered();
+	const { clock, self, pub, origin, streams, close } = clustered();
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
 		broadcast.announce({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
-		const stream = await take(streams);
+		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 
 		broadcast.announce({ hops: [VIA, MID], cost: 4n });
@@ -1789,7 +1778,7 @@ test("a hop path change behind the same publisher is one REQUEST_UPDATE carrying
 		await acceptPublishNamespace(stream);
 
 		const more = watch(stream.reader.done());
-		await flush();
+		await clock.advance(Nano.zero);
 		expect(more.state).toBe("pending");
 		expect(streams).toHaveLength(0);
 	} finally {
@@ -1805,7 +1794,7 @@ test.each([
 	["a hop path and cost change", [VIA, MID], 8n],
 	["a first-hop change", [OTHER], 4n],
 ] as const)("a solicited namespace takes %s as one NAMESPACE and no NAMESPACE_DONE", async (_, hops, cost) => {
-	const { self, pair, pub, origin, close } = clustered(true);
+	const { clock, self, pair, pub, origin, close } = clustered(true);
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
 		broadcast.announce({ hops: [VIA], cost: 4n });
@@ -1834,7 +1823,7 @@ test.each([
 		});
 
 		const more = watch(subscription.reader.u53());
-		await flush();
+		await clock.advance(Nano.zero);
 		expect(more.state).toBe("pending");
 		subscription.close();
 	} finally {
@@ -1847,13 +1836,13 @@ test.each([
  * change does: withdrawing it would make the namespace briefly vanish downstream.
  */
 test("a first-hop change is one REQUEST_UPDATE carrying HOP_PATH, not a withdrawal", async () => {
-	const { self, pub, origin, streams, close } = clustered();
+	const { clock, self, pub, origin, streams, close } = clustered();
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
 		broadcast.announce({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
-		const stream = await take(streams);
+		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 
 		broadcast.announce({ hops: [OTHER], cost: 4n });
@@ -1861,7 +1850,7 @@ test("a first-hop change is one REQUEST_UPDATE carrying HOP_PATH, not a withdraw
 		await acceptPublishNamespace(stream);
 
 		const more = watch(stream.reader.done());
-		await flush();
+		await clock.advance(Nano.zero);
 		expect(more.state).toBe("pending");
 		expect(streams).toHaveLength(0);
 	} finally {
@@ -1933,14 +1922,14 @@ function carriedTokens() {
  */
 test("swapping a route's token is one REQUEST_UPDATE carrying it", async () => {
 	const tokens = new Tokens();
-	const { pub, origin, streams, close } = clustered(false, tokens);
+	const { clock, pub, origin, streams, close } = clustered(false, tokens);
 	const { sent, restore } = carriedTokens();
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
 		broadcast.announce({ hops: [VIA], cost: 4n, auth: tokens.issue("first") });
 		void pub.runPublishNamespaces();
 
-		const stream = await take(streams);
+		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 		expect(sent).toEqual(["first"]);
 
@@ -1958,18 +1947,18 @@ test("swapping a route's token is one REQUEST_UPDATE carrying it", async () => {
 /** A token another session issued is never carried, so swapping between two sends nothing. */
 test("a foreign route token is not carried", async () => {
 	const foreign = new Tokens();
-	const { pub, origin, streams, close } = clustered(false, new Tokens());
+	const { clock, pub, origin, streams, close } = clustered(false, new Tokens());
 	const { sent, restore } = carriedTokens();
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
 		broadcast.announce({ hops: [VIA], cost: 4n, auth: foreign.issue("first") });
 		void pub.runPublishNamespaces();
 
-		const stream = await take(streams);
+		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 		broadcast.announce({ hops: [VIA], cost: 4n, auth: foreign.issue("second") });
 		const more = watch(stream.reader.u53());
-		await flush();
+		await clock.advance(Nano.zero);
 		expect(more.state).toBe("pending");
 		expect(sent).toEqual([undefined]);
 	} finally {
@@ -1981,19 +1970,19 @@ test("a foreign route token is not carried", async () => {
 /** REQUEST_UPDATE cannot name a token on a request that had none, so the request restarts. */
 test("naming a token on an unnamed request makes it again", async () => {
 	const tokens = new Tokens();
-	const { pub, origin, streams, close } = clustered(false, tokens);
+	const { clock, pub, origin, streams, close } = clustered(false, tokens);
 	const { sent, restore } = carriedTokens();
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
 		broadcast.announce({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
-		const old = await take(streams);
+		const old = await take(clock, streams);
 		await acceptClustered(old);
 		broadcast.announce({ hops: [VIA], cost: 4n, auth: tokens.issue("first") });
 
 		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
-		await acceptClustered(await take(streams));
+		await acceptClustered(await take(clock, streams));
 		expect(sent).toEqual([undefined, "first"]);
 	} finally {
 		restore();
@@ -2004,7 +1993,7 @@ test("naming a token on an unnamed request makes it again", async () => {
 /** Closing a route's token drops it from the request, which REQUEST_UPDATE cannot do. */
 test("closing a route's token makes its request again without it", async () => {
 	const tokens = new Tokens();
-	const { pub, origin, streams, close } = clustered(false, tokens);
+	const { clock, pub, origin, streams, close } = clustered(false, tokens);
 	const { sent, restore } = carriedTokens();
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
@@ -2012,12 +2001,12 @@ test("closing a route's token makes its request again without it", async () => {
 		broadcast.announce({ hops: [VIA], cost: 4n, auth: token });
 		void pub.runPublishNamespaces();
 
-		const old = await take(streams);
+		const old = await take(clock, streams);
 		await acceptClustered(old);
 		token.close();
 
 		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
-		await acceptClustered(await take(streams));
+		await acceptClustered(await take(clock, streams));
 		expect(sent).toEqual(["first", undefined]);
 	} finally {
 		restore();
@@ -2026,21 +2015,21 @@ test("closing a route's token makes its request again without it", async () => {
 });
 
 test("a republish withdraws the PUBLISH_NAMESPACE and advertises again", async () => {
-	const { pub, origin, streams, close } = clustered();
+	const { clock, pub, origin, streams, close } = clustered();
 	try {
 		const broadcastPublication = origin.createBroadcast(Path.from("mine"));
 		const broadcast = broadcastPublication.broadcast;
 		broadcastPublication.announce({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
-		const old = await take(streams);
+		const old = await take(clock, streams);
 		await acceptClustered(old);
 
 		republish(origin, broadcast);
 
 		// Draft-18+ withdraws by cancelling the request, never a FIN.
 		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
-		const next = await take(streams);
+		const next = await take(clock, streams);
 		expect(await acceptClustered(next)).toMatchObject({ cost: 4n });
 	} finally {
 		close();
@@ -2087,13 +2076,13 @@ test.each([
 	["waits out its retry interval", 10_000n],
 	["that forbids retrying is never re-offered", 0n],
 ])("a refused update %s", async (_, retryInterval) => {
-	const { pub, origin, streams, close } = clustered();
+	const { clock, pub, origin, streams, close } = clustered();
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
 		broadcast.announce({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
-		const stream = await take(streams);
+		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 
 		broadcast.announce({ hops: [VIA], cost: 8n });
@@ -2104,18 +2093,18 @@ test.each([
 		expect(await stream.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
 
 		// Well past our own backoff, but inside the interval the peer asked for.
-		await advance(9_000);
+		await clock.advance(Nano.fromMilli(Milli(9_000)));
 		expect(streams).toHaveLength(0);
 
 		if (retryInterval === 0n) {
-			await advance(20_000);
+			await clock.advance(Nano.fromMilli(Milli(20_000)));
 			expect(streams).toHaveLength(0);
 			return;
 		}
 
 		// Past the interval, the next backoff (at most its ceiling) brings it back.
-		await advanceUntil(() => streams.length > 0, 6_500);
-		const fresh = await take(streams);
+		await advanceUntil(clock, () => streams.length > 0, 6_500);
+		const fresh = await take(clock, streams);
 		expect(await acceptClustered(fresh)).toMatchObject({ cost: 8n });
 	} finally {
 		close();
@@ -2128,7 +2117,7 @@ test.each([
  * instead of ending.
  */
 test("a refused update whose peer closes the request keeps the loop running", async () => {
-	const { pub, origin, streams, close } = clustered();
+	const { clock, pub, origin, streams, close } = clustered();
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
 		broadcast.announce({ hops: [VIA], cost: 4n });
@@ -2137,7 +2126,7 @@ test("a refused update whose peer closes the request keeps the loop running", as
 			failed = err;
 		});
 
-		const stream = await take(streams);
+		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 
 		broadcast.announce({ hops: [VIA], cost: 8n });
@@ -2145,9 +2134,9 @@ test("a refused update whose peer closes the request keeps the loop running", as
 		await declinePublishNamespace(stream, 1n);
 		stream.close();
 
-		await advanceUntil(() => streams.length > 0 || failed !== undefined, 10_000);
+		await advanceUntil(clock, () => streams.length > 0 || failed !== undefined, 10_000);
 		expect(failed).toBeUndefined();
-		const fresh = await take(streams);
+		const fresh = await take(clock, streams);
 		expect(await acceptClustered(fresh)).toMatchObject({ cost: 8n });
 	} finally {
 		close();
@@ -2159,13 +2148,13 @@ test("a refused update whose peer closes the request keeps the loop running", as
  * without reading it: a change landing while one waits for its answer goes out after.
  */
 test("a change while an update is unanswered waits for its answer", async () => {
-	const { pub, origin, streams, close } = clustered();
+	const { clock, pub, origin, streams, close } = clustered();
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
 		broadcast.announce({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
-		const stream = await take(streams);
+		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 
 		broadcast.announce({ hops: [VIA], cost: 8n });
@@ -2173,12 +2162,12 @@ test("a change while an update is unanswered waits for its answer", async () => 
 
 		broadcast.announce({ hops: [VIA], cost: 12n });
 		const second = watch(stream.reader.u53());
-		await advance(1_000);
+		await clock.advance(Nano.fromMilli(Milli(1_000)));
 		expect(second.state).toBe("pending");
 		expect(streams).toHaveLength(0);
 
 		await acceptPublishNamespace(stream);
-		await flush();
+		await clock.advance(Nano.zero);
 		expect(second.state).toBe("resolved");
 		expect(second.value).toBe(PublishNamespaceUpdate.id);
 		expect((await PublishNamespaceUpdate.decode(stream.reader, VERSION)).update).toEqual({
@@ -2197,23 +2186,23 @@ test("a change while an update is unanswered waits for its answer", async () => 
  * on a backoff instead of a stream per turn of the loop.
  */
 test("an advertisement the peer keeps ending comes back on a growing backoff", async () => {
-	const { pub, origin, streams, close } = clustered();
+	const { clock, pub, origin, streams, close } = clustered();
 	try {
 		origin.createBroadcast(Path.from("mine")).announce({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
-		let stream = await take(streams);
+		let stream = await take(clock, streams);
 		for (const wait of [100, 200, 400, 800]) {
 			await acceptClustered(stream);
 			stream.writer.close();
-			await flush();
+			await clock.advance(Nano.zero);
 
 			// Just short of the wait, nothing has been offered yet.
-			await advance(wait - 50);
+			await clock.advance(Nano.fromMilli(Milli(wait - 50)));
 			expect(streams).toHaveLength(0);
 
-			await advanceUntil(() => streams.length > 0, 10_000);
-			stream = await take(streams);
+			await advanceUntil(clock, () => streams.length > 0, 10_000);
+			stream = await take(clock, streams);
 		}
 	} finally {
 		close();
@@ -2225,28 +2214,28 @@ test("an advertisement the peer keeps ending comes back on a growing backoff", a
  * request is dropped and the namespace comes back on a fresh one.
  */
 test("an unanswered update drops the request and re-offers the namespace fresh", async () => {
-	const { pub, origin, streams, close } = clustered();
+	const { clock, pub, origin, streams, close } = clustered();
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
 		broadcast.announce({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
-		const stream = await take(streams);
+		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 
 		broadcast.announce({ hops: [VIA], cost: 8n });
 		await readUpdate(stream);
 		const reset = watch(stream.reader.u53());
 
-		await advance(9_900);
+		await clock.advance(Nano.fromMilli(Milli(9_900)));
 		expect(reset.state).toBe("pending");
 		expect(streams).toHaveLength(0);
 
 		// The timeout resets the request, then the retry offers it on a new one.
-		await advance(100);
+		await clock.advance(Nano.fromMilli(Milli(100)));
 		expect(reset.state).toBe("rejected");
-		await advanceUntil(() => streams.length > 0, 200);
-		const fresh = await take(streams);
+		await advanceUntil(clock, () => streams.length > 0, 200);
+		const fresh = await take(clock, streams);
 		expect(await acceptClustered(fresh)).toMatchObject({ cost: 8n });
 	} finally {
 		close();
@@ -2352,7 +2341,10 @@ interface ServedGroup {
 interface ServedFill {
 	/** The request id the FETCH_HEADER named, when it survived a reset. */
 	requestId?: bigint;
-	/** Each object's group, absolute id, and payload. */
+	/**
+	 * Each object's group, absolute id, and payload, and each End of Range's group and id
+	 * with `end <reason in hex>` for its payload.
+	 */
 	objects: { group: number; id: number; payload: string }[];
 	/**
 	 * The error the stream ended with, when the publisher reset it instead of finishing.
@@ -2520,6 +2512,13 @@ async function readFill(
 	try {
 		while (!(await reader.done())) {
 			const flags = await reader.u53();
+			// Absolute ids, and nothing after them.
+			if (flags >= 0x80) {
+				group = Number(await reader.u62());
+				id = Number(await reader.u62());
+				objects.push({ group, id, payload: `end ${flags.toString(16)}` });
+				continue;
+			}
 			if (flags & 0x08) {
 				const value = await reader.u53();
 				group = objects.length === 0 ? value : order === "ascending" ? group + value + 1 : group - value - 1;
@@ -3284,10 +3283,101 @@ test("draft-22: the subscriber leaving ends a fill still reading its group", asy
 		client.close();
 
 		// A reset discards what the peer has not acknowledged, so the objects already written
-		// may or may not survive it. That it ends at all, with the cancellation as its reason,
-		// is the whole point.
+		// may or may not survive it. That it ends at all, reset as CANCELLED, is the whole point.
 		const served = await reading;
-		expect(served.reset?.message).toContain("unsubscribed");
+		expect(served.reset).toMatchObject({ code: StreamCode.Cancel });
+	} finally {
+		open.finish();
+		fx.close();
+		client.close();
+	}
+});
+
+// A fill's FILL_TIMEOUT bounds its wait as a FETCH's does. Zero takes only what is cached, so
+// the open group's missing tail is a Timed-Out gap rather than a wait the fill never ends.
+test("draft-22: a fill's FILL_TIMEOUT marks what it did not wait for", async () => {
+	using _clock = manual();
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new TextEncoder().encode("0.0"), timestamp: Timestamp.now() });
+	writeGroup(track, 1);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: {
+				filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 0n },
+				fillTimeout: Milli(0),
+				rangeFilters: false,
+			},
+		}),
+	);
+
+	try {
+		const fill = await nextUni(fx.uni);
+		if (!fill) throw new Error("no fetch stream for the requested fill");
+		const served = await readFill(fill);
+		expect(served.reset).toBeUndefined();
+		expect(served.objects).toEqual([
+			{ group: 0, id: 0, payload: "0.0" },
+			{ group: 0, id: Number(2n ** 62n - 1n), payload: "end 20c" },
+		]);
+	} finally {
+		open.finish();
+		fx.close();
+		client.close();
+	}
+});
+
+// A group the cache evicts after the fill listed it is unknown, not skipped, which would say it
+// never existed. Waiting on the open group the fill reaches first gives the older groups time
+// to age out of the cache.
+test("draft-22: a fill marks a group evicted after it was listed unknown", async () => {
+	using clock = manual();
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	// Groups 0 and 1 age out; the open group 2 is the newest the fill covers.
+	writeGroup(track, 2);
+	writeGroup(track, 2);
+	await clock.advance(Nano.fromMilli(Milli(25_000)));
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new TextEncoder().encode("2.0"), timestamp: Timestamp.now() });
+	writeGroup(track, 1);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: {
+				filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 2n },
+				fillTimeout: Milli(20_000),
+				rangeFilters: false,
+			},
+		}),
+	);
+
+	try {
+		const fill = await nextUni(fx.uni);
+		if (!fill) throw new Error("no fetch stream for the requested fill");
+		const served = await clock.drive(readFill(fill));
+		expect(served.reset).toBeUndefined();
+		const end = Number(2n ** 62n - 1n);
+		expect(served.objects).toEqual([
+			{ group: 2, id: 0, payload: "2.0" },
+			{ group: 2, id: end, payload: "end 20c" },
+			{ group: 1, id: end, payload: "end 10c" },
+			{ group: 0, id: end, payload: "end 10c" },
+		]);
 	} finally {
 		open.finish();
 		fx.close();
@@ -4373,7 +4463,7 @@ test("draft-22: narrowing gives up an excluded group's open stream", async () =>
 		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect((await reading)?.message).toContain("range update");
+		expect(await reading).toMatchObject({ code: StreamCode.Cancel });
 		// The publisher remains usable; only this subscription stopped its old group.
 		open.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.now() });
 		writeGroup(track, 1);
@@ -4608,7 +4698,7 @@ test.each([
 			expect(await client.reader.u53()).toBe(RequestOk.id);
 			await RequestOk.decode(client.reader, fx.version);
 		}
-		expect((await reading)?.message).toContain("range update");
+		expect(await reading).toMatchObject({ code: StreamCode.Cancel });
 		open.writeFrame({ payload: new TextEncoder().encode("1.1"), timestamp: Timestamp.now() });
 		open.finish();
 		expect((await readServed(fx.uni, 2)).sort()).toEqual(["0.0", "1.0", "1.1"]);

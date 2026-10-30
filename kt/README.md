@@ -41,7 +41,7 @@ Moq.connect("https://relay.example.com").use { moq ->
         println("got broadcast ${announce.prefix}")
         println("captures ${announce.captures}")
 
-        val catalog = dev.moq.media.catalog(moq.requestBroadcast(announce.prefix))
+        val catalog = dev.moq.media.catalog(moq.request(announce.prefix))
         println("catalog: $catalog")
     }
 }
