@@ -50,9 +50,10 @@ pub(super) struct Wakes {
 	/// read lock, which orders them against insertion too. First-frame reveal holds only
 	/// a track read lock and must always take the parked lock instead.
 	landing_waiters: AtomicBool,
-	/// One past the highest sequence a servable group ever landed at, or 0, so a read with
-	/// nothing above it skips the track lock. Never lowered: a group that later fails or
-	/// leaves only sends the read the slow way.
+	/// The highest sequence a servable group ever landed at, or 0, so a read with nothing
+	/// above it skips the track lock. Nothing landing and group 0 landing put no group
+	/// above any read, so 0 serves both. Never lowered: a group that later fails or leaves
+	/// only sends the read the slow way.
 	newest: AtomicU64,
 	parked: kio::Lock<Parked>,
 }
@@ -203,7 +204,7 @@ impl Wakes {
 	/// A servable group was inserted at `sequence`: returns whether a landing read may be
 	/// parked for it to wake.
 	pub(super) fn land(&self, sequence: u64) -> bool {
-		self.newest.fetch_max(sequence.saturating_add(1), Ordering::Relaxed);
+		self.newest.fetch_max(sequence, Ordering::Relaxed);
 		// Pairs with the fence in `watch_landing`.
 		fence(Ordering::SeqCst);
 		self.landing_waiters.load(Ordering::Relaxed)
@@ -222,7 +223,7 @@ impl Wakes {
 		}
 		// Pairs with the fence in `land`.
 		fence(Ordering::SeqCst);
-		self.newest.load(Ordering::Relaxed) > sequence.saturating_add(1)
+		self.newest.load(Ordering::Relaxed) > sequence
 	}
 
 	/// Park `waiter`, holding group `sequence` from another copy, until it or a group
@@ -383,6 +384,8 @@ mod test {
 		assert!(wakes.land(13));
 		assert!(wakes.watch_landing(12, &waiter), "a group landed above it");
 		assert!(!wakes.watch_landing(13, &waiter), "nothing landed above it");
+		assert!(wakes.land(u64::MAX));
+		assert!(wakes.watch_landing(u64::MAX - 1, &waiter), "the last sequence is above it");
 		wakes.wake_all();
 		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));
 	}
