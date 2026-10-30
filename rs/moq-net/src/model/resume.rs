@@ -419,6 +419,9 @@ struct Copy {
 	/// Held by every group handed out from this copy, so a replaced copy stays subscribed
 	/// while one is still read from it.
 	lease: Arc<()>,
+	/// Whether it may still deliver a group the reader lacks, as [`Reader::let_go`] last
+	/// judged: a drop under its bound waits for it.
+	feeds: bool,
 }
 
 // Boxed: a subscriber is twice a pending answer, and a copy holds one for its whole life.
@@ -1080,6 +1083,7 @@ impl Reader {
 			datagrams_done: None,
 			since: None,
 			lease: Arc::new(()),
+			feeds: true,
 		});
 		self.learn_end(None);
 	}
@@ -1176,15 +1180,18 @@ impl Reader {
 		};
 		let mut waits = false;
 		// The serving copy, or one between routes with nothing replacing it yet, stays.
-		self.copies
-			.retain_mut(|copy| match copy.replaced.then(|| copy.retains(&reader)) {
+		self.copies.retain_mut(|copy| {
+			let retains = copy.replaced.then(|| copy.retains(&reader));
+			copy.feeds = matches!(retains, None | Some(Retains::Wait));
+			match retains {
 				None | Some(Retains::Keep) => true,
 				Some(Retains::Wait) => {
 					waits = true;
 					true
 				}
 				Some(Retains::No) => false,
-			});
+			}
+		});
 		waits
 	}
 
@@ -1640,12 +1647,14 @@ impl Reader {
 		for run in covered {
 			self.drops.remove(run);
 		}
+		// Judged as the group path judges it, so a copy kept only for a group still read
+		// holds nothing back, and letting one go wakes this too.
+		self.let_go(delivered, waiter);
 		let serving = self.generation;
-		let budget = self.mirrored.budget();
 		let (start, end) = self.groups;
 		let mut feeding = RangeSet::new();
 		for copy in &self.copies {
-			if Some(copy.generation) == serving || copy.done.is_some() || copy.expired(budget, waiter) {
+			if Some(copy.generation) == serving || !copy.feeds {
 				continue;
 			}
 			let from = copy.start(start);
@@ -1752,6 +1761,7 @@ impl Reader {
 			done: None,
 			datagrams_done: None,
 			lease: Arc::new(()),
+			feeds: true,
 		};
 		// The last copy stays the newest route's own.
 		self.copies.insert(self.copies.len() - 1, copy);

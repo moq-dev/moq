@@ -5602,6 +5602,7 @@ dependencies = [
  "moq-clock",
  "moq-pattern 0.1.2",
  "num_enum",
+ "proptest",
  "rand 0.10.3",
  "rangemap",
  "serde",

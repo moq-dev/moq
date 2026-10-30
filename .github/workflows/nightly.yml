@@ -355,6 +355,7 @@ jobs:
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
         # `rs quic-sim` sweeps moq-quic's simulated workloads from a fresh seed; PRs run a fixed 64.
+        # `test resume-model` sweeps resume against its model from a fresh seed; PRs run a fixed 64.
         # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
@@ -364,7 +365,7 @@ jobs:
         # `rs multicast` runs the mDNS tests, which loop multicast back on the runner.
         # `rs render-sw` renders through wgpu on Mesa's software Vulkan driver.
         # `test qmux` runs js/qmux against the in-tree Rust qmux, per draft.
-        recipe: ["gate", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux"]
+        recipe: ["gate", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux"]
         include:
           - recipe: rs send-depth
             nightly: true

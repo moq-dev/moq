@@ -1164,7 +1164,9 @@ impl TrackState {
 		// If the exclusive end is already at or below where we'd resume, no
 		// group can ever satisfy this call until the cap rises or the ranges widen.
 		// Pending (not None) so the consumer is parked rather than told the stream
-		// is over. An empty range (`end == 0`) parks even at the first sequence.
+		// is over, unless the track declared its end: a finished track ends a reader
+		// with nothing left in range, as the arrival path does. An empty range
+		// (`end == 0`) parks even at the first sequence.
 		let cap = match (end_sequence, window.end()) {
 			(Some(cap), Some(end)) => Some(cap.min(end)),
 			(cap, end) => cap.or(end),
@@ -1172,7 +1174,7 @@ impl TrackState {
 		if let Some(cap) = cap
 			&& cap <= next_sequence
 		{
-			if closed {
+			if closed || self.final_sequence().is_some() {
 				return Poll::Ready(end());
 			}
 			return Poll::Pending;
@@ -1203,10 +1205,11 @@ impl TrackState {
 		// `final_sequence` is one past the last possible sequence. If our
 		// floor is already at/past it, nothing else can land in range.
 		// A closed track produces nothing more either, so a gap below its
-		// boundary is the end, not a wait. Cached in-range groups were
-		// returned above, so an aborted track drains what finished first.
+		// boundary is the end, not a wait, as is one in a complete track, which
+		// ends the arrival path too. Cached in-range groups were returned above,
+		// so an aborted track drains what finished first.
 		// This is the cursor the ordered reader uses.
-		if closed || self.final_sequence().is_some_and(|fin| next_sequence >= fin) {
+		if closed || self.is_complete() || self.final_sequence().is_some_and(|fin| next_sequence >= fin) {
 			return Poll::Ready(end());
 		}
 		Poll::Pending
@@ -6097,8 +6100,10 @@ impl Cursor {
 		{
 			self.probe(self.floor(), &drift, waiter);
 		}
+		// A cap at or below the floor leaves nothing to report, not a reversed span.
+		let floor = self.floor();
 		let within = Within {
-			span: self.floor()..self.end_sequence.unwrap_or(u64::MAX),
+			span: floor..self.end_sequence.unwrap_or(u64::MAX).max(floor),
 			window: &self.filter.window,
 			revision: self.filter.revision,
 		};
@@ -13176,6 +13181,34 @@ mod test {
 		assert_eq!(second.sequence, 2);
 		let done = ordered.next_group().now_or_never().expect("end").unwrap();
 		assert!(done.is_none(), "missing groups below the boundary are not an error");
+	}
+
+	/// A finished track ends a sequence reader with nothing left in its range, as it ends
+	/// an arrival reader: whether the range ends at the cursor or the rest was given up.
+	#[test]
+	fn ordered_ends_once_a_finished_track_leaves_nothing_in_range() {
+		for given_up in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			let end = if given_up { 4 } else { 3 };
+			let mut ordered = producer.subscribe(replay().with_range(0..end)).ordered();
+			if given_up {
+				producer.drop_groups(3..4, StreamError::DeliveryTimeout);
+			}
+			for sequence in [0, 1, 2, 4, 5] {
+				write_group(&producer, sequence);
+			}
+			producer.finish().unwrap();
+			for sequence in 0..3 {
+				let Poll::Ready(Ok(Some(group))) = ordered.poll_next_group(&kio::Waiter::noop()) else {
+					panic!("group {sequence}, given_up={given_up}")
+				};
+				assert_eq!(group.sequence, sequence);
+			}
+			assert!(
+				matches!(ordered.poll_next_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
+				"given_up={given_up}"
+			);
+		}
 	}
 
 	#[test]

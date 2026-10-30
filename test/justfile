@@ -266,6 +266,10 @@ bare-fin:
 json-properties:
     bash ../sh/local.sh bash json-properties.sh
 
+# Check resume against its model of one logical track from a fresh replayable seed.
+resume-model:
+    bash ../sh/local.sh bash resume-model.sh
+
 # The TypeScript qmux peer as client and server against the in-tree Rust qmux
 # interop examples, per draft. The manifest path names the in-tree crate, which
 # shares its package name with the 0.6 release its tests interoperate with.
