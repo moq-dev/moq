@@ -38,7 +38,7 @@ use crate::catalog;
 /// Each PID is counted once, so a PID several programs read has one continuous set of
 /// counters while they start and retire. The PMT sections are reassembled here, once per PMT
 /// PID, so a bad CRC counts once however many programs read the PID. Every other count of a PID
-/// is taken from one program at a time for each way it is read ([`Checks`]): its row and PTS
+/// is taken from one program at a time for each way it is read: its row and PTS
 /// cadence from a program carrying it, or else one reading it, its PCR checks from one taking
 /// its clock there, and its PMT interval from one reading its PMT there. When that program stops
 /// reading it so, the earliest running one that does takes over the intervals it was timing,
