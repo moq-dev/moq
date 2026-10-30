@@ -24,3 +24,11 @@ or holds.
   `group_contended` costs 13 to 61% less per reader across cores, and about
   4 ns more per frame on one thread. A profile that contradicts them goes back
   to the maintainer.
+- A 2026-10-30 attempt ran on `desktop` while other agents kept the 1-minute
+  load between 5 and 30
+  ([moq-dev/moq#7300](https://github.com/moq-dev/moq/pull/7300)). At 4 workers,
+  `GroupState` held 1% of mutex wait before #6782 and none after it, but
+  unprofiled 1-worker throughput swung from 11k to 30k fps between runs, and
+  the 16-worker capture failed on perf dropping events or recording
+  nonalternating switches. Profiling `d854bf98b1` as the base as well isolates
+  #6782 from later changes. Rerun both bases while the host is quiet.
