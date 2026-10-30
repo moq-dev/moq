@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - [**breaking**] Declare per-track archive durations from GOP hints or the first completed record.
+- [**breaking**] Update the re-exported `mp4_atom` to 0.17, whose `Trun.entries` is now `Trun.samples`: a run without per-sample fields decodes as a count, so a moof of field-less runs no longer materializes an entry per sample before import refuses it. Read entries with `trun.samples.iter()` and build them with `samples: entries.into()`. `Dops` gains `channel_mapping: Option<OpusChannelMapping>` (`None` for family 0); the fMP4 importer still refuses a nonzero family.
 
 ### Fixed
 

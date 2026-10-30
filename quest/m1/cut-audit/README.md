@@ -54,7 +54,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 
 ## Required
 
-- [Counted field-less `trun` entries](/quest/m1/cut-audit/fmp4-sample-resolver.md) - a moof of field-less runs cannot materialize millions of sample entries
 - [A reserved group survives a route returning](/quest/m1/cut-audit/reserved-route-return.md) - a route flip A to B to A no longer panics a peeked reader
 - [Settle received-track termination on a local session close](/quest/m1/cut-audit/js-close-cause.md) - choose the received track's local-close outcome after the prepared teardown error fixes
 - [A description-less AAC rendition means one thing](/quest/m1/cut-audit/aac-description-less.md) - every player and exporter agrees on the frame format

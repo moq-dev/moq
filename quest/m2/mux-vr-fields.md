@@ -40,9 +40,9 @@ landed the fields.
   stays out of scope. `webm-iterable` already names the Matroska elements.
 - Ambisonic fMP4 needs the `dOps` mapping table, so it moved to
   [fMP4 ambisonic layout](/quest/m2/mux-vr-ambisonic-fmp4.md) (2026-10-22,
-  maintainer); Matroska and raw Opus land here. Before taking 0.17.0,
-  settle with [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) whether
-  the release also carries kixelated/mp4-atom#246.
+  maintainer); Matroska and raw Opus land here. 0.17.0 also carries
+  kixelated/mp4-atom#246 (2026-10-28, maintainer), which
+  [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) consumes.
 - Exporters writing the fields back are out of scope.
 
 Tests: a fixture per source (MP4 360, a 180-degree equirectangular MP4 with

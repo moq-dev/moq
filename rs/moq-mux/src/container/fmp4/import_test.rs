@@ -597,16 +597,16 @@ async fn separated_runs_keep_their_samples() {
 				trun: vec![
 					mp4_atom::Trun {
 						data_offset: Some(0),
-						entries: vec![video_entry(0), video_entry(non_sync)],
+						samples: vec![video_entry(0), video_entry(non_sync)].into(),
 					},
 					mp4_atom::Trun {
 						data_offset: Some(0),
-						entries: vec![video_entry(non_sync)],
+						samples: vec![video_entry(non_sync)].into(),
 					},
 					// No data_offset: it starts where the run before it ended.
 					mp4_atom::Trun {
 						data_offset: None,
-						entries: vec![video_entry(non_sync), video_entry(non_sync)],
+						samples: vec![video_entry(non_sync), video_entry(non_sync)].into(),
 					},
 				],
 				..Default::default()
@@ -621,7 +621,7 @@ async fn separated_runs_keep_their_samples() {
 				}),
 				trun: vec![mp4_atom::Trun {
 					data_offset: Some(0),
-					entries: vec![audio_entry(2), audio_entry(4)],
+					samples: vec![audio_entry(2), audio_entry(4)].into(),
 				}],
 				..Default::default()
 			},
@@ -698,13 +698,14 @@ fn empty_samples_are_refused() {
 				}),
 				trun: vec![mp4_atom::Trun {
 					data_offset: None,
-					entries: vec![
+					samples: vec![
 						mp4_atom::TrunEntry {
 							size: explicit.then_some(0),
 							..Default::default()
 						};
 						4
-					],
+					]
+					.into(),
 				}],
 				..Default::default()
 			}],
@@ -750,7 +751,7 @@ fn absolute_sample_bases_are_refused() {
 					base_media_decode_time: 0,
 				}),
 				trun: vec![mp4_atom::Trun {
-					entries: vec![Default::default()],
+					samples: vec![Default::default()].into(),
 					..Default::default()
 				}],
 				..Default::default()
@@ -795,7 +796,7 @@ async fn shared_sample_bytes_are_refused() {
 		trun: (0..runs)
 			.map(|_| mp4_atom::Trun {
 				data_offset: Some(0),
-				entries: vec![Default::default()],
+				samples: vec![Default::default()].into(),
 			})
 			.collect(),
 		..Default::default()
@@ -877,7 +878,7 @@ async fn unwrapped_samples_present_at_their_composition_time() {
 			}),
 			trun: vec![mp4_atom::Trun {
 				data_offset: None,
-				entries: entries
+				samples: entries
 					.iter()
 					.map(|&(cts, flags, _)| mp4_atom::TrunEntry {
 						duration: Some(tick as u32),
@@ -885,7 +886,8 @@ async fn unwrapped_samples_present_at_their_composition_time() {
 						flags: Some(flags),
 						cts: Some(cts as i32),
 					})
-					.collect(),
+					.collect::<Vec<_>>()
+					.into(),
 			}],
 			..Default::default()
 		}],
@@ -923,6 +925,60 @@ async fn unwrapped_samples_present_at_their_composition_time() {
 }
 
 /// bbb's init with `entries` as the edit list of track `track_id`.
+/// Once the video group is open, the keyframe scan for a segment boundary stops at the mdat
+/// rather than walking a forged moof's field-less runs of `u32::MAX` non-sync samples.
+#[test]
+fn fieldless_runs_do_not_stall_the_segment_scan() {
+	let (_, (video_id, video_scale), _) = bbb_init();
+	let init = bbb_init_with_edits(video_id, vec![media_edit(0)]);
+	let tick = video_scale.as_u64() / 24;
+
+	let moof = mp4_atom::Moof {
+		mfhd: mp4_atom::Mfhd { sequence_number: 2 },
+		traf: vec![mp4_atom::Traf {
+			tfhd: mp4_atom::Tfhd {
+				track_id: video_id,
+				default_sample_duration: Some(tick as u32),
+				default_sample_size: Some(1),
+				default_sample_flags: Some(0x0001_0000),
+				..Default::default()
+			},
+			tfdt: Some(mp4_atom::Tfdt {
+				base_media_decode_time: tick,
+			}),
+			trun: vec![
+				mp4_atom::Trun {
+					data_offset: None,
+					samples: mp4_atom::TrunSamples::Inherited {
+						count: u32::MAX,
+						first_flags: None,
+					},
+				};
+				1000
+			],
+			..Default::default()
+		}],
+	};
+	let mut forged = Vec::new();
+	moof.encode(&mut forged).unwrap();
+	mp4_atom::Mdat { data: vec![0; 6] }.encode(&mut forged).unwrap();
+
+	for passthrough in [false, true] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+		fmp4.decode(&init).unwrap();
+		fmp4.decode(&video_fragment(video_id, 0, tick, &[(0, 0, 0xA)])).unwrap();
+		assert!(
+			matches!(
+				fmp4.decode(&forged),
+				Err(crate::Error::Cmaf(super::Error::SampleRangeOutOfBounds { .. }))
+			),
+			"passthrough {passthrough}"
+		);
+	}
+}
+
 fn bbb_init_with_edits(track_id: u32, entries: Vec<mp4_atom::ElstEntry>) -> Vec<u8> {
 	let (init, _, _) = bbb_init();
 	let (ftyp, mut moov) = decode_init(&init);
@@ -1013,7 +1069,7 @@ fn video_fragment(track_id: u32, dts: u64, tick: u64, entries: &[(u64, u32, u8)]
 			}),
 			trun: vec![mp4_atom::Trun {
 				data_offset: None,
-				entries: entries
+				samples: entries
 					.iter()
 					.map(|&(cts, flags, _)| mp4_atom::TrunEntry {
 						duration: Some(tick as u32),
@@ -1021,7 +1077,8 @@ fn video_fragment(track_id: u32, dts: u64, tick: u64, entries: &[(u64, u32, u8)]
 						flags: Some(flags),
 						cts: Some(cts as i32),
 					})
-					.collect(),
+					.collect::<Vec<_>>()
+					.into(),
 			}],
 			..Default::default()
 		}],
@@ -1605,6 +1662,7 @@ fn opus_init(entry_rate: u16) -> (mp4_atom::Dops, Vec<u8>) {
 		pre_skip: 312,
 		input_sample_rate: 44_100,
 		output_gain: -1536,
+		channel_mapping: None,
 	};
 	let opus = mp4_atom::Opus {
 		audio: mp4_atom::Audio {
@@ -1660,17 +1718,30 @@ fn opus_catalog_uses_the_decode_rate() {
 /// A dOps with a channel mapping table is refused rather than imported without it.
 #[test]
 fn opus_dops_mapping_family_is_refused() {
-	let (_, mut data) = opus_init(48_000);
-
-	// The mapping family byte follows version, channels, pre-skip, rate, and gain.
-	let at = data.windows(4).position(|w| w == b"dOps").unwrap() + 4 + 10;
-	assert_eq!(data[at], 0);
-	data[at] = 1;
+	let (_, data) = opus_init(48_000);
+	let (ftyp, mut moov) = decode_init(&data);
+	let mp4_atom::Codec::Opus(opus) = &mut moov.trak[0].mdia.minf.stbl.stsd.codecs[0] else {
+		panic!("expected Opus sample entry");
+	};
+	opus.dops.channel_mapping = Some(mp4_atom::OpusChannelMapping {
+		family: 1,
+		stream_count: 1,
+		coupled_count: 1,
+		channel_mapping: vec![0, 1],
+	});
+	let mut data = Vec::new();
+	ftyp.encode(&mut data).unwrap();
+	moov.encode(&mut data).unwrap();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
-	assert!(fmp4.decode(&bytes::BytesMut::from(data.as_slice())).is_err());
+	assert!(matches!(
+		fmp4.decode(&bytes::BytesMut::from(data.as_slice())),
+		Err(crate::Error::Cmaf(super::Error::Opus(
+			crate::codec::opus::Error::UnsupportedMappingFamily(1)
+		)))
+	));
 	assert!(catalog.snapshot().audio.renditions.is_empty());
 }
 
@@ -2056,7 +2127,7 @@ fn audio_fragment(base_media_decode_time: u64, duration: u32, size: u32) -> Vec<
 			tfdt: Some(mp4_atom::Tfdt { base_media_decode_time }),
 			trun: vec![mp4_atom::Trun {
 				data_offset: None,
-				entries: vec![mp4_atom::TrunEntry::default()],
+				samples: vec![mp4_atom::TrunEntry::default()].into(),
 			}],
 			..Default::default()
 		}],
@@ -2145,7 +2216,7 @@ fn audio_fragment_samples(base_media_decode_time: u64, duration: u32, size: u32,
 			tfdt: Some(mp4_atom::Tfdt { base_media_decode_time }),
 			trun: vec![mp4_atom::Trun {
 				data_offset: None,
-				entries: vec![mp4_atom::TrunEntry::default(); samples],
+				samples: vec![mp4_atom::TrunEntry::default(); samples].into(),
 			}],
 			..Default::default()
 		}],
@@ -2251,14 +2322,15 @@ fn fragment_jitter_uses_sample_endpoints() {
 				}),
 				trun: vec![mp4_atom::Trun {
 					data_offset: None,
-					entries: samples
+					samples: samples
 						.iter()
 						.map(|(duration, cts)| mp4_atom::TrunEntry {
 							duration: *duration,
 							cts: Some(*cts),
 							..Default::default()
 						})
-						.collect(),
+						.collect::<Vec<_>>()
+						.into(),
 				}],
 				..Default::default()
 			}],
@@ -2811,13 +2883,14 @@ fn webvtt_fragment(decode_time: u64, samples: &[Vec<u8>], duration: u32) -> Vec<
 			}),
 			trun: vec![mp4_atom::Trun {
 				data_offset: None,
-				entries: samples
+				samples: samples
 					.iter()
 					.map(|sample| mp4_atom::TrunEntry {
 						size: Some(sample.len() as u32),
 						..Default::default()
 					})
-					.collect(),
+					.collect::<Vec<_>>()
+					.into(),
 			}],
 			..Default::default()
 		}],

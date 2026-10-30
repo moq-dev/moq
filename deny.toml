@@ -78,4 +78,5 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # uniffi-bindgen's generator-only UniFFI fork. Unpublished, so it never ships in a crate.
-allow-git = ["https://github.com/kixelated/uniffi-rs"]
+# mp4-atom's counted trun samples and dOps mapping (kixelated/mp4-atom#254, #246), until 0.17.0 is published.
+allow-git = ["https://github.com/kixelated/uniffi-rs", "https://github.com/kixelated/mp4-atom"]

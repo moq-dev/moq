@@ -836,9 +836,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			mp4_atom::Codec::Opus(opus) => {
 				// dOps carries the OpusHead fields in ISOBMFF byte order; republish them as the
-				// OpusHead description so decoders apply its pre-skip and gain. mp4-atom already
-				// refuses a nonzero channel mapping family, so the table is never dropped here.
+				// OpusHead description so decoders apply its pre-skip and gain. The head built here
+				// is family 0, so refuse a mapping table rather than drop it.
 				let dops = &opus.dops;
+				if let Some(mapping) = &dops.channel_mapping {
+					return Err(
+						Error::Opus(crate::codec::opus::Error::UnsupportedMappingFamily(mapping.family)).into(),
+					);
+				}
 				let mut head =
 					crate::codec::opus::Config::new(dops.input_sample_rate, dops.output_channel_count as u32)
 						.with_pre_skip(dops.pre_skip);
@@ -904,7 +909,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// A segment is the unit a group carries, which is what lets audio (whose samples are all
 	/// independently decodable, so it has no boundary of its own) follow the same segmentation as
 	/// video instead of opening a group per fragment.
-	fn starts_segment(&self, moof: &Moof, has_video: bool) -> bool {
+	///
+	/// `mdat_len` bounds the scan: each sample takes at least one byte of the mdat, and the resolver
+	/// refuses any past it, so a forged field-less run of billions of samples isn't walked here.
+	fn starts_segment(&self, moof: &Moof, has_video: bool, mdat_len: usize) -> bool {
 		if self.pending_cut {
 			return true;
 		}
@@ -931,8 +939,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				&& traf
 					.trun
 					.iter()
-					.flat_map(|trun| trun.entries.iter())
-					.any(|entry| track.defaults.resolve(&traf.tfhd, entry).is_sync())
+					.flat_map(|trun| trun.samples.iter())
+					.take(mdat_len)
+					.any(|entry| track.defaults.resolve(&traf.tfhd, &entry).is_sync())
 		})
 	}
 
@@ -955,7 +964,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Resolve the segment boundary BEFORE the per-track loop. A moof can carry both an audio
 		// and a video traf, and whichever comes first must see the same answer, or the other rolls
 		// a fragment late and the two tracks stop agreeing on where segments fall.
-		if self.starts_segment(&moof, has_video) {
+		if self.starts_segment(&moof, has_video, payload.len()) {
 			self.segment += 1;
 			// A boundary the source declared is also an HLS segment boundary; one merely inferred
 			// from a keyframe is not, since the default pacing already sees that group open.
@@ -1175,9 +1184,12 @@ fn fragment(
 		for trun_mut in &mut traf_mut.trun {
 			// Reserve the data_offset field; the real value is filled in below.
 			trun_mut.data_offset = Some(0);
-			for entry in &mut trun_mut.entries {
-				if entry.duration == Some(0) {
-					entry.duration = None;
+			// Only explicit entries carry a duration; an inherited run takes the tfhd's, cleared above.
+			if let mp4_atom::TrunSamples::Explicit(entries) = &mut trun_mut.samples {
+				for entry in entries {
+					if entry.duration == Some(0) {
+						entry.duration = None;
+					}
 				}
 			}
 		}
@@ -1197,9 +1209,9 @@ fn fragment(
 
 			// Advance past this trun's sample data
 			let trun_data_size: u64 = trun_mut
-				.entries
+				.samples
 				.iter()
-				.map(|entry| u64::from(defaults.resolve(&traf_mut.tfhd, entry).size))
+				.map(|entry| u64::from(defaults.resolve(&traf_mut.tfhd, &entry).size))
 				.sum();
 			cumulative_offset += trun_data_size;
 		}
@@ -1258,7 +1270,7 @@ fn kept(traf: &mp4_atom::Traf, run: &Run) -> Result<mp4_atom::Traf> {
 		}),
 		trun: vec![mp4_atom::Trun {
 			data_offset: None,
-			entries,
+			samples: entries.into(),
 		}],
 		..Default::default()
 	})
