@@ -57,8 +57,14 @@ Decided in the 2026-10-14 planning interview:
   newest group in `Container.Consumer` first, and `DecoderTrack` then drops
   the earlier group as stale. That would leave the max-delay decoder starting
   mid-sweep. Its consumer must wait for the lower group within its budget
-  before emitting a newer one: pass `lookback: 1` to its `Container.Consumer`,
-  the opt-in Rust's max-delay decoder uses as `with_lookback(1)`.
+  before emitting a newer one. ✅ Decided 2026-10-30 (maintainer): a
+  `Container.Consumer` starts at the group covering the live edge less
+  `maxDelay` plus its `warmup` prop (ms, the catalog's name and units),
+  waiting for it under that reach. After the start, `maxDelay` alone governs
+  lateness. Both default to zero, which starts at the newest group. This
+  decoder's `maxDelay` already includes the catalog `warmup`, so its start
+  reaches the earlier group without the `warmup` prop, as Rust's max-delay
+  decoder does ([moq-dev/moq#7311](https://github.com/moq-dev/moq/pull/7311)).
 - H.264 recovery-point frames sent as `key` chunks pass Chromium's WebCodecs
   keyframe check (`ParseH264KeyFrame` accepts `is_sei_recovery_point`; WPT
   `videoDecoder-h264-sei`). Chromium rejects a non-IRAP H.265 frame sent as

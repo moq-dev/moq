@@ -296,8 +296,7 @@ impl Consumer {
 
 impl Reader {
 	/// Subscribe with `max_delay`, starting `lookback` groups before the live
-	/// edge when the caller asked for [`Start::Latest`], even when the live
-	/// edge arrives first.
+	/// edge when the caller asked for [`Start::Latest`].
 	async fn open(
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &VideoConfig,
@@ -344,13 +343,11 @@ impl Reader {
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
 		let container = moq_mux::catalog::hang::Container::try_from(catalog)?;
-		let mut track = moq_mux::container::Consumer::new(track, container);
-		// On a cold network join the range above names the live edge before any group lands, and
-		// the live edge's stream often lands first: without a lookback the container would start
-		// there and drop the earlier group as old.
-		if options.start == Start::Latest {
-			track = track.with_lookback(lookback);
-		}
+		// On a cold network join the live edge's stream often lands first. The container starts
+		// at the group covering the live edge less `max_delay`, waiting for it under that budget,
+		// so the max-delay decoder, whose budget includes the warmup, still gets the group its
+		// warmup needs. Its budget is its lateness too, so it passes no further warmup.
+		let track = moq_mux::container::Consumer::new(track, container);
 
 		Ok(Self {
 			decoder,

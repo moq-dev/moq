@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Micro, Milli } from "@moq/clock";
+import { Signal } from "@moq/signals";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
@@ -58,14 +59,17 @@ async function drain(consumer: Consumer): Promise<[number, number | undefined][]
 // subscription's own max delay already bounds how far back one can be.
 test("out-of-order groups are delivered rather than dropped", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
+	// No max delay yet, so delivery starts at the live edge rather than waiting for the groups below it.
+	const maxDelay = new Signal(Milli.zero);
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(5000) }), {
 		format: new LegacyFormat("data"),
-		maxDelay: 5000 as Milli,
+		maxDelay,
 	});
 
-	// The live edge lands first, and delivery starts there rather than waiting.
+	// The live edge lands first, and delivery starts there.
 	publish(track, 3, 30);
 	expect((await nextFrame(consumer))?.frame.payload).toEqual(new Uint8Array([3]));
+	maxDelay.set(Milli(5000));
 
 	// The window's head follows it. Every group is still within both budgets, so all three
 	// are handed over even though each sits below the group already delivered.
@@ -87,15 +91,18 @@ test("out-of-order groups are delivered rather than dropped", async () => {
 // instant silently truncates its tail, so removal must wait for the group to finish.
 test("a below-cursor group still downloading is not truncated", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
+	// No max delay yet, so delivery starts at the live edge rather than waiting for the groups below it.
+	const maxDelay = new Signal(Milli.zero);
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(5000) }), {
 		format: new LegacyFormat("data"),
-		maxDelay: 5000 as Milli,
+		maxDelay,
 	});
 
 	// The live edge group arrives first and starts delivery (still open).
 	const live = track.createGroup(3);
 	publishFrame(live, 3000, 30);
 	expect((await nextFrame(consumer))?.frame.payload[0]).toBe(30);
+	maxDelay.set(Milli(5000));
 
 	// A backlog group lands below the cursor, one frame at a time (mid-download).
 	const backlog = track.createGroup(1);
@@ -124,13 +131,16 @@ test("a below-cursor group still downloading is not truncated", async () => {
 test("delayed older groups survive a floor established by two newer groups", async () => {
 	const clock = spyOn(performance, "now").mockReturnValue(200);
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
+	// No max delay yet, so delivery starts at the live edge rather than waiting for the groups below it.
+	const maxDelay = new Signal(Milli.zero);
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(5000) }), {
 		format: new LegacyFormat("data"),
-		maxDelay: Milli(5000),
+		maxDelay,
 	});
 	try {
 		publish(track, 3, 30);
 		expect((await nextFrame(consumer))?.group).toBe(3);
+		maxDelay.set(Milli(5000));
 
 		const latest = track.createGroup(4);
 		publishFrame(latest, 40, 4);

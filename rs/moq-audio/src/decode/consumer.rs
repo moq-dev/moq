@@ -211,7 +211,9 @@ impl Consumer {
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
 		let container = moq_mux::catalog::hang::Container::try_from(catalog)?;
-		let track = moq_mux::container::Consumer::new(track, container);
+		// The subscription's budget includes the warmup, so the start reaches that far back, while
+		// the container skips at the max delay alone.
+		let track = moq_mux::container::Consumer::new(track, container).with_warmup(warmup);
 
 		Ok(Self {
 			target: Target::new(options.delay, catalog.jitter),
