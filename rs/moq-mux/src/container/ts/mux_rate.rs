@@ -81,6 +81,15 @@ pub(super) struct Meter {
 }
 
 impl Meter {
+	/// A meter whose catalog already records `published`, measured on this multiplex before,
+	/// which the next windows confirm, replace, or clear.
+	pub fn measured(published: Option<u64>) -> Self {
+		Self {
+			published,
+			..Default::default()
+		}
+	}
+
 	/// The rate recorded in the catalog.
 	pub fn published(&self) -> Option<u64> {
 		self.published
