@@ -36,7 +36,7 @@ since the async-to-poll adapter and leases that hold the lock both go first.
 Levers, only where the profile shows a cost:
 
 - A per-stream staging queue: a write hands its owned `Bytes` (the `Buf`
-  API from [streams](/quest/m1/quic-api/streams.md)) to the stream, bounded
+  API from [moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)) to the stream, bounded
   by the stream's flow-control window so backpressure is unchanged, and the
   connection task moves it into moq-quic under its own lock.
 - Dispatch a whole GRO batch per connection in one message, coordinated
@@ -57,7 +57,6 @@ staging queue and batch dispatch should need none.
 ## Required
 
 - [Native WebTransport](/quest/m1/quic-api/native-web.md) - removes the adapter's per-operation boxing, which would otherwise dominate the profile
-- [Streams](/quest/m1/quic-api/streams.md) - owned writes and lock-free leases
 - [Waits](/quest/m1/quic-api/waits.md) - moves the waiter tables under the lock this profiles
 
 ## Related

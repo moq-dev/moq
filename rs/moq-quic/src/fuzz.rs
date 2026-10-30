@@ -23,7 +23,7 @@ use bytes::{Bytes, BytesMut};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use crate::{
-	ConnectionId, Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, SendStream, Side, StreamId, Streams, VarInt,
+	ConnectionId, Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, Side, StreamId, Streams, VarInt,
 	coding::BufMutExt,
 	connection::{Retransmits, State, StreamsState},
 	frame::{self, Frame},
@@ -185,7 +185,7 @@ pub fn streams(data: &[u8]) -> bool {
 				Streams::new(&mut state, &conn_state).accept(dir);
 			}
 			StreamOp::Finish { id } => {
-				let _ = SendStream::new(StreamId(id), &mut state, &mut pending, &conn_state).finish();
+				let _ = crate::send::Stream::new(StreamId(id), &mut state, &mut pending, &conn_state).finish();
 			}
 			StreamOp::ReceivedStopSending { id, error_code } => {
 				let _ = state.received_stop_sending(StreamId(id), varint(error_code));
@@ -204,7 +204,8 @@ pub fn streams(data: &[u8]) -> bool {
 				});
 			}
 			StreamOp::Reset { id } => {
-				let _ = SendStream::new(StreamId(id), &mut state, &mut pending, &conn_state).reset(0u32.into());
+				let _ =
+					crate::send::Stream::new(StreamId(id), &mut state, &mut pending, &conn_state).reset(0u32.into());
 			}
 		}
 	}

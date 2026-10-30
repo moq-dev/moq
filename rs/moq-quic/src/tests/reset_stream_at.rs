@@ -18,7 +18,7 @@ fn pair(server_reset_stream_at: bool) -> Pair {
 }
 
 /// Read a server stream until it ends, returning the bytes and how it ended
-fn read(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, Result<(), ReadError>) {
+fn read(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, Result<(), recv::Error>) {
 	let mut recv = pair.server_recv(ch, s);
 	let mut chunks = recv.read().unwrap();
 	let mut data = Vec::new();
@@ -39,10 +39,10 @@ fn accept(pair: &mut Pair, ch: ConnectionHandle) -> StreamId {
 }
 
 /// Write `MSG` to a client stream, returning the offset after its first `RELIABLE` bytes
-fn write(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> u64 {
-	pair.client_send(ch, s).write(&MSG[..RELIABLE]).unwrap();
+fn write(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> send::Offset {
+	pair.client_send(ch, s).write(&mut &MSG[..RELIABLE]).unwrap();
 	let offset = pair.client_send(ch, s).offset();
-	pair.client_send(ch, s).write(&MSG[RELIABLE..]).unwrap();
+	pair.client_send(ch, s).write(&mut &MSG[RELIABLE..]).unwrap();
 	offset
 }
 
@@ -51,7 +51,7 @@ fn write(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> u64 {
 ///
 /// A plain RESET_STREAM lets the receiver discard data it has not read yet, so only an
 /// application that keeps reading sees the prefix a peer without RESET_STREAM_AT is sent.
-fn drive_reading(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, Result<(), ReadError>) {
+fn drive_reading(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, Result<(), recv::Error>) {
 	let mut accepted = false;
 	let mut data = Vec::new();
 	loop {
@@ -60,12 +60,12 @@ fn drive_reading(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>
 		if accepted {
 			let (read, end) = read(pair, ch, s);
 			data.extend(read);
-			if end != Err(ReadError::Blocked) {
+			if end != Err(recv::Error::Blocked) {
 				return (data, end);
 			}
 		}
 		if !busy {
-			return (data, Err(ReadError::Blocked));
+			return (data, Err(recv::Error::Blocked));
 		}
 	}
 }
@@ -94,14 +94,14 @@ fn stop_sending_abandons_prefix(reset_stream_at: bool) {
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, s).write(&MSG[..1]).unwrap();
+	pair.client_send(client_ch, s).write(&mut &MSG[..1]).unwrap();
 	pair.drive();
 	assert_eq!(accept(&mut pair, server_ch), s);
 
 	// The rest of the prefix is lost, and so is any reset sent for it
-	pair.client_send(client_ch, s).write(&MSG[1..RELIABLE]).unwrap();
+	pair.client_send(client_ch, s).write(&mut &MSG[1..RELIABLE]).unwrap();
 	let offset = pair.client_send(client_ch, s).offset();
-	pair.client_send(client_ch, s).write(&MSG[RELIABLE..]).unwrap();
+	pair.client_send(client_ch, s).write(&mut &MSG[RELIABLE..]).unwrap();
 	lose_client_packets(&mut pair);
 	pair.client_send(client_ch, s).reset_at(offset, ERROR).unwrap();
 	pair.client.drive(pair.time, pair.server.addr);
@@ -144,13 +144,13 @@ fn delivers_prefix_before_error() {
 	assert_eq!(accept(&mut pair, server_ch), s);
 	assert_eq!(
 		read(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(ReadError::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
 	);
 	// Both halves let go of the stream once the prefix and the reset are through
 	assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
 	assert!(matches!(
 		pair.server_recv(server_ch, s).read(),
-		Err(ReadableError::ClosedStream)
+		Err(recv::Error::Closed)
 	));
 }
 
@@ -166,7 +166,7 @@ fn delivers_unsent_prefix() {
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, s).write(&MSG[..RELIABLE]).unwrap();
+	pair.client_send(client_ch, s).write(&mut &MSG[..RELIABLE]).unwrap();
 	let offset = pair.client_send(client_ch, s).offset();
 	pair.client_send(client_ch, s).reset_at(offset, ERROR).unwrap();
 	pair.drive();
@@ -174,7 +174,7 @@ fn delivers_unsent_prefix() {
 	assert_eq!(accept(&mut pair, server_ch), s);
 	assert_eq!(
 		read(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(ReadError::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
 	);
 }
 
@@ -196,7 +196,7 @@ fn retransmits_lost_prefix() {
 	pair.drive_client();
 	pair.drive_server();
 	assert_eq!(accept(&mut pair, server_ch), s);
-	assert_eq!(read(&mut pair, server_ch, s), (Vec::new(), Err(ReadError::Blocked)));
+	assert_eq!(read(&mut pair, server_ch, s), (Vec::new(), Err(recv::Error::Blocked)));
 	assert_matches!(
 		pair.server_conn_mut(server_ch).recv_stream(s).received_reset(),
 		Ok(None)
@@ -205,7 +205,7 @@ fn retransmits_lost_prefix() {
 	pair.drive();
 	assert_eq!(
 		read(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(ReadError::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
 	);
 	assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
 }
@@ -229,7 +229,7 @@ fn retransmits_lost_reset() {
 	assert_eq!(accept(&mut pair, server_ch), s);
 	assert_eq!(
 		read(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(ReadError::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
 	);
 	assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
 }
@@ -286,7 +286,7 @@ fn after_finish() {
 		assert_eq!(accept(&mut pair, server_ch), s);
 		assert_eq!(
 			read(&mut pair, server_ch, s),
-			(MSG[..reliable].to_vec(), Err(ReadError::Reset(ERROR)))
+			(MSG[..reliable].to_vec(), Err(recv::Error::Reset(ERROR)))
 		);
 	}
 	assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
@@ -307,20 +307,23 @@ fn flow_control_blocked() {
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, s).write(&MSG[..RELIABLE]).unwrap();
+	pair.client_send(client_ch, s).write(&mut &MSG[..RELIABLE]).unwrap();
 	let offset = pair.client_send(client_ch, s).offset();
 	assert_eq!(
-		pair.client_send(client_ch, s).write(&MSG[RELIABLE..]),
+		pair.client_send(client_ch, s).write(&mut &MSG[RELIABLE..]),
 		Ok(10 - RELIABLE)
 	);
-	assert_eq!(pair.client_send(client_ch, s).write(MSG), Err(WriteError::Blocked));
+	assert_eq!(
+		pair.client_send(client_ch, s).write(&mut &MSG[..]),
+		Err(send::Error::Blocked)
+	);
 	pair.client_send(client_ch, s).reset_at(offset, ERROR).unwrap();
 	pair.drive();
 
 	assert_eq!(accept(&mut pair, server_ch), s);
 	assert_eq!(
 		read(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(ReadError::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
 	);
 	assert!(!pair.server_conn_mut(server_ch).is_closed());
 }
@@ -345,7 +348,7 @@ fn unsupported_holds_reset_until_acked() {
 	assert_eq!(resets_sent(&mut pair, client_ch), 0);
 	assert_eq!(
 		drive_reading(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(ReadError::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
 	);
 	assert_eq!(resets_sent(&mut pair, client_ch), 1);
 	pair.drive();
@@ -368,7 +371,7 @@ fn unsupported_retransmits_lost_prefix() {
 
 	assert_eq!(
 		drive_reading(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(ReadError::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
 	);
 	assert_eq!(resets_sent(&mut pair, client_ch), 1);
 	pair.drive();
@@ -389,7 +392,7 @@ fn unsupported_resets_at_once_when_acked() {
 	let offset = write(&mut pair, client_ch, s);
 	pair.drive();
 	assert_eq!(accept(&mut pair, server_ch), s);
-	assert_eq!(read(&mut pair, server_ch, s), (MSG.to_vec(), Err(ReadError::Blocked)));
+	assert_eq!(read(&mut pair, server_ch, s), (MSG.to_vec(), Err(recv::Error::Blocked)));
 
 	pair.client_send(client_ch, s).reset_at(offset, ERROR).unwrap();
 	pair.drive_client();
@@ -397,7 +400,7 @@ fn unsupported_resets_at_once_when_acked() {
 	pair.drive();
 	assert_eq!(
 		read(&mut pair, server_ch, s),
-		(Vec::new(), Err(ReadError::Reset(ERROR)))
+		(Vec::new(), Err(recv::Error::Reset(ERROR)))
 	);
 }
 
@@ -415,12 +418,15 @@ fn unsupported_after_finish() {
 	let offset = write(&mut pair, client_ch, s);
 	pair.client_send(client_ch, s).finish().unwrap();
 	pair.client_send(client_ch, s).reset_at(offset, ERROR).unwrap();
-	assert_eq!(pair.client_send(client_ch, s).finish(), Err(FinishError::ClosedStream));
-	assert_eq!(pair.client_send(client_ch, s).write(MSG), Err(WriteError::ClosedStream));
+	assert_eq!(pair.client_send(client_ch, s).finish(), Err(send::Error::Closed));
+	assert_eq!(
+		pair.client_send(client_ch, s).write(&mut &MSG[..]),
+		Err(send::Error::Closed)
+	);
 
 	assert_eq!(
 		drive_reading(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(ReadError::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
 	);
 	pair.drive();
 	assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
@@ -445,7 +451,7 @@ fn unsupported_repeated_reset_is_closed() {
 	pair.client_send(client_ch, s).reset_at(offset, ERROR).unwrap();
 	assert_eq!(
 		pair.client_send(client_ch, s).reset_at(again, ERROR),
-		Err(ClosedStream::default())
+		Err(send::Error::Closed)
 	);
 	assert!(pair.client_send(client_ch, s).reset(ERROR).is_err());
 }
@@ -498,14 +504,17 @@ fn unsupported_returns_flow_control() {
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	assert_eq!(pair.client_send(client_ch, next).write(MSG), Err(WriteError::Blocked));
+	assert_eq!(
+		pair.client_send(client_ch, next).write(&mut &MSG[..]),
+		Err(send::Error::Blocked)
+	);
 
 	assert_eq!(
 		drive_reading(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(ReadError::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
 	);
 	pair.drive();
-	assert_eq!(pair.client_send(client_ch, next).write(MSG), Ok(MSG.len()));
+	assert_eq!(pair.client_send(client_ch, next).write(&mut &MSG[..]), Ok(MSG.len()));
 }
 
 /// A zero Reliable Size is a plain RESET_STREAM, which needs no negotiation.
@@ -520,14 +529,14 @@ fn unsupported_allows_zero() {
 		.open(Dir::Uni, Default::default())
 		.unwrap();
 	let offset = pair.client_send(client_ch, s).offset();
-	pair.client_send(client_ch, s).write(MSG).unwrap();
+	pair.client_send(client_ch, s).write(&mut &MSG[..]).unwrap();
 	pair.client_send(client_ch, s).reset_at(offset, ERROR).unwrap();
 	pair.drive();
 
 	assert_eq!(accept(&mut pair, server_ch), s);
 	assert_eq!(
 		read(&mut pair, server_ch, s),
-		(Vec::new(), Err(ReadError::Reset(ERROR)))
+		(Vec::new(), Err(recv::Error::Reset(ERROR)))
 	);
 }
 
@@ -546,7 +555,7 @@ fn repeated_reset_is_closed() {
 	pair.client_send(client_ch, s).reset_at(offset, ERROR).unwrap();
 	assert_eq!(
 		pair.client_send(client_ch, s).reset_at(again, ERROR),
-		Err(ClosedStream::default())
+		Err(send::Error::Closed)
 	);
 	assert!(pair.client_send(client_ch, s).reset(ERROR).is_err());
 }

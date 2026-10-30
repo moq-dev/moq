@@ -8,8 +8,8 @@ is served again when the publisher allows replay, without any frame being
 fetched faster than its readers take it. Readers replaying the same part of a
 group share one upstream fill, and a reader that catches up hands over to the
 copy ahead, whose fill then stops. A track whose publisher has no
-`track::Requests` handler keeps refresh-or-`Evicted` from
-[Front eviction](/quest/m1/unbounded-groups/front-eviction.md).
+`track::Requests` handler keeps the refresh-or-`Evicted` behavior of front eviction
+([moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)).
 
 ## Plan
 
