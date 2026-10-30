@@ -226,6 +226,42 @@ async fn renew_refreshes_before_expiry() {
 	assert!(renewed.expires > enrollment.expires);
 }
 
+#[tokio::test]
+async fn renew_retries_an_evicted_challenge() {
+	use wiremock::matchers::{method, path};
+	use wiremock::{Mock, MockServer, ResponseTemplate};
+
+	let mesh = Mesh::with_ttl(Duration::from_secs(3)).await;
+	let signer = Arc::new(Ed25519KeyPair::generate().unwrap());
+	let device = Client::new(mesh.base.clone(), signer.clone()).unwrap();
+	let enrollment = device.enroll(&mesh.key(true), None).await.unwrap();
+	let fresh = device.refresh().await.unwrap();
+
+	// A coordinator whose challenge is evicted before the first refresh arrives.
+	let server = MockServer::start().await;
+	Mock::given(method("POST"))
+		.and(path("/mesh/challenge"))
+		.respond_with(ResponseTemplate::new(200).set_body_json(mesh.coordinator.challenge()))
+		.mount(&server)
+		.await;
+	Mock::given(method("POST"))
+		.and(path("/mesh/refresh"))
+		.respond_with(ResponseTemplate::new(400).set_body_json(ErrorReply::new(ErrorCode::InvalidChallenge, "evicted")))
+		.up_to_n_times(1)
+		.with_priority(1)
+		.mount(&server)
+		.await;
+	Mock::given(method("POST"))
+		.and(path("/mesh/refresh"))
+		.respond_with(ResponseTemplate::new(200).set_body_json(&fresh))
+		.mount(&server)
+		.await;
+
+	let device = Client::new(format!("{}/mesh", server.uri()).parse().unwrap(), signer).unwrap();
+	let renewed = device.renew(&enrollment).await.unwrap();
+	assert_eq!(renewed, fresh);
+}
+
 #[test]
 fn a_key_that_cannot_sign_refuses_to_start() {
 	let key = Key::generate(Algorithm::ES256, None).unwrap().to_public().unwrap();

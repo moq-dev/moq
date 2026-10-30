@@ -388,7 +388,9 @@ revoked device cannot enroll again. Each enrollment and refresh also returns
 every member's unique, DNS-safe name, defaulting to the device's hostname.
 
 The device-facing API on `--mesh-listen` is meant to be public behind a TLS
-proxy, since devices refuse plain `http://` beyond loopback. The owner's
+proxy, since devices refuse plain `http://` beyond loopback. Challenges and
+device grants are issued without a credential and bounded in memory (4096
+challenges, 256 pending grants), so the proxy should rate-limit each client. The owner's
 commands go to `--listen`, which stays private. A hosted coordinator implements
 the same JSON contract, documented in
 [`moq_auth::mesh`](https://docs.rs/moq-auth/latest/moq_auth/mesh/); it adds

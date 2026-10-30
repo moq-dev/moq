@@ -113,7 +113,8 @@ impl Client {
 
 	/// Wait until `current` is two thirds through its remaining life, then refresh it,
 	/// retrying through an outage until it expires. A refusal is returned at once, so a
-	/// revoked device stops rather than retrying.
+	/// revoked device stops rather than retrying, except a transient one: a server error,
+	/// `slow_down`, or a challenge that expired or was evicted before the proof arrived.
 	pub async fn renew(&self, current: &Enrollment) -> crate::Result<Enrollment> {
 		let remaining = || {
 			current
@@ -126,7 +127,14 @@ impl Client {
 		let mut backoff = Duration::from_secs(1);
 		loop {
 			match self.refresh().await {
-				Err(Error::Mesh(reply)) if reply.error != ErrorCode::ServerError => return Err(Error::Mesh(reply)),
+				Err(Error::Mesh(reply))
+					if !matches!(
+						reply.error,
+						ErrorCode::ServerError | ErrorCode::SlowDown | ErrorCode::InvalidChallenge
+					) =>
+				{
+					return Err(Error::Mesh(reply));
+				}
 				Ok(enrollment) => return Ok(enrollment),
 				Err(err) if remaining().is_zero() => return Err(err),
 				Err(err) => {
