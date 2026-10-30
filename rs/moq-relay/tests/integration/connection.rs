@@ -269,9 +269,10 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 #[tokio::test(start_paused = true)]
 async fn stats_count_admitted_and_refused_sessions() {
 	let cluster = memory::cluster();
-	let publisher = moq_stats::Producer::new(moq_stats::produce::Config::new().with_origin(cluster.origin.clone()));
-	let registry = publisher.registry().clone();
-	let cluster = cluster.with_stats(publisher);
+	let (producer, publisher) =
+		moq_stats::Producer::new(moq_stats::produce::Config::new().with_origin(cluster.origin.clone()));
+	let registry = producer.registry().clone();
+	let cluster = cluster.with_stats(producer, publisher);
 	let presence = || {
 		registry
 			.snapshot()

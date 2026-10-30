@@ -245,7 +245,8 @@ fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio:
 	}
 	tasks.spawn(async move {
 		let mut sessions = JoinSet::new();
-		while let Some(request) = listener.accept().await {
+		loop {
+			let request = listener.accept().await.context("the MoQ listener stopped accepting")?;
 			while sessions.try_join_next().is_some() {}
 			let serving = serving.clone();
 			sessions.spawn(async move {
@@ -272,7 +273,6 @@ fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio:
 				}
 			});
 		}
-		anyhow::bail!("the MoQ listener stopped accepting")
 	});
 }
 

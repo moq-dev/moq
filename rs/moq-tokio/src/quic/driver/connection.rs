@@ -81,7 +81,7 @@ impl Connecting {
 		let driver = ConnectionDriver::new(conn.clone());
 		runtime.spawn(
 			async {
-				if let Err(e) = driver.await {
+				if let Some(Err(e)) = crate::panic::isolate(driver).await {
 					tracing::error!("I/O error: {e}");
 				}
 			}

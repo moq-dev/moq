@@ -1255,12 +1255,12 @@ mod tests {
 	/// depth 1 (so feeding a broadcast under `<group>/...` publishes a
 	/// `<group>/group.json` track on `.stats/node/<node>`).
 	fn node_producer(origin: &origin::Producer, node: &str) -> Producer {
-		Producer::new(
+		crate::produce::spawned(Producer::new(
 			produce::Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::try_from(node.to_string()).unwrap())
 				.with_depth(1),
-		)
+		))
 	}
 
 	/// Kept-alive handles from [`feed`]: dropping them closes the subscription and
@@ -2153,13 +2153,13 @@ mod tests {
 		// counted from zero under a new epoch: the reader follows the listing to
 		// it, and its totals add to the old instance's instead of regressing.
 		let origin = produce_origin();
-		let node = Producer::new(
+		let node = crate::produce::spawned(Producer::new(
 			produce::Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::from_static("a"))
 				.with_depth(1)
 				.with_linger(Duration::ZERO),
-		);
+		));
 		let agg = Consumer::new(origin.consume(), Config::new());
 		let mut group = agg.group(moq_net::Path::from_static("acme"));
 

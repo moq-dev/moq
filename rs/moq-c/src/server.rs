@@ -62,8 +62,8 @@ impl Server {
 				biased;
 				_ = &mut close => break Ok(()),
 				request = listener.accept() => match request {
-					Some(request) => request,
-					None => break Ok(()),
+					Ok(request) => request,
+					Err(err) => break Err(err.into()),
 				},
 			};
 

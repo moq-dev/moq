@@ -261,7 +261,7 @@ async fn spawn_upstream(
 	let (accepted_tx, accepted_rx) = tokio::sync::mpsc::unbounded_channel();
 
 	let handle = tokio::spawn(async move {
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			// Serve the shared origin bidirectionally, like a relay peer would.
 			let scratch = moq_tokio::origin::spawn();
 			let session = match request.with_publisher(&origin).with_subscriber(scratch).ok().await {
@@ -437,7 +437,7 @@ async fn spawn_relay_with_upstream(
 
 		let mut accept_notify = accept_notify;
 		let mut id = 0;
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			if let Some(notify) = accept_notify.take() {
 				let _ = notify.send(());
 			}

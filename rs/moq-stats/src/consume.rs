@@ -179,11 +179,11 @@ mod tests {
 
 	fn test_producer() -> (Producer, origin::Producer) {
 		let origin = produce_origin();
-		let producer = Producer::new(
+		let producer = crate::produce::spawned(Producer::new(
 			produce::Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::from_static("sjc")),
-		);
+		));
 		(producer, origin)
 	}
 

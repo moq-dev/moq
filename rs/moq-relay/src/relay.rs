@@ -316,10 +316,10 @@ impl Relay {
 			Some(iroh) => cluster.with_iroh(iroh),
 			None => cluster,
 		};
-		let stats = config.stats.build(cluster.origin.clone())?;
+		let (stats, publisher) = config.stats.build(cluster.origin.clone())?;
 		// The cluster takes over keeping the publish task alive, so an embedder that
 		// drops the producer keeps publishing for as long as it serves.
-		let cluster = cluster.with_stats(stats.clone());
+		let cluster = cluster.with_stats(stats.clone(), publisher);
 
 		let sessions = crate::session::Registry::new();
 		let (ready, _) = tokio::sync::watch::channel(false);
@@ -720,8 +720,8 @@ impl Relay {
 
 		// With the QUIC listener owned by a worker group, the shared server has
 		// only the `tcp`/`unix` stream listeners left, and a config with none
-		// of those has nothing to accept: its loop would report "stopped
-		// accepting" immediately and take the healthy relay down. Pend instead;
+		// of those has nothing to accept: its loop would fail with
+		// `NoBackend` immediately and take the healthy relay down. Pend instead;
 		// the workers are what serve.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		let quic_on_workers = has_workers || uring_serving;
@@ -856,15 +856,14 @@ async fn serve_listening(
 	shutdown: shutdown::Observer,
 	sessions: crate::session::Registry,
 ) -> anyhow::Result<()> {
-	while let Some(request) = listener.accept().await {
+	loop {
+		let request = listener.accept().await?;
 		let conn = Connection::new(request, cluster.clone(), auth.clone())
 			.with_id(cluster.next_connection_id())
 			.with_shutdown(shutdown.clone())
 			.with_sessions(sessions.clone());
 		tokio::spawn(conn.run());
 	}
-
-	anyhow::bail!("stopped accepting connections")
 }
 
 #[cfg(test)]

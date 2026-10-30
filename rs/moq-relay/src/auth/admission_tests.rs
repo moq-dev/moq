@@ -151,9 +151,10 @@ async fn a_moved_gateway_tier_retags_its_stats() {
 #[tokio::test(start_paused = true)]
 async fn gateway_admission_refuses_once_in_the_shared_stats_registry() {
 	let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
-	let publisher = moq_stats::Producer::new(moq_stats::produce::Config::new().with_origin(cluster.origin.clone()));
-	let registry = publisher.registry().clone();
-	let cluster = cluster.with_stats(publisher);
+	let (producer, publisher) =
+		moq_stats::Producer::new(moq_stats::produce::Config::new().with_origin(cluster.origin.clone()));
+	let registry = producer.registry().clone();
+	let cluster = cluster.with_stats(producer, publisher);
 	let (auth, mut admissions) = auth::Auth::embedded("edge");
 	let (result, ()) = tokio::join!(
 		cluster.admit(&auth, auth.request(Transport::Srt, "/unattributed")),
@@ -188,9 +189,9 @@ async fn embedded_expired_refusals_keep_verified_root_and_tier() {
 		enabled: true,
 		..Default::default()
 	};
-	let producer = config.build(cluster.origin.clone()).unwrap();
+	let (producer, publisher) = config.build(cluster.origin.clone()).unwrap();
 	let registry = producer.registry().clone();
-	let cluster = cluster.with_stats(producer);
+	let cluster = cluster.with_stats(producer, publisher);
 	let (auth, mut admissions) = auth::Auth::embedded("edge");
 	for tier in [None, Some("edge")] {
 		let mut refusal = moq_auth::Refusal::default();

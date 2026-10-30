@@ -61,7 +61,7 @@ impl Fixture {
 		let cluster = cluster::Cluster::new(Default::default()).unwrap();
 		let listener = tokio::spawn(async move {
 			let mut serving = tokio::task::JoinSet::new();
-			while let Some(request) = server.accept().await {
+			while let Ok(request) = server.accept().await {
 				let connection = Connection::new(request, cluster.clone(), auth.clone());
 				serving.spawn(async move {
 					connection.run().await;
@@ -173,7 +173,7 @@ impl Queue {
 		let cluster = cluster::Cluster::new(Default::default()).unwrap();
 		let listener = tokio::spawn(async move {
 			let mut serving = tokio::task::JoinSet::new();
-			while let Some(request) = server.accept().await {
+			while let Ok(request) = server.accept().await {
 				let connection = Connection::new(request, cluster.clone(), auth.clone());
 				serving.spawn(async move {
 					connection.run().await;

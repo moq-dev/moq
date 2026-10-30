@@ -452,7 +452,7 @@ impl Peer {
 			taken: false,
 		};
 		use tracing::Instrument;
-		crate::runtime::spawn(driver.run().instrument(tracing::Span::current()));
+		crate::runtime::spawn(crate::panic::isolate(driver.run()).instrument(tracing::Span::current()));
 
 		let resolver = Resolver::spawn(commands.clone(), resolver::Mdns);
 		Ok(Self {

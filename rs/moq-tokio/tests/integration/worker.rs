@@ -154,7 +154,7 @@ async fn stopping_the_group_closes_its_sessions() {
 	for member in group.members() {
 		member.serve(|server| async move {
 			let mut listener = server.listen().await.unwrap();
-			while let Some(request) = listener.accept().await {
+			while let Ok(request) = listener.accept().await {
 				tokio::spawn(async move {
 					let _session = request.ok().await.unwrap();
 					std::future::pending::<()>().await;
@@ -782,7 +782,7 @@ async fn rotated_identity_reaches_every_worker() {
 		member.serve(move |server| async move {
 			let certificates = server.certificates();
 			let mut listener = server.listen().await.unwrap();
-			while let Some(request) = listener.accept().await {
+			while let Ok(request) = listener.accept().await {
 				let send = send.clone();
 				let certificates = certificates.clone();
 				tokio::spawn(async move {

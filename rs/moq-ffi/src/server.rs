@@ -147,8 +147,11 @@ async fn serve(
 			request = listener.accept() => request,
 		};
 		match request {
-			Some(request) => slot.send(request),
-			None => break,
+			Ok(request) => slot.send(request),
+			Err(err) => {
+				tracing::error!(%err, "server stopped accepting");
+				break;
+			}
 		}
 	}
 	// `Listener::close` releases the sockets before it returns; a drop only schedules that.

@@ -320,7 +320,6 @@ impl Config {
 	/// Build the [`Auth`] this configuration describes, after [`validate`](Self::validate)
 	/// with the same `client_ca`. `tls` is the client identity an `https://` server
 	/// is dialed with, never its server trust; `node` names this relay in every request.
-	/// Must be called within a Tokio runtime, which drives the admission decider.
 	pub fn init(
 		&self,
 		node: impl Into<String>,
@@ -334,17 +333,14 @@ impl Config {
 				let tls = crate::http_client::server_tls(&tls, &self.root)?;
 				Decider::Server(moq_auth::Client::new(url.clone(), Some(tls))?)
 			}
-			(None, Some(grant)) => Decider::Public(
+			(None, Some(grant)) => Decider::Public(Arc::new(
 				moq_auth::Claims::default()
 					.with_publish(grant.publish)
 					.with_subscribe(grant.subscribe),
-			),
+			)),
 			(None, None) => unreachable!("validated above"),
 		};
-		let (mut auth, admissions) = Auth::embedded(node);
-		auth.in_band = matches!(decider, Decider::Server(_));
-		decider.spawn(admissions);
-		Ok(auth)
+		Ok(Auth::new(node, decider))
 	}
 }
 
@@ -768,63 +764,70 @@ pub(crate) async fn hold<T>(mut lease: Lease, work: impl std::future::Future<Out
 	}
 }
 
+/// Who answers an [`Admission`].
+///
+/// Each admission is decided where it is submitted: nothing long-lived sits between
+/// a session and its answer, so a panic deciding one costs only that session.
+#[derive(Clone)]
 enum Decider {
+	/// The embedding process, through [`Admissions`].
+	Embedded(mpsc::UnboundedSender<Admission>),
 	Server(moq_auth::Client),
 	/// The public rules, as a token with an empty root.
-	Public(moq_auth::Claims),
+	Public(Arc<moq_auth::Claims>),
 	Refuse,
 }
 
 impl Decider {
-	fn spawn(self, mut admissions: Admissions) {
-		tokio::spawn(async move {
-			while let Some(mut admission) = admissions.next().await {
-				match &self {
-					Self::Server(client) => {
-						let client = client.clone();
-						// A panic drops the admission, which answers it as unavailable.
-						tokio::spawn(moq_tokio::panic::isolate(async move {
-							let ask = async {
-								match &admission.connection {
-									Some(connection) => client.attach(connection, admission.request.clone()).await,
-									None => client.connect(admission.request.clone()).await,
-								}
-							};
-							// The relay stopped waiting (its handshake deadline passed): drop the
-							// request to the server, so an expired admission leaves nothing in flight.
-							let lease = tokio::select! {
-								biased;
-								() = admission.reply.closed() => return,
-								lease = ask => lease,
-							};
-							match lease {
-								Ok(lease) => admission.grant(lease),
-								Err(err) => admission.refuse(err.into()),
-							}
-						}));
-					}
-					// Nothing here can verify a token, so one is refused rather than ignored:
-					// its holder expects it to count, and the public grant is not what it says.
-					Self::Public(_) if presents_token(&admission.request) => {
-						tracing::debug!(path = %admission.request.path, "a token was presented to public rules");
-						admission.refuse(Error::Refused(Default::default()));
-					}
-					Self::Public(rules) => match rules.authorize(&admission.request.path) {
-						Ok(access) => {
-							let grant = Grant::new(access.publish, access.subscribe);
-							admission.grant(lease::Consumer::fixed(grant));
+	fn decide(&self, mut admission: Admission) -> Result<(), Error> {
+		match self {
+			Self::Embedded(admissions) => admissions
+				.send(admission)
+				.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?,
+			Self::Server(client) => {
+				let client = client.clone();
+				// A panic drops the admission, which answers it as unavailable.
+				tokio::spawn(moq_tokio::panic::isolate(async move {
+					let ask = async {
+						match &admission.connection {
+							Some(connection) => client.attach(connection, admission.request.clone()).await,
+							None => client.connect(admission.request.clone()).await,
 						}
-						// A path the rules don't reach is a refusal, never an outage a
-						// client would retry.
-						Err(err) => {
-							tracing::debug!(path = %admission.request.path, %err, "public rules refused");
-							admission.refuse(Error::Refused(Default::default()));
-						}
-					},
-					Self::Refuse => admission.refuse(Error::Refused(Default::default())),
-				}
+					};
+					// The relay stopped waiting (its handshake deadline passed): drop the
+					// request to the server, so an expired admission leaves nothing in flight.
+					let lease = tokio::select! {
+						biased;
+						() = admission.reply.closed() => return,
+						lease = ask => lease,
+					};
+					match lease {
+						Ok(lease) => admission.grant(lease),
+						Err(err) => admission.refuse(err.into()),
+					}
+				}));
 			}
-		});
+			// Nothing here can verify a token, so one is refused rather than ignored:
+			// its holder expects it to count, and the public grant is not what it says.
+			Self::Public(_) if presents_token(&admission.request) => {
+				tracing::debug!(path = %admission.request.path, "a token was presented to public rules");
+				admission.refuse(Error::Refused(Default::default()));
+			}
+			Self::Public(rules) => match rules.authorize(&admission.request.path) {
+				Ok(access) => {
+					let grant = Grant::new(access.publish, access.subscribe);
+					admission.grant(lease::Consumer::fixed(grant));
+				}
+				// A path the rules don't reach is a refusal, never an outage a
+				// client would retry.
+				Err(err) => {
+					tracing::debug!(path = %admission.request.path, %err, "public rules refused");
+					admission.refuse(Error::Refused(Default::default()));
+				}
+			},
+			Self::Refuse => admission.refuse(Error::Refused(Default::default())),
+		}
+		Ok(())
 	}
 }
 
@@ -839,10 +842,10 @@ fn presents_token(request: &Request) -> bool {
 		})
 }
 
-/// Admits sessions by queueing every request for one admission decider.
+/// Admits sessions through one admission decider.
 #[derive(Clone)]
 pub struct Auth {
-	admissions: mpsc::UnboundedSender<Admission>,
+	decider: Decider,
 	node: Arc<str>,
 	/// Whether the decider can verify a token presented in band; public rules cannot.
 	in_band: bool,
@@ -857,14 +860,17 @@ impl Auth {
 	/// refused. Dropping the `Admissions` fails every later session as unavailable.
 	pub fn embedded(node: impl Into<String>) -> (Self, Admissions) {
 		let (sender, receiver) = mpsc::unbounded_channel();
-		let auth = Self {
-			admissions: sender,
+		(Self::new(node, Decider::Embedded(sender)), Admissions(receiver))
+	}
+
+	fn new(node: impl Into<String>, decider: Decider) -> Self {
+		Self {
+			in_band: !matches!(decider, Decider::Public(_)),
+			decider,
 			node: Arc::from(node.into()),
-			in_band: true,
 			#[cfg(test)]
 			verifications: VERIFICATIONS,
-		};
-		(auth, Admissions(receiver))
+		}
 	}
 
 	#[cfg(test)]
@@ -884,11 +890,8 @@ impl Auth {
 
 	/// An `Auth` that refuses every session a server or a public grant would have
 	/// decided, admitting only what the relay decides for itself (a LAN peer).
-	/// Must be called within a Tokio runtime, which drives the refusal decider.
 	pub fn refuse(node: impl Into<String>) -> Self {
-		let (auth, admissions) = Self::embedded(node);
-		Decider::Refuse.spawn(admissions);
-		auth
+		Self::new(node, Decider::Refuse)
 	}
 
 	/// The name this relay puts in every request.
@@ -924,16 +927,14 @@ impl Auth {
 		answered_with(answer.await)
 	}
 
-	/// Queue one admission for the decider, returning its pending answer.
+	/// Hand one admission to the decider, returning its pending answer.
 	fn submit(&self, request: Request, connection: Option<lease::Consumer>) -> Result<Answer, Error> {
 		let (reply, answer) = oneshot::channel();
-		self.admissions
-			.send(Admission {
-				request,
-				connection,
-				reply,
-			})
-			.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?;
+		self.decider.decide(Admission {
+			request,
+			connection,
+			reply,
+		})?;
 		Ok(answer)
 	}
 
