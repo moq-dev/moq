@@ -4548,3 +4548,38 @@ async function readServed(
 	}
 	return served;
 }
+
+test("subscriber max age and REQUEST_UPDATE preserve omitted preferences", async () => {
+	const fx = fixture(Version.DRAFT_18);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 128,
+			maxAge: 250,
+		}),
+	);
+	try {
+		expect(track.subscription.peek()?.maxDelay).toBe(Milli(250));
+		const parameters = new Parameters();
+		parameters.maxAge = 900;
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(client.reader, fx.version);
+		expect(track.subscription.peek()?.maxDelay).toBe(Milli(900));
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 4n }).encode(client.writer, fx.version);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(client.reader, fx.version);
+		expect(track.subscription.peek()?.maxDelay).toBe(Milli(900));
+	} finally {
+		client.close();
+		track.finish();
+		track.close();
+		fx.close();
+	}
+});
