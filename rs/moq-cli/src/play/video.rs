@@ -683,7 +683,9 @@ mod tests {
 			.consume()
 			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
 			.await
-			.unwrap();
+			.unwrap()
+			// The join is mid-stream: nothing below the first group arrives for the start to wait for.
+			.with_range(10..);
 		let format = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 		let write = |sequence, stamps: Vec<u64>| {
 			let mut group = published.create_group(moq_net::group::Info { sequence }).unwrap();
