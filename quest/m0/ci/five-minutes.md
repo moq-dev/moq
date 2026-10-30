@@ -52,7 +52,7 @@ the release loom compile 112 s.
 
 Landed in [moq-dev/moq#7282](https://github.com/moq-dev/moq/pull/7282): the
 local `just check` runs `feature-shapes` and the net, QUIC, tokio, and media
-feature contracts for the crates the diff changed, while the queue's `just ci`
+feature contracts for the crates the diff changed, while the landing worker's `just ci`
 keeps their dependents; the gate compiles the loom models in the dev profile
 (46 s against release's 146 s after a moq-net edit). The same lint then took
 319 s at load near 30, with `feature-shapes` at 29 s. The whole `just check`

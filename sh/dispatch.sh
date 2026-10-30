@@ -294,7 +294,7 @@ step() {
         # The check keeps docs and target-specific lints; the test phase
         # enforces default-feature clippy without a second compile.
         # Locally, the feature-contract checks skip the dependents of the
-        # changed crates; the queue keeps them (see sh/rs/select.sh).
+        # changed crates; the landing worker keeps them (see sh/rs/select.sh).
         check:rs)
             if [[ "$action" == check ]]; then
                 RS_FEATURE_SCOPE=changed just rs lint-changed "$rs_list"

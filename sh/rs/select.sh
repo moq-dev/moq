@@ -120,7 +120,7 @@ names=$(crate_names "$packages")
 # The feature-contract checks lint each crate without the features workspace
 # unification adds, and a changed crate recompiles in every shape it is
 # checked in. `RS_FEATURE_SCOPE=changed`, which `just check` sets, checks only
-# the changed crates; the merge queue's `just ci` keeps their dependents too.
+# the changed crates; the landing worker's `just ci` keeps their dependents too.
 shape_packages=$packages
 if [[ "${RS_FEATURE_SCOPE:-}" == changed && "$packages" != ALL && "$action" =~ ^(check|check-test|lint)$ ]]; then
     shape_packages=$(select_packages seeds)

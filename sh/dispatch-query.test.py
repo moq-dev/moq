@@ -219,7 +219,7 @@ class QueryTests(unittest.TestCase):
         return (self.root / "calls").read_text().splitlines()
 
     def test_only_the_local_check_narrows_feature_contracts(self):
-        # The queue's `just ci` keeps the dependents' feature shapes.
+        # The landing worker's `just ci` keeps the dependents' feature shapes.
         self.change("rs/moq-net/src/lib.rs")
         for action, scope in (("check", "changed"), ("ci", "")):
             with self.subTest(action=action):

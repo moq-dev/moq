@@ -80,7 +80,7 @@ class SelectTest(unittest.TestCase):
 
     def test_local_feature_contracts_skip_dependents(self):
         # `just check` lints feature shapes for the changed crates alone; their
-        # dependents keep the default-feature lint and the queue's shapes.
+        # dependents keep the default-feature lint and the landing worker's shapes.
         calls = self.selected("rs/kio/src/lib.rs", feature_scope="changed")
         shapes = next(call for call in calls if call.startswith("rs feature-shapes "))
         self.assertIn("/rs/kio#", shapes)
