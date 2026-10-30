@@ -41,7 +41,3 @@ covers it.
 
 Public API: none. Wire: our publishers refuse SUBSCRIBE_TRACKS with
 NOT_SUPPORTED.
-
-## Related
-
-- [Our moq-transport publishers serve at most one group](/quest/m1/ietf-publisher-one-group.md) - the same publisher-side narrowing for FETCH

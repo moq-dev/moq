@@ -152,7 +152,8 @@ names, so an end and a start is not a cache flush.
 RTMP, SRT, and WHIP ingests mint one per connection. Independent importers use
 distinct epochs, even when fed one stream. Only replicas of one publisher's
 bytes share its epoch, such as one publisher announced through multiple relays. See [Clustering](/bin/relay/cluster) for
-how a relay uses this.
+how a relay uses this, and [identity and recovery](/concept/identity) for
+choosing epochs, following restarts, and answering work on demand.
 
 ### Multiple CDNs
 
@@ -208,7 +209,13 @@ a literal `*`. The empty pattern matches the empty path.
 
 A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route
-its scope can use.
+its scope can use. A listing reports only routes whose literal name matches its
+patterns: under `**/*.chat`, a claim at `room` is left out even though it could
+serve `room/lobby.chat`, and so is a route above the root. Requests still
+resolve through such covering routes, and a session still forwards them to its
+peer, which routes through them. Code that routes or forwards opts in with the
+origin consumer's covering view: `covering()` in Rust, `{ covering: true }` in
+JS.
 
 ## Authorization
 

@@ -55,9 +55,9 @@ state again).
 - **A segment with no groups is `EXT-X-GAP`**, so numbering never skips
   across a pause or an overrun. A group overrunning the interval is listed
   at its first line, so its `EXTINF` understates the media; document the
-  deviation beside
-  [fixed target duration](/quest/m1/archive/hls-target.md)'s overrun rule,
-  whose target then comes from the interval.
+  deviation beside the fixed target duration's overrun rule (in
+  `rs/moq-hls/src/export/rendition.rs`), whose target then comes from the
+  interval.
 - **The target duration is the interval** (maintainer, 2026-10-28). A
   segment can run up to twice the interval even without an overrun, since
   the group containing a line can start up to one interval before it;

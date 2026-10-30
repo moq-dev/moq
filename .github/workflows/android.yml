@@ -1,6 +1,6 @@
 name: Android
 
-# Compiles moq-video for Android, which no merge queue job does.
+# Compiles moq-video for Android, which no landing worker does.
 # Its MediaCodec encoder and decoder, the `Surface::HardwareBuffer` variant and
 # the `frame::android` module are all `#[cfg(target_os = "android")]`, so every
 # Linux job compiles them to nothing, and a moq-net change that breaks them
