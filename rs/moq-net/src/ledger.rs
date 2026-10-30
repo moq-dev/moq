@@ -77,19 +77,6 @@ impl Changes {
 		self.changed.insert(self.revision, run.start);
 	}
 
-	/// Every current run with the revision it last changed at, oldest change first.
-	pub fn by_revision(&self) -> impl Iterator<Item = (u64, Range<u64>)> + '_ {
-		self.changed.iter().map(|(revision, start)| {
-			let (end, _) = self.runs.get(start).expect("a changed run stays indexed");
-			(*revision, *start..*end)
-		})
-	}
-
-	/// How many runs are indexed.
-	pub fn len(&self) -> usize {
-		self.runs.len()
-	}
-
 	pub fn since(&self, revision: u64) -> impl Iterator<Item = Range<u64>> + '_ {
 		self.changed
 			.range((std::ops::Bound::Excluded(revision), std::ops::Bound::Unbounded))

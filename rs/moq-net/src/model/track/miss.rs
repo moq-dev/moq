@@ -19,6 +19,7 @@
 use std::{
 	collections::{BTreeMap, BTreeSet},
 	ops::{self, RangeInclusive},
+	sync::{Arc, PoisonError},
 	task::Poll,
 	time::Duration,
 };
@@ -28,8 +29,9 @@ use rangemap::{RangeInclusiveSet, RangeSet};
 use super::super::delivered::Delivered;
 pub(super) use super::fill::Asking;
 use super::fill::{Ask, FillState, Join};
-use super::{Drift, Judged, Order, Position, TrackState};
+use super::{Drift, Order, Position, TrackState};
 use crate::Error;
+use crate::sync::Mutex;
 
 /// What a probe judges against: the span read, the feed's newest group, where the feed
 /// and readers start, and the drops revision.
@@ -62,9 +64,10 @@ pub(super) struct Misses {
 	filled: BTreeSet<u64>,
 	/// Never asked again: named dropped to the reader.
 	given_up: RangeSet<u64>,
-	/// The track's eviction revision and newest sequence this reader judged up to,
-	/// registered with the track.
-	evicted: Option<Judged>,
+	/// Where the track leaves what it evicts that this reader judged cached, once it judged.
+	inbox: Option<Inbox>,
+	/// The track's eviction count this reader last emptied its inbox at.
+	evictions: u64,
 	/// Judged again after an eviction, within the judged span: never refilled twice.
 	refilled: RangeSet<u64>,
 }
@@ -195,11 +198,6 @@ impl Misses {
 	/// Everything given up so far, for a drop cursor created after.
 	pub fn given_up(&self) -> &RangeSet<u64> {
 		&self.given_up
-	}
-
-	/// Where this reader is registered with its track as having judged evictions up to.
-	pub fn evicted(&self) -> Option<Judged> {
-		self.evicted
 	}
 
 	/// The next answered group still cached in `order`, giving up one evicted before it was
@@ -401,7 +399,6 @@ impl Misses {
 		let ended = state.abort.is_some() || state.is_complete();
 		let ledger = state.arrivals.changes();
 		let drops = &state.drops_changes;
-		let evictions = &state.eviction_changes;
 		// Every reader probes on every poll, mostly with nothing changed since the last, so
 		// that answer costs neither the subscriptions' lock nor a clock read.
 		let unchanged = self.at == Some(at)
@@ -409,7 +406,7 @@ impl Misses {
 			&& self.ended == ended
 			&& self.ledger_revision == ledger.revision()
 			&& self.drops_revision == drops.revision()
-			&& self.evicted.map(|(revision, _)| revision) == Some(evictions.revision());
+			&& self.evictions == state.evictions;
 		// The grace only times deferred gaps, so with none a new one has nothing to move.
 		// It is judged once something else changes.
 		if unchanged && self.deferred.runs.is_empty() {
@@ -519,33 +516,35 @@ impl Misses {
 				self.refused.remove(sequence..sequence + 1);
 			}
 		}
-		// What was judged cached and evicted since, before this reader took it, is a miss now.
+		// What it judged cached and the track evicted since, before this reader took it, is a
+		// miss now.
+		let inbox = self.inbox.get_or_insert_with(|| {
+			let inbox = Inbox::default();
+			state
+				.inboxes
+				.lock()
+				.unwrap_or_else(PoisonError::into_inner)
+				.register(inbox.clone());
+			inbox
+		});
+		let evicted = inbox.judge(state.cached, low, top);
+		self.evictions = state.evictions;
 		let mut refills = RangeSet::new();
-		if let Some((seen, _)) = self.evicted
-			&& seen != evictions.revision()
-			&& low <= top
-		{
-			for run in evictions.since(seen) {
-				let run = run.start.max(low)..run.end.min(top + 1);
-				if run.is_empty() {
-					continue;
-				}
-				for part in target(run.start..=run.end - 1).iter() {
-					for gap in taken.gaps(*part.start()..*part.end() + 1) {
-						for judged in self.judged.overlapping(&gap) {
-							let judged = judged.start.max(gap.start)..judged.end.min(gap.end);
-							for fresh in self.refilled.gaps(&judged) {
-								refills.insert(fresh);
-							}
+		for run in evicted.iter() {
+			let run = run.start.max(low)..run.end.min(top.saturating_add(1));
+			if run.is_empty() {
+				continue;
+			}
+			for part in target(run.start..=run.end - 1).iter() {
+				for gap in taken.gaps(*part.start()..*part.end() + 1) {
+					for judged in self.judged.overlapping(&gap) {
+						let judged = judged.start.max(gap.start)..judged.end.min(gap.end);
+						for fresh in self.refilled.gaps(&judged) {
+							refills.insert(fresh);
 						}
 					}
 				}
 			}
-		}
-		let judged = Some((evictions.revision(), top));
-		if self.evicted != judged {
-			state.judged_evictions(self.evicted, judged);
-			self.evicted = judged;
 		}
 		for run in refills.iter() {
 			self.refilled.insert(run.clone());
@@ -782,6 +781,78 @@ impl Misses {
 		}
 		self.given_up.insert(groups.clone());
 		given_up.push(groups);
+	}
+}
+
+/// What the track evicted that one reader judged cached, and what it judged: a slot cached
+/// by the count it judged at, within the span it judged. Holds no more than the slots it
+/// judged cached, so a stalled reader pins nothing cached after.
+#[derive(Clone, Default)]
+pub(super) struct Inbox(Arc<Mutex<Judging>>);
+
+#[derive(Default)]
+struct Judging {
+	cached: u64,
+	span: Option<RangeInclusive<u64>>,
+	evicted: RangeSet<u64>,
+}
+
+impl Inbox {
+	/// Take what was evicted since the last call, and judge `low..=top` from here on, with
+	/// every slot cached by `cached`.
+	fn judge(&self, cached: u64, low: u64, top: u64) -> RangeSet<u64> {
+		let mut judging = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		judging.cached = cached;
+		judging.span = Some(low..=top);
+		std::mem::take(&mut judging.evicted)
+	}
+}
+
+/// Every reader's [`Inbox`], pruned of dropped readers once it doubles past what the last
+/// prune kept.
+#[derive(Default)]
+pub(super) struct Inboxes {
+	inboxes: Vec<Inbox>,
+	kept: usize,
+}
+
+impl Inboxes {
+	fn register(&mut self, inbox: Inbox) {
+		self.inboxes.push(inbox);
+		if self.inboxes.len() > 2 * self.kept.max(1) {
+			self.inboxes.retain(|inbox| Arc::strong_count(&inbox.0) > 1);
+			self.kept = self.inboxes.len();
+		}
+	}
+
+	/// What each live reader's inbox holds, in registration order.
+	#[cfg(test)]
+	pub(super) fn held(&self) -> Vec<Vec<(u64, u64)>> {
+		self.inboxes
+			.iter()
+			.filter(|inbox| Arc::strong_count(&inbox.0) > 1)
+			.map(|inbox| {
+				let judging = inbox.0.lock().unwrap_or_else(PoisonError::into_inner);
+				judging.evicted.iter().map(|run| (run.start, run.end)).collect()
+			})
+			.collect()
+	}
+
+	/// Leave `sequence`, cached as count `cached`, with each reader that judged it cached.
+	/// Returns whether any did.
+	pub(super) fn evicted(&mut self, sequence: u64, cached: u64) -> bool {
+		let Some(end) = sequence.checked_add(1) else {
+			return false;
+		};
+		let mut landed = false;
+		for inbox in &self.inboxes {
+			let mut judging = inbox.0.lock().unwrap_or_else(PoisonError::into_inner);
+			if cached <= judging.cached && judging.span.as_ref().is_some_and(|span| span.contains(&sequence)) {
+				judging.evicted.insert(sequence..end);
+				landed = true;
+			}
+		}
+		landed
 	}
 }
 

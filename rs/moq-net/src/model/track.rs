@@ -39,7 +39,7 @@ use fill::FillState;
 pub(crate) use fill::{GroupFill, Readers as FillReaders};
 
 use std::{
-	collections::{BTreeMap, BTreeSet, VecDeque, btree_map},
+	collections::{BTreeMap, BTreeSet, VecDeque},
 	ops::{self, Bound, RangeBounds},
 	sync::Arc,
 	sync::OnceLock,
@@ -460,17 +460,15 @@ pub(crate) struct TrackState {
 	// Bumped on every insert into `drops`, so a cursor rescans it only after a change.
 	drops_revision: u64,
 	drops_changes: ledger::Changes,
-	// Sequences evicted while servable, indexed by when each run last changed, so a reader
-	// that judged one cached judges it again. A run is kept only while some reader judged up
-	// to it and has yet to see its last change: the readers bound it, not the cache, and a
-	// stalled one pins only evictions within what it judged.
-	evictions: RangeSet<u64>,
-	eviction_changes: ledger::Changes,
-	// The runs the last trim kept, so trimming waits for the record to double past it.
-	evictions_kept: usize,
-	// Where each reader judged up to. Its own lock, so a reader moves through the read guard
-	// it judges under.
-	eviction_readers: Mutex<EvictionReaders>,
+	// Every reader's eviction inbox. Its own lock, so a reader registers through the read
+	// guard it judges under.
+	inboxes: Mutex<miss::Inboxes>,
+	// Bumped whenever an eviction lands in an inbox, so a reader with nothing new skips
+	// its own lock.
+	evictions: u64,
+	// Bumped as each group is cached, stamped on its slot: a reader judged a slot cached
+	// only if it was cached by the count the reader last judged at.
+	cached: u64,
 
 	// Whether the cache reflects the live feed: readers get nothing from it while it does
 	// not, since how stale it is cannot be told; fetches still do. A track is live from
@@ -553,6 +551,9 @@ struct Slot {
 	// backfill) gets a fresh stamp, so a historical arrival entry can't resolve to
 	// the replacement and deliver it twice or at the wrong position.
 	stamp: u32,
+
+	// [`TrackState::cached`] once this incarnation was cached.
+	cached: u64,
 
 	// Whether this incarnation came from the live publisher and can replace older
 	// subscription content. Fetch-only backfill stays cached but never anchors drift.
@@ -948,67 +949,15 @@ impl TrackState {
 	/// [`Self::uncache`] a servable group to free the cache and abort it with `err`, recording
 	/// it for the readers that judged it cached to judge again.
 	fn evict_group(&mut self, sequence: u64, err: Error) {
-		self.uncache(sequence).expect("a cached group").abort(err);
-		let readers = self.eviction_readers.lock().unwrap_or_else(PoisonError::into_inner);
-		// Every reader registered before this change, so one judged up to it needs it.
-		if let Some(end) = sequence.checked_add(1)
-			&& readers.top().is_some_and(|top| sequence <= top)
-		{
-			self.evictions.insert(sequence..end);
-			let run = self
-				.evictions
-				.get(&sequence)
-				.cloned()
-				.expect("the eviction was just recorded");
-			// The neighbours it coalesced with retire their entries.
-			for old in [run.start, end] {
-				self.eviction_changes.remove(old);
-			}
-			self.eviction_changes.insert(run);
-		}
-		// With no reader left, nothing is owed.
-		if readers.top().is_none() {
-			drop(readers);
-			for (_, run) in self.eviction_changes.by_revision().collect::<Vec<_>>() {
-				self.eviction_changes.remove(run.start);
-			}
-			self.evictions = RangeSet::new();
-			self.evictions_kept = 0;
-			return;
-		}
-		if self.eviction_changes.len() <= 2 * self.evictions_kept {
-			return;
-		}
-		// Oldest change first, against the readers registered before it: a run stays only if
-		// one of them judged up to it.
-		let mut registered = readers.by_revision().peekable();
-		let mut top = None;
-		let mut seen = Vec::new();
-		for (revision, run) in self.eviction_changes.by_revision() {
-			while let Some((_, judged)) = registered.next_if(|(judged, _)| *judged < revision) {
-				top = top.max(Some(judged));
-			}
-			if top.is_none_or(|top| top < run.start) {
-				seen.push(run);
-			}
-		}
-		drop(registered);
-		drop(readers);
-		for run in seen {
-			self.eviction_changes.remove(run.start);
-			self.evictions.remove(run);
-		}
-		self.evictions_kept = self.eviction_changes.len();
-	}
-
-	/// Move one reader's eviction registration from `from`, if it had one, to `to`.
-	pub(super) fn judged_evictions(&self, from: Option<Judged>, to: Option<Judged>) {
-		let mut readers = self.eviction_readers.lock().unwrap_or_else(PoisonError::into_inner);
-		if let Some(from) = from {
-			readers.remove(from);
-		}
-		if let Some(to) = to {
-			readers.add(to);
+		let slot = self.uncache(sequence).expect("a cached group");
+		slot.abort(err);
+		let landed = self
+			.inboxes
+			.get_mut()
+			.unwrap_or_else(PoisonError::into_inner)
+			.evicted(sequence, slot.cached);
+		if landed {
+			self.evictions += 1;
 		}
 	}
 
@@ -2110,11 +2059,13 @@ impl TrackState {
 		if visible {
 			self.record_arrival(sequence, now);
 		}
+		self.cached += 1;
 		let replaced = self.lookup.insert(
 			sequence,
 			Slot {
 				group: group.clone(),
 				stamp,
+				cached: self.cached,
 				visible,
 				arrived: now,
 				head: None,
@@ -5933,47 +5884,6 @@ impl PresentationEdge {
 	}
 }
 
-/// Where a reader judged evictions up to: the track's eviction revision and the newest
-/// sequence it judged.
-pub(super) type Judged = (u64, u64);
-
-/// Where every reader judged evictions up to, counted.
-#[derive(Default)]
-struct EvictionReaders {
-	judged: BTreeMap<Judged, usize>,
-	tops: BTreeMap<u64, usize>,
-}
-
-impl EvictionReaders {
-	fn add(&mut self, judged: Judged) {
-		*self.judged.entry(judged).or_default() += 1;
-		*self.tops.entry(judged.1).or_default() += 1;
-	}
-
-	fn remove(&mut self, judged: Judged) {
-		fn take<K: Ord>(counts: &mut BTreeMap<K, usize>, key: K) {
-			if let btree_map::Entry::Occupied(mut entry) = counts.entry(key) {
-				*entry.get_mut() -= 1;
-				if *entry.get() == 0 {
-					entry.remove();
-				}
-			}
-		}
-		take(&mut self.judged, judged);
-		take(&mut self.tops, judged.1);
-	}
-
-	/// The newest sequence any reader judged.
-	fn top(&self) -> Option<u64> {
-		self.tops.last_key_value().map(|(top, _)| *top)
-	}
-
-	/// Each registration's revision and newest sequence, lowest revision first.
-	fn by_revision(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
-		self.judged.keys().copied()
-	}
-}
-
 /// The read cursor behind a [`Subscriber`].
 struct Cursor {
 	state: kio::Consumer<TrackState>,
@@ -6021,15 +5931,6 @@ struct Cursor {
 	drops: Option<Box<DropCursor>>,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
-}
-
-impl Drop for Cursor {
-	fn drop(&mut self) {
-		// The slowest reader bounds what the track keeps of its evictions.
-		if let Some(evicted) = self.misses.as_ref().and_then(|misses| misses.evicted()) {
-			self.state.read().judged_evictions(Some(evicted), None);
-		}
-	}
 }
 
 struct Peeked {
@@ -18796,48 +18697,40 @@ mod test {
 		assert!(drained_drops(&mut subscriber).is_empty(), "nothing was given up");
 	}
 
-	/// The track keeps an eviction run only while a reader that judged up to it has yet to
-	/// see its last change: a reader that judged once and stalled pins nothing past what it
-	/// judged while another reads on, and with no reader nothing is kept.
+	/// An eviction waits only for a reader that judged the evicted group cached: a reader
+	/// that judged once and stalled holds no more than what was cached then, however many
+	/// groups the feed caches and evicts after, late lower ones included.
 	#[test]
 	#[cfg(feature = "async")]
-	fn the_readers_bound_the_eviction_record() {
+	fn an_eviction_waits_only_for_readers_that_judged_it_cached() {
 		let producer = track_producer("test", Info::timed());
 		let _dynamic = producer.requests();
-		for sequence in 0..6 {
-			write_group(&producer, sequence);
-		}
-		let recorded = || {
-			let state = producer.state.read();
-			state
-				.evictions
-				.iter()
-				.map(|run| (run.start, run.end))
-				.collect::<Vec<_>>()
-		};
+		write_group(&producer, 0);
+		write_group(&producer, 1);
+		write_group(&producer, 1 << 40);
+		let held = || producer.state.read().inboxes.lock().unwrap().held();
 		evict(&producer, 0);
-		assert!(recorded().is_empty(), "no reader judged group 0");
+		assert!(held().is_empty(), "no reader judged group 0");
 
 		let mut stalled = producer.subscribe(replay());
 		let mut active = producer.subscribe(replay());
 		drain_groups(&mut stalled);
 		drain_groups(&mut active);
-		evict(&producer, 1);
-		assert_eq!(recorded(), [(1, 2)], "both readers judged it");
-		for sequence in (6..200).step_by(2) {
+		// Late groups below the stalled reader's newest, cached after it judged.
+		for sequence in (2..200).step_by(2) {
 			write_group(&producer, sequence);
-			write_group(&producer, sequence + 1);
 			drain_groups(&mut active);
 			evict(&producer, sequence);
-			let runs = recorded();
-			assert!(runs.contains(&(1, 2)), "the stalled reader has yet to see group 1");
-			// A trim keeps group 1 and the active reader's latest, and waits for twice that.
-			assert!(runs.len() <= 4, "{} runs after group {sequence}", runs.len());
 		}
+		// The active reader judged each one cached, so it holds the last until it judges again.
+		assert_eq!(held(), [vec![], vec![(198, 199)]], "the stalled reader judged none");
+		drain_groups(&mut active);
+		evict(&producer, 1);
+		assert_eq!(held(), [vec![(1, 2)], vec![(1, 2)]], "both judged group 1 cached");
+		drain_groups(&mut active);
+		assert_eq!(held(), [vec![(1, 2)], vec![]], "the active reader took it in");
 		drop(stalled);
-		drop(active);
-		evict(&producer, 3);
-		assert!(recorded().is_empty(), "no reader is left");
+		assert_eq!(held(), [vec![]], "a dropped reader holds nothing");
 	}
 
 	/// An ordered reader forwarding drops asks nothing below what it took, though its drop
