@@ -94,12 +94,12 @@ install:
 check $BASE="":
     sh/dispatch.sh check "$BASE"
 
-# The merge queue runs this gate in one job. The test build also enforces
+# The landing worker runs this gate in one job. The test build also enforces
 # default-feature clippy; selected feature extremes run in the gate, while
 # the full feature matrix and optimized bindings run nightly and on release
 # PRs. Missing tools fail under CI_STRICT.
 
-# Run the merge queue's Linux gate over the branch diff against BASE.
+# Run the landing worker's Linux gate over the branch diff against BASE.
 ci $BASE="":
     CI_STRICT=1 NEXTEST_PROFILE=ci sh/dispatch.sh ci "$BASE"
 
