@@ -93,3 +93,12 @@ test("lookback ends once the newest content is a budget past its start", async (
 	await flush();
 	expect(frames(results)).toEqual(["5@5000000", "5@5500000"]);
 });
+
+test("lookback ends once the age skip drops the newest group", async () => {
+	const { track, results, flush } = setup(1);
+	group(track, 5, [5_000_000]);
+	await flush();
+	group(track, 6, [5_000_000 + (BUDGET + 100) * 1000]);
+	await flush();
+	expect(frames(results)).toEqual(["6@5600000"]);
+});

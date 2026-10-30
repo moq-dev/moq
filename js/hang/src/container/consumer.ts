@@ -869,13 +869,15 @@ export class Consumer {
 		const anchor = this.#anchor;
 		const maxDelay = Micro.fromMilli(this.#maxDelay.peek());
 		const target = Math.max(0, anchor.sequence - this.#lookback);
-		// Media time: the newest content is a budget past where the anchor group starts.
-		const start = this.#groups.find((group) => group.consumer.sequence === anchor.sequence)?.start;
+		// Media time: the newest content is a budget past where the anchor group starts. The age skip
+		// dropping the anchor says as much.
+		const found = this.#groups.find((group) => group.consumer.sequence === anchor.sequence);
+		const start = found?.start;
 		let latest: number | undefined;
 		for (const group of this.#groups) {
 			if (group.latest !== undefined && (latest === undefined || group.latest > latest)) latest = group.latest;
 		}
-		const aged = start !== undefined && latest !== undefined && latest - start >= maxDelay;
+		const aged = !found || (start !== undefined && latest !== undefined && latest - start >= maxDelay);
 		// Wall time: the anchor group arrived a budget ago.
 		const elapsed = Instant.durationSince(now(), anchor.arrived) >= Nano.fromMicro(maxDelay);
 		const arrived = this.#groups[0].consumer.sequence <= target;

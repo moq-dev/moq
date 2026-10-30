@@ -781,6 +781,10 @@ impl<F: Container> Consumer<F> {
 		{
 			return false;
 		}
+		// Looking ahead may have filled the max buffer, which then registers no waiter on more frames.
+		if self.memory.full() {
+			return false;
+		}
 
 		// Wall time: the anchor group arrived a budget ago.
 		if arrived.elapsed() >= self.max_delay {
@@ -3037,6 +3041,23 @@ mod tests {
 		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
 			.expect("the earlier group would arrive too old to wait for")
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.timestamp, ts(5_000_000));
+	}
+
+	/// A full max buffer can hold none of what the lookback waits for, so the wait ends at once.
+	#[tokio::test]
+	async fn lookback_ends_once_the_max_buffer_is_full() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut consumer = lookback_consumer(&mut track, 1);
+		consumer.set_max_buffer(1);
+
+		write_group(&mut track, 5, &[ts(5_000_000), ts(5_100_000)]);
+		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+			.await
+			.expect("the max buffer cannot hold the earlier group")
 			.unwrap()
 			.unwrap();
 		assert_eq!(frame.timestamp, ts(5_000_000));
