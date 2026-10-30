@@ -3496,9 +3496,9 @@ async fn run_front(task: FrontTask, origin: TasksWeak) {
 /// The route a front may serve from. `resolved` is what the front first resolved,
 /// once it has. Routes with its epoch serve the same bytes, so any of them may take
 /// over; a front resolved without one stays on its resolution's route, the only one
-/// known to serve its bytes (its first, or the [`Takeover`] it adopted), and never
-/// re-requests a failed track through it, since it may resolve that to another
-/// instance. Either way the front
+/// known to serve its bytes (its first, or the [`Takeover`] it adopted), while a
+/// source serves it, and never re-requests a failed track through it, since it may
+/// resolve that to another instance. Either way the front
 /// stays until those routes go, even once another instance wins the path: its
 /// subscriptions are sticky, and new requests resolve the winner on a fresh front.
 fn pick<'a>(
@@ -3516,10 +3516,13 @@ fn pick<'a>(
 		Instance::Epoch(epoch) => {
 			table.best_route(path, horizon, excluded, |entry| entry.epoch.as_ref() == Some(epoch))
 		}
-		Instance::Route(_) => table
-			.routes
-			.covering(path)
-			.find(|entry| entry.id == resolved.route && entry.live() && horizon.admits(entry)),
+		// A closed source took the bytes with it: nothing else is known to serve them.
+		Instance::Route(_) => front.serving().and_then(|_| {
+			table
+				.routes
+				.covering(path)
+				.find(|entry| entry.id == resolved.route && entry.live() && horizon.admits(entry))
+		}),
 	}
 }
 
