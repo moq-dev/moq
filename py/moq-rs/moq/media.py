@@ -39,6 +39,7 @@ from moq_ffi import (
     MoqMediaTrackStreamProducer,
     MoqRendition,
 )
+from moq_ffi import MoqDecodeStart as DecodeStart
 from moq_ffi import MoqDimensions as Dimensions
 from moq_ffi import MoqVideo as Video
 from moq_ffi import MoqVideoFormat as VideoFormat
@@ -428,6 +429,7 @@ __all__ = [
     "Catalog",
     "Container",
     "Dimensions",
+    "DecodeStart",
     "AudioFormat",
     "VideoFormat",
     "ContainerFormat",

@@ -317,6 +317,7 @@ fn audio_output() -> crate::audio::MoqAudioDecoderOutput {
 		channels: None,
 		max_delay: None,
 		delay: None,
+		start: Default::default(),
 	}
 }
 
@@ -3996,6 +3997,114 @@ async fn video_decode_frame_ownership() {
 
 	// Converting again reads the same retained surface.
 	assert_eq!(frame.pixels(MoqVideoPixelFormat::I420).unwrap(), i420);
+}
+
+/// The default start decodes a cached track from its oldest group, while
+/// `Latest` skips that backlog and joins at the newest group.
+#[cfg(feature = "video")]
+#[tokio::test]
+async fn video_decode_start() {
+	use crate::media::MoqDecodeStart;
+	use crate::video::*;
+
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let broadcast = create_announced(&origin, "video-decode-start");
+	let video = crate::video::MoqVideoProducer::new(
+		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		crate::video::MoqVideoProducerOptions {
+			input: MoqVideoEncoderInput {
+				format: MoqVideoPixelFormat::Rgba,
+				width: 320,
+				height: 240,
+				framerate: crate::video::MoqVideoFrameRate {
+					numerator: 30,
+					denominator: 1,
+				},
+			},
+			output: MoqVideoEncoderOutput {
+				codec: MoqVideoCodec::H264,
+				bitrate: None,
+				gop: None,
+				kind: MoqVideoEncoderKind::Software,
+			},
+			track: Some("camera".into()),
+			bandwidth: None,
+			lower: None,
+		},
+	)
+	.unwrap();
+
+	// Two groups, the second starting at frame 10.
+	const NEWEST_US: u64 = 10 * 33_333;
+	let rgba = vec![0x80u8; 320 * 240 * 4];
+	for i in 0..20u64 {
+		if i % 10 == 0 {
+			video.cut().unwrap();
+		}
+		video
+			.write(MoqVideoFrame {
+				timestamp_us: i * 33_333,
+				data: rgba.clone(),
+			})
+			.unwrap();
+	}
+
+	let consumer = origin.consume();
+	let broadcast_consumer = await_announced(&consumer, "video-decode-start").await;
+	// The newest group must be cached before `Latest` subscribes, or it would join the first.
+	let raw = broadcast_consumer.subscribe_track("camera".into(), None).await.unwrap();
+	while tokio::time::timeout(TIMEOUT, raw.recv_group())
+		.await
+		.expect("timed out")
+		.unwrap()
+		.expect("the track ended early")
+		.sequence() == 0
+	{}
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out")
+		.unwrap()
+		.expect("expected catalog");
+	let rendition = catalog.video["camera"].clone();
+
+	let subscribe = async |start| {
+		crate::video::MoqVideoConsumer::subscribe(
+			&broadcast_consumer,
+			"camera".into(),
+			rendition.clone(),
+			MoqVideoDecoderOutput {
+				start,
+				// The track's whole retention, so a slow host does not skip the first group.
+				max_delay: Some(Duration::from_secs(30)),
+				..Default::default()
+			},
+		)
+		.await
+		.unwrap()
+	};
+	let oldest = subscribe(MoqDecodeStart::default()).await;
+	let latest = subscribe(MoqDecodeStart::Latest).await;
+	video.finish().unwrap();
+
+	let timestamps = async |decoder: Arc<MoqVideoConsumer>| {
+		let mut timestamps = Vec::new();
+		while let Some(read) = tokio::time::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
+			match read {
+				MoqVideoRead::Frame { frame } => timestamps.push(frame.timestamp_us()),
+				MoqVideoRead::End { .. } => break,
+				MoqVideoRead::Gap { .. } => panic!("nothing was lost"),
+			}
+		}
+		timestamps
+	};
+	assert_eq!(timestamps(oldest).await.first(), Some(&0), "the default starts at the oldest group");
+	assert_eq!(
+		timestamps(latest).await.first(),
+		Some(&NEWEST_US),
+		"latest joins at the newest group"
+	);
+	broadcast.close().unwrap();
 }
 
 /// Regression: a `MoqVideoProducer` is shared, so its calls land on whichever

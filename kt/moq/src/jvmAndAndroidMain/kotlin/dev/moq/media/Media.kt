@@ -57,6 +57,8 @@ typealias ContainerInit = uniffi.moq.MoqContainerInit
 typealias Audio = uniffi.moq.MoqAudio
 /** A width and height pair, in pixels. */
 typealias Dimensions = uniffi.moq.MoqDimensions
+/** Where an audio or video decoder starts on a track that already holds groups: `LATEST` for a live player. */
+typealias DecodeStart = uniffi.moq.MoqDecodeStart
 
 /** A weak catalog handle that closes with its broadcast. */
 typealias CatalogProducer = uniffi.moq.MoqMediaCatalogProducer

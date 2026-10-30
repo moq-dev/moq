@@ -29,6 +29,9 @@ public enum Media {
     public typealias Audio = MoqFFI.MoqAudio
     /// A width and height in pixels.
     public typealias Dimensions = MoqFFI.MoqDimensions
+    /// Where an audio or video decoder starts on a track that already holds
+    /// groups: `.latest` for a live player.
+    public typealias DecodeStart = MoqFFI.MoqDecodeStart
     /// How a track's frames are packaged (Legacy, CMAF, or LOC), as advertised in
     /// the catalog.
     public typealias Container = MoqFFI.MoqContainer

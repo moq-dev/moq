@@ -25,6 +25,8 @@ type (
 	Catalog = ffi.MoqCatalog
 	// Dimensions is a width and height in pixels.
 	Dimensions = ffi.MoqDimensions
+	// DecodeStart is where an audio or video decoder starts on a track that already holds groups.
+	DecodeStart = ffi.MoqDecodeStart
 	// Video describes one catalog rendition, including whether the publisher recommends temporarily avoiding it.
 	Video = ffi.MoqVideo
 	// VideoHint supplies catalog fields a video stream can't reveal itself, such as bitrate, filling only the gaps.
@@ -355,6 +357,14 @@ const (
 	ContainerFormatTs = ffi.MoqContainerFormatTs
 	// ContainerFormatFlv is Flash Video, as used by RTMP.
 	ContainerFormatFlv = ffi.MoqContainerFormatFlv
+)
+
+// DecodeStart values. A decoder's zero value starts at the oldest group.
+const (
+	// DecodeStartOldest decodes everything the track still holds: what a recorder, an export, or anything reading a finished track wants.
+	DecodeStartOldest = ffi.MoqDecodeStartOldest
+	// DecodeStartLatest joins at the newest group and skips the cached backlog: what a live player wants, so reopening a decoder does not replay what it already played.
+	DecodeStartLatest = ffi.MoqDecodeStartLatest
 )
 
 // TrackProducer writes timestamped frames into a media track.
