@@ -153,7 +153,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 		let session = moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Address::Setup);
 		let (session, driver) = moq_net::Server::new()
 			.with_versions(version.into())
-			.with_publisher(&publisher.consume())
+			.with_publisher(publisher.consume())
 			.accept(moq_clock::now(), session)
 			.await
 			.unwrap();
