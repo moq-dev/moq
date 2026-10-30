@@ -44,8 +44,9 @@ publisher-local padding handle:
 - **Native retransmits, the browser pads.** Where moq-quic sends, it
   resends in-flight data during BBR3's Startup and one ProbeBW_UP per probe
   wait ([moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)). A browser over WebTransport can't
-  reach its controller, so a lowest-priority padding stream on an ALR probe
-  schedule does ([padding](/quest/m2/probe/padding.md)).
+  reach its controller, so padding on an ALR probe schedule does
+  ([padding](/quest/m2/probe/padding.md)): lowest-priority datagrams, not
+  streams, decided with the maintainer on 2026-10-30.
 
 Decided with the maintainer on 2026-10-20:
 
