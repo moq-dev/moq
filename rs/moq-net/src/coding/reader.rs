@@ -417,18 +417,10 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 
 		let result = loop {
 			// A writer too far ahead of the group's fastest reader leaves the rest in the
-			// stream, so flow control pushes back upstream, if the session has room for the
-			// credit the paused stream holds; otherwise it reads on and sheds.
-			let paced = match frame.poll_ready(waiter) {
-				Poll::Ready(()) => {
-					self.stream.resume();
-					false
-				}
-				Poll::Pending => self.stream.pause(),
-			};
-			let lease = match paced {
-				false => self.poll_lease(waiter, frame.remaining().min(1)),
-				true => Poll::Pending,
+			// stream, so flow control pushes back upstream.
+			let lease = match self.poll_pace(frame.poll_ready(waiter)) {
+				Poll::Ready(()) => self.poll_lease(waiter, frame.remaining().min(1)),
+				Poll::Pending => Poll::Pending,
 			};
 			let mut lease = match lease {
 				Poll::Pending => {
@@ -480,6 +472,34 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		};
 
 		Poll::Ready(result)
+	}
+
+	/// Poll until `group`'s writer may admit a frame of `size` bytes from this stream: until
+	/// that leaves no byte its fastest reader has yet to take for the live tail to shed.
+	///
+	/// Pacing before the frame exists matters because admitting it trims the tail to fit
+	/// its declared size, so a large frame would otherwise shed what that reader still wants.
+	pub(crate) fn poll_admit(&mut self, waiter: &kio::Waiter, group: &crate::recv::Group, size: u64) -> Poll<()>
+	where
+		S: Pause,
+	{
+		self.poll_pace(group.poll_admit(waiter, size))
+	}
+
+	/// Wait out `paced`, the group's pace gate, if the session has room for the credit this
+	/// stream holds while paused (see [`Pause`]); otherwise read on, and the group sheds.
+	fn poll_pace(&mut self, paced: Poll<()>) -> Poll<()>
+	where
+		S: Pause,
+	{
+		match paced {
+			Poll::Ready(()) => {
+				self.stream.resume();
+				Poll::Ready(())
+			}
+			Poll::Pending if self.stream.pause() => Poll::Pending,
+			Poll::Pending => Poll::Ready(()),
+		}
 	}
 
 	/// Poll for exactly `size` bytes.

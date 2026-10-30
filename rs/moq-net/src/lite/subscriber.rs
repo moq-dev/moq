@@ -1086,6 +1086,8 @@ enum IngestPhase {
 		timestamp: Option<Timestamp>,
 		inflated: Option<u64>,
 	},
+	/// Waiting to admit the frame until the group's fastest reader leaves room for it.
+	Admit { header: frame::Header },
 	/// Streaming the frame payload.
 	Payload { frame: frame::Producer },
 }
@@ -1267,16 +1269,25 @@ impl FrameIngest {
 						}
 						None => None,
 					};
+					self.phase = IngestPhase::Admit {
+						header: frame::Header {
+							info: frame::Info { size, timestamp },
+							fields,
+							inflated,
+						},
+					};
+				}
+				IngestPhase::Admit { header } => {
+					ready!(reader.poll_admit(waiter, group, header.info.size));
+					let IngestPhase::Admit { header } = std::mem::replace(&mut self.phase, IngestPhase::Timing) else {
+						unreachable!()
+					};
 					// `create_object` is the allocation chokepoint: it rejects an oversized
 					// `size` and allocates up front only within the origin's budget, so no
 					// pre-check is needed. No wire timestamp (pre-lite-05) means an untimed
 					// frame. A compressed frame stores the slice as it arrives, its inflated
 					// size checked against the same limits before anything inflates.
-					let frame = group.create_object(frame::Header {
-						info: frame::Info { size, timestamp },
-						fields,
-						inflated,
-					})?;
+					let frame = group.create_object(header)?;
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Payload { frame } => {

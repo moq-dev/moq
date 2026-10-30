@@ -201,6 +201,23 @@ mod tests {
 		assert_eq!(frame.poll_ready(&waiter), Poll::Pending);
 	}
 
+	/// A frame is admitted only once its declared size fits the window, since admitting
+	/// it trims the tail to fit, which would otherwise shed what the reader still wants.
+	#[test]
+	fn a_large_frame_waits_to_be_admitted() {
+		let (flag, waiter) = flag();
+		let group = written(15);
+		let mut reader = group.consume();
+		assert_eq!(group.poll_paced(&waiter, 20 * MB as u64), Poll::Pending);
+		while reader.poll_read_frame(&kio::Waiter::noop()).is_ready() {}
+		assert!(flag.woken());
+		assert_eq!(
+			group.poll_paced(&waiter, 20 * MB as u64),
+			Poll::Ready(()),
+			"the reader took everything, so the frame sheds nothing it wants"
+		);
+	}
+
 	/// A group nobody reads keeps writing, and a parked writer moves on once its last
 	/// reader leaves.
 	#[test]

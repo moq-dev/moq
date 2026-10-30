@@ -88,8 +88,9 @@ Landed in [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388) (Rust,
 session ingest only): readers report the byte end of each frame they take
 (`Pace` in `rs/moq-net/src/model/pace.rs`), and the shared transport reader's
 payload loop (`coding::Reader::poll_read_frame`) waits on
-`group::Producer::poll_ready` before taking more, so moq-lite and
-moq-transport ingest both pause past the 16 MB window. A reader that took every
+`group::Producer::poll_paced` before taking more, and admits a frame only once
+its declared size fits the window (`coding::Reader::poll_admit`), so moq-lite
+and moq-transport ingest both pause past the 16 MB window. A reader that took every
 committed frame counts as waiting on the writer, so a frame larger than the
 window never stalls it. Tests cover one hop on lite-06, lite-07-wip, and
 moq-transport-22: an idle reader holds the relay copy near the window and then
@@ -105,6 +106,9 @@ What remains:
 - Receive-window reporting for the transports that report none yet (quinn,
   iroh, qmux, WebTransport in the browser, and the FFI adapters), whose ingest
   never pauses until they do.
+- A sized readiness check for local writers: `group::Producer::ready()`
+  waits for room but not for the next frame's size, so a local frame larger
+  than the room left still sheds what the egress has yet to send.
 - JS parity.
 - A two-relay chain test with memory measured near the window.
 - Benchmarks of the hot path in `group.rs`: the cursor's report is one

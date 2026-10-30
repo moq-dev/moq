@@ -30,6 +30,15 @@ impl Group {
 			.map(frame::Producer::cancel_on_drop)
 	}
 
+	/// Poll until the writer may admit a frame of `size` bytes without shedding a byte its
+	/// fastest reader has yet to take; see [`group::Producer::poll_paced`].
+	pub fn poll_admit(&self, waiter: &kio::Waiter, size: u64) -> std::task::Poll<()> {
+		self.writer
+			.as_ref()
+			.expect("group writer is available between frames")
+			.poll_paced(waiter, size)
+	}
+
 	/// Restore the writer returned by a completed frame.
 	pub fn restore(&mut self, writer: group::Producer) {
 		debug_assert!(self.writer.is_none());

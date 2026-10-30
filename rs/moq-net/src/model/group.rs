@@ -2224,7 +2224,8 @@ impl Producer {
 	/// Ready once the group is closed, so the next write surfaces why. A reader that took
 	/// every committed frame is waiting on the writer, so it never holds the writer back,
 	/// and one whose next frame was shed has fallen off the group and is not waited on.
-	/// Writing without waiting never fails: the group sheds its front instead.
+	/// Writing without waiting never fails: the group sheds its front instead, as it also
+	/// does for a frame larger than the room left, which trims the tail to fit.
 	pub fn poll_ready(&self, waiter: &kio::Waiter) -> Poll<()> {
 		ready!(self.poll_paced(waiter, 0));
 		// A closed group reports `Closed`, which is ready too.
