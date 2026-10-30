@@ -1084,10 +1084,13 @@ fn grade(ledgers: &[Ledger], stats: &stats::Export) -> Result<(), String> {
 			}
 		}
 
+		// The leading pictures of the group the video starts at go before it, though they follow
+		// its keyframe in decode order.
 		let first = units.iter().position(|unit| unit.output).unwrap_or(units.len());
 		for (i, unit) in ledger.media() {
 			if unit.delivered && !unit.output {
-				*if i < first { &mut before } else { &mut after } += 1;
+				let leads = ledger.video && unit.leading && unit.group == start.group;
+				*if i < first || leads { &mut before } else { &mut after } += 1;
 				late += u64::from(unit.on_time != Some(true));
 			}
 		}

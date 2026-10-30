@@ -2376,7 +2376,11 @@ where
 			let mut track = match old.remove(name) {
 				Some(track) => track,
 				None => Track::new(
-					ExportSource::for_stream(&self.program.source, name, self.budget())?,
+					stream_edge(
+						ExportSource::for_stream(&self.program.source, name, self.budget())?,
+						&kind,
+						self.program.replay,
+					),
 					kind.clone(),
 				),
 			};
@@ -2431,7 +2435,8 @@ where
 				.get(name)
 				.is_some_and(|t| t.verbatim.is_some() || t.pes_packet.is_some())
 			{
-				Some(ExportSource::for_stream(&self.program.source, name, budget)?)
+				let source = ExportSource::for_stream(&self.program.source, name, budget)?;
+				Some(stream_edge(source, &track.kind, self.program.replay))
 			} else {
 				None
 			};
@@ -4253,6 +4258,15 @@ fn at_edge(source: ExportSource, replay: bool) -> ExportSource {
 	match replay {
 		true => source,
 		false => source.live(),
+	}
+}
+
+/// Start an `mpegts` section track's source as [`at_edge`] would, if it is MPEG-1/2 video
+/// carried whole: video, not sparse, whose groups older than the edge would only be trimmed.
+fn stream_edge(source: ExportSource, kind: &Kind, replay: bool) -> ExportSource {
+	match kind.class() {
+		super::stats::Class::Video => at_edge(source, replay),
+		_ => source,
 	}
 }
 
