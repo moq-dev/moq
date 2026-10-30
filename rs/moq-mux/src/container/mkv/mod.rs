@@ -100,6 +100,10 @@ pub enum Error {
 	#[error("invalid Colour {0}")]
 	InvalidColour(&'static str),
 
+	/// A `StereoMode` or `Projection` element the catalog cannot describe, or a malformed one.
+	#[error("unsupported spherical video: {0}")]
+	UnsupportedSpatial(&'static str),
+
 	/// The named track joined after the MKV header was emitted.
 	#[error("MKV track layout changed after header was emitted: track '{0}' added")]
 	HeaderAddedTrack(String),
