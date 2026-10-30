@@ -198,6 +198,10 @@ name = "interop-finish"
 path = "../../test/interop/clients/rust/finish.rs"
 
 [[example]]
+name = "interop-hls"
+path = "../../test/interop/clients/rust/hls.rs"
+
+[[example]]
 name = "interop-audio"
 path = "../../test/interop/clients/rust/audio.rs"
 
