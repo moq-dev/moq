@@ -584,7 +584,13 @@ fn check_segment(stmt: &Stmt) -> syn::Result<()> {
 		let mut tokens = tokens.into_iter().peekable();
 		while let Some(token) = tokens.next() {
 			match token {
-				TokenTree::Ident(ident) if ident == "Pending" => return Some(ident.span()),
+				// `Pending<..>` and `Pending::..` name a type, such as `kio::Pending`, never the variant.
+				TokenTree::Ident(ident)
+					if ident == "Pending"
+						&& !matches!(tokens.peek(), Some(TokenTree::Punct(next)) if matches!(next.as_char(), '<' | ':')) =>
+				{
+					return Some(ident.span());
+				}
 				TokenTree::Ident(ident)
 					if (ident == "ready" || ident == "pending")
 						&& matches!(tokens.peek(), Some(TokenTree::Punct(bang)) if bang.as_char() == '!') =>
