@@ -2979,7 +2979,9 @@ impl Connection {
 				}
 				Frame::Ack(ack) => {
 					// Only 1-RTT packets carry receive timestamps, and only to a peer that asked
-					if ack.timestamps.is_some() && (!packet.header.is_short() || self.config.receive_timestamps.is_none()) {
+					if ack.timestamps.is_some()
+						&& (!packet.header.is_short() || self.config.receive_timestamps.is_none())
+					{
 						return Err(TransportError::PROTOCOL_VIOLATION("unexpected receive timestamps"));
 					}
 					self.on_ack_received(now, SpaceId::Data, ack)?;
@@ -3594,7 +3596,10 @@ impl Connection {
 	///
 	/// This method assumes ACKs are pending, and should only be called if
 	/// `!PendingAcks::ranges().is_empty()` returns `true`.
-	#[allow(clippy::too_many_arguments)]
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "an associated function, so a caller can lend it disjoint fields of the connection"
+	)]
 	fn try_populate_acks(
 		now: Instant,
 		receiving_ecn: bool,

@@ -1341,7 +1341,11 @@ mod test {
 	/// A delta that steps back past the basis, or a range below packet zero, is malformed
 	#[test]
 	fn receive_timestamps_malformed() {
-		for field in [&[1u8, 0, 2, 5, 6][..], &[1, 3, 5, 1, 1, 1, 1, 1][..], &[1, 11, 1, 0][..]] {
+		for field in [
+			&[1u8, 0, 2, 5, 6][..],
+			&[1, 3, 5, 1, 1, 1, 1, 1][..],
+			&[1, 11, 1, 0][..],
+		] {
 			let mut buf = Vec::new();
 			buf.write(FrameType::ACK_RECEIVE_TIMESTAMPS);
 			// Largest 10, no delay, one range of one packet

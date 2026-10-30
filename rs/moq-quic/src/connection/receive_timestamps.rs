@@ -45,7 +45,8 @@ impl Log {
 		let at = self.latest.map_or(at, |latest| latest.max(at));
 		self.latest = Some(at);
 		// The basis is strictly before every reported arrival
-		self.basis.get_or_insert_with(|| at.checked_sub(Duration::from_micros(1)).unwrap_or(at));
+		self.basis
+			.get_or_insert_with(|| at.checked_sub(Duration::from_micros(1)).unwrap_or(at));
 		self.received.push_back((packet, at));
 		while self.received.len() > limit.min(self.max) {
 			self.received.pop_front();

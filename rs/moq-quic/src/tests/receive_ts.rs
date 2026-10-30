@@ -111,7 +111,11 @@ impl ControllerFactory for Recorder {
 }
 
 /// A pair whose client paces [`MEDIA`] through `recorder`, asking for `timestamps` per ACK
-fn pair_with(recorder: &Recorder, timestamps: Option<u32>, ack_threshold: Option<u32>) -> (Pair, ConnectionHandle, ConnectionHandle) {
+fn pair_with(
+	recorder: &Recorder,
+	timestamps: Option<u32>,
+	ack_threshold: Option<u32>,
+) -> (Pair, ConnectionHandle, ConnectionHandle) {
 	let mut server = server_config();
 	server.transport.limits.max_streams = NonZeroU64::new(10);
 	let mut pair = Pair::new(Default::default(), server);
@@ -139,7 +143,10 @@ fn send(
 ) -> Instant {
 	const CHUNK: [u8; 16_384] = [0; 16_384];
 	let start = pair.time;
-	let id = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+	let id = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
 	let mut recv = None;
 	loop {
 		let now = pair.time;
@@ -515,4 +522,3 @@ fn latency(values: impl Iterator<Item = Option<Duration>>) -> String {
 		false => format!("{:.0}ms, missed {missed}", avg(hits.into_iter())),
 	}
 }
-

@@ -127,9 +127,18 @@ async fn run(preset: &str) -> Run {
 	let setup = preset.setup("127.0.0.1:0".parse().unwrap(), server_addr);
 	// The media runs below the uplink until its first step, or at 1.6 Mbit/s on a path with no
 	// rate
-	let uplink = setup.config.up.rate.as_ref().map_or(2_000_000, |rate| rate.bits_per_second);
+	let uplink = setup
+		.config
+		.up
+		.rate
+		.as_ref()
+		.map_or(2_000_000, |rate| rate.bits_per_second);
 	let step = setup.up.steps.first().map(|step| step.at);
-	let duration = setup.up.steps.last().map_or(Duration::from_secs(10), |last| last.at + AFTER);
+	let duration = setup
+		.up
+		.steps
+		.last()
+		.map_or(Duration::from_secs(10), |last| last.at + AFTER);
 	let start = Instant::now();
 	let shaper = moq_shaper::Shaper::bind(setup).await.expect("shaper");
 	let dial: SocketAddr = shaper.addr();
@@ -147,8 +156,8 @@ async fn run(preset: &str) -> Run {
 	let mut client = driver::client::Config::new(Arc::new(quic));
 	client.transport.congestion = Arc::new(recorder.clone());
 	client.transport.receive_timestamps = std::num::NonZeroU32::new(32);
-	let endpoint = driver::endpoint::Endpoint::new(Default::default(), UdpSocket::bind("127.0.0.1:0").unwrap())
-		.expect("client");
+	let endpoint =
+		driver::endpoint::Endpoint::new(Default::default(), UdpSocket::bind("127.0.0.1:0").unwrap()).expect("client");
 	let conn = endpoint
 		.connect(&client, dial, "localhost")
 		.expect("connect")
