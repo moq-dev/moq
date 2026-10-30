@@ -183,6 +183,8 @@ client = moq.Client(
   - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.
   - `.abort(error_code)` terminates the track or group with an application error.
   - `.append_datagram(payload, timestamp=None) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
+  - `.insert_datagram(sequence, payload, timestamp=None)` (`TrackProducer`) sends one at the caller's own sequence.
+  - `.largest() -> Position | None` (`TrackProducer`) reports the newest group or datagram written, at its newest frame.
 
 ### Media
 

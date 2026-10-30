@@ -189,6 +189,17 @@ public final class TrackProducer: Sendable {
         try ffi.appendDatagram(frame: Frame(payload: payload, timestampUs: timestampUs))
     }
 
+    /// Send a best-effort datagram at an explicit sequence number, for a caller that
+    /// allocates its own. `appendDatagram` continues after the largest one.
+    public func insertDatagram(_ payload: Data, sequence: UInt64, timestampUs: UInt64? = nil) throws {
+        try ffi.insertDatagram(sequence: sequence, frame: Frame(payload: payload, timestampUs: timestampUs))
+    }
+
+    /// The newest group or datagram written, at its newest frame, or `nil` before any.
+    public func largest() throws -> Position? {
+        try ffi.largest()
+    }
+
     /// Abort the track with an application error code, failing active consumers.
     public func abort(errorCode: UInt16) throws {
         try ffi.abort(errorCode: errorCode)

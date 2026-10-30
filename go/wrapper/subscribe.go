@@ -13,6 +13,12 @@ type BroadcastConsumer struct {
 	inner *ffi.MoqBroadcastConsumer
 }
 
+// Closed blocks until the broadcast ends: its publisher closed it, or every producer
+// left. Cancelling ctx stops waiting.
+func (b *BroadcastConsumer) Closed(ctx context.Context) error {
+	return b.inner.Closed(ctx)
+}
+
 // SubscribeTrack subscribes to a track, receiving arbitrary byte payloads.
 // subscription tunes delivery priority, group range, and staleness; pass nil for defaults.
 func (b *BroadcastConsumer) SubscribeTrack(
