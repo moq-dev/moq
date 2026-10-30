@@ -826,7 +826,7 @@ impl Inboxes {
 	}
 
 	/// What each live reader's inbox holds, in registration order.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(super) fn held(&self) -> Vec<Vec<(u64, u64)>> {
 		self.inboxes
 			.iter()
