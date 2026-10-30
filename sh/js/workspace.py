@@ -111,7 +111,7 @@ def selection(root, paths):
 
 def unmapped(root, paths):
     """Existing inputs the dispatcher's static JS impact map misses, so changing one would skip its readers."""
-    impact = re.compile(re.search(r"^\s*\[js\]='([^']*)'", (root / "sh/dispatch.sh").read_text(),
+    impact = re.compile(re.search(r"^module js '([^']*)'", (root / "sh/dispatch.sh").read_text(),
                                   re.M).group(1))
     # A directory input matches through the files under it, and an import through its file.
     return [path for path in paths

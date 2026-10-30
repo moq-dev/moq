@@ -54,68 +54,150 @@ else
     fi
 fi
 
-# The impact map: a module is in scope when a changed path matches its
-# pattern. An empty pattern is a repository-wide lint that runs on every diff.
-declare -A scope=(
-    # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
-    # fails a check that reads a cross-tree input this pattern misses.
-    # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
-    # Root Nix inputs own the browser version every npm Playwright pin matches.
-    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)'
-    # Workers with lockfiles outside the Bun workspace.
-    [workers]='^(infra/|demo/pub/|sh/js/workers\.sh$)'
-    [moq_sh]='^infra/moq-sh/'
-    # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
-    # moq-cli builds the Rust interop clients as examples from outside its
-    # crate; sh/rs/select.test.py fails when a target's directory is missing.
-    [rs]='^(\.cargo/|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
-    [bench]='^bench/'
-    # The CARLA demo's simulator worker and launchers. Its player is a JS
-    # package and its GPU bridge a Rust crate, so those modules cover them.
-    [carla]='^demo/carla/(sim/|justfile$)'
-    [drafts]='^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)'
-    # Quest documents form one graph, so any change validates the whole tree,
-    # as does a bump of the flake-pinned validator.
-    [quest]='^(quest/|flake\.lock$)'
-    # The drill mutations patch Rust source, so a Rust change can move the code
-    # they target. Only nightly runs the drills; this catches a stale patch.
-    [drill]='^(rs/|test/drill/)'
-    # maturin bundles rs/moq-ffi into the moq-ffi wheel, and the other
-    # bindings generate from it, built by the `cargo build-ffi` alias in
-    # .cargo/config.toml. Each check also compiles its doc samples.
-    [py]='^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)'
-    [kt]='^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|doc/lib/kt/|doc/lib/samples\.sh$)'
-    [swift]='^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
-    [go]='^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)'
-    [dart]='^(\.cargo/config\.toml$|dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)'
-    # The C package links moq-c's native-libs lists, and the C++ package's FFI pin.
-    [c]='^(\.cargo/config\.toml$|c/|sh/c/|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)'
-    # The package links moq-c's native-libs lists, and compiles its doc samples.
-    [cpp]='^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
-    # The plugin and its tests call through the bindings generated from cpp/moq
-    # and moq-ffi and link through moq-c's native-libs lists, and flake.nix owns
-    # the libobs headers it compiles against.
-    [obs_compile]='^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/moq-c/native-libs/|flake\.nix$)'
-    # `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
-    # nixpkgs, and the last moves on a flake.lock bump alone.
-    [obs]='^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)'
-    # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
-    # and its own modules and test helpers; those still gate the full flake.
-    [flake]='(^\.cargo/|^rs/.*\.(toml|txt|ptx|in)$|^Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^flake\.lock$|^nix/|\.nix$)'
-    # ts.yml's crate filters against the closure test/ts/run.sh builds, which
-    # moves only with a manifest, the lockfile, or the harness's packages.
-    [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)'
-    [markdown]=''
-    [shell]=''
-    [large_files]=''
-    [toml]=''
-    [nix]=''
-    [justfile]=''
-    [gh]=''
-)
+# The impact map: each module registers once, in the order its lane starts, so
+# the slowest come first. A module is in scope when a changed path matches its
+# pattern; an empty pattern is a repository-wide lint that runs on every diff.
+# After the pattern:
+#   tools='...'     The commands it needs. A module missing one is skipped
+#                   locally, so an incomplete toolchain checks less; under
+#                   CI_STRICT (CI) it is an error, up front, because there a skip
+#                   is indistinguishable from a pass.
+#   compiles='...'  The actions (check, fix) whose run compiles Rust through
+#                   Cargo, so CI restores the Rust build cache only when one is
+#                   selected.
+#   lane=NAME       Modules that share mutable state run in one lane, in module
+#                   order; every other module is a lane of its own, and lanes
+#                   run concurrently.
+#   alone           Its lane runs with no other lane beside it, so it waits for
+#                   the rest.
+#   fix             `just fix` runs it too; check and ci run every module.
+declare -A scope=() tools=() compiles=([check]="" [fix]="") lane=() alone=()
+checks=()
+fixes=()
+module() {
+    local name=$1 option each solo=
+    scope[$name]=$2
+    tools[$name]=
+    checks+=("$name")
+    shift 2
+    for option; do
+        case "$option" in
+            tools=*) tools[$name]=${option#tools=} ;;
+            compiles=*) for each in ${option#compiles=}; do compiles[$each]+=" $name"; done ;;
+            lane=*) lane[$name]=${option#lane=} ;;
+            alone) solo=1 ;;
+            fix) fixes+=("$name") ;;
+            *)
+                echo "error: module $name has an unknown option '$option'" >&2
+                exit 2
+                ;;
+        esac
+    done
+    [[ -z "$solo" ]] || alone[${lane[$name]:-$name}]=1
+}
+
+# maturin bundles rs/moq-ffi into the moq-ffi wheel, and the other bindings
+# generate from it, built by the `cargo build-ffi` alias in .cargo/config.toml.
+# Each binding's check also compiles its doc samples. kt, swift, go, cpp, and
+# obs_compile each build moq-ffi's cdylib with the same features and profile
+# before reading target/debug/libmoq_ffi.so. Cargo runs one build at a time per
+# target directory and leaves a fresh output untouched, so the first of those
+# lanes builds it while the rest wait in Cargo, and none rewrites it while
+# another reads it. py builds its test features into a target directory of its
+# own, and carla runs its tools outside py's venv.
+module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)' \
+    tools='uv' compiles=check fix
+# sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
+# moq-cli builds the Rust interop clients as examples from outside its
+# crate; sh/rs/select.test.py fails when a target's directory is missing.
+module rs '^(\.cargo/|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
+    tools='cargo jq' compiles='check fix' fix
 # rs's crates again, each compiled alone at its feature extremes: its own
 # module because one clippy pass per package outgrows a hosted job beside rs.
-scope[rs_shapes]=${scope[rs]}
+# It shares rs's lane because both build the workspace in one target directory.
+module rs_shapes "${scope[rs]}" \
+    tools='cargo cargo-hack jq' compiles=check lane=rs
+# The C package links moq-c's native-libs lists, and the C++ package's FFI pin.
+module c '^(\.cargo/config\.toml$|c/|sh/c/|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)' \
+    tools='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp' compiles=check
+# The package links moq-c's native-libs lists, and compiles its doc samples.
+# It shares a lane with obs_compile because both build cpp/moq/build.
+module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)' \
+    tools='cargo cmake c++ uniffi-bindgen-cpp' compiles=check lane=cpp
+# The plugin and its tests call through the bindings generated from cpp/moq
+# and moq-ffi and link through moq-c's native-libs lists, and flake.nix owns
+# the libobs headers it compiles against.
+module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/moq-c/native-libs/|flake\.nix$)' \
+    tools='cargo cmake pkg-config uniffi-bindgen-cpp' compiles=check lane=cpp
+# The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
+# fails a check that reads a cross-tree input this pattern misses.
+# demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
+# Root Nix inputs own the browser version every npm Playwright pin matches.
+# Its check builds @moq/wasm for its consumers.
+# The bun lane exists because `bun install` relinks the root workspace's
+# packages even when nothing changed, so a concurrent install or import of
+# them fails.
+module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
+    tools='bun python3' compiles=check lane=bun fix
+module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|doc/lib/kt/|doc/lib/samples\.sh$)' \
+    tools='cargo gradle java' compiles=check
+# Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
+# and its own modules and test helpers; those still gate the full flake.
+module flake '(^\.cargo/|^rs/.*\.(toml|txt|ptx|in)$|^Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^flake\.lock$|^nix/|\.nix$)' \
+    tools='nix'
+module bench '^bench/' \
+    tools='cargo' compiles=check
+# The CARLA demo's simulator worker and launchers. Its player is a JS
+# package and its GPU bridge a Rust crate, so those modules cover them.
+module carla '^demo/carla/(sim/|justfile$)' \
+    tools='uv' fix
+# swift needs no tools: it skips off macOS by design, and platform.yml is its
+# real gate.
+module swift '^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
+module go '^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)' \
+    tools='cargo go uniffi-bindgen-go' compiles=check
+module drafts '^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)' \
+    tools='bun kramdown-rfc xml2rfc' lane=bun
+module markdown '' \
+    tools='bun' lane=bun fix
+module gh '' \
+    tools='actionlint bun python3 cargo clippy-driver dpkg-deb nfpm rpm' lane=bun
+# The drill mutations patch Rust source, so a Rust change can move the code
+# they target. Only nightly runs the drills; this catches a stale patch.
+module drill '^(rs/|test/drill/)'
+# Workers with lockfiles outside the Bun workspace.
+module workers '^(infra/|demo/pub/|sh/js/workers\.sh$)' \
+    tools='bun'
+module moq_sh '^infra/moq-sh/' \
+    tools='dash'
+# Quest documents form one graph, so any change validates the whole tree,
+# as does a bump of the flake-pinned validator.
+module quest '^(quest/|flake\.lock$)' \
+    tools='quest'
+# `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
+# nixpkgs, and the last moves on a flake.lock bump alone.
+module obs '^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)' \
+    tools='clang-format cmake gersemi jq' fix
+# ts.yml's crate filters against the closure test/ts/run.sh builds, which
+# moves only with a manifest, the lockfile, or the harness's packages.
+module ts_paths '^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)' \
+    tools='cargo python3'
+module shell '' \
+    tools='shellcheck shfmt' fix
+module large_files ''
+module toml '' \
+    tools='taplo' fix
+module nix '' \
+    tools='nixfmt' fix
+module justfile '' \
+    fix
+# dart builds moq-ffi with the filtered environment its build hook gets, then
+# checks that the hook finds that build fresh. Any other Cargo build in between
+# reruns the host build scripts in target/debug that track the environment,
+# such as bindgen's BINDGEN_EXTRA_CLANG_ARGS, and so rebuilds what the hook
+# then rebuilds again, so it runs alone, last.
+module dart '^(\.cargo/config\.toml$|dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)' \
+    tools='cargo dart uniffi_bindgen_dart' compiles=check alone fix
 
 # Report each native suite from the same impact map, before any toolchain is
 # installed. Rust dependencies can break external consumers too, so include
@@ -142,89 +224,12 @@ if [[ "$action" == ci-platform ]]; then
     exit
 fi
 
-# The tools each module needs. A module missing one is skipped locally, so an
-# incomplete toolchain checks less; under CI_STRICT (CI) it is an error, up
-# front, because there a skip is indistinguishable from a pass. swift needs
-# none: it skips off macOS by design, and platform.yml is its real gate.
-declare -A tools=(
-    [js]='bun python3'
-    [workers]='bun'
-    [moq_sh]='dash'
-    [rs]='cargo jq'
-    [rs_shapes]='cargo cargo-hack jq'
-    [bench]='cargo'
-    [carla]='uv'
-    [drafts]='bun kramdown-rfc xml2rfc'
-    [quest]='quest'
-    [drill]=''
-    [py]='uv'
-    [kt]='cargo gradle java'
-    [swift]=''
-    [go]='cargo go uniffi-bindgen-go'
-    [dart]='cargo dart uniffi_bindgen_dart'
-    [c]='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp'
-    [cpp]='cargo cmake c++ uniffi-bindgen-cpp'
-    [obs_compile]='cargo cmake pkg-config uniffi-bindgen-cpp'
-    [obs]='clang-format cmake gersemi jq'
-    [flake]='nix'
-    [ts_paths]='cargo python3'
-    [markdown]='bun'
-    [shell]='shellcheck shfmt'
-    [large_files]=''
-    [toml]='taplo'
-    [nix]='nixfmt'
-    [justfile]=''
-    [gh]='actionlint bun python3 cargo clippy-driver dpkg-deb nfpm rpm'
-)
-
 # CI and the local check share one selection and one lint/test dispatch.
 verb=$action
 [[ "$verb" != ci ]] || verb=check
 
-# The modules whose run compiles Rust through Cargo, so CI restores the Rust
-# build cache only when one is selected. JS checks build @moq/wasm for its
-# consumers, and the bindings build moq-ffi.
-declare -A compiles=(
-    [check]='rs rs_shapes bench js py kt go dart c cpp obs_compile'
-    [fix]='rs'
-)
-
-# Lanes start in this order, so the slowest come first. dart runs alone (see
-# below), so it waits for the rest.
-case "$action" in
-    check | ci) modules=(py rs rs_shapes c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
-    fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
-esac
-
-# Modules that share mutable state run in one lane, in module order; every
-# other module is a lane of its own, and lanes run concurrently.
-declare -A lane=(
-    # Both build the workspace in one target directory.
-    [rs_shapes]=rs
-    # `bun install` relinks the root workspace's packages even when nothing
-    # changed, so a concurrent install or import of them fails.
-    [js]=bun
-    [drafts]=bun
-    [markdown]=bun
-    [gh]=bun
-    # Both build cpp/moq/build.
-    [cpp]=cpp
-    [obs_compile]=cpp
-)
-
-# kt, swift, go, cpp, and obs_compile each build moq-ffi's cdylib with the same
-# features and profile before reading target/debug/libmoq_ffi.so. Cargo runs
-# one build at a time per target directory and leaves a fresh output untouched,
-# so the first of those lanes builds it while the rest wait in Cargo, and none
-# rewrites it while another reads it. py builds its test features into a target
-# directory of its own, and carla runs its tools outside py's venv.
-
-# Lanes that run with no other lane beside them. dart builds moq-ffi with the
-# filtered environment its build hook gets, then checks that the hook finds
-# that build fresh. Any other Cargo build in between reruns the host build
-# scripts in target/debug that track the environment, such as bindgen's
-# BINDGEN_EXTRA_CLANG_ARGS, and so rebuilds what the hook then rebuilds again.
-declare -A alone=([dart]=1)
+modules=("${checks[@]}")
+[[ "$action" != fix ]] || modules=("${fixes[@]}")
 
 # CHECK_MODULES names the modules to run, or with a leading `-` those to skip.
 declare -A only=() skip=()

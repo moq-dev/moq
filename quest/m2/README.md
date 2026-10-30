@@ -239,7 +239,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Dependency and alternatives audit](/quest/m2/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
 - [Dead code and API surface audit](/quest/m2/audit-dead-code.md) - repeat the removal audit before the next major release
 - [Typecheck with bun check](/quest/m2/bun-check.md) - workspace packages typecheck through bun once nixpkgs ships bun 1.4.4
-- [Declare each check module once in the dispatcher](/quest/m2/dispatch-modules.md) - one registration call per module replaces its parallel tables
 - [Upgrade Biome to 2.6](/quest/m2/biome-2-6.md) - the workspace runs Biome 2.6.4+ with its new formatters off and no file reformatted
 - [Format YAML with Biome](/quest/m2/biome-yaml.md) - `just check` fails on unformatted YAML
 - [Format Markdown with Biome](/quest/m2/biome-markdown.md) - Biome formats every Markdown file and remark is gone, landed in a quiet window

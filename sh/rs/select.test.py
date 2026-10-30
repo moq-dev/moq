@@ -132,7 +132,7 @@ class SelectTest(unittest.TestCase):
         self.assertEqual(self.selected("test/interop/compat/container.rs"), [])
 
     def test_dispatch_scope_covers_out_of_crate_targets(self):
-        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        scope = re.search(r"^module rs '([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
         metadata = json.loads(subprocess.check_output(
             ["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT, text=True))
         root = Path(metadata["workspace_root"])
