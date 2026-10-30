@@ -15,7 +15,7 @@ use axum::{
 };
 use str0m::{Candidate, RtcConfig};
 
-use crate::{Error, Result, ingest::IngestSink, sdp, server::Server, session};
+use crate::{Error, Result, ingest::IngestSink, rate, sdp, server::Server, session};
 
 pub use crate::server::Response;
 
@@ -86,6 +86,7 @@ async fn accept_offer(
 		publisher,
 		moq_net::Path::new(path).map_err(moq_net::Error::from)?,
 		offer,
+		&rate::Limit::unlimited(),
 	)
 	.await
 }
@@ -117,11 +118,19 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 /// [`Error::InvalidSdp`] on a malformed offer and surfaces
 /// [`moq_net::Error::Unauthorized`] if `broadcast` is
 /// outside `publisher`'s scope.
+///
+/// `rate` caps the session's media; pass [`rate::Limit::unlimited`] for none. The answer
+/// carries a `b=TIAS` line at the cap it holds when the offer is accepted, and the session
+/// repeats a REMB on every video line that negotiated one, following [`rate::Limit::set`]
+/// at once. Both steer to nine tenths of the cap, leaving room for audio and keyframe
+/// overshoot. A publisher that ignores them, sending media past the cap plus its burst,
+/// ends [`Response::run`] with [`Error::RateLimited`].
 pub async fn accept(
 	server: &Server,
 	publisher: &moq_net::origin::Producer,
 	broadcast: impl Into<moq_net::Path>,
 	offer: &str,
+	rate: &rate::Limit,
 ) -> Result<Response> {
 	let offer = sdp::parse_offer(offer)?;
 	let broadcast: moq_net::Path = broadcast.into();
@@ -160,16 +169,21 @@ pub async fn accept(
 
 	let resource_id = sdp::new_resource_id();
 	let socket = moq_ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
-	let session = session::Session::ingest(rtc, socket, sink)?;
+	let session = session::Session::ingest(rtc, socket, sink)?.with_rate(rate);
 
 	// Register before returning so a DELETE that races the first packet still
 	// finds the session; Response::run unregisters itself when it ends.
 	let cancel = server.register_session(resource_id.clone());
-	tracing::info!(%broadcast, %epoch, "whip publish accepted");
+	let cap = rate.get();
+	tracing::info!(%broadcast, %epoch, cap = cap.map(|cap| cap.rate.as_bps()), "whip publish accepted");
 
+	let mut answer = sdp::render_answer(&answer);
+	if let Some(cap) = cap {
+		answer = sdp::cap_answer(&answer, cap.steer());
+	}
 	Ok(Response {
 		resource_id: resource_id.clone(),
-		answer: sdp::render_answer(&answer),
+		answer,
 		session: crate::server::AcceptedSession {
 			server: server.clone(),
 			resource_id,
@@ -222,6 +236,27 @@ mod tests {
 		offer.to_sdp_string()
 	}
 
+	/// A capped session's answer bounds the encoder at nine tenths of the cap with TIAS, in
+	/// a description str0m still parses, and an uncapped one carries no bandwidth line.
+	#[tokio::test]
+	async fn a_capped_answer_carries_tias() {
+		let server = Server::new(crate::server::Config::default());
+		let origin = moq_tokio::origin::spawn();
+		let cap = rate::Cap::new(moq_net::bandwidth::Rate::from_mbps(1));
+		let path = moq_net::Path::from_static("live/capped");
+		let capped = accept(&server, &origin, path, &offer(), &rate::Limit::new(cap))
+			.await
+			.unwrap();
+		assert!(capped.answer.contains("\r\nb=TIAS:900000\r\n"), "{}", capped.answer);
+		str0m::change::SdpAnswer::from_sdp_string(&capped.answer).expect("str0m parses the capped answer");
+
+		let path = moq_net::Path::from_static("live/uncapped");
+		let uncapped = accept(&server, &origin, path, &offer(), &rate::Limit::unlimited())
+			.await
+			.unwrap();
+		assert!(!uncapped.answer.contains("\r\nb="), "{}", uncapped.answer);
+	}
+
 	/// A session that ends without a DELETE, here one that never connects, ends its tracks
 	/// with the transport cause, so a reader sees the publisher go rather than a producer
 	/// dropped unfinished.
@@ -230,9 +265,15 @@ mod tests {
 		let server = Server::new(crate::server::Config::default());
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let session = accept(&server, &origin, moq_net::Path::from_static("live/cam0"), &offer())
-			.await
-			.unwrap();
+		let session = accept(
+			&server,
+			&origin,
+			moq_net::Path::from_static("live/cam0"),
+			&offer(),
+			&rate::Limit::unlimited(),
+		)
+		.await
+		.unwrap();
 		let broadcast = consumer.request("live/cam0", None).await.unwrap();
 		let mut catalog = broadcast
 			.track(hang::Catalog::DEFAULT_NAME)
@@ -261,9 +302,15 @@ mod tests {
 		let server = Server::new(crate::server::Config::default());
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let _stale_session = accept(&server, &origin, moq_net::Path::from_static("live/cam0"), &offer())
-			.await
-			.unwrap();
+		let _stale_session = accept(
+			&server,
+			&origin,
+			moq_net::Path::from_static("live/cam0"),
+			&offer(),
+			&rate::Limit::unlimited(),
+		)
+		.await
+		.unwrap();
 		let stale = consumer.request("live/cam0", None).await.unwrap();
 		let mut catalog = stale
 			.track(hang::Catalog::DEFAULT_NAME)
@@ -272,9 +319,15 @@ mod tests {
 			.await
 			.unwrap();
 
-		let _fresh_session = accept(&server, &origin, moq_net::Path::from_static("live/cam0"), &offer())
-			.await
-			.unwrap();
+		let _fresh_session = accept(
+			&server,
+			&origin,
+			moq_net::Path::from_static("live/cam0"),
+			&offer(),
+			&rate::Limit::unlimited(),
+		)
+		.await
+		.unwrap();
 		// The session binds a real UDP socket, so this runs on the wall clock.
 		let stale_viewer = tokio::time::timeout(std::time::Duration::from_millis(200), async {
 			loop {
