@@ -8,6 +8,7 @@
 //! and closed with [`Error::RateLimited`](crate::Error::RateLimited) past the cap plus its
 //! burst.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -128,15 +129,26 @@ impl std::fmt::Debug for Limit {
 /// A token bucket over received media payload: full at the burst, refilled at the rate.
 ///
 /// It charges whole frames as str0m completes them, stamped with their first packet's
-/// arrival, so a frame that completes after a later one earns no credit for its assembly
-/// time. That makes the meter stricter than a per-packet one by at most the cap's rate
-/// over a frame's assembly time, a few hundredths of the default one-second burst. str0m
-/// 0.24 surfaces individual RTP packets only in `rtp_mode`, which gives up depacketization.
+/// arrival, so frames can be charged out of order: a frame that completes after a
+/// later-starting one is charged behind it. str0m 0.24 surfaces individual RTP packets
+/// only in `rtp_mode`, which gives up depacketization. The meter remembers the credit it
+/// discarded while full and refunds a late frame what was discarded since its arrival, up
+/// to its size, so it never closes a publisher that charging in arrival order would
+/// accept. It errs lenient by at most the cap's rate over a frame's assembly time.
 pub(crate) struct Meter {
 	cap: Option<Cap>,
 	/// Bytes still allowed before the cap plus burst is exceeded.
 	tokens: f64,
 	last: Instant,
+	/// When the bucket sat full, oldest first, kept for one burst duration.
+	full: VecDeque<Full>,
+}
+
+/// An interval the bucket sat full, discarding credit at `rate` bytes per second.
+struct Full {
+	since: Instant,
+	until: Instant,
+	rate: f64,
 }
 
 impl Meter {
@@ -145,6 +157,7 @@ impl Meter {
 			cap,
 			tokens: cap.map_or(0.0, Cap::burst_bytes),
 			last: now,
+			full: VecDeque::new(),
 		}
 	}
 
@@ -161,6 +174,9 @@ impl Meter {
 			(None, Some(cap)) => cap.burst_bytes(),
 			(Some(_), Some(cap)) => self.tokens.min(cap.burst_bytes()),
 		};
+		if cap.is_none() {
+			self.full.clear();
+		}
 		self.cap = cap;
 	}
 
@@ -170,7 +186,10 @@ impl Meter {
 			return Ok(());
 		};
 		self.refill(now);
-		self.tokens -= bytes as f64;
+		let bytes = bytes as f64;
+		// Charged in arrival order, this frame would have kept the bucket below full
+		// for the credit discarded since it arrived.
+		self.tokens += self.refund(now, bytes) - bytes;
 		if self.tokens < 0.0 {
 			return Err(cap);
 		}
@@ -179,12 +198,46 @@ impl Meter {
 
 	fn refill(&mut self, now: Instant) {
 		// Arrival times can trail a `set` stamped with the current time; never run the clock back.
-		let elapsed = now.saturating_duration_since(self.last);
+		let from = self.last;
+		let elapsed = now.saturating_duration_since(from);
 		self.last = self.last.max(now);
-		if let Some(cap) = self.cap {
-			let earned = cap.rate.as_bps() as f64 / 8.0 * elapsed.as_secs_f64();
-			self.tokens = (self.tokens + earned).min(cap.burst_bytes());
+		let Some(cap) = self.cap else {
+			return;
+		};
+
+		let rate = cap.rate.as_bps() as f64 / 8.0;
+		let burst = cap.burst_bytes();
+		let tokens = self.tokens + rate * elapsed.as_secs_f64();
+		if tokens > burst {
+			// The bucket filled partway through and discarded credit from then until now.
+			let since = (from + Duration::from_secs_f64((burst - self.tokens).max(0.0) / rate)).min(now);
+			match self.full.back_mut() {
+				Some(full) if full.until == since && full.rate == rate => full.until = now,
+				_ => self.full.push_back(Full { since, until: now, rate }),
+			}
 		}
+		self.tokens = tokens.min(burst);
+
+		if let Some(horizon) = self.last.checked_sub(cap.burst) {
+			while self.full.front().is_some_and(|full| full.until < horizon) {
+				self.full.pop_front();
+			}
+		}
+	}
+
+	/// Take back up to `limit` bytes of credit discarded after `at`, newest first.
+	fn refund(&mut self, at: Instant, limit: f64) -> f64 {
+		let mut refund = 0.0;
+		for full in self.full.iter_mut().rev() {
+			if full.until <= at || refund >= limit {
+				break;
+			}
+			let discarded = full.rate * full.until.saturating_duration_since(full.since.max(at)).as_secs_f64();
+			let take = discarded.min(limit - refund);
+			full.until -= Duration::from_secs_f64(take / full.rate);
+			refund += take;
+		}
+		refund
 	}
 }
 
@@ -242,6 +295,49 @@ mod tests {
 		let later = t0 + Duration::from_secs(3600);
 		assert!(meter.charge(1000, later).is_ok());
 		assert!(meter.charge(1, later).is_err());
+	}
+
+	#[test]
+	fn a_frame_charged_late_is_refunded_the_credit_discarded_since_it_arrived() {
+		let t0 = Instant::now();
+		let ms = |ms| t0 + Duration::from_millis(ms);
+
+		// A 1000-byte video frame arrives over 0..50 ms with 10-byte audio frames at 20 and
+		// 40 ms, which str0m completes first. In arrival order the bucket ends at 20 bytes.
+		let mut ordered = Meter::new(Some(cap()), t0);
+		for (bytes, at) in [(1000, ms(0)), (10, ms(20)), (10, ms(40))] {
+			assert!(ordered.charge(bytes, at).is_ok());
+		}
+
+		let mut meter = Meter::new(Some(cap()), t0);
+		for (bytes, at) in [(10, ms(20)), (10, ms(40)), (1000, ms(0))] {
+			assert!(meter.charge(bytes, at).is_ok());
+		}
+		assert!((meter.tokens - ordered.tokens).abs() < 1e-6, "{} != {}", meter.tokens, ordered.tokens);
+		assert!((meter.tokens - 20.0).abs() < 1e-6);
+	}
+
+	#[test]
+	fn a_refund_covers_only_credit_discarded_after_the_frame_arrived() {
+		let t0 = Instant::now();
+		// Idle for a minute, then a frame at 60 s and one charged late from 10 ms before it.
+		let mut meter = Meter::new(Some(cap()), t0);
+		assert!(meter.charge(10, t0 + Duration::from_secs(60)).is_ok());
+		assert!(meter.charge(1000, t0 + Duration::from_millis(59_990)).is_ok());
+		// Only the 10 bytes discarded over those 10 ms came back.
+		assert!((meter.tokens - 0.0).abs() < 1e-6, "{}", meter.tokens);
+	}
+
+	#[test]
+	fn discarded_credit_is_refunded_once() {
+		let t0 = Instant::now();
+		let mut meter = Meter::new(Some(cap()), t0);
+		// 100 bytes discarded over 0..100 ms, then two frames from 0 ms charged late.
+		assert!(meter.charge(0, t0 + Duration::from_millis(100)).is_ok());
+		assert!(meter.charge(600, t0).is_ok());
+		assert!(meter.charge(500, t0).is_ok());
+		assert!((meter.tokens - 0.0).abs() < 1e-6, "{}", meter.tokens);
+		assert!(meter.charge(1, t0).is_err());
 	}
 
 	#[test]
