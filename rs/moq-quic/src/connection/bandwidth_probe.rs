@@ -14,7 +14,9 @@
 //! sits out before retrying the target, up to a bound that finds capacity which returns within a
 //! few seconds. A miss shows within two round trips, as a round of duplicates that raised
 //! nothing, while the controller's probe lasts several rounds more before it sees the plateau
-//! itself, so an attempt stops there.
+//! itself, so an attempt stops there. Each raise restarts that count: an attempt that begins
+//! below the plateau, as once BBR3 has aged an application-limited estimate, climbs back to it
+//! and then stalls rather than filling the rest of the controller's probe.
 
 use std::{ops::Bound, time::Duration};
 
@@ -55,10 +57,11 @@ pub(super) struct BandwidthProbe {
 	floor: u64,
 }
 
-/// Probing toward the target since one instant
+/// Probing toward the target
 struct Attempt {
+	/// When the attempt began or last raised the estimate
 	since: Instant,
-	/// The bandwidth estimate then, in bytes per second
+	/// The highest bandwidth estimate since it began, in bytes per second
 	estimate: u64,
 }
 
@@ -114,8 +117,12 @@ impl BandwidthProbe {
 			self.resume = None;
 			return false;
 		}
-		if let Some(attempt) = &self.attempt {
-			let stalled = now > attempt.since + 2 * rtt && estimate <= attempt.estimate;
+		if let Some(attempt) = &mut self.attempt {
+			if estimate > attempt.estimate {
+				attempt.since = now;
+				attempt.estimate = estimate;
+			}
+			let stalled = now > attempt.since + 2 * rtt;
 			if !probing || stalled {
 				self.attempt = None;
 				self.misses = self.misses.saturating_add(1);
@@ -365,6 +372,25 @@ mod tests {
 		assert!(!probe.judge(false, Some(PATH + 1), RTT, later));
 		assert!(!probe.judge(true, Some(PATH + 1), RTT, later + BACKOFF - MS));
 		assert!(probe.judge(true, Some(PATH + 1), RTT, later + BACKOFF));
+	}
+
+	/// An attempt that begins below the plateau stalls two round trips after it climbs back,
+	/// rather than going on until the controller's probe ends
+	#[test]
+	fn climbing_back_stalls_at_the_plateau() {
+		let now = Instant::now();
+		let mut probe = probe(now);
+		attempt(&mut probe, now, PATH / 2);
+		let back = now + RTT;
+		assert!(probe.judge(true, Some(PATH), RTT, back));
+		assert!(
+			probe.judge(true, Some(PATH), RTT, back + 2 * RTT),
+			"stalled before a round came back"
+		);
+		assert!(
+			!probe.judge(true, Some(PATH), RTT, back + 2 * RTT + MS),
+			"kept filling once the estimate stopped rising"
+		);
 	}
 
 	/// Reaching the target, or the caller changing it, retries the target at once
