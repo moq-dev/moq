@@ -53,7 +53,16 @@ assert.equal(land.jobs.land["runs-on"], "ubuntu-latest");
 assert.equal(land.jobs.resolve.permissions.contents, "read");
 assert.deepEqual(land.jobs.check.permissions, { contents: "read" });
 assert.equal(land.jobs.check.environment, undefined);
-assert.equal(land.jobs.land.environment, "bot");
+// token.moq.dev issues moq-bot's token to any job of main's land.yml that asks
+// with an ID token, so only the land job, which runs no queued PR code, may.
+assert.equal(land.jobs.land.environment, undefined);
+assert.equal(land.permissions?.["id-token"], undefined);
+for (const [id, job] of Object.entries(land.jobs) as [string, { uses?: string; permissions?: unknown }][]) {
+	const grants = job.permissions === "write-all" || (job.permissions as Record<string, string>)?.["id-token"] === "write";
+	assert.equal(grants, id === "land", `land.yml/${id} must not request an ID token`);
+	assert.equal(job.uses, undefined, `land.yml/${id} must not call a workflow, whose jobs inherit land.yml's workflow_ref`);
+}
+assert.ok(!JSON.stringify(land.jobs.land).includes("APP_PRIVATE_KEY"));
 assert.deepEqual(land.jobs.land.needs, ["resolve", "check"]);
 for (const job of Object.values(land.jobs) as { steps: { uses?: string; with?: { ref?: string } }[] }[]) {
 	const checkout = job.steps.find((step) => step.uses?.startsWith("actions/checkout@"));

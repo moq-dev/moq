@@ -96,9 +96,11 @@ jobs:
     needs: [resolve, check]
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # The moq-bot key lives in the `bot` Environment, which only protected
-    # refs can deploy to.
-    environment: bot
+    # moq-bot, which main's ruleset lets bypass it, pushes the landing. No
+    # Environment holds its key: token.moq.dev trades this job's GitHub ID token
+    # for a moq-bot token scoped to this repository, and only for land.yml on
+    # main (infra/README.md). So this job never runs queued PR code, and no other
+    # job here requests an ID token or calls another workflow.
     permissions:
       contents: write
       pull-requests: write
@@ -106,6 +108,7 @@ jobs:
       actions: write
       checks: read
       statuses: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -118,16 +121,15 @@ jobs:
           mkdir -p .tmp
           nix build --out-link .tmp/quest-cli .#quest
           echo "$PWD/.tmp/quest-cli/bin" >> "$GITHUB_PATH"
-      - name: Generate moq-bot token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+      - name: Get a moq-bot token
         id: token
-        with:
-          client-id: ${{ secrets.APP_CLIENT_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: moq-dev
-          repositories: moq
-          permission-contents: write
-          permission-workflows: write
+        # bash runs with pipefail, so a refused request fails here rather than as an empty token.
+        shell: bash
+        run: |
+          id=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=token.moq.dev" | jq -er .value)
+          token=$(curl -fsS -X POST -H "Authorization: Bearer $id" https://token.moq.dev/land | jq -er .token)
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
       - name: Authenticate pushes
         env:
           BOT_TOKEN: ${{ steps.token.outputs.token }}

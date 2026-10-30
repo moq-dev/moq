@@ -78,17 +78,23 @@ Decided 2026-10-26 (maintainer):
 - Decided 2026-10-29 (maintainer), answering the question raised in
   [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166): the moq-bot
   key moves to its own `bot` Environment, for `main`, `release`, and
-  `moq-ffi-v*`. The land gate, Dependabot, and the moq-bot-only publishers
-  name it. `publish` keeps the key too, for release-rs, which also needs the
+  `moq-ffi-v*`. Dependabot, the Smoke toolchain update, and the moq-bot-only
+  publishers name it. `publish` keeps the key too, for release-rs, which also needs the
   crates.io token. Narrowing `publish` to release refs waits on
   [its own quest](/quest/m0/ci/publish-release-only.md), since `workflow_run`
   publishers run as `main`.
+- Decided 2026-10-30 (maintainer): the land job holds no key. It trades its
+  GitHub ID token at `token.moq.dev` ([moq-dev/moq#7275](https://github.com/moq-dev/moq/pull/7275)),
+  which issues a moq-bot token scoped to the calling repository only for its
+  `land.yml` on `main`, so opting another moq-dev repository into the gate
+  needs no secret. No other job in `land.yml` may request an ID token or call
+  another workflow.
 - Open, found 2026-10-29: `APP_CLIENT_ID` and `APP_PRIVATE_KEY` are moq-dev
   organization secrets visible to this repository, so any workflow on a
   pushed branch can read the moq-bot key, not only jobs in `bot`. Once
   moq-bot bypasses `main`, that branch could push to `main`. Before cutover,
-  the maintainer restricts the organization secrets and puts the key in
-  `bot` and `publish` under the same names, so no workflow changes.
+  the maintainer deletes the organization secrets and this repository's own
+  copies; `bot` and `publish` already hold the key under the same names.
 - The gate tests each PR on the latest `main`, not the PR's own base. On
   2026-10-29 [moq-dev/moq#7162](https://github.com/moq-dev/moq/pull/7162)
   passed its own CI but broke in the queue on API renames that landed after
