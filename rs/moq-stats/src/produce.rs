@@ -412,10 +412,9 @@ impl<T: Serialize> Snapshot<T> {
 	/// written; `None` means the value was unchanged, the interval already has a group for a
 	/// snapshot, or the track already ended, and nothing was written.
 	///
-	/// A frame over the cache limit aborts the track with
+	/// A frame over the group budget aborts the track with
 	/// [`moq_net::Error::FrameTooLarge`]: skipping it would leave readers on the
-	/// previous snapshot with no sign it stopped tracking. A compressed track
-	/// holds a frame to the same limit by its uncompressed size.
+	/// previous snapshot with no sign it stopped tracking.
 	fn update(&mut self, value: &T, stamp: Stamp) -> moq_json::Result<Option<usize>> {
 		#[cfg(feature = "bench")]
 		{
@@ -433,9 +432,10 @@ impl<T: Serialize> Snapshot<T> {
 			self.encoder.reset();
 		}
 		let frame = match self.encoder.update(value) {
-			Ok(Some(frame)) if frame.payload.len() as u64 <= moq_net::group::MAX_CACHE_BYTES => frame,
+			Ok(Some(frame)) => frame,
 			Ok(None) => return Ok(None),
-			Ok(Some(_)) | Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge)) => {
+			// The encoder refuses a frame past the group budget before anything is written.
+			Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge)) => {
 				let err = moq_net::Error::FrameTooLarge;
 				if let Some(group) = self.group.take() {
 					let _ = group.abort(err.clone());
@@ -505,6 +505,15 @@ fn info() -> track::Info {
 		.with_refresh(8)
 }
 
+/// The snapshot codec every stats track encodes with.
+fn config() -> moq_json::snapshot::Config {
+	let config = moq_json::snapshot::Config::default();
+	// A test overflows a group with a few KiB rather than moq-net's 32 MiB.
+	#[cfg(test)]
+	let config = config.with_max_group_bytes(tests::MAX_GROUP_BYTES);
+	config
+}
+
 impl<V: Serialize> Output<V> {
 	fn create(broadcast: &broadcast::Producer, name: &str) -> Result<Self, moq_net::Error> {
 		Ok(Self::new(broadcast.create_track(name, info())?))
@@ -524,7 +533,7 @@ impl<V: Serialize> Output<V> {
 
 	fn new(track: track::Producer) -> Self {
 		Self {
-			snapshot: Snapshot::new(track, moq_json::snapshot::Config::default()),
+			snapshot: Snapshot::new(track, config()),
 			frame: Frame::default(),
 		}
 	}
@@ -808,7 +817,7 @@ impl GroupTrack {
 		let track = broadcast.create_track(name.as_str(), info())?;
 		Ok(Self {
 			name,
-			snapshot: Snapshot::new(track, moq_json::snapshot::Config::default()),
+			snapshot: Snapshot::new(track, config()),
 			body: GroupBody {
 				// A new instance of the name: readers keep its counters apart from
 				// an earlier instance's.
@@ -1299,6 +1308,10 @@ fn advertised_path(prefix: &Path, node: Option<&Path>) -> Result<Path, moq_net::
 
 #[cfg(test)]
 mod tests {
+	/// The group budget every stats track has under test, small enough that a test
+	/// overflows it with a handful of paths.
+	pub(super) const MAX_GROUP_BYTES: u64 = 64 * 1024;
+
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
@@ -1524,10 +1537,8 @@ mod tests {
 		}
 	}
 
-	/// A frame that outgrows the cache ends the track with `FrameTooLarge`
-	/// instead of leaving readers on their last snapshot. DEFLATE would shrink
-	/// the frame under the limit, but a reader inflates it whole, so the track
-	/// holds it to the same budget by its uncompressed size.
+	/// A frame that outgrows the group budget ends the track with `FrameTooLarge`
+	/// instead of leaving readers on their last snapshot.
 	#[tokio::test]
 	async fn oversized_frame_ends_the_track() {
 		use futures::FutureExt;
@@ -1566,11 +1577,11 @@ mod tests {
 		));
 	}
 
-	/// Distinct paths under `prefix` whose JSON overflows a group's cache, since one
-	/// path holds at most [`Path::MAX_BYTES`].
+	/// Distinct paths under `prefix` whose JSON overflows [`MAX_GROUP_BYTES`], since
+	/// one path holds at most [`Path::MAX_BYTES`].
 	fn oversized_paths(prefix: &str) -> Vec<Path> {
 		let filler = "a".repeat(Path::MAX_BYTES - 16);
-		(0..=moq_net::group::MAX_CACHE_BYTES as usize / filler.len())
+		(0..=MAX_GROUP_BYTES as usize / filler.len())
 			.map(|i| Path::new(&format!("{prefix}{i}/{filler}")).unwrap())
 			.collect()
 	}
