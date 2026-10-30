@@ -71,22 +71,14 @@ impl Client {
 		whep::dial(self, url, broadcast).await
 	}
 
-	/// `client publish`: pull the broadcast at `path` from `origin` and push it to a
-	/// remote WHIP endpoint, until the session ends.
+	/// `client publish`: push the broadcast `source` resolved to a remote WHIP endpoint,
+	/// until the session ends.
 	///
-	/// It stays on the publisher instance it resolved, and fails once that instance's
-	/// route dies.
-	///
-	/// Taking the origin plus path (rather than a resolved [`moq_net::broadcast::Consumer`])
-	/// lets the egress resolve a rendition whose catalog `broadcast` field references a
-	/// sibling broadcast, against the same origin.
-	pub async fn publish(
-		&self,
-		url: Url,
-		origin: moq_net::origin::Consumer,
-		path: impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>,
-	) -> crate::Result<()> {
-		whip::dial(self, url, origin, path).await
+	/// It stays on that publisher instance, and fails once the instance's route dies.
+	/// The source's origin resolves a rendition whose catalog `broadcast` field references
+	/// a sibling broadcast.
+	pub async fn publish(&self, url: Url, source: moq_mux::Source) -> crate::Result<()> {
+		whip::dial(self, url, source).await
 	}
 }
 

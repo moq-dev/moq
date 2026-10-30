@@ -55,6 +55,13 @@ typedef struct {
 // The most audio renditions this client decodes; a catalog offering more fails it.
 #define MAX_AUDIO 4
 
+// How far a read may fall behind live before it skips, in microseconds. A gap fails the run, which
+// a reader skipping behind live would cause itself: the matrix starts every subscriber at once, and
+// a runtime starved by the others can fall a second behind. That is this reader's speed, not the
+// delivery under test. A track's max-age caps it, so interop.sh's Rust publisher keeps its media at
+// least this long.
+#define MAX_DELAY_US 5000000
+
 struct ctx {
     pthread_mutex_t mu;
     pthread_cond_t cv;
@@ -64,7 +71,7 @@ struct ctx {
     int32_t origin;
     int32_t session;
     int32_t broadcast_wait;
-    int32_t broadcast; // handle delivered by moq_origin_announced_broadcast (0 until it arrives)
+    int32_t broadcast; // handle delivered by moq_origin_follow (0 until it arrives)
     int32_t catalog;
     int32_t video_track; // handle from moq_consume_video (0 until on_catalog starts it)
 
@@ -85,7 +92,7 @@ struct ctx {
 // on main's stack and moq-c keeps the pointer until each registration's
 // terminal (<= 0) callback fires, so main must not return until every one of
 // them has. Closing the session ends its state registration alone;
-// moq_origin_announced_broadcast, moq_consume_catalog and moq_consume_video each
+// moq_origin_follow, moq_consume_catalog and moq_consume_video each
 // keep the pointer until their own terminal. See drain() at the bottom.
 static void done(ctx_t *c, int *flag) {
     pthread_mutex_lock(&c->mu);
@@ -238,7 +245,7 @@ static void start_audio(ctx_t *c, int32_t catalog) {
         moq_audio_decoder_output out;
         memset(&out, 0, sizeof(out));
         out.format = MOQ_AUDIO_SAMPLE_FORMAT_F32;
-        out.max_delay_us = 1000000;
+        out.max_delay_us = MAX_DELAY_US;
         int32_t track = moq_decode_audio((uint32_t)catalog, i, &out, on_audio, &c->audio[i]);
         pthread_mutex_lock(&c->mu);
         if (track > 0) c->audio[i].track = track;
@@ -317,7 +324,7 @@ static void on_catalog(void *ud, int32_t catalog) {
         moq_video_config vcfg;
         memset(&vcfg, 0, sizeof(vcfg));
         if (moq_consume_video_config((uint32_t)catalog, 0, &vcfg) == 0) {
-            int32_t track = moq_consume_video((uint32_t)catalog, 0, 1000000, on_frame, ud);
+            int32_t track = moq_consume_video((uint32_t)catalog, 0, MAX_DELAY_US, on_frame, ud);
             if (track > 0) {
                 pthread_mutex_lock(&c->mu);
                 c->video_track = track;
@@ -462,7 +469,7 @@ static void finish(ctx_t *c, const struct timespec *deadline) {
     char *path = malloc(length);
     if (!path) fail("error: cannot allocate health path\n");
     snprintf(path, length, "%s.health", c->finish.path);
-    c->finish.health_wait = moq_origin_announced_broadcast((uint32_t)c->origin, path, strlen(path), on_finish_health, c);
+    c->finish.health_wait = moq_origin_follow((uint32_t)c->origin, path, strlen(path), NULL, 0, on_finish_health, c);
     free(path);
     if (c->finish.health_wait <= 0) fail("error: health registration failed\n");
 
@@ -507,10 +514,10 @@ static void drain(ctx_t *c) {
         if (audio[i] > 0) moq_decode_audio_cancel((uint32_t)audio[i]);
     }
     if (cancel_catalog) moq_consume_catalog_cancel((uint32_t)c->catalog);
-    moq_origin_announced_broadcast_cancel((uint32_t)c->broadcast_wait);
+    moq_origin_follow_cancel((uint32_t)c->broadcast_wait);
     if (c->finish.enabled) {
         moq_origin_announced_cancel((uint32_t)c->finish.announcements);
-        moq_origin_announced_broadcast_cancel((uint32_t)c->finish.health_wait);
+        moq_origin_follow_cancel((uint32_t)c->finish.health_wait);
     }
     moq_session_close((uint32_t)c->session);
 
@@ -635,12 +642,12 @@ int main(int argc, char **argv) {
     }
 
     // The broadcast arrives over the network after connect, so wait for it to be
-    // announced. moq_origin_announced_broadcast resolves via on_broadcast once it's
+    // announced. moq_origin_follow resolves via on_broadcast once it's
     // available; we block on the condvar until then (or the deadline).
     c.broadcast_wait =
-        moq_origin_announced_broadcast((uint32_t)c.origin, broadcast, strlen(broadcast), on_broadcast, &c);
+        moq_origin_follow((uint32_t)c.origin, broadcast, strlen(broadcast), NULL, 0, on_broadcast, &c);
     if (c.broadcast_wait <= 0) {
-        fail("error: moq_origin_announced_broadcast failed: %d\n", c.broadcast_wait);
+        fail("error: moq_origin_follow failed: %d\n", c.broadcast_wait);
     }
 
     pthread_mutex_lock(&c.mu);

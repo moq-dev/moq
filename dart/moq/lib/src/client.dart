@@ -215,9 +215,10 @@ final class Moq {
 
   /// Create an unannounced broadcast at [path], invisible to everyone until announced.
   ///
-  /// Advertise it with `announce` after populating tracks. Create, `requests`
-  /// if tracks are served on demand, populate, then announce.
-  BroadcastProducer createBroadcast(String path) =>
+  /// Populate its `broadcast`, calling `requests` first if tracks are served
+  /// on demand, then advertise it with `announce`. Disposing the publication
+  /// keeps the route; closing the broadcast ends it.
+  Publication createBroadcast(String path) =>
       session.publish().createBroadcast(path: path);
 
   /// Discover routes matching [options]; prefixes stay relative to the origin.
@@ -229,13 +230,15 @@ final class Moq {
   }) => session.consume().announced(config: options._ffi);
 
   /// Follow the broadcast at exactly [path]: each `available()` resolves the
-  /// next publisher instance serving it, such as a restarted publisher.
-  AnnouncedBroadcast announcedBroadcast(String path) =>
-      session.consume().announcedBroadcast(path: path);
+  /// next publisher instance serving it, such as a restarted publisher. Pass an
+  /// [epoch] (UUIDv7 text) to follow only that instance.
+  Following follow(String path, {String? epoch}) =>
+      session.consume().follow(path: path, epoch: epoch);
 
-  /// Resolve an existing broadcast at [path].
-  Future<BroadcastConsumer> requestBroadcast(String path) =>
-      session.consume().requestBroadcast(path: path);
+  /// Resolve one publisher instance of the broadcast at [path]. Pass an
+  /// [epoch] (UUIDv7 text) to refuse any other instance.
+  Future<BroadcastConsumer> request(String path, {String? epoch}) =>
+      session.consume().request(path: path, epoch: epoch);
 
   /// The session's bandwidth allocator.
   ///

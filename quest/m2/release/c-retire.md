@@ -22,6 +22,11 @@ served it are deleted once the generated `moq-c` publishes. The generated
 - `AGENTS.md`'s Cross-Package Sync table keeps the hand-written crate beside
   `c/moq` while it ships. Drop `rs/moq-c` from the `rs/moq-ffi` row and point
   the `rs/moq-c` C ABI row at the generated `c/moq` header (`<moq/moq.h>`).
+- Deleting the crate removes its four `moq-c-<target>` archives from the
+  Nightly size report, which `sh/size/report.py` refuses as missing. Add a way
+  to retire one artifact's series without dropping the rest of the history
+  (decided 2026-10-28, from [moq-dev/moq#7132](https://github.com/moq-dev/moq/pull/7132)),
+  rather than deleting every `nightly-size-history` artifact.
 - The code-free `rs/libmoq` stub left under the old name is
   [Retire the libmoq stub](/quest/m2/release/libmoq-retire.md)'s, separately.
 

@@ -57,6 +57,43 @@ export class Tail {
 		};
 	}
 
+	/**
+	 * Hold the end open for something being read that is not one of the counted streams,
+	 * such as a joining FETCH's head, or let go of a counted stream while it waits on one.
+	 * Returns the call that lets go, which is idempotent.
+	 */
+	hold(): () => void {
+		this.#active += 1;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.#active -= 1;
+			this.#bump();
+		};
+	}
+
+	/**
+	 * Stop holding the end open for a counted stream while it waits on something that holds
+	 * it instead. Returns the call that holds it again, which must come before the stream's
+	 * own close.
+	 */
+	suspend(): () => void {
+		this.#active -= 1;
+		this.#bump();
+		let resumed = false;
+		return () => {
+			if (resumed) return;
+			resumed = true;
+			this.#active += 1;
+		};
+	}
+
+	/** Re-check what {@link settle} waits on, after something outside the ledger changed. */
+	touch(): void {
+		this.#bump();
+	}
+
 	/** Record sequences `[start, end)` as accounted for without a stream: dropped, or a datagram. */
 	account(start: number, end: number): void {
 		this.#account(start, end);
