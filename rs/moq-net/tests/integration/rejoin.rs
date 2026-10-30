@@ -181,6 +181,74 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 	}
 }
 
+/// A rejoin keeps the cached group its max age still allows, though the backlog lands
+/// newest first.
+///
+/// A fetch-only reader holds the relay's copy, so it idles with group 0 cached when the
+/// last subscriber leaves. The publisher writes groups 1 to 3 meanwhile, and the rejoin
+/// asks again from the cached head, which a descending track answers newest first. Group
+/// 3 landing first is not a gap after group 0, so a reader asking from group 0 gets it.
+#[moq_clock::test]
+async fn rejoin_keeps_the_cache_when_the_backlog_lands_newest_first() {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+		moq_clock::timeout(TEST_TIMEOUT, async {
+			let publisher = produce_origin(1);
+			let relay = produce_origin(2);
+
+			let broadcast = publisher.create_broadcast("bench").unwrap();
+			let track = broadcast.create_track("video", timed()).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+
+			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(relay.clone());
+			let pair = connect_mock(options).await;
+
+			let consumer = relay.consume();
+			let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
+			let ts = |ms| Timestamp::from_millis(ms).unwrap();
+			let prefs = || track::Subscription::default().with_max_delay(Duration::from_secs(10));
+
+			// Held for fetches only: it keeps the relay's copy without subscribing.
+			let _held = remote.track("video").unwrap();
+
+			let mut group = track.append_group().unwrap();
+			group.write_frame(ts(0), b"0".as_ref()).unwrap();
+			group.finish().unwrap();
+			let mut sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
+			let mut group = sub.recv_group().await.unwrap().unwrap();
+			assert_eq!(read_all(&mut group).await.unwrap(), [b"0".to_vec()], "{version}");
+			drop((group, sub));
+			crate::support::unwanted(track.demand()).await.unwrap();
+
+			// The publisher moves on while nobody subscribes, all within the max age.
+			for sequence in 1..=3u64 {
+				let mut group = track.append_group().unwrap();
+				group.write_frame(ts(sequence * 100), sequence.to_string()).unwrap();
+				group.finish().unwrap();
+			}
+
+			pair.server_transport.hold_unis();
+			let rejoin = remote.track("video").unwrap().subscribe(prefs().with_range(0..));
+			let release = async {
+				moq_clock::sleep(Duration::from_millis(100)).await;
+				pair.server_transport.release_unis_reversed();
+			};
+			let (sub, ()) = futures::join!(rejoin, release);
+			let mut sub = sub.unwrap();
+			let mut rejoined = Vec::new();
+			// Arrival order, newest first: whatever the reader gets once the backlog settled.
+			while let Ok(group) = moq_clock::timeout(Duration::from_secs(1), sub.recv_group()).await {
+				rejoined.push(group.unwrap().unwrap().sequence);
+			}
+			rejoined.sort();
+			assert_eq!(rejoined, [0, 1, 2, 3], "{version}: the rejoin skipped the cache");
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
+}
+
 /// A reader rejoining an open group keeps reading it, and leaves the relay holding it whole.
 ///
 /// The client still holds the group's head when it rejoins, so it may ask the relay for
