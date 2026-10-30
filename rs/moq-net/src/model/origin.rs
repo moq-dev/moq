@@ -3513,7 +3513,9 @@ fn pick<'a>(
 		return table.best_route(path, horizon, excluded, |_| true);
 	};
 	match &resolved.instance {
-		Instance::Epoch(epoch) => table.best_route(path, horizon, excluded, |entry| entry.epoch.as_ref() == Some(epoch)),
+		Instance::Epoch(epoch) => {
+			table.best_route(path, horizon, excluded, |entry| entry.epoch.as_ref() == Some(epoch))
+		}
 		Instance::Route(_) => table
 			.routes
 			.covering(path)
