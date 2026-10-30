@@ -68,8 +68,8 @@ export interface Established {
 	/**
 	 * Withdraw announcements and drain for up to one second, then close the session.
 	 *
-	 * Explicit lite-07-wip waits for the subscriber to receive finished tails; older
-	 * Lite versions wait only for transport ACKs. IETF media streams are not drained.
+	 * Lite-05 and newer wait for the subscriber to read finished tails; older Lite versions
+	 * wait only for transport ACKs. IETF media streams are not drained.
 	 */
 	close(): Promise<void>;
 

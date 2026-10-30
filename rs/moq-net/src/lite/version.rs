@@ -226,12 +226,11 @@ impl Version {
 		self.resolves_start() && !self.has_media_time() && !self.has_fetch_max_delay()
 	}
 
-	/// Whether subscription completion waits for the subscriber's FIN.
+	/// Whether subscription completion waits for the subscriber's FIN, which it sends once
+	/// its tail accounting settles. SUBSCRIBE_END says which groups are owed, so that is
+	/// prompt from lite-05; before it, only the subscriber's grace settles the tail.
 	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
+		self.has_track_stream()
 	}
 
 	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older

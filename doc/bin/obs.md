@@ -95,8 +95,7 @@ alone writes nothing, and the toggle without it fails the connection. Existing U
 
 The plugin is C++ over the [generated C++ bindings](/lib/cpp/) and ships with
 every moq-cpp release. Stopping finishes the tracks and drains for up to one
-second. The default lite-06 waits for transport ACKs, which do not confirm that
-the peer received the tail.
+second. The default lite-06 waits for the peer to receive the tails.
 
 If the relay closes the session for too many requests, reduce the broadcasts
 or subscribed tracks, or have the operator adjust its

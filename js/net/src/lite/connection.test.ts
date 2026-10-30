@@ -448,10 +448,9 @@ for (const [alpn, version] of [
 	}
 }
 
-/** A lite-07 publisher serving a finished track to a raw subscriber that has read up to the FIN. */
-async function servedRawSubscription() {
-	const version = Version.DRAFT_07;
-	const pair = createMockTransportPair(ALPN_07_WIP);
+/** A publisher serving a finished track to a raw subscriber that has read up to the FIN. */
+async function servedRawSubscription(alpn = ALPN_07_WIP, version = Version.DRAFT_07) {
+	const pair = createMockTransportPair(alpn);
 	const origin = new Producer();
 	const broadcastPublication = origin.createBroadcast(Path.from("room"));
 	const broadcast = broadcastPublication.broadcast;
@@ -502,42 +501,49 @@ async function servedRawSubscription() {
 	};
 }
 
-// The publisher's FIN says nothing about whether the subscriber read the tail; on lite-07 the
-// subscriber's FIN does, so close waits for it.
-test("a lite-07 subscriber withholding FIN holds close until the deadline", async () => {
-	const deadline = mockDeadline();
-	const served = await servedRawSubscription();
-	try {
-		const closing = served.server.close();
-		await settle();
-		expect(served.closed()).toBe(false);
+// The publisher's FIN says nothing about whether the subscriber read the tail, and a receiver
+// may drop unread bytes on close. From lite-05, whose SUBSCRIBE_END lets the subscriber settle
+// its tail at once, the subscriber's FIN says so, and close waits for it.
+for (const [alpn, version] of [
+	[ALPN_05, Version.DRAFT_05],
+	[ALPN_06, Version.DRAFT_06],
+	[ALPN_07_WIP, Version.DRAFT_07],
+] as const) {
+	test(`a ${versionName(version)} subscriber withholding FIN holds close until the deadline`, async () => {
+		const deadline = mockDeadline();
+		const served = await servedRawSubscription(alpn, version);
+		try {
+			const closing = served.server.close();
+			await settle();
+			expect(served.closed()).toBe(false);
 
-		const failure = closing.catch((error: unknown) => error);
-		await deadline.expire();
-		expect(await failure).toHaveProperty("message", "session close timed out");
-		expect(served.closed()).toBe(true);
-	} finally {
-		deadline.installed.close();
-		served.cleanup();
-	}
-});
+			const failure = closing.catch((error: unknown) => error);
+			await deadline.expire();
+			expect(await failure).toHaveProperty("message", "session close timed out");
+			expect(served.closed()).toBe(true);
+		} finally {
+			deadline.installed.close();
+			served.cleanup();
+		}
+	});
 
-test("a lite-07 subscriber FIN releases close", async () => {
-	const deadline = mockDeadline();
-	const served = await servedRawSubscription();
-	try {
-		const closing = served.server.close();
-		await settle();
-		expect(served.closed()).toBe(false);
+	test(`a ${versionName(version)} subscriber FIN releases close`, async () => {
+		const deadline = mockDeadline();
+		const served = await servedRawSubscription(alpn, version);
+		try {
+			const closing = served.server.close();
+			await settle();
+			expect(served.closed()).toBe(false);
 
-		served.subscriber.writer.close();
-		await closing;
-		expect(served.closed()).toBe(true);
-	} finally {
-		deadline.installed.close();
-		served.cleanup();
-	}
-});
+			served.subscriber.writer.close();
+			await closing;
+			expect(served.closed()).toBe(true);
+		} finally {
+			deadline.installed.close();
+			served.cleanup();
+		}
+	});
+}
 
 test("abort during the close drain ends the session at once", async () => {
 	const deadline = mockDeadline();

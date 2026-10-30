@@ -7841,7 +7841,6 @@ async fn shutdown_failure_survives_a_discarded_waiter() {
 }
 
 /// Real sockets exercise the FFI runtime and both accepted/client session handles.
-/// Only lite-07 acknowledges the received tail; default lite-06 closes after transport ACKs.
 async fn shutdown_pair() -> (Arc<MoqServer>, Arc<MoqSession>, Arc<MoqSession>) {
 	session_pair("moq-lite-07-wip").await
 }

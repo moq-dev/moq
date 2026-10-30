@@ -1739,8 +1739,9 @@ impl<R: Request> RequestServe<R> {
 						stream.writer.finish()?;
 						*finished = true;
 					}
-					// A transport ACK does not say the application read the tail: a lite-07
-					// subscriber FINs once its tail accounting settles, so wait for that.
+					// A transport ACK does not say the application read the tail, and a
+					// receiver may drop unread bytes on close: the subscriber FINs once its
+					// tail accounting settles, so wait for that.
 					if R::GRACEFUL && self.shared.version.waits_for_subscriber_fin() {
 						ready!(self.poll_requester(waiter))?;
 					}

@@ -226,9 +226,8 @@ Set `ClientConfig::tokens` instead of putting the credential in the URL. The fir
 ## Shutdown
 
 `session->shutdown()` requests a drain immediately; `session->closed().get()` waits up to one second and reports its result.
-Application delivery requires explicitly selecting `moq-lite-07-wip` on both
-peers; older Lite versions (including default lite-06) and IETF wait only for
-transport ACKs. Finish or abort live tracks first.
+moq-lite-05 and newer wait for the peer to receive finished tails; older Lite
+versions and IETF wait only for transport ACKs. Finish or abort live tracks first.
 
 To end a broadcast cleanly, finish every track, then call `catalog->finish()` on
 its `moq::MediaCatalogProducer` to finish the catalog, which ends the content.

@@ -1021,7 +1021,7 @@ export class Subscriber {
 				if (tailSettled && entry.finished) producer.finish();
 				hooks.releaseTrack(producer);
 			}
-			// A settled lite07 tail acknowledges completion with FIN, without cancelling
+			// A settled lite-05+ tail acknowledges completion with FIN, without cancelling
 			// the publisher's already-finished receive half.
 			if (tailSettled && waitsForSubscriberFin(this.version)) stream.writer.close();
 			else stream.close();

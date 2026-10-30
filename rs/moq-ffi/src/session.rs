@@ -1246,8 +1246,8 @@ impl MoqSession {
 	/// handle or a `closed()` waiter; repeated requests share the same drain.
 	/// `cancel` stays immediate. The name avoids Kotlin's generated
 	/// `AutoCloseable.close()`, which releases the handle.
-	/// Explicit `moq-lite-07-wip` waits for the peer to receive the tail. Older Lite
-	/// versions, including the default lite-06, and IETF wait only for transport ACKs.
+	/// `moq-lite-05` and newer wait for the peer to receive the tail; older Lite
+	/// versions and IETF wait only for transport ACKs.
 	/// A drain that takes longer than one second ends with a delivery timeout.
 	pub fn shutdown(&self) {
 		let _guard = crate::ffi::enter();

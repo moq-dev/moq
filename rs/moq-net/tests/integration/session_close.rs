@@ -262,12 +262,22 @@ async fn close_times_out_waiting_for_announcement_acknowledgements() {
 	}
 }
 
-/// A transport ACK is not proof the subscriber read the final group.
+/// The versions whose SUBSCRIBE_END lets a subscriber settle its tail, and FIN, at once.
+const SETTLED_TAIL: [&str; 3] = ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
+
+/// A transport ACK is not proof the subscriber read the final group: a receiver may drop
+/// unread bytes on close.
 #[moq_clock::test]
 async fn close_tail() {
+	for version in SETTLED_TAIL {
+		close_tail_for(version).await;
+	}
+}
+
+async fn close_tail_for(version: &str) {
 	let Setup {
 		pair, track, reader, ..
-	} = setup("moq-lite-07-wip").await;
+	} = setup(version).await;
 	pair.client_transport.ack_fins();
 	pair.client_transport.hold_unis();
 	let mut group = track.append_group().unwrap();
@@ -278,27 +288,31 @@ async fn close_tail() {
 	moq_clock::sleep(Duration::from_millis(100)).await;
 	assert!(
 		!close.is_finished(),
-		"close must wait for the subscriber, not the transport ACK"
+		"{version}: close must wait for the subscriber, not the transport ACK"
 	);
 	pair.client_transport.release_unis();
-	close
-		.await
-		.unwrap()
-		.expect("close drains after the subscriber reads the tail");
+	let res = close.await.unwrap();
+	assert!(res.is_ok(), "{version}: close drains after the subscriber reads the tail: {res:?}");
 	let (got, end) = reader.await.unwrap();
-	assert_eq!(got, vec![b"last".to_vec()]);
-	end.expect("track ends cleanly");
+	assert_eq!(got, vec![b"last".to_vec()], "{version}");
+	assert!(end.is_ok(), "{version}: track ends cleanly: {end:?}");
 }
 
-/// A lite07 peer that never acknowledges the track end cannot report a successful close.
+/// A peer that never acknowledges the track end cannot report a successful close.
 #[moq_clock::test]
 async fn close_requires_subscriber_fin() {
+	for version in SETTLED_TAIL {
+		close_requires_subscriber_fin_for(version).await;
+	}
+}
+
+async fn close_requires_subscriber_fin_for(version: &str) {
 	let Setup {
 		pair,
 		track,
 		reader: _reader,
 		..
-	} = setup("moq-lite-07-wip").await;
+	} = setup(version).await;
 	pair.client_transport.ack_fins();
 	pair.server_transport.withhold_bidi_fins();
 	let mut group = track.append_group().unwrap();
@@ -306,18 +320,13 @@ async fn close_requires_subscriber_fin() {
 	group.finish().unwrap();
 	track.finish().unwrap();
 	let started = moq_clock::now();
-	assert!(matches!(pair.client.close().await, Err(Error::Timeout)));
-	assert_eq!(moq_clock::now() - started, Duration::from_secs(1));
+	let res = pair.client.close().await;
+	assert!(matches!(res, Err(Error::Timeout)), "{version}: {res:?}");
+	assert_eq!(moq_clock::now() - started, Duration::from_secs(1), "{version}");
 }
 
-/// Released drafts retain ACK-based close even when application delivery is delayed.
-#[moq_clock::test]
-async fn older_lite_close_keeps_ack_drain() {
-	for version in ["moq-lite-05", "moq-lite-06"] {
-		peer_close_reads_buffered_tail(version).await;
-	}
-}
-
+/// Before lite-05 only the subscriber's grace settles its tail, so the close keeps the
+/// ACK drain rather than wait out that timer.
 #[moq_clock::test]
 async fn earlier_lite_peer_close_reads_buffered_tail() {
 	for version in ["moq-lite-01", "moq-lite-02", "moq-lite-03", "moq-lite-04"] {
@@ -369,7 +378,12 @@ async fn peer_close_before_receiver_poll_keeps_buffered_tail() {
 		group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
 		group.finish().unwrap();
 		track.finish().unwrap();
-		pair.client.close().await.expect("FIN delivery needs no receiver poll");
+		let res = pair.client.close().await;
+		// From lite-05 the close waits for the subscriber's FIN, which the gate holds back.
+		match version {
+			"moq-lite-05" | "moq-lite-06" => assert!(matches!(res, Err(Error::Timeout)), "{version}: {res:?}"),
+			_ => assert!(res.is_ok(), "{version}: FIN delivery needs no receiver poll: {res:?}"),
+		}
 		*gate.write().ok().expect("receiver gate remains open") = true;
 		let (got, _) = reader.await.unwrap();
 		assert_eq!(got, vec![b"last".to_vec()], "{version}");
