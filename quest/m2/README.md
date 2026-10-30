@@ -101,7 +101,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Route wakes](/quest/m2/route-wakes.md) - a route change wakes only the fronts it can move, so pool churn stops scaling with served paths
 - [Flatten nested Options](/quest/m2/nested-options.md) - three moq-net functions stop building `Option<Option<_>>`, so the TS translation reaches them
 - [Fewer allocations in announce fan-out](/quest/m2/announce-fanout-allocs.md) - a deep path costs no more allocations per subscriber than a shallow one
-- [Keyed prefix polling](/quest/m2/keyed-prefix-polling.md) - `SubscriberDriver` polls only the prefixes a wake concerns, if a bench shows the slope
 - [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive track recovery over metadata-only subscriptions
 - [Wrapper traits over moq-net](/quest/m2/net-wrap/README.md) - moq-net exports producer and consumer traits, and every writer and reader above it takes them, so a wrapper such as e2ee passes through unchanged
 - [E2EE](/quest/m2/e2ee/README.md) - TypeScript and Rust peers interoperate over encrypted broadcasts no relay can decrypt
