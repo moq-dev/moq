@@ -152,7 +152,6 @@ removed).
 - [moq-transport carries no epoch](/quest/m1/ietf-epoch-cut.md) - Rust and JS moq-transport sessions stop negotiating MoQ Epoch, so every moq-transport hop is epochless; the draft stays
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
 - [On-demand JavaScript FETCH](/quest/m1/js-fetch-on-demand.md) - browser publishers answer IETF FETCH for evicted or uncached groups through the JS ranges request surface
-- [Rust FETCH parity](/quest/m1/ietf-fetch-parity.md) - Rust finishes an answered joining FETCH's head, refuses a lost head with DOES_NOT_EXIST, and sends no timestamps without TIMESCALE, as the JS publisher does
 - [Rust cancels an unclaimed fill head when a subscription ends](/quest/m1/ietf-fill-end-cancel.md) - SUBSCRIPTION_ENDED cancels, not finishes, a fill no group was sent for, as in JS
 - [SUBSCRIBE honors the properties opt-out](/quest/m1/subscribe-timestamps.md) - the Rust publisher sends untimed objects to a SUBSCRIBE that declines Track Properties, and the Rust subscriber asks for them when it needs timestamps
 - [A resumed untimed copy keeps DYNAMIC_GROUPS](/quest/m1/ietf-dynamic-groups-resume.md) - opting out of properties on a draft-22 resume no longer forgets DYNAMIC_GROUPS
