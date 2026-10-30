@@ -649,7 +649,7 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 
 	/// Start an interruptible operation on the idle `stream`: a read of up to
 	/// `max` bytes, or with `None` the closed-watch's `closed()`, whose end
-	/// reads as the FIN.
+	/// resolves as `Ok(None)`.
 	fn start(&mut self, mut stream: S, max: Option<usize>) {
 		let (tx, rx) = futures::channel::oneshot::channel::<()>();
 		self.interrupt = Some(tx);
@@ -696,15 +696,17 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 				RecvState::Reading(fut) => {
 					// A read wants the stream back from the closed-watch, which
 					// would otherwise hold it until the stream ends.
-					if self.watching
-						&& let Some(tx) = self.interrupt.take()
-					{
+					let watching = self.watching;
+					if watching && let Some(tx) = self.interrupt.take() {
 						let _ = tx.send(());
 					}
-					let Some(res) = ready!(self.poll_op(cx, fut)) else {
-						continue;
-					};
-					return Poll::Ready(res);
+					match ready!(self.poll_op(cx, fut)) {
+						// Interrupted, or the watch saw the stream end: the
+						// read that follows reports how.
+						None => continue,
+						Some(Ok(_)) if watching => continue,
+						Some(res) => return Poll::Ready(res),
+					}
 				}
 			}
 		}
@@ -722,7 +724,7 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 			return Poll::Pending;
 		};
 		self.interrupt = None;
-		self.watching = false;
+		let watched = std::mem::take(&mut self.watching);
 		// Apply a stop requested while the operation was in flight now, not on
 		// the next read: a caller that stops and never reads again must still
 		// send STOP_SENDING.
@@ -730,7 +732,8 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 			stream.stop(code);
 		}
 		*self.state.get_mut().unwrap() = Some(RecvState::Idle(stream));
-		if let Some(Ok(None)) = &res {
+		// Only a read's end is the FIN: closed() also ends at a reset.
+		if !watched && let Some(Ok(None)) = &res {
 			self.fin = true;
 		}
 		Poll::Ready(res)
@@ -815,20 +818,30 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for RecvS
 				// reads drain below the cap.
 				self.parked = Some(cx.waker().clone());
 				match self.state.get_mut().unwrap().take().expect("in-flight") {
-					RecvState::Idle(stream) => self.start(stream, None),
-					// The caller's own read, which wakes us by draining.
-					RecvState::Reading(fut) if !self.watching => {
-						*self.state.get_mut().unwrap() = Some(RecvState::Reading(fut));
-						return Poll::Pending;
+					RecvState::Idle(stream) => {
+						self.start(stream, None);
+						continue;
 					}
-					RecvState::Reading(fut) => match ready!(self.poll_op(cx, fut)) {
-						Some(Ok(_)) => return Poll::Ready(Ok(())),
-						Some(Err(err)) => return Poll::Ready(Err(err)),
-						// Interrupted by a stop; watch again.
-						None => {}
-					},
+					RecvState::Reading(fut) if self.watching => {
+						match ready!(self.poll_op(cx, fut)) {
+							Some(Err(err)) => return Poll::Ready(Err(err)),
+							// A reset ends closed() as well as the FIN, and after
+							// either no payload is left to wait on, so one read
+							// says which without growing the backlog.
+							Some(Ok(_)) => {
+								let Some(RecvState::Idle(stream)) = self.state.get_mut().unwrap().take() else {
+									unreachable!("a settled watch leaves the stream idle");
+								};
+								self.start(stream, Some(8 * 1024));
+							}
+							// Interrupted by a stop; watch again.
+							None => {}
+						}
+						continue;
+					}
+					// A read in flight, ours or the caller's: settle it below.
+					reading => *self.state.get_mut().unwrap() = Some(reading),
 				}
-				continue;
 			}
 			match ready!(self.poll_fill(cx, 8 * 1024)) {
 				Ok(Some(bytes)) => {
@@ -1076,16 +1089,12 @@ mod tests {
 			self.stops.lock().unwrap().push(code);
 		}
 
-		/// Ends at a reset, or at the FIN once every chunk was read.
+		/// Ends at a reset or at the FIN once every chunk was read, and like
+		/// moq-tokio's own streams does not say which.
 		async fn closed(&mut self) -> Result<(), Self::Error> {
-			std::future::poll_fn(|_| {
-				if self.reset.load(Ordering::SeqCst) {
-					return Poll::Ready(Err(FakeError));
-				}
-				match self.chunks.is_empty() {
-					true => Poll::Ready(Ok(())),
-					false => Poll::Pending,
-				}
+			std::future::poll_fn(|_| match self.reset.load(Ordering::SeqCst) || self.chunks.is_empty() {
+				true => Poll::Ready(Ok(())),
+				false => Poll::Pending,
 			})
 			.await
 		}
@@ -1490,6 +1499,11 @@ mod tests {
 			read += chunk.len();
 		}
 		assert_eq!(read, READ_AHEAD_CAP);
+		assert_eq!(
+			recv.poll_read_chunk(&mut cx, 1),
+			Poll::Ready(Err(FakeError)),
+			"a reset, not the FIN"
+		);
 	}
 
 	// A watch parked at the cap is woken by a read in another task draining
