@@ -444,11 +444,19 @@ impl Drop for Reservation {
 /// [`Budget`]). Clones share delivery progress; [`Self::fork`] starts another delivery
 /// over the same content. Publication serializes their writes, never rewriting bytes
 /// already visible to readers, while each delivery advances only as its bytes arrive.
+///
+/// The delivery that creates the content keeps its progress in the content itself, so
+/// a frame with one delivery, nearly every frame, costs one allocation. Only a fork
+/// allocates a [`View`] of its own.
 #[derive(Clone)]
-pub(super) struct FrameBuf(Arc<FrameBufInner>);
-
-struct FrameBufInner {
+pub(super) struct FrameBuf {
 	content: Arc<FrameContent>,
+	fork: Option<Arc<View>>,
+}
+
+/// A forked delivery's progress, shared by its clones.
+#[derive(Default)]
+struct View {
 	received: AtomicUsize,
 	bill: OnceLock<cache::Extra>,
 }
@@ -457,7 +465,11 @@ struct FrameContent {
 	size: usize,
 	grow: AtomicBool,
 	written: AtomicUsize,
+	// The creating delivery's received bytes; a fork counts its own in its [`View`].
+	received: AtomicUsize,
 	storage: OnceLock<FrameStorage>,
+	// Copied storage frozen once, so every delivery shares one payload. Whole storage
+	// freezes as itself and leaves this empty.
 	frozen: OnceLock<Payload>,
 	publication: Mutex<Publication>,
 	bill: OnceLock<cache::Extra>,
@@ -503,8 +515,9 @@ impl Shared {
 			size,
 			grow: AtomicBool::new(false),
 			written: AtomicUsize::new(size),
-			storage: OnceLock::from(FrameStorage::Shared(payload.clone())),
-			frozen: OnceLock::from(payload),
+			received: AtomicUsize::new(size),
+			storage: OnceLock::from(FrameStorage::Shared(payload)),
+			frozen: OnceLock::new(),
 			publication: Mutex::default(),
 			bill: OnceLock::new(),
 			identity: OnceLock::new(),
@@ -514,11 +527,10 @@ impl Shared {
 		SharedWeak(Arc::downgrade(&self.0))
 	}
 	pub(super) fn fork(&self) -> FrameBuf {
-		FrameBuf(Arc::new(FrameBufInner {
+		FrameBuf {
 			content: self.0.clone(),
-			received: AtomicUsize::new(0),
-			bill: OnceLock::new(),
-		}))
+			fork: Some(Arc::default()),
+		}
 	}
 	pub(super) fn freeze(&self) -> Payload {
 		self.0.freeze()
@@ -558,19 +570,14 @@ impl Shared {
 impl FrameContent {
 	fn bill_content(&self, bill: cache::Extra) {
 		let content = self;
-		let publication = content.publication.lock().unwrap_or_else(PoisonError::into_inner);
+		let _publication = content.publication.lock().unwrap_or_else(PoisonError::into_inner);
 		content.bill.get_or_init(|| {
-			let admission = if publication.admitted {
-				FrameBuf::ADMISSION_HEAP
-			} else {
-				0
-			};
 			let written = self.written.load(Ordering::Relaxed) as u64;
 			// A lazy owner may take already-billed payload from the original delivery.
 			let fresh = written
 				.checked_sub(bill.size())
 				.expect("transferred payload cannot exceed published bytes");
-			bill.add(fresh + (FrameBuf::CONTENT_HEAP + admission) as u64);
+			bill.add(fresh + FrameBuf::CONTENT_HEAP as u64);
 			if let Some(identity) = self.identity.get() {
 				identity.owner.charge_frame(bill.size());
 			}
@@ -591,9 +598,12 @@ impl FrameContent {
 
 	fn freeze(&self) -> Payload {
 		debug_assert_eq!(self.written.load(Ordering::Acquire), self.size);
+		// A whole payload is already its own frozen form; only copied storage builds one.
+		if let Some(FrameStorage::Shared(payload)) = self.storage.get() {
+			return payload.clone();
+		}
 		self.frozen
 			.get_or_init(|| match self.storage.get() {
-				Some(FrameStorage::Shared(payload)) => payload.clone(),
 				Some(FrameStorage::Chain(segments)) => {
 					let segments = segments.lock().unwrap_or_else(PoisonError::into_inner);
 					debug_assert!(segments.open.is_none(), "froze a frame mid-segment");
@@ -637,17 +647,45 @@ impl FrameContent {
 	}
 }
 
+/// What a frame's concurrent deliveries share while publishing into its content.
 #[derive(Default)]
 struct Publication {
-	admission: Weak<Admission>,
-	admitted: bool,
+	// Producers holding the frame's admission; the last one to end releases it.
+	producers: usize,
+	// The admission's share of the budget, if it got one. Even a failed reservation is
+	// shared, so overlapping deliveries use the same growth strategy without each
+	// attempting another admission.
+	reserved: Option<Reservation>,
 }
 
-/// One canonical frame's reservation while any of its producers remains active.
-/// Even a failed reservation is shared, so overlapping deliveries use the same
-/// growth strategy without each attempting another admission.
-pub(super) struct Admission {
-	_reserved: Option<Reservation>,
+/// One producer's hold on its canonical frame's admission. The reservation returns to
+/// the budget once no producer of the frame remains active.
+///
+/// The admission lives in the frame's [`Publication`] rather than an allocation of its
+/// own: every streamed frame takes one, and nearly all have a single producer.
+pub(super) struct Admission(Arc<FrameContent>);
+
+impl Admission {
+	/// Whether the frame holds a share of the budget.
+	#[cfg(test)]
+	fn reserved(&self) -> bool {
+		self.0
+			.publication
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.reserved
+			.is_some()
+	}
+}
+
+impl Drop for Admission {
+	fn drop(&mut self) {
+		let mut publication = self.0.publication.lock().unwrap_or_else(PoisonError::into_inner);
+		publication.producers -= 1;
+		if publication.producers == 0 {
+			publication.reserved = None;
+		}
+	}
 }
 
 enum FrameStorage {
@@ -771,8 +809,7 @@ impl AsRef<[u8]> for Filled {
 
 impl FrameBuf {
 	pub(super) const CONTENT_HEAP: usize = 2 * size_of::<usize>() + size_of::<FrameContent>();
-	pub(super) const VIEW_HEAP: usize = 2 * size_of::<usize>() + size_of::<FrameBufInner>();
-	pub(super) const ADMISSION_HEAP: usize = 2 * size_of::<usize>() + size_of::<Admission>();
+	pub(super) const VIEW_HEAP: usize = 2 * size_of::<usize>() + size_of::<View>();
 
 	/// A buffer for a frame of `size` bytes, allocated at that size on the first write.
 	///
@@ -789,120 +826,123 @@ impl FrameBuf {
 	}
 
 	fn with_growth(size: usize, grow: bool) -> Self {
-		Self(Arc::new(FrameBufInner {
+		Self {
 			content: Arc::new(FrameContent {
 				size,
 				grow: AtomicBool::new(grow),
 				written: AtomicUsize::new(0),
+				received: AtomicUsize::new(0),
 				storage: OnceLock::new(),
 				frozen: OnceLock::new(),
 				publication: Mutex::default(),
 				bill: OnceLock::new(),
 				identity: OnceLock::new(),
 			}),
-			received: AtomicUsize::new(0),
-			bill: OnceLock::new(),
-		}))
+			fork: None,
+		}
 	}
 
 	/// Keep an already-complete payload without copying its buffers or segments.
 	#[cfg(test)]
 	pub(super) fn from_payload(payload: Payload) -> Self {
-		let size = payload.len();
-		Self(Arc::new(FrameBufInner {
+		Self {
 			content: Shared::from_payload(payload).0,
-			received: AtomicUsize::new(size),
-			bill: OnceLock::new(),
-		}))
+			fork: None,
+		}
 	}
 
 	pub(super) fn shared(&self) -> Shared {
-		Shared(self.0.content.clone())
+		Shared(self.content.clone())
 	}
 
 	/// Another delivery of the same immutable frame, starting before its first byte.
 	#[cfg(test)]
 	pub(super) fn fork(&self) -> Self {
-		Self(Arc::new(FrameBufInner {
-			content: self.0.content.clone(),
-			received: AtomicUsize::new(0),
-			bill: OnceLock::new(),
-		}))
+		self.shared().fork()
 	}
 
 	/// Bill physical content once, including bytes already received before attachment.
 	/// The charge follows its buffers even if a cached row lets go before a stream does.
 	#[cfg(test)]
 	pub(super) fn bill_content(&self, bill: cache::Extra) {
-		self.0.content.bill_content(bill);
+		self.content.bill_content(bill);
 	}
 
 	/// One delivery's metadata, retained by its streaming readers and shared by clones.
+	/// The creating delivery's lives in its content, so only a fork's is billed here.
 	pub(super) fn bill_view(&self, bill: cache::Extra) {
-		self.0.bill.get_or_init(|| {
-			bill.add(Self::VIEW_HEAP as u64);
-			bill
-		});
+		if let Some(view) = &self.fork {
+			view.bill.get_or_init(|| {
+				bill.add(Self::VIEW_HEAP as u64);
+				bill
+			});
+		}
 	}
 
 	/// The canonical allocation's charge, counted once by its cache owner.
 	#[cfg(test)]
 	pub(super) fn content_size(&self) -> u64 {
-		self.0.content.bill.get().map_or(0, cache::Extra::size)
+		self.content.bill.get().map_or(0, cache::Extra::size)
 	}
 
 	/// This delivery's charge; clones retain the same view allocation.
 	pub(super) fn view_size(&self) -> u64 {
-		self.0.bill.get().map_or(0, cache::Extra::size)
+		self.fork
+			.as_ref()
+			.and_then(|view| view.bill.get())
+			.map_or(0, cache::Extra::size)
+	}
+
+	/// This delivery's received bytes.
+	fn received(&self) -> &AtomicUsize {
+		match &self.fork {
+			Some(view) => &view.received,
+			None => &self.content.received,
+		}
 	}
 
 	/// Share the existing per-frame admission until its last active producer ends.
 	/// Complete canonical data is replayed without reserving memory again.
-	pub(super) fn admit(&self, budget: &Budget) -> Option<Arc<Admission>> {
-		let content = &self.0.content;
+	pub(super) fn admit(&self, budget: &Budget) -> Option<Admission> {
+		let content = &self.content;
 		let mut publication = content.publication.lock().unwrap_or_else(PoisonError::into_inner);
 		if self.shared_written(Ordering::Acquire) == self.size() {
 			return None;
 		}
-		if let Some(admission) = publication.admission.upgrade() {
-			return Some(admission);
+		if publication.producers == 0 {
+			let reserved = budget.reserve(self.size().min(SEGMENT));
+			// Existing bytes keep their allocations. A later admission may only make
+			// future growth more conservative once storage already exists.
+			if reserved.is_none() || content.storage.get().is_none() {
+				content.grow.store(reserved.is_none(), Ordering::Relaxed);
+			}
+			publication.reserved = reserved;
 		}
-		let reserved = budget.reserve(self.size().min(SEGMENT));
-		// Existing bytes keep their allocations. A later admission may only make
-		// future growth more conservative once storage already exists.
-		if reserved.is_none() || content.storage.get().is_none() {
-			content.grow.store(reserved.is_none(), Ordering::Relaxed);
-		}
-		let admission = Arc::new(Admission { _reserved: reserved });
-		publication.admission = Arc::downgrade(&admission);
-		if !publication.admitted {
-			publication.admitted = true;
-			content.add_charge(Self::ADMISSION_HEAP as u64);
-		}
-		Some(admission)
+		publication.producers += 1;
+		drop(publication);
+		Some(Admission(content.clone()))
 	}
 
 	/// The frame's declared size.
 	pub(super) fn size(&self) -> usize {
-		self.0.content.size
+		self.content.size
 	}
 
 	/// Bytes this delivery received, independently of other copies' progress.
 	pub(super) fn written(&self, ord: Ordering) -> usize {
-		self.0.received.load(ord)
+		self.received().load(ord)
 	}
 
 	/// Unique canonical bytes published so far, for shared-content accounting.
 	pub(super) fn shared_written(&self, ord: Ordering) -> usize {
-		self.0.content.written.load(ord)
+		self.content.written.load(ord)
 	}
 
 	fn try_set_bytes(&self, bytes: Bytes) -> std::result::Result<(), Bytes> {
 		if bytes.len() != self.size() || self.shared_written(Ordering::Acquire) != 0 {
 			return Err(bytes);
 		}
-		self.0
-			.content
+		self.content
 			.storage
 			.set(FrameStorage::Shared(Payload::Whole(bytes)))
 			.map_err(|storage| match storage {
@@ -913,7 +953,7 @@ impl FrameBuf {
 
 	/// Safety: caller holds the publication mutex and `new_written` is `<= size`.
 	unsafe fn store_written(&self, new_written: usize) {
-		let content = &self.0.content;
+		let content = &self.content;
 		let before = content.written.load(Ordering::Relaxed);
 		content.add_charge((new_written - before) as u64);
 		// Release pairs with consumers' Acquire load to publish prior writes.
@@ -926,7 +966,7 @@ impl FrameBuf {
 	}
 
 	fn write_chunk<B: IntoBytes>(&self, chunk: B) -> Result<()> {
-		let content = &self.0.content;
+		let content = &self.content;
 		let _publication = content.publication.lock().unwrap_or_else(PoisonError::into_inner);
 		let start = self.written(Ordering::Relaxed);
 		let end = start
@@ -959,7 +999,7 @@ impl FrameBuf {
 				self.append_suffix(&chunk.as_ref()[published - start..]);
 			}
 		}
-		self.0.received.store(end, Ordering::Release);
+		self.received().store(end, Ordering::Release);
 		Ok(())
 	}
 
@@ -970,7 +1010,7 @@ impl FrameBuf {
 		}
 		let prev = self.shared_written(Ordering::Relaxed);
 		let size = self.size();
-		let content = &self.0.content;
+		let content = &self.content;
 		let grow = content.grow.load(Ordering::Relaxed);
 		let storage = content.storage.get_or_init(|| match grow {
 			_ if size > SEGMENT => FrameStorage::Chain(Mutex::default()),
@@ -1002,7 +1042,7 @@ impl FrameBuf {
 	/// Called only once the canonical payload is complete. Delivery completion is
 	/// checked separately by [`Producer::finish`].
 	pub(super) fn freeze(&self) -> Payload {
-		self.0.content.freeze()
+		self.content.freeze()
 	}
 
 	/// A zero-copy slice of the written region from `start` to `end`, or to the end of
@@ -1011,13 +1051,13 @@ impl FrameBuf {
 	/// `end` must not exceed a shared published value already loaded with `Acquire`.
 	/// A delivery's own received count is always within that prefix too.
 	fn slice(&self, start: usize, end: usize) -> Bytes {
-		self.0.content.slice(start, end)
+		self.content.slice(start, end)
 	}
 
 	/// Heap bytes the buffer currently holds for the payload.
 	#[cfg(test)]
 	pub(super) fn allocated(&self) -> usize {
-		match self.0.content.storage.get() {
+		match self.content.storage.get() {
 			Some(FrameStorage::Shared(payload)) => payload.len(),
 			Some(FrameStorage::Fixed(segment)) => segment.capacity,
 			Some(FrameStorage::Growing(current)) => current.lock().unwrap_or_else(PoisonError::into_inner).capacity,
@@ -1059,7 +1099,7 @@ pub struct Producer {
 	// chunk's bytes. Empty (no-op) for an untagged group.
 	stats: stats::Meter,
 	// The frame's share of the origin's [`Budget`], if it got one, held until it ends.
-	_reserved: Option<Arc<Admission>>,
+	_reserved: Option<Admission>,
 }
 
 impl std::ops::Deref for Producer {
@@ -1071,7 +1111,7 @@ impl std::ops::Deref for Producer {
 }
 
 impl Producer {
-	pub(super) fn new(group: group::Producer, buf: FrameBuf, info: Info, reserved: Option<Arc<Admission>>) -> Self {
+	pub(super) fn new(group: group::Producer, buf: FrameBuf, info: Info, reserved: Option<Admission>) -> Self {
 		Self {
 			group: Some(group),
 			buf,
@@ -1630,10 +1670,9 @@ mod tests {
 		assert_eq!(left, b"abcdefgh".as_slice());
 		assert_eq!(left.as_ptr(), right.as_ptr());
 		eprintln!(
-			"canonical frame metadata: content={}B, view={}B, active admission={}B",
+			"canonical frame metadata: content={}B, view={}B",
 			FrameBuf::CONTENT_HEAP,
-			FrameBuf::VIEW_HEAP,
-			FrameBuf::ADMISSION_HEAP
+			FrameBuf::VIEW_HEAP
 		);
 	}
 
@@ -1726,8 +1765,11 @@ mod tests {
 		let b = a.fork();
 		let a_active = a.admit(&budget).unwrap();
 		let b_active = b.admit(&budget).unwrap();
-		assert!(Arc::ptr_eq(&a_active, &b_active));
-		assert!(budget.reserve(1).is_none());
+		assert!(Arc::ptr_eq(&a_active.0, &b_active.0));
+		assert!(
+			budget.reserve(1).is_none(),
+			"the second producer shares the first's reservation"
+		);
 		a.append(&vec![7; SEGMENT + 1]).unwrap();
 		let replay = a.fork();
 		assert!(
@@ -1753,8 +1795,8 @@ mod tests {
 		let b = a.fork();
 		let left = a.admit(&budget).unwrap();
 		let right = b.admit(&budget).unwrap();
-		assert!(Arc::ptr_eq(&left, &right));
-		assert!(left._reserved.is_none());
+		assert!(Arc::ptr_eq(&left.0, &right.0));
+		assert!(!left.reserved());
 		a.append(b"a").unwrap();
 		assert_eq!(a.allocated(), 1, "failed admission grows only with received bytes");
 		b.append(b"ab").unwrap();
@@ -1774,12 +1816,17 @@ mod tests {
 		assert_eq!(pool.used(), baseline, "the content has not attached its account yet");
 		a.bill_content(charge.extra());
 		a.bill_view(charge.extra());
+		assert_eq!(
+			pool.used(),
+			baseline + FrameBuf::CONTENT_HEAP as u64 + 4,
+			"the creating delivery's progress is billed with its content"
+		);
 		let b = a.fork();
 		b.bill_content(charge.extra());
 		b.bill_view(charge.extra());
 		let reader = b.clone();
 		reader.bill_view(charge.extra());
-		let metadata = (FrameBuf::CONTENT_HEAP + FrameBuf::ADMISSION_HEAP + 2 * FrameBuf::VIEW_HEAP) as u64;
+		let metadata = (FrameBuf::CONTENT_HEAP + FrameBuf::VIEW_HEAP) as u64;
 		assert_eq!(
 			pool.used(),
 			baseline + metadata + 4,
@@ -1795,23 +1842,19 @@ mod tests {
 		assert_eq!(pool.used(), baseline + metadata + 8);
 		drop(active);
 		drop(a);
-		assert_eq!(pool.used(), baseline + metadata + 8 - FrameBuf::VIEW_HEAP as u64);
+		assert_eq!(pool.used(), baseline + metadata + 8, "the fork still holds the content");
 		drop(b);
 		assert_eq!(
 			pool.used(),
-			baseline + metadata + 8 - FrameBuf::VIEW_HEAP as u64,
+			baseline + metadata + 8,
 			"the streaming clone owns its view and content"
 		);
 		drop(reader);
-		assert_eq!(
-			pool.used(),
-			baseline,
-			"the weak admission and all intrinsic charges release with content"
-		);
+		assert_eq!(pool.used(), baseline, "all intrinsic charges release with content");
 	}
 
 	#[test]
-	fn preattached_content_bills_admission_once_and_completed_payload_needs_none() {
+	fn admission_allocates_nothing_and_completed_payload_needs_none() {
 		let pool = cache::Pool::unbounded();
 		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let charge = account.charge();
@@ -1819,28 +1862,29 @@ mod tests {
 		let a = FrameBuf::new(8);
 		a.bill_content(charge.extra());
 		a.bill_view(charge.extra());
-		let metadata = (FrameBuf::CONTENT_HEAP + FrameBuf::VIEW_HEAP) as u64;
+		let metadata = FrameBuf::CONTENT_HEAP as u64;
 		assert_eq!(pool.used(), baseline + metadata);
 		let budget = Budget::new(0);
 		let first = a.admit(&budget).unwrap();
 		let copy = a.fork();
 		let second = copy.admit(&budget).unwrap();
-		assert!(Arc::ptr_eq(&first, &second));
-		assert_eq!(pool.used(), baseline + metadata + FrameBuf::ADMISSION_HEAP as u64);
+		assert!(Arc::ptr_eq(&first.0, &second.0));
+		assert_eq!(
+			pool.used(),
+			baseline + metadata,
+			"an admission lives in its content, allocating nothing"
+		);
 		drop(first);
 		drop(second);
 		let resumed = a.admit(&budget).unwrap();
 		assert_eq!(
 			pool.used(),
-			baseline + metadata + FrameBuf::ADMISSION_HEAP as u64,
-			"replacing an expired admission keeps one weak allocation"
+			baseline + metadata,
+			"a renewed admission allocates nothing either"
 		);
 		a.append(b"abcdefgh").unwrap();
-		assert_eq!(
-			a.content_size(),
-			(FrameBuf::CONTENT_HEAP + FrameBuf::ADMISSION_HEAP + 8) as u64
-		);
-		assert_eq!(a.view_size(), FrameBuf::VIEW_HEAP as u64);
+		assert_eq!(a.content_size(), (FrameBuf::CONTENT_HEAP + 8) as u64);
+		assert_eq!(a.view_size(), 0, "the creating delivery's view is part of its content");
 		assert_eq!(copy.view_size(), 0, "a fork starts without a delivery charge");
 		drop(resumed);
 		drop(a);

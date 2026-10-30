@@ -260,15 +260,18 @@ int main(void) {
     /* Publisher: a server whose origin serves one broadcast with one track. */
     moq_origin_config origin_config = moq_origin_config_default();
     moq_origin_producer *origin = moq_origin_producer_new(&origin_config);
-    moq_broadcast_producer *broadcast = NULL;
-    ok(moq_origin_producer_create_broadcast(origin, "probe", &broadcast), "create_broadcast");
+    moq_publication *publication = NULL;
+    ok(moq_origin_producer_create_broadcast(origin, "probe", &publication), "create_broadcast");
+    moq_broadcast_producer *broadcast = moq_publication_broadcast(publication);
     moq_track_info info = moq_track_info_default();
     info.timescale.has_value = true;
     info.timescale.value = 1000000;
     moq_track_producer *track = NULL;
     ok(moq_broadcast_producer_publish_track(broadcast, "data", &info, &track), "publish_track");
     moq_announce_route route = moq_announce_route_default();
-    ok(moq_broadcast_producer_announce(broadcast, &route), "announce");
+    ok(moq_publication_announce(publication, &route), "announce");
+    /* Releasing the publication keeps the route: the subscriber below still reaches it. */
+    moq_publication_free(publication);
 
     const char *generate[] = {"localhost"};
     const char *versions[] = {"moq-lite-07-wip"};
@@ -316,10 +319,10 @@ int main(void) {
 
     /* Subscriber: resolve the announced broadcast and subscribe to its track. */
     moq_origin_consumer *remote_origin = moq_session_consume(session);
-    moq_announced_broadcast *announced = NULL;
-    ok(moq_origin_consumer_announced_broadcast(remote_origin, "probe", &announced), "announced_broadcast");
+    moq_following *following = NULL;
+    ok(moq_origin_consumer_follow(remote_origin, "probe", NULL, &following), "follow");
     result available = {0};
-    task = moq_announced_broadcast_available(announced, on_broadcast, &available);
+    task = moq_following_available(following, on_broadcast, &available);
     moq_broadcast_consumer *remote = await(&available, "available");
     moq_task_free(task);
     result subscribed = {0};
@@ -379,7 +382,7 @@ int main(void) {
 
     moq_track_consumer_free(consumer);
     moq_broadcast_consumer_free(remote);
-    moq_announced_broadcast_free(announced);
+    moq_following_free(following);
     moq_origin_consumer_free(remote_origin);
     moq_session_free(session);
     moq_session_free(served);
@@ -424,8 +427,10 @@ int main(void) {
      * while moq_shutdown drains the dispatcher; none may run once it returns, even as the
      * handles are freed afterward. */
     moq_origin_producer *late_origin = moq_origin_producer_new(&origin_config);
-    moq_broadcast_producer *late_broadcast = NULL;
-    ok(moq_origin_producer_create_broadcast(late_origin, "late", &late_broadcast), "late broadcast");
+    moq_publication *late_publication = NULL;
+    ok(moq_origin_producer_create_broadcast(late_origin, "late", &late_publication), "late broadcast");
+    moq_broadcast_producer *late_broadcast = moq_publication_broadcast(late_publication);
+    moq_publication_free(late_publication);
     moq_track_producer *late_track = NULL;
     ok(moq_broadcast_producer_publish_track(late_broadcast, "data", &info, &late_track), "late track");
     moq_track_consumer *late = NULL;

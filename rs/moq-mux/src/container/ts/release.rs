@@ -162,7 +162,6 @@ impl Release {
 					decode: frame.timestamp.into(),
 					restart: track.markers(),
 					skip: track.skips(),
-					cut: track.cuts(),
 					// The output opens on a group, at a random access point; from then on every
 					// object goes out on its own, so one dropped late is a gap of its packets only.
 					sync: frame.keyframe || self.released,
