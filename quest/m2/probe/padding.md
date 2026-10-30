@@ -2,13 +2,13 @@
 
 ## Goal
 
-A browser session (`js/net` over WebTransport) probes up to its target with
-padding datagrams sent below every media stream, so padding never delays
+A browser session (`js/net` over WebTransport) on lite-07 probes up to its
+target with padding datagrams sent below every media stream, so padding never delays
 media at the sender and is dropped rather than queued when there is no room.
 A shaped link in Chrome proves it: with padding the estimate rises past the
 media, without it it stays frozen, and on a path with no room padding stays
-within its overhead and media frame-delay budgets. Such sessions on lite-07
-or IETF draft-18 and later then have a sender, so
+within its overhead and media frame-delay budgets. Such lite-07 sessions
+then have a sender, so
 [viewer targets](/quest/m2/probe/viewer-target.md) can advertise PROBE
 `Increase` for them.
 
@@ -27,6 +27,14 @@ often cause the congestion they probe for. A padding stream at the lowest
 once written, so a frame ready just after a cluster waits behind it. Padding
 should instead use datagrams at the lowest priority: unreliable, never
 retransmitted, and dropped by the sender once stale.
+
+✅ Decided with the maintainer on 2026-10-30: padding datagrams are
+supported **only on lite-07**. Neither IETF moq-transport nor lite-05/06
+gets a sender, and #7390's moq-transport PADDING stream writer goes with the
+rest of the stream writer. lite-07 gains a padding datagram type that
+receivers discard before its cut. That type is its own quest, gating
+[Finalize moq-lite-07](/quest/m1/lite07-finalize.md)
+([moq-dev/moq#7419](https://github.com/moq-dev/moq/pull/7419)).
 
 What the browsers allow, checked on 2026-10-30:
 
@@ -58,14 +66,11 @@ What the browsers allow, checked on 2026-10-30:
 
 So, to do:
 
-- **Wire.** moq-transport draft-18+ defines padding datagrams (Section 11.5,
-  cited by `drafts/draft-lcurley-moq-probe.md`); check that moq-net's IETF
-  receiver discards them, since `run_datagrams` in
-  `rs/moq-net/src/ietf/session.rs` ends the session on a malformed datagram.
-  Lite datagrams (lite-05 §6.4) carry only group bodies, so lite-07 needs a
-  padding datagram type before its cut, or the lite sender waits for a later
-  version.
-- **Sender.** Replace #7390's `Padding` writer with one datagram writable
+- **Wire.** The lite-07 padding datagram type lands before the cut, under
+  [Finalize moq-lite-07](/quest/m1/lite07-finalize.md). The sender uses
+  it only on lite-07. If `drafts/draft-lcurley-moq-probe.md` names
+  moq-transport padding as a mechanism, scope it to lite-07.
+- **Sender.** On lite-07 only, replace #7390's `Padding` writer with one datagram writable
   from `createWritable({ sendOrder: Number.MIN_SAFE_INTEGER })`, with a short
   `outgoingMaxAge` so queued padding expires instead of sending late. Keep
   the send target and ALR schedule, retuned for datagrams.

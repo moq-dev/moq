@@ -58,9 +58,9 @@ Decided with the maintainer on 2026-10-20:
 - Padding is browser-only (WebTransport in `js/net`). moq-quic with BBR3 is
   the only native backend with a probing hook; other native backends (iroh
   on noq, moq-quic under CUBIC) have no sender, keep `Report`, and never
-  disable a rung. lite-07 reserves its stream
-  type before the cut (Padding Stream 0x2), and
-  the sender stays here.
+  disable a rung. Decided 2026-10-30: browser padding uses datagrams and
+  only on lite-07, which reserves a padding datagram type before its cut.
+  The sender stays here.
 - The JS publisher's rung disable split into its own quest here, since it
   probes with padding.
 - The target then split: m1 keeps the send target
@@ -85,7 +85,7 @@ This README's own work, once the children land:
 ## Required
 
 - [Native rung disable](/quest/m1/simulcast-rung-disable.md) - OBS stops sending the top renditions its grant cannot fund, as the Rust/FFI publishers do, and a shaped uplink through moq-ffi proves the resume
-- [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
+- [Padding probes](/quest/m2/probe/padding.md) - a browser on lite-07 probes with lowest-priority padding datagrams on an ALR schedule
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
 - [Viewer targets](/quest/m2/probe/viewer-target.md) - a session sends its viewer handles as its PROBE target, probes to the peer's, splits the receive estimate into viewer grants, and advertises `Increase` where a sender exists
 - [Players set viewer targets](/quest/m2/probe/players.md) - players hold a viewer handle per watched broadcast at its highest enabled rendition's bitrate
