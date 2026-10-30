@@ -717,11 +717,14 @@ def recipe_line(root: Path, recipe: Recipe) -> str:
     return str(source.relative_to(root))
 
 
-def runs_tests(graph: Graph, recipe: Recipe) -> bool:
+def runs_tests(graph: Graph, recipe: Recipe, found: set[Path]) -> bool:
     """A recipe runs tests when its body runs a suite, or names a script no workflow reaches
-    that runs one, is a test script, or drives a browser. A wrapper around a reached script
-    adds no test of its own."""
-    texts = [(recipe.text, None)]
+    that runs one, is a test script, or drives a browser. A wrapper around a reached script,
+    or a bare `bun test` in a directory a reached run already tests, adds no test of its own."""
+    text = recipe.text
+    if any(recipe.cwd.is_relative_to(directory) for directory in found):
+        text = re.sub(r"(?m)^\s*bun test\s*$", "", text)
+    texts = [(text, None)]
     seen = set()
     while texts:
         text, file = texts.pop()
@@ -749,9 +752,12 @@ def drives_browser(path: Path, relative: str) -> bool:
     return re.search(r"""from ["']playwright["']""", path.read_text(errors="replace")) is not None
 
 
-def discovered(root: Path) -> set[Path]:
-    """What a Bun package's scripts discover with `bun test`: the paths it names, or the package."""
+def discovered(root: Path, graph: Graph) -> set[Path]:
+    """What `bun test` discovers: the paths a Bun package's scripts name, or the package, and
+    every Worker sh/js/workers.sh tests, one per lockfile outside the workspace."""
     found = set()
+    if root / "sh/js/workers.sh" in graph.files:
+        found.update(lock.parent for lock in tracked(root, "*/bun.lock"))
     for manifest in tracked(root, "package.json", "*/package.json"):
         for script in json.loads(manifest.read_text()).get("scripts", {}).values():
             for match in re.finditer(r"\bbun test((?: +[^&|;]+?)*)\s*(?:$|&&|\|\||;)", script):
@@ -813,18 +819,19 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
                 if not any(benched(chosen, run, target) for chosen, run in selections):
                     orphans.append((f"bench {target.package}::{target.name}", where))
 
+    found = discovered(root, graph)
+
     # Recipes that run tests.
     recipes = {recipe.path: recipe for module in justfiles.values() for recipe in module.recipes.values()}
     for _, recipe in sorted(recipes.items()):
-        if recipe.path not in graph.reached and runs_tests(graph, recipe):
+        if recipe.path not in graph.reached and runs_tests(graph, recipe, found):
             orphans.append((f"recipe {recipe.path}", recipe_line(root, recipe)))
 
     # Standalone test scripts.
-    packages_with_bun_test = discovered(root)
     for path in tracked(root, "*.test.py", "*.test.sh", "*.test.ts", "*.test.js", "*.browser.ts"):
         relative = str(path.relative_to(root))
         if path.suffix in (".ts", ".js") and not path.name.endswith(".browser.ts") and any(
-                path.resolve().is_relative_to(directory) for directory in packages_with_bun_test):
+                path.resolve().is_relative_to(directory) for directory in found):
             continue
         if path.resolve() not in graph.files:
             orphans.append((f"script {relative}", relative))

@@ -177,6 +177,20 @@ class InventoryTest(unittest.TestCase):
         self.assertNotIn("recipe rs::sweep", orphans)
         self.assertNotIn("ignore media::probe::long_sweep", orphans)
 
+    def test_workers_are_tested_by_their_lockfile(self):
+        self.write("infra/worker/bun.lock", "")
+        self.write("infra/worker/src/policy.test.ts", "")
+        self.write("infra/worker/justfile", "test:\n    bun test\n")
+        orphans = self.orphans()
+        self.assertIn("recipe infra/worker::test", orphans)
+        self.assertIn("script infra/worker/src/policy.test.ts", orphans)
+
+        self.write("sh/js/workers.sh", "")
+        self.write("justfile", JUSTFILE + "        bash sh/js/workers.sh\n")
+        orphans = self.orphans()
+        self.assertNotIn("recipe infra/worker::test", orphans)
+        self.assertNotIn("script infra/worker/src/policy.test.ts", orphans)
+
     def test_a_selection_outside_the_ignored_set_covers_nothing(self):
         # Same filter, but without --run-ignored nextest skips the ignored tests.
         self.write("justfile", JUSTFILE.replace("--run-ignored only ", ""))
