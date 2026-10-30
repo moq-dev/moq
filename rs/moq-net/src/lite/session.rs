@@ -438,22 +438,20 @@ impl Driver {
 					self.session.abort(&Error::Cancel, SessionError::Cancel.to_code(), "");
 				}
 			}
-			if self.session.closing().is_local() {
-				self.subscriber.close();
-				return Poll::Ready(res);
-			}
 			self.ending = Some(res);
 		}
 		// Closing the transport first bounds every read, including when a control
 		// stream ended the protocol while the connection itself was still live.
-		// Keep control machines and their subscription entries until data drains.
+		// Keep control machines and their subscription entries until data drains,
+		// whichever side closed it.
 		std::task::ready!(self.subscriber.poll_drain(waiter));
 		let res = self.ending.take().expect("draining a terminal session");
-		if let Err(err) = &res {
-			self.subscriber.abort(err);
-		} else {
-			self.subscriber.close();
-		}
+		// A clean close, by dropping or draining here or by the peer, cuts off what is
+		// still arriving with the cancelled session either way.
+		self.subscriber.abort(match &res {
+			Err(err) if !self.session.closing().is_local() => err,
+			_ => &Error::Session(SessionError::Cancel),
+		});
 		Poll::Ready(res)
 	}
 
@@ -636,6 +634,7 @@ impl kio::Task for PresentToken {
 impl PresentToken {
 	/// Run the stream, resolving with why the token ended.
 	fn poll_present(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			match &mut self.state {
 				PresentState::Open { token, answered } => {
@@ -693,6 +692,9 @@ impl PresentToken {
 									expires,
 								},
 							);
+							// Each grant recomputes the session's permits, so a peer streaming
+							// them must not hold the session's other tasks.
+							ready!(budget.poll_yield(waiter));
 						}
 						super::AuthReply::Error(refused) => {
 							// Session codes are u32 everywhere else, so a wider one is malformed.
@@ -734,7 +736,10 @@ impl PresentToken {
 /// the stream dies (a FIN counts: the peer abandoned the session).
 // TODO do something useful with the updates
 fn poll_session_stream(stream: &mut Stream<Transport, Version>, waiter: &kio::Waiter) -> Poll<Error> {
+	// A yield only skips this arm: the rest of the driver still runs this turn.
+	let mut budget = kio::coop::Budget::new(32);
 	loop {
+		ready!(budget.poll_yield(waiter));
 		match ready!(stream.reader.poll_decode_maybe::<SessionInfo>(waiter)) {
 			Ok(Some(_info)) => {}
 			Ok(None) => return Poll::Ready(Error::Cancel),

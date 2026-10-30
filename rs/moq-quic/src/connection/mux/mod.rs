@@ -14,7 +14,7 @@
 
 use std::{collections::VecDeque, num::NonZeroU64};
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use tracing::{debug, trace};
 
 use super::{
@@ -22,12 +22,11 @@ use super::{
 	datagrams::DatagramState,
 	spaces::Retransmits,
 	stats::FrameStats,
-	streams::{Leased, RecvStream, SendGroups, SendOptions, SendStream, StreamEvent, Streams, StreamsState},
+	streams::{StreamEvent, Streams, StreamsState, recv, send},
 };
 use crate::{
-	ApplicationClose, Dir, Duration, Instant, Limits, MAX_STREAM_COUNT, SendDatagramError, Side, TransportError,
-	VarInt,
-	frame::{self, Close, Datagram},
+	ApplicationClose, Dir, Duration, Instant, Limits, MAX_STREAM_COUNT, Side, TransportError, VarInt,
+	frame::{self, Close, Datagram, OutgoingDatagram},
 	transport_parameters::TransportParameters,
 };
 
@@ -373,15 +372,15 @@ impl Connection {
 	}
 
 	/// Schedule outgoing streams in send groups
-	pub fn send_groups(&mut self) -> SendGroups<'_> {
-		SendGroups {
+	pub fn send_groups(&mut self) -> send::Groups<'_> {
+		send::Groups {
 			state: &mut self.streams,
 		}
 	}
 
 	/// The send half of stream `id`
-	pub fn send_stream(&mut self, id: crate::StreamId) -> SendStream<'_> {
-		SendStream {
+	pub fn send_stream(&mut self, id: crate::StreamId) -> send::Stream<'_> {
+		send::Stream {
 			id,
 			state: &mut self.streams,
 			pending: &mut self.pending,
@@ -390,8 +389,8 @@ impl Connection {
 	}
 
 	/// The receive half of stream `id`
-	pub fn recv_stream(&mut self, id: crate::StreamId) -> RecvStream<'_> {
-		RecvStream {
+	pub fn recv_stream(&mut self, id: crate::StreamId) -> recv::Stream<'_> {
+		recv::Stream {
 			id,
 			state: &mut self.streams,
 			pending: &mut self.pending,
@@ -401,11 +400,6 @@ impl Connection {
 	/// Send and receive datagrams
 	pub fn datagrams(&mut self) -> Datagrams<'_> {
 		Datagrams { conn: self }
-	}
-
-	/// The bytes leased from receive stream `id` with [`RecvStream::lease()`], if it has a lease
-	pub fn leased(&self, id: crate::StreamId) -> Option<&Leased> {
-		self.streams.leased(id)
 	}
 
 	/// The frame space of a record: the peer's `max_record_size`, under the STREAM ceiling
@@ -826,16 +820,18 @@ impl Datagrams<'_> {
 	///
 	/// # Panics
 	/// - when `options.group` was opened on another connection
-	pub fn send(&mut self, data: Bytes, options: SendOptions<'_>) -> Result<(), SendDatagramError> {
+	pub fn send(&mut self, data: impl Buf, options: send::Options<'_>) -> Result<(), send::Error> {
 		if self.conn.config.max_datagram_frame_size.is_none() {
-			return Err(SendDatagramError::Disabled);
+			return Err(send::Error::Unsupported);
 		}
-		let max = self.max_size().ok_or(SendDatagramError::UnsupportedByPeer)?;
+		let max = self.max_size().ok_or(send::Error::Unsupported)?;
 		let budget = self.conn.config.datagram_send_buffer_size;
-		let datagram = Datagram { data };
-		if datagram.data.len() > max || datagram.size(true) > budget {
-			return Err(SendDatagramError::TooLarge);
+		// Checked before taking the payload, which copies whatever is not already `Bytes`.
+		let len = data.remaining();
+		if len > max || OutgoingDatagram::frame_size(len) > budget {
+			return Err(send::Error::TooLarge);
 		}
+		let datagram = OutgoingDatagram::new(data);
 		if !self.conn.streams.queue_datagram(datagram, options, budget) {
 			trace!("dropping outgoing datagram");
 		}
