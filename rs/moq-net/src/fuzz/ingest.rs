@@ -158,8 +158,9 @@ fn check(session: Session, info: &track::Info, body: &[u8], ingested: &Ingested)
 
 	// On a clean end nothing was skipped: every byte is a frame, a header field, or a
 	// property block. A moq-transport extension block is decoded rather than kept, so its
-	// length is unknown and the bound only applies without one.
+	// length is unknown and the bound only applies to a subgroup without them.
 	let Ok(_) = &ingested.end else { return };
+	let (header, extensions) = subgroup_header(session, body);
 	let fields = match session {
 		Session::Lite { records, .. } => {
 			// Timing, inflated size, and size; a record adds its code and block length.
@@ -176,13 +177,9 @@ fn check(session: Session, info: &track::Info, body: &[u8], ingested: &Ingested)
 		}
 		// The ID delta and the size, then an empty object's status. A status object that
 		// ends the group, or the track, repeats them.
-		Session::Ietf { .. } => match info.compress || info.timescale.is_some() {
-			true => None,
-			false => Some((3, 3 * MAX_VARINT, 0)),
-		},
+		Session::Ietf { .. } => (!extensions).then_some((3, 3 * MAX_VARINT, 0)),
 	};
 	if let Some((fields, trailer, blocks)) = fields {
-		let header = header_len(session, body);
 		let most = header + payload + blocks + frames * fields * MAX_VARINT + trailer;
 		assert!(
 			body.len() <= most,
@@ -192,11 +189,13 @@ fn check(session: Session, info: &track::Info, body: &[u8], ingested: &Ingested)
 	}
 }
 
-/// The subgroup header's length, which a moq-transport run decodes before its objects.
-fn header_len(session: Session, body: &[u8]) -> usize {
+/// The subgroup header's length, which a moq-transport run decodes before its objects,
+/// and whether its objects carry extension blocks.
+fn subgroup_header(session: Session, body: &[u8]) -> (usize, bool) {
 	match session {
-		Session::Lite { .. } => 0,
-		Session::Ietf { version } => ietf::GroupHeader::decode_slice(body, version).map_or(0, |(_, used)| used),
+		Session::Lite { .. } => (0, false),
+		Session::Ietf { version } => ietf::GroupHeader::decode_slice(body, version)
+			.map_or((0, false), |(header, used)| (used, header.flags.has_extensions)),
 	}
 }
 
