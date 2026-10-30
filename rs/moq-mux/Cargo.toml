@@ -50,7 +50,7 @@ futures = { workspace = true }
 moq-clock = { workspace = true, features = ["sim"] }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
-tracing-test = { workspace = true, features = ["no-env-filter"] }
+tracing-test = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
 
 # The ts_schedule bench pins glibc's heap.

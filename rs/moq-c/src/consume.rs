@@ -11,8 +11,8 @@ use crate::decode::Read;
 use crate::ffi::OnStatus;
 use crate::task::Task;
 use crate::{
-	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_json_value, moq_section, moq_string,
-	moq_video_config, moq_video_properties,
+	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_json_value, moq_json_window_event,
+	moq_json_window_kind, moq_section, moq_string, moq_video_config, moq_video_properties,
 };
 
 struct ConsumeCatalog {
@@ -169,6 +169,39 @@ impl JsonValue {
 	}
 }
 
+/// A JSON window event, its record pre-serialized to a string, with its frame timestamp.
+struct JsonWindowEvent {
+	kind: moq_json_window_kind,
+	range: std::ops::Range<u64>,
+	/// The pushed record, `None` for a pop or skip.
+	json: Option<String>,
+	timestamp_us: Option<u64>,
+}
+
+impl JsonWindowEvent {
+	fn new(event: moq_net::Timed<moq_json::window::Event<serde_json::Value>>) -> Result<Self, Error> {
+		use moq_json::window::Event;
+
+		let timestamp_us = timestamp_us(event.at)?;
+		let (kind, range, json) = match event.value {
+			Event::Push { index, value } => (
+				moq_json_window_kind::MOQ_JSON_WINDOW_KIND_PUSH,
+				index..index + 1,
+				Some(serde_json::to_string(&value)?),
+			),
+			Event::Pop(range) => (moq_json_window_kind::MOQ_JSON_WINDOW_KIND_POP, range, None),
+			Event::Skip(range) => (moq_json_window_kind::MOQ_JSON_WINDOW_KIND_SKIP, range, None),
+			event => return Err(Error::Json(format!("unsupported window event: {event:?}"))),
+		};
+		Ok(Self {
+			kind,
+			range,
+			json,
+			timestamp_us,
+		})
+	}
+}
+
 #[derive(Default)]
 pub struct Consume {
 	/// Active broadcast consumers.
@@ -198,11 +231,14 @@ pub struct Consume {
 	/// Buffered datagrams ready for consumption.
 	datagram: NonZeroSlab<moq_net::Datagram>,
 
-	/// JSON consumer tasks (snapshot and stream share this slab).
+	/// JSON consumer tasks (snapshot, stream, and window share this slab).
 	json_task: NonZeroSlab<Task>,
 
 	/// Buffered JSON values ready for consumption.
 	json_value: NonZeroSlab<JsonValue>,
+
+	/// Buffered JSON window events ready for consumption.
+	json_window_event: NonZeroSlab<JsonWindowEvent>,
 }
 
 impl Consume {
@@ -823,6 +859,22 @@ impl Consume {
 		Ok(())
 	}
 
+	/// Subscribe a JSON consumer to `name`, or return `None` once `close` fires first.
+	///
+	/// A publisher can leave SUBSCRIBE_OK pending forever, so a cancel must not wait on it.
+	async fn json_subscribe(
+		broadcast: &moq_net::broadcast::Consumer,
+		name: &str,
+		close: &mut oneshot::Receiver<()>,
+	) -> Result<Option<moq_net::track::Subscriber>, Error> {
+		let subscribe = broadcast.track(name)?.subscribe(None);
+		tokio::select! {
+			biased;
+			_ = close => Ok(None),
+			track = subscribe => Ok(Some(track?)),
+		}
+	}
+
 	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
 	///
 	/// `on_value` is called with a value ID for each state, in order; a group superseded by a
@@ -842,10 +894,12 @@ impl Consume {
 		self.json_task.spawn(
 			on_value,
 			|state| &mut state.consume.json_task,
-			|close| async move {
+			|mut close| async move {
 				driver
 					.watch(async move {
-						let track = broadcast.track(&name)?.subscribe(None).await?;
+						let Some(track) = Self::json_subscribe(&broadcast, &name, &mut close).await? else {
+							return Ok(());
+						};
 						let consumer =
 							moq_json::snapshot::Consumer::<serde_json::Value>::new(track, Default::default());
 						Self::run_json_snapshot(on_value, consumer, close).await
@@ -897,10 +951,12 @@ impl Consume {
 		self.json_task.spawn(
 			on_value,
 			|state| &mut state.consume.json_task,
-			|close| async move {
+			|mut close| async move {
 				driver
 					.watch(async move {
-						let track = broadcast.track(&name)?.subscribe(None).await?;
+						let Some(track) = Self::json_subscribe(&broadcast, &name, &mut close).await? else {
+							return Ok(());
+						};
 						let consumer = moq_json::stream::Consumer::<serde_json::Value>::new(track, Default::default());
 						Self::run_json_stream(on_value, consumer, close).await
 					})
@@ -931,7 +987,61 @@ impl Consume {
 		}
 	}
 
-	/// Signal a JSON consumer task (snapshot or stream) to stop. The task still delivers one
+	/// Subscribe to a JSON window track by name.
+	///
+	/// `on_event` is called with an event ID for each push, pop, and skip, in order. Events must be
+	/// released with [`Self::json_window_event_close`].
+	pub fn json_window(&mut self, broadcast: Id, name: &str, on_event: OnStatus) -> Result<Id, Error> {
+		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let driver = context
+			.origin
+			.as_ref()
+			.map(|origin| origin.driver.clone())
+			.unwrap_or_default();
+		let broadcast = context.broadcast.clone();
+		let name = name.to_string();
+
+		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
+		self.json_task.spawn(
+			on_event,
+			|state| &mut state.consume.json_task,
+			|mut close| async move {
+				driver
+					.watch(async move {
+						let Some(track) = Self::json_subscribe(&broadcast, &name, &mut close).await? else {
+							return Ok(());
+						};
+						let consumer = moq_json::window::Consumer::<serde_json::Value>::new(track, Default::default());
+						Self::run_json_window(on_event, consumer, close).await
+					})
+					.await
+			},
+		)
+	}
+
+	async fn run_json_window(
+		callback: OnStatus,
+		mut consumer: moq_json::window::Consumer<serde_json::Value>,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		loop {
+			// `biased` so a pending close always wins over a ready event.
+			let event = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				next = consumer.next() => match next? {
+					Some(event) => event,
+					None => return Ok(()),
+				},
+			};
+
+			let event = JsonWindowEvent::new(event)?;
+			let event_id = State::lock().consume.json_window_event.insert(event)?;
+			callback.call(Ok(event_id));
+		}
+	}
+
+	/// Signal a JSON consumer task (snapshot, stream, or window) to stop. The task still delivers one
 	/// final terminal callback and then removes itself, so `user_data` stays valid until then.
 	pub fn json_close(&mut self, task: Id) -> Result<(), Error> {
 		self.json_task.close(task, Error::TrackNotFound)
@@ -955,6 +1065,34 @@ impl Consume {
 	/// Release a JSON value and clean up its resources.
 	pub fn json_value_close(&mut self, value: Id) -> Result<(), Error> {
 		self.json_value.remove(value).ok_or(Error::FrameNotFound)?;
+		Ok(())
+	}
+
+	/// Fill `dst` with a JSON window event delivered via a consumer callback. The pointer is valid
+	/// until the event is released with [`Self::json_window_event_close`].
+	pub fn json_window_event(&self, event: Id, dst: &mut moq_json_window_event) -> Result<(), Error> {
+		let event = self.json_window_event.get(event).ok_or(Error::FrameNotFound)?;
+		let (json, json_len) = match &event.json {
+			Some(json) => (json.as_ptr() as *const c_char, json.len()),
+			None => (std::ptr::null(), 0),
+		};
+
+		*dst = moq_json_window_event {
+			kind: event.kind,
+			start: event.range.start,
+			end: event.range.end,
+			json,
+			json_len,
+			timestamp_us: event.timestamp_us.unwrap_or_default(),
+			timestamp_present: event.timestamp_us.is_some(),
+		};
+
+		Ok(())
+	}
+
+	/// Release a JSON window event and clean up its resources.
+	pub fn json_window_event_close(&mut self, event: Id) -> Result<(), Error> {
+		self.json_window_event.remove(event).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
 

@@ -5631,6 +5631,7 @@ dependencies = [
  "moq-clock",
  "moq-pattern 0.1.2",
  "num_enum",
+ "proptest",
  "rand 0.10.3",
  "rangemap",
  "serde",
@@ -5958,7 +5959,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-test",
+ "tracing-subscriber",
  "workspace-hack",
 ]
 
@@ -13094,8 +13095,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-subscriber",
- "tracing-test",
- "tracing-test-macro",
  "tungstenite 0.30.0",
  "typenum",
  "url",

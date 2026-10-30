@@ -773,35 +773,60 @@ mod tests {
 	/// A video PID that goes silent behind a running mux is logged against its ingest path,
 	/// and neither the same feed intact nor the audio that kept delivering is.
 	#[tokio::test(start_paused = true)]
-	#[tracing_test::traced_test]
 	async fn publisher_reports_a_silent_pid() {
 		const VIDEO: u16 = 0x100;
+		// `moq-mux` logs the report, and `traced_test` keeps only this crate's lines. The
+		// current-thread runtime runs the ingest on this thread, where this subscriber is.
+		#[derive(Clone, Default)]
+		struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+		impl std::io::Write for Logs {
+			fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+				self.0.lock().unwrap().write(buf)
+			}
+			fn flush(&mut self) -> std::io::Result<()> {
+				Ok(())
+			}
+		}
+		let logs = Logs::default();
+		let writer = logs.clone();
+		let subscriber = tracing_subscriber::fmt()
+			.with_max_level(tracing::Level::INFO)
+			.with_ansi(false)
+			.with_writer(move || writer.clone())
+			.finish();
+		let _guard = tracing::subscriber::set_default(subscriber);
+		// With one dispatcher registered, tracing caches each callsite's interest from the
+		// first thread to hit it, so a parallel test without a subscriber could disable the
+		// ingest span for good. A second one leaves every thread to ask its own subscriber.
+		let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+
 		let origin = produce_origin();
 		ingest(&origin, "intact", &[BBB5S]).await;
 		let stimulus = suppress(BBB5S, VIDEO, Duration::from_millis(1500), Duration::from_millis(3500));
 		ingest(&origin, "silent", &[&stimulus]).await;
 
-		logs_assert(|lines: &[&str]| {
-			let stopped: Vec<_> = lines
+		let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+		let stopped: Vec<_> = logs
+			.lines()
+			.filter(|line| line.contains("stopped delivering access units"))
+			.collect();
+		let reported = |path: &str, pid: u16| {
+			stopped
 				.iter()
-				.filter(|line| line.contains("stopped delivering access units"))
-				.collect();
-			let reported = |path: &str, pid: u16| {
-				stopped
-					.iter()
-					.any(|line| line.contains(&format!("path={path}")) && line.contains(&format!("pid={pid} ")))
-			};
-			if !reported("silent", VIDEO) {
-				return Err(format!("the silent video PID was not reported: {stopped:?}"));
-			}
-			if reported("intact", VIDEO) {
-				return Err(format!("the intact feed's video was reported: {stopped:?}"));
-			}
-			if reported("silent", 0x101) || reported("intact", 0x101) {
-				return Err(format!("the audio kept delivering: {stopped:?}"));
-			}
-			Ok(())
-		});
+				.any(|line| line.contains(&format!("path={path}")) && line.contains(&format!("pid={pid} ")))
+		};
+		assert!(
+			reported("silent", VIDEO),
+			"the silent video PID was not reported: {stopped:?}"
+		);
+		assert!(
+			!reported("intact", VIDEO),
+			"the intact feed's video was reported: {stopped:?}"
+		);
+		assert!(
+			!reported("silent", 0x101) && !reported("intact", 0x101),
+			"the audio kept delivering: {stopped:?}"
+		);
 	}
 
 	/// SRT is a contribution protocol, so SCTE-35 cues survive ingest and egress.
