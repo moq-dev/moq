@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{oneshot, watch};
 
 use hang::moq_net;
 
@@ -412,12 +412,64 @@ struct PadTable {
 	listed: HashSet<Rendition>,
 }
 
+impl Drop for PadTable {
+	/// Lets each actor go once it is done, leaving its pad as is.
+	fn drop(&mut self) {
+		for handle in self.pads.values() {
+			handle.commands.close();
+		}
+	}
+}
+
 /// How the session reaches a pad's [`PadActor`].
 struct PadHandle {
-	commands: mpsc::UnboundedSender<Command>,
+	commands: Arc<Inbox>,
 	task: tokio::task::JoinHandle<()>,
 	/// A [`Command::Retire`] is queued, so a further delisting needs none.
 	retiring: bool,
+}
+
+/// A [`PadActor`]'s queue of commands. Unlike a channel, a reader's cancelled turn leaves it as
+/// soon as the next command arrives, without waiting for the actor, so a pad blocked downstream
+/// holds only its live readers' turns however often the catalog changes.
+#[derive(Default)]
+struct Inbox {
+	/// The commands in order, and whether the session let the actor go.
+	queue: Mutex<(std::collections::VecDeque<Command>, bool)>,
+	ready: tokio::sync::Notify,
+}
+
+impl Inbox {
+	fn send(&self, command: Command) {
+		let mut queue = self.queue.lock().unwrap();
+		queue
+			.0
+			.retain(|command| !matches!(command, Command::Play(turn) if turn.is_closed()));
+		queue.0.push_back(command);
+		drop(queue);
+		self.ready.notify_one();
+	}
+
+	/// Let the actor go once it takes the commands already sent.
+	fn close(&self) {
+		self.queue.lock().unwrap().1 = true;
+		self.ready.notify_one();
+	}
+
+	async fn recv(&self) -> Option<Command> {
+		loop {
+			{
+				let mut queue = self.queue.lock().unwrap();
+				if let Some(command) = queue.0.pop_front() {
+					return Some(command);
+				}
+				if queue.1 {
+					return None;
+				}
+			}
+			self.ready.notified().await;
+		}
+	}
 }
 
 /// A play handed to a [`PadActor`] on its turn, with where to report why it exited.
@@ -484,7 +536,7 @@ impl Pads {
 		let (turn, called) = oneshot::channel();
 		if let Some(handle) = table.pads.get(rendition) {
 			// The actor only leaves once it is out of the table.
-			let _ = handle.commands.send(Command::Play(turn));
+			handle.commands.send(Command::Play(turn));
 			return Ok(called);
 		}
 
@@ -496,15 +548,15 @@ impl Pads {
 		let pad = gst::Pad::builder_from_template(&templ)
 			.name(kind.next_pad_name())
 			.build();
-		let (commands, inbox) = mpsc::unbounded_channel();
-		let _ = commands.send(Command::Play(turn));
+		let commands = Arc::new(Inbox::default());
+		commands.send(Command::Play(turn));
 		let actor = PadActor {
 			pads: Arc::downgrade(&self.0),
 			rendition: rendition.clone(),
 			pad,
 			added: false,
 		};
-		let task = RUNTIME.spawn(STREAMING.scope(element.clone(), actor.run(inbox)));
+		let task = RUNTIME.spawn(STREAMING.scope(element.clone(), actor.run(commands.clone())));
 		table.pads.insert(
 			rendition.clone(),
 			PadHandle {
@@ -538,7 +590,7 @@ impl Pads {
 			if let Some(handle) = pads.get_mut(rendition)
 				&& !std::mem::replace(&mut handle.retiring, true)
 			{
-				let _ = handle.commands.send(Command::Retire);
+				handle.commands.send(Command::Retire);
 			}
 		}
 	}
@@ -548,7 +600,7 @@ impl Pads {
 	async fn settled(&self, rendition: &Rendition) {
 		let (settled, done) = oneshot::channel();
 		if let Some(handle) = self.0.lock().unwrap().pads.get(rendition) {
-			let _ = handle.commands.send(Command::Settled(settled));
+			handle.commands.send(Command::Settled(settled));
 		}
 		let _ = done.await;
 	}
@@ -560,7 +612,7 @@ impl Pads {
 			(std::mem::take(&mut table.pads), std::mem::take(&mut table.ending))
 		};
 		for handle in pads.values() {
-			let _ = handle.commands.send(Command::Release { eos });
+			handle.commands.send(Command::Release { eos });
 		}
 		for task in pads.into_values().map(|handle| handle.task).chain(ending) {
 			let _ = task.await;
@@ -580,7 +632,7 @@ struct PadActor {
 }
 
 impl PadActor {
-	async fn run(mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
+	async fn run(mut self, commands: Arc<Inbox>) {
 		while let Some(command) = commands.recv().await {
 			match command {
 				Command::Play(turn) => {
