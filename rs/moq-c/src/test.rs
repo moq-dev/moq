@@ -726,9 +726,10 @@ fn publish_catalog_config_invalid_broadcast() {
 	assert!(unsafe { moq_publish_video_properties(0, &moq_video_properties::default()) } < 0);
 
 	let audio_codec = "opus";
+	let (audio_name, audio_codec) = ("audio", "opus");
 	let audio = moq_audio_config {
-		name: name.as_ptr() as *const c_char,
-		name_len: name.len(),
+		name: audio_name.as_ptr() as *const c_char,
+		name_len: audio_name.len(),
 		label: std::ptr::null(),
 		label_len: 0,
 		codec: audio_codec.as_ptr() as *const c_char,
@@ -2618,40 +2619,187 @@ fn json_window_refreshes_a_bounded_checkpoint() {
 
 /// Cancelling a JSON consumer whose subscription the publisher has not answered still delivers
 /// the terminal callback, for every JSON mode.
-#[test]
-fn json_cancel_while_subscribing() {
-	type Consumer = unsafe extern "C" fn(u32, *const c_char, usize, ffi::moq_status_callback, *mut c_void) -> i32;
-	let consumers: [(&[u8], Consumer); 3] = [
-		(b"snapshot", moq_consume_json_snapshot),
-		(b"stream", moq_consume_json_stream),
-		(b"window", moq_consume_json_window),
-	];
+/// Every consumer that subscribes by name, with its cancel.
+type NamedConsumer = (
+	&'static [u8],
+	fn(u32, &[u8], *mut c_void) -> i32,
+	extern "C" fn(u32) -> i32,
+);
 
+const NAMED_CONSUMERS: [NamedConsumer; 5] = [
+	(
+		b"raw",
+		|consume, name, user_data| unsafe {
+			moq_consume_track(
+				consume,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				std::ptr::null(),
+				Some(channel_callback),
+				user_data,
+			)
+		},
+		moq_consume_track_cancel,
+	),
+	(
+		b"datagrams",
+		|consume, name, user_data| unsafe {
+			moq_consume_datagrams(
+				consume,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				Some(channel_callback),
+				user_data,
+			)
+		},
+		moq_consume_datagrams_cancel,
+	),
+	(
+		b"snapshot",
+		|consume, name, user_data| unsafe {
+			moq_consume_json_snapshot(
+				consume,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				Some(channel_callback),
+				user_data,
+			)
+		},
+		moq_consume_json_cancel,
+	),
+	(
+		b"stream",
+		|consume, name, user_data| unsafe {
+			moq_consume_json_stream(
+				consume,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				Some(channel_callback),
+				user_data,
+			)
+		},
+		moq_consume_json_cancel,
+	),
+	(
+		b"window",
+		|consume, name, user_data| unsafe {
+			moq_consume_json_window(
+				consume,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				Some(channel_callback),
+				user_data,
+			)
+		},
+		moq_consume_json_cancel,
+	),
+];
+
+#[test]
+fn named_consumers_cancel_while_subscribing() {
 	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"json-cancel-subscribing");
+	let broadcast = publish_broadcast(origin, b"cancel-subscribing");
 	// Unknown tracks become requests, which leave each subscribe pending until answered.
 	let request_cb = Callback::new();
 	let dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
 	let consume = consume_local(broadcast);
 
-	for (name, consumer) in consumers {
+	for (name, consumer, cancel) in NAMED_CONSUMERS {
 		let cb = Callback::new();
-		let task = id(unsafe {
-			consumer(
-				consume,
-				name.as_ptr() as *const c_char,
-				name.len(),
-				Some(channel_callback),
-				cb.ptr,
-			)
-		});
+		let task = id(consumer(consume, name, cb.ptr));
 		let request = id(request_cb.recv());
 
-		assert_eq!(moq_consume_json_cancel(task), 0);
+		assert_eq!(cancel(task), 0);
 		assert_eq!(cb.recv_terminal(), 0, "a cancelled subscribe ends cleanly");
 		assert_eq!(moq_track_request_free(request), 0);
 	}
 
+	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
+	assert_eq!(request_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn catalog_cancel_while_subscribing() {
+	// A bare moq-net broadcast has no catalog track, so its subscribe waits on the handler.
+	let broadcast = moq_net::broadcast::Info::new().produce();
+	let mut requests = broadcast.requests();
+	let consume = i32::from(State::lock().consume.start(broadcast.consume(), None).unwrap()) as u32;
+
+	let cb = Callback::new();
+	let catalog = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), cb.ptr) });
+	let _unanswered = crate::ffi::RUNTIME.block_on(requests.requested_track()).unwrap();
+
+	assert_eq!(moq_consume_catalog_cancel(catalog), 0);
+	assert_eq!(cb.recv_terminal(), 0, "a cancelled subscribe ends cleanly");
+	assert_eq!(moq_consume_close(consume), 0);
+}
+
+#[test]
+fn media_consumers_cancel_while_subscribing() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"media-cancel-subscribing");
+
+	// Catalog renditions with no track behind them, so each media subscribe becomes a request.
+	let (video_name, video_codec) = ("video", "vp8");
+	let video = moq_video_config {
+		preference: 0,
+		name: video_name.as_ptr() as *const c_char,
+		name_len: video_name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: video_codec.as_ptr() as *const c_char,
+		codec_len: video_codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 0,
+		coded_height: 0,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
+	let (audio_name, audio_codec) = ("audio", "opus");
+	let audio = moq_audio_config {
+		name: audio_name.as_ptr() as *const c_char,
+		name_len: audio_name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: audio_codec.as_ptr() as *const c_char,
+		codec_len: audio_codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 48000,
+		channel_count: 2,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
+
+	let request_cb = Callback::new();
+	let dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
+	let consume = consume_local(broadcast);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog = id(catalog_cb.recv());
+
+	type Media = unsafe extern "C" fn(u32, u32, u64, ffi::moq_status_callback, *mut c_void) -> i32;
+	let consumers: [(Media, extern "C" fn(u32) -> i32); 2] = [
+		(moq_consume_video, moq_consume_video_cancel),
+		(moq_consume_audio, moq_consume_audio_cancel),
+	];
+	for (consumer, cancel) in consumers {
+		let cb = Callback::new();
+		let task = id(unsafe { consumer(catalog, 0, 0, Some(channel_callback), cb.ptr) });
+		let request = id(request_cb.recv());
+
+		assert_eq!(cancel(task), 0);
+		assert_eq!(cb.recv_terminal(), 0, "a cancelled subscribe ends cleanly");
+		assert_eq!(moq_track_request_free(request), 0);
+	}
+
+	assert_eq!(moq_consume_catalog_free(catalog), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
 	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
 	assert_eq!(request_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
