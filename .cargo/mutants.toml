@@ -1,0 +1,22 @@
+# cargo-mutants scope for `just rs mutants`, run weekly by mutants.yml.
+#
+# Only the code where a missed behavior change is a security or delivery bug:
+# moq-auth, and moq-net's grant enforcement, resume, and group expiry. Each
+# mutant rebuilds its crate and reruns its tests, so a wider scope costs a
+# rebuild per mutant.
+examine_globs = [
+    "rs/moq-auth/src/**/*.rs",
+    "rs/moq-net/src/auth.rs",
+    "rs/moq-net/src/model/resume.rs",
+    "rs/moq-net/src/model/expiry.rs",
+]
+
+# Mutants no test can or should kill, each with its reason.
+exclude_re = []
+
+test_tool = "nextest"
+
+# Bound each mutant's test run, so one that hangs cannot eat the job, at three
+# times the unmutated run. Builds stay unbounded: a build timeout would read a
+# slow rebuild as a caught mutant.
+timeout_multiplier = 3.0

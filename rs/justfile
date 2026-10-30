@@ -420,6 +420,12 @@ fuzz target *args:
 coverage crate="workspace":
     bash sh/rs/coverage.sh '{{ crate }}'
 
+# Fail on mutants of .cargo/mutants.toml's scope that no test catches, under
+# target/mutants. Arguments pass to cargo-mutants: `just rs mutants --shard 0/8`.
+[positional-arguments]
+mutants *args:
+    bash sh/rs/mutants.sh "$@"
+
 # Build the default workspace members.
 build:
     bash sh/local.sh cargo build --locked
