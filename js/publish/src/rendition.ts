@@ -56,7 +56,7 @@ export class Rendition<Config> {
 	}
 
 	/**
-	 * The HLS recorder of `track`, one of this rendition's {@link track}s, or `undefined` when it
+	 * The HLS recorder of `track`, one of this rendition's {@link Rendition.track | tracks}, or `undefined` when it
 	 * publishes no records. Pass it to the container producer writing the track, so each group it
 	 * writes is reported into the records the catalog advertises in the rendition's `hls` field.
 	 */

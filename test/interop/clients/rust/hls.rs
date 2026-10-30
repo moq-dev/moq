@@ -87,7 +87,12 @@ async fn main() -> anyhow::Result<()> {
 		write(&mut audio_track, audio())?;
 		catalog.finish()?;
 
-		let session = client.clone().with_publisher(&origin).connect(url).established().await?;
+		let session = client
+			.clone()
+			.with_publisher(&origin)
+			.connect(url)
+			.established()
+			.await?;
 		publication.announce(Default::default())?;
 		println!("hls ready");
 		let mut commands = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -114,9 +119,20 @@ async fn main() -> anyhow::Result<()> {
 			moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang).await?;
 		// Both renditions, each advertising its records.
 		let renditions = loop {
-			let catalog = catalogs.next().await?.context("catalog ended before advertising records")?;
-			let video = catalog.video.renditions.iter().map(|(name, config)| ("video", name, &config.hls));
-			let audio = catalog.audio.renditions.iter().map(|(name, config)| ("audio", name, &config.hls));
+			let catalog = catalogs
+				.next()
+				.await?
+				.context("catalog ended before advertising records")?;
+			let video = catalog
+				.video
+				.renditions
+				.iter()
+				.map(|(name, config)| ("video", name, &config.hls));
+			let audio = catalog
+				.audio
+				.renditions
+				.iter()
+				.map(|(name, config)| ("audio", name, &config.hls));
 			let renditions: Vec<_> = video
 				.chain(audio)
 				.filter_map(|(kind, name, hls)| Some((kind, name.clone(), hls.clone()?)))
