@@ -77,6 +77,18 @@ impl Changes {
 		self.changed.insert(self.revision, run.start);
 	}
 
+	/// Remove the runs last changed at or before `revision`, returning them.
+	pub fn trim(&mut self, revision: u64) -> Vec<Range<u64>> {
+		let kept = self.changed.split_off(&(revision.saturating_add(1)));
+		std::mem::replace(&mut self.changed, kept)
+			.into_values()
+			.map(|start| {
+				let (end, _) = self.runs.remove(&start).expect("a changed run stays indexed");
+				start..end
+			})
+			.collect()
+	}
+
 	pub fn since(&self, revision: u64) -> impl Iterator<Item = Range<u64>> + '_ {
 		self.changed
 			.range((std::ops::Bound::Excluded(revision), std::ops::Bound::Unbounded))

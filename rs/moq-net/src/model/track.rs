@@ -39,7 +39,7 @@ use fill::FillState;
 pub(crate) use fill::{GroupFill, Readers as FillReaders};
 
 use std::{
-	collections::{BTreeMap, BTreeSet, VecDeque},
+	collections::{BTreeMap, BTreeSet, VecDeque, btree_map},
 	ops::{self, Bound, RangeBounds},
 	sync::Arc,
 	sync::OnceLock,
@@ -460,6 +460,14 @@ pub(crate) struct TrackState {
 	// Bumped on every insert into `drops`, so a cursor rescans it only after a change.
 	drops_revision: u64,
 	drops_changes: ledger::Changes,
+	// Sequences evicted while servable, indexed by when each run last changed, so a reader
+	// that judged one cached judges it again. Kept only until every reader that judged
+	// before an eviction has seen it: the slowest reader bounds it, not the cache.
+	evictions: RangeSet<u64>,
+	eviction_changes: ledger::Changes,
+	// How many readers judged up to each eviction revision, the lowest being the slowest.
+	// Its own lock, so a reader moves through the read guard it judges under.
+	eviction_readers: Mutex<BTreeMap<u64, usize>>,
 
 	// Whether the cache reflects the live feed: readers get nothing from it while it does
 	// not, since how stale it is cannot be told; fetches still do. A track is live from
@@ -932,6 +940,54 @@ impl TrackState {
 			self.evicted = Some((sequence, start));
 		}
 		Some(slot)
+	}
+
+	/// [`Self::uncache`] a servable group to free the cache and abort it with `err`, recording
+	/// it for the readers that judged it cached to judge again.
+	fn evict_group(&mut self, sequence: u64, err: Error) {
+		self.uncache(sequence).expect("a cached group").abort(err);
+		let Some(end) = sequence.checked_add(1) else {
+			return;
+		};
+		self.evictions.insert(sequence..end);
+		let run = self
+			.evictions
+			.get(&sequence)
+			.cloned()
+			.expect("the eviction was just recorded");
+		// The neighbours it coalesced with retire their entries.
+		for old in [run.start, end] {
+			self.eviction_changes.remove(old);
+		}
+		self.eviction_changes.insert(run);
+		// Readers registered after a run last changed judged it as it is: only one that
+		// judged earlier still needs it.
+		let slowest = self
+			.eviction_readers
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.first_key_value()
+			.map(|(revision, _)| *revision);
+		let seen = slowest.unwrap_or(self.eviction_changes.revision());
+		for run in self.eviction_changes.trim(seen) {
+			self.evictions.remove(run);
+		}
+	}
+
+	/// Move one reader's eviction registration from `from`, if it had one, to `to`.
+	pub(super) fn judged_evictions(&self, from: Option<u64>, to: Option<u64>) {
+		let mut readers = self.eviction_readers.lock().unwrap_or_else(PoisonError::into_inner);
+		if let Some(from) = from
+			&& let btree_map::Entry::Occupied(mut entry) = readers.entry(from)
+		{
+			*entry.get_mut() -= 1;
+			if *entry.get() == 0 {
+				entry.remove();
+			}
+		}
+		if let Some(to) = to {
+			*readers.entry(to).or_default() += 1;
+		}
 	}
 
 	/// [`Self::uncache`] a group that another copy displaces rather than one that ends, so a
@@ -1756,7 +1812,7 @@ impl TrackState {
 				// Take the group out of the cache and abort it, so any consumer
 				// still reading surfaces `Error::Old` instead of blocking forever
 				// on a frame that will never arrive.
-				self.uncache(sequence).unwrap().abort(Error::Old);
+				self.evict_group(sequence, Error::Old);
 			}
 		}
 
@@ -2226,7 +2282,7 @@ impl TrackState {
 
 			self.debt -= size;
 			paid = paid.saturating_add(size);
-			self.uncache(sequence).unwrap().abort(Error::Evicted);
+			self.evict_group(sequence, Error::Evicted);
 		}
 		// No cold group left to pay with: shed the front of the groups that could not go
 		// whole, the ones being read and then the live edge, so neither grows without bound.
@@ -5904,6 +5960,15 @@ struct Cursor {
 	misses: Option<Box<miss::Misses>>,
 }
 
+impl Drop for Cursor {
+	fn drop(&mut self) {
+		// The slowest reader bounds what the track keeps of its evictions.
+		if let Some(evicted) = self.misses.as_ref().and_then(|misses| misses.evicted()) {
+			self.state.read().judged_evictions(Some(evicted), None);
+		}
+	}
+}
+
 struct Peeked {
 	group: group::Consumer,
 	taken: Taken,
@@ -6118,7 +6183,7 @@ impl Cursor {
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
+	fn poll_drop(&mut self, taken: &Delivered, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
 		self.sync();
 		if self.drops.is_none() {
 			let mut drops = Box::new(DropCursor::new(&self.state.read()));
@@ -6132,7 +6197,9 @@ impl Cursor {
 		if self.filter.refused.is_none()
 			&& let Poll::Ready(Ok(drift)) = self.poll_drift(&self.servable, waiter)
 		{
-			self.probe(self.floor(), &drift, waiter);
+			// From where the reader reads next: an ordered one asks nothing below what it took.
+			let from = self.next_sequence.unwrap_or(u64::MAX).max(self.floor());
+			self.probe(from, &drift, taken, waiter);
 		}
 		// A cap at or below the floor leaves nothing to report, not a reversed span.
 		let floor = self.floor();
@@ -6514,7 +6581,8 @@ impl Cursor {
 
 	/// Ask fills for what this cursor misses from `from`, and take in what they answered,
 	/// parking `waiter` on the fills still out. Whatever it gives up goes to the drop cursor.
-	fn probe(&mut self, from: u64, drift: &Drift, waiter: &kio::Waiter) {
+	/// `taken` is what its subscriber handed out, which an eviction never makes a miss.
+	fn probe(&mut self, from: u64, drift: &Drift, taken: &Delivered, waiter: &kio::Waiter) {
 		let (window, cap, revision) = (&self.filter.window, self.end_sequence, self.filter.revision);
 		let asking = {
 			let subscription = self.subscription.read();
@@ -6547,6 +6615,7 @@ impl Cursor {
 						.map(|run| *run.start()..=(*run.end()).min(end))
 						.collect()
 				},
+				taken,
 				drift,
 				&mut given_up,
 				waiter,
@@ -6588,7 +6657,12 @@ impl Cursor {
 		self.misses.as_ref().is_some_and(|misses| misses.is_waiting())
 	}
 
-	fn poll_recv_group(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+	fn poll_recv_group(
+		&mut self,
+		take: bool,
+		taken: &Delivered,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<group::Consumer>>> {
 		if let Some(peeked) = self.peeked.take().filter(|peeked| take && !peeked.ordered) {
 			// The reserved group is still the one handed out, but bounded by the ranges in
 			// force now, which a `Control` may have replaced since the peek.
@@ -6607,7 +6681,7 @@ impl Cursor {
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
 		self.reoffer(drift.budget);
-		self.probe(self.floor(), &drift, waiter);
+		self.probe(self.floor(), &drift, taken, waiter);
 		self.poll_recv_with(take, drift, waiter)
 	}
 
@@ -6791,7 +6865,12 @@ impl Cursor {
 
 	/// The lowest servable group past the last one returned, walking off everything the
 	/// drift budget has convicted on the way.
-	fn poll_next_group(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+	fn poll_next_group(
+		&mut self,
+		take: bool,
+		taken: &Delivered,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<group::Consumer>>> {
 		if let Some(peeked) = self.peeked.take().filter(|peeked| take && peeked.ordered) {
 			// Bounded by the ranges in force now, as on the arrival path.
 			self.sync();
@@ -6807,7 +6886,7 @@ impl Cursor {
 		let floor = next.max(self.floor());
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
-		self.probe(floor, &drift, waiter);
+		self.probe(floor, &drift, taken, waiter);
 		self.poll_next_with(take, floor, drift, waiter)
 	}
 
@@ -7152,8 +7231,8 @@ impl Subscriber {
 		let res = match &mut self.inner {
 			Inner::Plain(cursor) => loop {
 				let res = match ordered {
-					true => cursor.poll_next_group(true, waiter),
-					false => cursor.poll_recv_group(true, waiter),
+					true => cursor.poll_next_group(true, &self.delivered, waiter),
+					false => cursor.poll_recv_group(true, &self.delivered, waiter),
 				};
 				match res {
 					Poll::Ready(Ok(Some(group))) if self.delivered.contains(group.sequence) => continue,
@@ -7175,8 +7254,8 @@ impl Subscriber {
 		match &mut self.inner {
 			Inner::Plain(cursor) => loop {
 				let group = ready!(match ordered {
-					true => cursor.poll_next_group(false, waiter),
-					false => cursor.poll_recv_group(false, waiter),
+					true => cursor.poll_next_group(false, &self.delivered, waiter),
+					false => cursor.poll_recv_group(false, &self.delivered, waiter),
 				})?;
 				let Some(group) = group else {
 					return Poll::Ready(Ok(None));
@@ -7186,8 +7265,8 @@ impl Subscriber {
 				}
 				// A replay advances only this copy's cursor, as an ordinary read would.
 				ready!(match ordered {
-					true => cursor.poll_next_group(true, waiter),
-					false => cursor.poll_recv_group(true, waiter),
+					true => cursor.poll_next_group(true, &self.delivered, waiter),
+					false => cursor.poll_recv_group(true, &self.delivered, waiter),
 				})?;
 			},
 			Inner::Resume(resume, _) => resume.poll_peek_group(ordered, &self.delivered, waiter),
@@ -7534,7 +7613,7 @@ impl Subscriber {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.poll_drop(waiter),
+			Inner::Plain(cursor) => cursor.poll_drop(&self.delivered, waiter),
 			Inner::Resume(resume, _) => resume.poll_drop(&self.delivered, waiter),
 		}
 	}
@@ -18622,6 +18701,251 @@ mod test {
 		assert_eq!(asked, [(4, 6), (0, 2)]);
 	}
 
+	/// A group evicted after an arrival-order reader judged it cached, before it took it, is
+	/// asked of a fill like one evicted before: the reader still receives it, and a group it
+	/// took is never asked again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_group_evicted_before_its_reader_took_it_is_refilled() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay());
+		for sequence in 0..3 {
+			write_group(&producer, sequence);
+		}
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(first))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("group 0 is cached");
+		};
+		assert_eq!(first.sequence, 0);
+		evict(&producer, 0);
+		evict(&producer, 1);
+		assert_eq!(drain_groups(&mut subscriber), [2]);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("group 1 is a miss now");
+		};
+		assert_eq!((fill.start().group, fill.end()), (1, 2), "group 0 was taken");
+		assert_eq!(fill.next(), Some(1));
+		write_filled(fill.accept(1, None), 1);
+		drop(fill);
+		assert_eq!(drain_groups(&mut subscriber), [1]);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
+		assert!(drained_drops(&mut subscriber).is_empty(), "nothing was given up");
+	}
+
+	/// The track keeps an eviction run only while a reader that judged before its last change
+	/// has yet to see it: the slowest reader bounds the record, and none keeps nothing.
+	#[test]
+	#[cfg(feature = "async")]
+	fn the_slowest_reader_bounds_the_eviction_record() {
+		let producer = track_producer("test", Info::timed());
+		let _dynamic = producer.requests();
+		for sequence in 0..6 {
+			write_group(&producer, sequence);
+		}
+		let recorded = || {
+			let state = producer.state.read();
+			state
+				.evictions
+				.iter()
+				.map(|run| (run.start, run.end))
+				.collect::<Vec<_>>()
+		};
+		evict(&producer, 0);
+		assert!(recorded().is_empty(), "no reader judged group 0");
+
+		let mut fast = producer.subscribe(replay());
+		let mut slow = producer.subscribe(replay());
+		drain_groups(&mut fast);
+		drain_groups(&mut slow);
+		evict(&producer, 1);
+		assert_eq!(recorded(), [(1, 2)], "both readers still owe a look");
+		drain_groups(&mut fast);
+		evict(&producer, 2);
+		assert_eq!(recorded(), [(1, 3)], "the slow reader has seen neither");
+		drop(slow);
+		drain_groups(&mut fast);
+		evict(&producer, 4);
+		assert_eq!(recorded(), [(4, 5)], "the fast reader saw every earlier run");
+		drop(fast);
+		evict(&producer, 3);
+		assert!(recorded().is_empty(), "no reader is left");
+	}
+
+	/// An ordered reader forwarding drops asks nothing below what it took, though its drop
+	/// cursor reports from the window's floor.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_readers_drop_poll_asks_nothing_it_took() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
+		for sequence in 0..3 {
+			write_group(&producer, sequence);
+		}
+		let waiter = kio::Waiter::noop();
+		for expected in 0..2 {
+			let Poll::Ready(Ok(Some(group))) = subscriber.poll_next_group(&waiter) else {
+				panic!("group {expected} is cached");
+			};
+			assert_eq!(group.sequence, expected);
+		}
+		evict(&producer, 0);
+		evict(&producer, 1);
+		assert!(drained_drops(&mut subscriber).is_empty());
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "both were taken");
+	}
+
+	/// An ordered reader waits on the refill of a group evicted at or above its next
+	/// sequence, and reads it in order.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_reader_refills_an_evicted_group_in_order() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
+		for sequence in 0..4 {
+			write_group(&producer, sequence);
+		}
+		let waiter = kio::Waiter::noop();
+		let next = |subscriber: &mut Subscriber| match subscriber.poll_next_group(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(group))) => Some(group.sequence),
+			_ => None,
+		};
+		assert_eq!(next(&mut subscriber), Some(0));
+		evict(&producer, 1);
+		evict(&producer, 2);
+		assert_eq!(next(&mut subscriber), None, "group 1 comes before 3");
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("groups 1 and 2 are misses now");
+		};
+		assert_eq!((fill.start().group, fill.end()), (1, 3));
+		while let Some(sequence) = fill.next() {
+			write_filled(fill.accept(sequence, None), sequence);
+		}
+		drop(fill);
+		assert_eq!([next(&mut subscriber), next(&mut subscriber)], [Some(1), Some(2)]);
+		assert_eq!(next(&mut subscriber), Some(3));
+	}
+
+	/// A refill evicted again before its reader took it is given up rather than asked a
+	/// second time, so refills that evict each other cannot loop.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refill_evicted_again_is_given_up() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay());
+		for sequence in 0..3 {
+			write_group(&producer, sequence);
+		}
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(Some(_)))));
+		evict(&producer, 1);
+		assert_eq!(drain_groups(&mut subscriber), [2]);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("group 1 is a miss now");
+		};
+		assert_eq!(fill.next(), Some(1));
+		write_filled(fill.accept(1, None), 1);
+		drop(fill);
+		evict(&producer, 1);
+		assert!(drain_groups(&mut subscriber).is_empty());
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "refilled once");
+		assert_eq!(drained_drops(&mut subscriber), [(1, 2)]);
+	}
+
+	/// A slow ascending reader on a pooled track holding `cached` groups, taking `pace` of
+	/// every four its feed writes, as behind a bufferbloated link. Returns what it read, how
+	/// many groups the fills wrote, and what it gave up.
+	#[cfg(feature = "async")]
+	fn read_slowly(cached: usize, pace: u64) -> (Vec<u64>, u64, Vec<(u64, u64)>) {
+		let size = 10_000;
+		let (producer, _pool) = pooled_producer((cached * size) as u64);
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
+		let write = |group: Result<group::Producer>, sequence: u64| {
+			let mut group = group.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(sequence).unwrap(), vec![0u8; size])
+				.unwrap();
+			group.finish().unwrap();
+		};
+		let waiter = kio::Waiter::noop();
+		let mut refilled = 0;
+		let mut serve = || {
+			while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+				while let Some(sequence) = fill.next() {
+					write(fill.accept(sequence, None), sequence);
+					refilled += 1;
+				}
+			}
+		};
+		let (mut read, mut drops) = (Vec::new(), Vec::new());
+		// A wire publisher forwards what the reader gives up as it reads.
+		let mut take = |subscriber: &mut Subscriber| {
+			let taken = match subscriber.poll_next_group(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(group))) => {
+					read.push(group.sequence);
+					true
+				}
+				_ => false,
+			};
+			drops.extend(drained_drops(subscriber));
+			taken
+		};
+		for sequence in 0..GROUPS {
+			write(producer.create_group(group::Info { sequence }), sequence);
+			if sequence % 4 < pace {
+				take(&mut subscriber);
+			}
+			serve();
+		}
+		// The feed pauses and the reader drains what it can, refills included.
+		loop {
+			serve();
+			if !take(&mut subscriber) {
+				serve();
+				if !take(&mut subscriber) {
+					break;
+				}
+			}
+		}
+		(read, refilled, drops)
+	}
+
+	#[cfg(feature = "async")]
+	const GROUPS: u64 = 40;
+
+	/// A backlog a little past the cache: what the reader judged and lost to eviction is
+	/// refilled, so it receives every group once, in order, refilling no more than it reads.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_slow_reader_on_a_pooled_track_receives_every_group() {
+		let (read, refilled, drops) = read_slowly(8, 3);
+		assert_eq!(read, (0..GROUPS).collect::<Vec<_>>(), "every group once, in order");
+		assert!(drops.is_empty(), "nothing given up: {drops:?}");
+		assert!(refilled > 0, "the backlog outgrew the cache");
+		assert!(refilled <= GROUPS, "{refilled} refills for {GROUPS} groups read");
+	}
+
+	/// A backlog far past the cache, where refills evict the groups the reader reads next:
+	/// each group is refilled at most once, and one lost again is given up and named, never
+	/// handed out twice.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_slow_reader_past_the_cache_refills_each_group_once() {
+		let (read, refilled, drops) = read_slowly(4, 2);
+		let mut seen = read.clone();
+		seen.dedup();
+		assert_eq!(seen, read, "none twice");
+		assert!(read.is_sorted(), "in order");
+		assert!(refilled <= GROUPS, "{refilled} refills for {GROUPS} groups");
+		let lost: Vec<u64> = (0..GROUPS).filter(|sequence| !read.contains(sequence)).collect();
+		let named: Vec<u64> = drops.iter().flat_map(|&(start, end)| start..end).collect();
+		assert_eq!(lost, named, "every group lost is named dropped");
+	}
+
 	/// A reader forgets the misses it gave up once its window moves past them, as it forgets
 	/// what it judged, so a feed skipping every other group costs it only the gaps it can
 	/// still read.
@@ -19413,12 +19737,7 @@ mod test {
 
 	/// Take group `sequence` out of the cache as eviction does.
 	fn evict(producer: &Producer, sequence: u64) {
-		producer
-			.modify()
-			.unwrap()
-			.uncache(sequence)
-			.unwrap()
-			.abort(Error::Evicted);
+		producer.modify().unwrap().evict_group(sequence, Error::Evicted);
 	}
 
 	/// A rewound first frame is refused and leaves the group as it was, so the publisher can

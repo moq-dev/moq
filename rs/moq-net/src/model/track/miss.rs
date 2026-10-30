@@ -7,8 +7,9 @@
 //! (evicted, or a gap the feed skipped). A hole the ledger still waits for is deferred and
 //! judged again as the feed moves.
 //!
-//! Each sequence is judged once, so a group evicted after the reader judged it cached is
-//! not a miss: judging it again would refill a group an arrival-order reader already took.
+//! Each sequence is judged once, except a group evicted after the reader judged it cached
+//! and before it took it: judged again as a miss, once. A refill evicted again before it is
+//! taken is given up, so a slow reader's refills cannot evict each other without bound.
 //!
 //! A start is no promise, since a group below it may still arrive late. A hole under it is
 //! asked at once, but a refusal is final only once the ledger gives up on it too; until
@@ -24,6 +25,7 @@ use std::{
 
 use rangemap::{RangeInclusiveSet, RangeSet};
 
+use super::super::delivered::Delivered;
 pub(super) use super::fill::Asking;
 use super::fill::{Ask, FillState, Join};
 use super::{Drift, Order, Position, TrackState};
@@ -60,6 +62,10 @@ pub(super) struct Misses {
 	filled: BTreeSet<u64>,
 	/// Never asked again: named dropped to the reader.
 	given_up: RangeSet<u64>,
+	/// The track's eviction revision this reader judged up to, registered with the track.
+	evicted: Option<u64>,
+	/// Judged again after an eviction, within the judged span: never refilled twice.
+	refilled: RangeSet<u64>,
 }
 
 /// A run of misses the reader gives up, for the drop cursor to name.
@@ -190,8 +196,13 @@ impl Misses {
 		&self.given_up
 	}
 
-	/// The next answered group still cached in `order`, forgetting one evicted before it was
-	/// read.
+	/// The eviction revision this reader is registered at with its track, if any.
+	pub fn evicted(&self) -> Option<u64> {
+		self.evicted
+	}
+
+	/// The next answered group still cached in `order`, giving up one evicted before it was
+	/// read: [`Self::judge`] asked a first eviction again, so this one was refilled already.
 	pub fn next_filled(
 		&mut self,
 		state: &TrackState,
@@ -351,7 +362,8 @@ impl Misses {
 
 	/// Judge the holes in `target` the last probe has not, returning the runs to ask a
 	/// fill for. Gives up a run already stale under this reader's budget. `named` is the
-	/// lowest group the reader's ranges name, which may reach below the feed's start.
+	/// lowest group the reader's ranges name, which may reach below the feed's start, and
+	/// `taken` what the reader handed out, which an eviction never makes a miss again.
 	#[expect(
 		clippy::too_many_arguments,
 		reason = "one probe's inputs, borrowed apart from its cursor"
@@ -362,6 +374,7 @@ impl Misses {
 		key: (u64, u64, Option<u64>),
 		named: Option<u64>,
 		mut target: impl FnMut(RangeInclusive<u64>) -> RangeInclusiveSet<u64>,
+		taken: &Delivered,
 		drift: &Drift,
 		given_up: &mut GivenUp,
 		waiter: &kio::Waiter,
@@ -387,13 +400,15 @@ impl Misses {
 		let ended = state.abort.is_some() || state.is_complete();
 		let ledger = state.arrivals.changes();
 		let drops = &state.drops_changes;
+		let evictions = &state.eviction_changes;
 		// Every reader probes on every poll, mostly with nothing changed since the last, so
 		// that answer costs neither the subscriptions' lock nor a clock read.
 		let unchanged = self.at == Some(at)
 			&& self.budget == Some(drift.budget)
 			&& self.ended == ended
 			&& self.ledger_revision == ledger.revision()
-			&& self.drops_revision == drops.revision();
+			&& self.drops_revision == drops.revision()
+			&& self.evicted == Some(evictions.revision());
 		// The grace only times deferred gaps, so with none a new one has nothing to move.
 		// It is judged once something else changes.
 		if unchanged && self.deferred.runs.is_empty() {
@@ -436,6 +451,7 @@ impl Misses {
 			self.judged = clip(&self.judged);
 			self.refused = clip(&self.refused);
 			self.given_up = clip(&self.given_up);
+			self.refilled = clip(&self.refilled);
 			for (&start, &(end, _)) in &self.deferred.runs {
 				for run in span.overlapping(&(start..end)) {
 					candidates.insert(start.max(run.start)..end.min(run.end));
@@ -451,7 +467,12 @@ impl Misses {
 			// A moving read floor removes only its retired prefix. New production extends the
 			// judged span; neither path visits older deferred gaps.
 			if low > 0 {
-				for set in [&mut self.judged, &mut self.refused, &mut self.given_up] {
+				for set in [
+					&mut self.judged,
+					&mut self.refused,
+					&mut self.given_up,
+					&mut self.refilled,
+				] {
 					set.remove(0..low);
 				}
 				self.deferred.remove(0..low);
@@ -495,6 +516,43 @@ impl Misses {
 				.collect();
 			for sequence in arrived {
 				self.refused.remove(sequence..sequence + 1);
+			}
+		}
+		// What was judged cached and evicted since, before this reader took it, is a miss now.
+		let mut refills = RangeSet::new();
+		if let Some(seen) = self.evicted
+			&& seen != evictions.revision()
+			&& low <= top
+		{
+			for run in evictions.since(seen) {
+				let run = run.start.max(low)..run.end.min(top + 1);
+				if run.is_empty() {
+					continue;
+				}
+				for part in target(run.start..=run.end - 1).iter() {
+					for gap in taken.gaps(*part.start()..*part.end() + 1) {
+						for judged in self.judged.overlapping(&gap) {
+							let judged = judged.start.max(gap.start)..judged.end.min(gap.end);
+							for fresh in self.refilled.gaps(&judged) {
+								refills.insert(fresh);
+							}
+						}
+					}
+				}
+			}
+		}
+		if self.evicted != Some(evictions.revision()) {
+			state.judged_evictions(self.evicted, Some(evictions.revision()));
+			self.evicted = Some(evictions.revision());
+		}
+		for run in refills.iter() {
+			self.refilled.insert(run.clone());
+			candidates.insert(run.clone());
+			// A fill's answer evicted before it was taken is asked again, not given up.
+			let filled: Vec<u64> = self.filled.range(run.clone()).copied().collect();
+			for sequence in filled {
+				self.filled.remove(&sequence);
+				self.release(sequence);
 			}
 		}
 		self.ledger_revision = ledger.revision();
@@ -857,6 +915,7 @@ mod tests {
 			(0, 0, None),
 			None,
 			|span| [span].into_iter().collect(),
+			&Delivered::default(),
 			&drift,
 			&mut given_up,
 			&waiter,
@@ -896,6 +955,7 @@ mod tests {
 			(0, 0, None),
 			None,
 			|_| panic!("the edge has not moved"),
+			&Delivered::default(),
 			&drift,
 			&mut given_up,
 			&waiter,
@@ -920,6 +980,7 @@ mod tests {
 			(0, 0, None),
 			None,
 			|_| panic!("recreation extends no span"),
+			&Delivered::default(),
 			&drift,
 			&mut given_up,
 			&waiter,
@@ -961,6 +1022,7 @@ mod tests {
 			(0, 0, None),
 			None,
 			|span| [span].into_iter().collect(),
+			&Delivered::default(),
 			&drift,
 			&mut given_up,
 			&waiter,
@@ -994,6 +1056,7 @@ mod tests {
 			(0, 0, None),
 			None,
 			|_| panic!("the edge has not moved"),
+			&Delivered::default(),
 			&drift,
 			&mut given_up,
 			&waiter,
@@ -1030,6 +1093,7 @@ mod tests {
 					(0, 0, None),
 					None,
 					|span| [span].into_iter().collect(),
+					&Delivered::default(),
 					&drift,
 					&mut given_up,
 					&waiter
@@ -1045,6 +1109,7 @@ mod tests {
 					(0, 0, None),
 					None,
 					|_| panic!("an unchanged probe rebuilds no span"),
+					&Delivered::default(),
 					&drift,
 					&mut given_up,
 					&waiter
@@ -1065,6 +1130,7 @@ mod tests {
 					(0, 0, None),
 					None,
 					|_| panic!("a late arrival extends no span"),
+					&Delivered::default(),
 					&drift,
 					&mut given_up,
 					&waiter
@@ -1081,6 +1147,7 @@ mod tests {
 			(0, 0, None),
 			None,
 			|_| panic!("a due gap extends no span"),
+			&Delivered::default(),
 			&drift,
 			&mut given_up,
 			&waiter,
@@ -1117,7 +1184,16 @@ mod tests {
 		let full = |span| [span].into_iter().collect();
 		assert!(
 			misses
-				.judge(&state, (0, 0, None), None, full, &drift, &mut given_up, &waiter)
+				.judge(
+					&state,
+					(0, 0, None),
+					None,
+					full,
+					&Delivered::default(),
+					&drift,
+					&mut given_up,
+					&waiter
+				)
 				.is_empty()
 		);
 		assert!(misses.deferred.runs.is_empty(), "a contiguous feed defers nothing");
@@ -1134,6 +1210,7 @@ mod tests {
 					(0, 0, None),
 					None,
 					|_| panic!("nothing deferred: the new grace waits for a change"),
+					&Delivered::default(),
 					&drift,
 					&mut given_up,
 					&waiter
@@ -1151,7 +1228,16 @@ mod tests {
 		let opened = state.cache.pool().now_wall();
 		assert!(
 			misses
-				.judge(&state, (0, 0, None), None, full, &drift, &mut given_up, &waiter)
+				.judge(
+					&state,
+					(0, 0, None),
+					None,
+					full,
+					&Delivered::default(),
+					&drift,
+					&mut given_up,
+					&waiter
+				)
 				.is_empty()
 		);
 		assert_eq!(misses.deferred.overlapping(0..5).collect::<Vec<_>>(), vec![3..4]);
