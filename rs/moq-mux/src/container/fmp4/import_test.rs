@@ -2406,9 +2406,11 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 					moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 				)
 				.unwrap();
-			let mut stream = catalog.binary_stream(track, crate::binary::Config::default()).unwrap();
+			let mut stream = catalog
+				.json_stream::<serde_json::Value>(track, crate::json::Config::default())
+				.unwrap();
 			stream
-				.append(moq_net::Timed::from(&b"before"[..]).at(catalog.clock().now()))
+				.append(moq_net::Timed::from(&serde_json::json!("before")).at(catalog.clock().now()))
 				.unwrap();
 			Some(stream)
 		}
@@ -2425,7 +2427,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 	let after = clock.now().as_micros();
 	if let Some(stream) = data.as_mut() {
 		stream
-			.append(moq_net::Timed::from(&b"after"[..]).at(catalog.clock().now()))
+			.append(moq_net::Timed::from(&serde_json::json!("after")).at(catalog.clock().now()))
 			.unwrap();
 	}
 	fmp4.finish().unwrap();
@@ -3459,4 +3461,84 @@ fn colr_nclc_keeps_its_code_points() {
 		(Some(9), Some(16), Some(9), None)
 	);
 	assert!(super::colr_color(&mp4_atom::Colr::new(300, 1, 1, false).unwrap()).is_err());
+}
+
+/// A declared boundary waits for decodable video; dependent fragments stay in the old group.
+#[tokio::test(start_paused = true)]
+async fn declared_boundaries_wait_for_sync_samples() {
+	for passthrough in [false, true] {
+		for explicit in [false, true] {
+			let (init, (video_id, video_scale), _) = bbb_init();
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+			import.decode(&init).unwrap();
+			let snapshot = catalog.snapshot();
+			let name = snapshot.video.renditions.keys().next().unwrap();
+			let mut track = consumer.track(name).unwrap().subscribe(replay()).await.unwrap();
+			for (index, sync) in [true, false, false, true, false, true].into_iter().enumerate() {
+				if index == 1 {
+					if explicit {
+						import.cut().unwrap();
+					} else {
+						import.decode(&styp()).unwrap();
+					}
+				}
+				let fragment = super::encode_fragment(
+					info(video_id, video_scale, index as u32),
+					&[sample(index as u64 * 1_000_000, sync, Some(1_000_000))],
+				)
+				.unwrap();
+				import.decode(&fragment).unwrap();
+			}
+			import.finish().unwrap();
+			let marker = usize::from(!passthrough);
+			assert_eq!(
+				drain_group_frames(&mut track),
+				vec![3 + marker, 2 + marker, 1 + marker],
+				"passthrough {passthrough}, explicit {explicit}"
+			);
+		}
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn declared_boundaries_do_not_split_passthrough_fragments() {
+	for passthrough in [false, true] {
+		let (init, (video_id, video_scale), _) = bbb_init();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+		import.decode(&init).unwrap();
+		let snapshot = catalog.snapshot();
+		let name = snapshot.video.renditions.keys().next().unwrap();
+		let mut track = consumer.track(name).unwrap().subscribe(replay()).await.unwrap();
+		let tick = video_scale.as_u64() / 24;
+		let non_sync = 0x0001_0000;
+		import
+			.decode(&video_fragment(video_id, 0, tick, &[(0, 0, 0xA)]))
+			.unwrap();
+		import.cut().unwrap();
+		import
+			.decode(&video_fragment(
+				video_id,
+				tick,
+				tick,
+				&[(0, non_sync, 0xB), (0, 0, 0xC)],
+			))
+			.unwrap();
+		import
+			.decode(&video_fragment(video_id, 3 * tick, tick, &[(0, non_sync, 0xD)]))
+			.unwrap();
+		import
+			.decode(&video_fragment(video_id, 4 * tick, tick, &[(0, 0, 0xE)]))
+			.unwrap();
+		import.finish().unwrap();
+		assert_eq!(
+			drain_group_frames(&mut track),
+			if passthrough { vec![3, 1] } else { vec![3, 3, 2] }
+		);
+	}
 }

@@ -99,10 +99,10 @@ enum Rendition<E: crate::catalog::hang::CatalogExt> {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Rendition<E> {
-	fn estimate(&mut self, estimate: crate::catalog::Estimate) -> crate::Result<()> {
+	fn estimate(&mut self, reading: crate::catalog::Reading) -> crate::Result<()> {
 		match self {
-			Self::Video(rendition) => rendition.estimate(estimate),
-			Self::Audio(rendition) => rendition.estimate(estimate),
+			Self::Video(rendition) => rendition.estimate(reading),
+			Self::Audio(rendition) => rendition.estimate(reading),
 		}
 	}
 }
@@ -179,9 +179,9 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 
 impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	fn publish_estimate(&mut self) -> crate::Result<()> {
-		let estimate = self.estimator.estimate();
-		self.claim.update(&self.track.demand(), estimate.bitrate);
-		self.rendition.estimate(estimate)
+		let reading = self.estimator.reading();
+		self.claim.update(&self.track.demand(), reading.estimate.bitrate);
+		self.rendition.estimate(reading)
 	}
 
 	/// Close the open group, so the next fragment opens one at `pending_sequence` or the next.
@@ -489,7 +489,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 		// Enroll every track for HLS records: passthrough writes groups by hand (no
 		// `container::Producer`), so the recorder is fed directly at each fragment.
-		let recorder = self.catalog.enroll(track.name(), None)?;
+		let mut recorder = self.catalog.enroll(track.name(), None)?;
+		if let Some(recorder) = recorder.as_mut() {
+			recorder.lend(&track);
+		}
 
 		// Whatever the descriptor declared (a bitrate) is authoritative; the rest is filled by
 		// `estimate` as fragments arrive.
@@ -1014,14 +1017,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				declared: new_segment && self.declared,
 			};
 
-			match &mut track.output {
+			let opened = match &mut track.output {
 				Output::Passthrough(passthrough) => {
 					let fragment = fragment(traf, &moof, &run, &payload, &track.defaults)?;
-					passthrough.write(fragment, &run, track.kind, placement)?;
+					passthrough.write(fragment, &run, track.kind, placement)?
 				}
 				output => unwrap(output, &run, &payload, track.timescale, placement)?,
+			};
+			// Consuming the boundary on a dependent fragment would let its next sync sample
+			// advance the segment again before this track has opened the first one.
+			if opened {
+				track.segment = Some(self.segment);
 			}
-			track.segment = Some(self.segment);
 		}
 
 		Ok(())
@@ -1037,6 +1044,16 @@ struct Placement {
 	new_segment: bool,
 	/// That segment was declared by the source, so it is an HLS segment boundary too.
 	declared: bool,
+}
+
+impl Placement {
+	/// Video opens only on a sync sample; audio follows the source's segment boundary.
+	fn keyframe(self, kind: Kind, sample: &Sample) -> bool {
+		match kind {
+			Kind::Video => sample.sync,
+			Kind::Audio => self.new_segment,
+		}
+	}
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
@@ -1248,18 +1265,18 @@ fn kept(traf: &mp4_atom::Traf, run: &Run) -> Result<mp4_atom::Traf> {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
-	/// Write one per-track `fragment` as a single frame.
-	fn write(&mut self, fragment: Bytes, run: &Run, kind: Kind, placement: Placement) -> Result<()> {
+	/// Write one per-track `fragment` as a single frame, reporting whether it opened a group.
+	fn write(&mut self, fragment: Bytes, run: &Run, kind: Kind, placement: Placement) -> Result<bool> {
 		// Carry the fragment's earliest presentation time as the frame timestamp, in the
 		// track's native timescale and shifted onto the catalog clock. Consumers present the
 		// fragment at it; `tfdt` only places the samples relative to each other.
 		let timestamp = placement.offset.apply(run.earliest)?;
 		let end = placement.offset.apply(run.end)?;
 
-		// The group rolls once per segment, so a group is a segment and the fragments inside it
-		// are frames. The keyframe bit does not decide that: audio flags every sample a sync
-		// sample, so keying off it opened a group (a QUIC stream) per audio fragment.
-		let start_group = self.group.is_none() || placement.new_segment;
+		// Audio follows segment boundaries; video also waits for a sync first sample so a new
+		// group's first fragment can be decoded independently.
+		let keyframe = placement.keyframe(kind, run.samples.first().ok_or(Error::MissingTrun)?);
+		let start_group = self.group.is_none() || (placement.new_segment && keyframe);
 		// A group may not start below the one before it. Refused before the open group closes or
 		// a new one opens, so a rewound fragment publishes nothing, as an unwrapped track does.
 		if start_group
@@ -1319,7 +1336,8 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			recorder.end(end);
 		}
 		self.estimator.burst(end.checked_sub(timestamp)?.into());
-		self.publish_estimate()
+		self.publish_estimate()?;
+		Ok(start_group)
 	}
 }
 
@@ -1330,25 +1348,28 @@ fn unwrap<E: crate::catalog::hang::CatalogExt>(
 	payload: &Bytes,
 	timescale: moq_net::Timescale,
 	placement: Placement,
-) -> Result<()> {
+) -> Result<bool> {
 	let earliest = placement.offset.apply(run.earliest)?;
 	let end = placement.offset.apply(run.end)?;
-	let video = matches!(output, Output::Video(_));
+	let kind = if matches!(output, Output::Video(_)) {
+		Kind::Video
+	} else {
+		Kind::Audio
+	};
 
 	media!(output, producer => {
-		if placement.declared {
-			producer.boundary(earliest);
-		}
-
+		let mut opened = false;
 		for (index, sample) in run.samples.iter().enumerate() {
-			let keyframe = match video {
-				// Video groups open on sync samples, the `depends_on` rule the rest of moq-mux applies.
-				true => sample.sync,
-				// Packagers flag every audio sample a sync sample, which would open a group per
-				// packet. Only a segment's first sample opens one instead, so audio keeps the
-				// source's grouping (and whatever a `seek` left open).
-				false => (index == 0 && placement.new_segment) || producer.needs_keyframe(),
+			let keyframe = match kind {
+				Kind::Video => placement.keyframe(kind, sample),
+				Kind::Audio => (index == 0 && placement.keyframe(kind, sample)) || producer.needs_keyframe(),
 			};
+			if keyframe {
+				if !opened && placement.declared {
+					producer.boundary(earliest);
+				}
+				opened = true;
+			}
 			if sample.pts > sample.dts {
 				producer.reorder(Timestamp::new(sample.pts - sample.dts, timescale)?);
 			}
@@ -1366,7 +1387,7 @@ fn unwrap<E: crate::catalog::hang::CatalogExt>(
 
 		// The fragment arrived at once, so a consumer has to buffer its whole span.
 		producer.burst(end.checked_sub(earliest)?.into())?;
-		Ok(())
+		Ok(opened)
 	}, _ => unreachable!("passthrough tracks write whole fragments"))
 }
 

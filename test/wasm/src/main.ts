@@ -20,7 +20,6 @@ import * as Moq from "@moq/net";
 /** The generated `@moq/wasm` module, typed from its published `.d.ts`. */
 type Wasm = typeof import("@moq/wasm");
 type Session = import("@moq/wasm").Session;
-type Broadcast = import("@moq/wasm").Broadcast;
 type Track = import("@moq/wasm").Track;
 
 /** One relay the suite runs against, and the version it must negotiate. */
@@ -214,13 +213,6 @@ async function withSession<T>(wasm: Wasm, relay: RelayFixture, body: (session: S
 	}
 }
 
-/** Wait for `path` to be announced and return the broadcast, or fail. */
-async function consume(session: Session, path: string): Promise<Broadcast> {
-	const broadcast = await session.consume(path);
-	if (!broadcast) throw new Error(`consume(${path}) resolved without a broadcast`);
-	return broadcast;
-}
-
 /**
  * Read `count` consecutive groups off a track, asking the publisher for each next one
  * with `advance`, and check each against {@link FIXTURE}.
@@ -307,7 +299,7 @@ const CASES: Case[] = [
 			const path = `wasm-test/${relay.name}`;
 			await withPublisher(relay, path, async (advance) => {
 				await withSession(wasm, relay, async (session) => {
-					const broadcast = await consume(session, path);
+					const broadcast = await session.consume(path);
 					const track = await broadcast.subscribe(TRACK);
 					try {
 						await expectGroups(track, GROUPS_TO_READ, advance);
@@ -330,7 +322,7 @@ const CASES: Case[] = [
 			const path = `wasm-test/${relay.name}-refuse`;
 			await withPublisher(relay, path, async () => {
 				await withSession(wasm, relay, async (session) => {
-					const broadcast = await consume(session, path);
+					const broadcast = await session.consume(path);
 					let read: string;
 					try {
 						const track = await broadcast.subscribe("missing");
@@ -361,7 +353,7 @@ const CASES: Case[] = [
 			session.free();
 			const resolved = await pending.then(
 				(broadcast) => {
-					broadcast?.free();
+					broadcast.free();
 					return true;
 				},
 				() => false,
@@ -378,7 +370,7 @@ const CASES: Case[] = [
 			const path = `wasm-test/${relay.name}-free`;
 			await withPublisher(relay, path, async () => {
 				await withSession(wasm, relay, async (session) => {
-					const broadcast = await consume(session, path);
+					const broadcast = await session.consume(path);
 					const track = await broadcast.subscribe(TRACK);
 					const pendingTrack = broadcast.subscribe(TRACK);
 					broadcast.free();

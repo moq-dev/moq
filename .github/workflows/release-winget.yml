@@ -52,12 +52,36 @@ env:
 jobs:
   publish:
     name: Submit winget manifest
-    # workflow_run: only after a successful release of a moq-* tag.
-    # workflow_dispatch: always (it's an explicit dry run).
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'moq-')) }}
+    # workflow_run: only after a successful release of a tag the `release tags`
+    # ruleset protects. workflow_dispatch: always (it's an explicit dry run).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       (startsWith(github.event.workflow_run.head_branch, 'moq-relay-v') ||
+        startsWith(github.event.workflow_run.head_branch, 'moq-cli-v')))
     runs-on: windows-latest
+    # WINGET_TOKEN lives in the `publish` Environment, which only protected refs
+    # can deploy to. A dry run needs no token, so it can run from any branch.
+    environment: ${{ github.event_name == 'workflow_run' && 'publish' || '' }}
 
     steps:
+      # head_branch names a branch as readily as a tag, and anyone who can push
+      # may name a branch and a workflow after a release. Only a tag the
+      # `release tags` ruleset protects, at the run's commit, is a release.
+      - name: Require a release tag at the run's commit
+        if: github.event_name == 'workflow_run'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$TAG" --jq .sha)
+          if [[ "$commit" != "$SHA" ]]; then
+            echo "::error::$TAG is not a release tag at $SHA"
+            exit 1
+          fi
+
       - name: Resolve mode and tag
         id: mode
         shell: bash

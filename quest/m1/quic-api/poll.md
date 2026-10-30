@@ -35,8 +35,7 @@ Decided 2026-10-25 (maintainer), replacing the 2026-10-23 shape:
   break, no longer holds: moq-net already re-exports kio, and moq-quic takes
   `&kio::Waiter` too. The caller owns the waiter, so a poll that is
   abandoned leaves nothing behind, and handles stay `&self`. moq-net's
-  `transport::poll` traits take the same shape
-  ([net-poll](/quest/m1/quic-api/net-poll.md)), so their native impls
+  `transport::poll` traits take the same shape, so their native impls
   forward without a `Park`.
 
 ```rust

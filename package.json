@@ -42,7 +42,6 @@
 		"js/pattern",
 		"js/auth",
 		"js/e2ee",
-		"js/flate",
 		"js/json",
 		"js/libav",
 		"js/hang",

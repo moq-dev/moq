@@ -578,7 +578,7 @@ mod tests {
 					let wire = socket.protocol().and_then(|h| h.to_str().ok()).map(str::to_owned);
 					let socket = WebSocketAdapter::new(socket);
 
-					let mut session = qmux::ws::Upgraded::new(socket, wire.as_deref().unwrap_or_default())
+					let session = qmux::ws::Upgraded::new(socket, wire.as_deref().unwrap_or_default())
 						.accept()
 						.expect("the upgrade selected a QMux subprotocol");
 					let _ = tx.send(Observed {
@@ -846,7 +846,7 @@ mod tests {
 		));
 
 		// A live qmux peer that answers keep-alives but never speaks moq.
-		let mut client = qmux::ws::Upgraded::new(
+		let client = qmux::ws::Upgraded::new(
 			Pipe::new(client_incoming, client_to_server, Arc::new(AtomicBool::new(false))),
 			&alpn,
 		)

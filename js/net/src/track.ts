@@ -41,6 +41,7 @@ import {
 } from "./internal.ts";
 import { grace, Ledger } from "./ledger.ts";
 import { Timescale, type Timestamp } from "./time.ts";
+import * as Varint from "./varint.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
 export type { Datagram } from "./datagram.ts";
@@ -225,7 +226,9 @@ export interface Subscription {
 	/**
 	 * How long (milliseconds) a non-latest group stays worth delivering, by the same two
 	 * clocks as {@link Info.maxAge}: it is skipped once its successor arrived this long ago
-	 * or starts this far behind the live edge. Defaults to `0`, the live edge only, timed or not.
+	 * or starts this far behind the live edge. Omitted means no subscriber limit, so the
+	 * publisher's {@link Info.maxAge} alone bounds it, which is what a reader reaching back for
+	 * history wants. {@link Subscription.default} sets `0`, the live edge only, timed or not.
 	 * Rounded up to a whole millisecond, so a value derived from a measurement is never
 	 * shortened. A negative or non-finite value, or one past `Number.MAX_SAFE_INTEGER`
 	 * after rounding, is refused.
@@ -264,14 +267,31 @@ export interface Subscription {
  */
 export type Order = "ascending" | "descending";
 
+/** Constructors for {@link Subscription}. */
+export const Subscription: {
+	/**
+	 * The default subscription, used when none is passed: priority `0`, descending order, and
+	 * a `maxDelay` of zero that skips a superseded group at once. Mirrors the Rust
+	 * `Subscription::default()`. Spread it to change one field and keep the rest:
+	 * `{ ...Subscription.default(), priority: 2 }`.
+	 */
+	default(): Subscription;
+} = {
+	default: () => ({ priority: DEFAULT_PRIORITY, maxDelay: Milli.zero, order: "descending" }),
+};
+
+// What an omitted maxDelay materializes to: the publisher's max age alone. The largest
+// value every peer can read, as the Rust wire sends for `None`.
+const NO_MAX_DELAY = Milli(Varint.MAX_U53);
+
 // Materialize the defaults at the model boundary so every layer observes a complete
 // subscription rather than interpreting an omitted field differently.
-function subscriptionDefaults(subscription: Subscription = {}): Subscription {
+function subscriptionDefaults(subscription: Subscription = Subscription.default()): Subscription {
 	if ("maxAge" in subscription) throw new TypeError("Subscriber maxAge is unsupported; use maxDelay");
 	const bounds = groupBounds(subscription.groups ?? {});
 	return {
 		priority: priorityValue(subscription.priority ?? DEFAULT_PRIORITY),
-		maxDelay: wireMillis("maxDelay", subscription.maxDelay ?? Milli.zero),
+		maxDelay: wireMillis("maxDelay", subscription.maxDelay ?? NO_MAX_DELAY),
 		order: orderOf(subscription.order),
 		groups: {
 			start: subscription.groups?.start === undefined ? undefined : { included: bounds.start },
@@ -386,14 +406,10 @@ export class Request {
 		};
 	}
 
-	/** Reject the request, closing the track optionally with an error. */
-	reject(err?: Error): void {
+	/** Reject the request with the error its subscribers receive. */
+	reject(err: Error): void {
 		this.#pending.delete(this);
-		if (err) this.#producer.abort(err);
-		else {
-			this.#producer.finish();
-			this.#producer.close();
-		}
+		this.#producer.abort(err);
 	}
 }
 
@@ -439,8 +455,10 @@ export class Consumer {
 	 *
 	 * The cursor starts at the group the subscription named (its floor), or 0.
 	 * {@link Subscription.maxDelay} is what asks for data: delivery skips everything above
-	 * the floor that the budget convicts, so the default budget of zero delivers only the
-	 * latest group and a larger one reaches back over what it can still use.
+	 * the floor that the budget convicts. Without options this is {@link Subscription.default},
+	 * whose budget of zero delivers only the latest group; a larger one reaches back over what
+	 * it can still use, and an options object without `maxDelay` reaches back as far as the
+	 * publisher retains.
 	 */
 	subscribe(options?: Subscription): Subscriber {
 		return this.#broadcast.subscribe(this.name, options);
@@ -760,8 +778,8 @@ export class Producer {
 	// to close, rather than end at the boundary with groups still to arrive.
 	#tailPending = false;
 	// The first group the wire subscription's live feed serves (see `hooks.startTrack`), unset
-	// until its START resolves it, and the floor the SUBSCRIBE requested.
-	#served?: { start?: number; requested?: number };
+	// until its START resolves it, null for a resolved-empty range, and the requested floor.
+	#served?: { start?: number | null; requested?: number };
 	// The sequences the live feed delivered, as a group or a datagram: what a pending tail is
 	// judged by. Eviction never touches it. A gap folds away a subscription's grace after a
 	// later arrival opened it, as the session's tail does, so this holds only the gaps still
@@ -966,10 +984,12 @@ export class Producer {
 	 *
 	 * Its cursor starts at the group the subscription named (its floor), or 0.
 	 * {@link Subscription.maxDelay} is what asks for data: delivery skips everything above
-	 * the floor that the budget convicts, so the default budget of zero delivers only the
-	 * latest group and a larger one reaches back over what it can still use.
+	 * the floor that the budget convicts. Without options this is {@link Subscription.default},
+	 * whose budget of zero delivers only the latest group; a larger one reaches back over what
+	 * it can still use, and an options object without `maxDelay` reaches back as far as the
+	 * publisher retains.
 	 */
-	subscribe(options: Subscription = {}): Subscriber {
+	subscribe(options: Subscription = Subscription.default()): Subscriber {
 		const sink = new TrackState(options);
 		this.#addSink(sink);
 		return makeSubscriber(this.name, sink);
@@ -1043,7 +1063,8 @@ export class Producer {
 				for (const entry of this.#cache) {
 					const mirror = entry.mirrors.get(sink);
 					if (mirror) {
-						hooks.releaseGroupReader(mirror, abort);
+						// A group its recovery moved to another copy no longer reads this one.
+						if (hooks.readsMirrored(mirror)) hooks.releaseGroupReader(mirror, abort);
 						entry.mirrors.delete(sink);
 					}
 				}
@@ -1106,8 +1127,7 @@ export class Producer {
 			EVICTED.add(evicted);
 			entry.group.abort(evicted);
 		}
-		const mirrors = [...entry.mirrors.values()];
-		for (const mirror of mirrors) hooks.evictGroup(mirror);
+		const mirrors = [...entry.mirrors.values()].filter((mirror) => hooks.evictGroup(mirror));
 		this.#unlink(entry);
 		for (const mirror of mirrors) mirror.close();
 	}
@@ -1603,6 +1623,7 @@ export class Producer {
 		const requested = groups?.start === undefined ? undefined : groupBounds(groups).start;
 		const served = this.#served;
 		if (!served || served.requested !== requested) return requested;
+		if (served.start === null) return requested;
 		if (served.start !== undefined) return served.start;
 		// A closed track never gets its START.
 		return this.#state.closed.peek() === undefined ? "pending" : requested;
@@ -1689,7 +1710,7 @@ export class Producer {
 	}
 
 	// `abort` is undefined for a clean close, which keeps whatever end was declared. A received
-	// copy whose session closed locally closes cleanly without one: a dead route, not finished
+	// copy released because nobody wants it closes cleanly without one: a dead route, not finished
 	// content.
 	#close(abort: Error | undefined) {
 		if (this.#state.closed.peek() !== undefined) return;
@@ -1698,13 +1719,15 @@ export class Producer {
 		if (abort && (this.#state.outcome.peek() === null || this.#settled())) abort = undefined;
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
-		const open = abort ? this.#cache.filter((entry) => entry.group.closed.peek() === undefined) : [];
+		const open = this.#cache.filter((entry) => entry.group.closed.peek() === undefined);
 		closeTrackState(this.#state, abort);
 		if (this.#state.outcome.peek() === undefined) this.#state.outcome.set(abort ?? null);
-		for (const { group } of this.#cache) {
-			if (abort) group.abort(abort);
-			else group.finish();
-		}
+		// Closing a copy never supplies the missing tail of a group. Already finished groups
+		// ignore the abort and stay readable; unfinished ones retain their truncation cause.
+		const groupError =
+			abort ??
+			new StreamError(StreamCode.Cancel, { message: `track ${this.name} closed with unfinished groups` });
+		for (const { group } of this.#cache) group.abort(groupError);
 		for (const entry of open) {
 			this.#unlink(entry);
 			this.#uncache(entry);
@@ -2207,7 +2230,7 @@ export class Subscriber {
 			return producer !== undefined && mayLand(producer, land);
 		};
 		hooks.resumeSubscriber = (name, subscription, source) => {
-			const state = new TrackState(subscription);
+			const state = new TrackState(subscription ?? Subscription.default());
 			const subscriber = new Subscriber(name, state);
 			subscriber.#resume = source({
 				subscription: state.update,
@@ -2465,7 +2488,7 @@ export class Subscriber {
 	 * beyond the cap stays buffered (not dropped) and is offered once the cap rises, even
 	 * after a clean close, without blocking in-range groups that arrive behind it.
 	 * A group whose presentation time is further behind the live edge than this
-	 * subscriber's `maxDelay` is skipped. The default of zero takes the live edge.
+	 * subscriber's `maxDelay` is skipped. The default subscription's zero takes the live edge.
 	 * The budget remains attached after return, so a pending frame read rejects if a stalled
 	 * group becomes stale while newer data advances.
 	 *
@@ -2984,8 +3007,8 @@ export class Ordered {
 	 * Return the next group with a strictly-greater sequence number than the last returned.
 	 *
 	 * Late arrivals (sequence at or below the last returned) are silently skipped, as is a
-	 * group whose every frame is further behind the live edge than `maxDelay` (the default of
-	 * zero keeps only what nothing newer has superseded). Honors the bounds set by
+	 * group whose every frame is further behind the live edge than `maxDelay` (the default
+	 * subscription's zero keeps only what nothing newer has superseded). Honors the bounds set by
 	 * {@link withRange}.
 	 */
 	nextGroup(): Promise<GroupConsumer | undefined> {

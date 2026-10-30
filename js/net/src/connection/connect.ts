@@ -17,7 +17,7 @@ import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
-import { type Credential, credential, fallback, hold } from "./tokens.ts";
+import { credential, fallback, hold, type Presentation } from "./tokens.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = Milli(500);
@@ -208,7 +208,7 @@ export interface ConnectProps {
 	 * nothing.
 	 *
 	 * What the peer announces under the prefixes the origin's readers watch
-	 * (`announced(scope)` or `request(path, { announced: true })`) appears in its table for
+	 * (`announced(scope)`, `request(path)`, or `follow(path)`) appears in its table for
 	 * the session's lifetime, consumable by path; nothing is asked until something watches,
 	 * and the entries retract when the session dies. Pass the producer behind
 	 * {@link ConnectProps.publish} to route both directions through one origin: a locally
@@ -357,12 +357,12 @@ async function connectInner(
 	tokens: readonly string[],
 	props: Omit<ConnectProps, "url">,
 	abort: Promise<void>,
-): Promise<[Established, Credential]> {
+): Promise<[Established, Presentation]> {
 	const offered = offer(props.versions);
 	const dial = credential(raw, tokens, offered.setupToken);
 	const url = dialable(dial.url);
 	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, offered.setupToken);
-	const wiring = (presented: Credential): SessionProps => ({
+	const wiring = (presented: Presentation): SessionProps => ({
 		publish: props.publish,
 		handle: props.auth,
 		client: true,

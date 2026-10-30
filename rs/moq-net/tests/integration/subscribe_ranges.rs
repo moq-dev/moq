@@ -91,11 +91,7 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 			sessions.push(connect_mock(options).await);
 
 			let consumer = subscriber.consume();
-			moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-				.await
-				.expect("announce timeout")
-				.expect("routed");
-			moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+			moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 				.await
 				.expect("resolve timeout")
 				.expect("broadcast resolves")
@@ -141,11 +137,7 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 		options.client_subscribe = Some(subscriber.clone());
 		let session = connect_mock(options).await;
 		let consumer = subscriber.consume();
-		moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-			.await
-			.expect("announce timeout")
-			.expect("routed");
-		let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+		let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");
@@ -248,11 +240,7 @@ async fn range_fixture_history(version: &str, relay: bool, history: u64) -> Rang
 	options.client_subscribe = Some(subscriber.clone());
 	sessions.push(connect_mock(options).await);
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("ranges"))
-		.await
-		.unwrap()
-		.unwrap();
-	let remote = consumer.request_broadcast("ranges", None).await.unwrap();
+	let remote = consumer.follow("ranges", None).unwrap().available().await.unwrap();
 	RangeFixture {
 		track,
 		remote,
@@ -282,15 +270,15 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 					assert_eq!(next(&mut warm).await, None);
 				}
 				let subscription = Subscription::default()
-					.with_ranges([Range::groups(1..3), Range::live()])
+					.with_ranges([Range::groups(1..2), Range::live()])
 					.with_max_delay(None);
 				let mut reader = subscribe(&fixture.remote, subscription).await;
 				let mut got = Vec::new();
-				for _ in 0..3 {
+				for _ in 0..2 {
 					got.push(next(&mut reader).await.expect("a mixed range group is missing"));
 				}
 				got.sort_unstable();
-				assert_eq!(got, [1, 2, 5], "{version} relay={relay} finished={finished}");
+				assert_eq!(got, [1, 5], "{version} relay={relay} finished={finished}");
 			}
 		}
 	}
@@ -351,7 +339,7 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"later".as_slice())
 			.unwrap();
 		group.finish().unwrap();
-		assert_eq!(next(&mut reader).await, Some(6));
+		assert_eq!(next(&mut reader).await, Some(6), "relay={relay}");
 	}
 }
 
@@ -464,15 +452,15 @@ async fn draft18_updates_narrow_then_widen() {
 	let version = "moq-transport-18";
 	for relay in [false, true] {
 		let mut fixture = range_fixture_version(version, relay).await;
-		let initial = Subscription::default().with_range(0..).with_max_delay(None);
+		let initial = Subscription::default().with_range(5..).with_max_delay(None);
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		let mut seen = Vec::new();
-		for _ in 0..6 {
+		for _ in 0..1 {
 			seen.push(next(&mut reader).await.expect("initial history"));
 		}
 		seen.sort_unstable();
-		assert_eq!(seen, [0, 1, 2, 3, 4, 5], "{version} relay={relay}");
-		reader.update(initial.clone().with_range(4..5)).unwrap();
+		assert_eq!(seen, [5], "{version} relay={relay}");
+		reader.update(initial.clone().with_range(6..7)).unwrap();
 		moq_clock::timeout(
 			TIMEOUT,
 			kio::wait(|waiter| {
@@ -481,7 +469,7 @@ async fn draft18_updates_narrow_then_widen() {
 					if fixture
 						.track
 						.subscription()
-						.is_some_and(|subscription| subscription.ranges == [Range::groups(4..5)])
+						.is_some_and(|subscription| subscription.ranges == [Range::groups(6..7)])
 					{
 						return std::task::Poll::Ready(());
 					}
@@ -588,16 +576,15 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 	}
 }
 
-/// A fill that widens an initially empty copy must finish every completed group,
-/// including the snapshot head, before the publisher produces another group.
+/// A largest-group fill finishes its snapshot before the publisher produces another group.
 #[moq_clock::test]
-async fn draft22_cold_widening_finishes_every_filled_group() {
+async fn draft22_cold_widening_finishes_the_largest_group() {
 	for relay in [false, true] {
 		let mut fixture = range_fixture_history("moq-transport-22", relay, 0).await;
 		let initial = Subscription::default().with_range(2..).with_max_delay(None);
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
-		for start in [0, 2, 4] {
-			let future = start + 2;
+		for start in [0, 1, 2] {
+			let future = start + 1;
 			reader.update(initial.clone().with_range(future..)).unwrap();
 			moq_clock::timeout(
 				TIMEOUT,
@@ -652,7 +639,7 @@ async fn draft22_cold_widening_finishes_every_filled_group() {
 				);
 			}
 			sequences.sort_unstable();
-			assert_eq!(sequences, [start, start + 1]);
+			assert_eq!(sequences, [start]);
 		}
 	}
 }
@@ -751,11 +738,7 @@ async fn a_covered_bounded_subscription_ends_on_lite07() {
 		options.client_subscribe = Some(subscriber.clone());
 		let session = connect_mock(options).await;
 		let consumer = subscriber.consume();
-		moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-			.await
-			.expect("announce timeout")
-			.expect("routed");
-		let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+		let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");

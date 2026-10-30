@@ -560,12 +560,16 @@ impl Front {
 			}
 			// Died mid-serve after delivering from the same instance: normal
 			// failover, re-splice from the serving source at the first missing group.
-			Err(_) if delivered && self.serving.is_some_and(|(_, candidate)| candidate.epoch) => {
+			Err(err)
+				if delivered
+					&& super::resume::route_failed(&err)
+					&& self.serving.is_some_and(|(_, candidate)| candidate.epoch) =>
+			{
 				track.state = TrackState::Idle;
 				self.redispatch(name, actions);
 			}
-			// Without an epoch nothing says a re-request serves the same bytes, so
-			// the track ends with the upstream error and readers request again.
+			// A content verdict survives every copy. Without an epoch, even a route
+			// failure cannot be retried against the same content.
 			Err(err) if delivered => {
 				track.state = TrackState::Idle;
 				track.ended = true;
@@ -1083,6 +1087,35 @@ mod tests {
 				source: 100,
 			}],
 		);
+	}
+
+	#[test]
+	fn an_epoch_copy_verdict_aborts_without_querying_again() {
+		for candidate in [remote(1), local(1)] {
+			for err in [
+				Error::from(crate::StreamError::FrameTooLarge),
+				Error::from(crate::StreamError::MalformedTrack),
+				Error::App(7),
+				Error::NotFound,
+				Error::Unsupported,
+			] {
+				let mut front = serving(candidate, 100);
+				assert_actions(
+					front.step(Event::TrackEnded {
+						track: name("video"),
+						source: 100,
+						closing: false,
+						result: Err(err.clone()),
+						delivered: true,
+					}),
+					&[Action::Abort {
+						track: name("video"),
+						err,
+					}],
+				);
+				assert_actions(front.step(Event::Used { track: name("video") }), &[]);
+			}
+		}
 	}
 
 	/// Without an epoch a re-request could reach another instance, so the track ends

@@ -18,7 +18,7 @@ const connection = new Reload({
 	goaway: { redirect: "follow" },
 });
 let replacementProbe: Moq.Track.Subscriber | undefined;
-const requests = [origin.request(Moq.Path.from("handover"), { announced: true })];
+const requests = [origin.follow(Moq.Path.from("handover"))];
 async function active(request: (typeof requests)[number]) {
 	let broadcast = request.active.peek();
 	while (!broadcast) {

@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Compression moves to the track
+
+`package:moq/flate.dart` is removed: publish opaque bytes on a `TrackProducer`.
+`SnapshotConfig` and `WindowConfig` lose `compression`, and `StreamConfig` is removed. Publish the track with `MoqTrackInfo(compress: true)` instead.
+`StreamProducer` drops its `config`, and `SnapshotConsumer`, `StreamConsumer`, and `WindowConsumer` take only the track.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 Publishing, serving, or requesting a broadcast at a path with a leading, trailing, or doubled `/` throws instead of collapsing it. Pass the canonical path, such as `room/cam`.
@@ -25,7 +31,7 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 
 The records carry durations as `Duration` fields instead of `*Us` microsecond integers, so the duration extension getters are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
 `audio.EncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs: 0` for the codec's own frame.
-`Subscription.maxDelay` has no default, so a `MoqSubscription()` that omits it gets no staleness limit instead of moq-net's 0: pass `Duration.zero` for the old default.
+`Subscription.maxDelay` defaults to null, so a `Subscription()` that omits it gets no staleness limit instead of moq-net's 0: start from `defaultSubscription()`, or pass `maxDelay: Duration.zero`, for the old default.
 A negative `Duration` throws `ArgumentError` wherever it crosses into the native library.
 
 ### Connection state

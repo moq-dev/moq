@@ -34,7 +34,7 @@ struct Ended {
 /// task sent it, including one ending the session from inside a single request.
 #[derive(Default)]
 pub(crate) struct Closing {
-	/// The handles closed it by dropping or draining, so received streams are not drained.
+	/// The handles closed it by dropping or draining: a clean close, whatever the protocol reports.
 	local: std::sync::atomic::AtomicBool,
 	/// The first close this side sent: its code, and the error behind it when the closer had one.
 	sent: std::sync::Mutex<Option<(u32, Option<Error>)>>,
@@ -572,10 +572,8 @@ impl Supervisor {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut cx = waiter.context();
-
 		// The transport's terminal error ends the supervisor.
-		if let Poll::Ready(err) = self.closed_watch.poll_closed(&mut cx) {
+		if let Poll::Ready(err) = self.closed_watch.poll_closed(waiter) {
 			// Nothing samples once this returns, but `stats()` keeps serving
 			// this cell, so leave it holding the session's final counters
 			// rather than whichever sample the last demand happened to catch.

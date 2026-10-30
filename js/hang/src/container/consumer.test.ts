@@ -1496,12 +1496,12 @@ test("Consumer duration-skips a stalled group once it is covered", async () => {
 	g1.finish();
 
 	track.finish();
-	track.close();
 
 	const frames = await drainFrames(consumer, 200);
 	expect(frames.map((f) => f.timestamp as number)).toEqual([0, 33_000]);
 	expect(frames.map((f) => f.group)).toEqual([0, 1]);
 	consumer.close();
+	track.close();
 });
 
 test("Consumer does not duration-skip when the gap is not covered", async () => {

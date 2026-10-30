@@ -23,7 +23,7 @@ async function session(protocol: string, client: string | undefined, server: str
 }
 
 // The lite Setup Stream and the moq-transport uni SETUP each carry it on their own path.
-for (const protocol of [Lite.ALPN_06, Ietf.ALPN.DRAFT_18]) {
+for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 	test(`each side reads the other's implementation over ${protocol}`, async () => {
 		expect(await session(protocol, "client/1", "server/2")).toEqual({ client: "server/2", server: "client/1" });
 	});
@@ -33,12 +33,14 @@ for (const protocol of [Lite.ALPN_06, Ietf.ALPN.DRAFT_18]) {
 	});
 }
 
-// lite-02 negotiates in a compat SETUP that carries it, but only lite-05+ reads it.
+// Older lite versions ignore the parameter, including the compat SETUP path.
 for (const [protocol, version] of [
+	[Lite.ALPN_05, undefined],
+	[Lite.ALPN_06, undefined],
 	[Lite.ALPN_04, undefined],
 	[Lite.ALPN, Lite.Version.DRAFT_02],
 ] as const) {
-	test(`a lite version before 05 reads no implementation over ${protocol}`, async () => {
+	test(`a lite version before 07 reads no implementation over ${protocol}`, async () => {
 		expect(await session(protocol, "client/1", "server/2", version)).toEqual({
 			client: undefined,
 			server: undefined,

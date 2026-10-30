@@ -17,7 +17,8 @@ reader will not pick it up.
 - **Stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
 - **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` ratio the same way.
 
-Both sides choose the same compression, `"none"` or `"deflate"`. Producers take
+Compression is the track's: create it with `compress: true`, which JSON benefits
+from, and readers see plain frames either way. Producers take
 a `Timed` value, `{ value, at }`, where `at` is the capture time written as
 the frame timestamp, and the snapshot and stream consumers return the same
 shape. Nothing fills in now: a timed track needs `at` on every write, and
@@ -35,9 +36,9 @@ for await (const { value, at } of consumer) {
 
 `next()` buffers every state it has not yielded and skips a group once the
 subscription's `maxDelay` proves it stale. The budget counts media time and
-wall time, or wall time alone for an untimed track. The default of zero keeps
-only the newest group, so subscribe with a `maxDelay` covering how far the
-playhead trails the live edge. Use `latest()` to skip straight to the head.
+wall time, or wall time alone for an untimed track. The default subscription's
+zero keeps only the newest group, so subscribe with a `maxDelay` covering how
+far the playhead trails the live edge. Use `latest()` to skip straight to the head.
 
 A stream rides one group, so the whole log shares `@moq/net`'s group budget:
 32 MiB of payload and 8192 records. An append that might not fit is refused

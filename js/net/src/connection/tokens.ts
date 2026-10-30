@@ -1,8 +1,8 @@
-import { type Handle, type Credential as Presented, Unsupported } from "../auth.ts";
+import { type Credential, type Handle, Unsupported } from "../auth.ts";
 import type { Established } from "./established.ts";
 
 /** What one dial presents, decided from its URL, the offered versions, and the tokens. @internal */
-export interface Credential {
+export interface Presentation {
 	/** The URL to dial, carrying the connection credential when an offered version has no SETUP token. */
 	url: URL;
 	/** The token SETUP carries, unless the URL brought its own credential. */
@@ -20,7 +20,7 @@ export interface Credential {
  *
  * @internal
  */
-export function credential(url: URL, tokens: readonly string[], setupToken: boolean): Credential {
+export function credential(url: URL, tokens: readonly string[], setupToken: boolean): Presentation {
 	const jwt = url.searchParams.get("jwt");
 	if (jwt) return { url, connection: jwt };
 	const first = tokens[0];
@@ -37,7 +37,7 @@ export function credential(url: URL, tokens: readonly string[], setupToken: bool
  *
  * @internal
  */
-export function fallback(primary: URL, url: URL, tokens: readonly string[], setupToken: boolean): Credential {
+export function fallback(primary: URL, url: URL, tokens: readonly string[], setupToken: boolean): Presentation {
 	const inherited = primary.searchParams.get("jwt");
 	if (inherited && !url.searchParams.get("jwt")) return credential(withJwt(url, inherited), tokens, setupToken);
 	return credential(url, tokens, setupToken);
@@ -51,12 +51,12 @@ export function withJwt(url: URL, jwt: string): URL {
 }
 
 /** The tokens to hold on their own AUTH streams, each once. @internal */
-export function extra(credential: Credential, tokens: readonly string[]): string[] {
+export function extra(credential: Presentation, tokens: readonly string[]): string[] {
 	return [...new Set(tokens)].filter((token) => token !== credential.connection);
 }
 
 interface Entry {
-	auth?: Presented;
+	auth?: Credential;
 	pending: boolean;
 	retired: boolean;
 }
@@ -73,17 +73,17 @@ interface Entry {
  */
 export class Held {
 	#handle: Handle;
-	#credential: Credential;
+	#credential: Presentation;
 	#entries = new Map<string, Entry>();
 	#retiring: Entry[] = [];
 
-	constructor(handle: Handle, credential: Credential) {
+	constructor(handle: Handle, credential: Presentation) {
 		this.#handle = handle;
 		this.#credential = credential;
 	}
 
 	/** A new dial on the handle, whose credential decides which tokens ride AUTH. */
-	dialed(credential: Credential, tokens: readonly string[]) {
+	dialed(credential: Presentation, tokens: readonly string[]) {
 		this.#credential = credential;
 		this.update(tokens);
 	}
@@ -139,7 +139,7 @@ export class Held {
 const held = new WeakMap<Handle, Held>();
 
 /** Present `tokens` on `connection`, beside the credential its dial carried. @internal */
-export function hold(connection: Established, credential: Credential, tokens: readonly string[]): Held {
+export function hold(connection: Established, credential: Presentation, tokens: readonly string[]): Held {
 	const existing = held.get(connection.auth);
 	if (existing) {
 		existing.dialed(credential, tokens);
