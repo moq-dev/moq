@@ -669,6 +669,15 @@ mints at its own time, so mint order outranks cost, preference, and the
 local-broadcast tie and relays disagree on a pool path's winner, while
 ranking a minted epoch last keeps the renewal it was meant to delete.
 
+Moved 2026-10-30 (maintainer, the [route epic](/quest/m1/api-audit/route/README.md)):
+[Identity and epoch](/quest/m1/api-audit/route/identity.md) now deletes that
+epochless machinery, so this quest no longer does. A session mints
+`Instance { identity, epoch }` for any route that arrives without one, and
+newest-wins compares epochs only within one identity, so mint order no
+longer outranks cost or preference. The rest of the 2026-10-27 decision
+stands. Build the route layer's identity fields on that `Instance` instead of
+the UUIDv7 epoch.
+
 Decided 2026-10-27 (maintainer), from
 [grant subject](https://github.com/moq-dev/moq/pull/6992): decide what key
 identities are filed under for sessions allowed to publish part of the tree

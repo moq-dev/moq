@@ -2,11 +2,12 @@
 
 ## Goal
 
-A worker advertises an epochless prefix to accept lazy work, then announces
-an independent, more-specific route with a unique job epoch without resetting
-readers already served by that same job. A different worker or replacement
-job never inherits those readers. Rust and JS expose the transition as
-`Takeover`, distinct from `Restart`.
+A worker advertises a prefix route to accept lazy work, then announces
+an independent, more-specific route with a unique job instance without
+resetting readers already served by that same job. A different worker or
+replacement job never inherits those readers. Readers holding `follow` or
+`request` continue across the transition, which is distinct from a restart;
+no public `Takeover` event is added.
 
 ## Plan
 
@@ -17,6 +18,19 @@ gets no counterpart, since [moq-transport carries no epoch](/quest/m1/ietf-epoch
 (decided 2026-10-28), so a moq-transport hop uses Start/Restart. Ordinary
 Start/Restart is a supported fallback, including the accepted cold-start
 reset before this lands.
+
+Amended 2026-10-30 (maintainer, the [route epic](/quest/m1/api-audit/route/README.md)).
+Routes now name `Instance { identity, epoch }`
+([Identity and epoch](/quest/m1/api-audit/route/identity.md)), so the
+worker's prefix route carries the worker's own instance instead of being
+epochless. A job answers with `request.announce` from
+[One Route handle](/quest/m1/api-audit/route/handle.md) in place of
+`Request::prepare` then `publish`. Continuity stays inside `follow` and
+`request` ([Listing and follow](/quest/m1/api-audit/route/events.md)), so
+the `Takeover` event bullet below is superseded. Below, read "epoch" as the
+job's `Instance` and "epochless prefix" as the worker's prefix route. A job
+that serves a held broadcast through
+[serve](/quest/m1/api-audit/route/serve.md) needs no takeover.
 
 - A worker advertises `transcode/` without an epoch. Demand for a path starts
   one job, which announces `transcode/path` with its own freshly minted epoch
@@ -99,11 +113,18 @@ Remove the cold-start warm-up reads that discard a claim's first subscription
 Run `just check`, `just test interop --all`, and `just drafts check`; wire
 regressions and benchmarks into existing CI lanes.
 
-Public API: a `Takeover` event, mirrored across languages and exposed
-bindings, on top of `Request::prepare` and `publish`. Wire: lite-07-wip gains
+Public API: none beyond the route handle; `follow` and `request` continue
+across a takeover. Wire: lite-07-wip gains
 ANNOUNCE_TAKEOVER; published versions retain their framing.
 
+## Required
+
+- [Identity and epoch](/quest/m1/api-audit/route/identity.md) - takeover names the `Instance { identity, epoch }` this replaces the UUIDv7 epoch with
+- [One Route handle](/quest/m1/api-audit/route/handle.md) - `request.announce` replaces `Request::prepare` then `publish`
+
 ## Related
+
+- [Listing and follow](/quest/m1/api-audit/route/events.md) - takeover continuity shows up inside `follow`, not as an event
 
 - [Claim answer epochs](https://github.com/moq-dev/moq/pull/5678) - `Request::prepare` then `publish` answers a claim at the exact path under a fresh epoch, the operation TAKEOVER continues
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route layer whose ANNOUNCE_START layout overlaps this one's
