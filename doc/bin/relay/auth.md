@@ -364,7 +364,7 @@ its own. See `moq auth serve --help` for the rest.
 `--mesh-url URL` also makes the server a mesh coordinator: a device holding an
 Ed25519 endpoint key enrolls and receives the relay URLs to dial and a JWT that
 publishes `mesh/<id>/**` and subscribes `mesh/**`, where `<id>` is the key in
-lowercase hex. It is verified like any other token, so the verifying keys
+z-base-32 (52 characters, the form pkarr and iroh's DNS discovery use). It is verified like any other token, so the verifying keys
 (`--key`, `--key-dir`, or `--key-set`) must include `--mesh-key`'s public half.
 
 ```bash

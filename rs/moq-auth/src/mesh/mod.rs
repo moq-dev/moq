@@ -49,10 +49,20 @@ pub const CHALLENGE_LEN: usize = 32;
 const KEY_LEN: usize = 32;
 const SIGNATURE_LEN: usize = 64;
 
+/// z-base-32: most significant bit first, no padding, trailing bits must be zero.
+static ZBASE32: std::sync::LazyLock<data_encoding::Encoding> = std::sync::LazyLock::new(|| {
+	let mut spec = data_encoding::Specification::new();
+	spec.symbols.push_str("ybndrfg8ejkmcpqxot1uwisza345h769");
+	spec.encoding().expect("a valid z-base-32 specification")
+});
+
 /// An endpoint's Ed25519 public key, which is also its endpoint ID.
 ///
-/// Its text form is the 64-character lowercase hex of the key, the form iroh displays.
-/// Parsing accepts only that form, so one key names exactly one `mesh/<id>` path.
+/// Its text form is the 52-character [z-base-32] of the key, the form pkarr and iroh's DNS
+/// discovery use, which is also a valid DNS label. Parsing accepts only that form (lowercase,
+/// zero trailing bits), so one key names exactly one `mesh/<id>` path.
+///
+/// [z-base-32]: https://philzimmermann.com/docs/human-oriented-base-32-encoding.txt
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EndpointId([u8; KEY_LEN]);
 
@@ -77,13 +87,13 @@ impl EndpointId {
 
 	/// The broadcasts this endpoint may publish: `mesh/<id>/**`.
 	pub fn publish(&self) -> crate::Pattern {
-		crate::Pattern::subtree(&format!("mesh/{self}")).expect("a hex segment is a valid path")
+		crate::Pattern::subtree(&format!("mesh/{self}")).expect("a z-base-32 segment is a valid path")
 	}
 }
 
-/// The text is not the 64-character lowercase hex of a 32-byte key.
+/// The text is not the 52-character z-base-32 of a 32-byte key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("invalid endpoint ID: expected 64 lowercase hex characters")]
+#[error("invalid endpoint ID: expected 52 z-base-32 characters")]
 #[non_exhaustive]
 pub struct InvalidEndpoint;
 
@@ -91,24 +101,19 @@ impl FromStr for EndpointId {
 	type Err = InvalidEndpoint;
 
 	fn from_str(text: &str) -> Result<Self, Self::Err> {
-		// Uppercase is refused so a key has one text form.
-		if text.len() != KEY_LEN * 2 || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-			return Err(InvalidEndpoint);
-		}
+		// The alphabet is lowercase-only and nonzero trailing bits are refused, so a key has one text form.
 		let mut out = [0u8; KEY_LEN];
-		for (i, byte) in out.iter_mut().enumerate() {
-			*byte = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).map_err(|_| InvalidEndpoint)?;
-		}
+		match ZBASE32.decode_len(text.len()) {
+			Ok(KEY_LEN) => ZBASE32.decode_mut(text.as_bytes(), &mut out).map_err(|_| InvalidEndpoint)?,
+			_ => return Err(InvalidEndpoint),
+		};
 		Ok(Self(out))
 	}
 }
 
 impl fmt::Display for EndpointId {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		for byte in self.0 {
-			write!(f, "{byte:02x}")?;
-		}
-		Ok(())
+		f.write_str(&ZBASE32.encode(&self.0))
 	}
 }
 
@@ -383,11 +388,22 @@ mod tests {
 	fn endpoint_ids_have_one_text_form() {
 		let id = signer().endpoint();
 		let text = id.to_string();
-		assert_eq!(text.len(), 64);
+		assert_eq!(text.len(), 52);
 		assert_eq!(text.parse::<EndpointId>().unwrap(), id);
 		assert!(text.to_uppercase().parse::<EndpointId>().is_err());
-		assert!(text[..62].parse::<EndpointId>().is_err());
+		assert!(text[..51].parse::<EndpointId>().is_err());
+		assert!(format!("{text}y").parse::<EndpointId>().is_err());
+		assert!(data_encoding::HEXLOWER.encode(id.as_bytes()).parse::<EndpointId>().is_err());
 		assert_eq!(id.publish().as_str(), format!("mesh/{text}/**"));
+	}
+
+	#[test]
+	fn endpoint_ids_are_z_base_32() {
+		assert_eq!(EndpointId::from_bytes([0; KEY_LEN]).to_string(), "y".repeat(52));
+		let ones = EndpointId::from_bytes([0xff; KEY_LEN]);
+		assert_eq!(ones.to_string(), format!("{}o", "9".repeat(51)));
+		// The last character carries 4 padding bits, which must be zero.
+		assert!(format!("{}9", "9".repeat(51)).parse::<EndpointId>().is_err());
 	}
 
 	#[test]
