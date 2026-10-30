@@ -11,6 +11,7 @@ import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCau
 import { type Hop, randomHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
+import { Padding } from "../padding.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import { Observed } from "../util/observed.ts";
@@ -94,6 +95,9 @@ export class Connection implements Established {
 
 	// The established WebTransport session.
 	#quic: WebTransport;
+
+	// Probes the session up to its target, where this version and transport can.
+	#padding?: Padding;
 
 	// Use to receive/send session messages.
 	#session?: Stream;
@@ -186,6 +190,10 @@ export class Connection implements Established {
 		this.version = versionName(version);
 		this.#version = version;
 		this.transport = transportOf(quic);
+		// lite-05 and lite-06 reset every padding stream, and only WebTransport has an estimate to probe.
+		if (hasPadding(version) && this.transport === "webtransport") {
+			this.#padding = new Padding({ quic, version, type: BigInt(DataType.Padding) });
+		}
 
 		this.probe = this.#probe;
 
@@ -235,6 +243,7 @@ export class Connection implements Established {
 			goaway: this.#goaway,
 			exclusive: false,
 			auth: this.#auth,
+			sender: this.#padding,
 		});
 
 		void this.#run();
@@ -266,6 +275,7 @@ export class Connection implements Established {
 	abort(): void {
 		this.#auth.close();
 		this.#publisher.close();
+		this.#padding?.close();
 		// Received tracks end in #run once what already arrived drains, as on the peer's close.
 		this.#closeTransport();
 	}

@@ -3,7 +3,7 @@ import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals
 import type * as Announce from "../announced.ts";
 import { Handle as AuthHandle } from "../auth.ts";
 import { ended } from "../auth_session.ts";
-import { Allocator } from "../bandwidth.ts";
+import { Allocator, follow } from "../bandwidth.ts";
 import { error, reason, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -407,6 +407,20 @@ export class Reload {
 
 		this.allocator = new Allocator(this.#estimate);
 		this.#signals.cleanup(() => this.allocator.close());
+
+		// The live session probes up to the reservations, where it has a sender to hand them to.
+		this.#signals.run((effect) => {
+			const connection = effect.get(this.established);
+			const sender = connection && wireOf(connection).sender;
+			if (!sender) return;
+
+			const target = follow(this.allocator);
+			effect.cleanup(() => {
+				target.close();
+				sender.setTarget(0);
+			});
+			effect.run((effect) => sender.setTarget(effect.get(target.rate)));
+		});
 
 		// The transport has no event for the send-rate estimate, so sample on our
 		// own schedule and skip a tick while the previous snapshot is outstanding.

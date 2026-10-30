@@ -129,6 +129,12 @@ export interface Established {
 	 * @internal
 	 */
 	readonly auth: import("./auth_session.ts").AuthSession;
+	/**
+	 * What probes this session up to its target, absent where the session has no sender.
+	 *
+	 * @internal
+	 */
+	readonly sender?: import("./padding.ts").Sender;
 }
 
 /** A produced broadcast's view, which always fetches from its own cache. */
