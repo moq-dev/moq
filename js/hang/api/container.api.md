@@ -6,6 +6,7 @@ import { Format as Format_1 } from "@moq/hang/container";
 import { Micro } from "@moq/clock";
 import { Milli } from "@moq/clock";
 import { Net } from "@moq/hang";
+import { Recorder } from "@moq/hang/hls";
 import { Signals } from "@moq/hang";
 import { Video } from "@moq/hang/catalog";
 
@@ -58,7 +59,7 @@ export namespace Legacy {
 	}
 	export { Frame };
 	export class Producer {
-		constructor(track: Net.Track.Producer, format: Legacy.Format);
+		constructor(track: Net.Track.Producer, format: Legacy.Format, recorder?: Recorder);
 		close(err?: Error): void;
 		discontinuity(end?: Micro): void;
 		encode(data: Uint8Array | Legacy.Source, timestamp: Micro, keyframe: boolean): void;
