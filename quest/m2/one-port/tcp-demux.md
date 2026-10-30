@@ -39,9 +39,11 @@ ALPN list): `0x03` is RTMP, anything else is HTTP.
 
 Decided 2026-10-08: under one acceptor, the client-certificate request the
 `tls://` listener makes (since
-[moq-dev/moq#7358](https://github.com/moq-dev/moq/pull/7358)) is optional (never required)
-and sits on the moq-ALPN TLS config only, so browsers and RTMPS clients on
-the same port are never asked for one. Keep `tls://` client-certificate
+[moq-dev/moq#7358](https://github.com/moq-dev/moq/pull/7358)) sits on the moq-ALPN TLS
+config only, so browsers and RTMPS clients on the same port are never asked
+for one. ✅ Decided 2026-10-30 (maintainer): it is optional under CA roots and
+required under pinned `tls.peers`, as on QUIC, so pinned mode still means
+the listener knows who connected. Keep `tls://` client-certificate
 verification and the `MtlsUnsupported` lift working.
 
 Keep the accepted `TcpStream`'s handle reachable after it is boxed: the
