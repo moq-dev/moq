@@ -26,6 +26,12 @@
 //!
 //! A rendition counts as encoding from its first encoded frame, not from the
 //! moment a consumer asked, for the same reason.
+//!
+//! A rendition the ladder retires before it encodes a single frame is dropped
+//! rather than kept for a bill it never ran up, so a source that keeps resizing
+//! does not grow the ladder without bound. A cursor that already reported it
+//! never mentions it again, and its handle stays at zero. One that did encode
+//! stays, since its counters are owed.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -71,6 +77,7 @@ impl Rendition {
 	///
 	/// Fixed for the life of the rendition: a source that resizes the ladder
 	/// under it retires this rung and publishes the replacement under a new name.
+	/// A retired rendition that never encoded is not reported again.
 	pub fn size(&self) -> moq_video::Size {
 		self.0.rung.size
 	}
@@ -145,10 +152,14 @@ struct Entry {
 
 #[derive(Default)]
 struct State {
-	/// The resolved ladder, by track name. Fixed once `run` resolves it, and
-	/// never pruned: a caller subtracting two [`Rendition::frames`] reads needs
-	/// the counters to survive an idle gap.
+	/// The resolved ladder, by track name. A rendition that encoded is never
+	/// pruned, since a caller subtracting two [`Rendition::frames`] reads needs
+	/// the counters to survive an idle gap. One retired before its first frame
+	/// is, since it owes nothing.
 	ladder: BTreeMap<String, Entry>,
+	/// Bumped whenever an entry is pruned, so a cursor forgets the names it holds
+	/// for it only when there is something to forget.
+	pruned: u64,
 }
 
 /// The writing half, held by the transcoder and every rung serving off it.
@@ -163,7 +174,7 @@ impl Producer {
 	pub(crate) fn consume(&self) -> Consumer {
 		Consumer {
 			state: self.state.consume(),
-			seen: BTreeMap::new(),
+			seen: Seen::default(),
 		}
 	}
 
@@ -180,23 +191,45 @@ impl Producer {
 		}
 	}
 
+	/// The handle for a rung, the same one the cursors were handed when it was
+	/// declared. Hold it for every pipeline the rung builds, so their output is
+	/// counted on the handle a caller bills even after the entry is pruned.
+	pub(crate) fn rendition(&self, rung: &Resolved) -> Rendition {
+		match self.state.write() {
+			Ok(mut state) => state.entry(rung).rendition.clone(),
+			// Closed: an orphan meter, so the pipelines still count their own work.
+			Err(_) => Rendition::new(rung),
+		}
+	}
+
+	/// Forget a rendition the ladder retired, if it never encoded a frame.
+	///
+	/// Without this, a source that keeps resizing mints a new name per resize
+	/// and every one of them stays here and in every cursor for good. One that
+	/// did encode stays, since its counters are owed. A pipeline of a pruned
+	/// rendition that encodes after all (a fetch that beat retirement) puts it
+	/// back, under the same handle.
+	pub(crate) fn retire(&self, name: &str) {
+		let Ok(mut state) = self.state.write() else { return };
+		let Some(entry) = state.ladder.get(name) else { return };
+		if entry.refs > 0 || entry.rendition.frames() > 0 {
+			return;
+		}
+		state.ladder.remove(name);
+		state.pruned += 1;
+	}
+
 	/// Attach a pipeline to a rendition until the returned guard drops.
 	///
 	/// Attaching is not encoding: the rendition starts on the guard's first
 	/// [`Guard::produced`], so a pipeline that never encodes a frame is never
 	/// reported and never billed.
-	pub(crate) fn attach(&self, rung: &Resolved) -> Guard {
+	pub(crate) fn attach(&self, rendition: &Rendition) -> Guard {
 		// The guard holds a producer clone, so the channel stays open until the
 		// last of them is gone.
-		let rendition = match self.state.write() {
-			Ok(mut state) => state.entry(rung).rendition.clone(),
-			// Closed: an orphan meter, so the pipeline still counts its own work.
-			Err(_) => Rendition::new(rung),
-		};
-
 		Guard {
 			state: self.state.clone(),
-			rendition,
+			rendition: rendition.clone(),
 			producing: AtomicBool::new(false),
 		}
 	}
@@ -210,10 +243,17 @@ impl State {
 		})
 	}
 
-	/// Adjust how many pipelines are producing `name`. Zero to one (and back) is
-	/// the edge a cursor reports.
-	fn count(&mut self, name: &str, delta: isize) {
-		let Some(entry) = self.ladder.get_mut(name) else { return };
+	/// Adjust how many pipelines are producing `rendition`. Zero to one (and
+	/// back) is the edge a cursor reports. Starting one that was pruned puts it
+	/// back, so its first frame is still an edge.
+	fn count(&mut self, rendition: &Rendition, delta: isize) {
+		let entry = self
+			.ladder
+			.entry(rendition.name().to_string())
+			.or_insert_with(|| Entry {
+				rendition: rendition.clone(),
+				refs: 0,
+			});
 		entry.refs = entry.refs.saturating_add_signed(delta);
 	}
 }
@@ -249,7 +289,7 @@ impl Guard {
 			return;
 		}
 		if let Ok(mut state) = self.state.write() {
-			state.count(self.rendition.name(), 1);
+			state.count(&self.rendition, 1);
 		}
 	}
 }
@@ -260,7 +300,7 @@ impl Drop for Guard {
 			return;
 		}
 		if let Ok(mut state) = self.state.write() {
-			state.count(self.rendition.name(), -1);
+			state.count(&self.rendition, -1);
 		}
 	}
 }
@@ -275,7 +315,8 @@ impl Drop for Guard {
 ///
 /// It is a cursor, not a log: a rendition that starts and stops between two
 /// calls is reported neither time. Bill from [`Rendition::frames`], which counts
-/// it regardless.
+/// it regardless. A rendition retired before it encoded anything is never
+/// reported again (see the [module docs](self)).
 ///
 /// ```no_run
 /// # async fn example(active: &mut moq_transcode::active::Consumer) {
@@ -289,9 +330,16 @@ impl Drop for Guard {
 /// ```
 pub struct Consumer {
 	state: kio::Consumer<State>,
-	/// What this cursor last reported for each rendition, which is its position.
+	seen: Seen,
+}
+
+/// A cursor's position: what it last reported for each rendition.
+#[derive(Default)]
+struct Seen {
 	/// A name absent from it has never been reported at all.
-	seen: BTreeMap<String, bool>,
+	names: BTreeMap<String, bool>,
+	/// The [`State::pruned`] these names were last checked against.
+	pruned: u64,
 }
 
 impl Consumer {
@@ -306,7 +354,7 @@ impl Consumer {
 	/// transcoder is gone, or `Poll::Pending` after registering `waiter`.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Update>> {
 		let update = {
-			let seen = &self.seen;
+			let seen = &mut self.seen;
 			match ready!(self.state.poll(waiter, |state| match next_update(state, seen) {
 				Some(update) => Poll::Ready(update),
 				None => Poll::Pending,
@@ -323,10 +371,7 @@ impl Consumer {
 	///
 	/// `None` does NOT mean the cursor is closed; see [`is_closed`](Self::is_closed).
 	pub fn try_next(&mut self) -> Option<Update> {
-		let update = {
-			let seen = &self.seen;
-			next_update(&self.state.read(), seen)?
-		};
+		let update = next_update(&self.state.read(), &mut self.seen)?;
 		Some(self.advance(update))
 	}
 
@@ -337,17 +382,26 @@ impl Consumer {
 
 	/// Move the cursor past an update before handing it to the caller.
 	fn advance(&mut self, update: Update) -> Update {
-		self.seen.insert(update.rendition.name().to_string(), update.encoding);
+		self.seen
+			.names
+			.insert(update.rendition.name().to_string(), update.encoding);
 		update
 	}
 }
 
 /// The first rendition whose state differs from `seen`, in name order. A name
 /// missing from `seen` has never been reported, so the ladder lands first.
-fn next_update(state: &State, seen: &BTreeMap<String, bool>) -> Option<Update> {
+///
+/// Forgets the names of pruned renditions first, so a cursor's position stays
+/// as small as the ladder.
+fn next_update(state: &State, seen: &mut Seen) -> Option<Update> {
+	if seen.pruned != state.pruned {
+		seen.names.retain(|name, _| state.ladder.contains_key(name));
+		seen.pruned = state.pruned;
+	}
 	state.ladder.iter().find_map(|(name, entry)| {
 		let encoding = entry.refs > 0;
-		if seen.get(name) == Some(&encoding) {
+		if seen.names.get(name) == Some(&encoding) {
 			return None;
 		}
 		Some(Update {
@@ -390,7 +444,7 @@ mod tests {
 		assert!(!update.encoding);
 		assert!(cursor.try_next().is_none());
 
-		let guard = active.attach(&rung);
+		let guard = active.attach(&active.rendition(&rung));
 		guard.produced(1, 1_000);
 		assert!(cursor.next().await.unwrap().encoding);
 		assert!(cursor.try_next().is_none());
@@ -411,7 +465,7 @@ mod tests {
 		let mut cursor = active.consume();
 		let rendition = cursor.next().await.unwrap().rendition;
 
-		let guard = active.attach(&rung);
+		let guard = active.attach(&active.rendition(&rung));
 		tokio::time::sleep(Duration::from_millis(20)).await;
 		assert!(cursor.try_next().is_none(), "attaching reported an edge");
 		assert_eq!(rendition.frames(), 0);
@@ -435,13 +489,13 @@ mod tests {
 		let high = resolved("video/360p", 360);
 		let mut cursor = active.consume();
 
-		let live = active.attach(&high);
+		let live = active.attach(&active.rendition(&high));
 		live.produced(2, 2_000);
 		let rendition = cursor.next().await.unwrap().rendition;
 
-		let fetch = active.attach(&high);
+		let fetch = active.attach(&active.rendition(&high));
 		fetch.produced(1, 500);
-		let other = active.attach(&low);
+		let other = active.attach(&active.rendition(&low));
 		other.produced(1, 400);
 		// Only the second NAME is an edge.
 		let update = cursor.next().await.unwrap();
@@ -471,7 +525,7 @@ mod tests {
 	async fn a_fresh_cursor_reports_the_current_set() {
 		let active = Producer::default();
 		let rung = resolved("video/480p", 480);
-		let guard = active.attach(&rung);
+		let guard = active.attach(&active.rendition(&rung));
 		guard.produced(1, 1_000);
 
 		let mut cursor = active.consume();
@@ -502,7 +556,7 @@ mod tests {
 		let rendition = cursor.next().await.unwrap().rendition;
 		assert_eq!(rendition.frames(), 0);
 
-		let guard = active.attach(&rung);
+		let guard = active.attach(&active.rendition(&rung));
 		guard.produced(30, 30_000);
 		drop(guard);
 
@@ -522,7 +576,7 @@ mod tests {
 		let rung = resolved("video/360p", 360);
 		let mut cursor = active.consume();
 
-		let guard = active.attach(&rung);
+		let guard = active.attach(&active.rendition(&rung));
 		guard.produced(10, 10_000);
 		let rendition = cursor.next().await.unwrap().rendition;
 
@@ -531,7 +585,7 @@ mod tests {
 		assert_eq!(rendition.frames(), 10, "the totals reset when the rendition went idle");
 
 		// A second session keeps accumulating rather than restarting at zero.
-		let guard = active.attach(&rung);
+		let guard = active.attach(&active.rendition(&rung));
 		guard.produced(5, 5_000);
 		assert!(cursor.next().await.unwrap().encoding);
 		assert_eq!(rendition.frames(), 15);
@@ -550,5 +604,59 @@ mod tests {
 		drop(active);
 		assert!(cursor.is_closed());
 		assert!(cursor.next().await.is_none());
+	}
+
+	/// A source that keeps resizing mints a name per resize. One retired before
+	/// it encoded anything owes nothing, so it leaves the ladder and every
+	/// cursor's position rather than accumulating; one that encoded stays.
+	#[tokio::test]
+	async fn a_retired_rendition_that_never_encoded_is_pruned() {
+		let active = Producer::default();
+		let idle = resolved("video/360p", 360);
+		let busy = resolved("video/240p", 240);
+		active.declare([&idle, &busy]);
+
+		let mut cursor = active.consume();
+		assert!(cursor.try_next().is_some());
+		assert!(cursor.try_next().is_some());
+		let guard = active.attach(&active.rendition(&busy));
+		guard.produced(1, 100);
+		assert!(cursor.next().await.unwrap().encoding);
+		drop(guard);
+		assert!(!cursor.next().await.unwrap().encoding);
+
+		active.retire(&idle.name);
+		active.retire(&busy.name);
+		assert!(cursor.try_next().is_none(), "pruning is not an edge");
+		assert_eq!(cursor.seen.names.keys().collect::<Vec<_>>(), [&busy.name]);
+
+		// A fresh cursor reports only what is still owed.
+		let mut fresh = active.consume();
+		assert_eq!(fresh.try_next().unwrap().rendition.name(), "video/240p");
+		assert!(fresh.try_next().is_none());
+	}
+
+	/// A fetch that beat retirement can still encode after the entry is pruned.
+	/// It counts on the handle the cursor was handed at declare, and reports its
+	/// start, so a caller billing that handle sees the work.
+	#[tokio::test]
+	async fn a_pruned_rendition_that_encodes_comes_back_under_its_handle() {
+		let active = Producer::default();
+		let rung = resolved("video/360p", 360);
+		active.declare(std::slice::from_ref(&rung));
+		let mut cursor = active.consume();
+		let reported = cursor.try_next().unwrap().rendition;
+
+		let rendition = active.rendition(&rung);
+		active.retire(&rung.name);
+		let guard = active.attach(&rendition);
+		guard.produced(3, 300);
+
+		let update = cursor.next().await.unwrap();
+		assert!(update.encoding);
+		assert_eq!(update.rendition.name(), "video/360p");
+		assert_eq!(reported.frames(), 3);
+		drop(guard);
+		assert!(!cursor.next().await.unwrap().encoding);
 	}
 }

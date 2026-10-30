@@ -14,7 +14,7 @@
 //! replacement is published under a fresh name, because a name always means the
 //! same content (see [`catalog::Names`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use hang::catalog::{Reference, Video, VideoConfig};
 
@@ -33,6 +33,14 @@ fn same_picture(a: &VideoConfig, b: &VideoConfig) -> bool {
 use crate::catalog::{self, Names, Published};
 use crate::feed::Feed;
 use crate::{Config, Error, active, rung};
+
+/// How many source pictures' worth of probed rung entries a ladder remembers.
+///
+/// A source flapping between a few sizes (a window capture being dragged, a
+/// publisher renegotiating back and forth) resolves the same rung shapes over
+/// and over, and each probe opens a real encoder serially on the transcoder's
+/// one loop. Bounded so a source cycling through endless sizes cannot grow it.
+const PROBED_PICTURES: usize = 4;
 
 /// Everything a transcoder publishes for one source rendition.
 pub(crate) struct Pipeline {
@@ -53,6 +61,10 @@ pub(crate) struct Pipeline {
 	rungs: Vec<Published>,
 	/// The track names handed out so far, so a re-resolved rung never reuses one.
 	names: Names,
+	/// The catalog entries probed so far, most recent last, so a rung shape seen
+	/// before takes its entry without opening an encoder again. Only the probe is
+	/// reused: the rung still takes a fresh name.
+	probed: VecDeque<Published>,
 	/// The retirement signal for each rung name being served. Keyed by name
 	/// rather than reaped when a task exits, since the entry a name maps to is
 	/// always the newest task for it and a signal sent to one that already ended
@@ -90,6 +102,7 @@ impl Pipeline {
 			feed,
 			rungs: Vec::new(),
 			names: Names::default(),
+			probed: VecDeque::new(),
 			serving: HashMap::new(),
 		};
 
@@ -115,7 +128,8 @@ impl Pipeline {
 	/// since a name one of them was serving can never come back.
 	///
 	/// Nothing is committed here: a probe that fails leaves the ladder exactly as
-	/// it was.
+	/// it was. The probes that succeeded before it are remembered regardless,
+	/// since they describe the encoder rather than the ladder.
 	async fn resolve(
 		&mut self,
 		source_name: &str,
@@ -138,13 +152,36 @@ impl Pipeline {
 				}
 				None => {
 					rung.name = self.names.mint(rung.short_side);
-					catalog::rung_entry(&rung, source, &self.config.encoder).await?
+					self.probe(&rung, source).await?
 				}
 			};
 			published.push(Published { rung, entry });
 		}
 		catalog::inherit(&mut published, source);
 		Ok(published)
+	}
+
+	/// The catalog entry for a fresh rung, probing an encoder only for a shape
+	/// this ladder has not probed recently.
+	async fn probe(&mut self, rung: &catalog::Resolved, source: &VideoConfig) -> Result<VideoConfig, Error> {
+		let mut entry = match self.probed.iter().find(|probed| probed.rung.same_shape(rung)) {
+			Some(probed) => probed.entry.clone(),
+			None => {
+				let entry = catalog::rung_entry(rung, source, &self.config.encoder).await?;
+				let capacity = (self.config.ladder.rungs().len() * PROBED_PICTURES).max(1);
+				while self.probed.len() >= capacity {
+					self.probed.pop_front();
+				}
+				self.probed.push_back(Published {
+					rung: rung.clone(),
+					entry: entry.clone(),
+				});
+				entry
+			}
+		};
+		// Belongs to the source rather than the probe, like on a carried rung.
+		entry.optimize_for_latency = source.optimize_for_latency;
+		Ok(entry)
 	}
 
 	/// The rungs currently published, to fill the derivative catalog with.
@@ -168,6 +205,7 @@ impl Pipeline {
 			decoder: self.config.decoder.clone(),
 			resize: self.config.resize,
 			active: self.active.clone(),
+			rendition: self.active.rendition(&published.rung),
 			info: published.rung.clone(),
 			retire,
 		})
@@ -239,11 +277,74 @@ impl Pipeline {
 			if let Some(retired) = self.serving.remove(&published.rung.name) {
 				let _ = retired.send(true);
 			}
+			self.active.retire(&published.rung.name);
 		}
 
 		tracing::info!(source = %self.name, rungs = rungs.len(), "source changed; ladder resolved again");
 		self.active.declare(rungs.iter().map(|published| &published.rung));
 		self.rungs = rungs;
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::{Ladder, Rung};
+
+	fn video(width: u32, height: u32) -> VideoConfig {
+		let mut video = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		video.coded_width = Some(width);
+		video.coded_height = Some(height);
+		video.bitrate = Some(1_000_000);
+		video.framerate = Some(30.0);
+		video
+	}
+
+	/// A source flapping between two sizes resolves the same two rung shapes
+	/// over and over. Each shape is probed once, and every name retired before
+	/// it encoded leaves the meters, so neither grows with the flapping.
+	#[tokio::test]
+	async fn a_flapping_source_probes_each_shape_once() {
+		let source = moq_net::broadcast::Info::default().produce();
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let active = active::Producer::default();
+		let decoders = catalog::Decoders::new(config.feed_decoder());
+		let mut pipeline = Pipeline::new(
+			source.consume(),
+			config,
+			active.clone(),
+			decoders,
+			"video".into(),
+			video(640, 360),
+		)
+		.await
+		.unwrap();
+
+		for (width, height) in [(480, 360), (640, 360), (480, 360), (640, 360)] {
+			let mut snapshot = Video::default();
+			snapshot.insert("video", video(width, height)).unwrap();
+			pipeline.follow(&snapshot).await.unwrap();
+		}
+
+		// A fresh name per incarnation, but only one probe per picture.
+		assert_eq!(pipeline.rungs()[0].rung.name, "video/120p.5");
+		assert_eq!(pipeline.probed.len(), 2);
+
+		// Only the rung still published is reported; the retired ones never encoded.
+		let mut cursor = active.consume();
+		assert_eq!(cursor.try_next().unwrap().rendition.name(), "video/120p.5");
+		assert!(cursor.try_next().is_none());
 	}
 }
