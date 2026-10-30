@@ -28,6 +28,5 @@ any other.
 
 ## Related
 
-- [Archive time ranges](/quest/m2/archive-time-ranges.md) - ranges reaching past the cache
 - [Archive DVR](/quest/m2/archive-dvr.md) - viewer scrubbing beyond the relay cache
 - [Recording](/quest/m3/studio/recording.md) - clips use the same file writer

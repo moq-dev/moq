@@ -7,6 +7,10 @@
 //! demand from the store through [`track::Requests`](moq_net::track::Requests) fills, each sequence in its recorded form: a
 //! group as a group, a datagram as a datagram.
 //!
+//! A reader's time start older than the newest group is looked up from the object keys, each of
+//! which carries its first frame's timestamp, so the range starts at the stored group containing
+//! it however old, and a time end stops just past the group containing it.
+//!
 //! A growing archive is followed: every [`Config::refresh`], one delimiter LIST of the prefix
 //! finds added tracks, and one LIST per track after its newest key finds new objects. Once the
 //! prefix holds `.end`, each track ends as recorded and refreshing stops. Without it the archive
