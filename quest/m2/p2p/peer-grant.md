@@ -47,9 +47,13 @@ Verification on a direct session: the opener writes `AUTH { Token (b) }`
 with the JWT and proves possession of the `cnf` key bound to this session.
 The proof prototype ([#6310](https://github.com/moq-dev/moq/pull/6310)) found
 that mutual fresh nonces alone let a keyless intermediary forward both honest
-exchanges, so the proof binds an authenticated transport exporter or
-authenticates every routing control the session sends; settle which here and
-add replay tests before the wire is fixed. The
+exchanges. ✅ Decided 2026-10-30 (maintainer): the presenter signs each
+routing control the session sends with the `cnf` key, over a session
+transcript. This works over WebRTC data channels, which expose no DTLS
+exporter, and keeps one code path and one set of replay tests. Binding a
+transport exporter was rejected: browsers expose none, so it covered only
+native QUIC pairs, and a hybrid would need both. The wire work defines the
+transcript and adds the replay tests before the wire is fixed. The
 receiver verifies the relay signature against the JWKS from its own
 AUTH_KEYS, checks `exp`, matches `cnf` against the presenter key in the
 peer's roster entry, and requires `cnf` to equal the key the session proved.
