@@ -44,8 +44,8 @@ the same. This tests the supported ingest without expanding the container API.
 
 Reference PCM includes all decoded AAC padding and excludes the Opus `dOps`
 pre-skip. Backend tests remove exactly the backend's declared delay. Consumer
-tests additionally remove the catalog's 80 ms Opus warmup from the reference;
-AAC declares no warmup. No correlation search, gain fitting, channel permutation,
+tests decode from each track's first packet, which trims no warmup, so they
+compare against the whole reference. No correlation search, gain fitting, channel permutation,
 or per-run tolerance adjustment is allowed.
 
 The following maxima were measured on x86-64 Linux with the pinned Nix toolchain,

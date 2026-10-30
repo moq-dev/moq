@@ -4812,12 +4812,14 @@ fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
 /// A finished encoder reaches a C decoder as an end read in microseconds rather
 /// than vanishing: Opus pads a partial last frame, so the finish publishes where
 /// the source really stopped. The default start decodes the finished track from
-/// its first group rather than waiting at its end.
+/// its first group rather than waiting at its end, even when it is shorter than
+/// the warmup a mid-stream join trims.
 #[test]
 fn audio_raw_decode_reads_the_encoder_end() {
 	const START_US: u64 = 123_000;
-	// Past the 80 ms Opus warmup the decoder trims, ending on a partial frame.
-	const SAMPLES: usize = 4_700;
+	// One partial frame, shorter than the 80 ms warmup a mid-stream join trims: decoded
+	// from the track's first packet, only the codec's pre-skip is dropped.
+	const SAMPLES: usize = 860;
 
 	let origin = id(moq_origin_create());
 	let path = b"audio-raw-end-test";

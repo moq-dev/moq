@@ -110,9 +110,12 @@ pub struct Consumer {
 	remix: Option<Remix>,
 	options: Options,
 	max_delay: std::time::Duration,
-	/// Prime after a join or loss, never after a declared endpoint.
+	/// Prime after a join or loss, never after a declared endpoint or at the track's
+	/// first packet, which the codec's own delay already primes.
 	warmup: Duration,
 	warmup_pending: bool,
+	/// Whether a packet was read or lost yet, so the track's first packet can be told apart.
+	started: bool,
 	warmup_until: Option<moq_net::Timestamp>,
 	resolved_sample_rate: u32,
 	resolved_layout: Layout,
@@ -224,6 +227,7 @@ impl Consumer {
 			warmup,
 			warmup_pending: !warmup.is_zero(),
 			warmup_until: None,
+			started: false,
 			resolved_sample_rate: sample_rate,
 			resolved_layout: layout,
 			next_start: None,
@@ -295,17 +299,22 @@ impl Consumer {
 				return Ok(Some(frame));
 			}
 
-			let mux_frame = match self.track.read().await? {
+			let (mux_frame, track_start) = match self.track.read().await? {
 				Some(Encoded::Frame { group, frame }) => {
+					let first = !std::mem::replace(&mut self.started, true);
 					// A later group after a declared end comes from a fresh encoder; the end's
 					// own group carries the stopped encoder's final packets, trimmed below.
 					if self.end.is_some() && group != self.end_group {
 						self.restart()?;
 					}
-					frame
+					// Nothing precedes group 0, and a group delivers from its frame 0 or not at
+					// all, so reading it first means decoding from the encoder's first packet.
+					// A finished group's end marker may come first; it carries no media.
+					(frame, first && group == 0)
 				}
 				// Behind whatever the resampler held from before the loss.
 				Some(Encoded::Gap { timestamp, duration }) => {
+					self.started = true;
 					self.restart()?;
 					self.warmup_pending = !self.warmup.is_zero();
 					self.ready.push_back(Read::Gap { timestamp, duration });
@@ -360,11 +369,12 @@ impl Consumer {
 			let epoch = *self.epoch.get_or_insert(mux_frame.timestamp);
 			let delay = self.decoder.delay_remaining();
 			let decoded = self.decoder.decode(&mux_frame.payload)?;
-			// Anchored only once a packet decodes: a refused one primed nothing.
-			if self.warmup_pending {
+			// Anchored only once a packet decodes: a refused one primed nothing. The track's
+			// first packet has no history to warm up from: the codec's pre-skip, trimmed by
+			// the decoder, is all the priming its encoder declared.
+			if std::mem::take(&mut self.warmup_pending) && !track_start {
 				let warmup = moq_net::Timestamp::try_from(self.warmup)?.convert(timestamp.scale())?;
 				self.warmup_until = Some(timestamp.checked_add(warmup)?);
-				self.warmup_pending = false;
 			}
 			// Codec delay trimmed off the front is media this packet covered even
 			// though no samples came out, so it still moves the packet after it along.
@@ -796,6 +806,8 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
+		// Joined mid-stream: the track's first packet needs no warmup.
+		producer.seek(1).unwrap();
 		for epoch in 0..2 {
 			if epoch != 0 && declared {
 				producer.discontinuity().unwrap();
@@ -1031,6 +1043,8 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
+		// Joined mid-stream: the track's first packet needs no warmup.
+		producer.seek(1).unwrap();
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(1_000_000).unwrap(),
@@ -1062,6 +1076,69 @@ mod tests {
 			(first - 0.25).abs() < 0.0001,
 			"the resampler must be converged too: {first}"
 		);
+	}
+
+	/// Decodes a finished track of `packets` 20 ms Opus packets starting at group `group`,
+	/// keeping the encoder's declared warmup, and returns the first frame's stamp and the
+	/// frames decoded.
+	async fn opus_track_output(group: u64, packets: u64) -> (Option<u128>, usize) {
+		let mut encoder = Encoder::new(&EncodeConfig::new(48_000, Layout::Mono)).unwrap();
+		let catalog = encoder.catalog();
+		assert_eq!(catalog.warmup, Some(Duration::from_millis(80)));
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		producer.seek(group).unwrap();
+		let pcm = vec![0.25f32; encoder.frame_size()];
+		for packet in 0..packets {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_scale(packet * encoder.frame_size() as u64, 48_000).unwrap(),
+					duration: None,
+					payload: encoder.encode(&pcm).unwrap().payload,
+					keyframe: true,
+				})
+				.unwrap();
+		}
+		producer.finish().unwrap();
+
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"audio",
+			Options {
+				max_delay: Duration::from_secs(10),
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		let (mut first, mut frames) = (None, 0);
+		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
+			first.get_or_insert(frame.timestamp.as_micros());
+			frames += frame.data.len() / size_of::<f32>();
+		}
+		(first, frames)
+	}
+
+	/// Decoding from the track's first packet drops only the codec's pre-skip: the encoder
+	/// started there, so there is no history to warm up from. A track shorter than the
+	/// warmup still decodes.
+	#[tokio::test(start_paused = true)]
+	async fn the_tracks_first_packet_keeps_all_but_pre_skip() {
+		assert_eq!(opus_track_output(0, 2).await, (Some(0), 2 * 960 - 312));
+	}
+
+	/// A join past the track's first group still drops its warmup after the pre-skip.
+	#[tokio::test(start_paused = true)]
+	async fn a_mid_stream_join_drops_its_warmup() {
+		assert_eq!(opus_track_output(1, 6).await, (Some(80_000), 6 * 960 - 312 - 3_840));
 	}
 
 	/// A refused packet primed nothing, so the window starts at the first one that decodes.
