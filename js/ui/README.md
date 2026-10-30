@@ -16,8 +16,8 @@ You only need it directly to build a custom overlay in the same style.
 - `formatBitrate`, `formatMillis`, `formatHz`, `formatFps`: human-readable stats values.
 - `Support`: the base of `<moq-watch-support>` and `<moq-publish-support>`, a banner and details table for a browser support report.
 
-It holds no capability detection, and its only styles are the stats cards and sparklines in `@moq/ui/stats.css`, which an overlay `@import`s into its stylesheet.
-Each overlay styles everything else, including the `player--pseudo-fullscreen` class, and detects its own support.
+It holds no capability detection and publishes no styles: each overlay styles these elements, including the `player--pseudo-fullscreen` class, and detects its own support.
+Inside this repository, `@moq/watch` and `@moq/publish` inline the shared stats card and sparkline styles from `src/stats.css` at build time; that file is not part of the npm package.
 
 ```bash
 bun add @moq/ui

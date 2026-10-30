@@ -1,5 +1,6 @@
 /* Stats cards (statCard, statLine) and sparklines (graph).
- * Each overlay imports this into its shadow stylesheet, which defines the variables. */
+ * The watch and publish overlays inline this into their shadow stylesheets, which define the
+ * variables. Workspace-only: packaging drops CSS exports, so it is not published. */
 .stat-card {
 	display: flex;
 	flex-direction: column;

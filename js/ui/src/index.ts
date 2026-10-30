@@ -3,8 +3,7 @@
  * buttons, a fullscreen controller, stats cards and formatters, a sparkline graph, and the base
  * of their browser support banners.
  *
- * Browser-only: {@link Support} extends `HTMLElement` when this module loads. The stats card and
- * graph styles ship as `@moq/ui/stats.css`, for an overlay to `@import` into its stylesheet.
+ * Browser-only: {@link Support} extends `HTMLElement` when this module loads.
  *
  * @module
  */
