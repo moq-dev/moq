@@ -2762,7 +2762,9 @@ fn keep_alive_explicit_cap_and_disable() {
 	}
 	assert_matches!(
 		pair.client_conn_mut(client_ch).poll(),
-		Some(Event::ConnectionLost { reason: ConnectionError::TimedOut })
+		Some(Event::ConnectionLost {
+			reason: ConnectionError::TimedOut
+		})
 	);
 	assert!(pair.time - start < 2 * IDLE, "{:?}", pair.time - start);
 }

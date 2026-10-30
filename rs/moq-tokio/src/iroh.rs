@@ -636,9 +636,11 @@ mod tests {
 			(secs(10), None, secs(3)),
 			(secs(30), None, secs(9)),
 		] {
-			let mut quic = crate::quic::Resolved::default();
-			quic.idle_timeout = idle;
-			quic.keep_alive = keep_alive;
+			let quic = crate::quic::Resolved {
+				idle_timeout: idle,
+				keep_alive,
+				..Default::default()
+			};
 			let rendered = format!("{:?}", transport_config(&quic));
 			let needle = format!("keep_alive_interval: Some({interval:?})");
 			assert!(rendered.contains(&needle), "{rendered}");

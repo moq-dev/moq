@@ -785,8 +785,14 @@ mod tests {
 		assert_eq!(interval(0, None), None);
 		assert_eq!(interval(10, Some(Duration::ZERO)), None);
 		assert_eq!(interval(10, Some(Duration::from_secs(5))), Some(Duration::from_secs(5)));
-		assert_eq!(interval(10, Some(Duration::from_secs(20))), Some(Duration::from_secs(3)));
-		assert_eq!(interval(0, Some(Duration::from_secs(20))), Some(Duration::from_secs(20)));
+		assert_eq!(
+			interval(10, Some(Duration::from_secs(20))),
+			Some(Duration::from_secs(3))
+		);
+		assert_eq!(
+			interval(0, Some(Duration::from_secs(20))),
+			Some(Duration::from_secs(20))
+		);
 	}
 
 	#[test]
