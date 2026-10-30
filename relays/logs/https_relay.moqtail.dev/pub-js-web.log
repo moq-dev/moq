@@ -1,18 +1,17 @@
-publishing smoke-js-web-4723-29701.hang (fake camera, vite) to https://relay.moqtail.dev
-[page] negotiated protocol: moqt-18
+publishing smoke-js-web-4922-10057.hang (fake camera, vite) to https://relay.moqtail.dev
+[page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=moqtail/ch04 active=true
-[page] announced: broadcast=moqtail/ch07 active=true
 [page] announced: broadcast=moqtail/ch06 active=true
 [page] announced: broadcast=moqtail/ch01 active=true
-[page] announced: broadcast=moqtail/ch05 active=true
-[page] announced: broadcast=moqtail/ch02 active=true
+[page] announced: broadcast=moqtail/ch07 active=true
 [page] announced: broadcast=moqtail/testsrc active=true
-[page] announced: broadcast=moqtail/ch03 active=true
 [page] announced: broadcast=moqtail/ch00 active=true
-[page] publish ok: broadcast=smoke-js-web-4723-29701.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4723-29701.hang track=video
-[page] publish done: broadcast=smoke-js-web-4723-29701.hang track=video
-[page] publish error: broadcast=smoke-js-web-4723-29701.hang track=video error=remote error: 0
-[page] publish done: broadcast=smoke-js-web-4723-29701.hang track=catalog.json
-[page] publish error: broadcast=smoke-js-web-4723-29701.hang track=catalog.json error=The stream was aborted by the remote server
+[page] announced: broadcast=moqtail/ch02 active=true
+[page] announced: broadcast=moqtail/ch07_all active=true
+[page] announced: broadcast=moqtail/ch05 active=true
+[page] announced: broadcast=moqtail/ch04 active=true
+[page] announced: broadcast=moqtail/ch00_all active=true
+[page] announced: broadcast=moqtail/ch03 active=true
+[page] publish ok: broadcast=smoke-js-web-4922-10057.hang track=catalog.json
+[page] publish done: broadcast=smoke-js-web-4922-10057.hang track=catalog.json
+[page] publish error: broadcast=smoke-js-web-4922-10057.hang track=catalog.json error=remote error: 0

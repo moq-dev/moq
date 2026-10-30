@@ -2,14 +2,14 @@ https://lminiero.it:9000/ connected via WebTransport
 https://lminiero.it:9000/ negotiated ALPN: moqt-22
 connected version=moq-transport-22
 subscribe_namespace written: requestId=0
-announced: broadcast=smoke-js-web-4723-27452.hang active=true
-subscribe start: id=2 broadcast=smoke-js-web-4723-27452.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-js-web-4723-27452.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-js-web-4723-27452.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-js-web-4723-27452.hang track=video
-subscribe written: id=4 broadcast=smoke-js-web-4723-27452.hang track=video
-subscribe ok: id=4 broadcast=smoke-js-web-4723-27452.hang track=video
-received 6587 bytes from smoke-js-web-4723-27452.hang
-announced: broadcast=smoke-js-web-4723-27452.hang active=false
-subscribe error: id=2 broadcast=smoke-js-web-4723-27452.hang track=catalog.json error=remote error: 0 (connection error: closed)
-subscribe error: id=4 broadcast=smoke-js-web-4723-27452.hang track=video error=remote error: 0 (connection error: closed)
+announced: broadcast=smoke-js-web-4922-31332.hang active=true
+subscribe start: id=2 broadcast=smoke-js-web-4922-31332.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-js-web-4922-31332.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-js-web-4922-31332.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-js-web-4922-31332.hang track=video
+subscribe written: id=4 broadcast=smoke-js-web-4922-31332.hang track=video
+subscribe ok: id=4 broadcast=smoke-js-web-4922-31332.hang track=video
+received 6614 bytes from smoke-js-web-4922-31332.hang
+announced: broadcast=smoke-js-web-4922-31332.hang active=false
+subscribe error: id=2 broadcast=smoke-js-web-4922-31332.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-js-web-4922-31332.hang track=video error=remote error: 0 (connection error: closed)

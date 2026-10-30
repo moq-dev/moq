@@ -1,1 +1,51 @@
-error: failed to exchange h3 connect: protocol error: expected 200, got: Some(404)
+https://us-west-2.relay.quicr.org:33437/relay connected via WebTransport
+https://us-west-2.relay.quicr.org:33437/relay negotiated ALPN: moqt-18
+connected version=moq-transport-18
+subscribe_namespace written: requestId=0
+announced: broadcast=metrics/us-west-2.relay.public active=true
+announced: broadcast=smoke-js-web-4922-1307.hang active=true
+subscribe start: id=2 broadcast=smoke-js-web-4922-1307.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-js-web-4922-1307.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-js-web-4922-1307.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-js-web-4922-1307.hang track=video
+subscribe written: id=4 broadcast=smoke-js-web-4922-1307.hang track=video
+subscribe ok: id=4 broadcast=smoke-js-web-4922-1307.hang track=video
+received 7804 bytes from smoke-js-web-4922-1307.hang
+subscribe_namespace error: connection error: closed (source=session)
+announced: broadcast=metrics/us-west-2.relay.public active=false
+announced: broadcast=smoke-js-web-4922-1307.hang active=false
+broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
+  source: "session",
+  streamErrorCode: null,
+  code: 0,
+  name: "WebTransportError",
+  message: "connection error: closed",
+  INDEX_SIZE_ERR: 1,
+  DOMSTRING_SIZE_ERR: 2,
+  HIERARCHY_REQUEST_ERR: 3,
+  WRONG_DOCUMENT_ERR: 4,
+  INVALID_CHARACTER_ERR: 5,
+  NO_DATA_ALLOWED_ERR: 6,
+  NO_MODIFICATION_ALLOWED_ERR: 7,
+  NOT_FOUND_ERR: 8,
+  NOT_SUPPORTED_ERR: 9,
+  INUSE_ATTRIBUTE_ERR: 10,
+  INVALID_STATE_ERR: 11,
+  SYNTAX_ERR: 12,
+  INVALID_MODIFICATION_ERR: 13,
+  NAMESPACE_ERR: 14,
+  INVALID_ACCESS_ERR: 15,
+  VALIDATION_ERR: 16,
+  TYPE_MISMATCH_ERR: 17,
+  SECURITY_ERR: 18,
+  NETWORK_ERR: 19,
+  ABORT_ERR: 20,
+  URL_MISMATCH_ERR: 21,
+  QUOTA_EXCEEDED_ERR: 22,
+  TIMEOUT_ERR: 23,
+  INVALID_NODE_TYPE_ERR: 24,
+  DATA_CLONE_ERR: 25,
+  toString: [Function: toString],
+}
+subscribe error: id=4 broadcast=smoke-js-web-4922-1307.hang track=video error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-js-web-4922-1307.hang track=catalog.json error=remote error: 0 (connection error: closed)

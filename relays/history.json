@@ -7492,5 +7492,240 @@
         "total": 1
       }
     }
+  },
+  {
+    "generated": "2026-10-30T08:45:37Z",
+    "run_url": "https://github.com/moq-dev/moq/actions/runs/41027227469",
+    "endpoints": {
+      "moqt://aiomoqt-relay.marzresearch.net:4443": {
+        "ok": true,
+        "versions": [
+          "moq-transport-22"
+        ],
+        "passed": 1,
+        "total": 1
+      },
+      "https://aiomoqt-relay.marzresearch.net:4443/": {
+        "ok": true,
+        "versions": [
+          "moq-transport-22"
+        ],
+        "passed": 6,
+        "total": 6
+      },
+      "https://lminiero.it:9000": {
+        "ok": true,
+        "versions": [
+          "moq-transport-22"
+        ],
+        "passed": 6,
+        "total": 6
+      },
+      "moqt://lminiero.it:9000": {
+        "ok": true,
+        "versions": [
+          "moq-transport-22"
+        ],
+        "passed": 1,
+        "total": 1
+      },
+      "https://us-west-2.relay.quicr.org:33437/relay": {
+        "ok": true,
+        "versions": [
+          "moq-transport-18"
+        ],
+        "passed": 6,
+        "total": 6
+      },
+      "moqt://us-west-2.relay.quicr.org:33437": {
+        "ok": true,
+        "versions": [
+          "moq-transport-18"
+        ],
+        "passed": 1,
+        "total": 1
+      },
+      "moqt://cdn.moq.dev:443/anon": {
+        "ok": true,
+        "versions": [
+          "moq-lite-06"
+        ],
+        "passed": 1,
+        "total": 1
+      },
+      "https://cdn.moq.dev/anon": {
+        "ok": true,
+        "versions": [
+          "moq-lite-06"
+        ],
+        "passed": 6,
+        "total": 6
+      },
+      "wss://cdn.moq.dev/anon": {
+        "ok": true,
+        "versions": [
+          "moq-lite-06"
+        ],
+        "passed": 1,
+        "total": 1
+      },
+      "moqt://draft-14.cloudflare.mediaoverquic.com:443": {
+        "ok": false,
+        "versions": [
+          "moq-transport-14"
+        ],
+        "passed": 0,
+        "total": 1
+      },
+      "https://draft-14.cloudflare.mediaoverquic.com:443/moq": {
+        "ok": false,
+        "versions": [
+          "moq-transport-14"
+        ],
+        "passed": 0,
+        "total": 6
+      },
+      "moqt://draft-18-interop.cloudflare.mediaoverquic.com:443": {
+        "ok": true,
+        "versions": [
+          "moq-transport-18"
+        ],
+        "passed": 1,
+        "total": 1
+      },
+      "https://draft-18-interop.cloudflare.mediaoverquic.com:443/moq": {
+        "ok": true,
+        "versions": [
+          "moq-transport-18"
+        ],
+        "passed": 6,
+        "total": 6
+      },
+      "https://relay.moqtail.dev:8244": {
+        "ok": false,
+        "versions": [],
+        "passed": 0,
+        "total": 6
+      },
+      "https://relay.moqtail.dev": {
+        "ok": false,
+        "versions": [
+          "moq-transport-22"
+        ],
+        "passed": 3,
+        "total": 6
+      },
+      "moqt://moqt.nokiaresearch.com:8443/moq": {
+        "ok": true,
+        "versions": [
+          "moq-transport-19"
+        ],
+        "passed": 1,
+        "total": 1
+      },
+      "https://moqt.nokiaresearch.com:8443/moq": {
+        "ok": true,
+        "versions": [
+          "moq-transport-19"
+        ],
+        "passed": 6,
+        "total": 6
+      },
+      "moqt://moqt.nokiaresearch.com:4443/moq": {
+        "ok": true,
+        "versions": [
+          "moq-transport-22"
+        ],
+        "passed": 1,
+        "total": 1
+      },
+      "https://moqt.nokiaresearch.com:4443/moq": {
+        "ok": true,
+        "versions": [
+          "moq-transport-22"
+        ],
+        "passed": 6,
+        "total": 6
+      },
+      "https://moqx-main.ci.openmoq.org:4433/moq-relay": {
+        "ok": true,
+        "versions": [
+          "moq-transport-16"
+        ],
+        "passed": 6,
+        "total": 6
+      },
+      "moqt://moqx-main.ci.openmoq.org:4433": {
+        "ok": true,
+        "versions": [
+          "moq-transport-16"
+        ],
+        "passed": 1,
+        "total": 1
+      },
+      "https://fb.mvfst.net:9448/moq-relay": {
+        "ok": false,
+        "versions": [
+          "moq-transport-14",
+          "moq-transport-16"
+        ],
+        "passed": 2,
+        "total": 6
+      },
+      "moqt://fb.mvfst.net:9448/moq-relay": {
+        "ok": false,
+        "versions": [
+          "moq-transport-14"
+        ],
+        "passed": 0,
+        "total": 1
+      },
+      "https://quichemoq.dev:443": {
+        "ok": false,
+        "versions": [],
+        "passed": 0,
+        "total": 6
+      },
+      "moqt://moq-relay.red5.net:4433": {
+        "ok": true,
+        "versions": [
+          "moq-transport-22"
+        ],
+        "passed": 1,
+        "total": 1
+      },
+      "https://moq-relay.red5.net:4433/moq": {
+        "ok": false,
+        "versions": [
+          "moq-transport-22"
+        ],
+        "passed": 1,
+        "total": 6
+      },
+      "https://34-72-6-160.sslip.io:443/moq-test": {
+        "ok": true,
+        "versions": [
+          "moq-lite-06"
+        ],
+        "passed": 6,
+        "total": 6
+      },
+      "wss://34-72-6-160.sslip.io:443/moq-test": {
+        "ok": true,
+        "versions": [
+          "moq-lite-06"
+        ],
+        "passed": 1,
+        "total": 1
+      },
+      "moqt://34-72-6-160.sslip.io:443/moq-test": {
+        "ok": true,
+        "versions": [
+          "moq-lite-06"
+        ],
+        "passed": 1,
+        "total": 1
+      }
+    }
   }
 ]

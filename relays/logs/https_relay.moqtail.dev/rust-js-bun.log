@@ -1,34 +1,38 @@
 https://relay.moqtail.dev/ connected via WebTransport
-https://relay.moqtail.dev/ negotiated ALPN: moqt-18
-connected version=moq-transport-18
+https://relay.moqtail.dev/ negotiated ALPN: moqt-22
+connected version=moq-transport-22
 subscribe_namespace written: requestId=0
-announced: broadcast=smoke-rust-4723-18281.hang active=true
-subscribe start: id=2 broadcast=smoke-rust-4723-18281.hang track=catalog.json
-announced: broadcast=moqtail/ch04 active=true
-announced: broadcast=moqtail/ch07 active=true
 announced: broadcast=moqtail/ch06 active=true
 announced: broadcast=moqtail/ch01 active=true
-announced: broadcast=moqtail/ch05 active=true
-announced: broadcast=moqtail/ch02 active=true
+announced: broadcast=moqtail/ch07 active=true
 announced: broadcast=moqtail/testsrc active=true
-announced: broadcast=moqtail/ch03 active=true
 announced: broadcast=moqtail/ch00 active=true
-subscribe written: id=2 broadcast=smoke-rust-4723-18281.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-rust-4723-18281.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-rust-4723-18281.hang track=0.avc3
-subscribe written: id=4 broadcast=smoke-rust-4723-18281.hang track=0.avc3
-subscribe ok: id=4 broadcast=smoke-rust-4723-18281.hang track=0.avc3
-dropping a group with no head: alias=218 group=2
-received 398 bytes from smoke-rust-4723-18281.hang
-subscribe error: id=4 broadcast=smoke-rust-4723-18281.hang track=0.avc3 error=remote error: 0 (connection error: closed)
-subscribe error: id=2 broadcast=smoke-rust-4723-18281.hang track=catalog.json error=remote error: 0 (connection error: closed)
-announced: broadcast=smoke-rust-4723-18281.hang active=false
-announced: broadcast=moqtail/ch04 active=false
-announced: broadcast=moqtail/ch07 active=false
+announced: broadcast=moqtail/ch02 active=true
+announced: broadcast=moqtail/ch07_all active=true
+announced: broadcast=smoke-rust-4922-1291.hang active=true
+subscribe start: id=2 broadcast=smoke-rust-4922-1291.hang track=catalog.json
+announced: broadcast=moqtail/ch05 active=true
+announced: broadcast=moqtail/ch04 active=true
+announced: broadcast=moqtail/ch00_all active=true
+announced: broadcast=moqtail/ch03 active=true
+subscribe written: id=2 broadcast=smoke-rust-4922-1291.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-rust-4922-1291.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-rust-4922-1291.hang track=0.avc3
+subscribe written: id=4 broadcast=smoke-rust-4922-1291.hang track=0.avc3
+subscribe ok: id=4 broadcast=smoke-rust-4922-1291.hang track=0.avc3
+dropping a group with no head: alias=1 group=2
+received 398 bytes from smoke-rust-4922-1291.hang
 announced: broadcast=moqtail/ch06 active=false
 announced: broadcast=moqtail/ch01 active=false
-announced: broadcast=moqtail/ch05 active=false
-announced: broadcast=moqtail/ch02 active=false
+announced: broadcast=moqtail/ch07 active=false
 announced: broadcast=moqtail/testsrc active=false
-announced: broadcast=moqtail/ch03 active=false
 announced: broadcast=moqtail/ch00 active=false
+announced: broadcast=moqtail/ch02 active=false
+announced: broadcast=moqtail/ch07_all active=false
+announced: broadcast=smoke-rust-4922-1291.hang active=false
+announced: broadcast=moqtail/ch05 active=false
+announced: broadcast=moqtail/ch04 active=false
+announced: broadcast=moqtail/ch00_all active=false
+announced: broadcast=moqtail/ch03 active=false
+subscribe error: id=4 broadcast=smoke-rust-4922-1291.hang track=0.avc3 error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-rust-4922-1291.hang track=catalog.json error=remote error: 0 (connection error: closed)

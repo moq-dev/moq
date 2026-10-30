@@ -1,17 +1,12 @@
-[page] Failed to establish a connection to https://us-west-2.relay.quicr.org:33437/relay: net::ERR_METHOD_NOT_SUPPORTED.
-[page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://us-west-2.relay.quicr.org:33437/relay: net::ERR_METHOD_NOT_SUPPORTED.
-[page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://us-west-2.relay.quicr.org:33437/relay: net::ERR_METHOD_NOT_SUPPORTED.
-[page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://us-west-2.relay.quicr.org:33437/relay: net::ERR_METHOD_NOT_SUPPORTED.
-[page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://us-west-2.relay.quicr.org:33437/relay: net::ERR_METHOD_NOT_SUPPORTED.
-[page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://us-west-2.relay.quicr.org:33437/relay: net::ERR_METHOD_NOT_SUPPORTED.
-[page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://us-west-2.relay.quicr.org:33437/relay: net::ERR_METHOD_NOT_SUPPORTED.
-[page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://us-west-2.relay.quicr.org:33437/relay: net::ERR_METHOD_NOT_SUPPORTED.
-[page] connection error: AggregateError: All promises were rejected
-decoded 0 frames from smoke-rust-4723-33.hang (vite)
+[page] negotiated protocol: moqt-18
+[page] subscribe_namespace written: requestId=0
+[page] announced: broadcast=smoke-rust-4922-8603.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4922-8603.hang track=catalog.json
+[page] announced: broadcast=metrics/us-west-2.relay.public active=true
+[page] subscribe written: id=2 broadcast=smoke-rust-4922-8603.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-rust-4922-8603.hang track=catalog.json
+[page] received catalog hang smoke-rust-4922-8603.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4922-8603.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4922-8603.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4922-8603.hang track=0.avc3
+decoded 14 frames from smoke-rust-4922-8603.hang (vite)

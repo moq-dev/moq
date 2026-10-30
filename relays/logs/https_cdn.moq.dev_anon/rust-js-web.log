@@ -1,13 +1,11 @@
 [page] negotiated protocol: moq-lite-06
 [page] announced: prefix=
 [page] announce: prefix=
-[page] announced: broadcast=anon/doom/game/e1m1 active=true
-[page] announced: broadcast=lcb-6749215-af07.hang active=true
-[page] announced: broadcast=smoke-rust-4723-5325.hang active=true
-[page] subscribe start: id=0 broadcast=smoke-rust-4723-5325.hang track=catalog.json
-[page] subscribe ok: id=0 broadcast=smoke-rust-4723-5325.hang track=catalog.json
-[page] received catalog hang smoke-rust-4723-5325.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=1 broadcast=smoke-rust-4723-5325.hang track=0.avc3
-[page] subscribe ok: id=1 broadcast=smoke-rust-4723-5325.hang track=0.avc3
-[page] subscribe update: id=1 broadcast=smoke-rust-4723-5325.hang track=0.avc3
-decoded 14 frames from smoke-rust-4723-5325.hang (vite)
+[page] announced: broadcast=lcb-6766769-9135.hang active=true
+[page] announced: broadcast=smoke-rust-4922-2980.hang active=true
+[page] subscribe start: id=0 broadcast=smoke-rust-4922-2980.hang track=catalog.json
+[page] subscribe ok: id=0 broadcast=smoke-rust-4922-2980.hang track=catalog.json
+[page] received catalog hang smoke-rust-4922-2980.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=1 broadcast=smoke-rust-4922-2980.hang track=0.avc3
+[page] subscribe ok: id=1 broadcast=smoke-rust-4922-2980.hang track=0.avc3
+decoded 10 frames from smoke-rust-4922-2980.hang (vite)
