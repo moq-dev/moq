@@ -2,23 +2,34 @@
 
 ## Goal
 
-Every route in an origin names its publisher `Instance { identity, epoch }`:
-`identity` is a string naming the publisher, and `epoch` is when this run
-started. The UUIDv7 `Epoch` is retired, and the origin no longer holds any
-epochless route. A route resolving a path is chosen like this:
+Every route in an origin carries an `identity`, a string naming one
+continuous stream at its path. Within an identity, group sequences never
+restart and never name two different groups, so readers can stitch across
+any routes and incarnations that share it. Different identities are
+independent streams that are never stitched together. Each route also
+carries an `epoch`: an opaque counter that increases within its identity
+and is never compared across identities. It only picks the live
+incarnation when stale routes linger. The UUIDv7 `Epoch` is retired, and
+the origin holds no route without an identity.
+
+A route resolving a path is chosen like this:
 
 1. The most specific prefix wins.
-2. Within one identity, only its newest epoch is eligible. An identity
-   publishes one run per path at a time, so a reconnect supersedes its
-   stale route at once, even when that route is cheaper.
+2. Within one identity, only its highest epoch is eligible, even over a
+   cheaper route. Readers continue across an epoch change without a seam,
+   because the sequence space continues.
 3. Among different identities, the order is link preference, then cost,
    then a broadcast published on this origin, then hop length, then a hash
    of the identity and the full requested path. Relays agree on the result,
    and paths spread over a pool's hosts.
-4. Routes with equal identity and epoch are one run, so a reader resumes
-   across them without a seam.
 
-Non-goals: moq-transport identity (it carries none,
+On the read side, the chain is origin → route(path, identity) → broadcast.
+`request(path)` resolves one identity and returns its broadcast. Moving to
+another identity, such as a pool failover or a redundant-ingest switch,
+ends that broadcast, and `follow` yields the next one. Consumers, pins and
+catalog references see only the identity; the epoch is never public.
+
+Non-goals: carrying identity over moq-transport (it carries none,
 [decided 2026-10-28](/quest/m1/ietf-epoch-cut.md)), public-key identities
 (a later option), and the route-handle API shape
 ([One Route handle](/quest/m1/api-audit/route/handle.md)).
@@ -28,73 +39,76 @@ Non-goals: moq-transport identity (it carries none,
 Decided 2026-10-30 (maintainer); every prompt is in the
 [epic](/quest/m1/api-audit/route/README.md).
 
-- **Types.** In `rs/moq-net`, `Identity` (string) and `Epoch` (start time
-  in microseconds, monotonic within a process) together form `Instance`.
-  Rename the internal `Instance`/`Resolution` types out of the way. Mirror
-  in `js/net`, moq-ffi, moq-c and the wrappers. `request(path, instance)`,
-  `follow`, catalog references and archive keys pin an `Instance`.
-- **Default identity.** It is random, minted once per process (per origin
-  in JS) and kept for that process's lifetime, so reconnects within the
-  process supersede their own stale routes. A process restart is a new
-  identity until its old route is withdrawn. A stable identity orders its
-  runs by wall-clock start time, as UUIDv7 epochs do today. If a restart's
-  clock rolls back, or lands on an equal epoch, the stale route keeps
-  winning until it is withdrawn, and never splices: an equal epoch from a
-  restarted process is refused as a conflicting copy, as differing track
-  info is today ([moq-dev/moq#6460](https://github.com/moq-dev/moq/pull/6460)).
-  Test both cases. Services set a stable one
-  (`--identity` on the CLI and relay, an origin config field in the
-  libraries), for example a hostname. The default is never a hostname,
-  since routes reach every relay and subscriber.
-- **Pools.** A pool is several hosts with distinct identities on one
-  prefix: transcoders, or moq.pro's three `.dash` control nodes. Step 3
+- **Types.** In `rs/moq-net`, add `Identity` (a string) and keep `epoch` as
+  a crate-private `u64` on routes. Replace `broadcast::Info.epoch` and JS
+  `Broadcast.Consumer.epoch` with `identity()`. `request(path, identity)`,
+  `follow(path, identity)`, catalog references and archive keys pin an
+  identity. Rename the internal `Instance`/`Resolution` types if they
+  confuse. Mirror this in `js/net`, moq-ffi, moq-c and the wrappers.
+- **Default identity.** Random, minted for each new stream, so a publisher
+  that restarts its sequences can never be stitched to its old run. A
+  [Route](/quest/m1/api-audit/route/handle.md) mints it when created and
+  keeps it, with epoch 0, while it is withdrawn and re-announced or
+  reconnects, since its sequences continue.
+- **Stable identity.** A publisher may set its own identity (`--identity`
+  on the CLI, an option on the route) only if it continues the sequence
+  space across restarts and announces a higher epoch each time, for
+  example a counter persisted on disk. Nothing assumes the epoch is a
+  clock. Document the promise and the cost of breaking it (spliced groups)
+  wherever the option is documented.
+- **Pools.** Several hosts on one prefix, such as transcoders or moq.pro's
+  three `.dash` control nodes, each have their own identities, and step 3
   spreads paths over them. A host that is full withdraws its route (a
   leaky bucket); a crashed host's route goes when its session closes or
-  drains. Document this pattern in `doc/concept/identity.md`, replacing
-  the epochless-claim lifecycle.
+  drains. Document this in `doc/concept/identity.md`, replacing the
+  epochless-claim lifecycle.
 - **Wire, lite-07-wip.** Announcements carry `identity` and `epoch` as two
-  explicit fields in place of the UUIDv7 epoch, and requests that pin an
-  instance carry both. Update `drafts/` (the lite draft's announce and
-  epoch sections) and `doc/concept/moq-lite.md`. Released versions keep
-  their framing. lite-06 and older read the old field. Account for it
-  wherever lite-07 epochs flow today: announce IDs, compression bases,
-  snapshots and route filtering.
-- **Minting off the wire.** A session that receives a route with no
-  identity mints one for it: identity = the session ID, epoch = when the
-  route arrived. This covers moq-transport, older lite and third-party
-  peers. The origin then holds no epochless route. A pool reached through
-  an older-lite relay hop can pick different winners per relay
+  explicit fields in place of the UUIDv7 epoch, and requests that pin carry
+  the identity. Update `drafts/` (the lite draft's announce and epoch
+  sections) and `doc/concept/moq-lite.md`. Released versions keep their
+  framing. Account for the change wherever lite-07 epochs flow today:
+  announce IDs, compression bases, snapshots and route filtering.
+- **Minting off the wire.** A session mints an identity for each route it
+  receives without one: the session ID plus that announcement's ID, with
+  epoch 0. This covers moq-transport, older lite and third-party peers, and
+  the origin then holds no route without an identity. A re-announcement is
+  a new identity, so a job restarting on the same session is never spliced
+  to its predecessor ([moq-dev/moq#5678](https://github.com/moq-dev/moq/pull/5678)'s
+  bug). moq-transport keeps the cold-start reset. A pool reached through an
+  older-lite relay hop can pick different winners per relay
   ([moq-dev/moq#6948](https://github.com/moq-dev/moq/pull/6948)'s
   objection), which is accepted because m1 prefers lite-07 between relays.
-  The objection does not apply otherwise: newest-wins only compares epochs
-  within one identity, so mint order never outranks cost or preference.
-- **Delete the epochless machinery.** `Instance::Route(generation)` and
-  its renewals, `restarted_since`, the held-restart Release for epochless
-  routes, Selection retirement, and the epochless refusal from
+  Elsewhere the objection is gone: epochs are compared only within one
+  identity, so mint order never outranks cost or preference.
+- **Delete the epochless machinery.** That is `Instance::Route(generation)`
+  and its renewals, `restarted_since`, the held-restart Release for
+  epochless routes, Selection retirement, and the epochless refusal from
   [moq-dev/moq#6816](https://github.com/moq-dev/moq/pull/6816). This
   replaces that part of [Routes and announces](/quest/m1/cluster-routing/routes.md)
   (decided there 2026-10-27).
 - **Docs.** Rewrite `doc/concept/identity.md`'s identity, selection-order
   and lazy-job sections to the rule above, so the guide, the
-  `Consumer::request` rustdoc and the `Route` docs give one order, with
-  specificity first. Also update `doc/setup/redundancy.md` (a redundant
-  pair is two identities), `doc/bin/cli.md` ("Publisher runs" and
-  `--epoch`, which becomes `--identity`) and `doc/bin/relay/config.md`.
+  `Consumer::request` rustdoc and the route docs give one order, with
+  specificity first. Update `doc/setup/redundancy.md` (a redundant pair is
+  two identities), `doc/bin/cli.md` ("Publisher runs", and `--epoch`, which
+  becomes `--identity`) and `doc/bin/relay/config.md`.
 - **moq.pro.** Recording resume compares `routeEpoch`
   (`api/src/recording.ts`), and recordings are keyed `<path>/@<epoch>/...`.
-  The Impact section says how to key on `Instance` instead, for moq.pro's
-  bump.
-- **Tests.** Cover a reconnect superseding its stale route across a
-  cheaper path; two identities hashing per path; same-instance resume
-  across two relays; a host withdrawing when full; minting at a
-  moq-transport and a lite-06 ingest; and archive and catalog pins. Update
-  every epoch fixture. Run `just check`, `just test interop --all` and
+  The Impact section says to key on identity and record the start time on
+  moq.pro's side, for moq.pro's bump.
+- **Tests.** Cover a higher epoch superseding a cheaper stale route of the
+  same identity; a reader continuing across an epoch change; two identities
+  hashing per path; a failover to another identity ending the broadcast and
+  `follow` yielding the next; a host withdrawing when full; per-announcement
+  minting at a moq-transport and a lite-06 ingest, including a job
+  re-announced on one session; and archive and catalog pins. Update every
+  epoch fixture. Run `just check`, `just test interop --all` and
   `just drafts check`. Any compat cell that asserted UUID epochs gets a
   planned break in `test/interop/compat/planned-breaks.json`.
 
-Public API: breaking. `Epoch` becomes the start-time half of `Instance`,
-and `Route::with_epoch` gives way to the handle's options. Wire: lite-07-wip
-announce and request fields change; released versions are unchanged.
+Public API: breaking. `Epoch` leaves the public API and `Identity` takes its
+place in pins and on consumers. Wire: lite-07-wip announce and request
+fields change; released versions are unchanged.
 
 ## Related
 

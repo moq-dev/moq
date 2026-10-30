@@ -23,9 +23,11 @@ and `rs/moq-cli/src/archive.rs:85`. Every JS consumer branches only on
 moves to `follow`.
 
 - The listing yields present and absent per path, with the announcement's
-  read-only facts. A path that changes instance stays present. To see an
-  instance change, hold a `follow`.
-- `follow` reports the new instance on a restart. It also needs an `End`
+  read-only facts. A path that changes identity stays present. To see an
+  identity change, hold a `follow`.
+- `follow` yields a new broadcast when the path's identity changes, as the
+  read side of [Identity and epoch](/quest/m1/api-audit/route/identity.md)
+  defines (an epoch change within one identity is invisible). It also needs an `End`
   signal for when the path goes absent, so that `moq_mux::follow::Instances`
   can fold into it: delete the wrapper's duplicate epoch filter and keep
   its one-shot fixed mode only if a caller needs it.
@@ -43,4 +45,4 @@ none.
 
 ## Related
 
-- [Announce takeover](/quest/m1/announce-takeover.md) - its continuity shows up inside `follow`, with no public `Takeover` variant
+- [Announce takeover](/quest/m1/announce-takeover.md) - a job's exact route continues its claim's readers inside `follow`, with no public event

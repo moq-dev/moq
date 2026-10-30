@@ -2,13 +2,17 @@
 
 ## Goal
 
-An application talks to the origin only in routes, as the wire does. It
-announces an exact path or a prefix and holds one `Route` handle. Every
-route names its publisher `Instance { identity, epoch }`, and nothing in the
-app API is epochless. A prefix route answers each request by serving a
-broadcast it already holds or by announcing a per-path route. Readers see a
-listing of paths, plus `follow` and `request` for instance changes, instead
-of four announce event kinds. Rust, JS, moq-ffi, moq-c and the wrappers
+An application talks to the origin only in routes, as the wire does. On the
+publishing side, ownership runs origin → route → broadcast → track → group →
+frame: a `Route` handle, for an exact path or a prefix, creates and owns
+its broadcast. Every route carries an `identity` naming one continuous
+stream, and an `epoch` that is private and only orders a single identity's
+incarnations. On the read side the chain is origin → route(path, identity)
+→ broadcast, and consumers see only the identity. A prefix route answers
+each request by serving a broadcast it already holds, or by creating the
+path's exact route under its identity. Readers see a listing of paths, plus
+`follow` and `request` for identity changes, instead of four announce event
+kinds. Rust, JS, moq-ffi, moq-c and the wrappers
 mirror it.
 
 Non-goals: the route layer's wire messages and federation
@@ -108,18 +112,48 @@ and every option after it was rejected):
 - Milestone: ✅ m1 under the API audit; m1 standalone; m2.
 - The external user's PR offer: ✅ we do all of it; offer them serve.
 
+Second round, the same day. The maintainer asked whether broadcasts should
+hang off routes (origin → route → broadcast → track → group → frame). An
+audit found the producer side inverted today: the broadcast holds its own
+announcer (`rs/moq-net/src/model/broadcast.rs:252-292`). A standalone
+broadcast cannot be announced in Rust. A consumer's broadcast, by contrast,
+moves between the routes that reach it (`origin.rs:6730`). These decisions
+supersede the epoch-minting, pairing and run-uniqueness answers above:
+
+- Producer ownership: ✅ the route creates and owns its broadcast; pass a
+  broadcast in.
+- Mint point: ✅ per Route, which keeps its identity across withdraw and
+  re-announce, so js/publish's toggle continues; per announce.
+- Read side: ✅ origin → route(path, identity) → broadcast, with only the
+  identity public; the instance on the consumer; a consumer route handle.
+  The maintainer added: "we can never stitch broadcasts over two different
+  identities, only different epochs". The epoch is only a restart
+  tie-break, relative to its identity, and need not be a clock. moq.pro
+  records start times itself.
+- Epoch change under a reader: the maintainer answered "that would be a
+  new identity?". So identity is one continuous sequence space, and a
+  publisher whose sequences restart is a new identity. ✅ Confirmed: the
+  default is a fresh identity per stream, and a stable identity promises
+  continued sequences and an increasing epoch. `Instance` and the
+  hostname advice for pools are dropped.
+- Edge minting: ✅ per announcement (the session ID plus the announcement's
+  ID); per session, which would splice a job restarted on one session.
+- Takeover: ✅ re-plan it around identity, where a job's exact route
+  inherits its claim's identity and ANNOUNCE_TAKEOVER is dropped; keep the
+  predecessor-ID plan.
+
 The epic owns no work of its own: each child updates the docs it makes
 stale, including `doc/concept/identity.md`.
 
 ## Required
 
 - [Serve a held broadcast](/quest/m1/api-audit/route/serve.md) - a prefix route's request can be answered with a broadcast the app already holds, and the first subscribe succeeds on every wire
-- [Identity and epoch](/quest/m1/api-audit/route/identity.md) - every route names `Instance { identity, epoch }`, ranked newest within an identity and hashed across identities, with no epochless routes left in the origin
-- [One Route handle](/quest/m1/api-audit/route/handle.md) - `Publication`, `Prepared`, `Announcer` and `Requests` become one `Route`, with app options separate from transit facts
+- [Identity and epoch](/quest/m1/api-audit/route/identity.md) - every route carries an `identity` (one continuous stream) and a private per-identity epoch, ranked newest within an identity and hashed across identities, with no epochless routes left in the origin
+- [One Route handle](/quest/m1/api-audit/route/handle.md) - `Publication`, `Prepared`, `Announcer` and `Requests` become one `Route` that owns its broadcast, with app options separate from transit facts
 - [Listing and follow](/quest/m1/api-audit/route/events.md) - apps read a path listing plus `follow`/`request`, and route metadata moves to a relay-level stream
 
 ## Related
 
-- [Announce takeover](/quest/m1/announce-takeover.md) - builds on the identity and handle shapes here
+- [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's identity, so lite-07 readers keep the first subscribe
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - the wire route layer; identity takes over its epochless deletion
 - [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - key identities that a future public-key `identity` could reuse
