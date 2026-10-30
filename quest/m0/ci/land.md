@@ -2,13 +2,14 @@
 
 ## Goal
 
-`main` changes only through a batched gate. `quest land` takes every PR whose
-landing was requested and builds them, in enqueue order, into a chain of
-squash commits on top of `main`. It runs `just ci` once on the chain's tip on
-the self-hosted queue runner, then fast-forwards `main` to the longest
-passing prefix of the chain. GitHub's merge queue is gone. Merged PRs per
-hour on a busy day rise measurably over the baseline below, while `main`
-only ever holds a tree the gate tested.
+`main` changes only through a batched gate: `quest land serve`, a daemon on
+the maintainer's host, shared with moq-dev/quest. It takes the oldest PR whose
+landing was requested plus up to floor(log₂ n) more that merge cleanly, in
+enqueue order, and runs `just ci` once on the chain's tip in an isolated
+container. A passing batch lands one squash commit per PR, each exactly the
+tree the gate tested; a failing one is ejected together and handed to a
+Codex fixer. GitHub's merge queue and the Land workflow are gone. Merged PRs
+per hour on a busy day rise measurably over the baseline below.
 
 ## Plan
 
@@ -46,35 +47,10 @@ Decided 2026-10-26 (maintainer):
   more concurrent builds needs more runners. Mergify (free for open source,
   with batching and bisection) was rejected: it merges through the API, so
   it can neither guarantee the tested tree nor resolve quest-file conflicts.
-- One self-hosted runner stays the gate. This replaces the planned second
-  queue runner (`queue-concurrency.md`, deleted).
 - The engine is `quest land` in moq-dev/quest, shared with moq-dev/quest,
-  moq.pro, and moq-dev/rust2. This repository adds a thin workflow, as
-  moq.pro's `gate.yml` and `queue.yml` do today.
-- The gate lands by fast-forward. For each PR it writes the squash commit
-  onto the chain, with the engine's default message, and resolves quest-file conflicts
-  with quest's merge driver. It force-pushes each PR's branch, with a lease
-  on the head it tested, to that PR's commit, then fast-forwards `main` to
-  the tip in one push. GitHub marks a PR merged once its head is on the base,
-  so the PRs show as merged, `main` stays linear, and the landed tree is
-  exactly the tested one. A conflict outside `quest/` ejects that PR, and so
-  does a fork branch that blocks maintainer edits, whose head the engine
-  cannot move: it is ejected as `no_maintainer_edits`
-  ([moq-dev/quest#229](https://github.com/moq-dev/quest/pull/229)).
-- Batches take every queued PR, with no size constant. On failure the gate
-  tests the first half. A passing prefix lands at once and the rest
-  continues. A PR that fails alone is ejected with a comment linking the
-  run. There are no retries.
+  moq.pro, and moq-dev/rust2.
 - The rule that quest, test, and CI PRs jump the queue is dropped. Order is
   enqueue order.
-- The push credential is moq-bot, added to the main ruleset's bypass list.
-  Its key (`APP_ID`/`APP_CLIENT_ID`, `APP_PRIVATE_KEY`) moves from repository
-  secrets into an Environment limited to `main`, `release`, and release tags.
-  That way a workflow on a same-repo PR branch can no longer read a key that
-  can push to `main`. The release workflows (some run on pushes to
-  `release`), `dependabot.yml`, and `smoke-toolchain.yml` that use it
-  reference the Environment. Only the hosted land job reads it, never the job
-  that runs PR code.
 - Decided 2026-10-29 (maintainer), answering the question raised in
   [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166): the moq-bot
   key moves to its own `bot` Environment, for `main`, `release`, and
@@ -83,12 +59,6 @@ Decided 2026-10-26 (maintainer):
   crates.io token. Narrowing `publish` to release refs waits on
   [its own quest](/quest/m0/ci/publish-release-only.md), since `workflow_run`
   publishers run as `main`.
-- Decided 2026-10-30 (maintainer): the land job holds no key. It trades its
-  GitHub ID token at `token.moq.dev` ([moq-dev/moq#7275](https://github.com/moq-dev/moq/pull/7275)),
-  which issues a moq-bot token scoped to the calling repository only for its
-  `land.yml` on `main`, so opting another moq-dev repository into the gate
-  needs no secret. No other job in `land.yml` may request an ID token or call
-  another workflow.
 - Open, found 2026-10-29: `APP_CLIENT_ID` and `APP_PRIVATE_KEY` are moq-dev
   organization secrets visible to this repository, so any workflow on a
   pushed branch can read the moq-bot key, not only jobs in `bot`. Once
@@ -100,30 +70,72 @@ Decided 2026-10-26 (maintainer):
   passed its own CI but broke in the queue on API renames that landed after
   its last base merge; that is the case the gate must catch before `main`.
 
+Decided 2026-10-30 (maintainer, from moq-dev/quest's
+[host gate epic](https://github.com/moq-dev/quest/blob/main/quest/m0/host-land/README.md)
+and [moq-dev/quest#297](https://github.com/moq-dev/quest/pull/297)). This
+replaces the 2026-10-26 design of a three-phase `land.yml` on the self-hosted
+queue runner, and the 2026-10-30 `token.moq.dev` decision:
+
+- **Host daemon.** `quest land serve` runs on the maintainer's NixOS host as
+  its own user, which loads moq-bot's App key through a systemd credential.
+  No GitHub Actions job lands anything: `land.yml` goes, and `dependabot.yml`
+  stops calling `quest land resolve`, requesting landing with
+  `quest merge --land` like any other PR. The `token.moq.dev` land endpoint
+  ([moq-dev/moq#7275](https://github.com/moq-dev/moq/pull/7275)) and the
+  rule that no other `land.yml` job may request an ID token go with them.
+- **Check.** `just ci` runs once per batch on the chain's tip, in an
+  ephemeral nspawn container with no credentials, as moq's runners already
+  are on that host. The daemon fetches with a read-only token only once
+  private-repository support lands in moq-dev/quest; moq is public.
+- **Batches** are the oldest queued PR plus up to floor(log₂ n) more that
+  merge cleanly with the quest merge driver. There is no bisection: a failing
+  batch is ejected together with the log's tail in each comment, and a Codex
+  fixer makes only mechanical fixes, requeues healthy PRs, and hands back the
+  rest. This supersedes the 2026-10-26 "every queued PR, test the first half"
+  rule.
+- **Landing.** For each PR in order, the daemon merges the current `main`
+  into the PR's branch with the quest merge driver and pushes it, then
+  squash-merges the PR through GitHub's API with its head pinned. The squash
+  is the tested tree, quest-file conflicts are resolved by the driver rather
+  than GitHub, and the PR shows as merged. A fork branch the daemon cannot
+  push to lands by pushing its squash to `main` and closing the PR with a
+  link, so forks are no longer ejected as `no_maintainer_edits`. This
+  supersedes the 2026-10-26 force-push-and-fast-forward landing; Mergify's
+  rejection still stands, since it cannot resolve quest files.
+- Decision prompts (maintainer, 2026-10-30):
+  - Landing: push `main` and close fork PRs / API squash merge per PR /
+    ✅ merge `main` into each PR with the driver, then API squash merge, and
+    push `main` and close the PR for a fork the daemon cannot push to
+  - moq's migration: ✅ rewrite this quest before the cutover / a separate
+    migration quest after it / wait for the daemon to run live first
+- **Pin.** moq keeps its current moq-dev/quest flake input, whose
+  three-phase `quest land` this repository's draft still targets, until the
+  cutover bumps it to a release with `quest land serve`.
+
 Draft source in [moq-dev/moq#7024](https://github.com/moq-dev/moq/pull/7024)
-prepares the three phases, trusted Quest installation, the read-only worker,
+prepared the three phases, trusted Quest installation, the read-only worker,
 head-pinned Dependabot requests, bot-key Environment declarations, and the
-event policy and setup tests. No workflow was deployed, queue entry changed,
-ruleset written, or credential moved. `release` keeps its own PR checks.
+event policy and setup tests. The host daemon supersedes its workflows; its
+Dependabot and Environment pieces may still apply. No workflow was deployed,
+queue entry changed, ruleset written, or credential moved. `release` keeps
+its own PR checks.
 
 Remaining before completion:
 
+- **Host.** moq-dev/quest's
+  [gate host](https://github.com/moq-dev/quest/blob/main/quest/m0/host-land/host.md)
+  quest runs the daemon for moq-dev/quest first; add moq-dev/moq to it.
 - **Maintainer cutover.** On 2026-10-27 the main ruleset still requires
   `Check`, contains `merge_queue`, and admits only the administrator bypass.
   Add the bot bypass and replace those two requirements with `quest land`,
-  pinned to an app that never reports it on PR heads. Coordinate source
-  installation with that ruleset change: removing `merge_group` cannot
-  pass the old queue, and changing protection first stops that queue.
+  pinned to an app that never reports it on PR heads. Coordinate the daemon's
+  start with that ruleset change: removing `merge_group` cannot pass the old
+  queue, and changing protection first stops that queue.
 - Decided 2026-10-29 (maintainer): CONTRIBUTING no longer prescribes the
   squash commit body; the engine's default message stands.
-- **Forks.** The land job's moq-bot token is scoped to this repository, and
-  whether an installation token can push to an editable fork's branch is
-  unverified (moq-dev/quest's land-adopt quest tests it live). Until then a
-  fork PR may be ejected as `push_failed`, which CONTRIBUTING's fallback
-  covers. Forks were 2 of the last 200 merged PRs on 2026-10-30.
 - **Live evidence.** Exercise the gate and its ejections after the
-  maintainer's cutover, including an editable fork, and measure a busy
-  day's merged PRs/hour and enqueue-to-merged latency against the baseline.
-  Local event-policy tests do not establish those outcomes.
+  maintainer's cutover, including a fork that blocks maintainer edits, and
+  measure a busy day's merged PRs/hour and enqueue-to-merged latency against
+  the baseline. Local tests do not establish those outcomes.
 
 Public API: none. Wire: none.

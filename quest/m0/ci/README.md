@@ -70,9 +70,10 @@ Decided 2026-10-26 (maintainer), from 414 queue merges over 2026-10-23 to
 10-26: the queue's latency is serial waiting (98%), not GitHub's overhead
 (about 1 minute per merge), with a median of 18 entries ahead and 12.7% of
 runs failing. GitHub's merge queue cannot test several PRs in one run, so a
-batched gate replaces it on the one self-hosted runner: `quest land`, shared
-through moq-dev/quest, lands a tested chain of squash commits by
-fast-forward ([land](/quest/m0/ci/land.md)). This supersedes concurrent queue
+batched gate replaces it: `quest land`, shared through moq-dev/quest, lands
+a tested chain of squash commits ([land](/quest/m0/ci/land.md)). Decided
+2026-10-30 (maintainer): it runs as a daemon on the maintainer's host, not as
+a workflow on the self-hosted runner. This supersedes concurrent queue
 entries on a second runner. Batching gains most when failures are rare, so the
 [flake epic](/quest/m0/test-flakes-2/README.md) moved to m0 and
 `MIGRATE.md` Unreleased sections, a top source of conflicts, stop being
@@ -127,7 +128,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
-- [Land main through quest land](/quest/m0/ci/land.md) - one self-hosted runner tests every queued PR as a squash chain and fast-forwards `main` to the longest passing prefix
+- [Land main through quest land](/quest/m0/ci/land.md) - a host daemon tests small batches of queued PRs once and lands each as its tested squash commit
 - [Gate each diff in under five minutes](/quest/m0/ci/five-minutes.md) - `just check` and `just test` each finish within a worker's 5-minute prompt cache, admission wait included
 - [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
