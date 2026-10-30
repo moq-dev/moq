@@ -48,6 +48,12 @@ What needs the info is decoding the response and approving the group, so:
 The line's shared decisions apply: early response data stays unread in QUIC,
 a failed info fails the fetch, and legacy serial peers keep working.
 
+The SUBSCRIBE half landed in
+[moq-dev/moq#7328](https://github.com/moq-dev/moq/pull/7328): lite's
+`TrackServeRun` opens a `Pipelined` SUBSCRIBE beside its TRACK, registered
+with its copy pending, and parks group streams that beat the info
+(`Parked`); a pipelined FETCH can take the same shape.
+
 Tests: a fetch-only reader's FETCH is on the wire before the info answer; a
 refused info drops the fetch and retries the next route; a group is never
 released before its route's info passes; a serial peer against a pipelining
@@ -57,5 +63,4 @@ Public API: none. Wire: none (ordering only).
 
 ## Related
 
-- [Pipelined SUBSCRIBE](/quest/m2/pipeline-requests/subscribe.md) - the same change for subscriptions
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - staged requests retain their selected instance; retries cannot resolve a replacement by path
