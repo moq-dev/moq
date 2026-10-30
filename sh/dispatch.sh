@@ -157,8 +157,8 @@ declare -A tools=(
     [swift]=''
     [go]='cargo go uniffi-bindgen-go'
     [dart]='cargo dart uniffi_bindgen_dart'
-    [c]='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp'
-    [cpp]='cargo cmake c++ uniffi-bindgen-cpp'
+    [c]='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp clang-format'
+    [cpp]='cargo cmake c++ uniffi-bindgen-cpp clang-format'
     [obs_compile]='cargo cmake pkg-config uniffi-bindgen-cpp'
     [obs]='clang-format cmake gersemi jq'
     [flake]='nix'
@@ -188,7 +188,7 @@ declare -A compiles=(
 # below), so it waits for the rest.
 case "$action" in
     check | ci) modules=(py rs c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
-    fix) modules=(js rs py carla dart go kt swift obs markdown shell toml nix justfile) ;;
+    fix) modules=(js rs py carla dart go kt swift c cpp obs markdown shell toml nix justfile) ;;
 esac
 
 # Modules that share mutable state run in one lane, in module order; every

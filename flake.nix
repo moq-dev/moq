@@ -529,6 +529,7 @@
             # too. Same 0.8.2 that obs-deps carries.
             simde
             qt6.qtbase
+            # clang-format, for the plugin and the c/ and cpp/moq packages.
             clang-tools
             gersemi
           ]
