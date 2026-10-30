@@ -667,6 +667,9 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 
 	auto it = video_tracks.find(encoder);
 	if (it == video_tracks.end()) {
+		// A track opens on a keyframe; deltas before it have no group to join.
+		if (!packet->keyframe)
+			return;
 		VideoInit(encoder);
 		it = video_tracks.find(encoder);
 	}
@@ -827,8 +830,16 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	}
 	std::optional<uint64_t> lower_bps;
 	if (lower) {
-		if (video_tracks.find(lower) == video_tracks.end())
+		if (video_tracks.find(lower) == video_tracks.end()) {
+			// The lower track keeps the headers it starts with, and some encoders only have
+			// them after their first frame. Wait for its first packet to start it instead;
+			// this rendition opens on its next keyframe after that.
+			uint8_t *lower_data = nullptr;
+			size_t lower_size = 0;
+			if (!obs_encoder_get_extra_data(lower, &lower_data, &lower_size) || lower_size == 0)
+				return;
 			VideoInit(lower);
+		}
 		auto below = video_tracks.find(lower);
 		if (below != video_tracks.end() && below->second.producer) {
 			config.lower = below->second.producer;

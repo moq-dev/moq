@@ -80,6 +80,8 @@ obs_encoder_t *const AUDIO_ENCODER = reinterpret_cast<obs_encoder_t *>(0x3);
 // A second, 2 Mbps video encoder below VIDEO_ENCODER's 8 Mbps, while g_ladder is set.
 obs_encoder_t *const LOW_ENCODER = reinterpret_cast<obs_encoder_t *>(0x5);
 std::atomic<bool> g_ladder{false};
+// LOW_ENCODER has no headers yet, as an encoder that only has them after its first frame.
+std::atomic<bool> g_low_headers_pending{false};
 } // namespace
 
 extern "C" {
@@ -156,6 +158,11 @@ void obs_register_output_s(const struct obs_output_info *, size_t) {}
 
 bool obs_encoder_get_extra_data(const obs_encoder_t *encoder, uint8_t **data, size_t *size)
 {
+	if (encoder == LOW_ENCODER && g_low_headers_pending) {
+		*data = nullptr;
+		*size = 0;
+		return false;
+	}
 	const auto &extra = encoder == AUDIO_ENCODER ? g_opus_head : g_h264_init;
 	*data = const_cast<uint8_t *>(extra.data());
 	*size = extra.size();
@@ -305,6 +312,7 @@ void reset(std::string url)
 	g_rate_control = "CBR";
 	g_encoder_caps = OBS_ENCODER_CAP_DYN_BITRATE;
 	g_ladder = false;
+	g_low_headers_pending = false;
 	{
 		std::lock_guard<std::mutex> lock(g_updates_mutex);
 		g_updates.clear();
@@ -723,6 +731,50 @@ int main()
 		o.Stop();
 	}
 	printf("a ladder rung disables, drops packets, and resumes on a keyframe: ok\n");
+
+	// A higher rung whose lower encoder has no headers yet waits for the lower's first
+	// packet rather than start the lower track without them, then opens on its own
+	// next keyframe one priority below it.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		g_ladder = true;
+		g_encoder_caps = 0;
+		g_low_headers_pending = true;
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+
+		auto keyframe = TestH264Keyframe();
+		std::vector<uint8_t> delta = {0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x00, 0x33};
+		auto early = videoPacket(keyframe, 0);
+		o.Data(&early);
+		CHECK(o.GetTotalBytes() == 0);
+		CHECK(!MoQOutputStatsTest::Published(o, LOW_ENCODER).has_value());
+
+		g_low_headers_pending = false;
+		auto first = videoPacket(keyframe, 0);
+		first.encoder = LOW_ENCODER;
+		o.Data(&first);
+		size_t sent = keyframe.size();
+		CHECK(o.GetTotalBytes() == sent);
+
+		auto skipped = videoPacket(delta, 1);
+		skipped.keyframe = false;
+		o.Data(&skipped);
+		CHECK(o.GetTotalBytes() == sent);
+		auto opened = videoPacket(keyframe, 2);
+		o.Data(&opened);
+		sent += keyframe.size();
+		CHECK(o.GetTotalBytes() == sent);
+
+		const auto high = MoQOutputStatsTest::Published(o, VIDEO_ENCODER);
+		const auto low = MoQOutputStatsTest::Published(o, LOW_ENCODER);
+		CHECK(high.has_value() && low.has_value());
+		CHECK(high && low && high->second == low->second - 1);
+		o.Stop();
+	}
+	printf("a ladder rung waits for its lower rung's headers: ok\n");
 
 	// Stop drains the session, even when the output is destroyed straight after: a
 	// large frame written just before it still reaches the relay, and the track then
