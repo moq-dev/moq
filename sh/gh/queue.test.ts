@@ -129,6 +129,8 @@ try {
 							"land",
 							"check",
 							".tmp/land/plan.json",
+							"--budget",
+							"150",
 							"--",
 							"nix",
 							"develop",
