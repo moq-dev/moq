@@ -7,7 +7,7 @@ use crate::{
 	lite::SessionInfo,
 };
 
-use std::task::{Context, Poll, ready};
+use std::task::{Poll, ready};
 
 use super::{
 	DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, SubscriberDriver, Version,
@@ -65,9 +65,8 @@ impl SetupAccept {
 		} = self;
 		let version = *version;
 
-		let mut cx = Context::from_waker(waiter.waker());
 		let mut accept_error = None;
-		while let Poll::Ready(stream) = session.poll_accept_uni(&mut cx) {
+		while let Poll::Ready(stream) = session.poll_accept_uni(waiter) {
 			match stream {
 				Ok(stream) => pending.push(Reader::new(stream, version)),
 				Err(err) => {
@@ -78,7 +77,7 @@ impl SetupAccept {
 		}
 		let mut index = 0;
 		while index < pending.len() {
-			let kind = match pending[index].poll_varint_peek(&mut cx) {
+			let kind = match pending[index].poll_varint_peek(waiter) {
 				Poll::Pending => {
 					index += 1;
 					continue;
@@ -105,7 +104,7 @@ impl SetupAccept {
 			if setup.is_some() {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
-			ready!(reader.poll_decode::<DataType>(&mut cx))?;
+			ready!(reader.poll_decode::<DataType>(waiter))?;
 			reader.set_priority(crate::priority::RECV_CONTROL);
 			*setup = Some(reader);
 		}
@@ -113,7 +112,7 @@ impl SetupAccept {
 		// before reporting the terminal error from accepting the next stream.
 		let result = setup
 			.as_mut()
-			.map(|reader| reader.poll_decode_sized::<Setup>(&mut cx))
+			.map(|reader| reader.poll_decode_sized::<Setup>(waiter))
 			.unwrap_or(Poll::Pending);
 		let (setup, size) = match result {
 			Poll::Ready(result) => result?,
@@ -469,8 +468,6 @@ impl Driver {
 	}
 
 	fn poll_protocol(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut cx = waiter.context();
-
 		// Presenting tokens ends the session only when the peer breaks the protocol.
 		if let Poll::Ready(err) = self.auth.poll(waiter) {
 			return Poll::Ready(Err(err));
@@ -478,7 +475,7 @@ impl Driver {
 
 		// The send-side machines never end the session; completion just retires them.
 		if let Some(setup) = &mut self.setup
-			&& setup.poll(&mut cx).is_ready()
+			&& setup.poll(waiter).is_ready()
 		{
 			self.setup = None;
 		}
@@ -489,7 +486,7 @@ impl Driver {
 		}
 
 		if let Some(stream) = &mut self.session_stream
-			&& let Poll::Ready(err) = poll_session_stream(stream, &mut cx)
+			&& let Poll::Ready(err) = poll_session_stream(stream, waiter)
 		{
 			return Poll::Ready(Err(err));
 		}
@@ -639,7 +636,6 @@ impl kio::Task for PresentToken {
 impl PresentToken {
 	/// Run the stream, resolving with why the token ended.
 	fn poll_present(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
-		let mut cx = Context::from_waker(waiter.waker());
 		loop {
 			match &mut self.state {
 				PresentState::Open { token, answered } => {
@@ -649,7 +645,7 @@ impl PresentToken {
 					}
 					let token = token.clone();
 					let answered = *answered;
-					let mut stream = match ready!(Stream::poll_open_request(&mut self.session, self.version, &mut cx)) {
+					let mut stream = match ready!(Stream::poll_open_request(&self.session, self.version, waiter)) {
 						Ok(stream) => stream,
 						Err(err) => return Poll::Ready(err),
 					};
@@ -664,14 +660,14 @@ impl PresentToken {
 					self.state = PresentState::Run { stream, answered };
 				}
 				PresentState::Run { stream, answered } => {
-					if let Err(err) = ready!(stream.writer.poll_flush(&mut cx)) {
+					if let Err(err) = ready!(stream.writer.poll_flush(waiter)) {
 						return Poll::Ready(err);
 					}
 					// Withdrawn: closing the stream is what tells the peer.
 					if self.handle.poll_withdrawn(self.id, waiter).is_ready() {
 						return Poll::Ready(Error::Cancel);
 					}
-					let reply = match ready!(stream.reader.poll_decode_maybe::<super::AuthReply>(&mut cx)) {
+					let reply = match ready!(stream.reader.poll_decode_maybe::<super::AuthReply>(waiter)) {
 						Ok(Some(reply)) => reply,
 						// The peer ended the grant without revoking it, or closed without
 						// ever answering (mapped to unsupported by the caller).
@@ -737,9 +733,9 @@ impl PresentToken {
 /// Drain SessionInfo updates off the legacy session stream, resolving only when
 /// the stream dies (a FIN counts: the peer abandoned the session).
 // TODO do something useful with the updates
-fn poll_session_stream(stream: &mut Stream<Transport, Version>, cx: &mut Context<'_>) -> Poll<Error> {
+fn poll_session_stream(stream: &mut Stream<Transport, Version>, waiter: &kio::Waiter) -> Poll<Error> {
 	loop {
-		match ready!(stream.reader.poll_decode_maybe::<SessionInfo>(cx)) {
+		match ready!(stream.reader.poll_decode_maybe::<SessionInfo>(waiter)) {
 			Ok(Some(_info)) => {}
 			Ok(None) => return Poll::Ready(Error::Cancel),
 			Err(err) => return Poll::Ready(err),
@@ -753,70 +749,44 @@ fn poll_session_stream(stream: &mut Stream<Transport, Version>, cx: &mut Context
 struct SendSetup {
 	stats: crate::stats::Session,
 	version: Version,
+	session: Transport,
+	setup: Box<Setup>,
 	state: SendSetupState,
 }
 
-enum SendSetupState {
-	/// Waiting for stream credit on our own session handle.
-	Open {
-		session: Transport,
-		setup: Box<Setup>,
-	},
-	/// Flushing the buffered SETUP, then FIN and wait for the acknowledgement (a
-	/// reset racing the FIN would discard the unacked message).
-	Send {
-		writer: Writer<crate::transport::boxed::SendStream, Version>,
-		finished: bool,
-	},
-	Done,
-}
-
+#[kio::machine(self.state: SendSetupState)]
 impl SendSetup {
 	fn new(session: Transport, setup: Setup, version: Version, stats: crate::stats::Session) -> Self {
 		Self {
 			stats,
 			version,
-			state: SendSetupState::Open {
-				session,
-				setup: Box::new(setup),
-			},
+			session,
+			setup: Box::new(setup),
+			state: SendSetupState::Start,
 		}
 	}
 
-	fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-		match ready!(self.poll_send(cx)) {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		match ready!(self.poll_send(waiter)) {
 			Ok(()) => {}
 			Err(err) => tracing::debug!(%err, "failed to send setup"),
 		}
-		self.state = SendSetupState::Done;
 		Poll::Ready(())
 	}
 
-	fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-		loop {
-			match &mut self.state {
-				SendSetupState::Open { session, setup } => {
-					let stream = ready!(session.poll_open_uni(cx, Default::default()))
-						.map_err(crate::lite::error::from_transport)?;
-					let mut writer = Writer::new(stream, self.version).with_stats(&self.stats);
-					writer.buffer(&super::DataType::Setup)?;
-					writer.buffer(&**setup)?;
-					self.state = SendSetupState::Send {
-						writer,
-						finished: false,
-					};
-				}
-				SendSetupState::Send { writer, finished } => {
-					if !*finished {
-						ready!(writer.poll_flush(cx))?;
-						writer.finish()?;
-						*finished = true;
-					}
-					return writer.poll_closed(cx);
-				}
-				SendSetupState::Done => return Poll::Ready(Ok(())),
-			}
-		}
+	fn poll_send(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		// Waiting for stream credit on our own session handle.
+		let stream = wait!(Open => self.session.poll_open_uni(waiter, Default::default()))
+			.map_err(crate::lite::error::from_transport)?;
+		let mut writer: Writer<crate::transport::boxed::SendStream, Version> =
+			Writer::new(stream, self.version).with_stats(&self.stats);
+		writer.buffer(&super::DataType::Setup)?;
+		writer.buffer(&*self.setup)?;
+		// Flushing the buffered SETUP, then FIN and wait for the acknowledgement (a
+		// reset racing the FIN would discard the unacked message).
+		wait!(Flush => writer.poll_flush(waiter))?;
+		writer.finish()?;
+		Poll::Ready(wait!(Close => writer.poll_closed(waiter)))
 	}
 }
 
@@ -832,18 +802,7 @@ struct SendGoaway {
 	state: SendGoawayState,
 }
 
-enum SendGoawayState {
-	Waiting,
-	Open {
-		payload: crate::goaway::Goaway,
-	},
-	/// Keep the writer through FIN acknowledgement, since dropping it resets the stream.
-	Send {
-		stream: Stream<Transport, Version>,
-		finished: bool,
-	},
-}
-
+#[kio::machine(self.state: SendGoawayState)]
 impl SendGoaway {
 	fn new(
 		session: Transport,
@@ -857,74 +816,55 @@ impl SendGoaway {
 			goaway,
 			closed: session.clone(),
 			session,
-			state: SendGoawayState::Waiting,
+			state: SendGoawayState::Start,
 		}
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut cx = waiter.context();
-		loop {
-			if self.closed.poll_closed(&mut cx).is_ready() {
+		#[every_poll]
+		if self.closed.poll_closed(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+
+		let payload: crate::goaway::Goaway = match wait!(Trigger => self.goaway.poll_triggered(waiter)) {
+			Some(payload) => payload,
+			None => return Poll::Ready(()),
+		};
+		if !self.version.has_goaway() {
+			return Poll::Ready(());
+		}
+		let mut stream: Stream<Transport, Version> = match wait!(Open => Stream::poll_open(&self.session, self.version, waiter))
+		{
+			Ok(stream) => stream,
+			Err(err) => {
+				tracing::warn!(%err, "failed to send goaway");
 				return Poll::Ready(());
 			}
-			match &mut self.state {
-				SendGoawayState::Waiting => {
-					let Some(payload) = ready!(self.goaway.poll_triggered(waiter)) else {
-						return Poll::Ready(());
-					};
-					if !self.version.has_goaway() {
-						return Poll::Ready(());
-					}
-					self.state = SendGoawayState::Open { payload };
-				}
-				SendGoawayState::Open { payload } => {
-					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
-						Ok(stream) => stream,
-						Err(err) => {
-							tracing::warn!(%err, "failed to send goaway");
-							return Poll::Ready(());
-						}
-					};
-					stream = stream.with_stats(&self.stats);
-					let msg = super::Goaway {
-						uri: std::borrow::Cow::Borrowed(payload.uri.as_str()),
-					};
-					if let Err(err) = stream
-						.writer
-						.buffer(&super::ControlType::Goaway)
-						.and_then(|()| stream.writer.buffer(&msg))
-					{
-						tracing::warn!(%err, "failed to send goaway");
-						return Poll::Ready(());
-					}
-					self.state = SendGoawayState::Send {
-						stream,
-						finished: false,
-					};
-				}
-				SendGoawayState::Send { stream, finished } => {
-					let result = if !*finished {
-						match ready!(stream.writer.poll_flush(&mut cx)) {
-							Ok(()) => {
-								*finished = true;
-								stream.writer.finish()
-							}
-							Err(err) => Err(err),
-						}
-					} else {
-						Ok(())
-					};
-					let result = match result {
-						Ok(()) => ready!(stream.writer.poll_closed(&mut cx)),
-						Err(err) => Err(err),
-					};
-					if let Err(err) = result {
-						tracing::warn!(%err, "failed to send goaway");
-					}
-					return Poll::Ready(());
-				}
-			}
+		};
+		stream = stream.with_stats(&self.stats);
+		let msg = super::Goaway {
+			uri: std::borrow::Cow::Borrowed(payload.uri.as_str()),
+		};
+		if let Err(err) = stream
+			.writer
+			.buffer(&super::ControlType::Goaway)
+			.and_then(|()| stream.writer.buffer(&msg))
+		{
+			tracing::warn!(%err, "failed to send goaway");
+			return Poll::Ready(());
 		}
+
+		// Keep the writer through FIN acknowledgement, since dropping it resets the stream.
+		let finished: Result<(), Error> =
+			wait!(Flush => stream.writer.poll_flush(waiter)).and_then(|()| stream.writer.finish());
+		let closed = wait!(Close => match finished {
+			Ok(()) => stream.writer.poll_closed(waiter),
+			Err(_) => Poll::Ready(Ok(())),
+		});
+		if let Err(err) = finished.and(closed) {
+			tracing::warn!(%err, "failed to send goaway");
+		}
+		Poll::Ready(())
 	}
 }
 

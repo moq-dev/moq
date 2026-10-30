@@ -54,20 +54,25 @@ int32_t moq_session_request_free(uint32_t request);
 // Origin
 int32_t moq_origin_create(void);
 int32_t moq_origin_close(uint32_t origin);
-int32_t moq_origin_create_broadcast(uint32_t origin, const char *path, uintptr_t path_len);
-int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, moq_status_callback on_broadcast, void *user_data);
+int32_t moq_origin_create_broadcast(uint32_t origin, const char *path, uintptr_t path_len, uint32_t *broadcast);
+int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, const char *epoch, uintptr_t epoch_len, moq_status_callback on_broadcast, void *user_data);
 int32_t moq_origin_request_cancel(uint32_t task);
-int32_t moq_origin_announced_broadcast(uint32_t origin, const char *path, uintptr_t path_len, moq_status_callback on_broadcast, void *user_data);
-int32_t moq_origin_announced_broadcast_cancel(uint32_t task);
+int32_t moq_origin_follow(uint32_t origin, const char *path, uintptr_t path_len, const char *epoch, uintptr_t epoch_len, moq_status_callback on_broadcast, void *user_data);
+int32_t moq_origin_follow_cancel(uint32_t task);
 int32_t moq_origin_announced(uint32_t origin, const moq_announce_config *config, moq_status_callback on_announce, void *user_data);
 int32_t moq_origin_announced_info(uint32_t announced, moq_announce_event *dst);
 int32_t moq_origin_announced_free(uint32_t announced);
 int32_t moq_origin_announced_cancel(uint32_t announced);
 // config (NULL for everything): filter is relative to the literal prefix, or NULL for **. hidden also lists `.`-named paths. Updates stay relative to the origin.
 
+// Publishing: Announcement (a publication from moq_origin_create_broadcast or moq_broadcast_prepared_publish)
+int32_t moq_publication_announce(uint32_t publication, const moq_announce_route *route);
+// route (NULL for the default): a cost and an optional epoch from moq_mint_epoch. Hops are the origin's to add.
+int32_t moq_mint_epoch(char *dst, uintptr_t dst_len);
+int32_t moq_publication_unannounce(uint32_t publication);
+int32_t moq_publication_free(uint32_t publication);
+
 // Publishing
-int32_t moq_publish_announce(uint32_t broadcast, const moq_route *route);
-int32_t moq_publish_unannounce(uint32_t broadcast);
 int32_t moq_publish_close(uint32_t broadcast);
 int32_t moq_publish_audio(uint32_t broadcast, const moq_audio_init *config);
 int32_t moq_publish_video(uint32_t broadcast, const moq_video_init *config);

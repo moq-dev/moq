@@ -27,9 +27,8 @@ A missing data timestamp stays untimed; the library never substitutes zero or no
 JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
 and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowPush`, `WindowPop`, or `WindowSkip`. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `None` timescale are untimed on both publish and receive.
-`TrackInfo(compress=True)` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
-`moq.flate.SnapshotProducer` / `StreamProducer` publish opaque payloads; their `update` / `append`
-and the JSON producers accept `timestamp=timedelta(...)` (`None` for untimed).
+`TrackInfo(compress=True)` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
+The JSON producers' `update` / `append` accept `timestamp=timedelta(...)` (`None` for untimed).
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -52,7 +51,7 @@ async def main():
                 continue  # AnnounceEventUpdate or AnnounceEventEnd
             announcement = event.announce
             print(announcement.captures)  # what * matched, or None for a partial overlap
-            broadcast = await client.request_broadcast(announcement.prefix)
+            broadcast = await client.request(announcement.prefix)
             catalog = await moq.media.catalog(broadcast)
             id, audio = next(iter(catalog.audio.items()))
             async for frame in await moq.media.TrackConsumer.subscribe(broadcast, id, audio):
@@ -70,7 +69,8 @@ import asyncio, moq
 async def main():
     # opus_init_bytes, payload, pts, and rgba come from your encoder or capture source.
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        broadcast = client.create_broadcast("my-stream.hang")
+        publication = client.create_broadcast("my-stream.hang")
+        broadcast = publication.broadcast
 
         # Already-encoded frames: the catalog is filled from the bitstream
         audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes))
@@ -93,10 +93,11 @@ async def main():
         # Raw bytes and JSON
         events = broadcast.publish_track("events")
         events.write_frame(b'{"cmd": "ready"}')
-        status = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
+        status_track = broadcast.publish_track("status", moq.TrackInfo(compress=True))
+        status = moq.json.SnapshotProducer(broadcast, status_track)
         status.update({"state": "live", "viewers": 42})
 
-        broadcast.announce(moq.AnnounceRoute(epoch=moq.mint_epoch()))  # a fresh epoch per run
+        publication.announce(moq.AnnounceRoute(epoch=moq.mint_epoch()))  # a fresh epoch per run
         audio.finish()
         video.finish()
         events.finish()
@@ -125,7 +126,7 @@ shows which module holds each.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `versions=`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `async for grant in session.grants()` yields the `Grant` the relay sent back and each change, `None` until it answers and while a client session reconnects. `grants().grant()` reads it once; cancelling or leaving an `async with` releases the wait.
 - **Tokens.** Pass `tokens=[...]` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `session.tokens().set([...])` replaces a client session's tokens before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `await tokens.answered()` returns once the relay accepts them and raises its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
-- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
+- **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 ## Runtime
@@ -142,7 +143,7 @@ kind `ProtocolKind.TOO_MANY_REQUESTS`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
-A session closed because its credential expired reports `ProtocolKind.EXPIRED`, and a request refused for an expired token raises `Error.Expired`; refresh the token before retrying.
+A session closed because its credential expired reports `ProtocolKind.EXPIRED`, and a request refused for an expired token raises `Error.Expired`; refresh the token before retrying. Malformed credentials report `ProtocolKind.MALFORMED_AUTH_TOKEN`; correct the token before reconnecting with it.
 A catalog that needs a newer moq-hang draft than this build reads raises `Error.UnsupportedCatalog`; upgrade the library to read it.
 
 ## Reference
