@@ -1748,11 +1748,25 @@ impl Reader {
 		let newest = self.copies.last().expect("checked above");
 		let (generation, track) = (newest.generation, newest.track.clone());
 		// A floor lowered again asks once.
-		if self.copies.iter().any(|copy| {
-			copy.track.same_channel(&track)
-				&& copy.floor.is_some_and(|floor| floor <= lowered.start)
-				&& copy.end().is_none_or(|end| end >= lowered.end)
-		}) {
+		let asks =
+			|copy: &Copy| copy.track.same_channel(&track) && copy.floor.is_some_and(|floor| floor <= lowered.start);
+		if self
+			.copies
+			.iter()
+			.any(|copy| asks(copy) && copy.end().is_none_or(|end| end >= lowered.end))
+		{
+			return;
+		}
+		// A later resume point widens the route's backfill rather than asking again, so flaps
+		// over a gap keep one per route. Waited for as long as a new one would be.
+		let last = self.copies.len() - 1;
+		if let Some(copy) = self.copies[..last]
+			.iter_mut()
+			.find(|copy| copy.done.is_none() && copy.end().is_some() && asks(copy))
+		{
+			copy.until = Some(lowered.end.checked_sub(1));
+			copy.since = Some(copy.track.now());
+			copy.update(&self.mirrored);
 			return;
 		}
 		// Resolved as the reader first had them: the newest copy's resolution starts at its
@@ -2639,6 +2653,31 @@ mod test {
 			sub.poll_finished(&kio::Waiter::noop()),
 			Poll::Ready(Err(Error::ProtocolViolation))
 		));
+	}
+
+	/// A gap that stays open across route flaps keeps one backfill per distinct route: a
+	/// later resume point widens the route's backfill rather than asking again.
+	#[moq_clock::test]
+	async fn route_flaps_keep_one_backfill_per_distinct_route() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let tracks = [copy(), copy()];
+		routes.serve(tracks[0].consume());
+		let mut sub = subscribe(&logical, HOUR);
+		for round in 1..24u64 {
+			let track = &tracks[round as usize % 2];
+			routes.serve(track.consume());
+			// Every odd group never lands, so every resume point leaves a gap.
+			write(track, round * 2);
+			assert_eq!(drain(&mut sub, false), [round * 2]);
+			assert!(
+				copies(&routes) <= 4,
+				"round {round} retained {} copies",
+				copies(&routes)
+			);
+		}
+		write(&tracks[1], 1);
+		assert_eq!(drain(&mut sub, false), [1]);
 	}
 
 	#[moq_clock::test]

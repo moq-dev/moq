@@ -519,12 +519,22 @@ class Reader implements ResumeSource {
 		if (this.#delivered.covers(start, end)) return;
 		// A floor lowered again asks once.
 		const closed = newest.source.from.closed;
-		const asked = (copy: Copy) =>
-			copy.source.from.closed === closed &&
-			copy.floor !== undefined &&
-			copy.floor <= start &&
-			(copyEnd(copy) ?? Number.POSITIVE_INFINITY) >= end;
-		if (this.#copies.some(asked)) return;
+		const asks = (copy: Copy) =>
+			copy.source.from.closed === closed && copy.floor !== undefined && copy.floor <= start;
+		if (this.#copies.some((copy) => asks(copy) && (copyEnd(copy) ?? Number.POSITIVE_INFINITY) >= end)) return;
+		// A later resume point widens the route's backfill rather than asking again, so flaps over
+		// a gap keep one per route. Waited for as long as a new one would be.
+		const widened = this.#copies
+			.slice(0, -1)
+			.find((copy) => copy.done === undefined && copy.until !== undefined && asks(copy));
+		if (widened) {
+			widened.until = end - 1;
+			widened.since = now();
+			this.#update(widened);
+			this.#bound(widened);
+			this.wake();
+			return;
+		}
 		const backfill = { floor: start, until: end - 1 };
 		this.#add(
 			{
