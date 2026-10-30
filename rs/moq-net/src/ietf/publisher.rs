@@ -3466,6 +3466,7 @@ impl Publisher {
 			suffix.clone(),
 			NamespaceRequest {
 				messages: super::request_stream::Messages::new(self.session.clone(), self.control.client()),
+				answer: None,
 				path: path.clone(),
 				stream: request,
 				auth,
@@ -3619,17 +3620,30 @@ impl Publisher {
 				.waiter
 				.get_or_insert_with(|| kio::Waiter::new(woken.waker(suffix.clone())));
 			let written = request.stream.writer.poll_flush(request_waiter);
+			if matches!(&written, Poll::Ready(Ok(())))
+				&& matches!(request.pending, Some(NamespacePending::Writing { .. }))
+			{
+				let deadline = now + ADVERTISE_TIMEOUT;
+				request.pending = Some(NamespacePending::Answer(deadline));
+				inflight.push_back((deadline, suffix.clone()));
+			}
 			let answer = match written {
-				Poll::Pending => continue,
 				Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-				Poll::Ready(Ok(())) => {
-					if matches!(request.pending, Some(NamespacePending::Writing { .. })) {
-						let deadline = now + ADVERTISE_TIMEOUT;
-						request.pending = Some(NamespacePending::Answer(deadline));
-						inflight.push_back((deadline, suffix.clone()));
+				Poll::Ready(Ok(())) if request.answer.is_some() => Poll::Ready(Ok(request.answer.take())),
+				_ => loop {
+					let answer = request.messages.poll_next(&mut request.stream.reader, request_waiter);
+					match answer {
+						Poll::Ready(Ok(Some(_))) if request.answer.is_some() => {
+							break Poll::Ready(Err(request.messages.failed(Error::UnexpectedMessage)));
+						}
+						Poll::Ready(Ok(Some(framed))) if written.is_pending() && framed.0 == ietf::RequestOk::ID => {
+							// An early OK must not admit another update or replacement behind
+							// this blocked write. Keep one, while still reading peer terminals.
+							request.answer = Some(framed);
+						}
+						answer => break answer,
 					}
-					request.messages.poll_next(&mut request.stream.reader, request_waiter)
-				}
+				},
 			};
 			if let Poll::Ready(answer) = answer {
 				// The rest stay woken for the next pass.
@@ -3687,16 +3701,16 @@ impl Publisher {
 		// violation and still ends the loop.
 		let answer = match answer {
 			Err(err) if !super::subscriber::is_protocol_violation(&err) => {
-				tracing::debug!(broadcast = %absolute, %err, "update stream ended");
+				tracing::debug!(broadcast = %absolute, %err, "advertisement stream ended");
 				Answer::Ended
 			}
 			answer => answer?,
 		};
 		let refused = match answer {
 			Answer::Late => {
-				tracing::debug!(broadcast = %absolute, "no answer to the update");
-				// Abrupt: a peer that never answers is not owed the FIN handshake.
-				ns.requests.remove(&suffix);
+				tracing::debug!(broadcast = %absolute, "no answer to the advertisement");
+				self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
+					.await?;
 				Refused::No
 			}
 			Answer::Ended if idle || initial => {
@@ -3721,8 +3735,7 @@ impl Publisher {
 						let msg: ietf::RequestOk = body
 							.message(self.version)
 							.map_err(|err| request.messages.failed(err.into()))?;
-						// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count);
-						// closed here for the same reason as in `advertise_namespace`.
+						// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count).
 						if msg.active.is_some() {
 							self.session.clone().close(
 								super::error::to_session_code(&crate::SessionError::ProtocolViolation),
@@ -3739,7 +3752,7 @@ impl Publisher {
 						let msg: ietf::RequestError = body
 							.message(self.version)
 							.map_err(|err| request.messages.failed(err.into()))?;
-						tracing::warn!(message = ?msg, "publish_namespace update error");
+						tracing::warn!(message = ?msg, "publish_namespace error");
 						// The peer closed its side; closing ours completes the withdrawal.
 						self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
 							.await?;
@@ -5670,8 +5683,10 @@ struct NamespaceRequest {
 	path: crate::Path,
 	stream: Stream<Transport, Version>,
 	messages: super::request_stream::Messages,
-	/// The auth the peer holds the request under: the one it opened with, or the one
-	/// its last update carried. Held, so the credential stays presented while it does.
+	/// One early OK, held until our request message flushes before admitting more work.
+	answer: Option<super::request_stream::Framed>,
+	/// The auth named by the current or buffered advertisement, held so the credential
+	/// stays presented while the peer may use it.
 	auth: Option<crate::auth::Credential>,
 	/// Whether the peer accepted the initial advertisement.
 	accepted: bool,
@@ -6734,6 +6749,7 @@ mod serve_tests {
 					crate::driver::Transport::new(session.clone()),
 					true,
 				),
+				answer: None,
 				auth: None,
 				accepted: true,
 				previous: None,
@@ -16174,95 +16190,120 @@ mod tests {
 		);
 	}
 
-	/// Withdrawal must release an advertisement even when the peer never grants enough
-	/// send credit for its first message or an update, including a partly written message.
+	/// Local withdrawal, refusal, and peer stream ends release an advertisement even when
+	/// send credit holds back its first message or an update, including a partial message.
 	#[moq_clock::test]
-	async fn a_withdrawn_namespace_resets_without_send_credit() {
-		use crate::lite::test_transport::{Log, ScriptedSession, Sent, SinkSend};
+	async fn stalled_advertisements_observe_local_and_peer_ends() {
+		use crate::lite::test_transport::{Close, Log, ScriptedSession, Sent, SinkSend};
+
+		#[derive(Clone, Copy, Debug)]
+		enum Stage {
+			FirstWrite,
+			FirstAnswer,
+			UpdateWrite,
+		}
+		#[derive(Clone, Copy, Debug)]
+		enum End {
+			Local,
+			Fin,
+			Reset,
+			Refused,
+		}
 
 		for version in [Version::Draft18, Version::Draft22] {
-			for (updating, answering) in [(false, false), (false, true), (true, false)] {
+			for stage in [Stage::FirstWrite, Stage::FirstAnswer, Stage::UpdateWrite] {
 				for partial in [0, 1] {
-					if answering && partial == 1 {
+					if matches!(stage, Stage::FirstAnswer) && partial == 1 {
 						continue;
 					}
-					let origin = unheld_origin();
-					let auth = crate::auth::Link::ietf(false);
-					let first = auth.present(bytes::Bytes::from_static(b"first"), false).unwrap();
-					let mut first_grant = first.grant();
-					let cam = origin
-						.announce("cam", crate::origin::Route::default().with_auth(first))
-						.unwrap();
-					settle().await;
+					for end in [End::Local, End::Fin, End::Reset, End::Refused] {
+						let origin = unheld_origin();
+						let auth = crate::auth::Link::ietf(false);
+						let first = auth.present(bytes::Bytes::from_static(b"first"), false).unwrap();
+						let mut first_grant = first.grant();
+						let cam = origin
+							.announce("cam", crate::origin::Route::default().with_auth(first))
+							.unwrap();
+						settle().await;
 
-					let encoded = Log::default();
-					let mut writer = Writer::new(SinkSend::new(encoded.clone()), version);
-					writer
-						.encode_message(&ietf::PublishNamespace {
-							request_id: RequestId(1),
-							track_namespace: crate::Path::from_static("cam"),
-							params: Default::default(),
-							authorization_token: Some(auth_token(b"first")),
-						})
-						.await
-						.unwrap();
-					let initial = encoded.writes.lock().unwrap().len();
-					let window = if updating || answering {
-						initial + partial
-					} else {
-						partial
-					};
-					let answer = if answering {
-						Vec::new()
-					} else {
-						publish_namespace_ok(version).await
-					};
-					let session = ScriptedSession::new(answer).with_send_window(window);
-					let log = session.log.clone();
-					let publisher = Publisher::new(
-						crate::time::sim(),
-						crate::driver::Transport::new(session),
-						origin.consume(),
-						Control::new(false),
-						None,
-						declared(Some(false)),
-						version,
-					)
-					.with_auth(auth.clone());
-					let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-					assert!(futures::poll!(run.as_mut()).is_pending());
-					if updating {
-						let second = auth.present(bytes::Bytes::from_static(b"second"), false).unwrap();
-						cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
+						let encoded = Log::default();
+						let mut writer = Writer::new(SinkSend::new(encoded.clone()), version);
+						writer
+							.encode_message(&ietf::PublishNamespace {
+								request_id: RequestId(1),
+								track_namespace: crate::Path::from_static("cam"),
+								params: Default::default(),
+								authorization_token: Some(auth_token(b"first")),
+							})
+							.await
+							.unwrap();
+						let initial = encoded.writes.lock().unwrap().len();
+						let window = match stage {
+							Stage::FirstWrite => partial,
+							_ => initial + partial,
+						};
+						let answer = match stage {
+							Stage::UpdateWrite => publish_namespace_ok(version).await,
+							_ => Vec::new(),
+						};
+						let session = ScriptedSession::new(answer).with_send_window(window);
+						let log = session.log.clone();
+						let peer = session.clone();
+						let publisher = Publisher::new(
+							crate::time::sim(),
+							crate::driver::Transport::new(session),
+							origin.consume(),
+							Control::new(false),
+							None,
+							declared(Some(false)),
+							version,
+						)
+						.with_auth(auth.clone());
+						let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+						assert!(futures::poll!(run.as_mut()).is_pending());
+						if matches!(stage, Stage::UpdateWrite) {
+							let second = auth.present(bytes::Bytes::from_static(b"second"), false).unwrap();
+							cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
+							settle().await;
+							assert!(futures::poll!(run.as_mut()).is_pending());
+							assert!(
+								first_grant.poll_changed(&kio::Waiter::noop()).is_pending(),
+								"{version}: dropped the credential before its replacement flushed"
+							);
+						}
+						assert_eq!(
+							log.writes.lock().unwrap().len(),
+							window,
+							"{version}, {stage:?}, {end:?}"
+						);
+						if !matches!(stage, Stage::FirstAnswer) {
+							// Backpressure alone is not an unanswered request, however long it lasts.
+							moq_clock::sim::advance(ADVERTISE_TIMEOUT * 2).await;
+							assert!(futures::poll!(run.as_mut()).is_pending());
+							assert!(log.resets().is_empty());
+						}
+						match end {
+							End::Local => drop(cam),
+							End::Fin => peer.close(Close::Fin),
+							End::Reset => peer.close(Close::Reset),
+							End::Refused => peer.push(&publish_namespace_error(version, 0).await),
+						}
 						settle().await;
 						assert!(futures::poll!(run.as_mut()).is_pending());
-						assert!(
-							first_grant.poll_changed(&kio::Waiter::noop()).is_pending(),
-							"{version}: dropped the credential before its replacement flushed"
+						assert_eq!(
+							log.resets(),
+							vec![super::super::error::CANCELLED],
+							"{version}, {stage:?}, {end:?}, partial={partial}"
 						);
+						assert_eq!(log.stops(), vec![super::super::error::CANCELLED]);
+						if matches!(end, End::Local) || matches!(stage, Stage::UpdateWrite) {
+							assert!(matches!(
+								first_grant.poll_changed(&kio::Waiter::noop()),
+								Poll::Ready(Err(Error::Cancel))
+							));
+						}
+						assert!(!log.trail().iter().any(|(_, sent)| matches!(sent, Sent::Finish)));
 					}
-					assert_eq!(log.writes.lock().unwrap().len(), window, "{version}, update={updating}");
-					if !answering {
-						// Send backpressure alone is not an unanswered request. Only the local
-						// withdrawal below ends it, however long the peer withholds credit.
-						moq_clock::sim::advance(ADVERTISE_TIMEOUT * 2).await;
-						assert!(futures::poll!(run.as_mut()).is_pending());
-						assert!(log.resets().is_empty());
-					}
-					drop(cam);
-					settle().await;
-					assert!(futures::poll!(run.as_mut()).is_pending());
-					assert_eq!(
-						log.resets(),
-						vec![super::super::error::CANCELLED],
-						"{version}, update={updating}, answering={answering}, partial={partial}"
-					);
-					assert_eq!(log.stops(), vec![super::super::error::CANCELLED]);
-					assert!(matches!(
-						first_grant.poll_changed(&kio::Waiter::noop()),
-						Poll::Ready(Err(Error::Cancel))
-					));
-					assert!(!log.trail().iter().any(|(_, sent)| matches!(sent, Sent::Finish)));
 				}
 			}
 		}
@@ -16401,6 +16442,7 @@ mod tests {
 				withdrawn(),
 				"{version}: the unanswered advertisement was never withdrawn"
 			);
+			assert_eq!(log.stops(), vec![super::super::error::CANCELLED], "{version}");
 		}
 	}
 
