@@ -1742,6 +1742,90 @@ mod tests {
 		}
 	}
 
+	/// A copy that learned DYNAMIC_GROUPS keeps it through a draft-22 resume that opts out of
+	/// the properties, so once that subscription pauses as the listing's entry, the
+	/// REQUEST_UPDATE resuming it still carries the group a join asked for.
+	#[moq_clock::test]
+	async fn a_paused_resume_that_opted_out_keeps_dynamic_groups() {
+		let version = Version::Draft22;
+		let mut h = harness(version);
+		let mut listing = h.establish().await;
+		let accept = |peer: memory::Session| async move {
+			let mut stream = moq_clock::timeout(TIMEOUT, Stream::accept(&mut Transport::new(peer), version))
+				.await
+				.expect("no SUBSCRIBE")
+				.unwrap();
+			let (id, body) = read(&mut stream).await;
+			assert_eq!(id, ietf::Subscribe::ID);
+			let msg: ietf::Subscribe = body.message(version).unwrap();
+			(stream, msg.properties_wanted, msg.new_group)
+		};
+		let subscribe_ok = |dynamic_groups| ietf::SubscribeOk {
+			track_alias: 3,
+			largest: Some(ietf::Location { group: 5, object: 0 }),
+			properties: ietf::Properties {
+				dynamic_groups,
+				..Default::default()
+			},
+		};
+		let answer = ietf::RequestOk {
+			active: None,
+			largest: None,
+		};
+
+		// The first answer declares DYNAMIC_GROUPS, and group 5 lands with a delta.
+		let (track, first, _serving) = h.read_track("video").await;
+		let (mut stream, wanted, _) = accept(h.peer.clone()).await;
+		assert!(wanted);
+		write(&mut stream, ietf::SubscribeOk::ID, &subscribe_ok(true)).await;
+		let first = moq_clock::timeout(TIMEOUT, first).await.expect("never accepted").unwrap();
+		let copy = h.subscriber.state.lock().subscribes.values().next().unwrap().producer.clone().unwrap();
+		let mut group = copy.create_group(crate::model::group::Info { sequence: 5 }).unwrap();
+		group.write_frame(None, b"key".as_slice()).unwrap();
+		group.write_frame(None, b"delta".as_slice()).unwrap();
+
+		// A join past the ratio asks for group 6, which stays outstanding.
+		let join = track.subscribe(None).await.unwrap();
+		settle().await;
+		let (id, body) = read(&mut stream).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID);
+		assert_eq!(body.message::<ietf::SubscribeUpdate>(version).unwrap().new_group, Some(6));
+		write(&mut stream, ietf::RequestOk::ID, &answer).await;
+
+		// Everyone leaves, and the copy lingers.
+		drop((first, join));
+		settle().await;
+
+		// A returning reader resumes it, opting out of the properties: the answer has none.
+		let reader = track.subscribe(None);
+		let (mut stream, wanted, new_group) = accept(h.peer.clone()).await;
+		assert!(!wanted, "the resume opts out");
+		assert_eq!(new_group, Some(6));
+		write(&mut stream, ietf::SubscribeOk::ID, &subscribe_ok(false)).await;
+		let reader = moq_clock::timeout(TIMEOUT, reader).await.expect("never accepted").unwrap();
+
+		// Skipped in the listing, so this subscription becomes the entry and pauses.
+		let skipped = ietf::PublishSkipped {
+			suffix: Path::from_static(""),
+			track_name: "video".into(),
+		};
+		write(&mut listing, ietf::PublishSkipped::ID, &skipped).await;
+		assert_eq!(event(&mut h.tracks).as_deref(), Some("+video"));
+		drop(reader);
+		let (id, body) = read(&mut stream).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID, "not paused");
+		assert_eq!(body.message::<ietf::SubscribeUpdate>(version).unwrap().forward, Some(false));
+		write(&mut stream, ietf::RequestOk::ID, &answer).await;
+
+		// The resume still asks for group 6, since the track declared DYNAMIC_GROUPS.
+		let _reader = track.subscribe(None);
+		let (id, body) = read(&mut stream).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID, "not resumed");
+		let resume: ietf::SubscribeUpdate = body.message(version).unwrap();
+		assert_eq!(resume.forward, Some(true));
+		assert_eq!(resume.new_group, Some(6), "the pause forgot DYNAMIC_GROUPS");
+	}
+
 	/// A listed track that finishes before its resume is answered goes back to lingering, and
 	/// its waiting reader SUBSCRIBEs: the idle copy cannot place the end, which the SUBSCRIBE
 	/// learns, rather than abort a clean finish.
