@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.18](https://github.com/moq-dev/moq/compare/moq-net-v0.3.17...moq-net-v0.3.18) - 2026-10-30
+
+### Added
+
+- *(relay)* bound advertised hop paths with a cluster setting (backport #6427)
+- *(relay)* expose control byte counters (backport #6235)
+
+### Fixed
+
+- *(net)* count draft 14 SUBSCRIBE_ERROR as subscribe traffic
+
+### Other
+
+- *(net)* keep announce cursors linear under churn (backport #6422)
+
 ## [0.3.17](https://github.com/moq-dev/moq/compare/moq-net-v0.3.16...moq-net-v0.3.17) - 2026-10-28
 
 ### Fixed

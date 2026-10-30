@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.31](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.30...moq-tokio-v0.19.31) - 2026-10-30
+
+### Fixed
+
+- *(relay)* keep cluster peers on a draining relay until it closes (backport #6423)
+
 ## [0.19.30](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.29...moq-tokio-v0.19.30) - 2026-10-28
 
 ### Fixed

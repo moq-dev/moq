@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.20](https://github.com/moq-dev/moq/compare/moq-rtc-v0.3.19...moq-rtc-v0.3.20) - 2026-10-30
+
+### Other
+
+- updated the following local packages: moq-net, moq-mux, moq-tokio, hang
+
 ## [0.3.19](https://github.com/moq-dev/moq/compare/moq-rtc-v0.3.18...moq-rtc-v0.3.19) - 2026-10-28
 
 ### Other
