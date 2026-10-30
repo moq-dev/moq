@@ -6,7 +6,7 @@
 //! endpoint, so it's the home for operational endpoints in general.
 //!
 //! Today it serves:
-//! - `/metrics` - this node's own traffic counters as Prometheus text
+//! - `/metrics` - this node's own traffic counters as OpenMetrics text
 //!   exposition, plus the accept-loop health of its TCP listeners
 //!   ([`with_listeners`](Internal::with_listeners)) and the per-worker health of
 //!   its io_uring runtime ([`with_uring`](Internal::with_uring)), and the
@@ -39,6 +39,13 @@ use axum::{
 	routing::{get, post},
 };
 use axum_server::accept::DefaultAcceptor;
+use prometheus_client::{
+	collector::Collector,
+	encoding::{
+		DescriptorEncoder, EncodeGaugeValue, EncodeLabelSet, EncodeLabelValue, EncodeMetric, LabelValueEncoder,
+	},
+	metrics::{MetricType, counter::ConstCounter, gauge::ConstGauge},
+};
 
 /// One io_uring worker's counters, as [`with_uring`](Internal::with_uring) takes
 /// them.
@@ -327,7 +334,7 @@ async fn serve_health() -> Response {
 	(StatusCode::OK, "ok\n").into_response()
 }
 
-/// Prometheus text-exposition metrics for this node's own MoQ traffic counters
+/// OpenMetrics text metrics for this node's own MoQ traffic counters
 /// (bytes/frames/groups, announces, subscriptions, viewers, and connected sessions),
 /// summed across broadcasts and split by `tier`/`role`.
 ///
@@ -338,19 +345,21 @@ async fn serve_health() -> Response {
 /// current cumulative snapshot; a downstream scraper derives rates and live
 /// counts (`open - closed`).
 async fn serve_metrics(State(state): State<InternalState>) -> Response {
-	let mut body = render_metrics(&state.stats.snapshot(), &state.listeners, &state.uring);
+	let mut scrape = Scrape::new(state.stats.snapshot(), &state.listeners, &state.uring);
 	#[cfg(any(feature = "stun", test))]
-	if let Some(stun) = &state.stun {
-		stun.render(&mut body);
+	{
+		scrape.stun = state.stun;
 	}
-	if let Some(shutdown) = &state.shutdown {
-		render_drain(&mut body, shutdown.tally());
-	}
-	if let Some(refusals) = &state.refusals {
-		render_refusals(&mut body, refusals);
-	}
-	render_panics(&mut body, moq_tokio::panic::count());
-	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
+	scrape.draining = state.shutdown.map(|shutdown| shutdown.tally().draining);
+	scrape.refusals = state.refusals.map(|refusals| refusals.snapshot());
+	(
+		[(
+			http::header::CONTENT_TYPE,
+			"application/openmetrics-text; version=1.0.0; charset=utf-8",
+		)],
+		scrape.render(),
+	)
+		.into_response()
 }
 
 /// Cluster peers this relay dialed and currently holds a session with. Accepted
@@ -390,304 +399,338 @@ async fn revalidate_sessions(RawQuery(query): RawQuery, State(state): State<Inte
 }
 
 /// A Prometheus label value, escaped per the text exposition format so no value
-/// can end its label or line early.
+/// can end its label or line early. `prometheus-client` writes label values
+/// verbatim, so a tier or listener name carrying a quote would otherwise forge a
+/// series.
 pub(crate) struct Label<'a>(pub(crate) &'a str);
 
-impl std::fmt::Display for Label<'_> {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl EncodeLabelValue for Label<'_> {
+	fn encode(&self, encoder: &mut LabelValueEncoder) -> std::fmt::Result {
 		use std::fmt::Write as _;
 		for c in self.0.chars() {
 			match c {
-				'\\' => f.write_str("\\\\")?,
-				'"' => f.write_str("\\\"")?,
-				'\n' => f.write_str("\\n")?,
-				c => f.write_char(c)?,
+				'\\' => encoder.write_str("\\\\")?,
+				'"' => encoder.write_str("\\\"")?,
+				'\n' => encoder.write_str("\\n")?,
+				c => encoder.write_char(c)?,
 			}
 		}
 		Ok(())
 	}
 }
 
-/// Render a [`moq_net::stats::Snapshot`] as Prometheus text exposition (v0.0.4).
+/// Encode whatever `encode` writes as one OpenMetrics text exposition.
+pub(crate) fn render(encode: impl Fn(&mut DescriptorEncoder) -> std::fmt::Result + Send + Sync + 'static) -> String {
+	/// The registry only takes collectors, so this adapts a closure into one.
+	struct Encode<F>(F);
+
+	impl<F> std::fmt::Debug for Encode<F> {
+		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+			f.debug_struct("Encode").finish_non_exhaustive()
+		}
+	}
+
+	impl<F: Fn(&mut DescriptorEncoder) -> std::fmt::Result + Send + Sync + 'static> Collector for Encode<F> {
+		fn encode(&self, mut encoder: DescriptorEncoder) -> std::fmt::Result {
+			(self.0)(&mut encoder)
+		}
+	}
+
+	let mut registry = prometheus_client::registry::Registry::default();
+	registry.register_collector(Box::new(Encode(encode)));
+	let mut body = String::new();
+	// Writing to a String cannot fail, and nothing here fails on its own.
+	let _ = prometheus_client::encoding::text::encode(&mut body, &registry);
+	body
+}
+
+/// One metric family: its HELP/TYPE header, then a sample per label set.
+pub(crate) fn family<L: EncodeLabelSet, M: EncodeMetric>(
+	encoder: &mut DescriptorEncoder,
+	name: &str,
+	help: &str,
+	kind: MetricType,
+	rows: impl IntoIterator<Item = (L, M)>,
+) -> std::fmt::Result {
+	let mut family = encoder.encode_descriptor(name, help, None, kind)?;
+	for (labels, metric) in rows {
+		metric.encode(family.encode_family(&labels)?)?;
+	}
+	Ok(())
+}
+
+/// A labeled counter family. The name leaves off `_total`, which the encoder
+/// appends to every sample.
+pub(crate) fn counter<L: EncodeLabelSet>(
+	encoder: &mut DescriptorEncoder,
+	name: &str,
+	help: &str,
+	rows: impl IntoIterator<Item = (L, u64)>,
+) -> std::fmt::Result {
+	let rows = rows
+		.into_iter()
+		.map(|(labels, value)| (labels, ConstCounter::new(value)));
+	family(encoder, name, help, MetricType::Counter, rows)
+}
+
+/// A labeled gauge family.
+fn gauge<L: EncodeLabelSet, V: EncodeGaugeValue>(
+	encoder: &mut DescriptorEncoder,
+	name: &str,
+	help: &str,
+	rows: impl IntoIterator<Item = (L, V)>,
+) -> std::fmt::Result {
+	let rows = rows.into_iter().map(|(labels, value)| (labels, ConstGauge::new(value)));
+	family(encoder, name, help, MetricType::Gauge, rows)
+}
+
+/// An unlabeled family with its one sample. A counter's name leaves off `_total`.
+pub(crate) fn single(
+	encoder: &mut DescriptorEncoder,
+	name: &str,
+	help: &str,
+	metric: impl EncodeMetric,
+) -> std::fmt::Result {
+	metric.encode(encoder.encode_descriptor(name, help, None, metric.metric_type())?)
+}
+
+/// Everything one `/metrics` scrape reports, read when the scrape arrives.
 ///
-/// Hand-formatted rather than pulling in a metrics registry crate: the atomics
-/// already are the registry, and a snapshot is a fixed handful of labeled
-/// counters, so a registry would only add a second source of truth to keep in
-/// sync.
-fn render_metrics(
-	snap: &moq_net::stats::Snapshot,
-	listeners: &[moq_tokio::accept::Health],
-	uring: &[UringWorker],
-) -> String {
-	use std::fmt::Write as _;
-
-	let traffic = snap.traffic();
-	let mut out = String::new();
-
-	// One HELP/TYPE header followed by a (tier, role) row per active tier for a
-	// counter selected out of `Traffic` by `field`.
-	let counter = |out: &mut String, name: &str, help: &str, field: fn(&moq_net::stats::Traffic) -> u64| {
-		let _ = writeln!(out, "# HELP {name} {help}");
-		let _ = writeln!(out, "# TYPE {name} counter");
-		for (tier, role, totals) in &traffic {
-			let _ = writeln!(
-				out,
-				"{name}{{tier=\"{}\",role=\"{}\"}} {}",
-				Label(tier.as_str()),
-				Label(role.as_str()),
-				field(totals)
-			);
-		}
-	};
-
-	counter(
-		&mut out,
-		"moq_relay_bytes_total",
-		"Media payload bytes transferred.",
-		|c| c.bytes,
-	);
-	counter(&mut out, "moq_relay_frames_total", "Media frames transferred.", |c| {
-		c.frames
-	});
-	counter(&mut out, "moq_relay_groups_total", "Media groups transferred.", |c| {
-		c.groups
-	});
-	counter(
-		&mut out,
-		"moq_relay_datagrams_total",
-		"Single-frame groups carried over unreliable QUIC datagrams; a subset of groups.",
-		|c| c.datagrams,
-	);
-	counter(
-		&mut out,
-		"moq_relay_inflated_bytes_total",
-		"Payload bytes inflated from compressed groups for peers that cannot carry compression, once per group.",
-		|c| c.inflated,
-	);
-	counter(
-		&mut out,
-		"moq_relay_stale_bytes_total",
-		"Media payload bytes skipped after drifting beyond a subscriber's latency budget.",
-		|c| c.stale.bytes,
-	);
-	counter(
-		&mut out,
-		"moq_relay_stale_frames_total",
-		"Media frames skipped after drifting beyond a subscriber's latency budget.",
-		|c| c.stale.frames,
-	);
-	counter(
-		&mut out,
-		"moq_relay_stale_groups_total",
-		"Media groups skipped after drifting beyond a subscriber's latency budget.",
-		|c| c.stale.groups,
-	);
-	counter(
-		&mut out,
-		"moq_relay_stale_datagrams_total",
-		"Media datagrams skipped after drifting beyond a subscriber's latency budget.",
-		|c| c.stale.datagrams,
-	);
-	counter(
-		&mut out,
-		"moq_relay_fetches_total",
-		"One-shot group fetches requested.",
-		|c| c.fetches,
-	);
-	counter(
-		&mut out,
-		"moq_relay_announces_started_total",
-		"Broadcast announces started.",
-		|c| c.announces_started,
-	);
-	counter(
-		&mut out,
-		"moq_relay_announces_ended_total",
-		"Broadcast announces ended; subtract from started for live announces.",
-		|c| c.announces_ended,
-	);
-	counter(
-		&mut out,
-		"moq_relay_subscriptions_opened_total",
-		"Track subscriptions opened.",
-		|c| c.subscriptions_started,
-	);
-	counter(
-		&mut out,
-		"moq_relay_subscriptions_closed_total",
-		"Track subscriptions closed; subtract from opened for live subscriptions.",
-		|c| c.subscriptions_ended,
-	);
-	counter(
-		&mut out,
-		"moq_relay_viewers_opened_total",
-		"Distinct (broadcast, session) subscriptions opened.",
-		|c| c.broadcasts_started,
-	);
-	counter(
-		&mut out,
-		"moq_relay_viewers_closed_total",
-		"Distinct (broadcast, session) subscriptions closed; subtract from opened for live viewers.",
-		|c| c.broadcasts_ended,
-	);
-
-	for (name, help, field) in [
-		(
-			"moq_relay_wire_tx_bytes_total",
-			"Transport bytes sent, including framing and retransmissions, excluding IP, UDP, and TCP headers.",
-			(|p: &moq_net::stats::Presence| p.wire_tx) as fn(&moq_net::stats::Presence) -> u64,
-		),
-		(
-			"moq_relay_wire_rx_bytes_total",
-			"Transport bytes received, including framing, excluding IP, UDP, and TCP headers.",
-			(|p: &moq_net::stats::Presence| p.wire_rx) as fn(&moq_net::stats::Presence) -> u64,
-		),
-	] {
-		let _ = writeln!(out, "# HELP {name} {help}");
-		let _ = writeln!(out, "# TYPE {name} counter");
-		for (tier, presence) in snap.sessions() {
-			let _ = writeln!(out, "{name}{{tier=\"{}\"}} {}", Label(tier.as_str()), field(&presence));
-		}
-	}
-
-	let control = snap.control();
-	for (name, help, field) in [
-		(
-			"moq_relay_control_tx_bytes_total",
-			"Control-message bytes encoded for sending, including codec prefixes; excludes transport overhead.",
-			(|b: &moq_net::stats::Totals| b.tx) as fn(&moq_net::stats::Totals) -> u64,
-		),
-		(
-			"moq_relay_control_rx_bytes_total",
-			"Control-message bytes decoded, including codec prefixes; excludes transport overhead.",
-			(|b: &moq_net::stats::Totals| b.rx) as fn(&moq_net::stats::Totals) -> u64,
-		),
-	] {
-		let _ = writeln!(out, "# HELP {name} {help}");
-		let _ = writeln!(out, "# TYPE {name} counter");
-		for (tier, class, bytes) in &control {
-			let _ = writeln!(
-				out,
-				"{name}{{tier=\"{}\",class=\"{}\"}} {}",
-				Label(tier.as_str()),
-				Label(class.as_str()),
-				field(bytes)
-			);
-		}
-	}
-
-	let _ = writeln!(
-		out,
-		"# HELP moq_relay_requests_total Admitted request/response exchanges."
-	);
-	let _ = writeln!(out, "# TYPE moq_relay_requests_total counter");
-	for (tier, presence) in &snap.sessions() {
-		let _ = writeln!(
-			out,
-			"moq_relay_requests_total{{tier=\"{}\"}} {}",
-			Label(tier.as_str()),
-			presence.requests
-		);
-	}
-
-	// Sessions are per-tier only (no role), so they don't fit the helper above.
-	let _ = writeln!(out, "# HELP moq_relay_sessions_opened_total Connected sessions opened.");
-	let _ = writeln!(out, "# TYPE moq_relay_sessions_opened_total counter");
-	for (tier, sessions) in &snap.sessions() {
-		let _ = writeln!(
-			out,
-			"moq_relay_sessions_opened_total{{tier=\"{}\"}} {}",
-			Label(tier.as_str()),
-			sessions.sessions_started
-		);
-	}
-	let _ = writeln!(
-		out,
-		"# HELP moq_relay_sessions_closed_total Connected sessions closed; subtract from opened for live sessions."
-	);
-	let _ = writeln!(out, "# TYPE moq_relay_sessions_closed_total counter");
-	for (tier, sessions) in &snap.sessions() {
-		let _ = writeln!(
-			out,
-			"moq_relay_sessions_closed_total{{tier=\"{}\"}} {}",
-			Label(tier.as_str()),
-			sessions.sessions_ended
-		);
-	}
-
-	let _ = writeln!(
-		out,
-		"# HELP moq_relay_sessions_failed_total Admitted sessions ending abnormally, by kind."
-	);
-	let _ = writeln!(out, "# TYPE moq_relay_sessions_failed_total counter");
-	for (tier, presence) in snap.sessions() {
-		for &kind in moq_net::stats::Failure::ALL {
-			let _ = writeln!(
-				out,
-				"moq_relay_sessions_failed_total{{tier=\"{}\",kind=\"{}\"}} {}",
-				Label(tier.as_str()),
-				Label(kind.as_str()),
-				presence.sessions_failed.count(kind)
-			);
-		}
-	}
-
-	render_accepts(&mut out, listeners);
-	render_uring(&mut out, uring);
-
-	out
+/// The counters already live in atomics behind [`moq_net::stats::Registry`] and
+/// the other sources, so a scrape reads them into a fresh `prometheus-client`
+/// registry rather than mirroring them into live metrics on the hot path.
+struct Scrape {
+	stats: moq_net::stats::Snapshot,
+	listeners: Vec<moq_tokio::accept::Health>,
+	uring: Vec<UringWorker>,
+	#[cfg(any(feature = "stun", test))]
+	stun: Option<crate::stun::Counters>,
+	draining: Option<usize>,
+	refusals: Option<moq_net::stats::Refusals>,
+	panics: u64,
 }
 
-/// The sessions a shutdown drain is still waiting on: 0 until the drain starts,
-/// and back to 0 when every session has left, which is when the relay exits.
-/// A scrape that last saw it above 0 shortly before the deadline means the
-/// deadline force-closed the rest; the exit log records how many.
-fn render_drain(out: &mut String, tally: crate::shutdown::Tally) {
-	use std::fmt::Write as _;
-
-	let _ = writeln!(
-		out,
-		"# HELP moq_relay_draining_sessions Sessions sent a shutdown GOAWAY that have not left yet."
-	);
-	let _ = writeln!(out, "# TYPE moq_relay_draining_sessions gauge");
-	let _ = writeln!(out, "moq_relay_draining_sessions {}", tally.draining);
-}
-
-/// Sessions admission turned away, one row per reason, every reason present from
-/// zero so a rate over it is defined from the first scrape. A refused session
-/// never reaches the traffic counters above.
-fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
-	use crate::refusals::RefusalKind;
-	use std::fmt::Write as _;
-
-	let _ = writeln!(
-		out,
-		"# HELP moq_relay_sessions_refused_total Sessions admission refused, by reason."
-	);
-	let _ = writeln!(out, "# TYPE moq_relay_sessions_refused_total counter");
-	let counts = refusals.snapshot();
-	for &refusal in RefusalKind::ALL {
-		let _ = writeln!(
-			out,
-			"moq_relay_sessions_refused_total{{reason=\"{}\"}} {}",
-			Label(refusal.as_str()),
-			counts.count(refusal)
-		);
+impl Scrape {
+	fn new(stats: moq_net::stats::Snapshot, listeners: &[moq_tokio::accept::Health], uring: &[UringWorker]) -> Self {
+		Self {
+			stats,
+			listeners: listeners.to_vec(),
+			uring: uring.to_vec(),
+			#[cfg(any(feature = "stun", test))]
+			stun: None,
+			draining: None,
+			refusals: None,
+			panics: moq_tokio::panic::count(),
+		}
 	}
-}
 
-/// Panics contained to one session's task, process-wide. Each one is a bug that
-/// closed a session instead of the process; the error log carries its message and
-/// the session's span.
-fn render_panics(out: &mut String, panics: u64) {
-	use std::fmt::Write as _;
+	fn render(self) -> String {
+		render(move |encoder| self.encode(encoder))
+	}
 
-	let _ = writeln!(
-		out,
-		"# HELP moq_relay_panics_total Panics that ended a single session instead of the process."
-	);
-	let _ = writeln!(out, "# TYPE moq_relay_panics_total counter");
-	let _ = writeln!(out, "moq_relay_panics_total {panics}");
+	fn encode(&self, encoder: &mut DescriptorEncoder) -> std::fmt::Result {
+		self.encode_traffic(encoder)?;
+		self.encode_sessions(encoder)?;
+		encode_accepts(encoder, &self.listeners)?;
+		encode_uring(encoder, &self.uring)?;
+		#[cfg(any(feature = "stun", test))]
+		if let Some(stun) = &self.stun {
+			stun.encode(encoder)?;
+		}
+
+		// The sessions a shutdown drain is still waiting on: 0 until the drain
+		// starts, and back to 0 when every session has left, which is when the
+		// relay exits. A scrape that last saw it above 0 shortly before the
+		// deadline means the deadline force-closed the rest; the exit log records
+		// how many.
+		if let Some(draining) = self.draining {
+			single(
+				encoder,
+				"moq_relay_draining_sessions",
+				"Sessions sent a shutdown GOAWAY that have not left yet.",
+				ConstGauge::new(draining as u64),
+			)?;
+		}
+
+		// Sessions admission turned away, one row per reason, every reason present
+		// from zero so a rate over it is defined from the first scrape. A refused
+		// session never reaches the traffic counters above.
+		if let Some(refusals) = &self.refusals {
+			use crate::refusals::RefusalKind;
+			counter(
+				encoder,
+				"moq_relay_sessions_refused",
+				"Sessions admission refused, by reason.",
+				RefusalKind::ALL
+					.iter()
+					.map(|&refusal| ([("reason", Label(refusal.as_str()))], refusals.count(refusal))),
+			)?;
+		}
+
+		// Panics contained to one session's task, process-wide. Each one is a bug
+		// that closed a session instead of the process; the error log carries its
+		// message and the session's span.
+		single(
+			encoder,
+			"moq_relay_panics",
+			"Panics that ended a single session instead of the process.",
+			ConstCounter::new(self.panics),
+		)
+	}
+
+	/// The `(tier, role)` traffic counters, summed across broadcasts.
+	fn encode_traffic(&self, encoder: &mut DescriptorEncoder) -> std::fmt::Result {
+		use moq_net::stats::Traffic;
+
+		let traffic = self.stats.traffic();
+		for (name, help, field) in [
+			(
+				"moq_relay_bytes",
+				"Media payload bytes transferred.",
+				(|c: &Traffic| c.bytes) as fn(&Traffic) -> u64,
+			),
+			("moq_relay_frames", "Media frames transferred.", |c| c.frames),
+			("moq_relay_groups", "Media groups transferred.", |c| c.groups),
+			(
+				"moq_relay_datagrams",
+				"Single-frame groups carried over unreliable QUIC datagrams; a subset of groups.",
+				|c| c.datagrams,
+			),
+			(
+				"moq_relay_inflated_bytes",
+				"Payload bytes inflated from compressed groups for peers that cannot carry compression, once per group.",
+				|c| c.inflated,
+			),
+			(
+				"moq_relay_stale_bytes",
+				"Media payload bytes skipped after drifting beyond a subscriber's latency budget.",
+				|c| c.stale.bytes,
+			),
+			(
+				"moq_relay_stale_frames",
+				"Media frames skipped after drifting beyond a subscriber's latency budget.",
+				|c| c.stale.frames,
+			),
+			(
+				"moq_relay_stale_groups",
+				"Media groups skipped after drifting beyond a subscriber's latency budget.",
+				|c| c.stale.groups,
+			),
+			(
+				"moq_relay_stale_datagrams",
+				"Media datagrams skipped after drifting beyond a subscriber's latency budget.",
+				|c| c.stale.datagrams,
+			),
+			("moq_relay_fetches", "One-shot group fetches requested.", |c| c.fetches),
+			("moq_relay_announces_started", "Broadcast announces started.", |c| {
+				c.announces_started
+			}),
+			(
+				"moq_relay_announces_ended",
+				"Broadcast announces ended; subtract from started for live announces.",
+				|c| c.announces_ended,
+			),
+			("moq_relay_subscriptions_opened", "Track subscriptions opened.", |c| {
+				c.subscriptions_started
+			}),
+			(
+				"moq_relay_subscriptions_closed",
+				"Track subscriptions closed; subtract from opened for live subscriptions.",
+				|c| c.subscriptions_ended,
+			),
+			(
+				"moq_relay_viewers_opened",
+				"Distinct (broadcast, session) subscriptions opened.",
+				|c| c.broadcasts_started,
+			),
+			(
+				"moq_relay_viewers_closed",
+				"Distinct (broadcast, session) subscriptions closed; subtract from opened for live viewers.",
+				|c| c.broadcasts_ended,
+			),
+		] {
+			let rows = traffic.iter().map(|(tier, role, totals)| {
+				(
+					[("tier", Label(tier.as_str())), ("role", Label(role.as_str()))],
+					field(totals),
+				)
+			});
+			counter(encoder, name, help, rows)?;
+		}
+		Ok(())
+	}
+
+	/// The per-tier session counters, plus control bytes split by message class.
+	fn encode_sessions(&self, encoder: &mut DescriptorEncoder) -> std::fmt::Result {
+		use moq_net::stats::{Presence, Totals};
+
+		let sessions = self.stats.sessions();
+		for (name, help, field) in [
+			(
+				"moq_relay_wire_tx_bytes",
+				"Transport bytes sent, including framing and retransmissions, excluding IP, UDP, and TCP headers.",
+				(|p: &Presence| p.wire_tx) as fn(&Presence) -> u64,
+			),
+			(
+				"moq_relay_wire_rx_bytes",
+				"Transport bytes received, including framing, excluding IP, UDP, and TCP headers.",
+				|p| p.wire_rx,
+			),
+			("moq_relay_requests", "Admitted request/response exchanges.", |p| {
+				p.requests
+			}),
+			("moq_relay_sessions_opened", "Connected sessions opened.", |p| {
+				p.sessions_started
+			}),
+			(
+				"moq_relay_sessions_closed",
+				"Connected sessions closed; subtract from opened for live sessions.",
+				|p| p.sessions_ended,
+			),
+		] {
+			let rows = sessions
+				.iter()
+				.map(|(tier, presence)| ([("tier", Label(tier.as_str()))], field(presence)));
+			counter(encoder, name, help, rows)?;
+		}
+
+		counter(
+			encoder,
+			"moq_relay_sessions_failed",
+			"Admitted sessions ending abnormally, by kind.",
+			sessions.iter().flat_map(|(tier, presence)| {
+				moq_net::stats::Failure::ALL.iter().map(|&kind| {
+					(
+						[("tier", Label(tier.as_str())), ("kind", Label(kind.as_str()))],
+						presence.sessions_failed.count(kind),
+					)
+				})
+			}),
+		)?;
+
+		let control = self.stats.control();
+		for (name, help, field) in [
+			(
+				"moq_relay_control_tx_bytes",
+				"Control-message bytes encoded for sending, including codec prefixes; excludes transport overhead.",
+				(|b: &Totals| b.tx) as fn(&Totals) -> u64,
+			),
+			(
+				"moq_relay_control_rx_bytes",
+				"Control-message bytes decoded, including codec prefixes; excludes transport overhead.",
+				|b| b.rx,
+			),
+		] {
+			let rows = control.iter().map(|(tier, class, bytes)| {
+				(
+					[("tier", Label(tier.as_str())), ("class", Label(class.as_str()))],
+					field(bytes),
+				)
+			});
+			counter(encoder, name, help, rows)?;
+		}
+		Ok(())
+	}
 }
 
 /// The accept-loop health of every listener on the node.
@@ -698,40 +741,36 @@ fn render_panics(out: &mut String, panics: u64) {
 /// paging on; `connection` is junk traffic the node is fielding, and `unknown` is an
 /// errno the classifier has never seen (worth a dashboard, never an escalation, since
 /// a remote peer could drive it).
-fn render_accepts(out: &mut String, listeners: &[moq_tokio::accept::Health]) {
+fn encode_accepts(encoder: &mut DescriptorEncoder, listeners: &[moq_tokio::accept::Health]) -> std::fmt::Result {
 	use moq_tokio::accept::Failure;
-	use std::fmt::Write as _;
 
-	let _ = writeln!(
-		out,
-		"# HELP moq_relay_accept_failures_total Failed accept() calls on a listener, by class."
-	);
-	let _ = writeln!(out, "# TYPE moq_relay_accept_failures_total counter");
-	for health in listeners {
-		for &failure in Failure::ALL {
-			let _ = writeln!(
-				out,
-				"moq_relay_accept_failures_total{{listener=\"{}\",class=\"{}\"}} {}",
-				Label(health.listener()),
-				Label(failure.as_str()),
-				health.failures(failure)
-			);
-		}
-	}
-
-	let _ = writeln!(
-		out,
-		"# HELP moq_relay_accept_stalled_seconds How long a listener has been unable to accept a connection; 0 when it is serving."
-	);
-	let _ = writeln!(out, "# TYPE moq_relay_accept_stalled_seconds gauge");
-	for health in listeners {
-		let _ = writeln!(
-			out,
-			"moq_relay_accept_stalled_seconds{{listener=\"{}\"}} {}",
-			Label(health.listener()),
-			health.stalled().unwrap_or_default().as_secs_f64()
-		);
-	}
+	counter(
+		encoder,
+		"moq_relay_accept_failures",
+		"Failed accept() calls on a listener, by class.",
+		listeners.iter().flat_map(|health| {
+			Failure::ALL.iter().map(|&failure| {
+				(
+					[
+						("listener", Label(health.listener())),
+						("class", Label(failure.as_str())),
+					],
+					health.failures(failure),
+				)
+			})
+		}),
+	)?;
+	gauge(
+		encoder,
+		"moq_relay_accept_stalled_seconds",
+		"How long a listener has been unable to accept a connection; 0 when it is serving.",
+		listeners.iter().map(|health| {
+			(
+				[("listener", Label(health.listener()))],
+				health.stalled().unwrap_or_default().as_secs_f64(),
+			)
+		}),
+	)
 }
 
 /// The io_uring runtime's per-worker counters, one `worker` label per bound
@@ -750,154 +789,193 @@ fn render_accepts(out: &mut String, listeners: &[moq_tokio::accept::Health]) {
 /// batching, and datagrams over `enters` the syscall amortization the runtime
 /// exists for.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
-fn render_uring(out: &mut String, workers: &[UringWorker]) {
-	use std::fmt::Write as _;
+fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std::fmt::Result {
+	use moq_uring::metrics::Snapshot;
 
 	if workers.is_empty() {
-		return;
+		return Ok(());
 	}
-	let snaps: Vec<moq_uring::metrics::Snapshot> = workers.iter().map(|worker| worker.snapshot()).collect();
-
-	// One HELP/TYPE header followed by a row per worker, as `render_metrics`
-	// does for the traffic counters.
-	let mut series = |name: &str, kind: &str, help: &str, field: fn(&moq_uring::metrics::Snapshot) -> u64| {
-		let _ = writeln!(out, "# HELP {name} {help}");
-		let _ = writeln!(out, "# TYPE {name} {kind}");
-		for (worker, snap) in snaps.iter().enumerate() {
-			let _ = writeln!(out, "{name}{{worker=\"{worker}\"}} {}", field(snap));
-		}
+	let snaps: Vec<Snapshot> = workers.iter().map(|worker| worker.snapshot()).collect();
+	let rows = |field: fn(&Snapshot) -> u64| {
+		snaps
+			.iter()
+			.enumerate()
+			.map(move |(worker, snap)| ([("worker", worker)], field(snap)))
 	};
 
-	let mut counter = |name, help, field| series(name, "counter", help, field);
-
-	counter(
-		"moq_relay_uring_rx_datagrams_total",
-		"UDP datagrams received by an io_uring worker, counting each UDP_GRO segment.",
-		|snap| snap.rx_datagrams,
-	);
-	counter(
-		"moq_relay_uring_rx_receives_total",
-		"Receive completions that delivered datagrams; datagrams over this is the GRO coalescing achieved.",
-		|snap| snap.rx_receives,
-	);
-	counter(
-		"moq_relay_uring_rx_enobufs_total",
-		"Receives the kernel ended with ENOBUFS: no provided buffer was free, so the receive never ran. Backpressure, not a confirmed loss.",
-		|snap| snap.rx_enobufs,
-	);
-	counter(
-		"moq_relay_uring_rx_exhausted_total",
-		"Receive re-arms that found no free buffer, leaving the socket unarmed until a packet was read.",
-		|snap| snap.rx_exhausted,
-	);
-	counter(
-		"moq_relay_uring_tx_datagrams_total",
-		"UDP datagrams sent by an io_uring worker, counting each UDP_SEGMENT segment.",
-		|snap| snap.tx_datagrams,
-	);
-	counter(
-		"moq_relay_uring_tx_sends_total",
-		"sendmsg operations staged; datagrams over this is the GSO batching achieved.",
-		|snap| snap.tx_sends,
-	);
-	counter(
-		"moq_relay_uring_tx_stalls_total",
-		"Times the send-buffer pool became drained at its ceiling and an acquisition had to wait.",
-		|snap| snap.tx_stalls,
-	);
-	counter(
-		"moq_relay_uring_submissions_total",
-		"Submission queue entries the kernel accepted.",
-		|snap| snap.submissions,
-	);
-	counter(
-		"moq_relay_uring_completions_total",
-		"Completion queue entries dispatched.",
-		|snap| snap.completions,
-	);
-	counter(
-		"moq_relay_uring_enters_total",
-		"io_uring_enter calls; datagrams over this is the syscall amortization.",
-		|snap| snap.enters,
-	);
-	counter(
-		"moq_relay_uring_turns_total",
-		"Worker drive-loop turns, including the final poll that completes the root future.",
-		|snap| snap.turns,
-	);
-	counter(
-		"moq_relay_uring_sq_full_enters_total",
-		"io_uring_enter calls forced by a full submission queue.",
-		|snap| snap.sq_full_enters,
-	);
-	counter(
-		"moq_relay_uring_parks_total",
-		"Times a worker parked in io_uring_enter with nothing left to poll.",
-		|snap| snap.parks,
-	);
-	counter(
-		"moq_relay_uring_wakes_total",
-		"futex wakes another thread had to issue because the worker was parked.",
-		|snap| snap.wakes,
-	);
-	counter(
-		"moq_relay_uring_timers_armed_total",
-		"Timers armed, re-arms included.",
-		|snap| snap.timers_armed,
-	);
-	counter(
-		"moq_relay_uring_timers_fired_total",
-		"Timers that reached their deadline.",
-		|snap| snap.timers_fired,
-	);
-	counter(
-		"moq_relay_uring_timers_cancelled_total",
-		"Timers dropped or re-armed before their deadline.",
-		|snap| snap.timers_cancelled,
-	);
-	series(
-		"moq_relay_uring_timers_active",
-		"gauge",
-		"Timers currently in a worker's heap.",
-		|snap| snap.timers_active(),
-	);
-
-	for (suffix, help, field) in [
+	for (name, help, field) in [
 		(
-			"sqes_per_enter",
-			"Submission entries accepted by each enter, including zero.",
-			(|snap: &moq_uring::metrics::Snapshot| snap.sqes) as fn(&_) -> _,
+			"moq_relay_uring_rx_datagrams",
+			"UDP datagrams received by an io_uring worker, counting each UDP_GRO segment.",
+			(|snap: &Snapshot| snap.rx_datagrams) as fn(&Snapshot) -> u64,
 		),
 		(
-			"cqes_per_enter",
-			"Completion entries made visible by each enter, including zero.",
-			|snap: &moq_uring::metrics::Snapshot| snap.cqes,
+			"moq_relay_uring_rx_receives",
+			"Receive completions that delivered datagrams; datagrams over this is the GRO coalescing achieved.",
+			|snap| snap.rx_receives,
+		),
+		(
+			"moq_relay_uring_rx_enobufs",
+			"Receives the kernel ended with ENOBUFS: no provided buffer was free, so the receive never ran. Backpressure, not a confirmed loss.",
+			|snap| snap.rx_enobufs,
+		),
+		(
+			"moq_relay_uring_rx_exhausted",
+			"Receive re-arms that found no free buffer, leaving the socket unarmed until a packet was read.",
+			|snap| snap.rx_exhausted,
+		),
+		(
+			"moq_relay_uring_tx_datagrams",
+			"UDP datagrams sent by an io_uring worker, counting each UDP_SEGMENT segment.",
+			|snap| snap.tx_datagrams,
+		),
+		(
+			"moq_relay_uring_tx_sends",
+			"sendmsg operations staged; datagrams over this is the GSO batching achieved.",
+			|snap| snap.tx_sends,
+		),
+		(
+			"moq_relay_uring_tx_stalls",
+			"Times the send-buffer pool became drained at its ceiling and an acquisition had to wait.",
+			|snap| snap.tx_stalls,
+		),
+		(
+			"moq_relay_uring_submissions",
+			"Submission queue entries the kernel accepted.",
+			|snap| snap.submissions,
+		),
+		(
+			"moq_relay_uring_completions",
+			"Completion queue entries dispatched.",
+			|snap| snap.completions,
+		),
+		(
+			"moq_relay_uring_enters",
+			"io_uring_enter calls; datagrams over this is the syscall amortization.",
+			|snap| snap.enters,
+		),
+		(
+			"moq_relay_uring_turns",
+			"Worker drive-loop turns, including the final poll that completes the root future.",
+			|snap| snap.turns,
+		),
+		(
+			"moq_relay_uring_sq_full_enters",
+			"io_uring_enter calls forced by a full submission queue.",
+			|snap| snap.sq_full_enters,
+		),
+		(
+			"moq_relay_uring_parks",
+			"Times a worker parked in io_uring_enter with nothing left to poll.",
+			|snap| snap.parks,
+		),
+		(
+			"moq_relay_uring_wakes",
+			"futex wakes another thread had to issue because the worker was parked.",
+			|snap| snap.wakes,
+		),
+		(
+			"moq_relay_uring_timers_armed",
+			"Timers armed, re-arms included.",
+			|snap| snap.timers_armed,
+		),
+		(
+			"moq_relay_uring_timers_fired",
+			"Timers that reached their deadline.",
+			|snap| snap.timers_fired,
+		),
+		(
+			"moq_relay_uring_timers_cancelled",
+			"Timers dropped or re-armed before their deadline.",
+			|snap| snap.timers_cancelled,
 		),
 	] {
-		let name = format!("moq_relay_uring_{suffix}");
-		let _ = writeln!(out, "# HELP {name} {help}");
-		let _ = writeln!(out, "# TYPE {name} histogram");
-		for (worker, snap) in snaps.iter().enumerate() {
-			let histogram = field(snap);
-			for (bound, count) in moq_uring::metrics::Histogram::BOUNDS.into_iter().zip(histogram.buckets) {
-				let bound = bound.map_or_else(|| "+Inf".to_string(), |bound| bound.to_string());
-				let _ = writeln!(out, "{name}_bucket{{worker=\"{worker}\",le=\"{bound}\"}} {count}");
-			}
-			let _ = writeln!(out, "{name}_sum{{worker=\"{worker}\"}} {}", histogram.sum);
-			let _ = writeln!(out, "{name}_count{{worker=\"{worker}\"}} {}", histogram.count());
-		}
+		counter(encoder, name, help, rows(field))?;
 	}
+	gauge(
+		encoder,
+		"moq_relay_uring_timers_active",
+		"Timers currently in a worker's heap.",
+		rows(Snapshot::timers_active),
+	)?;
+
+	for (name, help, field) in [
+		(
+			"moq_relay_uring_sqes_per_enter",
+			"Submission entries accepted by each enter, including zero.",
+			(|snap: &Snapshot| snap.sqes) as fn(&Snapshot) -> moq_uring::metrics::Histogram,
+		),
+		(
+			"moq_relay_uring_cqes_per_enter",
+			"Completion entries made visible by each enter, including zero.",
+			|snap| snap.cqes,
+		),
+	] {
+		let rows = snaps
+			.iter()
+			.enumerate()
+			.map(|(worker, snap)| ([("worker", worker)], Distribution(field(snap))));
+		family(encoder, name, help, MetricType::Histogram, rows)?;
+	}
+	Ok(())
 }
 
 /// Off the io_uring path there are no workers to describe, and [`UringWorker`]
 /// is uninhabited, so the list handed here is always empty.
 #[cfg(not(all(target_os = "linux", feature = "_uring")))]
-fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
+fn encode_uring(_encoder: &mut DescriptorEncoder, _workers: &[UringWorker]) -> std::fmt::Result {
+	Ok(())
+}
+
+/// An io_uring worker's histogram, whose cumulative buckets the encoder takes as
+/// per-bucket counts.
+#[cfg(all(target_os = "linux", feature = "_uring"))]
+struct Distribution(moq_uring::metrics::Histogram);
+
+#[cfg(all(target_os = "linux", feature = "_uring"))]
+impl EncodeMetric for Distribution {
+	fn encode(&self, mut encoder: prometheus_client::encoding::MetricEncoder) -> std::fmt::Result {
+		let mut below = 0;
+		let buckets: Vec<(f64, u64)> = moq_uring::metrics::Histogram::BOUNDS
+			.into_iter()
+			.zip(self.0.buckets)
+			.map(|(bound, cumulative)| {
+				// The encoder writes `f64::MAX` as `+Inf`. Bucket reads may be a few
+				// operations apart, so a later bucket can read below an earlier one.
+				let bucket = (
+					bound.map_or(f64::MAX, |bound| bound as f64),
+					cumulative.saturating_sub(below),
+				);
+				below = below.max(cumulative);
+				bucket
+			})
+			.collect();
+		encoder.encode_histogram::<prometheus_client::encoding::NoLabelSet>(
+			self.0.sum as f64,
+			self.0.count(),
+			&buckets,
+			None,
+		)
+	}
+
+	fn metric_type(&self) -> MetricType {
+		MetricType::Histogram
+	}
+}
 
 #[cfg(test)]
 #[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
+
+	/// The traffic, listener, and io_uring series of one scrape.
+	fn render_metrics(
+		stats: &moq_net::stats::Snapshot,
+		listeners: &[moq_tokio::accept::Health],
+		uring: &[UringWorker],
+	) -> String {
+		Scrape::new(stats.clone(), listeners, uring).render()
+	}
 
 	#[tokio::test]
 	async fn stun_metrics_are_present_only_for_a_configured_listener() {
@@ -1007,7 +1085,7 @@ mod tests {
 				assert!(body.contains(&line), "missing {line} in:\n{body}");
 			}
 			assert!(body.contains(&format!(
-				"moq_relay_accept_stalled_seconds{{listener=\"{listener}\"}} 0"
+				"moq_relay_accept_stalled_seconds{{listener=\"{listener}\"}} 0.0"
 			)));
 		}
 
@@ -1081,13 +1159,13 @@ mod tests {
 			"timers_cancelled",
 		];
 		for counter in counters {
-			let name = format!("moq_relay_uring_{counter}_total");
+			let name = format!("moq_relay_uring_{counter}");
 			assert!(
 				body.contains(&format!("# TYPE {name} counter")),
 				"missing type for {name}"
 			);
 			for worker in 0..2 {
-				let line = format!("{name}{{worker=\"{worker}\"}} 0");
+				let line = format!("{name}_total{{worker=\"{worker}\"}} 0");
 				assert!(body.contains(&line), "missing {line} in:\n{body}");
 			}
 		}
@@ -1095,15 +1173,43 @@ mod tests {
 			let name = format!("moq_relay_uring_{name}");
 			assert!(body.contains(&format!("# TYPE {name} histogram")));
 			for worker in 0..2 {
-				for bound in ["0", "1", "2", "4", "8", "16", "32", "64", "128", "256", "+Inf"] {
-					assert!(body.contains(&format!("{name}_bucket{{worker=\"{worker}\",le=\"{bound}\"}} 0")));
+				for bound in [
+					"0.0", "1.0", "2.0", "4.0", "8.0", "16.0", "32.0", "64.0", "128.0", "256.0", "+Inf",
+				] {
+					assert!(body.contains(&format!("{name}_bucket{{le=\"{bound}\",worker=\"{worker}\"}} 0")));
 				}
 				assert!(body.contains(&format!("{name}_count{{worker=\"{worker}\"}} 0")));
-				assert!(body.contains(&format!("{name}_sum{{worker=\"{worker}\"}} 0")));
+				assert!(body.contains(&format!("{name}_sum{{worker=\"{worker}\"}} 0.0")));
 			}
 		}
 		assert!(body.contains("# TYPE moq_relay_uring_timers_active gauge"));
 		assert!(body.contains("moq_relay_uring_timers_active{worker=\"1\"} 0"));
+	}
+
+	/// A worker's cumulative buckets come out cumulative again, not summed twice.
+	#[cfg(all(target_os = "linux", feature = "_uring"))]
+	#[test]
+	fn uring_histograms_keep_cumulative_buckets() {
+		let histogram = moq_uring::metrics::Histogram {
+			buckets: [1, 3, 3, 6, 6, 6, 6, 6, 6, 6, 7],
+			sum: 40,
+		};
+		let body = render(move |encoder| {
+			let rows = [([("worker", 0)], Distribution(histogram))];
+			family(encoder, "h", "A histogram.", MetricType::Histogram, rows)
+		});
+		for line in [
+			"h_bucket{le=\"0.0\",worker=\"0\"} 1",
+			"h_bucket{le=\"1.0\",worker=\"0\"} 3",
+			"h_bucket{le=\"2.0\",worker=\"0\"} 3",
+			"h_bucket{le=\"4.0\",worker=\"0\"} 6",
+			"h_bucket{le=\"256.0\",worker=\"0\"} 6",
+			"h_bucket{le=\"+Inf\",worker=\"0\"} 7",
+			"h_count{worker=\"0\"} 7",
+			"h_sum{worker=\"0\"} 40.0",
+		] {
+			assert!(body.lines().any(|l| l == line), "missing {line} in:\n{body}");
+		}
 	}
 
 	/// A relay with no io_uring workers publishes no worker series at all,
@@ -1215,11 +1321,12 @@ mod tests {
 
 		let refusals = Refusals::default();
 		refusals.record(RefusalKind::Unavailable);
-		let mut body = String::new();
-		render_refusals(&mut body, &refusals);
+		let mut scrape = Scrape::new(Default::default(), &[], &[]);
+		scrape.refusals = Some(refusals.snapshot());
+		let body = scrape.render();
 
 		assert!(
-			body.contains("# TYPE moq_relay_sessions_refused_total counter"),
+			body.contains("# TYPE moq_relay_sessions_refused counter"),
 			"type header:\n{body}"
 		);
 		for &refusal in RefusalKind::ALL {
@@ -1263,7 +1370,7 @@ mod tests {
 			.request(moq_net::Path::from_static("root"));
 		drop(request);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
-		assert!(body.contains("# TYPE moq_relay_requests_total counter"), "{body}");
+		assert!(body.contains("# TYPE moq_relay_requests counter"), "{body}");
 		assert!(body.contains("moq_relay_requests_total{tier=\"http\"} 1"), "{body}");
 		assert!(
 			body.contains("moq_relay_sessions_opened_total{tier=\"http\"} 0"),
@@ -1289,9 +1396,12 @@ mod tests {
 			let check = || {
 				let body = render_metrics(&registry.snapshot(), &[], &[]);
 				for (direction, value) in [("tx", 123), ("rx", 456)] {
-					let metric = format!("moq_relay_wire_{direction}_bytes_total");
+					let metric = format!("moq_relay_wire_{direction}_bytes");
 					assert!(body.contains(&format!("# TYPE {metric} counter")), "{body}");
-					assert!(body.contains(&format!("{metric}{{tier=\"{tier}\"}} {value}")), "{body}");
+					assert!(
+						body.contains(&format!("{metric}_total{{tier=\"{tier}\"}} {value}")),
+						"{body}"
+					);
 				}
 			};
 			check();
@@ -1405,10 +1515,7 @@ mod tests {
 
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 
-		assert!(
-			body.contains("# TYPE moq_relay_bytes_total counter"),
-			"type header:\n{body}"
-		);
+		assert!(body.contains("# TYPE moq_relay_bytes counter"), "type header:\n{body}");
 		assert!(
 			body.contains("moq_relay_bytes_total{tier=\"\",role=\"publisher\"} 1234"),
 			"default-tier egress bytes (empty tier label):\n{body}"
@@ -1483,8 +1590,8 @@ mod tests {
 
 	/// Every family header and sample in an exposition, as `# TYPE family kind` and
 	/// `kind name{labels} value`, sorted, so the comparison holds across text formats:
-	/// only a renamed, relabeled, retyped, or revalued series changes it. Bucket
-	/// bounds and values compare as numbers.
+	/// only a renamed, relabeled, retyped, or revalued series changes it. Labels
+	/// compare as a set, and bucket bounds and values as numbers.
 	fn series(body: &str) -> Vec<String> {
 		let mut types = std::collections::HashMap::new();
 		let mut rows = Vec::new();
@@ -1535,6 +1642,8 @@ mod tests {
 				rest = tail[end + 1..].trim_start_matches(',');
 			}
 
+			// A label set is unordered: Prometheus sorts it on ingest.
+			normalized.sort();
 			let value: f64 = value.parse().unwrap();
 			rows.push(format!("{kind} {name}{{{}}} {value}", normalized.join(",")));
 		}
@@ -1621,31 +1730,31 @@ mod tests {
 # TYPE moq_relay_viewers_opened_total counter
 # TYPE moq_relay_wire_rx_bytes_total counter
 # TYPE moq_relay_wire_tx_bytes_total counter
-counter moq_relay_accept_failures_total{listener="tcp",class="connection"} 0
-counter moq_relay_accept_failures_total{listener="tcp",class="exhausted"} 0
-counter moq_relay_accept_failures_total{listener="tcp",class="unknown"} 0
-counter moq_relay_announces_ended_total{tier="edge",role="publisher"} 0
-counter moq_relay_announces_ended_total{tier="edge",role="subscriber"} 0
-counter moq_relay_announces_started_total{tier="edge",role="publisher"} 0
-counter moq_relay_announces_started_total{tier="edge",role="subscriber"} 1
-counter moq_relay_bytes_total{tier="edge",role="publisher"} 0
-counter moq_relay_bytes_total{tier="edge",role="subscriber"} 0
-counter moq_relay_datagrams_total{tier="edge",role="publisher"} 0
-counter moq_relay_datagrams_total{tier="edge",role="subscriber"} 0
-counter moq_relay_fetches_total{tier="edge",role="publisher"} 0
-counter moq_relay_fetches_total{tier="edge",role="subscriber"} 0
-counter moq_relay_frames_total{tier="edge",role="publisher"} 0
-counter moq_relay_frames_total{tier="edge",role="subscriber"} 0
-counter moq_relay_groups_total{tier="edge",role="publisher"} 0
-counter moq_relay_groups_total{tier="edge",role="subscriber"} 0
-counter moq_relay_inflated_bytes_total{tier="edge",role="publisher"} 0
-counter moq_relay_inflated_bytes_total{tier="edge",role="subscriber"} 0
+counter moq_relay_accept_failures_total{class="connection",listener="tcp"} 0
+counter moq_relay_accept_failures_total{class="exhausted",listener="tcp"} 0
+counter moq_relay_accept_failures_total{class="unknown",listener="tcp"} 0
+counter moq_relay_announces_ended_total{role="publisher",tier="edge"} 0
+counter moq_relay_announces_ended_total{role="subscriber",tier="edge"} 0
+counter moq_relay_announces_started_total{role="publisher",tier="edge"} 0
+counter moq_relay_announces_started_total{role="subscriber",tier="edge"} 1
+counter moq_relay_bytes_total{role="publisher",tier="edge"} 0
+counter moq_relay_bytes_total{role="subscriber",tier="edge"} 0
+counter moq_relay_datagrams_total{role="publisher",tier="edge"} 0
+counter moq_relay_datagrams_total{role="subscriber",tier="edge"} 0
+counter moq_relay_fetches_total{role="publisher",tier="edge"} 0
+counter moq_relay_fetches_total{role="subscriber",tier="edge"} 0
+counter moq_relay_frames_total{role="publisher",tier="edge"} 0
+counter moq_relay_frames_total{role="subscriber",tier="edge"} 0
+counter moq_relay_groups_total{role="publisher",tier="edge"} 0
+counter moq_relay_groups_total{role="subscriber",tier="edge"} 0
+counter moq_relay_inflated_bytes_total{role="publisher",tier="edge"} 0
+counter moq_relay_inflated_bytes_total{role="subscriber",tier="edge"} 0
 counter moq_relay_requests_total{tier="edge"} 1
 counter moq_relay_sessions_closed_total{tier="edge"} 0
-counter moq_relay_sessions_failed_total{tier="edge",kind="application"} 0
-counter moq_relay_sessions_failed_total{tier="edge",kind="expired"} 0
-counter moq_relay_sessions_failed_total{tier="edge",kind="idle_timeout"} 0
-counter moq_relay_sessions_failed_total{tier="edge",kind="transport"} 0
+counter moq_relay_sessions_failed_total{kind="application",tier="edge"} 0
+counter moq_relay_sessions_failed_total{kind="expired",tier="edge"} 0
+counter moq_relay_sessions_failed_total{kind="idle_timeout",tier="edge"} 0
+counter moq_relay_sessions_failed_total{kind="transport",tier="edge"} 0
 counter moq_relay_sessions_opened_total{tier="edge"} 1
 counter moq_relay_sessions_refused_total{reason="expired"} 0
 counter moq_relay_sessions_refused_total{reason="forbidden"} 0
@@ -1653,14 +1762,14 @@ counter moq_relay_sessions_refused_total{reason="lan"} 0
 counter moq_relay_sessions_refused_total{reason="refused"} 0
 counter moq_relay_sessions_refused_total{reason="request"} 0
 counter moq_relay_sessions_refused_total{reason="unavailable"} 1
-counter moq_relay_stale_bytes_total{tier="edge",role="publisher"} 0
-counter moq_relay_stale_bytes_total{tier="edge",role="subscriber"} 0
-counter moq_relay_stale_datagrams_total{tier="edge",role="publisher"} 0
-counter moq_relay_stale_datagrams_total{tier="edge",role="subscriber"} 0
-counter moq_relay_stale_frames_total{tier="edge",role="publisher"} 0
-counter moq_relay_stale_frames_total{tier="edge",role="subscriber"} 0
-counter moq_relay_stale_groups_total{tier="edge",role="publisher"} 0
-counter moq_relay_stale_groups_total{tier="edge",role="subscriber"} 0
+counter moq_relay_stale_bytes_total{role="publisher",tier="edge"} 0
+counter moq_relay_stale_bytes_total{role="subscriber",tier="edge"} 0
+counter moq_relay_stale_datagrams_total{role="publisher",tier="edge"} 0
+counter moq_relay_stale_datagrams_total{role="subscriber",tier="edge"} 0
+counter moq_relay_stale_frames_total{role="publisher",tier="edge"} 0
+counter moq_relay_stale_frames_total{role="subscriber",tier="edge"} 0
+counter moq_relay_stale_groups_total{role="publisher",tier="edge"} 0
+counter moq_relay_stale_groups_total{role="subscriber",tier="edge"} 0
 counter moq_relay_stun_dropped_total{reason="capacity"} 0
 counter moq_relay_stun_dropped_total{reason="global"} 0
 counter moq_relay_stun_dropped_total{reason="invalid"} 0
@@ -1668,14 +1777,14 @@ counter moq_relay_stun_dropped_total{reason="io"} 0
 counter moq_relay_stun_dropped_total{reason="source"} 0
 counter moq_relay_stun_io_errors_total{} 0
 counter moq_relay_stun_replies_total{} 0
-counter moq_relay_subscriptions_closed_total{tier="edge",role="publisher"} 0
-counter moq_relay_subscriptions_closed_total{tier="edge",role="subscriber"} 0
-counter moq_relay_subscriptions_opened_total{tier="edge",role="publisher"} 0
-counter moq_relay_subscriptions_opened_total{tier="edge",role="subscriber"} 0
-counter moq_relay_viewers_closed_total{tier="edge",role="publisher"} 0
-counter moq_relay_viewers_closed_total{tier="edge",role="subscriber"} 0
-counter moq_relay_viewers_opened_total{tier="edge",role="publisher"} 0
-counter moq_relay_viewers_opened_total{tier="edge",role="subscriber"} 0
+counter moq_relay_subscriptions_closed_total{role="publisher",tier="edge"} 0
+counter moq_relay_subscriptions_closed_total{role="subscriber",tier="edge"} 0
+counter moq_relay_subscriptions_opened_total{role="publisher",tier="edge"} 0
+counter moq_relay_subscriptions_opened_total{role="subscriber",tier="edge"} 0
+counter moq_relay_viewers_closed_total{role="publisher",tier="edge"} 0
+counter moq_relay_viewers_closed_total{role="subscriber",tier="edge"} 0
+counter moq_relay_viewers_opened_total{role="publisher",tier="edge"} 0
+counter moq_relay_viewers_opened_total{role="subscriber",tier="edge"} 0
 counter moq_relay_wire_rx_bytes_total{tier="edge"} 0
 counter moq_relay_wire_tx_bytes_total{tier="edge"} 0
 gauge moq_relay_accept_stalled_seconds{listener="tcp"} 0
@@ -1722,30 +1831,30 @@ counter moq_relay_uring_tx_sends_total{worker="0"} 0
 counter moq_relay_uring_tx_stalls_total{worker="0"} 0
 counter moq_relay_uring_wakes_total{worker="0"} 0
 gauge moq_relay_uring_timers_active{worker="0"} 0
-histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="0"} 0
-histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="1"} 0
-histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="128"} 0
-histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="16"} 0
-histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="2"} 0
-histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="256"} 0
-histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="32"} 0
-histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="4"} 0
-histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="64"} 0
-histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="8"} 0
-histogram moq_relay_uring_cqes_per_enter_bucket{worker="0",le="inf"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{le="0",worker="0"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{le="1",worker="0"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{le="128",worker="0"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{le="16",worker="0"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{le="2",worker="0"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{le="256",worker="0"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{le="32",worker="0"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{le="4",worker="0"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{le="64",worker="0"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{le="8",worker="0"} 0
+histogram moq_relay_uring_cqes_per_enter_bucket{le="inf",worker="0"} 0
 histogram moq_relay_uring_cqes_per_enter_count{worker="0"} 0
 histogram moq_relay_uring_cqes_per_enter_sum{worker="0"} 0
-histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="0"} 0
-histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="1"} 0
-histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="128"} 0
-histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="16"} 0
-histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="2"} 0
-histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="256"} 0
-histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="32"} 0
-histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="4"} 0
-histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="64"} 0
-histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="8"} 0
-histogram moq_relay_uring_sqes_per_enter_bucket{worker="0",le="inf"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{le="0",worker="0"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{le="1",worker="0"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{le="128",worker="0"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{le="16",worker="0"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{le="2",worker="0"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{le="256",worker="0"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{le="32",worker="0"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{le="4",worker="0"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{le="64",worker="0"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{le="8",worker="0"} 0
+histogram moq_relay_uring_sqes_per_enter_bucket{le="inf",worker="0"} 0
 histogram moq_relay_uring_sqes_per_enter_count{worker="0"} 0
 histogram moq_relay_uring_sqes_per_enter_sum{worker="0"} 0
 "#;

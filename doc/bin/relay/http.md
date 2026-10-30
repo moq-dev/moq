@@ -42,9 +42,9 @@ listen = "127.0.0.1:9101"
 
 ### GET /metrics
 
-Prometheus text: payload bytes, frames, groups, announces, subscriptions, and
-viewers split by `tier` and `role`; requests and sessions by `tier`; and
-accept-loop counters per TCP listener. Payload counters accumulate for the
+OpenMetrics text, which Prometheus scrapes natively: payload bytes, frames,
+groups, announces, subscriptions, and viewers split by `tier` and `role`;
+requests and sessions by `tier`; and accept-loop counters per TCP listener. Payload counters accumulate for the
 node's lifetime and leave out the stats feed's own traffic. Every counter fed by
 sessions and requests, through the wire and control bytes below, counts only
 while [stats](/bin/relay/config#stats) are enabled. Host CPU and memory belong
