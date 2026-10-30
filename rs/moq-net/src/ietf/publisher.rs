@@ -3473,7 +3473,7 @@ impl Publisher {
 				accepted: false,
 				previous: None,
 				queued: false,
-				pending: Some(NamespacePending::Writing),
+				pending: Some(NamespacePending::Writing { _auth: None }),
 				waiter: None,
 			},
 		);
@@ -3591,8 +3591,9 @@ impl Publisher {
 		}
 
 		// Keep one buffered update until the peer answers it.
-		request.pending = Some(NamespacePending::Writing);
-		request.auth = auth;
+		request.pending = Some(NamespacePending::Writing {
+			_auth: std::mem::replace(&mut request.auth, auth),
+		});
 		watch.sent = advert;
 		// Marked woken, so the loop's next pass reads the answer it may already have.
 		ns.woken.suffixes.lock().unwrap().push(suffix);
@@ -3623,7 +3624,7 @@ impl Publisher {
 				Poll::Pending => continue,
 				Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
 				Poll::Ready(Ok(())) => {
-					if matches!(request.pending, Some(NamespacePending::Writing)) {
+					if matches!(request.pending, Some(NamespacePending::Writing { .. })) {
 						let deadline = now + ADVERTISE_TIMEOUT;
 						request.pending = Some(NamespacePending::Answer(deadline));
 						inflight.push_back((deadline, suffix.clone()));
@@ -3646,8 +3647,8 @@ impl Publisher {
 		}
 		while let Some((deadline, suffix)) = inflight.front() {
 			let current = matches!(
-				requests.get(suffix).and_then(|request| request.pending),
-				Some(NamespacePending::Answer(at)) if at == *deadline
+				requests.get(suffix).and_then(|request| request.pending.as_ref()),
+				Some(NamespacePending::Answer(at)) if at == deadline
 			);
 			if current && now < *deadline {
 				break;
@@ -5687,9 +5688,11 @@ struct NamespaceRequest {
 }
 
 /// A message's answer deadline begins only once its bytes reach the transport.
-#[derive(Clone, Copy)]
 enum NamespacePending {
-	Writing,
+	/// Keep the previous credential presented until the update leaves the buffer.
+	Writing {
+		_auth: Option<crate::auth::Credential>,
+	},
 	Answer(crate::time::Instant),
 }
 
@@ -16133,9 +16136,7 @@ mod tests {
 		assert_eq!(occurrences(&log, &update), 1, "only the one update was attempted");
 	}
 
-	/// The peer granting a stream is only half the exchange. One it accepts and then never
-	/// answers on wedges the loop exactly as a parked open does, so the response is bounded
-	/// too: everything queued behind it is otherwise stranded for the session.
+	/// A peer that never answers one advertisement must not hold the next namespace back.
 	#[moq_clock::test]
 	async fn a_silent_answer_still_lets_the_next_namespace_be_advertised() {
 		const VERSION: Version = Version::Draft18;
@@ -16161,16 +16162,9 @@ mod tests {
 		);
 
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..200 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, b"first-cam") > 0 && occurrences(&log, b"second-cam") > 0 {
-				break;
-			}
-			tick().await;
-		}
+		assert!(futures::poll!(run.as_mut()).is_pending());
 
-		// Whichever went first is the one that stalled, so both having reached the wire is
-		// the proof: the loop gave up on the answer and carried on.
+		// Both leave before an answer deadline, without advancing simulated time.
 		assert!(
 			occurrences(&log, b"first-cam") > 0,
 			"the first advertisement never went out"
@@ -16196,6 +16190,7 @@ mod tests {
 					let origin = unheld_origin();
 					let auth = crate::auth::Link::ietf(false);
 					let first = auth.present(bytes::Bytes::from_static(b"first"), false).unwrap();
+					let mut first_grant = first.grant();
 					let cam = origin
 						.announce("cam", crate::origin::Route::default().with_auth(first))
 						.unwrap();
@@ -16242,6 +16237,10 @@ mod tests {
 						cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
 						settle().await;
 						assert!(futures::poll!(run.as_mut()).is_pending());
+						assert!(
+							first_grant.poll_changed(&kio::Waiter::noop()).is_pending(),
+							"{version}: dropped the credential before its replacement flushed"
+						);
 					}
 					assert_eq!(log.writes.lock().unwrap().len(), window, "{version}, update={updating}");
 					if !answering {
@@ -16260,6 +16259,10 @@ mod tests {
 						"{version}, update={updating}, answering={answering}, partial={partial}"
 					);
 					assert_eq!(log.stops(), vec![super::super::error::CANCELLED]);
+					assert!(matches!(
+						first_grant.poll_changed(&kio::Waiter::noop()),
+						Poll::Ready(Err(Error::Cancel))
+					));
 					assert!(!log.trail().iter().any(|(_, sent)| matches!(sent, Sent::Finish)));
 				}
 			}
