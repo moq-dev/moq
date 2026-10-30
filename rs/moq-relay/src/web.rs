@@ -1228,6 +1228,7 @@ mod tests {
 	use super::*;
 
 	/// The state an acceptor built outside [`Web::serve`] hands a `tls://` session.
+	#[cfg(all(feature = "websocket", any(unix, windows)))]
 	fn acceptor_state() -> Arc<WebState> {
 		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
 		let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
