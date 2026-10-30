@@ -98,6 +98,12 @@ Coroutine read_one(std::shared_ptr<moq::TrackConsumer> consumer, std::optional<m
 }
 #endif
 
+// Only the defaults carry moq-net's zero max delay; a bare record sets no subscriber limit.
+void subscription_defaults() {
+    CHECK(moq::subscription_defaults().max_delay == std::chrono::nanoseconds::zero());
+    CHECK(!moq::Subscription{}.max_delay.has_value());
+}
+
 // Exercise the installed audio publisher and consumer rather than only generated signatures.
 void audio_roundtrip() {
     auto broadcast = ok(moq::BroadcastProducer::init(), "audio broadcast");
@@ -172,6 +178,7 @@ void audio_roundtrip() {
 } // namespace
 
 int main() {
+    subscription_defaults();
     audio_roundtrip();
     auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
     auto timebase_other = ok(moq::BroadcastProducer::init(), "timebase other");

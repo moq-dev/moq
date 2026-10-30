@@ -708,8 +708,6 @@ async fn serve_connection(
 	serve: Serve,
 	lifecycle: &Lifecycle,
 ) -> anyhow::Result<Supervision> {
-	use web_transport_trait::poll::Session as _;
-
 	// The endpoint started this deadline at the connection's first packet and
 	// enforced it through the QUIC handshake; it covers SETUP OK too.
 	let mut deadline = Deadline::new(&handle, &conn);

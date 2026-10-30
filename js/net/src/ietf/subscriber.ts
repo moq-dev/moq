@@ -135,14 +135,17 @@ type SubscribeSetupState = {
 type Announced = { adverts: { id: number; route: Route }[]; route: Route };
 
 /** A local announce reader's filter: its scope, the prefix it asked for, and its hidden opt-in. */
-type Filter = { scope: Path.Pattern; prefix: Path.Valid; hidden: boolean };
+type Filter = { scope: Path.Pattern; prefix: Path.Valid; hidden: boolean; covering: boolean };
 
 /** A local announce reader: its filter, and what settles once its request is off the wire. */
 type Asking = Filter & { gone?: Promise<void> };
 
 /** Whether a reader with `filter` sees an announcement at `path`. */
 function sees(filter: Filter, path: Path.Valid): boolean {
-	return scopeOverlaps(filter.scope, path) && (filter.hidden || !hiddenBelow(filter.prefix, path));
+	return (
+		(filter.covering ? scopeOverlaps(filter.scope, path) : filter.scope.matches(path)) &&
+		(filter.hidden || !hiddenBelow(filter.prefix, path))
+	);
 }
 
 /**
@@ -153,7 +156,6 @@ function sees(filter: Filter, path: Path.Valid): boolean {
  */
 export class Subscriber {
 	#session: Session;
-	#localClose = false;
 
 	// The transport, so a request cut off by the session's close ends with the session's
 	// error. Optional for tests that drive a bare session.
@@ -217,11 +219,6 @@ export class Subscriber {
 	// the peer answers, which allows everything.
 	#grant?: Getter<Grant | undefined>;
 	#auth?: AuthSession;
-
-	/** Marks this subscriber's deliberate local session close. @internal */
-	close() {
-		this.#localClose = true;
-	}
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -340,13 +337,21 @@ export class Subscriber {
 	 * understands it (MoQ Hidden); the rule is also applied here, since an unsolicited
 	 * PUBLISH_NAMESPACE or a peer that never heard of it hides nothing.
 	 *
+	 * Only routes whose literal name matches `scope` are reported, unless `options.covering`
+	 * also asks for those whose subtree overlaps it.
+	 *
 	 * The request goes out once every overlapping request already closed here is off the
 	 * wire, so a peer that refuses overlapping requests never sees this one beside them.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		// The wire speaks announce interest by prefix.
 		const prefix = scopeHead(scope);
-		const filter: Asking = { scope, prefix, hidden: options?.hidden ?? false };
+		const filter: Asking = {
+			scope,
+			prefix,
+			hidden: options?.hidden ?? false,
+			covering: options?.covering ?? false,
+		};
 
 		// The overlapping requests on their way out, such as the narrower ones an exclusive
 		// discovery just closed for this one. Those still open overlap it only where the
@@ -979,8 +984,7 @@ export class Subscriber {
 		} catch (err) {
 			stream.abort(err);
 			const e = await sessionCause(this.#quic, err);
-			if (this.#localClose) hooks.releaseTrack(producer);
-			else producer.abort(e);
+			producer.abort(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);

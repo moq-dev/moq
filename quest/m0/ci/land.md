@@ -48,8 +48,8 @@ Decided 2026-10-26 (maintainer):
   it can neither guarantee the tested tree nor resolve quest-file conflicts.
 - One self-hosted runner stays the gate. This replaces the planned second
   queue runner (`queue-concurrency.md`, deleted).
-- The engine is `quest land` in kixelated/quest, shared with kixelated/quest,
-  moq.pro, and kixelated/rust2. This repository adds a thin workflow, as
+- The engine is `quest land` in moq-dev/quest, shared with moq-dev/quest,
+  moq.pro, and moq-dev/rust2. This repository adds a thin workflow, as
   moq.pro's `gate.yml` and `queue.yml` do today.
 - The gate lands by fast-forward. For each PR it writes the squash commit
   onto the chain, with the engine's default message, and resolves quest-file conflicts
@@ -60,7 +60,7 @@ Decided 2026-10-26 (maintainer):
   exactly the tested one. A conflict outside `quest/` ejects that PR, and so
   does a fork branch that blocks maintainer edits, whose head the engine
   cannot move: it is ejected as `no_maintainer_edits`
-  ([kixelated/quest#229](https://github.com/kixelated/quest/pull/229)).
+  ([moq-dev/quest#229](https://github.com/moq-dev/quest/pull/229)).
 - Batches take every queued PR, with no size constant. On failure the gate
   tests the first half. A passing prefix lands at once and the rest
   continues. A PR that fails alone is ejected with a comment linking the

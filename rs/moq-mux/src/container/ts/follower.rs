@@ -201,6 +201,10 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 							return Poll::Pending;
 						}
 					};
+					// Ending abandons the catalog switch; a return of this instance reuses its source.
+					if switching.is_some() {
+						self.export.source().priority(0)?;
+					}
 					// Nor did one whose catalog ended before its first snapshot.
 					if let Some(missing) = awaiting {
 						self.state = self.withdrawn(missing);
@@ -283,12 +287,15 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	/// export carried on into it.
 	///
 	/// The old instance keeps playing until the replacement's catalog is subscribed, however long
-	/// that takes, and a replacement that goes first is no switch.
+	/// that takes, and a replacement that goes first is no switch. The old program's track
+	/// subscriptions yield priority while acquiring the replacement.
 	fn poll_switch(&mut self, waiter: &kio::Waiter, switching: &mut Option<Subscription<E>>) -> crate::Result<bool> {
 		let target = match &self.serving {
 			Serving::Other(target) if self.stitch && !self.refused => target,
 			_ => {
-				*switching = None;
+				if switching.take().is_some() {
+					self.export.source().priority(0)?;
+				}
 				return Ok(false);
 			}
 		};
@@ -297,6 +304,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			.is_some_and(|switching| switching.target.is_clone(target))
 		{
 			tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new instance");
+			self.export.source().priority(-1)?;
 			*switching = Some(self.subscribe(target.clone()));
 		}
 		let subscription = switching.as_mut().expect("just set");
@@ -311,6 +319,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 				tracing::warn!(path = %self.path, %err, "replacement went before its catalog subscribed");
 				*switching = None;
 				self.refused = true;
+				self.export.source().priority(0)?;
 				Ok(false)
 			}
 			// The replacement would not serve, so the switch fails loud.
