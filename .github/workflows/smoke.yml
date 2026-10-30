@@ -559,8 +559,9 @@ jobs:
           path: runner-upstream
           persist-credentials: false
 
-      # Any failed pair or setup step fails the job. A complete run still writes
-      # its report first, since a failing run is the one worth looking at.
+      # Only moq-dev clients against this checkout's relay gate the job, plus any
+      # setup step; the other pairs are reported only. A complete run still
+      # writes its report first, since a failing run is the one worth looking at.
       - name: Run upstream Docker matrices
         run: just runner "$GITHUB_WORKSPACE/runner-upstream" "$GITHUB_WORKSPACE/interop-runner-report"
 

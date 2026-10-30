@@ -185,7 +185,7 @@ async def _catalog_with_media(consumer: moq.BroadcastConsumer) -> moq.media.Cata
 async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> None:
     # Watch the exact path before resolving it, retaining END while media drains.
     async with client.announced(broadcast) as announcements:
-        async with client.announced_broadcast(broadcast) as announced:
+        async with client.follow(broadcast) as announced:
             consumer = await announced
             async with await moq.media.CatalogConsumer.subscribe(consumer) as catalogs:
                 async for catalog in catalogs:
@@ -228,7 +228,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
         else:
             raise RuntimeError("announcement stream ended before broadcast END")
 
-    async with client.announced_broadcast(f"{broadcast}.health") as announced_health:
+    async with client.follow(f"{broadcast}.health") as announced_health:
         health = await announced_health
         async with await health.subscribe_track("live") as live:
             seen = False
@@ -299,7 +299,7 @@ async def subscribe(
             await asyncio.wait_for(_finish_subscribe(client, broadcast, frames), timeout)
             return
         assert audio_out is not None and audio_ms is not None
-        consumer = await asyncio.wait_for(client.announced_broadcast(broadcast), timeout)
+        consumer = await asyncio.wait_for(client.follow(broadcast), timeout)
         catalog = await asyncio.wait_for(_catalog_with_media(consumer), timeout)
 
         id, video = next(iter(catalog.video.items()))

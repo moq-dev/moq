@@ -197,9 +197,21 @@ const DEATH_VERSIONS: &[&str] = &[
 /// The error the publisher's session is aborted with, carried in the close code.
 const DEATH: moq_net::SessionError = moq_net::SessionError::App(7);
 
-/// Kill the publisher's session with a group still open, and return the error the
-/// subscriber's `recv_group` ends with once it drains what arrived.
-async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<moq_net::Error>) {
+/// How [`killed`] ends the session.
+#[derive(Clone, Copy)]
+enum Kill {
+	/// The publisher aborts with [`DEATH`].
+	Death,
+	/// The publisher closes its transport cleanly. Not [`moq_net::Session::close`], whose
+	/// drain withdraws the broadcast first, so a fetch would lose its route instead.
+	RemoteClose,
+	/// The subscriber closes cleanly.
+	LocalClose,
+}
+
+/// End the session with a group still open, and return the errors the subscriber's
+/// `recv_group` and that group end with once it drains what arrived.
+async fn killed(version: &str, kill: Kill) -> (Option<moq_net::Error>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
@@ -255,10 +267,10 @@ async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<m
 	group.write_frame(Timestamp::ZERO, HEAD[0]).unwrap();
 	settle().await;
 
-	if local {
-		client.clone().close().await.expect("local close");
-	} else {
-		server.abort(moq_net::Error::Session(DEATH));
+	match kill {
+		Kill::Death => server.abort(moq_net::Error::Session(DEATH)),
+		Kill::RemoteClose => server.abort(moq_net::Error::Cancel),
+		Kill::LocalClose => client.clone().close().await.expect("local close"),
 	}
 	let err = reader.await.expect("reader panicked");
 	drop((client, server, group, track, broadcast, publisher, subscriber));
@@ -270,7 +282,7 @@ async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<m
 #[moq_clock::test]
 async fn a_session_death_ends_the_track_with_its_error() {
 	for version in DEATH_VERSIONS {
-		let (err, group_end) = moq_clock::timeout(TIMEOUT, killed(version, false))
+		let (err, group_end) = moq_clock::timeout(TIMEOUT, killed(version, Kill::Death))
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the track never ended"));
 		assert!(
@@ -284,12 +296,78 @@ async fn a_session_death_ends_the_track_with_its_error() {
 	}
 }
 
+/// A clean close cuts off the track and its open group with a cancelled session, and a
+/// local close reads exactly as the remote one does.
 #[moq_clock::test]
-async fn a_local_session_close_ends_the_track_cleanly() {
+async fn a_session_close_cancels_the_track_from_either_side() {
 	for version in DEATH_VERSIONS {
-		let (err, _) = moq_clock::timeout(TIMEOUT, killed(version, true))
-			.await
-			.expect("the track never ended");
-		assert!(err.is_none(), "{version}: local close ended with {err:?}");
+		for kill in [Kill::RemoteClose, Kill::LocalClose] {
+			let (err, group_end) = moq_clock::timeout(TIMEOUT, killed(version, kill))
+				.await
+				.unwrap_or_else(|_| panic!("{version}: the track never ended"));
+			let cancelled = |err: &Option<moq_net::Error>| {
+				matches!(err, Some(moq_net::Error::Session(moq_net::SessionError::Cancel)))
+			};
+			assert!(cancelled(&err), "{version}: the track ended with {err:?}");
+			assert!(cancelled(&group_end), "{version}: the group ended with {group_end:?}");
+		}
+	}
+}
+
+/// End the session while a FETCH waits on a publisher that never answers it, and return
+/// the error the fetch ends with.
+async fn fetch_killed(version: &str, kill: Kill) -> moq_net::Error {
+	let publisher = produce_origin(1);
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let mut dynamic = broadcast.requests();
+	broadcast.announce(Default::default()).unwrap();
+
+	let subscriber = produce_origin(2);
+	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(subscriber.clone());
+	let MockPair { client, server, .. } = connect_mock(options).await;
+
+	let remote = subscriber
+		.consume()
+		.follow("bcast", None)
+		.unwrap()
+		.available()
+		.await
+		.expect("broadcast resolves");
+	let mut fetching = moq_clock::sim::spawn(async move { remote.track("video").unwrap().fetch_group(0, None).await });
+
+	let request = dynamic.requested_track().await.expect("the track request arrives");
+	let groups = request.requests();
+	let track = request.accept(timed());
+	let fill = groups.requested_fill().await.expect("the fetch arrives");
+
+	match kill {
+		Kill::Death => server.abort(moq_net::Error::Session(DEATH)),
+		Kill::RemoteClose => server.abort(moq_net::Error::Cancel),
+		Kill::LocalClose => client.clone().close().await.expect("local close"),
+	}
+	let err = (&mut fetching)
+		.await
+		.expect("fetch panicked")
+		.err()
+		.expect("the unanswered fetch succeeded");
+	drop((client, server, fill, track, groups, broadcast, publisher, subscriber));
+	err
+}
+
+/// A FETCH cut off by a clean close ends as a cancelled session, whichever side closed.
+#[moq_clock::test]
+async fn a_session_close_cancels_a_pending_fetch_from_either_side() {
+	for version in ["moq-lite-05", "moq-lite-07-wip"] {
+		for kill in [Kill::RemoteClose, Kill::LocalClose] {
+			let err = moq_clock::timeout(TIMEOUT, fetch_killed(version, kill))
+				.await
+				.unwrap_or_else(|_| panic!("{version}: the fetch never ended"));
+			assert!(
+				matches!(err, moq_net::Error::Session(moq_net::SessionError::Cancel)),
+				"{version}: the fetch ended with {err:?}"
+			);
+		}
 	}
 }

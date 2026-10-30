@@ -37,16 +37,16 @@ impl Grouped for quic::web::Session {
 		Some(quic::web::Session::streams_evicted(self))
 	}
 
-	fn send_group(&mut self, priority: i64) -> Option<quic::SendGroup> {
+	fn send_group(&mut self, priority: i64) -> Option<quic::send::Group> {
 		Some(quic::web::Session::send_group(self, priority))
 	}
 
 	fn send_datagram(
 		&mut self,
 		payload: bytes::Bytes,
-		options: moq_net::transport::poll::SendOptions<'_, quic::SendGroup>,
+		options: moq_net::transport::poll::SendOptions<'_, quic::send::Group>,
 	) -> Result<(), Self::Error> {
-		let options = quic::SendOptions {
+		let options = quic::send::Options {
 			group: options.group,
 			priority: options.priority,
 		};
@@ -56,7 +56,7 @@ impl Grouped for quic::web::Session {
 
 #[cfg(feature = "quic")]
 impl GroupedSend for quic::web::SendStream {
-	type Group = quic::SendGroup;
+	type Group = quic::send::Group;
 
 	fn set_group(&mut self, group: &Self::Group) {
 		quic::web::SendStream::set_group(self, Some(group));
@@ -68,16 +68,16 @@ impl GroupedSend for quic::web::SendStream {
 }
 
 #[cfg(feature = "quic")]
-impl moq_net::transport::poll::SendGroup for quic::SendGroup {
+impl moq_net::transport::poll::SendGroup for quic::send::Group {
 	fn set_priority(&mut self, priority: i64) {
-		quic::SendGroup::set_priority(self, priority)
+		quic::send::Group::set_priority(self, priority)
 	}
 }
 
 #[cfg(feature = "quic")]
 impl moq_net::transport::poll::RecvStream for quic::web::RecvStream {
 	type Error = adapter::Error<quic::Error>;
-	type Lease<'a> = quic::Lease<'a>;
+	type Lease<'a> = quic::recv::Lease<'a>;
 
 	fn poll_lease(
 		&mut self,
@@ -95,14 +95,14 @@ impl moq_net::transport::poll::RecvStream for quic::web::RecvStream {
 }
 
 #[cfg(feature = "quic")]
-impl moq_net::transport::poll::Lease for quic::Lease<'_> {
+impl moq_net::transport::poll::Lease for quic::recv::Lease<'_> {
 	fn is_fin(&self) -> bool {
-		quic::Lease::is_fin(self)
+		quic::recv::Lease::is_fin(self)
 	}
 	fn chunks(&self) -> impl Iterator<Item = &[u8]> {
-		quic::Lease::chunks(self)
+		quic::recv::Lease::chunks(self)
 	}
 	fn release(self) {
-		quic::Lease::release(self)
+		quic::recv::Lease::release(self)
 	}
 }

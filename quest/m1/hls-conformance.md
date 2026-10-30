@@ -16,8 +16,7 @@ From the 2026-10-24 moq-hls audit, which found no player-level HLS or DASH
 coverage. Decided with the maintainer on 2026-10-24:
 
 - ffprobe conformance lands in m1, so it validates the
-  Catalog HLS field redesign and the
-  [fixed target duration](/quest/m1/archive/hls-target.md) before the cut. A
+  Catalog HLS field redesign and the fixed target duration before the cut. A
   browser player test follows in m2
   ([HLS and DASH browser playback](/quest/m2/hls-player-test.md)).
 - Cover a sliding window that evicts segments, a GOP that overruns the
@@ -29,10 +28,6 @@ coverage. Decided with the maintainer on 2026-10-24:
 - Runs nightly; move any part fast enough into the merge gate.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - the run-wide target this asserts
 
 ## Related
 

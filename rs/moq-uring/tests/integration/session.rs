@@ -113,11 +113,7 @@ fn lite_session_over_the_worker() {
 			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
 				.await
 				.expect("quic connect");
-			assert_eq!(
-				web_transport_trait::poll::Session::protocol(&conn),
-				Some(ALPN),
-				"negotiated ALPN"
-			);
+			assert_eq!(conn.protocol(), Some(ALPN), "negotiated ALPN");
 
 			let (session, driver) = moq_net::Client::new()
 				.with_subscriber(sub.clone())
@@ -356,11 +352,7 @@ fn configured_roots_verify_the_server() {
 			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
 				.await
 				.expect("quic connect");
-			assert_eq!(
-				web_transport_trait::poll::Session::protocol(&conn),
-				Some(ALPN),
-				"negotiated ALPN"
-			);
+			assert_eq!(conn.protocol(), Some(ALPN), "negotiated ALPN");
 		})
 		.expect("worker");
 }
@@ -424,8 +416,8 @@ fn required_client_auth_refuses_an_anonymous_client() {
 				// The dial itself was refused; done.
 				Err(_) => {}
 				// Established locally, but the server's refusal closes it.
-				Ok(mut conn) => {
-					std::future::poll_fn(|cx| web_transport_trait::poll::Session::poll_closed(&mut conn, cx)).await;
+				Ok(conn) => {
+					conn.closed().await;
 				}
 			}
 		})
@@ -479,11 +471,7 @@ fn a_root_bundle_is_loaded_whole() {
 			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
 				.await
 				.expect("quic connect");
-			assert_eq!(
-				web_transport_trait::poll::Session::protocol(&conn),
-				Some(ALPN),
-				"negotiated ALPN"
-			);
+			assert_eq!(conn.protocol(), Some(ALPN), "negotiated ALPN");
 		})
 		.expect("worker");
 }
