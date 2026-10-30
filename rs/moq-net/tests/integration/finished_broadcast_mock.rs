@@ -55,14 +55,14 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
+	// Resolved before the ending starts: a SUBSCRIBE sent alongside its TRACK reaches the
+	// publisher before the subscriber has the TRACK_INFO it accepts the track with.
+	let subscription = moq_net::track::Subscription::default().with_range(0..);
+	let mut sub = moq_clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(subscription))
+		.await
+		.expect("subscribe timeout")
+		.expect("subscribe");
 	let reader = moq_clock::sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default().with_range(0..);
-		let mut sub = remote
-			.track("video")
-			.unwrap()
-			.subscribe(subscription)
-			.await
-			.expect("subscribe");
 		let mut got = Vec::new();
 		loop {
 			let mut group = match sub.recv_group().await {

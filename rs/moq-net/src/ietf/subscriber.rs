@@ -13331,12 +13331,23 @@ mod stitch_tests {
 				original.push(datagram);
 			}
 			track.finish().unwrap();
-			let (served, _sessions) = match hop {
+			let (served, _sessions, _copy) = match hop {
 				true => {
 					let (served, sessions) = crate::lite::ietf::test_hop(&origin, "room", [true, true]).await;
-					(served, Some(sessions))
+					// The hop learns the track's info first, and holds the copy for the SUBSCRIBE
+					// below: a SUBSCRIBE sent alongside the TRACK has the cache replayed as
+					// datagrams before the TRACK_INFO they are read with, and they are dropped.
+					let copy = served
+						.consume()
+						.request("room", None)
+						.await
+						.unwrap()
+						.track("video")
+						.unwrap();
+					copy.info().await.unwrap();
+					(served, Some(sessions), Some(copy))
 				}
-				false => (origin, None),
+				false => (origin, None, None),
 			};
 			let downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
 			let peer = peer::PeerSetup::default();

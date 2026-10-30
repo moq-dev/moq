@@ -119,7 +119,9 @@ fn serving_max_delay(version: Version, requested: Duration) -> Option<Duration> 
 /// must not read as a request to replay the whole cache on join.
 ///
 /// `latest` is the newest group when the SUBSCRIBE arrived, not once the subscription
-/// resolved: anything written in between is newer, so it is delivered.
+/// resolved: anything written in between is newer, so it is delivered. On lite-05, a
+/// SUBSCRIBE sent alongside its TRACK can arrive before the track resolves, when no group
+/// is known yet: the newest once it resolves stands in, as it would for one sent after.
 fn cursor_floor(version: Version, start_group: Option<u64>, latest: Option<u64>) -> u64 {
 	if version.resolves_start() || start_group.is_some() {
 		return 0;
@@ -1838,6 +1840,8 @@ impl Request for TrackInfoServe {
 		let info = ready!(self.querying.poll_ok(waiter))?;
 		crate::ietf::flate::egress(&info, shared.version.has_compression())?;
 
+		// Ahead of the track's groups, which a subscriber holds unread until it lands.
+		writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise).
 		writer.buffer(&lite::TrackInfo::serve(&info, shared.version, ietf))?;
 		if ietf {
@@ -2100,6 +2104,10 @@ impl Request for SubscribeServe {
 						ietf,
 					};
 
+					let latest = match shared.version.has_track_stream() {
+						true => latest.or_else(|| track.latest_sequence()),
+						false => latest,
+					};
 					let floor = cursor_floor(shared.version, bounds.groups().start(), latest);
 					let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
 					if let Some(update) = update {
@@ -8066,6 +8074,59 @@ mod tests {
 				"{version:?}: the request was not refused"
 			);
 		}
+	}
+
+	/// TRACK_INFO goes out ahead of every group stream, the most urgent included: a subscriber
+	/// that sent its SUBSCRIBE alongside holds the groups that beat it unread.
+	#[moq_clock::test]
+	async fn track_info_outranks_the_track_groups() {
+		let version = Version::Lite07;
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		let _track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
+		peer_setup.set(crate::lite::Setup::default());
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let publisher = Publisher::new(PublisherConfig {
+			estimate: kio::Producer::default().weak(),
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(ScriptedSession::new(Vec::new())),
+			origin: origin.consume(),
+			version,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+			subscriptions: Default::default(),
+			auth: crate::auth::Link::new(false),
+			peer_grant: Default::default(),
+			client: false,
+		});
+
+		let mut script = Vec::new();
+		lite::Track {
+			epoch: None,
+			broadcast: crate::Path::from_static("room"),
+			track: "video".into(),
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
+		.unwrap();
+		let session = ScriptedSession::new(script);
+		let (send, recv) = kio::wait(|waiter| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&session, waiter, Default::default())
+		})
+		.await
+		.unwrap();
+		let stream = Stream::<Transport, Version> {
+			writer: Writer::new(crate::transport::boxed::SendStream::new(send), version),
+			reader: crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+		};
+		let mut serve = RequestServe::<TrackInfoServe>::new(publisher.shared.clone(), stream);
+		assert!(!drive(&mut serve).await, "the TRACK stream is held");
+
+		let top = i64::from(PriorityHandle::send_order_of(0));
+		assert_eq!(session.log.priorities(), [crate::coding::TRACK_INFO_SEND_ORDER]);
+		assert!(crate::coding::TRACK_INFO_SEND_ORDER > top);
 	}
 
 	/// An answered TRACK stream holds its track until the requester closes its side, by
