@@ -22,6 +22,9 @@ pub struct AudioInit {
 	/// [`Legacy`](hang::catalog::Container::Legacy) unless selected. A video rendition carries the
 	/// same knob on its [`VideoInit::hint`].
 	pub container: hang::catalog::Container,
+	/// The maximum bitrate in bits per second, for an encoder that knows it. Supplied, it replaces
+	/// any value the init bytes give and is never estimated.
+	pub bitrate: Option<u64>,
 }
 
 impl AudioInit {
@@ -32,6 +35,7 @@ impl AudioInit {
 			data: data.into(),
 			label: None,
 			container: hang::catalog::Container::default(),
+			bitrate: None,
 		}
 	}
 }

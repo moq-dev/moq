@@ -49,8 +49,11 @@ using Clock = std::chrono::steady_clock;
 
 constexpr size_t READ_CHUNK = 64 * 1024;
 
-// SubscribeMedia max delay: how much reordering the jitter buffer tolerates.
-constexpr std::chrono::nanoseconds MAX_DELAY = std::chrono::seconds(1);
+// How far a read may fall behind live before it skips. A gap fails the run, which a reader skipping
+// behind live would cause itself: the matrix starts every subscriber at once, and a runtime starved
+// by the others can fall a second behind. That is this reader's speed, not the delivery under test.
+// A track's max-age caps it, so interop.sh's Rust publisher keeps its media at least this long.
+constexpr std::chrono::nanoseconds MAX_DELAY = std::chrono::seconds(5);
 
 // Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.
 constexpr const char *AUDIO_TRACK = "tone";
@@ -345,7 +348,7 @@ int subscribe(
     const auto read_deadline = finish
         ? Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(timeout))
         : deadline;
-    auto announced = ok(session->consume()->announced_broadcast(path), "announced_broadcast");
+    auto announced = ok(session->consume()->follow(path, std::nullopt), "follow");
     auto consumer = until(announced->available(), read_deadline, "available");
 
     // The catalog is a live track. A lazy publisher (e.g. the browser, which only encodes on
@@ -401,7 +404,7 @@ int subscribe(
             const auto *end = std::get_if<moq::AnnounceEvent::kEnd>(&event->get_variant());
             if (end && end->announce.prefix == path) break;
         }
-        auto watch = ok(session->consume()->announced_broadcast(path + ".health"), "health watch");
+        auto watch = ok(session->consume()->follow(path + ".health", std::nullopt), "health watch");
         auto health = until(watch->available(), read_deadline, "health available");
         auto track = until(health->subscribe_track("live", std::nullopt), read_deadline, "health subscribe");
         auto group = until(track->next_group(), read_deadline, "health group");

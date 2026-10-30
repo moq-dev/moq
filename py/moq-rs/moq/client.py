@@ -14,7 +14,7 @@ from moq_ffi import (
 )
 
 from ._records import Backoff, ClientTls, QuicConfig, WebSocketConfig, _implementation, _strs
-from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer, Publication
+from .origin import AnnounceConsumer, Following, OriginConsumer, OriginProducer, Publication
 from .session import Session
 from .subscribe import BroadcastConsumer
 
@@ -169,16 +169,19 @@ class Client:
         """
         return self._require_consumer().announced(prefix, filter=filter, hidden=hidden)
 
-    def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
+    def follow(self, path: str, *, epoch: str | None = None) -> Following:
         """Follow the broadcast at exactly ``path`` across its publisher instances.
 
-        See :meth:`OriginConsumer.announced_broadcast`.
+        See :meth:`OriginConsumer.follow`.
         """
-        return self._require_consumer().announced_broadcast(path)
+        return self._require_consumer().follow(path, epoch=epoch)
 
-    async def request_broadcast(self, path: str) -> BroadcastConsumer:
-        """Request a broadcast by path, resolving as soon as it can be served."""
-        return await self._require_consumer().request_broadcast(path)
+    async def request(self, path: str, *, epoch: str | None = None) -> BroadcastConsumer:
+        """Request the broadcast at ``path``, resolving one publisher instance as soon as it can be served.
+
+        See :meth:`OriginConsumer.request`.
+        """
+        return await self._require_consumer().request(path, epoch=epoch)
 
     def _require_publisher(self) -> OriginProducer:
         if self._publisher is None:

@@ -22,6 +22,8 @@ waiter-based polls when implementing `Future` or `poll_*` on top of kio channels
 work ready still yields to the rest of its runtime. `log::Writer` is an append-only
 log whose `log::Reader`s read committed entries by index without a lock, paired with
 a channel that parks them; evicted entries are freed by epoch-based reclamation.
+With the `macros` feature, `#[kio::machine]` writes a `poll_*` state machine from
+straight-line code with explicit waits.
 
 It's used internally by [moq-net](https://github.com/moq-dev/moq/tree/main/rs/moq-net) and friends, but is generic enough to be useful on its own.
 

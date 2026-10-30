@@ -144,7 +144,7 @@ struct Connection {
 
 	std::shared_ptr<moq::Client> client;
 	std::shared_ptr<moq::Session> session;
-	std::shared_ptr<moq::AnnouncedBroadcast> announced;
+	std::shared_ptr<moq::Following> announced;
 
 	// How many publisher instances `announced` has handed out; the newest is the one read.
 	uint64_t instance = 0;
@@ -417,7 +417,7 @@ static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<
 	// Wait for the broadcast to be announced. Announcements arrive over the session
 	// after it connects, so resolving against only what is announced *now* would race
 	// them and blank the source for a broadcast that is live.
-	auto announced = conn->session->consume()->announced_broadcast(conn->broadcast);
+	auto announced = conn->session->consume()->follow(conn->broadcast, std::nullopt);
 	if (!announced) {
 		LOG_ERROR("Failed to request broadcast '%s': %s", conn->broadcast.c_str(),
 			  announced.error().to_string().c_str());
