@@ -183,3 +183,28 @@ baseline backend. It also runs parity cases and per-call timings in `uniffi/` ag
 every relay, once normally and once under a strict CSP. It builds from a scratch
 checkout, since ubrn needs a UniFFI pin that does not land.
 [generator.md](generator.md) is the report that chose this binding.
+
+### Parity with `@moq/net`
+
+What `@moq/net`'s in-tree consumers (`js/hang`, `watch`, `publish`, `json`, `msf`,
+`e2ee`, `room`, `moq-boy`) use, against moq-ffi on wasm32. The model is largely there:
+announcements and `follow`, broadcasts, tracks and their demand, subscriptions and their
+updates, ordered groups, timed frames, datagrams, the bandwidth allocator, and
+cancellation. `uniffi/cases.ts` exercises the parts listed in its cases.
+
+Still missing or partial, by what the consumer does:
+
+| `@moq/net` | used by | moq-ffi on wasm32 |
+| --- | --- | --- |
+| `Connection` reconnects with backoff, and re-dials on a new `url` or `versions` | watch, publish, moq-boy | dials once; `backoff` is `Unsupported` |
+| WebSocket fallback when WebTransport is missing | watch, publish | WebTransport only; `websocket` is `Unsupported` |
+| `connection.probe` round trip and receive rate | watch, room | `stats()` reports little in the browser |
+| `group.closed`, `group.arrived`, `group.expired` | hang | none on `MoqGroupConsumer` |
+| frame `arrived` time | hang | `MoqFrame` carries no arrival time |
+| `group.tryReadFrame()` | hang | async `read_frame` only |
+| `abort(err: Error)` on a track or group | hang | `abort(code)` only |
+| `Time.Timestamp` in a track's timescale | hang, publish | microseconds only |
+| `Group.MAX_GROUP_CACHE_BYTES` and `_FRAMES` | json | not exported |
+
+Arrival times need the Rust and JS clocks to agree on origin and units first. Tokens and
+in-band AUTH are native-only too, but no consumer uses `Auth` today.
