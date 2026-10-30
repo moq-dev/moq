@@ -20,6 +20,14 @@ forward it on that same condition, falling back to Start or Restart.
 Keep the rest in m1 as a prerequisite of the lite-07 cut. moq-transport gets
 no counterpart, since [moq-transport carries no epoch](/quest/m1/ietf-epoch-cut.md)
 (decided 2026-10-28), so a moq-transport hop uses Start/Restart.
+
+Decided 2026-10-29 (maintainer, settling #6994): the event stays
+`Takeover { announce, predecessor }`, with `predecessor == announce.prefix`
+in place; the C ABI's `moq_announce_event` carries the predecessor fields
+rather than gaining an accessor; and a reader whose cursor saw a takeover
+withdrawn before delivery gets the claim's later answers as Start/Restart.
+JS continuity and epoch-bound requests through an adopted source moved here.
+
 What remains:
 
 - JS continuity. `js/net` decodes ANNOUNCE_TAKEOVER and keeps the Announce
@@ -34,7 +42,9 @@ What remains:
 - Epoch-bound requests through an adopted source. A Rust front or selection
   that adopts a takeover keeps the epochless upstream SUBSCRIBE it already
   sent; a later request naming the new epoch joins it without restamping.
-  Decide whether that join needs the upstream's answer to confirm the epoch.
+  This is accepted for now, since the answering worker is the instance by
+  construction. Decide whether that join needs the upstream's answer to
+  confirm the epoch.
 - Tests not yet written, with controlled time: a SUBSCRIBE or FETCH pending
   at the front between its resolve and the takeover (`PendingFront::via`),
   a takeover naming a predecessor already restarted (the `seen` stamps in
