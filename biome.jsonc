@@ -74,9 +74,8 @@
 	},
 	"overrides": [
 		{
-			// Production code reads time through @moq/clock so a Manual clock drives it in tests.
-			// Tests are not swept yet.
-			"includes": ["js/*/src/**", "demo/web/src/**", "!js/clock/src/host.ts", "!**/*.test.ts", "!**/*.test.tsx"],
+			// Code and tests read time through @moq/clock, so a Manual clock drives them.
+			"includes": ["js/*/src/**", "demo/web/src/**", "!js/clock/src/host.ts"],
 			"linter": {
 				"rules": {
 					"style": {
