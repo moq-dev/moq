@@ -366,7 +366,9 @@ jobs:
         # `rs multicast` runs the mDNS tests, which loop multicast back on the runner.
         # `rs render-sw` renders through wgpu on Mesa's software Vulkan driver.
         # `test qmux` runs js/qmux against the in-tree Rust qmux, per draft.
-        recipe: ["gate -rs_shapes", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux"]
+        # `rs v4l2` streams moq-video's V4L2 capture from the kernel's vivid
+        # virtual camera, a module load no pull request job should make.
+        recipe: ["gate -rs_shapes", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2"]
         include:
           - recipe: rs send-depth
             nightly: true
@@ -390,6 +392,19 @@ jobs:
         if: matrix.recipe == 'rs uring'
         # moq-uring's local address test reaches a wildcard socket on it.
         run: sudo ip -6 addr add fd6d:6f71::2/128 dev lo nodad
+      - name: Load the vivid virtual camera
+        if: matrix.recipe == 'rs v4l2'
+        # Azure kernels from 7.0 ship vivid in the base modules package and have
+        # no linux-modules-extra; older ones split it out there.
+        run: |
+          if ! modinfo vivid > /dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+          fi
+          sudo modprobe vivid
+          sudo udevadm settle
+          # The runner user is not in the video group.
+          sudo chmod a+rw /dev/video*
       - name: Test
         run: nix develop --command just ${{ matrix.recipe }}
         env:

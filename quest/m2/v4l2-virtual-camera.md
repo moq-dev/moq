@@ -1,30 +1,26 @@
-# [M] V4L2 capture runs against a virtual camera
+# [S] V4L2 MJPEG capture runs against a virtual camera
 
 ## Goal
 
-`moq-v4l` and moq-video's V4L2 capture path run nightly against the kernel's
-`vivid` virtual capture driver, so opening a device, negotiating a format,
-MMAP streaming, and closing are tested without a camera.
+moq-video's V4L2 capture path streams MJPEG nightly from a virtual camera, so
+negotiating MJPEG and decoding only each buffer's `bytesused` are tested
+without a camera.
 
 ## Plan
 
-The m0 coverage audit measured `moq-v4l` at 9 of 1457 lines (0.6%); nothing
-opens a device, and `rs/moq-video/src/capture/v4l2.rs` runs only on a
-developer's camera.
+Nightly's `rs v4l2` lane streams YUYV from the kernel's `vivid` driver, and a
+fixture test covers `I420::from_mjpeg`. `vivid` offers raw formats only, so
+nothing streams MJPEG through a V4L2 device yet.
 
-- `vivid` ships in Ubuntu's `linux-modules-extra` package for the running
-  kernel. GitHub-hosted runners grant `sudo`, so a nightly job can install
-  that package and `modprobe vivid`. Check first that the hosted kernel's
-  package carries it; if not, fall back to `v4l2loopback` fed by FFmpeg,
-  which also needs the kernel headers to build.
-- Add ignored tests in moq-video that open the `vivid` node by its driver
-  name rather than a fixed `/dev/videoN`: enumerate formats and frame sizes,
-  stream a few frames in a raw format and in MJPEG, assert their size and
-  count, then close and reopen. Select them with a `just rs v4l2` recipe.
-- A missing device fails under `CI_STRICT`, the convention the io_uring and
-  mDNS tests use, and skips otherwise.
-- Nightly only: loading a kernel module is a runner mutation no pull request
-  job should make.
+- `v4l2loopback` fed by FFmpeg can offer MJPEG. It is not in Ubuntu's kernel
+  packages, so the nightly job builds it through `v4l2loopback-dkms`, which
+  needs `linux-headers-$(uname -r)`.
+- Open question: whether this is worth a DKMS build in nightly, given the
+  MJPEG-only code left untested is negotiating the format and slicing the
+  buffer to `bytesused`.
+- Extend the `vivid` tests in `rs/moq-video/src/capture/v4l2.rs`: find the
+  loopback node by driver name, stream a few MJPEG frames, assert their size
+  and count, and skip unless `CI_STRICT`.
 
 Public API: none. Wire: none.
 

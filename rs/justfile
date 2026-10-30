@@ -163,6 +163,11 @@ capture *args:
 capture-test *args:
     just rs test -p moq-video -p moq-audio -p moq-scene -p moq-studio --features moq-video/capture,moq-audio/capture,moq-audio/playback,moq-scene/capture,moq-studio/capture "$@"
 
+# Stream V4L2 capture from the kernel's vivid virtual camera (`sudo modprobe vivid`
+# first); without one the tests skip, or fail under CI_STRICT.
+v4l2:
+    just rs test -p moq-video --no-default-features --features capture --lib --run-ignored only -E 'test(/^capture::v4l2::tests::vivid::/)'
+
 # Compare SHM and GetImage through production capture on the current X11 display.
 x11-bench:
     just rs test --release -p moq-video --no-default-features --features capture -E 'test(x11_capture_workload)' --run-ignored only --no-capture
