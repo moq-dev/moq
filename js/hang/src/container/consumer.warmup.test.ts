@@ -13,8 +13,8 @@ function setup(delay = BUDGET, warmup = 0, min = delay, max: number | null = del
 	// Drain the in-memory readers and their continuations without moving time.
 	const flush = () => clock.advance(Nano.zero);
 	const track = new Track.Producer("video");
-	// A subscription has no unlimited budget, so an unlimited consumer takes the track's whole retention.
-	const consumer = new Consumer(track.subscribe({ maxDelay: Milli((max ?? 30_000) + warmup) }), {
+	// An omitted max delay sets no subscriber limit.
+	const consumer = new Consumer(track.subscribe({ maxDelay: max === null ? undefined : Milli(max + warmup) }), {
 		format: new Format("video"),
 		delay: { min: Milli(min), max: max === null ? null : Milli(max) },
 		warmup: Milli(warmup),
