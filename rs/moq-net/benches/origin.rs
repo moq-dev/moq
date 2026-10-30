@@ -30,7 +30,8 @@
 //! route delivered, and the routes each reader still holds a copy of.
 //!
 //! A claim's answer taking over the claim is swept over the paths the claim already
-//! answered and the cursors watching it.
+//! answered and the cursors watching it, and a takeover in place over the fronts
+//! resolved through what it takes over.
 //!
 //! Peer claims land through the hidden `fuzz` module, as a session lands them.
 //!
@@ -893,6 +894,43 @@ fn bench_restart_fronts(c: &mut Criterion) {
 	group.finish();
 }
 
+/// A pool member taken over in place and retired, under `fronts` fronts resolved
+/// through it, against the same member restarting without a takeover. Each change
+/// pokes every front beneath the prefix, and the takeover carries each one's verdict
+/// forward under the table lock, so the takeover's cost over the restart is that pass.
+/// The fronts' tasks never run: this is the install alone.
+fn bench_takeover_fronts(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/takeover_fronts");
+	for fronts in [100, 1_000, 10_000] {
+		for takeover in [false, true] {
+			let kind = if takeover { "takeover" } else { "restart" };
+			group.bench_function(format!("{fronts}f_{kind}"), |b| {
+				let mut pool = pool(1, fronts, 0);
+				let mut last = pool._members.pop().expect("one member");
+				let mut hop = POOL_HOP + 1;
+				b.iter(|| {
+					hop += 1;
+					let next = match takeover {
+						true => moq_net::fuzz::takeover_route(
+							&pool.producer,
+							moq_net::Path::from_static("pool"),
+							pool_route(hop),
+							&last,
+						),
+						false => moq_net::fuzz::requests_route(
+							&pool.producer,
+							moq_net::Path::from_static("pool"),
+							pool_route(hop),
+						),
+					};
+					drop(std::mem::replace(&mut last, next.unwrap()));
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
 /// A member joining and leaving a pool that already serves `paths` paths.
 ///
 /// Every front under the prefix watches the routes covering it, so each one
@@ -1712,6 +1750,7 @@ criterion_group!(
 	bench_retire,
 	bench_restart_fronts,
 	bench_pool_churn,
+	bench_takeover_fronts,
 	bench_pool_cursors,
 	bench_handoff,
 	bench_narrow_delivery,

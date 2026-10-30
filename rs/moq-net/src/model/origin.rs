@@ -3027,6 +3027,8 @@ impl AnnounceProducer {
 			let renewed = entry.epoch != route.epoch;
 			if renewed {
 				entry.generation = generation;
+				// The new instance continues nothing the old one took over.
+				entry.takeover = None;
 				if let Some(server) = &entry.server {
 					released.extend(server.lock().renew());
 				}
@@ -3621,25 +3623,34 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 		// Read alongside the decision, under the lock a poke takes first.
 		*seen = watch.seen();
 		front.retain_routes(|route| table.routes.covers(&path, route));
-		// A route that took over the instance the front resolved continues it: the
-		// front, its sources, and the requests joining it carry the new instance.
+		// A route that took over the instance the front resolved continues it. The table
+		// carries the front's verdict forward as each takeover lands; this also catches
+		// one that landed before the front wrote its first, or won the path only later.
 		if let Some(resolution) = resolved.as_mut()
-			&& let Some(entry) = table.continues(&path, horizon, front.excluded_routes(), resolution)
-		{
-			let instance = entry.instance();
+			&& let Some((instance, route)) = request.write().ok().and_then(|mut pending| {
+				if let Some(best) = table.best_route(&path, horizon, &HashSet::new(), |_| true) {
+					PendingFront::continue_with(&mut pending, best);
+				}
+				match (&pending.resolved, pending.via) {
+					(Some(Ok(instance)), Some((route, _))) if route != resolution.route => {
+						Some((instance.clone(), route))
+					}
+					_ => None,
+				}
+			}) {
 			for (asked, _) in instances.values_mut() {
 				if *asked == resolution.instance {
 					*asked = instance.clone();
 				}
 			}
-			resolution.instance = instance.clone();
-			resolution.route = entry.id;
-			resolution.prefix = Some(entry.prefix.clone());
+			resolution.instance = instance;
+			resolution.route = route;
+			resolution.prefix = table
+				.routes
+				.covering(&path)
+				.find(|entry| entry.id == route)
+				.map(|entry| entry.prefix.clone());
 			resolution.settled = None;
-			if let Ok(mut pending) = request.write() {
-				pending.resolved = Some(Ok(instance));
-				pending.via = Some((entry.id, resolution.asked));
-			}
 		}
 		let best = pick(&table, &path, horizon, front, resolved.as_ref());
 		// Under the table's lock, which a request reads it under too: a request that
@@ -3887,7 +3898,6 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							route,
 							prefix,
 							settled: None,
-							asked,
 						});
 						if let Ok(mut pending) = request.write()
 							&& pending.resolved.is_none()
@@ -4485,7 +4495,8 @@ struct Watched {
 }
 
 enum WatchProducer {
-	Changes(kio::Producer<Watched>),
+	/// A front's watch carries the front too; see [`FrontWatch`].
+	Changes(kio::Producer<Watched>, Option<FrontWatch>),
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Selection(kio::Producer<Selected>),
 }
@@ -4924,10 +4935,15 @@ impl RouteNode {
 	}
 
 	/// Wake route watchers, and revoke only leases whose selected instance changed.
-	fn poke(&self, routes: Option<(&RouteTable, &Hold)>) {
+	/// `taken` lists the routes taken over by the change: only a front resolved through
+	/// one of them can follow it.
+	fn poke(&self, routes: Option<(&RouteTable, &Hold, &[u64])>) {
 		for (_, watch) in &self.watches {
 			match watch {
-				WatchProducer::Changes(watch) => {
+				WatchProducer::Changes(watch, front) => {
+					if let (Some(front), Some((routes, _, taken))) = (front, routes) {
+						front.follow(routes, taken);
+					}
 					if let Ok(mut watched) = watch.write() {
 						watched.generation += 1;
 					}
@@ -4935,7 +4951,7 @@ impl RouteNode {
 				WatchProducer::Selection(watch) => {
 					if let Ok(mut selected) = watch.write() {
 						let change = match routes {
-							Some((routes, hold)) => {
+							Some((routes, hold, _)) => {
 								let best =
 									routes.best_route(&selected.path, Horizon::default(), &HashSet::new(), |entry| {
 										entry.via == selected.via
@@ -4958,13 +4974,13 @@ impl RouteNode {
 	}
 
 	/// Wake only the watched subtrees covered by this route.
-	fn poke_below(&self, routes: &RouteTable, hold: &Hold) {
+	fn poke_below(&self, routes: &RouteTable, hold: &Hold, taken: &[u64]) {
 		if self.watches_below == 0 {
 			return;
 		}
-		self.poke(Some((routes, hold)));
+		self.poke(Some((routes, hold, taken)));
 		for child in self.children.values() {
-			child.poke_below(routes, hold);
+			child.poke_below(routes, hold, taken);
 		}
 	}
 
@@ -5152,13 +5168,13 @@ impl RouteTable {
 	}
 
 	/// Register a watch on the routes covering `path`; see [`Watch`].
-	fn add_watch(&mut self, path: &Path, id: u64) -> kio::Consumer<Watched> {
+	fn add_watch(&mut self, path: &Path, id: u64, front: Option<FrontWatch>) -> kio::Consumer<Watched> {
 		let producer = kio::Producer::<Watched>::default();
 		let consumer = producer.consume();
 		self.root
 			.reach(path.parts(), Below::WATCH)
 			.watches
-			.push((id, WatchProducer::Changes(producer)));
+			.push((id, WatchProducer::Changes(producer, front)));
 		consumer
 	}
 
@@ -5200,9 +5216,18 @@ impl RouteTable {
 	}
 
 	/// Wake the watches of every path a route at `prefix` covers.
-	fn poke_below(&self, prefix: &Path, hold: &Hold) {
+	/// A route at `prefix` that took over as of `now` carries the fronts resolved through
+	/// its predecessor along; see [`FrontWatch`].
+	fn poke_below(&self, prefix: &Path, hold: &Hold, now: u64) {
 		if let (_, Some(node)) = self.split(prefix) {
-			node.poke_below(self, hold);
+			let taken: Vec<u64> = node
+				.entries
+				.iter()
+				.filter_map(|entry| entry.takeover.as_ref())
+				.filter(|takeover| takeover.at == now)
+				.map(|takeover| takeover.route)
+				.collect();
+			node.poke_below(self, hold, &taken);
 		}
 	}
 
@@ -5396,7 +5421,7 @@ impl OriginState {
 			}
 		}
 		// The fronts and requesters under the prefix re-select from the table.
-		routes.poke_below(prefix, &hold);
+		routes.poke_below(prefix, &hold, now);
 	}
 
 	/// A path beneath `prefix` moved to another of its routes without an epoch, while
@@ -5514,9 +5539,35 @@ impl OriginState {
 
 	/// Register a [`Watch`] on the routes covering `path`.
 	fn watch(&mut self, shared: &SendCell<kio::Shared<OriginState>>, path: &Path) -> Watch {
+		self.watch_inner(shared, path, None)
+	}
+
+	/// Register a front's [`Watch`]: the table also carries the front through each
+	/// takeover; see [`FrontWatch`].
+	fn watch_front(
+		&mut self,
+		shared: &SendCell<kio::Shared<OriginState>>,
+		path: &Path,
+		horizon: Horizon,
+		front: kio::Producer<PendingFront>,
+	) -> Watch {
+		let front = FrontWatch {
+			path: path.clone(),
+			horizon,
+			front,
+		};
+		self.watch_inner(shared, path, Some(front))
+	}
+
+	fn watch_inner(
+		&mut self,
+		shared: &SendCell<kio::Shared<OriginState>>,
+		path: &Path,
+		front: Option<FrontWatch>,
+	) -> Watch {
 		let id = self.next_watch;
 		self.next_watch += 1;
-		let signal = self.routes.add_watch(path, id);
+		let signal = self.routes.add_watch(path, id, front);
 		Watch {
 			shared: shared.clone(),
 			path: path.clone(),
@@ -5699,22 +5750,6 @@ impl OriginState {
 		})
 	}
 
-	/// The route now winning `path` when it took over what `resolution` resolved.
-	fn continues(
-		&self,
-		path: &Path,
-		horizon: Horizon,
-		excluded: &HashSet<u64>,
-		resolution: &Resolution,
-	) -> Option<&RouteEntry> {
-		let best = self.best_route(path, horizon, excluded, |_| true)?;
-		let takeover = best.takeover.as_ref()?;
-		(takeover.route == resolution.route
-			&& takeover.instance == resolution.instance
-			&& resolution.asked < takeover.at)
-			.then_some(best)
-	}
-
 	/// Whether every cursor presenting `prefix` restarted it since
 	/// [`next_route`](Self::next_route) read `since`: none still presents an instance
 	/// without an epoch it started before, which is what a [renewal](Self::renew)
@@ -5761,8 +5796,9 @@ struct PendingBroadcast {
 /// the front held.
 struct PendingFront {
 	resolved: Option<Result<Instance, Error>>,
-	/// The route the front resolved through and [`Resolution::asked`], so a request can
-	/// tell a route that took it over continues it before the front's task adopts that.
+	/// The route the front resolved through, and [`OriginState::next_route`] when it
+	/// asked: only a [`Takeover`] after that continues it. Each route that takes the
+	/// front over carries this forward; see [`Self::continue_with`].
 	via: Option<(u64, u64)>,
 	/// The instance the front resolves on unless the table moves first: the winner it
 	/// was minted for, then each one it selects. Written under the table's lock, so a
@@ -5770,6 +5806,58 @@ struct PendingFront {
 	selected: Instance,
 	/// The selected serving handler refused, rather than the route disappearing.
 	refused: bool,
+}
+
+impl PendingFront {
+	/// Whether a route that took over by `takeover` continues the instance the front
+	/// resolved: through the route it resolved that through, after the front asked.
+	fn continued_by(&self, takeover: Option<&Takeover>) -> bool {
+		let (Some(Ok(resolved)), Some((route, asked)), Some(takeover)) = (&self.resolved, self.via, takeover) else {
+			return false;
+		};
+		takeover.route == route && takeover.instance == *resolved && asked < takeover.at
+	}
+
+	/// Follow `best` when it took over what the front resolved: the front, its sources,
+	/// and the requests joining it carry the new instance. Under the table's lock as each
+	/// route takes over (see [`FrontWatch`]), so a chain of takeovers carries the front to
+	/// its end, however many land before the front's task looks.
+	fn continue_with(this: &mut kio::Mut<'_, Self>, best: &RouteEntry) {
+		// Read first: a write through the guard wakes every requester.
+		if this.continued_by(best.takeover.as_ref()) {
+			let asked = this.via.map(|(_, asked)| asked);
+			this.resolved = Some(Ok(best.instance()));
+			this.via = asked.map(|asked| (best.id, asked));
+		}
+	}
+}
+
+/// A front's [`Watch`] as the route table holds it: what the front is for, so the table
+/// can carry its [`PendingFront`] through a takeover as the takeover lands.
+struct FrontWatch {
+	path: Path,
+	horizon: Horizon,
+	front: kio::Producer<PendingFront>,
+}
+
+impl FrontWatch {
+	/// Follow the path's winner, when it took over what the front resolved through one
+	/// of the routes `taken` over just now.
+	fn follow(&self, routes: &RouteTable, taken: &[u64]) {
+		if taken.is_empty() {
+			return;
+		}
+		let Ok(mut pending) = self.front.write() else {
+			return;
+		};
+		// Skip the walk for a front no takeover here can continue.
+		if !pending.via.is_some_and(|(route, _)| taken.contains(&route)) {
+			return;
+		}
+		if let Some(best) = routes.best_route(&self.path, self.horizon, &HashSet::new(), |_| true) {
+			PendingFront::continue_with(&mut pending, best);
+		}
+	}
 }
 
 /// What a front resolved: the instance its first source serves, and the route that
@@ -5782,9 +5870,6 @@ struct Resolution {
 	/// The [`RemoteFront::joined`] the prefix last restarted for the path's move, by
 	/// a renewal or on its own; see [`Self::moved`].
 	settled: Option<u64>,
-	/// [`OriginState::next_route`] when the source was asked: only a [`Takeover`]
-	/// after that continues it.
-	asked: u64,
 }
 
 impl Resolution {
@@ -7019,15 +7104,7 @@ impl Consumer {
 					None => pending.selected == best,
 					// Or the winner took over what the front resolved, which the front's task
 					// adopts on its next look at the table.
-					Some(Ok(resolved)) => {
-						*resolved == best
-							|| takeover
-								.as_ref()
-								.zip(pending.via)
-								.is_some_and(|(takeover, (route, asked))| {
-									takeover.route == route && takeover.instance == *resolved && asked < takeover.at
-								})
-					}
+					Some(Ok(resolved)) => *resolved == best || pending.continued_by(takeover.as_ref()),
 					Some(Err(_)) => false,
 				}
 			};
@@ -7070,7 +7147,7 @@ impl Consumer {
 		let consumer = request.consume();
 		// The front starts held by this request; see [`Front::new`].
 		let held = broadcast.consume();
-		let watch = state.watch(&self.shared, &absolute);
+		let watch = state.watch_front(&self.shared, &absolute, horizon, request.clone());
 		state.next_route += 1;
 		let joined = Arc::new(AtomicU64::new(state.next_route));
 		state.fronts.insert(
@@ -9544,6 +9621,97 @@ mod tests {
 			.accept(&successor);
 		assert_eq!(listed(&mut tracks).await, "+b");
 		assert!(!front.is_closed());
+	}
+
+	/// A chain of takeovers in place that all land before the front's task looks again
+	/// carries the front to the last one, though each names only the one before it.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_front_follows_a_chain_of_takeovers() {
+		for epochs in [false, true] {
+			for links in [2, 8] {
+				follows_a_chain_of_takeovers(links, epochs).await;
+			}
+		}
+	}
+
+	#[cfg(feature = "async")]
+	async fn follows_a_chain_of_takeovers(links: u64, epochs: bool) {
+		let route = |link: u64| {
+			let route = Route::default().with_hops(hops(&[10]));
+			match epochs {
+				true => route.with_epoch(format!("01900000-0000-7000-8000-{link:012x}").parse().unwrap()),
+				false => route,
+			}
+		};
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let first = producer.requests_route("room/alice", route(0), None).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let upstream = broadcast::Info::new().produce();
+		let _a = upstream.create_track("a", None).unwrap();
+		queued(&first).await.accept(&upstream);
+		let front = pending.await.unwrap();
+		let mut tracks = front.tracks().unwrap();
+		assert_eq!(listed(&mut tracks).await, "+a");
+		assert_eq!(listed(&mut tracks).await, "synced");
+
+		// Each link takes over the one before and retires it, with no yield between.
+		let mut last = first;
+		for link in 1..=links {
+			let next = producer.requests_route("room/alice", route(link), Some(&last)).unwrap();
+			drop(std::mem::replace(&mut last, next));
+		}
+
+		let successor = broadcast::Info::new().produce();
+		let _a = successor.create_track("a", None).unwrap();
+		let _b = successor.create_track("b", None).unwrap();
+		moq_clock::timeout(Duration::from_secs(1), queued(&last))
+			.await
+			.expect("the front asked the chain's last route")
+			.accept(&successor);
+		assert_eq!(listed(&mut tracks).await, "+b", "{links} links, epochs: {epochs}");
+		assert!(!front.is_closed());
+		// The front carries the last instance, so a request now joins it.
+		let again = consumer.request("room/alice", None).await.unwrap();
+		assert!(again.is_clone(&front), "{links} links, epochs: {epochs}");
+	}
+
+	/// A successor renewed to another epoch continues nothing its predecessor served, even
+	/// before the front resolved through the predecessor looks at the table again.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_renewed_successor_continues_nothing() {
+		let route = |link: u64| {
+			Route::default()
+				.with_hops(hops(&[10]))
+				.with_epoch(format!("01900000-0000-7000-8000-{link:012x}").parse().unwrap())
+		};
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let first = producer.requests_route("room/alice", route(0), None).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let upstream = broadcast::Info::new().produce();
+		queued(&first).await.accept(&upstream);
+		let resolved = pending.await.unwrap();
+
+		// Taken over, then renewed, with no yield between.
+		let second = producer.requests_route("room/alice", route(1), Some(&first)).unwrap();
+		second.update_route(route(2)).unwrap();
+		moq_clock::sim::yield_now().await;
+
+		let pending = consumer.request("room/alice", None);
+		let renewed = broadcast::Info::new().produce();
+		moq_clock::timeout(Duration::from_secs(1), queued(&second))
+			.await
+			.expect("a fresh front asked the renewed route")
+			.accept(&renewed);
+		let again = pending.await.unwrap();
+		assert_eq!(again.info().epoch, route(2).epoch);
+		assert!(
+			!again.is_clone(&resolved),
+			"the renewed instance joined the first one's front"
+		);
 	}
 
 	/// A path served on request through a covering prefix is not a broadcast anyone
