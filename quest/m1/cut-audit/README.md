@@ -61,7 +61,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [The export jitter buffer admits only frames due within its window](/quest/m1/cut-audit/jitter-admission.md) - a fast or dense track is backpressured by time and bytes, not buffered without bound
 - [Peer-driven receive loops yield on a per-message budget](/quest/m1/cut-audit/peer-loop-budget.md) - small-message floods cannot monopolize a session driver
 - [Rust and JS accept the same catalogs](/quest/m1/cut-audit/catalog-parity.md) - one strictness, per rendition, with a shared fixture corpus
-- [Every relay runtime honors or refuses each listen setting](/quest/m1/cut-audit/uring-listen-config.md) - io_uring stops ignoring preferred addresses
 
 ## Related
 
