@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Manual, Micro, Milli, Nano } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
@@ -876,5 +876,30 @@ test("with hls off, a name ending in the record suffix is free", async () => {
 	});
 	broadcast.video("video");
 	expect(() => broadcast.audio("video.hls")).not.toThrow();
+	broadcast.close();
+});
+
+test("turning hls on leaves a rendition holding a record name its media", async () => {
+	const hls = new Signal(false);
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Origin.Producer(),
+		name: Path.from("flip.hang"),
+		hls,
+	});
+	const video = broadcast.video("video");
+	const audio = broadcast.audio("video.hls");
+	const later = broadcast.audio("audio");
+	await settle();
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	hls.set(true);
+	await settle();
+	warn.mockRestore();
+
+	const videoTrack = video.track.peek();
+	expect(videoTrack && video.hls(videoTrack)).toBeUndefined();
+	expect(audio.track.peek()?.name).toBe("video.hls");
+	const laterTrack = later.track.peek();
+	expect(laterTrack && later.hls(laterTrack)?.track.name).toBe("audio.hls");
 	broadcast.close();
 });

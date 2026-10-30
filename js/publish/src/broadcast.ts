@@ -532,12 +532,18 @@ export class Broadcast {
 	}
 
 	// Start the HLS records of `rendition`'s video or audio track `name`. A record track name already
-	// taken, such as by an application's own track, leaves the rendition without records rather than down.
+	// taken, by a rendition registered while hls was off or an application's own track, leaves the
+	// rendition without records rather than down.
 	#record(broadcast: Moq.Broadcast.Producer, rendition: Rendition<unknown>, name: string): Hls.Recorder | undefined {
 		if (rendition.kind === "text") return undefined;
+		const records = Hls.defaultName(name);
+		if (records in this.#renditions.peek() || this.#kinds.has(records)) {
+			console.warn(`rendition ${name} publishes no HLS records: ${records} is a rendition`);
+			return undefined;
+		}
 		let track: Moq.Track.Producer;
 		try {
-			track = broadcast.createTrack(Hls.defaultName(name), Hls.Recorder.INFO);
+			track = broadcast.createTrack(records, Hls.Recorder.INFO);
 		} catch (err) {
 			console.warn(`rendition ${name} publishes no HLS records`, err);
 			return undefined;
