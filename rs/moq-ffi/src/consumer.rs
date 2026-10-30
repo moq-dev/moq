@@ -26,7 +26,7 @@ fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
 ///
 /// Start from [`moq_subscription_defaults`] for moq-net's defaults (priority 0, a `max_delay`
 /// of 0, everything still fresh, newest first) and change the fields you care about. A record
-/// built field by field leaves out `max_delay`, which means no subscriber limit.
+/// built field by field must name `max_delay`, so none is unlimited by accident.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
@@ -34,12 +34,12 @@ pub struct MoqSubscription {
 	#[uniffi(default = 0)]
 	pub priority: i8,
 	/// Maximum age of a non-latest group before it is skipped.
-	/// `0` skips immediately; a larger value tolerates that much reordering; null, the
-	/// default, sets no subscriber limit and leaves the publisher's max age alone to bound it.
+	/// `0` skips immediately; a larger value tolerates that much reordering; null sets no
+	/// subscriber limit and leaves the publisher's max age alone to bound it, which an
+	/// ordered reader refuses. Required, since uniffi can't default a duration to `0`.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
-	#[uniffi(default = None)]
 	pub max_delay: Option<Duration>,
 	/// The spans of the track to deliver, or null for everything `max_delay` still
 	/// considers fresh. An empty list asks for nothing.

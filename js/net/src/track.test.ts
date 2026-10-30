@@ -826,7 +826,7 @@ test("zero latency takes the latest group when ages are equal", async () => {
 	}
 });
 
-test("the default subscription skips superseded groups and a bare options object sets no limit", async () => {
+test("an omitted maxDelay is the default zero, and null is refused", async () => {
 	expect(Subscription.default()).toEqual({ priority: 0, maxDelay: Milli.zero, order: "descending" });
 
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
@@ -837,12 +837,12 @@ test("the default subscription skips superseded groups and a bare options object
 		producer.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
 	}
 
-	// No options means the default subscription, whose zero budget keeps only the newest group.
+	// Each spelling of the default keeps only the newest group.
 	expect((await explicit.recvGroup())?.sequence).toBe(2);
 	expect((await implicit.recvGroup())?.sequence).toBe(2);
-	// An omitted maxDelay leaves the publisher's retention as the only bound.
-	for (const sequence of [0, 1, 2]) expect((await bare.recvGroup())?.sequence).toBe(sequence);
-	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(5000));
+	expect((await bare.recvGroup())?.sequence).toBe(2);
+	expect(producer.subscription.peek()?.maxDelay).toBe(Milli.zero);
+	expect(() => producer.subscribe({ maxDelay: null as unknown as Milli })).toThrow(TypeError);
 	producer.finish();
 	producer.close();
 });

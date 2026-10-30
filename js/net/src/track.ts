@@ -41,7 +41,6 @@ import {
 } from "./internal.ts";
 import { grace, Ledger } from "./ledger.ts";
 import { Timescale, type Timestamp } from "./time.ts";
-import * as Varint from "./varint.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
 export type { Datagram } from "./datagram.ts";
@@ -226,9 +225,9 @@ export interface Subscription {
 	/**
 	 * How long (milliseconds) a non-latest group stays worth delivering, by the same two
 	 * clocks as {@link Info.maxAge}: it is skipped once its successor arrived this long ago
-	 * or starts this far behind the live edge. Omitted means no subscriber limit, so the
-	 * publisher's {@link Info.maxAge} alone bounds it, which is what a reader reaching back for
-	 * history wants. {@link Subscription.default} sets `0`, the live edge only, timed or not.
+	 * or starts this far behind the live edge, and never past the publisher's
+	 * {@link Info.maxAge}. Omitted means `0`, the live edge only, timed or not, as in
+	 * {@link Subscription.default}; a reader reaching back for history sets how far.
 	 * Rounded up to a whole millisecond, so a value derived from a measurement is never
 	 * shortened. A negative or non-finite value, or one past `Number.MAX_SAFE_INTEGER`
 	 * after rounding, is refused.
@@ -280,18 +279,16 @@ export const Subscription: {
 	default: () => ({ priority: DEFAULT_PRIORITY, maxDelay: Milli.zero, order: "descending" }),
 };
 
-// What an omitted maxDelay materializes to: the publisher's max age alone. The largest
-// value every peer can read, as the Rust wire sends for `None`.
-const NO_MAX_DELAY = Milli(Varint.MAX_U53);
-
 // Materialize the defaults at the model boundary so every layer observes a complete
 // subscription rather than interpreting an omitted field differently.
 function subscriptionDefaults(subscription: Subscription = Subscription.default()): Subscription {
 	if ("maxAge" in subscription) throw new TypeError("Subscriber maxAge is unsupported; use maxDelay");
+	// Omitted means the default; a null would otherwise slip through `??` as one.
+	if (subscription.maxDelay === null) throw new TypeError("maxDelay must be a number of milliseconds, not null");
 	const bounds = groupBounds(subscription.groups ?? {});
 	return {
 		priority: priorityValue(subscription.priority ?? DEFAULT_PRIORITY),
-		maxDelay: wireMillis("maxDelay", subscription.maxDelay ?? NO_MAX_DELAY),
+		maxDelay: wireMillis("maxDelay", subscription.maxDelay ?? Milli.zero),
 		order: orderOf(subscription.order),
 		groups: {
 			start: subscription.groups?.start === undefined ? undefined : { included: bounds.start },
