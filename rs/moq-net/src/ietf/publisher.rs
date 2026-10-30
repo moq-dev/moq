@@ -16246,7 +16246,7 @@ mod tests {
 							Stage::UpdateWrite => publish_namespace_ok(version).await,
 							_ => Vec::new(),
 						};
-						let session = ScriptedSession::new(answer).with_send_window(window);
+						let session = ScriptedSession::new(answer).with_send_window(window).with_read_wakes();
 						let log = session.log.clone();
 						let peer = session.clone();
 						let publisher = Publisher::new(
