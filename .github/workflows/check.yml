@@ -1,7 +1,6 @@
 name: Check
 
 permissions:
-  id-token: write
   contents: read
 
 # Main PRs report Check as skipped; Land tests their combined prefix.

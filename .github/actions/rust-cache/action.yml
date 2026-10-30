@@ -158,7 +158,7 @@ runs:
     # uncached and still report success.
     - name: Cargo shim
       shell: bash
-      run: |
+      run: | # zizmor: ignore[github-env] mbx installed the shim; nothing from the event names it.
         mbx setup --yes
         shim=$(mbx setup --status 2>/dev/null | sed -n '1s/.*: //p' || true)
         if [ ! -e "$shim" ]; then

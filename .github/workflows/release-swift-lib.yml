@@ -28,7 +28,9 @@ on:
       - "sh/gh/release.sh"
   workflow_call:
   workflow_dispatch:
-  workflow_run:
+  # Publishes only a protected release tag at the run's commit; see
+  # "Require a release tag at the run's commit".
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: ["Release FFI", "Release Swift FFI"]
     types:
       - completed

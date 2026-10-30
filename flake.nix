@@ -311,6 +311,7 @@
           shellcheck
           shfmt
           actionlint
+          zizmor
           taplo
           nixfmt
         ];
@@ -374,6 +375,8 @@
         goDeps = [
           pkgs.go
           uniffi-bindgen-go
+          # `just go audit`, nightly.
+          pkgs.govulncheck
         ];
 
         # uniffi-bindgen-dart renders rs/moq-ffi into dart/moq_ffi. The fork

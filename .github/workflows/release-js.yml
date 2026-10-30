@@ -44,6 +44,8 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           registry-url: 'https://registry.npmjs.org'
+          # A release reads nothing from a cache another branch could have written.
+          package-manager-cache: false
 
       - name: Install dependencies
         run: nix develop --command bun install --frozen-lockfile
