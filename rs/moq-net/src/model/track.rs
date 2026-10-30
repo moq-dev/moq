@@ -5913,8 +5913,6 @@ struct Cursor {
 	drops: Option<Box<DropCursor>>,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
-	/// The time starts its window looks up from the track's history, each asked once.
-	lookups: Vec<Lookup>,
 }
 
 /// A time start a [`Cursor`]'s window looks up through a fill.
@@ -6070,6 +6068,8 @@ struct Filter {
 	/// budget, scanned in the cache in the subscription's order and handed out ahead of the
 	/// walk: each cached group in them is visited once.
 	owed: RangeInclusiveSet<u64>,
+	/// The time starts [`Self::window`] looks up from the track's history, each asked once.
+	lookups: Vec<Lookup>,
 }
 
 impl Cursor {
@@ -6112,6 +6112,7 @@ impl Cursor {
 				admitted: RangeInclusiveSet::new(),
 				admitted_at: None,
 				owed: RangeInclusiveSet::new(),
+				lookups: Vec::new(),
 			};
 			(filter, state.datagram_offset + start)
 		};
@@ -6134,7 +6135,6 @@ impl Cursor {
 			skipped: Skipped::default(),
 			drops: None,
 			misses: None,
-			lookups: Vec::new(),
 		}
 	}
 
@@ -6222,7 +6222,7 @@ impl Cursor {
 					Ok(window) => {
 						self.filter.window = window;
 						self.filter.refused = None;
-						self.lookups.clear();
+						self.filter.lookups.clear();
 					}
 					Err(err) => self.filter.refused = Some(err),
 				}
@@ -6542,12 +6542,12 @@ impl Cursor {
 	/// the answers, parking `waiter` on the lookups still out.
 	fn look_up(&mut self, asking: &miss::Asking, waiter: &kio::Waiter) {
 		let lookups: Vec<(Timestamp, u64)> = self.filter.window.lookups().collect();
-		if lookups.is_empty() && self.lookups.iter().all(|lookup| lookup.join.is_none()) {
+		if lookups.is_empty() && self.filter.lookups.iter().all(|lookup| lookup.join.is_none()) {
 			return;
 		}
 		let fills = self.state.read().fills.clone();
 		for (pts, reach) in lookups {
-			if self.lookups.iter().any(|lookup| lookup.pts == pts) {
+			if self.filter.lookups.iter().any(|lookup| lookup.pts == pts) {
 				continue;
 			}
 			let ask = fill::Ask {
@@ -6558,13 +6558,13 @@ impl Cursor {
 				time: Some(pts),
 			};
 			let (joins, _) = fills.lock().join(&fills, &ask);
-			self.lookups.push(Lookup {
+			self.filter.lookups.push(Lookup {
 				pts,
 				join: joins.into_iter().next(),
 			});
 		}
 		let mut moved = false;
-		for lookup in &mut self.lookups {
+		for lookup in &mut self.filter.lookups {
 			// The window stops looking once replaced; with no join, nothing can answer.
 			if !self.filter.window.lookups().any(|(pts, _)| pts == lookup.pts) {
 				lookup.join = None;
