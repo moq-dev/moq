@@ -44,7 +44,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   group's existing prefix but never wait for its future objects. Downstream,
   our publishers answer only a one-group FETCH or fill and refuse wider ones
   (maintainer, 2026-10-28,
-  [one group](/quest/m1/ietf-publisher-one-group.md)), until
+  [moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204)), until
   [hole markers](/quest/m2/ietf-hole-marker.md) let a cache that knows every
   group answer a range. A FETCH of the open largest group reads it whole
   (maintainer, 2026-10-25): the cache cannot know an open group's real

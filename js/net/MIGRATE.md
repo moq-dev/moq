@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### An omitted `maxDelay` sets no subscriber limit ([#7077](https://github.com/moq-dev/moq/pull/7077))
+
+A `Track.Subscription` without `maxDelay` now reaches back as far as the publisher's `Track.Info.maxAge` keeps, as `None` does in Rust, instead of meaning zero.
+`subscribe()` with no options still uses the default subscription, now spelled `Track.Subscription.default()`, whose zero `maxDelay` skips a superseded group at once.
+A live reader that passed options without `maxDelay` spreads the default to keep its behavior:
+
+```ts
+// Before
+const sub = track.subscribe({ priority: 2 });
+// After
+const sub = track.subscribe({ ...Track.Subscription.default(), priority: 2 });
+```
+
+The same applies to `Subscriber.update(options)`, which replaces every field.
+
 ### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 
 `Path.MAX_BYTES` is 4096, moq-transport's namespace limit, so every path fits every wire and an origin refuses a longer one. Keep broadcast paths within 4096 bytes.

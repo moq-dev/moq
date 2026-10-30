@@ -1,0 +1,5 @@
+error: `wait!` must start a top-level statement, outside any branch or loop: `let x: T = wait!(Step => poll)?;`
+  --> tests/ui/branch_wait.rs:18:27
+   |
+18 |         let b: u64 = if a > 1 { wait!(B => self.values.poll_pop(waiter))? } else { 0 };
+   |                                 ^^^^

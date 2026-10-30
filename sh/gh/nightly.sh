@@ -84,6 +84,7 @@ case "$1" in
         run just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
         run just rs test -p moq-tokio --release -E 'test(benchmark_receive_windows)' --run-ignored only --success-output immediate
         run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
+        run just rs test -p moq-c -E 'test(benchmark_handles)' --run-ignored only --success-output immediate
         run just rs test -p moq-archive -p moq-mux -p moq-hls --no-fail-fast \
             -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_reference_handoff_fanout)' \
             --run-ignored only --success-output immediate

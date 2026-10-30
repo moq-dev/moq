@@ -61,8 +61,8 @@ typedef AnnounceConsumer = MoqAnnounceConsumer;
 /// A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery.
 typedef AnnounceConfig = MoqAnnounceConfig;
 
-/// A pending wait for a route to cover a specific path.
-typedef AnnouncedBroadcast = MoqAnnouncedBroadcast;
+/// Follows a specific broadcast path across the publisher instances that serve it.
+typedef Following = MoqFollowing;
 
 /// How a broadcast advertises its exact path: its static production cost and publisher epoch.
 typedef AnnounceRoute = MoqAnnounceRoute;
@@ -131,6 +131,12 @@ typedef Timestamp = MoqTimestamp;
 
 /// Tunes how a track subscription is delivered: priority, latency budget, ranges, and group ordering.
 typedef Subscription = MoqSubscription;
+
+/// moq-net's defaults, whose `maxDelay` of zero skips a superseded group at once.
+///
+/// A null subscription means the same. A `Subscription()` leaves `maxDelay` null, which
+/// sets no subscriber limit, so pass `maxDelay: Duration.zero` when building one to match.
+Subscription defaultSubscription() => moqSubscriptionDefaults();
 
 /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
 typedef Range = MoqRange;

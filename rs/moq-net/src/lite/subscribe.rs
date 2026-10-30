@@ -494,20 +494,21 @@ impl<'a> Message<'a> for SubscribeOk {
 	}
 }
 
-/// Resolves the absolute start group of a Lite05+ subscription. The first message
-/// the publisher sends, once the start group is known. A value greater than the
-/// requested start implicitly drops the leading range.
+/// Resolves where a Lite05+ subscription starts. The first message the publisher sends,
+/// once the start is known. A start above the requested one implicitly drops the groups
+/// below it.
 ///
 /// There is no start *frame*: a partial group is only served to a subscriber that asked
-/// for one, so delivery begins either at the requested `Frame Start` (when this is the
-/// requested group) or at frame 0 (when the publisher resolved to a later one). A
-/// subscriber that asked for group 5 frame 15 and receives group 6 starts at frame 0.
+/// for one, so a range begins at its requested frame when it starts at its requested
+/// group, and at frame 0 of a later one otherwise.
 #[derive(Clone, Debug)]
 pub struct SubscribeStart {
-	pub group: u64,
 	/// The publisher's largest (group, frame) when it answered, `None` for a track with
 	/// nothing yet. Lite07+ only; not on the wire before, where it decodes as `None`.
 	pub largest: Option<crate::track::Position>,
+	/// The group each range's delivery starts at, by index, `None` for a range with no
+	/// group there. Before lite-07 the wire carries the one range's start as `Group`.
+	pub starts: Vec<Option<u64>>,
 }
 
 impl<'a> Message<'a> for SubscribeStart {
@@ -516,31 +517,46 @@ impl<'a> Message<'a> for SubscribeStart {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
-		let group = r.varint()?;
-		let largest = match version.has_largest() {
-			// Group + 1, so 0 is a track with nothing yet; the frame follows only otherwise.
-			true => match r.varint_opt()? {
-				Some(group) => Some(crate::track::Position {
-					group,
-					frame: r.varint()?,
-				}),
-				None => None,
-			},
-			false => None,
+		// Lite-07 added the largest position along with the ranges.
+		if !version.has_ranges() {
+			return Ok(Self {
+				largest: None,
+				starts: vec![Some(r.varint()?)],
+			});
+		}
+		// Group + 1, so 0 is a track with nothing yet; the frame follows only otherwise.
+		let largest = match r.varint_opt()? {
+			Some(group) => Some(crate::track::Position {
+				group,
+				frame: r.varint()?,
+			}),
+			None => None,
 		};
-		Ok(Self { group, largest })
+		// Not preallocated: each start costs a byte of the bounded message.
+		let mut starts = Vec::new();
+		for _ in 0..r.varint()? {
+			starts.push(r.varint_opt()?);
+		}
+		Ok(Self { largest, starts })
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if !version.has_track_stream() {
 			return Err(EncodeError::Version);
 		}
-		w.varint(self.group)?;
-		if version.has_largest() {
-			w.varint_opt(self.largest.map(|largest| largest.group))?;
-			if let Some(largest) = self.largest {
-				w.varint(largest.frame)?;
-			}
+		if !version.has_ranges() {
+			let [Some(group)] = self.starts[..] else {
+				return Err(EncodeError::InvalidState);
+			};
+			return w.varint(group);
+		}
+		w.varint_opt(self.largest.map(|largest| largest.group))?;
+		if let Some(largest) = self.largest {
+			w.varint(largest.frame)?;
+		}
+		w.varint(self.starts.len() as u64)?;
+		for start in &self.starts {
+			w.varint_opt(*start)?;
 		}
 		Ok(())
 	}
@@ -839,15 +855,15 @@ mod test {
 	#[test]
 	fn subscribe_start_roundtrips_on_lite05() {
 		let resp = SubscribeResponse::Start(SubscribeStart {
-			group: 42,
 			largest: None,
+			starts: vec![Some(42)],
 		});
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
 		let mut slice = buf.as_slice();
 		match crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| SubscribeResponse::decode(r, v)).unwrap() {
-			SubscribeResponse::Start(start) => assert_eq!(start.group, 42),
+			SubscribeResponse::Start(start) => assert_eq!(start.starts, [Some(42)]),
 			other => panic!("expected Start, got {other:?}"),
 		}
 	}
@@ -857,29 +873,40 @@ mod test {
 	#[test]
 	fn subscribe_start_carries_the_largest_position_on_lite07() {
 		for largest in [None, Some(crate::track::Position { group: 3, frame: 2 })] {
-			let resp = SubscribeResponse::Start(SubscribeStart { group: 4, largest });
-			let mut buf = Vec::new();
-			resp.encode(
-				&mut crate::coding::Encoder::new(&mut buf, Version::Lite07.into()),
-				Version::Lite07,
-			)
-			.unwrap();
+			let resp = SubscribeResponse::Start(SubscribeStart {
+				largest,
+				starts: vec![Some(4)],
+			});
+			let buf = resp.encode_bytes(Version::Lite07).unwrap();
 			match SubscribeResponse::decode_slice(&buf, Version::Lite07).unwrap().0 {
-				SubscribeResponse::Start(start) => assert_eq!((start.group, start.largest), (4, largest)),
+				SubscribeResponse::Start(start) => assert_eq!(start.largest, largest),
 				other => panic!("expected Start, got {other:?}"),
 			}
 		}
 		let resp = SubscribeResponse::Start(SubscribeStart {
-			group: 4,
 			largest: Some(crate::track::Position { group: 3, frame: 2 }),
+			starts: vec![Some(4)],
 		});
-		let mut buf = Vec::new();
-		resp.encode(
-			&mut crate::coding::Encoder::new(&mut buf, Version::Lite06.into()),
-			Version::Lite06,
-		)
-		.unwrap();
-		assert_eq!(buf, [0, 1, 4], "lite-06 has no largest position");
+		let buf = resp.encode_bytes(Version::Lite06).unwrap();
+		assert_eq!(buf.as_ref(), [0, 1, 4], "lite-06 has no largest position");
+	}
+
+	/// Lite-07 says where each range starts in place of the one `Group` earlier versions
+	/// carry, which can name only a single range.
+	#[test]
+	fn subscribe_start_carries_the_range_starts_on_lite07() {
+		let start = SubscribeStart {
+			largest: None,
+			starts: vec![Some(2), None, Some(0)],
+		};
+		let resp = SubscribeResponse::Start(start.clone());
+		let buf = resp.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(buf.as_ref(), [0, 5, 0, 3, 3, 0, 1]);
+		match SubscribeResponse::decode_slice(&buf, Version::Lite07).unwrap().0 {
+			SubscribeResponse::Start(decoded) => assert_eq!(decoded.starts, start.starts),
+			other => panic!("expected Start, got {other:?}"),
+		}
+		assert!(resp.encode_bytes(Version::Lite06).is_err());
 	}
 
 	#[test]

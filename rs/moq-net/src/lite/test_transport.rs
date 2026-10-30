@@ -948,6 +948,8 @@ pub struct ScriptedSession {
 	datagram_size: usize,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
+	/// Set by [`Self::with_send_window`].
+	send_window: Option<usize>,
 }
 
 impl ScriptedSession {
@@ -985,7 +987,15 @@ impl ScriptedSession {
 			unacked_unis: Default::default(),
 			datagram_size: 0,
 			groups: false,
+			send_window: None,
 		}
+	}
+
+	/// Let each opened bidi stream send only its first `bytes`, then park its writes for good,
+	/// like a peer that never grants more send credit.
+	pub fn with_send_window(mut self, bytes: usize) -> Self {
+		self.send_window = Some(bytes);
+		self
 	}
 
 	/// Open send groups, as native QUIC does, recording them in the log.
@@ -1141,7 +1151,15 @@ impl poll::Session for ScriptedSession {
 			Some(queue) => Arc::new(Mutex::new(queue.lock().unwrap().pop_front().unwrap_or_default())),
 			None => self.script.clone(),
 		};
-		let mut send = SinkSend::new(self.log.clone()).opened(options);
+		let mut send = match self.send_window {
+			// The gate's producer is gone, so the writes past the prefix park forever.
+			Some(window) => SinkSend {
+				prefix: window,
+				..SinkSend::gated(self.log.clone(), kio::Producer::new(false).consume())
+			},
+			None => SinkSend::new(self.log.clone()),
+		}
+		.opened(options);
 		send.unacked_fin = self.unacked_fin;
 		Poll::Ready(Ok((
 			send,

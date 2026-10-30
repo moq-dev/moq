@@ -278,6 +278,12 @@ class SmokeTest {
     }
 
     @Test
+    fun `a default subscription skips superseded groups at once`() {
+        assertEquals(java.time.Duration.ZERO, Subscription.default().maxDelay)
+        assertNull(Subscription().maxDelay)
+    }
+
+    @Test
     fun `an ascending subscription reads a cached backlog oldest first`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("backlog", TrackInfo(timescale = 1_000_000uL))
@@ -565,7 +571,7 @@ class SmokeTest {
             origin.createBroadcast("live").use { publication ->
                 publication.broadcast().use { it.publishTrack("events", null) }
                 val consumer = origin.consume()
-                assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
+                assertFailsWith<MoqException> { consumer.request("live") }
 
                 publication.announce(AnnounceRoute())
                 val announced = consumer.announced(AnnounceConfig())
@@ -575,11 +581,11 @@ class SmokeTest {
                 publication.unannounce()
                 val retracted = assertIs<AnnounceEventEnd>(announced.nextRoute())
                 assertEquals("live", retracted.announce.prefix)
-                assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
+                assertFailsWith<MoqException> { consumer.request("live") }
 
                 publication.announce(AnnounceRoute())
                 assertIs<AnnounceEventStart>(announced.nextRoute())
-                consumer.requestBroadcast("live")
+                consumer.request("live")
             }
         }
     }
@@ -593,11 +599,11 @@ class SmokeTest {
             publication.broadcast().use { broadcast ->
                 publication.use { it.announce(AnnounceRoute()) }
                 assertIs<AnnounceEventStart>(announced.nextRoute())
-                consumer.requestBroadcast("live")
+                consumer.request("live")
 
                 broadcast.end()
                 assertIs<AnnounceEventEnd>(announced.nextRoute())
-                assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
+                assertFailsWith<MoqException> { consumer.request("live") }
             }
         }
     }
@@ -613,7 +619,7 @@ class SmokeTest {
                     replacement.announce(AnnounceRoute())
                     assertFailsWith<MoqException.Closed> { stale.announce(AnnounceRoute()) }
                     assertFailsWith<MoqException.Closed> { stale.unannounce() }
-                    origin.consume().requestBroadcast("live")
+                    origin.consume().request("live")
                     replacement.broadcast().use { it.end() }
                 }
             }
@@ -658,7 +664,7 @@ class SmokeTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.requests("live").use { dynamic ->
                 val pending = async {
-                    origin.consume().requestBroadcast("live/cam")
+                    origin.consume().request("live/cam")
                 }
                 val request = dynamic.requestedBroadcast()
                 assertEquals("live/cam", request.path())
@@ -785,7 +791,7 @@ class SmokeTest {
                     )
                     publication.announce(AnnounceRoute())
 
-                    val consumer = origin.consume().requestBroadcast("audio-delay")
+                    val consumer = origin.consume().request("audio-delay")
                     val catalog = CatalogConsumer.subscribe(consumer).next()!!
                     val rendition = catalog.audio["mic"]!!
 
@@ -836,7 +842,7 @@ class SmokeTest {
                         video.write(VideoFrame(timestamp = Timestamp(i.toULong(), 30uL), data = rgba))
                     }
 
-                    val consumer = origin.consume().requestBroadcast("video-decode-frame")
+                    val consumer = origin.consume().request("video-decode-frame")
                     val catalog = CatalogConsumer.subscribe(consumer).next()!!
                     val rendition = catalog.video["camera"]!!
 

@@ -133,6 +133,12 @@ void timestamp_roundtrip() {
     ok(broadcast->close(), "close timestamp broadcast");
 }
 
+// Only the defaults carry moq-net's zero max delay; a bare record sets no subscriber limit.
+void subscription_defaults() {
+    CHECK(moq::subscription_defaults().max_delay == std::chrono::nanoseconds::zero());
+    CHECK(!moq::Subscription{}.max_delay.has_value());
+}
+
 // Exercise the installed audio publisher and consumer rather than only generated signatures.
 void audio_roundtrip() {
     auto broadcast = ok(moq::BroadcastProducer::init(), "audio broadcast");
@@ -208,6 +214,7 @@ void audio_roundtrip() {
 
 int main() {
     timestamp_roundtrip();
+    subscription_defaults();
     audio_roundtrip();
     auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
     auto timebase_other = ok(moq::BroadcastProducer::init(), "timebase other");
@@ -285,7 +292,7 @@ int main() {
     auto session = ok(connecting.get(), "connect");
 
     // Subscriber: resolve the announced broadcast and subscribe to its track.
-    auto announced = ok(session->consume()->announced_broadcast("probe"), "announced_broadcast");
+    auto announced = ok(session->consume()->follow("probe", std::nullopt), "follow");
     auto remote = ok(announced->available().get(), "available");
     auto consumer = ok(remote->subscribe_track("data", std::nullopt).get(), "subscribe_track");
 

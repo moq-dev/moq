@@ -55,6 +55,15 @@ export interface Options {
 	 * list everything. Subscribing to a hidden path by name works either way.
 	 */
 	hidden?: boolean;
+
+	/**
+	 * Also report every route that could serve a path in scope, not just those whose literal
+	 * name matches it. A route is a prefix serving everything beneath it, so a scope listing
+	 * `.chat` names at any depth still reports a route at `room`, which can serve
+	 * `room/lobby.chat`. Code that routes or forwards needs these; listing broadcasts does
+	 * not. Requests resolve through covering routes either way.
+	 */
+	covering?: boolean;
 }
 
 /** Reactive backing state shared by announcement producers and consumers. */

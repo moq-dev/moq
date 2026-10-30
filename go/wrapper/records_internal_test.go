@@ -58,3 +58,22 @@ func TestTimestampToDurationZeroScale(t *testing.T) {
 	}()
 	TimestampToDuration(Timestamp{})
 }
+
+// DefaultSubscription carries moq-net's zero max delay, while the zero Subscription
+// leaves it nil, which sets no subscriber limit.
+func TestDefaultSubscriptionMaxDelay(t *testing.T) {
+	got, err := DefaultSubscription().ffi()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MaxDelay == nil || *got.MaxDelay != 0 {
+		t.Errorf("DefaultSubscription MaxDelay = %v, want 0", got.MaxDelay)
+	}
+	got, err = Subscription{}.ffi()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MaxDelay != nil {
+		t.Errorf("zero Subscription MaxDelay = %v, want nil", *got.MaxDelay)
+	}
+}

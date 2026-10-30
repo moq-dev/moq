@@ -120,8 +120,8 @@ fn restart(reset_secret: bool) -> Result<driver::connection::Error, tokio::time:
 
 	client.block_on(async {
 		let mut send = conn.open_uni(Default::default()).await.expect("open");
-		send.write_all(&[0; 64]).await.expect("write");
-		send.finish().expect("finish");
+		send.write_all(&[0; 64][..]).await.expect("write");
+		send.finish();
 		// Far below the client's 30s idle timeout, and ample for a loopback round
 		// trip; the keyless arm waits all of it.
 		tokio::time::timeout(Duration::from_secs(1), conn.closed()).await

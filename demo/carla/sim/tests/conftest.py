@@ -49,13 +49,14 @@ class SnapshotProducer:
 
 
 class SnapshotConsumer:
-    """Yields whatever the wrapped fake track yields, already parsed."""
+    """Wraps parsed fake values in timed records, like the runtime consumer."""
 
     def __init__(self, track: object) -> None:
         self._track = track
 
-    def __aiter__(self):
-        return aiter(self._track)
+    async def __aiter__(self):
+        async for value in self._track:
+            yield SimpleNamespace(value=value, at=None)
 
 
 moq = ModuleType("moq")

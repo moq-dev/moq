@@ -9,10 +9,14 @@ use url::Url;
 use crate::{Error, Id, moq_protocol_error};
 
 /// A callback receiving a positive handle/value, zero on clean completion, or a negative error.
+///
+/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 pub type moq_status_callback = Option<extern "C" fn(user_data: *mut c_void, code: i32)>;
 
 /// A callback receiving each session lifecycle change; the `MOQ_CONNECTION_PHASE_CLOSED` one is terminal.
+///
+/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 pub type moq_state_callback = Option<extern "C" fn(user_data: *mut c_void, state: *const crate::moq_connection_state)>;
 
@@ -209,6 +213,7 @@ impl OnStatus {
 	/// # Safety
 	/// - The caller must ensure user_data remains valid for the callback's lifetime.
 	/// - The callback function pointer must be valid if provided.
+	/// - The callback and `user_data` must be safe to use on moq-c's runtime thread.
 	pub unsafe fn new(user_data: *mut c_void, on_status: moq_status_callback) -> Result<Self, Error> {
 		Ok(Self {
 			user_data,
@@ -227,6 +232,8 @@ impl OnStatus {
 	}
 }
 
+// SAFETY: The constructor requires the callback and user_data to remain valid and
+// safe to use on moq-c's runtime thread for the callback's lifetime.
 unsafe impl Send for OnStatus {}
 
 /// A [moq_state_callback] and its user data.
@@ -241,6 +248,7 @@ impl OnState {
 	///
 	/// # Safety
 	/// - The caller must keep `user_data` valid until the terminal callback.
+	/// - The callback and `user_data` must be safe to use on moq-c's runtime thread.
 	pub unsafe fn new(user_data: *mut c_void, on_state: moq_state_callback) -> Result<Self, Error> {
 		Ok(Self {
 			user_data,
@@ -258,6 +266,8 @@ impl OnState {
 	}
 }
 
+// SAFETY: The constructor requires the callback and user_data to remain valid and
+// safe to use on moq-c's runtime thread until the terminal callback.
 unsafe impl Send for OnState {}
 
 /// Types that can be converted to C-compatible return codes.

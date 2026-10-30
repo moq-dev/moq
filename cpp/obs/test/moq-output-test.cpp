@@ -337,7 +337,7 @@ encoder_packet audioPacket(std::vector<uint8_t> &payload, int64_t pts)
 // The output's broadcast as the relay serves it, or null once the wait times out.
 std::shared_ptr<moq::BroadcastConsumer> relayBroadcast(TestRelay &relay)
 {
-	auto announced = TestOk(relay.origin->consume()->announced_broadcast("room"), "announced_broadcast");
+	auto announced = TestOk(relay.origin->consume()->follow("room", std::nullopt), "follow");
 	auto available = announced->available();
 	if (available.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
 		return nullptr;
