@@ -22,7 +22,3 @@ Tests: replaying a step through the supervisor, the second epoch's catalog
 is published with its first group.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [A timebase step restarts the TS import](/quest/m1/ts-reliability/step-restart.md) - the restart this speeds up

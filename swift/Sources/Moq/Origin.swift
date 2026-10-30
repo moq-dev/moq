@@ -153,17 +153,19 @@ public final class OriginConsumer: Sendable {
     }
 
     /// Follow an exact path, resolving each publisher instance that serves it.
-    public func announcedBroadcast(path: String) throws -> AnnouncedBroadcast {
-        AnnouncedBroadcast(try ffi.announcedBroadcast(path: path))
+    /// Pass an `epoch` (UUIDv7 text) to follow only that instance.
+    public func follow(path: String, epoch: String? = nil) throws -> Following {
+        Following(try ffi.follow(path: path, epoch: epoch))
     }
 
-    /// Request a broadcast by path, resolving as soon as it can be served through the
-    /// best announced route covering it: an announced broadcast on this origin, a route
-    /// a session announced (served on demand by that session), or a dynamic handler on
-    /// the origin, or an error if nothing can serve it. Unlike `announcedBroadcast`,
-    /// this does not wait for a future announcement.
-    public func requestBroadcast(path: String) async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.requestBroadcast(path: path))
+    /// Request a broadcast by path, resolving one publisher instance as soon as it can be
+    /// served through the best announced route covering it: an announced broadcast on this
+    /// origin, a route a session announced (served on demand by that session), or a dynamic
+    /// handler on the origin, or an error if nothing can serve it. Unlike `follow`, this
+    /// does not wait for a future announcement. Pass an `epoch` (UUIDv7 text) to refuse
+    /// any other instance.
+    public func request(path: String, epoch: String? = nil) async throws -> BroadcastConsumer {
+        BroadcastConsumer(try await ffi.request(path: path, epoch: epoch))
     }
 }
 
@@ -199,11 +201,11 @@ public final class AnnounceConsumer: AsyncSequence, Sendable {
     }
 }
 
-/// A pending wait for a specific broadcast path.
-public final class AnnouncedBroadcast: Sendable {
-    let ffi: MoqAnnouncedBroadcast
+/// Follows a specific broadcast path across the publisher instances that serve it.
+public final class Following: Sendable {
+    let ffi: MoqFollowing
 
-    init(_ ffi: MoqAnnouncedBroadcast) {
+    init(_ ffi: MoqFollowing) {
         self.ffi = ffi
     }
 

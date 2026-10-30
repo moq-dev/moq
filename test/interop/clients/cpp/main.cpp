@@ -348,7 +348,7 @@ int subscribe(
     const auto read_deadline = finish
         ? Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(timeout))
         : deadline;
-    auto announced = ok(session->consume()->announced_broadcast(path), "announced_broadcast");
+    auto announced = ok(session->consume()->follow(path, std::nullopt), "follow");
     auto consumer = until(announced->available(), read_deadline, "available");
 
     // The catalog is a live track. A lazy publisher (e.g. the browser, which only encodes on
@@ -404,7 +404,7 @@ int subscribe(
             const auto *end = std::get_if<moq::AnnounceEvent::kEnd>(&event->get_variant());
             if (end && end->announce.prefix == path) break;
         }
-        auto watch = ok(session->consume()->announced_broadcast(path + ".health"), "health watch");
+        auto watch = ok(session->consume()->follow(path + ".health", std::nullopt), "health watch");
         auto health = until(watch->available(), read_deadline, "health available");
         auto track = until(health->subscribe_track("live", std::nullopt), read_deadline, "health subscribe");
         auto group = until(track->next_group(), read_deadline, "health group");

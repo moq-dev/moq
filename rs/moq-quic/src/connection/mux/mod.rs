@@ -559,7 +559,11 @@ impl Connection {
 				break;
 			};
 			let frame_len = before - payload.len();
-			frames += 1;
+			// A PADDING run decodes as one frame but is a frame per byte on the wire
+			frames += match frame {
+				wire::Frame::Quic(frame::Frame::Padding) => frame_len,
+				_ => 1,
+			};
 			if frames > 1 && !self.config.version.uses_records() {
 				return Err(TransportError::FRAME_ENCODING_ERROR(
 					"draft-00 message carries more than one frame",

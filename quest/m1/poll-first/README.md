@@ -67,13 +67,13 @@ and their alternatives:
   type-check and borrow-check cost matches hand-written code; it adds about 1.5 ms
   of expansion per machine plus a one-time 1.3 s build of `kio-macros`, below what
   async costs. The cost is a dialect: stored locals need type annotations and are
-  `&mut` inside a wait's poll, and a `!Send` error doesn't name the wait. Its users
-  are moq-net's 23 straight-line multi-await `async fn` bodies and 12 straight-line
+  `&mut` inside a wait's poll, and a `!Send` error names the type and the wait but
+  not the local: the generated state keeps Rust's automatic `Send`, with no
+  `unsafe impl` (decided 2026-10-28). Its users are moq-net's 23 straight-line multi-await `async fn` bodies and 12 straight-line
   hand-written machines; 59 bodies await in loops or selects.
 
 ## Required
 
-- [kio::machine](/quest/m1/poll-first/machine.md) - kio's `macros` feature writes straight-line `poll_*` bodies, landing with the hand-written machines it replaces
 - [Straight-line bodies become machines](/quest/m1/poll-first/machine-bodies.md) - moq-net's straight-line `async fn` bodies become `#[kio::machine]` polls
 - [Generated async wrappers behind a feature](/quest/m1/poll-first/async-feature.md) - each library's `async fn` wrappers are generated from its `poll_*` signatures and compile only with its `async` feature
 - [Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md) - web-async goes, and moq-ffi, moq-stats, moq-wasm and moq-relay's cluster and auth run as polled `kio::Tasks` children instead of spawned tasks

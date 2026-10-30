@@ -464,8 +464,9 @@ impl Window {
 		}
 	}
 
-	/// Each range resolved, in the order given: `None` for one that is empty or still
-	/// waits on a first group. An unsettled time end is reported open, never at its cap.
+	/// Each range resolved, in the order given: `None` for one empty as given or still
+	/// waiting on a first group. One that only resolves empty keeps its span, ending at or
+	/// below its start. An unsettled time end is reported open, never at its cap.
 	pub fn resolved(&self) -> Vec<Option<Resolved>> {
 		let mut resolved = vec![None; self.ranges.len()];
 		for span in &self.spans {
@@ -478,6 +479,19 @@ impl Window {
 			});
 		}
 		resolved
+	}
+
+	/// Where each range starts once delivery starts at `from`, in the order given: `None`
+	/// for one with no group there, or still waiting on a first group.
+	pub fn starts(&self, from: u64) -> Vec<Option<u64>> {
+		self.resolved()
+			.into_iter()
+			.map(|r| {
+				let r = r?;
+				let start = r.start.max(from);
+				r.end.is_none_or(|end| end > start).then_some(start)
+			})
+			.collect()
 	}
 
 	/// The exclusive end past every group in range, `None` when one stays open. An
@@ -779,6 +793,9 @@ mod tests {
 				Some(Resolved { start: 7, end: None }),
 			]
 		);
+		// Delivery starting inside a range raises its start; past its end leaves it none.
+		assert_eq!(window.starts(3), [Some(3), Some(7)]);
+		assert_eq!(window.starts(5), [None, Some(7)]);
 
 		// Nothing asked for is nothing in range, floored nowhere.
 		let window = Window::new(&[], None, &Untimed).unwrap();

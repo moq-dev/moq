@@ -34,7 +34,7 @@ flate2 = { workspace = true, features = ["zlib-rs", "runtime_detection"] }
 futures = { workspace = true, optional = true }
 hashbrown = { workspace = true }
 hashlink = { workspace = true }
-kio = { workspace = true }
+kio = { workspace = true, features = ["macros"] }
 moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 moq-pattern = { workspace = true, features = ["serde"] }
 num_enum = { workspace = true }

@@ -774,7 +774,8 @@ For example, with video at 20 millisecond intervals and audio at 15 written as v
 
 ### enabled {#field-enabled}
 The `enabled` field says whether a consumer may select an audio or video rendition; a text rendition does not carry it.
-When `enabled` is false, no frames are coming, and a consumer MUST NOT select the rendition.
+When `enabled` is false, no frames are coming, and a consumer SHOULD NOT select the rendition.
+A consumer MAY keep a rendition it already selected while that rendition is disabled and no enabled one it can decode remains, so a re-enable needs no new subscription.
 If absent, `enabled` defaults to true; a publisher SHOULD only write it when false.
 
 Earlier versions defined a video `stalled` field instead.
@@ -1149,7 +1150,7 @@ This document has no IANA actions.
 - Added the optional `delay` rendition field: how far a rendition's timestamps trail those other renditions already wrote, never lowered once advertised and never subtracted across renditions.
 - Recommended namespaced keys for application root sections.
 - Added the optional `delay` field to `json` and `binary` track entries, measured only from payloads stamped with their capture time on the broadcast clock.
-- Replaced the video `stalled` field with an optional `enabled` field on audio and video renditions. A consumer MUST NOT select a disabled rendition and ignores `stalled`. A consumer that predates `enabled` keeps selecting a disabled rendition.
+- Replaced the video `stalled` field with an optional `enabled` field on audio and video renditions. A consumer SHOULD NOT select a disabled rendition, MAY keep one it already selected while no enabled alternative remains, and ignores `stalled`. A consumer that predates `enabled` keeps selecting a disabled rendition.
 - Audio `sampleRate` and `numberOfChannels` describe the decoded output, so HE-AAC names its SBR rate and parametric stereo names two channels.
 - Added an optional `track` field to video, audio, text, `json`, and `binary` entries naming the track in its broadcast; the entry's key is its ID and names the track when `track` is absent. A consumer MUST reject a catalog using one ID for both a video and an audio rendition.
 - Defined video `displayAspectWidth` and `displayAspectHeight` as the whole picture's display aspect, not the sample aspect.

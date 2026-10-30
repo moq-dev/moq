@@ -54,8 +54,6 @@ encoder, and record why.
 
 ## Required
 
-- [JS consumers hold a disabled rendition](/quest/m1/push-to-talk/hold-js.md) - watch keeps a disabled audio or video rendition subscribed, and the hang spec says "should not select"
-- [moqsrc holds a disabled rendition](/quest/m1/push-to-talk/hold-rs.md) - moqsrc keeps its reader running under the selection rule moq play and moq-mux already apply
 - [`muted` and `invisible` keep capture open](/quest/m1/push-to-talk/mute.md) - the element disables only the encoder, so unmute skips getUserMedia and AudioContext setup
 - [Watch caches audio codec support](/quest/m1/push-to-talk/audio-support-cache.md) - an unmute resumes audio without waiting on a support check
 

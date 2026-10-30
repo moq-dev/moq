@@ -756,8 +756,8 @@ export class Producer {
 	// to close, rather than end at the boundary with groups still to arrive.
 	#tailPending = false;
 	// The first group the wire subscription's live feed serves (see `hooks.startTrack`), unset
-	// until its START resolves it, and the floor the SUBSCRIBE requested.
-	#served?: { start?: number; requested?: number };
+	// until its START resolves it, null for a resolved-empty range, and the requested floor.
+	#served?: { start?: number | null; requested?: number };
 	// The sequences the live feed delivered, as a group or a datagram: what a pending tail is
 	// judged by. Eviction never touches it. A gap folds away a subscription's grace after a
 	// later arrival opened it, as the session's tail does, so this holds only the gaps still
@@ -1599,6 +1599,7 @@ export class Producer {
 		const requested = groups?.start === undefined ? undefined : groupBounds(groups).start;
 		const served = this.#served;
 		if (!served || served.requested !== requested) return requested;
+		if (served.start === null) return requested;
 		if (served.start !== undefined) return served.start;
 		// A closed track never gets its START.
 		return this.#state.closed.peek() === undefined ? "pending" : requested;

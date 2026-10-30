@@ -30,8 +30,8 @@ func TestOriginEndsWithItsProducer(t *testing.T) {
 	if update != nil || err != nil {
 		t.Fatalf("Next = (%v, %v), want the end of the stream", update, err)
 	}
-	if _, err := consumer.RequestBroadcast(ctx, "live"); !errors.Is(err, ErrClosed) {
-		t.Fatalf("RequestBroadcast err = %v, want ErrClosed", err)
+	if _, err := consumer.Request(ctx, "live", nil); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Request err = %v, want ErrClosed", err)
 	}
 }
 
@@ -58,7 +58,7 @@ func TestRequestsKeepTheOrigin(t *testing.T) {
 	}
 	requested := make(chan result, 1)
 	go func() {
-		broadcast, err := consumer.RequestBroadcast(ctx, "live")
+		broadcast, err := consumer.Request(ctx, "live", nil)
 		requested <- result{broadcast: broadcast, err: err}
 	}()
 
@@ -83,7 +83,7 @@ func TestRequestsKeepTheOrigin(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	if res.err != nil {
-		t.Fatalf("RequestBroadcast err = %v, want the served broadcast", res.err)
+		t.Fatalf("Request err = %v, want the served broadcast", res.err)
 	}
 }
 
@@ -108,13 +108,13 @@ func TestReleasingAPublicationKeepsItsRoute(t *testing.T) {
 	}
 	publication.inner.Destroy()
 
-	if _, err := consumer.RequestBroadcast(ctx, "live"); err != nil {
-		t.Fatalf("RequestBroadcast = %v, want the released publication's broadcast", err)
+	if _, err := consumer.Request(ctx, "live", nil); err != nil {
+		t.Fatalf("Request = %v, want the released publication's broadcast", err)
 	}
 	if err := broadcast.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := consumer.RequestBroadcast(ctx, "live"); err == nil {
+	if _, err := consumer.Request(ctx, "live", nil); err == nil {
 		t.Fatal("a closed broadcast must be unroutable")
 	}
 }
