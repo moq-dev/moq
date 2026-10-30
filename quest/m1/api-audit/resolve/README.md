@@ -53,7 +53,6 @@ Wire: none.
 ## Required
 
 - [The player takes any read-side origin](/quest/m1/api-audit/resolve/watch-origin.md) - `@moq/watch`'s `Player` and `Broadcast` accept a read-only `Origin.Consumer` as well as a `Table`
-- [The carla demo pins its driver epoch](/quest/m1/api-audit/resolve/callers.md) - the demo's driver watcher requests each run pinned to its announced epoch
 
 ## Related
 
