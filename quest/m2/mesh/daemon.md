@@ -22,8 +22,9 @@ the epic's first shippable outcome.
   configure.
 - Nothing is served unless `serve` names it. A restart keeps the endpoint key
   and enrollment, so a node never re-enrolls on its own.
-- Enroll and renew with `moq_auth::mesh::Client`, signing with the endpoint key
-  through its `Signer` trait, and pass the hostname as the default name. The
+- Enroll with an enrollment key and renew with `moq_auth::mesh::Client`,
+  signing with the endpoint key through its `Signer` trait, and pass the
+  hostname as the default name. The
   contract is in `doc/bin/relay/auth.md#mesh-enrollment`.
 - Update `doc/bin/cli.md` inline.
 

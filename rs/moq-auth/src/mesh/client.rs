@@ -5,10 +5,7 @@ use std::time::Duration;
 
 use url::Url;
 
-use super::{
-	Challenge, DeviceAuthorization, DeviceRequest, DeviceTokenRequest, EnrollRequest, Enrollment, ErrorCode,
-	ErrorReply, Proof, Signer,
-};
+use super::{Challenge, EnrollRequest, Enrollment, ErrorCode, ErrorReply, Proof, Signer};
 use crate::Error;
 
 /// Every request is bounded so a hung coordinator fails rather than parks the device.
@@ -16,9 +13,6 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The largest reply read from the coordinator; a mesh's member list fits easily.
 const MAX_REPLY: usize = 4 << 20;
-
-/// How much a `slow_down` adds to the polling interval (RFC 8628 §3.5).
-const SLOW_DOWN: Duration = Duration::from_secs(5);
 
 /// The longest wait between refresh attempts while the coordinator is unreachable.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -69,41 +63,6 @@ impl Client {
 		self.post("enroll", &request).await
 	}
 
-	/// Start a device grant, asking for `name`. Show the human its `user_code` and
-	/// `verification_uri`, then [`poll`](Self::poll).
-	pub async fn device(&self, name: Option<&str>) -> crate::Result<DeviceAuthorization> {
-		let proof = self.proof().await?;
-		let request = DeviceRequest {
-			proof,
-			name: name.map(Into::into),
-		};
-		self.post("device", &request).await
-	}
-
-	/// Wait for a human to approve the device grant, polling at its interval. Fails with
-	/// [`ErrorCode::AccessDenied`] when denied and [`ErrorCode::ExpiredToken`] when it
-	/// times out.
-	pub async fn poll(&self, authorization: &DeviceAuthorization) -> crate::Result<Enrollment> {
-		let mut interval = Duration::from_secs(authorization.interval);
-		let request = DeviceTokenRequest {
-			device_code: authorization.device_code.clone(),
-		};
-		loop {
-			moq_clock::sleep(interval).await;
-			match self.post("device/token", &request).await {
-				Err(Error::Mesh(ErrorReply {
-					error: ErrorCode::AuthorizationPending,
-					..
-				})) => {}
-				Err(Error::Mesh(ErrorReply {
-					error: ErrorCode::SlowDown,
-					..
-				})) => interval += SLOW_DOWN,
-				other => return other,
-			}
-		}
-	}
-
 	/// Prove the key again for a fresh token. Fails with [`ErrorCode::AccessDenied`] once
 	/// the device is revoked.
 	pub async fn refresh(&self) -> crate::Result<Enrollment> {
@@ -114,7 +73,7 @@ impl Client {
 	/// Wait until `current` is two thirds through its remaining life, then refresh it,
 	/// retrying through an outage until it expires. A refusal is returned at once, so a
 	/// revoked device stops rather than retrying, except a transient one: a server error,
-	/// `slow_down`, or a challenge that expired or was evicted before the proof arrived.
+	/// `slow_down`, or a challenge that expired or outlived a coordinator restart.
 	pub async fn renew(&self, current: &Enrollment) -> crate::Result<Enrollment> {
 		let remaining = || {
 			current

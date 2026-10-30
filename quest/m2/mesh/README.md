@@ -44,6 +44,10 @@ Decided 2026-10-25 with the maintainer (planning interview):
   already runs as a relay node.
 - Services are opt-in and named; nothing is exposed by default and sshd's own
   authentication still applies.
+- Enrollment is automated, with no human in the loop (decided 2026-10-30): a
+  device presents an enrollment key the owner created (single-use or reusable,
+  tagged, expiring) and then refreshes by proving its key. There is no OAuth
+  device grant.
 - Robots are a primary use case: aarch64 builds, headless enrollment, and
   flapping uplinks are acceptance criteria, not follow-ups.
 - Upstream exposes an iroh-shaped Rust API (not wire-compatible with iroh), and

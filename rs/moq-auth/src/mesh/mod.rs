@@ -1,8 +1,8 @@
 //! Mesh enrollment: how a device with an endpoint key joins a mesh.
 //!
 //! A device proves it holds its Ed25519 endpoint key by signing a fresh challenge from
-//! the coordinator, and presents a credential: a pre-authorized enrollment key, or a
-//! device grant (RFC 8628) a human approved. The coordinator answers with an
+//! the coordinator, and presents an enrollment key the mesh owner created, so enrollment
+//! needs no human in the loop. The coordinator answers with an
 //! [`Enrollment`]: the relays to dial and a JWT granting publish on `mesh/<id>/**` and
 //! subscribe on `mesh/**`. The device refreshes it before it expires by proving its key
 //! again, so revoking a device makes its next refresh fail.
@@ -15,8 +15,6 @@
 //! |---|---|---|
 //! | `POST {base}/challenge` | none | [`Challenge`] |
 //! | `POST {base}/enroll` | [`EnrollRequest`] | [`Enrollment`] |
-//! | `POST {base}/device` | [`DeviceRequest`] | [`DeviceAuthorization`] |
-//! | `POST {base}/device/token` | [`DeviceTokenRequest`] | [`Enrollment`] |
 //! | `POST {base}/refresh` | [`Proof`] | [`Enrollment`] |
 //!
 //! Every refusal is a 4xx with an [`ErrorReply`].
@@ -164,7 +162,7 @@ fn audience(base: &url::Url) -> &str {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Challenge {
-	/// [`CHALLENGE_LEN`] random bytes, base64url without padding.
+	/// [`CHALLENGE_LEN`] bytes, opaque to the device, base64url without padding.
 	#[serde_as(as = "serde_with::base64::Base64<serde_with::base64::UrlSafe, serde_with::formats::Unpadded>")]
 	pub challenge: Vec<u8>,
 	/// When the coordinator stops accepting a proof over it, unix seconds.
@@ -254,42 +252,6 @@ pub struct EnrollRequest {
 	pub name: Option<String>,
 }
 
-/// `POST {base}/device`: start a device grant (RFC 8628) for a human to approve.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct DeviceRequest {
-	/// Proof of the endpoint key, which the grant is bound to.
-	#[serde(flatten)]
-	pub proof: Proof,
-	/// The device's requested name, as in [`EnrollRequest::name`].
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub name: Option<String>,
-}
-
-/// The device authorization response of RFC 8628 §3.2.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct DeviceAuthorization {
-	/// The secret the device polls `POST {base}/device/token` with.
-	pub device_code: String,
-	/// The code the human enters or reads out to approve the device.
-	pub user_code: String,
-	/// Where the human approves it.
-	pub verification_uri: url::Url,
-	/// Seconds until the codes expire.
-	pub expires_in: u64,
-	/// Seconds the device waits between polls.
-	pub interval: u64,
-}
-
-/// `POST {base}/device/token`: poll a device grant.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct DeviceTokenRequest {
-	/// The code from the [`DeviceAuthorization`].
-	pub device_code: String,
-}
-
 /// What a device needs to join: the relays to dial and the token to present.
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -343,7 +305,7 @@ impl ErrorReply {
 	}
 }
 
-/// The reasons a coordinator refuses, the device grant ones from RFC 8628 §3.5.
+/// The reasons a coordinator refuses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -356,14 +318,10 @@ pub enum ErrorCode {
 	InvalidSignature,
 	/// The enrollment key is unknown, used, revoked, or expired.
 	InvalidGrant,
-	/// The human has not yet approved the device grant; poll again.
-	AuthorizationPending,
-	/// Polling too fast; wait longer between polls.
+	/// The coordinator is busy; retry shortly.
 	SlowDown,
-	/// The human denied the device grant, or the device is revoked or not enrolled.
+	/// The device is revoked or not enrolled.
 	AccessDenied,
-	/// The device grant expired; start a new one.
-	ExpiredToken,
 	/// The coordinator failed on its side; retry later.
 	ServerError,
 	/// A reason this version does not know.
@@ -429,8 +387,8 @@ mod tests {
 
 	#[test]
 	fn error_replies_read_unknown_codes() {
-		let reply: ErrorReply = serde_json::from_str(r#"{"error":"authorization_pending"}"#).unwrap();
-		assert_eq!(reply.error, ErrorCode::AuthorizationPending);
+		let reply: ErrorReply = serde_json::from_str(r#"{"error":"access_denied"}"#).unwrap();
+		assert_eq!(reply.error, ErrorCode::AccessDenied);
 		let reply: ErrorReply = serde_json::from_str(r#"{"error":"new_thing","error_description":"x"}"#).unwrap();
 		assert_eq!(reply.error, ErrorCode::Unknown);
 		assert_eq!(ErrorCode::SlowDown.to_string(), "slow_down");

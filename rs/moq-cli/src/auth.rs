@@ -199,7 +199,7 @@ enum Command {
 	/// Answer a relay's auth requests with keys, public rules, an mTLS grant, tiers, and session limits.
 	Serve(Serve),
 
-	/// Manage a mesh served by `moq auth serve --mesh-url`: enrollment keys, devices, and device grants.
+	/// Manage a mesh served by `moq auth serve --mesh-url`: enrollment keys and devices.
 	Mesh(Mesh),
 
 	/// List live sessions on a relay's internal listener.
@@ -657,21 +657,6 @@ enum MeshCommand {
 		/// The device's endpoint ID.
 		endpoint: String,
 	},
-
-	/// List device grants waiting for approval.
-	Pending,
-
-	/// Approve the device grant showing this user code.
-	Approve {
-		/// The code the device shows, e.g. `BCDF-GHJK`.
-		code: String,
-	},
-
-	/// Deny the device grant showing this user code.
-	Deny {
-		/// The code the device shows.
-		code: String,
-	},
 }
 
 impl Mesh {
@@ -690,9 +675,6 @@ impl Mesh {
 			MeshCommand::RevokeKey { id } => client.delete(self.url("/mesh/keys", &[id])),
 			MeshCommand::Devices => client.get(self.url("/mesh/devices", &[])),
 			MeshCommand::Revoke { endpoint } => client.delete(self.url("/mesh/devices", &[endpoint])),
-			MeshCommand::Pending => client.get(self.url("/mesh/pending", &[])),
-			MeshCommand::Approve { code } => client.post(self.url("/mesh/pending", &[code, "approve"])),
-			MeshCommand::Deny { code } => client.post(self.url("/mesh/pending", &[code, "deny"])),
 		};
 		let response = request
 			.send()
@@ -705,9 +687,6 @@ impl Mesh {
 			anyhow::bail!(match self.command {
 				MeshCommand::RevokeKey { .. } if !body.is_empty() => "no enrollment key has that ID",
 				MeshCommand::Revoke { .. } if !body.is_empty() => "no device has that endpoint ID",
-				MeshCommand::Approve { .. } | MeshCommand::Deny { .. } if !body.is_empty() => {
-					"no device grant is waiting with that code"
-				}
 				_ => "not found; is the server running with --mesh-url?",
 			});
 		}
@@ -901,7 +880,7 @@ mod tests {
 				"--expires",
 				"1d",
 			][..],
-			&["moq", "auth", "mesh", "approve", "BCDF-GHJK"],
+			&["moq", "auth", "mesh", "devices"],
 			&["moq", "auth", "mesh", "--url", "http://127.0.0.1:9000", "revoke", "ab"],
 		] {
 			assert!(matches!(parse(args).unwrap().command, Command::Mesh(_)), "{args:?}");

@@ -3,8 +3,8 @@
 //! [`Coordinator::router`] answers the device-facing contract; [`Coordinator::admin_router`]
 //! is the owner's API, mounted on the auth server's own listener, which has no
 //! authentication and stays on loopback. Enrollment keys and devices persist to a JSON
-//! state file; challenges and pending device grants live in memory, so a restart only
-//! makes a device fetch a new challenge or start its grant again.
+//! state file. Challenges are sealed with a secret held in memory, so a restart only makes
+//! a device fetch a new challenge.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,29 +16,22 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use moq_clock::Instant;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-use super::{
-	CHALLENGE_LEN, Challenge, DeviceAuthorization, DeviceRequest, DeviceTokenRequest, EndpointId, EnrollRequest,
-	Enrollment, ErrorCode, ErrorReply, Member, Proof,
-};
+use super::{CHALLENGE_LEN, Challenge, EndpointId, EnrollRequest, Enrollment, ErrorCode, ErrorReply, Member, Proof};
 use crate::{Claims, Key, Pattern};
 
 /// How long a challenge stays valid.
 const CHALLENGE_TTL: Duration = Duration::from_secs(60);
 
-/// The most challenges outstanding at once, so an unauthenticated caller cannot grow the
-/// table without bound; the oldest is dropped first.
-const MAX_CHALLENGES: usize = 4096;
+/// The most unexpired challenges remembered as used. Past it, proofs are refused with
+/// `slow_down` until the oldest expire; an outstanding challenge is never dropped.
+const MAX_SPENT: usize = 65536;
 
-/// The most device grants pending at once, for the same reason.
-const MAX_PENDING: usize = 256;
-
-/// The alphabet of a user code: no vowels, so a code spells no word, and no
-/// look-alikes (RFC 8628 §6.1).
-const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
+/// A challenge is its expiry (unix seconds), a nonce, then a truncated HMAC over both.
+const NONCE_LEN: usize = 8;
+const TAG_LEN: usize = CHALLENGE_LEN - 8 - NONCE_LEN;
 
 /// The longest a device name may be: one DNS label.
 const MAX_NAME: usize = 63;
@@ -59,15 +52,11 @@ pub struct Config {
 	pub state: Option<PathBuf>,
 	/// How long an issued token lasts.
 	pub token_ttl: Duration,
-	/// How long a device grant waits for a human.
-	pub device_ttl: Duration,
-	/// The seconds a device waits between device grant polls.
-	pub device_interval: Duration,
 }
 
 impl Config {
-	/// A coordinator at `url` signing with `key`, with hour-long tokens, ten-minute device
-	/// grants polled every five seconds, no relays, and no state file.
+	/// A coordinator at `url` signing with `key`, with hour-long tokens, no relays, and no
+	/// state file.
 	pub fn new(url: url::Url, key: Key) -> Self {
 		Self {
 			url,
@@ -75,8 +64,6 @@ impl Config {
 			relays: Vec::new(),
 			state: None,
 			token_ttl: Duration::from_secs(3600),
-			device_ttl: Duration::from_secs(600),
-			device_interval: Duration::from_secs(5),
 		}
 	}
 }
@@ -181,47 +168,19 @@ pub struct NewKey {
 	pub reusable: bool,
 }
 
-/// A device grant waiting for a human, as the owner sees it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct PendingDevice {
-	/// The code the device shows its human.
-	pub user_code: String,
-	/// The endpoint the grant would enroll.
-	pub endpoint: EndpointId,
-	/// The name the device asked for.
-	pub name: Option<String>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Decision {
-	Waiting,
-	Approved,
-	Denied,
-}
-
-struct Pending {
-	user_code: String,
-	endpoint: EndpointId,
-	name: Option<String>,
-	expires: Instant,
-	polled: Option<Instant>,
-	decision: Decision,
-}
-
 #[derive(Default)]
 struct Inner {
 	store: Store,
-	/// Outstanding challenges and when each was issued.
-	challenges: HashMap<Vec<u8>, Instant>,
-	/// Pending device grants, by the SHA-256 of their device code.
-	pending: HashMap<Vec<u8>, Pending>,
+	/// Challenges a valid proof already used, until each expires.
+	spent: HashMap<Vec<u8>, moq_clock::Wall>,
 }
 
 /// The mesh coordinator: issues challenges, enrolls devices, and refreshes their tokens.
 #[derive(Clone)]
 pub struct Coordinator {
 	config: Arc<Config>,
+	/// Seals challenges, so an outstanding one needs no state.
+	secret: Arc<aws_lc_rs::hmac::Key>,
 	inner: Arc<Mutex<Inner>>,
 }
 
@@ -245,6 +204,7 @@ impl Coordinator {
 			.sign(&claims(EndpointId::from_bytes([0; 32]), moq_clock::wall(), None))?;
 		Ok(Self {
 			config: Arc::new(config),
+			secret: Arc::new(aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &random(32))),
 			inner: Arc::new(Mutex::new(Inner {
 				store,
 				..Default::default()
@@ -252,27 +212,21 @@ impl Coordinator {
 		})
 	}
 
-	/// Issue a fresh challenge.
+	/// Issue a fresh challenge. It holds no state until a proof uses it, so no number of
+	/// requests can crowd out one a device is still signing.
 	pub fn challenge(&self) -> Challenge {
-		let challenge = random(CHALLENGE_LEN);
-		let mut inner = self.inner.lock().unwrap();
-		let now = Instant::now();
-		inner
-			.challenges
-			.retain(|_, issued| now.saturating_duration_since(*issued) < CHALLENGE_TTL);
-		if inner.challenges.len() >= MAX_CHALLENGES
-			&& let Some(oldest) = inner
-				.challenges
-				.iter()
-				.min_by_key(|(_, issued)| **issued)
-				.map(|(challenge, _)| challenge.clone())
-		{
-			inner.challenges.remove(&oldest);
-		}
-		inner.challenges.insert(challenge.clone(), now);
+		let now = moq_clock::wall();
+		let expires =
+			now.checked_duration_since(moq_clock::Wall::UNIX_EPOCH)
+				.unwrap_or_default()
+				.as_secs() + CHALLENGE_TTL.as_secs();
+		let mut challenge = expires.to_be_bytes().to_vec();
+		challenge.extend_from_slice(&random(NONCE_LEN));
+		let tag = self.tag(&challenge);
+		challenge.extend_from_slice(&tag);
 		Challenge {
 			challenge,
-			expires: moq_clock::wall() + CHALLENGE_TTL,
+			expires: moq_clock::Wall::UNIX_EPOCH.saturating_add(Duration::from_secs(expires)),
 		}
 	}
 
@@ -323,86 +277,6 @@ impl Coordinator {
 			}
 			self.issue(store, endpoint)
 		})
-	}
-
-	/// Start a device grant for a human to approve.
-	pub fn device(&self, request: &DeviceRequest) -> Reply<DeviceAuthorization> {
-		let mut inner = self.inner.lock().unwrap();
-		self.check(&mut inner, &request.proof)?;
-		refuse_revoked(&inner.store, request.proof.endpoint)?;
-
-		let now = Instant::now();
-		inner.pending.retain(|_, pending| pending.expires > now);
-		if inner.pending.len() >= MAX_PENDING {
-			return Err(ErrorReply::new(
-				ErrorCode::SlowDown,
-				"too many device grants are pending; try again later",
-			));
-		}
-
-		let device_code = encode(&random(32));
-		let user_code = loop {
-			let code = user_code();
-			if !inner.pending.values().any(|pending| pending.user_code == code) {
-				break code;
-			}
-		};
-		inner.pending.insert(
-			sha256(device_code.as_bytes()),
-			Pending {
-				user_code: user_code.clone(),
-				endpoint: request.proof.endpoint,
-				name: request.name.clone(),
-				expires: now + self.config.device_ttl,
-				polled: None,
-				decision: Decision::Waiting,
-			},
-		);
-
-		Ok(DeviceAuthorization {
-			device_code,
-			user_code,
-			verification_uri: self.verification_uri(),
-			expires_in: self.config.device_ttl.as_secs(),
-			interval: self.config.device_interval.as_secs(),
-		})
-	}
-
-	/// Poll a device grant: the enrollment once a human approves, a refusal until then.
-	pub fn device_token(&self, request: &DeviceTokenRequest) -> Reply<Enrollment> {
-		let mut inner = self.inner.lock().unwrap();
-		let hash = sha256(request.device_code.as_bytes());
-		let now = Instant::now();
-		let pending = inner
-			.pending
-			.get_mut(&hash)
-			.ok_or_else(|| ErrorReply::new(ErrorCode::ExpiredToken, "unknown or expired device code"))?;
-		if pending.expires <= now {
-			inner.pending.remove(&hash);
-			return Err(ErrorReply::new(ErrorCode::ExpiredToken, "the device grant expired"));
-		}
-		let fast = pending
-			.polled
-			.is_some_and(|polled| now.saturating_duration_since(polled) < self.config.device_interval);
-		pending.polled = Some(now);
-		match pending.decision {
-			Decision::Waiting if fast => Err(ErrorReply::new(ErrorCode::SlowDown, "polling faster than the interval")),
-			Decision::Waiting => Err(ErrorReply::new(ErrorCode::AuthorizationPending, "waiting for approval")),
-			Decision::Denied => {
-				inner.pending.remove(&hash);
-				Err(ErrorReply::new(ErrorCode::AccessDenied, "the device grant was denied"))
-			}
-			Decision::Approved => {
-				let (endpoint, name) = (pending.endpoint, pending.name.clone());
-				// The grant stays redeemable until its enrollment is saved.
-				let enrollment = self.commit(&mut inner, |store| {
-					self.admit(store, endpoint, name.as_deref(), Vec::new())?;
-					self.issue(store, endpoint)
-				})?;
-				inner.pending.remove(&hash);
-				Ok(enrollment)
-			}
-		}
 	}
 
 	/// Refresh an enrolled device's token, refusing a revoked or unknown one.
@@ -485,45 +359,11 @@ impl Coordinator {
 		Ok(found)
 	}
 
-	/// The device grants waiting for a human.
-	pub fn pending(&self) -> Vec<PendingDevice> {
-		let mut inner = self.inner.lock().unwrap();
-		let now = Instant::now();
-		inner.pending.retain(|_, pending| pending.expires > now);
-		inner
-			.pending
-			.values()
-			.filter(|pending| pending.decision == Decision::Waiting)
-			.map(|pending| PendingDevice {
-				user_code: pending.user_code.clone(),
-				endpoint: pending.endpoint,
-				name: pending.name.clone(),
-			})
-			.collect()
-	}
-
-	/// Approve or deny the waiting device grant showing `user_code`. Returns whether one
-	/// was waiting.
-	pub fn decide(&self, user_code: &str, approve: bool) -> bool {
-		let user_code = normalize_user_code(user_code);
-		let mut inner = self.inner.lock().unwrap();
-		let now = Instant::now();
-		let Some(pending) = inner.pending.values_mut().find(|pending| {
-			pending.user_code == user_code && pending.decision == Decision::Waiting && pending.expires > now
-		}) else {
-			return false;
-		};
-		pending.decision = if approve { Decision::Approved } else { Decision::Denied };
-		true
-	}
-
 	/// The device-facing contract, mounted at [`Config::url`]'s path.
 	pub fn router(&self) -> Router {
 		let router = Router::new()
 			.route("/challenge", post(challenge_handler))
 			.route("/enroll", post(enroll_handler))
-			.route("/device", post(device_handler).get(verification_handler))
-			.route("/device/token", post(device_token_handler))
 			.route("/refresh", post(refresh_handler))
 			.with_state(self.clone());
 		match self.config.url.path().trim_end_matches('/') {
@@ -540,9 +380,6 @@ impl Coordinator {
 			.route("/mesh/keys/{id}", delete(revoke_key_handler))
 			.route("/mesh/devices", get(devices_handler))
 			.route("/mesh/devices/{endpoint}", delete(revoke_device_handler))
-			.route("/mesh/pending", get(pending_handler))
-			.route("/mesh/pending/{code}/approve", post(approve_handler))
-			.route("/mesh/pending/{code}/deny", post(deny_handler))
 			.with_state(self.clone())
 	}
 
@@ -551,22 +388,22 @@ impl Coordinator {
 		axum::serve(listener, self.router()).await
 	}
 
-	fn verification_uri(&self) -> url::Url {
-		let mut url = self.config.url.clone();
-		let path = format!("{}/device", url.path().trim_end_matches('/'));
-		url.set_path(&path);
-		url
-	}
-
-	/// Consume the proof's challenge and verify its signature.
+	/// Verify the proof's challenge and signature, then spend the challenge.
 	fn check(&self, inner: &mut Inner, proof: &Proof) -> Reply<()> {
-		// Consumed even when the signature fails, so one challenge is one attempt.
-		let issued = inner
-			.challenges
-			.remove(&proof.challenge)
-			.ok_or_else(|| ErrorReply::new(ErrorCode::InvalidChallenge, "unknown or used challenge"))?;
-		if Instant::now().saturating_duration_since(issued) >= CHALLENGE_TTL {
-			return Err(ErrorReply::new(ErrorCode::InvalidChallenge, "the challenge expired"));
+		let invalid = |reason: &str| ErrorReply::new(ErrorCode::InvalidChallenge, reason);
+		let challenge = &proof.challenge;
+		if challenge.len() != CHALLENGE_LEN
+			|| !constant_eq(
+				&self.tag(&challenge[..CHALLENGE_LEN - TAG_LEN]),
+				&challenge[CHALLENGE_LEN - TAG_LEN..],
+			) {
+			return Err(invalid("unknown challenge"));
+		}
+		let expires = u64::from_be_bytes(challenge[..8].try_into().expect("8 bytes"));
+		let expires = moq_clock::Wall::UNIX_EPOCH.saturating_add(Duration::from_secs(expires));
+		let now = moq_clock::wall();
+		if expires <= now {
+			return Err(invalid("the challenge expired"));
 		}
 		if !proof.verify(&self.config.url) {
 			return Err(ErrorReply::new(
@@ -574,7 +411,23 @@ impl Coordinator {
 				"the signature does not verify against the endpoint ID",
 			));
 		}
+		inner.spent.retain(|_, until| *until > now);
+		if inner.spent.contains_key(challenge) {
+			return Err(invalid("the challenge was already used"));
+		}
+		if inner.spent.len() >= MAX_SPENT {
+			return Err(ErrorReply::new(
+				ErrorCode::SlowDown,
+				"too many proofs at once; retry shortly",
+			));
+		}
+		inner.spent.insert(challenge.clone(), expires);
 		Ok(())
+	}
+
+	/// The truncated HMAC sealing a challenge's expiry and nonce.
+	fn tag(&self, body: &[u8]) -> Vec<u8> {
+		aws_lc_rs::hmac::sign(&self.secret, body).as_ref()[..TAG_LEN].to_vec()
 	}
 
 	/// Apply `change` to a copy of the store and save it, adopting the copy only once it
@@ -723,34 +576,6 @@ fn unique_name(devices: &[Device], endpoint: EndpointId, name: &str) -> String {
 		.expect("an unbounded search finds a free name")
 }
 
-/// Eight characters from [`USER_CODE_ALPHABET`] as `XXXX-XXXX`.
-fn user_code() -> String {
-	let bytes = random(8);
-	let mut code = String::with_capacity(9);
-	for (i, byte) in bytes.iter().enumerate() {
-		if i == 4 {
-			code.push('-');
-		}
-		// 256 is not a multiple of 20; the slight bias costs a fraction of a bit.
-		code.push(USER_CODE_ALPHABET[*byte as usize % USER_CODE_ALPHABET.len()] as char);
-	}
-	code
-}
-
-/// A user code as typed: case and separators ignored, as RFC 8628 §6.1 advises.
-fn normalize_user_code(code: &str) -> String {
-	let letters: String = code
-		.chars()
-		.filter(char::is_ascii_alphanumeric)
-		.map(|c| c.to_ascii_uppercase())
-		.collect();
-	if letters.len() == 8 {
-		format!("{}-{}", &letters[..4], &letters[4..])
-	} else {
-		letters
-	}
-}
-
 /// base64url without padding, the encoding of every random secret in the contract.
 fn encode(bytes: &[u8]) -> String {
 	use base64::Engine;
@@ -813,24 +638,6 @@ async fn enroll_handler(
 	coordinator.enroll(&request).map(Json)
 }
 
-async fn device_handler(
-	State(coordinator): State<Coordinator>,
-	Body(request): Body<DeviceRequest>,
-) -> Reply<Json<DeviceAuthorization>> {
-	coordinator.device(&request).map(Json)
-}
-
-async fn verification_handler() -> &'static str {
-	"Ask the mesh owner to approve your device: moq auth mesh approve <user code>\n"
-}
-
-async fn device_token_handler(
-	State(coordinator): State<Coordinator>,
-	Body(request): Body<DeviceTokenRequest>,
-) -> Reply<Json<Enrollment>> {
-	coordinator.device_token(&request).map(Json)
-}
-
 async fn refresh_handler(State(coordinator): State<Coordinator>, Body(proof): Body<Proof>) -> Reply<Json<Enrollment>> {
 	coordinator.refresh(&proof).map(Json)
 }
@@ -873,27 +680,6 @@ async fn revoke_device_handler(State(coordinator): State<Coordinator>, Path(endp
 	}
 }
 
-async fn pending_handler(State(coordinator): State<Coordinator>) -> Json<Vec<PendingDevice>> {
-	Json(coordinator.pending())
-}
-
-async fn approve_handler(State(coordinator): State<Coordinator>, Path(code): Path<String>) -> Response {
-	decide(&coordinator, &code, true)
-}
-
-async fn deny_handler(State(coordinator): State<Coordinator>, Path(code): Path<String>) -> Response {
-	decide(&coordinator, &code, false)
-}
-
-/// A known route's miss carries a body, so the CLI can tell it from a missing route.
-fn decide(coordinator: &Coordinator, code: &str, approve: bool) -> Response {
-	if coordinator.decide(code, approve) {
-		StatusCode::NO_CONTENT.into_response()
-	} else {
-		(StatusCode::NOT_FOUND, "not found").into_response()
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -930,10 +716,24 @@ mod tests {
 	}
 
 	#[test]
-	fn user_codes_read_back_however_typed() {
-		let code = user_code();
-		assert_eq!(code.len(), 9);
-		assert_eq!(normalize_user_code(&code.to_lowercase().replace('-', " ")), code);
+	fn a_full_spent_table_refuses_without_forgetting() {
+		let key = Key::generate(Algorithm::HS256, None).unwrap();
+		let base: url::Url = "https://mesh.example".parse().unwrap();
+		let coordinator = Coordinator::new(Config::new(base.clone(), key)).unwrap();
+		let signer = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
+		let proof = Proof::sign(&signer, &base, coordinator.challenge().challenge);
+
+		let later = moq_clock::wall() + CHALLENGE_TTL;
+		let mut inner = coordinator.inner.lock().unwrap();
+		inner.spent = (0..MAX_SPENT as u64)
+			.map(|n| (n.to_be_bytes().to_vec(), later))
+			.collect();
+		let err = coordinator.check(&mut inner, &proof).unwrap_err();
+		assert_eq!(err.error, ErrorCode::SlowDown);
+
+		// Its challenge stays good once room frees up.
+		inner.spent.clear();
+		coordinator.check(&mut inner, &proof).unwrap();
 	}
 
 	#[test]

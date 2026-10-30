@@ -27,7 +27,6 @@ impl Mesh {
 		let key = Key::generate(Algorithm::HS256, Some(KeyId::decode("mesh").unwrap())).unwrap();
 		let mut config = Config::new(base.clone(), key.clone());
 		config.relays = vec!["https://relay.example".parse().unwrap()];
-		config.device_interval = Duration::ZERO;
 		config.token_ttl = ttl;
 		let coordinator = Coordinator::new(config).unwrap();
 		let router = coordinator.router();
@@ -130,9 +129,10 @@ async fn a_proof_from_the_wrong_key_is_refused() {
 		ErrorCode::InvalidSignature
 	);
 
-	// The challenge is spent, so even the honest retry needs a new one.
+	// A forged proof spends nothing, so the holder can still use the challenge, once.
 	let mut request = request;
 	request.proof = Proof::sign(&holder, &mesh.base, request.proof.challenge);
+	mesh.coordinator.enroll(&request).unwrap();
 	assert_eq!(
 		mesh.coordinator.enroll(&request).unwrap_err().error,
 		ErrorCode::InvalidChallenge
@@ -149,47 +149,6 @@ async fn a_proof_from_the_wrong_key_is_refused() {
 		mesh.coordinator.enroll(&request).unwrap_err().error,
 		ErrorCode::InvalidSignature
 	);
-}
-
-#[tokio::test]
-async fn a_device_grant_waits_for_approval() {
-	let mesh = Mesh::new().await;
-	let device = mesh.device();
-	let authorization = device.device(Some("laptop")).await.unwrap();
-	assert_eq!(authorization.verification_uri.path(), "/mesh/device");
-
-	let pending = mesh.coordinator.pending();
-	assert_eq!(pending.len(), 1);
-	assert_eq!(pending[0].user_code, authorization.user_code);
-
-	let poll = tokio::spawn({
-		let device = device.clone();
-		let authorization = authorization.clone();
-		async move { device.poll(&authorization).await }
-	});
-	moq_clock::sleep(Duration::from_millis(50)).await;
-	assert!(!poll.is_finished());
-
-	assert!(mesh.coordinator.decide(&authorization.user_code.to_lowercase(), true));
-	let enrollment = poll.await.unwrap().unwrap();
-	assert_eq!(enrollment.name, "laptop");
-	assert!(mesh.coordinator.pending().is_empty());
-
-	// The device code is spent once it is exchanged.
-	let err = device.poll(&authorization).await.unwrap_err();
-	assert_eq!(Mesh::refused(err), ErrorCode::ExpiredToken);
-}
-
-#[tokio::test]
-async fn a_denied_device_grant_enrolls_nothing() {
-	let mesh = Mesh::new().await;
-	let device = mesh.device();
-	let authorization = device.device(None).await.unwrap();
-	assert!(mesh.coordinator.decide(&authorization.user_code, false));
-	assert!(!mesh.coordinator.decide(&authorization.user_code, true));
-	let err = device.poll(&authorization).await.unwrap_err();
-	assert_eq!(Mesh::refused(err), ErrorCode::AccessDenied);
-	assert!(mesh.coordinator.devices().is_empty());
 }
 
 #[tokio::test]
@@ -227,7 +186,31 @@ async fn renew_refreshes_before_expiry() {
 }
 
 #[tokio::test]
-async fn renew_retries_an_evicted_challenge() {
+async fn only_an_issued_challenge_is_accepted() {
+	let mesh = Mesh::new().await;
+	let holder = Ed25519KeyPair::generate().unwrap();
+	let enroll = |challenge: Vec<u8>| {
+		let request = EnrollRequest {
+			proof: Proof::sign(&holder, &mesh.base, challenge),
+			key: mesh.key(true),
+			name: None,
+		};
+		mesh.coordinator.enroll(&request).unwrap_err().error
+	};
+
+	// Made up, tampered with, or issued before a restart (another secret).
+	assert_eq!(enroll(vec![7; CHALLENGE_LEN]), ErrorCode::InvalidChallenge);
+	let mut tampered = mesh.coordinator.challenge().challenge;
+	tampered[0] ^= 1;
+	assert_eq!(enroll(tampered), ErrorCode::InvalidChallenge);
+	let mut config = Config::new(mesh.base.clone(), mesh.key.clone());
+	config.relays = vec!["https://relay.example".parse().unwrap()];
+	let restarted = Coordinator::new(config).unwrap();
+	assert_eq!(enroll(restarted.challenge().challenge), ErrorCode::InvalidChallenge);
+}
+
+#[tokio::test]
+async fn renew_retries_a_transient_refusal() {
 	use wiremock::matchers::{method, path};
 	use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -237,7 +220,7 @@ async fn renew_retries_an_evicted_challenge() {
 	let enrollment = device.enroll(&mesh.key(true), None).await.unwrap();
 	let fresh = device.refresh().await.unwrap();
 
-	// A coordinator whose challenge is evicted before the first refresh arrives.
+	// A coordinator that restarts between issuing the challenge and seeing the proof.
 	let server = MockServer::start().await;
 	Mock::given(method("POST"))
 		.and(path("/mesh/challenge"))
@@ -246,7 +229,9 @@ async fn renew_retries_an_evicted_challenge() {
 		.await;
 	Mock::given(method("POST"))
 		.and(path("/mesh/refresh"))
-		.respond_with(ResponseTemplate::new(400).set_body_json(ErrorReply::new(ErrorCode::InvalidChallenge, "evicted")))
+		.respond_with(
+			ResponseTemplate::new(400).set_body_json(ErrorReply::new(ErrorCode::InvalidChallenge, "unknown challenge")),
+		)
 		.up_to_n_times(1)
 		.with_priority(1)
 		.mount(&server)
