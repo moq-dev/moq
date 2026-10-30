@@ -330,7 +330,7 @@
         # check` skips itself, which reads as a pass in CI.
         #
         # The tag pairs the generator's own version with the uniffi release it
-        # targets (v0.10.0-kixelated.1+v0.32.0 -> uniffi 0.32), and it only
+        # targets (v0.10.0-kixelated.2+v0.32.0 -> uniffi 0.32), and it only
         # understands metadata emitted by that uniffi, so it moves with the `uniffi`
         # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
         # generator version and must be bumped together: the repo and revision
@@ -342,21 +342,22 @@
         # uniffi 0.32 generator: the metadata encoding changed in 0.32 even
         # though the contract version did not, so v0.7.1+v0.31.0 fails to read a
         # 0.32-built cdylib at all. The fork carries the port, tracked upstream
-        # as NordSecurity/uniffi-bindgen-go#96, and renders an enum error's
-        # exported Display as its Error(). Move back to NordSecurity once they
-        # tag a 0.32 release carrying both.
+        # as NordSecurity/uniffi-bindgen-go#96, renders an enum error's
+        # exported Display as its Error(), and destroys an async result whose
+        # context was cancelled as it completed. Move back to NordSecurity once
+        # they tag a 0.32 release carrying all three.
         uniffi-bindgen-go = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-go";
-          version = "0.10.0-kixelated.1+v0.32.0";
+          version = "0.10.0-kixelated.2+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-go";
             rev = "v${version}";
-            hash = "sha256-0DCIgHt4R5ndtLkeXw/KF500HidB13L2HeuS4eLvLHU=";
+            hash = "sha256-1dXQI30UYjIqiSY/yq4OTNxRKuERm1mrLDrff32fty4=";
           };
 
-          cargoHash = "sha256-wD+5Ghd4WFFQWAY2PXedXVPG+oPGozG9HbOhXB0fWco=";
+          cargoHash = "sha256-Q9746NcD4FkhHVtrvl+2PbqMe7kiiw4Uxt3z/Qbqy7A=";
 
           # The tag is a virtual workspace whose other members are uniffi test
           # fixtures. Building from the root would compile all of them, and CI

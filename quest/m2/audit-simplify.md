@@ -60,9 +60,10 @@ New from m1:
 Proposals from m0 are settled. The moq-video raw-frame publisher and the
 shared `Background` would each have had moq-ffi as their only user once the
 [generated C bindings](/quest/m2/c/README.md) retire moq-c's hand-written
-copies, so both were dropped. The Go wrapper's missing `bridge.CallHandle` is
-in the generated binding, not the wrapper: see
-[Go cancelled results](/quest/m2/go-cancelled-result.md).
+copies, so both were dropped. The Go wrapper's missing `bridge.CallHandle` was
+in the generated binding, not the wrapper: uniffi-bindgen-go
+`v0.10.0-kixelated.2` destroys a result whose context was cancelled as it
+completed.
 
 ### Results (m1, 2026-10-23)
 
