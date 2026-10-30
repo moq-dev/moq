@@ -1189,11 +1189,11 @@ impl Producer {
 	}
 
 	/// Poll until the group's writer may take more of this frame from upstream; see
-	/// [`group::Producer::poll_ready`].
+	/// [`group::Producer::poll_paced`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_ready(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.group()
-			.poll_ready(waiter, self.buf.written(Ordering::Acquire) as u64)
+			.poll_paced(waiter, self.buf.written(Ordering::Acquire) as u64)
 	}
 
 	/// Publish what has been written so far, waking consumers parked on the group.

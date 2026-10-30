@@ -65,6 +65,18 @@ Decided 2026-10-28 (maintainer, after an audit of the plan):
   lossless. Bring the mechanism to the maintainer before coding, and align it
   with the [receive pool](/quest/m2/receive-pool.md).
 
+Decided 2026-10-30 (maintainer, in the
+[moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388) iteration):
+
+- moq-net caps the receive credit paused groups hold per session at about half
+  the connection window, read live from the transport
+  (`poll::Session::receive_window`). A group that would push the total past
+  the cap keeps reading and shedding instead of pausing. This stands until the
+  [receive pool](/quest/m2/receive-pool.md) folds paused credit into its
+  per-worker budget.
+- The readiness future is `group::Producer::poll_ready` and `async fn ready()`,
+  pending until a reader exists and the 16 MB window has room.
+
 Prior art splits the same way (2026-10-28 survey): Varnish streaming, ATS
 read-while-writer, and WHATWG `tee()` fan out at the writer's pace and buffer
 everything; Varnish `transit_buffer`, nginx unbuffered proxying, and ATS flow
@@ -81,17 +93,18 @@ moq-transport ingest both pause past the 16 MB window. A reader that took every
 committed frame counts as waiting on the writer, so a frame larger than the
 window never stalls it. Tests cover one hop on lite-06, lite-07-wip, and
 moq-transport-22: an idle reader holds the relay copy near the window and then
-receives every frame, and a slow reader ends `Evicted` while the fast one keeps
-up.
+receives every frame, a slow reader ends `Evicted` while the fast one keeps
+up, and a session past its credit cap reads on. The same PR landed the credit
+cap (each paused stream reserves its stream window from a per-session budget
+in `rs/moq-net/src/transport/boxed.rs`; moq-quic reports its windows through
+moq-tokio and moq-uring, and a transport that reports none never pauses) and
+the public readiness future.
 
 What remains:
 
-- The receive-credit cap for paused streams above, which has to land before
-  pacing can reset nothing it means to keep lossless. Bring the mechanism to
-  the maintainer before coding.
-- The readiness future for origin producers: its shape is an API decision to
-  bring to the maintainer before coding. Until it lands, a local byte-stream
-  writer more than 32 MB ahead of its session's egress sheds its own front.
+- Receive-window reporting for the transports that report none yet (quinn,
+  iroh, qmux, WebTransport in the browser, and the FFI adapters), whose ingest
+  never pauses until they do.
 - JS parity.
 - A two-relay chain test with memory measured near the window.
 - Benchmarks of the hot path in `group.rs`: the cursor's report is one

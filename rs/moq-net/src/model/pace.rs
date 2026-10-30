@@ -172,16 +172,16 @@ mod tests {
 		let mut group = written(15);
 		let mut fast = group.consume();
 		let _slow = group.consume();
-		assert_eq!(group.poll_ready(&waiter, 0), Poll::Ready(()), "within the window");
+		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()), "within the window");
 
 		group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
-		assert_eq!(group.poll_ready(&waiter, 0), Poll::Pending, "past the window");
+		assert_eq!(group.poll_paced(&waiter, 0), Poll::Pending, "past the window");
 		assert!(!flag.woken());
 
 		// A batch read takes several frames at once, which the writer counts as read.
 		read(&mut fast);
 		assert!(flag.woken(), "the fastest reader's read wakes the writer");
-		assert_eq!(group.poll_ready(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
 	}
 
 	/// Bytes measure the window, not frames, so an open frame counts as it fills.
@@ -207,17 +207,42 @@ mod tests {
 	fn a_group_without_readers_never_waits() {
 		let (flag, waiter) = flag();
 		let group = written(16);
-		assert_eq!(group.poll_ready(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
 
 		let reader = group.consume();
 		assert_eq!(
-			group.poll_ready(&waiter, 0),
+			group.poll_paced(&waiter, 0),
 			Poll::Pending,
 			"a reader that took nothing"
 		);
 		drop(reader);
 		assert!(flag.woken(), "the last reader leaving wakes the writer");
-		assert_eq!(group.poll_ready(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
+	}
+
+	/// A local writer waits for a reader before it writes, then for room in the window, and
+	/// a reader arriving or reading wakes it.
+	#[test]
+	fn a_local_writer_waits_for_a_reader_and_room() {
+		let (flag, waiter) = flag();
+		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		assert_eq!(group.poll_ready(&waiter), Poll::Pending, "nobody reads yet");
+		let mut reader = group.consume();
+		assert!(flag.woken(), "a reader arriving wakes the writer");
+		assert_eq!(group.poll_ready(&waiter), Poll::Ready(()));
+
+		for _ in 0..17 {
+			group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
+		}
+		assert_eq!(group.poll_ready(&waiter), Poll::Pending, "past the window");
+		read(&mut reader);
+		assert!(flag.woken(), "the reader's read wakes the writer");
+		assert_eq!(group.poll_ready(&waiter), Poll::Ready(()));
+
+		drop(reader);
+		assert_eq!(group.poll_ready(&waiter), Poll::Pending, "the reader left");
+		group.handle().abort(Error::Cancel).unwrap();
+		assert_eq!(group.poll_ready(&waiter), Poll::Ready(()), "a closed group never waits");
 	}
 
 	/// A reader that took every committed frame is waiting on the writer, so a frame
@@ -251,7 +276,7 @@ mod tests {
 		for _ in 0..40 {
 			group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
 		}
-		assert_eq!(group.poll_ready(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
 	}
 
 	/// A reader that skipped past what the writer has written is waiting on it, so it
@@ -267,7 +292,7 @@ mod tests {
 		}
 		// Each commit wakes the parked reader, which polls again and reports the edge.
 		assert!(reader.poll_read_frame(&kio::Waiter::noop()).is_pending());
-		assert_eq!(group.poll_ready(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
 	}
 
 	/// Shedding past the fastest reader under cache pressure wakes a parked writer: that
@@ -277,10 +302,10 @@ mod tests {
 		let (flag, waiter) = flag();
 		let group = written(17);
 		let _reader = group.consume();
-		assert_eq!(group.poll_ready(&waiter, 0), Poll::Pending);
+		assert_eq!(group.poll_paced(&waiter, 0), Poll::Pending);
 		group.handle().shed(u64::MAX, u64::MAX);
 		assert!(flag.woken());
-		assert_eq!(group.poll_ready(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
 	}
 
 	/// An abort wakes a parked writer, so its next write surfaces why.
@@ -289,9 +314,9 @@ mod tests {
 		let (flag, waiter) = flag();
 		let group = written(17);
 		let _reader = group.consume();
-		assert_eq!(group.poll_ready(&waiter, 0), Poll::Pending);
+		assert_eq!(group.poll_paced(&waiter, 0), Poll::Pending);
 		group.handle().abort(Error::Cancel).unwrap();
 		assert!(flag.woken());
-		assert_eq!(group.poll_ready(&waiter, 0), Poll::Ready(()));
+		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
 	}
 }

@@ -1063,6 +1063,17 @@ impl StreamsState {
 		self.send_window = send_window;
 	}
 
+	/// The connection receive window now in force.
+	pub(crate) fn receive_window(&self) -> u64 {
+		self.receive_window
+	}
+
+	/// The most credit one receive stream may hold: the window now in force, or the larger one
+	/// a new stream started with.
+	pub(crate) fn stream_receive_window(&self) -> u64 {
+		self.stream_receive_window.max(self.initial_stream_receive_window)
+	}
+
 	/// Set the receive window of each stream, which applies as each stream's credit is next
 	/// extended: credit already granted cannot be taken back.
 	pub(crate) fn set_stream_receive_window(&mut self, window: u64) {

@@ -5855,7 +5855,7 @@ struct FetchedObject {
 ///
 /// The `first` object on a stream has no prior to inherit from, so a field it leaves to
 /// the prior object is a protocol violation.
-async fn decode_fetch_object<R: crate::transport::poll::RecvStream>(
+async fn decode_fetch_object<R: crate::transport::poll::RecvStream + crate::coding::Pause>(
 	stream: &mut Reader<R, Version>,
 	first: bool,
 ) -> Result<Option<FetchedObject>, Error> {
@@ -5983,7 +5983,7 @@ impl GroupIngest {
 	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
 	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
 	/// group; an object cut short mid-payload was already aborted here with the reason.
-	fn poll<R: crate::transport::poll::RecvStream>(
+	fn poll<R: crate::transport::poll::RecvStream + crate::coding::Pause>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut crate::recv::Group,

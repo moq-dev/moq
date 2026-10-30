@@ -119,6 +119,10 @@ impl<S: poll::Session> poll::Session for Local<S> {
 	fn probe(&self) -> Option<moq::Probe> {
 		self.0.probe()
 	}
+
+	fn receive_window(&self) -> Option<moq::ReceiveWindow> {
+		self.0.receive_window()
+	}
 }
 
 impl<T: poll::SendStream> poll::SendStream for Local<T> {

@@ -351,6 +351,9 @@ fastest one, then stops reading its stream until that reader catches up, so
 flow control slows the upstream hop and the publisher. A slower reader is never
 waited on: one that trails the fastest by more than the rest of the 32 MB
 reaches a shed frame. A group nobody reads keeps arriving and shedding.
+A stopped stream keeps its receive credit, so the relay stops reading at most as
+many streams per connection as fit in half of `quic.receive_window`; past that,
+groups keep arriving and shedding as if unpaced.
 
 ## \[stats]
 

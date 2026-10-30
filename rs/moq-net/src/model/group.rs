@@ -2217,6 +2217,25 @@ impl Producer {
 	pub async fn closed(&self) -> Result<()> {
 		kio::wait(|waiter| self.handle.poll_closed(waiter)).await
 	}
+	/// Poll until a reader holds the group and the writer is at most 16 MB past the end of
+	/// the last frame its fastest reader took, so a local writer runs no further ahead than
+	/// the live tail keeps behind that reader.
+	///
+	/// Ready once the group is closed, so the next write surfaces why. A reader that took
+	/// every committed frame is waiting on the writer, so it never holds the writer back,
+	/// and one whose next frame was shed has fallen off the group and is not waited on.
+	/// Writing without waiting never fails: the group sheds its front instead.
+	pub fn poll_ready(&self, waiter: &kio::Waiter) -> Poll<()> {
+		ready!(self.poll_paced(waiter, 0));
+		// A closed group reports `Closed`, which is ready too.
+		self.handle.state.poll_used(waiter).map(|_| ())
+	}
+
+	/// Wait until a reader holds the group and the writer has room; see [`Self::poll_ready`].
+	pub async fn ready(&self) {
+		kio::wait(|waiter| self.poll_ready(waiter)).await
+	}
+
 	/// Poll until the writer may take more from upstream, `partial` bytes into a frame
 	/// it has not committed: until it is at most [`super::pace::AHEAD`] past the end of the last
 	/// frame its fastest reader took.
@@ -2227,9 +2246,8 @@ impl Producer {
 	/// larger than the window never stalls it, and one whose next frame was shed has
 	/// fallen off the group and is not waited on.
 	///
-	/// Only a paced writer, a session's ingest, waits on this; a local write never does.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_ready(&self, waiter: &kio::Waiter, partial: u64) -> Poll<()> {
+	/// A session's ingest waits on this; a local writer waits on [`Self::poll_ready`].
+	pub(crate) fn poll_paced(&self, waiter: &kio::Waiter, partial: u64) -> Poll<()> {
 		let pace = &self.handle.alive.pace;
 		if !pace.ahead(partial) {
 			return Poll::Ready(());

@@ -28,7 +28,7 @@ struct Relay {
 	track: track::Producer,
 	subscriber: track::Subscriber,
 	_broadcast: origin::Publication,
-	_pair: MockPair,
+	pair: MockPair,
 	_origins: [origin::Producer; 2],
 }
 
@@ -61,7 +61,7 @@ async fn relay(version: &str) -> Relay {
 		track,
 		subscriber,
 		_broadcast: broadcast,
-		_pair: pair,
+		pair,
 		_origins: [publisher, relay],
 	}
 }
@@ -105,6 +105,35 @@ async fn an_idle_reader_paces_the_relay_and_loses_nothing() {
 			.await
 			.expect("end timeout");
 		assert!(matches!(end, Ok(None)), "{version}: {end:?}");
+	}
+}
+
+/// A session whose paused streams would hold more than half its connection window reads
+/// on instead, and its idle reader keeps what the live tail holds.
+#[moq_clock::test]
+async fn a_session_past_its_credit_cap_reads_on() {
+	let payload = Bytes::from(vec![7u8; MB]);
+	for version in VERSIONS {
+		let mut relay = relay(version).await;
+		// One paused stream's credit is already more than half the connection window.
+		let window = moq_net::transport::ReceiveWindow::new(MB as u64, MB as u64);
+		relay.pair.server_transport.set_receive_window(Some(window));
+
+		let mut group = relay.track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		let reader = moq_clock::timeout(TIMEOUT, relay.subscriber.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap()
+			.expect("group 0");
+		for _ in 1..30 {
+			group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		}
+		group.finish().unwrap();
+
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		let held = reader.frame_count();
+		assert_eq!(held, 30, "{version}: the relay paused past its credit cap");
 	}
 }
 

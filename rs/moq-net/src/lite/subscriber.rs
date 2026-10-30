@@ -1129,7 +1129,7 @@ impl FrameIngest {
 	/// `Ready(Ok(()))` once the stream FINs on a frame boundary. The caller
 	/// finishes or aborts the group; a frame cut short mid-payload was already
 	/// aborted here with the reason.
-	fn poll<R: crate::transport::poll::RecvStream>(
+	fn poll<R: crate::transport::poll::RecvStream + crate::coding::Pause>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut crate::recv::Group,

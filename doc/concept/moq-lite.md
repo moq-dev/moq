@@ -387,7 +387,10 @@ that keeps up loses nothing. A slower reader is never waited on: one that trails
 the fastest by more than the group's 32 MB tail reaches a shed frame, and asks
 for a new group on tracks that opt into [refresh](#refresh) or ends with
 `Evicted`. A hop with no reader keeps receiving and shedding, so pacing never
-stalls an unwatched track, and the publisher's own writes never wait.
+stalls an unwatched track, and the publisher's own writes never wait unless it
+asks to. A stopped stream keeps its receive credit, so a hop stops at most as
+many streams per connection as fit in half its connection window, and the rest
+keep receiving and shedding.
 
 ### Refresh
 

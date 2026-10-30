@@ -459,6 +459,11 @@ impl Session {
 		self.conn.streams_evicted()
 	}
 
+	/// The receive windows now in force: the connection's, and the most one stream holds.
+	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
+		self.conn.receive_window()
+	}
+
 	/// Open a send group at `priority`, for streams to join with
 	/// [`SendStream::set_group`]. The HTTP/3 streams stay outside every
 	/// group, so they go first.

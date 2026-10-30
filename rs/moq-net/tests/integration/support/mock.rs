@@ -454,6 +454,8 @@ struct Side {
 	panic_on_stats: AtomicBool,
 	/// The wire counters [`poll::Session::wire`] exposes, which a test updates as a transport would.
 	wire: moq_net::transport::Wire,
+	/// What [`poll::Session::receive_window`] reports instead of the memory transport's, if set.
+	receive_window: Mutex<Option<Option<moq_net::transport::ReceiveWindow>>>,
 }
 
 /// The connection statistics a [`MockSession`] reports. Unavailable by default.
@@ -643,6 +645,13 @@ impl poll::Session for MockSession {
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
 		Some(self.side.wire.clone())
 	}
+
+	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
+		match *self.side.receive_window.lock().unwrap() {
+			Some(window) => window,
+			None => self.inner.receive_window(),
+		}
+	}
 }
 
 #[allow(dead_code, reason = "only some test binaries steer delivery")]
@@ -674,6 +683,11 @@ impl MockSession {
 	/// Report `stats` from now on.
 	pub fn set_stats(&self, stats: MockStats) {
 		*self.side.stats.lock().unwrap() = stats;
+	}
+
+	/// Report `window` as the receive windows in force, as a transport whose limits changed.
+	pub fn set_receive_window(&self, window: Option<moq_net::transport::ReceiveWindow>) {
+		*self.side.receive_window.lock().unwrap() = Some(window);
 	}
 
 	/// How many times the stats were read.
@@ -871,6 +885,7 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			stats: Default::default(),
 			stats_reads: Default::default(),
 			panic_on_stats: Default::default(),
+			receive_window: Default::default(),
 			wire: Default::default(),
 		}),
 	};

@@ -40,6 +40,31 @@ pub struct Reader<S: RecvStream, V> {
 /// enough that an ordinary burst is still one wake.
 const WAKE_BUDGET: usize = 64 * 1024;
 
+/// A stream ingest may stop reading to pace a group's writer, which holds its receive
+/// credit meanwhile.
+pub(crate) trait Pause {
+	/// Reserve the credit this stream may hold while paused, returning whether it may pause.
+	/// A stream outside any session always may.
+	fn pause(&mut self) -> bool {
+		true
+	}
+
+	/// Return what [`Self::pause`] reserved, as the stream is read again.
+	fn resume(&mut self) {}
+}
+
+impl Pause for crate::transport::boxed::RecvStream {
+	fn pause(&mut self) -> bool {
+		crate::transport::boxed::RecvStream::pause(self)
+	}
+
+	fn resume(&mut self) {
+		crate::transport::boxed::RecvStream::resume(self)
+	}
+}
+
+impl<T> Pause for crate::transport::poll::Buffered<T> {}
+
 /// The largest [`Reader::scratch`] kept between decodes; one past this is freed.
 const SCRATCH_KEEP: usize = 64 * 1024;
 
@@ -361,7 +386,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 
 	/// Fill a frame's payload from the stream, returning `Pending` once it would block or
 	/// the group's writer is paced by its fastest reader (see
-	/// [`crate::frame::Producer::poll_ready`]).
+	/// [`crate::frame::Producer::poll_ready`]) and the stream may pause (see [`Pause`]).
 	///
 	/// The payload reaches the frame as it arrives, but keeps its receive credit until the
 	/// segment it lands in seals, so an incomplete frame holds at most one segment of the
@@ -383,17 +408,27 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		&mut self,
 		waiter: &kio::Waiter,
 		frame: &mut crate::frame::Producer,
-	) -> Poll<Result<(), Error>> {
+	) -> Poll<Result<(), Error>>
+	where
+		S: Pause,
+	{
 		self.want = 0;
 		let mut owed = 0;
 
 		let result = loop {
 			// A writer too far ahead of the group's fastest reader leaves the rest in the
-			// stream, so flow control pushes back upstream.
-			let paced = frame.poll_ready(waiter);
+			// stream, so flow control pushes back upstream, if the session has room for the
+			// credit the paused stream holds; otherwise it reads on and sheds.
+			let paced = match frame.poll_ready(waiter) {
+				Poll::Ready(()) => {
+					self.stream.resume();
+					false
+				}
+				Poll::Pending => self.stream.pause(),
+			};
 			let lease = match paced {
-				Poll::Ready(()) => self.poll_lease(waiter, frame.remaining().min(1)),
-				Poll::Pending => Poll::Pending,
+				false => self.poll_lease(waiter, frame.remaining().min(1)),
+				true => Poll::Pending,
 			};
 			let mut lease = match lease {
 				Poll::Pending => {
@@ -992,6 +1027,8 @@ mod tests {
 	}
 
 	struct CreditedLease<'a>(&'a mut Credited);
+
+	impl Pause for Credited {}
 
 	impl RecvStream for Credited {
 		type Error = crate::lite::test_transport::SinkError;

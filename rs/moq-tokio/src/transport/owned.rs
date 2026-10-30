@@ -200,6 +200,9 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 	fn probe(&self) -> Option<moq::Probe> {
 		super::Grouped::probe(&self.session)
 	}
+	fn receive_window(&self) -> Option<moq::ReceiveWindow> {
+		super::Grouped::receive_window(&self.session)
+	}
 }
 impl<S: super::GroupedSend + 'static> poll::SendStream for BridgedSend<S> {
 	type Error = Error<S::Error>;
