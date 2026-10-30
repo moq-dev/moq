@@ -28,11 +28,11 @@ secret = "/etc/moq/reset.key"        # File holding 64 hex chars. Omit for a ran
 cert = "cert.pem"                    # Certificate chain and key. Reloaded on change.
 key = "key.pem"
 generate = ["localhost"]             # Or: a self-signed cert for development.
-root = ["peer-ca.pem"]               # Optional: CAs for client certs (mTLS), reported to the auth server. Needs QUIC.
+root = ["peer-ca.pem"]               # Optional: CAs for client certs (mTLS), reported to the auth server. Needs QUIC or tcp.tls.
 
 [listen.tcp]                         # Plaintext qmux over TCP for trusted local workers.
 bind = "127.0.0.1:4444"
-# tls = true                         # Or: qmux over TLS (tls://) with the listen certificate, no client certs.
+# tls = true                         # Or: qmux over TLS (tls://) with the listen certificate and client-cert policy.
 
 [listen.unix]                        # Plaintext qmux over a Unix socket, gated by peer credentials.
 bind = "/run/moq/internal.sock"

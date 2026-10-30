@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `tls://` listeners verify client certificates ([#7358](https://github.com/moq-dev/moq/pull/7358))
+
+A `listen.tcp.tls` listener serves the listen policy's client-certificate verifier, so `--listen-tls-root` and pinned `tls.peers` apply to it as they do to QUIC, and a stream-only server with that listener accepts them instead of returning `Error::MtlsUnsupported`.
+Its `Request::peer_identity`, `server_name`, and `authority` report the client chain and SNI, which were always `None`.
+Under pinned peers, a `tls://` client must present a pinned certificate, as on QUIC.
+
 ### `Connection::allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
 
 `Connection::bandwidth()` is `Connection::allocator()`, mirroring `moq_net::Session::allocator()`.

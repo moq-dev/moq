@@ -1,4 +1,6 @@
 use std::sync::Arc;
+
+use rustls::pki_types::CertificateDer;
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::TlsConnector;
@@ -101,12 +103,13 @@ impl Client {
 		}
 
 		let session_config = self.session.clone().with_negotiated(version, protocol);
+		let handshake = Handshake::new(tls_stream.get_ref().1.peer_certificates(), None);
 		let mut transport = Stream::new(tls_stream);
 		if let Some(stats) = socket_stats {
 			transport = transport.with_socket_stats(stats);
 		}
 		// `connect` awaits the peer's transport parameters so `protocol()` is resolved.
-		Session::connect(transport, session_config).await
+		Ok(Session::connect(transport, session_config).await?.with_tls(handshake))
 	}
 }
 
@@ -146,6 +149,10 @@ impl Server {
 	/// [`handshake_timeout`](crate::Config::handshake_timeout)). Drive each
 	/// connection with `tokio::spawn` so a slow or non-cooperative peer can't
 	/// stall your `listener.accept()` loop.
+	///
+	/// The returned session reports the client's certificate chain, when the
+	/// `rustls::ServerConfig` asked for one and the client presented it, and the
+	/// SNI it sent (see [`Session::peer_certificates`] and [`Session::server_name`]).
 	pub async fn accept(&self, stream: TcpStream) -> Result<Session, Error> {
 		let socket_stats = crate::tcp::adopt(&stream)?;
 		let acceptor = TlsAcceptor::from(self.config.clone());
@@ -159,11 +166,53 @@ impl Server {
 		tracing::debug!(?version, ?protocol, "parsed ALPN");
 
 		let session_config = self.session.clone().with_negotiated(version, protocol);
+		let conn = tls_stream.get_ref().1;
+		let handshake = Handshake::new(conn.peer_certificates(), conn.server_name());
 		let mut transport = Stream::new(tls_stream);
 		if let Some(stats) = socket_stats {
 			transport = transport.with_socket_stats(stats);
 		}
 		// `accept` awaits the peer's transport parameters so `protocol()` is resolved.
-		Session::accept(transport, session_config).await
+		Ok(Session::accept(transport, session_config).await?.with_tls(handshake))
+	}
+}
+
+/// What a session's TLS handshake learned about the peer, captured before the
+/// stream is handed to the session.
+#[derive(Debug)]
+pub(crate) struct Handshake {
+	peer_certificates: Option<Vec<CertificateDer<'static>>>,
+	server_name: Option<String>,
+}
+
+impl Handshake {
+	fn new(peer_certificates: Option<&[CertificateDer<'static>]>, server_name: Option<&str>) -> Arc<Self> {
+		Arc::new(Self {
+			peer_certificates: peer_certificates.map(<[_]>::to_vec),
+			server_name: server_name.map(str::to_owned),
+		})
+	}
+}
+
+impl Session {
+	fn with_tls(mut self, handshake: Arc<Handshake>) -> Self {
+		self.tls = Some(handshake);
+		self
+	}
+
+	/// The certificate chain the peer presented in the TLS handshake, leaf first.
+	///
+	/// On a [`Client`] session this is the server's chain. On a [`Server`] session
+	/// it is the client's, and only when the `rustls::ServerConfig` asked for one
+	/// and the client sent it; its client-certificate verifier has already
+	/// accepted the chain. `None` on a session not carried by TLS.
+	pub fn peer_certificates(&self) -> Option<&[CertificateDer<'static>]> {
+		self.tls.as_ref()?.peer_certificates.as_deref()
+	}
+
+	/// The SNI the client sent, on a session a [`Server`] accepted. `None` when the
+	/// client sent none, on a [`Client`] session, or off TLS.
+	pub fn server_name(&self) -> Option<&str> {
+		self.tls.as_ref()?.server_name.as_deref()
 	}
 }

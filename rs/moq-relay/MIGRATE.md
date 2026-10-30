@@ -5,6 +5,13 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### `tls://` links verify client certificates ([#7358](https://github.com/moq-dev/moq/pull/7358))
+
+The `listen.tcp.tls` listener applies `listen.tls.root` and pinned `tls.peers` as the QUIC listener does, so a stream-only relay with that listener no longer refuses them.
+A peer dialing `tls://` with a `connect.tls` certificate now presents it, and a certificate presented beside a JWT is refused as it is on QUIC: give such a peer `cluster.token` or a certificate, not both.
+With pinned `tls.peers`, a `tls://` peer must present a pinned certificate; a token alone is refused.
+The auth request's `server_name` reports the SNI on `tls://` too.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 A session dialed at a URL path with a trailing or doubled `/`, such as `/room/` or `/room//cam`, is refused as a bad request instead of collapsed; dial `/room`. An auth grant whose `root`, `mounts`, `tier`, or `label` has one is refused as forbidden, and `stats.prefix`, `stats.node`, and `--cluster-tier` with one refuse to start.
