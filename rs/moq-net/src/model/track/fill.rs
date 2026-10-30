@@ -21,7 +21,7 @@ use std::{
 use rangemap::{RangeMap, RangeSet};
 
 use super::{Info, Order, Position, TrackState, clamp_max_delay};
-use crate::{Error, Result, StreamError, group, util::SendCell};
+use crate::{Error, Result, StreamError, Timestamp, group, util::SendCell};
 
 /// The fills a track's readers asked for, queued or taken by a handler, under one lock.
 #[derive(Default)]
@@ -44,6 +44,8 @@ struct Pending {
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
+	// The time a lookup asks for, which owes no group.
+	time: Option<Timestamp>,
 	// What its joins ask with now, shared with them and its handler.
 	asks: kio::Shared<Asks>,
 	queued: bool,
@@ -198,6 +200,11 @@ impl Outcome {
 		self.accepted.contains(&sequence)
 	}
 
+	/// The lowest group accepted: a lookup's answer.
+	pub(super) fn first_accepted(&self) -> Option<u64> {
+		self.accepted.iter().next().map(|run| run.start)
+	}
+
 	/// The partial copy accepted for `sequence`, if it still holds `frames`.
 	pub(super) fn partial(&self, sequence: u64, frames: group::Bounds) -> Option<group::Handle> {
 		self.partial.get(&sequence).filter(|copy| copy.covers(frames)).cloned()
@@ -267,6 +274,8 @@ pub(super) struct Ask {
 	pub end: u64,
 	pub frame_end: Option<u64>,
 	pub asking: Asking,
+	/// A lookup of the group holding this time within the run, which owes none of it.
+	pub time: Option<Timestamp>,
 }
 
 /// A reader's place in one fill: the part of it the reader wants.
@@ -398,6 +407,15 @@ impl FillState {
 		if span.is_empty() {
 			return (joins, unfillable);
 		}
+		if let Some(time) = ask.time {
+			// A lookup joins nothing and nothing joins it: it owes no group, so no other
+			// reader's run is answered through it.
+			match self.handlers {
+				0 => unfillable.push(span),
+				_ => joins.push(self.queue_lookup(shared, ask, time)),
+			}
+			return (joins, unfillable);
+		}
 		let covered: Vec<(ops::Range<u64>, u64)> = self
 			.covers
 			.overlapping(&span)
@@ -493,6 +511,7 @@ impl FillState {
 					start,
 					end: groups.end,
 					frame_end: if groups.end == ask.end { ask.frame_end } else { None },
+					time: None,
 					asks,
 					queued: true,
 					wants: RangeMap::from_iter([(groups.clone(), 1)]),
@@ -502,6 +521,41 @@ impl FillState {
 			self.queue.push_back(id);
 		}
 		(joins, unfillable)
+	}
+
+	/// Queue a fill looking up `time` within `ask`'s run, with the join waiting on its answer.
+	fn queue_lookup(&mut self, shared: &kio::Shared<FillState>, ask: &Ask, time: Timestamp) -> Join {
+		let id = self.next;
+		self.next += 1;
+		let result = kio::Producer::<Outcome>::default();
+		let mut asks = Asks::default();
+		asks.add(&ask.asking);
+		let asks = kio::Shared::new(asks);
+		let join = Join {
+			fills: shared.clone(),
+			id,
+			groups: ask.start.group..ask.end,
+			held: RangeSet::new(),
+			outcome: Some(result.consume()),
+			attempt: result.weak(),
+			asking: ask.asking,
+			asks: asks.clone(),
+		};
+		self.pending.insert(
+			id,
+			Pending {
+				start: ask.start,
+				end: ask.end,
+				frame_end: None,
+				time: Some(time),
+				asks,
+				queued: true,
+				wants: RangeMap::new(),
+				result,
+			},
+		);
+		self.queue.push_back(id);
+		join
 	}
 
 	/// Count a join out of reading `groups` of fill `id`. What nobody reads any more is no
@@ -610,7 +664,7 @@ pub(super) fn poll_requested(
 	}) {
 		let id = guard.pop().expect("predicate guaranteed a fill");
 		let pending = guard.pending.get(&id).expect("popped fill is pending");
-		let (start, end, frame_end) = (pending.start, pending.end, pending.frame_end);
+		let (start, end, frame_end, time) = (pending.start, pending.end, pending.frame_end, pending.time);
 		let (asks, result) = (pending.asks.clone(), pending.result.clone());
 		drop(guard);
 		// Built with the fills unlocked, so no other lock nests under theirs.
@@ -621,6 +675,7 @@ pub(super) fn poll_requested(
 			start,
 			end,
 			frame_end,
+			time,
 			asks,
 			result,
 		};
@@ -667,6 +722,7 @@ struct Inner {
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
+	time: Option<Timestamp>,
 	asks: kio::Shared<Asks>,
 	result: kio::Producer<Outcome>,
 }
@@ -686,6 +742,20 @@ impl Fill {
 	/// The exclusive end group.
 	pub fn end(&self) -> u64 {
 		self.inner.end
+	}
+
+	/// The presentation time a reader's range starts at that no group the cache holds
+	/// resolves, so this fill looks it up: [`accept`](Self::accept) the group containing it,
+	/// the newest one starting at or before it, or the oldest group when every group starts
+	/// after it. The reader's range then starts there, once that group's first frame is
+	/// written.
+	///
+	/// A lookup owes no group, so [`next`](Self::next) is `None` and [`is_wanted`](Self::is_wanted)
+	/// false throughout; it waits only on its first accept, while [`is_used`](Self::is_used).
+	/// Dropped unanswered, as a handler that can't resolve times does, the reader's range
+	/// reaches back to the oldest group the cache holds. `None` for a fill of groups.
+	pub fn time(&self) -> Option<Timestamp> {
+		self.inner.time
 	}
 
 	/// The most urgent delivery priority among the readers waiting on it now.

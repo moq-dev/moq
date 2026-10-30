@@ -330,7 +330,10 @@ async fn refresh<S: ObjectStore>(shared: Arc<Shared<S>>, mut tracks: Vec<Snapsho
 
 		let (objects, from) = match track.started {
 			// Everything new, in order.
-			true => (listed.objects, 0),
+			true => (
+				listed.objects.into_iter().map(|(start, _, path)| (start, path)).collect(),
+				0,
+			),
 			// Only the newest sequence: fills serve the rest.
 			false => {
 				let Some((start, path)) = track.index.lock().unwrap().newest() else {

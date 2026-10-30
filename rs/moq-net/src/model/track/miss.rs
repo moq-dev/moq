@@ -190,6 +190,15 @@ impl Misses {
 		&self.given_up
 	}
 
+	/// The exclusive end of the run from `sequence` this reader's fills refused or it gave
+	/// up, `None` when it may still be read.
+	pub fn gone(&self, sequence: u64) -> Option<u64> {
+		[&self.refused, &self.given_up]
+			.into_iter()
+			.find_map(|runs| runs.get(&sequence))
+			.map(|run| run.end)
+	}
+
 	/// The next answered group still cached in `order`, forgetting one evicted before it was
 	/// read.
 	pub fn next_filled(
@@ -666,6 +675,7 @@ impl Misses {
 				end: run.end,
 				frame_end: None,
 				asking: *asking,
+				time: None,
 			};
 			let (joins, unfillable) = fills.lock().join(fills, &ask);
 			self.wanted.insert(run.clone());
