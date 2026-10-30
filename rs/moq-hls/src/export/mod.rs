@@ -3886,18 +3886,20 @@ mod tests {
 		// A removed rendition that returns serves the same playlist URI. Nothing of it is kept,
 		// but the target derives from its declared duration and the first batch's, so one that
 		// returns declaring what it first did comes back the same, even after a longer rendition
-		// registers in between.
-		let mut video0 = test.catalog.video.renditions.remove("video0").unwrap();
+		// registers in between. One whose reconfigure kept an older target, though, returns with
+		// the target its current declaration derives: the price of keeping no state per name.
+		let video0 = test.catalog.video.renditions.remove("video0").unwrap();
+		let video1 = test.catalog.video.renditions.remove("video1").unwrap();
 		test.sync();
-		video0.hls = declare("video0", 2);
 		let mut longer = video_config();
 		longer.hls = declare("video3", 8);
 		test.catalog.video.renditions.insert("video3".into(), longer);
 		test.sync();
 		test.catalog.video.renditions.insert("video0".into(), video0);
+		test.catalog.video.renditions.insert("video1".into(), video1);
 		test.sync();
 		let target = |name: &str| test.rendition(name).target_duration();
-		assert_eq!((target("video0"), target("video3")), (2, 8));
+		assert_eq!([target("video1"), target("video3"), target("video0")], [4, 8, 6]);
 	}
 
 	/// The `Push` events a fresh subscriber to `track`'s records reads before it is caught up.

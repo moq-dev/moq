@@ -328,7 +328,7 @@ pub struct Rendition {
 	tag: Arc<str>,
 	/// `EXT-X-TARGETDURATION`, in whole seconds: [`hls`](Self::hls)'s duration rounded up, or a
 	/// predecessor's (see [`after`](Self::after)), until [`pin`](Self::pin) sets the one its
-	/// playlist URI keeps for the run.
+	/// playlist URI keeps while it stays in the catalog.
 	target_duration: u64,
 	/// Segments listed past the target duration, counted to rate-limit their warning.
 	overruns: AtomicU64,
@@ -563,7 +563,7 @@ impl Rendition {
 	}
 
 	/// Advertise `target_duration` seconds as `EXT-X-TARGETDURATION`: the one this rendition's
-	/// playlist URI keeps for the run.
+	/// playlist URI keeps while it stays in the catalog.
 	pub(crate) fn pin(mut self, target_duration: u64) -> Self {
 		self.target_duration = target_duration;
 		self

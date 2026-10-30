@@ -416,13 +416,14 @@ impl Producer {
 	/// Enroll freshly created renditions with what their siblings share, and start following
 	/// their own records.
 	///
-	/// Every playlist URI keeps one `EXT-X-TARGETDURATION` for the run (RFC 8216 6.2.1). The
-	/// target is derived rather than stored per name, so a publisher churning names can't grow
-	/// the feed: a new rendition gets the larger of its own declared duration and the
-	/// [baseline](Feed::baseline), the longest the first batch declared. Renditions listed first
-	/// all agree, and one that leaves and returns declaring the same duration gets the same
-	/// target. A reconfigured rendition's replacement keeps its predecessor's (see
-	/// [`Rendition::after`]), which already covers the baseline.
+	/// A playlist URI keeps one `EXT-X-TARGETDURATION` while its rendition stays in the catalog
+	/// (RFC 8216 6.2.1). The target is derived rather than stored per name, so a publisher
+	/// churning names can't grow the feed: a new rendition gets the larger of its own declared
+	/// duration and the [baseline](Feed::baseline), the longest the first batch declared.
+	/// Renditions listed first all agree. A reconfigured rendition's replacement keeps its
+	/// predecessor's (see [`Rendition::after`]), which already covers the baseline. One that
+	/// leaves and returns gets the target its declaration derives: the same unless a reconfigure
+	/// had kept an older one.
 	fn register(&self, added: Vec<Rendition>) -> Vec<Arc<Rendition>> {
 		// Most catalog updates only revise estimates; writing the feed would wake every cursor.
 		if added.is_empty() {
