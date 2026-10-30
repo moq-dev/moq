@@ -272,3 +272,4 @@ lite-07; bitrate enforcement is not part of this release.
 - [Resume delivers late groups below its resume point](/quest/m2/resume-late-groups.md) - a bonus: groups that arrive late after a route change are delivered instead of written off
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
 - [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
+- [/fetch answers from the announce sync](/quest/m2/fetch-synced.md) - a missing broadcast gets a 404 once announcements are synced, not after 30 s
