@@ -1144,7 +1144,14 @@ impl GroupState {
 			(Some(total), Some(err)) if index < total => Poll::Ready(Err(err.clone())),
 			(Some(_), _) => Poll::Ready(Ok(())),
 			(None, Some(err)) => Poll::Ready(Err(err.clone())),
-			(None, None) => Poll::Pending,
+			(None, None) => {
+				// Waiting on frames the writer has yet to commit, wherever the reader skipped
+				// to, so it holds the writer back from none of them.
+				if index >= self.committed() {
+					self.pace.took_committed();
+				}
+				Poll::Pending
+			}
 		}
 	}
 

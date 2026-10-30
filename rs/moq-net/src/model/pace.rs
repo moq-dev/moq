@@ -47,6 +47,11 @@ impl Pace {
 		}
 		// SeqCst pairs with `park`: either this sees the writer parked, or it sees the read.
 		self.read.fetch_max(end, Ordering::SeqCst);
+		self.wake();
+	}
+
+	/// Wake the writer, if parked, since what it waits on changed.
+	fn wake(&self) {
 		if self.parked.swap(false, Ordering::SeqCst) {
 			let writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner).take();
 			if let Some(writer) = writer {
@@ -69,9 +74,12 @@ impl Pace {
 		end
 	}
 
-	/// The copy shed every frame up to the one ending at `end`.
+	/// The copy shed every frame up to the one ending at `end`, which may leave the
+	/// fastest reader fallen off, so the writer no longer waits on it.
 	pub fn shed(&self, end: u64) {
-		self.front.fetch_max(end, Ordering::Release);
+		// SeqCst pairs with `park`, as a read does.
+		self.front.fetch_max(end, Ordering::SeqCst);
+		self.wake();
 	}
 
 	fn written(&self) -> u64 {
@@ -85,7 +93,7 @@ impl Pace {
 	/// writer, nor once the frames it has yet to take were shed, since it fell off.
 	pub fn paced(&self, read: u64, partial: u64) -> bool {
 		let written = self.written();
-		read < written && read >= self.front.load(Ordering::Acquire) && written.saturating_add(partial) - read > AHEAD
+		read < written && read >= self.front.load(Ordering::SeqCst) && written.saturating_add(partial) - read > AHEAD
 	}
 
 	/// Whether the writer is paced, as [`Self::paced`] judges it now.
@@ -93,8 +101,9 @@ impl Pace {
 		self.paced(self.read.load(Ordering::SeqCst), partial)
 	}
 
-	/// Register `waiter` for the next read, returning how far readers got, read after
-	/// registering so a read in between is never missed.
+	/// Register `waiter` for the next read or shed, returning how far readers got, read
+	/// after registering so a read in between is never missed; [`Self::paced`] reads the
+	/// front after it too.
 	pub fn park(&self, waiter: &kio::Waiter) -> u64 {
 		let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
 		match &mut *writer {
@@ -242,6 +251,35 @@ mod tests {
 		for _ in 0..40 {
 			group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
 		}
+		assert_eq!(group.poll_ready(&waiter, 0), Poll::Ready(()));
+	}
+
+	/// A reader that skipped past what the writer has written is waiting on it, so it
+	/// never holds the writer back from the frame it wants.
+	#[test]
+	fn a_reader_ahead_of_the_writer_never_stalls_it() {
+		let (_flag, waiter) = flag();
+		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		let mut reader = group.consume().with_range(20..);
+		assert!(reader.poll_read_frame(&kio::Waiter::noop()).is_pending());
+		for _ in 0..17 {
+			group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
+		}
+		// Each commit wakes the parked reader, which polls again and reports the edge.
+		assert!(reader.poll_read_frame(&kio::Waiter::noop()).is_pending());
+		assert_eq!(group.poll_ready(&waiter, 0), Poll::Ready(()));
+	}
+
+	/// Shedding past the fastest reader under cache pressure wakes a parked writer: that
+	/// reader fell off.
+	#[test]
+	fn shedding_past_the_reader_wakes_the_writer() {
+		let (flag, waiter) = flag();
+		let group = written(17);
+		let _reader = group.consume();
+		assert_eq!(group.poll_ready(&waiter, 0), Poll::Pending);
+		group.handle().shed(u64::MAX, u64::MAX);
+		assert!(flag.woken());
 		assert_eq!(group.poll_ready(&waiter, 0), Poll::Ready(()));
 	}
 
