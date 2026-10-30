@@ -1,6 +1,7 @@
 import { Micro, Milli, type Second } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
+import type * as Hls from "@moq/hang/hls";
 import type * as Moq from "@moq/net";
 import {
 	type Computed,
@@ -349,7 +350,7 @@ export class Encoder {
 			effect.set(this.#out.active, enabled && !!track && !error, false);
 			if (!enabled || !track || error) return;
 
-			this.#encode(track, broadcast.order, effect);
+			this.#encode(track, rendition.hls(track), broadcast.order, effect);
 		});
 
 		// Reserve against the connection while a subscriber is attached. Wait for a ceiling so we
@@ -385,11 +386,11 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, order: Order, effect: Effect): void {
+	#encode(track: Moq.Track.Producer, hls: Hls.Recorder | undefined, order: Order, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
-		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
+		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"), hls);
 		const demand = track.demand();
 
 		let lastKeyframe: Micro | undefined;

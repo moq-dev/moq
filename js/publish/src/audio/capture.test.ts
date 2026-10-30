@@ -560,6 +560,7 @@ test("a failed encoder stays failed until the capture source changes", async () 
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
+		hls: () => undefined,
 		close: () => {},
 	};
 	const encoder = new Encoder("audio", {

@@ -1,3 +1,4 @@
+import type * as Hls from "@moq/hang/hls";
 import type * as Moq from "@moq/net";
 import { type Getter, Signal } from "@moq/signals";
 
@@ -35,15 +36,32 @@ export class Rendition<Config> {
 	 */
 	readonly track: Getter<Moq.Track.Producer | undefined>;
 
+	readonly #hls: (track: Moq.Track.Producer) => Hls.Recorder | undefined;
 	readonly #close: () => void;
 	#closed = false;
 
-	/** @internal Constructed by {@link Broadcast}; `track` and `close` are owned by it. */
-	constructor(name: string, kind: Kind, track: Getter<Moq.Track.Producer | undefined>, close: () => void) {
+	/** @internal Constructed by {@link Broadcast}; `track`, `hls`, and `close` are owned by it. */
+	constructor(
+		name: string,
+		kind: Kind,
+		track: Getter<Moq.Track.Producer | undefined>,
+		hls: (track: Moq.Track.Producer) => Hls.Recorder | undefined,
+		close: () => void,
+	) {
 		this.name = name;
 		this.kind = kind;
 		this.track = track;
+		this.#hls = hls;
 		this.#close = close;
+	}
+
+	/**
+	 * The HLS recorder of `track`, one of this rendition's {@link track}s, or `undefined` when it
+	 * publishes no records. Pass it to the container producer writing the track, so each group it
+	 * writes is reported into the records the catalog advertises in the rendition's `hls` field.
+	 */
+	hls(track: Moq.Track.Producer): Hls.Recorder | undefined {
+		return this.#hls(track);
 	}
 
 	/**

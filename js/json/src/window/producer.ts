@@ -161,6 +161,11 @@ export class Producer<T> {
 		this.#close();
 	}
 
+	/** Abort the track with `err`, so readers see the cause rather than a complete window. Idempotent. */
+	abort(err: Error): void {
+		this.#close(err);
+	}
+
 	#close(abort?: Error): void {
 		if (this.#finished) return;
 		this.#finished = true;

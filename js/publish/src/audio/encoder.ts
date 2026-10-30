@@ -415,7 +415,11 @@ export class Encoder {
 
 			const live = {
 				track,
-				producer: new Container.Legacy.Producer(track, new Container.Legacy.Format("audio")),
+				producer: new Container.Legacy.Producer(
+					track,
+					new Container.Legacy.Format("audio"),
+					rendition.hls(track),
+				),
 			};
 			this.#live = live;
 			effect.cleanup(() => {

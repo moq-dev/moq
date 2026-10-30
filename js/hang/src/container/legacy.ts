@@ -5,6 +5,7 @@ export type { BufferedRange, BufferedRanges, Frame } from "./types";
 
 import type { Micro } from "@moq/clock";
 import type { AudioConfig, VideoConfig } from "../catalog";
+import type { Recorder } from "../hls";
 import type { Format as ContainerFormat } from "./format";
 import type { Frame } from "./types";
 
@@ -78,11 +79,18 @@ export class Producer {
 	#interval?: Micro;
 	// A discontinuity's marker is the newest group, so another one would say nothing new.
 	#marked = false;
+	#recorder?: Recorder;
 
-	/** Wrap a track to publish legacy-container frames into it. */
-	constructor(track: Moq.Track.Producer, format: Format) {
+	/**
+	 * Wrap a track to publish legacy-container frames into it.
+	 *
+	 * With a `recorder`, each written group is reported into the track's HLS records. The recorder
+	 * outlives this producer, so another producer taking over the track continues its records.
+	 */
+	constructor(track: Moq.Track.Producer, format: Format, recorder?: Recorder) {
 		this.#format = format;
 		this.#track = track;
+		this.#recorder = recorder;
 	}
 
 	/** Encode and append a frame; a keyframe starts a new group. Throws if the first frame is not a keyframe, a group start goes backwards, or a frame is below the previous group start. */
@@ -107,6 +115,7 @@ export class Producer {
 			payload: encodeFrame(data, timestamp),
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
+		if (this.#group) this.#recorder?.frame(this.#group.sequence, timestamp);
 
 		this.#reordered ||= this.#previous !== undefined && timestamp < this.#previous;
 		if (this.#previous !== undefined && timestamp > this.#previous) {
@@ -147,6 +156,8 @@ export class Producer {
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
 		group.finish();
+		// The marker is contiguous, so without this the open HLS segment would absorb the pause.
+		this.#recorder?.stop(group.sequence);
 		this.#liveEdge = this.#liveEdge === undefined ? timestamp : (Math.max(this.#liveEdge, timestamp) as Micro);
 		this.#marked = true;
 	}
@@ -167,6 +178,11 @@ export class Producer {
 			this.#end !== undefined && this.#interval !== undefined
 				? ((this.#end + this.#interval) as Micro)
 				: undefined;
+		// Where this group's content stops: the duration marker when there is one, else the furthest
+		// point written.
+		const reached =
+			end === undefined ? this.#end : this.#end === undefined ? end : (Math.max(end, this.#end) as Micro);
+		if (reached !== undefined) this.#recorder?.end(reached);
 		// A presentation endpoint cannot bound the decode-order tail after reordering.
 		this.#format.finishGroup(this.#group, this.#reordered ? undefined : end);
 		this.#group.finish();
@@ -179,9 +195,11 @@ export class Producer {
 		this.#reordered = false;
 	}
 
-	/** Close the track and current group, optionally with an error. */
+	/** Close the track and current group, optionally with an error. Finishes or aborts the HLS records with it. */
 	close(err?: Error) {
 		if (!err) this.#close();
+		if (err) this.#recorder?.abort(err);
+		else this.#recorder?.finish();
 		if (err) this.#group?.abort(err);
 		else this.#group?.finish();
 		if (err) this.#track.abort(err);
