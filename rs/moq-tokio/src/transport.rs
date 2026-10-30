@@ -1513,7 +1513,10 @@ mod tests {
 			panic!("the read-ahead serves the reader");
 		};
 		assert_eq!(chunk.len(), 8 * 1024);
-		assert!(wakes.0.load(Ordering::SeqCst) > woken, "the draining read never woke the watch");
+		assert!(
+			wakes.0.load(Ordering::SeqCst) > woken,
+			"the draining read never woke the watch"
+		);
 
 		// The watch reclaims the stream and reads through to the FIN.
 		assert_eq!(recv.poll_closed(&mut watch), Poll::Ready(Ok(())));
