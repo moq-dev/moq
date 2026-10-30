@@ -18,7 +18,7 @@ use super::{
 	front::{Action, Candidate, Event, Front, Refusal},
 };
 use crate::{
-	Epoch, Error, InvalidPattern, Path, Pattern, Patterns, SessionError, StreamError,
+	Epoch, Error, InvalidPattern, Path, Pattern, Patterns,
 	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, Form, varint},
 	path::{self, Segment},
 	time::{Deadlines, Instant},
@@ -1534,6 +1534,9 @@ struct TableCursor {
 	horizon: Horizon,
 	/// Which routes beneath a hidden segment are reported.
 	hidden: Hidden,
+	/// Whether a route whose subtree only overlaps the scope is reported too, not just
+	/// one whose literal name matches it.
+	covering: bool,
 	/// The delivery buffer, drained by the cursor's `poll_next`. A mounted
 	/// consumer's cursors share one.
 	state: kio::Producer<OriginConsumerState>,
@@ -1606,7 +1609,13 @@ impl TableCursor {
 		entry.live()
 			&& self.horizon.admits(entry)
 			&& entry.overlaps(&self.allowed)
-			&& self.discovers(&entry.prefix)
+			&& (self.covering
+				|| match &self.named {
+					Some((mount, allowed)) => mount
+						.name(&entry.prefix)
+						.is_some_and(|name| allowed.matches(name.as_str())),
+					None => self.allowed.matches(entry.prefix.as_str()),
+				}) && self.discovers(&entry.prefix)
 			&& !self.holes.iter().any(|hole| entry.prefix.has_prefix(hole))
 			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&entry.prefix))
 	}
@@ -1866,16 +1875,26 @@ impl Default for OriginScope {
 /// The announce-interest prefixes that cover a pattern scope on a prefix-only
 /// wire: each member's literal head, minus heads another already covers.
 pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<Path> {
-	// A head too long for a path covers none, so it asks for nothing.
-	let mut heads: Vec<Path> = allowed
-		.iter()
-		.filter_map(|pattern| Path::new(pattern.head()).ok())
-		.collect();
+	let mut heads: Vec<Path> = allowed.iter().filter_map(|pattern| covering(pattern.head())).collect();
 	heads.sort();
 	heads.dedup();
 	let covered = heads.clone();
 	heads.retain(|head| !covered.iter().any(|other| other != head && head.has_prefix(other)));
 	heads
+}
+
+/// The nearest path at or above a pattern head.
+///
+/// A head cut at an escaped `/`, such as `a\` from `a\/*`, ends in half an escape, so it
+/// falls back to its parent. A head too long for a path covers none, so it asks for nothing.
+fn covering(mut head: &str) -> Option<Path> {
+	loop {
+		match Path::new(head) {
+			Ok(path) => return Some(path),
+			Err(crate::path::Error::InvalidEscape) => head = head.rsplit_once('/').map_or("", |(parent, _)| parent),
+			Err(_) => return None,
+		}
+	}
 }
 
 /// Which routes beneath a hidden segment an announce cursor reports.
@@ -3128,9 +3147,6 @@ struct TrackIo {
 	/// subscription that query made.
 	copy: Option<(u64, track::Consumer, track::Resolving)>,
 	held: Option<kio::Pending<track::Subscribing>>,
-	/// The last copy ended because its session closed locally: a close, not an
-	/// error, so the track ends cleanly if nothing takes over.
-	closed: bool,
 	/// Whether the track had a reader as of the last demand edge.
 	wanted: bool,
 }
@@ -3750,13 +3766,9 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							{
 								io.splice(asked);
 							}
-							// Nothing in flight: unread, or nothing serving it. One whose copy
-							// went with a session closed locally ends cleanly.
+							// Nothing in flight: unread, or nothing serving it.
 							if !wanted || io.copy.is_none() {
-								io.end(match io.closed && wanted {
-									true => Ok(()),
-									false => Err(err.clone()),
-								});
+								io.end(Err(err.clone()));
 								// An unread track the front has not parked yet still holds
 								// its copy, which would keep its source subscribed.
 								if !wanted {
@@ -3923,7 +3935,6 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						staged: None,
 						copy: None,
 						held: None,
-						closed: false,
 						wanted: false,
 					},
 				);
@@ -4018,7 +4029,6 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 				let Some(io) = tracks.get_mut(&name) else { continue };
 				io.copy = None;
 				io.held = None;
-				io.closed = matches!(result, Err(Error::Stream(StreamError::Session(SessionError::Cancel))));
 				Event::TrackEnded {
 					track: name,
 					source,
@@ -6150,6 +6160,9 @@ pub struct Consumer {
 	// Which routes beneath a hidden (`.`-prefixed) segment `announced` reports.
 	hidden: Hidden,
 
+	// Whether `announced` also reports routes whose subtree only overlaps the scope.
+	covering: bool,
+
 	// Whether this handle's announcement streams and routed requests count as
 	// interests, so a session fed into the origin asks its peer about them. Off
 	// for a session serving its peer (see `Self::serving`).
@@ -6184,6 +6197,7 @@ impl Consumer {
 				..Horizon::default()
 			},
 			hidden: Hidden::default(),
+			covering: false,
 			interested: true,
 			pool: producer.pool.clone(),
 			cache_duration: producer.cache_duration,
@@ -6232,9 +6246,12 @@ impl Consumer {
 
 	/// A clone for a session serving its peer: its reads are the peer's, not a
 	/// local reader's, so they never make a session ask its own peer about them.
+	/// It is [`covering`](Self::covering), since the peer routes requests through
+	/// what we announce.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn serving(mut self) -> Self {
 		self.interested = false;
+		self.covering = true;
 		self
 	}
 
@@ -6244,6 +6261,19 @@ impl Consumer {
 	/// broadcasts without them turning up in apps that list everything.
 	pub fn with_hidden(mut self, hidden: bool) -> Self {
 		self.hidden.include = hidden;
+		self
+	}
+
+	/// A clone whose [`announced`](Self::announced) also reports every route that could
+	/// serve a path in scope, not just those whose literal name matches it.
+	///
+	/// A route is a prefix that serves every path beneath it, so a route at `room` can
+	/// serve `room/lobby.chat` under a `**/*.chat` scope, and one above the root covers
+	/// all of it. Code that routes requests or forwards announcements needs those
+	/// routes; a session serving its peer always uses this view. Listing broadcasts does
+	/// not. Requests resolve through covering routes either way.
+	pub fn covering(mut self) -> Self {
+		self.covering = true;
 		self
 	}
 
@@ -6313,6 +6343,8 @@ impl Consumer {
 	/// Allocates a per-cursor coalescing buffer and replays the currently
 	/// announced routes as initial updates. Routes stay prefixes and are named
 	/// relative to this consumer's root; its patterns only filter visibility.
+	/// Only routes whose literal name matches those patterns are reported, unless
+	/// [`covering`](Self::covering) asks for every route that could serve them.
 	/// Routes with a segment starting with `.` below the literal head of those
 	/// patterns are hidden unless [`with_hidden`](Self::with_hidden) opted in.
 	/// The stream also watches its scope: a client session fed by this origin asks
@@ -6328,6 +6360,7 @@ impl Consumer {
 					allowed,
 					horizon: self.horizon,
 					hidden,
+					covering: self.covering,
 					state: state.clone(),
 					under,
 					holes,
@@ -6471,7 +6504,7 @@ impl Consumer {
 		// Untagged: this is a lookup, not egress announce forwarding, so it must not drive
 		// the announce guards. Hiding narrows discovery, not lookup, so a hidden path
 		// follows like any other.
-		let announced = consumer.untagged().with_hidden(true).announced();
+		let announced = consumer.untagged().with_hidden(true).covering().announced();
 		Ok(Follow::new(announced, path))
 	}
 
@@ -7435,7 +7468,6 @@ mod tests {
 				staged: None,
 				copy: None,
 				held: None,
-				closed: false,
 				wanted: true,
 			};
 			let mut subscriber = consumer.subscribe(None).now_or_never().unwrap().unwrap();
@@ -7909,7 +7941,7 @@ mod tests {
 		announced.expect_next_active("cam").await;
 		announced.assert_next_wait();
 
-		let mut announced = project.clone().with_hidden(true).announced();
+		let mut announced = project.clone().with_hidden(true).covering().announced();
 		announced.expect_next_active("cam").await;
 		announced.expect_next_active(".svc").await;
 		announced.expect_next_active(".svc/foo").await;
@@ -7919,6 +7951,7 @@ mod tests {
 		let mut inside = project
 			.scope(".svc", &Patterns::from(Pattern::all()))
 			.unwrap()
+			.covering()
 			.announced();
 		inside.expect_next_active("").await;
 		inside.expect_next_active("foo").await;
@@ -8273,8 +8306,9 @@ mod tests {
 		let _a = producer.announce("", Route::default()).unwrap();
 
 		let consumer = producer.consume().scope("", &scopes(&["room"])).unwrap();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.clone().covering().announced();
 		announced.expect_next_active("").await;
+		consumer.announced().assert_next_wait();
 	}
 
 	#[moq_clock::test]
@@ -8584,6 +8618,7 @@ mod tests {
 			.clone()
 			.scope("", &scopes(&["room/video"]))
 			.unwrap()
+			.covering()
 			.announced();
 		assert_eq!(video.expect_next_active("room").await.cost, Cost::new(5));
 		let _sticky = hold(&consumer, "room/video/b", &b).await;
@@ -8892,7 +8927,8 @@ mod tests {
 			.scope("", &Patterns::from("room/*".parse::<Pattern>().unwrap()))
 			.unwrap()
 			.scope("room/alice", &Patterns::from(Pattern::all()))
-			.unwrap();
+			.unwrap()
+			.covering();
 		let mut announced = consumer.announced();
 
 		let Some(Some(AnnounceEvent::Start(first))) = announced.next().now_or_never() else {
@@ -8912,6 +8948,14 @@ mod tests {
 		};
 		assert_eq!(replacement.prefix.as_str(), "");
 		assert_eq!(replacement.captures, None);
+	}
+
+	#[test]
+	fn interest_prefixes_fall_back_above_an_escaped_slash() {
+		let heads = |pattern: &str| interest_prefixes(&Patterns::from(pattern.parse::<Pattern>().unwrap()));
+		assert_eq!(heads(r"room/a\/*"), [Path::from_static("room")]);
+		assert_eq!(heads(r"a\/b\/*"), [Path::empty()]);
+		assert_eq!(heads(r"a\/b/*"), [Path::from_static(r"a\/b")]);
 	}
 
 	#[moq_clock::test]
@@ -10017,12 +10061,14 @@ mod tests {
 			.consume()
 			.scope("", &scopes(&["room/chat"]))
 			.unwrap()
+			.covering()
 			.announced();
 		matching.expect_next_active("").await;
 		let mut outside = producer
 			.consume()
 			.scope("", &scopes(&["room/video"]))
 			.unwrap()
+			.covering()
 			.announced();
 		outside.assert_next_wait();
 
@@ -10058,6 +10104,7 @@ mod tests {
 			.consume()
 			.scope("", &scopes(&["room/video"]))
 			.unwrap()
+			.covering()
 			.announced();
 		assert_eq!(video.expect_next_active("").await.cost, Cost::new(5));
 	}
@@ -10073,6 +10120,7 @@ mod tests {
 			.clone()
 			.scope("", &scopes(&["room/live/video"]))
 			.unwrap()
+			.covering()
 			.announced();
 		let mut rooted = consumer
 			.scope("room/live", &Patterns::from(Pattern::all()))
@@ -10125,6 +10173,7 @@ mod tests {
 			.consume()
 			.scope("room/live/video", &Patterns::from(Pattern::all()))
 			.unwrap()
+			.covering()
 			.announced();
 		assert_eq!(announced.expect_next_active("").await.cost, Cost::new(9));
 
@@ -13051,7 +13100,11 @@ mod tests {
 		let producer = origin(1).produce();
 		let _a = producer.announce("", Route::default()).unwrap();
 
-		let consumer = producer.consume().scope("", &scopes(&["alpha", "beta"])).unwrap();
+		let consumer = producer
+			.consume()
+			.scope("", &scopes(&["alpha", "beta"]))
+			.unwrap()
+			.covering();
 		let mut announced = consumer.announced();
 		announced.expect_next_active("").await;
 		announced.assert_next_wait();
@@ -13505,7 +13558,8 @@ mod tests {
 			.consume()
 			.scope("", &Patterns::from("room/*/chat".parse::<Pattern>().unwrap()))
 			.unwrap();
-		let mut announced = consumer.announced();
+		let mut listed = consumer.announced();
+		let mut announced = consumer.covering().announced();
 
 		let alice = producer.create_broadcast("room/alice/chat").unwrap();
 		alice.announce(Route::default()).unwrap();
@@ -13514,6 +13568,7 @@ mod tests {
 		};
 		assert_eq!(update.prefix.as_str(), "room/alice/chat");
 		assert_eq!(update.captures, Some(vec!["alice".parse::<Pattern>().unwrap()]));
+		listed.expect_next_active("room/alice/chat").await;
 
 		let audio = producer.create_broadcast("room/alice/audio").unwrap();
 		audio.announce(Route::default()).unwrap();
@@ -13525,10 +13580,172 @@ mod tests {
 		};
 		assert_eq!(update.prefix.as_str(), "room");
 		assert_eq!(update.captures, None, "an overlap does not pin the wildcard");
+		listed.assert_next_wait();
 
 		drop(broad);
 		drop(audio);
 		drop(alice);
+	}
+
+	#[moq_clock::test]
+	async fn announced_lists_full_names_in_replay_and_live_changes() {
+		let producer = origin(1).produce();
+		let patterns: Patterns = ["*.hang", "**/*.chat"]
+			.into_iter()
+			.map(|p| p.parse::<Pattern>().unwrap())
+			.collect();
+		let consumer = producer.consume().scope("project", &patterns).unwrap();
+		let cam = producer.announce("project/cam.hang", Route::default()).unwrap();
+		let overlap = producer.announce("project/room/mic.hang", Route::default()).unwrap();
+		let chat = producer.announce("project/lobby.chat", Route::default()).unwrap();
+		let mut routing = consumer.clone().covering().announced();
+		routing.expect_next_active("cam.hang").await;
+		routing.expect_next_active("lobby.chat").await;
+		routing.expect_next_active("room/mic.hang").await;
+		let mut selected = consumer.announced();
+		selected.expect_next_active("cam.hang").await;
+		selected.expect_next_active("lobby.chat").await;
+		selected.assert_next_wait();
+
+		let nested = producer.announce("project/room/lobby.chat", Route::default()).unwrap();
+		selected.expect_next_active("room/lobby.chat").await;
+		overlap.update(Route::default().with_cost(2)).unwrap();
+		drop(overlap);
+		selected.assert_next_wait();
+		drop(nested);
+		selected.expect_next_ended("room/lobby.chat").await;
+		drop(cam);
+		drop(chat);
+	}
+
+	#[moq_clock::test]
+	async fn announced_keeps_lifecycle_and_filters_before_rerooting() {
+		let producer = origin(1).produce();
+		let consumer = producer
+			.consume()
+			.scope("room/alice", &Patterns::from(Pattern::all()))
+			.unwrap();
+		let broad = producer.announce("room", Route::default()).unwrap();
+		let mut selected = consumer.announced();
+		selected.assert_next_wait();
+
+		let first_epoch = crate::Epoch::mint();
+		let exact = producer
+			.announce("room/alice", Route::default().with_epoch(first_epoch.clone()))
+			.unwrap();
+		assert!(
+			matches!(selected.expect_next().await, AnnounceEvent::Start(a) if a.prefix.is_empty() && a.captures.is_some())
+		);
+		exact
+			.update(Route::default().with_epoch(first_epoch).with_cost(2))
+			.unwrap();
+		assert!(matches!(selected.expect_next().await, AnnounceEvent::Update(a) if a.route.cost == Cost::new(2)));
+		exact.update(Route::default().with_epoch(crate::Epoch::mint())).unwrap();
+		assert!(matches!(selected.expect_next().await, AnnounceEvent::Restart(_)));
+		drop(exact);
+		selected.expect_next_ended("").await;
+		selected.assert_next_wait();
+		let _again = producer.announce("room/alice", Route::default()).unwrap();
+		assert!(matches!(selected.expect_next().await, AnnounceEvent::Start(_)));
+		drop(broad);
+		selected.assert_next_wait();
+		drop(selected);
+		let table = producer.shared.lock();
+		assert!(table.cursors.is_empty());
+		assert!(table.routes.interests_from(&Path::empty()).is_empty());
+	}
+
+	#[moq_clock::test]
+	async fn announced_matches_mounted_names_and_keeps_exclusions() {
+		let producer = origin(1).produce();
+		let _broad = producer.announce(".svc", Route::default()).unwrap();
+		let _overlap = producer.announce(".svc/p1/mic.hang", Route::default()).unwrap();
+		let _hidden = producer
+			.announce(".svc/p1/.private/lobby.chat", Route::default())
+			.unwrap();
+		let _excluded = producer
+			.announce(".svc/p1/private/lobby.chat", Route::default())
+			.unwrap();
+		let project = mounted(&producer, "p1", &["**/*.chat"])
+			.with_hidden(true)
+			.exclude(".svc/private")
+			.unwrap();
+		let mut selected = project.announced();
+		selected.expect_next_active(".svc/.private/lobby.chat").await;
+		selected.assert_next_wait();
+		let mut inside = project
+			.scope(".svc", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.announced();
+		inside.expect_next_active(".private/lobby.chat").await;
+		inside.assert_next_wait();
+		let live = producer.announce(".svc/p1/lobby.chat", Route::default()).unwrap();
+		selected.expect_next_active(".svc/lobby.chat").await;
+		inside.expect_next_active("lobby.chat").await;
+		drop(live);
+		selected.expect_next_ended(".svc/lobby.chat").await;
+		inside.expect_next_ended("lobby.chat").await;
+	}
+
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn announced_requests_covering_routes_and_preserves_shared_fronts_and_stats() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let producer = origin(1).produce();
+		let local = producer.publish("project/cam.chat", Route::default()).unwrap();
+		let overlap = producer.announce("project/room", Route::default()).unwrap();
+		let consumer = producer
+			.consume()
+			.scope("project", &Patterns::from("**/*.chat".parse::<Pattern>().unwrap()))
+			.unwrap()
+			.local()
+			.with_stats(
+				registry
+					.tier(stats::Tier::default())
+					.session(Path::from_static("project")),
+			);
+		let mut selected = consumer.announced();
+		selected.expect_next_active("cam.chat").await;
+		selected.assert_next_wait();
+		let resolved = consumer.request("cam.chat", None).await.unwrap();
+		let original = producer
+			.consume()
+			.local()
+			.request("project/cam.chat", None)
+			.await
+			.unwrap();
+		assert!(
+			resolved.is_clone(&original),
+			"the view shares the origin's existing front"
+		);
+		let track = local.create_track("video", crate::track::Info::timed()).unwrap();
+		let mut written = track.append_group().unwrap();
+		written.write_frame(crate::Timestamp::ZERO, b"frame".as_ref()).unwrap();
+		written.finish().unwrap();
+		track.finish().unwrap();
+		let mut reader = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = reader.recv_group().await.unwrap().unwrap();
+		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"frame");
+		let mut report = stats::Report::default();
+		registry.report(&mut report);
+		assert_eq!(report.traffic.len(), 1);
+		assert_eq!(report.traffic[0].path.as_str(), "project/cam.chat");
+		assert_eq!(report.traffic[0].publisher.announces_started, 1);
+		assert_eq!(report.traffic[0].publisher.bytes, 5);
+		drop(selected);
+		registry.report(&mut report);
+		assert_eq!(report.traffic[0].publisher.announces_ended, 1);
+
+		// Discovery of a request still sees a covering route that enumeration omits.
+		let mut routes = consumer.routes("room/lobby.chat").unwrap();
+		assert!(routes.next().await.is_some());
+		drop(routes);
+		drop(overlap);
+		let source = producer.requests("project/room").unwrap();
+		let pending = consumer.request("room/lobby.chat", None);
+		let request = source.requested_broadcast().await.unwrap();
+		request.accept(local.consume());
+		pending.await.unwrap();
 	}
 
 	#[moq_clock::test]

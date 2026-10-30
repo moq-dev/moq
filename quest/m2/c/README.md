@@ -14,7 +14,7 @@ Decided 2026-10-25 (maintainer): this line ships after the cut, once moq builds
 its bindings from rust2's UniFFI fork. The hand-written crate ships at the cut
 with [parity](/quest/m1/c/README.md) instead. The generator fix for the C name
 clash landed in rust2's fork
-([kixelated/rust2#66](https://github.com/kixelated/rust2/pull/66)), not in a
+([moq-dev/rust2#66](https://github.com/moq-dev/rust2/pull/66)), not in a
 `kixelated/uniffi-bindgen-cpp` release, and reaches moq with the switch.
 
 Decided earlier, still standing:

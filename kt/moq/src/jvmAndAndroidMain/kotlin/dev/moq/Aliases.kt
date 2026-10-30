@@ -107,6 +107,14 @@ typealias AnnounceRoute = uniffi.moq.MoqAnnounceRoute
 typealias Route = uniffi.moq.MoqRoute
 /** Tunes how a track subscription is delivered: priority, latency budget, ranges, and group ordering. */
 typealias Subscription = uniffi.moq.MoqSubscription
+
+/**
+ * moq-net's defaults, whose `maxDelay` of zero skips a superseded group at once. A null
+ * subscription means the same; `copy` this one to change a field. A `Subscription()` leaves
+ * `maxDelay` null, which sets no subscriber limit.
+ */
+fun uniffi.moq.MoqSubscription.Companion.default(): Subscription = uniffi.moq.moqSubscriptionDefaults()
+
 /** A span of a track to deliver: from `start` up to `end`, or onward when `end` is null. */
 typealias Range = uniffi.moq.MoqRange
 /** Where one end of a [Range] falls: [AnchorAbsolute], [AnchorRelative], or [AnchorTime]. */

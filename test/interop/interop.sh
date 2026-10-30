@@ -50,7 +50,7 @@ source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN CLI_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN CLI_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_PUB_LIVE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
@@ -370,14 +370,15 @@ publisher_codecs() {
 }
 # phase_checked <round> <subscriber> <codec>: whether tone.py also holds the tone's phase to the
 # decode's timestamps, which fails a misapplied pre-skip. Every publisher's tone starts at
-# timestamp zero except the browser's, which stamps its file from its own page clock. The native-JS
+# timestamp zero except the browser's, which stamps its file from its own page clock, and a CLI_BIN
+# whose fMP4 import restamps on arrival (INTEROP_PUB_LIVE=1: a released CLI's live import). The native-JS
 # subscriber hands WebCodecs raw Opus without the OpusHead, as the player does, which keeps the
 # pre-skip for the player to trim, and its libav fallback stamps milliseconds. GStreamer's AAC is
 # skipped for its decoder: `faad`, which decodebin picks, drops the first frame's output and stamps
 # the rest a frame early, so it reads the priming 1024 samples early whatever the timestamps say.
 # shellcheck disable=SC2329  # reached from run_cell, which 'harness_spawn' invokes
 phase_checked() {
-    [[ "$1" != js* && "$2" != js-native-* && ("$2" != gst || "$3" == opus) ]]
+    [[ "$1" != js* && ("$1" != rust || "${INTEROP_PUB_LIVE:-0}" != 1) && "$2" != js-native-* && ("$2" != gst || "$3" == opus) ]]
 }
 
 # Record a case for the CI report: `record <outcome> case=C [field=value...]` (see
@@ -1285,13 +1286,15 @@ PYCODE
                 # frame's timestamp and length for tone.py. The outputs are the verdict: a CLI may
                 # exit on EPIPE with a plain error once ffmpeg has what it needs. The WAV cannot say
                 # which codec it came from, so this takes a publisher of one audio rendition.
+                # Keep demuxed PTS: Opus priming can start before zero, and FFmpeg's default
+                # start-time shift would move the kept samples after their actual media time.
                 if [[ "$codecs" == *,* ]]; then
                     echo "error: the ffmpeg decode reads one audio rendition, not $codecs" >&2
                     return 1
                 fi
                 (timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" \
                     ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} --broadcast "$broadcast" export fmp4 || [[ "$?" == 141 ]]) |
-                    ffmpeg -hide_banner -loglevel error -i - \
+                    ffmpeg -hide_banner -loglevel error -copyts -i - \
                         -map 0:v:0 -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/$broadcast.raw" \
                         -map 0:a:0 -af "atrim=duration=${AUDIO_MS}ms" -c:a pcm_f32le \
                         -stats_enc_pre "$audio_out.stats" -stats_enc_pre_fmt '{tb} {pts} {samp}' -f wav "$audio_out.wav"
