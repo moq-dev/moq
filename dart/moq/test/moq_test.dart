@@ -67,6 +67,11 @@ void main() {
     broadcast.close();
   });
 
+  test('a default subscription skips superseded groups at once', () {
+    expect(defaultSubscription().maxDelay, Duration.zero);
+    expect(Subscription().maxDelay, isNull);
+  });
+
   test('a negative duration in a raw record is refused', () {
     final broadcast = BroadcastProducer();
     final track = broadcast.publishTrack(name: 'negative', info: null);

@@ -18,7 +18,6 @@ use std::net::UdpSocket;
 use std::time::Duration;
 
 use moq_uring::{Config, Error, Worker, quic, udp};
-use web_transport_trait::poll::Session as _;
 
 const ALPN: &str = "moq-uring-teardown";
 const CLOSE_CODE: u32 = 42;
@@ -113,8 +112,8 @@ fn a_published_close_has_already_left_the_client() {
 		ready.send(()).expect("test alive");
 		worker
 			.block_on(async move {
-				let mut conn = endpoint.accept().await.expect("accept");
-				std::future::poll_fn(|cx| conn.poll_closed(cx)).await
+				let conn = endpoint.accept().await.expect("accept");
+				conn.closed().await
 			})
 			.expect("server worker")
 	});
@@ -131,12 +130,12 @@ fn a_published_close_has_already_left_the_client() {
 
 	client_worker
 		.block_on(async move {
-			let mut conn = endpoint
+			let conn = endpoint
 				.connect(&dial_config(), server_addr, "localhost")
 				.await
 				.expect("dial");
-			conn.close(CLOSE_CODE, CLOSE_REASON);
-			std::future::poll_fn(|cx| conn.poll_closed(cx)).await;
+			conn.close(CLOSE_CODE.into(), CLOSE_REASON.as_bytes());
+			conn.closed().await;
 		})
 		.expect("client worker");
 	drop(client_worker);
@@ -158,13 +157,18 @@ impl std::task::Wake for Wakes {
 	}
 }
 
+/// Poll `future` once, as a task that nothing will ever wake.
+fn once<F: std::future::Future>(future: F) -> std::task::Poll<F::Output> {
+	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+	std::pin::pin!(future).poll(&mut cx)
+}
+
 /// Handles taken out of `block_on` outlive the worker that drove them. They
 /// fail instead of pending, parked ones are woken, and data already received
 /// is still read.
 #[test]
 fn handles_outliving_the_worker_fail() {
 	use std::task::{Context, Poll, Waker};
-	use web_transport_trait::poll::{RecvStream as _, SendStream as _};
 
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
@@ -181,51 +185,45 @@ fn handles_outliving_the_worker_fail() {
 	.expect("server endpoint");
 	let client = quic::Endpoint::new(socket(), quic::endpoint::Config::default()).expect("client endpoint");
 
-	let wakes = std::sync::Arc::new(Wakes::default());
-	let parked = Waker::from(wakes.clone());
-	let (mut conn, mut send, mut recv) = worker
+	let (conn, mut send, mut recv) = worker
 		.block_on(async move {
-			let mut dialed = client
+			let dialed = client
 				.connect(&dial_config(), server.local_addr(), "localhost")
 				.await
 				.expect("dial");
-			let mut conn = server.accept().await.expect("accept");
-			let mut send = std::future::poll_fn(|cx| dialed.poll_open_uni(cx)).await.expect("open");
-			std::future::poll_fn(|cx| send.poll_write(cx, b"hello"))
-				.await
-				.expect("write");
-			let mut recv = std::future::poll_fn(|cx| conn.poll_accept_uni(cx))
-				.await
-				.expect("accept stream");
+			let conn = server.accept().await.expect("accept");
+			let mut send = dialed.open_uni(Default::default()).await.expect("open");
+			send.write_all(&b"hello"[..]).await.expect("write");
+			let mut recv = conn.accept_uni().await.expect("accept stream");
 			// Take part of it, so the rest is received but unread.
 			let mut head = [0; 2];
-			let read = std::future::poll_fn(|cx| recv.poll_read(cx, &mut head))
-				.await
-				.expect("read");
-			assert_eq!(read, Some(2));
-			assert!(conn.poll_closed(&mut Context::from_waker(&parked)).is_pending());
+			recv.read_exact(&mut head).await.expect("read");
 			(conn, send, recv)
 		})
 		.expect("worker");
-	let woken = wakes.0.load(std::sync::atomic::Ordering::SeqCst);
+
+	// A task parked on the connection's end while the worker still exists.
+	let wakes = std::sync::Arc::new(Wakes::default());
+	let parked = Waker::from(wakes.clone());
+	let mut closed = std::pin::pin!(conn.closed());
+	assert!(closed.as_mut().poll(&mut Context::from_waker(&parked)).is_pending());
 	drop(worker);
 	assert!(
-		wakes.0.load(std::sync::atomic::Ordering::SeqCst) > woken,
+		wakes.0.load(std::sync::atomic::Ordering::SeqCst) > 0,
 		"the parked close watch was never woken"
 	);
+	assert!(matches!(
+		closed.poll(&mut Context::from_waker(Waker::noop())),
+		Poll::Ready(quic::Error::Io(_))
+	));
 
-	let mut cx = Context::from_waker(Waker::noop());
-	assert!(matches!(conn.poll_closed(&mut cx), Poll::Ready(quic::Error::Io(_))));
-	assert!(matches!(conn.poll_accept_uni(&mut cx), Poll::Ready(Err(_))));
-	assert!(matches!(conn.poll_open_bi(&mut cx), Poll::Ready(Err(_))));
-	assert!(
-		conn.send_datagram(bytes::Bytes::from_static(b"late"), Default::default())
-			.is_err()
-	);
-	assert!(matches!(send.poll_write(&mut cx, b"late"), Poll::Ready(Err(_))));
+	assert!(matches!(once(conn.accept_uni()), Poll::Ready(Err(_))));
+	assert!(matches!(once(conn.open_bi(Default::default())), Poll::Ready(Err(_))));
+	assert!(conn.send_datagram(&b"late"[..], Default::default()).is_err());
+	assert!(matches!(once(send.write_all(&b"late"[..])), Poll::Ready(Err(_))));
 
-	let mut tail = [0; 8];
-	assert!(matches!(recv.poll_read(&mut cx, &mut tail), Poll::Ready(Ok(Some(3)))));
-	assert_eq!(&tail[..3], b"llo");
-	assert!(matches!(recv.poll_read(&mut cx, &mut tail), Poll::Ready(Err(_))));
+	let mut tail = Vec::new();
+	assert!(matches!(once(recv.read(&mut tail)), Poll::Ready(Ok(Some(3)))));
+	assert_eq!(tail, b"llo");
+	assert!(matches!(once(recv.read(&mut tail)), Poll::Ready(Err(_))));
 }

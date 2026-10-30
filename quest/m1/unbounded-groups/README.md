@@ -78,8 +78,9 @@ edge is paced by its fastest reader (decided 2026-10-25, superseding
 2026-10-24's "never paced by readers"; see
 [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md)), so a
 byte stream over MoQ loses nothing to a reader that keeps up. Groups are bounded by bytes, with each
-frame's slot charged to the pool. Details are in
-[Front eviction](/quest/m1/unbounded-groups/front-eviction.md).
+frame's slot charged to the pool and the 32 MB tail. Front eviction landed
+in [moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)
+(`GroupState::trim` and `shed` in `rs/moq-net/src/model/group.rs`).
 
 Decided 2026-10-16 (maintainer interview):
 
@@ -145,7 +146,6 @@ moq-transport, with memory held near 32 MB per copy.
 
 ## Required
 
-- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - groups shed whole frames from their front past a 32 MB tail or under pool debt; the group caps go
 - [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - every hop buffers at most a window past its fastest reader and pushes back through QUIC flow control
 - [Flights](/quest/m1/unbounded-groups/flights.md) - a reader at a shed frame replays through a separate paced copy that hands over to the copy ahead
 - [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame shed like front frames and flights start at `(frame, byte)` on the current lite wip; the frame cap goes

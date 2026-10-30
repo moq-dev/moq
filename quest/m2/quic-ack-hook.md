@@ -50,22 +50,21 @@ impl send::Stream {
 ```
 
 The same pair goes on `send::Finished`, the handle `finish(self)` returns
-([quic-api streams](/quest/m1/quic-api/streams.md)); if that quest lands an
-opaque `send::Offset`, the methods take it instead of a `u64`. The
-`send::Error` says why the bytes will never be acknowledged: a reset, the
-peer's STOP_SENDING, the connection's loss, or an offset past the data
-written. Both drivers forward to `moq-quic`'s own `poll_acked` wait, which
+([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)), and the methods take its opaque `send::Offset`, which only
+`offset()` mints, instead of a `u64`. The `send::Error` says why the bytes will
+never be acknowledged: a reset, the peer's STOP_SENDING, or the connection's
+loss. Both drivers forward to `moq-quic`'s own `poll_acked` wait, which
 [waits](/quest/m1/quic-api/waits.md) makes of today's `acked(offset)` and
 `StreamEvent::Acked`. Four traps, each settled in moq-quic where the wait
 lives:
 
 - A finished stream whose every byte was acknowledged must not look like a
   reset one. moq-quic answers from the queryable send-stream end
-  [streams](/quest/m1/quic-api/streams.md) keeps until the id is released:
+  it keeps until the id is released:
   finished, with no reset or STOP_SENDING, means delivered.
-- An offset past the data written returns an error, never a panic, since a
-  panic under the connection lock poisons it for every handle (streams
-  makes moq-quic return it).
+- An offset past the data written cannot be built, and a foreign one panics
+  before moq-tokio takes the connection lock, since a panic under the lock
+  poisons it for every handle.
 - `reset_at` below the acknowledged prefix, or STOP_SENDING after a reset
   (which truncates to 0), shrinks the acknowledged prefix. The waiters fail
   anyway; keep the prefix a `poll_acked` reports monotonic.

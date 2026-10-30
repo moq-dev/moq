@@ -36,7 +36,7 @@ Rules every child follows:
 - Inherited debt is fixed here only when it is cheap or sits on a surface
   this release breaks anyway. Otherwise it joins the later quest that
   reshapes it (the ordered track reader joins rust2's
-  [exporter](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-export.md),
+  [exporter](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-export.md),
   which absorbed its foreign poll quest on 2026-10-25).
 - Each child lists its public API and wire impact in its PR, and its Impact
   bullet says how to migrate.
@@ -74,7 +74,6 @@ Rejected in planning:
 ## Required
 
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve/README.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
-- [Bindings default to zero max delay](/quest/m1/api-audit/binding-max-delay.md) - a no-argument subscription skips superseded groups in every binding, as Rust, JS, and Python do, and no subscriber limit is asked for explicitly
 - [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
 - [QMux datagrams obey or refuse their policy](/quest/m1/api-audit/qmux-datagrams.md) - `Session.datagrams` is the DOM interface, its high-water mark is live, and the inert settings throw
 - [No constructible internal handles](/quest/m1/api-audit/internal-constructors.md) - `Rendition`, `Lister`, `Arrivals`, and e2ee's generations get private constructors, and a lint rule stops new ones

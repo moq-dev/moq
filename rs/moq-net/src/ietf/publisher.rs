@@ -1745,7 +1745,11 @@ impl Publisher {
 			Renewal(request_update::Verdict),
 		}
 
+		// Each turn may apply a REQUEST_UPDATE, so a peer streaming them must not hold the
+		// session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			let mut queued = waiting.is_none().then(|| renewal.next()).flatten();
 
 			let turn = kio::wait(|waiter| {
@@ -1998,7 +2002,11 @@ impl Publisher {
 		msg: &mut ietf::Subscribe<'_>,
 	) -> Result<(), Option<Served>> {
 		let session = self.session.clone();
+		// Each update is answered, so a peer streaming them must not hold the session's
+		// other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			let read = kio::wait(|waiter| {
 				if session.poll_closed(waiter).is_ready() {
 					return Poll::Ready(UpdateRead::Cancelled);
@@ -4077,8 +4085,11 @@ impl Publisher {
 		let mut retry_delay = RETRY_BASE;
 
 		// Stream updates (origin route (un)announces), bailing if the peer closes
-		// its side first.
+		// its side first. A peer streaming REQUEST_UPDATEs must not hold the session's other
+		// tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		let res = loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			match ns.watched.values().any(|watch| watch.deferred) {
 				// Arm on the edge, so a turn that changes nothing else doesn't push the
 				// deadline out forever.

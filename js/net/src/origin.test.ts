@@ -154,7 +154,7 @@ test("a scoped route remains visible when an exact local path is outside the sco
 	const remote = wireOf(origin).receive(path, { cost: 5n });
 	const local = publish(origin, path);
 	const scope = Path.Pattern.parse("room/*");
-	const live = await announcedView(origin, scope);
+	const live = await announcedView(origin, scope, { covering: true });
 
 	await new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -409,7 +409,7 @@ test("announced keeps a broader covering route at its prefix", async () => {
 
 	// The scope filters the route without changing the prefix it claims.
 	const scope = Path.Pattern.subtree(Path.from("room/alice"));
-	const announced = consumer.announced(scope);
+	const announced = consumer.announced(scope, { covering: true });
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
 
 	dispose();
@@ -1798,6 +1798,81 @@ test("announced filters by arbitrary patterns and reports captures", async () =>
 	origin.close();
 });
 
+test("announced lists full names while covering views and session advertisements keep overlaps", async () => {
+	const origin = new Producer();
+	const patterns = new Path.Patterns([Path.Pattern.parse("*.hang"), Path.Pattern.parse("**/*.chat")]);
+	const reader = origin.scope(Path.from("project"), patterns).consume();
+	const cam = origin.requestsRoute(Path.from("project/cam.hang"));
+	const overlap = origin.requestsRoute(Path.from("project/room/mic.hang"));
+	const chat = origin.requestsRoute(Path.from("project/lobby.chat"));
+	const selected = await announcedView(reader);
+	const covering = await announcedView(reader, undefined, { covering: true });
+	const all = [Path.from("cam.hang"), Path.from("lobby.chat"), Path.from("room/mic.hang")];
+	expect([...selected.peek().keys()]).toEqual([Path.from("cam.hang"), Path.from("lobby.chat")]);
+	expect([...covering.peek().keys()].sort()).toEqual(all);
+	expect(Array.from(wireOf(reader).advertised.peek()?.keys() ?? []).sort()).toEqual(all);
+
+	const nested = origin.requestsRoute(Path.from("project/room/lobby.chat"));
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(selected.peek().has(Path.from("room/lobby.chat"))).toBe(true);
+	overlap.updateRoute({ cost: 2n });
+	overlap.close();
+	nested.close();
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect([...selected.peek().keys()]).toEqual([Path.from("cam.hang"), Path.from("lobby.chat")]);
+	await selected.close();
+	await covering.close();
+	cam.close();
+	chat.close();
+	origin.close();
+});
+
+test("announced filters before rooting and retains lifecycle, routing and watch cleanup", async () => {
+	const origin = new Producer();
+	const root = Path.from("room/alice");
+	const scoped = origin.scope(root, new Path.Patterns([Path.Pattern.all()]));
+	const reader = scoped.consume();
+	const interests: string[] = [];
+	const unlisten = wireOf(origin).interests((prefix, wanted) => interests.push(`${wanted ? "+" : "-"}${prefix}`));
+	const source = new BroadcastProducer();
+	const broad = origin.requestsRoute(Path.from("room"));
+	const stream = reader.announced();
+	const events = stream[Symbol.asyncIterator]();
+	const covering = await announcedView(reader, undefined, { covering: true });
+	expect([...covering.peek().keys()]).toEqual([Path.empty()]);
+	expect(Array.from(wireOf(reader).advertised.peek()?.keys() ?? [])).toEqual([Path.empty()]);
+
+	const request = reader.request(Path.from("cam"));
+	const incoming = await broad.requested().next();
+	if (!incoming.value) throw new Error("missing served request");
+	hooks.acceptRequest(incoming.value, source.consume());
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(request.active.peek()).toBeDefined();
+	request.close();
+
+	const exact = origin.requestsRoute(root, { epoch: EPOCH });
+	expect(await events.next()).toMatchObject({
+		value: { kind: "start", prefix: Path.empty(), captures: expect.any(Array) },
+	});
+	exact.updateRoute({ epoch: EPOCH, cost: 2n });
+	expect(await events.next()).toMatchObject({ value: { kind: "update", route: { cost: 2n } } });
+	exact.updateRoute({ epoch: Epoch.mint() });
+	expect(await events.next()).toMatchObject({ value: { kind: "restart" } });
+	exact.close();
+	expect(await events.next()).toMatchObject({ value: { kind: "end" } });
+	stream.close();
+	await covering.close();
+	expect(await events.next()).toMatchObject({ done: true });
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(interests).toContain(`+${root}`);
+	expect(interests).toContain(`-${root}`);
+	unlisten();
+	broad.close();
+	source.close();
+	origin.close();
+	expect(wireOf(reader).advertised.peek()).toBeUndefined();
+});
+
 test("the spread hash matches rs/moq-net byte for byte", () => {
 	expect(spreadHash("pool/job-0", [10n])).toBe(0xefb5e20a66101c32n);
 	expect(spreadHash("pool/job-0", [11n])).toBe(0x0eb0a91370ff6653n);
@@ -2117,9 +2192,9 @@ test("a scoped dynamic is announced only to readers its scope can serve", async 
 	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/chat")]));
 	const video = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/video")]));
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect([...(await announcedView(chat)).peek().keys()]).toEqual([Path.empty()]);
+	expect([...(await announcedView(chat, undefined, { covering: true })).peek().keys()]).toEqual([Path.empty()]);
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect([...(await announcedView(video)).peek().keys()]).toEqual([]);
+	expect([...(await announcedView(video, undefined, { covering: true })).peek().keys()]).toEqual([]);
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect([...(wireOf(chat.consume()).advertised.peek()?.keys() ?? [])]).toEqual([Path.empty()]);
 	await new Promise<void>((resolve) => setImmediate(resolve));
@@ -2151,10 +2226,13 @@ test("a scoped reader picks the best route its scope can see at a prefix", async
 
 	await new Promise<void>((resolve) => setImmediate(resolve));
 
-	expect((await announcedView(reader)).peek().get(Path.empty())?.cost).toBe(5n);
+	expect((await announcedView(reader, undefined, { covering: true })).peek().get(Path.empty())?.cost).toBe(5n);
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect((await announcedView(origin, Path.Pattern.parse("room/video"))).peek().get(Path.empty())?.cost).toBe(5n);
-	const announced = reader.announced();
+	expect(
+		(await announcedView(origin, Path.Pattern.parse("room/video"), { covering: true })).peek().get(Path.empty())
+			?.cost,
+	).toBe(5n);
+	const announced = reader.announced(undefined, { covering: true });
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect((await announced.next())?.route.cost).toBe(5n);
 	announced.close();
