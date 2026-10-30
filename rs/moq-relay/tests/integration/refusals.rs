@@ -502,7 +502,7 @@ async fn uri_setup_paths(io_uring: bool) {
 			};
 			bytes.extend(params);
 			let mut setup = peer.open_uni(Default::default()).await.unwrap();
-			setup.write_all(&bytes).await.unwrap();
+			setup.write_all(&bytes[..]).await.unwrap();
 			if version.is_lite() {
 				setup.finish().unwrap();
 			}

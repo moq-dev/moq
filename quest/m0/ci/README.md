@@ -71,7 +71,7 @@ Decided 2026-10-26 (maintainer), from 414 queue merges over 2026-10-23 to
 (about 1 minute per merge), with a median of 18 entries ahead and 12.7% of
 runs failing. GitHub's merge queue cannot test several PRs in one run, so a
 batched gate replaces it on the one self-hosted runner: `quest land`, shared
-through kixelated/quest, lands a tested chain of squash commits by
+through moq-dev/quest, lands a tested chain of squash commits by
 fast-forward ([land](/quest/m0/ci/land.md)). This supersedes concurrent queue
 entries on a second runner. Batching gains most when failures are rare, so the
 [flake epic](/quest/m0/test-flakes-2/README.md) moved to m0 and
@@ -108,7 +108,7 @@ so the work is making builds identical enough to hit it (flags in
 `.cargo/config.toml`, cargo-hakari), and auditing the package selection `just ci`
 already does. Nix builds run sandboxed and cannot reach R2, so they stay on crane
 for packaging only; CI builds with cargo and mbx. Decided 2026-10-26 from
-kixelated/rust2's [Nix build benchmark](https://github.com/kixelated/rust2/pull/63),
+moq-dev/rust2's [Nix build benchmark](https://github.com/moq-dev/rust2/pull/63),
 in billions of instructions over a clean build, a second package, the moq-net edit,
 and a lockfile bump: cargo with mbx totals 9,692 and crane 14,756. crate2nix built
 to the release profile totals 14,538: it wins only the lockfile bump (1,255 against
@@ -118,7 +118,7 @@ Decided 2026-10-25 (maintainer), from a profile of moq-net: monomorphized
 generics dominate its build (53% of the library's CPU), and its test target
 costs 3x the library. A "thin generics" profile shrinks them: generic entry
 points delegate to non-generic bodies, and BTreeMap instantiations are shared.
-kixelated/rust2's driver lints the rule later. Making IETF support a cargo
+moq-dev/rust2's driver lints the rule later. Making IETF support a cargo
 feature was considered and not planned: the churn outweighs the build saving.
 
 Measure each change against a current baseline and record the result in its PR.
@@ -128,14 +128,14 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
 - [Land main through quest land](/quest/m0/ci/land.md) - one self-hosted runner tests every queued PR as a squash chain and fast-forwards `main` to the longest passing prefix
+- [Gate each diff in under five minutes](/quest/m0/ci/five-minutes.md) - `just check` and `just test` each finish within a worker's 5-minute prompt cache, admission wait included
 - [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
-- [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
-- [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
+- [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
+- [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm releases use `nix.moq.dev`, check its bucket sizes, and retire Cachix
 - [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs
-- [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
 - [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
 - [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the slowest 1% of tests take under half their 289 CPU-seconds, with coverage kept
-- [tracing-test filter](/quest/m0/ci/tracing-filter.md) - moq-tokio's tests stop forcing every crate to format at TRACE
-- [Stats oversize](/quest/m0/ci/stats-oversize.md) - moq-stats refuses an oversized plain snapshot before parsing it back
 - [Gate send-depth](/quest/m0/ci/send-depth-gate.md) - the merge gate runs send-depth on a pinned nightly when moq-net changes, after #6890 fixes main
 - [Cargo aliases in nested checkouts](/quest/m0/ci/cargo-alias-strings.md) - `cargo build-ffi` and `cargo moq` work from a worktree nested inside another checkout
+- [Release credentials off main](/quest/m0/ci/publish-release-only.md) - `publish` admits only `release` and release tags once its `workflow_run` publishers run on their tag
+- [VM checks refuse a host without KVM](/quest/m0/ci/vm-kvm.md) - `check flake` fails fast with a clear message instead of an emulated-boot timeout

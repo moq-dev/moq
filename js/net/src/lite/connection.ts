@@ -266,8 +266,7 @@ export class Connection implements Established {
 	abort(): void {
 		this.#auth.close();
 		this.#publisher.close();
-		this.#subscriber.close();
-
+		// Received tracks end in #run once what already arrived drains, as on the peer's close.
 		this.#closeTransport();
 	}
 
@@ -280,7 +279,7 @@ export class Connection implements Established {
 		}
 	}
 
-	// Set the received tracks' terminal cause before abort's deliberate local teardown.
+	// End the received tracks with the session's end, then tear down the rest.
 	#fail(err: Error): void {
 		this.#subscriber.close(err);
 		this.abort();
@@ -330,8 +329,8 @@ export class Connection implements Established {
 			// The peer's close can overtake the group streams and SUBSCRIBE FIN it sent first.
 			// Read what already arrived, so a track its publisher ended finishes rather than aborts.
 			await Promise.all([...this.#unis, this.#subscriber.drain()]);
-			// The session died under every track it was receiving, so they end with its
-			// error. A deliberate close() already ended them cleanly, which makes this a no-op.
+			// The session ended under every track it was receiving, so they end with its
+			// error: a clean close from either side reads as a cancelled session.
 			this.#fail(err);
 		}
 	}

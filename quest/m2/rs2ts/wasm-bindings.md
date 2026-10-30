@@ -27,7 +27,7 @@ moves to [adoption](/quest/m2/rs2ts/wasm-adopt.md). Until
 
 Gaps the spike found against `@moq/net` and moq-wasm: moq-ffi has no WebSocket
 fallback on wasm, and payload copies cost about 7 to 8 ns
-per byte (see [Payload bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md)). Measure boundary calls, Promise allocation,
+per byte (see [Payload bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md)). Measure boundary calls, Promise allocation,
 payload copies, and retained memory. Compare a batched poll/event-drain
 boundary if these dominate, including latency and backpressure effects;
 do not require a sans-IO rewrite or impose batching latency to win throughput.

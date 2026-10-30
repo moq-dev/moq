@@ -186,7 +186,7 @@ function byBitrate(target: number): RenditionFilter {
 	};
 }
 
-/** Return the renditions that may be selected: a disabled one has no frames coming. */
+/** Return the renditions that may be newly selected: a disabled one has no frames coming. */
 function enabledRenditions(renditions: Record<string, Catalog.VideoConfig>): Record<string, Catalog.VideoConfig> {
 	return Object.fromEntries(Object.entries(renditions).filter(([, config]) => config.enabled !== false));
 }
@@ -219,6 +219,13 @@ export class Source {
 	#pending = new Signal(false);
 	/** Whether rendition support is still being resolved. @internal */
 	readonly pending: Getter<boolean> = this.#pending;
+
+	// The last selection, which a disable holds while no enabled rendition remains.
+	#held?: { broadcast: Broadcast; track: string };
+
+	// The broadcast `available` was probed for. It lags a broadcast switch until the new probe lands.
+	// A signal, since the new broadcast's renditions can equal the old ones and leave `available` unchanged.
+	#probed = new Signal<Broadcast | undefined>(undefined);
 
 	#signals = new Effect();
 	#supportCache = new WeakMap<Supported, Map<string, { key: string; supported: boolean }>>();
@@ -253,7 +260,9 @@ export class Source {
 			return;
 		}
 
-		const renditions = effect.get(this.#out.catalog)?.renditions ?? {};
+		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
+		const broadcast = effect.get(this.in.broadcast);
+		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.video?.renditions) ?? {};
 		this.#out.error.set(undefined);
 		let cache = this.#supportCache.get(supported);
 		if (!cache) {
@@ -309,23 +318,32 @@ export class Source {
 			} else {
 				this.#out.error.set(undefined);
 			}
+			this.#probed.set(broadcast);
 			this.#out.available.set(available);
 			this.#pending.set(false);
 		});
 	}
 
 	#runSelected(effect: Effect): void {
-		const available = enabledRenditions(effect.get(this.#out.available));
+		const broadcast = effect.get(this.in.broadcast);
+		const all = effect.get(this.#out.available);
+		const probed = effect.get(this.#probed);
+		const available = enabledRenditions(all);
 		const target = effect.get(this.in.target);
 
-		if (target?.name && target.name in available) {
-			const config = available[target.name];
-			effect.set(this.#out.track, target.name);
-			effect.set(this.#out.config, config);
-			return;
-		}
+		const selected = this.#choose(effect, available, target) ?? this.#hold(broadcast, all);
+		// A pick from the previous broadcast's renditions is not this broadcast's selection to hold.
+		this.#held = selected && broadcast && probed === broadcast ? { broadcast, track: selected } : undefined;
+		if (!selected) return;
 
-		if (Object.keys(available).length === 0) return;
+		effect.set(this.#out.track, selected);
+		effect.set(this.#out.config, all[selected]);
+	}
+
+	// Pick among the enabled renditions.
+	#choose(effect: Effect, available: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
+		if (target?.name && target.name in available) return target.name;
+		if (Object.keys(available).length === 0) return undefined;
 
 		// Auto-select: use recv bandwidth if no explicit bitrate target.
 		let effectiveTarget = target;
@@ -338,13 +356,16 @@ export class Source {
 			}
 		}
 
-		const selected = this.#select(preferredRenditions(available), effectiveTarget);
-		if (!selected) return;
+		return this.#select(preferredRenditions(available), effectiveTarget);
+	}
 
-		const config = available[selected];
-
-		effect.set(this.#out.track, selected);
-		effect.set(this.#out.config, config);
+	// Every rendition is disabled: keep the selected one, and its subscription, so the re-enable
+	// plays without a resubscribe. A removed rendition, or another broadcast, starts over.
+	#hold(broadcast: Broadcast | undefined, all: Record<string, Catalog.VideoConfig>): string | undefined {
+		if (Object.values(all).some((config) => config.enabled !== false)) return undefined;
+		const held = this.#held;
+		if (!held || held.broadcast !== broadcast || !(held.track in all)) return undefined;
+		return held.track;
 	}
 
 	/**

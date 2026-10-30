@@ -330,6 +330,7 @@ impl Present {
 		}
 
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			enum Next {
 				Withdrawn,
@@ -380,6 +381,9 @@ impl Present {
 							expires,
 						},
 					);
+					// Each grant recomputes the session's permits, so a peer streaming them
+					// must not hold the session's other tasks.
+					kio::wait(|waiter| budget.poll_yield(waiter)).await;
 				}
 				AuthError::ID => {
 					let refused: AuthError = match decode_reply(&body, self.version) {

@@ -304,20 +304,19 @@ async fn route_flaps(version: &str) {
 	let triggers = [Trigger::BetterRoute, Trigger::BetterRouteDies, Trigger::Disconnect];
 	let mut expected = Vec::new();
 	let mut seen = Vec::new();
-	for sequence in 0..=triggers.len() as u64 {
-		let mut group = topology.track.append_group().unwrap();
-		for frame in 0..FRAMES {
-			if frame == FRAMES / 2
-				&& let Some(trigger) = triggers.get(sequence as usize)
-			{
-				topology.trigger(*trigger).await;
-			}
-			group.write_frame(Timestamp::ZERO, payload(sequence, frame)).unwrap();
-			expected.push((sequence, payload(sequence, frame)));
-			seen.push(next(&mut rx).await);
+	// Keep every recovery within the largest group's head, which our IETF publishers serve.
+	let mut group = topology.track.append_group().unwrap();
+	for frame in 0..FRAMES * (triggers.len() as u64 + 1) {
+		if frame % FRAMES == FRAMES / 2
+			&& let Some(trigger) = triggers.get((frame / FRAMES) as usize)
+		{
+			topology.trigger(*trigger).await;
 		}
-		group.finish().unwrap();
+		group.write_frame(Timestamp::ZERO, payload(0, frame)).unwrap();
+		expected.push((0, payload(0, frame)));
+		seen.push(next(&mut rx).await);
 	}
+	group.finish().unwrap();
 
 	assert_eq!(seen, expected, "{version}");
 	settle().await;

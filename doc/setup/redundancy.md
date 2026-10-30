@@ -20,7 +20,7 @@ A [path and publisher epoch](/concept/moq-lite#publisher-epochs) identify one
 broadcast. Every independent publisher mints its own epoch, even if both read
 the same source. Sharing an epoch would claim that their group and frame
 numbers name the same content, which independently running importers cannot
-promise.
+promise. See [identity and recovery](/concept/identity) for the whole contract.
 
 ## Independent publishers on one path
 

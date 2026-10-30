@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
+import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
 
 type Value = Record<string, unknown>;
@@ -549,6 +550,14 @@ test("a delta that would overflow the snapshot rolls a new one instead", async (
 	// The newest value is readable with no earlier frame to apply it to.
 	const values = await drain(track.subscribe({ maxDelay: REPLAY_LATENCY }));
 	expect(values[values.length - 1]).toEqual({ v: "y".repeat(size) });
+});
+
+test("a snapshot past the budget is refused", () => {
+	for (const deltas of [false, true]) {
+		const encoder = new Encoder<Value>({ deltas, maxGroupBytes: 100 });
+		expect(() => encoder.update({ v: "x".repeat(1000) })).toThrow(NetError.FrameTooLarge);
+		expect(encoder.value).toBeUndefined();
+	}
 });
 
 // A publisher gives up a group a reader is still on once a newer one supersedes it, which every

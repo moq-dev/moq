@@ -21,7 +21,7 @@ use tokio::sync::oneshot;
 use crate::decode::Read;
 use crate::ffi::OnStatus;
 use crate::task::Task;
-use crate::{Error, Id, NonZeroSlab, Shared, State, ffi, moq_decode_gap, moq_decode_read_kind};
+use crate::{Error, Id, NonZeroSlab, Shared, State, ffi, moq_decode_gap, moq_decode_read_kind, moq_decode_start};
 
 // ---- C-visible types ----
 
@@ -179,6 +179,10 @@ pub struct moq_video_decoder_output {
 	pub width: u32,
 	/// Target height in pixels. 0 with `width` 0 means the native size.
 	pub height: u32,
+	/// `moq_decode_start` discriminant: where to start on a track that already
+	/// holds groups. 0 = the oldest, decoding everything cached; a live player
+	/// sets `MOQ_DECODE_START_LATEST`.
+	pub start: u32,
 }
 
 /// One decoded video frame from [`moq_decode_video`]: pixels plus a
@@ -1168,7 +1172,7 @@ pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 /// again, so release `user_data` there. The terminal callback fires even after
 /// [`moq_decode_video_cancel`].
 ///
-/// Starts at the newest cached group so reopening live playback skips the backlog.
+/// `output->start` picks where it starts on a track that already holds groups.
 ///
 /// # Safety
 /// - `output` must point to a valid [`moq_video_decoder_output`].
@@ -1189,10 +1193,14 @@ pub unsafe extern "C" fn moq_decode_video(
 		// subscription it would immediately drop.
 		let format = pixel_format_from_u32(raw.format)?;
 		let size = decoder_size(raw.width, raw.height)?;
+		let start = match moq_decode_start::from_u32(raw.start)? {
+			moq_decode_start::MOQ_DECODE_START_OLDEST => moq_video::decode::Start::Oldest,
+			moq_decode_start::MOQ_DECODE_START_LATEST => moq_video::decode::Start::Latest,
+		};
 		let catalog = ffi::parse_id(catalog)?;
 
 		let mut options = moq_video::decode::Options::new();
-		options.start = moq_video::decode::Start::Latest;
+		options.start = start;
 		options.max_delay = Duration::from_micros(raw.max_delay_us);
 		// The C caller takes packed pixels, so let a backend that can decode
 		// straight to the CPU do that rather than downloading afterwards.

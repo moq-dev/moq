@@ -149,7 +149,7 @@ Selection and an empty JS selection do not wait for admission. For a build
 outside these entrypoints, use `quest gate COMMAND [ARGS...]`; gate thresholds
 come from the host and have no configuration.
 
-PRs into `main` get no cloud CI until the merge queue, so run `just ci` before pushing. It runs what the queue runs, the same ground as `just check`, plus two settings: `CI_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
+PRs into `main` get no cloud CI until the batched landing gate, so run `just ci` before pushing. It runs what the landing gate runs, the same ground as `just check`, plus two settings: `CI_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
 
 See the [development guide](https://doc.moq.dev/setup/dev) and the [justfile](justfile) for more.
 

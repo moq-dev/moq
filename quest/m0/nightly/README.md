@@ -41,4 +41,3 @@ Public API: none. Wire: none.
 - [Paired bench regressions bisected](/quest/m0/nightly/bench-regressions.md) - retirement/selection's +21-24% and two 10% rows fixed or shown to be noise
 - [Firefox's player closes every VideoFrame](/quest/m0/nightly/firefox-videoframe.md) - the Media job's Firefox player stops leaking an unclosed VideoFrame
 - [Gate stops hanging](/quest/m0/nightly/gate-hang.md) - `just gate` finishes instead of hanging to the timeout, and a hang names its module
-- [moq-quic rustdoc](/quest/m0/nightly/quic-rustdoc.md) - `--all-features` rustdoc for moq-quic builds and a lane checks it

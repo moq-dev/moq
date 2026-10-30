@@ -548,24 +548,14 @@ impl SubscriptionCleanup {
 	/// End every active subscription with the session's error. Group machines own
 	/// their cleanup independently; this records the track's terminal state.
 	///
-	/// A subscription the publisher already ended finishes instead, here and on
-	/// [`Self::close`]: its track is over, and what arrived stays servable to readers
-	/// still behind rather than handed to another route.
+	/// A subscription the publisher already ended finishes instead: its track is over,
+	/// and what arrived stays servable to readers still behind rather than handed to
+	/// another route.
 	fn abort(&self, err: &Error) {
 		for (_, entry) in self.0.lock().drain() {
 			let _ = match entry.tail.read().is_ended() {
 				true => entry.producer.finish(),
 				false => entry.producer.abort(err.clone()),
-			};
-		}
-	}
-	fn close(&self) {
-		for (_, entry) in self.0.lock().drain() {
-			let _ = match entry.tail.read().is_ended() {
-				true => entry.producer.finish(),
-				false => entry
-					.producer
-					.abort(Error::Stream(crate::StreamError::Session(crate::SessionError::Cancel))),
 			};
 		}
 	}
@@ -624,11 +614,6 @@ impl SubscriberDriver {
 		// rejects with `err` rather than `Dropped`.
 		self.subscriber.note_end(err);
 		self.cleanup.abort(err);
-	}
-
-	pub fn close(&self) {
-		self.subscriber.note_end(&Error::Cancel);
-		self.cleanup.close();
 	}
 
 	/// Read what the closed transport already delivered: the buffered uni streams, then
@@ -799,8 +784,6 @@ enum UniState {
 	/// Discarding a lite-07+ padding stream until FIN.
 	Padding {
 		reader: Reader<crate::transport::boxed::RecvStream, Version>,
-		/// A peer that keeps chunks ready must not hold the driver for as long as they arrive.
-		budget: kio::coop::Budget,
 	},
 	Group(GroupRecv),
 	Done,
@@ -827,9 +810,7 @@ impl UniServe {
 	/// Abort the stream with the given error, wherever the reader currently lives.
 	fn abort(&mut self, err: &Error) {
 		match &mut self.state {
-			UniState::Start { reader } | UniState::Setup { reader } | UniState::Padding { reader, .. } => {
-				reader.abort(err)
-			}
+			UniState::Start { reader } | UniState::Setup { reader } | UniState::Padding { reader } => reader.abort(err),
 			UniState::Group(recv) => recv.reader.abort(err),
 			UniState::Done => {}
 		}
@@ -856,10 +837,7 @@ impl UniServe {
 							reader.set_priority(crate::priority::RECV_CONTROL);
 							UniState::Setup { reader }
 						}
-						lite::DataType::Padding => UniState::Padding {
-							reader,
-							budget: kio::coop::Budget::new(32),
-						},
+						lite::DataType::Padding => UniState::Padding { reader },
 					};
 				}
 				UniState::Setup { reader } => {
@@ -884,18 +862,12 @@ impl UniServe {
 						}
 					}
 				}
-				UniState::Padding { reader, budget } => {
+				UniState::Padding { reader } => {
 					if !self.subscriber.version.has_padding() {
 						self.abort(&Error::UnexpectedStream);
 						return Poll::Ready(Ok(()));
 					}
-					// Reading rather than cancelling returns credit as each chunk arrives.
-					loop {
-						ready!(budget.poll_yield(waiter));
-						if ready!(reader.poll_read_chunk(waiter, usize::MAX))?.is_none() {
-							return Poll::Ready(Ok(()));
-						}
-					}
+					return reader.poll_discard(waiter);
 				}
 
 				UniState::Group(recv) => {
@@ -1163,6 +1135,7 @@ impl FrameIngest {
 		group: &mut crate::recv::Group,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			match &mut self.phase {
 				IngestPhase::State => {
@@ -1322,6 +1295,9 @@ impl FrameIngest {
 							return Poll::Ready(Err(err));
 						}
 					}
+					// An empty frame is a few bytes, so a peer keeping them ready must not
+					// hold the session's other tasks.
+					ready!(budget.poll_yield(waiter));
 				}
 			}
 		}
@@ -1355,7 +1331,10 @@ impl DatagramRecv {
 		if !self.enabled {
 			return Poll::Ready(Ok(()));
 		}
+		// A peer keeping datagrams ready must not hold the session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
+			ready!(budget.poll_yield(waiter));
 			let payload = ready!(self.recv.poll_recv_datagram(waiter)).map_err(crate::lite::error::from_transport)?;
 			if let Err(err) = self.subscriber.route_datagram(payload) {
 				tracing::debug!(%err, "dropping datagram");
@@ -1482,7 +1461,11 @@ impl ProbeStream {
 		wait!(Send => stream.writer.poll_flush(waiter))?;
 		Poll::Ready(wait!(Read => {
 			let bandwidth = self.subscriber.recv_bandwidth.as_ref().expect("gated by RecvBandwidth");
+			// Each estimate wakes every reader, so a peer streaming them must not hold
+			// the session's other tasks.
+			let mut budget = kio::coop::Budget::new(32);
 			loop {
+				ready!(budget.poll_yield(waiter));
 				let Some(probe) = ready!(stream.reader.poll_decode_maybe::<lite::Probe>(waiter))? else {
 					break Poll::Ready(Ok(()));
 				};
@@ -1658,7 +1641,11 @@ impl AnnouncePrefix {
 			{
 				run.announced.limit(&permit, &self.subscriber);
 			}
-			loop {
+			// Each announce routes into the origin, so a peer streaming them must not hold
+			// the session's other tasks. A yield has woken the task, and this arm always
+			// ends Pending, so the routes below are still served this turn.
+			let mut budget = kio::coop::Budget::new(32);
+			while budget.poll_yield(waiter).is_ready() {
 				match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(waiter) {
 					Poll::Ready(Ok(Some(announce))) => {
 						if matches!(announce, lite::AnnounceBroadcast::Synced) {
@@ -2036,6 +2023,7 @@ mod tests {
 			ranges: vec![lite::Range::OLDEST],
 			tail: tail.clone(),
 			served: None,
+			starts: Vec::new(),
 			end: None,
 			wanted: None,
 			unanswered: None,
@@ -2091,6 +2079,44 @@ mod tests {
 
 		active.served = Some(0);
 		assert_eq!(active.covered(), Some(std::iter::once(0..2).collect()));
+	}
+
+	/// A covered FIN owes a relative range only from its own SUBSCRIBE_START, not from the
+	/// lowest start of a disjoint range below it.
+	#[kio::test]
+	async fn a_covered_fin_owes_each_range_from_its_own_start() {
+		let tail = kio::Producer::new(Tail::default());
+		let Sub::Active(mut active) = feed_sub(&tail).await else {
+			unreachable!("feed_sub is active")
+		};
+		let end = |group| Some(lite::Anchor::Absolute(crate::track::Position { group, frame: 0 }));
+		active.ranges = vec![
+			lite::Range::span(Some(0), 0, Some(0), None),
+			lite::Range {
+				start: Some(lite::Anchor::Relative(0)),
+				end: end(11),
+			},
+			lite::Range {
+				start: Some(lite::Anchor::Relative(0)),
+				end: end(20),
+			},
+		];
+		active.served = Some(0);
+		active.starts = vec![Some(0), Some(10), None];
+		assert_eq!(active.covered(), Some(vec![0..1, 10..11, 20..20]));
+
+		active.ranges[0] = lite::Range::span(Some(0), 0, Some(2), None);
+		active.starts[0] = Some(1);
+		assert_eq!(active.covered(), Some(vec![1..3, 10..11, 20..20]));
+		active.starts[0] = None;
+		assert_eq!(active.covered(), Some(vec![3..3, 10..11, 20..20]));
+
+		active.updated = true;
+		assert_eq!(
+			active.covered(),
+			Some(vec![0..3, 0..11, 0..20]),
+			"an update leaves only the lowest"
+		);
 	}
 
 	/// QUIC does not order streams, so group 2's header can reach the relay before group 1's.
@@ -2172,6 +2198,7 @@ mod tests {
 				ranges: vec![lite::Range::span(Some(floor), 0, None, None)],
 				tail: Default::default(),
 				served: None,
+				starts: Vec::new(),
 				end: None,
 				wanted: None,
 				unanswered: None,
@@ -2636,6 +2663,7 @@ mod tests {
 			ranges: vec![lite::Range::span(Some(2), 0, None, None)],
 			tail: Default::default(),
 			served: None,
+			starts: Vec::new(),
 			end: Some(lite::SubscribeEnd { group: 10 }),
 			wanted: None,
 			unanswered: None,
@@ -2721,6 +2749,41 @@ mod tests {
 			assert!(!log.stops().is_empty());
 		}
 		assert!(log.closes().is_empty());
+	}
+
+	/// A peer keeping datagrams ready gets a budget of them routed per poll, leaving the
+	/// rest for later so the session's other tasks run in between.
+	#[kio::test]
+	async fn a_flood_of_datagrams_yields() {
+		use crate::transport::poll::Session as _;
+
+		let (local, peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(local.clone()),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: Version::Lite07,
+			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let mut recv = DatagramRecv::new(subscriber);
+		assert!(recv.enabled);
+		// Each names no subscription, so it is dropped once routed.
+		for _ in 0..1024 {
+			peer.send_datagram(bytes::Bytes::from_static(b"x"), Default::default())
+				.unwrap();
+		}
+
+		assert!(recv.poll(&kio::Waiter::noop()).is_pending());
+		let other = local.clone();
+		assert!(
+			other.poll_recv_datagram(&kio::Waiter::noop()).is_ready(),
+			"one poll routed every datagram"
+		);
 	}
 
 	#[kio::test]
@@ -3322,8 +3385,8 @@ mod tests {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut responses = Vec::new();
 			lite::SubscribeResponse::Start(lite::SubscribeStart {
-				group: 0,
 				largest: None,
+				starts: vec![Some(0)],
 			})
 			.encode(
 				&mut crate::coding::Encoder::new(&mut responses, version.into()),
@@ -3440,8 +3503,8 @@ mod tests {
 		let mut answer = Vec::new();
 		let mut encoder = crate::coding::Encoder::new(&mut answer, version.into());
 		lite::SubscribeResponse::Start(lite::SubscribeStart {
-			group: 0,
 			largest: None,
+			starts: vec![Some(0)],
 		})
 		.encode(&mut encoder, version)
 		.unwrap();
@@ -3494,8 +3557,8 @@ mod tests {
 		let largest = track::Position { group: 4, frame: 2 };
 		let mut responses = Vec::new();
 		lite::SubscribeResponse::Start(lite::SubscribeStart {
-			group: 4,
 			largest: Some(largest),
+			starts: vec![Some(4)],
 		})
 		.encode(
 			&mut crate::coding::Encoder::new(&mut responses, version.into()),
@@ -3556,8 +3619,8 @@ mod tests {
 			let code = crate::coding::StreamCodes::encode_stream_code(&Version::Lite07, &crate::StreamError::App(5));
 			for resp in [
 				lite::SubscribeResponse::Start(lite::SubscribeStart {
-					group: 0,
 					largest: None,
+					starts: vec![Some(0)],
 				}),
 				lite::SubscribeResponse::Drop(lite::SubscribeDrop {
 					start: 2,
@@ -3696,8 +3759,8 @@ mod tests {
 		let mut responses = Vec::new();
 		if started {
 			lite::SubscribeResponse::Start(lite::SubscribeStart {
-				group: 0,
 				largest: None,
+				starts: vec![Some(0)],
 			})
 			.encode(
 				&mut crate::coding::Encoder::new(&mut responses, version.into()),
@@ -5787,6 +5850,37 @@ mod tests {
 		)
 	}
 
+	/// A peer streaming announces gets a budget of them read per poll, so the session's
+	/// other tasks run between them, and the announce behind the flood still arrives.
+	#[kio::test]
+	async fn a_flood_of_announces_yields() {
+		const VERSION: Version = Version::Lite06;
+		/// `AnnouncePrefix`'s announces per poll.
+		const BUDGET: usize = 32;
+		const SKIPS: usize = 4096;
+		let mut script = announce_script(VERSION, &[&announce_ok(VERSION, 0)]);
+		for _ in 0..SKIPS {
+			// An unknown announce type with an empty body: no change.
+			script.extend([0x3f, 0x00]);
+		}
+		script.extend(announce_script(VERSION, &[&announce_start(VERSION, "a")]));
+		let (mut prefix, consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
+		let mut cursor = consumer.announced();
+
+		let mut polls = 0;
+		kio::wait(|waiter| {
+			assert!(prefix.poll(waiter).is_pending(), "the announce stream ended");
+			polls += 1;
+			if cursor.try_next().is_some() {
+				return Poll::Ready(());
+			}
+			assert!(polls <= SKIPS, "the announces stalled");
+			Poll::Pending
+		})
+		.await;
+		assert!(polls * BUDGET >= SKIPS, "{SKIPS} announces read in {polls} polls");
+	}
+
 	/// The origin's consumers sync once the counted starts are in and read, never before.
 	#[kio::test]
 	async fn a_counted_initial_set_catches_up() {
@@ -6195,6 +6289,9 @@ struct SubStream {
 	tail: kio::Producer<Tail>,
 	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
 	served: Option<u64>,
+	/// Where SUBSCRIBE_START says each range's delivery starts, `None` for one with nothing
+	/// to deliver. It matches `ranges` until an update changes them.
+	starts: Vec<Option<u64>>,
 	/// The track's exclusive end (SUBSCRIBE_END), once declared.
 	end: Option<lite::SubscribeEnd>,
 	/// The refresh join's wanted group, restated in every SUBSCRIBE_UPDATE.
@@ -6244,14 +6341,20 @@ impl SubStream {
 		};
 		self.ranges
 			.iter()
-			.map(|range| {
+			.enumerate()
+			.map(|(index, range)| {
 				// Our absolute ends name a group's first frame (see `wire_ranges`).
 				let Some(lite::Anchor::Absolute(end)) = range.end else {
 					return None;
 				};
-				let start = match range.start {
-					Some(lite::Anchor::Absolute(start)) => start.group,
-					_ => served,
+				let start = match self.starts.get(index) {
+					// Each range's own start accounts for its skipped prefix, including
+					// an absolute one when another range has no absolute requested floor.
+					Some(start) if !self.updated => start.unwrap_or(end.group),
+					_ => match range.start {
+						Some(lite::Anchor::Absolute(start)) => start.group,
+						_ => served,
+					},
 				};
 				Some(start..end.group)
 			})
@@ -6935,6 +7038,7 @@ impl Establish {
 			requested: self.subscription.start(),
 			tail: self.tail.clone(),
 			served: None,
+			starts: Vec::new(),
 			end: None,
 			wanted: None,
 			bounded: bounded(&self.ranges),
@@ -7591,6 +7695,7 @@ impl ServeLoop {
 		{
 			self.held = None;
 		}
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			match &mut self.mode {
 				ServeMode::Establish(est) => {
@@ -7817,15 +7922,26 @@ impl ServeLoop {
 										}
 										active.end = Some(end.clone());
 									}
-									// SUBSCRIBE_START names the first group this feed serves:
-									// the publisher skipped everything below it (e.g. it could
-									// not serve the requested frame). Record it as a drop
-									// signal, so a reader waiting on a skipped group
-									// fails over instead of stalling on a live route.
+									// SUBSCRIBE_START names where each range's delivery starts,
+									// the lowest being the first group this feed serves: the
+									// publisher skipped everything below it (e.g. it could not
+									// serve the requested frame). Record it as a drop signal,
+									// so a reader waiting on a skipped group fails over
+									// instead of stalling on a live route.
 									lite::SubscribeResponse::Start(start) => {
+										// One resolved start per range the SUBSCRIBE carried, unless an
+										// update the publisher read first replaced them.
+										if serve.subscriber.version.has_ranges()
+											&& !active.updated && start.starts.len() != active.ranges.len()
+										{
+											tracing::warn!(track = %serve.name, starts = start.starts.len(), ranges = active.ranges.len(), "subscribe start resolves other ranges");
+											return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));
+										}
+										// No range starting anywhere leaves nothing owed.
+										let served = start.starts.iter().flatten().min().copied();
 										// Where the live feed is, on versions whose answer says.
 										if serve.subscriber.version.has_largest() {
-											self.serving.set_live(start.largest, Some(start.group));
+											self.serving.set_live(start.largest, served);
 											if let Some(largest) = start.largest {
 												self.serving.report_largest(largest);
 											}
@@ -7837,21 +7953,22 @@ impl ServeLoop {
 										// moved back restores it); elsewhere the
 										// request-tracked floor stands rather than a guess.
 										if active.start == active.requested {
-											let _ = match serve.subscriber.version.resolves_start() {
-												true => {
-													self.serving.start_resolved(start.group, active.requested_max_delay)
+											let _ = match (serve.subscriber.version.resolves_start(), served) {
+												(true, Some(served)) => {
+													self.serving.start_resolved(served, active.requested_max_delay)
 												}
-												false => self.serving.start_at(start.group),
+												_ => self.serving.start_at(served),
 											};
 										}
-										active.served = Some(start.group);
+										active.served = served;
+										active.starts = start.starts.clone();
 										// The groups the SUBSCRIBE asked for below it are not
 										// waited for, whatever the demand asks later. One that
 										// still arrives is delivered, so they are not dropped.
 										if let Some(requested) = active.requested
-											&& let Ok(mut tail) = active.tail.write()
+											&& let Some(served) = served && let Ok(mut tail) = active.tail.write()
 										{
-											tail.account(requested..start.group, serve.subscriber.runtime.now());
+											tail.account(requested..served, serve.subscriber.runtime.now());
 										}
 									}
 									// The publisher will never send these groups, so they
@@ -7875,6 +7992,9 @@ impl ServeLoop {
 										tracing::debug!(track = %serve.name, ?msg, "subscribe response")
 									}
 								}
+								// Each pass re-polls the whole loop, so a peer streaming
+								// responses must not hold the session's other tasks.
+								ready!(budget.poll_yield(waiter));
 								continue;
 							}
 							// Lite-07 FINs a covered bounded subscription without SUBSCRIBE_END,

@@ -126,6 +126,12 @@ pub struct Consumer<F: Container> {
 	// Groups that we are monitoring, sorted by sequence ascending.
 	pending: VecDeque<GroupBuffer<F>>,
 
+	// The last group whose input finished, so watching EOF never rescans that prefix.
+	received: Option<u64>,
+
+	// Reap unread evictions only after metadata doubles, charging each sweep to new handles.
+	collect_at: usize,
+
 	// What the pending groups hold, against the max buffer.
 	memory: Memory,
 
@@ -270,6 +276,8 @@ impl<F: Container> Consumer<F> {
 			format,
 			current: start.unwrap_or(0),
 			pending: VecDeque::new(),
+			received: None,
+			collect_at: 1,
 			memory: Memory::new(DEFAULT_MAX_BUFFER),
 			gated: false,
 			startup: start.is_none(),
@@ -736,10 +744,32 @@ impl<F: Container> Consumer<F> {
 		}
 	}
 
+	/// Receive group handles and wait for the track and every received group to finish.
+	pub(crate) fn poll_received(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.track.is_none() {
+			return Poll::Ready(());
+		}
+		ready!(self.poll_read_finish(waiter));
+		if self.track_error.is_some() {
+			return Poll::Pending;
+		}
+		let first = self
+			.pending
+			.partition_point(|group| self.received.is_some_and(|last| group.sequence <= last));
+		for group in self.pending.range_mut(first..) {
+			if !matches!(group.group.poll_finished(waiter), Poll::Ready(Ok(_))) {
+				return Poll::Pending;
+			}
+			self.received = Some(group.sequence);
+		}
+		Poll::Ready(())
+	}
+
 	// Reads any new groups from the track until it finished or failed.
 	//
 	// Returns Pending until all groups have been consumed.
 	fn poll_read_finish(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		self.collect_pending(waiter);
 		self.gated = false;
 		if self.track_error.is_some() {
 			return Poll::Ready(());
@@ -787,7 +817,21 @@ impl<F: Container> Consumer<F> {
 				below.late = reader.late;
 			}
 			self.pending.insert(idx, reader);
+			self.collect_pending(waiter);
 		}
+	}
+
+	fn collect_pending(&mut self, waiter: &kio::Waiter) {
+		if self.pending.len() < self.collect_at {
+			return;
+		}
+		let current = self.current;
+		self.pending.retain_mut(|group| {
+			// Keep the cursor's gap and anything already decoded, including markers and faults.
+			// A never-read evicted group holds no event that its missing sequence cannot say.
+			group.sequence == current || !group.empty || !group.poll_aborted(waiter)
+		});
+		self.collect_at = self.pending.len().saturating_mul(2).max(1);
 	}
 
 	// Whether the max buffer holds back the next group: it is full, and the cursor's group already has a
@@ -990,8 +1034,8 @@ impl<F: Container> GroupBuffer<F> {
 			self.bare = frames.is_empty();
 		}
 
-		// Decoded payloads are views of the wire payload, which stays allocated until the last of them
-		// is read, so that one also holds whatever of it the views leave out, such as a large header.
+		// Decoded payloads are views of the wire payload, which stays allocated while any of them is
+		// held, so the last one read also holds whatever of it the views leave out, such as a header.
 		let mut views = 0;
 		let first = self.buffered.len();
 		for mut frame in frames {
@@ -1032,8 +1076,14 @@ impl<F: Container> GroupBuffer<F> {
 			self.charge(cost);
 			self.buffered.push_back((frame, arrived, cost));
 		}
+		// Views that leave out more than they keep are copied out, freeing the wire payload, so
+		// whoever holds a frame after the reader retains at most twice its payload.
 		let rest = size.saturating_sub(views);
-		if self.buffered.len() > first
+		if rest > views {
+			for (frame, ..) in self.buffered.range_mut(first..) {
+				frame.payload = bytes::Bytes::copy_from_slice(&frame.payload);
+			}
+		} else if self.buffered.len() > first
 			&& rest > 0
 			&& let Some((_, _, cost)) = self.buffered.back_mut()
 		{
@@ -3838,7 +3888,7 @@ mod tests {
 		assert_eq!(rest[1].timestamp, ts(30_000));
 	}
 
-	/// A live group that outgrows its cache budget is aborted. A reader whose current
+	/// A live group its upstream gave up as too large is aborted. A reader whose current
 	/// group died that way skips forward; the gap is not a decode error.
 	#[tokio::test]
 	async fn oversized_group_skips_to_next() {
@@ -3857,22 +3907,7 @@ mod tests {
 		Container::Legacy(crate::container::Kind::Data)
 			.write(&mut group0, &[first])
 			.unwrap();
-		// Stay under the per-frame cap (hang prefixes a timestamp) so this is a group overflow,
-		// not FrameTooLarge.
-		let overflow = Frame {
-			timestamp: ts(0),
-			payload: Bytes::from(vec![0u8; (moq_net::group::MAX_CACHE_BYTES - 1024) as usize]),
-			keyframe: false,
-			duration: None,
-		};
-		let overflowed = Container::Legacy(crate::container::Kind::Data).write(&mut group0, &[overflow]);
-		assert!(
-			matches!(
-				overflowed,
-				Err(crate::Error::Hang(hang::Error::Moq(moq_net::Error::GroupTooLarge)))
-			),
-			"oversized group must abort as GroupTooLarge, got {overflowed:?}"
-		);
+		group0.abort(moq_net::Error::GroupTooLarge).unwrap();
 
 		write_group(&mut track, 1, &[ts(30_000)]);
 		track.finish().unwrap();
@@ -4261,13 +4296,13 @@ mod tests {
 		assert_eq!(frames, vec![ts(0), ts(20_000)]);
 	}
 
-	/// A decoded payload is a view of its wire frame, which stays allocated while the frame is held, so
-	/// the max buffer charges the whole wire frame rather than the view. Here each is a 1 byte payload
-	/// behind a large LOC property block.
+	/// A decoded payload is a view of its wire frame, which stays allocated while the view is held, so a
+	/// view that leaves out most of its wire frame is copied out: what holds the frame after the reader,
+	/// such as an export's jitter buffer, retains only its payload. Here each is a 1 byte payload behind
+	/// a large LOC property block.
 	#[test]
-	fn a_small_view_of_a_large_wire_frame_is_charged_the_wire_frame() {
+	fn a_small_view_of_a_large_wire_frame_is_copied_out() {
 		const PADDING: usize = 60_000;
-		const MAX_BUFFER: usize = 16 * 1024;
 
 		// A QUIC varint, which is all LOC's framing needs.
 		fn varint(buf: &mut Vec<u8>, value: usize) {
@@ -4282,21 +4317,11 @@ mod tests {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let subscriber =
 			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(30)));
-		let loc = Container::Loc(crate::container::Kind::Data);
 		let mut consumer = Consumer::new(subscriber, Container::Loc(crate::container::Kind::Data));
-		consumer.set_max_buffer(MAX_BUFFER);
 
-		let mut stalled = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		let frame = Frame {
-			timestamp: ts(0),
-			payload: Bytes::from_static(&[0xDE]),
-			keyframe: false,
-			duration: None,
-		};
-		loc.write(&mut stalled, &[frame]).unwrap();
-		let mut padded = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		let mut padded = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		for i in 0..8 {
-			let timestamp = 10_000 + i * 1_000;
+			let timestamp = i * 1_000;
 			// An unknown video-config property (0x0d) padding the frame, then the timestamp (0x10).
 			let mut props = Vec::new();
 			varint(&mut props, 0x0d);
@@ -4312,25 +4337,20 @@ mod tests {
 		}
 		padded.finish().unwrap();
 
-		// The padded frames fill the max buffer behind the stalled group, which moves the cursor on to them.
-		// Charging only the 1 byte views, the buffer never fills and the reader waits on the stall forever.
-		let slack = PADDING + 1024 + 2 * std::mem::size_of::<GroupBuffer<Container>>();
 		let mut reads = Vec::new();
 		while let Poll::Ready(read) = consumer.poll_read(&waiter) {
-			let used = consumer.buffered_bytes();
-			assert!(
-				used <= MAX_BUFFER + slack,
-				"holding {used} bytes past a {MAX_BUFFER} byte max buffer"
-			);
 			match read.unwrap() {
-				Some(Read::Frame { frame, .. }) => reads.push(Some(frame.timestamp)),
-				Some(Read::Gap { .. }) => reads.push(None),
+				Some(Read::Frame { frame, .. }) => {
+					assert_eq!(frame.payload[..], [0xAD]);
+					// The group still holds its wire frames, so a view of one would share it.
+					assert!(frame.payload.is_unique(), "the payload still shares its wire frame");
+					reads.push(frame.timestamp);
+				}
+				Some(Read::End { .. }) | None => break,
 				other => panic!("unexpected read: {other:?}"),
 			}
 		}
-		let mut expected = vec![Some(ts(0)), None];
-		expected.extend((0..8).map(|i| Some(ts(10_000 + i * 1_000))));
-		assert_eq!(reads, expected);
+		assert_eq!(reads, (0..8).map(|i| ts(i * 1_000)).collect::<Vec<_>>());
 	}
 
 	/// A stalled successor does not hide a readable group behind it once group overhead alone fills the
@@ -4529,5 +4549,73 @@ mod tests {
 			}
 		}
 		assert_eq!(reads, vec![Some(ts(0)), None, Some(ts(10_000))]);
+	}
+
+	/// A paused payload reader must not retain metadata for cache entries that were evicted.
+	#[kio::test]
+	async fn receiving_under_backpressure_releases_aborted_group_handles() {
+		let track = track_producer("backpressured", timed());
+		let mut consumer = Consumer::new(
+			track.subscribe(moq_net::track::Subscription::default()),
+			Container::Legacy(crate::container::Kind::Data),
+		);
+		for sequence in 0..256 {
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			Container::Legacy(crate::container::Kind::Data)
+				.write(
+					&mut group,
+					&[Frame {
+						timestamp: ts(sequence * 20_000),
+						payload: Bytes::from_static(b"payload"),
+						keyframe: true,
+						duration: None,
+					}],
+				)
+				.unwrap();
+			assert!(consumer.poll_received(&kio::Waiter::noop()).is_pending());
+			group.abort(moq_net::Error::Evicted).unwrap();
+		}
+		let _ = consumer.poll_received(&kio::Waiter::noop());
+		assert!(
+			consumer.pending.len() <= 2,
+			"doubling compaction bounds metadata by twice the cursor's one retained gap, retained {} aborted group handles",
+			consumer.pending.len()
+		);
+	}
+
+	/// A finished track may still have bytes in flight on a group already received.
+	#[kio::test]
+	async fn received_input_waits_for_group_fin_without_consuming_payload() {
+		let mut track = track_producer("finite", timed());
+		let mut consumer = Consumer::new(
+			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(500))),
+			Container::Legacy(crate::container::Kind::Data),
+		);
+		write_group(&mut track, 0, &[ts(0)]);
+		let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		Container::Legacy(crate::container::Kind::Data)
+			.write(
+				&mut group,
+				&[Frame {
+					timestamp: ts(20_000),
+					payload: Bytes::from_static(b"tail"),
+					keyframe: true,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		track.finish().unwrap();
+		assert!(consumer.poll_received(&kio::Waiter::noop()).is_pending());
+		assert!(
+			consumer.pending.iter().all(|group| group.empty),
+			"receipt must not decode payload"
+		);
+		group.finish().unwrap();
+		assert!(consumer.poll_received(&kio::Waiter::noop()).is_ready());
+		let mut frames = Vec::new();
+		while let Some(frame) = consumer.read_frame().await.unwrap() {
+			frames.push(frame.timestamp);
+		}
+		assert_eq!(frames, [ts(0), ts(20_000)]);
 	}
 }

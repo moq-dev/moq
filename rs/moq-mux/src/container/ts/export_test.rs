@@ -10172,6 +10172,97 @@ async fn a_midstream_stitch_awaits_the_replacement_catalog() {
 	}
 }
 
+/// Once the follow retires the old catalog, a cancelled replacement still leaves a catalog
+/// format to subscribe the next instance with, and that instance can finish cleanly.
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
+	use crate::catalog::CatalogFormat;
+
+	for format in [CatalogFormat::Hang, CatalogFormat::Msf] {
+		let origin = crate::source::produce_origin();
+		let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+		let first = origin.publish("live", route()).unwrap();
+		let (name, snapshot) = match format {
+			CatalogFormat::Hang => (
+				hang::Catalog::DEFAULT_NAME,
+				serde_json::to_vec(&hang::Catalog::<()>::default()).unwrap(),
+			),
+			CatalogFormat::Msf => (
+				moq_msf::DEFAULT_NAME,
+				moq_msf::Catalog::<()>::new(Vec::new()).to_json().unwrap().into_bytes(),
+			),
+		};
+		let mut old_catalog = first.create_track(name, hang::Catalog::default_track_info()).unwrap();
+		let mut group = old_catalog.append_group().unwrap();
+		group.write_frame(Timestamp::now(), snapshot).unwrap();
+		group.finish().unwrap();
+		let source = crate::source::resolved(&origin, "live").await;
+		let stream = source.catalog::<()>(format).await.unwrap();
+		let follow = Duration::from_secs(10);
+		let mut follower = super::Follower::new(Export::new(source, stream))
+			.unwrap()
+			.with_stitch(true)
+			.with_follow(follow);
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), follower.next())
+				.await
+				.is_err(),
+			"the original catalog stays open"
+		);
+		assert!(old_catalog.subscription().is_some());
+
+		let (second, mut catalog) = publish_live::<()>(&origin, route());
+		let audio = aac_rendition(&mut second.broadcast().clone(), &mut catalog, "a.aac");
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), follower.next())
+				.await
+				.is_err(),
+			"the replacement has no media to commit"
+		);
+		assert!(follower.export().cataloged(), "the replacement served its snapshot");
+		assert!(
+			old_catalog.subscription().is_some(),
+			"the follow still retains the old catalog"
+		);
+		tokio::time::advance(follow).await;
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), follower.next())
+				.await
+				.is_err(),
+			"still awaiting replacement media after the follow"
+		);
+		// Observe the origin driver releasing the routed subscription before cancelling B.
+		tokio::time::timeout(Duration::from_secs(1), async {
+			while old_catalog.subscription().is_some() {
+				old_catalog.subscription_changed().await.unwrap();
+			}
+		})
+		.await
+		.expect("the expired follow releases the old catalog");
+
+		audio.abort(moq_net::Error::Unroutable);
+		catalog.abort(moq_net::Error::Unroutable);
+		drop(second);
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), follower.next())
+				.await
+				.is_err(),
+			"following after the replacement left"
+		);
+
+		let epoch = moq_net::Epoch::mint();
+		let (_third, mut catalog) = publish_bare(&origin, Some(&epoch));
+		std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
+		catalog.finish().unwrap();
+		let end = tokio::time::timeout(follow * 2, follower.next())
+			.await
+			.expect("the final instance ends the export");
+		assert!(matches!(end, Ok(None)), "{format:?}: {end:?}");
+		assert_eq!(follower.export().instance(), Some(&epoch));
+		assert_eq!(follower.export().catalog_format(), format);
+	}
+}
+
 /// A mid-stream stitch keeps the old instance playing while the replacement's catalog request
 /// goes unanswered, rather than stalling the program on it.
 #[tokio::test(start_paused = true)]

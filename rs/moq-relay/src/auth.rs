@@ -463,9 +463,9 @@ impl Token {
 	/// The dialed path is a URL path, whose one leading `/` is syntax rather than a
 	/// segment. Fails with [`Error::Request`] if the rest of it is not a valid path,
 	/// and with [`Error::Forbidden`] if a root, mount, tier, or label the grant names
-	/// is not: one with an empty segment or longer than [`Path::MAX_BYTES`].
+	/// is not: one [`Path::new`] refuses.
 	pub fn new(path: &str, grant: &Grant) -> Result<Self, Error> {
-		let invalid = |err: moq_net::path::Invalid| Error::Forbidden(err.to_string());
+		let invalid = |err: moq_net::path::Error| Error::Forbidden(err.to_string());
 		let root = match &grant.root {
 			Some(root) => Path::new(root).map_err(invalid)?,
 			None => Path::new(path.strip_prefix('/').unwrap_or(path))
