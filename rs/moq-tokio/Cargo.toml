@@ -54,6 +54,11 @@ uds = ["tcp", "qmux/uds"]
 # Native WebRTC data channels over str0m, with a full ICE agent (the `webrtc` module).
 webrtc = ["_transport", "dep:qmux", "dep:moq-ice", "dep:str0m", "dep:if-addrs", "dep:mdns-sd"]
 ring = ["_certs", "rustls/ring", "rcgen/ring", "moq-quic?/ring"]
+# QUIC on moq-clock's deterministic simulator: inside `moq_clock::sim::run`, the driver's
+# and sessions' tasks spawn there, and `quic::driver::sim` carries datagrams over seeded,
+# impaired `moq_quic::sim::Link`s with no sockets. Hidden from the docs. Meant for
+# dev-dependencies, so production builds never compile it.
+sim = ["driver", "moq-clock/sim", "moq-quic/sim"]
 
 [dependencies]
 bytes = "1"
@@ -135,6 +140,10 @@ chrono = "0.4"
 # be driven with synthetic daemon events.
 flume = "0.12"
 moq-clock = { path = "../moq-clock", features = ["sim"] }
+# The simulator tests seed BBR3's probe phases.
+moq-congestion = { workspace = true, features = ["testing"] }
+# The tests run QUIC sessions on the simulator.
+moq-tokio = { path = ".", features = ["sim"] }
 # A bufferbloated path for the receive-credit tests and benchmark.
 moq-shaper = { path = "../moq-shaper" }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }

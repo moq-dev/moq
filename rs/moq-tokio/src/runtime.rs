@@ -15,10 +15,48 @@ pub(crate) fn enter() -> Option<tokio::runtime::EnterGuard<'static>> {
 	}
 }
 
-/// The caller's runtime, else the fallback, for a handle that outlives this call.
-#[cfg(feature = "driver")]
-pub(crate) fn handle() -> tokio::runtime::Handle {
-	tokio::runtime::Handle::try_current().unwrap_or_else(|_| fallback().handle().clone())
+/// Where detached tasks run, captured once so tasks spawned later land beside the first.
+#[cfg(any(feature = "driver", feature = "net"))]
+#[derive(Debug, Clone)]
+pub(crate) enum Spawner {
+	/// The caller's tokio runtime, else the fallback.
+	Tokio(tokio::runtime::Handle),
+	/// The `moq-clock` simulator the caller was running in.
+	#[cfg(feature = "sim")]
+	Sim,
+}
+
+#[cfg(any(feature = "driver", feature = "net"))]
+impl Spawner {
+	/// The `moq-clock` simulator when called inside one, else the caller's runtime or the fallback.
+	pub(crate) fn current() -> Self {
+		#[cfg(feature = "sim")]
+		if moq_clock::sim::is_running() {
+			return Self::Sim;
+		}
+		Self::Tokio(tokio::runtime::Handle::try_current().unwrap_or_else(|_| fallback().handle().clone()))
+	}
+
+	/// Run `future` in the background, with nobody to join it.
+	pub(crate) fn spawn<F>(&self, future: F)
+	where
+		F: Future<Output = ()> + Send + 'static,
+	{
+		match self {
+			Self::Tokio(handle) => drop(handle.spawn(future)),
+			#[cfg(feature = "sim")]
+			Self::Sim => drop(moq_clock::sim::spawn(future)),
+		}
+	}
+}
+
+/// Run `future` in the background with nobody to join it, where [`Spawner::current`] picks.
+#[cfg(feature = "net")]
+pub(crate) fn detach<F>(future: F)
+where
+	F: Future<Output = ()> + Send + 'static,
+{
+	Spawner::current().spawn(future);
 }
 
 fn fallback() -> &'static tokio::runtime::Runtime {

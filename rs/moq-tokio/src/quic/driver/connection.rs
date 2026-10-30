@@ -56,7 +56,7 @@ impl Connecting {
 		endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
 		conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
 		slot: Arc<Slot>,
-		runtime: &tokio::runtime::Handle,
+		runtime: &crate::runtime::Spawner,
 	) -> Self {
 		let (on_handshake_data_send, on_handshake_data_recv) = oneshot::channel();
 		let shared = Shared {

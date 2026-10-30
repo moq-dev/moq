@@ -97,9 +97,10 @@ pub struct Endpoint {
 impl Endpoint {
 	/// Run an endpoint on `socket`, serving incoming connections if [`Config::server`] is set
 	///
-	/// The endpoint's tasks run on the caller's tokio runtime, else moq-tokio's fallback.
+	/// The endpoint's tasks run on the caller's tokio runtime, else moq-tokio's fallback. With
+	/// the `sim` feature, an endpoint made inside `moq_clock::sim::run` runs them on the simulator.
 	pub fn new(config: Config, socket: impl Into<Socket>) -> Result<Self, Error> {
-		let runtime = crate::runtime::handle();
+		let runtime = crate::runtime::Spawner::current();
 		let socket = socket.into().into_async()?;
 		let addr = socket.local_addr()?;
 		let allow_mtud = !socket.may_fragment();
@@ -408,7 +409,7 @@ pub(crate) struct EndpointInner {
 	/// The socket, which connections send through without keeping it open
 	pub(crate) slot: Arc<Slot>,
 	/// Where the endpoint's and its connections' tasks run
-	pub(crate) runtime: tokio::runtime::Handle,
+	pub(crate) runtime: crate::runtime::Spawner,
 	/// What [`Endpoint::dial`] connects with
 	#[cfg(test)]
 	default_client: Mutex<Option<client::Config>>,
@@ -677,7 +678,7 @@ impl ConnectionSet {
 		conn: moq_quic::connection::Connection,
 		slot: Arc<Slot>,
 		driver_lost: bool,
-		runtime: &tokio::runtime::Handle,
+		runtime: &crate::runtime::Spawner,
 	) -> Connecting {
 		let (send, recv) = mpsc::unbounded_channel();
 		if let Some((error_code, reason)) = &self.close {
@@ -767,7 +768,7 @@ impl EndpointRef {
 		local_addr: SocketAddr,
 		max_udp_payload_size: u16,
 		max_receive_segments: usize,
-		runtime: tokio::runtime::Handle,
+		runtime: crate::runtime::Spawner,
 	) -> Self {
 		let (sender, events) = mpsc::unbounded_channel();
 		let recv_state = RecvState::new(sender, max_receive_segments, max_udp_payload_size);
