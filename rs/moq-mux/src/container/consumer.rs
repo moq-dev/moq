@@ -73,7 +73,8 @@ pub(crate) enum Item {
 ///
 /// Delivery starts at the lowest absolute start among the
 /// [`Subscription::ranges`](moq_net::track::Subscription::ranges) when every range names one, waiting for that group under the budget; without one it
-/// starts wherever the publisher does, adopted from the first served groups. From there
+/// starts wherever the publisher does, adopted from the first served groups, or a few groups
+/// earlier with [`with_lookback`](Self::with_lookback). From there
 /// the same budget is the one rule that catches the consumer up to the live edge, and
 /// history the publisher no longer serves expires like any other gap, since its reach
 /// sits a full budget behind the newest content.
@@ -140,10 +141,16 @@ pub struct Consumer<F: Container> {
 	// Latch onto the newest group instead, discarding what arrived below it.
 	newest: bool,
 
+	// How many groups below the newest first arrival an unfloored start waits for: see `with_lookback`.
+	lookback: u64,
+
+	// The newest group when the first one arrived, and when it landed, once a lookback wait starts.
+	anchor: Option<(u64, Instant)>,
+
 	// How far we may drift from the live edge before skipping a group.
 	max_delay: std::time::Duration,
 
-	// Wakes the reader once the hole at the cursor expires.
+	// Wakes the reader once the hole at the cursor, or the lookback wait, expires.
 	hole_timer: Option<std::pin::Pin<Box<moq_clock::Sleep>>>,
 
 	// The furthest presentation point delivered so far: max(timestamp + duration), endpoints
@@ -274,6 +281,8 @@ impl<F: Container> Consumer<F> {
 			gated: false,
 			startup: start.is_none(),
 			newest: false,
+			lookback: 0,
+			anchor: None,
 			max_delay,
 			hole_timer: None,
 			edge: None,
@@ -294,6 +303,23 @@ impl<F: Container> Consumer<F> {
 	pub(crate) fn live(mut self) -> Self {
 		self.startup = true;
 		self.newest = true;
+		self
+	}
+
+	/// Start up to `groups` groups below the live edge, even when the live edge arrives first.
+	///
+	/// Applies only where delivery would start wherever the publisher does: a subscription that names
+	/// a start already waits for it, and [`live`](Self::live) starts at the newest group. Without
+	/// this, the start is the lowest group that has arrived when the first one does, so a newer
+	/// group whose stream wins the race (newest-first delivery makes that likely) drops the earlier
+	/// ones as old. With it, once the first group arrives, the start waits for the group `groups`
+	/// below the newest that has arrived, or the lowest the subscription's ranges cover, for as long
+	/// as the max delay says it could still be fresh: until the newest content is a budget past
+	/// where that newest group starts, or a budget after it arrived, whichever comes first. The wall
+	/// clock bounds a quiet or paused track, which never ages out in media time. A finished track or
+	/// a full max buffer ends the wait at once. The start is then the lowest group that arrived.
+	pub fn with_lookback(mut self, groups: u64) -> Self {
+		self.lookback = groups;
 		self
 	}
 
@@ -430,6 +456,10 @@ impl<F: Container> Consumer<F> {
 				let _ = group.poll_min_timestamp(waiter, &self.format, i == 0);
 				!group.empty
 			});
+			// An opted-in lookback holds the start for the earlier groups it asks for.
+			if any_frame && self.looking_back(waiter, finished) {
+				return Poll::Pending;
+			}
 			if any_frame {
 				// A live reader takes the newest group, though its frames may still be on their
 				// way, and discards the older ones the budget also delivers. The publisher's
@@ -711,6 +741,59 @@ impl<F: Container> Consumer<F> {
 
 			return Poll::Pending;
 		}
+	}
+
+	// Whether an unfloored start still waits for the earlier groups `with_lookback` asks for,
+	// registering the waiter on whatever would end the wait.
+	fn looking_back(&mut self, waiter: &kio::Waiter, finished: bool) -> bool {
+		if self.lookback == 0 || self.newest || finished || self.memory.full() {
+			return false;
+		}
+		let (anchor, arrived) = *self.anchor.get_or_insert_with(|| {
+			let newest = self.pending.back().expect("a group has a frame");
+			(newest.sequence, newest.group.arrived())
+		});
+		// The ranges may exclude what lies below the target, which then never arrives.
+		let below = anchor.saturating_sub(self.lookback);
+		let Some(target) = self.subscriber().next_in_range(below) else {
+			return false;
+		};
+		if self.pending.front().is_some_and(|group| group.sequence <= target) {
+			return false;
+		}
+
+		// Media time: the newest content is a budget past where the anchor group starts.
+		let start = self
+			.pending
+			.iter()
+			.find(|group| group.sequence == anchor)
+			.and_then(|group| group.min_timestamp)
+			.map(std::time::Duration::from);
+		let mut newest = None;
+		for group in self.pending.iter_mut().rev() {
+			if let Poll::Ready(Some(ts)) = group.poll_max_timestamp(waiter, &self.format) {
+				newest = Some(std::time::Duration::from(ts));
+				break;
+			}
+		}
+		if let (Some(start), Some(newest)) = (start, newest)
+			&& newest.saturating_sub(start) >= self.max_delay
+		{
+			return false;
+		}
+
+		// Wall time: the anchor group arrived a budget ago.
+		if arrived.elapsed() >= self.max_delay {
+			return false;
+		}
+		if let Some(wake) = arrived.checked_add(self.max_delay) {
+			let timer = self
+				.hole_timer
+				.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(wake)));
+			timer.as_mut().reset(wake);
+			let _ = waiter.poll_future(timer.as_mut());
+		}
+		true
 	}
 
 	// The subscription, which only an error ending the reader drops.
@@ -2860,6 +2943,124 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
 		assert_eq!(micros, vec![0, 100_000], "the slow stream's frames are delivered");
+	}
+
+	// ---- Lookback ----
+
+	/// An unfloored consumer that waits for `lookback` groups below the newest first arrival.
+	fn lookback_consumer(track: &mut moq_net::track::Producer, lookback: u64) -> Consumer<Container> {
+		let consumer_track =
+			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(500)));
+		Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data)).with_lookback(lookback)
+	}
+
+	/// The live edge's stream wins the race, yet a lookback consumer starts at the group before it.
+	#[tokio::test]
+	async fn lookback_waits_for_the_group_below_a_live_edge_that_arrives_first() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut consumer = lookback_consumer(&mut track, 1);
+
+		write_group(&mut track, 5, &[ts(5_000_000)]);
+		assert!(
+			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+				.await
+				.is_err(),
+			"the group below the live edge is within budget and must be waited for"
+		);
+
+		write_group(&mut track, 4, &[ts(4_800_000)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		assert_eq!(
+			micros,
+			vec![4_800_000, 5_000_000],
+			"the earlier group is delivered first"
+		);
+	}
+
+	/// Without the opt-in, the same race starts at the live edge and drops the earlier group, as before.
+	#[tokio::test]
+	async fn without_lookback_a_live_edge_that_arrives_first_is_the_start() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut consumer = lookback_consumer(&mut track, 0);
+
+		write_group(&mut track, 5, &[ts(5_000_000)]);
+		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+			.await
+			.expect("no wait without the opt-in")
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.timestamp, ts(5_000_000));
+
+		write_group(&mut track, 4, &[ts(4_000_000)]);
+		track.finish().unwrap();
+		assert!(
+			read_all(&mut consumer).await.unwrap().is_empty(),
+			"the earlier group is old"
+		);
+	}
+
+	/// A quiet track with no earlier group starts once the first group arrived a budget ago.
+	#[tokio::test]
+	async fn lookback_on_a_quiet_track_starts_within_one_budget() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut consumer = lookback_consumer(&mut track, 1);
+
+		write_group(&mut track, 5, &[ts(5_000_000)]);
+		assert!(
+			tokio::time::timeout(Duration::from_millis(450), consumer.read())
+				.await
+				.is_err(),
+			"the wait lasts while the earlier group could still be fresh"
+		);
+		let frame = tokio::time::timeout(Duration::from_millis(100), consumer.read_frame())
+			.await
+			.expect("the wait ends a budget after the first group arrived")
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.timestamp, ts(5_000_000));
+	}
+
+	/// Media a budget past where the newest group starts ends the wait without the wall clock.
+	#[tokio::test]
+	async fn lookback_ends_once_the_newest_content_is_a_budget_past_its_start() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut consumer = lookback_consumer(&mut track, 1);
+
+		write_group(&mut track, 5, &[ts(5_000_000), ts(5_500_000)]);
+		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+			.await
+			.expect("the earlier group would arrive too old to wait for")
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.timestamp, ts(5_000_000));
+	}
+
+	/// A group below the subscriber's range never arrives, so the lookback does not wait for it.
+	#[tokio::test]
+	async fn lookback_stops_at_the_subscriber_range() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer_track = track
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(500)))
+			.with_range(4..);
+		let mut consumer =
+			Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data)).with_lookback(2);
+
+		write_group(&mut track, 4, &[ts(4_000_000)]);
+		write_group(&mut track, 5, &[ts(5_000_000)]);
+		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+			.await
+			.expect("nothing below the range can arrive")
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.timestamp, ts(4_000_000));
 	}
 
 	// ---- Decode errors ----

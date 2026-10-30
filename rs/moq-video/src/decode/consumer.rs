@@ -296,7 +296,8 @@ impl Consumer {
 
 impl Reader {
 	/// Subscribe with `max_delay`, starting `lookback` groups before the live
-	/// edge when the caller asked for [`Start::Latest`].
+	/// edge when the caller asked for [`Start::Latest`], even when the live
+	/// edge arrives first.
 	async fn open(
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &VideoConfig,
@@ -343,7 +344,13 @@ impl Reader {
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
 		let container = moq_mux::catalog::hang::Container::try_from(catalog)?;
-		let track = moq_mux::container::Consumer::new(track, container);
+		let mut track = moq_mux::container::Consumer::new(track, container);
+		// On a cold network join the range above names the live edge before any group lands, and
+		// the live edge's stream often lands first: without a lookback the container would start
+		// there and drop the earlier group as old.
+		if options.start == Start::Latest {
+			track = track.with_lookback(lookback);
+		}
 
 		Ok(Self {
 			decoder,
@@ -1214,6 +1221,46 @@ mod tests {
 			write(&mut live, &[second]);
 			assert_eq!(read(&mut consumer).await, (second, Lane::Max));
 		}
+	}
+
+	/// On a cold network join the live edge's stream often lands first. The
+	/// max-delay decoder still starts at the group before it, and takes over.
+	#[tokio::test]
+	async fn a_cold_join_whose_live_edge_arrives_first_starts_a_group_earlier() {
+		let (broadcast, mut track) = live_track();
+		let mut live = group(&mut track, 1, &[4, 5]);
+
+		let mut consumer = dual(
+			&broadcast,
+			Start::Latest,
+			std::time::Duration::ZERO,
+			probe::IMMEDIATE_NAME,
+		)
+		.await;
+
+		// Only the live edge has landed: the max-delay decoder waits for the group below it.
+		let max = consumer.reader(Lane::Max);
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_millis(50), max.read())
+				.await
+				.is_err(),
+			"the max-delay decoder started at the live edge"
+		);
+		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
+		let Ok(Some(Read::Frame(first))) = max.read().await else {
+			panic!("the max-delay decoder produced no picture");
+		};
+		assert_eq!(
+			first.timestamp,
+			Timestamp::from_micros(0).unwrap(),
+			"it starts a group earlier"
+		);
+
+		assert_eq!(read(&mut consumer).await, (4, Lane::Min), "the live edge shows first");
+		assert_eq!(read(&mut consumer).await.0, 5);
+		catch_up(&mut consumer).await;
+		write(&mut live, &[6]);
+		assert_eq!(read(&mut consumer).await, (6, Lane::Max));
 	}
 
 	/// A stall shorter than a sweep makes the min-delay decoder skip, while the

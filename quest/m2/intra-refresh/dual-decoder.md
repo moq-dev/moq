@@ -57,9 +57,8 @@ Decided in the 2026-10-14 planning interview:
   newest group in `Container.Consumer` first, and `DecoderTrack` then drops
   the earlier group as stale. That would leave the max-delay decoder starting
   mid-sweep. Its consumer must wait for the lower group within its budget
-  before emitting a newer one, through the opt-in in
-  [join earlier group](/quest/m2/intra-refresh/join-earlier-group.md), which
-  fixes it at the source for Rust and `js/hang` alike.
+  before emitting a newer one: pass `lookback: 1` to its `Container.Consumer`,
+  the opt-in Rust's max-delay decoder uses as `with_lookback(1)`.
 - H.264 recovery-point frames sent as `key` chunks pass Chromium's WebCodecs
   keyframe check (`ParseH264KeyFrame` accepts `is_sei_recovery_point`; WPT
   `videoDecoder-h264-sei`). Chromium rejects a non-IRAP H.265 frame sent as
@@ -79,10 +78,6 @@ Decided in the 2026-10-14 planning interview:
 - Measure the cost of always running two decoders: CPU, decoder memory, and
   dropped frames for one versus two decoders on a 1080p rendition, in a
   browser, recorded in the PR.
-
-## Required
-
-- [Join earlier group](/quest/m2/intra-refresh/join-earlier-group.md) - the `js/hang` opt-in the max-delay decoder joins with
 
 ## Related
 

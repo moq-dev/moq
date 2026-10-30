@@ -49,7 +49,6 @@ make these presentation guarantees true even when sweep lengths change.
 
 ## Required
 
-- [Join earlier group](/quest/m2/intra-refresh/join-earlier-group.md) - max-delay decoders, native and browser, start a group before the live edge even when the live edge arrives first
 - [Dual decoder](/quest/m2/intra-refresh/dual-decoder.md) - js/watch runs a min-delay and a max-delay decoder and shows the max-delay picture whenever it has caught up
 - [Play dual decoder](/quest/m2/intra-refresh/play-dual-decoder.md) - `moq play`'s paced pipeline reuses that pair
 - [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - settle publication ordering for a later, longer sweep

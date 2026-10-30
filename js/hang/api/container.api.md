@@ -26,6 +26,7 @@ export class Consumer {
 
 export interface ConsumerProps {
 	format: Format;
+	lookback?: number;
 	maxBuffer?: number;
 	maxDelay?: Signals.GetterInit<Milli>;
 	predecessor?: Consumer;
