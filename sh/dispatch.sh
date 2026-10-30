@@ -68,7 +68,8 @@ declare -A scope=(
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
     # moq-cli builds the Rust interop clients as examples from outside its
     # crate; sh/rs/select.test.py fails when a target's directory is missing.
-    [rs]='^(\.cargo/|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
+    # moq-relay's tests read its NixOS module.
+    [rs]='^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
     # The CARLA demo's simulator worker and launchers. Its player is a JS
     # package and its GPU bridge a Rust crate, so those modules cover them.
