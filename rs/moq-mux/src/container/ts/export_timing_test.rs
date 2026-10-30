@@ -686,10 +686,10 @@ async fn an_unmarked_step_keeps_the_export_rendering() {
 		for lag in [0, LAGS[0], LAGS[1]] {
 			let mut live = Live::new(1.0, lag).await;
 			let mut leg = live.join(Duration::ZERO).await;
-			live.run(8 * GOP + GOP / 2, &mut [&mut leg], |_| false).await;
+			live.run(8 * GOP + GOP / 2, &mut [&mut leg], |_| false);
 			live.offset += step;
 			let stepped = moq_clock::now();
-			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;
+			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false);
 
 			let case = format!("{} s step, lag {lag}", step as f64 / 1e6);
 			assert_eq!(leg.export.dropped(), 0, "{case}");
