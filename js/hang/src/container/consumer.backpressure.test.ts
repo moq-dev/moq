@@ -1,7 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, type Micro, Milli, Nano } from "@moq/clock";
 import { Time, Track } from "@moq/net";
-import { Signal } from "@moq/signals";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 import type { Frame } from "./types.ts";
@@ -342,11 +341,9 @@ for (const maxBuffer of [0, 256]) {
 test("Consumer moves past a stalled backlog group below the cursor once the max buffer is full", async () => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const track = new Track.Producer("test");
-	// No max delay yet, so delivery starts at the live edge rather than waiting for the groups below it.
-	const maxDelay = new Signal(Milli.zero);
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay,
+		maxDelay: Milli(5_000),
 		// Two groups' overhead: the backlog group and the active one leave no room for the newer group.
 		maxBuffer: 512,
 	});
@@ -354,7 +351,6 @@ test("Consumer moves past a stalled backlog group below the cursor once the max 
 		const active = track.createGroup(3);
 		write(active, 30_000);
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 3 });
-		maxDelay.set(Milli(5_000));
 
 		track.createGroup(1);
 		const newer = track.createGroup(4);
