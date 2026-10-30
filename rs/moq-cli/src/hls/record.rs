@@ -616,7 +616,9 @@ mod tests {
 
 		fn broadcaster(&self) -> Arc<Broadcaster> {
 			let source = moq_mux::Source::new(self.origin.consume(), self.broadcast.consume());
-			Broadcaster::new(source, moq_hls::export::Config::default())
+			let (broadcaster, driver) = Broadcaster::new(source, moq_hls::export::Config::default());
+			tokio::spawn(driver.run());
+			broadcaster
 		}
 
 		/// Write GOP `n`, two seconds from `2n`, to every rendition.

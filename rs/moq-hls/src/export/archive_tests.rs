@@ -284,7 +284,7 @@ impl Replay {
 		let consumer = tokio::spawn(consumer.run());
 		broadcast.announce(Default::default()).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "rec").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "rec").await, Config::default());
 		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
 			.expect("a rendition becomes playable or fails");

@@ -304,7 +304,8 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 			.await
 			.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
 		let source = moq_mux::Source::new(scoped.clone(), broadcast);
-		let broadcaster = moq_hls::export::Broadcaster::new(source, config);
+		let (broadcaster, driver) = moq_hls::export::Broadcaster::new(source, config);
+		tokio::spawn(driver.run());
 		tracing::info!(%name, "recording HLS");
 		recording.run(&broadcaster).await
 	};

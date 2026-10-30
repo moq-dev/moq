@@ -253,9 +253,15 @@ impl Server {
 
 impl Inner {
 	/// A broadcaster serving the instance `broadcast`.
+	///
+	/// Its driver runs on its own task rather than the path's follower: a replaced instance
+	/// keeps serving after the follower that started it moves on, and the driver ends with the
+	/// broadcaster.
 	fn serve(&self, broadcast: moq_net::broadcast::Consumer) -> Arc<Broadcaster> {
 		let source = moq_mux::Source::new(self.origin.consume(), broadcast);
-		Broadcaster::new(source, self.config.clone())
+		let (broadcaster, driver) = Broadcaster::new(source, self.config.clone());
+		tokio::spawn(driver.run());
+		broadcaster
 	}
 }
 
@@ -431,7 +437,7 @@ mod tests {
 		let producer = origin.create_broadcast("gone").expect("publish allowed");
 		producer.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "gone").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "gone").await, Config::default());
 		// Close the publisher so the resolved broadcast (and the broadcaster) reports closed.
 		producer.close();
 		settle().await;
@@ -564,7 +570,7 @@ mod tests {
 			.publish("live", moq_net::origin::Route::default())
 			.expect("publish allowed");
 		settle().await;
-		let open = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let open = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 
 		// The follower has not yet seen the takeover instance close.
 		let followed = Followed::new(open.clone());
