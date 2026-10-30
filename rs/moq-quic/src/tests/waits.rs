@@ -393,3 +393,22 @@ fn local_close_wakes_a_blocked_writer() {
 		Poll::Ready(Err(send::Error::ConnectionLost))
 	);
 }
+
+/// A local stop wakes a reader parked on the stream, which then finds it closed.
+#[test]
+fn stop_wakes_a_parked_reader() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let s = open_uni(&mut pair, client_ch, server_ch, b"a");
+
+	let waiter = Counter::new();
+	assert!(poll_read(&mut pair, server_ch, s, &waiter).is_ready());
+	assert!(poll_read(&mut pair, server_ch, s, &waiter).is_pending());
+	pair.server_recv(server_ch, s).stop(VarInt(1)).unwrap();
+	assert_eq!(waiter.wakes(), 1);
+	assert!(matches!(
+		pair.server_recv(server_ch, s).read(),
+		Err(recv::Error::Closed)
+	));
+}

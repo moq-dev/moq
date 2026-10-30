@@ -75,6 +75,8 @@ impl Stream<'_> {
 		self.pending.max_data |= leased.should_transmit() || transmit.should_transmit();
 		// The credit returned may only have paid a shrunk window's debt.
 		self.unstick();
+		// A reader parked on the stream learns it is closed.
+		self.state.waits.wake(self.id, Wait::Read);
 
 		Ok(())
 	}

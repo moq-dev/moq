@@ -344,6 +344,11 @@ impl Stream<'_> {
 	pub fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> (Poll<Result<Lease, Error>>, ShouldTransmit) {
 		let (result, transmit) = self.lease(want);
 		let poll = match result {
+			// A stuck window may have evicted this very stream, waking its readers before this
+			// one parked.
+			Err(Error::Blocked) if self.state.lease_mut(self.id).is_some_and(|lease| lease.evicted) => {
+				Poll::Ready(Err(Error::Evicted))
+			}
 			Err(Error::Blocked) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
 			Err(Error::Blocked) => {
 				self.state.waits.register(self.id, Wait::Read, waiter);

@@ -4083,6 +4083,36 @@ mod tests {
 		assert_eq!(client.local_max_data, 3 * WINDOW + 10);
 	}
 
+	/// A reader whose own wait evicts its stream hears of it at once, rather than parking after
+	/// the eviction's wake went by.
+	#[test]
+	fn self_eviction_does_not_park() {
+		use std::task::Poll;
+
+		use crate::connection::waits::Counter;
+
+		const WINDOW: u64 = 1000;
+		let (mut client, [low, high]) = stuck(WINDOW);
+		data(&mut client, high, 0, WINDOW as usize, false);
+		data(&mut client, low, 0, WINDOW as usize - 1, false);
+		let mut pending = Retransmits::default();
+		recv(&mut client, &mut pending, low).set_priority(-1);
+		recv(&mut client, &mut pending, high).set_priority(1);
+		assert_eq!(lease(&mut client, high), WINDOW as usize);
+		assert_eq!(lease(&mut client, low), WINDOW as usize - 1);
+		assert!(matches!(wait(&mut client, high, 2000), Err(recv::Error::Blocked)));
+		assert!(matches!(wait(&mut client, low, 2000), Err(recv::Error::Blocked)));
+		data(&mut client, low, WINDOW - 1, 1, false);
+		assert!(!client.leased(low).unwrap().evicted);
+
+		// This wait spends the last byte of credit and evicts its own stream.
+		let waiter = Counter::new();
+		let (poll, transmit) = recv(&mut client, &mut pending, low).poll_lease(&waiter, 2000);
+		assert!(matches!(poll, Poll::Ready(Err(recv::Error::Evicted))));
+		assert!(transmit.should_transmit());
+		assert_eq!(client.credit_stats().evicted, 1);
+	}
+
 	/// A frame past the window: once its taken bytes fill the window, waiting for one more
 	/// evicts it like any stuck holder, so its group reads as evicted rather than broken. The
 	/// credit returns when the reader stops the stream and lets go of what it took.
