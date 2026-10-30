@@ -20,7 +20,8 @@
 //! Indices stop at 2^53 - 1, the largest integer represented exactly by both implementations.
 //!
 //! Trimming is therefore an op, not a group boundary. Dropping a record costs one small frame
-//! inside the shared compression window instead of a roll that would throw that window away.
+//! instead of a roll that restates the whole window (and, on a
+//! [`compress`](moq_net::track::Info::compress)ed track, throws away the group's DEFLATE window).
 //!
 //! # Group boundaries are invisible
 //!
@@ -111,7 +112,7 @@ mod test {
 		producer.push(moq_net::Timed::from(&rec(1)).at(at)).unwrap();
 		producer.push(moq_net::Timed::from(&rec(2)).at(at)).unwrap();
 		producer.finish().unwrap();
-		let pushed: Vec<_> = drain(&mut consumer(track, false))
+		let pushed: Vec<_> = drain(&mut consumer(track))
 			.into_iter()
 			.filter_map(|event| match event {
 				Event::Push { value, .. } => Some(value),
@@ -127,7 +128,7 @@ mod test {
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut live = consumer(track.subscribe(None), false);
+		let mut live = consumer(track.subscribe(None));
 		let late = track.subscribe(None);
 		let mut producer = Producer::new(track, ProducerConfig::default());
 		let at = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
@@ -162,7 +163,7 @@ mod test {
 		producer.cut().unwrap();
 		producer.push(moq_net::Timed::from(&rec(3)).at(at(400))).unwrap();
 		let late = late.with_range(1..);
-		let mut late = consumer(late, false);
+		let mut late = consumer(late);
 		let events: Vec<_> = drain_timed(&mut late).into_iter().map(|e| (e.value, e.at)).collect();
 		assert_eq!(
 			events,
@@ -190,7 +191,7 @@ mod test {
 		let (mut producer, track) = producer(ProducerConfig::default());
 		producer.push(&rec(1)).unwrap();
 		producer.pop(1).unwrap();
-		let events = drain_timed(&mut consumer(track, false));
+		let events = drain_timed(&mut consumer(track));
 		assert_eq!(events.len(), 2);
 		assert!(events.iter().all(|event| event.at.is_none()));
 	}
@@ -245,8 +246,8 @@ mod test {
 		let _ = Encoder::<Value>::new(config);
 	}
 
-	fn consumer(track: moq_net::track::Subscriber, compression: bool) -> Consumer<Value> {
-		Consumer::new(track, ConsumerConfig::default().with_compression(compression))
+	fn consumer(track: moq_net::track::Subscriber) -> Consumer<Value> {
+		Consumer::new(track, ConsumerConfig::default())
 	}
 
 	/// A track whose timestamp conversion rejects every frame after its group is published.
@@ -292,11 +293,14 @@ mod test {
 
 	impl Live {
 		fn new(config: ProducerConfig) -> Self {
-			let compression = config.compression;
-			let (producer, track) = producer(config);
+			Self::on(config, moq_net::track::Info::default())
+		}
+
+		fn on(config: ProducerConfig, info: moq_net::track::Info) -> Self {
+			let (producer, track) = producer_on(config, info);
 			Self {
 				producer,
-				consumer: consumer(track, compression),
+				consumer: consumer(track),
 				events: Vec::new(),
 			}
 		}
@@ -495,7 +499,7 @@ mod test {
 			.map(|position| position.group)
 			.unwrap();
 		subscriber = subscriber.with_range(largest..);
-		let mut fresh = consumer(subscriber, false);
+		let mut fresh = consumer(subscriber);
 		producer.finish().unwrap();
 
 		// Joining at offset 3 must not report 3 skips for records that were never this reader's to
@@ -599,7 +603,7 @@ mod test {
 				.produce()
 				.create_track("test", timed())
 				.unwrap();
-			let mut consumer = consumer(track.subscribe(None), false);
+			let mut consumer = consumer(track.subscribe(None));
 			let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_ops(false));
 
 			let first = encoder.push(&rec(0)).unwrap();
@@ -749,7 +753,10 @@ mod test {
 
 	#[test]
 	fn compressed_round_trip_across_rolls() {
-		let mut live = Live::new(ProducerConfig::default().with_compression(true));
+		let mut live = Live::on(
+			ProducerConfig::default(),
+			moq_net::track::Info::default().with_compress(true),
+		);
 		for n in 0..40 {
 			live.push(n);
 			if n >= 10 {

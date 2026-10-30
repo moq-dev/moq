@@ -32,9 +32,9 @@ async fn widest_hop_crosses_each_varint_form() {
 		moq_clock::sim::idle().await;
 
 		let ids = |route: origin::Route| route.hops.iter().map(|hop| hop.id()).collect::<Vec<_>>();
-		let at_relay = relay.consume().routed("room").await.expect("relay learned the route");
+		let at_relay = crate::support::announced(&relay.consume(), "room").await;
 		assert_eq!(ids(at_relay), [u64::MAX], "{downstream}");
-		let at_sink = sink.consume().routed("room").await.expect("sink learned the route");
+		let at_sink = crate::support::announced(&sink.consume(), "room").await;
 		assert_eq!(ids(at_sink), [forwarded, 2], "{downstream}");
 	}
 }

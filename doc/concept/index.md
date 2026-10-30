@@ -38,6 +38,7 @@ watched at 100 ms by one viewer and 10 s by another.
 - [Identity and recovery](/concept/identity): choosing publisher epochs, following restarts, and answering work on demand without mixing instances.
 - [hang](/concept/hang): the media catalog, containers, encryption, and how to extend both.
 - [Audio jitter](/concept/audio-jitter): how a receiver sizes its audio playout target from arrival timing.
+- [Compressed tracks](/concept/compression): when to compress a track, what each protocol version receives, and the relay's cost.
 - [Stats](/concept/stats): the traffic counters a relay publishes as broadcasts, and how to read them.
 - [Standards](/concept/standard): how this relates to the IETF moq-transport, MSF, LOC, and this project's own drafts, including [e2ee](/draft/moq-e2ee).
 - [Use cases](/concept/use-case/): MoQ compared with HLS/DASH, RTMP/SRT, WebRTC, and used for AI.

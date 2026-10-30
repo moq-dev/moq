@@ -23,8 +23,7 @@ use bytes::{Bytes, BytesMut};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use crate::{
-	ConnectionId, DEFAULT_SUPPORTED_VERSIONS, Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, SendStream, Side, StreamId, Streams,
-	VarInt,
+	ConnectionId, Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, SendStream, Side, StreamId, Streams, VarInt,
 	coding::BufMutExt,
 	connection::{Retransmits, State, StreamsState},
 	frame::{self, Frame},
@@ -64,7 +63,6 @@ pub fn packet(data: &[u8]) -> bool {
 	let Ok((decoded, rest)) = PartialDecode::new(
 		BytesMut::from(packet),
 		&FixedLengthConnectionIdParser::new(cid_len),
-		DEFAULT_SUPPORTED_VERSIONS,
 		grease & 1 == 1,
 	) else {
 		return false;

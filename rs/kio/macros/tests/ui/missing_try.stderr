@@ -1,0 +1,18 @@
+error[E0308]: mismatched types
+  --> tests/ui/missing_try.rs:18:16
+   |
+13 | #[kio::machine(self.state: MState)]
+   | ----------------------------------- in this attribute macro expansion
+...
+18 |         let b: u64 = wait!(B => self.values.poll_pop(waiter));
+   |                ---   ^^^^ expected `u64`, found `Result<u64, Closed>`
+   |                |
+   |                expected due to this
+   |
+   = note: expected type `u64`
+              found enum `Result<u64, kio::Closed>`
+   = note: this error originates in the attribute macro `kio::machine` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider using `Result::expect` to unwrap the `Result<u64, kio::Closed>` value, panicking if the value is a `Result::Err`
+   |
+13 | #[kio::machine(self.state: MState)].expect("REASON")
+   |                                    +++++++++++++++++

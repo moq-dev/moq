@@ -49,13 +49,14 @@ the ingest gateways do it for you; see [publisher runs](/bin/cli#publisher-runs)
 | Independent publishers of one source | One each | The newest wins the path as a restart; see [redundant ingest](/setup/redundancy) |
 | A worker producing paths on demand | None on the claim, a fresh one per job | See [work on demand](#work-on-demand) |
 
-## What each wire carries
+## Routes with and without an epoch
 
-| Wire | Epoch | Another instance taking the path |
-| --- | --- | --- |
-| moq-lite 07 (`moq-lite-07-wip`, opt-in) | Yes | A restart message |
-| moq-transport 18 and 22 with the [epoch extension](/draft/moq-epoch) (on by default) | Yes | The new advertisement before the old is withdrawn |
-| moq-lite 01 to 06, or moq-transport without the extension | No | An end, then a start |
+An epoch reaches readers only over hops that carry it: moq-lite 07
+(`moq-lite-07-wip`, opt-in) and moq-transport with the
+[epoch extension](/draft/moq-epoch), which is on by default. Older moq-lite
+versions and moq-transport without the extension drop it. The
+[moq-lite](/draft/moq-lite) and [epoch](/draft/moq-epoch) drafts say how each
+version signals another instance taking the path.
 
 A relay forwards an epoch unchanged and never invents one. Without one, no
 route can prove it serves the same bytes as another, so any other route
@@ -82,15 +83,15 @@ Choose between two kinds of reader.
 **Follow announcements** when the reader should outlive any one publisher
 run, as a player does. Start on each instance, drop all decoder and buffer
 state on a restart, and wait on an end. Rust uses
-`consumer.announced_broadcast(path, None)` (or `moq_mux::follow::Instances`), and
-JavaScript `origin.request(path, { announced: true })`. `@moq/watch`, `moq play`,
+`consumer.follow(path, None)` (or `moq_mux::follow::Instances`), and
+JavaScript `origin.follow(path)`. `@moq/watch`, `moq play`,
 and `moqsrc` follow this way, and `moq export ts --stitch` can splice a
 replacement as a marked program switch. A request failing is never the signal
 to restart; the announcement is.
 
 **Hold one instance** when the output must not splice two runs, as an exporter
-or recorder does. Rust `request_broadcast` and `routed_broadcast`, a plain
-JavaScript `request(path)`, and `moq_mux::Source` keep the first broadcast they
+or recorder does. Rust and JavaScript
+`request(path)` and `moq_mux::Source` keep the first broadcast they
 resolve for their whole life, then end when it does. Request the path again
 for the next run.
 
@@ -102,12 +103,12 @@ they resolve. See [renditions in another broadcast](/concept/hang#catalog).
 
 | Expectation | Over a route with an epoch | Over a route without one |
 | --- | --- | --- |
-| Request pinned to an epoch (`request_broadcast(path, Some(epoch))`, `request(path, { epoch })`) | Only that instance; another is refused as unroutable | Refused: nothing proves the instance |
+| Request pinned to an epoch (`request(path, Some(epoch))`, `request(path, { epoch })`) | Only that instance; another is refused as unroutable | Refused: nothing proves the instance |
 | Catalog reference with an `epoch` | Only that instance; another ends the rendition | Best effort: reads whatever resolved |
 | No expectation | Whichever instance wins | Whichever route wins |
 
-The epoch also travels on requests: on moq-lite 07 and moq-transport with the
-epoch extension, SUBSCRIBE and FETCH name the instance their route announced,
+The epoch also travels on requests: where the route carries one, SUBSCRIBE
+and FETCH name the instance their route announced,
 pinned or not, and a publisher or relay that now serves another refuses them
 rather than answer with the wrong one. A catalog's `epoch` is weaker. It never
 proves a subscription may resume across routes, and over an older wire it
@@ -173,9 +174,7 @@ Within one instance, recovery is about which groups are still worth having.
   recovery; a relay may evict sooner. A reader's `max_delay` (`maxDelay`) is how long a non-latest group
   stays worth delivering to that reader. It can tighten retention, never relax
   it. Both age a group from its successor's arrival and never expire the newest
-  group. A fetch carries its own max delay only on moq-lite 07; moq-transport
-  carries a subscriber budget only on SUBSCRIBE and its updates, with the
-  [timestamp extension](/draft/moq-timestamp). See
+  group. Not every wire carries a reader's max delay on every request; see
   [subscriptions](/concept/moq-lite#subscriptions).
 - **Arrivals are unordered.** Each group is its own stream, so a lower group
   can land after a higher one, and is still delivered if the reader's range and
@@ -183,19 +182,16 @@ Within one instance, recovery is about which groups are still worth having.
 - **Duplicates are dropped.** A reader receives each group sequence once,
   however many routes deliver it or however often a producer re-creates it. A
   sequence names one group, so resending one cannot correct it.
-- **A drop is terminal for that group.** On moq-lite 05 and later, the
+- **A drop is terminal for that group.** Where the wire reports drops, the
   publisher names each group it will not deliver, and every reader of that
-  group, even one still arriving, ends with the publisher's error. moq-lite 07
-  carries the reason, such as `OLD`, `NOT_FOUND`, or `EVICTED`; on 05 and 06
-  every drop reads as `OLD`. Older moq-lite versions and moq-transport
-  subscriptions carry no drop report, so a reader gives a missing group up
-  after a grace. A moq-transport FETCH response that skips a group says it does not
-  exist.
+  group, even one still arriving, ends with the publisher's error. Elsewhere a
+  reader gives a missing group up after a grace. The
+  [moq-lite draft](/draft/moq-lite) lists which versions report drops and why.
 
 moq-transport's FETCH `FILL_TIMEOUT` bounds how long a hop waits on upstream,
 not how old the content it returns may be, so it is no substitute for max age
-or max delay. Rust and JavaScript refuse a FETCH carrying it today, as
-`NOT_SUPPORTED`.
+or max delay. Support differs by library; see
+[moq-transport compatibility](/concept/standard).
 
 ## Relays
 

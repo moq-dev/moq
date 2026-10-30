@@ -9,6 +9,7 @@ import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { accept, connect, type Established } from "./connection/index.ts";
 import type { Producer as GroupProducer } from "./group.ts";
+import { FetchHeader } from "./ietf/fetch.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "./mock.ts";
@@ -33,10 +34,42 @@ function expected(order: Order, count: number): number[] {
 	);
 }
 
+// The positions in `sendStreams.uni` of each transport's fetch streams.
+const fetchStreams = new WeakMap<MockTransport, Set<number>>();
+
+// Note which uni streams open with a fetch header. A draft-18 subscriber that joins after
+// Largest fetches the group's head on one, ranked with that group, beside its group streams.
+function noteFetchStreams(transport: MockTransport): void {
+	const fetches = new Set<number>();
+	fetchStreams.set(transport, fetches);
+	const create = transport.createUnidirectionalStream.bind(transport);
+	transport.createUnidirectionalStream = async (options) => {
+		const stream = await create(options);
+		// Kept by position, since a wrapper such as holdFins replaces the logged stream.
+		const index = transport.sendStreams.uni.indexOf(stream as SendStream);
+		const getWriter = stream.getWriter.bind(stream);
+		stream.getWriter = () => {
+			const writer = getWriter();
+			const write = writer.write.bind(writer);
+			let first = true;
+			writer.write = (chunk) => {
+				if (first && chunk?.[0] === FetchHeader.type) fetches.add(index);
+				first = false;
+				return write(chunk);
+			};
+			return writer;
+		};
+		return stream;
+	};
+}
+
 // The send orders of a transport's group streams. Protocol streams, such as the setup stream,
-// open without one.
+// open without one, and fetch streams are left out.
 function sendOrders(transport: MockTransport): number[] {
-	return transport.sendStreams.uni.flatMap((stream) => (stream.sendOrder === undefined ? [] : [stream.sendOrder]));
+	const fetches = fetchStreams.get(transport);
+	return transport.sendStreams.uni.flatMap((stream, index) =>
+		stream.sendOrder === undefined || fetches?.has(index) ? [] : [stream.sendOrder],
+	);
 }
 
 // A group with one frame, left open.
@@ -75,6 +108,7 @@ async function session(protocol: string, origin: OriginProducer): Promise<Sessio
 		connect({ url, transport: pair.client }),
 		accept({ transport: pair.server, url, publish: origin.consume() }),
 	]);
+	noteFetchStreams(pair.server);
 	return { client, server, transport: pair.server };
 }
 
@@ -163,7 +197,7 @@ test.each(["ascending", "descending"] as const)("ietf serves GROUP_ORDER %s", as
 	server.abort();
 });
 
-// Holds the FIN of every uni stream `transport` opens from here on, while their data still
+// Holds the FIN of every group stream `transport` opens from here on, while their data still
 // flows, until `release`. `closing` resolves once a stream has asked to close.
 function holdFins(transport: MockTransport): { closing: Promise<void>; release: () => void } {
 	let release!: () => void;
@@ -178,10 +212,13 @@ function holdFins(transport: MockTransport): { closing: Promise<void>; release: 
 	const create = transport.createUnidirectionalStream.bind(transport);
 	transport.createUnidirectionalStream = async (options) => {
 		const inner = await create(options);
+		const index = transport.sendStreams.uni.indexOf(inner as SendStream);
 		const writer = inner.getWriter();
 		const outer: SendStream = new WritableStream<Uint8Array>({
 			write: (chunk) => writer.write(chunk),
 			close: async () => {
+				// A join's fetch stream closes as usual; only group streams are held.
+				if (fetchStreams.get(transport)?.has(index)) return writer.close();
 				closed();
 				await released;
 				await writer.close();
@@ -191,7 +228,7 @@ function holdFins(transport: MockTransport): { closing: Promise<void>; release: 
 		outer.sendOrder = options?.sendOrder;
 		// Record the stream the publisher re-ranks.
 		const log = transport.sendStreams.uni;
-		log[log.indexOf(inner)] = outer;
+		log[index] = outer;
 		return outer;
 	};
 	return { closing, release };

@@ -1354,8 +1354,8 @@ pub(crate) struct ListenDeprecated {
 impl Listen {
 	/// Load one served identity and client-auth policy, sharing reloads across listeners.
 	///
-	/// File-backed certificates reload on the caller's Tokio runtime, which must outlive
-	/// every listener using the result; loading them outside a runtime is refused.
+	/// File-backed certificates reload on the caller's Tokio runtime, else the fallback,
+	/// which must outlive every listener using the result.
 	#[cfg(feature = "_certs")]
 	pub fn load(&self) -> Result<Serve> {
 		self.refuse_deprecated()?;
@@ -2196,17 +2196,10 @@ mod tests {
 		);
 	}
 
-	/// Loading must not panic inside `tokio::spawn` when called from synchronous code.
+	/// Outside a runtime, file-backed certificates still reload, on the fallback runtime.
 	#[cfg(feature = "watch")]
 	#[test]
-	fn loading_outside_a_runtime_refuses_only_what_needs_reloads() {
-		Listen {
-			generate: vec!["localhost".into()],
-			..Default::default()
-		}
-		.load()
-		.expect("a generated identity has nothing to reload");
-
+	fn loading_outside_a_runtime_watches_on_the_fallback() {
 		let dir = tempfile::tempdir().unwrap();
 		let cert_path = dir.path().join("cert.pem");
 		let key_path = dir.path().join("key.pem");
@@ -2217,14 +2210,13 @@ mod tests {
 			.unwrap();
 		std::fs::write(&cert_path, cert.pem()).unwrap();
 		std::fs::write(&key_path, key.serialize_pem()).unwrap();
-		let error = Listen {
+		Listen {
 			cert: vec![cert_path],
 			key: vec![key_path],
 			..Default::default()
 		}
 		.load()
-		.unwrap_err();
-		assert!(matches!(error, Error::Watch(_)));
+		.expect("file-backed certificates reload on the fallback runtime");
 	}
 
 	#[cfg(feature = "watch")]
@@ -3354,17 +3346,14 @@ impl Reload {
 	///
 	/// The returned guard stops the watcher if listener construction fails.
 	///
-	/// The task runs on the caller's Tokio runtime, which must outlive the listeners:
-	/// a reload watcher that dies with a temporary runtime would stop rotation silently.
+	/// The task runs on the caller's Tokio runtime, else the fallback, which must
+	/// outlive the listeners: a reload watcher that dies with a temporary runtime
+	/// would stop rotation silently.
 	pub(crate) fn spawn(certs: Arc<ServeCerts>, config: Listen) -> Result<Self> {
 		let paths: Vec<PathBuf> = config.cert.iter().chain(config.key.iter()).cloned().collect();
 		if paths.is_empty() {
 			return Ok(Self { _task: None });
 		}
-		// Refused rather than panicking inside `tokio::spawn`.
-		let runtime = tokio::runtime::Handle::try_current()
-			.map_err(|_| Error::Watch("certificate reloads need a Tokio runtime".into()))?;
-
 		let watcher = crate::watch::Files::new(&paths).map_err(|err| Error::Watch(err.to_string()))?;
 
 		// The certificates were loaded before the watch existed, so anything that
@@ -3377,7 +3366,9 @@ impl Reload {
 		}
 
 		Ok(Self {
-			_task: Some(AbortOnDrop::new(runtime.spawn(reload_certs(watcher, certs, config)))),
+			_task: Some(AbortOnDrop::new(crate::runtime::spawn(reload_certs(
+				watcher, certs, config,
+			)))),
 		})
 	}
 }
