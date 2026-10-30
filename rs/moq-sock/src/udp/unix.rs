@@ -749,7 +749,10 @@ pub(crate) fn decode_recv<M: cmsg::MsgHdr<ControlMessage = libc::cmsghdr>>(
 	if flags & libc::MSG_CTRUNC != 0 {
 		static CTRUNC: Once = Once::new();
 		CTRUNC.call_once(|| {
-			crate::udp::log::warn!("control messages truncated to {} bytes; some receive metadata is lost", cmsg::LEN);
+			crate::udp::log::warn!(
+				"control messages truncated to {} bytes; some receive metadata is lost",
+				cmsg::LEN
+			);
 		});
 	}
 	let name = unsafe { name.assume_init() };
