@@ -279,6 +279,8 @@ pub(crate) struct Handoff {
 	track: String,
 	/// The first record it will not list.
 	next: u64,
+	/// Its `EXT-X-TARGETDURATION`, which a replacement serving the same playlist URI keeps.
+	target_duration: u64,
 }
 
 /// Which records a rendition lists, shared by its records watcher and [`Rendition::retire`] so a
@@ -324,8 +326,9 @@ pub struct Rendition {
 	/// The [tag](segments::tag) of [`hls`](Self::hls)'s record track muxed under this config, in
 	/// every segment URL.
 	tag: Arc<str>,
-	/// `EXT-X-TARGETDURATION`, in whole seconds: [`hls`](Self::hls)'s duration rounded up until
-	/// [`pin`](Self::pin) sets the one its playlist URI keeps for the run.
+	/// `EXT-X-TARGETDURATION`, in whole seconds: [`hls`](Self::hls)'s duration rounded up, or a
+	/// predecessor's (see [`after`](Self::after)), until [`pin`](Self::pin) sets the one its
+	/// playlist URI keeps for the run.
 	target_duration: u64,
 	/// Segments listed past the target duration, counted to rate-limit their warning.
 	overruns: AtomicU64,
@@ -517,12 +520,18 @@ impl Rendition {
 		*self.watcher.lock().expect("watcher lock poisoned") = Some(watcher);
 	}
 
-	/// Take over from a retired predecessor (see [`retire`](Self::retire)): list only the records
-	/// it won't. One reading another record track shares no numbering with it, so it lists all.
+	/// Take over from a retired predecessor (see [`retire`](Self::retire)): keep its target
+	/// duration and list only the records it won't. One reading another record track shares no
+	/// numbering with it, so it lists all.
 	pub(crate) fn after(mut self, handoff: Option<&Handoff>) -> Self {
-		let Some(handoff) = handoff.filter(|handoff| handoff.track == self.hls.track) else {
+		let Some(handoff) = handoff else {
 			return self;
 		};
+		// The playlist URI stays the same, so it keeps its target duration (RFC 8216 6.2.1).
+		self.target_duration = handoff.target_duration;
+		if handoff.track != self.hls.track {
+			return self;
+		}
 		let start = handoff.next;
 		self.claim = Mutex::new(Claim {
 			start,
@@ -549,6 +558,7 @@ impl Rendition {
 		Handoff {
 			track: self.hls.track.clone(),
 			next,
+			target_duration: self.target_duration,
 		}
 	}
 

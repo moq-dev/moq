@@ -3840,9 +3840,9 @@ mod tests {
 		);
 	}
 
-	// Each playlist URI keeps the EXT-X-TARGETDURATION it first got. Renditions listed together
-	// share the longest declared duration; one added later that declares longer segments raises
-	// only its own target and later ones', and a reconfigure keeps the original target.
+	// Each playlist URI keeps the EXT-X-TARGETDURATION it first got. The first renditions listed
+	// share the longest duration they declare, which floors every later target; one added later
+	// that declares longer segments raises only its own, and a reconfigure keeps the original.
 	#[tokio::test(start_paused = true)]
 	async fn each_playlist_keeps_its_target_duration() {
 		let declare = |name: &str, secs: u64| {
@@ -3872,7 +3872,7 @@ mod tests {
 		let target = |name: &str| test.rendition(name).target_duration();
 		assert_eq!(
 			[target("video0"), target("audio0"), target("video1"), target("video2")],
-			[2, 2, 4, 4]
+			[2, 2, 4, 2]
 		);
 
 		let original = test.rendition("video0");
@@ -3883,17 +3883,21 @@ mod tests {
 		assert_eq!(replacement.target_duration(), 2);
 		drop((original, replacement));
 
-		// A removed rendition that returns serves the same playlist URI, so it keeps its target
-		// even after its last reference drops and a longer rendition registers in between.
-		let video0 = test.catalog.video.renditions.remove("video0").unwrap();
+		// A removed rendition that returns serves the same playlist URI. Nothing of it is kept,
+		// but the target derives from its declared duration and the first batch's, so one that
+		// returns declaring what it first did comes back the same, even after a longer rendition
+		// registers in between.
+		let mut video0 = test.catalog.video.renditions.remove("video0").unwrap();
 		test.sync();
+		video0.hls = declare("video0", 2);
 		let mut longer = video_config();
 		longer.hls = declare("video3", 8);
 		test.catalog.video.renditions.insert("video3".into(), longer);
 		test.sync();
 		test.catalog.video.renditions.insert("video0".into(), video0);
 		test.sync();
-		assert_eq!(test.rendition("video0").target_duration(), 2);
+		let target = |name: &str| test.rendition(name).target_duration();
+		assert_eq!((target("video0"), target("video3")), (2, 8));
 	}
 
 	/// The `Push` events a fresh subscriber to `track`'s records reads before it is caught up.

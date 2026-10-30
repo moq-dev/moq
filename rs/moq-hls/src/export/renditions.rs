@@ -85,12 +85,9 @@ struct Feed {
 	targets: Vec<Weak<Rendition>>,
 	/// Each rendition's discontinuity count.
 	discontinuities: Discontinuities,
-	/// Each playlist URI's `EXT-X-TARGETDURATION` (see [`Producer::register`]). Never pruned: a
-	/// removed rendition that returns serves the same URI, so it must find its old target. One
-	/// small entry per name the broadcast has ever listed.
-	target_durations: BTreeMap<Key, u64>,
-	/// The longest duration any rendition has declared this run, in whole seconds rounded up.
-	declared: u64,
+	/// The longest duration the first catalog batch declared, in whole seconds rounded up: the
+	/// floor of every target duration this run (see [`Producer::register`]).
+	baseline: Option<u64>,
 	/// The catalog failed; late-created renditions start failed.
 	failed: Option<crate::Error>,
 	/// The estimated wall-clock time of `pts` 0, anchored when the first segment was listed
@@ -144,8 +141,7 @@ impl Producer {
 				feed: kio::Producer::new(Feed {
 					targets: Vec::new(),
 					discontinuities: Discontinuities::default(),
-					target_durations: BTreeMap::new(),
-					declared: 0,
+					baseline: None,
 					failed: None,
 					anchor: None,
 					generation: None,
@@ -420,11 +416,13 @@ impl Producer {
 	/// Enroll freshly created renditions with what their siblings share, and start following
 	/// their own records.
 	///
-	/// Every playlist URI keeps one `EXT-X-TARGETDURATION` for the run (RFC 8216 6.2.1), so a
-	/// reconfigured rendition's replacement, or a removed one that returns, keeps its predecessor's.
-	/// A new one gets the longest duration any rendition has declared this run, these included, so
-	/// renditions listed together agree. One added later that declares longer segments raises only
-	/// its own target and later ones': playlists already served never change theirs.
+	/// Every playlist URI keeps one `EXT-X-TARGETDURATION` for the run (RFC 8216 6.2.1). The
+	/// target is derived rather than stored per name, so a publisher churning names can't grow
+	/// the feed: a new rendition gets the larger of its own declared duration and the
+	/// [baseline](Feed::baseline), the longest the first batch declared. Renditions listed first
+	/// all agree, and one that leaves and returns declaring the same duration gets the same
+	/// target. A reconfigured rendition's replacement keeps its predecessor's (see
+	/// [`Rendition::after`]), which already covers the baseline.
 	fn register(&self, added: Vec<Rendition>) -> Vec<Arc<Rendition>> {
 		// Most catalog updates only revise estimates; writing the feed would wake every cursor.
 		if added.is_empty() {
@@ -436,16 +434,14 @@ impl Producer {
 			.write()
 			.unwrap_or_else(|_| unreachable!("fanout is open"));
 		let feed = &mut *feed;
-		// Before any rendition joins, while each target is still its own declared duration.
-		feed.declared = added
-			.iter()
-			.map(Rendition::target_duration)
-			.fold(feed.declared, u64::max);
+		// Fixed by the first batch, while each target is still its own declared duration.
+		let baseline = *feed
+			.baseline
+			.get_or_insert_with(|| added.iter().map(Rendition::target_duration).max().unwrap_or(1));
 		let added: Vec<_> = added
 			.into_iter()
 			.map(|rendition| {
-				let key = (rendition.kind, rendition.name.clone());
-				let target_duration = *feed.target_durations.entry(key).or_insert(feed.declared);
+				let target_duration = rendition.target_duration().max(baseline);
 				let rendition = Arc::new(rendition.pin(target_duration));
 				rendition.label(feed.generation.clone());
 				if let Some(err) = &feed.failed {
