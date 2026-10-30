@@ -68,7 +68,8 @@ SIZE="${INTEROP_SIZE:-320x240}"
 # Empty means "any reserved port"; INTEROP_PORT pins one instead.
 PORT="${INTEROP_PORT:-}"
 URL=""
-KEY="" # the HMAC key every cell's token is signed with (set once the relay's auth server starts)
+KEY=""         # the HMAC key every cell's token is signed with (set once the relay's auth server starts)
+METRICS_URL="" # the relay's internal /metrics, served only by an in-tree run's relay
 NEGATIVE=0
 MEDIA=0
 MEDIA_CASES=""
@@ -323,6 +324,9 @@ SUITE=interop
 DROP_VERSIONS=(moq-lite-05 moq-lite-06 moq-lite-07-wip)
 # The lite drafts the compressed-track lanes cross: lite-07 carries the flag, lite-06 gets inflated bytes.
 COMPRESS_VERSIONS=(moq-lite-07-wip moq-lite-06)
+# The compressed catalog's concurrent readers: lite-07 carries the flag, and lite-06 and a
+# moq-transport reader that does not offer FLATE share the relay's one inflated copy.
+CATALOG_VERSIONS=(moq-lite-07-wip moq-lite-06 moq-transport-22)
 
 # Every publisher in this checkout sends a tone per audio channel, and every subscriber decodes
 # AUDIO_MS of it for tone.py (the browser: its page) to check against the publisher's list. This
@@ -448,9 +452,13 @@ plan_pass() {
     fi
     [[ "$FINISH_ONLY" -eq 0 ]] || return 0
     record "not run" case="CLI FETCH" publisher=rust subscriber=rust
+    record "not run" case="late join" publisher=rust subscriber=rust
     record "not run" case=tail publisher=rust subscriber=rust
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
+        record "not run" case="CLI FETCH" publisher="$runtime" subscriber=rust
+        record "not run" case="late join" publisher=rust subscriber="$runtime"
+        record "not run" case="late join" publisher="$runtime" subscriber=rust
         record "not run" case=tail publisher=rust subscriber="$runtime"
         record "not run" case=tail publisher="$runtime" subscriber=rust
         if [[ "$VERSION" == moq-transport-* ]]; then
@@ -469,6 +477,7 @@ plan_pass() {
             record "not run" case=compress publisher=rust subscriber="$runtime" version="$version"
             record "not run" case=compress publisher="$runtime" subscriber=rust version="$version"
         done
+        record "not run" case="compressed catalog" publisher=rust subscriber="$runtime"
     done
     needs js-native-node || return 0
     for version in "${DROP_VERSIONS[@]}"; do
@@ -546,7 +555,7 @@ build_relay_cli() {
         exit 1
     }
     if [[ "$MEDIA" -eq 0 ]]; then
-        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail --example interop-audio --example interop-control --example interop-goaway --example interop-goaway-client --example interop-finish)
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail --example interop-catalog --example interop-audio --example interop-control --example interop-goaway --example interop-goaway-client --example interop-finish)
     fi
     [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
     # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
@@ -854,6 +863,11 @@ if [[ "$COMPAT" -eq 1 ]]; then
 else
     sed -e "s|:4443\"|:${PORT}\"|g" -e "s|http://127.0.0.1:4440/|${AUTH_URL}|" \
         "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
+    # The compressed-catalog lane reads the relay's inflate counter from /metrics, which counts
+    # only while stats are enabled.
+    harness_port metrics
+    METRICS_URL="http://127.0.0.1:${HARNESS_PORT}/metrics"
+    printf '\n[internal]\nlisten = "127.0.0.1:%s"\n\n[stats]\nenabled = true\n' "$HARNESS_PORT" >>"$HARNESS_RUN/relay.toml"
 fi
 # Connection spans and clean closes must survive an inherited warn-only filter.
 harness_spawn relay "$HARNESS_RUN/relay.log" env \
@@ -1016,8 +1030,8 @@ run_publisher() {
             local connect
             rust_connect "$url"
             if [[ "$AUDIO" -eq 1 ]]; then
-                # The max-age caps every reader's max delay, so it covers the longest, the native
-                # JS audio readers' 5 s. Each 1 s fragment lands as one burst, so with a 1 s
+                # The max-age caps every reader's max delay, so it covers the gap-checked
+                # readers' 5 s. Each 1 s fragment lands as one burst, so with a 1 s
                 # max-age the oldest group a joining reader is served goes stale as soon as the
                 # next group lands, cutting it mid-read and failing the gap check.
                 ffmpeg_fmp4 "$tone" "$(publisher_codecs rust)" | RUST_LOG="$CLI_LOG" "$MOQ" "${connect[@]}" --connect-version "$(cell_version rust)" \
@@ -1910,37 +1924,103 @@ run_tail_pair() {
     rm "$fifo"
 }
 
-# Exercise this checkout's CLI FETCH under the same relay close check as live readers.
+# A late joiner. The publisher writes group 0's head before any subscriber exists and the rest only
+# once the subscriber reports reading that head, so only a join from object 0 passes (a joining
+# FETCH, a draft-22 fill, or a moq-lite group), never one that merely outran the publisher.
+run_late_pair() {
+    local pub="$1" sub="$2" pid subscriber_pid started=$SECONDS from version head=""
+    local name="late-$1-$2" fifo="$LOGS/late-ack" heads="$LOGS/late-head" broadcast="late-$1-$2-$$-$RANDOM"
+    local cell=(case="late join" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
+    version=$(pinned_version)
+    if is_broken "$pub" || is_broken "$sub"; then
+        echo "  FAIL  late join $pub -> $sub (client unavailable)"
+        record fail "${cell[@]}" detail="client unavailable"
+        overall=1
+        return
+    fi
+    mkfifo "$fifo" "$heads"
+    exec 9<>"$fifo"
+    from=$(relay_next_line)
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" late
+    pid="$HARNESS_PID"
+    exec 8<>"$heads"
+    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$heads" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" late
+    subscriber_pid="$HARNESS_PID"
+    if read -r -t "$TIMEOUT" head <&8 && [[ "$head" == "late head" ]]; then
+        printf 'late tail\n' >&9
+    fi
+    harness_wait "$subscriber_pid" || true
+    if [[ "$head" == "late head" ]] && grep -qx 'late join clean groups=0,1 frames=6' "$LOGS/$name-sub.log"; then
+        printf 'clean end\n' >&9
+        harness_wait "$pid" || true
+        if [[ -n "$version" ]] && ! check_versions "late join $pub -> $sub" "$from" "$version"; then
+            record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="a relay connection negotiated another version"
+            overall=1
+        elif grep -qx 'tail acknowledged' "$LOGS/$name-pub.log"; then
+            echo "  PASS  late join $pub -> $sub (group 0 from its head; clean end 2)"
+            record pass "${cell[@]}" seconds=$((SECONDS - started))
+        else
+            echo "  FAIL  late join $pub -> $sub (publisher did not acknowledge)"
+            record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="publisher did not acknowledge"
+            overall=1
+            cat "$LOGS/$name-pub.log"
+        fi
+    else
+        local why="missing group 0's head"
+        [[ "$head" != "late head" ]] || why="missing objects or clean end"
+        echo "  FAIL  late join $pub -> $sub ($why)"
+        record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="$why"
+        overall=1
+        cat "$LOGS/$name-pub.log" "$LOGS/$name-sub.log"
+        harness_reap "$pid"
+        harness_reap "$subscriber_pid"
+    fi
+    exec 8>&- 9>&-
+    rm "$fifo" "$heads"
+}
+
+# This checkout's CLI FETCHes a past group of a finished track, under the same relay close check as
+# live readers. Every object has its own bytes, so a FETCH that drops, repeats, or reorders one fails.
 run_fetch_round() {
-    local name="fetch-rust" fifo="$LOGS/fetch-ack" broadcast="fetch-$$-$RANDOM" pid from version
+    local pub="$1" name="fetch-$1" fifo="$LOGS/fetch-ack" broadcast="fetch-$1-$$-$RANDOM" pid from version
     local started=$SECONDS why=""
+    local cell=(case="CLI FETCH" publisher="$pub" subscriber=rust log="$LOGS/$name-pub.log")
+    if is_broken "$pub"; then
+        echo "  FAIL  CLI FETCH $pub (client unavailable)"
+        record fail "${cell[@]}" detail="client unavailable"
+        overall=1
+        return
+    fi
     version=$(pinned_version)
     from=$(relay_next_line)
     mkfifo "$fifo"
     exec 9<>"$fifo"
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" rust publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" cached
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" cached
     pid="$HARNESS_PID"
     if timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
-        --broadcast "$broadcast" fetch tail --group 0 >"$LOGS/$name.raw" &&
-        python3 - "$LOGS/$name.raw" <<'PYCODE'
-import pathlib, sys
-assert pathlib.Path(sys.argv[1]).read_bytes() == bytes(256 * 1024), "incorrect FETCH payload"
+        --broadcast "$broadcast" fetch tail --group 1 --json >"$LOGS/$name.json" &&
+        python3 - "$LOGS/$name.json" <<'PYCODE'
+import base64, json, sys
+frames = [json.loads(line) for line in open(sys.argv[1])]
+assert [(frame["group"], frame["frame"], frame["size"]) for frame in frames] == [(1, index, 64 * 1024) for index in range(3)], frames
+assert [base64.b64decode(frame["payload"], validate=True) for frame in frames] == [bytes([16 + index]) * (64 * 1024) for index in range(3)], "incorrect FETCH payload"
 PYCODE
     then
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
         if grep -qx 'tail acknowledged' "$LOGS/$name-pub.log"; then
-            echo "  PASS  CLI FETCH (group 0; 262144 bytes)"
+            echo "  PASS  CLI FETCH $pub (group 1; 3 objects)"
         else
-            echo "  FAIL  CLI FETCH (publisher did not acknowledge)"
+            echo "  FAIL  CLI FETCH $pub (publisher did not acknowledge)"
             why="publisher did not acknowledge"
             overall=1
             cat "$LOGS/$name-pub.log"
         fi
     else
-        echo "  FAIL  CLI FETCH"
+        echo "  FAIL  CLI FETCH $pub"
         why="incorrect or missing FETCH payload"
         overall=1
+        cat "$LOGS/$name-pub.log"
         harness_reap "$pid"
     fi
     exec 9>&-
@@ -1950,7 +2030,7 @@ PYCODE
         why="${why:-a relay connection negotiated another version}"
         overall=1
     fi
-    local cell=(case="CLI FETCH" publisher=rust subscriber=rust seconds=$((SECONDS - started)) log="$LOGS/$name-pub.log")
+    cell+=(seconds=$((SECONDS - started)))
     if [[ -z "$why" ]]; then record pass "${cell[@]}"; else record fail "${cell[@]}" detail="$why"; fi
 }
 
@@ -2122,11 +2202,102 @@ run_control_case() {
     fi
 }
 
+# The bytes the relay has inflated for plain readers, summed over every tier and role.
+relay_inflated() {
+    curl -sf --max-time 5 "$METRICS_URL" | awk '/^moq_relay_inflated_bytes_total\{/ { sum += $2 } END { print sum + 0 }'
+}
+
+# shellcheck disable=SC2329  # invoked indirectly via harness_spawn
+run_catalog_publisher() {
+    local fifo="$1"
+    shift
+    timeout -k 3 $((TIMEOUT * 2)) "$TARGET_BASE/$PROFILE/examples/interop-catalog" "$@" <"$fifo" 9>&-
+}
+
+# shellcheck disable=SC2329  # invoked indirectly via harness_spawn
+run_catalog_reader() {
+    local runtime="$1"
+    shift
+    case "$runtime" in
+        js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" node --import tsx catalog.ts "$@") ;;
+        js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" bun catalog.ts "$@") ;;
+    esac
+}
+
+# A Rust publisher's compressed catalog reaches a native JS reader on each of CATALOG_VERSIONS at
+# once through the relay, which must inflate the stored DEFLATE group exactly once for the plain
+# readers: its inflate counter grows by the catalog's inflated size, not a multiple of it.
+run_catalog_fanout() {
+    local runtime="$1" started=$SECONDS pid reader version before after bytes from got want readers=() why=""
+    local name="catalog-$1" fifo="$LOGS/catalog-ack" broadcast="catalog-$1-$$-$RANDOM"
+    local cell=(case="compressed catalog" publisher=rust subscriber="$runtime" log="$LOGS/$name-pub.log")
+    if is_broken "$runtime"; then
+        echo "  FAIL  compressed catalog rust -> $runtime (client unavailable)"
+        record fail "${cell[@]}" detail="client unavailable"
+        overall=1
+        return
+    fi
+    mkfifo "$fifo"
+    exec 9<>"$fifo"
+    from=$(relay_next_line)
+    before=$(relay_inflated) || why="relay metrics unavailable"
+    # Subtree grants, which moq-transport's AUTH extension can carry too.
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_catalog_publisher "$fifo" "$(token_url --publish "$broadcast/**")" "$broadcast"
+    pid="$HARNESS_PID"
+    for version in "${CATALOG_VERSIONS[@]}"; do
+        harness_spawn "$name-$version" "$LOGS/$name-$version.log" run_catalog_reader "$runtime" "$(token_url --subscribe "$broadcast/**")" "$broadcast" "$version"
+        readers+=("$HARNESS_PID")
+    done
+    for reader in "${readers[@]}"; do harness_wait "$reader" || true; done
+    for version in "${CATALOG_VERSIONS[@]}"; do
+        want="catalog compress=false video=hd,sd audio=en,fr"
+        [[ "$version" != moq-lite-07-wip ]] || want="catalog compress=true video=hd,sd audio=en,fr"
+        # Like run_native, a verified result survives the NAPI addon's exit crash.
+        grep -qx "$want" "$LOGS/$name-$version.log" || why="${why:-$version reader did not report: $want}"
+    done
+    printf 'clean end\n' >&9
+    harness_wait "$pid" || true
+    after=$(relay_inflated) || why="${why:-relay metrics unavailable}"
+    bytes=$(sed -n 's/^catalog bytes=\([0-9]*\)$/\1/p' "$LOGS/$name-pub.log")
+    got=$(relay_log_since "$from" | sed -n 's/.*conn{id=[0-9]* .*negotiated version=\([^ ]*\).*/\1/p' | sort | tr '\n' ' ')
+    if [[ -z "$why" ]] && ! grep -qx 'catalog acknowledged' "$LOGS/$name-pub.log"; then
+        why="publisher did not acknowledge"
+    elif [[ -z "$why" && "$got" != "moq-lite-06 moq-lite-07-wip moq-lite-07-wip moq-transport-22 " ]]; then
+        why="relay connections negotiated ${got:-nothing}"
+    elif [[ -z "$why" && "$((after - before))" != "$bytes" ]]; then
+        why="relay inflated $((after - before)) bytes, not the catalog's ${bytes:-?} once"
+    fi
+    if [[ -z "$why" ]]; then
+        echo "  PASS  compressed catalog rust -> $runtime (${CATALOG_VERSIONS[*]}; one ${bytes}-byte inflate)"
+        record pass "${cell[@]}" seconds=$((SECONDS - started))
+    else
+        echo "  FAIL  compressed catalog rust -> $runtime ($why)"
+        record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="$why"
+        overall=1
+        for version in "${CATALOG_VERSIONS[@]}"; do cat "$LOGS/$name-$version.log"; done
+        cat "$LOGS/$name-pub.log"
+        harness_reap "$pid"
+    fi
+    exec 9>&-
+    rm "$fifo"
+}
+
 # This checkout's CLI FETCH and finite track tails in this pass, then the lite drop lanes.
 run_tails() {
     local runtime version
     echo "=== CLI FETCH close ==="
-    run_fetch_round
+    run_fetch_round rust
+    for runtime in js-native-node js-native-bun; do
+        ! needs "$runtime" || run_fetch_round "$runtime"
+    done
+    echo "=== late join ==="
+    run_late_pair rust rust
+    for runtime in js-native-node js-native-bun; do
+        if needs "$runtime"; then
+            run_late_pair rust "$runtime"
+            run_late_pair "$runtime" rust
+        fi
+    done
     echo "=== finite track tails ==="
     run_tail_pair rust rust
     for runtime in js-native-node js-native-bun; do
@@ -2143,7 +2314,7 @@ run_tails() {
             fi
         fi
     done
-    # The compress and drop lanes pin their own lite versions.
+    # The compress, compressed catalog, and drop lanes pin their own versions.
     [[ "$VERSION" == auto ]] || return 0
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
@@ -2151,6 +2322,7 @@ run_tails() {
             run_tail_pair rust "$runtime" compress "$version"
             run_tail_pair "$runtime" rust compress "$version"
         done
+        run_catalog_fanout "$runtime"
     done
     if needs js-native-node; then
         for version in "${DROP_VERSIONS[@]}"; do

@@ -55,7 +55,7 @@ Never bypass the queue with `--admin`, with one exception: the maintainer's pre-
 
 # AI
 
-AI-assisted issues, pull requests, reviews, and comments are welcome.
+AI-assisted issues, pull requests, reviews, and comments are encouraged.
 Especially bug reports; dive deep into the root issue before proposing a solution.
 
 GitHub issues are the public front door for brainstorming.
@@ -63,20 +63,18 @@ Prefer a quest for work needing durable scope or coordination.
 
 # Reviews
 
-AI agents review pushes on their own, skipping ones they judge trivial.
-Never explicitly request a review.
+Before marking a PR ready for review, and before each push to a ready PR, run `/quest-review` on the committed branch after the local checks pass.
+It uses `quest review` to have the other vendor's model review against the PR's base branch, with `REVIEW.md` read from that base.
 
-For each finding:
+The PR body's `## Review` section records the reviewer harness, model and effort, reviewed head SHA, and each finding's disposition, or a skip and its reason when the author judges the change too trivial to review.
+A record naming the head being merged counts as the required review when the PR's author has write access to the repository.
+Otherwise, or if the record is missing or stale, the merging session checks out the head and runs `/quest-review`, following `quest guide`'s rules for untrusted heads and review exemptions.
 
-- If you don't agree with it, reply to the finding and move on.
-- If it's a relatively easy improvement, fix it and push. Update the summary if needed.
+Address online reviewers' findings already posted on the head when merging; never wait for or request an online review.
+For each local or online finding:
 
-Wait for a review from any reviewer other than Grok.
-Codex (OpenAI) reacts with a thumbs up when it has no findings; that counts as a review.
-A push that gets no new review once CI finishes was judged trivial, so the earlier review still covers it.
-Skipped or rate-limited reviews do not count.
-For a fork with no automatic non-Grok review, ask the maintainer to arrange one.
-Merge only when that review has no findings, or every finding is fixed or replied to.
+- Refute findings you disagree with using evidence; reply to online findings on the PR.
+- Fix findings you agree with, rerun checks, and review the new head locally before pushing. Update the summary if needed.
 
 # Follow-ups
 
@@ -93,6 +91,7 @@ For an advisory against Quinn, follow the advisory triage in [`rs/moq-quic/READM
 
 `main` is the trunk; `release` is what ships, and release-plz and every branch-triggered publish run only there.
 
+- Smoke clients call only the latest published APIs. A release cut updates `test/smoke/clients` to the APIs being published, then verifies the affected smoke lanes.
 - A release is cut by hand: a PR merging `main` into `release`, with a merge commit.
 - A breaking cut first writes, on `main`, each changed package's version-transition section in its `MIGRATE.md` (`## 0.3 -> 0.4`) from the migration audit: the `!` subjects since the `release` merge base, each of those PRs' Impact section, and the API diff.
 - Suggest a `release` backport for any serious bug fix (crash, security, data loss, broken interop), whether found on `main` or reported against a release. Land it on `main` first, then port it onto `release` as a separate PR that keeps the published API, so it ships as a patch. The Release gate's API diff (`just api-diff --deny`) fails a backport that changes one; on the cut PR, whose head is `main`, it only reports.

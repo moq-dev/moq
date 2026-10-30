@@ -78,10 +78,12 @@ async fn refused_code(server: &Server, alpn: &str) -> Option<driver::VarInt> {
 		.with_no_client_auth();
 	tls.alpn_protocols = vec![alpn.as_bytes().to_vec()];
 
-	let endpoint = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
+	let endpoint =
+		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+			.expect("endpoint");
 	let conn = endpoint
-		.connect_with(
-			driver::ClientConfig::new(Arc::new(tls)),
+		.connect(
+			&driver::client::Config::new(Arc::new(tls)),
 			([127, 0, 0, 1], server.port).into(),
 			"localhost",
 		)

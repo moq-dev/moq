@@ -203,17 +203,18 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 		return;
 
 	auto origin = moq::OriginProducer::init(moq::OriginConfig{});
-	auto broadcast = TestOk(origin->create_broadcast("room"), "create_broadcast");
+	auto publication = TestOk(origin->create_broadcast("room"), "create_broadcast");
+	auto broadcast = publication->broadcast();
 	moq::AnnounceRoute route;
 	route.epoch = moq::mint_epoch();
-	TestOk(broadcast->announce(route), "announce");
+	TestOk(publication->announce(route), "announce");
 
 	moq::AudioInit init{};
 	init.format = moq::AudioFormat::kOpus;
 	init.data = encoder.ExtraData();
 	auto track = TestOk(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, init), "audio track");
 
-	auto announced = TestOk(origin->consume()->announced_broadcast("room"), "announced_broadcast");
+	auto announced = TestOk(origin->consume()->follow("room", std::nullopt), "follow");
 	auto consumer = TestOk(announced->available().get(), "available");
 	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "catalog consumer");
 	std::optional<moq::Catalog> catalog;

@@ -11,12 +11,11 @@ use std::sync::Arc;
 use bytes::BytesMut;
 
 use crate::{
-	ClientConfig, ConnectError, ConnectionId, ServerConfig, Side, TransportError,
+	ConnectionId, Side, TransportError, Version, client,
 	coding::{BufExt, BufMutExt},
-	crypto::{
-		self, CryptoError, ExportKeyingMaterialError, HandshakeData, HeaderKey, KeyPair, Keys, PacketKey,
-		UnsupportedVersion,
-	},
+	crypto::{self, CryptoError, ExportKeyingMaterialError, HandshakeData, HeaderKey, KeyPair, Keys, PacketKey},
+	endpoint::ConnectError,
+	server,
 	transport_parameters::TransportParameters,
 };
 
@@ -33,20 +32,20 @@ pub struct Plaintext;
 
 impl Plaintext {
 	/// A client config whose connections run plaintext crypto.
-	pub fn client() -> ClientConfig {
-		ClientConfig::from_crypto(Arc::new(Self))
+	pub fn client() -> client::Config {
+		client::Config::from_crypto(Arc::new(Self))
 	}
 
 	/// A server config whose connections run plaintext crypto.
-	pub fn server() -> ServerConfig {
-		ServerConfig::from_crypto(Arc::new(Self))
+	pub fn server() -> server::Config {
+		server::Config::from_crypto(Arc::new(Self))
 	}
 }
 
 impl crypto::ClientConfig for Plaintext {
 	fn start_session(
 		self: Arc<Self>,
-		_version: u32,
+		_version: Version,
 		_server_name: &str,
 		params: &TransportParameters,
 	) -> Result<Box<dyn crypto::Session>, ConnectError> {
@@ -55,17 +54,17 @@ impl crypto::ClientConfig for Plaintext {
 }
 
 impl crypto::ServerConfig for Plaintext {
-	fn initial_keys(&self, _version: u32, _dst_cid: ConnectionId) -> Result<Keys, UnsupportedVersion> {
-		Ok(keys())
+	fn initial_keys(&self, _version: Version, _dst_cid: ConnectionId) -> Keys {
+		keys()
 	}
 
-	fn retry_tag(&self, _version: u32, _orig_dst_cid: ConnectionId, _packet: &[u8]) -> [u8; 16] {
+	fn retry_tag(&self, _version: Version, _orig_dst_cid: ConnectionId, _packet: &[u8]) -> [u8; 16] {
 		[0; 16]
 	}
 
 	fn start_session(
 		self: Arc<Self>,
-		_version: u32,
+		_version: Version,
 		params: &TransportParameters,
 	) -> Result<Box<dyn crypto::Session>, TransportError> {
 		Ok(Box::new(Session::new(Side::Server, params)))

@@ -13,10 +13,9 @@ use rustls::{
 };
 
 use crate::{
-	ConnectError, ConnectionId, Side, TransportError, TransportErrorCode,
-	crypto::{
-		self, CryptoError, ExportKeyingMaterialError, HandshakeData, HeaderKey, KeyPair, Keys, UnsupportedVersion,
-	},
+	ConnectionId, Side, TransportError, TransportErrorCode,
+	crypto::{self, CryptoError, ExportKeyingMaterialError, HandshakeData, HeaderKey, KeyPair, Keys},
+	endpoint::ConnectError,
 	transport_parameters::TransportParameters,
 };
 
@@ -156,7 +155,6 @@ impl crypto::Session for TlsSession {
 
 		let (nonce, key) = match self.version {
 			Version::V1 => (RETRY_INTEGRITY_NONCE_V1, RETRY_INTEGRITY_KEY_V1),
-			Version::V1Draft => (RETRY_INTEGRITY_NONCE_DRAFT, RETRY_INTEGRITY_KEY_DRAFT),
 			_ => unreachable!(),
 		};
 
@@ -179,11 +177,6 @@ impl crypto::Session for TlsSession {
 		Ok(())
 	}
 }
-
-const RETRY_INTEGRITY_KEY_DRAFT: [u8; 16] = [
-	0xcc, 0xce, 0x18, 0x7e, 0xd0, 0x9a, 0x09, 0xd0, 0x57, 0x28, 0x15, 0x5a, 0x6c, 0xb9, 0x6b, 0xe1,
-];
-const RETRY_INTEGRITY_NONCE_DRAFT: [u8; 12] = [0xe5, 0x49, 0x30, 0xf9, 0x7f, 0x21, 0x36, 0xf0, 0x53, 0x0a, 0x8c, 0x1c];
 
 const RETRY_INTEGRITY_KEY_V1: [u8; 16] = [
 	0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e,
@@ -249,11 +242,11 @@ impl QuicClientConfig {
 impl crypto::ClientConfig for QuicClientConfig {
 	fn start_session(
 		self: Arc<Self>,
-		version: u32,
+		version: crate::Version,
 		server_name: &str,
 		params: &TransportParameters,
 	) -> Result<Box<dyn crypto::Session>, ConnectError> {
-		let version = interpret_version(version)?;
+		let version = rustls_version(version);
 		let server_name = ServerName::try_from(server_name)
 			.map_err(|_| ConnectError::InvalidServerName(server_name.into()))?
 			.to_owned();
@@ -299,11 +292,10 @@ impl QuicServerConfig {
 impl crypto::ServerConfig for QuicServerConfig {
 	fn start_session(
 		self: Arc<Self>,
-		version: u32,
+		version: crate::Version,
 		params: &TransportParameters,
 	) -> Result<Box<dyn crypto::Session>, TransportError> {
-		// Safe: `start_session()` is never called if `initial_keys()` rejected `version`
-		let version = interpret_version(version).unwrap();
+		let version = rustls_version(version);
 		// Only a config that cannot do QUIC at all (no TLS 1.3) fails here.
 		let inner = rustls::quic::ServerConnection::new(self.inner.clone(), version, to_vec(params)).map_err(|e| {
 			TransportError {
@@ -321,17 +313,13 @@ impl crypto::ServerConfig for QuicServerConfig {
 		}))
 	}
 
-	fn initial_keys(&self, version: u32, dst_cid: ConnectionId) -> Result<Keys, UnsupportedVersion> {
-		let version = interpret_version(version)?;
-		Ok(initial_keys(version, dst_cid, Side::Server))
+	fn initial_keys(&self, version: crate::Version, dst_cid: ConnectionId) -> Keys {
+		initial_keys(rustls_version(version), dst_cid, Side::Server)
 	}
 
-	fn retry_tag(&self, version: u32, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16] {
-		// Safe: `start_session()` is never called if `initial_keys()` rejected `version`
-		let version = interpret_version(version).unwrap();
-		let (nonce, key) = match version {
+	fn retry_tag(&self, version: crate::Version, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16] {
+		let (nonce, key) = match rustls_version(version) {
 			Version::V1 => (RETRY_INTEGRITY_NONCE_V1, RETRY_INTEGRITY_KEY_V1),
-			Version::V1Draft => (RETRY_INTEGRITY_NONCE_DRAFT, RETRY_INTEGRITY_KEY_DRAFT),
 			_ => unreachable!(),
 		};
 
@@ -426,11 +414,9 @@ impl crypto::PacketKey for Box<dyn PacketKey> {
 	}
 }
 
-fn interpret_version(version: u32) -> Result<Version, UnsupportedVersion> {
+fn rustls_version(version: crate::Version) -> Version {
 	match version {
-		0xff00_001d..=0xff00_0020 => Ok(Version::V1Draft),
-		0x0000_0001 | 0xff00_0021..=0xff00_0022 => Ok(Version::V1),
-		_ => Err(UnsupportedVersion),
+		crate::Version::V1 => Version::V1,
 	}
 }
 

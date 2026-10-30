@@ -10,7 +10,6 @@ use std::{
 	collections::{HashMap, HashSet, VecDeque},
 	net::{Ipv6Addr, SocketAddr},
 	num::NonZeroU64,
-	sync::Arc,
 };
 
 use arbitrary::{Arbitrary, Unstructured};
@@ -18,10 +17,12 @@ use bytes::{Bytes, BytesMut};
 
 use super::plaintext::{Clear, Plaintext, TAG_LEN};
 use crate::{
-	Connection, ConnectionHandle, DEFAULT_SUPPORTED_VERSIONS, DatagramEvent, Dir, Duration, Endpoint, EndpointConfig,
-	Event, Instant, LeaseError, Limits, ReadError, Side, StreamId, TransportConfig, VarInt,
+	Dir, Duration, Event, Instant, LeaseError, Limits, ReadError, Side, StreamId,
+	connection::Connection,
+	endpoint::{self, ConnectionHandle, DatagramEvent, Dial, Endpoint, Received},
 	frame::{self, Frame},
 	packet::{FixedLengthConnectionIdParser, PartialDecode},
+	transport,
 };
 
 /// The connection ID length both endpoints issue, which a captured packet needs to parse.
@@ -41,10 +42,10 @@ const RECEIVE_WINDOW: u32 = 4 * MAX_WRITE as u32;
 
 /// Both sides' transport: a receive window a few writes fill, so leases that wait spend it and
 /// the stuck-window eviction runs.
-fn transport() -> Arc<TransportConfig> {
-	let mut transport = TransportConfig::default();
-	transport.receive_window(VarInt::from_u32(RECEIVE_WINDOW));
-	Arc::new(transport)
+fn transport() -> transport::Config {
+	let mut transport = transport::Config::default();
+	transport.limits.receive_window = NonZeroU64::new(RECEIVE_WINDOW.into());
+	transport
 }
 
 /// Which endpoint an op acts on, or which one's inbound queue it touches.
@@ -218,16 +219,19 @@ impl Peer {
 	fn new(side: Side, port: u16) -> Self {
 		let server = side.is_server().then(|| {
 			let mut config = Plaintext::server();
-			config.transport_config(transport());
-			Arc::new(config)
+			config.transport = transport();
+			config
 		});
 		// A fixed seed per side keeps connection IDs and packet number skips stable across
 		// runs; the reset and token keys still draw their own randomness.
-		let mut endpoint = EndpointConfig::default();
-		endpoint.rng_seed(Some([side as u8; 32]));
+		let endpoint = endpoint::Config {
+			server,
+			rng_seed: Some([side as u8; 32]),
+			..Default::default()
+		};
 		Self {
 			side,
-			endpoint: Endpoint::new(Arc::new(endpoint), server, true),
+			endpoint: Endpoint::new(endpoint, true).unwrap(),
 			addr: SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port),
 			conn: None,
 			connected: false,
@@ -259,7 +263,7 @@ impl Peer {
 		let mut rest = Some(BytesMut::from(datagram));
 		while let Some(data) = rest.take() {
 			let start = datagram.len() - data.len();
-			let Ok((partial, next)) = PartialDecode::new(data, &parser, DEFAULT_SUPPORTED_VERSIONS, true) else {
+			let Ok((partial, next)) = PartialDecode::new(data, &parser, true) else {
 				return;
 			};
 			let end = datagram.len() - next.as_ref().map_or(0, |next| next.len());
@@ -319,11 +323,18 @@ impl Pair {
 		};
 
 		let mut config = Plaintext::client();
-		config.transport_config(transport());
+		config.transport = transport();
 		let (ch, conn) = pair
 			.client
 			.endpoint
-			.connect(pair.now, config, pair.server.addr, "localhost")
+			.connect(
+				pair.now,
+				Dial {
+					config: &config,
+					remote: pair.server.addr,
+					server_name: "localhost",
+				},
+			)
 			.unwrap();
 		pair.client.conn = Some((ch, conn));
 		pair
@@ -408,13 +419,22 @@ impl Pair {
 			};
 			// Only what the connection takes can deliver frames; the endpoint drops the rest.
 			let tampered = tampered.map(|from| (data.clone(), from));
-			let event = peer.endpoint.handle(now, other.addr, None, None, data, &mut buf);
+			let event = peer.endpoint.handle(
+				now,
+				Received {
+					remote: other.addr,
+					local_ip: None,
+					ecn: None,
+					data,
+				},
+				&mut buf,
+			);
 			match event {
 				Some(DatagramEvent::NewConnection(incoming)) => {
 					// One connection per run: a forged Initial after it is turned away.
 					if peer.conn.is_some() {
 						peer.endpoint.ignore(incoming);
-					} else if let Ok(accepted) = peer.endpoint.accept(incoming, now, &mut buf, None) {
+					} else if let Ok(accepted) = peer.endpoint.accept(incoming, now, &mut buf) {
 						peer.conn = Some(accepted);
 						if let Some((data, from)) = tampered {
 							peer.taint(&data, from);
@@ -1012,8 +1032,7 @@ mod tests {
 		pair.apply(Op::Advance { millis: 100 });
 		let ping = pair.server.inbound.back().expect("the ping sent nothing").data.clone();
 		let parser = FixedLengthConnectionIdParser::new(CID_LEN);
-		let (ping, _) =
-			PartialDecode::new(ping, &parser, DEFAULT_SUPPORTED_VERSIONS, true).expect("the ping did not decode");
+		let (ping, _) = PartialDecode::new(ping, &parser, true).expect("the ping did not decode");
 		let dcid = ping.dst_cid();
 
 		// A 4-byte packet number far past the client's, a DATAGRAM too short to carry a

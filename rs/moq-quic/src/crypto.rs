@@ -9,7 +9,10 @@ use std::{str, sync::Arc};
 use ::rustls::pki_types::CertificateDer;
 use bytes::BytesMut;
 
-use crate::{ConnectError, Side, TransportError, shared::ConnectionId, transport_parameters::TransportParameters};
+use crate::{
+	Side, TransportError, Version, endpoint::ConnectError, shared::ConnectionId,
+	transport_parameters::TransportParameters,
+};
 
 /// Cryptography interface based on *ring*
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
@@ -32,7 +35,8 @@ pub struct HandshakeData {
 
 /// The requested keying material is longer than the handshake's hash can export.
 #[derive(Debug, PartialEq, Eq)]
-pub struct ExportKeyingMaterialError;
+#[cfg_attr(not(test), expect(dead_code, reason = "only tests export keying material"))]
+pub(crate) struct ExportKeyingMaterialError;
 
 /// A cryptographic session (commonly TLS)
 pub(crate) trait Session: Send + Sync + 'static {
@@ -83,6 +87,7 @@ pub(crate) trait Session: Send + Sync + 'static {
 	///
 	/// This function will fail, returning [ExportKeyingMaterialError],
 	/// if the requested output length is too large.
+	#[cfg_attr(not(test), expect(dead_code, reason = "only tests export keying material"))]
 	fn export_keying_material(
 		&self,
 		output: &mut [u8],
@@ -112,7 +117,7 @@ pub(crate) trait ClientConfig: Send + Sync {
 	/// Start a client session with this configuration
 	fn start_session(
 		self: Arc<Self>,
-		version: u32,
+		version: Version,
 		server_name: &str,
 		params: &TransportParameters,
 	) -> Result<Box<dyn Session>, ConnectError>;
@@ -121,20 +126,17 @@ pub(crate) trait ClientConfig: Send + Sync {
 /// Server-side configuration for the crypto protocol
 pub(crate) trait ServerConfig: Send + Sync {
 	/// Create the initial set of keys given the client's initial destination ConnectionId
-	fn initial_keys(&self, version: u32, dst_cid: ConnectionId) -> Result<Keys, UnsupportedVersion>;
+	fn initial_keys(&self, version: Version, dst_cid: ConnectionId) -> Keys;
 
 	/// Generate the integrity tag for a retry packet
-	///
-	/// Never called if `initial_keys` rejected `version`.
-	fn retry_tag(&self, version: u32, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16];
+	fn retry_tag(&self, version: Version, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16];
 
 	/// Start a server session with this configuration
 	///
-	/// Never called if `initial_keys` rejected `version`.
 	/// Sessions must reject early data; the transport only processes 1-RTT application packets.
 	fn start_session(
 		self: Arc<Self>,
-		version: u32,
+		version: Version,
 		params: &TransportParameters,
 	) -> Result<Box<dyn Session>, TransportError>;
 }
@@ -189,13 +191,3 @@ pub(crate) trait AeadKey {
 /// Generic crypto errors
 #[derive(Debug)]
 pub(crate) struct CryptoError;
-
-/// Error indicating that the specified QUIC version is not supported
-#[derive(Debug)]
-pub(crate) struct UnsupportedVersion;
-
-impl From<UnsupportedVersion> for ConnectError {
-	fn from(_: UnsupportedVersion) -> Self {
-		Self::UnsupportedVersion
-	}
-}
