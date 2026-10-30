@@ -12038,7 +12038,7 @@ fn settle_bounds(
 	resolved: &mut ResolvedRanges,
 	track: &track::Producer,
 	subscription: &track::Subscription,
-) -> Result<Option<(Option<u64>, Option<u64>)>, Error> {
+) -> Result<Option<WireBounds>, Error> {
 	match resolved.resolve(track, subscription) {
 		Ok(subscription) => Ok(Some(wire_bounds(&subscription))),
 		Err(Error::Unsupported) if !has_time(subscription) => Ok(None),
@@ -12064,8 +12064,11 @@ fn needs_resolution(subscription: &track::Subscription) -> bool {
 	})
 }
 
+/// A subscription's single wire span: its start and exclusive end group, each open when `None`.
+type WireBounds = (Option<u64>, Option<u64>);
+
 /// The single wire span covers mixed absolute/live starts from group zero.
-fn wire_bounds(subscription: &track::Subscription) -> (Option<u64>, Option<u64>) {
+fn wire_bounds(subscription: &track::Subscription) -> WireBounds {
 	let start = subscription.start().or_else(|| {
 		subscription
 			.ranges
