@@ -102,7 +102,8 @@ function configToTransportParams(config: Required<Config>): TransportParams {
 		maxDatagramFrameSize:
 			config.maxDatagramFrameSize === null
 				? 0n
-				: config.maxDatagramFrameSize < config.maxRecordSize
+				: // biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
+					config.maxDatagramFrameSize < config.maxRecordSize
 					? config.maxDatagramFrameSize
 					: config.maxRecordSize,
 		maxRecordSize: config.maxRecordSize,
@@ -1016,6 +1017,7 @@ export default class Session implements WebTransport {
 			// A datagram must fit in one record, so the frame is capped by the
 			// smaller of the peer's datagram-frame limit and its record size.
 			const cap =
+				// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 				params.maxRecordSize < params.maxDatagramFrameSize ? params.maxRecordSize : params.maxDatagramFrameSize;
 			// We encode the length-prefixed form (0x31): one type byte plus a length
 			// varint sized for `cap`. Subtracting it keeps the frame within the limit.
@@ -1055,6 +1057,7 @@ export default class Session implements WebTransport {
 		if (a === 0n && b === 0n) return 0n;
 		if (a === 0n) return b;
 		if (b === 0n) return a;
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		return a < b ? a : b;
 	}
 
@@ -1113,6 +1116,7 @@ export default class Session implements WebTransport {
 			this.#sendResetAt = this.#lastSendAt;
 			this.#sendCredit = false;
 		}
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		return this.#recvSeen > this.#sendResetAt ? this.#recvSeen : this.#sendResetAt;
 	}
 
@@ -1297,6 +1301,7 @@ export default class Session implements WebTransport {
 		// TODO(qmux-03): Once draft-03 is implemented, reject finalSize < received
 		// (and conflicting terminal final sizes) with FINAL_SIZE_ERROR instead of
 		// applying this draft-00/-01/-02 compatibility fallback.
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		const finalSize = frame.finalSize > received ? frame.finalSize : received;
 		const gap = finalSize - received;
 
@@ -1595,6 +1600,7 @@ export default class Session implements WebTransport {
 	#maxStreamPayload(id: Stream.Id, offset: bigint): bigint {
 		const peerMax = Frame.maxStreamPayload(this.#version, this.#sendFrameBudget(), id, offset);
 		const compatibilityMax = BigInt(Frame.MAX_FRAME_PAYLOAD);
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		const max = peerMax < compatibilityMax ? peerMax : compatibilityMax;
 		// Unreachable with a conforming peer: max_record_size is validated against
 		// the draft-01 minimum on arrival. Guard anyway — a zero budget would make
@@ -1635,6 +1641,7 @@ export default class Session implements WebTransport {
 			// Size from the peer's frame budget and this frame's actual header, then
 			// apply the compatibility ceiling for released receivers.
 			const payloadMax = this.#maxStreamPayload(id, flow.sendOffset);
+			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 			const chunkMax = Number(payloadMax < remaining ? payloadMax : remaining);
 
 			// Claim flow control credit (stream + connection)
