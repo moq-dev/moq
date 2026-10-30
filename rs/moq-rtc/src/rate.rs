@@ -24,6 +24,12 @@ use tokio::sync::watch;
 /// drift past it and be closed, so the steered rate leaves a tenth of the cap for both.
 const STEER: f64 = 0.9;
 
+/// How long the meter remembers the credit it discarded, for frames still assembling.
+///
+/// str0m completes a frame at most its video reordering timeout after the frame's first
+/// packet, 2 seconds by default, which moq-rtc keeps; audio waits half that.
+const ASSEMBLY: Duration = Duration::from_secs(2);
+
 /// A bitrate cap: the sustained rate media may arrive at, and the burst above it.
 ///
 /// The cap counts media payload, the depacketized frames a publisher sends. RTP, SRTP,
@@ -140,7 +146,7 @@ pub(crate) struct Meter {
 	/// Bytes still allowed before the cap plus burst is exceeded.
 	tokens: f64,
 	last: Instant,
-	/// When the bucket sat full, oldest first, kept for one burst duration.
+	/// When the bucket sat full, oldest first, kept for [`ASSEMBLY`].
 	full: VecDeque<Full>,
 }
 
@@ -222,7 +228,7 @@ impl Meter {
 		}
 		self.tokens = tokens.min(burst);
 
-		if let Some(horizon) = self.last.checked_sub(cap.burst) {
+		if let Some(horizon) = self.last.checked_sub(ASSEMBLY) {
 			while self.full.front().is_some_and(|full| full.until < horizon) {
 				self.full.pop_front();
 			}
@@ -324,6 +330,18 @@ mod tests {
 			ordered.tokens
 		);
 		assert!((meter.tokens - 20.0).abs() < 1e-6);
+	}
+
+	#[test]
+	fn a_refund_outlives_a_short_burst() {
+		let t0 = Instant::now();
+		// A 100-byte burst, and a 100-byte video frame from 0 ms that completes after nine
+		// 20-byte audio frames at 20..180 ms. Arrival order accepts all of them.
+		let mut meter = Meter::new(Some(cap().with_burst(Duration::from_millis(100))), t0);
+		for i in 1..10 {
+			assert!(meter.charge(20, t0 + Duration::from_millis(20 * i)).is_ok(), "{i}");
+		}
+		assert!(meter.charge(100, t0).is_ok());
 	}
 
 	#[test]
