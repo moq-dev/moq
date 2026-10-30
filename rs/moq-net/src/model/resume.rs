@@ -20,7 +20,10 @@
 //! A new copy is asked from where the reader got to, so it never has the groups below the
 //! reader's local floor that the copies it replaced cached. Lowering that floor asks the
 //! newest route for them through a backfill: another copy of that route, bounded to the
-//! groups the floor newly covers, and kept like a replaced copy.
+//! groups the floor newly covers, and kept like a replaced copy. A switch asks the same way
+//! for the groups below where the reader got to that it still lacks, from the lowest one: one
+//! late, reordered, or in flight on the replaced route still arrives within the reader's
+//! budget, as it would on one cursor.
 //!
 //! A group carries on across the switch through its [`Recover`]: once its copy stalls while
 //! a newer route serves, it continues from the serving route's copy of the same group at the
@@ -292,6 +295,7 @@ impl Consumer {
 				generation: None,
 				copies: Vec::new(),
 				newest: None,
+				resumed: None,
 				window,
 				datagrams: Datagrams::default(),
 				groups: (0, None),
@@ -891,6 +895,10 @@ struct Reader {
 	copies: Vec<Copy>,
 	/// The newest group handed out: where a new copy is asked to start.
 	newest: Option<u64>,
+	/// The newest group handed out when the route last changed, and where the copy serving
+	/// until then resolved the reader's ranges, until the gaps below it are backfilled: see
+	/// [`Reader::backfill_gaps`].
+	resumed: Option<(u64, Vec<Option<Resolved>>)>,
 	/// The reader's ranges resolved; see [`Reader::window`].
 	window: Window,
 	/// Identities handed out within the reader's budget, by Group and Object ID, and the highest ever.
@@ -985,6 +993,10 @@ impl Reader {
 			let replaced = sub.ranges != self.mirrored.ranges;
 			if replaced {
 				self.window = Window::new(&sub.ranges, None, &Unheld).expect("an unheld hop refuses nothing");
+				// Resolved for the old ranges, so the gaps are judged by the reader's window.
+				if let Some((_, resolved)) = &mut self.resumed {
+					resolved.clear();
+				}
 			}
 			self.mirrored = sub;
 			for copy in &mut self.copies {
@@ -1036,6 +1048,9 @@ impl Reader {
 			}) if *from == self.mirrored.ranges => resolved.clone(),
 			_ => Vec::new(),
 		};
+		// The new copy starts at the newest group handed out, so a lower one still missing is
+		// asked of its route once the reader says which; see `backfill_gaps`.
+		self.resumed = self.newest.map(|newest| (newest, resolved.clone()));
 		// The replaced copies keep delivering until the new one delivers its first group: a
 		// group they get meanwhile may be one the new route never has. See `observe`.
 		for copy in &mut self.copies {
@@ -1360,6 +1375,7 @@ impl Reader {
 			return Some(Poll::Ready(Err(Error::ProtocolViolation)));
 		}
 		self.groups_read = true;
+		self.backfill_gaps(delivered);
 		let groups = self.groups;
 		let budget = self.mirrored.budget();
 		let floor = if ordered { delivered.floor() } else { Some(0) };
@@ -1713,13 +1729,17 @@ impl Reader {
 				sub.set_range((Bound::Included(start), end.map_or(Bound::Unbounded, Bound::Excluded)));
 			}
 		}
-		self.backfill(start..passed, delivered);
+		// Resolved as the reader first had them: the newest copy's resolution starts at its
+		// resume point.
+		let resolved = self.window().resolved();
+		self.backfill(start..passed, resolved, delivered);
 	}
 
 	/// Ask the newest copy's route for the groups in `lowered` under that copy's resume point,
-	/// which a lowered floor newly covers. The copies that cached them may be gone, and that
-	/// copy never asked for them, so a bounded copy of the same route asks for just those.
-	fn backfill(&mut self, lowered: std::ops::Range<u64>, delivered: &Delivered) {
+	/// with the reader's ranges as `resolved` places them. The copies that cached them may be
+	/// gone, and that copy never asked for them, so a bounded copy of the same route asks for
+	/// just those.
+	fn backfill(&mut self, lowered: std::ops::Range<u64>, resolved: Vec<Option<Resolved>>, delivered: &Delivered) {
 		let Some(end) = self.copies.last().and_then(|newest| newest.floor) else {
 			return;
 		};
@@ -1738,9 +1758,6 @@ impl Reader {
 		}) {
 			return;
 		}
-		// Resolved as the reader first had them: the newest copy's resolution starts at its
-		// resume point.
-		let resolved = self.window().resolved();
 		let floor = Some(lowered.start);
 		let wire = self.mirrored.clamped(floor, Some(lowered.end), &resolved);
 		let copy = Copy {
@@ -1762,6 +1779,36 @@ impl Reader {
 		};
 		// The last copy stays the newest route's own.
 		self.copies.insert(self.copies.len() - 1, copy);
+	}
+
+	/// Ask the serving route for the groups below where the route last changed that the
+	/// reader still lacks: a late or reordered one, or one in flight on the route it
+	/// replaced, as one cursor on the logical track would still get. From the lowest gap
+	/// within the reader's ranges, so groups already handed out are not asked for again
+	/// below it. A gap past the reader's budget was already forgotten as handed out.
+	fn backfill_gaps(&mut self, delivered: &Delivered) {
+		let Some((resumed, resolved)) = self.resumed.take() else {
+			return;
+		};
+		let Some(floor) = self.window().floor() else {
+			return;
+		};
+		// Each range from where the copy it replaced placed it, else where the reader did.
+		let from = self
+			.mirrored
+			.clamped(Some(0), None, &resolved)
+			.ranges
+			.iter()
+			.map(|range| match range.start {
+				Anchor::Absolute(start) => start,
+				_ => floor,
+			})
+			.min()
+			.unwrap_or(floor)
+			.max(self.groups.0);
+		if let Some(gap) = delivered.gaps(from..resumed).first() {
+			self.backfill(gap.start..resumed, resolved, delivered);
+		}
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -2617,10 +2664,11 @@ mod test {
 		drop(held);
 	}
 
-	/// A returning route resumes where a fresh copy would: what it buffered while replaced,
-	/// below what another route already handed out, is not handed out again.
+	/// A returning route resumes where a fresh copy would, and what it buffered while
+	/// replaced below what another route already handed out comes through the backfill:
+	/// the late group once, and nothing handed out again.
 	#[moq_clock::test]
-	async fn a_returning_route_resumes_at_the_readers_newest() {
+	async fn a_returning_route_backfills_below_the_readers_newest() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = copy();
@@ -2636,7 +2684,7 @@ mod test {
 		write(&a, 15);
 		assert_eq!(copies(&routes), 2, "the held group keeps the first route");
 		routes.serve(a.consume());
-		assert_eq!(drain(&mut sub, false), [] as [u64; 0]);
+		assert_eq!(drain(&mut sub, false), [15]);
 		write(&a, 21);
 		assert_eq!(drain(&mut sub, false), [21]);
 		drop(held);
@@ -4333,12 +4381,12 @@ mod test {
 		assert_eq!(drain(&mut sub, false), [2998]);
 	}
 
-	/// A replacement copy asked to start at the newest group handed out keeps that
-	/// floor when the reader's floor widens: an older group its route cached was
-	/// never owed, and handing it out now would be out of order.
+	/// A group below the replacement's resume point that the reader never got is asked of
+	/// the new route, as one cursor on the logical track would still get it late, and a
+	/// widened floor hands nothing out twice.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_widened_floor_stays_above_the_replacement_resume_point() {
+	fn a_group_below_the_replacement_resume_point_is_backfilled() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = copy();
@@ -4360,7 +4408,7 @@ mod test {
 		}
 
 		sub.set_range(..);
-		assert_eq!(recv(&mut sub).sequence, 6);
+		assert_eq!(drain(&mut sub, false), [2, 6]);
 	}
 
 	/// A replacement copy keeps each range where the serving copy resolved it: the floor
@@ -4442,10 +4490,11 @@ mod test {
 	}
 
 	/// A replacement asked for a range reaching back past where the reader got to, while
-	/// still unanswered, never hands out a group the reader skipped below that point.
+	/// still unanswered, hands out each group the reader lacks below that point once: the
+	/// backfill under its resume point carries them, and nothing comes twice.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_pending_replacement_never_reads_below_the_floor() {
+	fn a_pending_replacement_hands_out_the_groups_below_the_floor_once() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = copy();
@@ -4476,7 +4525,7 @@ mod test {
 		while let Some(Ok(Some(group))) = sub.recv_group().now_or_never() {
 			rest.push(group.sequence);
 		}
-		assert_eq!(rest, vec![6]);
+		assert_eq!(rest, vec![0, 1, 2, 3, 4, 6]);
 	}
 
 	/// A copy updated while pending, then answering, hands its own resolution of the

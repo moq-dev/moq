@@ -145,7 +145,11 @@ test("returning to a route reuses its subscription and held group", async () => 
 	}
 });
 
-test("a returning route resumes where a fresh copy would", async () => {
+/**
+ * A returning route resumes where a fresh copy would, and what it buffered while replaced below
+ * what another route already handed out comes through the backfill: the late group once.
+ */
+test("a returning route backfills below the reader's newest", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const front = new Front();
@@ -169,13 +173,49 @@ test("a returning route resumes where a fresh copy would", async () => {
 		front.serve(handles[0]);
 		await clock.advance(Nano.zero);
 		expect(mirrored.mock.calls.length).toBe(1);
-		expect(drain(sub)).toEqual([]);
+		expect(drain(sub)).toEqual([15]);
 		ta.write(26);
 		expect(drain(sub)).toEqual([26]);
 		held.close();
 	} finally {
 		mirrored.mockRestore();
 		open.finish();
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+/**
+ * A group below the replacement's resume point that the reader never got is asked of the new
+ * route, as one cursor on the logical track would still get it late.
+ */
+test("a group below the replacement's resume point is backfilled", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
+	try {
+		await clock.advance(Nano.zero);
+		ta.write(5);
+		expect(drain(sub)).toEqual([5]);
+		front.serve(handles[1]);
+		await clock.advance(Nano.zero);
+		expect(drain(sub)).toEqual([]);
+		tb.write(2);
+		tb.write(6);
+		await clock.advance(Nano.zero);
+		expect(drain(sub)).toEqual([2, 6]);
+		tb.write(4);
+		await clock.advance(Nano.zero);
+		expect(drain(sub)).toEqual([4]);
+	} finally {
 		sub.close();
 		front.consumer.close();
 		for (const handle of handles) handle.close();

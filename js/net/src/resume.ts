@@ -20,7 +20,9 @@
  * A new copy is asked from where the reader got to, so it never has the groups below the reader's
  * local floor that the copies it replaced cached. Lowering that floor asks the newest route for
  * them through a backfill: another copy of that route, bounded to the groups the floor newly
- * covers, and kept like a replaced copy.
+ * covers, and kept like a replaced copy. A switch asks the same way for the groups below where the
+ * reader got to that it still lacks, from the lowest one: one late, reordered, or in flight on the
+ * replaced route still arrives within the reader's budget, as it would on one cursor.
  *
  * A group carries on across the switch through its {@link Recover}: once its copy stalls while a
  * newer route serves, it continues from the serving route's copy of the same group at the same
@@ -295,6 +297,11 @@ class Reader implements ResumeSource {
 	#start: number;
 	/** The newest group handed out: where a new copy is asked to start. */
 	#newest?: number;
+	/**
+	 * The newest group handed out when the route last changed, until the gaps below it are
+	 * backfilled; see {@link #backfillGaps}.
+	 */
+	#resumed?: number;
 	/** The last datagram handed out, which never ages until another supersedes it. */
 	#datagram?: number;
 	/**
@@ -379,6 +386,9 @@ class Reader implements ResumeSource {
 		this.#drops = [];
 		const source = route.source;
 		if (!source) return;
+		// The new copy starts at the newest group handed out, so a lower one still missing is
+		// asked of its route once a read says which; see #backfillGaps.
+		this.#resumed = this.#newest;
 		// The replaced copies keep delivering until the new one delivers its first group: a
 		// group they get meanwhile may be one the new route never has. See #observe.
 		for (const copy of this.#copies) copy.replaced = true;
@@ -532,6 +542,23 @@ class Reader implements ResumeSource {
 		);
 	}
 
+	/**
+	 * Ask the serving route for the groups below where the route last changed that the reader
+	 * still lacks: a late or reordered one, or one in flight on the route it replaced, as one
+	 * cursor on the logical track would still get. From the lowest gap within the reader's
+	 * groups, so groups already handed out are not asked for again below it. A gap past the
+	 * reader's budget was already forgotten as handed out. Mirrors the Rust `Reader::backfill_gaps`.
+	 */
+	#backfillGaps(delivered: Delivered): void {
+		const resumed = this.#resumed;
+		if (resumed === undefined) return;
+		this.#resumed = undefined;
+		const preferences = this.#shell.subscription.peek() ?? track.Subscription.default();
+		const from = Math.max(groupBounds(preferences.groups).start, this.#shell.cursor.peek().start);
+		const [gap] = delivered.gaps(from, resumed);
+		if (gap) this.#backfill(gap.start, resumed);
+	}
+
 	/** Wake parked reads, so they look again and let go of what nothing needs. */
 	wake(): void {
 		this.#changed.update((n) => n + 1);
@@ -592,6 +619,7 @@ class Reader implements ResumeSource {
 		this.#learnEnd();
 		if (this.#closed) return this.#refused ? { kind: "error", error: this.#refused } : { kind: "done" };
 		this.#groupsRead = true;
+		this.#backfillGaps(delivered);
 		if (dispositions) {
 			const dropped = this.#tryDrop(delivered);
 			if (dropped) return dropped;
