@@ -199,14 +199,13 @@ pub fn catalog(data: &[u8]) -> bool {
 		.create_track(name, info)
 		.expect("a fresh broadcast has no catalog");
 	let subscriber = track.subscribe(None);
-	let mut next: Box<dyn FnMut() -> Poll<crate::Result<Option<crate::catalog::hang::Catalog<()>>>>> =
-		if selector & 1 == 0 {
-			let mut consumer = crate::catalog::hang::Consumer::<()>::new(subscriber);
-			Box::new(move || consumer.poll_next(&waiter))
-		} else {
-			let mut consumer = crate::catalog::msf::Consumer::<()>::new(subscriber);
-			Box::new(move || consumer.poll_next(&waiter))
-		};
+	let mut next: Box<dyn FnMut() -> Poll<CatalogUpdate>> = if selector & 1 == 0 {
+		let mut consumer = crate::catalog::hang::Consumer::<()>::new(subscriber);
+		Box::new(move || consumer.poll_next(&waiter))
+	} else {
+		let mut consumer = crate::catalog::msf::Consumer::<()>::new(subscriber);
+		Box::new(move || consumer.poll_next(&waiter))
+	};
 
 	let mut group = track.append_group().expect("a fresh track takes a group");
 	let mut accepted = false;
@@ -225,6 +224,9 @@ pub fn catalog(data: &[u8]) -> bool {
 	}
 	accepted
 }
+
+/// What a catalog consumer yields when polled.
+type CatalogUpdate = crate::Result<Option<crate::catalog::hang::Catalog<()>>>;
 
 /// Build every audio and video rendition's container, returning whether all of them parsed.
 fn containers(catalog: &crate::catalog::hang::Catalog<()>) -> bool {
