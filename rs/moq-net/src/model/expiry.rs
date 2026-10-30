@@ -385,7 +385,10 @@ mod test {
 		assert!(wakes.watch_landing(12, &waiter), "a group landed above it");
 		assert!(!wakes.watch_landing(13, &waiter), "nothing landed above it");
 		assert!(wakes.land(u64::MAX));
-		assert!(wakes.watch_landing(u64::MAX - 1, &waiter), "the last sequence is above it");
+		assert!(
+			wakes.watch_landing(u64::MAX - 1, &waiter),
+			"the last sequence is above it"
+		);
 		wakes.wake_all();
 		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));
 	}
