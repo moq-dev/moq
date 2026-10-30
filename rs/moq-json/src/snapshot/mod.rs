@@ -207,8 +207,7 @@ mod test {
 	fn next_preserves_intermediate_states() {
 		let (mut producer, mut track) = producer(cfg(true));
 		let mut subscription = track.subscription();
-		// Every state, in order: a history read takes a day-long budget.
-		subscription.max_delay = Some(std::time::Duration::from_secs(24 * 60 * 60));
+		subscription.max_delay = None;
 		track.update(subscription).unwrap();
 		for n in [1, 2, 3] {
 			producer

@@ -180,8 +180,7 @@ mod timestamps {
 				.unwrap();
 			let mut subscriber = track.subscribe(None);
 			let mut subscription = subscriber.subscription();
-			// Every state, in order: a history read takes a day-long budget.
-			subscription.max_delay = Some(std::time::Duration::from_secs(24 * 60 * 60));
+			subscription.max_delay = None;
 			subscriber.update(subscription).unwrap();
 			let mut producer = crate::snapshot::Producer::new(track, crate::snapshot::Config::default());
 			let mut consumer = Consumer::<serde_json::Value>::new(subscriber, Default::default());

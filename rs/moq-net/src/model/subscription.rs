@@ -27,10 +27,8 @@ pub struct Subscription {
 	/// 7 is abandoned, timed or not. A larger budget tolerates that much reordering before
 	/// giving up. This never *adds* delay, since the bound is only reached once newer data
 	/// is already that far ahead. `None` is the publisher's
-	/// [`Info::max_age`](crate::track::Info::max_age) alone, which an arrival-order reader
-	/// reaching back for history may use. A [`track::Ordered`](crate::track::Ordered) reader
-	/// refuses `None` and reads history with a long finite budget instead, such as a day;
-	/// see its docs for where that is safe.
+	/// [`Info::max_age`](crate::track::Info::max_age) alone, what a reader reaching back
+	/// for history wants.
 	///
 	/// This is the `Subscriber Max Age` on the wire, and it is stored here verbatim so
 	/// what was asked for stays readable. Encoded as milliseconds in a QUIC varint, so
