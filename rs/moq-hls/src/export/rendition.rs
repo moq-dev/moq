@@ -670,6 +670,15 @@ impl Rendition {
 		self.live.end();
 	}
 
+	/// End the window at the segments listed now, because another publisher run replaced this
+	/// one, and stop following its records: what the replaced run lists later is never listed.
+	pub(crate) fn cut(&self) {
+		if let Some(watcher) = self.watcher.lock().expect("watcher lock poisoned").take() {
+			watcher.abort();
+		}
+		self.live.cut();
+	}
+
 	/// Fail this rendition's window with `err`.
 	pub(crate) fn fail(&self, err: crate::Error) {
 		self.live.fail(err);

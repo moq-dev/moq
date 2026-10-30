@@ -90,6 +90,9 @@ struct Feed {
 	baseline: Option<u64>,
 	/// The catalog failed; late-created renditions start failed.
 	failed: Option<crate::Error>,
+	/// Another publisher run replaced this one, so every window ended where it was (see
+	/// [`Producer::cut`]) and no later failure reaches them.
+	cut: bool,
 	/// The estimated wall-clock time of `pts` 0, anchored when the first segment was listed
 	/// (assuming it had just ended). The DASH manifest's `availabilityStartTime` falls back to
 	/// this when the catalog declares no `clock`; set once so reloads see a stable presentation,
@@ -143,6 +146,7 @@ impl Producer {
 					discontinuities: Discontinuities::default(),
 					baseline: None,
 					failed: None,
+					cut: false,
 					anchor: None,
 					generation: None,
 					window,
@@ -249,6 +253,20 @@ impl Producer {
 		self.close();
 	}
 
+	/// End the rendition set and every window at what is listed now, because another publisher
+	/// run replaced this one, which may go on publishing. A cursor drains the listed segments and
+	/// then ends as after a clean finish; one already failed keeps its failure.
+	///
+	/// Closes the set first: that waits out a [`sync`](Self::sync) in flight, so no rendition
+	/// joins after its siblings were cut.
+	pub fn cut(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.finished.get_or_insert(Ok(()));
+		}
+		self.close();
+		self.fanout.cut();
+	}
+
 	/// Close the channel, signalling consumers that no more renditions will appear.
 	///
 	/// Deliberately does NOT cascade into the renditions' own segment windows: each ends with its
@@ -310,10 +328,23 @@ impl Fanout {
 		});
 	}
 
+	/// End every window, including those only a cursor still holds (see [`Producer::cut`]).
+	fn cut(&self) {
+		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
+		feed.cut = true;
+		feed.targets.retain(|target| {
+			let Some(rendition) = target.upgrade() else {
+				return false;
+			};
+			rendition.cut();
+			true
+		});
+	}
+
 	/// Fail every window with `err`, so no playlist reads as finished.
 	fn fail(&self, err: crate::Error) {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		if feed.failed.is_some() {
+		if feed.failed.is_some() || feed.cut {
 			return;
 		}
 		feed.failed = Some(err.clone());

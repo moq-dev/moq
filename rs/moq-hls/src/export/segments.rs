@@ -84,6 +84,8 @@ struct State {
 	discontinuity: u64,
 	/// The record track ended: the rendition is over (`EXT-X-ENDLIST`).
 	ended: bool,
+	/// The run was replaced: the listed rows are final, so nothing appends, trims, or fails them.
+	cut: bool,
 	/// The record track or the catalog failed, so every listing refuses with this error.
 	failed: Option<crate::Error>,
 	/// Bumped whenever the window is cleared, so a cursor can tell its position is stale.
@@ -215,6 +217,7 @@ impl Producer {
 				sequence: start,
 				discontinuity: 0,
 				ended: false,
+				cut: false,
 				failed: None,
 				resets: 0,
 				produced: 0,
@@ -227,6 +230,9 @@ impl Producer {
 		let Ok(mut state) = self.state.write() else {
 			return;
 		};
+		if state.cut {
+			return;
+		}
 
 		if let Some(back) = state.rows.back() {
 			// A backward jump in pts or segment number means the publisher restarted its records;
@@ -257,7 +263,9 @@ impl Producer {
 
 	/// Retire the prefix through segment `through`, so the playlist stays consecutive.
 	pub fn retire(&self, through: u64) {
-		if let Ok(mut state) = self.state.write() {
+		if let Ok(mut state) = self.state.write()
+			&& !state.cut
+		{
 			state.rows.retain(|row| row.segment > through);
 			state.sequence = state
 				.rows
@@ -268,7 +276,9 @@ impl Producer {
 
 	/// Clear every retained row after an unrecoverable gap in the records.
 	pub fn clear(&self) {
-		if let Ok(mut state) = self.state.write() {
+		if let Ok(mut state) = self.state.write()
+			&& !state.cut
+		{
 			state.rows.clear();
 			state.resets += 1;
 		}
@@ -284,9 +294,22 @@ impl Producer {
 	/// Mark the window failed with `err`: every listing refuses with it instead of ending, and
 	/// cursors return it once drained. No row is pushed after.
 	pub fn fail(&self, err: crate::Error) {
-		if let Ok(mut state) = self.state.write() {
+		if let Ok(mut state) = self.state.write()
+			&& !state.cut
+		{
 			state.failed.get_or_insert(err);
 		}
+	}
+
+	/// End the window at the rows listed now, because another run replaced this one: the
+	/// playlist gets `EXT-X-ENDLIST`, cursors drain those rows and then end, and whatever the
+	/// replaced run sends later is refused. A window that already failed keeps its failure.
+	pub fn cut(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.cut = true;
+			state.ended = true;
+		}
+		self.close();
 	}
 
 	/// Why the window failed, if it did.
@@ -598,6 +621,31 @@ mod tests {
 
 		live.end();
 		assert!(live.window().ended);
+	}
+
+	// A cut freezes the listed rows: later records, trims, resets, and failures are refused, and
+	// the window reads as ended. One that failed first keeps its failure.
+	#[test]
+	fn a_cut_window_keeps_what_it_listed() {
+		let live = Producer::new(0);
+		let window = Duration::from_secs(30);
+		live.push(row(0, 0, 0, 2_000), window);
+		live.push(row(1, 1, 2_000, 2_000), window);
+		live.cut();
+		live.push(row(2, 2, 4_000, 2_000), window);
+		live.retire(0);
+		live.clear();
+		live.fail(crate::Error::IncompleteRecording);
+		let snapshot = live.window();
+		assert!(snapshot.ended);
+		assert!(snapshot.failed.is_none());
+		let segments: Vec<_> = snapshot.segments.iter().map(|row| row.segment).collect();
+		assert_eq!(segments, [0, 1]);
+
+		let failed = Producer::new(0);
+		failed.fail(crate::Error::IncompleteRecording);
+		failed.cut();
+		assert!(failed.failure().is_some());
 	}
 
 	#[test]

@@ -270,13 +270,17 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 	let mut config = moq_hls::export::Config::default();
 	config.window = args.window.into();
 
+	// Serving and recording share one server, which follows the publisher instances: a recording
+	// ends at what its instance listed once another takes the broadcast over.
+	let server = moq_hls::Server::new(scoped.clone(), config);
+
 	let tls = args.tls.into_config()?;
 	let listen = match (args.listen, &args.output) {
 		(None, Some(_)) => None,
 		(listen, _) => Some(listen.unwrap_or(LISTEN)),
 	};
 	let serving = match listen {
-		Some(listen) => Some(serve(scoped.clone(), config.clone(), listen, tls, &args.cors)?),
+		Some(listen) => Some(serve(server.clone(), listen, tls, &args.cors)?),
 		None => {
 			anyhow::ensure!(
 				tls.cert.is_empty() && tls.key.is_empty() && tls.generate.is_empty() && tls.root.is_empty(),
@@ -298,13 +302,15 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 		};
 		// Wait for a covering route rather than asking on the spot: a recording started beside
 		// its publisher, or over a session that discovers only watched paths, sees no route yet.
-		let broadcast = scoped
+		scoped
 			.follow(name.as_str(), None)?
 			.available()
 			.await
 			.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
-		let source = moq_mux::Source::new(scoped.clone(), broadcast);
-		let broadcaster = moq_hls::export::Broadcaster::new(source, config);
+		let broadcaster = server
+			.broadcaster(&name)
+			.await
+			.with_context(|| format!("broadcast `{name}` went offline before recording"))?;
 		tracing::info!(%name, "recording HLS");
 		recording.run(&broadcaster).await
 	};
@@ -316,13 +322,11 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 
 /// Bind the HLS listener, returning the server to run.
 fn serve(
-	origin: moq_net::origin::Consumer,
-	config: moq_hls::export::Config,
+	server: moq_hls::Server,
 	listen: SocketAddr,
 	tls: moq_tokio::tls::Listen,
 	cors: &crate::web::Cors,
 ) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + use<>> {
-	let server = moq_hls::Server::new(origin, config);
 	let app = server.router().layer(cors.layer([Method::GET])?);
 	let tls = if tls.cert.is_empty() && tls.generate.is_empty() {
 		None

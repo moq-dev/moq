@@ -370,6 +370,20 @@ impl Broadcaster {
 		}
 	}
 
+	/// End every playlist and recording cursor at the segments listed now, because another
+	/// publisher run took the broadcast over, and stop following this one's catalog and records.
+	/// The replaced publisher may keep sending, so nothing else would end them.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature follows takeovers")
+	)]
+	pub(crate) fn replaced(&self) {
+		if let Some(watcher) = self.watcher.lock().unwrap().take() {
+			watcher.abort();
+		}
+		self.renditions.cut();
+	}
+
 	/// Whether the current catalog contains no servable renditions (serve path).
 	#[cfg_attr(
 		not(feature = "server"),

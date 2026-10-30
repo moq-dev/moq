@@ -478,6 +478,94 @@ mod tests {
 		assert_eq!(status(&app, &new_playlist).await, StatusCode::OK);
 	}
 
+	/// A replaced instance's recording ends at the segments it listed before the takeover, even
+	/// while its publisher keeps sending, and the replacement records at once without waiting
+	/// on that drain.
+	#[tokio::test(start_paused = true)]
+	async fn a_replaced_recording_ends_at_what_it_listed() {
+		let origin = moq_tokio::origin::spawn();
+		let old = origin.create_broadcast("live").expect("publish");
+		old.announce(run()).expect("announce");
+		let (_old_catalog, _, _old_track, mut old_media) =
+			publish_video(&mut old.broadcast().clone(), video_config(), timed());
+		// Keyframes at 0, 2, and 4 s list segments 0 and 1; the third waits for its successor.
+		write_three_gops(&mut old_media);
+
+		let server = Server::new(origin.consume(), crate::export::Config::default());
+		let app = server.router();
+		let old_playlist = format!("/live/@{RUN}/video/video0/media.m3u8");
+		wait_listed(&app, &old_playlist, "seg/53e0aafd.1.m4s").await;
+		let replaced = server.broadcaster("live").await.expect("announced");
+		let mut old_renditions = replaced.renditions();
+		let old_rendition = replaced.rendition(Kind::Video, "video0").expect("listed");
+		// Held, not read, until the replacement has recorded.
+		let mut old_segments = old_rendition.segments();
+
+		let next = moq_net::Epoch::mint();
+		let new = origin.create_broadcast("live").expect("publish");
+		new.announce(moq_net::origin::Route::default().with_epoch(next.clone()))
+			.expect("announce");
+		let (_new_catalog, _, _new_track, mut new_media) =
+			publish_video(&mut new.broadcast().clone(), video_config(), timed());
+		write_three_gops(&mut new_media);
+
+		let deadline = tokio::time::Instant::now() + TIMEOUT;
+		let successor = loop {
+			let current = server.broadcaster("live").await.expect("announced");
+			if current.instance().as_ref() == next.as_str() {
+				break current;
+			}
+			assert!(tokio::time::Instant::now() < deadline, "the replacement was never served");
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		};
+		let mut renditions = successor.renditions();
+		let rendition = loop {
+			match tokio::time::timeout(TIMEOUT, renditions.next()).await {
+				Ok(Ok(Some(crate::export::renditions::Event::Added(rendition)))) => break rendition,
+				Ok(Ok(Some(_))) => continue,
+				_ => panic!("the replacement listed no rendition"),
+			}
+		};
+		let mut segments = rendition.segments();
+		let first = tokio::time::timeout(TIMEOUT, segments.next())
+			.await
+			.expect("the replacement waited on the old drain")
+			.unwrap()
+			.expect("the replacement recorded");
+		assert_eq!(first.segment, 0);
+
+		// The old publisher keeps going: these would list segments 2 and 3.
+		old_media.write(vp8_frame(6_000_000, true)).unwrap();
+		old_media.write(vp8_frame(8_000_000, true)).unwrap();
+		old_media.write(vp8_frame(10_000_000, true)).unwrap();
+		tokio::time::sleep(Duration::from_secs(1)).await;
+
+		let mut recorded = Vec::new();
+		while let Some(segment) = tokio::time::timeout(TIMEOUT, old_segments.next())
+			.await
+			.expect("the replaced recording never ended")
+			.unwrap()
+		{
+			assert!(segment.media.is_some(), "listed media drains");
+			recorded.push(segment.segment);
+		}
+		assert_eq!(recorded, [0, 1], "exactly what was listed before the takeover");
+		let playlist = old_rendition.media_playlist(None).unwrap().expect("listed");
+		assert!(playlist.contains("#EXT-X-ENDLIST"), "{playlist}");
+		assert!(!playlist.contains("seg/53e0aafd.2.m4s"), "{playlist}");
+
+		let mut added = 0;
+		while let Some(event) = tokio::time::timeout(TIMEOUT, old_renditions.next())
+			.await
+			.expect("the replaced rendition set never ended")
+			.unwrap()
+		{
+			added += matches!(event, crate::export::renditions::Event::Added(_)) as usize;
+		}
+		assert_eq!(added, 1);
+		assert!(!replaced.is_closed(), "its publisher is still sending");
+	}
+
 	/// Failed records answer every listing with an uncacheable error rather than ending it as a
 	/// complete recording.
 	#[tokio::test(start_paused = true)]
