@@ -487,6 +487,12 @@ export class Consumer {
 
 			const age = max - min;
 			if (age <= threshold) break;
+			// Before the first frame, a group may cover the start's reach though it began before it: it
+			// is stale only once its successor starts a whole budget behind the newest content.
+			if (this.#warmed === undefined) {
+				const nextStart = this.#groups[1].start;
+				if (nextStart === undefined || max - nextStart < threshold) break;
+			}
 
 			this.#groups.shift();
 			this.#active = this.#groups[0]?.consumer.sequence;

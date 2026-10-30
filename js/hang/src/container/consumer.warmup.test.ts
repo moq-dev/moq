@@ -111,11 +111,23 @@ test("the start needs no wait once a group covers the reach", async () => {
 	expect(frames(results)).toEqual(["5@5000000", "5@5500000"]);
 });
 
-test("the age skip dropping a group ends the wait", async () => {
+test("the start keeps a group that began before the reach but covers it", async () => {
+	const { track, results, flush } = setup(200, 300);
+	group(track, 5, [5_000_000]);
+	await flush();
+	// Group 4 begins 600ms before the newest content, past the 500ms reach, yet covers its 4.5s target.
+	group(track, 4, [4_400_000, 4_600_000, 4_900_000]).finish();
+	await flush();
+	expect(frames(results)[0]).toEqual("4@4400000");
+});
+
+test("the age skip still drops a group its successor covers", async () => {
 	const { track, results, flush } = setup();
 	group(track, 5, [5_000_000]);
 	await flush();
+	// Group 6 starts a whole budget behind group 7's content, so group 5 cannot cover the reach.
 	group(track, 6, [5_000_000 + (BUDGET + 100) * 1000]);
+	group(track, 7, [5_000_000 + (2 * BUDGET + 200) * 1000]);
 	await flush();
-	expect(frames(results)).toEqual(["6@5600000"]);
+	expect(frames(results)[0]).toEqual("6@5600000");
 });

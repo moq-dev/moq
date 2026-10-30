@@ -330,7 +330,14 @@ impl<F: Container> Consumer<F> {
 	/// A subscription that names a start already waits for it, a live start takes the newest group,
 	/// and one with no max delay reaches back for history, starting at the lowest group that arrived.
 	pub fn with_warmup(mut self, warmup: std::time::Duration) -> Self {
-		self.max_delay = self.max_delay.saturating_sub(warmup);
+		// Carve the warmup out of what was asked for, then clamp to retention as `new` does, so a
+		// budget the track can keep is not cut by the clamp too.
+		if let Some(track) = &self.track {
+			let requested = track.subscription().max_delay.unwrap_or(std::time::Duration::MAX);
+			self.max_delay = requested
+				.saturating_sub(warmup)
+				.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
+		}
 		self.warmup = warmup;
 		self
 	}
@@ -3073,6 +3080,17 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		assert_eq!(frame.timestamp, ts(100_000));
+	}
+
+	/// The warmup is carved out of the requested budget before the retention clamp, so a max delay
+	/// the track can keep stays whole.
+	#[tokio::test]
+	async fn the_warmup_is_carved_before_the_retention_clamp() {
+		let mut info = hang::container::track_info(hang::catalog::PRIORITY.audio);
+		info.max_age = Some(Duration::from_secs(1));
+		let mut track = track_producer("test", info);
+		let consumer = reach_consumer(&mut track, Duration::from_secs(1), Duration::from_millis(300));
+		assert_eq!(consumer.max_delay, Duration::from_secs(1));
 	}
 
 	/// A quiet track with no earlier group starts once its first group arrived a whole reach ago.
