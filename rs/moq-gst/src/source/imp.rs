@@ -406,6 +406,8 @@ struct Pads(Arc<Mutex<PadTable>>);
 #[derive(Default)]
 struct PadTable {
 	pads: HashMap<Rendition, PadHandle>,
+	/// The actors of retired pads, until each has ended its pad, so a release still waits for them.
+	ending: Vec<tokio::task::JoinHandle<()>>,
 	/// Only a listed rendition takes a pad, or keeps one once its plays are done.
 	listed: HashSet<Rendition>,
 }
@@ -414,14 +416,21 @@ struct PadTable {
 struct PadHandle {
 	commands: mpsc::UnboundedSender<Command>,
 	task: tokio::task::JoinHandle<()>,
+	/// A [`Command::Retire`] is queued, so a further delisting needs none.
+	retiring: bool,
 }
+
+/// A play handed to a [`PadActor`] on its turn, with where to report why it exited.
+type Handoff = (Box<Play>, oneshot::Sender<Exit>);
 
 /// What a [`PadActor`] takes, in the order it was sent.
 enum Command {
-	/// Stream a reader's track to the pad until it ends or the reader stops, then report why.
-	Play(Box<Play>, oneshot::Sender<Exit>),
+	/// A reader's turn: the actor asks it for its play once the commands before are done, then
+	/// streams its track to the pad until it ends or the reader stops. A reader cancelled while it
+	/// waits drops its turn, and its subscription with it.
+	Play(oneshot::Sender<oneshot::Sender<Handoff>>),
 	/// The catalog stopped listing the rendition: end the pad with EOS, unless it is listed again
-	/// by the time the plays sent before this are done.
+	/// by the time the commands before are done.
 	Retire,
 	/// The session ended: remove the pad, after an EOS if `eos`.
 	Release { eos: bool },
@@ -434,33 +443,49 @@ impl Pads {
 	/// Play `play` on the rendition's pad, created if the session has none, once the plays sent
 	/// before it are done. [`Exit::Unlisted`] if the latest catalog does not list the rendition.
 	async fn play(&self, element: &glib::WeakRef<super::MoqSrc>, rendition: &Rendition, play: Play) -> Exit {
-		match self.send(element, rendition, play) {
-			Ok(done) => done.await.unwrap_or(Exit::Done),
-			Err(exit) => exit,
+		let turn = match self.queue(element, rendition, &play.cancel) {
+			Ok(turn) => turn,
+			Err(exit) => return exit,
+		};
+		let mut cancel = play.cancel.clone();
+		let handoff = tokio::select! {
+			biased;
+			_ = cancel.changed() => return Exit::Done,
+			handoff = turn => match handoff {
+				Ok(handoff) => handoff,
+				// The actor ended the pad first.
+				Err(_) => return Exit::Done,
+			},
+		};
+		let (done, exit) = oneshot::channel();
+		if handoff.send((Box::new(play), done)).is_err() {
+			return Exit::Done;
 		}
+		exit.await.unwrap_or(Exit::Done)
 	}
 
-	fn send(
+	/// Queue a turn on the rendition's pad, creating it if the session has none.
+	fn queue(
 		&self,
 		element: &glib::WeakRef<super::MoqSrc>,
 		rendition: &Rendition,
-		play: Play,
-	) -> std::result::Result<oneshot::Receiver<Exit>, Exit> {
+		cancel: &watch::Receiver<bool>,
+	) -> std::result::Result<oneshot::Receiver<oneshot::Sender<Handoff>>, Exit> {
 		let obj = element.upgrade().ok_or(Exit::Done)?;
 		let mut table = self.0.lock().unwrap();
 		// Checked under the lock [`Self::list`] takes, so a reader that an update cancels or delists
 		// never plays behind the update's retirements.
-		if *play.cancel.borrow() {
+		if *cancel.borrow() {
 			return Err(Exit::Done);
 		}
 		if !table.listed.contains(rendition) {
 			return Err(Exit::Unlisted);
 		}
-		let (done, exit) = oneshot::channel();
+		let (turn, called) = oneshot::channel();
 		if let Some(handle) = table.pads.get(rendition) {
 			// The actor only leaves once it is out of the table.
-			let _ = handle.commands.send(Command::Play(Box::new(play), done));
-			return Ok(exit);
+			let _ = handle.commands.send(Command::Play(turn));
+			return Ok(called);
 		}
 
 		let kind = rendition.0;
@@ -472,7 +497,7 @@ impl Pads {
 			.name(kind.next_pad_name())
 			.build();
 		let (commands, inbox) = mpsc::unbounded_channel();
-		let _ = commands.send(Command::Play(Box::new(play), done));
+		let _ = commands.send(Command::Play(turn));
 		let actor = PadActor {
 			pads: Arc::downgrade(&self.0),
 			rendition: rendition.clone(),
@@ -480,8 +505,15 @@ impl Pads {
 			added: false,
 		};
 		let task = RUNTIME.spawn(STREAMING.scope(element.clone(), actor.run(inbox)));
-		table.pads.insert(rendition.clone(), PadHandle { commands, task });
-		Ok(exit)
+		table.pads.insert(
+			rendition.clone(),
+			PadHandle {
+				commands,
+				task,
+				retiring: false,
+			},
+		);
+		Ok(called)
 	}
 
 	/// Whether the latest catalog lists the rendition.
@@ -498,11 +530,14 @@ impl Pads {
 		if *cancel.borrow() {
 			return;
 		}
-		// Every pad is of a rendition listed when it was made or last retired, so a pad is retired
-		// once per delisting.
+		// A pad is made listed, and an actor finding it listed again keeps it, so only a delisting
+		// retires one. A retirement already queued judges the listing when its turn comes.
 		let delisted = std::mem::replace(&mut table.listed, listed);
-		for rendition in delisted.difference(&table.listed) {
-			if let Some(handle) = table.pads.get(rendition) {
+		let PadTable { pads, listed, .. } = &mut *table;
+		for rendition in delisted.difference(listed) {
+			if let Some(handle) = pads.get_mut(rendition)
+				&& !std::mem::replace(&mut handle.retiring, true)
+			{
 				let _ = handle.commands.send(Command::Retire);
 			}
 		}
@@ -520,12 +555,15 @@ impl Pads {
 
 	/// Remove every pad once nothing streams to them any more, after an EOS if `eos`.
 	async fn release(&self, eos: bool) {
-		let pads = std::mem::take(&mut self.0.lock().unwrap().pads);
+		let (pads, ending) = {
+			let mut table = self.0.lock().unwrap();
+			(std::mem::take(&mut table.pads), std::mem::take(&mut table.ending))
+		};
 		for handle in pads.values() {
 			let _ = handle.commands.send(Command::Release { eos });
 		}
-		for handle in pads.into_values() {
-			let _ = handle.task.await;
+		for task in pads.into_values().map(|handle| handle.task).chain(ending) {
+			let _ = task.await;
 		}
 	}
 }
@@ -545,15 +583,28 @@ impl PadActor {
 	async fn run(mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
 		while let Some(command) = commands.recv().await {
 			match command {
-				Command::Play(play, done) => {
+				Command::Play(turn) => {
+					let (handoff, handed) = oneshot::channel();
+					// A reader cancelled while it waited dropped its turn, or drops this ask.
+					if turn.send(handoff).is_err() {
+						continue;
+					}
+					let Ok((play, done)) = handed.await else {
+						continue;
+					};
 					let exit = self.play(*play).await;
 					let _ = done.send(exit);
 				}
 				Command::Retire => {
 					if self.retired() {
-						// A play sent before the retirement removed it from the table drops here,
-						// which its reader takes as done.
-						return self.end(true);
+						// A turn queued behind the retirement drops here, which its reader takes as
+						// done.
+						self.end(true);
+						if let Some(pads) = self.pads.upgrade() {
+							let id = tokio::task::id();
+							pads.lock().unwrap().ending.retain(|task| task.id() != id);
+						}
+						return;
 					}
 				}
 				Command::Release { eos } => return self.end(eos),
@@ -602,25 +653,31 @@ impl PadActor {
 		Exit::Done
 	}
 
-	/// Whether the rendition is still delisted, taking the pad out of the session if so. A pad the
-	/// session already released is ended by its release instead.
+	/// Whether the rendition is still delisted, taking the pad out of the session if so. Its actor
+	/// stays in [`PadTable::ending`] until it ended the pad. A pad the session already released is
+	/// ended by its release instead.
 	fn retired(&self) -> bool {
 		let Some(pads) = self.pads.upgrade() else {
 			return false;
 		};
 		let mut table = pads.lock().unwrap();
-		let own = table
-			.pads
-			.get(&self.rendition)
-			.is_some_and(|handle| handle.task.id() == tokio::task::id());
-		if !own || table.listed.contains(&self.rendition) {
+		let PadTable { pads, ending, listed } = &mut *table;
+		let Some(handle) = pads
+			.get_mut(&self.rendition)
+			.filter(|handle| handle.task.id() == tokio::task::id())
+		else {
+			return false;
+		};
+		handle.retiring = false;
+		if listed.contains(&self.rendition) {
 			return false;
 		}
-		table.pads.remove(&self.rendition);
+		let handle = pads.remove(&self.rendition).expect("checked above");
+		ending.push(handle.task);
 		true
 	}
 
-	fn end(self, eos: bool) {
+	fn end(&self, eos: bool) {
 		if eos {
 			let _ = tokio::task::block_in_place(|| self.pad.push_event(gst::event::Eos::new()));
 		}
