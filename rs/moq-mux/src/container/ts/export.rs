@@ -444,13 +444,16 @@ impl Track {
 		}
 		let leading = match stream_type {
 			Some(stream_type) => {
-				self.leading_floor.is_some_and(|(floor, _)| pending.frame.timestamp < floor)
+				self.leading_floor
+					.is_some_and(|(floor, _)| pending.frame.timestamp < floor)
 					&& !radl(stream_type, self.source.description(), &pending.frame)
 			}
 			None => {
 				let picture = Mpeg2Picture::read(&pending.frame.payload);
 				if pending.frame.keyframe {
-					self.open_gop = picture.filter(|picture| picture.gop == Some(false)).map(|picture| picture.temporal_reference);
+					self.open_gop = picture
+						.filter(|picture| picture.gop == Some(false))
+						.map(|picture| picture.temporal_reference);
 				} else if picture.is_some_and(|picture| picture.gop.is_some()) {
 					// A GOP inside the group: its leading pictures reference only the group's own.
 					self.open_gop = None;

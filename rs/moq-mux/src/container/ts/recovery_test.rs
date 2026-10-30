@@ -140,7 +140,16 @@ impl Encode {
 				x265 = format!("{params}:log-level=error");
 				args.extend(["-c:v", "libx265", "-x265-params", &x265]);
 			}
-			Video::Mpeg2 => args.extend(["-c:v", "mpeg2video", "-g", "12", "-bf", "2", "-sc_threshold", "1000000000"]),
+			Video::Mpeg2 => args.extend([
+				"-c:v",
+				"mpeg2video",
+				"-g",
+				"12",
+				"-bf",
+				"2",
+				"-sc_threshold",
+				"1000000000",
+			]),
 		}
 		args.extend([
 			"-preset",
@@ -473,8 +482,12 @@ async fn record(profile: Profile) -> Recording {
 	import.finish().unwrap();
 	let snapshot = catalog.snapshot();
 
-	let whole = (snapshot.ext.mpegts.tracks.iter())
-		.filter(|(_, track)| track.pes_packet.as_ref().is_some_and(|pes| matches!(pes.stream_type, 0x01 | 0x02)));
+	let whole = (snapshot.ext.mpegts.tracks.iter()).filter(|(_, track)| {
+		track
+			.pes_packet
+			.as_ref()
+			.is_some_and(|pes| matches!(pes.stream_type, 0x01 | 0x02))
+	});
 	let names = (snapshot.video.renditions.keys().chain(whole.map(|(name, _)| name)))
 		.map(|name| (name.clone(), true))
 		.chain(snapshot.audio.renditions.keys().map(|name| (name.clone(), false)));
