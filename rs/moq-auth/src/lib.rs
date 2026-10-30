@@ -12,6 +12,8 @@
 //!   policy a relay used to: keys, public rules, an mTLS grant, tiers, and limits.
 //! - [`Claims`], [`Key`], and [`KeySet`]: the JWT a client presents in its query, with
 //!   the keys that sign and verify it. `moq auth generate|sign|verify` is the CLI.
+//! - [`PeerGrant`]: the relay's ES256 or EdDSA statement of a session's scope, bound to
+//!   its presenter key, that another client verifies with [`KeySet::to_peer_set`].
 //!
 //! Grants and claims name paths with [`Pattern`]s from `moq-pattern`, re-exported here:
 //! `foo` is one broadcast, `foo/**` is a subtree, `**` is everything.
@@ -27,6 +29,7 @@ mod grant;
 mod key;
 mod key_id;
 mod path;
+mod peer;
 mod request;
 mod set;
 mod wire;
@@ -50,5 +53,6 @@ pub use grant::*;
 pub use key::*;
 pub use key_id::*;
 pub use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment, Specificity};
+pub use peer::*;
 pub use request::*;
 pub use set::*;
