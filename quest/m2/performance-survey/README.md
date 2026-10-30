@@ -160,8 +160,7 @@ No duplicate quest or workflow edit belongs here.
   [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md),
   [NVENC pooling](/quest/m2/nvenc-pool.md), and
   [watch worker planning](/quest/m2/plan-watch-worker.md) retain their scopes.
-- [Route wakes](/quest/m2/route-wakes.md),
-  [keyed prefix polling](/quest/m2/keyed-prefix-polling.md), and
+- [Route wakes](/quest/m2/route-wakes.md) and
   [front parking](/quest/m2/origin-front-parks.md) own discovery scans/wakes.
 - The [recurring audit](/quest/m2/audit-perf.md) retains real congestion-
   controller/loss-recovery coverage, broader importer/container coverage,
