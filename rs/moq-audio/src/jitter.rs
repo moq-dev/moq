@@ -57,7 +57,9 @@ impl Target {
 	pub(crate) fn new(delay: Duration, estimate: bool, advertised: Option<Duration>) -> Self {
 		match estimate {
 			false => Self::Fixed(millis(delay)),
-			true => Self::Auto(Box::new(Estimator::new(millis(advertised.unwrap_or_default().max(delay))))),
+			true => Self::Auto(Box::new(Estimator::new(millis(
+				advertised.unwrap_or_default().max(delay),
+			)))),
 		}
 	}
 
@@ -430,7 +432,11 @@ pub(crate) mod tests {
 	fn conforms_to_the_corpus() {
 		for name in CORPUS {
 			let case = case(name);
-			let mut target = Target::new(case.delay.map_or(Duration::ZERO, duration), case.delay.is_none(), case.advertised.map(duration));
+			let mut target = Target::new(
+				case.delay.map_or(Duration::ZERO, duration),
+				case.delay.is_none(),
+				case.advertised.map(duration),
+			);
 			target.set_frame(case.frame);
 
 			let series = case.series();

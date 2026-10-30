@@ -919,7 +919,10 @@ async fn raw_audio_decode_delay() {
 			"microphone".into(),
 			rendition.clone(),
 			MoqAudioDecoderOutput {
-				delay: delay.map(|min| crate::media::MoqDelay { min, max: Some(Duration::ZERO) }),
+				delay: delay.map(|min| crate::media::MoqDelay {
+					min,
+					max: Some(Duration::ZERO),
+				}),
 				estimate: delay.is_none(),
 				..audio_output()
 			},

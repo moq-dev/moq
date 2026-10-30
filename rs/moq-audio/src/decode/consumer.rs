@@ -1316,9 +1316,9 @@ mod tests {
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 		let options = Options {
 			delay: Delay {
-					max: Some(Duration::from_secs(1)),
-					..Delay::default()
-				},
+				max: Some(Duration::from_secs(1)),
+				..Delay::default()
+			},
 			..Options::new()
 		};
 		let mut consumer = Consumer::new(&broadcast.consume(), &catalog, "audio", options)

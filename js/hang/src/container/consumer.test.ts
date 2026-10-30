@@ -391,7 +391,10 @@ test("Legacy Producer discontinuity on a data track reads as an end at the edge"
 test("Consumer refuses a data marker that shares its group", async () => {
 	for (const second of [new Uint8Array(), encodeLegacyFrame(10_000 as Micro, new Uint8Array([1]))]) {
 		const track = new Track.Producer("data");
-		const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), delay: { max: 500 as Milli } });
+		const consumer = new Consumer(replay(track), {
+			format: new LegacyFormat("data"),
+			delay: { max: 500 as Milli },
+		});
 		try {
 			const group = track.appendGroup();
 			group.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) });

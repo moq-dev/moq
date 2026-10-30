@@ -12,8 +12,8 @@ use super::decoder::Config;
 use super::select::{Lane, Next, Selector};
 use super::sink::Sink;
 use crate::Error;
-pub use moq_mux::container::Delay;
 use crate::Frame;
+pub use moq_mux::container::Delay;
 
 /// One item of a [`Consumer`] read, in delivery order: a decoded picture, or a break
 /// between them.
@@ -833,10 +833,7 @@ mod tests {
 			[1000, 1100, 2000, 1800, 1900],
 			"join trims, continuous delivery keeps every leading picture"
 		);
-		consumer
-			.reader(Lane::Min)
-			.track
-			.set_delay(Delay::default());
+		consumer.reader(Lane::Min).track.set_delay(Delay::default());
 		write(12, &[3000]);
 		write(13, &[4000, 3800, 3900, 4100]);
 		track.finish().unwrap();

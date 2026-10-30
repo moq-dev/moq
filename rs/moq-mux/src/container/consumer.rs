@@ -386,7 +386,7 @@ impl<F: Container> Consumer<F> {
 		self
 	}
 
-		/// The group sequence of the last event read.
+	/// The group sequence of the last event read.
 	pub(crate) fn group(&self) -> u64 {
 		self.group
 	}
@@ -3089,7 +3089,12 @@ mod tests {
 	async fn the_start_waits_for_an_earlier_group_when_the_live_edge_arrives_first() {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut consumer = reach_consumer(&mut track, Duration::from_millis(500), Duration::from_millis(500), Duration::ZERO);
+		let mut consumer = reach_consumer(
+			&mut track,
+			Duration::from_millis(500),
+			Duration::from_millis(500),
+			Duration::ZERO,
+		);
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);
 		assert!(
@@ -3145,7 +3150,12 @@ mod tests {
 			(Duration::from_millis(300), vec![4_400_000, 4_700_000, 5_000_000]),
 		] {
 			let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-			let mut consumer = reach_consumer(&mut track, Duration::from_millis(200), Duration::from_millis(200), warmup);
+			let mut consumer = reach_consumer(
+				&mut track,
+				Duration::from_millis(200),
+				Duration::from_millis(200),
+				warmup,
+			);
 
 			// Newest first: group 4 covers the min delay alone, but not the warmup too.
 			write_group(&mut track, 5, &[ts(5_000_000)]);
@@ -3195,7 +3205,12 @@ mod tests {
 		let mut info = hang::container::track_info(hang::catalog::PRIORITY.audio);
 		info.max_age = Some(Duration::from_secs(1));
 		let mut track = track_producer("test", info);
-		let consumer = reach_consumer(&mut track, Duration::ZERO, Duration::from_secs(1), Duration::from_millis(300));
+		let consumer = reach_consumer(
+			&mut track,
+			Duration::ZERO,
+			Duration::from_secs(1),
+			Duration::from_millis(300),
+		);
 		assert_eq!(consumer.max_delay, Duration::from_secs(1));
 	}
 
@@ -3231,7 +3246,12 @@ mod tests {
 	async fn the_start_needs_no_wait_once_a_group_covers_the_reach() {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut consumer = reach_consumer(&mut track, Duration::from_millis(500), Duration::from_millis(500), Duration::ZERO);
+		let mut consumer = reach_consumer(
+			&mut track,
+			Duration::from_millis(500),
+			Duration::from_millis(500),
+			Duration::ZERO,
+		);
 
 		write_group(&mut track, 5, &[ts(5_000_000), ts(5_500_000)]);
 		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
@@ -3247,7 +3267,12 @@ mod tests {
 	async fn the_start_wait_ends_once_the_max_buffer_is_full() {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut consumer = reach_consumer(&mut track, Duration::from_millis(500), Duration::from_millis(500), Duration::ZERO);
+		let mut consumer = reach_consumer(
+			&mut track,
+			Duration::from_millis(500),
+			Duration::from_millis(500),
+			Duration::ZERO,
+		);
 		consumer.set_max_buffer(1);
 
 		write_group(&mut track, 5, &[ts(5_000_000), ts(5_100_000)]);
@@ -3305,7 +3330,12 @@ mod tests {
 	async fn a_min_delay_past_the_max_delay_reaches_the_max_delay() {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut consumer = reach_consumer(&mut track, Duration::from_secs(2), Duration::from_millis(200), Duration::ZERO);
+		let mut consumer = reach_consumer(
+			&mut track,
+			Duration::from_secs(2),
+			Duration::from_millis(200),
+			Duration::ZERO,
+		);
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);
 		assert!(
