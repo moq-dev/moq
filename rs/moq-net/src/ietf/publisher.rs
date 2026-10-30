@@ -871,6 +871,18 @@ struct Retain {
 	_slot: crate::auth::Hold,
 }
 
+impl Retain {
+	/// Ready once what authorized the subscription no longer covers it.
+	fn poll_lapsed(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if let Some(grant) = &self.grant
+			&& grant.poll_ended(waiter).is_ready()
+		{
+			return Poll::Ready(());
+		}
+		self.gate.poll_denied(waiter)
+	}
+}
+
 impl<G> Drop for Join<G> {
 	fn drop(&mut self) {
 		self.joins.lock().remove(&self.request_id);
@@ -1729,14 +1741,27 @@ impl Publisher {
 			Served::Paused(_) => Ok(()),
 		};
 
-		let _ = stream
-			.writer
-			.encode_message(&ietf::PublishDone {
+		let mut retain = retain;
+		{
+			let done = ietf::PublishDone {
 				status_code: status.code(),
 				stream_count: streams,
 				reason_phrase: reason.into(),
+			};
+			// A peer holding back flow control parks PUBLISH_DONE, and the kept join must still
+			// go once the request closes or its authorization lapses meanwhile.
+			let mut encode = std::pin::pin!(stream.writer.encode_message(&done));
+			let reader = &mut stream.reader;
+			let _ = kio::wait(|waiter| {
+				if let Some(kept) = &mut retain
+					&& (reader.poll_discard(waiter).is_ready() || kept.poll_lapsed(waiter).is_ready())
+				{
+					retain = None;
+				}
+				waiter.poll_future(encode.as_mut())
 			})
 			.await;
+		}
 
 		if let Some(retain) = retain {
 			self.retain_join(&mut stream, retain).await;
@@ -1763,19 +1788,10 @@ impl Publisher {
 			}
 			// An update that crossed PUBLISH_DONE is skipped, since nothing answers it now; the
 			// subscriber's FIN or a reset ends the request.
-			loop {
-				match stream.reader.poll_read_chunk(waiter, usize::MAX) {
-					Poll::Ready(Ok(Some(_))) => continue,
-					Poll::Ready(_) => return Poll::Ready(()),
-					Poll::Pending => break,
-				}
-			}
-			if let Some(grant) = &retain.grant
-				&& grant.poll_ended(waiter).is_ready()
-			{
+			if stream.reader.poll_discard(waiter).is_ready() {
 				return Poll::Ready(());
 			}
-			retain.gate.poll_denied(waiter)
+			retain.poll_lapsed(waiter)
 		})
 		.await;
 	}
@@ -10454,6 +10470,85 @@ mod serve_tests {
 			h.session.close(Close::Fin);
 			serving.await.unwrap();
 			assert!(h.publisher.joins.read().is_empty(), "{version}");
+		}
+	}
+
+	/// A peer holding back flow control parks PUBLISH_DONE, and the kept join still goes
+	/// once the subscription's request token is revoked meanwhile.
+	#[moq_clock::test]
+	async fn a_kept_join_ends_with_its_token_while_publish_done_waits() {
+		for version in JOINING_DRAFTS {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+			let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+			group.write_frame(timestamp(), b"frame".to_vec()).unwrap();
+			group.finish().unwrap();
+			settle().await;
+
+			let bi = kio::Producer::new(true);
+			let session = SinkSession::gated_bi(bi.consume());
+			let peer_setup = peer::PeerSetup::default();
+			peer_setup.set(peer::Peer::default());
+			let auth = crate::auth::Link::new(false);
+			let mut requests = auth.handle().requests();
+			// A limit of nothing, so only the token admits the subscription.
+			auth.handle().authorize(&crate::auth::Grant::default());
+			let publisher = Publisher::new(
+				crate::time::sim(),
+				crate::driver::Transport::new(session.clone()),
+				origin.consume(),
+				Control::new(false),
+				None,
+				peer_setup,
+				version,
+			)
+			.with_auth(auth.clone());
+
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let mut serving = std::pin::pin!(publisher.clone().run_subscribe_stream(stream, token_subscribe()));
+			let accepted = async { requests.next().await.expect("a request") };
+			let request = match futures::future::select(std::pin::pin!(accepted), serving.as_mut()).await {
+				futures::future::Either::Left((request, _)) => request,
+				futures::future::Either::Right((res, _)) => panic!("{version}: ended unverified: {res:?}"),
+			};
+			let enforced = request.accept(crate::auth::Grant::all());
+			let joined = publisher.joins.wait(|joins| match joins.get(&RequestId(REQUEST_ID)) {
+				Some(Some(_)) => Poll::Ready(()),
+				_ => Poll::Pending,
+			});
+			match futures::future::select(std::pin::pin!(joined), serving.as_mut()).await {
+				futures::future::Either::Left(_) => {}
+				futures::future::Either::Right((res, _)) => panic!("{version}: subscription ended: {res:?}"),
+			}
+
+			// The request stream takes nothing more, so PUBLISH_DONE parks.
+			let Ok(mut writable) = bi.write() else {
+				panic!("request stream gate closed");
+			};
+			*writable = false;
+			drop(writable);
+			track.finish().unwrap();
+			for _ in 0..50 {
+				assert!(futures::poll!(serving.as_mut()).is_pending(), "{version}");
+				settle().await;
+			}
+			assert!(
+				!publisher.joins.read().is_empty(),
+				"{version}: the finished join was not kept"
+			);
+
+			enforced.revoke(crate::SessionError::Unauthorized, "revoked");
+			for _ in 0..10 {
+				let _ = futures::poll!(serving.as_mut());
+				settle().await;
+			}
+			assert!(
+				publisher.joins.read().is_empty(),
+				"{version}: the join outlived its grant while PUBLISH_DONE waited"
+			);
 		}
 	}
 
