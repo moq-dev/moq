@@ -587,6 +587,15 @@ impl FillState {
 	}
 }
 
+/// The pieces of `gap` once `skip` is taken out of it.
+fn without(gap: ops::Range<u64>, skip: Option<u64>) -> impl Iterator<Item = ops::Range<u64>> {
+	let pieces = match skip {
+		Some(skip) if gap.contains(&skip) => [gap.start..skip, skip + 1..gap.end],
+		_ => [gap, 0..0],
+	};
+	pieces.into_iter().filter(|piece| !piece.is_empty())
+}
+
 /// Stop routing readers wanting `groups` to fill `id`: they were answered. Reads first, so
 /// an answer that changes nothing wakes no handler parked on the queue.
 fn uncover(fills: &kio::Shared<FillState>, id: u64, groups: ops::Range<u64>) {
@@ -778,11 +787,19 @@ impl Fill {
 	/// The next group still owed in the fill's order: a reader still reads it, and it was
 	/// neither answered nor delivered live since it was asked. `None` once none is owed.
 	pub fn next(&self) -> Option<u64> {
+		self.next_except(None)
+	}
+
+	/// [`Self::next`], passing over `skip`.
+	fn next_except(&self, skip: Option<u64>) -> Option<u64> {
 		loop {
 			let wanted = self.inner.wanted();
 			let sequence = {
 				let outcome = self.inner.result.read();
-				let mut gaps = wanted.iter().flat_map(|run| outcome.resolved.gaps(run));
+				let mut gaps = wanted
+					.iter()
+					.flat_map(|run| outcome.resolved.gaps(run))
+					.flat_map(|gap| without(gap, skip));
 				match self.order() {
 					Order::Ascending => gaps.next().map(|gap| gap.start),
 					Order::Descending => gaps.last().map(|gap| gap.end - 1),
@@ -821,10 +838,29 @@ impl Fill {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn next_run(&self) -> Option<ops::Range<u64>> {
 		let sequence = self.next()?;
+		Some(self.run_from(sequence, self.inner.owed_around(sequence)))
+	}
+
+	/// [`Self::next_run`], passing over `skip`: a group another request is already bringing,
+	/// so the groups around it are served while it waits. `None` once nothing else is owed.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn next_run_except(&self, skip: u64) -> Option<ops::Range<u64>> {
+		let sequence = self.next_except(Some(skip))?;
 		let owed = self.inner.owed_around(sequence);
+		let owed = match skip < sequence {
+			true => owed.start.max(skip + 1)..owed.end,
+			false => owed.start..owed.end.min(skip),
+		};
+		Some(self.run_from(sequence, owed))
+	}
+
+	/// The run from `sequence` over the `owed` groups beside it, in the fill's order, up to
+	/// the nearest one the cache holds.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn run_from(&self, sequence: u64, owed: ops::Range<u64>) -> ops::Range<u64> {
 		let state = self.inner.state.read();
 		let held = |(_, slot): &(&u64, &super::Slot)| !slot.is_aborted();
-		Some(match self.order() {
+		match self.order() {
 			Order::Ascending => {
 				let end = state
 					.lookup
@@ -842,7 +878,7 @@ impl Fill {
 					.map_or(owed.start, |(held, _)| held + 1);
 				start..sequence + 1
 			}
-		})
+		}
 	}
 
 	/// The newest group the track's live feed produced, while a feed still writes the track:

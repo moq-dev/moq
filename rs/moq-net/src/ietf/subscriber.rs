@@ -5348,9 +5348,15 @@ impl Subscriber {
 	) {
 		let fill = std::sync::Arc::new(fill);
 		let mut last = None;
-		while fill.is_used()
-			&& let Some(run) = fill.next_run()
-		{
+		while fill.is_used() {
+			// The groups around a pending head go first, so it holds back only its own group.
+			let pending = match heading.as_ref().and_then(|heading| heading.pending(&self.state)) {
+				Some(Head::Group(group)) => fill.next_run_except(group),
+				_ => None,
+			};
+			let Some(run) = pending.or_else(|| fill.next_run()) else {
+				break;
+			};
 			let mut run = match fill.live_group() {
 				Some(live) => first_piece(run, live, fill.order()),
 				None => run,
@@ -5359,7 +5365,7 @@ impl Subscriber {
 				&& let Some(head) = heading.pending(&self.state)
 			{
 				if let Head::Group(group) = head {
-					run = first_piece_without(run, group, fill.order());
+					run = first_piece(run, group, fill.order());
 				}
 				if head.overlaps(&run) {
 					let waited = kio::wait(|waiter| {
@@ -6053,22 +6059,6 @@ fn first_piece(run: std::ops::Range<u64>, group: u64, order: track::Order) -> st
 		track::Order::Descending => pieces.next_back(),
 	};
 	piece.expect("the run holds the group")
-}
-
-/// The first piece of `run` in `order` that leaves `group` out, so the groups around it are
-/// served while it waits, or `group` alone once nothing else is left.
-fn first_piece_without(run: std::ops::Range<u64>, group: u64, order: track::Order) -> std::ops::Range<u64> {
-	if !run.contains(&group) {
-		return run;
-	}
-	let mut pieces = [run.start..group, group + 1..run.end]
-		.into_iter()
-		.filter(|piece| !piece.is_empty());
-	let piece = match order {
-		track::Order::Ascending => pieces.next(),
-		track::Order::Descending => pieces.next_back(),
-	};
-	piece.unwrap_or(group..group + 1)
 }
 
 /// A Normal object's timestamp: none on an untimed track, and required on a timed one,
@@ -15629,21 +15619,6 @@ mod joining_fetch_tests {
 		*fill.write().ok().unwrap() = Fill::Done;
 		settle().await;
 		assert_eq!(fetches(), 1, "a settled fill leaves the miss to a FETCH");
-	}
-
-	/// The groups around a pending head are served before it, in the fill's order, so a
-	/// head that never arrives holds back only its own group.
-	#[test]
-	fn a_pending_head_is_split_off_last() {
-		use track::Order::{Ascending, Descending};
-		assert_eq!(first_piece_without(0..5, 4, Descending), 0..4);
-		assert_eq!(first_piece_without(0..5, 4, Ascending), 0..4);
-		assert_eq!(first_piece_without(3..8, 4, Ascending), 3..4);
-		assert_eq!(first_piece_without(4..8, 4, Ascending), 5..8);
-		assert_eq!(first_piece_without(3..8, 4, Descending), 5..8);
-		assert_eq!(first_piece_without(3..5, 4, Descending), 3..4);
-		assert_eq!(first_piece_without(4..5, 4, Descending), 4..5);
-		assert_eq!(first_piece_without(0..3, 4, Ascending), 0..3);
 	}
 
 	/// A malformed answer to the joining FETCH is not a refusal: the peer broke the

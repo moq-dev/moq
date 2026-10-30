@@ -18831,6 +18831,41 @@ mod test {
 		);
 	}
 
+	/// A run that passes over a group another request is bringing serves the groups around
+	/// it, across the runs that answered groups split the fill into, and leaves that group
+	/// to [`Fill::next_run`] once nothing else is owed.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_run_passes_over_a_skipped_group() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut descending = producer.subscribe(replay().with_range(0..));
+		producer.start_at(6).unwrap();
+		write_group(&producer, 6);
+		let _ = descending.poll_recv_group(&kio::Waiter::noop());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
+			panic!("the miss below the start is asked");
+		};
+		assert_eq!(fill.order(), Order::Descending);
+		assert_eq!(fill.next_run(), Some(0..6));
+		assert_eq!(fill.next_run_except(5), Some(0..5));
+		assert_eq!(fill.next_run_except(2), Some(3..6));
+
+		fill.drop_groups(3..4);
+		assert_eq!(fill.next_run(), Some(4..6));
+		assert_eq!(fill.next_run_except(5), Some(4..5));
+		assert_eq!(fill.next_run_except(4), Some(5..6));
+		fill.drop_groups(4..5);
+		assert_eq!(
+			fill.next_run_except(5),
+			Some(0..3),
+			"older runs are served while 5 waits"
+		);
+		fill.drop_groups(0..3);
+		assert_eq!(fill.next_run_except(5), None);
+		assert_eq!(fill.next_run(), Some(5..6));
+	}
+
 	/// A reader changing its priority, budget, or order moves the fill it waits on, queued
 	/// or taken, so the handler serves the rest under the new values, even ones lower than
 	/// it was asked with.
