@@ -797,3 +797,28 @@ test("a new network broadcast starts every track name over", async () => {
 
 	broadcast.close();
 });
+
+// A fold that throws publishes nothing, so it must not move a track the catalog still lists.
+test("a refused catalog fold renames no track", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("refused.hang") });
+	const video = broadcast.video("video");
+	const audio = broadcast.audio("audio");
+	video.config.set(videoConfig);
+	await settle();
+	const track = video.track.peek();
+
+	video.config.set({ ...videoConfig, codec: "vp8" });
+	audio.config.set({ ...audioConfig, track: "elsewhere" });
+	await settle();
+	expect(video.track.peek()).toBe(track);
+	expect(track?.closed.peek()).toBeUndefined();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.codec).toBe(videoConfig.codec);
+
+	// Once the fold succeeds, the new identity moves to a fresh name.
+	audio.config.set(audioConfig);
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBe("video/1");
+	expect(video.track.peek()?.name).toBe("video/1");
+
+	broadcast.close();
+});

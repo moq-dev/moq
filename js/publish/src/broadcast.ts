@@ -7,7 +7,7 @@ import { rotateVideoDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { errors } from "./internal";
 import { Order } from "./order";
-import { identity, type Listing, Publication } from "./publication";
+import { type Identity, identity, type Listing, Publication } from "./publication";
 import { type Kind, Rendition } from "./rendition";
 
 // The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
@@ -215,6 +215,7 @@ export class Broadcast {
 		const audio: Record<string, Catalog.AudioConfig> = {};
 		const text: Record<string, Catalog.TextConfig> = {};
 		const listed = new Map<string, Listing>();
+		const served: [Rendition<unknown>, string, Identity][] = [];
 
 		for (const rendition of Object.values(renditions)) {
 			const source = enabled ? effect.get(rendition.config) : undefined;
@@ -226,8 +227,8 @@ export class Broadcast {
 			}
 			const media = identity(rendition.kind, source);
 			listed.set(rendition.name, { kind: rendition.kind, identity: media });
-			// Everything else (bitrate, frame rate, coded size, ...) updates the served track in place.
-			const track = publication?.list(rendition, media) ?? rendition.name;
+			const track = publication?.name(rendition, media) ?? rendition.name;
+			served.push([rendition, track, media]);
 			const config = track !== rendition.name ? { ...(source as object), track } : source;
 
 			if (rendition.kind === "video") {
@@ -271,6 +272,9 @@ export class Broadcast {
 			}
 		});
 		this.#listed = listed;
+
+		// Only once the catalog holds them, so the track loop never ends a track the catalog still lists.
+		if (publication) for (const [rendition, track, media] of served) publication.commit(rendition, track, media);
 	}
 
 	// The names outside a publication's own that a replacement must avoid: every registered ID, and

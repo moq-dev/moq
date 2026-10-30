@@ -79,34 +79,47 @@ export class Publication {
 	}
 
 	/**
-	 * List `rendition` with its config's `identity`, returning the track name the catalog serves it
-	 * under. A new identity renames it; everything else updates the served track in place.
+	 * The track name `rendition` would serve its config's `identity` under: its current one, or a
+	 * fresh one for a new identity. Everything else updates the served track in place. Changes
+	 * nothing until {@link commit}, so a catalog edit that fails leaves the tracks alone.
 	 */
-	list(rendition: Rendition<unknown>, identity: Identity): string {
+	name(rendition: Rendition<unknown>, identity: Identity): string {
+		const current = this.#entries.get(rendition.name)?.name ?? rendition.name;
+		const listed = this.#names.get(current)?.identity;
+		if (listed && !Json.deepEqual(listed, identity)) return this.#mint(rendition.name);
+		return current;
+	}
+
+	/** Record that the catalog lists `rendition` under `name` with `identity`. */
+	commit(rendition: Rendition<unknown>, name: string, identity: Identity): void {
 		const entry = this.entry(rendition);
-		const listed = this.#names.get(entry.name)?.identity;
-		if (listed && !Json.deepEqual(listed, identity)) this.rename(entry);
-		const name = this.#names.get(entry.name);
-		if (name && !name.identity) name.identity = identity;
-		return entry.name;
+		if (entry.name !== name) this.#move(entry, name);
+		const listed = this.#names.get(name);
+		if (listed && !listed.identity) listed.identity = identity;
 	}
 
 	/**
-	 * Move `entry` to a fresh `<id>/<n>` track name. The track loop ends its old track, so that
-	 * track's subscribers follow the catalog. This publisher owns the namespace and reserves `<id>/`
-	 * for the rendition (see `Broadcast.net`), so skipping every name handed out here and every
-	 * reserved one is enough to never reuse one.
+	 * Move `entry` to a fresh track name, such as for a replacement registration after its track
+	 * closed. The track loop ends its old track, so that track's subscribers follow the catalog.
 	 */
 	rename(entry: Entry): void {
-		const { id } = entry;
+		this.#move(entry, this.#mint(entry.id));
+	}
+
+	#move(entry: Entry, name: string): void {
+		this.#names.set(name, { id: entry.id });
+		entry.name = name;
+		this.#renames.update((n) => n + 1);
+	}
+
+	// The next unused `<id>/<n>` track name. This publisher owns the namespace and reserves `<id>/` for
+	// the rendition (see `Broadcast.net`), so skipping every name handed out here and every reserved
+	// one is enough to never reuse one.
+	#mint(id: string): string {
 		const taken = new Set([...this.#names.keys(), ...this.#entries.keys(), ...this.#reserved()]);
 		for (let n = 1; ; n++) {
 			const name = `${id}/${n}`;
-			if (taken.has(name)) continue;
-			this.#names.set(name, { id });
-			entry.name = name;
-			this.#renames.update((n) => n + 1);
-			return;
+			if (!taken.has(name)) return name;
 		}
 	}
 
