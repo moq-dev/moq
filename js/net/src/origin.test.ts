@@ -167,6 +167,19 @@ test("a scoped route remains visible when an exact local path is outside the sco
 	origin.close();
 });
 
+test("a scope cut at an escaped slash discovers through the nearest valid ancestor", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/a\\/b");
+	const broadcast = publish(origin, path);
+	const live = await announcedView(origin, Path.Pattern.parse("room/a\\/*"));
+	await settle();
+
+	expect([...live.peek().keys()]).toEqual([path]);
+
+	broadcast.close();
+	origin.close();
+});
+
 test("a published broadcast resolves by path", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

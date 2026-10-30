@@ -168,17 +168,18 @@ where
 
 /// Assert the invariant every path holds once built: its spelling parses back to it under
 /// the strict constructor, and so does every run of its leading segments, which is what
-/// stats grouping and announce compression derive from it.
+/// stats grouping and announce compression derive from it. Only a run ending at an
+/// escaped `/` has no head, since it would end in half an escape.
 fn assert_strict(path: &Path) {
 	let reparsed = Path::new(path.as_str()).unwrap_or_else(|err| panic!("{path:?} is refused: {err}"));
 	assert_eq!(reparsed, *path, "{path:?} did not parse back to itself");
 	let count = path.parts().count();
 	for n in 0..=count {
-		let head = path.head(n).expect("a path has a head per segment");
-		assert!(
-			Path::new(head.as_str()).is_ok(),
-			"{path:?} has an invalid head {head:?}"
-		);
+		let cut = path.parts().take(n).collect::<Vec<_>>().join("/");
+		match path.head(n) {
+			Some(head) => assert_eq!(Path::new(&cut), Ok(head), "{path:?} has a wrong head at {n}"),
+			None => assert!(cut.ends_with('\\'), "{path:?} has no head at {n}"),
+		}
 	}
 	assert!(path.head(count + 1).is_none(), "{path:?} has a head past its segments");
 }
@@ -1048,13 +1049,15 @@ pub fn path(data: &[u8]) -> bool {
 
 	let (target, base) = text.split_once('\n').unwrap_or((text, ""));
 
-	// A spelling is refused exactly when it is over the limit or has an empty segment, so
-	// each path has one spelling.
+	// A spelling is refused exactly when it is over the limit, has an empty segment, or has
+	// a `\` escaping anything but `\` or `/`, so each path has one spelling.
 	for s in [target, base] {
 		let expected = if s.len() > Path::MAX_BYTES {
-			Err(crate::path::Invalid::TooLong)
+			Err(crate::path::Error::TooLong)
 		} else if !s.is_empty() && s.split('/').any(str::is_empty) {
-			Err(crate::path::Invalid::EmptySegment)
+			Err(crate::path::Error::EmptySegment)
+		} else if s.replace(r"\\", "").replace(r"\/", "").contains('\\') {
+			Err(crate::path::Error::InvalidEscape)
 		} else {
 			Ok(())
 		};
@@ -1107,9 +1110,24 @@ pub fn path(data: &[u8]) -> bool {
 	// Resolving arbitrary references must stay inside the clamped/unclamped contract:
 	// `try_resolve` only refuses by walking above the root, so whenever it answers, it
 	// answers the same as `resolve`.
-	let rel = Relative::new(base.as_str()).expect("a reference no longer than its path fits");
-	if let Some(resolved) = target.try_resolve(&rel) {
-		assert_eq!(Ok(resolved), target.resolve(&rel), "try_resolve disagreed with resolve");
+	match Relative::new(base.as_str()) {
+		Ok(rel) => {
+			if let Some(resolved) = target.try_resolve(&rel) {
+				assert_eq!(Ok(resolved), target.resolve(&rel), "try_resolve disagreed with resolve");
+			}
+		}
+		// Only dropping a `.` segment can make a valid path an invalid reference, by stranding
+		// the `\` of the escaped `/` before it.
+		Err(err) => assert_eq!(err, crate::path::Error::InvalidEscape, "{base:?} is no reference"),
+	}
+
+	// The moq-transport namespace tuple is the same path back, so the mapping is symmetric.
+	let mut tuple = Vec::new();
+	let form = Form::LeadingOnes;
+	if ietf::namespace::encode_namespace(&mut Encoder::new(&mut tuple, form), &target).is_ok() {
+		let decoded = ietf::namespace::decode_namespace(&mut Decoder::new(&tuple, form))
+			.expect("could not decode our own namespace");
+		assert_eq!(decoded, target, "path did not survive the namespace tuple");
 	}
 
 	// The wire form is the same path back, whenever the path is expressible at all.

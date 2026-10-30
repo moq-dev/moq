@@ -237,8 +237,7 @@ impl MoqBroadcastConsumer {
 	) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		self.driver
 			.watch(async {
-				// Normalize before testing emptiness: this is a caller-supplied string, and one made only
-				// of slashes normalizes to the empty reference, which names this broadcast.
+				// A caller-supplied string, refused unless it is spelled as a catalog's reference must be.
 				let reference = reference
 					.map(moq_net::path::Relative::new)
 					.transpose()

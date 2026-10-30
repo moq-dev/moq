@@ -68,6 +68,8 @@ A setting no configured listener reads stops startup rather than being ignored.
 A stream-only relay refuses `preferred_v4`, `preferred_v6`, `lb.id`, and
 `reset.secret`, which only QUIC reads, and a `[listen.tls]` `cert`, `key`, or `generate` unless
 `tcp.tls` serves it.
+The io\_uring runtime refuses `preferred_v4`, `preferred_v6`, and `lb.id`;
+use the tokio runtime when the listener needs these settings.
 `[listen.lb] nonce` needs an `id` in the same table; unset nonce uses 8.
 The `--listen-quic-lb-id` and `--listen-quic-lb-nonce` flags update that table.
 `unix.allow` needs `unix.bind`.
