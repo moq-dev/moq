@@ -152,7 +152,7 @@ tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
 tokio-rustls = { workspace = true }
 toml = "1.1"
-tracing-test = { workspace = true, features = ["no-env-filter"] }
+tracing-test = { workspace = true }
 
 # The examples and integration tests run MoQ sessions, which a driver-only build lacks.
 [[example]]

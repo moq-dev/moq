@@ -38,9 +38,8 @@ type (
 	// Route is an observed route: the publisher Epoch it serves (nil when unknown), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
 	Route = ffi.MoqRoute
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
-	// wildcard matched (nil Captures for a route that only overlaps the scope), and the
-	// Route serving it. It carries no broadcast; resolve a path with
-	// [OriginConsumer.Request].
+	// wildcard matched (Captures), and the Route serving it. It carries no broadcast;
+	// resolve a path with [OriginConsumer.Request].
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
 	// AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventRestart.

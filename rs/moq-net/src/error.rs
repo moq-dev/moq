@@ -223,8 +223,9 @@ pub enum StreamError {
 	#[error("old")]
 	Old,
 
-	/// The group was dropped under memory pressure. Unlike [`Old`](Self::Old) it was still
-	/// current, so it can be re-fetched.
+	/// The group, or the frames a reader still needed from its front, was dropped under
+	/// memory pressure. Unlike [`Old`](Self::Old) it was still current, so it can be
+	/// re-fetched.
 	#[error("evicted")]
 	Evicted,
 
@@ -236,7 +237,7 @@ pub enum StreamError {
 	#[error("frame too large")]
 	FrameTooLarge,
 
-	/// A group grew past its cache budget and was aborted.
+	/// A group could not make room for a write, even by shedding its front, and was aborted.
 	#[error("group too large")]
 	GroupTooLarge,
 
@@ -483,9 +484,8 @@ pub enum Error {
 
 	/// The reader asked for a frame the group never held: below
 	/// [`crate::group::Producer::start_at`]. Named from the consumer's side; distinct
-	/// from [`Self::GroupTooLarge`], which aborts the whole group when a write exceeds
-	/// the cache budget, and from [`Self::Evicted`], which drops a whole group under the
-	/// pool's memory pressure.
+	/// from [`Self::Evicted`], for frames the group held but shed from its front or
+	/// dropped whole under memory pressure.
 	#[error("lagged")]
 	Lagged,
 
@@ -493,9 +493,10 @@ pub enum Error {
 	#[error("frame too large")]
 	FrameTooLarge,
 
-	/// A write would grow the group past its cache budget (byte size or frame count).
-	/// The write is refused and the group is aborted, so every reader sees the same
-	/// failure rather than a prefix some of them missed.
+	/// A write could not make room in the group even by shedding its front: what is left,
+	/// such as the frame in flight, already fills the live tail
+	/// ([`MAX_CACHE_BYTES`](crate::group::MAX_CACHE_BYTES)). The write is refused and the
+	/// group is aborted.
 	#[error("group too large")]
 	GroupTooLarge,
 
@@ -507,8 +508,9 @@ pub enum Error {
 
 	/// The group was evicted under memory pressure: by its own track to pay eviction debt
 	/// (see [`cache::Pool`](crate::cache::Pool)), or by the transport when incomplete
-	/// messages spent its receive window. Unlike [`Self::Old`], the group was still within
-	/// the publisher's window; it can be re-fetched.
+	/// messages spent its receive window. Also a read of a frame the group shed from its
+	/// front, past its live tail or under that debt. Unlike [`Self::Old`], the group was
+	/// still within the publisher's window; it can be re-fetched.
 	#[error("evicted")]
 	Evicted,
 

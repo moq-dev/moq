@@ -18,7 +18,6 @@ use std::net::UdpSocket;
 use std::time::Duration;
 
 use moq_uring::{Config, Error, Worker, quic, udp};
-use web_transport_trait::poll::Session as _;
 
 const ALPN: &str = "moq-uring-teardown";
 const CLOSE_CODE: u32 = 42;
@@ -113,8 +112,8 @@ fn a_published_close_has_already_left_the_client() {
 		ready.send(()).expect("test alive");
 		worker
 			.block_on(async move {
-				let mut conn = endpoint.accept().await.expect("accept");
-				std::future::poll_fn(|cx| conn.poll_closed(cx)).await
+				let conn = endpoint.accept().await.expect("accept");
+				conn.closed().await
 			})
 			.expect("server worker")
 	});
@@ -131,12 +130,12 @@ fn a_published_close_has_already_left_the_client() {
 
 	client_worker
 		.block_on(async move {
-			let mut conn = endpoint
+			let conn = endpoint
 				.connect(&dial_config(), server_addr, "localhost")
 				.await
 				.expect("dial");
-			conn.close(CLOSE_CODE, CLOSE_REASON);
-			std::future::poll_fn(|cx| conn.poll_closed(cx)).await;
+			conn.close(CLOSE_CODE.into(), CLOSE_REASON.as_bytes());
+			conn.closed().await;
 		})
 		.expect("client worker");
 	drop(client_worker);

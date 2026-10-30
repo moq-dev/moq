@@ -6,7 +6,7 @@ use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqGroupConsumer;
 use crate::consumer::MoqTrackConsumer;
-use crate::consumer::{MoqAnchor, MoqOrder, MoqRange, MoqSubscription};
+use crate::consumer::{MoqAnchor, MoqOrder, MoqRange, MoqSubscription, moq_subscription_defaults};
 use crate::error::{MoqError, MoqProtocolError, MoqProtocolKind};
 use crate::json::{
 	MoqJsonSnapshotConfig, MoqJsonSnapshotConsumer, MoqJsonSnapshotProducer, MoqJsonStreamConsumer,
@@ -3288,10 +3288,8 @@ async fn announced_filters_patterns_and_reports_captures() {
 		})
 		.unwrap();
 
+	// A claim at `room` could serve a match, but its own name is none, so it is not listed.
 	let _broad = origin.requests("room".into()).unwrap();
-	let overlap = next_announced(&announced).await;
-	assert_eq!(overlap.prefix, "room");
-	assert_eq!(overlap.captures, None, "an overlap does not pin the wildcard");
 
 	let chat = create_announced(&origin, "room/alice/chat");
 	let _audio = create_announced(&origin, "room/alice/audio");
@@ -6122,6 +6120,14 @@ async fn server_new_validates_the_config() {
 	} else {
 		assert!(matches!(qlog, Err(MoqError::Config { .. })));
 	}
+}
+
+/// The defaults convert back to moq-net's own, so they mean the same as no subscription.
+#[test]
+fn subscription_defaults_are_moq_net_defaults() {
+	let defaults = moq_net::track::Subscription::try_from(moq_subscription_defaults()).unwrap();
+	assert_eq!(defaults, moq_net::track::Subscription::default());
+	assert_eq!(defaults.max_delay, Some(Duration::ZERO));
 }
 
 /// A settings UI shows these, so each must be what an unset knob actually dials with.

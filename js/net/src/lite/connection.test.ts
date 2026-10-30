@@ -405,6 +405,52 @@ for (const [alpn, version] of [
 		});
 	}
 
+	// A local close reads what already arrived as the peer's close does: a track whose
+	// SUBSCRIBE FIN is in flight, its only end on legacy drafts, still finishes.
+	if (!hasTrackStream(version)) {
+		test(`a local close drains a FIN sent first over ${versionName(version)}`, async () => {
+			const pair = createMockTransportPair(alpn);
+			finAfterClose(pair.client);
+			const origin = new Producer();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const url = new URL("https://localhost/test");
+			const client = new Connection({ url, quic: pair.client, version });
+			const server = new Connection({
+				url,
+				quic: pair.server,
+				version,
+				publish: origin.consume(),
+				client: false,
+			});
+			const remote = wireOf(client).consume(Path.from("room"));
+			const track = remote.track("video").subscribe().ordered();
+			try {
+				const group = producer.appendGroup();
+				group.writeFrame(textFrame("only"));
+				group.finish();
+				expect(await (await track.nextGroup())?.readString()).toBe("only");
+
+				producer.finish();
+				producer.close();
+				await settle();
+				client.abort();
+
+				expect(await track.nextGroup()).toBeUndefined();
+				expect(await track.closed).toBeNull();
+			} finally {
+				track.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				broadcast.close();
+				origin.close();
+			}
+		});
+	}
+
 	// The subscriber reads a legacy subscribe stream to its FIN, since QMux closes a stream only
 	// on a read; awaiting the FIN instead would hold the closing session's drain forever.
 	if (!hasTrackStream(version)) {

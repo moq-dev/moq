@@ -20,7 +20,6 @@ use std::task::Poll;
 use std::time::Duration;
 
 use moq_uring::{Config, Error, Worker, quic, udp};
-use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
 
 const ALPN: &str = "moq-uring-mtu";
 /// The UDP payload every QUIC path must carry, and moq-quic's floor.
@@ -234,32 +233,18 @@ async fn connect(
 
 /// Send `len` bytes on a fresh stream from `from` and read them all at `to`.
 async fn transfer(handle: &moq_uring::Handle, from: &mut quic::Connection, to: &mut quic::Connection, len: usize) {
-	let mut send = std::future::poll_fn(|cx| from.poll_open_uni(cx))
-		.await
-		.expect("open_uni");
+	let mut send = from.open_uni(Default::default()).await.expect("open_uni");
 	handle.spawn(async move {
-		let payload = vec![7u8; len];
-		let mut buf = &payload[..];
-		while !buf.is_empty() {
-			match std::future::poll_fn(|cx| send.poll_write(cx, buf)).await {
-				Ok(n) => buf = &buf[n..],
-				Err(_) => return,
-			}
+		if send.write_all(bytes::Bytes::from(vec![7u8; len])).await.is_ok() {
+			let _ = send.finish().stopped().await;
 		}
-		let _ = send.finish();
-		let _ = std::future::poll_fn(|cx| send.poll_closed(cx)).await;
 	});
 
 	let read = within(handle, "the transfer", async {
-		let mut recv = std::future::poll_fn(|cx| to.poll_accept_uni(cx))
-			.await
-			.expect("accept_uni");
+		let mut recv = to.accept_uni().await.expect("accept_uni");
 		let mut buf = vec![0u8; 64 * 1024];
 		let mut read = 0;
-		while let Some(n) = std::future::poll_fn(|cx| recv.poll_read(cx, &mut buf))
-			.await
-			.expect("read")
-		{
+		while let Some(n) = recv.read(&mut &mut buf[..]).await.expect("read") {
 			read += n;
 		}
 		read
