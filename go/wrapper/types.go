@@ -38,9 +38,8 @@ type (
 	// Route is an observed route: the publisher Epoch it serves (nil when unknown), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
 	Route = ffi.MoqRoute
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
-	// wildcard matched (nil Captures for a route that only overlaps the scope), and the
-	// Route serving it. It carries no broadcast; resolve a path with
-	// [OriginConsumer.RequestBroadcast].
+	// wildcard matched (Captures), and the Route serving it. It carries no broadcast;
+	// resolve a path with [OriginConsumer.Request].
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
 	// AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventRestart.
@@ -258,6 +257,20 @@ const (
 	ProtocolKindUnknown = ffi.MoqProtocolKindUnknown
 	// ProtocolKindTooManyRequests identifies an exceeded session request cap.
 	ProtocolKindTooManyRequests = ffi.MoqProtocolKindTooManyRequests
+	// ProtocolKindAuthTokenCacheOverflow identifies an exceeded token cache limit.
+	ProtocolKindAuthTokenCacheOverflow = ffi.MoqProtocolKindAuthTokenCacheOverflow
+	// ProtocolKindMalformedAuthToken identifies an unparseable authorization token.
+	ProtocolKindMalformedAuthToken = ffi.MoqProtocolKindMalformedAuthToken
+	// ProtocolKindUnknownAuthTokenAlias identifies an unregistered token alias.
+	ProtocolKindUnknownAuthTokenAlias = ffi.MoqProtocolKindUnknownAuthTokenAlias
+	// ProtocolKindInvalidRequestId identifies an invalid request ID.
+	ProtocolKindInvalidRequestId = ffi.MoqProtocolKindInvalidRequestId
+	// ProtocolKindInvalidPath identifies an invalid session path.
+	ProtocolKindInvalidPath = ffi.MoqProtocolKindInvalidPath
+	// ProtocolKindInvalidAuthority identifies an invalid session authority.
+	ProtocolKindInvalidAuthority = ffi.MoqProtocolKindInvalidAuthority
+	// ProtocolKindTooManyRequestUpdates identifies an exceeded request update limit.
+	ProtocolKindTooManyRequestUpdates = ffi.MoqProtocolKindTooManyRequestUpdates
 )
 
 // AudioSampleFormat values: the raw PCM sample layout fed to or returned from the

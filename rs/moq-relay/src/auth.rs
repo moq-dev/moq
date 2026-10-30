@@ -37,6 +37,13 @@ pub struct Config {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub url: Option<Url>,
 
+	/// PEM roots used instead of system roots to verify the auth server's hostname.
+	#[usage(long = "auth-root", env = "MOQ_AUTH_ROOT", setting = "auth.root")]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_>")]
+	pub root: Vec<std::path::PathBuf>,
+
 	/// Patterns an anonymous session may both publish and subscribe to, rooted at
 	/// `/`, such as `anon/**`. Repeatable or comma-separated. Sets a static grant
 	/// with no expiry and no server.
@@ -250,7 +257,7 @@ impl Config {
 				"--auth-tls-*",
 				"MOQ_AUTH_TLS_*",
 				self.tls.is_some().then_some("[auth.tls]"),
-				"--connect-tls-*, which an https:// --auth-url presents",
+				"--connect-tls-cert/--connect-tls-key for identity; --auth-root for server trust",
 			),
 		] {
 			if set {
@@ -312,8 +319,8 @@ impl Config {
 
 	/// Build the [`Auth`] this configuration describes, after [`validate`](Self::validate)
 	/// with the same `client_ca`. `tls` is the client identity an `https://` server
-	/// is dialed with; `node` names this relay in every request. Must be called
-	/// within a Tokio runtime, which drives the admission decider.
+	/// is dialed with, never its server trust; `node` names this relay in every request.
+	/// Must be called within a Tokio runtime, which drives the admission decider.
 	pub fn init(
 		&self,
 		node: impl Into<String>,
@@ -324,6 +331,7 @@ impl Config {
 		let decider = match (&self.url, self.public_grant()) {
 			(Some(url), _) => {
 				let tls = tls.build()?;
+				let tls = crate::http_client::server_tls(&tls, &self.root)?;
 				Decider::Server(moq_auth::Client::new(url.clone(), Some(tls))?)
 			}
 			(None, Some(grant)) => Decider::Public(
@@ -455,9 +463,9 @@ impl Token {
 	/// The dialed path is a URL path, whose one leading `/` is syntax rather than a
 	/// segment. Fails with [`Error::Request`] if the rest of it is not a valid path,
 	/// and with [`Error::Forbidden`] if a root, mount, tier, or label the grant names
-	/// is not: one with an empty segment or longer than [`Path::MAX_BYTES`].
+	/// is not: one [`Path::new`] refuses.
 	pub fn new(path: &str, grant: &Grant) -> Result<Self, Error> {
-		let invalid = |err: moq_net::path::Invalid| Error::Forbidden(err.to_string());
+		let invalid = |err: moq_net::path::Error| Error::Forbidden(err.to_string());
 		let root = match &grant.root {
 			Some(root) => Path::new(root).map_err(invalid)?,
 			None => Path::new(path.strip_prefix('/').unwrap_or(path))

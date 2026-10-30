@@ -1,0 +1,19 @@
+error: calls to `std::mem::drop` with a reference instead of an owned value does nothing
+  --> tests/ui/poll_moves.rs:19:4
+   |
+19 |             drop(label);
+   |             ^^^^^-----^
+   |                  |
+   |                  argument has type `&mut String`
+   |
+note: the lint level is defined here
+  --> tests/ui/poll_moves.rs:13:1
+   |
+13 | #[kio::machine(self.state: MState)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `kio::machine` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: use `let _ = ...` to ignore the expression or result
+   |
+19 -             drop(label);
+19 +             let _ = label;
+   |

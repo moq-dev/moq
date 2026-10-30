@@ -57,7 +57,8 @@ const AudioConfigFields = z.object({
 	bitrate: z.optional(u53Schema),
 
 	// Whether this rendition may be selected. When false, no frames are coming and a consumer
-	// must not select it. Default: true, so publishers only write it when false.
+	// should not select it, though one may keep it selected while no enabled alternative exists.
+	// Default: true, so publishers only write it when false.
 	enabled: z.optional(z.boolean()),
 
 	// The maximum delay between a frame being ready and the publisher flushing it, in whole

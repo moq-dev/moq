@@ -38,7 +38,7 @@ kio?":
   which a write, open, reset, stop, close, or credit change wakes. Pacing
   and loss timers stay on `poll_timeout`. This replaces the kick each
   handle sends its driver after mutating the connection.
-- **After [streams](/quest/m1/quic-api/streams.md)**, whose queryable
+- **After [moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)**, whose queryable
   send-stream end is what `poll_finished` and `poll_acked` read, and whose
   names the new methods take.
 
@@ -69,10 +69,6 @@ Public API: moq-quic gains `poll_*` methods taking `&kio::Waiter`,
 variants go. The drivers' and qmux's public APIs are unchanged here; the
 driver poll forms come in [poll](/quest/m1/quic-api/poll.md). Update
 moq-quic's README fork list and describe migration in the PR's Impact section. Wire: none.
-
-## Required
-
-- [Streams](/quest/m1/quic-api/streams.md) - the send-stream end state and the `send::`/`recv::` names these waits use
 
 ## Related
 

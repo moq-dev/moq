@@ -124,13 +124,25 @@ impl Cache {
 /// opened without [`wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF`], or a
 /// platform with no importer.
 pub fn output(device: &wgpu::Device) -> Output {
+	output_with(device, device.features())
+}
+
+/// [`output`] for `device` as if it had been opened with `features`, which
+/// lets a test cover both answers on a device that has only one of them.
+pub(super) fn output_with(device: &wgpu::Device, features: wgpu::Features) -> Output {
 	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
-	let imports = super::dmabuf::supports(device);
-	#[cfg(apple)]
-	let imports = super::metal::supports(device);
-	#[cfg(not(any(apple, all(target_os = "linux", feature = "dmabuf"))))]
 	let imports = {
 		let _ = device;
+		super::dmabuf::supports(features)
+	};
+	#[cfg(apple)]
+	let imports = {
+		let _ = features;
+		super::metal::supports(device)
+	};
+	#[cfg(not(any(apple, all(target_os = "linux", feature = "dmabuf"))))]
+	let imports = {
+		let _ = (device, features);
 		false
 	};
 	if imports { Output::Render } else { Output::Cpu }

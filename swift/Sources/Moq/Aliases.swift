@@ -56,8 +56,7 @@ public typealias AnnounceRoute = MoqFFI.MoqAnnounceRoute
 /// cost, lower wins.
 public typealias Route = MoqFFI.MoqRoute
 /// A route over a prefix: the origin-relative `prefix`, what each filter
-/// wildcard matched (`captures`, `nil` for a partial overlap), and the `route`
-/// serving it. Resolve a path with `OriginConsumer.requestBroadcast`.
+/// wildcard matched (`captures`), and the `route` serving it. Resolve a path with `OriginConsumer.request`.
 public typealias Announce = MoqFFI.MoqAnnounce
 /// What an `AnnounceConsumer` yields: `.start`, `.update`, `.end`, or
 /// `.restart` (request the path again), each carrying an `Announce`.
@@ -126,4 +125,9 @@ extension Subscription {
     public typealias Anchor = MoqFFI.MoqAnchor
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder
+
+    /// moq-net's defaults, whose `maxDelay` of 0 skips a superseded group at once. A `nil`
+    /// subscription means the same; copy this one to change a field. A `Subscription()`
+    /// leaves `maxDelay` `nil`, which sets no subscriber limit.
+    public static var `default`: Subscription { moqSubscriptionDefaults() }
 }

@@ -18,6 +18,10 @@ m1 quest on 2026-10-22.
   for its migration note, since squash commits drop the PR body. Write each
   note into its package's guide. The API-diff report below catches breaks a
   PR left unmarked; a behavior break with no `!` stays with PR review.
+- Correct Unreleased entries that a later PR overturned. Known: `js/net/MIGRATE.md`
+  still describes `request(path, { announced: true })`, which
+  [moq-dev/moq#7173](https://github.com/moq-dev/moq/pull/7173) replaced with
+  `follow(path)` (decided 2026-10-29).
 - Run the API-diff report on the cut PR and read the diff of the
   hand-written binding wrappers (`py/moq-rs`, `kt/moq`, `dart/moq`,
   `go/wrapper`, `swift`, `cpp/moq`, `cpp/obs`) and of each binary's flags,

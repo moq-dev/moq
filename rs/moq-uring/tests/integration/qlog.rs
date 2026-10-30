@@ -83,11 +83,7 @@ fn a_connection_writes_a_trace() {
 			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
 				.await
 				.expect("quic connect");
-			assert_eq!(
-				web_transport_trait::poll::Session::protocol(&conn),
-				Some(ALPN),
-				"negotiated ALPN"
-			);
+			assert_eq!(conn.protocol(), Some(ALPN), "negotiated ALPN");
 		})
 		.expect("worker");
 

@@ -35,8 +35,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [Byte streams](/quest/m2/stream/README.md) - TCP connections ride MoQ losslessly through relays, proxied per hop rather than as IP packets
 - [Mesh](/quest/m2/mesh/README.md) - `moq mesh` enrolls a host or robot and reaches any node by endpoint ID or name for SSH, forwards, and agents
 - [P2P](/quest/m2/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
-- [rust2 publishes its UniFFI fork](/quest/m2/rust2-uniffi.md) - waiting on kixelated/rust2 to import UniFFI and moq's generators and publish them
-- [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - moq-ffi and every wrapper build from kixelated/rust2's fork under one pin, and moq's generator code is deleted
+- [rust2 publishes its UniFFI fork](/quest/m2/rust2-uniffi.md) - waiting on moq-dev/rust2 to import UniFFI and moq's generators and publish them
+- [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - moq-ffi and every wrapper build from moq-dev/rust2's fork under one pin, and moq's generator code is deleted
 - [Generated C bindings](/quest/m2/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written crate
 - [A runtime-free QUIC driver](/quest/m2/quic-sansio-driver.md) - a caller's own loop moves UDP datagrams and polls moq sessions over moq-quic, for rust2's bindings
 - [MoQ on rind](/quest/m2/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
@@ -263,8 +263,12 @@ lite-07; bitrate enforcement is not part of this release.
 - [A malformed track says so downstream](/quest/m2/malformed-track-status.md) - subscribers and bindings see a malformed track, not INTERNAL_ERROR
 - [Branch checks lint examples](/quest/m2/lint-examples.md) - `just check` runs clippy on the selected crates' examples
 - [Drop kio's epoch fence](/quest/m2/crossbeam-pin-fence.md) - waiting on crossbeam#1352, then the `Read::drop` fence goes
+- [A cancelled miss stops waiting](/quest/m2/fill-wait-cancel-test.md) - a test proves a relay miss waiting on its own fill ends when no reader wants it
 - [Quiet logs for clean ends](/quest/m2/quiet-clean-close-logs.md) - clean probe ends and unroutable requests log at debug
 - [No MOQ_* knobs outside the binaries](/quest/m2/env-knobs.md) - test, bench, and library knobs leave the `MOQ_*` prefix
 - [Clean ALSA playback onset](/quest/m2/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
 - [Interop audit](/quest/m2/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
 - [Open-GOP MPEG-2 export](/quest/m2/mpeg2-open-gop-export.md) - a TS export resuming in an open GOP trims the B-pictures that reference the previous one
+- [Resume delivers late groups below its resume point](/quest/m2/resume-late-groups.md) - a bonus: groups that arrive late after a route change are delivered instead of written off
+- [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
+- [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
