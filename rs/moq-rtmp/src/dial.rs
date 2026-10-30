@@ -473,15 +473,12 @@ impl<S: Stream> Client<S> {
 							) => self.metadata.record(),
 							// A refused publish/play arrives as an `_error`, or as an onStatus
 							// *failure* code; surface it instead of hanging until the peer closes.
-							(
-								Direction::Publish,
-								ClientSessionEvent::PublishRequestRejected { code, description },
-							)
-							| (
-								Direction::Play,
-								ClientSessionEvent::PlaybackRequestRejected { code, description },
-							) => {
-								return Err(anyhow::anyhow!("rtmp {direction} rejected by remote: {code}: {description}").into());
+							(Direction::Publish, ClientSessionEvent::PublishRequestRejected { code, description })
+							| (Direction::Play, ClientSessionEvent::PlaybackRequestRejected { code, description }) => {
+								return Err(anyhow::anyhow!(
+									"rtmp {direction} rejected by remote: {code}: {description}"
+								)
+								.into());
 							}
 							// Benign progress codes (e.g. NetStream.Play.Reset, which precedes
 							// .Start) come through here too, so only fail on error codes.
@@ -869,7 +866,11 @@ mod tests {
 					let (_broadcast, _catalog, _importer) = source(&upstream);
 					client.publish("cam0", exported(upstream.consume()).await).await
 				}
-				false => client.pull("cam0", &upstream, moq_net::Path::from_static("live/cam0")).await,
+				false => {
+					client
+						.pull("cam0", &upstream, moq_net::Path::from_static("live/cam0"))
+						.await
+				}
 			}
 			.unwrap_err()
 			.to_string();

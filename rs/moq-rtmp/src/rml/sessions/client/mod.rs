@@ -891,4 +891,3 @@ mod clock_tests {
 		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
 	}
 }
-
