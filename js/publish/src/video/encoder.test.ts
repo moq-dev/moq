@@ -117,6 +117,7 @@ test("encoding tracks encoder config in its child effect", async () => {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -159,6 +160,7 @@ test("an on-demand gap marks a discontinuity and leaves the broadcast-owned trac
 		config: new Signal(undefined),
 		track: live,
 		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -214,6 +216,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -300,6 +303,7 @@ test("every published config fits a probe for its own codec", async () => {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -634,6 +638,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -802,6 +807,7 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1010,6 +1016,7 @@ async function recordKeyframes(
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1387,6 +1394,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1460,6 +1468,7 @@ test("the catalog bitrate and frame rate only rise", async () => {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1517,6 +1526,7 @@ test("each broadcast keeps its own ceiling and maxima", async () => {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(undefined),
 		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {},
 	});
 	const first = { video: rendition, order: new Order() };

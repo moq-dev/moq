@@ -1,3 +1,4 @@
+import type { Micro } from "@moq/clock";
 import type * as Hls from "@moq/hang/hls";
 import type * as Moq from "@moq/net";
 import { type Getter, Signal } from "@moq/signals";
@@ -27,6 +28,14 @@ export class Rendition<Config> {
 	 * broadcast owns `broadcast` and `track`, so a config setting either is refused.
 	 */
 	readonly config = new Signal<Config | undefined>(undefined);
+
+	/**
+	 * The rendition's longest group duration, when known (a video encoder's keyframe interval). Read
+	 * when each of its tracks is created, it fixes that track's HLS segment duration up front, so the
+	 * catalog advertises the records before any media is encoded, as an on-demand broadcast needs.
+	 * Without one, the first segment declares the duration.
+	 */
+	readonly hlsHint = new Signal<Micro | undefined>(undefined);
 
 	/**
 	 * The open track producer, or `undefined` while the network broadcast is down, after the track

@@ -388,6 +388,11 @@ export class Encoder {
 		const rendition = broadcast.audio(this.name);
 		errors.set(rendition, failure);
 		effect.cleanup(() => rendition.close());
+		// Groups hold about this much audio, which fixes each new track's HLS segment duration up front.
+		const hint = (duration: Milli) =>
+			Number.isFinite(duration) && duration > 0 ? Micro.fromMilli(duration) : undefined;
+		rendition.hlsHint.set(hint(this.groupDuration.peek()));
+		effect.subscribe(this.groupDuration, (duration) => rendition.hlsHint.set(hint(duration)));
 
 		// Publish the resolved config; undefined (no capture) drops it from the catalog.
 		effect.proxy(rendition.config, this.out.catalog);

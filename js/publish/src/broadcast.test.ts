@@ -836,3 +836,33 @@ test("on demand, a record subscriber wants the media too", async () => {
 	expect(rendition.track.peek()).toBeUndefined();
 	broadcast.close();
 });
+
+test("a hinted rendition advertises its records before encoding, so an on-demand export finds them", async () => {
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Origin.Producer(),
+		name: Path.from("hinted.hang"),
+		onDemand: true,
+	});
+	const video = broadcast.video("video");
+	video.hlsHint.set(Micro(2_000_000));
+	video.config.set(videoConfig);
+	await settle();
+
+	expect(video.track.peek()).toBeUndefined();
+	const catalog = await readCatalog(broadcast);
+	expect(catalog?.video?.renditions.video?.hls).toEqual({ track: "video.hls", duration: Catalog.u53(4000) });
+	broadcast.close();
+});
+
+test("registering a name another rendition's HLS records hold throws", async () => {
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("taken.hang") });
+	broadcast.video("video");
+	expect(() => broadcast.audio("video.hls")).toThrow("HLS record track");
+	await settle();
+	expect(() => broadcast.audio("video.hls")).toThrow("HLS record track");
+	// A text rendition publishes no records, so its sidecar name stays free.
+	broadcast.text("captions");
+	expect(() => broadcast.audio("captions.hls")).not.toThrow();
+	broadcast.close();
+});

@@ -214,6 +214,14 @@ export class Broadcast {
 		if (this.#replacements.has(name)) {
 			throw new Error(`rendition ${name} names another rendition's replacement track`);
 		}
+		// A video or audio rendition's HLS records hold or will hold the name.
+		if (name.endsWith(Hls.SUFFIX)) {
+			const media = name.slice(0, -Hls.SUFFIX.length);
+			const owner = this.#renditions.peek()[media];
+			if (this.#records.peek()[media] || (owner && owner.kind !== "text")) {
+				throw new Error(`rendition ${name} names another rendition's HLS record track`);
+			}
+		}
 
 		const track = new Signal<Moq.Track.Producer | undefined>(undefined);
 		this.#tracks.set(name, track);
@@ -492,7 +500,7 @@ export class Broadcast {
 					entry = {
 						track,
 						owner: rendition,
-						recorder: hls ? this.#record(broadcast, rendition.kind, name) : undefined,
+						recorder: hls ? this.#record(broadcast, rendition, name) : undefined,
 					};
 					tracks.set(rendition.name, entry);
 					kinds.set(rendition.name, rendition.kind);
@@ -523,10 +531,10 @@ export class Broadcast {
 		});
 	}
 
-	// Start the HLS records of the video or audio track `name`. A record track name already taken,
-	// such as by an application's own track, leaves the rendition without records rather than down.
-	#record(broadcast: Moq.Broadcast.Producer, kind: Kind, name: string): Hls.Recorder | undefined {
-		if (kind === "text") return undefined;
+	// Start the HLS records of `rendition`'s video or audio track `name`. A record track name already
+	// taken, such as by an application's own track, leaves the rendition without records rather than down.
+	#record(broadcast: Moq.Broadcast.Producer, rendition: Rendition<unknown>, name: string): Hls.Recorder | undefined {
+		if (rendition.kind === "text") return undefined;
 		let track: Moq.Track.Producer;
 		try {
 			track = broadcast.createTrack(Hls.defaultName(name), Hls.Recorder.INFO);
@@ -534,7 +542,7 @@ export class Broadcast {
 			console.warn(`rendition ${name} publishes no HLS records`, err);
 			return undefined;
 		}
-		const recorder = new Hls.Recorder(track);
+		const recorder = new Hls.Recorder(track, { durationHint: rendition.hlsHint.peek() });
 		this.#records.update((records) => ({ ...records, [name]: recorder }));
 		return recorder;
 	}
