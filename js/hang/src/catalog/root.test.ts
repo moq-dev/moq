@@ -43,10 +43,11 @@ test("rendition broadcast reference is parsed and normalized", () => {
 	// Normalized like Rust path::Relative: redundant `.` segments are dropped.
 	expect(parsed.video.renditions.video?.broadcast).toBe("source" as RelativeBroadcast);
 
-	// Spelled like a path, so an empty segment or a lone backslash refuses the catalog.
+	// Spelled like a path, so an empty segment or a lone backslash makes the rendition malformed.
 	for (const broadcast of ["./source/", "/source", "a//b", "a\\b"]) {
 		const video = { broadcast, codec: "avc1.64001f", container: { kind: "legacy" } };
-		expect(RootSchema.safeParse({ video: { renditions: { video } } }).success).toBe(false);
+		const skipped = RootSchema.parse({ video: { renditions: { video } } });
+		expect(skipped.video?.renditions).toEqual({});
 	}
 });
 

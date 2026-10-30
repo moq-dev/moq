@@ -856,6 +856,25 @@ mod test {
 	}
 
 	#[test]
+	fn rendition_with_misspelled_broadcast_is_skipped() {
+		// Spelled like a path, so an empty segment or a lone backslash makes the rendition
+		// malformed. Mirrors the JS `rendition broadcast reference is parsed and normalized`.
+		for broadcast in ["./source/", "/source", "a//b", r"a\b"] {
+			let encoded = serde_json::json!({
+				"video": {"renditions": {"video": {
+					"broadcast": broadcast,
+					"codec": "avc1.64001f",
+					"container": {"kind": "legacy"}
+				}}}
+			})
+			.to_string();
+
+			let parsed = Catalog::<()>::from_str(&encoded).expect("failed to decode");
+			assert!(parsed.video.renditions.is_empty(), "{broadcast:?} should be skipped");
+		}
+	}
+
+	#[test]
 	fn rendition_with_parent_broadcast_stays_distinct_from_empty() {
 		let encoded = r#"{
 			"video": {
