@@ -13,9 +13,9 @@ non-CI usage grew by roughly 480 GB and was later freed. CI's XFS quota is
 whatever the host leaves free past a 32 GiB reserve, so the runner hit ENOSPC
 mid-check: quest land ejected moq-dev/moq#6985 and moq-dev/moq#6999 as
 `failed_checks`, and at 07:49 the runner aborted and stayed down for 36
-minutes. The host configuration lives in the private kixelated/nixos repository.
+minutes.
 
-Done so far ([kixelated/nixos#15](https://github.com/kixelated/nixos/pull/15)):
+Done so far, in the host's configuration:
 an `agent-storage-gc` user timer reclaims idle worktree build outputs and
 leaked test scratch every 10 minutes and logs free space, and the runner unit
 restarts after a crash (that change is in the PR but not yet deployed).
@@ -27,6 +27,6 @@ Remaining:
 - Guarantee CI a floor: put agent storage (`/home`, `/tmp`) in its own XFS
   project with a hard cap, so an agent gets ENOSPC instead of the queue.
 
-Decided 2026-10-30 (maintainer, /quest-plan of the 2026-10-30 /quest-complete follow-ups): ✅ new m0 moq quest / note in nixos#15 only / drop.
+Decided 2026-10-30 (maintainer, /quest-plan of the 2026-10-30 /quest-complete follow-ups): ✅ new m0 quest / note in the host configuration only / drop.
 
 Public API: none. Wire: none.
