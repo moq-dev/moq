@@ -94,6 +94,10 @@ impl Default for Config {
 }
 
 /// All renditions of one broadcast, kept in sync with its catalog.
+///
+/// A cheap handle: clones share the one broadcaster, which stops watching the catalog once the
+/// last clone drops.
+#[derive(Clone)]
 pub struct Broadcaster {
 	#[cfg_attr(
 		not(feature = "server"),
@@ -108,16 +112,31 @@ pub struct Broadcaster {
 	instance: Arc<str>,
 	/// The current rendition set, reconciled from the catalog by the watcher task.
 	renditions: renditions::Producer,
-	/// Ends the catalog watcher when the broadcaster is dropped; `Drop` also releases the
-	/// renditions themselves (see [`renditions::Producer::clear`]), each of which stops following
-	/// its records once no recording cursor holds it.
+	/// Shared by every clone; its drop with the last one ends the catalog watcher.
+	_guard: Arc<Guard>,
+}
+
+/// What the last [`Broadcaster`] clone releases.
+struct Guard {
+	renditions: renditions::Producer,
+	/// Ends the catalog watcher when dropped.
 	_watcher: driver::Owner,
+}
+
+impl Drop for Guard {
+	fn drop(&mut self) {
+		// Release the map: a surviving `renditions::Consumer` would otherwise pin every
+		// `Rendition` forever. A recording cursor's own `Arc<Rendition>` keeps that rendition's
+		// records flowing, so its final segments are not truncated. Each rendition stops
+		// following its records once no recording cursor holds it.
+		self.renditions.clear();
+	}
 }
 
 impl Broadcaster {
 	/// Start tracking the renditions of `source`'s catalog broadcast, once the returned
 	/// [`Driver`] runs.
-	pub fn new(source: moq_mux::Source, config: Config) -> (Arc<Self>, Driver) {
+	pub fn new(source: moq_mux::Source, config: Config) -> (Self, Driver) {
 		let broadcast = source.broadcast();
 		// An epoch names the instance on every edge, so each serves it under the same URLs.
 		let instance = broadcast.info().epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
@@ -126,21 +145,41 @@ impl Broadcaster {
 		// The watcher owns its own producer clone; dropping the `Broadcaster` ends it so the
 		// standing catalog subscription stops when nobody's serving from this broadcaster.
 		let watcher = driver.lead(watch_catalog(source, renditions.clone()));
-		let broadcaster = Arc::new(Self {
+		let broadcaster = Self {
 			broadcast,
 			instance: Arc::from(instance.as_str()),
+			_guard: Arc::new(Guard {
+				renditions: renditions.clone(),
+				_watcher: watcher,
+			}),
 			renditions,
-			_watcher: watcher,
-		});
+		};
 		(broadcaster, driver)
 	}
 
 	/// [`new`](Self::new), with its driver spawned on the ambient runtime.
 	#[cfg(test)]
-	pub(crate) fn spawned(source: moq_mux::Source, config: Config) -> Arc<Self> {
+	pub(crate) fn spawned(source: moq_mux::Source, config: Config) -> Self {
 		let (broadcaster, driver) = Self::new(source, config);
 		tokio::spawn(driver.run());
 		broadcaster
+	}
+
+	/// Return true if this is a clone of the same broadcaster.
+	pub fn is_clone(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self._guard, &other._guard)
+	}
+
+	/// How many clones of this broadcaster are alive.
+	#[cfg(test)]
+	pub(crate) fn clones(&self) -> usize {
+		Arc::strong_count(&self._guard)
+	}
+
+	/// A weak reference that reports, through its `strong_count`, whether any clone is alive.
+	#[cfg(test)]
+	pub(crate) fn downgrade(&self) -> std::sync::Weak<impl Sized + use<>> {
+		Arc::downgrade(&self._guard)
 	}
 
 	/// The publisher instance every listed URL is under (`@{instance}/{kind}/{rendition}/...`).
@@ -392,15 +431,6 @@ impl Broadcaster {
 	)]
 	pub(crate) fn is_empty(&self) -> bool {
 		self.renditions.is_empty()
-	}
-}
-
-impl Drop for Broadcaster {
-	fn drop(&mut self) {
-		// Release the map: a surviving `renditions::Consumer` would otherwise pin every
-		// `Rendition` forever. A recording cursor's own `Arc<Rendition>` keeps that rendition's
-		// records flowing, so its final segments are not truncated.
-		self.renditions.clear();
 	}
 }
 

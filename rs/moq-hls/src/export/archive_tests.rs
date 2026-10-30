@@ -265,7 +265,7 @@ fn catalog() -> hang::Catalog {
 
 /// An archive served back through an origin by a consumer, and a broadcaster exporting it.
 struct Replay {
-	broadcaster: Arc<Broadcaster>,
+	broadcaster: Broadcaster,
 	/// Keeps the served broadcast's origin open.
 	_origin: moq_net::origin::Producer,
 	consumer: tokio::task::JoinHandle<moq_archive::Result<()>>,
