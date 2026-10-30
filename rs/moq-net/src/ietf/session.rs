@@ -527,7 +527,11 @@ pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<P
 	let outer_version = crate::Version::Ietf(version);
 	let mut early = Vec::new();
 
+	// Each stream racing ahead of SETUP is held, so a peer opening them at once must not
+	// hold the task for its whole MAX_STREAMS credit.
+	let mut budget = kio::coop::Budget::new(32);
 	loop {
+		kio::wait(|waiter| budget.poll_yield(waiter)).await;
 		let recv = session.accept_uni().await.map_err(Error::from_transport)?;
 		let mut reader: Reader<crate::transport::boxed::RecvStream, crate::Version> = Reader::new(recv, outer_version);
 
@@ -822,7 +826,11 @@ impl Unis {
 	}
 
 	fn accept(&mut self, waiter: &kio::Waiter) {
-		while self.ended.is_none() {
+		// MAX_STREAMS credit alone lets one poll accept thousands of streams, so a peer
+		// opening them at once must not hold the session's other tasks. A yield has woken
+		// the task, and both callers end Pending while the session lives.
+		let mut budget = kio::coop::Budget::new(32);
+		while self.ended.is_none() && budget.poll_yield(waiter).is_ready() {
 			let reader = match self.early.pop_front() {
 				Some(reader) => reader,
 				None => match self.session.poll_accept_uni(waiter) {
@@ -1080,8 +1088,13 @@ async fn run_dispatch(
 	};
 	let mut tasks = TaskSet::owned();
 	let fatal = kio::Shared::<Option<Error>>::default();
+	// MAX_STREAMS credit alone lets the peer keep thousands of streams ready, and the
+	// drive below polls the children only when accepting pends. A yield pends it.
+	let mut budget = kio::coop::Budget::new(32);
 
 	let err = loop {
+		// One pass per accepted stream, not per wake of the drive.
+		let mut charge = true;
 		let accepted = tasks
 			.drive(|waiter| {
 				let broken = fatal.poll(waiter, |fatal| match fatal.is_some() {
@@ -1092,6 +1105,9 @@ async fn run_dispatch(
 					&& let Some(err) = fatal.take()
 				{
 					return Poll::Ready(Err(err));
+				}
+				if std::mem::take(&mut charge) {
+					std::task::ready!(budget.poll_yield(waiter));
 				}
 				Stream::poll_accept(&session, version, waiter)
 			})
@@ -2702,6 +2718,102 @@ mod tests {
 		}
 
 		(log, None)
+	}
+
+	/// A peer opening uni streams at once gets a budget of them accepted per poll, leaving
+	/// the rest for later so the session's other tasks run in between.
+	#[moq_clock::test]
+	async fn a_flood_of_uni_streams_yields() {
+		const VERSION: Version = Version::Draft18;
+		let (local, peer) = crate::transport::memory::pair(Default::default());
+		let (tasks, _task_set) = TaskSet::new();
+		let peer_setup = peer::PeerSetup::default();
+		let subscriber = Subscriber::new(
+			crate::time::sim(),
+			crate::driver::Transport::new(local.clone()),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(true),
+			None,
+			peer_setup.clone(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		);
+		let (_goaway, goaway) = crate::goaway::Handle::new(false);
+		let mut unis = Unis::new(
+			crate::driver::Transport::new(local.clone()),
+			subscriber,
+			UniSetup {
+				peer: Some(peer_setup),
+				read: false,
+				early: Vec::new(),
+				client: true,
+				version: VERSION,
+				goaway,
+			},
+		);
+		// Held open and empty, so each accepted stream waits on its type.
+		let mut opened = Vec::new();
+		for _ in 0..1024 {
+			opened.push(peer.open_uni(Default::default()).await.unwrap());
+		}
+
+		assert!(unis.poll(&kio::Waiter::noop()).is_pending());
+		assert!(
+			local.poll_accept_uni(&kio::Waiter::noop()).is_ready(),
+			"one poll accepted every stream"
+		);
+	}
+
+	/// A peer opening request streams at once gets a budget of them accepted per poll,
+	/// leaving the rest for later so the session's other tasks run in between.
+	#[moq_clock::test]
+	async fn a_flood_of_request_streams_yields() {
+		const VERSION: Version = Version::Draft18;
+		let (local, peer) = crate::transport::memory::pair(Default::default());
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let (tasks, _task_set) = TaskSet::new();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+		let transport = crate::driver::Transport::new(local.clone());
+		let publisher = Publisher::new(
+			crate::time::sim(),
+			transport.clone(),
+			origin.consume(),
+			Control::new(true),
+			None,
+			peer_setup.clone(),
+			VERSION,
+		);
+		let subscriber = Subscriber::new(
+			crate::time::sim(),
+			transport.clone(),
+			origin,
+			Control::new(true),
+			None,
+			peer_setup.clone(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		);
+		let mut dispatch = std::pin::pin!(run_dispatch(
+			transport, publisher, subscriber, peer_setup, None, VERSION
+		));
+		// Held open and empty, so each accepted stream waits on its header.
+		let mut opened = Vec::new();
+		for _ in 0..1024 {
+			opened.push(peer.open_bi(Default::default()).await.unwrap());
+		}
+
+		assert!(kio::Waiter::noop().poll_future(dispatch.as_mut()).is_pending());
+		assert!(
+			local.poll_accept_bi(&kio::Waiter::noop()).is_ready(),
+			"one poll accepted every stream"
+		);
 	}
 
 	/// A late group must reach the dispatch loop and stop with CANCELLED.

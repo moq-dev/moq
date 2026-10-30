@@ -25,6 +25,12 @@ import { Budget } from "./util/yield.ts";
 // Sharing the slice across writers bounds concurrent groups and subscriber fanout too.
 const writeBudget = new Budget();
 
+/** Stream credit alone lets a peer keep thousands of streams ready, each accepted in a
+ * microtask, so accept loops share a slice that lets the host's other tasks run.
+ * @internal
+ */
+export const acceptBudget = new Budget();
+
 // Decode raw transport errors before mapping so they cannot bypass the negotiated
 // registry. Ordinary errors already send 0 and retain their local identity.
 function withCode(reason: unknown, stream: StreamVersion): unknown {
@@ -225,6 +231,8 @@ export class Stream {
 
 	static async accept(quic: WebTransport, version: StreamVersion): Promise<Stream | undefined> {
 		for (;;) {
+			const pause = acceptBudget.poll();
+			if (pause !== undefined) await pause;
 			const reader =
 				quic.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
 			const next = await reader.read();
@@ -911,6 +919,8 @@ export class Readers {
 	}
 
 	async next(): Promise<Reader | undefined> {
+		const pause = acceptBudget.poll();
+		if (pause !== undefined) await pause;
 		const next = await this.#reader.read();
 		if (next.done) return;
 		return new Reader(next.value, undefined, this.#version);

@@ -1,5 +1,6 @@
 import { heapStats } from "bun:jsc";
 import { expect, spyOn, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import {
 	FrameTooLarge,
 	GroupTooLarge,
@@ -13,7 +14,8 @@ import {
 } from "./error.ts";
 import { Version } from "./ietf/version.ts";
 import { Version as Lite } from "./lite/version.ts";
-import { type Cursor, Reader, Stream, type StreamVersion, Writer } from "./stream.ts";
+import { createMockTransportPair } from "./mock.ts";
+import { type Cursor, Reader, Readers, Stream, type StreamVersion, Writer } from "./stream.ts";
 import { TimeoutError } from "./util/timeout.ts";
 import { U64 } from "./util/u64.ts";
 
@@ -987,3 +989,37 @@ test("Reader u53 decodes every size in both formats, one byte per chunk", async 
 		expect(await reader.done()).toBe(true);
 	}
 });
+
+// A peer keeping streams ready must not hold the host for as long as they keep arriving:
+// each accept resolves in a microtask, so only a yield lets a sibling task run in between.
+// The CPU slice is stubbed to pass on every check, so the yield does not depend on load.
+// The stub only moves forward, since the budget's slice start outlives each test.
+let fakeNow = performance.now();
+for (const kind of ["uni", "bidi"] as const) {
+	test(`a flood of ${kind} streams yields to the host's other tasks`, async () => {
+		const STREAMS = 1024;
+		const { client, server } = createMockTransportPair();
+		for (let i = 0; i < STREAMS; i++) {
+			if (kind === "uni") await client.createUnidirectionalStream();
+			else await client.createBidirectionalStream();
+		}
+
+		const clock = spyOn(performance, "now").mockImplementation(() => (fakeNow += 5));
+		try {
+			const readers = kind === "uni" ? new Readers(server, QUIC) : undefined;
+			let accepted = 0;
+			let sibling: number | undefined;
+			void yieldNow().then(() => {
+				sibling = accepted;
+			});
+			for (; accepted < STREAMS; accepted++) {
+				const stream = readers ? await readers.next() : await Stream.accept(server, QUIC);
+				expect(stream).toBeDefined();
+			}
+			expect(sibling).toBeDefined();
+			expect(sibling).toBeLessThan(STREAMS);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+}
