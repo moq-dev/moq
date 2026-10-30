@@ -771,8 +771,8 @@ mod tests {
 			let segments = listed(&playlist);
 			assert!(segments.len() > 1 && consecutive(&segments, 0), "{playlist}");
 			assert_eq!(duration(&playlist), Duration::from_secs(6), "{playlist}");
-			// The exporter's target: the 2s declared duration.
-			assert!(playlist.contains("\n#EXT-X-TARGETDURATION:2\n"), "{playlist}");
+			// The exporter's target: the declared duration, the 2s hint's multiple at the 4s grid.
+			assert!(playlist.contains("\n#EXT-X-TARGETDURATION:4\n"), "{playlist}");
 			assert!(playlist.contains("\n#EXT-X-MEDIA-SEQUENCE:0\n"), "{playlist}");
 			assert!(
 				playlist.contains("#EXT-X-MAP:URI=\"init.0.mp4\"\n#EXT-X-PROGRAM-DATE-TIME:"),
