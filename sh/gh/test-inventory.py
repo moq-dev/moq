@@ -278,9 +278,9 @@ class Graph:
                             self.visit_recipe(recipe)
 
     def scripts(self, text: str, cwd: Path, file: Path | None) -> list[Path]:
-        """The script files text names outside its comment lines."""
+        """The script files text names outside its comments."""
         found = []
-        text = re.sub(r"(?m)^\s*(?:#(?!!)|//).*$", "", text)
+        text = re.sub(r"(?m)(?:^|\s)(?:#(?!!)|//).*$", "", text)
         bases = [cwd, self.root, *([file.parent] if file else [])]
         # A path after a `cd` is relative to where it went.
         bases += [(cwd / directory).resolve() for directory in re.findall(r"\bcd\s+([\w./-]+)", text)]
@@ -354,7 +354,8 @@ def workflow_steps(root: Path) -> list[tuple[str, str, Path]]:
             matrix = matrix_values(job)
             directory = ((job.get("defaults") or {}).get("run") or {}).get("working-directory", defaults)
             for step in job.get("steps") or []:
-                run = step.get("run")
+                # An action that runs a command takes it as `with: run:`, like CodSpeed's.
+                run = step.get("run") or (step.get("with") or {}).get("run")
                 if not isinstance(run, str):
                     continue
                 cwd = (root / step.get("working-directory", directory)).resolve()
@@ -861,7 +862,7 @@ def benched(chosen: Selection, run: Run, target: Target, codspeed: bool) -> bool
     if chosen.packages is not None and target.package not in chosen.packages:
         return False
     heads = [index for index, word in enumerate(run.words) if word == "cargo"]
-    command = run.words[heads[-1] + 1:heads[-1] + 3] if heads else []
+    command = [word for word in run.words[heads[-1] + 1:] if not word.startswith("+")][:2] if heads else []
     if "--no-run" in run.words or command[:1] in (["build"], ["check"], ["clippy"], ["doc"]):
         return False
     if command == ["codspeed", "build"] and not codspeed:

@@ -95,6 +95,7 @@ JUSTFILE = """
         cargo bench -p media --bench decode
         # Neither a comment nor a build runs anything: python3 sh/b.test.py
         cargo bench --no-run -p media --bench encode
+        cargo +nightly build -p media --bench encode # bash sh/b.test.py
 """
 
 RS = """
