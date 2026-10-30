@@ -72,7 +72,6 @@ jobs:
           # Only the permissions needed to pin and request a landing.
           permission-contents: write
           permission-pull-requests: write
-          permission-issues: write
 
       - name: Request checked landing
         env:
