@@ -218,6 +218,19 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
 
+    def test_only_the_local_check_narrows_feature_contracts(self):
+        # The queue's `just ci` keeps the dependents' feature shapes.
+        self.change("rs/moq-net/src/lib.rs")
+        for action, scope in (("check", "changed"), ("ci", "")):
+            with self.subTest(action=action):
+                self.stub_ci('[[ "$1" != "rs" || "$2" != "lint-changed" ]] || '
+                             'printf "scope=%s\\n" "${RS_FEATURE_SCOPE:-}" >>"$CALLS"\n')
+                result = subprocess.run(["bash", "sh/dispatch.sh", action, "origin/main"],
+                                        cwd=self.repo, env=self.env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = (self.root / "calls").read_text().splitlines()
+                self.assertIn(f"scope={scope}", calls)
+
     def test_failure_keeps_running_lanes_and_starts_remaining_modules(self):
         # The failed lane finishes before go releases the two parked lanes.
         # No timing assumption can make cancellation look like completion.

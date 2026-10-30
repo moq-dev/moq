@@ -293,7 +293,15 @@ step() {
         check:moq_sh) just infra moq-sh test ;;
         # The check keeps docs and target-specific lints; the test phase
         # enforces default-feature clippy without a second compile.
-        check:rs) just rs lint-changed "$rs_list" ;;
+        # Locally, the feature-contract checks skip the dependents of the
+        # changed crates; the queue keeps them (see sh/rs/select.sh).
+        check:rs)
+            if [[ "$action" == check ]]; then
+                RS_FEATURE_SCOPE=changed just rs lint-changed "$rs_list"
+            else
+                just rs lint-changed "$rs_list"
+            fi
+            ;;
         check:bench)
             python3 bench/compare.test.py
             bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
