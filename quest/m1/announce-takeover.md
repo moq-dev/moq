@@ -45,6 +45,11 @@ What remains:
   This is accepted for now, since the answering worker is the instance by
   construction. Decide whether that join needs the upstream's answer to
   confirm the epoch.
+- Coalesced takeovers. A front or request continues only the takeover naming
+  the route it resolved through, so in-place takeovers A→B→C installed
+  before its task runs leave it on the retired A, ending it like the
+  Start/Restart fallback. Carry continuity across the chain without keeping
+  unbounded history of retired routes.
 - Tests not yet written, with controlled time: a SUBSCRIBE or FETCH pending
   at the front between its resolve and the takeover (`PendingFront::via`),
   a takeover naming a predecessor already restarted (the `seen` stamps in

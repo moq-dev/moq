@@ -3493,11 +3493,12 @@ async fn run_front(task: FrontTask, origin: TasksWeak) {
 	.await;
 }
 
-/// The route a front may serve from. `resolved` is the instance the front first
-/// resolved, once it has. Routes with its epoch serve the same bytes, so any of them
-/// may take over; a front resolved without one stays on its first route, the only one
-/// known to serve its bytes, and never re-requests a failed track through it, since it
-/// may resolve that to another instance. Either way the front
+/// The route a front may serve from. `resolved` is what the front first resolved,
+/// once it has. Routes with its epoch serve the same bytes, so any of them may take
+/// over; a front resolved without one stays on its resolution's route, the only one
+/// known to serve its bytes (its first, or the [`Takeover`] it adopted), and never
+/// re-requests a failed track through it, since it may resolve that to another
+/// instance. Either way the front
 /// stays until those routes go, even once another instance wins the path: its
 /// subscriptions are sticky, and new requests resolve the winner on a fresh front.
 fn pick<'a>(
@@ -3505,20 +3506,18 @@ fn pick<'a>(
 	path: &Path,
 	horizon: Horizon,
 	front: &Front,
-	resolved: Option<&Instance>,
+	resolved: Option<&Resolution>,
 ) -> Option<&'a RouteEntry> {
 	let excluded = front.excluded_routes();
-	match resolved {
-		None => table.best_route(path, horizon, excluded, |_| true),
-		Some(Instance::Epoch(epoch)) => {
-			table.best_route(path, horizon, excluded, |entry| entry.epoch.as_ref() == Some(epoch))
-		}
-		Some(Instance::Route(_)) => front.serving_route().and_then(|route| {
-			table
-				.routes
-				.covering(path)
-				.find(|entry| entry.id == route && entry.live() && horizon.admits(entry))
-		}),
+	let Some(resolved) = resolved else {
+		return table.best_route(path, horizon, excluded, |_| true);
+	};
+	match &resolved.instance {
+		Instance::Epoch(epoch) => table.best_route(path, horizon, excluded, |entry| entry.epoch.as_ref() == Some(epoch)),
+		Instance::Route(_) => table
+			.routes
+			.covering(path)
+			.find(|entry| entry.id == resolved.route && entry.live() && horizon.admits(entry)),
 	}
 }
 
@@ -3637,8 +3636,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 				pending.via = Some((entry.id, resolution.asked));
 			}
 		}
-		let instance = resolved.as_ref().map(|resolved| &resolved.instance);
-		let best = pick(&table, &path, horizon, front, instance);
+		let best = pick(&table, &path, horizon, front, resolved.as_ref());
 		// Under the table's lock, which a request reads it under too: a request that
 		// sees another winner from here on mints its own front rather than join this one.
 		if resolved.is_none()
@@ -3685,8 +3683,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 	// request was pending speaks for nobody, so either one re-selects instead.
 	let standing = |front: &Front, route: u64, resolved: &Option<Resolution>| {
 		let table = shared.read();
-		let instance = resolved.as_ref().map(|resolved| &resolved.instance);
-		pick(&table, &path, horizon, front, instance).is_some_and(|best| best.id == route)
+		pick(&table, &path, horizon, front, resolved.as_ref()).is_some_and(|best| best.id == route)
 	};
 
 	// Whether an answer `route` gave for `asked` would serve another instance than the
@@ -9506,6 +9503,42 @@ mod tests {
 
 		assert_eq!(listed(&mut tracks).await, "+c");
 		assert_eq!(listed(&mut tracks).await, "-a");
+	}
+
+	/// A takeover without an epoch, in place, continues the front too: it serves from
+	/// the successor once the predecessor retires rather than ending with no route.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_front_follows_an_epochless_takeover_in_place() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let first = producer
+			.requests_route("room/alice", Route::default().with_hops(hops(&[10])), None)
+			.unwrap();
+		let pending = consumer.request("room/alice", None);
+		let upstream = broadcast::Info::new().produce();
+		let _a = upstream.create_track("a", None).unwrap();
+		queued(&first).await.accept(&upstream);
+		let front = pending.await.unwrap();
+		let mut tracks = front.tracks().unwrap();
+		assert_eq!(listed(&mut tracks).await, "+a");
+		assert_eq!(listed(&mut tracks).await, "synced");
+
+		let second = producer
+			.requests_route("room/alice", Route::default().with_hops(hops(&[10])), Some(&first))
+			.unwrap();
+		moq_clock::sim::yield_now().await;
+		drop(first);
+
+		let successor = broadcast::Info::new().produce();
+		let _a = successor.create_track("a", None).unwrap();
+		let _b = successor.create_track("b", None).unwrap();
+		moq_clock::timeout(Duration::from_secs(1), queued(&second))
+			.await
+			.expect("the front asked the successor")
+			.accept(&successor);
+		assert_eq!(listed(&mut tracks).await, "+b");
+		assert!(!front.is_closed());
 	}
 
 	/// A path served on request through a covering prefix is not a broadcast anyone
