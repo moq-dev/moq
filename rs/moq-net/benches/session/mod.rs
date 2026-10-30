@@ -25,6 +25,9 @@
 //! subscriptions and the backlog each holds, so every group waits for a stream grant. A
 //! publisher that parks state per backlogged group pays for it on each grant, which shows
 //! as a slope over the backlog.
+//! `session_delivery_prefixes` holds silent broadcasts open on one viewer session beside the
+//! one it watches, against a fixed route table. Each is an announce request the session
+//! keeps, so a per-group cost that grows with them shows as a slope over `follow`.
 //! `SESSION_EXPIRY_ONLY=1` uses the standalone 30s-expiry pool and reports groups
 //! written plus charged cache bytes every 10s during long profiling runs. Each round
 //! advances the cache clock by a second, so the expiry window spans 30 rounds.
@@ -119,6 +122,9 @@ struct Shape {
 	viewers: usize,
 	/// Broadcasts each viewer subscribes to.
 	watch: usize,
+	/// Further broadcasts each viewer resolves and holds without subscribing, each
+	/// keeping one more announce request open on its session.
+	follow: usize,
 	/// Payload bytes per frame.
 	frame: usize,
 	/// Frames in a complete group.
@@ -149,6 +155,7 @@ impl Shape {
 		broadcasts: 1,
 		viewers: 16,
 		watch: 1,
+		follow: 0,
 		frame: 64,
 		group_frames: FRAMES,
 		paced: false,
@@ -185,6 +192,9 @@ impl Shape {
 		// 100-character title limit, which truncates and renumbers it.
 		if let Some(credit) = self.credit {
 			return format!("{version}/watch={}/burst={}/credit={credit}", self.watch, self.burst);
+		}
+		if self.follow > 0 {
+			return format!("{version}/broadcasts={}/follow={}", self.broadcasts, self.follow);
 		}
 		if self.fetch && self.burst > 1 {
 			return format!(
@@ -509,6 +519,7 @@ impl<B: Backend> Cluster<B> {
 		let pair = B::connect(options, &self.relays[relay], hidden).await;
 
 		Viewer {
+			following: Vec::new(),
 			subscribers: Vec::new(),
 			fetches: Vec::new(),
 			blocked: 0,
@@ -520,6 +531,8 @@ impl<B: Backend> Cluster<B> {
 }
 
 struct Viewer {
+	/// Broadcasts resolved and held without a subscription.
+	following: Vec<(origin::Following, broadcast::Consumer)>,
 	subscribers: Vec<track::Subscriber>,
 	fetches: Vec<(usize, track::Consumer)>,
 	blocked: usize,
@@ -529,6 +542,13 @@ struct Viewer {
 }
 
 impl Viewer {
+	/// Resolve `path` and hold it, subscribing to nothing.
+	async fn follow(&mut self, path: &str) {
+		let mut following = self.origin.consume().follow(path, None).unwrap();
+		let broadcast = following.available().await.unwrap();
+		self.following.push((following, broadcast));
+	}
+
 	/// Resolve `path` and subscribe to each of its `tracks`.
 	async fn watch(&mut self, path: &str, tracks: &[impl AsRef<str>], subscription: Option<track::Subscription>) {
 		let broadcast = self
@@ -575,8 +595,8 @@ struct Room<B: Backend> {
 impl<B: Backend> Room<B> {
 	async fn new(version: &str, shape: Shape) -> Self {
 		assert!(
-			shape.watch <= shape.total(),
-			"a viewer can't watch more broadcasts than exist"
+			shape.watch + shape.follow <= shape.total(),
+			"a viewer can't watch or follow more broadcasts than exist"
 		);
 		assert!(!shape.paced || shape.burst == 1, "a paced round writes one frame");
 		assert!(!shape.fetch || !shape.paced, "fetch rounds read finished groups");
@@ -586,16 +606,16 @@ impl<B: Backend> Room<B> {
 		// spread over the broadcasts before any doubles up.
 		let mut viewers = Vec::new();
 		let mut watched = vec![false; shape.total()];
-		for viewer in 0..shape.viewers {
+		for viewer_index in 0..shape.viewers {
 			let broadcasts: Vec<_> = (0..shape.watch)
-				.map(|k| (viewer * shape.watch + k) % shape.total())
+				.map(|k| (viewer_index * shape.watch + k) % shape.total())
 				.collect();
 			for &broadcast in &broadcasts {
 				watched[broadcast] = true;
 			}
 			// Offset by one so a viewer lands on a different relay than the
 			// publisher it watches whenever there is more than one.
-			let mut viewer = cluster.join((viewer + 1) % shape.relays, false).await;
+			let mut viewer = cluster.join((viewer_index + 1) % shape.relays, false).await;
 			for broadcast in broadcasts {
 				if shape.fetch {
 					let source = viewer
@@ -610,6 +630,12 @@ impl<B: Backend> Room<B> {
 				} else {
 					viewer.watch(&path(broadcast), &[TRACK], shape.subscription()).await;
 				}
+			}
+			// The followed broadcasts sit just past the watched window, so they stay silent.
+			for k in 0..shape.follow {
+				viewer
+					.follow(&path((viewer_index * shape.watch + shape.watch + k) % shape.total()))
+					.await;
 			}
 			viewers.push(viewer);
 		}
@@ -1521,6 +1547,20 @@ pub(crate) fn session<B: Backend>(c: &mut Criterion) {
 			publishers: 1,
 			broadcasts: 256,
 			watch,
+			..base
+		}),
+	);
+	// One viewer session holding many silent broadcasts open beside the one it watches:
+	// each is an announce request on the session, against a fixed route table. A wake
+	// for the watched group should not cost a poll per held request.
+	delivery::<B>(
+		c,
+		"prefixes",
+		[1, 64, 1024].map(|follow| Shape {
+			publishers: 1,
+			broadcasts: 1025,
+			viewers: 1,
+			follow,
 			..base
 		}),
 	);
