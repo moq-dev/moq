@@ -193,13 +193,16 @@ pub(crate) fn bytes(
 		memo.next.clear();
 	}
 	let forced = Cell::new(false);
-	let node = erased_serde::serialize(new, Differ {
-		baseline: old,
-		present: true,
-		forced: &forced,
-		scratch,
-		depth: 0,
-	});
+	let node = erased_serde::serialize(
+		new,
+		Differ {
+			baseline: old,
+			present: true,
+			forced: &forced,
+			scratch,
+			depth: 0,
+		},
+	);
 	match node {
 		Ok(Node::Same) => Ok(PatchBytes {
 			patch: Vec::new(),
