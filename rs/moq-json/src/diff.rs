@@ -32,6 +32,10 @@ pub struct Diff {
 /// Only object roots produce a recursive patch; any other root forces a snapshot. A merge patch that
 /// would delete a key it shouldn't (a value genuinely set to null) also forces a snapshot.
 pub fn diff<T: Serialize>(old: &Value, new: &T) -> Diff {
+	erased(old, new)
+}
+
+fn erased(old: &Value, new: &dyn erased_serde::Serialize) -> Diff {
 	let result = bytes(old, new, &RefCell::new(Scratch::default())).unwrap_or(PatchBytes {
 		patch: Vec::new(),
 		forced_snapshot: true,
@@ -177,12 +181,19 @@ pub(crate) struct PatchBytes {
 ///
 /// With a memoized scratch this also records the new value's root entries, which the caller commits
 /// with [`Scratch::commit_memo`] once `old` has been brought up to `new`.
-pub(crate) fn bytes<T: Serialize>(old: &Value, new: &T, scratch: &RefCell<Scratch>) -> Result<PatchBytes, String> {
+///
+/// `new` is type-erased so the diff serializer compiles once here, rather than once per value type
+/// in every crate that publishes one. Only the value's own `Serialize` impl stays generic.
+pub(crate) fn bytes(
+	old: &Value,
+	new: &dyn erased_serde::Serialize,
+	scratch: &RefCell<Scratch>,
+) -> Result<PatchBytes, String> {
 	if let Some(memo) = scratch.borrow_mut().memo.as_mut() {
 		memo.next.clear();
 	}
 	let forced = Cell::new(false);
-	let node = new.serialize(Differ {
+	let node = erased_serde::serialize(new, Differ {
 		baseline: old,
 		present: true,
 		forced: &forced,
