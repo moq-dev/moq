@@ -12,7 +12,7 @@ Cross-language interop smoke for the published MoQ packages.
 - Hang media (`smoke.sh`), Cloudflare, and moxygen stay on separate lanes.
 - In `relays.sh`, only `--required` relays fail the run. The default required relay is moq-dev's own.
 - In `runner.py`, only moq-dev's clients against this checkout's relay fail the run. Every other upstream Docker pair is reported only.
-- Wire new lanes into `.github/workflows/smoke.yml`. It runs on pull requests that touch `test/smoke/`, and nightly.
+- Wire new lanes into `.github/workflows/smoke.yml`. It runs nightly, on pushes to `main` that touch `test/smoke/`, and on dispatch; dispatch it on your branch to try a change before merging.
 - New dependencies use the newest stable version, except the pins `freshness.sh` enforces.
 
 # Development
