@@ -73,9 +73,11 @@ impl From<Rate> for Cap {
 /// A live cap for one WHIP session.
 ///
 /// Clones share the cap. [`Limit::set`] applies to a running session at once: the
-/// meter switches to the new cap, and the next REMB goes out immediately. The SDP answer
-/// carries whatever cap was set when the offer was accepted, so a session that starts
-/// uncapped steers only through REMB.
+/// meter switches to the new cap, and the next REMB goes out immediately, lifting its
+/// ceiling when the cap is lifted. The SDP answer's TIAS is fixed at the cap set when the
+/// offer was accepted, since moq-rtc never renegotiates: a session that starts uncapped
+/// steers only through REMB, and raising or lifting a starting cap frees the publisher
+/// only as far as that TIAS allows.
 #[derive(Clone)]
 pub struct Limit {
 	cap: Arc<watch::Sender<Option<Cap>>>,

@@ -358,7 +358,8 @@ mod tests {
 	}
 
 	/// A capped WHIP session sends its publisher REMB at nine tenths of the cap, follows a
-	/// live update at once, and leaves a publisher under the cap running.
+	/// live update at once, lifts the ceiling with the cap, and leaves a publisher under the
+	/// cap running.
 	#[tokio::test]
 	#[tracing_test::traced_test]
 	async fn a_capped_whip_publisher_is_steered_by_remb() {
@@ -395,6 +396,9 @@ mod tests {
 		logged("bps=1800000").await;
 		rate.set(crate::rate::Cap::new(moq_net::bandwidth::Rate::from_mbps(1)));
 		logged("bps=900000").await;
+		// Lifting the cap lifts the publisher's ceiling rather than leaving the last one.
+		rate.set(None);
+		logged(&format!("bps={}", str0m::bwe::Bitrate::MAX.as_u64())).await;
 		assert!(!session.is_finished(), "a publisher under the cap was closed");
 		assert!(!pushed.is_finished(), "a publisher under the cap stopped");
 		session.abort();

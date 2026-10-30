@@ -157,6 +157,7 @@ impl Session {
 			limit: Some(limit),
 			remb: Vec::new(),
 			next_remb: Instant::now(),
+			steered: cap.is_some(),
 		});
 		self
 	}
@@ -235,6 +236,7 @@ impl Session {
 						Ok(cap) => {
 							tracing::debug!(?cap, "ingest cap updated");
 							rate.meter.set(cap, Instant::now());
+							rate.steered |= cap.is_some();
 							// REMB follows an update at once.
 							rate.next_remb = Instant::now();
 						}
@@ -390,10 +392,12 @@ impl Session {
 			return;
 		};
 		rate.next_remb = Instant::now() + REMB_INTERVAL;
-		let Some(cap) = rate.meter.cap() else {
-			return;
+		// A REMB ceiling holds until the next one replaces it, so a lifted cap keeps sending
+		// the largest REMB can carry rather than going quiet and leaving the old ceiling.
+		let bitrate = match rate.meter.cap() {
+			Some(cap) => str0m::bwe::Bitrate::bps(cap.steer().as_bps()),
+			None => str0m::bwe::Bitrate::MAX,
 		};
-		let bitrate = str0m::bwe::Bitrate::bps(cap.steer().as_bps());
 		let mut rtc = self.agent.rtc_mut();
 		for &mid in &rate.remb {
 			// One REMB per receive stream, simulcast layers included; a stream that has yet to
@@ -421,12 +425,14 @@ struct IngestRate {
 	/// Video lines that negotiated REMB.
 	remb: Vec<str0m::media::Mid>,
 	next_remb: Instant,
+	/// Whether a cap was ever set, so REMB has a ceiling to keep current.
+	steered: bool,
 }
 
 impl IngestRate {
-	/// When the next REMB is due, if there is a cap to steer to and a line to send it on.
+	/// When the next REMB is due, once a cap was set and there is a line to send it on.
 	fn remb_at(&self) -> Option<Instant> {
-		(self.meter.cap().is_some() && !self.remb.is_empty()).then_some(self.next_remb)
+		(self.steered && !self.remb.is_empty()).then_some(self.next_remb)
 	}
 }
 
