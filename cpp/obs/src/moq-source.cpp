@@ -870,7 +870,14 @@ static void moq_source_on_audio_subscribed(struct moq_source *ctx, const std::sh
 // still refuses, such as a malformed OpusHead, discards the candidate when it subscribes.
 static bool moq_source_audio_codec_supported(const std::string &codec)
 {
-	return codec == "opus" || codec == "pcm" || codec == "mp4a.40.2";
+	if (codec == "opus" || codec == "pcm")
+		return true;
+	// hang reads the AAC profile as a decimal, so `mp4a.40.02` is AAC-LC too.
+	const std::string aac = "mp4a.40.";
+	if (codec.rfind(aac, 0) != 0)
+		return false;
+	const auto profile = codec.find_first_not_of('0', aac.size());
+	return profile != std::string::npos && codec.compare(profile, std::string::npos, "2") == 0;
 }
 
 // The channels moq-audio should remix a rendition to, and where OBS puts them. A count

@@ -1180,6 +1180,12 @@ int main()
 		CHECK((names(moq_source_candidates(moq_source_ranked_audio(audios), held)) ==
 		       std::vector<std::string>{"c-low"}));
 		CHECK(moq_source_candidates(moq_source_ranked_audio(audios), none).empty());
+
+		// The codecs moq-audio decodes, with AAC-LC in either spelling hang parses.
+		for (const char *codec : {"opus", "pcm", "mp4a.40.2", "mp4a.40.02"})
+			CHECK(moq_source_audio_codec_supported(codec));
+		for (const char *codec : {"flac", "mp4a.40.5", "mp4a.40.20", "mp4a.40.", "mp4a.40.0"})
+			CHECK(!moq_source_audio_codec_supported(codec));
 	}
 	report("renditions rank like hang");
 
