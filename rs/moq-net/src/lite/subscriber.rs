@@ -1417,7 +1417,15 @@ impl RecvBandwidth {
 						Ok(()) => tracing::debug!("probe stream closed"),
 						Err(err) => {
 							let err = lite::error::control(&mut self.subscriber.session.clone(), err);
-							tracing::warn!(%err, "probe stream error");
+							match &err {
+								// The session or the peer ended it cleanly.
+								Error::Cancel
+								| Error::Stream(crate::StreamError::Cancel)
+								| Error::Session(crate::SessionError::Cancel) => {
+									tracing::debug!(%err, "probe stream cancelled")
+								}
+								err => tracing::warn!(%err, "probe stream error"),
+							}
 						}
 					}
 					// The stream ended (peer FIN'd or errored). Don't hammer an
@@ -7179,7 +7187,14 @@ impl kio::Task for TrackServeRun {
 						}
 						Err(err) => {
 							let err = lite::error::control(&mut self.serve.subscriber.session.clone(), err);
-							tracing::warn!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, %err, "track info failed");
+							let broadcast = self.serve.subscriber.log_path(&self.serve.path);
+							match &err {
+								// A request racing the route's removal: a normal outcome.
+								Error::Unroutable | Error::Stream(crate::StreamError::Unroutable) => {
+									tracing::debug!(%broadcast, track = %self.serve.name, %err, "track info failed")
+								}
+								err => tracing::warn!(%broadcast, track = %self.serve.name, %err, "track info failed"),
+							}
 							// Rejecting the request lets the origin retry (bounded) on
 							// another source; waiting subscribers stall rather than error
 							// meanwhile.

@@ -264,7 +264,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Branch checks lint examples](/quest/m2/lint-examples.md) - `just check` runs clippy on the selected crates' examples
 - [Drop kio's epoch fence](/quest/m2/crossbeam-pin-fence.md) - waiting on crossbeam#1352, then the `Read::drop` fence goes
 - [A cancelled miss stops waiting](/quest/m2/fill-wait-cancel-test.md) - a test proves a relay miss waiting on its own fill ends when no reader wants it
-- [Quiet logs for clean ends](/quest/m2/quiet-clean-close-logs.md) - clean probe ends and unroutable requests log at debug
 - [No MOQ_* knobs outside the binaries](/quest/m2/env-knobs.md) - test, bench, and library knobs leave the `MOQ_*` prefix
 - [Clean ALSA playback onset](/quest/m2/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
 - [Interop audit](/quest/m2/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported

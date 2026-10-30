@@ -597,7 +597,7 @@ pub(crate) async fn serve_subscribe(
 	};
 
 	let Some(mut subscriber) = subscriber else {
-		tracing::warn!(%path, "SRT subscribe for an unroutable broadcast");
+		tracing::debug!(%path, "SRT subscribe for an unroutable broadcast");
 		return Ok(());
 	};
 
