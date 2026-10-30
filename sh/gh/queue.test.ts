@@ -58,12 +58,21 @@ assert.equal(land.jobs.check.environment, undefined);
 assert.equal(land.jobs.land.environment, undefined);
 assert.equal(land.permissions?.["id-token"], undefined);
 for (const [id, job] of Object.entries(land.jobs) as [string, { uses?: string; permissions?: unknown }][]) {
-	const grants = job.permissions === "write-all" || (job.permissions as Record<string, string>)?.["id-token"] === "write";
+	const grants =
+		job.permissions === "write-all" || (job.permissions as Record<string, string>)?.["id-token"] === "write";
 	assert.equal(grants, id === "land", `land.yml/${id} must not request an ID token`);
-	assert.equal(job.uses, undefined, `land.yml/${id} must not call a workflow, whose jobs inherit land.yml's workflow_ref`);
+	assert.equal(
+		job.uses,
+		undefined,
+		`land.yml/${id} must not call a workflow, whose jobs inherit land.yml's workflow_ref`,
+	);
 }
 assert.ok(!JSON.stringify(land.jobs.land).includes("APP_PRIVATE_KEY"));
 assert.deepEqual(land.jobs.land.needs, ["resolve", "check"]);
+// The self-hosted worker has no jq; the hosted resolver passes it the base.
+assert.ok(!JSON.stringify(land.jobs.check).includes("jq "), "the check job must not need jq");
+// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
+assert.equal(land.jobs.resolve.outputs.base, "${{ steps.resolve.outputs.base }}");
 for (const job of Object.values(land.jobs) as { steps: { uses?: string; with?: { ref?: string } }[] }[]) {
 	const checkout = job.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
 	assert.equal(checkout?.with?.ref, "main", "every phase installs Quest from trusted main");
@@ -99,9 +108,10 @@ try {
 					...process.env,
 					PATH: `${bin}:${process.env.PATH}`,
 					PLAN: JSON.stringify({ base: { sha: "a".repeat(40) } }),
+					BASE: "a".repeat(40),
 					GITHUB_OUTPUT: output,
 					ENGINE_EXIT: String(code),
-					ENGINE_OUTPUT: '{"checks":[]}',
+					ENGINE_OUTPUT: JSON.stringify({ base: { sha: "a".repeat(40) }, checks: [] }),
 					ENGINE_ARGS: join(scratch, "args"),
 				},
 			});

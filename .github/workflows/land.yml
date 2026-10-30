@@ -27,6 +27,7 @@ jobs:
       statuses: read
     outputs:
       plan: ${{ steps.resolve.outputs.plan }}
+      base: ${{ steps.resolve.outputs.base }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,6 +46,9 @@ jobs:
         run: |
           plan=$(quest land resolve --base main)
           printf 'plan=%s\n' "$plan" >> "$GITHUB_OUTPUT"
+          # The self-hosted worker has no jq, so the hosted resolver hands it the base.
+          base=$(jq -er '.base.sha' <<< "$plan")
+          printf 'base=%s\n' "$base" >> "$GITHUB_OUTPUT"
 
   check:
     needs: resolve
@@ -76,14 +80,14 @@ jobs:
         id: check
         env:
           PLAN: ${{ needs.resolve.outputs.plan }}
+          BASE: ${{ needs.resolve.outputs.base }}
           NEXTEST_TEST_THREADS: 24
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           mkdir -p .tmp/land
           printf '%s' "$PLAN" > .tmp/land/plan.json
-          base=$(jq -er '.base.sha' .tmp/land/plan.json)
-          result=$(quest land check .tmp/land/plan.json -- nix develop --command just ci "$base")
+          result=$(quest land check .tmp/land/plan.json -- nix develop --command just ci "$BASE")
           printf 'result=%s\n' "$result" >> "$GITHUB_OUTPUT"
       - name: Upload build timings
         if: ${{ !cancelled() }}
