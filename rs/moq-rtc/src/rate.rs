@@ -213,7 +213,11 @@ impl Meter {
 			let since = (from + Duration::from_secs_f64((burst - self.tokens).max(0.0) / rate)).min(now);
 			match self.full.back_mut() {
 				Some(full) if full.until == since && full.rate == rate => full.until = now,
-				_ => self.full.push_back(Full { since, until: now, rate }),
+				_ => self.full.push_back(Full {
+					since,
+					until: now,
+					rate,
+				}),
 			}
 		}
 		self.tokens = tokens.min(burst);
@@ -313,7 +317,12 @@ mod tests {
 		for (bytes, at) in [(10, ms(20)), (10, ms(40)), (1000, ms(0))] {
 			assert!(meter.charge(bytes, at).is_ok());
 		}
-		assert!((meter.tokens - ordered.tokens).abs() < 1e-6, "{} != {}", meter.tokens, ordered.tokens);
+		assert!(
+			(meter.tokens - ordered.tokens).abs() < 1e-6,
+			"{} != {}",
+			meter.tokens,
+			ordered.tokens
+		);
 		assert!((meter.tokens - 20.0).abs() < 1e-6);
 	}
 
