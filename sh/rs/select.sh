@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Run `just rs check|check-test|lint|fix|test` on the crates a diff touches, plus
-# their dependents. `platform` is the Windows and macOS compile.
+# Run `just rs check|check-test|lint|feature-shapes|fix|test` on the crates a
+# diff touches, plus their dependents. `platform` is the Windows and macOS
+# compile.
 #
-# Usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|uring LISTFILE|--all
+# Usage: sh/rs/select.sh check|check-test|lint|feature-shapes|fix|test|platform|uring LISTFILE|--all
 #
 # LISTFILE holds the changed paths, one per line. `--all` is the whole
 # workspace, as is a change to anything every crate is built or tested by.
 set -euo pipefail
 
-usage="usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|uring LISTFILE|--all"
+usage="usage: sh/rs/select.sh check|check-test|lint|feature-shapes|fix|test|platform|uring LISTFILE|--all"
 action=${1:?$usage}
 list=${2:?$usage}
 
@@ -122,7 +123,7 @@ names=$(crate_names "$packages")
 # checked in. `RS_FEATURE_SCOPE=changed`, which `just check` sets, checks only
 # the changed crates; the landing worker's `just ci` keeps their dependents too.
 shape_packages=$packages
-if [[ "${RS_FEATURE_SCOPE:-}" == changed && "$packages" != ALL && "$action" =~ ^(check|check-test|lint)$ ]]; then
+if [[ "${RS_FEATURE_SCOPE:-}" == changed && "$packages" != ALL && "$action" =~ ^(check|check-test|lint|feature-shapes)$ ]]; then
     shape_packages=$(select_packages seeds)
 fi
 shape_names=$(crate_names "$shape_packages")
@@ -174,7 +175,9 @@ case "$action" in
         just rs "$action" "${flags[@]}"
         # Workspace feature unification can hide an individual crate's missing
         # gates. Keep the boundary checks isolated and the full matrix nightly.
-        if [[ -n "$shape_packages" ]]; then just rs feature-shapes "${shape_flags[@]}"; fi
+        # The dispatcher runs them as a module of their own (rs_shapes), so a
+        # gate split across jobs can give them one.
+        [[ "$action" == lint || -z "$shape_packages" ]] || just rs feature-shapes "${shape_flags[@]}"
         if wants '(kio|moq-net)'; then just rs loom-check; fi
         if shapes_want moq-net; then just rs net-features; fi
         if shapes_want moq-quic; then just rs quic-features; fi
@@ -193,6 +196,9 @@ case "$action" in
         if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
         # The relay's io_uring listener, off the default feature set.
         if wants moq-relay; then just rs uring-check; fi
+        ;;
+    feature-shapes)
+        [[ -z "$shape_packages" ]] || just rs feature-shapes "${shape_flags[@]}"
         ;;
     fix)
         just rs fix "${flags[@]}"

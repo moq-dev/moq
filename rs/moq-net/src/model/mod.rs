@@ -28,6 +28,9 @@ mod flate;
 pub(crate) mod object;
 mod request_queue;
 mod resume;
+// Resume checked against a model of one logical track.
+#[cfg(all(test, feature = "async"))]
+mod resume_model;
 mod subscription;
 mod time;
 mod timed;

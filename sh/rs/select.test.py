@@ -58,13 +58,20 @@ class SelectTest(unittest.TestCase):
     def test_queue_checks_selected_feature_shapes(self):
         for path in ("rs/kio/src/lib.rs", "rs/moq-tokio/src/lib.rs",
                      "rs/moq-video/src/lib.rs", "Cargo.lock", "sh/rs/nextest.sh"):
-            for action in ("check", "check-test", "lint"):
+            for action in ("check", "check-test"):
                 with self.subTest(path=path, action=action):
                     calls = self.selected(path, action=action)
                     defaults = next(call for call in calls if call.startswith(f"rs {action} "))
                     self.assertIn(defaults.replace(f"rs {action} ", "rs feature-shapes ", 1), calls)
+            # The dispatcher runs lint and the shapes as separate modules.
+            with self.subTest(path=path, action="feature-shapes"):
+                lint = self.selected(path)
+                defaults = next(call for call in lint if call.startswith("rs lint "))
+                self.assertFalse(any(call.startswith("rs feature-shapes") for call in lint), lint)
+                self.assertEqual(self.selected(path, action="feature-shapes"),
+                                 [defaults.replace("rs lint ", "rs feature-shapes ", 1)])
         for owner in ("tokio", "media", "net"):
-            calls = self.selected(f"sh/rs/{owner}-features.sh")
+            calls = self.selected(f"sh/rs/{owner}-features.sh", action="feature-shapes")
             self.assertIn("rs feature-shapes --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz", calls)
 
     def test_boundary_checks_follow_reverse_dependencies(self):
@@ -81,10 +88,13 @@ class SelectTest(unittest.TestCase):
     def test_local_feature_contracts_skip_dependents(self):
         # `just check` lints feature shapes for the changed crates alone; their
         # dependents keep the default-feature lint and the landing worker's shapes.
+        for action in ("check", "feature-shapes"):
+            with self.subTest(action=action):
+                calls = self.selected("rs/kio/src/lib.rs", action=action, feature_scope="changed")
+                shapes = next(call for call in calls if call.startswith("rs feature-shapes "))
+                self.assertIn("/rs/kio#", shapes)
+                self.assertNotIn("/rs/moq-net#", shapes)
         calls = self.selected("rs/kio/src/lib.rs", feature_scope="changed")
-        shapes = next(call for call in calls if call.startswith("rs feature-shapes "))
-        self.assertIn("/rs/kio#", shapes)
-        self.assertNotIn("/rs/moq-net#", shapes)
         self.assertTrue(any("/rs/moq-net#" in call for call in calls if call.startswith("rs lint ")), calls)
         self.assertIn("rs loom-check", calls)
         self.assertFalse(any(call.endswith("-features") for call in calls), calls)
@@ -95,7 +105,7 @@ class SelectTest(unittest.TestCase):
                 self.assertEqual([call for call in calls if call.endswith("-features")], [f"rs {owner}-features"])
         # Inputs every crate shares still select the workspace.
         self.assertIn("rs feature-shapes --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz",
-                      self.selected("Cargo.lock", feature_scope="changed"))
+                      self.selected("Cargo.lock", action="feature-shapes", feature_scope="changed"))
 
     def test_loom_compiles_only_when_its_model_changes(self):
         for action in ("check", "check-test", "lint"):

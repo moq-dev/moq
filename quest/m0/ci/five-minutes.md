@@ -66,7 +66,8 @@ What remains for a moq-net edit, largest first:
   are the epic's [thin generics](/quest/m0/ci/btree-keys.md) and
   [hakari](/quest/m0/ci/hakari.md) levers, or running the rs lint beside the
   test build in a second target directory, which trades CPU for wall time
-  against the epic's CPU measure and so needs its own decision.
+  against the epic's CPU measure. Decided 2026-10-30 (user): defer that
+  parallel lint; measure it after the slow-tests and hakari quests land.
 - The test run is the [slow tests](/quest/m0/ci/slow-tests.md) quest's.
 - The lint's remaining 230 s: net-features (62 s), the dev loom compile,
   `cargo doc`, and the wasm and io_uring clippy passes.
