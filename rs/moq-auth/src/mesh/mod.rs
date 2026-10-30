@@ -104,7 +104,9 @@ impl FromStr for EndpointId {
 		// The alphabet is lowercase-only and nonzero trailing bits are refused, so a key has one text form.
 		let mut out = [0u8; KEY_LEN];
 		match ZBASE32.decode_len(text.len()) {
-			Ok(KEY_LEN) => ZBASE32.decode_mut(text.as_bytes(), &mut out).map_err(|_| InvalidEndpoint)?,
+			Ok(KEY_LEN) => ZBASE32
+				.decode_mut(text.as_bytes(), &mut out)
+				.map_err(|_| InvalidEndpoint)?,
 			_ => return Err(InvalidEndpoint),
 		};
 		Ok(Self(out))
@@ -393,7 +395,12 @@ mod tests {
 		assert!(text.to_uppercase().parse::<EndpointId>().is_err());
 		assert!(text[..51].parse::<EndpointId>().is_err());
 		assert!(format!("{text}y").parse::<EndpointId>().is_err());
-		assert!(data_encoding::HEXLOWER.encode(id.as_bytes()).parse::<EndpointId>().is_err());
+		assert!(
+			data_encoding::HEXLOWER
+				.encode(id.as_bytes())
+				.parse::<EndpointId>()
+				.is_err()
+		);
 		assert_eq!(id.publish().as_str(), format!("mesh/{text}/**"));
 	}
 
