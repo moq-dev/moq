@@ -78,6 +78,10 @@ pub struct Export<S: Stream> {
 	/// Set after the init segment has been emitted, which fixes the track set.
 	init_emitted: bool,
 
+	/// Keep a rendition that joins after the init segment instead of failing, for a writer
+	/// that declares it elsewhere. Its fragments carry a track id the init never declared.
+	late: bool,
+
 	/// The `tkhd.track_id` the next new rendition gets.
 	next_track_id: u32,
 
@@ -483,6 +487,7 @@ impl<S: Stream> Export<S> {
 			tracks: HashMap::new(),
 			queued: VecDeque::new(),
 			init_emitted: false,
+			late: false,
 			next_track_id: 1,
 			sequence_number: 1,
 		}
@@ -514,6 +519,22 @@ impl<S: Stream> Export<S> {
 	pub fn with_fragment_duration(mut self, duration: impl Into<Option<Duration>>) -> Self {
 		self.fragment_duration = duration.into();
 		self
+	}
+
+	/// Keep renditions that join after the init segment, whose fragments then carry track
+	/// ids the init does not declare. See [`declaration`](Self::declaration).
+	pub(crate) fn with_late_tracks(mut self) -> Self {
+		self.late = true;
+		self
+	}
+
+	/// The `trak` and `trex` declaring `track_id`, once the track could be described.
+	pub(crate) fn declaration(&self, track_id: u32) -> Option<(&mp4_atom::Trak, &mp4_atom::Trex)> {
+		self.tracks
+			.values()
+			.filter(|track| track.track_id == track_id)
+			.find_map(|track| track.declaration.as_ref())
+			.map(|declaration| (&declaration.trak, &declaration.trex))
 	}
 
 	/// Get the next byte chunk.
@@ -864,7 +885,7 @@ impl<S: Stream> Export<S> {
 					let Some(source) = config.subscribe(&self.source, &name, self.max_delay)? else {
 						continue;
 					};
-					if self.init_emitted {
+					if self.init_emitted && !self.late {
 						return Err(Error::TrackAdded(name).into());
 					}
 					let mut track = Fmp4Track::new(source, config, self.next_track_id)?;

@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hang::moq_net;
+use moq_mux::container::fmp4::mp4_atom;
 use moq_mux::container::ts;
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -1092,4 +1093,69 @@ async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	);
 	second.kill().await.unwrap();
 	feeding.abort();
+}
+
+/// The top-level boxes of an MP4 file, by kind.
+fn boxes(file: &[u8]) -> Vec<mp4_atom::Any> {
+	use mp4_atom::DecodeMaybe;
+	let mut cursor = Cursor::new(file);
+	let mut boxes = Vec::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode the recording") {
+		boxes.push(atom);
+	}
+	boxes
+}
+
+/// SIGINT during `export mp4` finishes the recording as a regular MP4 with its moov at the end.
+#[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
+async fn an_interrupted_mp4_recording_is_finished() {
+	let relay = relay().await;
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("recording.mp4");
+	let mut recording = moq(&relay, &[])
+		.args(["export", "mp4", "--output"])
+		.arg(&path)
+		.stderr(Stdio::piped())
+		.spawn()
+		.expect("spawn export");
+	let (mut publisher, feeding) = import(&relay);
+
+	tokio::time::timeout(TIMEOUT, async {
+		while std::fs::metadata(&path).map_or(0, |file| file.len()) < 10_000 {
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+	})
+	.await
+	.expect("the recording never grew");
+	let pid = recording.id().expect("running").to_string();
+	let status = std::process::Command::new("kill")
+		.args(["-INT", &pid])
+		.status()
+		.expect("kill");
+	assert!(status.success());
+	let status = wait(&mut recording).await;
+	let mut errors = String::new();
+	recording
+		.stderr
+		.take()
+		.unwrap()
+		.read_to_string(&mut errors)
+		.await
+		.unwrap();
+	assert!(status.success(), "{errors}");
+
+	let file = std::fs::read(&path).unwrap();
+	let boxes = boxes(&file);
+	let kinds: Vec<String> = boxes.iter().map(|atom| atom.kind().to_string()).collect();
+	assert_eq!(kinds, ["ftyp", "mdat", "moov"], "{errors}");
+	let Some(mp4_atom::Any::Moov(moov)) = boxes.last() else {
+		unreachable!();
+	};
+	assert!(moov.mvex.is_none());
+	assert_eq!(moov.trak.len(), 2, "video and audio");
+
+	let stdin = feeding.await.unwrap();
+	drop(stdin);
+	assert!(wait(&mut publisher).await.success());
 }
