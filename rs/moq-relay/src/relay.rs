@@ -446,6 +446,12 @@ impl Relay {
 		self.admissions.take()
 	}
 
+	/// The RTMP and RTMPS connections the public web listeners classify, for the
+	/// embedder to serve; see [`web::Web::rtmp`]. Untaken, they are logged and closed.
+	pub fn rtmp(&mut self) -> web::rtmp::Incoming {
+		self.web.rtmp()
+	}
+
 	/// The shared cluster: the origin every session and peer publishes into.
 	pub fn cluster(&self) -> &cluster::Cluster {
 		&self.cluster

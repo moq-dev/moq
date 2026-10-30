@@ -1,41 +1,24 @@
-# [M] TCP acceptor
+# [M] TCP acceptor: tls:// on the web port
 
 ## Goal
 
-`moq-relay`'s listener accepts TLS-terminated HTTP, RTMP, and RTMPS on one
-TCP port and yields classified connections, so an embedder routes RTMP to
-`moq-rtmp` and everything else reaches the axum router as today. The relay
-binary has no RTMP consumer and gains none here: it refuses a classified
-RTMP connection with a log line, and the embedder that carries RTMP today
-(moq.pro's edge) is the consumer.
+The relay's HTTPS listener also carries `tls://` qmux, so one TCP port serves
+TLS-terminated HTTP, RTMP, RTMPS, and `tls://` MoQ. The HTTP, RTMP, and RTMPS
+split already landed: `listener::classify` peeks each connection on its own
+task, and an embedder takes RTMP from `Relay::rtmp`.
 
 ## Plan
 
-`moq-relay/src/listener.rs` grows the acceptor: peek the first byte; 0x16 is
-TLS, accepted with the served identity, then the first decrypted byte is
-peeked; 0x03 is RTMP, anything else is HTTP. A plaintext 0x03 is RTMP; a
-plaintext ASCII method is HTTP. The acceptor yields
-`Accepted::{Http(stream), Rtmp(stream)}` where the stream is a boxed
-`AsyncRead + AsyncWrite` that may already be TLS. HTTP connections are pushed
-into a channel that stands behind `axum_server::Server::from_listener`, so
-the router and its ALPN list are untouched. RTMP connections are the
-embedder's to hand to `moq_rtmp::Server::accept_stream`; upstream nothing
-consumes them, so the relay logs and drops them unless a consumer is wired.
+`tls://` is served today by its own `listen.tcp` listener with TLS. It
+negotiates a moq ALPN in the TLS handshake, so split the decrypted arm on ALPN:
+a moq ALPN goes to the qmux server and an HTTP ALPN to the router. A connection
+with no ALPN keeps the decrypted-byte sniff, since RTMPS clients negotiate none.
+Selecting the server config from the ClientHello (rustls' `LazyConfigAcceptor`)
+lets the moq ALPN serve the listen TLS identity while HTTP keeps
+`web.https.cert`.
 
-The accept loop never peeks or handshakes. Each accepted socket is spawned
-onto its own task with a bounded read timeout; that task peeks, optionally
-terminates TLS, and yields `Accepted`. An idle or slow client stalls only
-its own task, so a peer that connects and sends nothing cannot block later
-accepts. The peek is non-destructive on `TcpStream` and on the rustls
-stream alike. Reuse the handshake bound `listen.timeout` already sets
-(`moq_tokio::listen::Config::timeout`) rather than a new knob.
-
-The TLS arm also carries `tls://` qmux, served today by its own `listen.tcp`
-listener with TLS. It negotiates a moq ALPN in the TLS handshake, so split
-the decrypted arm on ALPN: a moq ALPN goes to the qmux server and an HTTP
-ALPN to the router. A connection with no ALPN keeps the decrypted-byte
-sniff, since RTMPS clients negotiate none (`moq-rtmp` documents an empty
-ALPN list): `0x03` is RTMP, anything else is HTTP.
+Open: how an operator turns this on, and what becomes of the separate
+`listen.tcp` TLS bind. Asked in the PR that landed the HTTP and RTMP split.
 
 Decided 2026-10-08: under one acceptor, the client-certificate request from
 [mTLS on tls://](/quest/m2/tls-listener-mtls.md) is optional (never required)
@@ -43,14 +26,13 @@ and sits on the moq-ALPN TLS config only, so browsers and RTMPS clients on
 the same port are never asked for one. Whichever lands second keeps `tls://`
 client-certificate verification and the `MtlsUnsupported` lift working.
 
-Keep the accepted `TcpStream`'s handle reachable after it is boxed: the
-relay already captures socket stats at accept for qmux (`SocketStats` in
-`web.rs`), and [WebSocket bitrate caps](/quest/m2/rate-websocket.md) set
-socket buffer sizes on the same socket.
+Keep the accepted `TcpStream` reachable (`listener::Stream::tcp`): qmux
+reads socket stats from it, and
+[WebSocket bitrate caps](/quest/m2/rate-websocket.md) set socket buffer sizes
+on the same socket.
 
-Tests: an HTTP request, a WebSocket upgrade, a raw RTMP C0, an RTMPS C0 with
-no ALPN, and a `tls://` qmux client against one listener each land in the
-right arm.
+Tests: a `tls://` qmux client against the HTTPS listener lands in the qmux
+server, beside the HTTP and RTMP cases already covered.
 
 ## Related
 

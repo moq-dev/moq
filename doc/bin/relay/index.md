@@ -99,6 +99,10 @@ relay.with_web(web).run().await?;
   send its path in the SETUP.
 - To decide admissions yourself, leave `[auth]` empty and answer
   `relay.admissions()`; see [Authentication](/bin/relay/auth#in-process).
+- To serve RTMP on the web ports, take `relay.rtmp()` and pass each accepted
+  stream to `moq_rtmp::accept_stream`. The HTTP and HTTPS listeners hand it
+  plaintext RTMP, and RTMPS (TLS with no ALPN) already decrypted; untaken, the
+  relay closes them.
 
 See [docs.rs/moq-relay](https://docs.rs/moq-relay) and
 [`rs/moq-relay/examples/embed.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/examples/embed.rs).

@@ -51,4 +51,4 @@ live session applies.
 
 ## Related
 
-- [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - boxes the accepted stream, so it must keep the socket handle these buffer sizes need
+- [TCP acceptor: tls:// on the web port](/quest/m2/one-port/tcp-demux.md) - wraps the accepted stream; `listener::Stream::tcp` keeps the socket these buffer sizes need

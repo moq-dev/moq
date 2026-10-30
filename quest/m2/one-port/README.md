@@ -96,7 +96,7 @@ pre-accepted streams can stand behind.
 ## Required
 
 - [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md) - `moq-rtc` serves WHIP and WHEP media from the WebRTC hook and pins ICE tuples
-- [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - one listener carries TLS-terminated HTTP, RTMP, and RTMPS
+- [TCP acceptor: tls:// on the web port](/quest/m2/one-port/tcp-demux.md) - the HTTPS listener also carries `tls://` qmux beside HTTP, RTMP, and RTMPS
 - [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - moq-srt drives `srt-protocol` on demuxed packets and the flow table pins its 4-tuples
 
 ## Related

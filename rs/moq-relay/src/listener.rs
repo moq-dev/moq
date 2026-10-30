@@ -14,7 +14,9 @@
 //! back. Because the wrapper never yields an error upward, `axum_server`'s flat
 //! sleep is unreachable.
 
+mod demux;
 mod idle;
+pub(crate) use demux::{Classified, Stream, classify};
 pub(crate) use idle::Admission;
 
 use std::{
@@ -33,6 +35,17 @@ use tokio::net::{TcpListener, TcpStream};
 pub(crate) struct Accepted {
 	stream: TcpStream,
 	pub(crate) admission: Option<Admission>,
+}
+
+#[cfg(all(test, unix, feature = "websocket"))]
+impl Accepted {
+	/// A socket accepted outside [`Listener`], holding no admission.
+	pub(crate) fn new(stream: TcpStream) -> Self {
+		Self {
+			stream,
+			admission: None,
+		}
+	}
 }
 
 impl AsyncRead for Accepted {
