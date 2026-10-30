@@ -43,5 +43,4 @@ Public API: behavior only (implicit close on drop). Wire: none.
 
 ## Related
 
-- [io_uring socket teardown](/quest/m2/uring-socket-teardown.md) - the UDP socket's own resource cleanup, split off
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - requires this
