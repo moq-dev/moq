@@ -21,4 +21,8 @@ release, so pairing them is simpler than the usual one PR per backport.
   its test.
 - Version bumps are hand-picked, per `CONTRIBUTING.md`.
 
+Both are ported in [moq-dev/moq#7389](https://github.com/moq-dev/moq/pull/7389)
+against `release`. What remains is the maintainer's: merge it and pick the
+patch versions. Once the patch publishes, delete this quest.
+
 Public API: none. Wire: a conflicting SETUP Path is refused, as on main.
