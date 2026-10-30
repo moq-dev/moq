@@ -342,6 +342,16 @@ impl<E: catalog::Catalog> Import<E> {
 		self
 	}
 
+	/// The PID this importer reads its PMT from.
+	pub(super) fn pmt_pid(&self) -> Option<u16> {
+		self.pmt.as_ref().map(|(pid, _)| pid.as_u16())
+	}
+
+	/// The PID this importer takes its program clock from.
+	pub(super) fn pcr_pid(&self) -> Option<u16> {
+		self.pcr_pid.map(|pid| pid.as_u16())
+	}
+
 	/// Whether this importer reassembles the PMT sections on `pid`.
 	fn reads_pmt(&self, pid: u16) -> bool {
 		self.pmt.as_ref().is_some_and(|(pmt, _)| pmt.as_u16() == pid)
