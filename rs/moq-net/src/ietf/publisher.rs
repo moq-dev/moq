@@ -7368,9 +7368,7 @@ mod serve_tests {
 					.expect("the malformed track ends the subscription")
 					.ok();
 
-				let (status, _) = Wire::read(&h.log, version)
-					.publish_done
-					.expect("PUBLISH_DONE was sent");
+				let (status, _) = Wire::read(&h.log, version).publish_done.expect("PUBLISH_DONE was sent");
 				assert_eq!(status, 0x12, "{version:?} {err:?}");
 			}
 		}
