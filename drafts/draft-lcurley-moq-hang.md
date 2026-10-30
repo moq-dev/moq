@@ -228,7 +228,7 @@ A consumer MAY configure a decoder once per track from the catalog.
 
 ## Malformed Renditions {#malformed}
 A consumer MUST ignore a malformed audio or video rendition and keep the rest of the catalog, while a `renditions` value that is not an object refuses the catalog.
-A rendition is malformed when it is not an object or a field it carries has the wrong type or is out of range.
+A rendition is malformed when it is not an object or a field this document defines has the wrong type or is out of range.
 
 `codedWidth`, `codedHeight`, `displayAspectWidth`, `displayAspectHeight`, `sampleRate`, and `numberOfChannels` are integers from 1 to 2^32 - 1, and `bitrate`, `jitter`, `warmup`, and `delay` are integers from 0 to 2^53 - 1.
 
