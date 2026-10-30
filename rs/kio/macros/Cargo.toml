@@ -30,6 +30,7 @@ kio = { path = "..", features = ["macros"] }
 test-env = { path = "../../test-env" }
 # Compiles each mistake in `tests/ui/` and checks the diagnostic it reports.
 trybuild = "1"
+workspace-hack = { path = "../../workspace-hack" }
 
 [lints]
 workspace = true
