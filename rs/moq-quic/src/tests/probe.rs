@@ -325,7 +325,7 @@ fn run(scenario: &Scenario) -> Outcome {
 
 		if let Some((client, _, id, _)) = &competing {
 			let mut stream = pair.client_send(*client, *id);
-			while stream.write(&[0; 16_384]).is_ok() {}
+			while stream.write(&mut &[0; 16_384][..]).is_ok() {}
 		}
 
 		pair.drive_client();
@@ -426,7 +426,7 @@ fn write_frame(pair: &mut Pair, ch: ConnectionHandle, groups: &mut Vec<Group>, k
 			.client_streams(ch)
 			.open(
 				Dir::Uni,
-				SendOptions {
+				send::Options {
 					group: None,
 					priority: sequence,
 				},
@@ -454,9 +454,9 @@ fn flush(pair: &mut Pair, ch: ConnectionHandle, groups: &mut [Group]) {
 	for group in groups.iter_mut().filter(|g| g.reset.is_none() && !g.finished) {
 		let mut stream = pair.client_send(ch, group.id);
 		while !group.backlog.is_empty() {
-			match stream.write(&group.backlog) {
+			match stream.write(&mut &group.backlog[..]) {
 				Ok(n) => drop(group.backlog.drain(..n)),
-				Err(WriteError::Blocked) => return,
+				Err(send::Error::Blocked) => return,
 				Err(e) => panic!("write: {e}"),
 			}
 		}
@@ -517,7 +517,7 @@ fn receive(
 					reading.done = true;
 					break;
 				}
-				Err(ReadError::Blocked) => break,
+				Err(recv::Error::Blocked) => break,
 				Err(_) => {
 					reading.done = true;
 					break;
@@ -762,7 +762,7 @@ fn single_packet_writes() {
 	let mut next_write = pair.time;
 	while pair.time < end {
 		if pair.time >= next_write {
-			pair.client_send(client_ch, id).write(&[0; 100]).unwrap();
+			pair.client_send(client_ch, id).write(&mut &[0; 100][..]).unwrap();
 			next_write += Duration::from_millis(200);
 		}
 		pair.drive_client();
@@ -787,7 +787,7 @@ fn batch_within_probe_inflight() {
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, id).write(&[0; 1400]).unwrap();
+	pair.client_send(client_ch, id).write(&mut &[0; 1400][..]).unwrap();
 	pair.drive_client();
 
 	let conn = pair.client_conn_mut(client_ch);

@@ -24,8 +24,9 @@ fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
 
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
 ///
-/// Set `max_delay`, whose moq-net default is 0, and the other fields you care about; the
-/// rest default to moq-net's defaults (priority 0, everything still fresh, newest first).
+/// Start from [`moq_subscription_defaults`] for moq-net's defaults (priority 0, a `max_delay`
+/// of 0, everything still fresh, newest first) and change the fields you care about. A record
+/// built field by field leaves out `max_delay`, which means no subscriber limit.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
@@ -33,13 +34,12 @@ pub struct MoqSubscription {
 	#[uniffi(default = 0)]
 	pub priority: i8,
 	/// Maximum age of a non-latest group before it is skipped.
-	/// `0` skips immediately; a larger value tolerates that much reordering; null leaves
-	/// the publisher's max age alone to bound it.
+	/// `0` skips immediately; a larger value tolerates that much reordering; null, the
+	/// default, sets no subscriber limit and leaves the publisher's max age alone to bound it.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
-	///
-	/// It has no binding default because UniFFI cannot spell a duration literal.
+	#[uniffi(default = None)]
 	pub max_delay: Option<Duration>,
 	/// The spans of the track to deliver, or null for everything `max_delay` still
 	/// considers fresh. An empty list asks for nothing.
@@ -51,6 +51,20 @@ pub struct MoqSubscription {
 	/// Which pending group the publisher sends first, or null for newest first.
 	#[uniffi(default = None)]
 	pub order: Option<MoqOrder>,
+}
+
+/// A subscription with moq-net's defaults, which skips a superseded group at once.
+///
+/// A null subscription argument means the same; build from this one to change a field.
+#[uniffi::export]
+pub fn moq_subscription_defaults() -> MoqSubscription {
+	let defaults = moq_net::track::Subscription::default();
+	MoqSubscription {
+		priority: defaults.priority,
+		max_delay: defaults.max_delay,
+		ranges: None,
+		order: None,
+	}
 }
 
 /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.

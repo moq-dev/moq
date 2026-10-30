@@ -237,7 +237,7 @@ function subscribeJson<T>(
 	effect: Effect,
 	update: (value: T) => void,
 ): void {
-	const track = broadcast.track(name).subscribe({ priority: PRIORITY });
+	const track = broadcast.track(name).subscribe({ ...Moq.Track.Subscription.default(), priority: PRIORITY });
 	effect.cleanup(() => track.close());
 
 	const consumer = new Json.Snapshot.Consumer<T>({ track });

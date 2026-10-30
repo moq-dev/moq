@@ -1562,7 +1562,7 @@ func TestAnnouncedPatternCaptures(t *testing.T) {
 }
 
 // An exact filter with no wildcards still reports a full match: captures is
-// empty but not nil, which is what tells it apart from a partial overlap.
+// empty but not nil.
 func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
