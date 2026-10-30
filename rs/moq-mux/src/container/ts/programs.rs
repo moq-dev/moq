@@ -383,11 +383,7 @@ impl Programs {
 			.programs
 			.iter()
 			.map(|program| program.number)
-			.chain(
-				self.waiting
-					.values()
-					.flat_map(|waiting| waiting.keys().copied()),
-			)
+			.chain(self.waiting.values().flat_map(|waiting| waiting.keys().copied()))
 			.collect();
 		for (&number, &pid) in &listed {
 			if known.contains(&number) {
