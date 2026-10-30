@@ -1598,6 +1598,18 @@ impl Connection {
 		if ack.largest >= self.spaces[space].next_packet_number {
 			return Err(TransportError::PROTOCOL_VIOLATION("unsent packet acked"));
 		}
+		// Receive times by packet number, in microseconds since the peer's basis, as we advertise
+		// no exponent
+		let mut received = Vec::new();
+		if let Some(timestamps) = ack.receive_timestamps() {
+			let max = self.config.receive_timestamps.map_or(0, |max| max.get() as usize);
+			received.extend(timestamps.take(max + 1));
+			if received.len() > max {
+				return Err(TransportError::PROTOCOL_VIOLATION("too many receive timestamps"));
+			}
+			received.sort_unstable_by_key(|&(packet, _)| packet);
+		}
+
 		// Whether the largest acknowledged packet is new, and whether we still know when it was
 		// sent. A forgotten ACK-only packet, or one declared lost, has no send time, so it yields
 		// no RTT sample.
@@ -1633,18 +1645,6 @@ impl Connection {
 			return Ok(());
 		}
 
-		// Receive times by packet number, in microseconds since the peer's basis, as we advertise
-		// no exponent
-		let mut received = Vec::new();
-		if let Some(timestamps) = ack.receive_timestamps() {
-			let max = self.config.receive_timestamps.map_or(0, |max| max.get() as usize);
-			received.extend(timestamps.take(max + 1));
-			if received.len() > max {
-				return Err(TransportError::PROTOCOL_VIOLATION("too many receive timestamps"));
-			}
-			received.sort_unstable_by_key(|&(packet, _)| packet);
-		}
-
 		let mut ack_eliciting_acked = false;
 		let mut acked = mem::take(&mut self.acked);
 		acked.clear();
@@ -1657,11 +1657,6 @@ impl Connection {
 					// discussion at
 					// https://www.rfc-editor.org/rfc/rfc9000.html#name-limiting-ranges-by-tracking
 					self.spaces[space].pending_acks.subtract_below(acked);
-					if space == SpaceId::Data
-						&& let Some(log) = &mut self.receive_timestamps
-					{
-						log.subtract_below(acked);
-					}
 				}
 				ack_eliciting_acked |= info.ack_eliciting;
 
@@ -3356,14 +3351,14 @@ impl Connection {
 		}
 
 		// Only 1-RTT ACKs carry receive timestamps, and the Data space sends no 0-RTT ACK
-		let timestamps = self.receive_timestamps.as_ref().filter(|_| space_id == SpaceId::Data);
+		let mut timestamps = self.receive_timestamps.as_mut().filter(|_| space_id == SpaceId::Data);
 
 		// ACK
 		if space.pending_acks.can_send() {
 			Self::try_populate_acks(
 				now,
 				self.receiving_ecn,
-				timestamps,
+				timestamps.as_deref_mut(),
 				&mut sent,
 				space,
 				buf,
@@ -3603,7 +3598,7 @@ impl Connection {
 	fn try_populate_acks(
 		now: Instant,
 		receiving_ecn: bool,
-		timestamps: Option<&receive_timestamps::Log>,
+		timestamps: Option<&mut receive_timestamps::Log>,
 		sent: &mut SentFrames,
 		space: &mut PacketSpace,
 		buf: &mut Vec<u8>,

@@ -433,3 +433,36 @@ fn ack_frequency_max_ack_delay_upper_bound() {
 	let frames = Frames::default().var(FrameType::ACK_FREQUENCY, &[0, 1, LIMIT_US, 1]);
 	assert_eq!(server_answer(frames), Some(TransportErrorCode::PROTOCOL_VIOLATION));
 }
+
+/// An ACK_RECEIVE_TIMESTAMPS frame acknowledging packets 0 and 1 with `timestamps` of them
+fn ack_receive_timestamps(timestamps: u64) -> Frames {
+	// Largest Acknowledged, ACK Delay, ACK Range Count, First ACK Range
+	let mut fields = vec![1, 0, 0, 1];
+	// Timestamp Range Count, Delta Largest Acknowledged, Timestamp Delta Count, then the deltas
+	fields.extend([1, 0, timestamps]);
+	fields.extend((0..timestamps).map(|i| 10 - i));
+	Frames::default().var(FrameType::ACK_RECEIVE_TIMESTAMPS, &fields)
+}
+
+/// Receive timestamps are refused from a peer that was never asked for them, and past the
+/// number asked for
+#[test]
+fn receive_timestamps_beyond_request() {
+	assert_eq!(
+		server_answer(ack_receive_timestamps(1)),
+		Some(TransportErrorCode::PROTOCOL_VIOLATION)
+	);
+
+	for (timestamps, answer) in [(1, None), (2, Some(TransportErrorCode::PROTOCOL_VIOLATION))] {
+		let _guard = subscribe();
+		let (mut pair, client_ch, server_ch) =
+			connected_with(|server| server.receive_timestamps = NonZeroU32::new(1), |_| {});
+		client_sends(&mut pair, client_ch, SpaceId::Data, ack_receive_timestamps(timestamps));
+		pair.drive();
+		let lost = lost(pair.server_conn_mut(server_ch)).map(|error| match error {
+			ConnectionError::TransportError(error) => error.code,
+			other => panic!("server lost with {other:?}"),
+		});
+		assert_eq!(lost, answer, "{timestamps} timestamps");
+	}
+}

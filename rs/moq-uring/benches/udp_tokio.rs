@@ -327,7 +327,6 @@ mod linux {
 			Ok(Received {
 				bytes,
 				datagrams: bytes.div_ceil(stride),
-				arrival: None,
 			})
 		}
 	}
