@@ -3773,10 +3773,7 @@ impl Subscriber {
 							track_name.to_owned(),
 							requested,
 							timescale,
-							Some(Heading {
-								request_id,
-								fill: fill.clone(),
-							}),
+							Some(Heading { request_id }),
 						);
 						group_fetches.push(fetch);
 					}
@@ -5362,7 +5359,7 @@ impl Subscriber {
 				&& let Some(head) = heading.pending(&self.state)
 			{
 				if let Head::Group(group) = head {
-					run = first_piece(run, group, fill.order());
+					run = first_piece_without(run, group, fill.order());
 				}
 				if head.overlaps(&run) {
 					let waited = kio::wait(|waiter| {
@@ -5986,9 +5983,9 @@ fn poll_headed(fill: &kio::Producer<Fill>, waiter: &kio::Waiter) -> Poll<()> {
 }
 
 /// A subscription's own fill, which may still be bringing the head of the group it joined.
+/// It is looked up on each read, since a widening replaces the fill with its own.
 struct Heading {
 	request_id: RequestId,
-	fill: kio::Producer<Fill>,
 }
 
 /// The group a subscription's fill may still bring a head for.
@@ -6013,27 +6010,32 @@ impl Heading {
 	/// The group whose head the fill may still bring, or `None` once the head landed or
 	/// none is coming.
 	fn pending(&self, state: &Lock<State>) -> Option<Head> {
-		// The state lock first, as SUBSCRIBE_OK takes it to name the group and serve the fill.
-		let state = state.lock();
-		let largest = state
-			.subscribes
-			.get(&self.request_id)
-			.and_then(|held| held.fill_largest);
-		match *self.fill.read() {
-			Fill::Requested => Some(Head::Unnamed),
-			Fill::Serving(_) | Fill::Active => largest.map(Head::Group),
-			Fill::Ready { .. } | Fill::Done | Fill::Ended => None,
-		}
+		self.read(state, None)
 	}
 
 	/// Ready once [`Self::pending`] no longer answers `head`.
 	fn poll_changed(&self, state: &Lock<State>, head: Head, waiter: &kio::Waiter) -> Poll<()> {
-		// Registered before reading, so a change after the read still wakes us. The group
-		// only changes with the fill's state.
-		let _ = self.fill.poll_ref(waiter, |_| Poll::<()>::Pending);
-		match self.pending(state) == Some(head) {
+		match self.read(state, Some(waiter)) == Some(head) {
 			true => Poll::Pending,
 			false => Poll::Ready(()),
+		}
+	}
+
+	/// [`Self::pending`], registering `waiter` on the fill read before reading it, so a change
+	/// after the read still wakes it. The group only changes with the fill's state, and a
+	/// widening cancels the fill it replaces, which wakes a waiter on that one.
+	fn read(&self, state: &Lock<State>, waiter: Option<&kio::Waiter>) -> Option<Head> {
+		// The state lock first, as SUBSCRIBE_OK takes it to name the group and serve the fill.
+		// Holding it across the read keeps a widening from swapping the fill in between.
+		let state = state.lock();
+		let held = state.subscribes.get(&self.request_id)?;
+		if let Some(waiter) = waiter {
+			let _ = held.fill.poll_ref(waiter, |_| Poll::<()>::Pending);
+		}
+		match *held.fill.read() {
+			Fill::Requested => Some(Head::Unnamed),
+			Fill::Serving(_) | Fill::Active => held.fill_largest.map(Head::Group),
+			Fill::Ready { .. } | Fill::Done | Fill::Ended => None,
 		}
 	}
 }
@@ -6051,6 +6053,22 @@ fn first_piece(run: std::ops::Range<u64>, group: u64, order: track::Order) -> st
 		track::Order::Descending => pieces.next_back(),
 	};
 	piece.expect("the run holds the group")
+}
+
+/// The first piece of `run` in `order` that leaves `group` out, so the groups around it are
+/// served while it waits, or `group` alone once nothing else is left.
+fn first_piece_without(run: std::ops::Range<u64>, group: u64, order: track::Order) -> std::ops::Range<u64> {
+	if !run.contains(&group) {
+		return run;
+	}
+	let mut pieces = [run.start..group, group + 1..run.end]
+		.into_iter()
+		.filter(|piece| !piece.is_empty());
+	let piece = match order {
+		track::Order::Ascending => pieces.next(),
+		track::Order::Descending => pieces.next_back(),
+	};
+	piece.unwrap_or(group..group + 1)
 }
 
 /// A Normal object's timestamp: none on an untimed track, and required on a timed one,
@@ -15569,6 +15587,63 @@ mod joining_fetch_tests {
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
 		settle().await;
 		assert_eq!(fetches(), 1, "group 3 is fetched without waiting for group 4's head");
+	}
+
+	/// A widening replaces the subscription's fill with its own, so a miss follows the new
+	/// one: until its answer names the group it heads, every miss waits for it.
+	#[moq_clock::test]
+	async fn a_miss_follows_the_fill_a_widening_requested() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_ok(version)).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+
+		// As the update arm does: cancel the old fill and request a new one in its place.
+		{
+			let mut state = run.subscriber.state.lock();
+			let held = state.subscribes.values_mut().next().unwrap();
+			held.fill.write().ok().unwrap().cancel();
+			held.fill = kio::Producer::new(Fill::Requested);
+		}
+
+		let mut fetch = Box::pin(run._hold.1.fetch_group(3, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		assert_eq!(fetches(), 0, "the miss waits for the widening's fill");
+
+		let fill = run
+			.subscriber
+			.state
+			.lock()
+			.subscribes
+			.values()
+			.next()
+			.unwrap()
+			.fill
+			.clone();
+		*fill.write().ok().unwrap() = Fill::Done;
+		settle().await;
+		assert_eq!(fetches(), 1, "a settled fill leaves the miss to a FETCH");
+	}
+
+	/// The groups around a pending head are served before it, in the fill's order, so a
+	/// head that never arrives holds back only its own group.
+	#[test]
+	fn a_pending_head_is_split_off_last() {
+		use track::Order::{Ascending, Descending};
+		assert_eq!(first_piece_without(0..5, 4, Descending), 0..4);
+		assert_eq!(first_piece_without(0..5, 4, Ascending), 0..4);
+		assert_eq!(first_piece_without(3..8, 4, Ascending), 3..4);
+		assert_eq!(first_piece_without(4..8, 4, Ascending), 5..8);
+		assert_eq!(first_piece_without(3..8, 4, Descending), 5..8);
+		assert_eq!(first_piece_without(3..5, 4, Descending), 3..4);
+		assert_eq!(first_piece_without(4..5, 4, Descending), 4..5);
+		assert_eq!(first_piece_without(0..3, 4, Ascending), 0..3);
 	}
 
 	/// A malformed answer to the joining FETCH is not a refusal: the peer broke the
