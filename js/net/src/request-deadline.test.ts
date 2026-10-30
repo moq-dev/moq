@@ -12,13 +12,14 @@ import * as Path from "./path.ts";
 // Zero stream credit can be rejected immediately or queued by a transport that ignores
 // waitUntilAvailable. Once a slot returns, observe both resets and any unwanted bytes.
 function limited(mode: "refuse" | "queue" | "open") {
-	const slot = Promise.withResolvers<WebTransportBidirectionalStream>();
+	const slot = Promise.withResolvers<void>();
 	const created = Promise.withResolvers<void>();
 	const aborted = Promise.withResolvers<unknown>();
 	const cancelled = Promise.withResolvers<unknown>();
 	const written: Uint8Array[] = [];
 	const options: unknown[] = [];
-	const stream = {
+	// Each create gets its own stream: a fetch opens its TRACK stream alongside.
+	const stream = () => ({
 		readable: new ReadableStream<Uint8Array>({ cancel: cancelled.resolve }),
 		writable: new WritableStream<Uint8Array>({
 			abort: aborted.resolve,
@@ -26,14 +27,14 @@ function limited(mode: "refuse" | "queue" | "open") {
 				written.push(new Uint8Array(bytes));
 			},
 		}),
-	};
+	});
 	const quic = {
 		closed: new Promise(() => {}),
 		createBidirectionalStream: (opts: unknown) => {
 			options.push(opts);
 			created.resolve();
 			if (mode === "refuse") return Promise.reject(new DOMException("stream limit reached", "NetworkError"));
-			return mode === "open" ? Promise.resolve(stream) : slot.promise;
+			return mode === "open" ? Promise.resolve(stream()) : slot.promise.then(stream);
 		},
 	} as unknown as WebTransport;
 	return {
@@ -43,7 +44,7 @@ function limited(mode: "refuse" | "queue" | "open") {
 		cancelled: cancelled.promise,
 		written,
 		options,
-		release: () => slot.resolve(stream),
+		release: () => slot.resolve(),
 	};
 }
 
@@ -125,7 +126,11 @@ for (const operation of ["info", "fetch"] as const) {
 					await transport.cancelled;
 					expect(transport.written).toEqual([]);
 				}
-				expect(transport.options).toEqual([{ sendOrder: undefined, waitUntilAvailable: false }]);
+				// A fetch opens its FETCH stream alongside the TRACK stream, under the same deadline.
+				const opened = transport.options as { sendOrder?: number; waitUntilAvailable: boolean }[];
+				expect(opened).toHaveLength(operation === "info" ? 1 : 2);
+				expect(opened[0]).toEqual({ sendOrder: undefined, waitUntilAvailable: false });
+				for (const open of opened) expect(open.waitUntilAvailable).toBe(false);
 			} finally {
 				subscriber.close();
 				installed.close();
