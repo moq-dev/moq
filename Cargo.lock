@@ -4620,11 +4620,13 @@ name = "moq-relay"
 version = "0.17.9"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
  "axum",
  "axum-server",
  "bytes",
  "bytesize",
  "futures",
+ "hex",
  "http-cache-reqwest",
  "humantime",
  "hyper-util",

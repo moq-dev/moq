@@ -203,6 +203,17 @@ connect_api = "https://api.example.com/cluster/peers"
 node = "https://us-west.example.com/"
 ```
 
+An HTTPS endpoint is verified against system roots and sees this relay's
+`connect.tls` client certificate, if any. Mesh roots, fingerprints, insecure
+mode, and hostname overrides never apply to it. For a private CA, set
+`connect_api_tls_root` to PEM paths (or repeat `--cluster-connect-api-tls-root`);
+these replace system trust for API fetches only. Malformed roots fail startup,
+and files reload for new connections when rotated.
+
+Remote API URLs must use HTTPS; plaintext HTTP is accepted only for loopback
+hosts. Redirects are refused: configure the final API URL, since its peer list
+decides which relays receive the cluster token.
+
 ## Identity
 
 Each relay has a Hop ID: the value it adds to a route's hop list for loop

@@ -29,11 +29,19 @@ const ADMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub struct Config {
 	/// The auth server asked once per session event: `connect`, `revalidate`, and
 	/// `end`, each one JSON POST carrying everything the relay knows. `https://`
-	/// presents the `--connect-tls-*` identity, `unix://` speaks HTTP over a socket,
-	/// and `http://` is accepted for a loopback host only.
+	/// presents the `--connect-tls-cert` identity and verifies the hostname with
+	/// `--auth-root` or system roots, `unix://` speaks HTTP over a socket, and
+	/// `http://` is accepted for a loopback host only.
 	#[usage(long = "auth-url", env = "MOQ_AUTH_URL", setting = "auth.url")]
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub url: Option<Url>,
+
+	/// PEM roots used instead of system roots to verify the auth server's hostname.
+	#[usage(long = "auth-root", env = "MOQ_AUTH_ROOT", setting = "auth.root")]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_>")]
+	pub root: Vec<std::path::PathBuf>,
 
 	/// Patterns an anonymous session may both publish and subscribe to, rooted at
 	/// `/`, such as `anon/**`. Repeatable or comma-separated. Sets a static grant
@@ -221,7 +229,7 @@ impl Config {
 				"--auth-tls-*",
 				"MOQ_AUTH_TLS_*",
 				self.tls.is_some().then_some("[auth.tls]"),
-				"--connect-tls-*, which an https:// --auth-url presents",
+				"--connect-tls-cert/--connect-tls-key for identity; --auth-root for server trust",
 			),
 		] {
 			if set {
@@ -285,14 +293,15 @@ impl Config {
 	}
 
 	/// Build the [`Auth`] this configuration describes. `tls` is the client
-	/// identity an `https://` server is dialed with; `node` names this relay in
-	/// every request. Must be called within a Tokio runtime, which drives the
-	/// admission decider.
+	/// identity an `https://` server is dialed with, never its server trust;
+	/// `node` names this relay in every request. Must be called within a Tokio
+	/// runtime, which drives the admission decider.
 	pub fn init(&self, node: impl Into<String>, tls: &moq_tokio::tls::Connect) -> anyhow::Result<Auth> {
 		self.validate()?;
 		let decider = match (&self.url, self.public_grant()) {
 			(Some(url), _) => {
 				let tls = tls.build()?;
+				let tls = crate::http_client::server_tls(&tls, &self.root)?;
 				Decider::Server(moq_auth::Client::new(url.clone(), Some(tls))?)
 			}
 			(None, Some(grant)) => Decider::Public(

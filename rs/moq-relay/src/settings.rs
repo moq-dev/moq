@@ -78,6 +78,9 @@ struct Cluster {
 	#[usage(env = "MOQ_CLUSTER_CONNECT_API", cli("--cluster-connect-api"))]
 	connect_api: Option<String>,
 
+	#[usage(env = "MOQ_CLUSTER_CONNECT_API_TLS_ROOT", cli("--cluster-connect-api-tls-root"))]
+	connect_api_tls_root: Option<Vec<String>>,
+
 	#[usage(env = "MOQ_CLUSTER_NODE", cli("--cluster-node"))]
 	node: Option<String>,
 
@@ -117,6 +120,9 @@ struct ClusterLan {
 struct Auth {
 	#[usage(env = "MOQ_AUTH_URL", cli("--auth-url"))]
 	url: Option<String>,
+
+	#[usage(env = "MOQ_AUTH_ROOT", cli("--auth-root"))]
+	root: Option<Vec<String>>,
 
 	#[usage(env = "MOQ_AUTH_PUBLIC", cli("--auth-public"), parse = "list_by_comma")]
 	public: Option<Vec<String>>,
