@@ -50,6 +50,10 @@ Align the two stacks while each gets its impl:
   uring to the same shape. Test with pending × ready headers and fragmented
   arrival, preserving FIN handling, the held control streams, and stream
   credit (2026-10-27 audit, maintainer).
+- A cleanly finished stream ends `closed()`: today moq-tokio's adapter waits
+  only for a reset, so a peer's clean FIN never returns it
+  ([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950) fixed the same
+  bug in moq-uring). Test a FIN on both stacks (maintainer, 2026-10-30).
 - `transport::poll_op` and `OpSlot` move to `moq_tokio::iroh`, their last
   user, when moq-tokio's adapter goes.
 - moq-relay's io_uring server and its tests call the uring session through

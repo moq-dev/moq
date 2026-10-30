@@ -2336,32 +2336,6 @@ mod tests {
 		drop((audio, catalog, broadcast));
 	}
 
-	// The declared duration is nominal, so the exporter derives EXT-X-TARGETDURATION from the
-	// segments it has. A playlist whose EXTINF exceeds its target duration is invalid.
-	#[tokio::test]
-	async fn target_duration_follows_the_observed_segments() {
-		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
-		settle().await;
-		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
-		// 3s GOPs on the 2s grid: every GOP lands in a later cell, so each is one segment.
-		let mut media = video(&catalog, &broadcast, "video0", inline_vp8());
-		media.write(frame(0, true)).unwrap();
-		media.write(frame(3_000_000, true)).unwrap();
-		media.write(frame(6_000_000, true)).unwrap();
-
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
-		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
-		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
-
-		let playlist = rendition.snapshot();
-		assert_eq!(playlist.segments[0].duration, Duration::from_secs(3));
-		assert_eq!(playlist.target_duration, 3, "the target duration covers the 3s segment");
-		drop((media, catalog, broadcast));
-	}
-
 	// Audio and video renditions whose groups start on the same grid lines cut the same
 	// boundaries, with no state shared between them. Video is one group per segment; an audio
 	// segment packs every audio group inside the video segment's span.
@@ -3849,6 +3823,89 @@ mod tests {
 		}
 		test.sync();
 		assert_eq!(numbers(&test.listed("video0", 0).await), [0]);
+	}
+
+	// EXT-X-TARGETDURATION is the declared duration rounded up, however long the segments in the
+	// window are. A segment that overruns it once rounded to the nearest second is listed anyway,
+	// and counted for the warning.
+	#[tokio::test(start_paused = true)]
+	async fn the_target_duration_is_the_declared_one() {
+		let test = Records::with(&["video0"], &[]);
+		let (_, mut records) = test.publish("video0");
+		for (sequence, pts) in (0..).zip([0, 2_499, 4_999, 6_000, 8_000]) {
+			records.push(&hang::hls::Record::new(sequence, sequence, pts)).unwrap();
+		}
+		let snapshot = test.listed("video0", 3).await;
+		let durations: Vec<_> = snapshot.segments.iter().map(|s| s.duration.as_millis()).collect();
+		assert_eq!(durations, [2_499, 2_500, 1_001, 2_000]);
+		assert_eq!(snapshot.target_duration, 2);
+		assert_eq!(
+			test.rendition("video0").overruns(),
+			1,
+			"only the 2.5s segment rounds past the target"
+		);
+	}
+
+	// Each playlist URI keeps the EXT-X-TARGETDURATION it first got. The first renditions listed
+	// share the longest duration they declare, which floors every later target; one added later
+	// that declares longer segments raises only its own, and a reconfigure keeps the original.
+	#[tokio::test(start_paused = true)]
+	async fn each_playlist_keeps_its_target_duration() {
+		let declare = |name: &str, secs: u64| {
+			Some(hang::catalog::Hls::new(
+				hang::hls::default_name(name),
+				Duration::from_secs(secs),
+			))
+		};
+		let mut test = Records::with(&[], &[]);
+		let mut video = video_config();
+		video.hls = declare("video0", 2);
+		test.catalog.video.renditions.insert("video0".into(), video);
+		let mut audio = opus();
+		audio.hls = declare("audio0", 1);
+		test.catalog.audio.renditions.insert("audio0".into(), audio);
+		test.sync();
+		let target = |name: &str| test.rendition(name).target_duration();
+		assert_eq!((target("video0"), target("audio0")), (2, 2));
+
+		let mut late = video_config();
+		late.hls = declare("video1", 4);
+		test.catalog.video.renditions.insert("video1".into(), late.clone());
+		test.sync();
+		late.hls = declare("video2", 2);
+		test.catalog.video.renditions.insert("video2".into(), late);
+		test.sync();
+		let target = |name: &str| test.rendition(name).target_duration();
+		assert_eq!(
+			[target("video0"), target("audio0"), target("video1"), target("video2")],
+			[2, 2, 4, 2]
+		);
+
+		let original = test.rendition("video0");
+		test.catalog.video.renditions.get_mut("video0").unwrap().hls = declare("video0", 6);
+		test.sync();
+		let replacement = test.rendition("video0");
+		assert!(!Arc::ptr_eq(&original, &replacement), "a new duration reconfigures");
+		assert_eq!(replacement.target_duration(), 2);
+		drop((original, replacement));
+
+		// A removed rendition that returns serves the same playlist URI. Nothing of it is kept,
+		// but the target derives from its declared duration and the first batch's, so one that
+		// returns declaring what it first did comes back the same, even after a longer rendition
+		// registers in between. One whose reconfigure kept an older target, though, returns with
+		// the target its current declaration derives: the price of keeping no state per name.
+		let video0 = test.catalog.video.renditions.remove("video0").unwrap();
+		let video1 = test.catalog.video.renditions.remove("video1").unwrap();
+		test.sync();
+		let mut longer = video_config();
+		longer.hls = declare("video3", 8);
+		test.catalog.video.renditions.insert("video3".into(), longer);
+		test.sync();
+		test.catalog.video.renditions.insert("video0".into(), video0);
+		test.catalog.video.renditions.insert("video1".into(), video1);
+		test.sync();
+		let target = |name: &str| test.rendition(name).target_duration();
+		assert_eq!([target("video1"), target("video3"), target("video0")], [4, 8, 6]);
 	}
 
 	/// The `Push` events a fresh subscriber to `track`'s records reads before it is caught up.

@@ -19,7 +19,7 @@ This suite installs the published moq packages and checks that they exchange med
 
 Hang media, Cloudflare, and moxygen each have their own lane.
 
-CI runs the matrix nightly and on pull requests that touch `test/smoke/`: [`.github/workflows/smoke.yml`](../../.github/workflows/smoke.yml).
+CI runs the matrix nightly, on pushes to `main` that touch `test/smoke/`, and on dispatch: [`.github/workflows/smoke.yml`](../../.github/workflows/smoke.yml).
 
 ## Clients
 

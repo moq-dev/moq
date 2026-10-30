@@ -142,7 +142,10 @@ origin can regenerate data from disk or an archive.
 This epic owns the end-to-end test: a relay chain carries one live group well
 past the old caps. A late joiner gets its head through a flight and hands
 over to the live copy, and a live reader keeps the tail, over lite and
-moq-transport, with memory held near 32 MB per copy.
+moq-transport, with memory held near 32 MB per copy. It also carries a long
+compressed group through a small cache pool with a plain reader on a legacy
+wire, which [moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)
+covered only at the model layer (maintainer, 2026-10-30).
 
 ## Required
 
