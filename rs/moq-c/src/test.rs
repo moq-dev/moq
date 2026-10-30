@@ -726,10 +726,9 @@ fn publish_catalog_config_invalid_broadcast() {
 	assert!(unsafe { moq_publish_video_properties(0, &moq_video_properties::default()) } < 0);
 
 	let audio_codec = "opus";
-	let (audio_name, audio_codec) = ("audio", "opus");
 	let audio = moq_audio_config {
-		name: audio_name.as_ptr() as *const c_char,
-		name_len: audio_name.len(),
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
 		label: std::ptr::null(),
 		label_len: 0,
 		codec: audio_codec.as_ptr() as *const c_char,
@@ -2617,8 +2616,6 @@ fn json_window_refreshes_a_bounded_checkpoint() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Cancelling a JSON consumer whose subscription the publisher has not answered still delivers
-/// the terminal callback, for every JSON mode.
 /// Every consumer that subscribes by name, with its cancel.
 type NamedConsumer = (
 	&'static [u8],
@@ -2695,6 +2692,8 @@ const NAMED_CONSUMERS: [NamedConsumer; 5] = [
 	),
 ];
 
+/// Cancelling a consumer whose subscription the publisher has not answered still delivers the
+/// terminal callback.
 #[test]
 fn named_consumers_cancel_while_subscribing() {
 	let origin = id(moq_origin_create());
