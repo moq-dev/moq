@@ -6489,7 +6489,13 @@ impl Cursor {
 				return Poll::Ready(Ok(false));
 			};
 			state.cache.wakes().watch_arrival(owed, waiter);
-			Poll::Ready(Ok(!state.poll_drifted(owed, &drift.edge.servable, budget, None, waiter)))
+			Poll::Ready(Ok(!state.poll_drifted(
+				owed,
+				&drift.edge.servable,
+				budget,
+				None,
+				waiter,
+			)))
 		})
 	}
 
@@ -14389,6 +14395,7 @@ mod test {
 	}
 
 	/// A received copy, as a session's subscription feeds it, on a pinned wall clock.
+	#[cfg(feature = "async")]
 	fn received_producer(info: impl Into<Option<Info>>) -> Producer {
 		let producer = track_producer("test", info);
 		producer.received();
@@ -14397,6 +14404,7 @@ mod test {
 	}
 
 	/// Create and finish group `sequence`, with one frame at `millis` on a timed track.
+	#[cfg(feature = "async")]
 	fn put(producer: &Producer, sequence: u64, millis: Option<u64>) {
 		let mut group = producer.create_group(group::Info { sequence }).unwrap();
 		if let Some(millis) = millis {
@@ -14509,7 +14517,11 @@ mod test {
 		put(&producer, 0, None);
 		assert_eq!(producer.append_datagram(None, &b"d"[..]).unwrap(), 1);
 		put(&producer, 2, None);
-		assert_eq!(drain_ordered(&mut consumer), [0, 2], "a datagram took group 1's sequence");
+		assert_eq!(
+			drain_ordered(&mut consumer),
+			[0, 2],
+			"a datagram took group 1's sequence"
+		);
 
 		producer.drop_groups(3..4, StreamError::Old);
 		put(&producer, 4, None);
@@ -14518,7 +14530,7 @@ mod test {
 		let aborted = producer.create_group(group::Info { sequence: 5 }).unwrap();
 		aborted.abort(Error::Cancel).unwrap();
 		producer.modify().unwrap().reclaim_aborted(5);
-		assert!(producer.state.read().lookup.get(&5).is_none(), "the slot was reclaimed");
+		assert!(!producer.state.read().lookup.contains_key(&5), "the slot was reclaimed");
 		put(&producer, 6, None);
 		assert_eq!(drain_ordered(&mut consumer), [6], "group 5 was aborted and reclaimed");
 
@@ -14533,7 +14545,10 @@ mod test {
 		let mut consumer = producer.subscribe(subscription).ordered();
 		producer.start_at(0).unwrap();
 		put(&producer, 1, None);
-		assert!(drain_ordered(&mut consumer).is_empty(), "group 0 is owed from the start");
+		assert!(
+			drain_ordered(&mut consumer).is_empty(),
+			"group 0 is owed from the start"
+		);
 		put(&producer, 0, None);
 		assert_eq!(drain_ordered(&mut consumer), [0, 1]);
 	}
