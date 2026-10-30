@@ -1,4 +1,4 @@
-use crate::{Path, coding::*, path::Invalid};
+use crate::{Path, coding::*};
 
 /// The escaped text of each tuple field in `path`, split at every `/` no escape covers.
 ///
@@ -26,8 +26,8 @@ fn escaped_fields(path: &str) -> impl Iterator<Item = &str> {
 	})
 }
 
-/// A field's bytes with its `\/` and `\\` escapes undone, in pieces. Any other
-/// backslash stays, as written.
+/// A field's bytes with its escapes undone, in pieces. Every `\` in a valid path escapes
+/// the `\` or `/` after it.
 fn unescape(field: &str) -> impl Iterator<Item = &[u8]> {
 	let mut rest = field.as_bytes();
 	// Where to look for the next escape: never at the byte an escape just produced.
@@ -36,18 +36,13 @@ fn unescape(field: &str) -> impl Iterator<Item = &[u8]> {
 		if rest.is_empty() {
 			return None;
 		}
-		let mut i = from;
-		while i + 1 < rest.len() {
-			if rest[i] == b'\\' && matches!(rest[i + 1], b'/' | b'\\') {
-				let piece = &rest[..i];
-				rest = &rest[i + 1..];
-				from = 1;
-				return Some(piece);
-			}
-			// Another backslash keeps the byte after it too.
-			i += if rest[i] == b'\\' { 2 } else { 1 };
-		}
-		Some(std::mem::take(&mut rest))
+		let Some(i) = rest[from..].iter().position(|&b| b == b'\\') else {
+			return Some(std::mem::take(&mut rest));
+		};
+		let piece = &rest[..from + i];
+		rest = &rest[from + i + 1..];
+		from = 1;
+		Some(piece)
 	})
 }
 
@@ -55,13 +50,15 @@ fn unescaped_len(field: &str) -> usize {
 	unescape(field).map(<[u8]>::len).sum()
 }
 
-// A field ending in `/` escapes to a path with an empty segment, so it is refused, as is a
-// namespace whose separators and escapes push its path past `Path::MAX_BYTES`.
-fn from_tuple(parts: &[&str]) -> Result<Path, Invalid> {
+// Every `\` and `/` in a field is escaped, the only spelling a path accepts, so every path
+// returns from its own tuple unchanged. A field ending in `/` escapes to a path with an empty
+// segment, so it is refused, as is a namespace whose separators and escapes push its path
+// past `Path::MAX_BYTES`.
+fn from_tuple(parts: &[&str]) -> Result<Path, crate::path::Error> {
 	// Joined on the stack, which `arrayvec` leaves uninitialized, so the path's own copy
 	// is the only allocation, and a short path makes none.
 	let mut path = arrayvec::ArrayVec::<u8, { Path::MAX_BYTES }>::new();
-	let mut push = |b| path.try_push(b).map_err(|_| Invalid::TooLong);
+	let mut push = |b| path.try_push(b).map_err(|_| crate::path::Error::TooLong);
 	for (i, part) in parts.iter().enumerate() {
 		if i > 0 {
 			push(b'/')?;
@@ -295,6 +292,24 @@ mod tests {
 		let decoded = decode_ns(&tuple);
 		assert_eq!(decoded.as_str(), r"foo\\bar\/baz/qux");
 		assert_eq!(encode_path(&decoded), tuple);
+	}
+
+	/// Every valid path, `\` and `/` included, encodes to a tuple that decodes back to it, so
+	/// a path crossing the IETF boundary keeps its one spelling.
+	#[test]
+	fn every_path_round_trips() {
+		let mut texts = vec![String::new()];
+		for _ in 0..10 {
+			texts = texts
+				.iter()
+				.flat_map(|text| ['a', '/', '\\'].map(|c| format!("{text}{c}")))
+				.collect();
+			for text in &texts {
+				if let Ok(path) = Path::new(text) {
+					assert_eq!(decode_ns(&encode_path(&path)), path, "{text:?}");
+				}
+			}
+		}
 	}
 
 	#[test]

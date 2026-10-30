@@ -248,6 +248,9 @@ pub unsafe extern "C" fn moq_bandwidth_consumer_changed(
 }
 
 /// Release this consumer's demand and cancel any outstanding wait.
+///
+/// The outstanding `moq_bandwidth_consumer_changed` callback still fires once.
+/// Release its `user_data` in that callback, not when this function returns.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_bandwidth_consumer_close(consumer: u32) -> i32 {
 	ffi::enter(move || {

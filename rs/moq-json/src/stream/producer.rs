@@ -67,12 +67,10 @@ impl<T: Serialize> Producer<T> {
 
 	/// Append one record to the log.
 	///
-	/// A record that might not fit in what is left of the group's budget is refused with
-	/// [`moq_net::Error::GroupTooLarge`] before anything is written, leaving the log intact. The
-	/// budget covers the whole log, so once it is spent every append is refused; a publisher with
-	/// more to say opens a new track. A timestamp whose presence doesn't match the track's timescale
-	/// is refused with [`moq_net::Error::TimestampMismatch`] the same way, so a corrected append
-	/// carries on.
+	/// The log accepts appends for its track's life. A record larger than a frame may be is refused
+	/// with [`moq_net::Error::FrameTooLarge`] before anything is written, leaving the log intact. A
+	/// timestamp whose presence doesn't match the track's timescale is refused with
+	/// [`moq_net::Error::TimestampMismatch`] the same way, so a corrected append carries on.
 	///
 	/// Any other failure ends the track. A log missing a record is not the lossless log a stream
 	/// promises, and that holds whether the group rejected the record or it never encoded at all, so
@@ -105,9 +103,9 @@ impl<T: Serialize> Producer<T> {
 
 #[cfg(test)]
 impl<T> Producer<T> {
-	/// Shrink the group budget to a size a test can reach.
-	pub(super) fn set_max_group_bytes(&self, bytes: u64) {
-		self.inner.lock().unwrap().encoder.max_group_bytes = bytes;
+	/// Shrink the frame limit to a size a test can reach.
+	pub(super) fn set_max_frame_bytes(&self, bytes: u64) {
+		self.inner.lock().unwrap().encoder.max_frame_bytes = bytes;
 	}
 }
 
@@ -138,7 +136,7 @@ impl<T: Serialize> Inner<T> {
 		let record = match encoder.encode(payload.value) {
 			Ok(record) => record,
 			// Refused before encoding, so nothing is missing from the log and nothing desynced.
-			Err(err @ crate::Error::Net(moq_net::Error::GroupTooLarge)) => return Err(err),
+			Err(err @ crate::Error::Net(moq_net::Error::FrameTooLarge)) => return Err(err),
 			Err(err) => {
 				// A record that can't be encoded is as lost as one the group rejects: the log is
 				// missing it either way, and carrying on would present that gap as a complete log.
@@ -156,9 +154,8 @@ impl<T: Serialize> Inner<T> {
 		};
 
 		if let Err(err) = result {
-			// The record never reached the wire either way, so it is not charged to the group.
+			// The record never reached the wire either way.
 			drop(record);
-			encoder.reset();
 
 			// What differs is whether a consumer could have seen the group. A write failure means the
 			// group is already live, so the record is a hole in the log, and a second group would hand

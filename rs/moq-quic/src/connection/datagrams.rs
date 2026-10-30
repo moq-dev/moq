@@ -1,13 +1,12 @@
 use std::collections::VecDeque;
 
-use bytes::Bytes;
-use thiserror::Error;
+use bytes::{Buf, Bytes};
 use tracing::{debug, trace};
 
-use super::{Connection, SendOptions};
+use super::{Connection, send};
 use crate::{
 	TransportError,
-	frame::{Datagram, FrameStruct},
+	frame::{Datagram, FrameStruct, OutgoingDatagram},
 };
 
 /// API to control datagram traffic
@@ -28,20 +27,26 @@ impl Datagrams<'_> {
 	/// the oldest datagram of the lowest-priority group is dropped, and this datagram is dropped
 	/// instead once it is the one to go.
 	///
-	/// Returns `Err` iff `data` cannot currently be sent.
+	/// Each chunk of `data` is taken with [`Buf::copy_to_bytes`], so a header chained in front
+	/// of a [`Bytes`] payload costs no copy of the payload.
+	///
+	/// Fails with [`send::Error::Unsupported`] when datagrams are disabled locally or by the peer,
+	/// or [`send::Error::TooLarge`] when `data` exceeds [`max_size`](Self::max_size).
 	///
 	/// # Panics
 	/// - when `options.group` was opened on another connection
-	pub fn send(&mut self, data: Bytes, options: SendOptions<'_>) -> Result<(), SendDatagramError> {
+	pub fn send(&mut self, data: impl Buf, options: send::Options<'_>) -> Result<(), send::Error> {
 		if self.conn.config.datagram.receive_buffer.is_none() {
-			return Err(SendDatagramError::Disabled);
+			return Err(send::Error::Unsupported);
 		}
-		let max = self.max_size().ok_or(SendDatagramError::UnsupportedByPeer)?;
+		let max = self.max_size().ok_or(send::Error::Unsupported)?;
 		let budget = self.conn.config.datagram.send_buffer;
-		let datagram = Datagram { data };
-		if datagram.data.len() > max || datagram.size(true) > budget {
-			return Err(SendDatagramError::TooLarge);
+		// Checked before taking the payload, which copies whatever is not already `Bytes`.
+		let len = data.remaining();
+		if len > max || OutgoingDatagram::frame_size(len) > budget {
+			return Err(send::Error::TooLarge);
 		}
+		let datagram = OutgoingDatagram::new(data);
 		if !self.conn.streams.queue_datagram(datagram, options, budget) {
 			trace!("dropping outgoing datagram");
 		}
@@ -205,22 +210,4 @@ mod tests {
 		assert!(state.incoming.memory_used() <= WINDOW);
 		assert_eq!(state.recv().unwrap(), &[7][..]);
 	}
-}
-
-/// Errors that can arise when sending a datagram
-#[derive(Debug, Error, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[non_exhaustive]
-pub enum SendDatagramError {
-	/// The peer does not support receiving datagrams
-	#[error("datagrams not supported by peer")]
-	UnsupportedByPeer,
-	/// Datagram support is disabled locally
-	#[error("datagram support disabled")]
-	Disabled,
-	/// The datagram is larger than the connection can currently accommodate
-	///
-	/// Indicates that the path MTU minus overhead or the limit advertised by the peer has been
-	/// exceeded.
-	#[error("datagram too large")]
-	TooLarge,
 }

@@ -246,6 +246,13 @@ int main(void) {
     moq_dispatcher dispatcher = {loop_dispatch, loop_shutdown, NULL};
     moq_set_dispatcher(&dispatcher);
 
+    /* Only the defaults carry moq-net's zero max delay; a bare record sets no subscriber limit. */
+    moq_subscription *defaults = moq_subscription_defaults();
+    CHECK(defaults->max_delay.has_value && defaults->max_delay.value == 0);
+    moq_subscription_free(defaults);
+    moq_subscription bare = moq_subscription_default();
+    CHECK(!bare.max_delay.has_value);
+
     /* A synchronous error is a returned value with Rust's Display message. */
     moq_server_config unbound_config = moq_server_config_default();
     moq_server *unbound = NULL;

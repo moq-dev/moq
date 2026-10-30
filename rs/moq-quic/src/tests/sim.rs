@@ -267,9 +267,9 @@ impl Peer {
 			let mut stream = conn.send_stream(id);
 			while sending.written < sending.spec.len {
 				let end = sending.spec.len.min(sending.written + PAYLOAD_MAX);
-				match stream.write(payload(index, sending.written..end)) {
+				match stream.write(&mut payload(index, sending.written..end)) {
 					Ok(written) => sending.written += written,
-					Err(WriteError::Blocked) => break,
+					Err(send::Error::Blocked) => break,
 					Err(error) => panic!("writing stream {index}: {error}"),
 				}
 			}
@@ -330,7 +330,7 @@ impl Peer {
 						receiving.done = Some(now);
 						break;
 					}
-					Err(ReadError::Blocked) => break,
+					Err(recv::Error::Blocked) => break,
 					Err(error) => panic!("reading stream {index}: {error}"),
 				}
 			}

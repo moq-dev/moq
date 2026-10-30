@@ -116,7 +116,7 @@ const files = (await Bun.stdin.text()).split("\n").filter(Boolean);
 // only by these needs no entry.
 const UNWATCHED = new Set(["pull_request", "pull_request_target", "merge_group", "workflow_call"]);
 // These push workflows validate branches or warm caches; none publishes.
-const CI_ONLY = new Set(["Cache", "OBS", "Platform", "Quest", "Runner VM"]);
+const CI_ONLY = new Set(["Cache", "Land", "OBS", "Platform", "Quest", "Runner VM"]);
 const names = [];
 for (const file of files) {
     const doc = Bun.YAML.parse(await Bun.file(file).text());

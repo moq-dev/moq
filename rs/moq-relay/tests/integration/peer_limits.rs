@@ -75,8 +75,8 @@ async fn probe(port: u16, peer: bool) -> Seen {
 
 	// SETUP type, then a one-byte message holding zero parameters.
 	let mut setup = conn.open_uni(Default::default()).await.expect("open");
-	setup.write_all(&[0x01, 0x01, 0x00]).await.expect("write");
-	setup.finish().expect("finish");
+	setup.write_all(&[0x01, 0x01, 0x00][..]).await.expect("write");
+	setup.finish();
 
 	// The relay widens a peer before it answers SETUP, so its SETUP stream
 	// arrives behind the new credit.
