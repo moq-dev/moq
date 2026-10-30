@@ -712,8 +712,8 @@ fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Optio
 
 /// The exclusive end of the run a lookup of a time start resolved to `start` searches, when
 /// the groups held can't tell which group contains it and a handler may: it is before every
-/// group known to start, or in a gap after `start`, the newest known to start at or before it,
-/// that nothing says is gone.
+/// group known to start, or in a gap after `start`, the newest known to start at or before it.
+/// Even a gap the live feed accounted for may sit in the history once evicted.
 fn unresolved(start: u64, floored: bool, holdings: &impl Holdings) -> Option<u64> {
 	if !holdings.looks_up() {
 		return None;
@@ -723,7 +723,7 @@ fn unresolved(start: u64, floored: bool, holdings: &impl Holdings) -> Option<u64
 	}
 	let next = start.checked_add(1)?;
 	let (after, _) = holdings.next_start(next)?;
-	(after > next && holdings.gone(next).is_none_or(|end| end < after)).then_some(after)
+	(after > next).then_some(after)
 }
 
 /// Where a range stops, or `None` while it waits on a latest group. A time end's walk
@@ -757,6 +757,7 @@ mod tests {
 		held: std::collections::BTreeMap<u64, Held>,
 		gone: Vec<ops::Range<u64>>,
 		complete: bool,
+		looks_up: bool,
 		asked: Cell<usize>,
 	}
 
@@ -776,6 +777,10 @@ mod tests {
 	impl Holdings for Groups {
 		fn timed(&self) -> bool {
 			true
+		}
+
+		fn looks_up(&self) -> bool {
+			self.looks_up
 		}
 
 		fn containing(&self, pts: Timestamp) -> Containing {
@@ -1202,5 +1207,47 @@ mod tests {
 			Window::new(&[range(Anchor::Relative(0), time(0))], None, &Untimed),
 			Err(Error::TimestampMismatch)
 		));
+	}
+
+	/// With a handler serving the history, a time start the groups held can't place is looked
+	/// up and reads nothing meanwhile: before every start, or in a gap after the newest group
+	/// starting at or before it, even one the live feed accounted for, since an evicted group
+	/// still sits in the history. The answer places it; none leaves what the groups held say.
+	#[test]
+	fn a_time_start_the_groups_cant_place_is_looked_up() {
+		let mut groups = Groups::new([Groups::started(4, 4000), Groups::started(9, 9000)]);
+		groups.gone = vec![5..9];
+		groups.looks_up = true;
+		let mut window = Window::new(&[range(time(8500), None)], Some(9), &groups).unwrap();
+		assert_eq!(window.lookups().collect::<Vec<_>>(), [(at(8500), 9)]);
+		assert!(!window.is_settled() && !window.contains(9) && window.resolved() == [None]);
+		groups.held.insert(8, Held::Started(at(8000)));
+		assert!(window.found(at(8500), Some(8), &groups));
+		assert_eq!(window.resolved(), [Some(Resolved { start: 8, end: None })]);
+		assert!(window.is_settled());
+
+		let window = Window::new(&[range(time(8500), None)], Some(9), &groups).unwrap();
+		assert_eq!(window.lookups().count(), 0, "group 8 is held, with 9 after it");
+
+		let mut window = Window::new(&[range(time(500), None)], Some(9), &groups).unwrap();
+		assert_eq!(window.lookups().collect::<Vec<_>>(), [(at(500), 4)]);
+		assert!(window.found(at(500), None, &groups));
+		assert_eq!(window.resolved(), [Some(Resolved { start: 0, end: None })]);
+		assert!(window.contains(4) && !window.missable(0).any(|run| *run.start() < 4));
+	}
+
+	/// Without a handler serving the history, the groups held decide alone.
+	#[test]
+	fn a_time_start_is_not_looked_up_without_a_history() {
+		let groups = Groups::new([Groups::started(4, 4000), Groups::started(9, 9000)]);
+		let window = Window::new(&[range(time(8500), None), range(time(500), None)], Some(9), &groups).unwrap();
+		assert_eq!(window.lookups().count(), 0);
+		assert_eq!(
+			window.resolved(),
+			[
+				Some(Resolved { start: 4, end: None }),
+				Some(Resolved { start: 0, end: None }),
+			]
+		);
 	}
 }
