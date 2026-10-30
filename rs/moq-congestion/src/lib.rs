@@ -158,6 +158,11 @@ pub struct Acked {
     pub bytes: u16,
     /// The state [`Controller::on_sent`] returned for it.
     pub packet: Packet,
+    /// When the peer received it, if the peer reports receive timestamps.
+    ///
+    /// Counted from a basis the peer picked and never shares, on the peer's clock, so only the
+    /// difference between two packets' times means anything, and the two clocks may drift.
+    pub received: Option<Duration>,
 }
 
 /// Packets loss detection declared lost together.

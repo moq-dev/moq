@@ -61,6 +61,7 @@ fn measure(flight: usize, batch: usize, steady: bool) -> (Duration, usize) {
             sent: base,
             bytes: PACKET,
             packet,
+            received: None,
         }));
         bbr.on_ack(Ack {
             now,

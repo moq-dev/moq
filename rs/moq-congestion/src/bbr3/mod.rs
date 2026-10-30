@@ -2074,6 +2074,7 @@ mod test {
                 sent: now,
                 bytes,
                 packet,
+                received: None,
             };
             assert!(self.sent.insert(pn, acked).is_none(), "{pn} sent twice");
         }
@@ -2086,6 +2087,7 @@ mod test {
                     sent,
                     bytes: bytes as u16,
                     packet: acked.packet,
+                    received: None,
                 });
             }
         }

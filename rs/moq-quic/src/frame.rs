@@ -131,6 +131,9 @@ frame_types! {
 	// ACK Frequency
 	ACK_FREQUENCY = 0xaf,
 	IMMEDIATE_ACK = 0x1f,
+	// https://www.ietf.org/archive/id/draft-ietf-quic-receive-ts-03.html#section-4
+	ACK_RECEIVE_TIMESTAMPS = 0x03178307,
+	ACK_RECEIVE_TIMESTAMPS_ECN = 0x03178308,
 	// DATAGRAM
 }
 
@@ -183,7 +186,12 @@ impl Frame {
 			StreamsBlocked { dir: Dir::Uni, .. } => FrameType::STREAMS_BLOCKED_UNI,
 			StopSending { .. } => FrameType::STOP_SENDING,
 			RetireConnectionId { .. } => FrameType::RETIRE_CONNECTION_ID,
-			Ack(_) => FrameType::ACK,
+			Ack(x) => match (x.ecn.is_some(), x.timestamps.is_some()) {
+				(false, false) => FrameType::ACK,
+				(true, false) => FrameType::ACK_ECN,
+				(false, true) => FrameType::ACK_RECEIVE_TIMESTAMPS,
+				(true, true) => FrameType::ACK_RECEIVE_TIMESTAMPS_ECN,
+			},
 			Stream(x) => {
 				let mut ty = *STREAM_TYS.start();
 				if x.fin {
@@ -341,6 +349,8 @@ pub(crate) struct Ack {
 	pub delay: u64,
 	pub additional: Bytes,
 	pub ecn: Option<EcnCounts>,
+	/// The Receive Timestamps field of an ACK_RECEIVE_TIMESTAMPS frame, validated when parsed
+	pub timestamps: Option<Bytes>,
 }
 
 impl fmt::Debug for Ack {
@@ -361,6 +371,7 @@ impl fmt::Debug for Ack {
 			.field("delay", &self.delay)
 			.field("ecn", &self.ecn)
 			.field("ranges", &ranges)
+			.field("timestamps", &self.receive_timestamps().map(|x| x.count()))
 			.finish()
 	}
 }
@@ -375,15 +386,24 @@ impl<'a> IntoIterator for &'a Ack {
 }
 
 impl Ack {
-	pub(crate) fn encode<W: BufMut>(delay: u64, ranges: &ArrayRangeSet, ecn: Option<&EcnCounts>, buf: &mut W) {
+	/// Writes the frame, leaving the Receive Timestamps field to [`ReceiveTimestamps::encode`]
+	/// when `timestamps` makes it an ACK_RECEIVE_TIMESTAMPS frame
+	pub(crate) fn encode<W: BufMut>(
+		delay: u64,
+		ranges: &ArrayRangeSet,
+		ecn: Option<&EcnCounts>,
+		timestamps: bool,
+		buf: &mut W,
+	) {
 		let mut rest = ranges.iter().rev();
 		let first = rest.next().unwrap();
 		let largest = first.end - 1;
 		let first_size = first.end - first.start;
-		buf.write(if ecn.is_some() {
-			FrameType::ACK_ECN
-		} else {
-			FrameType::ACK
+		buf.write(match (ecn.is_some(), timestamps) {
+			(false, false) => FrameType::ACK,
+			(true, false) => FrameType::ACK_ECN,
+			(false, true) => FrameType::ACK_RECEIVE_TIMESTAMPS,
+			(true, true) => FrameType::ACK_RECEIVE_TIMESTAMPS_ECN,
 		});
 		buf.write_var(largest);
 		buf.write_var(delay);
@@ -403,6 +423,117 @@ impl Ack {
 
 	pub(crate) fn iter(&self) -> AckIter<'_> {
 		self.into_iter()
+	}
+
+	/// The receive timestamps it reports, newest arrival first, or `None` for a plain ACK
+	pub(crate) fn receive_timestamps(&self) -> Option<ReceiveTimestamps<'_>> {
+		let mut data = &self.timestamps.as_ref()?[..];
+		let ranges = data.get_var().unwrap();
+		Some(ReceiveTimestamps {
+			largest: self.largest,
+			data,
+			ranges,
+			left: 0,
+			packet: 0,
+			time: None,
+		})
+	}
+}
+
+/// The packets an ACK_RECEIVE_TIMESTAMPS frame reports, newest arrival first
+///
+/// Each is a packet number and when it arrived, in units of the exponent the frame's recipient
+/// advertised since a basis only the frame's sender knows. Only differences between them mean
+/// anything.
+pub(crate) struct ReceiveTimestamps<'a> {
+	largest: u64,
+	data: &'a [u8],
+	/// Timestamp ranges not yet started
+	ranges: u64,
+	/// Timestamps left in the current range
+	left: u64,
+	/// The packet the next timestamp in the current range belongs to
+	packet: u64,
+	/// The previous timestamp, which the next delta counts back from, or `None` before the first,
+	/// which counts up from the basis
+	time: Option<u64>,
+}
+
+impl ReceiveTimestamps<'_> {
+	/// Writes the Receive Timestamps field for `received`, newest arrival first, keeping the
+	/// newest that fit in `space` bytes
+	///
+	/// `received` holds each packet's number and arrival in units since the basis, and only
+	/// packets the ACK whose largest is `largest` acknowledges. Arrivals never increase, so every
+	/// delta is a step back in time. Returns how many it wrote.
+	pub(crate) fn encode<W: BufMut>(
+		largest: u64,
+		received: impl Iterator<Item = (u64, u64)>,
+		space: usize,
+		buf: &mut W,
+	) -> usize {
+		// Ranges as (first index into `deltas`, Delta Largest Acknowledged)
+		let mut ranges: Vec<(usize, u64)> = Vec::new();
+		let mut deltas: Vec<u64> = Vec::new();
+		// The field's size, starting with an empty Timestamp Range Count
+		let mut size = 1;
+		let mut prev: Option<(u64, u64)> = None;
+		for (packet, time) in received {
+			let delta = prev.map_or(time, |(_, prev)| prev - time);
+			let extends = prev.is_some_and(|(prev, _)| prev.checked_sub(1) == Some(packet));
+			let mut cost = varint_size(delta);
+			if extends {
+				let (start, _) = *ranges.last().unwrap();
+				let count = (deltas.len() - start) as u64;
+				cost += varint_size(count + 1) - varint_size(count);
+			} else {
+				cost += varint_size(largest - packet) + 1;
+				cost += varint_size(ranges.len() as u64 + 1) - varint_size(ranges.len() as u64);
+			}
+			if size + cost > space {
+				break;
+			}
+			size += cost;
+			if !extends {
+				ranges.push((deltas.len(), largest - packet));
+			}
+			deltas.push(delta);
+			prev = Some((packet, time));
+		}
+
+		buf.write_var(ranges.len() as u64);
+		for (i, &(start, gap)) in ranges.iter().enumerate() {
+			let end = ranges.get(i + 1).map_or(deltas.len(), |&(next, _)| next);
+			buf.write_var(gap);
+			buf.write_var((end - start) as u64);
+			for &delta in &deltas[start..end] {
+				buf.write_var(delta);
+			}
+		}
+		deltas.len()
+	}
+}
+
+impl Iterator for ReceiveTimestamps<'_> {
+	type Item = (u64, u64);
+
+	fn next(&mut self) -> Option<(u64, u64)> {
+		// Validated by `scan_receive_timestamps`
+		while self.left == 0 {
+			if self.ranges == 0 {
+				return None;
+			}
+			self.ranges -= 1;
+			self.packet = self.largest - self.data.get_var().unwrap();
+			self.left = self.data.get_var().unwrap();
+		}
+		let delta = self.data.get_var().unwrap();
+		let time = self.time.map_or(delta, |prev| prev - delta);
+		self.time = Some(time);
+		let packet = self.packet;
+		self.packet = self.packet.wrapping_sub(1);
+		self.left -= 1;
+		Some((packet, time))
 	}
 }
 
@@ -639,24 +770,36 @@ impl Iter {
 			FrameType::RETIRE_CONNECTION_ID => Frame::RetireConnectionId {
 				sequence: self.bytes.get_var()?,
 			},
-			FrameType::ACK | FrameType::ACK_ECN => {
+			FrameType::ACK
+			| FrameType::ACK_ECN
+			| FrameType::ACK_RECEIVE_TIMESTAMPS
+			| FrameType::ACK_RECEIVE_TIMESTAMPS_ECN => {
 				let largest = self.bytes.get_var()?;
 				let delay = self.bytes.get_var()?;
 				let extra_blocks = self.bytes.get_var()? as usize;
 				let n = scan_ack_blocks(&self.bytes, largest, extra_blocks)?;
+				let additional = self.bytes.split_to(n);
+				let ecn = match ty {
+					FrameType::ACK_ECN | FrameType::ACK_RECEIVE_TIMESTAMPS_ECN => Some(EcnCounts {
+						ect0: self.bytes.get_var()?,
+						ect1: self.bytes.get_var()?,
+						ce: self.bytes.get_var()?,
+					}),
+					_ => None,
+				};
+				let timestamps = match ty {
+					FrameType::ACK_RECEIVE_TIMESTAMPS | FrameType::ACK_RECEIVE_TIMESTAMPS_ECN => {
+						let n = scan_receive_timestamps(&self.bytes, largest)?;
+						Some(self.bytes.split_to(n))
+					}
+					_ => None,
+				};
 				Frame::Ack(Ack {
 					delay,
 					largest,
-					additional: self.bytes.split_to(n),
-					ecn: if ty != FrameType::ACK_ECN {
-						None
-					} else {
-						Some(EcnCounts {
-							ect0: self.bytes.get_var()?,
-							ect1: self.bytes.get_var()?,
-							ce: self.bytes.get_var()?,
-						})
-					},
+					additional,
+					ecn,
+					timestamps,
 				})
 			}
 			FrameType::PATH_CHALLENGE => Frame::PathChallenge(self.bytes.get()?),
@@ -788,6 +931,35 @@ fn scan_ack_blocks(mut buf: &[u8], largest: u64, n: usize) -> Result<usize, Iter
 		smallest = smallest.checked_sub(block).ok_or(IterErr::Malformed)?;
 	}
 	Ok(total_len - buf.remaining())
+}
+
+/// Checks a Receive Timestamps field, returning its length
+///
+/// Every packet it names is at most `largest`, and no delta steps back past the basis.
+fn scan_receive_timestamps(mut buf: &[u8], largest: u64) -> Result<usize, IterErr> {
+	let total_len = buf.remaining();
+	let ranges = buf.get_var()?;
+	let mut time = None;
+	for _ in 0..ranges {
+		let packet = largest.checked_sub(buf.get_var()?).ok_or(IterErr::Malformed)?;
+		let count = buf.get_var()?;
+		// A range names `count` packets counting down from `packet`, so needs `count` numbers
+		if count > packet.saturating_add(1) {
+			return Err(IterErr::Malformed);
+		}
+		for _ in 0..count {
+			let delta = buf.get_var()?;
+			time = Some(match time {
+				None => delta,
+				Some(prev) => u64::checked_sub(prev, delta).ok_or(IterErr::Malformed)?,
+			});
+		}
+	}
+	Ok(total_len - buf.remaining())
+}
+
+fn varint_size(x: u64) -> usize {
+	VarInt::from_u64(x).unwrap().size()
 }
 
 enum IterErr {
@@ -1110,6 +1282,75 @@ mod test {
 		}
 	}
 
+	/// The out-of-order example from draft-ietf-quic-receive-ts-03 section 8
+	#[test]
+	fn receive_timestamps_coding() {
+		let mut ranges = ArrayRangeSet::new();
+		ranges.insert(87..101);
+		// Newest arrival first: 92 to 95 arrived late, after 96 to 100
+		let received = [
+			(95, 395),
+			(94, 394),
+			(93, 392),
+			(92, 390),
+			(100, 380),
+			(99, 370),
+			(98, 360),
+			(97, 355),
+			(96, 350),
+			(91, 330),
+			(90, 320),
+			(89, 310),
+			(88, 305),
+			(87, 300),
+		];
+		let mut buf = Vec::new();
+		Ack::encode(0, &ranges, None, true, &mut buf);
+		let header = buf.len();
+		assert_eq!(
+			ReceiveTimestamps::encode(100, received.iter().copied(), usize::MAX, &mut buf),
+			received.len()
+		);
+		// The draft's three ranges: 4 from 95, 5 from 100, 5 from 91
+		let mut field = &buf[header..];
+		let mut fields = Vec::new();
+		while field.has_remaining() {
+			fields.push(field.get_var().unwrap());
+		}
+		assert_eq!(
+			fields,
+			[3, 5, 4, 395, 1, 2, 2, 0, 5, 10, 10, 10, 5, 5, 9, 5, 20, 10, 10, 5, 5]
+		);
+
+		let frames = frames(buf.clone());
+		let [Frame::Ack(ack)] = &frames[..] else {
+			panic!("incorrect frames {frames:?}");
+		};
+		assert_eq!(frames[0].ty(), FrameType::ACK_RECEIVE_TIMESTAMPS);
+		assert_eq!(ack.receive_timestamps().unwrap().collect::<Vec<_>>(), received);
+
+		// Space for only the newest range keeps it whole and drops the rest
+		let mut short = Vec::new();
+		assert_eq!(
+			ReceiveTimestamps::encode(100, received.iter().copied(), 9, &mut short),
+			4
+		);
+		assert_eq!(short, [1, 5, 4, 0x41, 0x8b, 1, 2, 2]);
+	}
+
+	/// A delta that steps back past the basis, or a range below packet zero, is malformed
+	#[test]
+	fn receive_timestamps_malformed() {
+		for field in [&[1u8, 0, 2, 5, 6][..], &[1, 3, 5, 1, 1, 1, 1, 1][..], &[1, 11, 1, 0][..]] {
+			let mut buf = Vec::new();
+			buf.write(FrameType::ACK_RECEIVE_TIMESTAMPS);
+			// Largest 10, no delay, one range of one packet
+			buf.extend_from_slice(&[10, 0, 0, 0]);
+			buf.extend_from_slice(field);
+			assert!(Iter::new(buf.into()).unwrap().next().unwrap().is_err(), "{field:?}");
+		}
+	}
+
 	#[test]
 	fn ack_coding() {
 		const PACKETS: &[u64] = &[1, 2, 3, 5, 10, 11, 14];
@@ -1123,7 +1364,7 @@ mod test {
 			ect1: 24,
 			ce: 12,
 		};
-		Ack::encode(42, &ranges, Some(&ECN), &mut buf);
+		Ack::encode(42, &ranges, Some(&ECN), false, &mut buf);
 		let frames = frames(buf);
 		assert_eq!(frames.len(), 1);
 		match &frames[0] {

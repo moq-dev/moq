@@ -152,6 +152,7 @@ impl Peer {
 					local_ip: None,
 					ecn: None,
 					data,
+					arrival: None,
 				},
 				&mut buf,
 			) {
@@ -577,6 +578,7 @@ pub(crate) fn deliver(pair: &mut Pair, datagram: BytesMut) {
 			local_ip: None,
 			ecn: None,
 			data: datagram,
+			arrival: None,
 		},
 		&mut server.buf,
 	) {

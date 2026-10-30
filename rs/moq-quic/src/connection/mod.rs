@@ -73,6 +73,8 @@ use qlog::QlogSink;
 
 mod send_buffer;
 
+mod receive_timestamps;
+
 mod sent_packets;
 #[cfg(feature = "fuzz")]
 #[doc(hidden)]
@@ -258,6 +260,10 @@ pub struct Connection {
 	app_limited: bool,
 	/// Reused to hand the congestion controller the packets an ACK acknowledged
 	acked: Vec<congestion::Acked>,
+	/// When received 1-RTT packets arrived, kept while the peer asks for receive timestamps
+	receive_timestamps: Option<receive_timestamps::Log>,
+	/// When the datagram being handled arrived, if the socket knows
+	arrival: Option<Instant>,
 	/// Resends in-flight data to probe for bandwidth while `app_limited`
 	bandwidth_probe: BandwidthProbe,
 
@@ -375,6 +381,8 @@ impl Connection {
 
 			app_limited: false,
 			acked: Vec::new(),
+			receive_timestamps: None,
+			arrival: None,
 			bandwidth_probe: BandwidthProbe::new(&config, now),
 			receiving_ecn: false,
 
@@ -880,6 +888,7 @@ impl Connection {
 					Self::try_populate_acks(
 						now,
 						self.receiving_ecn,
+						None,
 						&mut SentFrames::default(),
 						&mut self.spaces[space_id],
 						buf,
@@ -1204,6 +1213,7 @@ impl Connection {
 		match event.0 {
 			Datagram(DatagramConnectionEvent {
 				now,
+				arrival,
 				remote,
 				ecn,
 				first_decode,
@@ -1223,6 +1233,8 @@ impl Connection {
 				self.stats.udp_rx.bytes += first_decode.len() as u64;
 				let data_len = first_decode.len();
 
+				// Coalesced packets share the datagram's arrival
+				self.arrival = arrival;
 				self.handle_decode(now, remote, ecn, first_decode);
 				// The current `path` might have changed inside `handle_decode`,
 				// since the packet could have triggered a migration. Make sure
@@ -1234,6 +1246,7 @@ impl Connection {
 					self.stats.udp_rx.bytes += data.len() as u64;
 					self.handle_coalesced(now, remote, ecn, data);
 				}
+				self.arrival = None;
 
 				self.qlog
 					.emit_recovery_metrics(self.pto_count, &mut self.path, now, self.orig_rem_cid);
@@ -1620,6 +1633,18 @@ impl Connection {
 			return Ok(());
 		}
 
+		// Receive times by packet number, in microseconds since the peer's basis, as we advertise
+		// no exponent
+		let mut received = Vec::new();
+		if let Some(timestamps) = ack.receive_timestamps() {
+			let max = self.config.receive_timestamps.map_or(0, |max| max.get() as usize);
+			received.extend(timestamps.take(max + 1));
+			if received.len() > max {
+				return Err(TransportError::PROTOCOL_VIOLATION("too many receive timestamps"));
+			}
+			received.sort_unstable_by_key(|&(packet, _)| packet);
+		}
+
 		let mut ack_eliciting_acked = false;
 		let mut acked = mem::take(&mut self.acked);
 		acked.clear();
@@ -1632,6 +1657,11 @@ impl Connection {
 					// discussion at
 					// https://www.rfc-editor.org/rfc/rfc9000.html#name-limiting-ranges-by-tracking
 					self.spaces[space].pending_acks.subtract_below(acked);
+					if space == SpaceId::Data
+						&& let Some(log) = &mut self.receive_timestamps
+					{
+						log.subtract_below(acked);
+					}
 				}
 				ack_eliciting_acked |= info.ack_eliciting;
 
@@ -1644,7 +1674,11 @@ impl Connection {
 				// Notify ack frequency that a packet was acked, because it might contain an ACK_FREQUENCY frame
 				self.ack_frequency.on_acked(packet);
 
-				acked.extend(self.on_packet_acked(info));
+				let received = received
+					.binary_search_by_key(&packet, |&(packet, _)| packet)
+					.ok()
+					.map(|i| Duration::from_micros(received[i].1));
+				acked.extend(self.on_packet_acked(info, received));
 			}
 		}
 
@@ -1774,7 +1808,7 @@ impl Connection {
 	///
 	/// Not timing-aware, so it's safe to call this for inferred acks, such as arise from
 	/// high-latency handshakes.
-	fn on_packet_acked(&mut self, info: SentPacket) -> Option<congestion::Acked> {
+	fn on_packet_acked(&mut self, info: SentPacket, received: Option<Duration>) -> Option<congestion::Acked> {
 		self.remove_in_flight(&info);
 		// Only pass ACKs to the congestion controller if we are not validating the current
 		// path, so as to ignore any ACKs from older paths still coming in. A packet from another
@@ -1786,6 +1820,7 @@ impl Connection {
 				sent: info.time_sent,
 				bytes: info.size,
 				packet,
+				received,
 			});
 
 		// Update state for confirmed delivery of frames
@@ -2146,6 +2181,11 @@ impl Connection {
 		}
 		let space = &mut self.spaces[space_id];
 		space.pending_acks.insert_one(packet, now);
+		if space_id == SpaceId::Data
+			&& let (Some(log), Some(arrival)) = (&mut self.receive_timestamps, self.arrival)
+		{
+			log.received(packet, arrival, usize::from(self.path.current_mtu()));
+		}
 		if packet >= space.rx_packet {
 			space.rx_packet = packet;
 			// Update outgoing spin bit, inverting iff we're the client
@@ -2687,7 +2727,7 @@ impl Connection {
 
 				let space = &mut self.spaces[SpaceId::Initial];
 				if let Some(info) = space.sent_packets.remove(0)
-					&& let Some(acked) = self.on_packet_acked(info)
+					&& let Some(acked) = self.on_packet_acked(info, None)
 				{
 					self.path.congestion.on_ack(congestion::Ack {
 						now,
@@ -2856,7 +2896,7 @@ impl Connection {
 				Frame::Crypto(frame) => {
 					self.read_crypto(packet.header.space(), &frame, payload_len)?;
 				}
-				Frame::Ack(ack) => {
+				Frame::Ack(ack) if ack.timestamps.is_none() => {
 					self.on_ack_received(now, packet.header.space(), ack)?;
 				}
 				// Per RFC 9000 §12.4 Table 3, only a CONNECTION_CLOSE frame of type 0x1c may
@@ -2943,6 +2983,10 @@ impl Connection {
 					}
 				}
 				Frame::Ack(ack) => {
+					// Only 1-RTT packets carry receive timestamps, and only to a peer that asked
+					if ack.timestamps.is_some() && (!packet.header.is_short() || self.config.receive_timestamps.is_none()) {
+						return Err(TransportError::PROTOCOL_VIOLATION("unexpected receive timestamps"));
+					}
 					self.on_ack_received(now, SpaceId::Data, ack)?;
 				}
 				Frame::Padding | Frame::Ping => {}
@@ -3311,11 +3355,15 @@ impl Connection {
 			self.stats.frame_tx.immediate_ack += 1;
 		}
 
+		// Only 1-RTT ACKs carry receive timestamps, and the Data space sends no 0-RTT ACK
+		let timestamps = self.receive_timestamps.as_ref().filter(|_| space_id == SpaceId::Data);
+
 		// ACK
 		if space.pending_acks.can_send() {
 			Self::try_populate_acks(
 				now,
 				self.receiving_ecn,
+				timestamps,
 				&mut sent,
 				space,
 				buf,
@@ -3532,6 +3580,7 @@ impl Connection {
 			Self::try_populate_acks(
 				now,
 				self.receiving_ecn,
+				timestamps,
 				&mut sent,
 				space,
 				buf,
@@ -3550,9 +3599,11 @@ impl Connection {
 	///
 	/// This method assumes ACKs are pending, and should only be called if
 	/// `!PendingAcks::ranges().is_empty()` returns `true`.
+	#[allow(clippy::too_many_arguments)]
 	fn try_populate_acks(
 		now: Instant,
 		receiving_ecn: bool,
+		timestamps: Option<&receive_timestamps::Log>,
 		sent: &mut SentFrames,
 		space: &mut PacketSpace,
 		buf: &mut Vec<u8>,
@@ -3572,7 +3623,15 @@ impl Connection {
 		trace!("ACK {:?}, Delay = {}us", space.pending_acks.ranges(), delay_micros);
 
 		let no_acks_len = buf.len();
-		frame::Ack::encode(delay as _, space.pending_acks.ranges(), ecn, buf);
+		let ranges = space.pending_acks.ranges();
+		// Timestamps fill the space left after the ranges, rather than a packet of their own
+		let timestamps = timestamps.filter(|log| log.any(ranges));
+		frame::Ack::encode(delay as _, ranges, ecn, timestamps.is_some(), buf);
+		if let Some(log) = timestamps
+			&& let Some(space) = max_size.checked_sub(buf.len())
+		{
+			log.encode(ranges, space, buf);
+		}
 		if buf.len() > max_size {
 			// The ACK frame is too large. Remove it.
 			buf.truncate(no_acks_len);
@@ -3623,6 +3682,13 @@ impl Connection {
 				.expect("preferred address CID is the first received, and hence is guaranteed to be legal");
 		}
 		self.ack_frequency.peer_max_ack_delay = get_max_ack_delay(&params);
+		// A timestamp costs at least a byte, so the MTU bounds how many one ACK can carry
+		self.receive_timestamps = (params.max_receive_timestamps_per_ack.0 != 0).then(|| {
+			receive_timestamps::Log::new(
+				params.max_receive_timestamps_per_ack.0,
+				params.receive_timestamps_exponent.0,
+			)
+		});
 		self.peer_params = params;
 		self.path.mtud.on_peer_max_udp_payload_size_received(
 			u16::try_from(self.peer_params.max_udp_payload_size.into_inner()).unwrap_or(u16::MAX),

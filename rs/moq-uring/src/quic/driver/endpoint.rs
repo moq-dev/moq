@@ -301,6 +301,7 @@ impl Inner {
 				local_ip: dst_ip,
 				ecn,
 				data: segment,
+				arrival: None,
 			};
 			let event = self.endpoint.borrow_mut().handle(self.owner.now(), received, &mut buf);
 			match event {

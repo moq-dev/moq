@@ -909,6 +909,7 @@ impl RecvState {
 								local_ip: meta.dst_ip,
 								ecn: meta.ecn.map(proto_ecn),
 								data: buf,
+								arrival: None,
 							};
 							match endpoint.handle(now, received, &mut response_buffer) {
 								Some(DatagramEvent::NewConnection(incoming)) => {
