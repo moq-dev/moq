@@ -23,9 +23,9 @@ nightly, because estimator and player changes landed after the cap
 [moq-dev/moq#6525](https://github.com/moq-dev/moq/pull/6525),
 [moq-dev/moq#6484](https://github.com/moq-dev/moq/pull/6484),
 [moq-dev/moq#6609](https://github.com/moq-dev/moq/pull/6609)), the last on
-2026-10-24. That makes 3 of 7 so far (2026-10-25, 10-26 and 10-27), with the
-seventh due about 2026-10-31. The earlier post-cap runs below no longer
-count toward the seven. Re-measure by the rule in the budgets note, and drop the note's sentence
+2026-10-24. Five have run (2026-10-25 to 10-29), with the seventh due about
+2026-10-31, but whether the first four count is open (below). The earlier
+post-cap runs below no longer count toward the seven. Re-measure by the rule in the budgets note, and drop the note's sentence
 that budgets the AAC bursty discards against Opus's as measured. Nightlies
 from before the one-ring removal also carry `-isolated` rows; grade only the
 `-plain` rows, which are the browser rows now.
@@ -70,11 +70,28 @@ seven-frame PES flush is seven one-frame groups, delivered newest first, so the
 oldest frame of a flush waits behind every newer group on a path that cannot
 carry them together.
 
-The fourth run, [2026-10-28 nightly](https://github.com/moq-dev/moq/actions/runs/40698329026/job/122851001011),
-breaches six browser ceilings: AAC wide discards 1790.9 ms/min against 460
-and target p95 2023.2 ms against 450; Opus bursty target p95 540 ms against
-370, mild 160 against 120, and wide discards 1913.9 ms/min against 420 and
-target p95 2020 ms against 570. Preserve this run with the other post-cap
-measurements and distinguish startup/runner stalls from sustained estimator
-behavior before re-measuring. The separate publisher fairness timeout was
+The 2026-10-25 to 10-28 nightlies
+([40192013303](https://github.com/moq-dev/moq/actions/runs/40192013303),
+[40332938121](https://github.com/moq-dev/moq/actions/runs/40332938121),
+[40506938673](https://github.com/moq-dev/moq/actions/runs/40506938673),
+[40698329026](https://github.com/moq-dev/moq/actions/runs/40698329026))
+measured a relay bug rather than the player: 2 to 4.5 s into every row except
+`fixed-250` and Opus `near-zero`, the subscriber received 15 to 25 s of the
+publisher's cached history, newest first. On the `wide` rows the estimator
+took that as a late interval and held a 2020 ms target for about 20 s,
+then discarded about 1.8 to 1.9 s of audio a minute falling back, every night;
+the 10-28 Opus `bursty` 540 ms target is the same arrival. No `wide` or
+`bursty` row logged more than one long task, of at most 58 ms.
+[moq-dev/moq#7168](https://github.com/moq-dev/moq/pull/7168) stopped a fresh
+subscriber filling history below its start, merged 2026-10-29T00:52Z, and the
+[2026-10-29 nightly](https://github.com/moq-dev/moq/actions/runs/40885347517)
+is the first after it: the oldest frame any row received is about 2.6 s
+behind live, every browser row is within budget, and AAC `wide` discards
+205.6 ms/min at a 323.2 ms target p95, Opus `wide` 243.4 at 460. Across all
+five nights the AAC `bursty` rows discard 0 to 238.1 ms a minute against 0 to
+370.9 for Opus `bursty`, and Opus `near-zero` has no underrun episodes, at a
+60 ms target p95 on three nights and 80 on two (the 120 ms prior decays to 60
+only at 21.4 s, after the 5 s warmup). Each night's browser metrics are kept
+in [moq-dev/moq#7286](https://github.com/moq-dev/moq/pull/7286), since the
+artifacts expire. The separate publisher fairness timeout was
 excess per-object work, fixed by [moq-dev/moq#7133](https://github.com/moq-dev/moq/pull/7133).
