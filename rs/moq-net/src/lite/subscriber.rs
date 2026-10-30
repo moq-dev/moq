@@ -4371,7 +4371,11 @@ mod tests {
 			assert_eq!((msg.id, msg.track.as_ref(), msg.priority), (0, "video", 3), "{version}");
 			assert!(!trailing, "{version}");
 			assert!(
-				subscriber.subscribes.lock().get(&0).is_some_and(|entry| entry.copy.is_none()),
+				subscriber
+					.subscribes
+					.lock()
+					.get(&0)
+					.is_some_and(|entry| entry.copy.is_none()),
 				"{version}: registered with its copy pending"
 			);
 			assert!((&mut waiting).now_or_never().is_none(), "{version}: no TRACK_INFO yet");

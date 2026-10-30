@@ -59,6 +59,7 @@ mod stream_credit;
 mod subscribe_priority;
 mod subscribe_ranges;
 mod subscribe_tracks;
+mod subscribe_with_track;
 mod subscriber_max_age;
 mod subscription_end_integrity;
 #[cfg(feature = "async")]
