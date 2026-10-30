@@ -136,7 +136,7 @@ async fn first_fetch(version: &str, relays: u64, rtt: Duration) -> Duration {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let mut track = broadcast.create_track("video", timed()).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
