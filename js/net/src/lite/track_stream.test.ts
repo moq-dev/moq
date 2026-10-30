@@ -1,8 +1,9 @@
 // An open Track Stream is interest in the track: the subscriber keeps it open until its
 // SUBSCRIBE is answered, and the publisher keeps the track wanted until the subscriber closes it.
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
+import { SessionCode } from "../error.ts";
 import { randomHop } from "../hop.ts";
 import { Version as IetfVersion } from "../ietf/version.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -149,6 +150,29 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			origin.close();
 		},
 	);
+
+	test("data after a TRACK request closes the session", async () => {
+		const pair = createMockTransportPair(ALPN_05);
+		const closing = spyOn(pair.server, "close");
+		const origin = new OriginProducer();
+		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
+
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("the publisher never accepted the TRACK stream");
+		void publisher.runTrackInfo(new TrackMessage(Path.from("room"), "video"), server);
+
+		await client.writer.u53(0);
+		await expect(client.reader.done()).rejects.toThrow();
+		expect(closing).toHaveBeenCalledWith(expect.objectContaining({ closeCode: SessionCode.ProtocolViolation }));
+
+		publisher.close();
+		broadcast.close();
+		origin.close();
+	});
 
 	test.each(["FIN", "reset"] as const)(
 		"a requester's %s while TRACK_INFO is blocked lets the track go",
