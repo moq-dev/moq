@@ -565,7 +565,7 @@ impl Consumer {
 /// [`sync`](Self::synced) before reporting [`TracksEvent::Synced`]. Answer while [`poll_used`](Self::poll_used): list what the
 /// publisher behind the handler holds and keep it current, then [`clear`](Self::clear)
 /// once [`poll_unused`](Self::poll_unused). Dropping it clears what it listed.
-pub(crate) struct Lister {
+pub struct Lister {
 	state: kio::Shared<BroadcastState>,
 }
 

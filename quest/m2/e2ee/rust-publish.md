@@ -19,9 +19,8 @@ moq-video and moq-audio encoders take them, so mux, video, audio, and
 timeline publishers already publish into an encrypted
 broadcast under semantic names with no change here. This quest keeps only
 what the traits do not cover. Every track these publishers serve is declared
-in advance, so it does not wait on
-[undeclared names](/quest/m2/e2ee/undeclared-names.md) (maintainer,
-2026-10-19).
+in advance, so it never needed the undeclared-name handler (maintainer,
+2026-10-19), which `moq_e2ee::broadcast::Producer::requests` now provides.
 
 - Catalog naming: derive the protected catalog name from its well-known
   logical role, then put media roles, codecs, quality, timelines, and
@@ -36,9 +35,7 @@ in advance, so it does not wait on
 - A re-created track resumes (decided 2026-10-25, maintainer, replacing the
   2026-10-17 refusal): moq-e2ee never releases a name's claim, and a track
   created again under a claimed name continues above its high-water marks,
-  so nonces never repeat. [Undeclared names](/quest/m2/e2ee/undeclared-names.md)
-  owns that `create_track` change and its test, so this quest still does not
-  wait on it.
+  so nonces never repeat. moq-e2ee's `create_track` already does this.
 
 Public API: none. Wire: none.
 

@@ -79,7 +79,7 @@ the reverse (decided 2026-10-20, maintainer):
 - Keep the nonce rules the epic specifies: a group producer still owns its
   frame numbering, and a re-created or re-served track name resumes above
   its high-water marks (decided 2026-10-25, maintainer, replacing the
-  refusal; see [undeclared names](/quest/m2/e2ee/undeclared-names.md)).
+  refusal; moq-e2ee's claims already resume).
 - Test the wrappers against the questline's pass-through test cases. The
   moq-json round trip through an encrypted track waits for
   [moq-json to take the traits](/quest/m2/net-wrap/json.md).
