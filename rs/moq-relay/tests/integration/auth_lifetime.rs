@@ -308,7 +308,7 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
 	let bc = sub_consumer
-		.request_broadcast("test", None)
+		.request("test", None)
 		.await
 		.expect("announced broadcast resolves");
 
@@ -455,7 +455,7 @@ async fn forwards_the_setup_token() {
 		let encoded = [&[0x03, 0x00][..], &value].concat();
 		let params = [&[0x03, encoded.len() as u8][..], &encoded].concat();
 		let setup = [&[0xaf, 0x00][..], &(params.len() as u16).to_be_bytes(), &params].concat();
-		let mut session = if websocket {
+		let session = if websocket {
 			qmux::ws::Client::new()
 				.with_protocol("moqt-18", &[qmux::Version::QMux01])
 				.connect(&format!("ws://127.0.0.1:{port}/room?source=setup"))
@@ -670,7 +670,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(announced, "expected announce, got retraction");
 	let bc = sub_consumer
-		.request_broadcast("test", None)
+		.request("test", None)
 		.await
 		.expect("announced broadcast resolves");
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
@@ -812,7 +812,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		let mut subs = Vec::new();
 		for path in ["alice/audio", "alice/video"] {
-			let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.routed_broadcast(path))
+			let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.follow(path, None).unwrap().available())
 				.await
 				.expect("announcement timeout")
 				.expect("announced broadcast resolves");
@@ -875,7 +875,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		// Undeafen: the path is announced again and a new subscription flows.
 		script.on_revalidate(Answer::Grant(grant(Duration::from_secs(3600))));
-		let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.routed_broadcast("alice/audio"))
+		let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.follow("alice/audio", None).unwrap().available())
 			.await
 			.expect("the undeafened path was never announced again")
 			.expect("announced broadcast resolves");
@@ -1771,7 +1771,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		.await
 		.unwrap()
 		.unwrap();
-		let a_read = tokio::time::timeout(TIMEOUT, read.routed_broadcast("a/cam"))
+		let a_read = tokio::time::timeout(TIMEOUT, read.follow("a/cam", None).unwrap().available())
 			.await
 			.unwrap()
 			.unwrap();
@@ -1783,7 +1783,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.await
 			.unwrap()
 			.unwrap();
-		let b_read = tokio::time::timeout(TIMEOUT, read.routed_broadcast("b/cam"))
+		let b_read = tokio::time::timeout(TIMEOUT, read.follow("b/cam", None).unwrap().available())
 			.await
 			.expect("new prefix not announced")
 			.unwrap();
@@ -1915,7 +1915,7 @@ async fn websocket_refusal_is_in_band() {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		script.on_connect(answer);
 		let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
-		let mut session = qmux::ws::Client::new()
+		let session = qmux::ws::Client::new()
 			.with_protocol("moq-lite-06", &[qmux::Version::QMux01])
 			.connect(&format!("ws://127.0.0.1:{port}/room"))
 			.await

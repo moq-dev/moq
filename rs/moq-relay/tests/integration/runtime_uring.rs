@@ -162,7 +162,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "test");
 		assert!(active, "expected announce, got retraction");
-		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request("test", None))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} request timeout"))
 			.expect("announced broadcast resolves");
@@ -267,7 +267,7 @@ async fn uring_workers_serve_every_configured_version() {
 			// moq-lite-02 has no in-band path, so a raw QUIC session sits at the root.
 			let path = update.prefix.as_str().to_owned();
 			assert!(active && path.ends_with("test"), "{scheme} {name}: announced {path}");
-			let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast(&path, None))
+			let broadcast = tokio::time::timeout(TIMEOUT, consumer.request(&path, None))
 				.await
 				.unwrap_or_else(|_| panic!("{scheme} {name}: request timeout"))
 				.expect("announced broadcast resolves");
@@ -625,7 +625,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+	let announced = tokio::time::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");
@@ -876,7 +876,8 @@ async fn uring_forwards_the_setup_token() {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	let tls = config.tls.build().unwrap();
-	let client = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+	let client =
+		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap()).unwrap();
 	for webtransport in [false, true] {
 		let mut tls = tls.clone();
 		tls.alpn_protocols = vec![if webtransport {
@@ -886,8 +887,8 @@ async fn uring_forwards_the_setup_token() {
 		}];
 		let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
 		let conn = client
-			.connect_with(
-				driver::ClientConfig::new(std::sync::Arc::new(crypto)),
+			.connect(
+				&driver::client::Config::new(std::sync::Arc::new(crypto)),
 				addr,
 				"localhost",
 			)
@@ -922,8 +923,7 @@ async fn uring_forwards_the_setup_token() {
 		);
 	}
 	deciding.await.unwrap();
-	client.close(driver::VarInt::from_u32(0), b"test complete");
-	client.wait_idle().await;
+	client.close(driver::VarInt::from_u32(0), "test complete").await;
 	running.abort();
 	let _ = running.await;
 }
@@ -1082,19 +1082,21 @@ fn uring_workers_bound_stalled_handshakes() {
 			let mut tls = tls.clone();
 			tls.alpn_protocols = vec![alpn.to_vec()];
 			let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC crypto");
-			let mut transport = driver::TransportConfig::default();
-			transport.congestion_controller_factory(std::sync::Arc::new(moq_congestion::Unlimited));
-			let mut config = driver::ClientConfig::new(std::sync::Arc::new(crypto));
-			config.transport_config(std::sync::Arc::new(transport));
+			let mut transport = driver::transport::Config::default();
+			transport.congestion = std::sync::Arc::new(moq_congestion::Unlimited);
+			let mut config = driver::client::Config::new(std::sync::Arc::new(crypto));
+			config.transport = transport;
 			config
 		};
-		let client = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client");
+		let client =
+			driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+				.expect("client");
 
 		// TLS: the relay never hears more than the ClientHello. Once it answers, its
 		// deadline is armed, and passing it is the only way the handshake can end:
 		// the client's own timeouts are far beyond the time this test lets pass.
 		let (hop, answered) = stall_after_hello(addr).await;
-		let stalled = client.connect_with(crypto(b"moq-lite-06"), hop, "localhost").unwrap();
+		let stalled = client.connect(&crypto(b"moq-lite-06"), hop, "localhost").unwrap();
 		let stalled = tokio::spawn(async move {
 			match stalled.await {
 				Ok(conn) => conn.closed().await,
@@ -1105,7 +1107,7 @@ fn uring_workers_bound_stalled_handshakes() {
 		clock.advance(LISTEN);
 		let error = stalled.await.unwrap();
 		assert!(
-			!matches!(error, driver::ConnectionError::TimedOut),
+			!matches!(error, driver::connection::Error::TimedOut),
 			"the relay must close a stalled QUIC handshake: {error}"
 		);
 
@@ -1115,11 +1117,7 @@ fn uring_workers_bound_stalled_handshakes() {
 		for (scheme, code) in [("moql", timeout), ("https", timeout), ("h3", H3_GENERAL_PROTOCOL_ERROR)] {
 			let session = async {
 				let alpn: &[u8] = if scheme == "moql" { b"moq-lite-06" } else { b"h3" };
-				let conn = client
-					.connect_with(crypto(alpn), addr, "localhost")
-					.unwrap()
-					.await
-					.unwrap();
+				let conn = client.connect(&crypto(alpn), addr, "localhost").unwrap().await.unwrap();
 				// The client is connected once it sends its Finished, but the relay has
 				// left the TLS phase only once it confirms the handshake.
 				while conn.stats().frame_rx.handshake_done == 0 {
@@ -1144,8 +1142,8 @@ fn uring_workers_bound_stalled_handshakes() {
 				"{scheme}: {error}"
 			);
 		}
-		// No `wait_idle`: draining waits on time this clock never passes.
-		client.close(driver::VarInt::from_u32(0), b"test complete");
+		// Not awaited: draining waits on time this clock never passes.
+		drop(client.close(driver::VarInt::from_u32(0), "test complete"));
 		running.abort();
 		let _ = running.await;
 	});

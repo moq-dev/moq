@@ -18,7 +18,7 @@ use moq_net::track::Subscribing;
 use moq_net::{Epoch, Path, broadcast, origin};
 
 use crate::{
-	Encoding, Group, GroupFrame, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage, group_track,
+	Group, GroupFrame, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage, group_track,
 	parse_node_path, prefix_track, presence_track, totals_track,
 };
 
@@ -35,11 +35,6 @@ pub struct Config {
 	/// Top-level path stats are published under (default `.stats`). Must match
 	/// the producer's prefix.
 	pub prefix: Path,
-	/// Which encoding of the totals, presence, and prefix tracks to read.
-	/// [`Encoding::Compressed`] carries the same data for a fraction of the
-	/// bytes. Defaults to [`Encoding::Plain`]. A group's track compresses
-	/// itself, so this does not apply to it.
-	pub encoding: Encoding,
 	/// How long a departed node's traffic waits for its path to return before
 	/// folding into the retired total (default 10 minutes). A return within it
 	/// under the same epoch (or again without one) resumes the node's own
@@ -49,8 +44,7 @@ pub struct Config {
 }
 
 impl Config {
-	/// A config with default settings: the `.stats` prefix and the plain
-	/// `.json` tracks.
+	/// A config with default settings: the `.stats` prefix.
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -58,12 +52,6 @@ impl Config {
 	/// Override the top-level prefix (default `.stats`). Must match the producer.
 	pub fn with_prefix(mut self, prefix: impl Into<Path>) -> Self {
 		self.prefix = prefix.into();
-		self
-	}
-
-	/// Read the totals, presence, and prefix tracks in `encoding`.
-	pub fn with_encoding(mut self, encoding: Encoding) -> Self {
-		self.encoding = encoding;
 		self
 	}
 
@@ -78,7 +66,6 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			prefix: Path::from_static(".stats"),
-			encoding: Encoding::Plain,
 			// Well above reconnect times; a longer grace only costs memory.
 			grace: Duration::from_secs(600),
 		}
@@ -143,7 +130,7 @@ impl Consumer {
 	/// without a handshake.
 	pub fn totals(&self) -> TotalsConsumer {
 		TotalsConsumer {
-			inner: self.merged(totals_track(self.config.encoding), self.config.encoding),
+			inner: self.merged(totals_track()),
 		}
 	}
 
@@ -151,7 +138,7 @@ impl Consumer {
 	/// lists it; see [`Self::totals`].
 	pub fn group(&self, group: impl Into<Path>) -> GroupConsumer {
 		GroupConsumer {
-			inner: self.merged(group_track(group), Encoding::Plain),
+			inner: self.merged(group_track(group)),
 		}
 	}
 
@@ -159,7 +146,7 @@ impl Consumer {
 	/// node broadcast; see [`Self::totals`].
 	pub fn presence(&self, label: impl Into<Path>) -> PresenceConsumer {
 		PresenceConsumer {
-			inner: self.merged(presence_track(label, self.config.encoding), self.config.encoding),
+			inner: self.merged(presence_track(label)),
 		}
 	}
 
@@ -167,12 +154,12 @@ impl Consumer {
 	/// every node broadcast; see [`Self::totals`].
 	pub fn prefix(&self, path: impl Into<Path>) -> PrefixConsumer {
 		PrefixConsumer {
-			inner: self.merged(prefix_track(path, self.config.encoding), self.config.encoding),
+			inner: self.merged(prefix_track(path)),
 		}
 	}
 
-	fn merged<S: Shape>(&self, name: String, encoding: Encoding) -> Merged<S> {
-		Merged::new(self.origin.clone(), &self.config, name, encoding)
+	fn merged<S: Shape>(&self, name: String) -> Merged<S> {
+		Merged::new(self.origin.clone(), &self.config, name)
 	}
 }
 
@@ -709,15 +696,8 @@ impl Shape for Grouped {
 
 /// One node's subscription to the merged track.
 enum Reader<F> {
-	/// Resolving the announced path into a broadcast. `queued` records whether
-	/// the request was handed to a serving route (fixed at request time): a
-	/// queued request that fails `Unroutable` was killed by its serving route
-	/// retracting (the table has already changed), while an unqueued
-	/// `Unroutable` means nothing serves the path at all.
-	Resolving {
-		pending: Pending<origin::Requesting>,
-		queued: bool,
-	},
+	/// Resolving the instance while owning discovery and retrying route churn.
+	Resolving(Box<Pending<origin::Requesting>>),
 	/// Waiting for the node's listing to offer the track.
 	Waiting,
 	/// Awaiting the subscription handshake.
@@ -805,18 +785,14 @@ struct Merged<S: Shape> {
 }
 
 impl<S: Shape> Merged<S> {
-	fn new(origin: origin::Consumer, config: &Config, name: String, encoding: Encoding) -> Self {
+	fn new(origin: origin::Consumer, config: &Config, name: String) -> Self {
 		Self {
 			// Stats live under a `.`-named prefix, which discovery hides by default.
 			announce: origin.clone().with_hidden(true).announced(),
 			origin,
 			prefix: config.prefix.clone(),
 			name,
-			config: {
-				let mut json = moq_json::snapshot::consumer::Config::default();
-				json.compression = encoding.compression();
-				json
-			},
+			config: Default::default(),
 			nodes: HashMap::new(),
 			last_announced: HashMap::new(),
 			grace: config.grace,
@@ -1036,7 +1012,7 @@ fn advance<S: Shape>(
 		}
 
 		match &mut node.reader {
-			Reader::Resolving { pending, queued } => match pending.poll_ok(waiter) {
+			Reader::Resolving(pending) => match pending.poll_ok(waiter) {
 				// An unpinned retry on a known lineage can reach a replacement publisher
 				// before its announcement drains here. Its counters belong to its own entry,
 				// which that announcement creates, so this lineage keeps its last frame.
@@ -1070,15 +1046,6 @@ fn advance<S: Shape>(
 						return changed | node.depart();
 					}
 				},
-				// A queued request killed by its route retracting: an identical
-				// standby swaps in without any announce update, so re-resolve
-				// through the already-updated table. Each retry consumed a real
-				// retraction, so this cannot spin; an instant Unroutable instead
-				// means nothing serves the path (the retraction that empties the
-				// table also unannounces this node).
-				Poll::Ready(Err(moq_net::Error::Unroutable)) if *queued => {
-					node.reader = resolve(origin, &node.path, node.epoch.clone());
-				}
 				Poll::Ready(Err(err)) => {
 					tracing::debug!(?err, name, "stats: node broadcast unresolvable");
 					return changed | node.depart();
@@ -1168,9 +1135,8 @@ fn advance<S: Shape>(
 
 /// Start resolving `path` (relative to the announce cursor) into a broadcast.
 fn resolve<F>(origin: &origin::Consumer, path: &Path, epoch: Option<Epoch>) -> Reader<F> {
-	let pending = origin.request_broadcast(path, epoch);
-	let queued = pending.is_queued();
-	Reader::Resolving { pending, queued }
+	let pending = origin.request(path, epoch);
+	Reader::Resolving(Box::new(pending))
 }
 
 #[cfg(test)]
@@ -1330,7 +1296,7 @@ mod tests {
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
-		let consumer = egress.request_broadcast(path, None).await.expect("resolve");
+		let consumer = egress.request(path, None).await.expect("resolve");
 		let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
 		let mut group = track.append_group().unwrap();
@@ -1599,8 +1565,7 @@ mod tests {
 		let b: Epoch = "01900000-0000-7000-8000-000000000002".parse().unwrap();
 		let c: Epoch = "01900000-0000-7000-8000-000000000003".parse().unwrap();
 		let d: Epoch = "01900000-0000-7000-8000-000000000004".parse().unwrap();
-		let mut merged =
-			Merged::<Keyed<Traffic>>::new(origin.consume(), &Config::new(), "traffic".into(), Encoding::Plain);
+		let mut merged = Merged::<Keyed<Traffic>>::new(origin.consume(), &Config::new(), "traffic".into());
 		let update = |epoch: Option<Epoch>| moq_net::announce::Announce {
 			prefix: path.clone(),
 			captures: None,
@@ -1717,7 +1682,7 @@ mod tests {
 			.unwrap();
 		old.publish("acme/room", 100);
 		let name = group_track(moq_net::Path::from_static("acme"));
-		let mut merged = Merged::<Grouped>::new(origin.consume(), &Config::new(), name.clone(), Encoding::Plain);
+		let mut merged = Merged::<Grouped>::new(origin.consume(), &Config::new(), name.clone());
 		let initial = futures::executor::block_on(kio::wait(|waiter| {
 			driver.poll(now, waiter).unwrap();
 			merged.poll_next(waiter)
@@ -1750,7 +1715,7 @@ mod tests {
 					.announce(origin::Route::default().with_epoch(epoch_b.clone()))
 					.unwrap();
 				new.publish("acme/room", 30);
-				let pending = origin.consume().request_broadcast(".stats/node/a", None);
+				let mut pending = origin.consume().request(".stats/node/a", None);
 				let front = futures::executor::block_on(kio::wait(|waiter| {
 					driver.poll(now, waiter).unwrap();
 					pending.poll_ok(waiter)
@@ -2246,9 +2211,7 @@ mod tests {
 				.create_broadcast(format!(".stats/node/{node}").as_str())
 				.expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
-			let track = source
-				.create_track(totals_track(Encoding::Plain), timed())
-				.expect("create track");
+			let track = source.create_track(totals_track(), timed()).expect("create track");
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {
 				_source: source,
@@ -2298,7 +2261,7 @@ mod tests {
 	fn hand_merged<V: Mergeable>() -> (Merged<Keyed<V>>, (Path, Option<Epoch>)) {
 		let origin = produce_origin();
 		let path = Path::from_static(".stats/node/a");
-		let mut merged = Merged::<Keyed<V>>::new(origin.consume(), &Config::new(), "p".into(), Encoding::Plain);
+		let mut merged = Merged::<Keyed<V>>::new(origin.consume(), &Config::new(), "p".into());
 		merged.apply_announce(
 			moq_net::announce::Announce {
 				prefix: path.clone(),

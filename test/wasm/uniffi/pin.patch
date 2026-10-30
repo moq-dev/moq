@@ -21,8 +21,8 @@ index 40254d1d2..34acfca78 100644
  uniffi = { workspace = true, features = ["wasm-unstable-single-threaded"] }
 +uniffi-runtime-wasm = "=0.31.0-6"
  web-async = { workspace = true }
- web-transport-trait = { workspace = true }
  web-transport-wasm = { workspace = true }
+ 
 diff --git a/rs/moq-ffi/src/lib.rs b/rs/moq-ffi/src/lib.rs
 index 090bd368e..fd7013830 100644
 --- a/rs/moq-ffi/src/lib.rs

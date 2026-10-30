@@ -91,7 +91,7 @@ async fn drain(announced: &mut announce::Consumer) -> Vec<(&'static str, String,
 
 /// The first frame of `video` at `path` through `origin`, on the first subscription.
 async fn watch(origin: &origin::Producer, path: &str) -> String {
-	let broadcast = origin.consume().request_broadcast(path, None).await.unwrap();
+	let broadcast = origin.consume().request(path, None).await.unwrap();
 	let mut subscription = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut group = moq_clock::timeout(Duration::from_secs(10), subscription.recv_group())
 		.await
@@ -125,7 +125,7 @@ async fn chain(version: &str, claim: &str) {
 
 	if !lite07(version) {
 		// An older wire resets the first subscription through the claim.
-		let broadcast = edge.consume().request_broadcast("pool/p", None).await.unwrap();
+		let broadcast = edge.consume().request("pool/p", None).await.unwrap();
 		drop(broadcast.track("video").unwrap().subscribe(None).await);
 		settle().await;
 	}

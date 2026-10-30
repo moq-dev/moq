@@ -103,7 +103,7 @@ async fn read(subscription: &mut track::Subscriber) -> String {
 }
 
 async fn subscribe(origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
-	let broadcast = origin.consume().request_broadcast(path, None).await.unwrap();
+	let broadcast = origin.consume().request(path, None).await.unwrap();
 	let subscription = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 	(broadcast, subscription)
 }
@@ -433,7 +433,7 @@ async fn dynamic_epoch_second_route_keeps_winning() {
 			"dropping a shared epoch delivered {event:?}"
 		);
 	}
-	let fresh = origin.consume().request_broadcast("live/cam", None).await.unwrap();
+	let fresh = origin.consume().request("live/cam", None).await.unwrap();
 	assert!(fresh.is_clone(&resolved), "the epoch's broadcast was replaced");
 	assert_eq!((first.answered(), second.answered()), (1, 1));
 	// The same epoch serves the same bytes: group 0 was delivered, so it resumes at 1.
@@ -687,7 +687,7 @@ impl Pool {
 /// claim, so they wake the worker first and subscribe through the exact route.
 async fn claimed(version: Version, origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
 	if version != "moq-lite-07-wip".parse().unwrap() {
-		let cold = origin.consume().request_broadcast(path, None).await.unwrap();
+		let cold = origin.consume().request(path, None).await.unwrap();
 		drop(cold.track("video").unwrap().subscribe(None).await);
 		settle().await;
 	}
@@ -753,4 +753,83 @@ claim_restart_tests! {
 	claim_restart_lite07: "moq-lite-07-wip",
 	claim_restart_ietf18: "moq-transport-18",
 	claim_restart_ietf22: "moq-transport-22",
+}
+
+/// A mid-stream priority change on a viewer's subscription reaches the publisher's
+/// aggregate, directly or through a relay (`P -> R -> V`), and on an old instance after
+/// an epoch switch left the subscription on it.
+async fn priority_update(version: &str, relayed: bool, switch: bool) {
+	let version: Version = version.parse().unwrap();
+	let case = format!("{version} relayed={relayed} switch={switch}");
+	let publisher = produce_origin(1);
+	let relay = produce_origin(2);
+	let viewer = produce_origin(3);
+	let mut links = Vec::new();
+	if relayed {
+		links.push(link(version, &publisher, &relay).await);
+		links.push(link(version, &relay, &viewer).await);
+	} else {
+		links.push(link(version, &publisher, &viewer).await);
+	}
+
+	let (a, b) = epochs();
+	let old = publisher
+		.publish("live", origin::Route::default().with_epoch(a))
+		.unwrap();
+	let old_track = old.create_track("video", timed()).unwrap();
+	let mut announced = viewer.consume().announced();
+	assert!(
+		matches!(next_event(&mut announced).await, announce::Event::Start(_)),
+		"{case}"
+	);
+
+	let (_held, mut subscription) = subscribe(&viewer, "live").await;
+	write(&old_track, "old:0");
+	assert_eq!(read(&mut subscription).await, "old:0", "{case}");
+
+	let _new = switch.then(|| {
+		publisher
+			.publish("live", origin::Route::default().with_epoch(b))
+			.unwrap()
+	});
+	if switch {
+		let in_place = version != "moq-lite-06".parse().unwrap();
+		expect_replaced(version, &mut announced, "live", in_place).await;
+	}
+
+	// Demoted, promoted, then back to the default, each reaching the publisher before the
+	// viewer reads again: nothing waits for its next read to forward it.
+	for (group, priority) in [-2, 1, 0].into_iter().enumerate() {
+		subscription
+			.update(subscription.subscription().with_priority(priority))
+			.unwrap();
+		settle().await;
+		let seen = old_track.subscription().map(|subscription| subscription.priority);
+		assert_eq!(seen, Some(priority), "{case}: the publisher saw {seen:?}");
+		let tag = format!("old:{}", group + 1);
+		write(&old_track, &tag);
+		assert_eq!(read(&mut subscription).await, tag, "{case}");
+	}
+}
+
+macro_rules! priority_update_tests {
+	($($name:ident: $version:literal,)*) => { $(
+		#[moq_clock::test]
+		async fn $name() {
+			for relayed in [false, true] {
+				for switch in [false, true] {
+					moq_clock::timeout(TEST_TIMEOUT, priority_update($version, relayed, switch))
+						.await
+						.expect("timed out");
+				}
+			}
+		}
+	)* };
+}
+
+priority_update_tests! {
+	priority_update_lite06: "moq-lite-06",
+	priority_update_lite07: "moq-lite-07-wip",
+	priority_update_ietf18: "moq-transport-18",
+	priority_update_ietf22: "moq-transport-22",
 }

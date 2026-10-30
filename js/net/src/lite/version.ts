@@ -606,3 +606,18 @@ export function hasSynced(version: Version): boolean {
 			return true;
 	}
 }
+
+/** Whether SETUP recognizes the Implementation parameter, added in lite-07. */
+export function hasImplementation(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}

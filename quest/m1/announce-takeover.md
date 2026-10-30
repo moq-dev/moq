@@ -17,6 +17,9 @@ records which incarnation a route continues at install, fronts and session
 selections adopt it once, cursors deliver `Takeover` only where every route
 they saw at the predecessor's prefix serves that incarnation, and relays
 forward it on that same condition, falling back to Start or Restart.
+Keep the rest in m1 as a prerequisite of the lite-07 cut. moq-transport gets
+no counterpart, since [moq-transport carries no epoch](/quest/m1/ietf-epoch-cut.md)
+(decided 2026-10-28), so a moq-transport hop uses Start/Restart.
 What remains:
 
 - JS continuity. `js/net` decodes ANNOUNCE_TAKEOVER and keeps the Announce
@@ -42,5 +45,4 @@ What remains:
 ## Related
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route layer whose ANNOUNCE_START layout overlaps this one's
-- [IETF takeover](/quest/m1/ietf-takeover.md) - negotiated IETF counterpart
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explains takeover alongside restart and legacy behavior

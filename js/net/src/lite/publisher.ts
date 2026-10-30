@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
+import { Instant, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
@@ -15,13 +15,12 @@ import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runG
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Priority, sendOrder } from "../priority.ts";
-import { type Reader, type Stream, Writer } from "../stream.ts";
+import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { untilGivenUp } from "../util/given_up.ts";
-import { nextTask } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -32,6 +31,7 @@ import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
 	exclusiveGroupEnd,
+	type RangeGroups,
 	type Subscribe,
 	SubscribeDrop,
 	SubscribeEnd,
@@ -66,6 +66,19 @@ const PROBE_RTT_DELTA = 0.25;
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `varint::zigzag`). */
 function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
+}
+
+/**
+ * A frame's fields ahead of its payload, built in memory for one write: a stream write is far
+ * costlier than a varint, and a backlog pays it for every frame. The timestamp `delta` is present
+ * when the track is stamped, and `inflated` when the frame was decompressed.
+ */
+function frameHeader(version: StreamVersion, delta: bigint | undefined, inflated: number | undefined, size: number) {
+	const parts: Uint8Array[] = [];
+	if (delta !== undefined) parts.push(encodeVarint(zigzag(delta), version));
+	if (inflated !== undefined) parts.push(encodeVarint(inflated, version));
+	parts.push(encodeVarint(size, version));
+	return concat(parts);
 }
 
 /** How a lite hop stamps a track's frames and datagrams. */
@@ -333,6 +346,17 @@ class SubscriptionControls {
 		}
 		this.#finish(null);
 	}
+}
+
+// Where each range starts once delivery starts at `from`, `undefined` for one with no group
+// there. Before lite-07 there is one range, which starts there.
+function rangeStarts(ranges: (RangeGroups | undefined)[] | undefined, from: number): (number | undefined)[] {
+	if (!ranges) return [from];
+	return ranges.map((range) => {
+		if (!range) return undefined;
+		const start = Math.max(range.start, from);
+		return range.end === undefined || range.end > start ? start : undefined;
+	});
 }
 
 // The later of two locations, either of which may be unknown.
@@ -820,6 +844,11 @@ export class Publisher {
 			return;
 		}
 
+		if (msg.ranges?.some((range) => range?.unresolved)) {
+			stream.abort(new Error("relative and time subscription anchors are not supported"));
+			return;
+		}
+
 		// The requester leaving while the broadcast and track resolve ends the request, as
 		// Rust polls the requester throughout, so a cancelled subscription gives back its
 		// charge instead of holding it until the track is answered, which may be never. A
@@ -931,6 +960,8 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				apply: (update) => {
+					if (update.ranges?.some((range) => range?.unresolved))
+						throw new Error("relative and time subscription anchors are not supported");
 					Object.assign(datagramBounds, {
 						startGroup: update.startGroup,
 						startFrame: update.startFrame,
@@ -963,6 +994,7 @@ export class Publisher {
 				served,
 				floor,
 				bounds,
+				ranges: msg.ranges,
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -1127,11 +1159,14 @@ export class Publisher {
 			// The read cursor's floor; see {@link cursorFloor}.
 			floor: number;
 			bounds: FrameBounds;
+			// Each lite-07 range, which SUBSCRIBE_START answers for.
+			ranges: (RangeGroups | undefined)[] | undefined;
 		},
 	): Promise<boolean> {
 		const { sub, broadcast, stamp, publisher, compress, served, bounds } = serving;
 		// The read cursor's floor, assigned with the cap in {@link bounds} on every move.
 		let floor = serving.floor;
+		let ranges = serving.ranges;
 		const moveCursor = () =>
 			track.withRange({
 				start: { included: floor },
@@ -1267,13 +1302,15 @@ export class Publisher {
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
+							ranges = update.ranges;
 							moveCursor();
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
-							// task boundary lets the decoder finish whatever the transport already
-							// delivered before the next group pop. Updates are rare, so groups do
-							// not pay this scheduling cost on the normal path.
-							await nextTask();
+							// task boundary usually lets the decoder finish whatever the transport
+							// already delivered before the next group pop. It orders nothing: an update
+							// decoded later applies from the pop after it. Updates are rare, so groups
+							// do not pay this scheduling cost on the normal path.
+							await yieldNow();
 							continue;
 						}
 					}
@@ -1314,7 +1351,7 @@ export class Publisher {
 								startSent = true;
 								startSequence = bounds.startGroup;
 								raiseFloor(bounds.startGroup);
-								const start = new SubscribeStart(bounds.startGroup, largest);
+								const start = new SubscribeStart(rangeStarts(ranges, bounds.startGroup), largest);
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)
@@ -1397,7 +1434,7 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(startSequence, largest) },
+								{ start: new SubscribeStart(rangeStarts(ranges, startSequence), largest) },
 								this.version,
 							),
 						))
@@ -1615,7 +1652,7 @@ export class Publisher {
 	/**
 	 * Forwards a track's datagrams best-effort over QUIC datagrams (lite-05 §6.4), parallel to
 	 * its groups. Each datagram is dropped (there is no group fallback) if the encoded body
-	 * doesn't fit the transport's datagram limit or the send fails. Returns once the track
+	 * doesn't fit the wire and transport datagram limits or the send fails. Returns once the track
 	 * finishes; a failure never tears down the subscription.
 	 *
 	 * @internal
@@ -1632,7 +1669,7 @@ export class Publisher {
 		const { sub, stamp, served, bounds } = options;
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
-		const maxSize = DatagramStream.maxDatagramSize(this.#quic);
+		const maxSize = Math.min(DatagramMessage.MAX_SIZE, DatagramStream.maxDatagramSize(this.#quic));
 
 		try {
 			for (;;) {
@@ -1689,14 +1726,14 @@ export class Publisher {
 			if (!read) break;
 			const frame = read.frame;
 
+			let delta: bigint | undefined;
 			if (stamp !== undefined) {
 				const ts = BigInt(wireTime(frame.timestamp, stamp));
-				await stream.u62(zigzag(ts - prevTs));
+				delta = ts - prevTs;
 				prevTs = ts;
 			}
 
-			if (read.inflated !== undefined) await stream.u53(read.inflated);
-			await stream.u53(frame.payload.byteLength);
+			await stream.write(frameHeader(stream.version, delta, read.inflated, frame.payload.byteLength));
 			if (frame.payload.length > 0) await stream.write(frame.payload);
 		}
 	}
@@ -1799,16 +1836,16 @@ export class Publisher {
 				if (read.sequence < startFrame) continue;
 				if (endFrame !== undefined && read.sequence > endFrame) break;
 
+				let delta: bigint | undefined;
 				if (stamp !== undefined) {
 					// Convert each frame to the track's wire timescale.
 					const ts = BigInt(wireTime(read.frame.timestamp, stamp));
-					await write(() => stream.u62(zigzag(ts - prevTs)));
+					delta = ts - prevTs;
 					prevTs = ts;
 				}
 
-				const inflated = read.inflated;
-				if (inflated !== undefined) await write(() => stream.u53(inflated));
-				await write(() => stream.u53(read.frame.payload.byteLength));
+				const header = frameHeader(stream.version, delta, read.inflated, read.frame.payload.byteLength);
+				await write(() => stream.write(header));
 				if (read.frame.payload.length > 0) await write(() => stream.write(read.frame.payload));
 			}
 

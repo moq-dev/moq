@@ -82,7 +82,11 @@ bytes sent and received. A shutdown waits for these reports before exiting.
 **The link.** `https://` presents the relay's `connect.tls` client certificate
 when one is configured, so a remote server can tell which relay is asking;
 `unix://` speaks HTTP over a socket; `http://` is accepted for a loopback host
-only. There is no shared secret. Redirects are not followed, since each request
+only. HTTPS verifies the URL's hostname with system roots. For a private CA,
+set `auth.root` to PEM paths (or repeat `--auth-root`); these replace system
+trust for auth only and reload for new connections when rotated. Mesh roots,
+fingerprints, insecure mode, and hostname overrides never apply to auth.
+There is no shared secret. Redirects are not followed, since each request
 carries a credential: point `url` at the final address.
 
 ```toml

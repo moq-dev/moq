@@ -317,7 +317,8 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 
 	const delay = new Signal<Delay>(initial);
 	const source = new Source({ broadcast, supported: async () => true });
-	const sync = new Sync({ delay, buffer: Milli(buffered ? 1000 : 0) });
+	const buffer = new Signal(Milli(buffered ? 1000 : 0));
+	const sync = new Sync({ delay, buffer });
 	// The decoder's own switch, which a mute or pause turns off.
 	const decoding = new Signal(true);
 	const decoder = new Decoder({ source, sync, enabled: decoding });
@@ -337,6 +338,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 
 	return {
 		delay,
+		buffer,
 		sync,
 		push,
 		queued,
@@ -676,7 +678,7 @@ describe("Decoder across a rendition's absence", () => {
 		}
 	});
 
-	it("deselects a disabled rendition and keeps one graph across disable and enable", async () => {
+	it("holds a disabled rendition and keeps one subscription across mute and unmute", async () => {
 		const playback = await play(Milli(100));
 		try {
 			await playback.play(12);
@@ -684,16 +686,69 @@ describe("Decoder across a rendition's absence", () => {
 
 			playback.disable();
 			await microtasks();
-			expect(playback.track()).toBeUndefined();
+			expect(playback.track()).toBe("audio");
 			expect(contexts).toHaveLength(1);
 
 			playback.restore();
 			await microtasks();
 			expect(playback.track()).toBe("audio");
-			await playback.play(6);
+			const before = playback.inserted().length;
+			const timestamps = await playback.play(6);
 
 			expect(contexts).toHaveLength(1);
 			expect(contexts[0].calls.close).toBe(0);
+			expect(playback.subscriptions()).toBe(1);
+			expect(playback.inserted().slice(before)).toEqual(timestamps);
+		} finally {
+			playback.close();
+		}
+	});
+
+	it("suspends a held muted tile once drained, and resumes on unmute", async () => {
+		const playback = await play(Milli(100));
+		try {
+			await playback.play(12);
+			const [ring] = playback.rings();
+			expect(ring.read([new Float32Array(128), new Float32Array(128)])).toBe(128);
+			await microtasks();
+
+			playback.disable();
+			await microtasks();
+			const [context] = contexts;
+			expect(context.calls.suspend).toBe(0);
+
+			expect(drain(ring)).toBeGreaterThan(0);
+			await microtasks();
+			expect(context.calls.suspend).toBe(1);
+			expect(context.state).toBe("suspended");
+			expect(playback.track()).toBe("audio");
+
+			playback.restore();
+			await microtasks();
+			expect(context.state).toBe("running");
+			expect(playback.subscriptions()).toBe(1);
+		} finally {
+			playback.close();
+		}
+	});
+
+	it("drops a held rendition once it is removed", async () => {
+		const playback = await play(Milli(100));
+		try {
+			await playback.play(12);
+			playback.disable();
+			await microtasks();
+			expect(playback.track()).toBe("audio");
+
+			playback.remove();
+			await microtasks();
+			expect(playback.track()).toBeUndefined();
+
+			// Its return is a fresh selection, with a fresh subscription.
+			playback.restore();
+			await microtasks();
+			expect(playback.track()).toBe("audio");
+			await playback.play(6);
 			expect(playback.subscriptions()).toBe(2);
 		} finally {
 			playback.close();
@@ -1445,3 +1500,37 @@ it.each([false, true])("releases shared startup across a hole in queued audio (C
 		installed.close();
 	}
 });
+
+for (const cmaf of [false, true]) {
+	for (const buffered of [false, true]) {
+		it(`switches a running ${cmaf ? "CMAF" : "legacy"} player to ${buffered ? "buffered" : "live"} audio`, async () => {
+			const playback = await play(Milli(100), !buffered, cmaf);
+			try {
+				await playback.play(12);
+				playback.buffer.set(Milli(buffered ? 1000 : 0));
+				await microtasks();
+				const inserted = playback.inserted().length;
+				const start = frameTimestamp;
+				for (const ms of [140, 120, 100, 80, 60, 40, 20, 0, 160]) {
+					frameTimestamp = start + (ms - 20) * 1000;
+					playback.push({ ...frame(), group: 1 + ms / 20 });
+					await microtasks();
+				}
+				expect(playback.inserted().slice(inserted)).toEqual(
+					(buffered ? [0, 20, 40, 60, 80] : [140, 160]).map((ms) => start + ms * 1000),
+				);
+
+				// A running live ring sheds old audio when it gets ahead; a buffered ring plays it all.
+				const ring = worklets.at(-1)?.ring;
+				if (!ring) throw new Error("no running audio ring");
+				ring.reset();
+				const samples = [new Float32Array(4800), new Float32Array(4800)];
+				for (const timestamp of [0, 100_000, 200_000]) ring.write(Micro(timestamp), samples);
+				expect(ring.length).toBe(samples[0].length * (buffered ? 3 : 1));
+			} finally {
+				playback.close();
+				await microtasks();
+			}
+		});
+	}
+}

@@ -30,6 +30,16 @@ frames pile up behind it, and `Stream::fill` keeps reading while
 `jitter.full(name)` is false. No frame-count cap. Alternatively charge
 a track whose lead keeps growing as a source fault.
 
+Bound bytes too (decided 2026-10-27, maintainer, from a second audit of
+main against release). Timestamp distance does not bound memory: frames
+that share one timestamp all fall inside the window, and the container
+consumer's max buffer
+([moq-dev/moq#7056](https://github.com/moq-dev/moq/pull/7056)) only charges
+frames the jitter buffer has not pulled yet. So a track is also full while
+its queued bytes exceed a per-track byte budget. Like the time bound, it
+holds the track back in its source as backpressure, never refuses a frame.
+Test a track that packs many frames into one timestamp beside an honest one.
+
 Then evaluate the larger simplification: about a dozen fixes to the export
 clock (f85547ffd0, 5d5974f083, 3fdf46160b, e84ffb3de3, a1465d0d00,
 11bfa30461, 3cf978cdbf, 493d8eee99, 7a3890cd30, 3b77d23015, 7c4c48d08b,

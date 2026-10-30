@@ -1,3 +1,4 @@
+import type { Instant } from "@moq/clock";
 import type { Frame } from "../group.ts";
 import type { Timestamp } from "../time.ts";
 import { Decoder } from "./decoder.ts";
@@ -14,9 +15,11 @@ export interface Stored {
 // Class identity keeps reactive equality from reading the lazy payload getter.
 class SliceFrame implements Frame {
 	readonly timestamp: Timestamp | undefined;
+	readonly arrived: Instant | undefined;
 	#read: () => Uint8Array;
-	constructor(timestamp: Timestamp | undefined, read: () => Uint8Array) {
+	constructor(timestamp: Timestamp | undefined, arrived: Instant | undefined, read: () => Uint8Array) {
 		this.timestamp = timestamp;
+		this.arrived = arrived;
 		this.#read = read;
 	}
 	get payload(): Uint8Array {
@@ -44,7 +47,7 @@ export function datagramSlice(payload: Uint8Array, inflated?: number): Stored {
 /** One reader's lazy plain view of a slice, so no queue retains a copy another reader inflated. */
 export function sliceView(timestamp: Timestamp | undefined, slice: Stored): Frame {
 	let plain: Uint8Array | undefined;
-	const frame = new SliceFrame(timestamp, () => {
+	const frame = new SliceFrame(timestamp, undefined, () => {
 		plain ??= new Decoder().frame(slice.payload, slice.inflated);
 		return plain;
 	});
@@ -79,7 +82,7 @@ export class Compression {
 		this.bytes += slice.payload.length;
 		const index = this.#frames.length;
 		this.#frames.push(slice);
-		const result = new SliceFrame(frame.timestamp, () => this.#inflate(index));
+		const result = new SliceFrame(frame.timestamp, frame.arrived, () => this.#inflate(index));
 		slices.set(result, slice);
 		return result;
 	}

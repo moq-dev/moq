@@ -24,6 +24,7 @@ Two ways to drive things, both backed by `kio`:
 
 Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way around. `pin!` then polling inside `kio::wait` is a code smell, as is `tokio::spawn` / `select!` inside a library; use `kio` primitives. Don't color APIs with `Send` bounds that native needs and wasm can't satisfy.
 
+- A `poll_*` that waits on several things in a fixed order is a `#[kio::machine]` (kio's `macros` feature): straight-line code with a `wait!` at each wait, from which it writes the state enum and its transitions. Hand-write the machine when a wait sits in a loop or branch, or when it yields more than once (a stream's `poll_next`). A conditional wait is one whose poll is ready at once.
 - Use `ready!(...)` instead of `Poll::Pending => return Poll::Pending`.
 - `Poll<Result<T, E>>` supports `?`: `ready!(poll())?` or `match poll()?`.
 - Prefer `Ok(x?)` over `.map_err(Into::into)`.

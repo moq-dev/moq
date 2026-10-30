@@ -1,0 +1,57 @@
+name: CodSpeed
+
+# CPU-simulated instruction counts for the deterministic Criterion benches on
+# every main commit. An extra signal beside Nightly's paired timing, which still
+# measures every bench and is the only gate; see bench/README.md.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rs/**"
+      - Cargo.toml
+      - Cargo.lock
+      - flake.nix
+      - flake.lock
+      - .github/workflows/codspeed.yml
+  workflow_dispatch:
+
+# A busy main queues one run behind the active one, so a burst of merges is
+# measured as one comparison instead of piling up runs.
+concurrency:
+  group: codspeed
+  cancel-in-progress: false
+
+jobs:
+  codspeed:
+    name: CodSpeed
+    if: github.ref == 'refs/heads/main'
+    # CodSpeed's simulation runner supports x86 hosted runners.
+    runs-on: ubuntu-24.04
+    environment: cache-write
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      # CodSpeed authenticates the upload with GitHub OIDC; no token secret.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+
+      # The runner measures its whole command, so the benches run on the dev
+      # shell's PATH rather than inside a `nix develop` it would also measure.
+      - name: Build
+        run: |
+          nix develop --command just rs codspeed
+          echo "DEV_PATH=$(nix develop --command printenv PATH)" >> "$GITHUB_ENV"
+
+      - uses: CodSpeedHQ/action@78102a468f96d8e0ccb92d0ec49425753fc42062 # v5.6.0
+        with:
+          mode: simulation
+          run: env PATH="$DEV_PATH" cargo codspeed run

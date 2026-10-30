@@ -87,11 +87,11 @@ impl Worker {
 /// they wake the worker first.
 async fn watch(version: Version, relay: &origin::Producer) -> String {
 	if version != "moq-lite-07-wip".parse().unwrap() {
-		let cold = relay.consume().request_broadcast("pool/p", None).await.unwrap();
+		let cold = relay.consume().request("pool/p", None).await.unwrap();
 		drop(cold.track("video").unwrap().subscribe(None).await);
 		settle().await;
 	}
-	let broadcast = relay.consume().request_broadcast("pool/p", None).await.unwrap();
+	let broadcast = relay.consume().request("pool/p", None).await.unwrap();
 	let mut subscription = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut group = subscription.recv_group().await.unwrap().expect("a group");
 	let frame = group.read_frame().await.unwrap().expect("a frame");
