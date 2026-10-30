@@ -56,18 +56,22 @@ compilation is "not looked up".
 - Windows: 0 hits on 1.28.0 on both 2026-10-27 and
   [2026-10-28](https://github.com/moq-dev/moq/actions/runs/40698329026), each
   reporting that "a manifest predicting 124 compilations was loaded, but none
-  matched this build". The preceding `cargo install uniffi-bindgen-cpp` step,
-  run from the checkout, takes the workspace's identity and publishes those
-  124 first, and mbx skips inheritance for an identity that already has a
-  manifest. Reported upstream as
-  [jdx/mr-boxington#869](https://github.com/jdx/mr-boxington/issues/869).
-  Decided 2026-10-28 (maintainer): `platform.yml` now installs it after
-  `Rust compile and tests`, on Windows and macOS. Check that the first
-  scheduled Nightly after that change loads a manifest of more than 124
-  predictions and hits on Windows.
-- macOS: on 2026-10-28 the install (122 hits) also ran first and the build
-  hit 13, with 1565 compilations not looked up, which fits the same cause.
-  Judge it on the same Nightly as Windows.
+  matched this build". We reported it upstream as
+  [jdx/mr-boxington#869](https://github.com/jdx/mr-boxington/issues/869),
+  blaming the preceding `cargo install uniffi-bindgen-cpp`. The fix,
+  [jdx/mr-boxington#870](https://github.com/jdx/mr-boxington/pull/870)
+  (merged 2026-10-29, after v1.29.0), found a different cause. Git for
+  Windows checks `Cargo.lock` out with CRLF, while history holds LF, so no
+  earlier lockfile state ever matched. The build then fell back to the newest
+  local manifest, which was the install's. Since 1.28.0 an install builds
+  under its own workspace. Check that the first scheduled Nightly on an mbx
+  release with that fix loads a manifest of more than 124 predictions and
+  hits on Windows. The pin is `version` in
+  `.github/actions/rust-cache/action.yml`.
+- macOS: on 2026-10-28 the build did inherit, prefetching 732 predictions,
+  yet hit only 13, with 1565 compilations not looked up. The install order is
+  not the cause. Find out why the inherited predictions mostly miss, for
+  example the lockfile changes or the 30-day expiry.
 - Linux: Nightly's Linux jobs check out at depth 1, so mbx finds no earlier
   lockfile and reuses only a manifest written for the identical `Cargo.lock`.
   The doctest job hit 0 on 2026-10-24 and 2026-10-27, 115 on 2026-10-25, and
