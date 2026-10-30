@@ -75,6 +75,12 @@ timer is armed panics as a deadlock instead of hanging. `sim::advance()` and
 `sim::step_wall()` move time by hand, and `sim::attach(&deadlines)` keeps a
 `Deadlines` queue in step until it drops.
 
+Draw jitter and other randomness from `moq_clock::rng()`. Inside the simulator
+it comes from one seed per run, picked at random or set with `MOQ_SIM_SEED`. A
+run that panics prints its seed, so rerunning the test with `MOQ_SIM_SEED` set to
+that seed replays it bit-exact. Outside the simulator `rng()` is rand's thread
+generator.
+
 ## Driving a tokio runtime by hand
 
 Paused tokio and the simulator both jump to the next timer once everything
