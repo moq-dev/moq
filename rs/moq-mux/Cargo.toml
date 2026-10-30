@@ -12,6 +12,11 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+[features]
+# Exposes the media parsers' fuzz target bodies and seeds to the `fuzz/` harness through the
+# hidden `fuzz` module. Off by default and hidden from the docs.
+fuzz = []
+
 [dependencies]
 anyhow = { workspace = true }
 base64 = { workspace = true }
@@ -55,6 +60,13 @@ tracing-test = { workspace = true, features = ["no-env-filter"] }
 # The ts_schedule bench pins glibc's heap.
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dev-dependencies]
 libc = { workspace = true }
+
+# Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
+# `--all-targets` build skips it rather than failing to find the module.
+[[example]]
+name = "fuzz-seeds"
+path = "examples/fuzz-seeds.rs"
+required-features = ["fuzz"]
 
 [[bench]]
 name = "catalog"

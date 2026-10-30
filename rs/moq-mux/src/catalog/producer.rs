@@ -1381,7 +1381,7 @@ fn packaging_of(container: &hang::catalog::Container) -> Option<moq_msf::Packagi
 
 /// Convert a catalog to its MSF equivalent: the media sections become MSF tracks and the
 /// extension rides the MSF root under the same member names it uses in the hang catalog.
-fn to_msf<E: CatalogExt>(catalog: &Catalog<E>, base: &moq_net::Path) -> moq_msf::Catalog<E> {
+pub(crate) fn to_msf<E: CatalogExt>(catalog: &Catalog<E>, base: &moq_net::Path) -> moq_msf::Catalog<E> {
 	let mut msf = to_msf_media(&catalog.media(), base);
 	msf.ext = catalog.ext.clone();
 	msf

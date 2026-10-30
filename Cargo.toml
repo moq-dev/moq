@@ -1,7 +1,7 @@
 [workspace]
 # Keep source-only members discoverable in Maturin's dependency-pruned archive,
 # including the separately packaged UniFFI generator.
-members = ["demo/carla/bridge", "rs/*", "rs/kio/macros", "rs/moq-clock/macros", "rs/moq-net/fuzz", "rs/moq-quic/fuzz"]
+members = ["demo/carla/bridge", "rs/*", "rs/kio/macros", "rs/moq-clock/macros", "rs/moq-mux/fuzz", "rs/moq-net/fuzz", "rs/moq-quic/fuzz", "rs/moq-rtmp/fuzz"]
 default-members = [
     "rs/bench-harness",
     "rs/kio",

@@ -41,4 +41,3 @@ Public API: none expected. Wire: none.
 ## Related
 
 - [MKV import streams blocks](/quest/m1/security-audit/mkv-stream-blocks.md) - the same principle for MKV
-- [Media fuzz](/quest/m2/media-fuzz.md) - would catch this class of buffer lifetime bug

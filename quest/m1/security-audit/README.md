@@ -24,7 +24,7 @@ Placed elsewhere (decided 2026-10-27, maintainer):
   [fill-linear](/quest/m1/subscribe-ranges/fill-linear.md).
 - qmux buffering a peer-declared size (NET-3): owned by
   [qmux receive lease](/quest/m2/qmux-receive-lease.md).
-- Media parser fuzzing: owned by [media fuzz](/quest/m2/media-fuzz.md).
+- Media parser fuzzing: the `rs/moq-mux/fuzz` and `rs/moq-rtmp/fuzz` targets.
 - E2EE cloned-process rule and CryptoKey length:
   [cloned process](/quest/m2/e2ee/cloned-process.md).
 

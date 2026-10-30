@@ -2,9 +2,9 @@
 # Coverage-guided fuzzing: sh/rs/fuzz.sh [--minimize] TARGET [ARGS...]
 #
 # TARGET names a file in some crate's fuzz/fuzz_targets/, such as moq-net's lite or
-# moq-quic's connection; names are unique across crates. ARGS pass to
+# moq-mux's fmp4; names are unique across crates. ARGS pass to
 # `cargo fuzz run`, so `just rs fuzz lite -- -max_total_time=300` bounds a run.
-# See rs/moq-net/fuzz/README.md and rs/moq-quic/fuzz/README.md.
+# See the README in each rs/<crate>/fuzz/.
 #
 # Seeds are regenerated first so the corpus follows the code rather than a
 # stale run, and libFuzzer writes what it discovers to the FIRST corpus

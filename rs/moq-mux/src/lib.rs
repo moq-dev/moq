@@ -34,12 +34,19 @@
 //! - [`Linger`] keeps a cleanly ended broadcast up for a fixed time, so a
 //!   subscriber that arrives after the end still gets its tail.
 
+#[cfg(any(test, feature = "fuzz"))]
+mod allocation;
 pub mod catalog;
 mod clock;
 pub mod codec;
 pub mod container;
 mod error;
 pub mod follow;
+// Not part of the public API: compiled only for the crate's own tests and for the `fuzz/`
+// harness.
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub mod fuzz;
 pub mod hls;
 pub mod import;
 mod jitter;

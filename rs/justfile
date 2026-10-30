@@ -13,7 +13,7 @@ set working-directory := '..'
 # needs a nightly toolchain and sanitizer flags, so `just rs fuzz` is the one recipe
 # that may compile it. Every `--workspace` below therefore carries this, as does
 # sh/rs/select.sh, since it cannot read this.
-no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz"
+no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz"
 
 default:
     just check
@@ -401,9 +401,9 @@ audio-devices:
         just rs test -p moq-audio --features aec,pulseaudio --run-ignored only -E 'not test(/benchmark_/)'
 
 # Needs nightly and cargo-fuzz; CI replays the corpus on stable through each
-# crate's own tests instead. See rs/moq-net/fuzz/README.md and rs/moq-quic/fuzz/README.md.
+# crate's own tests instead. See the README in each rs/<crate>/fuzz/.
 
-# Fuzz a moq-net or moq-quic target by name: `just rs fuzz lite -- -max_total_time=300`.
+# Fuzz a target of any rs/<crate>/fuzz/ by name: `just rs fuzz lite -- -max_total_time=300`.
 # `just rs fuzz --minimize lite` shrinks its corpus instead.
 [positional-arguments]
 fuzz target *args:

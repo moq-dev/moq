@@ -21,6 +21,9 @@ default = ["tls"]
 # `pub use rustls`. Plaintext RTMP needs none of this, so an embedder can drop
 # TLS with `default-features = false`.
 tls = ["dep:rustls", "dep:tokio-rustls"]
+# Exposes the AMF0 fuzz target body and seeds to the `fuzz/` harness through the hidden `fuzz`
+# module. Off by default and hidden from the docs.
+fuzz = []
 
 # Pure library: the RTMP <-> MoQ gateway. The CLI lives in `moq-cli` (the `rtmp`
 # subcommand); a relay can also embed `moq_rtmp::Server` against its own origin.
@@ -62,6 +65,13 @@ moq-clock = { path = "../moq-clock", features = ["sim"] }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["aws-lc-rs", "net"] }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
+
+# Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
+# `--all-targets` build skips it rather than failing to find the module.
+[[example]]
+name = "fuzz-seeds"
+path = "examples/fuzz-seeds.rs"
+required-features = ["fuzz"]
 
 [[bench]]
 name = "chunk_interleaving"
