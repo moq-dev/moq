@@ -49,7 +49,9 @@ jobs:
   check:
     needs: resolve
     runs-on: ${{ vars.MOQ_QUEUE_RUNNER }}
-    timeout-minutes: 60
+    # One job tests the whole batch and each bisected prefix, and a timeout lands
+    # nothing and ejects nothing, so leave room; the runner is self-hosted.
+    timeout-minutes: 240
     permissions:
       contents: read
     outputs:
