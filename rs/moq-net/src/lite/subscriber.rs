@@ -2036,6 +2036,7 @@ mod tests {
 			ranges: vec![lite::Range::OLDEST],
 			tail: tail.clone(),
 			served: None,
+			starts: Vec::new(),
 			end: None,
 			wanted: None,
 			unanswered: None,
@@ -2091,6 +2092,44 @@ mod tests {
 
 		active.served = Some(0);
 		assert_eq!(active.covered(), Some(std::iter::once(0..2).collect()));
+	}
+
+	/// A covered FIN owes a relative range only from its own SUBSCRIBE_START, not from the
+	/// lowest start of a disjoint range below it.
+	#[moq_clock::test]
+	async fn a_covered_fin_owes_each_range_from_its_own_start() {
+		let tail = kio::Producer::new(Tail::default());
+		let Sub::Active(mut active) = feed_sub(&tail).await else {
+			unreachable!("feed_sub is active")
+		};
+		let end = |group| Some(lite::Anchor::Absolute(crate::track::Position { group, frame: 0 }));
+		active.ranges = vec![
+			lite::Range::span(Some(0), 0, Some(0), None),
+			lite::Range {
+				start: Some(lite::Anchor::Relative(0)),
+				end: end(11),
+			},
+			lite::Range {
+				start: Some(lite::Anchor::Relative(0)),
+				end: end(20),
+			},
+		];
+		active.served = Some(0);
+		active.starts = vec![Some(0), Some(10), None];
+		assert_eq!(active.covered(), Some(vec![0..1, 10..11, 20..20]));
+
+		active.ranges[0] = lite::Range::span(Some(0), 0, Some(2), None);
+		active.starts[0] = Some(1);
+		assert_eq!(active.covered(), Some(vec![1..3, 10..11, 20..20]));
+		active.starts[0] = None;
+		assert_eq!(active.covered(), Some(vec![3..3, 10..11, 20..20]));
+
+		active.updated = true;
+		assert_eq!(
+			active.covered(),
+			Some(vec![0..3, 0..11, 0..20]),
+			"an update leaves only the lowest"
+		);
 	}
 
 	/// QUIC does not order streams, so group 2's header can reach the relay before group 1's.
@@ -2172,6 +2211,7 @@ mod tests {
 				ranges: vec![lite::Range::span(Some(floor), 0, None, None)],
 				tail: Default::default(),
 				served: None,
+				starts: Vec::new(),
 				end: None,
 				wanted: None,
 				unanswered: None,
@@ -2636,6 +2676,7 @@ mod tests {
 			ranges: vec![lite::Range::span(Some(2), 0, None, None)],
 			tail: Default::default(),
 			served: None,
+			starts: Vec::new(),
 			end: Some(lite::SubscribeEnd { group: 10 }),
 			wanted: None,
 			unanswered: None,
@@ -3322,8 +3363,8 @@ mod tests {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut responses = Vec::new();
 			lite::SubscribeResponse::Start(lite::SubscribeStart {
-				group: 0,
 				largest: None,
+				starts: vec![Some(0)],
 			})
 			.encode(
 				&mut crate::coding::Encoder::new(&mut responses, version.into()),
@@ -3440,8 +3481,8 @@ mod tests {
 		let mut answer = Vec::new();
 		let mut encoder = crate::coding::Encoder::new(&mut answer, version.into());
 		lite::SubscribeResponse::Start(lite::SubscribeStart {
-			group: 0,
 			largest: None,
+			starts: vec![Some(0)],
 		})
 		.encode(&mut encoder, version)
 		.unwrap();
@@ -3494,8 +3535,8 @@ mod tests {
 		let largest = track::Position { group: 4, frame: 2 };
 		let mut responses = Vec::new();
 		lite::SubscribeResponse::Start(lite::SubscribeStart {
-			group: 4,
 			largest: Some(largest),
+			starts: vec![Some(4)],
 		})
 		.encode(
 			&mut crate::coding::Encoder::new(&mut responses, version.into()),
@@ -3556,8 +3597,8 @@ mod tests {
 			let code = crate::coding::StreamCodes::encode_stream_code(&Version::Lite07, &crate::StreamError::App(5));
 			for resp in [
 				lite::SubscribeResponse::Start(lite::SubscribeStart {
-					group: 0,
 					largest: None,
+					starts: vec![Some(0)],
 				}),
 				lite::SubscribeResponse::Drop(lite::SubscribeDrop {
 					start: 2,
@@ -3696,8 +3737,8 @@ mod tests {
 		let mut responses = Vec::new();
 		if started {
 			lite::SubscribeResponse::Start(lite::SubscribeStart {
-				group: 0,
 				largest: None,
+				starts: vec![Some(0)],
 			})
 			.encode(
 				&mut crate::coding::Encoder::new(&mut responses, version.into()),
@@ -6195,6 +6236,9 @@ struct SubStream {
 	tail: kio::Producer<Tail>,
 	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
 	served: Option<u64>,
+	/// Where SUBSCRIBE_START says each range's delivery starts, `None` for one with nothing
+	/// to deliver. It matches `ranges` until an update changes them.
+	starts: Vec<Option<u64>>,
 	/// The track's exclusive end (SUBSCRIBE_END), once declared.
 	end: Option<lite::SubscribeEnd>,
 	/// The refresh join's wanted group, restated in every SUBSCRIBE_UPDATE.
@@ -6244,14 +6288,20 @@ impl SubStream {
 		};
 		self.ranges
 			.iter()
-			.map(|range| {
+			.enumerate()
+			.map(|(index, range)| {
 				// Our absolute ends name a group's first frame (see `wire_ranges`).
 				let Some(lite::Anchor::Absolute(end)) = range.end else {
 					return None;
 				};
-				let start = match range.start {
-					Some(lite::Anchor::Absolute(start)) => start.group,
-					_ => served,
+				let start = match self.starts.get(index) {
+					// Each range's own start accounts for its skipped prefix, including
+					// an absolute one when another range has no absolute requested floor.
+					Some(start) if !self.updated => start.unwrap_or(end.group),
+					_ => match range.start {
+						Some(lite::Anchor::Absolute(start)) => start.group,
+						_ => served,
+					},
 				};
 				Some(start..end.group)
 			})
@@ -6935,6 +6985,7 @@ impl Establish {
 			requested: self.subscription.start(),
 			tail: self.tail.clone(),
 			served: None,
+			starts: Vec::new(),
 			end: None,
 			wanted: None,
 			bounded: bounded(&self.ranges),
@@ -7817,15 +7868,26 @@ impl ServeLoop {
 										}
 										active.end = Some(end.clone());
 									}
-									// SUBSCRIBE_START names the first group this feed serves:
-									// the publisher skipped everything below it (e.g. it could
-									// not serve the requested frame). Record it as a drop
-									// signal, so a reader waiting on a skipped group
-									// fails over instead of stalling on a live route.
+									// SUBSCRIBE_START names where each range's delivery starts,
+									// the lowest being the first group this feed serves: the
+									// publisher skipped everything below it (e.g. it could not
+									// serve the requested frame). Record it as a drop signal,
+									// so a reader waiting on a skipped group fails over
+									// instead of stalling on a live route.
 									lite::SubscribeResponse::Start(start) => {
+										// One resolved start per range the SUBSCRIBE carried, unless an
+										// update the publisher read first replaced them.
+										if serve.subscriber.version.has_ranges()
+											&& !active.updated && start.starts.len() != active.ranges.len()
+										{
+											tracing::warn!(track = %serve.name, starts = start.starts.len(), ranges = active.ranges.len(), "subscribe start resolves other ranges");
+											return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));
+										}
+										// No range starting anywhere leaves nothing owed.
+										let served = start.starts.iter().flatten().min().copied();
 										// Where the live feed is, on versions whose answer says.
 										if serve.subscriber.version.has_largest() {
-											self.serving.set_live(start.largest, Some(start.group));
+											self.serving.set_live(start.largest, served);
 											if let Some(largest) = start.largest {
 												self.serving.report_largest(largest);
 											}
@@ -7837,21 +7899,22 @@ impl ServeLoop {
 										// moved back restores it); elsewhere the
 										// request-tracked floor stands rather than a guess.
 										if active.start == active.requested {
-											let _ = match serve.subscriber.version.resolves_start() {
-												true => {
-													self.serving.start_resolved(start.group, active.requested_max_delay)
+											let _ = match (serve.subscriber.version.resolves_start(), served) {
+												(true, Some(served)) => {
+													self.serving.start_resolved(served, active.requested_max_delay)
 												}
-												false => self.serving.start_at(start.group),
+												_ => self.serving.start_at(served),
 											};
 										}
-										active.served = Some(start.group);
+										active.served = served;
+										active.starts = start.starts.clone();
 										// The groups the SUBSCRIBE asked for below it are not
 										// waited for, whatever the demand asks later. One that
 										// still arrives is delivered, so they are not dropped.
 										if let Some(requested) = active.requested
-											&& let Ok(mut tail) = active.tail.write()
+											&& let Some(served) = served && let Ok(mut tail) = active.tail.write()
 										{
-											tail.account(requested..start.group, serve.subscriber.runtime.now());
+											tail.account(requested..served, serve.subscriber.runtime.now());
 										}
 									}
 									// The publisher will never send these groups, so they

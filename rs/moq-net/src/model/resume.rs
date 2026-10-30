@@ -741,6 +741,11 @@ impl Subscriber {
 		self.reader().window().start()
 	}
 
+	/// Where each of the reader's ranges starts; see [`track::Subscriber::starts`].
+	pub(super) fn starts(&self, from: u64) -> Vec<Option<u64>> {
+		self.reader().window().starts(from)
+	}
+
 	/// The lowest group at or above `from` the reader's ranges cover; see
 	/// [`track::Subscriber::next_in_range`].
 	pub(super) fn next_in_range(&self, from: u64) -> Option<u64> {
@@ -921,7 +926,7 @@ impl Reader {
 	/// while a relative anchor waits on a copy to resolve it.
 	fn window(&mut self) -> &Window {
 		for index in 0..self.copies.len() {
-			if !self.window.is_pending() {
+			if self.window.is_settled() {
 				break;
 			}
 			let copy = &mut self.copies[index];
@@ -934,9 +939,11 @@ impl Reader {
 		&self.window
 	}
 
-	/// Resolve a pending [`Self::window`] with a copy's resolution of the reader's ranges,
+	/// Resolve unsettled [`Self::window`] anchors with a copy's resolution of the reader's ranges,
 	/// unless a relative anchor still waits there too.
 	fn resolve(&mut self, resolved: &[Option<Resolved>]) {
+		// Once placed, relative/time starts stay pinned even while a time end settles.
+		let placed = (!self.window.is_pending()).then(|| self.window.resolved());
 		let ranges: Vec<_> = self
 			.mirrored
 			.ranges
@@ -946,15 +953,18 @@ impl Reader {
 				let Some(resolved) = resolved.get(index).copied().flatten() else {
 					return *range;
 				};
+				let previous = placed.as_ref().and_then(|placed| placed[index]);
+				let start = previous.map_or(resolved.start, |previous| previous.start);
+				let end = previous.and_then(|previous| previous.end).or(resolved.end);
 				track::Range {
 					start: match range.start {
 						// The farthest offset reaches back to the oldest group, which names no floor.
-						Anchor::Relative(back) if back != u64::MAX => Anchor::Absolute(resolved.start),
-						Anchor::Time(_) => Anchor::Absolute(resolved.start),
+						Anchor::Relative(back) if back != u64::MAX => Anchor::Absolute(start),
+						Anchor::Time(_) => Anchor::Absolute(start),
 						start => start,
 					},
 					// A time end the copy has not settled stays one: its cap is not the end.
-					end: match (range.end, resolved.end) {
+					end: match (range.end, end) {
 						(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(end)) => Some(Anchor::Absolute(end)),
 						(end, _) => end,
 					},
@@ -997,7 +1007,7 @@ impl Reader {
 			// failover cap raised them, so the reader takes that resolution now.
 			if replaced {
 				for index in (0..self.copies.len()).rev() {
-					if !self.window.is_pending() {
+					if self.window.is_settled() {
 						break;
 					}
 					if matches!(self.copies[index].sub, Sub::Ready(_)) {
@@ -5990,6 +6000,36 @@ mod test {
 			"the relative range resolved on the serving copy"
 		);
 		assert_eq!(sub.floor(), Some(0));
+	}
+
+	/// A time end resolves on the serving copy even when the start is already absolute.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_resumed_reader_reports_starts_within_its_time_end() {
+		for start in [Anchor::Absolute(0), Anchor::Relative(0)] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			write(&a, 0);
+			routes.serve(a.consume());
+			let subscription = Subscription::default().with_max_delay(HOUR).with_ranges([track::Range {
+				start,
+				end: Some(Anchor::Time(ts(1))),
+			}]);
+			let mut sub = logical
+				.consume()
+				.subscribe(subscription)
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			let _ = sub.poll_start(&kio::Waiter::noop());
+			assert_eq!(sub.starts(0), [Some(0)]);
+			for sequence in 1..3 {
+				write(&a, sequence);
+			}
+			assert_eq!(sub.starts(10), [None]);
+			assert_eq!(sub.starts(0), [Some(0)], "the start stays pinned while the end settles");
+		}
 	}
 
 	/// A resumed reader names the next group its ranges cover, so a reader waiting on each
