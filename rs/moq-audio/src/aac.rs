@@ -141,7 +141,7 @@ fn declares_sbr(description: &[u8]) -> bool {
 
 		// The sync extension itself. Padding can't be mistaken for it: the pattern
 		// has to match, name SBR or PS, and then set the flag.
-		if bits.left() < 16 || bits.read(11)? != SYNC_EXTENSION {
+		if bits.read(11)? != SYNC_EXTENSION {
 			return Some(false);
 		}
 		if !matches!(object_type(bits)?, OBJECT_TYPE_SBR | OBJECT_TYPE_PS) {
@@ -151,7 +151,7 @@ fn declares_sbr(description: &[u8]) -> bool {
 		Some(bits.read(1)? == 1)
 	}
 
-	scan(&mut Bits::new(description)).unwrap_or(false)
+	scan(&mut Bits::endian(description, bitstream_io::BigEndian)).unwrap_or(false)
 }
 
 /// An audioObjectType, which escapes to a second field once it runs out of room.
@@ -163,34 +163,16 @@ fn object_type(bits: &mut Bits) -> Option<u8> {
 }
 
 /// A big-endian bit cursor, which is how an AudioSpecificConfig is packed.
-struct Bits<'a> {
-	data: &'a [u8],
-	pos: usize,
+type Bits<'a> = bitstream_io::BitReader<&'a [u8], bitstream_io::BigEndian>;
+
+/// Reads the next `count` bits, or `None` when the config is shorter than that.
+trait ReadBits {
+	fn read(&mut self, count: u32) -> Option<u32>;
 }
 
-impl<'a> Bits<'a> {
-	fn new(data: &'a [u8]) -> Self {
-		Self { data, pos: 0 }
-	}
-
-	fn left(&self) -> usize {
-		self.data.len() * 8 - self.pos
-	}
-
-	/// The next `count` bits, or `None` when the config is shorter than that.
-	fn read(&mut self, count: usize) -> Option<u32> {
-		if count > 32 || self.left() < count {
-			return None;
-		}
-
-		let mut value = 0;
-		for _ in 0..count {
-			let bit = (self.data[self.pos / 8] >> (7 - self.pos % 8)) & 1;
-			value = (value << 1) | u32::from(bit);
-			self.pos += 1;
-		}
-
-		Some(value)
+impl ReadBits for Bits<'_> {
+	fn read(&mut self, count: u32) -> Option<u32> {
+		bitstream_io::BitRead::read_var(self, count).ok()
 	}
 }
 

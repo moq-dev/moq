@@ -69,6 +69,7 @@ pulseaudio = ["cpal?/pulseaudio"]
 aec = ["capture", "dep:sonora", "playback"]
 
 [dependencies]
+bitstream-io = { workspace = true }
 bytes = { workspace = true }
 # Pure-Rust cross-platform audio I/O. Optional: only the `capture` and
 # `playback` features need it. Encode stays on unsafe-libopus, so a build

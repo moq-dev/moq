@@ -104,8 +104,11 @@ pub(crate) fn access_unit(
 ) -> Hdr {
 	let mut hdr = Hdr::default();
 	let mut scan = |nal: &[u8]| {
-		if nal.len() > header && sei(nal[0]) {
-			hdr.update(self::sei(&h264_parser::nal::ebsp_to_rbsp(&nal[header..])));
+		if nal.len() > header
+			&& sei(nal[0])
+			&& let Some(rbsp) = crate::codec::annexb::rbsp_bytes(nal, header)
+		{
+			hdr.update(self::sei(&rbsp));
 		}
 	};
 	match length_size {
@@ -311,7 +314,7 @@ pub(crate) mod test {
 		use crate::codec::h264::fixtures::{SEI_CONTENT_LIGHT, SEI_MASTERING};
 		let mut hdr = Hdr::default();
 		for nal in [SEI_MASTERING, SEI_CONTENT_LIGHT] {
-			hdr.update(sei(&h264_parser::nal::ebsp_to_rbsp(&nal[1..])));
+			hdr.update(sei(&crate::codec::annexb::rbsp_bytes(nal, 1).unwrap()));
 		}
 		assert_eq!(hdr, hdr10());
 	}

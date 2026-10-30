@@ -275,16 +275,19 @@ impl Split {
 /// True if an SEI NAL carries a recovery-point message (payload type 6), the
 /// open-GOP random-access marker. The NAL header byte precedes the SEI RBSP.
 fn sei_has_recovery_point(nal: &[u8]) -> bool {
-	let Some(ebsp) = nal.get(1..) else {
+	use h264_reader::nal::sei::{HeaderType, SeiReader};
+
+	let Some(rbsp) = crate::codec::annexb::rbsp_bytes(nal, 1) else {
 		return false;
 	};
-	let rbsp = h264_parser::nal::ebsp_to_rbsp(ebsp);
-	let Ok(messages) = h264_parser::sei::SeiMessage::parse(&rbsp) else {
-		return false;
-	};
-	messages
-		.iter()
-		.any(|m| matches!(m.payload, h264_parser::sei::SeiPayload::RecoveryPoint { .. }))
+	let mut scratch = Vec::new();
+	let mut messages = SeiReader::from_rbsp_bytes(&rbsp[..], &mut scratch);
+	while let Ok(Some(message)) = messages.next() {
+		if message.payload_type == HeaderType::RecoveryPoint {
+			return true;
+		}
+	}
+	false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive)]

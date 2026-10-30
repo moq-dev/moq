@@ -6,6 +6,32 @@ use std::collections::BTreeMap;
 
 use bytes::{Buf, Bytes, BytesMut};
 
+/// A bit reader over an H.264 or H.265 parameter set or SEI NAL unit's RBSP: the bytes after its
+/// `header`-byte NAL header, with emulation prevention removed as they are read.
+///
+/// These NAL units end in `rbsp_trailing_bits`, so a trailing zero byte is Annex B's
+/// `trailing_zero_8bits` left behind by the splitter, and is dropped rather than refused as an
+/// emulated start code.
+pub(crate) fn rbsp(nal: &[u8], header: usize) -> h264_reader::rbsp::BitReader<h264_reader::rbsp::ByteReader<&[u8]>> {
+	h264_reader::rbsp::BitReader::new(rbsp_bytes_reader(nal, header))
+}
+
+/// The RBSP bytes of an H.264 or H.265 parameter set or SEI NAL unit, as [`rbsp`] reads them.
+/// `None` when the payload holds a byte sequence emulation prevention forbids.
+pub(crate) fn rbsp_bytes(nal: &[u8], header: usize) -> Option<Vec<u8>> {
+	use std::io::Read;
+
+	let mut out = Vec::with_capacity(nal.len());
+	rbsp_bytes_reader(nal, header).read_to_end(&mut out).ok()?;
+	Some(out)
+}
+
+fn rbsp_bytes_reader(nal: &[u8], header: usize) -> h264_reader::rbsp::ByteReader<&[u8]> {
+	let payload = nal.get(header..).unwrap_or_default();
+	let end = payload.iter().rposition(|&b| b != 0).map_or(0, |last| last + 1);
+	h264_reader::rbsp::ByteReader::without_skip(&payload[..end])
+}
+
 /// The four-byte Annex B start code preceding a NAL unit.
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
 
@@ -189,21 +215,22 @@ impl InBandCodec {
 	/// Insert parameter set `nal` (header included) under the id it defines, replacing any
 	/// earlier set with that id.
 	pub(crate) fn insert_parameter_set(self, sets: &mut ParameterSets, nal: &Bytes) -> Result<()> {
-		use h264_parser::{bitreader::BitReader, eg::read_ue};
+		use h264_reader::rbsp::BitRead;
 
 		let nal_type = self.nal_type(nal);
 		let header = match self {
 			Self::H264 => 1,
 			Self::H265 => 2,
 		};
-		let rbsp = h264_parser::nal::ebsp_to_rbsp(nal.get(header..).unwrap_or_default());
-		let r = &mut BitReader::new(&rbsp);
+		let r = &mut rbsp(nal, header);
 		let id = match (self, nal_type) {
 			// seq_parameter_set_id follows profile_idc, the constraint flags, and level_idc.
-			(Self::H264, 7) => r.skip_bits(24).and_then(|()| read_ue(r)),
+			(Self::H264, 7) => r
+				.skip(24, "profile_idc..level_idc")
+				.and_then(|()| r.read_ue("seq_parameter_set_id")),
 			// pic_parameter_set_id opens a PPS in both codecs.
-			(Self::H264, 8) | (Self::H265, 34) => read_ue(r),
-			(Self::H265, 32) => r.read_bits(4), // vps_video_parameter_set_id
+			(Self::H264, 8) | (Self::H265, 34) => r.read_ue("pic_parameter_set_id"),
+			(Self::H265, 32) => r.read::<4, u32>("vps_video_parameter_set_id"),
 			(Self::H265, 33) => crate::codec::h265::sps_id(r),
 			_ => return Err(Error::ParameterSetId(nal_type)),
 		};

@@ -7,7 +7,7 @@
 //! `bit_depth_chroma_minus8`. So when scuffle_h265 refuses a value (`InvalidData`), [`Sps::parse`]
 //! reads the head itself. A truncated SPS, or one whose head is invalid, is still an error.
 
-use h264_parser::{bitreader::BitReader, eg::read_ue};
+use h264_reader::rbsp::{BitRead, BitReaderError};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
 
 use super::{Error, Result};
@@ -118,56 +118,60 @@ impl SpsHead {
 	/// Read the head of an SPS NAL unit (header included). `None` when the NAL is not an SPS, ends
 	/// before `bit_depth_chroma_minus8`, or breaks a constraint on the head.
 	fn parse(nal: &[u8]) -> Option<Self> {
-		let [header, header2, payload @ ..] = nal else {
+		let [header, header2, ..] = nal else {
 			return None;
 		};
 		// forbidden_zero_bit, nal_unit_type, and TemporalId 0 for an SPS (7.4.2.2).
 		if header & 0x80 != 0 || super::split::nal_unit_type(*header) != NALUnitType::SpsNut || header2 & 0x07 != 1 {
 			return None;
 		}
-		let rbsp = h264_parser::nal::ebsp_to_rbsp(payload);
-		Self::read(&mut BitReader::new(&rbsp)).ok()?
+		Self::read(&mut crate::codec::annexb::rbsp(nal, 2)).ok()?
 	}
 
 	/// Read the head from the SPS RBSP: `Ok(None)` for an out-of-range value.
-	fn read(r: &mut BitReader<'_>) -> h264_parser::Result<Option<Self>> {
-		r.skip_bits(4)?; // sps_video_parameter_set_id
-		let max_sub_layers_minus1 = r.read_bits(3)? as u8;
-		let temporal_id_nesting_flag = r.read_flag()?;
+	fn read(r: &mut impl BitRead) -> std::result::Result<Option<Self>, BitReaderError> {
+		r.skip(4, "sps_video_parameter_set_id")?;
+		let max_sub_layers_minus1 = r.read::<3, u8>("sps_max_sub_layers_minus1")?;
+		let temporal_id_nesting_flag = r.read_bit("sps_temporal_id_nesting_flag")?;
 		// 7.4.3.2.1: at most 7 sub-layers, and a single sub-layer is nested.
 		if max_sub_layers_minus1 > 6 || (max_sub_layers_minus1 == 0 && !temporal_id_nesting_flag) {
 			return Ok(None);
 		}
 
 		// profile_tier_level(1, sps_max_sub_layers_minus1), 7.3.3
-		let profile_space = r.read_bits(2)? as u8;
-		let tier_flag = r.read_flag()?;
-		let profile_idc = r.read_bits(5)? as u8;
-		let profile_compatibility_flags = r.read_bits(32)?.to_be_bytes();
+		let profile_space = r.read::<2, u8>("general_profile_space")?;
+		let tier_flag = r.read_bit("general_tier_flag")?;
+		let profile_idc = r.read::<5, u8>("general_profile_idc")?;
+		let profile_compatibility_flags = r.read::<32, u32>("general_profile_compatibility_flags")?.to_be_bytes();
 		// progressive_source, interlaced_source, non_packed_constraint and frame_only_constraint.
-		let constraint_flags = [(r.read_bits(4)? as u8) << 4, 0, 0, 0, 0, 0];
-		r.skip_bits(44)?; // the other 43 constraint and reserved bits, and general_inbld_flag
-		let level_idc = r.read_u8()?;
+		let constraint_flags = [r.read::<4, u8>("general_constraint_flags")? << 4, 0, 0, 0, 0, 0];
+		r.skip(44, "general_reserved_zero_43bits")?; // and general_inbld_flag
+		let level_idc = r.read::<8, u8>("general_level_idc")?;
 		skip_sub_layers(r, max_sub_layers_minus1)?;
 
-		let sps_seq_parameter_set_id = read_ue(r)?;
-		let chroma_format_idc = read_ue(r)?;
+		let sps_seq_parameter_set_id = r.read_ue("sps_seq_parameter_set_id")?;
+		let chroma_format_idc = r.read_ue("chroma_format_idc")?;
 		if sps_seq_parameter_set_id > 15 || chroma_format_idc > 3 {
 			return Ok(None);
 		}
 		if chroma_format_idc == 3 {
-			r.skip_bits(1)?; // separate_colour_plane_flag
+			r.skip(1, "separate_colour_plane_flag")?;
 		}
-		let pic_width = read_ue(r)?;
-		let pic_height = read_ue(r)?;
+		let pic_width = r.read_ue("pic_width_in_luma_samples")?;
+		let pic_height = r.read_ue("pic_height_in_luma_samples")?;
 		// conformance_window_flag, then the left, right, top and bottom offsets.
-		let [left, right, top, bottom] = if r.read_flag()? {
-			[read_ue(r)?, read_ue(r)?, read_ue(r)?, read_ue(r)?]
+		let [left, right, top, bottom] = if r.read_bit("conformance_window_flag")? {
+			[
+				r.read_ue("conf_win_left_offset")?,
+				r.read_ue("conf_win_right_offset")?,
+				r.read_ue("conf_win_top_offset")?,
+				r.read_ue("conf_win_bottom_offset")?,
+			]
 		} else {
 			[0; 4]
 		};
-		let bit_depth_luma_minus8 = read_ue(r)?;
-		let bit_depth_chroma_minus8 = read_ue(r)?;
+		let bit_depth_luma_minus8 = r.read_ue("bit_depth_luma_minus8")?;
+		let bit_depth_chroma_minus8 = r.read_ue("bit_depth_chroma_minus8")?;
 		if bit_depth_luma_minus8 > 8 || bit_depth_chroma_minus8 > 8 {
 			return Ok(None);
 		}
@@ -200,34 +204,41 @@ impl SpsHead {
 }
 
 /// Read `sps_seq_parameter_set_id` from an SPS RBSP (the payload after the NAL header).
-pub(crate) fn id(r: &mut BitReader<'_>) -> h264_parser::Result<u32> {
-	r.skip_bits(4)?; // sps_video_parameter_set_id
-	let max_sub_layers_minus1 = r.read_bits(3)? as u8;
-	r.skip_bits(1)?; // sps_temporal_id_nesting_flag
-	r.skip_bits(96)?; // the general profile's 88 bits and general_level_idc
+pub(crate) fn id(r: &mut impl BitRead) -> std::result::Result<u32, BitReaderError> {
+	r.skip(4, "sps_video_parameter_set_id")?;
+	let max_sub_layers_minus1 = r.read::<3, u8>("sps_max_sub_layers_minus1")?;
+	r.skip(1, "sps_temporal_id_nesting_flag")?;
+	r.skip(96, "general_profile_and_level")?; // the general profile's 88 bits and general_level_idc
 	skip_sub_layers(r, max_sub_layers_minus1)?;
-	read_ue(r)
+	r.read_ue("sps_seq_parameter_set_id")
 }
 
 /// Skip the sub-layer half of profile_tier_level (7.3.3), which follows `general_level_idc`.
-fn skip_sub_layers(r: &mut BitReader<'_>, max_sub_layers_minus1: u8) -> h264_parser::Result<()> {
+fn skip_sub_layers(r: &mut impl BitRead, max_sub_layers_minus1: u8) -> std::result::Result<(), BitReaderError> {
 	// 7.4.3.2.1: at most 7 sub-layers.
 	if max_sub_layers_minus1 > 6 {
-		return Err(h264_parser::Error::MalformedSps(
-			"sps_max_sub_layers_minus1 out of range".into(),
+		return Err(BitReaderError::ReaderError(
+			"sps_max_sub_layers_minus1",
+			std::io::ErrorKind::InvalidData.into(),
 		));
 	}
 	let sub_layers = usize::from(max_sub_layers_minus1);
 	let mut present = [(false, false); 6];
 	for flags in &mut present[..sub_layers] {
-		*flags = (r.read_flag()?, r.read_flag()?);
+		*flags = (
+			r.read_bit("sub_layer_profile_present_flag")?,
+			r.read_bit("sub_layer_level_present_flag")?,
+		);
 	}
 	if sub_layers > 0 {
-		r.skip_bits(2 * (8 - u32::from(max_sub_layers_minus1)))?; // reserved_zero_2bits
+		r.skip(2 * (8 - u32::from(max_sub_layers_minus1)), "reserved_zero_2bits")?;
 	}
 	for &(profile, level) in &present[..sub_layers] {
 		// A sub-layer profile is the same 88 bits as the general one; sub_layer_level_idc is 8.
-		r.skip_bits(88 * u32::from(profile) + 8 * u32::from(level))?;
+		r.skip(
+			88 * u32::from(profile) + 8 * u32::from(level),
+			"sub_layer_profile_and_level",
+		)?;
 	}
 	Ok(())
 }
@@ -270,14 +281,15 @@ mod tests {
 	fn id_matches_the_full_parse() {
 		for nal in [fixtures::SPS, fixtures::SPS_PYRAMID, SPS_SUB_LAYERS] {
 			let full = SpsNALUnit::parse(&mut &nal[..]).unwrap().rbsp;
-			let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[2..]);
 			assert_eq!(
-				id(&mut BitReader::new(&rbsp)).unwrap(),
+				id(&mut crate::codec::annexb::rbsp(nal, 2)).unwrap(),
 				full.sps_seq_parameter_set_id as u32
 			);
 		}
-		let rbsp = h264_parser::nal::ebsp_to_rbsp(&SPS_SUB_LAYER_PROFILE_AND_LEVEL[2..]);
-		assert_eq!(id(&mut BitReader::new(&rbsp)).unwrap(), 0);
+		assert_eq!(
+			id(&mut crate::codec::annexb::rbsp(SPS_SUB_LAYER_PROFILE_AND_LEVEL, 2)).unwrap(),
+			0
+		);
 	}
 
 	/// scuffle_h265 0.2.2 reads that `sub_layer_level_idc` twice and refuses the SPS; the head

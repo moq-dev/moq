@@ -14,6 +14,7 @@ use h264_reader::nal::slice::{
 use h264_reader::nal::sps::PicOrderCntType;
 use h264_reader::nal::{Nal, RefNal, UnitType};
 use h264_reader::nal::{pps::PicParameterSet, sps::SeqParameterSet};
+use h264_reader::rbsp::{BitRead, BitReader, BitReaderError};
 use moq_net::Timestamp;
 
 use super::Unit;
@@ -211,7 +212,7 @@ impl Clock {
 							.insert(sps.sps_seq_parameter_set_id, Arc::new(sps));
 					}
 					34 => {
-						let rbsp = h264_parser::nal::ebsp_to_rbsp(bytes.get(2..).ok_or("short HEVC PPS")?);
+						let rbsp = crate::codec::annexb::rbsp_bytes(&bytes, 2).ok_or("invalid HEVC PPS")?;
 						let pps = HevcPps::parse(&rbsp)?;
 						Arc::make_mut(&mut ctx).pictures.insert(pps.id, pps);
 					}
@@ -220,7 +221,7 @@ impl Clock {
 						if bytes[0] & 1 != 0 || second & 0xf8 != 0 {
 							return Err("multilayer HEVC timing is unsupported".to_owned());
 						}
-						let rbsp = h264_parser::nal::ebsp_to_rbsp(bytes.get(2..).ok_or("short HEVC slice")?);
+						let rbsp = crate::codec::annexb::rbsp_bytes(&bytes, 2).ok_or("invalid HEVC slice")?;
 						let (lsb, width, rate) = hevc_prefix(&rbsp, kind, &ctx.pictures, &ctx.sets)?;
 						let idr = matches!(kind, 19 | 20);
 						let reset = idr || matches!(kind, 16..=18) || (kind == 21 && self.hevc.is_none());
@@ -271,15 +272,16 @@ struct HevcPps {
 impl HevcPps {
 	fn parse(rbsp: &[u8]) -> Result<Self, String> {
 		let parsed = (|| {
-			let mut r = h264_parser::bitreader::BitReader::new(rbsp);
-			let id = h264_parser::eg::read_ue(&mut r)?;
-			let sps = h264_parser::eg::read_ue(&mut r)?;
-			r.skip_bits(1)?; // dependent_slice_segments_enabled_flag, absent on the first slice
-			let output = r.read_flag()?;
-			let extra = r.read_bits(3)? as u8;
-			h264_parser::Result::Ok(Self { id, sps, output, extra })
+			let mut r = BitReader::new(rbsp);
+			let id = r.read_ue("pps_pic_parameter_set_id")?;
+			let sps = r.read_ue("pps_seq_parameter_set_id")?;
+			// Absent on the first slice.
+			r.skip(1, "dependent_slice_segments_enabled_flag")?;
+			let output = r.read_bit("output_flag_present_flag")?;
+			let extra = r.read::<3, u8>("num_extra_slice_header_bits")?;
+			Ok::<_, BitReaderError>(Self { id, sps, output, extra })
 		})();
-		let pps = parsed.map_err(|err| err.to_string())?;
+		let pps = parsed.map_err(|err| format!("{err:?}"))?;
 		if pps.id > 63 || pps.sps > 15 {
 			return Err("invalid HEVC parameter-set id".to_owned());
 		}
@@ -293,34 +295,35 @@ fn hevc_prefix(
 	pictures: &BTreeMap<u32, HevcPps>,
 	sets: &BTreeMap<u64, Arc<scuffle_h265::SpsRbsp>>,
 ) -> Result<(i64, u32, Option<Rate>), String> {
-	let mut r = h264_parser::bitreader::BitReader::new(rbsp);
-	if !r.read_flag().map_err(|err| err.to_string())? {
+	let mut r = BitReader::new(rbsp);
+	let err = |err: BitReaderError| format!("{err:?}");
+	if !r.read_bit("first_slice_segment_in_pic_flag").map_err(err)? {
 		return Err("missing first independent HEVC slice".to_owned());
 	}
 	if (16..=23).contains(&kind) {
-		r.skip_bits(1).map_err(|err| err.to_string())?;
+		r.skip(1, "no_output_of_prior_pics_flag").map_err(err)?;
 	}
-	let id = h264_parser::eg::read_ue(&mut r).map_err(|err| err.to_string())?;
+	let id = r.read_ue("slice_pic_parameter_set_id").map_err(err)?;
 	let pps = pictures.get(&id).ok_or("missing HEVC PPS")?;
 	let sps = sets.get(&u64::from(pps.sps)).ok_or("missing HEVC SPS")?;
 	// The first independent slice has no segment address or inherited header.
 	// Stop as soon as its POC is available, before reference lists and slice data.
-	r.skip_bits(pps.extra.into()).map_err(|err| err.to_string())?;
-	let slice_type = h264_parser::eg::read_ue(&mut r).map_err(|err| err.to_string())?;
+	r.skip(pps.extra.into(), "slice_reserved_flag").map_err(err)?;
+	let slice_type = r.read_ue("slice_type").map_err(err)?;
 	if slice_type > 2 {
 		return Err("invalid HEVC slice type".to_owned());
 	}
 	if pps.output {
-		r.skip_bits(1).map_err(|err| err.to_string())?;
+		r.skip(1, "pic_output_flag").map_err(err)?;
 	}
 	if sps.separate_colour_plane_flag {
-		r.skip_bits(2).map_err(|err| err.to_string())?;
+		r.skip(2, "colour_plane_id").map_err(err)?;
 	}
 	let width = u32::from(sps.log2_max_pic_order_cnt_lsb_minus4) + 4;
 	let lsb = if matches!(kind, 19 | 20) {
 		0
 	} else {
-		i64::from(r.read_bits(width).map_err(|err| err.to_string())?)
+		i64::from(r.read_var::<u32>(width, "slice_pic_order_cnt_lsb").map_err(err)?)
 	};
 	let info = sps.vui_parameters.as_ref().and_then(|vui| vui.vui_timing_info.as_ref());
 	let rate = info

@@ -100,6 +100,8 @@ axum = { version = "0.8", default-features = false, features = [
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.23"
 bitflags = "2"
+# MSB-first bit reading for codec configs; the version h264-reader builds on.
+bitstream-io = "4.10"
 block2 = "0.6.2"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
