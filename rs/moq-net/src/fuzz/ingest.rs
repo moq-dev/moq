@@ -101,7 +101,11 @@ pub fn ingest(data: &[u8]) -> bool {
 		_ => {
 			let version = super::IETF_VERSIONS[(*selector as usize / 2) % super::IETF_VERSIONS.len()];
 			// A moq-transport track was always published over moq-transport.
-			(Session::Ietf { version }, track_info(timed, compress, Some(version)), rest)
+			(
+				Session::Ietf { version },
+				track_info(timed, compress, Some(version)),
+				rest,
+			)
 		}
 	};
 
@@ -130,9 +134,16 @@ fn check(session: Session, info: &track::Info, body: &[u8], ingested: &Ingested)
 			info.timescale.is_some(),
 			"frame {index} does not match its track's timeline"
 		);
-		assert_eq!(frame.inflated.is_some(), info.compress, "frame {index} lost its inflated size");
+		assert_eq!(
+			frame.inflated.is_some(),
+			info.compress,
+			"frame {index} lost its inflated size"
+		);
 		let id = frame.fields.as_ref().map_or(index as u64, |(id, _)| *id);
-		assert!(ids.is_none_or(|prior| id > prior), "Object ID {id} does not follow {ids:?}");
+		assert!(
+			ids.is_none_or(|prior| id > prior),
+			"Object ID {id} does not follow {ids:?}"
+		);
 		ids = Some(id);
 		payload += frame.payload.len();
 	}
@@ -217,7 +228,11 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 		Session::Ietf { version } => {
 			let (header, used) = ietf::GroupHeader::decode_slice(body, version).ok()?;
 			let mut reader = reader(Bytes::copy_from_slice(&body[used..]), chunk, version);
-			let producer = track.create_group(group::Info { sequence: header.group_id }).ok()?;
+			let producer = track
+				.create_group(group::Info {
+					sequence: header.group_id,
+				})
+				.ok()?;
 			producer
 				.set_wire(group::Wire {
 					sparse: false,
@@ -413,7 +428,9 @@ pub(super) fn limit_seeds() -> Vec<super::Seed> {
 	// The caps on moq-lite-07: a frame's size, and a record's property block.
 	let varint = |value: u64| {
 		let mut out = Vec::new();
-		coding::Encoder::new(&mut out, lite::Version::Lite07.into()).varint(value).unwrap();
+		coding::Encoder::new(&mut out, lite::Version::Lite07.into())
+			.varint(value)
+			.unwrap();
 		out
 	};
 	for size in super::limits(&[group::MAX_CACHE_BYTES]) {

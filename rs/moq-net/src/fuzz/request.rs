@@ -56,12 +56,24 @@ fn framing(consumed: &[u8], framed: &ietf::Framed, version: ietf::Version) {
 	let ietf::Framed(id, ietf::Body(body)) = framed;
 	let form: Form = version.into();
 	let mut decoder = Decoder::new(consumed, form);
-	assert_eq!(decoder.varint().ok(), Some(*id), "message type {id:#x} was not read from the stream");
+	assert_eq!(
+		decoder.varint().ok(),
+		Some(*id),
+		"message type {id:#x} was not read from the stream"
+	);
 	let id_len = decoder.position();
 	let length = u16::from_be_bytes([consumed[id_len], consumed[id_len + 1]]) as usize;
 	assert_eq!(length, body.len(), "message {id:#x} body is not its declared length");
-	assert_eq!(consumed.len(), id_len + 2 + length, "message {id:#x} read past its body");
-	assert_eq!(&consumed[id_len + 2..], &body[..], "message {id:#x} body is not the stream's bytes");
+	assert_eq!(
+		consumed.len(),
+		id_len + 2 + length,
+		"message {id:#x} read past its body"
+	);
+	assert_eq!(
+		&consumed[id_len + 2..],
+		&body[..],
+		"message {id:#x} body is not the stream's bytes"
+	);
 
 	// Not a GOAWAY, or the stream would have migrated instead.
 	assert_ne!(*id, ietf::GoAway::ID, "a GOAWAY was read as a request message");

@@ -65,7 +65,7 @@ Beyond "does not panic":
 - A request-stream message is its type, a two-byte length, and exactly that body; at
   most one GOAWAY migrates it. Its body decodes as each message its type names exactly
   when the control stream's length-prefixed reading accepts it, as the same message, and
-  the REQUEST_UPDATE readers stop where the framing did.
+  the REQUEST\_UPDATE readers stop where the framing did.
 
 `seeds/` also holds length prefixes at and one past each cap (a moq-lite message's size,
 a moq-transport length, a frame, a property or extension block), so every rejection path

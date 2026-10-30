@@ -1740,7 +1740,12 @@ mod tests {
 	#[test]
 	fn stream_seeds_decode() {
 		for seed in ingest::seeds().into_iter().chain(request::seeds()) {
-			assert!(target(seed.target)(&seed.data), "{} seed {:x?} does not decode", seed.target, seed.data);
+			assert!(
+				target(seed.target)(&seed.data),
+				"{} seed {:x?} does not decode",
+				seed.target,
+				seed.data
+			);
 		}
 		for seed in ingest::limit_seeds() {
 			assert!(!ingest(&seed.data), "ingest seed {:x?} decodes past its cap", seed.data);
