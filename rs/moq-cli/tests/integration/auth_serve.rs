@@ -35,6 +35,14 @@ async fn stops_on(signal: libc::c_int) {
 	tokio::time::timeout(TIMEOUT, async {
 		while let Some(line) = lines.next_line().await.expect("read stderr") {
 			if line.contains("auth server listening") {
+				// The line names the port the OS assigned, not the requested port 0.
+				let port = line
+					.split("127.0.0.1:")
+					.nth(1)
+					.and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+					.and_then(|port| port.parse::<u16>().ok())
+					.unwrap_or_else(|| panic!("no bound address in {line:?}"));
+				assert_ne!(port, 0, "logged the requested port instead of the bound one: {line:?}");
 				return;
 			}
 		}
