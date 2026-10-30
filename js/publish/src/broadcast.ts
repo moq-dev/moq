@@ -5,9 +5,8 @@ import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
-import { errors } from "./internal";
 import { Order } from "./order";
-import { type Identity, identity, type Listing, Publication } from "./publication";
+import { type Identity, identity, type Listing, Publication, type Slot } from "./publication";
 import { type Kind, Rendition } from "./rendition";
 
 // The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
@@ -114,10 +113,13 @@ export class Broadcast {
 	// key add/remove; the Rendition values compare by identity, which is stable.
 	readonly #renditions = new Signal<Record<string, Rendition<unknown>>>({});
 
-	// The writable track producer signals backing each Rendition's read-only `track`, keyed by name.
+	// The writable signals backing each Rendition's read-only `track` and `slot`, keyed by name.
 	// A static network track is exposed here while it is open, and with `onDemand` only while at
-	// least one subscriber uses it.
-	readonly #tracks = new Map<string, Signal<Moq.Track.Producer | undefined>>();
+	// least one subscriber uses it. The slot is the current publication's, while there is one.
+	readonly #handles = new Map<
+		string,
+		{ track: Signal<Moq.Track.Producer | undefined>; slot: Signal<Slot | undefined> }
+	>();
 
 	// The renditions of the current network broadcast, undefined while there is none.
 	readonly #publication = new Signal<Publication | undefined>(undefined);
@@ -178,21 +180,27 @@ export class Broadcast {
 		}
 		this.#publication.peek()?.check(name, kind);
 
-		const track = new Signal<Moq.Track.Producer | undefined>(undefined);
-		this.#tracks.set(name, track);
+		const handle = {
+			track: new Signal<Moq.Track.Producer | undefined>(undefined),
+			slot: new Signal<Slot | undefined>(undefined),
+		};
+		this.#handles.set(name, handle);
 
-		const rendition = new Rendition<C>(name, kind, track, () => this.#unregister(name));
+		// The slot is the one its producer fills, so it holds this rendition's config.
+		const slot = handle.slot as Getter<Slot<C> | undefined>;
+		const rendition = new Rendition<C>(name, kind, handle.track, slot, () => this.#unregister(name));
 		this.#renditions.update((renditions) => ({ ...renditions, [name]: rendition as Rendition<unknown> }));
 
 		return rendition;
 	}
 
 	#unregister(name: string): void {
-		const track = this.#tracks.get(name);
-		if (track) {
+		const handle = this.#handles.get(name);
+		if (handle) {
 			// The network track stays with the broadcast, so registering the name again continues it.
-			track.set(undefined);
-			this.#tracks.delete(name);
+			handle.track.set(undefined);
+			handle.slot.set(undefined);
+			this.#handles.delete(name);
 		}
 
 		this.#renditions.update((renditions) => {
@@ -380,11 +388,15 @@ export class Broadcast {
 			inner.get(publication.renames);
 
 			for (const rendition of Object.values(renditions)) {
-				const signal = this.#tracks.get(rendition.name);
-				if (!signal) continue;
+				const handle = this.#handles.get(rendition.name);
+				if (!handle) continue;
 
 				const entry = publication.entry(rendition);
-				const cause = entry.owner && errors.get(entry.owner)?.peek();
+				inner.set(handle.slot, entry.slot);
+				// A replacement registration is a new producer, so the last one's failure no longer holds.
+				if (entry.owner && entry.owner !== rendition) entry.slot.error.set(undefined);
+				const cause = inner.get(entry.slot.error);
+				// Including an idle track, which no producer holds to abort.
 				if (entry.track && cause) entry.track.abort(cause);
 				if (entry.track && entry.track.name !== entry.name) {
 					// The catalog moved this rendition to a new name for new media. End the old track
@@ -392,10 +404,10 @@ export class Broadcast {
 					entry.track.finish();
 					entry.track.close();
 					entry.track = undefined;
-				} else if (entry.track && entry.owner !== rendition && entry.track.closed.peek() !== undefined) {
-					// An error leaves this rendition down. Only a replacement registration may recover,
-					// with a fresh track name so its group sequence can start over.
-					publication.rename(entry);
+				} else if (entry.track && entry.track.closed.peek() !== undefined) {
+					// A failure leaves this rendition down until it clears. It then recovers under a fresh
+					// track name, so its group sequence can start over.
+					if (!cause) publication.rename(entry);
 					continue;
 				}
 				if (!entry.track) {
@@ -407,17 +419,15 @@ export class Broadcast {
 				}
 				entry.owner = rendition;
 				const served = entry.track;
-				const error = errors.get(rendition);
-				if (error) {
-					inner.run((failure) => {
-						const cause = failure.get(error);
-						if (cause) served.abort(cause);
-					});
-				}
 				inner.run((gate) => {
-					if (gate.get(served.closed) !== undefined) return;
+					const closed = gate.get(served.closed);
+					if (closed !== undefined) {
+						// A producer aborting its track directly fails the rendition the same way.
+						if (closed && !entry.slot.error.peek()) entry.slot.error.set(closed);
+						return;
+					}
 					if (gate.get(this.in.onDemand) && gate.get(served.demand().wanted) === undefined) return;
-					gate.set(signal, served);
+					gate.set(handle.track, served);
 				});
 			}
 		});

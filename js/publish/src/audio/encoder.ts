@@ -8,14 +8,14 @@ import {
 	type Getter,
 	getter,
 	type Inputs,
-	Once,
 	type Readonlys,
 	readonlys,
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { errors, watched } from "../internal";
+import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
+import { Slot } from "../publication";
 import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
 import { Resampler } from "./resampler";
@@ -227,18 +227,18 @@ export class Encoder {
 	 */
 	readonly settled: Computed<boolean>;
 
-	// Each registration keeps its terminal failure even after the public error clears.
-	#failure = new Signal(new Once<Error>());
 	// The capture inputs #runCaptureRecovery last saw, carried across a gap in the source or format.
 	#seen?: { capture?: Capture; source?: unknown; format?: Format };
 	#signals = new Effect();
 	#estimator = new Estimator();
 	// The estimator's delay, republished whenever it rises.
 	#estimate = new Signal<Estimator["estimate"]>({});
-	// What this rendition advertised on each broadcast, keyed by the broadcast or, with none, the
-	// encoder. A broadcast keeps a rendition's track when it re-registers, so returning to one
-	// continues its bitrate maximum and last config, while another broadcast starts its own.
-	#advertised = new WeakMap<object, { bitrate: number; last?: Catalog.AudioConfig }>();
+	// What this rendition keeps for the current network broadcast's track: its bitrate maximum, last
+	// config, and failure. A network broadcast keeps a rendition's track when it re-registers, so
+	// returning to one continues them, while a new one starts its own.
+	#slot = new Signal<Slot<Catalog.AudioConfig> | undefined>(undefined);
+	// The slot while no network broadcast is serving the rendition.
+	#local = new Slot<Catalog.AudioConfig>();
 	// Whether the rendition was disabled since a config last resolved, so it keeps advertising its last
 	// config as disabled until the re-enabled capture resolves a new one. A capture that never reopens
 	// leaves it disabled, which is accurate: no frames are coming.
@@ -292,6 +292,7 @@ export class Encoder {
 				}
 			});
 		}
+		this.#signals.run(this.#runError.bind(this));
 		this.#signals.run(this.#runSettingsRecovery.bind(this));
 		this.#signals.run(this.#runCaptureRecovery.bind(this));
 		this.#signals.run(this.#runRegister.bind(this));
@@ -370,24 +371,34 @@ export class Encoder {
 		this.#rearm();
 	}
 
-	// Clear a latched failure so a fresh registration retries.
+	// The current slot, read through `effect`.
+	#current(effect: Effect): Slot<Catalog.AudioConfig> {
+		return effect.get(this.#slot) ?? this.#local;
+	}
+
+	// The public error is the current slot's, so a new network broadcast starts without one.
+	#runError(effect: Effect): void {
+		effect.set(this.#out.error, effect.get(this.#current(effect).error));
+	}
+
+	// Clear a latched failure, so the broadcast serves the rendition again under a fresh track name.
 	#rearm(): void {
-		if (!this.#out.error.peek()) return;
-		this.#out.error.set(undefined);
+		const failure = (this.#slot.peek() ?? this.#local).error;
+		if (!failure.peek()) return;
+		failure.set(undefined);
 		this.#floor = undefined;
-		this.#failure.set(new Once<Error>());
 	}
 
 	// Register the rendition on the broadcast, publish its config, and encode while it hands over a
 	// track. Re-registers cleanly when the broadcast swaps.
 	#runRegister(effect: Effect): void {
-		const failure = effect.get(this.#failure);
 		const broadcast = effect.get(this.in.broadcast);
 		if (!broadcast) return;
 
 		const rendition = broadcast.audio(this.name);
-		errors.set(rendition, failure);
 		effect.cleanup(() => rendition.close());
+		effect.proxy(this.#slot, rendition.slot);
+		effect.cleanup(() => this.#slot.set(undefined));
 
 		// Publish the resolved config; undefined (no capture) drops it from the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
@@ -429,11 +440,9 @@ export class Encoder {
 			const capture = effect.get(this.in.capture);
 			const format = capture ? effect.get(capture.out.format) : undefined;
 			const track = effect.get(rendition.track);
+			// A dead encoder can't serve anyone: the broadcast aborts its track with the real error, so
+			// the current subscriber and every later one get it rather than a track that stays silent.
 			const fatal = effect.get(this.#out.error);
-
-			// A dead encoder can't serve anyone, so the current subscriber and every later one get
-			// the real error rather than a track that stays silent.
-			if (fatal) track?.abort(fatal);
 
 			effect.set(this.#out.active, enabled && !!format && !!track && !fatal, false);
 		});
@@ -563,16 +572,11 @@ export class Encoder {
 	#runCatalog(effect: Effect): void {
 		const estimate = effect.get(this.#estimate);
 		const enabled = effect.get(this.in.enabled) && !effect.get(this.#out.error);
-		const key = effect.get(this.in.broadcast) ?? this;
-		let track = this.#advertised.get(key);
-		if (!track) {
-			track = { bitrate: 0 };
-			this.#advertised.set(key, track);
-		}
+		const slot = this.#current(effect);
 		if (!enabled) this.#paused = true;
 		const config = enabled ? effect.get(this.#config)?.catalog : undefined;
 		if (!config) {
-			const last = this.#paused ? track.last : undefined;
+			const last = this.#paused ? slot.last : undefined;
 			effect.set(this.#out.catalog, last && { ...last, ...estimate, enabled: false });
 			return;
 		}
@@ -580,10 +584,10 @@ export class Encoder {
 
 		// The catalog bitrate is the most this track has been configured for, so lowering the knob
 		// retunes the encoder without lowering what the catalog advertises.
-		track.bitrate = Math.max(track.bitrate, config.bitrate ?? 0);
-		const bitrate = track.bitrate > 0 ? Catalog.u53(track.bitrate) : undefined;
-		track.last = { ...config, bitrate, ...estimate };
-		effect.set(this.#out.catalog, track.last);
+		slot.bitrate = Math.max(slot.bitrate, config.bitrate ?? 0);
+		const bitrate = slot.bitrate > 0 ? Catalog.u53(slot.bitrate) : undefined;
+		slot.last = { ...config, bitrate, ...estimate };
+		effect.set(this.#out.catalog, slot.last);
 	}
 
 	// Collect the encode-only Opus knobs that are set, reading the codec through the effect so the
@@ -760,10 +764,10 @@ export class Encoder {
 	}
 
 	#abort(error: unknown): void {
-		if (this.#out.error.peek()) return;
+		const failure = (this.#slot.peek() ?? this.#local).error;
+		if (failure.peek()) return;
 		const cause = error instanceof Error ? error : new Error(String(error));
-		this.#failure.peek().set(cause);
-		this.#out.error.set(cause);
+		failure.set(cause);
 		this.#live?.track.abort(cause);
 	}
 

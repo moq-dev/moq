@@ -3,6 +3,29 @@ import type * as Moq from "@moq/net";
 import { type Getter, Signal } from "@moq/signals";
 import type { Kind, Rendition } from "./rendition";
 
+/**
+ * @internal What a rendition's producer keeps for one catalog ID in one network broadcast. A new
+ * network broadcast starts a new slot, so what the producer advertised, and how it failed, start over
+ * with it. A class, so a signal holding one changes with each new slot.
+ */
+export class Slot<Config = unknown> {
+	/** The coded-size ceiling of the largest accepted probe (video). */
+	ceiling?: { width: number; height: number };
+
+	/** The largest bitrate and frame rate advertised, since the catalog may only raise them. */
+	bitrate = 0;
+	framerate = 0;
+
+	/** The last config published while enabled, which a disabled rendition keeps advertising. */
+	last?: Config;
+
+	/**
+	 * The producer's terminal failure. It ends the track and keeps the rendition down until it clears,
+	 * when the rendition recovers under a fresh track name.
+	 */
+	readonly error = new Signal<Error | undefined>(undefined);
+}
+
 /** @internal One catalog ID's rendition in a network broadcast. */
 export type Entry = {
 	readonly id: string;
@@ -14,6 +37,8 @@ export type Entry = {
 	track?: Moq.Track.Producer;
 	// The registration that last served `track`.
 	owner?: Rendition<unknown>;
+	// What the registration's producer keeps for this ID.
+	readonly slot: Slot;
 };
 
 /** @internal What the catalog lists for a rendition: its kind and its config's media identity. */
@@ -21,7 +46,7 @@ export type Listing = { kind: Kind; identity: Identity };
 
 /**
  * @internal The renditions of one network broadcast, keyed by catalog ID. A new network broadcast
- * starts a new publication, so every name, kind, and track starts over with it.
+ * starts a new publication, so every name, kind, track, and slot starts over with it.
  */
 export class Publication {
 	// Each catalog ID that holds or held a rendition here.
@@ -48,7 +73,7 @@ export class Publication {
 	constructor(listed: Map<string, Listing>, reserved: () => Iterable<string>) {
 		this.#reserved = reserved;
 		for (const [id, { kind, identity }] of listed) {
-			this.#entries.set(id, { id, kind, name: id });
+			this.#entries.set(id, { id, kind, name: id, slot: new Slot() });
 			this.#names.set(id, { id, identity });
 		}
 	}
@@ -71,7 +96,7 @@ export class Publication {
 	entry(rendition: Rendition<unknown>): Entry {
 		let entry = this.#entries.get(rendition.name);
 		if (!entry) {
-			entry = { id: rendition.name, kind: rendition.kind, name: rendition.name };
+			entry = { id: rendition.name, kind: rendition.kind, name: rendition.name, slot: new Slot() };
 			this.#entries.set(rendition.name, entry);
 			this.#names.set(rendition.name, { id: rendition.name });
 		}

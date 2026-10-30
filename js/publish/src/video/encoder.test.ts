@@ -7,6 +7,7 @@ import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
 import { Estimator, Order } from "../order";
+import { Slot } from "../publication";
 import { Encoder } from "./encoder";
 
 // How long a fake hardware probe takes on the installed clock.
@@ -114,6 +115,7 @@ test("encoding tracks encoder config in its child effect", async () => {
 
 	const track = new Moq.Track.Producer("video/hd").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
@@ -155,6 +157,7 @@ test("an on-demand gap marks a discontinuity and leaves the broadcast-owned trac
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
 	const live = new Signal<Moq.Track.Producer | undefined>(track);
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
 		track: live,
 		close: () => {
@@ -209,6 +212,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
 	const sub = track.subscribe();
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
@@ -294,6 +298,7 @@ test("every published config fits a probe for its own codec", async () => {
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
 	const sub = track.subscribe();
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
@@ -627,6 +632,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
@@ -794,6 +800,7 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
 	const sub = track.subscribe();
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
@@ -1001,6 +1008,7 @@ async function recordKeyframes(
 
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MICRO, ...info });
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
@@ -1306,6 +1314,51 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 	}
 });
 
+// A failure belongs to the network broadcast's track, so a new network broadcast starts without it,
+// and with its own maxima.
+test("a new network broadcast clears a video encoder failure and its maxima", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockResolvedValue({ supported: true });
+	using _now = spyOn(performance, "now").mockReturnValue(0);
+	const flush = async () => {
+		for (let i = 0; i < 10; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
+	};
+	const name = new Signal(Moq.Path.from("one.hang"));
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name });
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) } as never) },
+		out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(undefined) },
+	};
+	const encoder = new Encoder("video", { broadcast, capture: capture as never, config: { frameRate: 60 } });
+	try {
+		await encoder.out.catalog.changed();
+		await flush();
+		encoder.config.set({ frameRate: 30 });
+		await flush();
+		expect(encoder.out.catalog.peek()?.framerate).toBe(60);
+
+		const live = FakeVideoEncoder.instances.find((instance) => instance.state === "configured");
+		if (!live) throw new Error("expected live video encoder");
+		const failure = new Error("GPU encoder failed");
+		live.fail(failure);
+		await flush();
+		expect(encoder.out.error.peek()).toBe(failure);
+		expect(encoder.out.active.peek()).toBe(false);
+
+		name.set(Moq.Path.from("two.hang"));
+		await flush();
+		expect(encoder.out.error.peek()).toBeUndefined();
+		expect(encoder.out.active.peek()).toBe(true);
+		const catalog = encoder.out.catalog.peek();
+		expect(catalog?.enabled).not.toBe(false);
+		expect(catalog?.track).toBeUndefined();
+		expect(catalog?.framerate).toBe(30);
+	} finally {
+		encoder.close();
+		broadcast.close();
+	}
+});
+
 // A track's coded size is a ceiling fixed for its name: a smaller capture resizes in band, opening a
 // group whose keyframe carries the new size, and the catalog never hears about it.
 test("a shrinking capture resizes in band below the advertised ceiling", async () => {
@@ -1377,6 +1430,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
@@ -1449,6 +1503,7 @@ test("the catalog bitrate and frame rate only rise", async () => {
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
 	const sub = track.subscribe();
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {
@@ -1500,16 +1555,22 @@ test("the catalog bitrate and frame rate only rise", async () => {
 	}
 });
 
-// Another broadcast is another track, so the ceiling and maxima start over there, while returning to a
-// broadcast continues the track it kept.
-test("each broadcast keeps its own ceiling and maxima", async () => {
+// Another slot is another track, so the ceiling and maxima start over there, while returning to a
+// slot continues the track it kept. A new network broadcast, or another broadcast, hands over a new slot.
+test("each slot keeps its own ceiling and maxima", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
-	const rendition = () => ({
-		config: new Signal(undefined),
-		track: new Signal<Moq.Track.Producer | undefined>(undefined),
-		close: () => {},
-	});
-	const first = { video: rendition, order: new Order() };
+	// A broadcast serving its one rendition from one slot, as a network broadcast does.
+	const fake = () => {
+		const slot = new Signal<Slot | undefined>(new Slot());
+		const rendition = () => ({
+			config: new Signal(undefined),
+			track: new Signal<Moq.Track.Producer | undefined>(undefined),
+			slot,
+			close: () => {},
+		});
+		return { video: rendition, order: new Order() };
+	};
+	const first = fake();
 	const broadcast = new Signal<unknown>(first);
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
@@ -1531,7 +1592,7 @@ test("each broadcast keeps its own ceiling and maxima", async () => {
 		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 1920, codedHeight: 1072, framerate: 60 });
 		const bitrate = encoder.out.catalog.peek()?.bitrate ?? 0;
 
-		broadcast.set({ video: rendition, order: new Order() });
+		broadcast.set(fake());
 		// The previous broadcast's probe never describes the new track, even while its own runs.
 		for (let i = 0; i < 5; i++) await Promise.resolve();
 		expect(encoder.out.catalog.peek()).toBeUndefined();
@@ -1554,7 +1615,7 @@ test("each broadcast keeps its own ceiling and maxima", async () => {
 		enabled.set(false);
 		await settle();
 		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
-		broadcast.set({ video: rendition, order: new Order() });
+		broadcast.set(fake());
 		await settle();
 		expect(encoder.out.catalog.peek()).toBeUndefined();
 	} finally {
