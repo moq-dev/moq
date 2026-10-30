@@ -1831,16 +1831,16 @@ export class Subscriber {
 	// datagram (best-effort) if the subscription is unknown or closed.
 	async #routeDatagram(payload: Uint8Array): Promise<void> {
 		if (payload.byteLength > DatagramMessage.MAX_SIZE) return;
-		// An unknown subscription's datagram is dropped below, however it parses.
-		const dg = await DatagramMessage.decode(payload, this.version, (id) => ({
-			timed: !!this.#subscribes.get(id)?.timescale,
-			compressed: this.#subscribes.get(id)?.compress ?? false,
-		}));
-
-		// Unknown or already-closed subscription, or one whose TRACK_INFO has not landed yet,
-		// which a datagram cannot wait for.
-		const entry = this.#subscribes.get(dg.subscribe);
-		if (!entry) return;
+		// Read with the entry it was decoded with: one registered while the decode awaited would
+		// read a datagram parsed with the defaults. An unknown subscription's datagram, or one
+		// whose TRACK_INFO had not landed, which a datagram cannot wait for, is dropped below.
+		let entry: SubscribeEntry | undefined;
+		const dg = await DatagramMessage.decode(payload, this.version, (id) => {
+			entry = this.#subscribes.get(id);
+			return { timed: !!entry?.timescale, compressed: entry?.compress ?? false };
+		});
+		// Gone since, too: the subscription ended while the decode awaited.
+		if (!entry || this.#subscribes.get(dg.subscribe) !== entry) return;
 
 		const scale = entry.timescale;
 
