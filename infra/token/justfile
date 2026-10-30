@@ -1,0 +1,19 @@
+set fallback
+
+# Deploy the token.moq.dev worker.
+deploy:
+    bun install --frozen-lockfile
+    bun wrangler deploy
+
+# Store the moq-bot key, converting GitHub's PKCS#1 PEM to the PKCS#8 that WebCrypto imports.
+secret pem:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bun install --frozen-lockfile
+    openssl pkcs8 -topk8 -nocrypt -in "{{ pem }}" | bun wrangler secret put APP_PRIVATE_KEY
+    printf '%s' Iv23lijGeXMMj2WE2mMK | bun wrangler secret put APP_CLIENT_ID
+
+# Test the token policy and JWT verification.
+test:
+    bun install --frozen-lockfile
+    bun test

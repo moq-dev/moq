@@ -499,8 +499,8 @@ mod tests {
 
 		writer
 			.buffer(&lite::SubscribeStart {
-				group: 3,
 				largest: None,
+				starts: vec![Some(3)],
 			})
 			.unwrap();
 		writer.buffer(&lite::AnnounceBroadcast::Synced).unwrap();

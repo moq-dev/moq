@@ -32,7 +32,7 @@ fi
 
 # The Gradle daemon, and the Kotlin daemon it starts, outlive the build, so the next check
 # skips their warm-up. A GitHub Actions runner kills whatever a job leaves running, found by
-# its RUNNER_TRACKING_ID, so Gradle runs without the job's variables: the merge queue's
+# its RUNNER_TRACKING_ID, so Gradle runs without the job's variables: the landing worker's
 # persistent runner then keeps the daemons for its next job. A daemon keeps the environment it
 # started with, so this also keeps the job's tokens out of it; each build gets its client's.
 gradle() (

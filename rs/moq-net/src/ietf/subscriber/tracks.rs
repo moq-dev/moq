@@ -452,7 +452,10 @@ impl Subscriber {
 			Cancelled,
 			Message(Option<Framed>),
 		}
+		// A peer streaming skips must not hold the session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			let event = kio::wait(|waiter| {
 				if session.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Ok(Event::Closed));
@@ -526,6 +529,7 @@ impl Subscriber {
 				return Poll::Ready(());
 			}
 			loop {
+				ready!(budget.poll_yield(waiter));
 				match ready!(messages.poll_next(&mut reader, waiter)) {
 					Ok(Some(_)) => continue,
 					Ok(None) | Err(_) => return Poll::Ready(()),

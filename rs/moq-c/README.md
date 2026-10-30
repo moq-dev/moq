@@ -136,6 +136,7 @@ int32_t moq_consume_audio_cancel(uint32_t track);
 // Consuming: Frames
 int32_t moq_consume_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_frame_free(uint32_t frame);
+moq_subscription moq_subscription_defaults(void);
 int32_t moq_consume_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_subscription *subscription, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_track_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_track_frame_free(uint32_t frame);

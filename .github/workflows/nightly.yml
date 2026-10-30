@@ -27,7 +27,7 @@ name: Nightly
 # exception: deterministic and seconds long, so audio-quality.yml also gates
 # release PRs on them.
 #
-# Main PRs run no cloud CI beyond the merge queue's Check, so every
+# Main PRs run no cloud CI beyond the landing gate's checks, so every
 # path-filtered gate (Android, C, C++, WASM, X11, the audio replays, the OSS
 # Scanner image, platform.yml and the release dry-runs) runs here on main too,
 # and release-gate.yml runs them on release PRs.
@@ -98,8 +98,8 @@ jobs:
   nightly:
     name: Nightly (${{ matrix.name }})
     runs-on: ${{ matrix.runner || 'ubuntu-24.04-arm' }}
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     timeout-minutes: 60
     permissions:
       contents: read
@@ -342,8 +342,8 @@ jobs:
   tests:
     name: Tests (${{ matrix.recipe }})
     runs-on: ubuntu-24.04-arm
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -355,16 +355,18 @@ jobs:
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
         # `rs quic-sim` sweeps moq-quic's simulated workloads from a fresh seed; PRs run a fixed 64.
+        # `test resume-model` sweeps resume against its model from a fresh seed; PRs run a fixed 64.
         # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
-        # `gate` runs the queue's Check over every package, catching
-        # what a diff-scoped queue run let into main.
+        # `gate -rs_shapes` runs the queue's Check over every package, catching
+        # what a diff-scoped queue run let into main. Features runs the rest,
+        # the isolated feature shapes, which outgrow one hosted job beside it.
         # `rs audio-devices` plays moq-audio's device tests into a private null sink.
         # `rs multicast` runs the mDNS tests, which loop multicast back on the runner.
         # `rs render-sw` renders through wgpu on Mesa's software Vulkan driver.
         # `test qmux` runs js/qmux against the in-tree Rust qmux, per draft.
-        recipe: ["gate", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux"]
+        recipe: ["gate -rs_shapes", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux"]
         include:
           - recipe: rs send-depth
             nightly: true
@@ -400,8 +402,8 @@ jobs:
   media-firefox:
     name: Media (firefox player)
     runs-on: ubuntu-24.04-arm
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -448,8 +450,8 @@ jobs:
   audio-quality:
     name: Audio quality
     runs-on: ubuntu-24.04-arm
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     # Twenty-four rows at a minute each, plus the relay, CLI, and shaper built from source.
     timeout-minutes: 90
     steps:
@@ -631,8 +633,8 @@ jobs:
     # Measures what these release jobs upload rather than rebuilding it.
     needs: [release-py-ffi, release-shared-ffi, release-moq-c, release-moq-relay, release-moq-cli]
     runs-on: ubuntu-24.04-arm
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     timeout-minutes: 120
     permissions:
       contents: read
