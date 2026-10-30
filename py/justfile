@@ -42,7 +42,6 @@ _develop *args:
 check:
     uv sync --locked --no-install-workspace
     uv run --no-sync ruff check .
-    uv run --no-sync ruff format --check .
     just _develop {{ test_features }}
     uv run --no-sync pyright
     just samples
@@ -52,11 +51,10 @@ check:
 samples:
     ../sh/py/samples.sh
 
-# Auto-fix lint and formatting issues.
+# Auto-fix lint issues; `just fix` formats them with the rest of the repo's Python.
 fix:
     uv sync --no-install-workspace
     uv run --no-sync ruff check --fix .
-    uv run --no-sync ruff format .
 
 # Run the unit tests, on a build with the test clock (`moq.testing`).
 test:

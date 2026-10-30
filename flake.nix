@@ -315,6 +315,8 @@
             actionlint
             taplo
             nixfmt
+            # Formats and lints every Python file; the same version uv.lock pins.
+            ruff
           ]
           # Apple's formatter, so `just swift check` checks formatting off macOS
           # too. nixpkgs marks the Swift compiler it builds with broken on

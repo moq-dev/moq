@@ -103,6 +103,8 @@ declare -A scope=(
     # ts.yml's crate filters against the closure test/ts/run.sh builds, which
     # moves only with a manifest, the lockfile, or the harness's packages.
     [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)'
+    # Ruff formats and lints every Python file under the nearest pyproject.toml.
+    [python]='(\.pyi?|(^|/)pyproject\.toml)$'
     [markdown]=''
     [shell]=''
     [large_files]=''
@@ -164,6 +166,7 @@ declare -A tools=(
     [flake]='nix'
     [ts_paths]='cargo python3'
     [markdown]='bun'
+    [python]='ruff'
     [shell]='shellcheck shfmt'
     [large_files]=''
     [toml]='taplo'
@@ -187,8 +190,8 @@ declare -A compiles=(
 # Lanes start in this order, so the slowest come first. dart runs alone (see
 # below), so it waits for the rest.
 case "$action" in
-    check | ci) modules=(py rs c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
-    fix) modules=(js rs py carla dart go kt swift c cpp obs markdown shell toml nix justfile) ;;
+    check | ci) modules=(py rs c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths python shell large_files toml nix justfile dart) ;;
+    fix) modules=(js rs py carla dart go kt swift c cpp obs python markdown shell toml nix justfile) ;;
 esac
 
 # Modules that share mutable state run in one lane, in module order; every
@@ -330,6 +333,7 @@ step() {
             sh/markdown.sh check
             ;;
         check:large_files) sh/large-files.sh "$large_base" ;;
+        check:python) files '*.py' '*.pyi' | xargs -0 ruff format --check --force-exclude ;;
         check:toml) RUST_LOG=error taplo format --check ;;
         check:nix) files '*.nix' | xargs -0 nixfmt --check ;;
         check:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --check --justfile ;;
@@ -343,6 +347,7 @@ step() {
             bun install
             sh/markdown.sh fix
             ;;
+        fix:python) files '*.py' '*.pyi' | xargs -0 ruff format --force-exclude ;;
         fix:toml) RUST_LOG=error taplo format ;;
         fix:nix) files '*.nix' | xargs -0 nixfmt ;;
         fix:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --justfile ;;

@@ -79,7 +79,6 @@ dev := "uv run --project ../../.. --isolated --only-group dev"
 # Lint and test the worker and its launchers.
 check:
     cd sim && {{ dev }} --locked ruff check .
-    cd sim && {{ dev }} --locked ruff format --check .
     cd sim && {{ dev }} --locked pyright
     cd sim && {{ dev }} --locked pytest -q
     sim/python.test.sh
@@ -87,10 +86,9 @@ check:
     sim/systemd/install-user-service.test.sh
     bridge/gpu.test.sh
 
-# Auto-fix the worker's lint and formatting.
+# Auto-fix the worker's lint; `just fix` formats it with the rest of the repo's Python.
 fix:
     cd sim && {{ dev }} ruff check --fix .
-    cd sim && {{ dev }} ruff format .
 
 # A Vulkan stand-in plays the CARLA plugin. A host with no NVIDIA GPU skips, and
 # one whose NVIDIA driver is not loaded fails.
