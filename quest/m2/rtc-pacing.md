@@ -44,5 +44,4 @@ Public API: a rate handle on moq-rtc's WHEP server. Wire: none.
 
 ## Related
 
-- [moq-rtc REMB and TIAS](/quest/m2/rtc-remb-tias.md) - the WHIP half of the same caps
 - [SRT rate handle](/quest/m2/srt-rate-handle.md) - the same pacing and retransmit charging on SRT

@@ -3,7 +3,7 @@
 //! An embedder hands [`whip::accept`](crate::whip::accept) a [`Limit`], and moq-rtc steers the publisher's encoder under its [`Cap`]: a `b=TIAS`
 //! line in the SDP answer, and periodic REMB where the publisher negotiated
 //! it. WebRTC has no receiver backpressure, so a publisher that ignores both is metered
-//! and closed with [`Error::Limited`](crate::Error::Limited) past the cap plus its
+//! and closed with [`Error::RateLimited`](crate::Error::RateLimited) past the cap plus its
 //! burst.
 
 use std::sync::Arc;
