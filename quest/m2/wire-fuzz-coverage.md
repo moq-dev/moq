@@ -18,7 +18,7 @@ Decided 2026-10-22 from the security audit, with the maintainer:
 - Add one target for a stream of frame headers, records, and payloads through the incremental ingest, asserting the declared sizes and the stream position stay consistent.
 - Add a target for request-stream framing.
 - Add seeds that approach a limit (`0xffff` and 64 MiB prefixes) so the rejection paths run.
-- Add a Miri job for the crates whose unsafe is reachable from a peer, and a target for `moq-sock`'s cmsg walk and `moq-uring`'s `RecvMeta::parse`. Both walks must stop at a malformed length and keep what came before it.
+- Add the crates whose unsafe is reachable from a peer to `just rs miri` (`sh/rs/miri.sh`), which Nightly already runs for `kio` and `moq-net`, and a target for `moq-sock`'s cmsg walk and `moq-uring`'s `RecvMeta::parse`. Both walks must stop at a malformed length and keep what came before it.
 - Wire every target and the Miri run into the nightly gate, and keep the merge-gate replay of committed regressions.
 
 The point is the invariant, not the coverage number: a target that only checks for a panic would miss the bugs this audit is about.

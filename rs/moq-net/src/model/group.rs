@@ -5114,6 +5114,7 @@ mod test {
 
 	/// An explicit current timestamp is converted to the group's scale.
 	#[test]
+	#[cfg_attr(miri, ignore = "reads the wall clock, which Miri's isolation refuses")]
 	fn create_frame_converts_current_timestamp() {
 		use crate::Timescale;
 
@@ -5508,7 +5509,7 @@ mod test {
 		let payloads: Vec<Bytes> = (0..Prefetch::CAP)
 			.map(|i| match i % 2 {
 				0 => Bytes::from(vec![i as u8; 3]),
-				_ => Bytes::from((0..2 * frame::SEGMENT + 7).map(|b| (b + i) as u8).collect::<Vec<_>>()),
+				_ => Bytes::from(frame::pattern(i, 2 * frame::SEGMENT + 7)),
 			})
 			.collect();
 		for payload in &payloads {

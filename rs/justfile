@@ -337,6 +337,14 @@ loom *args:
     RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p moq-net --test loom "$@"
     RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p moq-net --test expiry-loom "$@"
 
+# Needs nightly with the miri component; executes only in Nightly. See sh/rs/miri.sh
+# for what runs and why it splits in two.
+
+# Run kio's and moq-net's hand-written in-memory unsafe under Miri.
+[positional-arguments]
+miri *args:
+    bash sh/rs/miri.sh "$@"
+
 # Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite.
 quic-sim:
     #!/usr/bin/env bash

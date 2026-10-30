@@ -53,3 +53,12 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 retries = 0
 # Repeat each failure at the end of the run, so it isn't buried in the log.
 failure-output = "immediate-final"
+
+# `just rs miri` interprets every instruction, orders of magnitude slower than
+# native, so a test that takes a second here takes minutes there. The cap still
+# turns a lost wakeup into a TIMEOUT; keep a test under it by shrinking its
+# workload under `cfg(miri)`, as with the native ceiling above.
+[profile.miri]
+slow-timeout = { period = "300s", terminate-after = 3 }
+retries = 0
+failure-output = "immediate-final"

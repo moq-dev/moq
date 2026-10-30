@@ -575,8 +575,11 @@ mod tests {
 			waiter.register(&mut list);
 		}
 
+		// Miri takes over twenty minutes for the full run; a thousand rounds still far
+		// outnumber the bound.
+		let rounds = if cfg!(miri) { 1_000 } else { 100_000 };
 		let mut seed = 1u64;
-		for _ in 0..100_000 {
+		for _ in 0..rounds {
 			seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
 			let i = (seed >> 33) as usize % LIVE;
 			waiters[i] = Waiter::noop();

@@ -18,3 +18,4 @@ The wire layer. Generic over the transport and media-agnostic: the relay never i
 - Tests never use tokio or the wall clock. Prefer a plain `#[test]` that polls with explicit instants; async bodies use `#[moq_clock::test]`, whose simulated time jumps only when every task is stalled. tokio is for the benches.
 - `just rs fuzz <target>` (one per file in `fuzz/fuzz_targets/`) needs nightly. The target bodies live in `src/fuzz.rs`; `fuzz/regressions/<target>/` replays under `just check`, so commit every crash input there.
 - `just rs loom` model-checks the concurrent handoffs. A hang is a lost wakeup, not a flake.
+- `just rs miri` runs kio's and this crate's model tests under Miri, in Nightly (`sh/rs/miri.sh` lists them). A test Miri cannot run (foreign calls, sockets, the wall clock) carries `#[cfg_attr(miri, ignore = "...")]` naming why; a heavy workload shrinks under `cfg(miri)` instead.
