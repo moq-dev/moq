@@ -4578,11 +4578,13 @@ fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
 
 /// A finished encoder reaches a C decoder as an end read in microseconds rather
 /// than vanishing: Opus pads a partial last frame, so the finish publishes where
-/// the source really stopped.
+/// the source really stopped. The default start decodes the finished track from
+/// its first group rather than waiting at its end.
 #[test]
 fn audio_raw_decode_reads_the_encoder_end() {
 	const START_US: u64 = 123_000;
-	const SAMPLES: usize = 860;
+	// Past the 80 ms Opus warmup the decoder trims, ending on a partial frame.
+	const SAMPLES: usize = 4_700;
 
 	let origin = id(moq_origin_create());
 	let path = b"audio-raw-end-test";
@@ -4621,10 +4623,12 @@ fn audio_raw_decode_reads_the_encoder_end() {
 		sample_rate: 0,
 		channels: 0,
 		max_delay_us: 30_000_000,
+		start: 0,
 	};
 	let read_cb = Callback::new();
 	id(unsafe { moq_decode_audio(catalog_id, 0, &decoded, Some(channel_callback), read_cb.ptr) });
 
+	let mut frames = 0;
 	let mut ends = Vec::new();
 	loop {
 		let code = read_cb.recv();
@@ -4646,6 +4650,7 @@ fn audio_raw_decode_reads_the_encoder_end() {
 		match read.kind {
 			moq_decode_read_kind::MOQ_DECODE_READ_FRAME => {
 				assert!(!read.frame.data.is_null());
+				frames += 1;
 			}
 			moq_decode_read_kind::MOQ_DECODE_READ_END => {
 				assert!(read.frame.data.is_null(), "an end carries no samples");
@@ -4655,6 +4660,7 @@ fn audio_raw_decode_reads_the_encoder_end() {
 		}
 		assert_eq!(moq_decode_audio_read_free(id(code)), 0);
 	}
+	assert!(frames > 0, "a finished track decodes from its start");
 	assert_eq!(ends, [START_US + SAMPLES as u64 * 1_000_000 / 48_000]);
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
@@ -4722,6 +4728,7 @@ fn video_raw_publish_consume() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 0,
 		height: 0,
+		start: 0,
 	};
 	let frame_cb = Callback::new();
 	let consumer = id(unsafe { moq_decode_video(catalog_id, 0, &decoder, Some(channel_callback), frame_cb.ptr) });
@@ -4776,8 +4783,8 @@ fn video_raw_publish_consume() {
 }
 
 /// A request the decoder cannot honor fails before anything is subscribed, so
-/// no session is needed: an unknown pixel format, a half-set or odd size, and
-/// a size whose packed bytes don't fit are all refused, as is a null output.
+/// no session is needed: an unknown pixel format or start, a half-set or odd size,
+/// and a size whose packed bytes don't fit are all refused, as is a null output.
 /// A valid request against a bogus catalog gets past validation and fails on
 /// the lookup instead.
 #[test]
@@ -4789,9 +4796,22 @@ fn video_raw_decode_output_rejected() {
 		format: 999,
 		width: 0,
 		height: 0,
+		start: 0,
 	};
 	assert_eq!(
 		unsafe { moq_decode_video(1, 0, &bad_format, Some(ignore_callback), std::ptr::null_mut()) },
+		Error::InvalidCode.code()
+	);
+
+	let bad_start = moq_video_decoder_output {
+		max_delay_us: 0,
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
+		width: 0,
+		height: 0,
+		start: moq_decode_start::MOQ_DECODE_START_LATEST as u32 + 1,
+	};
+	assert_eq!(
+		unsafe { moq_decode_video(1, 0, &bad_start, Some(ignore_callback), std::ptr::null_mut()) },
 		Error::InvalidCode.code()
 	);
 
@@ -4801,6 +4821,7 @@ fn video_raw_decode_output_rejected() {
 			format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 			width,
 			height,
+			start: 0,
 		};
 		assert_eq!(
 			unsafe { moq_decode_video(1, 0, &bad_size, Some(ignore_callback), std::ptr::null_mut()) },
@@ -4819,6 +4840,7 @@ fn video_raw_decode_output_rejected() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 160,
 		height: 120,
+		start: 0,
 	};
 	assert_eq!(
 		unsafe { moq_decode_video(u32::MAX / 2, 0, &valid, Some(ignore_callback), std::ptr::null_mut(),) },
@@ -4918,6 +4940,7 @@ fn video_raw_decode_rgba() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 0,
 		height: 0,
+		start: 0,
 	};
 	assert_eq!(decode_first_frame(&output), (320, 240, 320 * 240 * 4));
 }
@@ -4931,6 +4954,7 @@ fn video_raw_decode_resize() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 160,
 		height: 120,
+		start: 0,
 	};
 	assert_eq!(decode_first_frame(&output), (160, 120, 160 * 120 * 3 / 2));
 }
@@ -5340,6 +5364,7 @@ fn video_raw_decode() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 0,
 		height: 0,
+		start: 0,
 	};
 	let frame_cb = Callback::new();
 	let consumer = id(unsafe { moq_decode_video(catalog_id, 0, &output, Some(channel_callback), frame_cb.ptr) });

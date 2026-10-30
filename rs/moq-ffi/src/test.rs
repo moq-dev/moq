@@ -3338,11 +3338,10 @@ async fn resolve_rejects_a_reference_without_an_origin() {
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 
 	// An absent or empty reference still names this broadcast, so it needs no origin. A reference
-	// made only of slashes normalizes to the empty one, so it must be treated the same rather than
-	// looking like a cross-broadcast reference.
+	// made only of slashes is refused rather than read as the empty one.
 	consumer.resolve(referencing(None, None)).await.unwrap();
 	consumer.resolve(referencing(Some(""), None)).await.unwrap();
-	consumer.resolve(referencing(Some("/"), None)).await.unwrap();
+	assert!(consumer.resolve(referencing(Some("/"), None)).await.is_err());
 
 	// Reported in normalized form, matching `EscapingBroadcast` and moq-c: it names what the
 	// resolver actually tried to reach, not the caller's spelling of it.
