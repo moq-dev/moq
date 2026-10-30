@@ -4,12 +4,7 @@
 # moq-auth, and moq-net's grant enforcement, resume, and group expiry. Each
 # mutant rebuilds its crate and reruns its tests, so a wider scope costs a
 # rebuild per mutant.
-examine_globs = [
-    "rs/moq-auth/src/**/*.rs",
-    "rs/moq-net/src/auth.rs",
-    "rs/moq-net/src/model/resume.rs",
-    "rs/moq-net/src/model/expiry.rs",
-]
+examine_globs = ["rs/moq-auth/src/**/*.rs", "rs/moq-net/src/auth.rs", "rs/moq-net/src/model/resume.rs", "rs/moq-net/src/model/expiry.rs"]
 
 # Mutants no test can or should kill, each with its reason.
 exclude_re = []
