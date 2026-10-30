@@ -14662,7 +14662,10 @@ mod test {
 		let mut consumer = producer.subscribe(replay()).ordered();
 		let unbounded = Subscription::default().with_max_delay(None);
 		assert!(matches!(consumer.update(unbounded.clone()), Err(Error::Unsupported)));
-		assert!(matches!(consumer.control().update(unbounded.clone()), Err(Error::Unsupported)));
+		assert!(matches!(
+			consumer.control().update(unbounded.clone()),
+			Err(Error::Unsupported)
+		));
 		assert_eq!(consumer.subscription(), replay(), "a refused update changes nothing");
 
 		// A budget set before the reader turned ordered is refused when it reads.
