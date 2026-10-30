@@ -36,4 +36,3 @@ Public API: none. Wire: none; the marker exists in both drafts.
 
 - [Rust FETCH parity](/quest/m1/ietf-fetch-parity.md) - edits the same FETCH answer path
 - [Our moq-transport publishers serve at most one group](/quest/m1/ietf-publisher-one-group.md) - narrows the same FETCH answer and fill paths to one group
-- [SUBSCRIBE honors the properties opt-out](/quest/m1/subscribe-timestamps.md) - edits the same publisher
