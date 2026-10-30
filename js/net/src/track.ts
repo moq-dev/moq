@@ -1087,12 +1087,13 @@ export class Producer {
 
 	// Recompute from every live sink because an update or close can narrow as well as widen
 	// the aggregate. The wire layer observes this signal and emits SUBSCRIBE_UPDATE.
+	//
+	// The max delay is the subscribers' own, not clamped to the track's maxAge: the publisher
+	// applies its own, as each reader's budget does, so the demand asked upstream is the same
+	// before and after the info lands.
 	#updateSubscription(): void {
 		const combined = combineSubscriptions(this.#sinks);
 		this.#settle();
-		const retained = this.#state.info.peek()?.maxAge;
-		if (combined && retained !== undefined)
-			combined.maxDelay = Milli(Math.min(combined.maxDelay ?? Milli.zero, retained));
 		this.#state.update.set(combined);
 		// The requested floor bounds what a pending tail owes.
 		this.#owe();

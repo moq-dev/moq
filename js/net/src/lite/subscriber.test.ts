@@ -29,6 +29,7 @@ import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
 import {
 	encodeSubscribeResponse,
+	Subscribe,
 	SubscribeDrop,
 	SubscribeEnd,
 	SubscribeOk,
@@ -1087,7 +1088,7 @@ test.each([
 });
 
 // A setup that outlived its deadline is over: its TRACK stream is reset, even one still waiting for a
-// slot, and the subscription is neither registered again nor sent as a SUBSCRIBE.
+// slot, along with the SUBSCRIBE sent beside it, and the subscription is not registered again.
 test.each([
 	["lite-05 subscribe waiting on the TRACK_INFO", Version.DRAFT_05, false],
 	["lite-06 subscribe waiting on the TRACK_INFO", Version.DRAFT_06, false],
@@ -1109,7 +1110,8 @@ test.each([
 
 		if (parked) streams[0].release();
 		await streams[0].aborted;
-		expect(streams.length).toBe(1);
+		await streams[1].aborted;
+		expect(streams.length).toBe(2);
 
 		// A GROUP for a forgotten id is ignored without touching its stream.
 		const touched: PropertyKey[] = [];
@@ -1183,6 +1185,104 @@ test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its
 	}
 });
 
+// On lite-05 and later a SUBSCRIBE goes out beside its TRACK, before the TRACK_INFO, and accepting
+// the info sends no SUBSCRIBE_UPDATE even when the publisher keeps groups for less than the
+// subscriber waits.
+test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
+	"lite %s: a subscribe goes out with its track",
+	async (version) => {
+		const { quic, streams, opened } = fakeSession();
+		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+		const track = subscriber
+			.consume(Path.from("room"))
+			.track("video")
+			.subscribe({ priority: 3, maxDelay: Milli(10_000) });
+		try {
+			await opened(0);
+			await streams[0].reading;
+			await (await opened(1)).writing;
+			const sent = new Reader(undefined, new Uint8Array(Buffer.concat(streams[0].written)), version);
+			expect(await sent.u53()).toBe(StreamId.Track);
+			await drainReactions();
+			const wire = () => new Reader(undefined, new Uint8Array(Buffer.concat(streams[1].written)), version);
+			let subscribe = wire();
+			expect(await subscribe.u53()).toBe(StreamId.Subscribe);
+			const msg = await Subscribe.decode(subscribe, version);
+			expect([msg.id, msg.track, msg.priority, msg.maxDelay]).toEqual([0n, "video", 3, 10_000]);
+
+			const chunks: Uint8Array[] = [];
+			const writer = new Writer(
+				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+				version,
+			);
+			await new TrackInfo({ timescale: 1000, maxAge: 1000 }).encode(writer, version);
+			for (const chunk of chunks) streams[0].inbound.enqueue(chunk);
+			await track.info();
+			await drainReactions();
+			subscribe = wire();
+			await subscribe.u53();
+			await Subscribe.decode(subscribe, version);
+			expect(await subscribe.done()).toBe(true);
+		} finally {
+			track.close();
+			subscriber.close();
+		}
+	},
+);
+
+// A GROUP that beats its subscription's TRACK_INFO waits unread for it, then is read with it.
+test("a group that beats its track info waits for it", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await (await opened(1)).writing;
+		const touched: PropertyKey[] = [];
+		const stream = await groupStream(0, version);
+		const reader = new Proxy(stream, {
+			get: (target, key) => {
+				touched.push(key);
+				const value = Reflect.get(target, key, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const receiving = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0 }), reader);
+		await drainReactions();
+		expect(touched).toEqual([]);
+
+		await answerTrackInfo(streams[0], version, 1000);
+		await receiving;
+		const group = await track.recvGroup();
+		expect(group?.sequence).toBe(0);
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([0]));
+	} finally {
+		track.close();
+		subscriber.close();
+	}
+});
+
+// A TRACK reset while its SUBSCRIBE is live fails the subscription, so the origin can try another
+// route, and resets the SUBSCRIBE.
+test("a reset track rejects the subscription and resets its subscribe", async () => {
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await (await opened(1)).writing;
+		streams[0].inbound.error(new Error("peer reset"));
+		expect(await track.closed).toBeInstanceOf(Error);
+		await streams[1].aborted;
+	} finally {
+		track.close();
+		subscriber.close();
+		warn.mockRestore();
+	}
+});
+
 test("a fetch started after the subscriber closes rejects without opening a stream", async () => {
 	const { quic, streams } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
@@ -1194,7 +1294,7 @@ test("a fetch started after the subscriber closes rejects without opening a stre
 });
 
 // The grant watch is armed before the first check, so a shrink while TRACK_INFO is still in
-// flight refuses the subscription rather than opening a SUBSCRIBE the grant no longer covers.
+// flight refuses the subscription and resets the SUBSCRIBE sent beside its TRACK.
 test("a grant that shrinks while the subscription sets up refuses it", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const scoped = (prefix: string): Grant => ({
@@ -1223,8 +1323,8 @@ test("a grant that shrinks while the subscription sets up refuses it", async () 
 	const err = await next;
 	expect(err).toBeInstanceOf(StreamError);
 	expect((err as StreamError).code).toBe(StreamCode.Unauthorized);
-	// Nothing past the TRACK stream reached the wire.
-	expect(streams.length).toBe(1);
+	await streams[1].aborted;
+	expect(streams.length).toBe(2);
 
 	track.close();
 });
@@ -2513,8 +2613,9 @@ test("closing a broadcast while TRACK_INFO is pending leaves no unhandled reject
 		broadcast.close();
 		track.close();
 		await streams[0].aborted;
+		await streams[1].aborted;
 		await drainReactions();
-		expect(streams).toHaveLength(1);
+		expect(streams).toHaveLength(2);
 		expect(unhandled).toEqual([]);
 	} finally {
 		process.off("unhandledRejection", onUnhandled);

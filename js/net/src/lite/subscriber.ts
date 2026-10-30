@@ -175,6 +175,9 @@ export class Subscriber {
 	// Registered only after immutable TRACK_INFO or the older drafts' defaults resolve,
 	// so every incoming group and datagram already knows its timestamp framing.
 	#subscribes = new Map<bigint, SubscribeEntry>();
+	// A SUBSCRIBE sent alongside its TRACK, until its TRACK_INFO lands: settles with the
+	// entry, or `undefined` if it never does.
+	#pending = new Map<bigint, Promise<SubscribeEntry | undefined>>();
 	#subscribeNext = 0n;
 
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
@@ -1049,16 +1052,16 @@ export class Subscriber {
 		}
 	}
 
-	// Determine the track's immutable properties, accept the request (so the
-	// application's track.Subscriber resolves and incoming groups have a producer to
-	// write into), register it, then open the subscribe stream. `state.stream` and
-	// `state.track` are populated as soon as each stream opens so the caller can clean
-	// them up on timeout even before this promise settles.
+	// Open the subscribe stream and accept the request (so the application's track.Subscriber
+	// resolves and incoming groups have a producer to write into) with the track's immutable
+	// properties. `state.stream` and `state.track` are populated as soon as each stream opens
+	// so the caller can clean them up on timeout even before this promise settles.
 	//
-	// On lite-05+ the properties come from a TRACK stream opened first, held open until
-	// the SUBSCRIBE is answered, and the SUBSCRIBE is accepted implicitly (no
-	// SUBSCRIBE_OK). Older drafts carry no per-track properties, so they resolve to
-	// defaults and just drain SUBSCRIBE_OK.
+	// On lite-05+ the properties come from a TRACK stream, held open until the SUBSCRIBE is
+	// answered, and the SUBSCRIBE goes out alongside it rather than a round trip after: it is
+	// accepted implicitly (no SUBSCRIBE_OK), and needs the info only to read what it receives.
+	// A group stream that beats the info waits on `#pending`, unread. Older drafts carry no
+	// per-track properties, so they resolve to defaults and just drain SUBSCRIBE_OK.
 	async #openSubscribe(
 		state: SubscribeSetup,
 		msg: Subscribe,
@@ -1067,44 +1070,84 @@ export class Subscriber {
 		deadline: Deadline,
 	): Promise<{ stream: Stream; entry: SubscribeEntry }> {
 		state.cancel.signal.throwIfAborted();
-		let producer: track.Producer;
-		let drainOk = false;
-		let compress = false;
-		let timescale = 0;
 
-		if (hasTrackStream(this.version)) {
-			// Fetch the immutable properties once via the TRACK stream.
-			const { info, stream } = await this.#trackInfo(
-				msg.broadcast,
-				msg.epoch,
-				msg.track,
-				state.cancel.signal,
-				deadline,
-			);
-			state.track = stream;
-			// The deadline passed as TRACK_INFO landed: the request is already rejected, so don't
-			// register it again or send its SUBSCRIBE.
-			state.cancel.signal.throwIfAborted();
-			producer = request.accept(this.#toModelInfo(info));
-			compress = info.compress;
-			timescale = info.timescale ?? 0;
-		} else {
+		if (!hasTrackStream(this.version)) {
 			// Older drafts negotiate nothing per-track: verbatim frames with no timeline.
-			producer = request.accept();
-			drainOk = true;
+			const entry = this.#register(id, request.accept(), { compress: false, timescale: 0 }, msg, request, state);
+			const stream = await this.#sendSubscribe(state, msg, deadline);
+			// The first response MUST be a SUBSCRIBE_OK (older drafts only).
+			const resp = await decodeSubscribeResponse(stream.reader, this.version);
+			if (!("ok" in resp)) {
+				throw new Error("first subscribe response must be SUBSCRIBE_OK");
+			}
+			return { stream, entry };
 		}
+
+		// The TRACK opens first, then the SUBSCRIBE, which is waiting on before it is written.
+		const info = this.#trackInfo(msg.broadcast, msg.epoch, msg.track, state.cancel.signal, deadline);
+		let settle: (entry: SubscribeEntry | undefined) => void = () => {};
+		this.#pending.set(
+			id,
+			new Promise((resolve) => {
+				settle = resolve;
+			}),
+		);
+		const sending = this.#sendSubscribe(state, msg, deadline);
+		try {
+			// Either failing fails the subscription: a reset TRACK rejects the request, so the
+			// origin can try another route, and the caller resets the SUBSCRIBE.
+			const [answered, stream] = await Promise.all([info, sending]);
+			state.track = answered.stream;
+			// The deadline passed as TRACK_INFO landed: the request is already rejected, so don't
+			// accept it again.
+			state.cancel.signal.throwIfAborted();
+			const producer = request.accept(this.#toModelInfo(answered.info));
+			const entry = this.#register(
+				id,
+				producer,
+				{ compress: answered.info.compress, timescale: answered.info.timescale ?? 0 },
+				msg,
+				request,
+				state,
+			);
+			settle(entry);
+			return { stream, entry };
+		} catch (err) {
+			settle(undefined);
+			// Whichever exchange outlived the other is no longer wanted.
+			void info.then(
+				({ stream }) => stream.abort(error(err)),
+				() => {},
+			);
+			void sending.then(
+				(stream) => stream.abort(error(err)),
+				() => {},
+			);
+			throw err;
+		} finally {
+			this.#pending.delete(id);
+		}
+	}
+
+	// Register a subscription's accepted copy, so incoming groups and datagrams find it.
+	#register(
+		id: bigint,
+		producer: track.Producer,
+		framing: { compress: boolean; timescale: number },
+		msg: Subscribe,
+		request: track.Request,
+		state: SubscribeSetup,
+	): SubscribeEntry {
 		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
 		// this copy holds its first group until the answer arrives.
 		if (resolvesStart(this.version)) hooks.startTrack(producer, { requested: msg.startGroup });
 
-		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
 		const entry: SubscribeEntry = {
 			track: producer,
-			compress,
-			timescale,
+			...framing,
 			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
-			// for a late group anyway. Already the smaller of the subscriber's and the track's.
+			// for a late group anyway.
 			tail: new Tail({
 				grace: () => grace(producer.subscription.peek()?.maxDelay ?? Milli.zero),
 			}),
@@ -1115,23 +1158,19 @@ export class Subscriber {
 		};
 		this.#subscribes.set(id, entry);
 		state.producer = producer;
+		return entry;
+	}
 
-		state.stream = await deadline.open(Stream.open(this.#quic, { version: this.version, ...requestOptions }));
+	// Open the subscribe stream and write the SUBSCRIBE on it.
+	async #sendSubscribe(state: SubscribeSetup, msg: Subscribe, deadline: Deadline): Promise<Stream> {
+		const stream = await deadline.open(Stream.open(this.#quic, { version: this.version, ...requestOptions }));
+		state.stream = stream;
 		// The deadline passed while the open waited: the late-setup handler resets the stream, so
 		// don't send a SUBSCRIBE on it first.
 		state.cancel.signal.throwIfAborted();
-		await state.stream.writer.u53(StreamId.Subscribe);
-		await msg.encode(state.stream.writer, this.version);
-
-		if (drainOk) {
-			// The first response MUST be a SUBSCRIBE_OK (older drafts only).
-			const resp = await decodeSubscribeResponse(state.stream.reader, this.version);
-			if (!("ok" in resp)) {
-				throw new Error("first subscribe response must be SUBSCRIBE_OK");
-			}
-		}
-
-		return { stream: state.stream, entry };
+		await stream.writer.u53(StreamId.Subscribe);
+		await msg.encode(stream.writer, this.version);
+		return stream;
 	}
 
 	// Opens a TRACK stream and reads the single TRACK_INFO. Lite-05+ only. The stream
@@ -1692,7 +1731,9 @@ export class Subscriber {
 	 * @internal
 	 */
 	async runGroup(group: GroupMessage, stream: Reader) {
-		const entry = this.#subscribes.get(group.subscribe);
+		// One that beats its subscription's TRACK_INFO waits for it unread, which flow control
+		// bounds. Waiters resume in the order they arrived.
+		const entry = this.#subscribes.get(group.subscribe) ?? (await this.#pending.get(group.subscribe));
 		if (!entry) {
 			if (group.subscribe >= this.#subscribeNext) {
 				throw new Error(`unknown subscription: id=${group.subscribe}`);
@@ -1796,8 +1837,10 @@ export class Subscriber {
 			compressed: this.#subscribes.get(id)?.compress ?? false,
 		}));
 
+		// Unknown or already-closed subscription, or one whose TRACK_INFO has not landed yet,
+		// which a datagram cannot wait for.
 		const entry = this.#subscribes.get(dg.subscribe);
-		if (!entry) return; // Unknown or already-closed subscription.
+		if (!entry) return;
 
 		const scale = entry.timescale;
 

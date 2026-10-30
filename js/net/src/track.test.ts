@@ -563,14 +563,17 @@ test("an unfloored subscriber clears a resume floor above the live edge", () => 
 	expect(producer.subscription.peek()?.groups?.start).toBeUndefined();
 });
 
-test("the producer aggregate is clamped without changing subscriber options", async () => {
+test("the producer aggregate is not clamped to the track's maxAge", () => {
+	// The publisher applies its own, so a subscriber asking upstream before the info lands
+	// asks for the same demand after it.
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ maxDelay: Milli(10_000) });
-	const clamped = producer.subscription.changed();
+	const before = producer.subscription.peek();
 
 	producer.accept({ timescale: Timescale.MILLI, maxAge: Milli(2_000) });
 
-	expect((await clamped)?.maxDelay).toBe(Milli(2_000));
+	expect(producer.subscription.peek()).toEqual(before);
+	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(10_000));
 	expect(track.subscription.peek()?.maxDelay).toBe(Milli(10_000));
 });
 
@@ -840,9 +843,10 @@ test("the default subscription skips superseded groups and a bare options object
 	// No options means the default subscription, whose zero budget keeps only the newest group.
 	expect((await explicit.recvGroup())?.sequence).toBe(2);
 	expect((await implicit.recvGroup())?.sequence).toBe(2);
-	// An omitted maxDelay leaves the publisher's retention as the only bound.
+	// An omitted maxDelay leaves the publisher's retention as the only bound, which the
+	// aggregate leaves to the publisher.
 	for (const sequence of [0, 1, 2]) expect((await bare.recvGroup())?.sequence).toBe(sequence);
-	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(5000));
+	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(Number.MAX_SAFE_INTEGER));
 	producer.finish();
 	producer.close();
 });
