@@ -178,7 +178,7 @@ protocol's reaction to loss and delay, not the kernel's rendering of them.
 The Nightly workflow runs all mutations, so patches that stop applying and drills
 that stop detecting their recovery failures fail CI. `just check` also runs
 `--apply-only` whenever Rust or this directory changes, so a patch that no longer
-applies fails `just ci` and the merge queue for the PR that moved its code rather
+applies fails `just ci` and the landing gate for the PR that moved its code rather
 than the next nightly.
 
 Pull requests do not run the mutations: the drills' sockets still run on the host

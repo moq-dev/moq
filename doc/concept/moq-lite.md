@@ -157,7 +157,8 @@ names, so an end and a start is not a cache flush.
 RTMP, SRT, and WHIP ingests mint one per connection. Independent importers use
 distinct epochs, even when fed one stream. Only replicas of one publisher's
 bytes share its epoch, such as one publisher announced through multiple relays. See [Clustering](/bin/relay/cluster) for
-how a relay uses this.
+how a relay uses this, and [identity and recovery](/concept/identity) for
+choosing epochs, following restarts, and answering work on demand.
 
 ### Multiple CDNs
 

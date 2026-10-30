@@ -242,22 +242,6 @@ impl Consumer {
 		self.state.read().copy.clone()
 	}
 
-	/// Poll for the serving route's copy, as a fetch waits for one: `None` once the logical
-	/// track ends without one.
-	#[cfg(feature = "async")]
-	pub(super) fn poll_serving(&self, waiter: &kio::Waiter) -> Poll<Option<track::Consumer>> {
-		loop {
-			let (generation, copy) = {
-				let route = self.state.read();
-				(route.generation, route.copy.clone())
-			};
-			if copy.is_some() || self.end().is_some() {
-				return Poll::Ready(copy);
-			}
-			ready!(self.poll_changed(generation, waiter));
-		}
-	}
-
 	/// The copy the front parked, while it serves none and may still serve one again.
 	pub(super) fn parked(&self) -> Option<track::Consumer> {
 		let route = self.state.read();
@@ -5241,27 +5225,6 @@ mod test {
 		assert_eq!(group.index(), 2);
 		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(&frame.payload[..], &[2]);
-	}
-
-	/// A span fill made before the front serves a copy waits for one and asks it for the
-	/// whole span, rather than resolving with nothing filled.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_span_fill_waits_for_the_serving_copy() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let consumer = logical.consume();
-		let mut filling = Box::pin(consumer.fill_groups(0..4, 0));
-		assert!(filling.as_mut().now_or_never().is_none(), "no copy serves yet");
-		let a = copy();
-		let dynamic = a.requests();
-		routes.serve(a.consume());
-		assert!(
-			filling.as_mut().now_or_never().is_none(),
-			"the copy's fill is unanswered"
-		);
-		let fill = dynamic.requested_fill().now_or_never().unwrap().unwrap();
-		assert_eq!((fill.start().group, fill.end()), (0, 4));
 	}
 
 	#[test]

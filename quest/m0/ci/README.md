@@ -128,6 +128,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
 - [Land main through quest land](/quest/m0/ci/land.md) - one self-hosted runner tests every queued PR as a squash chain and fast-forwards `main` to the longest passing prefix
+- [Gate each diff in under five minutes](/quest/m0/ci/five-minutes.md) - `just check` and `just test` each finish within a worker's 5-minute prompt cache, admission wait included
 - [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm releases use `nix.moq.dev`, check its bucket sizes, and retire Cachix
@@ -138,4 +139,5 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Stats oversize](/quest/m0/ci/stats-oversize.md) - moq-stats refuses an oversized plain snapshot before parsing it back
 - [Gate send-depth](/quest/m0/ci/send-depth-gate.md) - the merge gate runs send-depth on a pinned nightly when moq-net changes, after #6890 fixes main
 - [Cargo aliases in nested checkouts](/quest/m0/ci/cargo-alias-strings.md) - `cargo build-ffi` and `cargo moq` work from a worktree nested inside another checkout
+- [Release credentials off main](/quest/m0/ci/publish-release-only.md) - `publish` admits only `release` and release tags once its `workflow_run` publishers run on their tag
 - [VM checks refuse a host without KVM](/quest/m0/ci/vm-kvm.md) - `check flake` fails fast with a clear message instead of an emulated-boot timeout

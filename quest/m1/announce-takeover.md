@@ -14,9 +14,11 @@ Rust, the lite-07 wire (ANNOUNCE_TAKEOVER, 0x5), the lite draft, the concept
 docs, and the FFI bindings landed in
 [moq-dev/moq#6994](https://github.com/moq-dev/moq/pull/6994): the origin
 records which incarnation a route continues at install, fronts and session
-selections adopt it once, cursors deliver `Takeover` only where every route
-they saw at the predecessor's prefix serves that incarnation, and relays
-forward it on that same condition, falling back to Start or Restart.
+selections follow each takeover as it lands (so a chain of them too),
+cursors deliver `Takeover` only where every route they saw at the
+predecessor's prefix serves that incarnation, and relays forward it on that
+same condition, falling back to Start or Restart. The identity guide
+describes it.
 Keep the rest in m1 as a prerequisite of the lite-07 cut. moq-transport gets
 no counterpart, since [moq-transport carries no epoch](/quest/m1/ietf-epoch-cut.md)
 (decided 2026-10-28), so a moq-transport hop uses Start/Restart.
@@ -26,6 +28,8 @@ Decided 2026-10-29 (maintainer, settling #6994): the event stays
 in place; the C ABI's `moq_announce_event` carries the predecessor fields
 rather than gaining an accessor; and a reader whose cursor saw a takeover
 withdrawn before delivery gets the claim's later answers as Start/Restart.
+A chain of in-place takeovers landing before a reader looks again is fixed
+in that PR, without keeping history of retired routes.
 JS continuity and epoch-bound requests through an adopted source moved here.
 
 What remains:
@@ -45,11 +49,6 @@ What remains:
   This is accepted for now, since the answering worker is the instance by
   construction. Decide whether that join needs the upstream's answer to
   confirm the epoch.
-- Coalesced takeovers. A front or request continues only the takeover naming
-  the route it resolved through, so in-place takeovers A→B→C installed
-  before its task runs leave it on the retired A, ending it like the
-  Start/Restart fallback. Carry continuity across the chain without keeping
-  unbounded history of retired routes.
 - Tests not yet written, with controlled time: a SUBSCRIBE or FETCH pending
   at the front between its resolve and the takeover (`PendingFront::via`),
   a takeover naming a predecessor already restarted (the `seen` stamps in
@@ -60,4 +59,3 @@ What remains:
 ## Related
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route layer whose ANNOUNCE_START layout overlaps this one's
-- [Identity and recovery guide](/quest/m1/identity-guide.md) - explains takeover alongside restart and legacy behavior

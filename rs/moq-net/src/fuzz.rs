@@ -364,13 +364,6 @@ pub fn received(track: &track::Producer) {
 	track.received();
 }
 
-/// Fill the `groups` of `track` its cache misses, a run per FETCH, as a publisher answers a
-/// range FETCH, for the session bench. The returned guard keeps the filled groups cached.
-pub async fn fill_groups(track: &track::Consumer, groups: std::ops::Range<u64>) -> crate::Result<impl Sized> {
-	track.info().await?;
-	Ok(track.fill_groups(groups, 0).await)
-}
-
 /// `origin` as a session connected to `peer` serves it, for the viewers bench.
 pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
 	origin.excluding(peer)

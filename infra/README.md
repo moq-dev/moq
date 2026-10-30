@@ -53,7 +53,8 @@ names the Environment, and a branch that is not on the list fails to start it.
 
 | Environment | Deployable from | Holds |
 | --- | --- | --- |
-| `publish` | `main`, `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, deploy, alert, and moq-bot credentials |
+| `bot` | `main`, `release`, `moq-ffi-v*` | The moq-bot key (`APP_CLIENT_ID`, `APP_PRIVATE_KEY`) alone |
+| `publish` | `main`, `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, deploy, and alert credentials, and the moq-bot key for jobs that also need one of those |
 | `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
 | `npm` | `release` | `JSR_TOKEN`; npm's trusted publisher names it |
 | `pypi` | `main`, `release`, `moq-ffi-v*` | Nothing; PyPI's trusted publisher names it |
@@ -61,7 +62,9 @@ names the Environment, and a branch that is not on the list fails to start it.
 | `github-pages` | `main` | Nothing |
 
 `main` is on the `publish` list for `workflow_run`, schedule, and dispatch jobs,
-which run there. A job that also runs dry on other refs names the Environment
+which run there, until [those publishers run on their tag](../quest/m0/ci/publish-release-only.md).
+A job that needs only the moq-bot key, such as Dependabot's, names `bot`; the land gate holds no key
+and gets its token from [the token broker](#the-token-broker). A job that also runs dry on other refs names the Environment
 only when it publishes, as in `environment: ${{ github.ref_type == 'tag' &&
 'publish' || '' }}`. Read-only secrets, such as the mbx read key, stay at the
 repository level.
@@ -139,19 +142,51 @@ After this, every release that publishes a `.deb` or `.rpm` (one of the
 triggers `apt-repo.yml` / `rpm-repo.yml`, which downloads the assets,
 regenerates the repository metadata, signs it, and uploads the diff.
 
+## Bootstrapping the landing gate
+
+`land.yml` separates queue resolution, the self-hosted build, and a hosted
+push. The worker receives only a read credential and local compiler caches;
+the hosted push reconstructs the tested chain with Quest from `main`.
+
+A maintainer coordinates the cutover. The land job gets its moq-bot token
+from [the token broker](#the-token-broker), so it reads no secret. The
+workflow cannot replace GitHub's queue until its ruleset is installed with it:
+
+1. Deploy the token broker, and delete the organization's `APP_CLIENT_ID` and
+   `APP_PRIVATE_KEY` and this repository's `APP_ID` and `APP_PRIVATE_KEY`, so
+   only the `bot` and `publish` Environments hold the key. Any branch's
+   workflow can read the others.
+2. Add moq-bot to the main ruleset's bypass actors, retain the administrator
+   bypass, remove the `merge_queue` rule, and replace `Check` with required
+   context `quest land`, pinned to an app that never reports it on PR heads.
+   Keep the deletion and non-fast-forward protections. Other required
+   checks or review rules must be ones the pinned Quest engine supports.
+3. Install the workflow source and ruleset in a coordinated maintenance
+   window. A queued PR that removes its own `merge_group` handler cannot
+   supply the old queue's required check; changing the ruleset first also
+   stops the old queue. Confirm the exact installation path before starting
+   that window. This setup does not dispatch a gate or request any landing.
+
+`MOQ_QUEUE_RUNNER` keeps selecting the existing self-hosted worker. After
+cutover, request landing with the pinned-head command in
+[`CONTRIBUTING.md`](../CONTRIBUTING.md). A new push invalidates that request.
+The Land run links any ejection reason on the PR; failures do not retry a
+batch. Measure a busy day's throughput and queue latency before declaring
+the migration complete.
+
 ## Bootstrapping the Rust build cache
 
 `.github/actions/rust-cache` points mbx at the private `mbx-moq-dev` bucket,
-namespaced per runner OS and architecture. Every job that runs on `main` or in
-its merge queue (`gh-readonly-queue/main/*`) writes what it compiles: a queued
-pull request is about to become `main`, so its code is trusted like `main`'s.
+namespaced per runner OS and architecture. Hosted jobs on `main` write what
+they compile. The landing worker uses its persistent local store and has no R2
+credentials.
 Release pull request jobs only read (main pull requests run no cloud CI), and
 fork pull requests, which get no secrets, build cold.
 
 The write key is what enforces that: it lives in a GitHub Environment that
 only those refs can deploy to, and each writer job names that Environment only
 when it runs on one of them. mbx on its own trusts only a push to a protected
-branch, which leaves out the queue and Nightly's schedule, so the action sets
+branch, which leaves out Nightly's schedule, so the action sets
 `MBX_REMOTE_TRUST_WRITES` for writers and the Environment is the only boundary.
 
 All of this runs once, by a maintainer. Steps 1, 2, and 4 are done, and step 3
@@ -177,8 +212,9 @@ is done for `main`.
    - `mbx-read`: **Object Read only**.
    - `mbx-write`: **Object Read & Write**.
 
-3. **Create the `cache-write` Environment**, deployable from `main` and its
-   merge queue only. A protected-branches policy would admit `release` as
+3. **Create the `cache-write` Environment**, deployable from `main` and the
+   protected release tags configured below.
+   A protected-branches policy would admit `release` as
    well, so name the branches instead:
 
    ```bash
@@ -187,12 +223,10 @@ is done for `main`.
    EOF
    gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
      -f name=main -f type=branch
-   gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
-     -f name='gh-readonly-queue/main/*' -f type=branch
    ```
 
-   Without the queue policy, every merge queue job that writes fails before
-   it starts, and the queue merges nothing.
+   Remove an existing `gh-readonly-queue/main/*` branch policy after the
+   batched landing gate replaces GitHub's queue.
 
 4. **Store the keys under the same two names at both levels.** An Environment
    secret shadows a repository secret of the same name, so writers get the
@@ -255,8 +289,8 @@ depends on it.
 
 Nix only trusts paths signed by the key in `flake.nix`, so the signing key is
 the trust boundary, not the bucket keys. It lives in the `cache-write`
-Environment beside one R2 token for both buckets. Only `main`, the merge queue,
-and the five release tag patterns can deploy there; anything that can reach
+Environment beside one R2 token for both buckets. Only `main` and the five
+release tag patterns can deploy there; anything that can reach
 the key can sign any path, so a second Environment for releases would only
 guard the bucket. Readers need no secret.
 
