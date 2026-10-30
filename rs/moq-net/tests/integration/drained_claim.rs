@@ -85,10 +85,10 @@ impl Worker {
 /// through a claim is reset once the answer's exact route arrives, the cold-start reset
 /// accepted until announce takeover lands, so the read retries once.
 async fn watch(relay: &origin::Producer) -> String {
-	let cold = relay.consume().request_broadcast("pool/p", None).await.unwrap();
+	let cold = relay.consume().request("pool/p", None).await.unwrap();
 	drop(cold.track("video").unwrap().subscribe(None).await);
 	settle().await;
-	let broadcast = relay.consume().request_broadcast("pool/p", None).await.unwrap();
+	let broadcast = relay.consume().request("pool/p", None).await.unwrap();
 	let mut subscription = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut group = subscription.recv_group().await.unwrap().expect("a group");
 	let frame = group.read_frame().await.unwrap().expect("a frame");

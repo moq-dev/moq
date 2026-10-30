@@ -19,11 +19,6 @@ and OBS through moq-ffi's `MoqRateControl`, `MoqVideoInit.lower`, and
 `MoqMediaTrackProducer::set_enabled`, which a pre-encoded publisher follows
 the same way.
 
-- Blocked on [BBR3 aging](/quest/m1/bbr-app-limited.md): the grant can stay
-  high for 20 s or more after the path drops, since `update_max_bw` in
-  `rs/moq-congestion/src/bbr3/mod.rs` never ages an app-limited `max_bw`
-  (measured in [moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)),
-  so a rung keeps sending into a narrowed path until that lands.
 - `moq-shaper` never steps its rate limit (queued datagrams would reorder),
   so a run whose bottleneck opens back up needs either a rate step the shaper
   can apply without reordering, or a second shaper the first retargets to.
@@ -32,10 +27,6 @@ the same way.
   `enabled` flips, and the resume, not exact timings.
 - Run it nightly with an `#[ignore]` test and a recipe in `rs/justfile`,
   beside `quic-sim`.
-
-## Required
-
-- [BBR3 aging](/quest/m1/bbr-app-limited.md) - the estimate this run reads falls within seconds of the path narrowing
 
 ## Related
 

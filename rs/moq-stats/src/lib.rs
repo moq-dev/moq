@@ -24,16 +24,15 @@
 //! `totals.json` track of each [`Tier`]'s [`Totals`] for the epoch, and a
 //! reader may request any stats label's `<label>/presence.json` track and any
 //! broadcast prefix's `<path>/prefix.json` track of [`Prefix`] counters. Each
-//! of these has a `.z` sibling encoded with [`moq_json::snapshot`]; compute
-//! names with [`totals_track`], [`presence_track`], and [`prefix_track`],
-//! picking one by [`Encoding`].
+//! is a compressed [`moq_json::snapshot`] track; compute names with
+//! [`totals_track`], [`presence_track`], and [`prefix_track`].
 //!
 //! Each group of leading broadcast-path segments is a compressed
 //! `<group>/group.json` track of [`GroupFrame`]s carrying the group's per-path
 //! [`Traffic`] and per-label [`Presence`], listed through the broadcast's
 //! track listing while the group is live; compute and parse names with
 //! [`group_track`] and [`parse_group_track`]. The full contract (paths,
-//! tracks, both encodings, and counter semantics) is at
+//! tracks, and counter semantics) is at
 //! <https://doc.moq.dev/concept/stats>.
 
 pub mod aggregate;
@@ -162,124 +161,76 @@ pub struct Group {
 	pub labels: BTreeMap<String, Presence>,
 }
 
-/// Suffix appended to a plain track name for its compressed sibling.
-pub const COMPRESSED_SUFFIX: &str = ".z";
-
-/// Which of a stats track's two encodings to name or read.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Encoding {
-	/// The plain `.json` track: each changed frame is its own group.
-	#[default]
-	Plain,
-	/// The `.json.z` sibling: merge-patch deltas under DEFLATE, for a fraction
-	/// of the bytes.
-	Compressed,
-}
-
-impl Encoding {
-	/// `name` with this encoding's suffix appended.
-	fn name(self, mut name: String) -> String {
-		if self == Self::Compressed {
-			name.push_str(COMPRESSED_SUFFIX);
-		}
-		name
-	}
-
-	/// A track name split into its plain name and encoding.
-	pub(crate) fn split(name: &str) -> (&str, Self) {
-		match name.strip_suffix(COMPRESSED_SUFFIX) {
-			Some(plain) => (plain, Self::Compressed),
-			None => (name, Self::Plain),
-		}
-	}
-
-	/// The moq-json snapshot compression that reads this encoding.
-	pub(crate) fn compression(self) -> moq_json::Compression {
-		match self {
-			Self::Plain => moq_json::Compression::None,
-			Self::Compressed => moq_json::Compression::Deflate,
-		}
-	}
-}
-
-/// The totals track's plain name.
+/// The totals track's name.
 pub(crate) const TOTALS: &str = "totals.json";
 
-/// The last segment of a presence track's plain name.
+/// The last segment of a presence track's name.
 const PRESENCE: &str = "presence.json";
 
-/// The last segment of a prefix track's plain name.
+/// The last segment of a prefix track's name.
 const PREFIX: &str = "prefix.json";
 
 /// The last segment of a group track's name.
 const GROUP: &str = "group.json";
 
-/// The totals track name: `totals.json`, plus [`COMPRESSED_SUFFIX`] for
-/// [`Encoding::Compressed`].
-pub fn totals_track(encoding: Encoding) -> String {
-	encoding.name(TOTALS.to_string())
+/// The totals track name: `totals.json`.
+pub fn totals_track() -> String {
+	TOTALS.to_string()
 }
 
 /// The presence track name for a stats label: `<label>/presence.json`, or
-/// `presence.json` for the empty label, plus [`COMPRESSED_SUFFIX`] for
-/// [`Encoding::Compressed`]. Served only while requested.
-pub fn presence_track(label: impl Into<Path>, encoding: Encoding) -> String {
-	keyed_track(&label.into(), PRESENCE, encoding)
+/// `presence.json` for the empty label. Served only while requested.
+pub fn presence_track(label: impl Into<Path>) -> String {
+	keyed_track(&label.into(), PRESENCE)
 }
 
 /// The prefix track name for a broadcast prefix: `<path>/prefix.json`, or
-/// `prefix.json` for the empty prefix, plus [`COMPRESSED_SUFFIX`] for
-/// [`Encoding::Compressed`]. Served only while requested.
-pub fn prefix_track(path: impl Into<Path>, encoding: Encoding) -> String {
-	keyed_track(&path.into(), PREFIX, encoding)
+/// `prefix.json` for the empty prefix. Served only while requested.
+pub fn prefix_track(path: impl Into<Path>) -> String {
+	keyed_track(&path.into(), PREFIX)
 }
 
 /// The group track name for a group: `<group>/group.json`, or `group.json` for
-/// the empty group. One name, compressed by the track itself, with no `.z`
-/// sibling.
+/// the empty group.
 pub fn group_track(group: impl Into<Path>) -> String {
-	keyed_track(&group.into(), GROUP, Encoding::Plain)
+	keyed_track(&group.into(), GROUP)
 }
 
 /// The group a group track name carries; `None` for any other name. The
 /// inverse of [`group_track`], for reading a stats broadcast's track listing.
 pub fn parse_group_track(name: &str) -> Option<Path> {
-	match parse_keyed_track(name, GROUP)? {
-		(group, Encoding::Plain) => Some(group),
-		(_, Encoding::Compressed) => None,
+	parse_keyed_track(name, GROUP)
+}
+
+/// `<key>/<kind>`, or `<kind>` for the empty key.
+fn keyed_track(key: &Path, kind: &str) -> String {
+	match key.is_empty() {
+		true => kind.to_string(),
+		false => format!("{}/{kind}", key.as_str()),
 	}
 }
 
-/// `<key>/<kind>`, or `<kind>` for the empty key, plus the encoding's suffix.
-fn keyed_track(key: &Path, kind: &str, encoding: Encoding) -> String {
-	encoding.name(match key.is_empty() {
-		true => kind.to_string(),
-		false => format!("{}/{kind}", key.as_str()),
-	})
-}
-
-/// The stats label a presence track name requests, and its encoding; `None`
-/// for any other name. The inverse of [`presence_track`].
-pub(crate) fn parse_presence_track(name: &str) -> Option<(Path, Encoding)> {
+/// The stats label a presence track name requests; `None` for any other name.
+/// The inverse of [`presence_track`].
+pub(crate) fn parse_presence_track(name: &str) -> Option<Path> {
 	parse_keyed_track(name, PRESENCE)
 }
 
-/// The broadcast prefix a prefix track name requests, and its encoding; `None`
-/// for any other name. The inverse of [`prefix_track`].
-pub(crate) fn parse_prefix_track(name: &str) -> Option<(Path, Encoding)> {
+/// The broadcast prefix a prefix track name requests; `None` for any other
+/// name. The inverse of [`prefix_track`].
+pub(crate) fn parse_prefix_track(name: &str) -> Option<Path> {
 	parse_keyed_track(name, PREFIX)
 }
 
 /// The key a `<key>/<kind>` name requests: the last segment picks the kind and
 /// everything before it is the key, so names stay injective across kinds.
-fn parse_keyed_track(name: &str, kind: &str) -> Option<(Path, Encoding)> {
-	let (plain, encoding) = Encoding::split(name);
-	let key = match plain.strip_suffix(kind)? {
+fn parse_keyed_track(name: &str, kind: &str) -> Option<Path> {
+	let key = match name.strip_suffix(kind)? {
 		"" => "",
 		rest => rest.strip_suffix('/').filter(|key| !key.is_empty())?,
 	};
 	// Only a valid key round-trips, so each key has exactly one name.
-	Some((Path::new(key).ok()?, encoding))
+	Path::new(key).ok()
 }
 
 /// The node a stats broadcast path names: `<prefix>/node/<node>` yields
@@ -345,41 +296,32 @@ mod tests {
 
 	#[test]
 	fn track_names() {
-		assert_eq!(totals_track(Encoding::Plain), "totals.json");
-		assert_eq!(totals_track(Encoding::Compressed), "totals.json.z");
+		assert_eq!(totals_track(), "totals.json");
 		assert_eq!(
-			presence_track(moq_net::Path::from_static("acme/live"), Encoding::Plain),
+			presence_track(moq_net::Path::from_static("acme/live")),
 			"acme/live/presence.json"
 		);
+		assert_eq!(presence_track(moq_net::Path::from_static("")), "presence.json");
 		assert_eq!(
-			presence_track(moq_net::Path::from_static(""), Encoding::Compressed),
-			"presence.json.z"
-		);
-		assert_eq!(
-			prefix_track(moq_net::Path::from_static("acme/live"), Encoding::Plain),
+			prefix_track(moq_net::Path::from_static("acme/live")),
 			"acme/live/prefix.json"
 		);
-		assert_eq!(
-			prefix_track(moq_net::Path::from_static(""), Encoding::Compressed),
-			"prefix.json.z"
-		);
+		assert_eq!(prefix_track(moq_net::Path::from_static("")), "prefix.json");
 	}
 
 	#[test]
 	fn presence_track_names_round_trip() {
 		for label in ["", "acme", "acme/live", "a.json", "x/presence.json", "publisher", "z"] {
-			for encoding in [Encoding::Plain, Encoding::Compressed] {
-				let name = presence_track(moq_net::Path::new(label).unwrap(), encoding);
-				assert_eq!(
-					parse_presence_track(&name),
-					Some((Path::try_from(label).unwrap(), encoding)),
-					"{name}"
-				);
-			}
+			let name = presence_track(moq_net::Path::new(label).unwrap());
+			assert_eq!(
+				parse_presence_track(&name),
+				Some(Path::try_from(label).unwrap()),
+				"{name}"
+			);
 		}
 
 		// Names no label produces, including ones with an empty segment, which would give
-		// one label two names.
+		// one label two names, and the retired `.z` sibling.
 		for name in [
 			"publisher.json",
 			"acme/publisher.json",
@@ -391,7 +333,7 @@ mod tests {
 			"acme//presence.json",
 			"a//b/presence.json",
 			"/a/presence.json",
-			"presence.json.z.z",
+			"presence.json.z",
 		] {
 			assert_eq!(parse_presence_track(name), None, "{name}");
 		}
@@ -408,15 +350,9 @@ mod tests {
 			"x/presence.json",
 			"publisher",
 		] {
-			for encoding in [Encoding::Plain, Encoding::Compressed] {
-				let name = prefix_track(moq_net::Path::new(path).unwrap(), encoding);
-				assert_eq!(
-					parse_prefix_track(&name),
-					Some((Path::try_from(path).unwrap(), encoding)),
-					"{name}"
-				);
-				assert_eq!(parse_presence_track(&name), None, "{name} is not a presence track");
-			}
+			let name = prefix_track(moq_net::Path::new(path).unwrap());
+			assert_eq!(parse_prefix_track(&name), Some(Path::try_from(path).unwrap()), "{name}");
+			assert_eq!(parse_presence_track(&name), None, "{name} is not a presence track");
 		}
 
 		for name in [
@@ -428,7 +364,7 @@ mod tests {
 			"xprefix.json",
 			"/prefix.json",
 			"acme//prefix.json",
-			"prefix.json.z.z",
+			"prefix.json.z",
 		] {
 			assert_eq!(parse_prefix_track(name), None, "{name}");
 		}

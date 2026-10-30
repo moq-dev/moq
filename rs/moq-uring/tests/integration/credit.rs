@@ -98,15 +98,15 @@ fn endpoints(
 			.server(&[ALPN], quic::server::ClientAuth::None)
 			.expect("tls"),
 	);
-	server_config.transport.receive_window = Some(window as u64);
-	server_config.transport.stream_receive_window = Some(stream_window as u64);
+	server_config.transport.limits.receive_window = std::num::NonZeroU64::new(window as u64);
+	server_config.transport.limits.stream_receive_window = std::num::NonZeroU64::new(stream_window as u64);
 	let server = quic::Endpoint::new(
 		socket(handle),
 		quic::endpoint::Config::default().with_server(server_config),
 	)
 	.expect("server endpoint");
 	let client = quic::Endpoint::new(socket(handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
-	let mut dial = quic::client::Config::new(server.local_addr(), "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
 	(server, client, dial)
@@ -137,7 +137,10 @@ fn leases_spend_the_connection_window() {
 
 	worker
 		.block_on(async move {
-			let mut dialed = client.connect(&dial).await.expect("dial");
+			let mut dialed = client
+				.connect(&dial, server.local_addr(), "localhost")
+				.await
+				.expect("dial");
 			let mut accepted = server.accept().await.expect("accept");
 			let send = std::future::poll_fn(|cx| dialed.poll_open_uni(cx))
 				.await
@@ -178,7 +181,10 @@ fn stuck_window_evicts_the_lower_priority() {
 
 	worker
 		.block_on(async move {
-			let mut dialed = client.connect(&dial).await.expect("dial");
+			let mut dialed = client
+				.connect(&dial, server.local_addr(), "localhost")
+				.await
+				.expect("dial");
 			let mut accepted = server.accept().await.expect("accept");
 			for _ in 0..2 {
 				let send = std::future::poll_fn(|cx| dialed.poll_open_uni(cx))
@@ -244,14 +250,14 @@ fn chunked_writes_stop_at_the_window() {
 			.server(&[ALPN], quic::server::ClientAuth::None)
 			.expect("tls"),
 	);
-	server_config.transport.stream_receive_window = Some(STREAM_WINDOW as u64);
+	server_config.transport.limits.stream_receive_window = std::num::NonZeroU64::new(STREAM_WINDOW as u64);
 	let server = quic::Endpoint::new(
 		socket(&handle),
 		quic::endpoint::Config::default().with_server(server_config),
 	)
 	.expect("server endpoint");
 	let client = quic::Endpoint::new(socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
-	let mut dial = quic::client::Config::new(server.local_addr(), "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
 
@@ -259,7 +265,10 @@ fn chunked_writes_stop_at_the_window() {
 
 	worker
 		.block_on(async move {
-			let mut dialed = client.connect(&dial).await.expect("dial");
+			let mut dialed = client
+				.connect(&dial, server.local_addr(), "localhost")
+				.await
+				.expect("dial");
 			let mut accepted = server.accept().await.expect("accept");
 
 			let mut send = std::future::poll_fn(|cx| dialed.poll_open_uni(cx))
@@ -339,7 +348,10 @@ fn tiny_frames_do_not_pin_receive_buffers() {
 
 	worker
 		.block_on(async move {
-			let mut dialed = client.connect(&dial).await.expect("dial");
+			let mut dialed = client
+				.connect(&dial, server.local_addr(), "localhost")
+				.await
+				.expect("dial");
 			let mut accepted = server.accept().await.expect("accept");
 
 			dialed

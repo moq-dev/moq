@@ -1,12 +1,11 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { Instant, Manual, Milli, Nano } from "@moq/clock";
+import { Instant, Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { RefusedRedirect } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
-import { nextTask } from "../util/yield.ts";
 import { accept } from "./accept.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { Redirects, Reload } from "./reload.ts";
@@ -76,7 +75,7 @@ const url = new URL("https://relay.example/room");
 // Short enough to watch, long enough that a handover visibly overlaps the replacement.
 const handover = Milli(200);
 
-test("an empty GOAWAY migrates the announced request to the replacement session", async () => {
+test("an empty GOAWAY migrates the follower to the replacement session", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const { dials, origin } = fleet();
@@ -93,7 +92,7 @@ test("an empty GOAWAY migrates the announced request to the replacement session"
 		// A session younger than this counts as redirected immediately and backs off first.
 		delay: { initial: Milli(1) },
 	});
-	const watched = consume.request(Path.from("cam"), { announced: true });
+	const watched = consume.follow(Path.from("cam"));
 
 	try {
 		await waitUntil(() => watched.active.peek() !== undefined);
@@ -113,7 +112,7 @@ test("an empty GOAWAY migrates the announced request to the replacement session"
 		expect(reload.status.peek()).toBe("connected");
 
 		// Without an epoch the replacement route is a new publisher instance.
-		// The announced request follows it while the old session finishes draining.
+		// The follower follows it while the old session finishes draining.
 		await elapse(clock, () => watched.active.peek() !== undefined && watched.active.peek() !== served);
 		expect(watched.closed.peek()).toBeUndefined();
 		await elapse(clock, () => drained.closed);
@@ -298,7 +297,7 @@ test("the connection's tokens ride every session across a GOAWAY", async () => {
 	// so the reconnect's delay passes long before the draining session's handover.
 	const until = async (done: () => boolean) => {
 		for (let i = 0; i < 100 && !done(); i++) {
-			await nextTask();
+			await yieldNow();
 			await clock.advance(Nano.fromMilli(Milli(1)));
 		}
 		expect(done()).toBe(true);
@@ -351,13 +350,13 @@ test("the connection's tokens ride every session across a GOAWAY", async () => {
 		// session keeps presenting it beside its successor.
 		await until(() => relays[1]?.tokens.includes("token") === true);
 		await until(() => token.grant.peek() !== undefined && reload.established.peek() !== undefined);
-		await nextTask();
+		await yieldNow();
 		expect(first.withdrawn).not.toContain("token");
 		let ended = false;
 		void token.closed.then(() => {
 			ended = true;
 		});
-		await nextTask();
+		await yieldNow();
 		expect(ended).toBe(false);
 
 		// The tokens end with the loop.

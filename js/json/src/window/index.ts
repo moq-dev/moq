@@ -16,7 +16,7 @@
  * are tagged `push` and `pop` ops, positional against the group header.
  * Indices stop at `Number.MAX_SAFE_INTEGER`, matching the Rust implementation's wire domain.
  * Trimming is therefore an op, not a group boundary, so dropping a record costs one small frame
- * inside the shared compression window instead of a roll that would throw that window away.
+ * instead of a roll that restates the whole window.
  *
  * The publisher rolls a group when a joiner wants a fresh one: once the ops in the open group
  * outweigh the track's `refresh` ratio times the header that opened it, a join asks for a group past
@@ -37,6 +37,6 @@
  */
 
 export { Consumer, type ConsumerConfig } from "./consumer.ts";
-export { Decoder, type DecoderConfig, type Event, type Group, type Span } from "./decoder.ts";
+export { Decoder, type Event, type Group, type Span } from "./decoder.ts";
 export { type Config, type Encoded, Encoder, type Pending } from "./encoder.ts";
 export { Producer, type ProducerConfig } from "./producer.ts";

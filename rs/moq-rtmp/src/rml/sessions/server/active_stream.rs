@@ -2,6 +2,7 @@ use super::PublishMode;
 
 pub enum StreamState {
 	Created,
+	Requested,
 
 	Publishing { stream_key: String, mode: PublishMode },
 

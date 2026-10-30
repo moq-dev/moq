@@ -51,7 +51,7 @@ If your auth server can take longer than the handshake timeout allows, raise `--
 
 ### `--epoch` is removed (#5967)
 
-Remove `--epoch` and `MOQ_EPOCH`: `--epoch` is now an unknown flag, and `MOQ_EPOCH` is ignored.
+Remove `--epoch` and `MOQ_EPOCH`: either stops startup as an unknown flag or environment variable.
 Every `moq` run mints its own epoch, so two importers fed one stream publish two instances, and the newest wins new requests.
 To fail over between them, follow restarts: `export ts --stitch` switches programs, and players follow the announced restart.
 Other consumers, such as `export ts --passthrough`, end with the instance they read.

@@ -8,6 +8,12 @@ How to update your code for each breaking change, newest first.
 
 `media.VideoInit` is its own struct rather than an alias of the generated record, so its new `Lower` field takes a `*media.TrackProducer`. A composite literal with `Format`, `Data`, `Label`, and `Hint` compiles unchanged; build one that way where you converted a generated `MoqVideoInit`.
 
+### Compression moves to the track
+
+`moq.dev/moq/flate` is removed: publish opaque bytes on a `TrackProducer`.
+`SnapshotOptions` and `WindowOptions` lose `Compression`, and `StreamOptions` and `ConsumerOptions` are removed: `NewStreamProducer` and every JSON consumer constructor take only the track (and broadcast).
+Publish the track with `&moq.TrackInfo{Compress: true}` instead; a consumer reads a compressed track with no option of its own.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 Publishing, serving, or requesting a broadcast at a path with a leading, trailing, or doubled `/` returns an error instead of collapsing it. Pass the canonical path, such as `room/cam`.

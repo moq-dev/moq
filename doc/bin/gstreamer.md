@@ -159,4 +159,9 @@ To decrypt a capture, set `quic-keylog=true` on either element along with
 `SSLKEYLOGFILE`; the variable alone writes nothing, and the flag without it fails
 the start. Existing Unix log files must be private (mode 0600); files accessible to group or others are refused.
 
-`moqsrc` creates source pads only for enabled renditions. Disabling a rendition stops its media and holds its pad idle without EOS; enabling it again resumes on the same pad.
+`moqsrc` initially selects only enabled renditions. When a selected rendition is
+disabled, it keeps reading on the same pad while no rendition of its kind is
+enabled, so media arriving before the re-enable catalog update still plays. An
+enabled alternative stops the disabled reader but keeps its pad idle without EOS;
+enabling it again resumes on that pad. Removing a rendition drains its track and
+ends its pad.

@@ -202,6 +202,9 @@ async function audio(
 /** What a subscriber reads: a video frame and decoded audio, or the group live demand fills on a track. */
 type Read = { kind: "media"; out: string; ms: number } | { kind: "group"; file: string; track?: string };
 
+/** The released origin, which follows a path through `request`. */
+type Released = { request(path: Moq.Path.Valid, options: { announced: true }): Moq.Origin.Requesting };
+
 /** Print `received N bytes` once both media have arrived, or record the observed group. */
 async function subscribe(url: URL, broadcast: string, read: Read) {
 	install();
@@ -210,7 +213,10 @@ async function subscribe(url: URL, broadcast: string, read: Read) {
 	if (read.kind === "media" && !(await Libav.polyfill())) throw new Error("no AudioDecoder");
 	const origin = new Moq.Origin.Producer();
 	const connection = await connect({ url, consume: origin, websocket: { enabled: false } });
-	const requested = origin.request(Moq.Path.from(broadcast), { announced: true });
+	// Released packages follow with `request(path, { announced: true })`; current ones with `follow(path)`.
+	const path = Moq.Path.from(broadcast);
+	const requested =
+		"follow" in origin ? origin.follow(path) : (origin as unknown as Released).request(path, { announced: true });
 	try {
 		let bc = requested.active.peek();
 		while (!bc) {
