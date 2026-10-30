@@ -211,6 +211,9 @@ jobs:
     # Directly on ffi-release: its gate is what makes the head_sha checkout trusted.
     needs: [ffi-release, build, verify]
     runs-on: ubuntu-latest
+    # The moq-bot key lives in the `bot` Environment, which only protected
+    # refs can deploy to, not in an organization secret any branch can read.
+    environment: bot
     if: ${{ needs.build.outputs.publish == 'true' }}
 
     steps:
