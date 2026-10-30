@@ -82,6 +82,11 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	#[ignore = "benchmark; runs in nightly"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures host CPU time"
+	)]
 	async fn benchmark_damage_pid_fanout() {
 		let error = anyhow::anyhow!("broken PES");
 		eprintln!("pids,damaged_units,ns_per_unit");

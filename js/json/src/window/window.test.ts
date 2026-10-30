@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Milli, yieldNow } from "@moq/clock";
 import { Group, Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
@@ -42,10 +42,7 @@ class Live {
 		for (;;) {
 			const idle = Symbol("idle");
 			this.#next ??= this.consumer.next();
-			const event = await Promise.race([
-				this.#next,
-				new Promise<typeof idle>((resolve) => setTimeout(() => resolve(idle), 0)),
-			]);
+			const event = await Promise.race([this.#next, yieldNow().then((): typeof idle => idle)]);
 			if (event === idle || event === undefined) return;
 			this.#next = undefined;
 			this.events.push(event.value);

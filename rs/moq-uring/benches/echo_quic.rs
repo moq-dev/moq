@@ -9,6 +9,7 @@ mod support;
 #[cfg(target_os = "linux")]
 #[expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "benchmarks measure themselves on the host clock"
 )]
 mod linux {

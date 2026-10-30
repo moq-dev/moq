@@ -1015,7 +1015,6 @@ impl Driver {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::playback::sink::{self, Input};
@@ -1321,6 +1320,10 @@ mod tests {
 
 		// Let the driver reach `park` with an empty mailbox, then race a flood
 		// of notifications against it.
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the driver is a real OS thread that parks outside any runtime"
+		)]
 		std::thread::sleep(Duration::from_millis(10));
 		std::thread::scope(|s| {
 			for _ in 0..8 {
@@ -1385,6 +1388,10 @@ mod tests {
 			requests.wait(Some(Instant::now() + PATIENCE))
 		});
 
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the driver is a real OS thread that parks outside any runtime"
+		)]
 		std::thread::sleep(Duration::from_millis(10));
 		waker.sync();
 

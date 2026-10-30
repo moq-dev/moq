@@ -232,6 +232,10 @@ mod tests {
 			std::thread::yield_now();
 		}
 		// The inner changed() may not have parked yet; give it a turn.
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the test thread has no runtime; it gives the follower's runtime thread a real turn"
+		)]
 		std::thread::sleep(std::time::Duration::from_millis(50));
 		let _sub = track.consume(None).unwrap();
 		estimate

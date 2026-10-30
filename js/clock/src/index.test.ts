@@ -208,6 +208,7 @@ test("an interval cancels pending ticks, refuses concurrent ticks and stays clos
 });
 
 test("the host clock counts from the performance time origin", () => {
+	// biome-ignore lint/style/noRestrictedGlobals: checks the host backend against the global it wraps.
 	const host = performance;
 	const before = host.now();
 	const at = Nano.toMilli(Instant.durationSince(now(), Instant.zero));

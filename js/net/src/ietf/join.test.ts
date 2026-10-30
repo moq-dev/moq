@@ -1,4 +1,5 @@
 import { expect, jest, onTestFinished, test } from "bun:test";
+import { Elapsed, Instant, Milli, Nano, now, timeout } from "@moq/clock";
 import * as Connection from "../connection/index.ts";
 import { GRACE } from "../ledger.ts";
 import { createMockTransportPair, textFrame } from "../mock.ts";
@@ -37,18 +38,14 @@ async function nextStream(
 ): Promise<Stream | undefined> {
 	const reader =
 		transport.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
-	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		const next = await Promise.race([
-			reader.read(),
-			new Promise<undefined>((resolve) => {
-				timer = setTimeout(() => resolve(undefined), wait);
-			}),
-		]);
+		const next = await timeout(Nano.fromMilli(Milli(wait)), reader.read()).catch((error: unknown) => {
+			if (error instanceof Elapsed) return undefined;
+			throw error;
+		});
 		if (!next || next.done) return undefined;
 		return new Stream({ readable: next.value.readable, writable: next.value.writable, version });
 	} finally {
-		clearTimeout(timer);
 		reader.releaseLock();
 	}
 }
@@ -291,7 +288,7 @@ test("a joining FETCH has no deadline of its own", async () => {
 
 test("a joining FETCH reset after FETCH_OK costs only the head", async () => {
 	const { subscriber, consumer, fetching, peer } = await join();
-	const started = performance.now();
+	const started = now();
 
 	const tail = subscriber.handleGroup(...liveStream(GROUP, 2, ["t2"]));
 	await accept(fetching);
@@ -308,7 +305,7 @@ test("a joining FETCH reset after FETCH_OK costs only the head", async () => {
 	expect(group?.sequence).toBe(GROUP + 1);
 	expect(await consumer.recvGroup()).toBeUndefined();
 	expect(await consumer.closed).toBeNull();
-	expect(performance.now() - started).toBeLessThan(GRACE);
+	expect(Nano.toMilli(Instant.durationSince(now(), started))).toBeLessThan(GRACE);
 });
 
 test("SUBSCRIPTION_ENDED cancels a head nothing claimed", async () => {
@@ -492,7 +489,7 @@ test("a draft-22 fill that overtakes SUBSCRIBE_OK waits for it", async () => {
 test("a draft-22 fill counts toward PUBLISH_DONE's Stream Count", async () => {
 	const { subscriber, consumer, subscribe, peer, answer } = await subscribed(DRAFT_22);
 	await answer({ groupId: 0n, objectId: 0n });
-	const started = performance.now();
+	const started = now();
 	await subscriber.handleFetch(await head(subscribe.requestId, ["catalog"], 0, DRAFT_22));
 	await peer.writer.u53(PublishDone.id);
 	const done = new PublishDone({ statusCode: PublishDoneStatus.TRACK_ENDED, streamCount: 1n, reasonPhrase: "done" });
@@ -504,7 +501,7 @@ test("a draft-22 fill counts toward PUBLISH_DONE's Stream Count", async () => {
 	expect(await frames(group)).toEqual(["catalog"]);
 	expect(await consumer.recvGroup()).toBeUndefined();
 	expect(await consumer.closed).toBeNull();
-	expect(performance.now() - started).toBeLessThan(GRACE);
+	expect(Nano.toMilli(Instant.durationSince(now(), started))).toBeLessThan(GRACE);
 });
 
 test("a clean end finishes a head nothing claimed", () => {

@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { type Micro, Milli, Nano, now } from "@moq/clock";
+import { type Micro, Milli, Nano, now, yieldNow } from "@moq/clock";
 import { Container } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
@@ -60,7 +60,7 @@ async function pendingListeners(run: () => Promise<void>): Promise<number> {
 test("waits on a stable clock leave nothing behind", async () => {
 	const sync = new Sync({ delay: Milli(10) });
 	// Let the delay effect run before anchoring.
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	sync.received(Nano.toMilli(Nano(now())));
 
 	const wait = async () => {

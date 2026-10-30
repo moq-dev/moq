@@ -497,11 +497,6 @@ fn highest_bucket(buckets: &[u64]) -> Option<u64> {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use std::sync::Arc;
 
@@ -785,6 +780,11 @@ mod tests {
 	/// Sweep observation concurrency and report density without a network bottleneck.
 	#[test]
 	#[ignore = "performance measurement; run by the nightly stats benchmark"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures real observation throughput"
+	)]
 	fn benchmark_observation_contention() {
 		use std::sync::Barrier;
 		use std::time::Instant;

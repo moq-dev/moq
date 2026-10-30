@@ -1,6 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
-import { Manual, Micro, Milli, Nano, now, type Second } from "@moq/clock";
+import { Manual, Micro, Milli, Nano, now, type Second, yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
@@ -12,7 +12,7 @@ import { type Delay, Sync } from "../sync";
 import { Decoder } from "./decoder";
 import { Source } from "./source";
 
-const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+const flush = () => yieldNow();
 
 async function settle(): Promise<void> {
 	for (let i = 0; i < 8; i++) await flush();

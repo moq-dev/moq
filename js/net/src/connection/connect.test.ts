@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, sleep } from "@moq/clock";
+import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ClientSetup, ServerSetup } from "../lite/compat.ts";
@@ -20,7 +20,7 @@ const SECRET = "super-secret-jwt";
 const authUrl = new URL(`https://example.com/test?jwt=${SECRET}#frag`);
 
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 }
 
 const CONSOLE_METHODS = ["debug", "info", "log", "warn", "error"] as const;

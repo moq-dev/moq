@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { getter, Once, race, Signal } from "@moq/signals";
 import { announcedView } from "./announced.test-util";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
@@ -42,7 +43,7 @@ function serve(origin: Producer, prefix: Path.Valid, consume: () => BroadcastCon
 }
 
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 }
 
 /**

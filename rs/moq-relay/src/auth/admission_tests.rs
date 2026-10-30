@@ -137,7 +137,7 @@ async fn a_moved_gateway_tier_retags_its_stats() {
 	let work = tokio::spawn(auth::hold(admitted.lease, std::future::pending::<()>()));
 	grant.tier = Some("moved".into());
 	producer.update(grant);
-	tokio::time::timeout(std::time::Duration::from_secs(5), async {
+	moq_clock::timeout(std::time::Duration::from_secs(5), async {
 		while active("moved") != 1 {
 			tokio::task::yield_now().await;
 		}

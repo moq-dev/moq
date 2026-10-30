@@ -535,7 +535,6 @@ mod tests {
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	#[tokio::test]
 	#[ignore = "needs a PipeWire desktop and Vulkan GPU"]
-	#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 	async fn packed_dmabuf_renders_through_vulkan() {
 		let instance = wgpu::Instance::default();
 		let adapter = instance
@@ -571,7 +570,7 @@ mod tests {
 		let mut stream = crate::capture::open(&capture).await.expect("portal screen capture");
 
 		for index in 0..16 {
-			let frame = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read())
+			let frame = moq_clock::timeout(std::time::Duration::from_secs(5), stream.read())
 				.await
 				.unwrap_or_else(|_| panic!("timed out waiting for frame {index}"))
 				.unwrap_or_else(|error| panic!("capture failed before frame {index}: {error}"))

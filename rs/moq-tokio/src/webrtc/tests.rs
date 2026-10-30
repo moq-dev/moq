@@ -1,5 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::*;
 
@@ -53,7 +53,7 @@ async fn transfer(offerer: &Offerer, answerer: &Answerer, payload: &[u8]) {
 		.init()
 		.unwrap()
 		.with_subscriber(subscribed);
-	let (_server, _client) = tokio::time::timeout(TIMEOUT, async {
+	let (_server, _client) = moq_clock::timeout(TIMEOUT, async {
 		tokio::join!(server, async { client.connect_webrtc(offerer).await.unwrap() })
 	})
 	.await
@@ -69,7 +69,7 @@ async fn transfer(offerer: &Offerer, answerer: &Answerer, payload: &[u8]) {
 		let mut group = track.recv_group().await.unwrap().unwrap();
 		group.read_frame().await.unwrap().unwrap()
 	};
-	let frame = tokio::time::timeout(TIMEOUT, read).await.expect("transfer timed out");
+	let frame = moq_clock::timeout(TIMEOUT, read).await.expect("transfer timed out");
 	assert!(frame.payload[..] == *payload, "the frame arrived corrupted");
 }
 
@@ -108,7 +108,7 @@ async fn channels() -> (Offerer, Answerer, Opened, Opened) {
 		.await
 		.unwrap();
 	offerer.accept(&answer).await.unwrap();
-	let (sent, received) = tokio::time::timeout(TIMEOUT, async { tokio::join!(offerer.channel(), answerer.channel()) })
+	let (sent, received) = moq_clock::timeout(TIMEOUT, async { tokio::join!(offerer.channel(), answerer.channel()) })
 		.await
 		.expect("the channel did not open");
 	(offerer, answerer, sent.unwrap(), received.unwrap())
@@ -128,7 +128,7 @@ async fn unread_records_do_not_stall_the_writer() {
 	let (_offerer, _answerer, sent, received) = channels().await;
 	let (mut writer, mut reader) = (sent.channel.writer, received.channel.reader);
 	let count = 8 * SEND_WINDOW / RECORD_SIZE as usize;
-	tokio::time::timeout(TIMEOUT, async {
+	moq_clock::timeout(TIMEOUT, async {
 		for index in 0..count {
 			writer.send(record(index)).await.unwrap();
 		}
@@ -151,7 +151,7 @@ async fn ignoring_flow_control_closes_the_channel() {
 	let budget = RECEIVE_WINDOW + READ_SLACK;
 	let within = (budget / RECORD_SIZE) as usize;
 	let (mut writer, mut reader) = (sent.channel.writer, received.channel.reader);
-	tokio::time::timeout(TIMEOUT, async {
+	moq_clock::timeout(TIMEOUT, async {
 		for index in 0..within + 8 {
 			if writer.send(record(index)).await.is_err() {
 				break;
@@ -217,7 +217,7 @@ async fn server_reflexive_candidate_is_offered_and_selected() {
 		.await
 		.unwrap();
 
-	let candidate = tokio::time::timeout(TIMEOUT, offerer.candidate())
+	let candidate = moq_clock::timeout(TIMEOUT, offerer.candidate())
 		.await
 		.expect("gathering timed out")
 		.expect("no server-reflexive candidate");
@@ -266,7 +266,7 @@ async fn unsignaled_protocol_is_refused() {
 		.listen()
 		.await
 		.unwrap();
-	let accepted = tokio::time::timeout(TIMEOUT, listener.accept_webrtc(&answerer))
+	let accepted = moq_clock::timeout(TIMEOUT, listener.accept_webrtc(&answerer))
 		.await
 		.expect("the channel did not open");
 	assert!(matches!(
@@ -351,7 +351,7 @@ fn construction_queues_no_output() {
 		idle(rtc);
 	}
 
-	let mut offerer = Rtc::builder().build(Instant::now());
+	let mut offerer = Rtc::builder().build(moq_clock::now().into_std());
 	host(&mut offerer, "127.0.0.1:5000");
 	host(&mut offerer, "[::1]:5000");
 	let mut api = offerer.sdp_api();
@@ -359,7 +359,7 @@ fn construction_queues_no_output() {
 	let (offer, _pending) = api.apply().unwrap();
 	idle(&mut offerer);
 
-	let mut answerer = Rtc::builder().build(Instant::now());
+	let mut answerer = Rtc::builder().build(moq_clock::now().into_std());
 	host(&mut answerer, "127.0.0.1:5001");
 	host(&mut answerer, "[::1]:5001");
 	answerer.sdp_api().accept_offer(offer).unwrap();

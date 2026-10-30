@@ -56,7 +56,7 @@ async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
 	// listener answers a loopback handshake well inside it, and on Linux the
 	// socket check before this is what proves the port closed.
 	let url: url::Url = format!("https://{quic}/").parse().expect("parse url");
-	let after = tokio::time::timeout(
+	let after = moq_clock::timeout(
 		Duration::from_millis(500),
 		client().with_reconnect(false).connect(url).established(),
 	)
@@ -139,7 +139,7 @@ fn open_sockets() -> std::collections::HashSet<u64> {
 /// worker thread and listener goes through, as opposed to aborting the task.
 async fn stop(trigger: moq_relay::shutdown::Trigger, running: tokio::task::JoinHandle<anyhow::Result<()>>) {
 	trigger.start();
-	tokio::time::timeout(TIMEOUT, running)
+	moq_clock::timeout(TIMEOUT, running)
 		.await
 		.expect("run did not return after the shutdown trigger")
 		.expect("run panicked")
@@ -275,7 +275,7 @@ async fn embed_and_stop(mut config: Config) {
 	let subscriber_origin = moq_tokio::origin::spawn();
 	let consumer = subscriber_origin.consume();
 	let mut announced = consumer.announced();
-	let subscriber = tokio::time::timeout(
+	let subscriber = moq_clock::timeout(
 		TIMEOUT,
 		client()
 			.with_reconnect(false)
@@ -287,13 +287,13 @@ async fn embed_and_stop(mut config: Config) {
 	.expect("connect timeout")
 	.expect("connect failed");
 
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+	let (update, active) = moq_clock::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let announced = tokio::time::timeout(TIMEOUT, consumer.request("test", None))
+	let announced = moq_clock::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");
@@ -303,12 +303,12 @@ async fn embed_and_stop(mut config: Config) {
 		.subscribe(None)
 		.await
 		.expect("subscribe");
-	let mut group = tokio::time::timeout(TIMEOUT, subscription.recv_group())
+	let mut group = moq_clock::timeout(TIMEOUT, subscription.recv_group())
 		.await
 		.expect("recv_group timeout")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
-	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("read_frame timeout")
 		.expect("read_frame failed")

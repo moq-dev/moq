@@ -1,14 +1,17 @@
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { Micro, Milli } from "@moq/clock";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { type Installed, Manual, Micro, Milli, Nano } from "@moq/clock";
 import { Time, Track } from "@moq/net";
 import { Consumer } from "./consumer";
 import { encodeFrame, Format, Producer } from "./legacy";
 
-let clock: ReturnType<typeof spyOn>;
+// Frozen at 200ms: nothing in these tests waits on time.
+let installed: Installed;
 beforeEach(() => {
-	clock = spyOn(performance, "now").mockReturnValue(200);
+	const clock = new Manual();
+	clock.jump(Nano.fromMilli(Milli(200)));
+	installed = clock.install();
 });
-afterEach(() => clock.mockRestore());
+afterEach(() => installed.close());
 
 function setup() {
 	const track = new Track.Producer("rewind");

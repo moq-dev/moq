@@ -998,7 +998,6 @@ fn reject_listener_cors(cors: &crate::web::Cors, endpoint: &str) -> anyhow::Resu
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::future::Future;
@@ -1119,12 +1118,12 @@ mod tests {
 		});
 		let server = accepting.await.unwrap();
 		tokio::spawn(moq_relay::supervise(server, lease.unwrap(), observer.serve(), None));
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		reading.store(false, Ordering::Relaxed);
 
 		let mut signals = Signals::new().unwrap();
 		let shutdown = Shutdown { trigger, observer };
-		tokio::time::timeout(window * 2, drain(shutdown, &mut signals))
+		moq_clock::timeout(window * 2, drain(shutdown, &mut signals))
 			.await
 			.expect("a stalled session held the drain past its deadline");
 		let (reason, _) = producer
@@ -1227,7 +1226,7 @@ mod tests {
 			);
 			tokio::time::advance(Duration::from_secs(1)).await;
 			tokio::time::resume();
-			let error = tokio::time::timeout(TIMEOUT, listening.connection.closed())
+			let error = moq_clock::timeout(TIMEOUT, listening.connection.closed())
 				.await
 				.unwrap()
 				.unwrap_err();
@@ -1258,12 +1257,12 @@ mod tests {
 					moq_auth::Pattern::all(),
 				)));
 				tokio::time::resume();
-				let connection = tokio::time::timeout(TIMEOUT, listening.connection.clone().established())
+				let connection = moq_clock::timeout(TIMEOUT, listening.connection.clone().established())
 					.await
 					.unwrap()
 					.unwrap();
 				// Media proves the CLI admitted the session, even on a transport that establishes early.
-				let payload = tokio::time::timeout(TIMEOUT, async {
+				let payload = moq_clock::timeout(TIMEOUT, async {
 					let broadcast = listening
 						.consumer
 						.follow("probe", None)
@@ -1511,7 +1510,7 @@ mod tests {
 		}
 
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(50), tasks.join_next())
+			moq_clock::timeout(std::time::Duration::from_millis(50), tasks.join_next())
 				.await
 				.is_err(),
 			"the server task should still be accepting connections"

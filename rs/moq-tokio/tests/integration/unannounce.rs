@@ -19,13 +19,13 @@ async fn release(unannounce: bool, settle: bool) {
 	if unannounce {
 		broadcast.unannounce();
 		if settle {
-			tokio::time::sleep(Duration::from_secs(1)).await;
+			moq_clock::sleep(Duration::from_secs(1)).await;
 		}
 	}
 
 	drop(sub);
 	drop(consumer);
-	tokio::time::timeout(Duration::from_secs(600), crate::unwanted(track.demand()))
+	moq_clock::timeout(Duration::from_secs(600), crate::unwanted(track.demand()))
 		.await
 		.expect("demand released")
 		.unwrap();

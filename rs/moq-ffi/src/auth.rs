@@ -94,7 +94,7 @@ mod tests {
 		// Let the wait park before cancelling it.
 		tokio::task::yield_now().await;
 		grants.cancel();
-		let result = tokio::time::timeout(Duration::from_secs(5), waiting)
+		let result = moq_clock::timeout(Duration::from_secs(5), waiting)
 			.await
 			.expect("the wait outlived its cancel")
 			.unwrap();

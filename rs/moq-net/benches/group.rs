@@ -24,6 +24,7 @@
 
 #![expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "`iter_custom` timings measure the host clock on purpose"
 )]
 

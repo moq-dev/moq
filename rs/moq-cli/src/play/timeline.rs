@@ -624,7 +624,6 @@ pub(super) struct Fit {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -853,8 +852,7 @@ mod tests {
 		video.declare();
 		video.end(ms(60_000)).unwrap();
 		audio.plan(transition, ms(0), Some(DELAY));
-		let resumed =
-			tokio::time::timeout(Duration::from_millis(1), audio.resume(transition, ms(0), Some(DELAY))).await;
+		let resumed = moq_clock::timeout(Duration::from_millis(1), audio.resume(transition, ms(0), Some(DELAY))).await;
 		assert!(resumed.is_ok(), "audio waited for video's next end");
 	}
 
@@ -873,7 +871,7 @@ mod tests {
 		let transition = video.declare();
 		video.end(ms(10_000)).unwrap();
 		video.plan(transition, ms(0), None);
-		let resume = tokio::time::timeout(
+		let resume = moq_clock::timeout(
 			DELAY + Duration::from_millis(150),
 			video.resume(transition, ms(0), None),
 		)
@@ -896,7 +894,7 @@ mod tests {
 		let transition = video.declare();
 		video.end(ms(10_000)).unwrap();
 		video.plan(transition, ms(0), None);
-		let resume = tokio::time::timeout(
+		let resume = moq_clock::timeout(
 			DELAY + Duration::from_millis(150),
 			video.resume(transition, ms(0), None),
 		)
@@ -923,7 +921,7 @@ mod tests {
 		}
 		let transition = video.declare();
 		video.plan(transition, ms(0), None);
-		let resume = tokio::time::timeout(Duration::from_millis(400), video.resume(transition, ms(0), None)).await;
+		let resume = moq_clock::timeout(Duration::from_millis(400), video.resume(transition, ms(0), None)).await;
 		assert!(resume.is_ok(), "video waited past the drained tail");
 	}
 
@@ -944,7 +942,7 @@ mod tests {
 		drop(successor);
 		let transition = video.declare();
 		video.plan(transition, ms(0), None);
-		let resume = tokio::time::timeout(Duration::from_millis(250), video.resume(transition, ms(0), None)).await;
+		let resume = moq_clock::timeout(Duration::from_millis(250), video.resume(transition, ms(0), None)).await;
 		assert!(resume.is_err(), "video resumed over the retired audio tail");
 	}
 

@@ -21,7 +21,7 @@ async fn running<T>(child: &mut Child, what: &str, step: impl Future<Output = T>
 	tokio::select! {
 		out = step => out,
 		status = child.wait() => panic!("moq exited with {} before {what}", status.expect("wait for moq")),
-		_ = tokio::time::sleep(TIMEOUT) => panic!("{what} timed out"),
+		_ = moq_clock::sleep(TIMEOUT) => panic!("{what} timed out"),
 	}
 }
 
@@ -107,14 +107,14 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 		.expect("a catalog");
 
 	drop(stdin);
-	let status = tokio::time::timeout(TIMEOUT, child.wait())
+	let status = moq_clock::timeout(TIMEOUT, child.wait())
 		.await
 		.expect("moq never exited")
 		.expect("wait for moq");
 	assert!(status.success(), "moq exited with {status}");
 
 	loop {
-		match tokio::time::timeout(TIMEOUT, catalogs.next())
+		match moq_clock::timeout(TIMEOUT, catalogs.next())
 			.await
 			.expect("the catalog never ended")
 		{
@@ -178,7 +178,7 @@ async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 	.await
 	.expect("subscribe to the catalog");
 
-	let catalog = tokio::time::timeout(TIMEOUT, catalogs.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalogs.next())
 		.await
 		.expect("no catalog")
 		.expect("catalog read")
@@ -190,12 +190,12 @@ async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 		.next()
 		.expect("a video rendition")
 		.clone();
-	let mut track = tokio::time::timeout(TIMEOUT, broadcast.track(&name).expect("track").subscribe(None))
+	let mut track = moq_clock::timeout(TIMEOUT, broadcast.track(&name).expect("track").subscribe(None))
 		.await
 		.expect("the video subscription timed out")
 		.expect("subscribe to the video");
 	let mut frames = 0;
-	while let Some(mut group) = tokio::time::timeout(TIMEOUT, track.recv_group())
+	while let Some(mut group) = moq_clock::timeout(TIMEOUT, track.recv_group())
 		.await
 		.expect("the video never ended")
 		.expect("video group")
@@ -206,7 +206,7 @@ async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 	}
 	assert!(frames > 0, "the subscriber received no video");
 
-	let status = tokio::time::timeout(TIMEOUT, child.wait())
+	let status = moq_clock::timeout(TIMEOUT, child.wait())
 		.await
 		.expect("moq never exited")
 		.expect("wait for moq");

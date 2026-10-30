@@ -31,6 +31,10 @@ const SETTLE: Duration = Duration::from_millis(10);
 /// Wall-clock bound on anything the test waits for.
 const WAIT: Duration = Duration::from_secs(10);
 
+#[expect(
+	clippy::disallowed_methods,
+	reason = "the watchdog runs on tokio's real clock, beside the installed manual clock"
+)]
 async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
 	tokio::time::timeout(WAIT, fut)
 		.await
@@ -137,6 +141,10 @@ async fn pass(clock: &moq_clock::Installed, total: Duration) {
 	while passed < total {
 		clock.advance(STEP);
 		passed += STEP;
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "real sockets settle on tokio's clock, beside the installed manual clock"
+		)]
 		tokio::time::sleep(SETTLE).await;
 	}
 }

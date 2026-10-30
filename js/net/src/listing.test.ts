@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { NotFound, StreamCode, StreamError } from "./error.ts";
 import type { Tracks } from "./listing.ts";
@@ -6,7 +7,7 @@ import { wireOf } from "./wire.ts";
 
 /** Lets queued microtasks and the listing's signal notifications run. */
 function settle(): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, 0));
+	return yieldNow();
 }
 
 /**

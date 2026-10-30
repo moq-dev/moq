@@ -22,8 +22,8 @@ const HALF: usize = CLIP.len() / 2;
 
 /// Feed `clip` to `write` at about real time, never catching up in a burst.
 async fn feed(clip: &[u8], mut write: impl AsyncFnMut(&[u8])) {
-	let mut pace = tokio::time::interval(PACE);
-	pace.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+	let mut pace = moq_clock::interval(PACE);
+	pace.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Delay);
 	for chunk in clip.chunks(CHUNK) {
 		pace.tick().await;
 		write(chunk).await;
@@ -75,7 +75,7 @@ fn sink(relay: &Relay, broadcast: &str, sink: &str) -> (Child, Lines<BufReader<C
 
 /// The next line the sink prints, or `None` once it exits.
 async fn next<T: serde::de::DeserializeOwned>(lines: &mut Lines<BufReader<ChildStdout>>) -> Option<T> {
-	let line = tokio::time::timeout(TIMEOUT, lines.next_line())
+	let line = moq_clock::timeout(TIMEOUT, lines.next_line())
 		.await
 		.expect("the sink printed nothing")
 		.expect("read the sink");
@@ -83,7 +83,7 @@ async fn next<T: serde::de::DeserializeOwned>(lines: &mut Lines<BufReader<ChildS
 }
 
 async fn wait(child: &mut Child) -> std::process::ExitStatus {
-	tokio::time::timeout(TIMEOUT, child.wait())
+	moq_clock::timeout(TIMEOUT, child.wait())
 		.await
 		.expect("moq never exited")
 		.expect("wait for moq")
@@ -355,7 +355,7 @@ async fn a_late_sink_reads_the_final_report() {
 	stdin.write_all(CLIP).await.expect("write stdin");
 	drop(stdin);
 	let mut stderr = BufReader::new(import.stderr.take().expect("stderr")).lines();
-	let ended = tokio::time::timeout(TIMEOUT, async {
+	let ended = moq_clock::timeout(TIMEOUT, async {
 		while let Some(line) = stderr.next_line().await.expect("read the import's stderr") {
 			if line.contains("input ended") {
 				return;

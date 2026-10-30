@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Milli, Nano, sleep } from "@moq/clock";
 import { Effect } from "@moq/signals";
 import { Fanout } from "./fanout";
 
@@ -19,7 +20,7 @@ function pushable<T>(): { stream: ReadableStream<T>; push: (value: T) => void; c
 
 // Let the fanout's pump drain everything pushed so far, so a test that asserts on the queue's
 // contents isn't racing it.
-const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
+const flush = () => sleep(Nano.fromMilli(Milli(10)));
 
 const INVALID_QUEUES = [
 	0,
@@ -37,10 +38,7 @@ async function take<T>(stream: ReadableStream<T>, count: number): Promise<T[]> {
 	const out: T[] = [];
 
 	for (let i = 0; i < count; i++) {
-		const next = await Promise.race([
-			reader.read(),
-			new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 50)),
-		]);
+		const next = await Promise.race([reader.read(), sleep(Nano.fromMilli(Milli(50))).then(() => undefined)]);
 		if (!next || next.done) break;
 		out.push(next.value);
 	}

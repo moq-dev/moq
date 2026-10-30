@@ -257,7 +257,7 @@ pub(crate) async fn published<E>(
 		let track = consumer.track(&name).unwrap().subscribe(replay).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, container);
 		let mut timestamps = Vec::new();
-		while let Some(frame) = tokio::time::timeout(std::time::Duration::from_secs(5), reader.read_frame())
+		while let Some(frame) = moq_clock::timeout(std::time::Duration::from_secs(5), reader.read_frame())
 			.await
 			.expect("the importer finished its tracks")
 			.unwrap()

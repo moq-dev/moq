@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
@@ -151,7 +152,7 @@ test("does not carry a hold to another broadcast", async () => {
 
 		// The same catalog on another broadcast probes nothing new, so wait on a timer, not the probe.
 		current.set(broadcast({ mic: config("opus", { enabled: false }) }).broadcast);
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await yieldNow();
 		expect(source.out.track.peek()).toBeUndefined();
 	} finally {
 		source.close();
@@ -166,7 +167,7 @@ test("does not hold an enabled selection into another broadcast's disabled rendi
 		expect(source.out.track.peek()).toBe("mic");
 
 		current.set(broadcast({ mic: config("opus", { enabled: false }) }).broadcast);
-		for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+		for (let i = 0; i < 5; i++) await yieldNow();
 		expect(source.out.track.peek()).toBeUndefined();
 		expect(source.out.config.peek()).toBeUndefined();
 	} finally {

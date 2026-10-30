@@ -251,7 +251,7 @@ fn client_at(bind: &str) -> moq_tokio::Client {
 }
 
 async fn connect(url: url::Url, bind: &str) -> moq_tokio::Connection {
-	tokio::time::timeout(
+	moq_clock::timeout(
 		TIMEOUT,
 		client_at(bind)
 			.with_subscriber(moq_tokio::origin::spawn())
@@ -265,7 +265,7 @@ async fn connect(url: url::Url, bind: &str) -> moq_tokio::Connection {
 }
 
 async fn wait_listed(fixture: &Fixture, n: usize) -> List {
-	let deadline = std::time::Instant::now() + Duration::from_secs(5);
+	let deadline = moq_clock::now() + Duration::from_secs(5);
 	loop {
 		let (status, list) = fixture.list("").await;
 		assert_eq!(status, reqwest::StatusCode::OK);
@@ -273,11 +273,11 @@ async fn wait_listed(fixture: &Fixture, n: usize) -> List {
 			return list;
 		}
 		assert!(
-			std::time::Instant::now() < deadline,
+			moq_clock::now() < deadline,
 			"expected {n} sessions, got {}",
 			list.sessions.len()
 		);
-		tokio::time::sleep(Duration::from_millis(25)).await;
+		moq_clock::sleep(Duration::from_millis(25)).await;
 	}
 }
 
@@ -301,12 +301,12 @@ async fn push_by_id_refuses_inside_the_cadence() {
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
 	assert_eq!(nudged.ids.as_slice(), std::slice::from_ref(&id));
 
-	tokio::time::timeout(Duration::from_secs(3), session.closed())
+	moq_clock::timeout(Duration::from_secs(3), session.closed())
 		.await
 		.expect("a push must close the session well inside the cadence")
 		.expect_err("refused as Unauthorized");
 
-	tokio::time::sleep(Duration::from_millis(200)).await;
+	moq_clock::sleep(Duration::from_millis(200)).await;
 	let ends = script.ends();
 	assert_eq!(ends.len(), 1);
 	assert_eq!(ends[0].id, id);
@@ -352,16 +352,16 @@ async fn path_and_cidr_select_a_subset() {
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
 	assert_eq!(nudged.ids.len(), 2);
 
-	tokio::time::timeout(Duration::from_secs(3), a.closed())
+	moq_clock::timeout(Duration::from_secs(3), a.closed())
 		.await
 		.expect("path match a")
 		.expect_err("refused");
-	tokio::time::timeout(Duration::from_secs(3), b.closed())
+	moq_clock::timeout(Duration::from_secs(3), b.closed())
 		.await
 		.expect("path match b")
 		.expect_err("refused");
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), c.closed())
+		moq_clock::timeout(Duration::from_millis(200), c.closed())
 			.await
 			.is_err(),
 		"the unmatched session must stay"
@@ -380,7 +380,7 @@ async fn websocket_is_listed_and_closes_on_a_push() {
 	script.on_revalidate(Answer::Status(403));
 	let (status, _) = fixture.revalidate(&format!("?id={}", list.sessions[0].id)).await;
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
-	tokio::time::timeout(Duration::from_secs(3), session.closed())
+	moq_clock::timeout(Duration::from_secs(3), session.closed())
 		.await
 		.expect("websocket push")
 		.expect_err("refused");
@@ -399,12 +399,12 @@ async fn empty_filter_reaches_all() {
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
 	assert_eq!(nudged.ids.len(), 2);
 
-	tokio::time::timeout(Duration::from_secs(3), async {
+	moq_clock::timeout(Duration::from_secs(3), async {
 		loop {
 			if script.revalidate_ids().len() >= 2 {
 				break;
 			}
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			moq_clock::sleep(Duration::from_millis(20)).await;
 		}
 	})
 	.await
@@ -425,18 +425,18 @@ async fn a_pushed_retier_arrives_on_the_next_reply() {
 	let (status, _) = fixture.revalidate("").await;
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
 
-	tokio::time::timeout(Duration::from_secs(3), async {
+	moq_clock::timeout(Duration::from_secs(3), async {
 		loop {
 			if script.events().contains(&Event::Revalidate) {
 				break;
 			}
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			moq_clock::sleep(Duration::from_millis(20)).await;
 		}
 	})
 	.await
 	.expect("the push re-checked");
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), session.closed())
+		moq_clock::timeout(Duration::from_millis(200), session.closed())
 			.await
 			.is_err(),
 		"a retier must not close the session"

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Elapsed, Manual, Milli, Nano, sleep, timeout } from "@moq/clock";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { randomHop } from "../hop.ts";
@@ -97,15 +97,13 @@ const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /** Whether `promise` settles within `ms`. */
 async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const pending = new Promise<false>((resolve) => {
-		timer = setTimeout(() => resolve(false), ms);
-	});
-	try {
-		return await Promise.race([promise.then(() => true), pending]);
-	} finally {
-		clearTimeout(timer);
-	}
+	return await timeout(Nano.fromMilli(Milli(ms)), promise).then(
+		() => true,
+		(error: unknown) => {
+			if (error instanceof Elapsed) return false;
+			throw error;
+		},
+	);
 }
 
 describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (version) => {
@@ -180,20 +178,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	test("readers hold at a missing group until the grace settles the subscription", async () => {
-		const realTimeout = globalThis.setTimeout;
-		const realNow = performance.now.bind(performance);
-		let now = 0;
-		performance.now = () => now;
-		let expire!: () => void;
-		let armed!: () => void;
-		const graceArmed = new Promise<void>((resolve) => (armed = resolve));
-		globalThis.setTimeout = ((callback: () => void, delay?: number) => {
-			if (delay !== GRACE) return realTimeout(callback, delay);
-			expire = callback;
-			armed();
-			// The test advances this clock explicitly, without a wall-clock timer.
-			return 0;
-		}) as typeof setTimeout;
+		// The test advances this clock explicitly, without a wall-clock timer.
+		const clock = new Manual();
+		const installed = clock.install();
 
 		let subscriber: Subscriber | undefined;
 		try {
@@ -208,7 +195,6 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			await group.handled;
 			await respond({ end: new SubscribeEnd(2) });
 			await fin();
-			await graceArmed;
 
 			// Group 0 has no header, so accounting still waits, and its stream may yet
 			// land behind group 1's. The arrival reader holds at the hole; the sequence
@@ -224,14 +210,11 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			expect(hooks.subscriberEnd(reader)).toEqual({ group: 2, frame: 0 });
 
 			// The grace gives up on group 0, and the settled subscription ends the reader.
-			now = GRACE;
-			expire();
-			expect(await held).toBeUndefined();
+			expect(await clock.drive(held)).toBeUndefined();
 			expect(await reader.closed).toBeNull();
 			ordered.close();
 		} finally {
-			globalThis.setTimeout = realTimeout;
-			performance.now = realNow;
+			installed.close();
 			subscriber?.close();
 		}
 	});
@@ -375,7 +358,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await respond({ end: new SubscribeEnd(4) });
 		await fin();
 		// Long enough for a subscription that owed nothing more to have ended.
-		await new Promise((resolve) => setTimeout(resolve, 50));
+		await sleep(Nano.fromMilli(Milli(50)));
 
 		// QUIC does not order streams, so the lowered groups land after the FIN.
 		for (const sequence of [1, 2]) {

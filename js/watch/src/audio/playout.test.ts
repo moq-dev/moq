@@ -1,5 +1,5 @@
-import { describe, expect, it, spyOn } from "bun:test";
-import { Micro, Milli } from "@moq/clock";
+import { describe, expect, it } from "bun:test";
+import { Manual, Micro, Milli, Nano } from "@moq/clock";
 import * as Container from "@moq/hang/container";
 import { Time, Track, Varint } from "@moq/net";
 import { AUTO_MAX_DELAY, target } from "./latency";
@@ -70,12 +70,12 @@ interface Measured {
 
 /**
  * Feed `t` through the path the decoder measures on: a transport subscription into a container
- * consumer, on a stubbed monotonic clock, one group per frame. After each arrival `budget` turns the
+ * consumer, on a Manual clock, one group per frame. After each arrival `budget` turns the
  * current target into the subscription's max delay, the way the decoder does.
  */
 async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<Measured> {
-	let clock = 0;
-	const now = spyOn(performance, "now").mockImplementation(() => clock);
+	const clock = new Manual();
+	const installed = clock.install();
 	const track = new Track.Producer("audio");
 	const subscriber = track.subscribe({ maxDelay: budget(Milli.zero) });
 	const consumer = new Container.Consumer(subscriber, {
@@ -95,8 +95,9 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 	try {
 		let next = 0;
 		while (next < t.length) {
-			clock = t[next].arrival;
-			for (; next < t.length && t[next].arrival === clock; next++) {
+			const arrival = t[next].arrival;
+			clock.jump(Nano(Nano.fromMilli(Milli(arrival)) - clock.now()));
+			for (; next < t.length && t[next].arrival === arrival; next++) {
 				const media = Micro.fromMilli(t[next].media as Milli);
 				const group = track.createGroup(next);
 				group.writeFrame({ payload: encode(media), timestamp: Time.Timestamp.fromMicros(media) });
@@ -115,7 +116,7 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 		track.close();
 		consumer.close();
 		await reader;
-		now.mockRestore();
+		installed.close();
 	}
 
 	return result;

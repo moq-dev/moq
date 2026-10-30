@@ -540,7 +540,6 @@ impl Ingest {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests bound waits on the host clock")]
 mod tests {
 	use std::time::Duration;
 
@@ -552,6 +551,10 @@ mod tests {
 	/// 30 fps at the RTP video clock.
 	const FRAME: u32 = 3000;
 
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "the watchdog runs on tokio's host timer: tests that install a manual clock advance the ambient one past it"
+	)]
 	async fn within<T>(what: &str, step: impl Future<Output = T>) -> T {
 		tokio::time::timeout(WAIT, step)
 			.await
@@ -1024,7 +1027,7 @@ mod tests {
 				tokio::select! {
 					result = &mut pull => return result.unwrap().unwrap_err(),
 					// A driver turn, so the pull can read what was sent.
-					_ = tokio::time::sleep(Duration::ZERO) => {}
+					_ = moq_clock::sleep(Duration::ZERO) => {}
 				}
 			}
 			unreachable!()
@@ -1054,7 +1057,7 @@ mod tests {
 		let snapshot = catalog_with(&catalog, 1, 0).await;
 		let reader = subscribe(&broadcast, video_track(&snapshot)).await;
 		// Half a second of silence, well past the 100ms allowance, then the matching timestamp.
-		tokio::time::sleep(Duration::from_millis(500)).await;
+		moq_clock::sleep(Duration::from_millis(500)).await;
 		session.video(0, 45_000, &[fake::H264_SLICE]).await;
 		session.close().await;
 		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
@@ -1150,7 +1153,7 @@ mod tests {
 				tokio::select! {
 					result = &mut pull => return result.unwrap().unwrap_err(),
 					// A driver turn, so the pull can read what was sent.
-					_ = tokio::time::sleep(Duration::ZERO) => {}
+					_ = moq_clock::sleep(Duration::ZERO) => {}
 				}
 			}
 			unreachable!()

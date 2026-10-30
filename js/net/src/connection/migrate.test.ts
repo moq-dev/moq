@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { Instant, Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
 import { RefusedRedirect } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -18,15 +18,15 @@ afterEach(() => {
 });
 
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 }
 
 // Polls until `pred` holds, so a regression fails the test instead of hanging it.
 async function waitUntil(pred: () => boolean, ms = 2000): Promise<void> {
-	const deadline = Date.now() + ms;
+	const deadline = Instant.add(now(), Nano.fromMilli(Milli(ms)));
 	for (;;) {
 		if (pred()) return;
-		if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+		if (now() > deadline) throw new Error("timed out waiting for condition");
 		await settle();
 	}
 }

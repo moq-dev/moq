@@ -79,7 +79,7 @@ async fn admit(observer: &shutdown::Observer, version: moq_net::Version, stalled
 
 	// Paused time advances only once every task is idle, so the relay is
 	// supervising the session by the time this returns.
-	tokio::time::sleep(Duration::from_millis(1)).await;
+	moq_clock::sleep(Duration::from_millis(1)).await;
 	assert!(
 		lease.closed().now_or_never().is_none(),
 		"the session ended before the drain"
@@ -102,10 +102,10 @@ async fn a_session_ignoring_the_goaway_is_closed_at_the_deadline() {
 	for alpn in ["moq-lite-06", "moq-lite-03", "moq-transport-18"] {
 		let (trigger, observer) = shutdown::Observer::new(WINDOW);
 		let session = admit(&observer, alpn.parse().unwrap(), false).await;
-		let started = tokio::time::Instant::now();
+		let started = moq_clock::now();
 		let drained = drain(&trigger, &observer);
 
-		tokio::time::timeout(WINDOW + Duration::from_secs(1), drained)
+		moq_clock::timeout(WINDOW + Duration::from_secs(1), drained)
 			.await
 			.unwrap_or_else(|_| panic!("{alpn}: the drain outlived its deadline"))
 			.unwrap();
@@ -135,7 +135,7 @@ async fn a_stalled_goaway_write_is_still_closed_at_the_deadline() {
 	let session = admit(&observer, "moq-lite-06".parse().unwrap(), true).await;
 	let drained = drain(&trigger, &observer);
 
-	tokio::time::timeout(WINDOW + Duration::from_secs(1), drained)
+	moq_clock::timeout(WINDOW + Duration::from_secs(1), drained)
 		.await
 		.expect("a stalled GOAWAY held the drain past its deadline")
 		.unwrap();

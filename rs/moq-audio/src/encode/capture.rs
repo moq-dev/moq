@@ -1217,7 +1217,6 @@ fn frame(samples: &[f32], timestamp_us: u64) -> Result<Frame, Error> {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::collections::VecDeque;
 	use std::future::Future;
@@ -1512,7 +1511,7 @@ mod tests {
 	}
 
 	async fn wait_for(control: &mut Control, status: Status) -> State {
-		tokio::time::timeout(Duration::from_secs(1), async {
+		moq_clock::timeout(Duration::from_secs(1), async {
 			loop {
 				let state = control.state();
 				if state.status() == status {
@@ -1589,7 +1588,7 @@ mod tests {
 		events
 			.try_push(Ok(capture::Samples::plain(vec![0.25, -0.5, 1.0, -1.0], false)))
 			.unwrap();
-		let level = tokio::time::timeout(Duration::from_secs(1), async {
+		let level = moq_clock::timeout(Duration::from_secs(1), async {
 			loop {
 				let level = control.level();
 				if level != Level::default() {
@@ -1620,7 +1619,7 @@ mod tests {
 				.try_push(Ok(capture::Samples::plain(vec![0.25, -0.5, 1.0, -1.0], false)))
 				.unwrap();
 		}
-		tokio::time::timeout(Duration::from_millis(100), control.changed())
+		moq_clock::timeout(Duration::from_millis(100), control.changed())
 			.await
 			.expect_err("a level change woke a state waiter");
 
@@ -1639,7 +1638,7 @@ mod tests {
 			..driver
 		};
 
-		let err = tokio::time::timeout(Duration::from_secs(1), driver.run_with(source))
+		let err = moq_clock::timeout(Duration::from_secs(1), driver.run_with(source))
 			.await
 			.expect("a terminal failure parked instead of returning")
 			.expect_err("the terminal failure was swallowed");
@@ -1675,7 +1674,7 @@ mod tests {
 		events
 			.try_push(Ok(capture::Samples::plain(vec![0.5, -0.5], false)))
 			.unwrap();
-		tokio::time::timeout(Duration::from_secs(1), async {
+		moq_clock::timeout(Duration::from_secs(1), async {
 			while control.level() == Level::default() {
 				tokio::task::yield_now().await;
 			}
@@ -1725,7 +1724,7 @@ mod tests {
 		let task = tokio::spawn(driver.run_with(source));
 
 		assert_eq!(control.track_name(), "audio");
-		tokio::time::timeout(Duration::from_secs(1), async {
+		moq_clock::timeout(Duration::from_secs(1), async {
 			while attempts.load(Ordering::SeqCst) == 0 {
 				tokio::task::yield_now().await;
 			}
@@ -2086,7 +2085,7 @@ mod tests {
 		poll_pending(run.as_mut()).await;
 		assert_eq!(attempts.load(Ordering::SeqCst), 1);
 		drop(control);
-		tokio::time::timeout(Duration::from_secs(1), run)
+		moq_clock::timeout(Duration::from_secs(1), run)
 			.await
 			.expect("dropping the controls ends the driver")
 			.unwrap();
@@ -2104,7 +2103,7 @@ mod tests {
 			poll_pending(run.as_mut()).await;
 		}
 		drop(control);
-		tokio::time::timeout(Duration::from_secs(1), run)
+		moq_clock::timeout(Duration::from_secs(1), run)
 			.await
 			.expect("dropping the controls ends the driver")
 			.unwrap();
@@ -2409,7 +2408,7 @@ mod tests {
 				.unwrap();
 			// Published before anyone subscribes: the largest location is read without asking for it.
 			let mut probe = fixture.consumer.track("audio").unwrap();
-			tokio::time::timeout(Duration::from_secs(1), probe.largest())
+			moq_clock::timeout(Duration::from_secs(1), probe.largest())
 				.await
 				.expect("a group published with nobody listening")
 				.expect("the track is still open");
@@ -2453,7 +2452,7 @@ mod tests {
 			drop(track);
 			wait_for(&mut fixture.publication, Status::Waiting).await;
 
-			tokio::time::sleep(idle).await;
+			moq_clock::sleep(idle).await;
 
 			let mut track = fixture.subscribe().await;
 			let after = fixture.deliver(&second, &mut track, &[before]).await;
@@ -2519,7 +2518,7 @@ mod tests {
 				}
 				wait_for(&mut fixture.publication, Status::Waiting).await;
 				// Idle past the minimum segment, so each run is listed as its own segment.
-				tokio::time::sleep(moq_mux::hls::DEFAULT_DURATION + Duration::from_millis(100)).await;
+				moq_clock::sleep(moq_mux::hls::DEFAULT_DURATION + Duration::from_millis(100)).await;
 			}
 
 			let (mut catalog, consumer) = fixture.finish().await;
