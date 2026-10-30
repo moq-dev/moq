@@ -33,8 +33,11 @@ Decided in quest-plan (2026-10-30):
   `rs/moq-net/tests/integration/route_change.rs` already covers the
   `Disconnect` and `Unannounce` triggers over lite-04 to 06 under mock time.
   It checks that the subscription ends and a re-request reaches the survivor.
-  Extend it, or a sibling sharing its topology, so a follower on the
-  subscriber's origin also observes the restart for both triggers.
+  Extend it, or a sibling sharing its topology, so a follower one wire hop
+  past the relay observes the restart for both triggers. Watching
+  `announced()` on the relay's own origin only sees its local model event,
+  which `better_route_restarts` already covers; the follower must see what the
+  relay sends over the wire.
   Cover lite-07-wip with an epochless route too, if the topology can produce
   one. Player-level resume is already covered on a graceful leave by
   `just test native-play` (lite-06 publishers) and
