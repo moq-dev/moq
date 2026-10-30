@@ -46,7 +46,12 @@ enum Late {
 	Delivered,
 	/// They never arrive, like a stream reset before its header.
 	Lost,
+	/// The publisher's session dies before they arrive.
+	Killed,
 }
+
+/// The error the publisher's session dies with.
+const DEATH: moq_net::SessionError = moq_net::SessionError::App(7);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
@@ -172,6 +177,7 @@ async fn round(version: &str, late: Late, final_sequence: u64, max_delay: Option
 	match late {
 		Late::Delivered => pair.server_transport.release_unis(),
 		Late::Lost => pair.server_transport.drop_unis(),
+		Late::Killed => pair.server.abort(moq_net::Error::Session(DEATH)),
 	}
 
 	let (frames, err, ended) = moq_clock::timeout(TIMEOUT, reader)
@@ -234,6 +240,26 @@ async fn a_lost_group_ends_the_track_after_the_grace() {
 			outcome.elapsed >= GRACE / 2,
 			"{version}: ended after {:?}",
 			outcome.elapsed
+		);
+	}
+}
+
+/// A session that dies with the tail still owed cuts the track off, even though the publisher
+/// ended it: a clean end would pass the missing group off as never sent. Lite-03 declares no
+/// end, so nothing there says a group is owed.
+#[moq_clock::test]
+async fn a_session_death_before_the_tail_aborts_the_track() {
+	for version in ["moq-lite-05", "moq-lite-07-wip"] {
+		let outcome = round(version, Late::Killed, 1, None).await;
+		assert!(
+			outcome.frames.is_empty(),
+			"{version}: got {} frame(s)",
+			outcome.frames.len()
+		);
+		assert!(
+			matches!(&outcome.err, Some(moq_net::Error::Session(code)) if *code == DEATH),
+			"{version}: ended with {:?}",
+			outcome.err
 		);
 	}
 }

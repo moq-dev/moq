@@ -548,25 +548,16 @@ impl SubscriptionCleanup {
 	/// End every active subscription with the session's error. Group machines own
 	/// their cleanup independently; this records the track's terminal state.
 	///
-	/// A subscription the publisher already ended finishes instead, here and on
-	/// [`Self::close`]: its track is over, and what arrived stays servable to readers
-	/// still behind rather than handed to another route.
+	/// Even a subscription the publisher already ended aborts: finishing it before its tail
+	/// settled would report what arrived as the whole track. Once the declared end settled,
+	/// [`track::Producer::abort`] ends its readers cleanly instead. Before lite-05 the FIN
+	/// is that end, declared here at the live edge since nothing more can arrive.
 	fn abort(&self, err: &Error) {
 		for (_, entry) in self.0.lock().drain() {
-			let _ = match entry.tail.read().is_ended() {
-				true => entry.producer.finish(),
-				false => entry.producer.abort(err.clone()),
-			};
-		}
-	}
-	fn close(&self) {
-		for (_, entry) in self.0.lock().drain() {
-			let _ = match entry.tail.read().is_ended() {
-				true => entry.producer.finish(),
-				false => entry
-					.producer
-					.abort(Error::Stream(crate::StreamError::Session(crate::SessionError::Cancel))),
-			};
+			if entry.tail.read().is_ended() {
+				let _ = entry.producer.finish();
+			}
+			let _ = entry.producer.abort(err.clone());
 		}
 	}
 }
@@ -628,7 +619,8 @@ impl SubscriberDriver {
 
 	pub fn close(&self) {
 		self.subscriber.note_end(&Error::Cancel);
-		self.cleanup.close();
+		self.cleanup
+			.abort(&Error::Stream(crate::StreamError::Session(crate::SessionError::Cancel)));
 	}
 
 	/// Read what the closed transport already delivered: the buffered uni streams, then
@@ -3779,6 +3771,91 @@ mod tests {
 		}
 	}
 
+	/// SUBSCRIBE_START at group 0 and SUBSCRIBE_END at 1: the publisher ended the track
+	/// owing group 0.
+	fn owed_responses(version: Version) -> Vec<u8> {
+		let mut responses = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut responses, version.into());
+		lite::SubscribeResponse::Start(lite::SubscribeStart {
+			largest: None,
+			starts: vec![Some(0)],
+		})
+		.encode(&mut encoder, version)
+		.unwrap();
+		lite::SubscribeResponse::End(lite::SubscribeEnd { group: 1 })
+			.encode(&mut encoder, version)
+			.unwrap();
+		responses
+	}
+
+	/// Drive the subscriber with a peer's response bytes and FIN, owing a group that never
+	/// arrives, then close the session: the track ends with the session's error.
+	async fn check_owed_tail_death(version: Version, responses: Vec<u8>) {
+		let session = crate::lite::test_transport::ScriptedSession::eof(responses);
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			subscriber,
+			path: Path::from_static("room"),
+			epoch: None,
+			name: "video".to_string(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
+		let mut reader = broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let gate = serve.gate();
+		let mut running = TrackServeRun {
+			serve,
+			state: TrackRunState::Serve(serving),
+			gate,
+		};
+		assert!(
+			kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending(),
+			"{version:?}: the tail still owes group 0"
+		);
+		crate::transport::poll::Session::close(&session, crate::SessionError::App(7).to_code(), "died");
+		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready());
+		let res = reader.recv_group().await.err();
+		assert!(matches!(res, Some(Error::Session(_))), "{version:?}: {res:?}");
+	}
+
+	#[moq_clock::test]
+	async fn an_owed_tail_aborts_at_session_death() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			check_owed_tail_death(version, owed_responses(version)).await;
+		}
+	}
+
+	/// Both runtimes abort a track whose tail the other's publisher still owed when the
+	/// session died.
+	#[moq_clock::test]
+	#[ignore = "requires Bun; run by just test bare-fin in interop CI"]
+	async fn owed_tail_death_interop() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let responses =
+				crate::test_interop::owed_tail(crate::Version::from(version).alpn(), owed_responses(version));
+			check_owed_tail_death(version, responses).await;
+		}
+	}
+
 	/// Removing a subscription both stops delivery and releases the session's handle
 	/// on the producer, so the track (its cached groups, its stats subscription) ends
 	/// rather than outliving the subscription it belonged to.
@@ -4473,19 +4550,27 @@ mod tests {
 		}
 	}
 
-	/// A session that dies hands a live track back with the session's error, but finishes one
-	/// whose subscription the publisher already ended, as the driver's cleanup does.
+	/// A session that dies before a tail settles hands the track back with the session's error,
+	/// even one the publisher ended, and the abort `TrackServeRun` commits then ends readers
+	/// cleanly only if the declared end settled: SUBSCRIBE_END on lite-05+, the FIN before it.
 	#[moq_clock::test]
-	async fn internal_session_end_gives_back_live_and_finishes_ended() {
+	async fn internal_session_end_aborts_an_unsettled_tail() {
 		use crate::transport::poll::Session as _;
-		for ended in [false, true] {
+		// The publisher ended the track; whether its last group finished.
+		for (version, ended) in [
+			(Version::Lite04, None),
+			(Version::Lite04, Some(false)),
+			(Version::Lite04, Some(true)),
+			(Version::Lite05, Some(false)),
+			(Version::Lite05, Some(true)),
+		] {
 			let (session, peer) = crate::transport::memory::pair(Default::default());
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
 				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
-				version: VERSION,
+				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_hop: None,
 				cost: None,
@@ -4506,7 +4591,15 @@ mod tests {
 			assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
 			// Held for the whole round: a dropped tail settles at once.
 			let tail = kio::Producer::new(Tail::default());
-			if ended {
+			let mut group = serving.serving.append_group().unwrap();
+			if let Some(finished) = ended {
+				if finished {
+					group.finish().unwrap();
+				}
+				if version.has_track_stream() {
+					serving.serving.finish_at(Position::group(1)).unwrap();
+				}
+				// The tail machine has not seen group 0 accounted for, so it never settles.
 				serving.mode = ServeMode::Tail {
 					settle: Settle::new(&serve.subscriber.runtime, tail.consume()),
 					owed: Some(std::iter::once(0..1).collect()),
@@ -4516,13 +4609,23 @@ mod tests {
 			}
 			peer.close(crate::SessionError::Unauthorized.to_code(), "revoked");
 			let end = serving.poll(&serve, &kio::Waiter::noop());
+			let Poll::Ready(ServeEnd::GiveBack(err @ Error::Session(crate::SessionError::Unauthorized))) = end else {
+				panic!("{version:?} {ended:?}: the tail must hand the track back");
+			};
+			let track = serving.serving.clone();
+			serving.serving.abort(err).unwrap();
+			let outcome = track.poll_closed(&kio::Waiter::noop());
 			match ended {
-				true => assert!(matches!(end, Poll::Ready(ServeEnd::Finished))),
-				false => assert!(matches!(
-					end,
-					Poll::Ready(ServeEnd::GiveBack(Error::Session(crate::SessionError::Unauthorized)))
-				)),
+				Some(true) => assert!(matches!(outcome, Poll::Ready(Ok(()))), "{version:?}: {outcome:?}"),
+				_ => assert!(
+					matches!(
+						outcome,
+						Poll::Ready(Err(Error::Session(crate::SessionError::Unauthorized)))
+					),
+					"{version:?} {ended:?}: {outcome:?}"
+				),
 			}
+			drop(group);
 		}
 	}
 
@@ -7698,14 +7801,15 @@ impl ServeLoop {
 					if self.fetches.is_empty() && crate::util::poll_unwanted(&mut self.demand, waiter).is_ready() {
 						return Poll::Ready(ServeEnd::Idle);
 					}
-					// The publisher already ended the track, so a session that dies now
-					// finishes it, as `SubscriptionCleanup` does, rather than hand it to
-					// another route. A copy whose subscription alone ended is handed back.
+					// The tail is still unsettled, so a session that dies now cuts the track
+					// off, even one the publisher ended: the abort ends readers cleanly only
+					// once the declared end settled. Before lite-05 the FIN is that end, as in
+					// `SubscriptionCleanup`.
 					if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
-						return Poll::Ready(match track {
-							true => ServeEnd::Finished,
-							false => ServeEnd::GiveBack(crate::lite::error::from_transport(err)),
-						});
+						if *track && !serve.subscriber.version.has_track_stream() {
+							let _ = self.serving.finish();
+						}
+						return Poll::Ready(ServeEnd::GiveBack(crate::lite::error::from_transport(err)));
 					}
 					return Poll::Pending;
 				}
@@ -7949,6 +8053,10 @@ impl ServeLoop {
 								tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "subscribe covered");
 								let budget = self.serving.subscription().map(|sub| sub.budget());
 								if let Ok(mut tail) = active.tail.write() {
+									// Lite-05+ declared the end with SUBSCRIBE_END instead.
+									if !serve.subscriber.version.has_track_stream() {
+										tail.end();
+									}
 									tail.set_grace(tail::grace(budget.unwrap_or_default()));
 									tail.expire(serve.subscriber.runtime.now());
 								}
@@ -7976,7 +8084,10 @@ impl ServeLoop {
 								// (it bounds presentation-time drift), but it is how long the
 								// subscriber was willing to wait for a late group anyway.
 								if let Ok(mut tail) = active.tail.write() {
-									tail.end();
+									// Lite-05+ declared the end with SUBSCRIBE_END instead.
+									if !serve.subscriber.version.has_track_stream() {
+										tail.end();
+									}
 									tail.set_grace(tail::grace(
 										subscription.map(|sub| sub.budget()).unwrap_or_default(),
 									));

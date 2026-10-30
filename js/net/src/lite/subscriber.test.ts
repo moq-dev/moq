@@ -2341,6 +2341,58 @@ test.each(
 	}
 });
 
+// A session that dies once the publisher ended the track, but before the tail settled, cuts it
+// off: the track ends with the session's error unless the declared end settled first. That end
+// is SUBSCRIBE_END on lite-05+, and the FIN before it.
+test.each([
+	["lite-03 ends clean with its last group finished", Version.DRAFT_03, true],
+	["lite-03 aborts with its last group still open", Version.DRAFT_03, false],
+	["lite-05 ends clean with its last group finished", Version.DRAFT_05, true],
+	["lite-05 aborts with its last group still owed", Version.DRAFT_05, false],
+] as const)("a session death before the tail settles: %s", async (_, version, settled) => {
+	const installed = new Manual().install();
+	const { quic, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	const died = new Error("session died");
+	// Lite-05 asks for TRACK_INFO first; untimed, a frame is its size and payload.
+	const legacy = version === Version.DRAFT_03;
+	const frame = (controller: ReadableStreamDefaultController<Uint8Array>) =>
+		controller.enqueue(new Uint8Array([1, 0]));
+	try {
+		if (!legacy) await answerTrackInfo(await opened(0), version);
+		const subscribe = await opened(legacy ? 0 : 1);
+		await subscribe.reading;
+		const responses: SubscribeResponse[] = legacy
+			? [{ ok: new SubscribeOk({}) }]
+			: [{ start: new SubscribeStart([0]) }, { end: new SubscribeEnd(1) }];
+		await respond(subscribe, version, responses, true);
+		if (settled) {
+			const group = new ReadableStream<Uint8Array>({
+				start: (controller) => {
+					frame(controller);
+					controller.close();
+				},
+			});
+			await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0 }), new Reader(group, undefined, version));
+		} else if (legacy) {
+			// Lite-03 says nothing about which groups are owed, so only a stream still being read is.
+			const group = new ReadableStream<Uint8Array>({ start: frame });
+			void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0 }), new Reader(group, undefined, version));
+		}
+		await drainReactions();
+
+		subscriber.close(died);
+		expect(await track.closed).toBe(settled ? null : died);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+		installed.close();
+	}
+});
+
 // The FIN may answer the bounded range before the publisher read an update that widened it,
 // so the track fails rather than ending clean short of the demand.
 test.each([

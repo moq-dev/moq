@@ -24,6 +24,13 @@ pub(crate) fn fin(version: &str, started: bool, clean: bool, responses: Vec<u8>)
 	serde_json::from_slice(&bun("bare-fin.ts", input)).expect("JS publisher returned response bytes")
 }
 
+/// Feed a JS subscriber responses that end the track owing group 0, kill its session, and
+/// return the JS publisher's encoding of the same responses.
+pub(crate) fn owed_tail(version: &str, responses: Vec<u8>) -> Vec<u8> {
+	let input = serde_json::json!({ "version": version, "owed": true, "responses": responses });
+	serde_json::from_slice(&bun("bare-fin.ts", input)).expect("JS publisher returned response bytes")
+}
+
 /// Rust updates keep the JS subscription alive, cover both unseen groups after narrowing,
 /// and fill the largest group's head under the update's ID on draft-22.
 #[test]

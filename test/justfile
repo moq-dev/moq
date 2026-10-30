@@ -260,7 +260,7 @@ receive-credit:
 
 # Cross-language subscription termination over in-memory transports.
 bare-fin:
-    just rs test -p moq-net --lib bare_fin_interop --run-ignored all
+    just rs test -p moq-net --lib bare_fin_interop owed_tail_death_interop --run-ignored all
 
 # Explore JSON snapshot codec sequences with a fresh replayable seed.
 json-properties:
