@@ -1890,7 +1890,10 @@ export class Front {
 				// rather than a round trip after it: only handing the group out waits for the check.
 				const fetchGroup = source.wire.fetchGroup;
 				const ahead = new AbortController();
-				const fetching = fetchGroup?.(name, sequence, { ...options, signal: AbortSignal.any([signal, ahead.signal]) });
+				const fetching = fetchGroup?.(name, sequence, {
+					...options,
+					signal: AbortSignal.any([signal, ahead.signal]),
+				});
 				fetching?.catch(() => {});
 				try {
 					await until(this.#verify(name, source), signal);

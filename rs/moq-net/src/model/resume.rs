@@ -2229,7 +2229,12 @@ impl kio::Task for Fetching {
 		loop {
 			let (generation, serving, staged, spliced) = {
 				let route = self.route.state.read();
-				(route.generation, route.copy.clone(), route.staged.clone(), route.spliced)
+				(
+					route.generation,
+					route.copy.clone(),
+					route.staged.clone(),
+					route.spliced,
+				)
 			};
 			let staged_id = staged.as_ref().map(|(id, _)| *id);
 			// A fetch sent to a staged copy carries on once that copy is spliced.

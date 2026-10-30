@@ -17699,7 +17699,9 @@ mod test {
 		let mut fetched = pending.await.unwrap();
 		subscriber.assert_no_group();
 
-		let mut live = producer.create_group_at(0u64.into(), 0).expect("the feed takes the slot");
+		let mut live = producer
+			.create_group_at(0u64.into(), 0)
+			.expect("the feed takes the slot");
 		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"snapshot"))
 			.unwrap();
 		let mut group = subscriber.assert_group();

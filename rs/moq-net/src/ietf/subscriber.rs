@@ -4000,9 +4000,12 @@ impl Subscriber {
 
 			match step {
 				Step::Fill(fill) => {
-					let fetch =
-						self.clone()
-							.serve_fill(broadcast_path.clone(), track_name.to_owned(), fill, Later::Known(idle.timescale));
+					let fetch = self.clone().serve_fill(
+						broadcast_path.clone(),
+						track_name.to_owned(),
+						fill,
+						Later::Known(idle.timescale),
+					);
 					group_fetches.push(fetch);
 				}
 				Step::Subscribe => break true,
@@ -5572,7 +5575,8 @@ impl Subscriber {
 			if let Poll::Ready(res) = timescale.poll(waiter) {
 				return Poll::Ready(res);
 			}
-			fill.poll_unwanted_groups(run.clone(), waiter).map(|_| Err(Error::Cancel))
+			fill.poll_unwanted_groups(run.clone(), waiter)
+				.map(|_| Err(Error::Cancel))
 		})
 		.await
 		{
@@ -7781,7 +7785,13 @@ mod tests {
 			SetupWait::StatusOpen | SetupWait::StatusWrite | SetupWait::StatusResponse => Box::pin(async {
 				assert!(
 					subscriber
-						.track_status(&Path::from_static("broadcast"), "video", request, &mut TaskSet::owned(), &mut gate)
+						.track_status(
+							&Path::from_static("broadcast"),
+							"video",
+							request,
+							&mut TaskSet::owned(),
+							&mut gate
+						)
 						.await
 						.is_none()
 				);

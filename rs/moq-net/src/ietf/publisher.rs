@@ -6728,7 +6728,8 @@ mod subscribe_cursor_test {
 		open.write_frame(crate::Timestamp::ZERO, b"a".to_vec()).unwrap();
 
 		let consumer = track.consume();
-		let read = moq_clock::sim::spawn(async move { read_fetch(&consumer, 0, 0, None, 0, false, None).await.map(|_| ()) });
+		let read =
+			moq_clock::sim::spawn(async move { read_fetch(&consumer, 0, 0, None, 0, false, None).await.map(|_| ()) });
 		moq_clock::sim::yield_now().await;
 		// The track runs a full second past the group's successor.
 		for ms in [1000, 2000] {
