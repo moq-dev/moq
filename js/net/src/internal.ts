@@ -313,7 +313,7 @@ export interface ResumeSource {
 	start(): number | "pending" | undefined;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Position | undefined;
-	/** The error the serving copy's end carries, if the track does not end cleanly. */
+	/** The error the logical track's end carries, if it does not end cleanly. */
 	endError(): Error | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
 	finished(): Promise<Position>;
