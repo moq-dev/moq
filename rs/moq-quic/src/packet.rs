@@ -911,11 +911,12 @@ mod tests {
 	#[test]
 	fn header_encoding() {
 		use crate::Side;
-		use crate::crypto::rustls::initial_keys;
+		use crate::crypto::rustls::{configured_provider, initial_keys, initial_suite};
 		use rustls::quic::Version;
 
 		let dcid = ConnectionId::new(&hex!("06b858ec6f80452b"));
-		let client = initial_keys(Version::V1, dcid, Side::Client);
+		let suite = initial_suite(&configured_provider());
+		let client = initial_keys(Version::V1, dcid, Side::Client, &suite);
 		let mut buf = Vec::new();
 		let header = Header::Initial(InitialHeader {
 			number: PacketNumber::U8(0),
@@ -941,7 +942,7 @@ mod tests {
 			)[..]
 		);
 
-		let server = initial_keys(Version::V1, dcid, Side::Server);
+		let server = initial_keys(Version::V1, dcid, Side::Server, &suite);
 		let decode = PartialDecode::new(buf.as_slice().into(), &FixedLengthConnectionIdParser::new(0), false)
 			.unwrap()
 			.0;

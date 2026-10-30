@@ -34,6 +34,7 @@ pub(crate) struct TlsSession {
 	got_handshake_data: bool,
 	next_secrets: Option<Secrets>,
 	inner: Connection,
+	initial: Suite,
 }
 
 impl TlsSession {
@@ -47,7 +48,7 @@ impl TlsSession {
 
 impl crypto::Session for TlsSession {
 	fn initial_keys(&self, dst_cid: ConnectionId, side: Side) -> Keys {
-		initial_keys(self.version, dst_cid, side)
+		initial_keys(self.version, dst_cid, side, &self.initial)
 	}
 
 	fn handshake_data(&self) -> Option<HandshakeData> {
@@ -217,6 +218,7 @@ impl HeaderKey for Box<dyn HeaderProtectionKey> {
 /// resumption cache still enables resumed 1-RTT handshakes.
 pub(crate) struct QuicClientConfig {
 	pub(crate) inner: Arc<rustls::ClientConfig>,
+	initial: Suite,
 }
 
 impl QuicClientConfig {
@@ -225,7 +227,8 @@ impl QuicClientConfig {
 		if inner.enable_early_data {
 			Arc::make_mut(&mut inner).enable_early_data = false;
 		}
-		Self { inner }
+		let initial = initial_suite(inner.crypto_provider());
+		Self { inner, initial }
 	}
 
 	/// A TLS 1.3 config on this crate's provider that verifies the server with `verifier`.
@@ -257,6 +260,7 @@ impl crypto::ClientConfig for QuicClientConfig {
 			got_handshake_data: false,
 			next_secrets: None,
 			inner: Connection::Client(inner),
+			initial: self.initial,
 		}))
 	}
 }
@@ -265,6 +269,7 @@ impl crypto::ClientConfig for QuicClientConfig {
 /// still enable resumed 1-RTT handshakes.
 pub(crate) struct QuicServerConfig {
 	pub(crate) inner: Arc<rustls::ServerConfig>,
+	initial: Suite,
 }
 
 impl QuicServerConfig {
@@ -273,7 +278,8 @@ impl QuicServerConfig {
 		if inner.max_early_data_size != 0 {
 			Arc::make_mut(&mut inner).max_early_data_size = 0;
 		}
-		Self { inner }
+		let initial = initial_suite(inner.crypto_provider());
+		Self { inner, initial }
 	}
 
 	/// A TLS 1.3 config on this crate's provider that presents `cert_chain`.
@@ -310,11 +316,12 @@ impl crypto::ServerConfig for QuicServerConfig {
 			got_handshake_data: false,
 			next_secrets: None,
 			inner: Connection::Server(inner),
+			initial: self.initial,
 		}))
 	}
 
 	fn initial_keys(&self, version: crate::Version, dst_cid: ConnectionId) -> Keys {
-		initial_keys(rustls_version(version), dst_cid, Side::Server)
+		initial_keys(rustls_version(version), dst_cid, Side::Server, &self.initial)
 	}
 
 	fn retry_tag(&self, version: crate::Version, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16] {
@@ -342,15 +349,21 @@ impl crypto::ServerConfig for QuicServerConfig {
 
 /// The suite that protects Initial packets, which RFC 9001 fixes as AES-128-GCM-SHA256.
 ///
-/// Initial keys derive from public values, so this crate's provider serves them whatever
-/// provider the caller's config uses, as it already serves the retry tag.
-fn initial_suite() -> Suite {
+/// Taken from `provider`, so a caller's provider (such as a FIPS module) also protects
+/// Initial packets. A provider without the suite falls back to this crate's: Initial keys
+/// derive from public values, so this costs no confidentiality, and the constructors stay
+/// infallible.
+pub(crate) fn initial_suite(provider: &rustls::crypto::CryptoProvider) -> Suite {
 	#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
 	use rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256;
 	#[cfg(feature = "ring")]
 	use rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256;
 
-	TLS13_AES_128_GCM_SHA256
+	provider
+		.cipher_suites
+		.iter()
+		.find(|suite| suite.suite() == rustls::CipherSuite::TLS13_AES_128_GCM_SHA256)
+		.unwrap_or(&TLS13_AES_128_GCM_SHA256)
 		.tls13()
 		.and_then(|suite| suite.quic_suite())
 		.expect("AES-128-GCM-SHA256 supports QUIC")
@@ -370,8 +383,8 @@ fn to_vec(params: &TransportParameters) -> Vec<u8> {
 	bytes
 }
 
-pub(crate) fn initial_keys(version: Version, dst_cid: ConnectionId, side: Side) -> Keys {
-	let keys = initial_suite().keys(&dst_cid, side.into(), version);
+pub(crate) fn initial_keys(version: Version, dst_cid: ConnectionId, side: Side, suite: &Suite) -> Keys {
+	let keys = suite.keys(&dst_cid, side.into(), version);
 	Keys {
 		header: KeyPair {
 			local: Box::new(keys.local.header),
@@ -500,5 +513,24 @@ mod tests {
 			handshake(wrapped_client.inner, wrapped_server.inner),
 			(rustls::HandshakeKind::Resumed, false, false)
 		);
+	}
+
+	/// A provider without the Initial suite still keys Initial packets, from this crate's.
+	#[test]
+	fn initial_suite_falls_back_without_aes_128_gcm() {
+		let mut provider = (*configured_provider()).clone();
+		provider
+			.cipher_suites
+			.retain(|suite| suite.suite() != rustls::CipherSuite::TLS13_AES_128_GCM_SHA256);
+		assert!(!provider.cipher_suites.is_empty());
+
+		let dcid = ConnectionId::new(&[1; 8]);
+		let ours = initial_keys(Version::V1, dcid, Side::Client, &initial_suite(&configured_provider()));
+		let fallback = initial_keys(Version::V1, dcid, Side::Client, &initial_suite(&provider));
+		let mut a = vec![0; 64];
+		let mut b = a.clone();
+		ours.packet.local.encrypt(0, &mut a, 16);
+		fallback.packet.local.encrypt(0, &mut b, 16);
+		assert_eq!(a, b);
 	}
 }
