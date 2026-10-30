@@ -44,10 +44,10 @@ futures = { workspace = true }
 moq-archive = { path = "../moq-archive" }
 moq-json = { path = "../moq-json" }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "quic", "aws-lc-rs"] }
-tokio = { workspace = true, features = ["test-util"] }
-tower = { version = "0.5", features = ["util"] }
 mp4-atom = "0.16.2"
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tower = { version = "0.5", features = ["util"] }
 tracing-test = { workspace = true }
 
 [lints]
