@@ -5,7 +5,7 @@
  *
  * @module
  */
-import type { Instant, Milli } from "@moq/clock";
+import { type Instant, Milli } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Datagram } from "./datagram.ts";
@@ -18,7 +18,17 @@ import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
+import * as Varint from "./varint.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
+
+/** What a null maxDelay goes out as: the largest value every peer can read, as Rust sends for `None`. */
+export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
+
+/** A subscription's budget as the wire carries it: null for no limit, omitted for zero. */
+export function maxDelayOf(subscription: Pick<Subscription, "maxDelay">): Milli {
+	if (subscription.maxDelay === null) return NO_MAX_DELAY;
+	return subscription.maxDelay ?? Milli.zero;
+}
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
 export function groupBounds(groups: Groups = {}): { start: number; end?: number } {

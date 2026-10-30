@@ -30,6 +30,7 @@ import {
 	insertRun,
 	type Land,
 	MAX_DATAGRAMS,
+	NO_MAX_DELAY,
 	type Recv,
 	type RecvDatagram,
 	type ResumeSource,
@@ -41,7 +42,6 @@ import {
 } from "./internal.ts";
 import { grace, Ledger } from "./ledger.ts";
 import { Timescale, type Timestamp } from "./time.ts";
-import * as Varint from "./varint.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
 export type { Datagram } from "./datagram.ts";
@@ -281,10 +281,6 @@ export const Subscription: {
 } = {
 	default: () => ({ priority: DEFAULT_PRIORITY, maxDelay: Milli.zero, order: "descending" }),
 };
-
-// What a null maxDelay materializes to: the publisher's max age alone. The largest value
-// every peer can read, as the Rust wire sends for `None`.
-const NO_MAX_DELAY = Milli(Varint.MAX_U53);
 
 // Materialize the defaults at the model boundary so every layer observes a complete
 // subscription rather than interpreting an omitted field differently.

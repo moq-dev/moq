@@ -660,7 +660,7 @@ export namespace Track {
 	};
 	export interface Subscription {
 		groups?: Track.Groups;
-		maxDelay?: Milli;
+		maxDelay?: Milli | null;
 		order?: Track.Order;
 		priority?: number;
 	}
