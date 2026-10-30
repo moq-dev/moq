@@ -4944,52 +4944,6 @@ impl Consumer {
 		})
 	}
 
-	/// Fill the groups of `span` the cache misses and nothing recorded dropped, asking a
-	/// [`Requests`] once per run of misses so it fetches each run at once, and resolve once
-	/// every run is answered. The returned guard keeps the fills wanted, so the groups they
-	/// accepted stay cached while the caller reads them. A track with no handler resolves at
-	/// once, and a front's logical track fills through the copy the front assigns it.
-	#[cfg(feature = "async")]
-	pub(crate) fn fill_groups(&self, span: ops::Range<u64>, priority: i8) -> kio::Pending<Filling> {
-		// Held while waiting: a front assigns its logical track a copy only while it is read.
-		let state = self.resolve(None).0;
-		let routes = state.read().routes.clone();
-		if let Some(routes) = routes {
-			return kio::Pending::new(Filling(FillStage::Front {
-				routes,
-				read: state,
-				span,
-				priority,
-				serving: None,
-			}));
-		}
-		let (fills, holes, cached) = {
-			let state = state.read();
-			let cached = state
-				.lookup
-				.range(span.clone())
-				.filter(|(_, slot)| slot.serves_end())
-				.map(|(sequence, _)| *sequence)
-				.collect();
-			let holes: Vec<ops::Range<u64>> = miss::holes(&state, span)
-				.into_iter()
-				.flat_map(|hole| state.drops.gaps(&hole).collect::<Vec<_>>())
-				.collect();
-			(state.fills.clone(), holes, cached)
-		};
-		let joins = holes
-			.into_iter()
-			.flat_map(|hole| ask_span(&fills, hole, priority))
-			.collect();
-		kio::Pending::new(Filling(FillStage::Asked {
-			fills,
-			priority,
-			joins,
-			checked: 0,
-			cached,
-		}))
-	}
-
 	/// The sequences of `span` the cache holds, lowest first.
 	#[cfg(feature = "async")]
 	pub(crate) fn cached_groups(&self, span: ops::Range<u64>) -> Vec<u64> {
@@ -5261,162 +5215,6 @@ fn queue(fills: &kio::Shared<FillState>, sequence: u64, request: &FetchOptions) 
 	// nobody drains); with no handler, `Fetching::poll` fails fast.
 	let (joins, _) = fills.lock().join(fills, &ask);
 	joins.into_iter().next().map(Box::new)
-}
-
-/// The fills a [`Consumer::fill_groups`] asked, kept wanted until it drops.
-#[cfg(feature = "async")]
-pub(crate) struct Filled {
-	/// Held to keep the fills wanted.
-	joins: Vec<fill::Join>,
-	/// The sequences the cache held when the fill began, lowest first.
-	cached: Vec<u64>,
-	/// A front's logical track, held read so the front keeps the filled copy serving it.
-	_read: Option<kio::Consumer<TrackState>>,
-}
-
-#[cfg(feature = "async")]
-impl Filled {
-	/// The sequences of `span` the cache held when the fill began or the fills accepted,
-	/// lowest first. Their source has them even once the cache evicts them, so reading one
-	/// again fetches it again.
-	pub(crate) fn held(&self, span: ops::Range<u64>) -> std::collections::BTreeSet<u64> {
-		let cached = self.cached.iter().copied().filter(|sequence| span.contains(sequence));
-		self.joins
-			.iter()
-			.flat_map(|join| join.outcome().read().accepted_in(&span).collect::<Vec<_>>())
-			.chain(cached)
-			.collect()
-	}
-
-	/// Why the fills refused sequences of `span`, lowest first.
-	pub(crate) fn refused(&self, span: ops::Range<u64>) -> Vec<Error> {
-		self.joins
-			.iter()
-			.flat_map(|join| join.outcome().read().refused_in(&span).cloned().collect::<Vec<_>>())
-			.collect()
-	}
-}
-
-/// The pollable state of a [`Consumer::fill_groups`], resolving to the [`Filled`] guard.
-#[cfg(feature = "async")]
-pub(crate) struct Filling(FillStage);
-
-#[cfg(feature = "async")]
-enum FillStage {
-	/// A front's logical track, filling through the copy the front serves it from.
-	Front {
-		routes: super::resume::Consumer,
-		read: kio::Consumer<TrackState>,
-		span: ops::Range<u64>,
-		priority: i8,
-		/// The serving copy's fill, once the front assigned one.
-		serving: Option<Box<FillStage>>,
-	},
-	/// Waiting for each run asked to be answered.
-	Asked {
-		fills: kio::Shared<FillState>,
-		priority: i8,
-		joins: Vec<fill::Join>,
-		/// How many of `joins` were answered and checked for a refusal to ask again.
-		checked: usize,
-		/// The sequences the cache held when the fill began.
-		cached: Vec<u64>,
-	},
-	/// Resolved.
-	Done,
-}
-
-#[cfg(feature = "async")]
-impl kio::Task for Filling {
-	type Output = Filled;
-
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Filled> {
-		self.0.poll(waiter)
-	}
-}
-
-#[cfg(feature = "async")]
-impl FillStage {
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Filled> {
-		match self {
-			Self::Front {
-				routes,
-				span,
-				priority,
-				serving,
-				..
-			} => {
-				if serving.is_none() {
-					// The front ended without a copy, so nothing fills.
-					let Some(copy) = ready!(routes.poll_serving(waiter)) else {
-						return Poll::Ready(self.resolve(Vec::new(), Vec::new()));
-					};
-					*serving = Some(Box::new(copy.fill_groups(span.clone(), *priority).into_inner().0));
-				}
-				let filled = ready!(serving.as_mut().expect("set above").poll(waiter));
-				Poll::Ready(self.resolve(filled.joins, filled.cached))
-			}
-			Self::Asked {
-				fills,
-				priority,
-				joins,
-				checked,
-				cached,
-			} => loop {
-				for join in &joins[*checked..] {
-					ready!(join.poll_answered(waiter));
-				}
-				// Joined after a tighter budget went on the wire, which judged a group too old
-				// for that budget, not ours: ask again with ours, as a fetch does. Terminates,
-				// since a new fill asks no budget at all.
-				let retry: Vec<ops::Range<u64>> = joins[*checked..]
-					.iter()
-					.flat_map(|join| join.outcome().read().budget_old_in(&join.groups))
-					.collect();
-				*checked = joins.len();
-				if retry.is_empty() {
-					return Poll::Ready(Filled {
-						joins: std::mem::take(joins),
-						cached: std::mem::take(cached),
-						_read: None,
-					});
-				}
-				for run in retry {
-					joins.extend(ask_span(fills, run, *priority));
-				}
-			},
-			Self::Done => panic!("polled after resolving"),
-		}
-	}
-
-	/// Resolve a front's fill with what its serving copy held and asked.
-	fn resolve(&mut self, joins: Vec<fill::Join>, cached: Vec<u64>) -> Filled {
-		let Self::Front { read, .. } = std::mem::replace(self, Self::Done) else {
-			unreachable!("only a front resolves through its copy");
-		};
-		Filled {
-			joins,
-			cached,
-			_read: Some(read),
-		}
-	}
-}
-
-/// Ask the fills for the groups of `span`, joining any that cover them.
-#[cfg(feature = "async")]
-fn ask_span(fills: &kio::Shared<FillState>, span: ops::Range<u64>, priority: i8) -> Vec<fill::Join> {
-	let ask = fill::Ask {
-		start: Position::group(span.start),
-		end: span.end,
-		frame_end: None,
-		asking: fill::Asking {
-			priority,
-			// A fetch names its groups outright, so only the publisher's max age applies.
-			max_delay: None,
-			order: Order::Ascending,
-		},
-	};
-	fills.lock().join(fills, &ask).0
 }
 
 /// One transport request, whose end may cut the stored copy short.
@@ -15626,7 +15424,6 @@ mod test {
 			consumer.cached_groups(0..1).is_empty(),
 			"a bounded prefix is no whole cached group"
 		);
-		let all = consumer.fill_groups(0..1, 0);
 		// A narrower bound reuses the same stored prefix.
 		assert!(
 			consumer
@@ -15649,7 +15446,6 @@ mod test {
 			assert!(whole.read_frame().await.unwrap().is_some());
 		}
 		assert!(whole.read_frame().await.unwrap().is_none());
-		assert_eq!(all.await.held(0..1), BTreeSet::from([0]));
 		assert_eq!(producer.state.read().lookup[&0].copies().count(), 1);
 	}
 
@@ -19951,82 +19747,6 @@ mod test {
 			b"b"
 		);
 		assert!(matches!(whole.read_frame().now_or_never(), Some(Ok(None))));
-	}
-
-	/// Filling a span asks once per run of misses, and a run is served up to a group the
-	/// cache gained since, which it skips: the handler fetches each run at once.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn a_filled_span_is_served_a_run_at_a_time() {
-		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.requests();
-		let consumer = producer.consume();
-		producer
-			.create_group(group::Info { sequence: 2 })
-			.unwrap()
-			.finish()
-			.unwrap();
-
-		let mut filling = Box::pin(consumer.fill_groups(0..8, 0));
-		assert!(futures::poll!(filling.as_mut()).is_pending());
-		let low = dynamic.requested_fill().await.unwrap();
-		let high = dynamic.requested_fill().await.unwrap();
-		assert_eq!((low.start().group, low.end()), (0, 2));
-		assert_eq!((high.start().group, high.end()), (3, 8));
-
-		// Group 5 lands live while the high run waits on its source.
-		producer
-			.create_group(group::Info { sequence: 5 })
-			.unwrap()
-			.finish()
-			.unwrap();
-		assert_eq!(low.next_run(), Some(0..2));
-		assert_eq!(high.next_run(), Some(3..5));
-		high.drop_groups(3..5);
-		assert_eq!(high.next_run(), Some(6..8));
-		high.accept(6, None).unwrap().finish().unwrap();
-		assert_eq!(high.next_run(), Some(7..8));
-		high.drop_groups(7..8);
-		assert_eq!(high.next_run(), None);
-		low.drop_groups(0..2);
-
-		let std::task::Poll::Ready(filled) = futures::poll!(filling.as_mut()) else {
-			panic!("every run is answered");
-		};
-		assert_eq!(consumer.cached_groups(0..8), [2, 5, 6]);
-
-		// A group cached when the fill began, or accepted since, stays named once the cache
-		// evicts it, so the answer reads it again. Group 5, which the live feed answered,
-		// counts too.
-		evict(&producer, 2);
-		evict(&producer, 6);
-		assert_eq!(consumer.cached_groups(0..8), [5]);
-		assert_eq!(filled.held(0..8).into_iter().collect::<Vec<_>>(), [2, 5, 6]);
-	}
-
-	/// A span fill that joined after a tighter budget went on the wire is not answered by
-	/// that budget's `Old`: it asks again with its own, as a fetch does.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn a_span_fill_asks_again_after_another_budget_is_too_old() {
-		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.requests();
-		let consumer = producer.consume();
-
-		let tight = consumer.fetch_group(5, group::Fetch::default().with_max_delay(Duration::from_secs(1)));
-		let req = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
-		let mut filling = Box::pin(consumer.fill_groups(5..6, 0));
-		assert!(futures::poll!(filling.as_mut()).is_pending());
-
-		req.reject(Error::Old);
-		assert!(matches!(tight.await, Err(Error::Old)));
-		assert!(futures::poll!(filling.as_mut()).is_pending());
-
-		let fill = dynamic.requested_fill().now_or_never().unwrap().unwrap();
-		assert_eq!((fill.start().group, fill.end(), fill.max_delay()), (5, 6, None));
-		fill.accept(5, None).unwrap().finish().unwrap();
-		let filled = filling.await;
-		assert_eq!(filled.held(5..6).into_iter().collect::<Vec<_>>(), [5]);
 	}
 
 	/// A drop judges the subscription, not a fetch: a fetched head still arriving keeps

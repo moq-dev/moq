@@ -134,6 +134,7 @@ removed).
 - [moq-c at parity](/quest/m1/c/README.md) - the hand-written `moq-c` ships at the cut with every m1 binding feature moq-ffi gains
 - [Lite-05/06 timestamps pass through](/quest/m1/lite-timestamps-through.md) - a timed track received over lite-05/06 stays timed and is forwarded with its timestamps over every version
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
+- [moq-ffi decoders choose where to start](/quest/m1/ffi-decode-start.md) - moq-ffi decoder outputs take a `start`, so a live player in any binding can skip the cached backlog as moq-c does
 - [A broadcast stamps everything from one clock](/quest/m1/broadcast-clock.md) - catalog, MSF, and HLS record groups are stamped from the broadcast's clock, never the ambient one
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
@@ -147,7 +148,6 @@ removed).
 - [Moxygen pin bump](/quest/m1/moxygen-pin-bump.md) - waiting on moxygen#264, then the TRACK_STATUS patch is dropped
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) - drafts 14-17 and 19-21 are deleted from Rust, JS, tests, interop lanes, and docs, removing the legacy control-stream adapter and its request limit
-- [Our moq-transport publishers serve at most one group](/quest/m1/ietf-publisher-one-group.md) - a wider FETCH gets NOT_SUPPORTED and a wider draft-22 fill fails, FILL_TIMEOUT is ignored, and our subscribers still send ranges
 - [Our moq-transport publishers refuse SUBSCRIBE_TRACKS](/quest/m1/ietf-tracks-refuse.md) - a peer's listing gets NOT_SUPPORTED, while Rust still lists an IETF peer's tracks upstream for the archive
 - [A moq-transport request token is one auth per distinct token](/quest/m1/ietf-token-auth.md) - requests naming the same token share one verification and grant, on any request type, ending with the last such request
 - [moq-transport carries no epoch](/quest/m1/ietf-epoch-cut.md) - Rust and JS moq-transport sessions stop negotiating MoQ Epoch, so every moq-transport hop is epochless; the draft stays
@@ -156,7 +156,6 @@ removed).
 - [Rust FETCH parity](/quest/m1/ietf-fetch-parity.md) - Rust finishes an answered joining FETCH's head, refuses a lost head with DOES_NOT_EXIST, and sends no timestamps without TIMESCALE, as the JS publisher does
 - [SUBSCRIBE honors the properties opt-out](/quest/m1/subscribe-timestamps.md) - the Rust publisher sends untimed objects to a SUBSCRIBE that declines Track Properties, and the Rust subscriber asks for them when it needs timestamps
 - [Rust marks a lost listed group unknown](/quest/m1/ietf-publisher-unknown-range.md) - the Rust IETF publisher sends End of Unknown Range for a listed group it can't serve, after the publisher's open quests land
-- [Identity and recovery guide](/quest/m1/identity-guide.md) - explain epochs, pinned catalogs, lazy jobs, restart and version compatibility as they exist; takeover adds its own section
 - [Native rung disable](/quest/m1/simulcast-rung-disable.md) - OBS stops sending the top renditions its grant cannot fund, as the Rust/FFI publishers do, and a shaped uplink through moq-ffi proves the resume
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles

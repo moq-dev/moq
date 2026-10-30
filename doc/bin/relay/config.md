@@ -68,6 +68,8 @@ A setting no configured listener reads stops startup rather than being ignored.
 A stream-only relay refuses `preferred_v4`, `preferred_v6`, `lb.id`, and
 `reset.secret`, which only QUIC reads, and a `[listen.tls]` `cert`, `key`, or `generate` unless
 `tcp.tls` serves it.
+The io\_uring runtime refuses `preferred_v4`, `preferred_v6`, and `lb.id`;
+use the tokio runtime when the listener needs these settings.
 `[listen.lb] nonce` needs an `id` in the same table; unset nonce uses 8.
 The `--listen-quic-lb-id` and `--listen-quic-lb-nonce` flags update that table.
 `unix.allow` needs `unix.bind`.
@@ -376,6 +378,10 @@ enabled = true
 secret = "./iroh-secret.key"         # Persist the key so the endpoint id survives restarts.
 # disable_relay = true               # Direct addresses only. Right on a LAN, wrong on the internet.
 ```
+
+The secret path must be a regular file, not a symlink. A missing file is created
+exclusively, with mode `0600` on Unix. Existing Unix files readable by group or
+others are refused; use `chmod 600` to make an existing key private before startup.
 
 See [Transport](/concept/transport#iroh-peer-to-peer-experimental).
 

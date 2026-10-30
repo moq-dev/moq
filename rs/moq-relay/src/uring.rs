@@ -138,6 +138,21 @@ impl Workers {
 		server.quic.validate()?;
 		let listen = &server.listen;
 		let quic = &server.quic;
+		for (configured, setting) in [
+			(listen.preferred_v4.is_some(), "listen.preferred_v4"),
+			(listen.preferred_v6.is_some(), "listen.preferred_v6"),
+		] {
+			anyhow::ensure!(
+				!configured,
+				"io_uring workers cannot advertise a QUIC preferred address ({setting}); use the tokio runtime"
+			);
+		}
+		if listen.lb.id.is_some() {
+			anyhow::bail!(
+				"io_uring workers issue shard-steered connection ids and cannot also carry a \
+				 QUIC-LB server id (listen.lb.id)"
+			);
+		}
 		let tls = match server.tls {
 			Some(tls) => {
 				// A second configured source must not be silently ignored.
@@ -156,16 +171,6 @@ impl Workers {
 		};
 		let certificates = tls.certificates();
 
-		// Everything below is a setting this listener cannot deliver. Refusing
-		// beats starting and quietly behaving differently from what the
-		// operator configured, which is the whole failure mode this mode is
-		// most likely to produce.
-		if listen.lb.id.is_some() {
-			anyhow::bail!(
-				"io_uring workers issue shard-steered connection ids and cannot also carry a \
-				 QUIC-LB server id (listen.lb.id)"
-			);
-		}
 		// One resolution for the whole group, so a DNS answer that rotates
 		// between queries cannot hand members different addresses.
 		//
@@ -922,6 +927,34 @@ async fn serve_request(
 #[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
+
+	/// Unsupported listen settings fail before loading TLS or binding a socket.
+	#[test]
+	fn bind_refuses_preferred_addresses() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		type Set = fn(&mut moq_tokio::listen::Config);
+		let cases: [(&str, Set); 2] = [
+			("listen.preferred_v4", |listen| {
+				listen.preferred_v4 = Some("192.0.2.1:443".parse().unwrap());
+			}),
+			("listen.preferred_v6", |listen| {
+				listen.preferred_v6 = Some("[2001:db8::1]:443".parse().unwrap());
+			}),
+		];
+		for (setting, set) in cases {
+			for configured in [false, true] {
+				let mut server = moq_tokio::server::Config::default();
+				if configured {
+					server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+					server.listen.tls.generate = vec!["localhost".into()];
+				}
+				set(&mut server.listen);
+				let err = Workers::bind(server, moq_tokio::worker::Config::new(1))
+					.expect_err("the workers cannot advertise a preferred address");
+				assert!(err.to_string().contains(setting), "{err:#}");
+			}
+		}
+	}
 
 	/// A window the operator set has to reach the worker. Refusing it, or
 	/// accepting the config and leaving the field unset, would both hide it.

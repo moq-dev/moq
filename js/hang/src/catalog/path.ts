@@ -1,15 +1,25 @@
 import { Epoch, Path } from "@moq/net";
 import * as z from "@zod/mini";
 
+function isRelative(text: string): boolean {
+	try {
+		Path.normalizeRelative(text);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Zod schema for a relative broadcast reference stored in a catalog (a rendition's
- * `broadcast` field, e.g. "./source"). Normalizes the input the same way the Rust
- * `path::Relative` type does so JS and Rust agree byte-for-byte after deserialization.
+ * `broadcast` field, e.g. "./source"). Refuses and normalizes the input the same way the Rust
+ * `path::Relative` type does so JS and Rust agree byte-for-byte after deserialization: a
+ * leading, trailing, or doubled `/` or a lone `\` refuses the catalog.
  * Resolve it against the catalog broadcast's own path with `Path.tryResolve`, which returns
  * `undefined` for a reference that walks above the root: hang requires rejecting such a catalog.
  */
 export const RelativeBroadcastSchema: z.ZodMiniType<RelativeBroadcast, string> = z.pipe(
-	z.string(),
+	z.string().check(z.refine(isRelative, "expected a relative broadcast path")),
 	z.transform(Path.normalizeRelative),
 );
 

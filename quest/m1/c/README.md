@@ -29,6 +29,5 @@ Public API: moq-c gains each m1 binding feature. Wire: none.
 
 ## Required
 
-- [moq-c decode start](/quest/m1/c/decode-start.md) - a moq-c decoder can read a finished track from its start
 - [JSON windows](/quest/m1/c/json-window.md) - moq-c publishes and reads moq-json windows, as moq-ffi does
 - [API gaps](/quest/m1/c/api-gaps.md) - one malformed-epoch error code, an audio enabled query, and a relay hops test
