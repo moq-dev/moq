@@ -55,7 +55,10 @@ Decided 2026-10-30 (maintainer); every prompt is in the
   space across restarts and announces a higher epoch each time, for
   example a counter persisted on disk. Nothing assumes the epoch is a
   clock. Document the promise and the cost of breaking it (spliced groups)
-  wherever the option is documented.
+  wherever the option is documented. This publisher identity is not
+  [Routes and announces](/quest/m1/cluster-routing/routes.md)'s origin-node
+  identity, whose seqno and revision are route-layer state. A restarted
+  relay node still takes a fresh node identity there.
 - **Pools.** Several hosts on one prefix, such as transcoders or moq.pro's
   three `.dash` control nodes, each have their own identities, and step 3
   spreads paths over them. A host that is full withdraws its route (a

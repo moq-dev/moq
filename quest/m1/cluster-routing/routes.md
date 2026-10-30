@@ -677,8 +677,11 @@ epochless machinery, so this quest no longer does. A session mints
 an `identity` (the session ID plus the announcement's ID) for any route that
 arrives without one, and newest-wins compares epochs only within one
 identity, so mint order no longer outranks cost or preference. The rest of
-the 2026-10-27 decision stands. Build the route layer's identity fields on
-that identity and per-identity epoch instead of the UUIDv7 epoch.
+the 2026-10-27 decision stands. The broadcast epoch fields here become that
+publisher identity and its per-identity epoch, in place of the UUIDv7
+epoch. The route layer's own origin-node identity, with its seqno and
+revision, stays separate ("keep administrative identity and broadcast epoch
+separate", above).
 
 Decided 2026-10-27 (maintainer), from
 [grant subject](https://github.com/moq-dev/moq/pull/6992): decide what key
