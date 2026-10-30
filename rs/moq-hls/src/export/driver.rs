@@ -60,8 +60,10 @@ impl Driver {
 
 impl Drop for Driver {
 	fn drop(&mut self) {
-		// Later starts are refused instead of queueing work nothing will run.
+		// Later starts are refused instead of queueing work nothing will run, and queued ones drop
+		// now, releasing what they hold (such as an init build's lock).
 		self.inbox.close();
+		while let Ok(Some(_)) = self.inbox.try_pop() {}
 	}
 }
 
@@ -155,5 +157,18 @@ mod tests {
 		assert!(driver.poll(&waiter).is_pending(), "the owned task still runs");
 		drop(forever);
 		assert!(driver.poll(&waiter).is_ready(), "the task ended with its owner");
+	}
+
+	// Dropping the driver drops the tasks it never polled, so nothing they hold leaks.
+	#[test]
+	fn a_dropped_driver_drops_queued_tasks() {
+		let (spawner, driver) = Spawner::new();
+		let held = Arc::new(());
+		let _owner = spawner.spawn({
+			let held = held.clone();
+			async move { drop(held) }
+		});
+		drop(driver);
+		assert_eq!(Arc::strong_count(&held), 1, "the queued task was dropped");
 	}
 }
