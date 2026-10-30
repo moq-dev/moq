@@ -216,6 +216,7 @@ export class Rendition<Config> {
 	close(): void;
 	readonly config: Signals.Signal<Config | undefined>;
 	hls(track: Net.Track.Producer): Hang.Hls.Recorder | undefined;
+	readonly hlsHint: Signals.Signal<Clock.Micro | undefined>;
 	readonly kind: Kind;
 	readonly name: string;
 	readonly track: Signals.Getter<Net.Track.Producer | undefined>;
