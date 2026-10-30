@@ -100,10 +100,10 @@ type StreamOp<S, T, E> = OpBox<(S, Option<Result<T, E>>)>;
 ///   `closed(&mut self)` cannot be stored as a `'static` watch without taking
 ///   the stream with it). A receive stream reports closed through its reads
 ///   (FIN drained, or a read error), buffering bounded read-ahead so a FIN
-///   behind undelivered payload still resolves the watch; past the cap the
-///   watch parks until the caller's reads drain the backlog, deliberately
-///   trading watch liveness on an undrained flooding stream for a memory
-///   bound (every driver in this crate drains its reads alongside the watch).
+///   behind undelivered payload still resolves the watch. At the cap it reads
+///   no further: it watches the underlying `closed()` for a reset or
+///   connection close, interruptibly so any read reclaims the stream, and
+///   resumes reading ahead once the caller's reads drain below the cap.
 ///   Send-side watches are interruptible, so an idle watch can observe peer
 ///   cancellation while later writes reclaim the stream.
 pub struct Session<S: web_transport_trait::Session> {
@@ -580,8 +580,14 @@ pub struct RecvStream<S: web_transport_trait::RecvStream + 'static> {
 	stop: Option<u32>,
 	/// Cancels the in-flight read so a stop applies immediately instead of
 	/// waiting behind blocked I/O. Fired by [`stop`](wt_poll::RecvStream::stop)
-	/// and by [`Drop`].
+	/// and by [`Drop`], and by a read that needs the stream back from the
+	/// closed-watch.
 	interrupt: Option<futures::channel::oneshot::Sender<()>>,
+	/// The in-flight operation is the closed-watch's `closed()` at the cap,
+	/// which any read interrupts rather than waits on.
+	watching: bool,
+	/// The closed-watch parked at the cap, woken once reads drain below it.
+	parked: Option<std::task::Waker>,
 }
 
 /// How much the closed-watch may read ahead of the caller before it parks and
@@ -591,8 +597,9 @@ const READ_AHEAD_CAP: usize = 64 * 1024;
 
 enum RecvState<S: web_transport_trait::RecvStream + 'static> {
 	Idle(S),
-	/// A read in flight; a `None` result means it was interrupted by a stop
-	/// (see [`RecvStream::interrupt`]).
+	/// A read in flight, or the closed-watch's `closed()` reporting its end
+	/// as `Ok(None)`; a `None` result means it was interrupted (see
+	/// [`RecvStream::interrupt`]).
 	Reading(StreamOp<S, Option<Bytes>, S::Error>),
 }
 
@@ -607,6 +614,8 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 			fin: false,
 			stop: None,
 			interrupt: None,
+			watching: false,
+			parked: None,
 		}
 	}
 
@@ -629,6 +638,51 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 		}
 	}
 
+	/// Wake a closed-watch parked at the cap once reads drain below it.
+	fn drained(&mut self) {
+		if self.buffer.len() + self.queued_len < READ_AHEAD_CAP
+			&& let Some(parked) = self.parked.take()
+		{
+			parked.wake();
+		}
+	}
+
+	/// Start an interruptible operation on the idle `stream`: a read of up to
+	/// `max` bytes, or with `None` the closed-watch's `closed()`, whose end
+	/// reads as the FIN.
+	fn start(&mut self, mut stream: S, max: Option<usize>) {
+		let (tx, rx) = futures::channel::oneshot::channel::<()>();
+		self.interrupt = Some(tx);
+		self.watching = max.is_none();
+		let fut = async move {
+			let res = {
+				let op = async {
+					match max {
+						Some(max) => stream.read_chunk(max).await,
+						None => stream.closed().await.map(|()| None),
+					}
+				};
+				let mut op = std::pin::pin!(op.fuse());
+				let mut rx = rx.fuse();
+				loop {
+					futures::select_biased! {
+						res = op => break Some(res),
+						cancel = rx => match cancel {
+							Ok(()) => break None,
+							// A dropped (unfired) sender must not interrupt;
+							// only an explicit stop or a read does. The fused
+							// arm goes quiet and the operation keeps driving.
+							Err(_) => continue,
+						},
+					}
+				}
+			};
+			(stream, res)
+		}
+		.boxed();
+		*self.state.get_mut().unwrap() = Some(RecvState::Reading(fut));
+	}
+
 	/// Read the next chunk from the transport, setting `self.fin` on the FIN.
 	fn poll_fill(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, S::Error>> {
 		loop {
@@ -637,55 +691,49 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 					if let Some(code) = self.stop.take() {
 						stream.stop(code);
 					}
-					let (tx, rx) = futures::channel::oneshot::channel::<()>();
-					self.interrupt = Some(tx);
-					let fut = async move {
-						let res = {
-							let mut op = std::pin::pin!(stream.read_chunk(max).fuse());
-							let mut rx = rx.fuse();
-							loop {
-								futures::select_biased! {
-									res = op => break Some(res),
-									cancel = rx => match cancel {
-										Ok(()) => break None,
-										// A dropped (unfired) sender must not interrupt;
-										// only an explicit stop does. The fused arm goes
-										// quiet and the read keeps driving.
-										Err(_) => continue,
-									},
-								}
-							}
-						};
-						(stream, res)
-					}
-					.boxed();
-					*self.state.get_mut().unwrap() = Some(RecvState::Reading(fut));
+					self.start(stream, Some(max));
 				}
-				RecvState::Reading(mut fut) => match fut.as_mut().poll(cx) {
-					Poll::Pending => {
-						*self.state.get_mut().unwrap() = Some(RecvState::Reading(fut));
-						return Poll::Pending;
+				RecvState::Reading(fut) => {
+					// A read wants the stream back from the closed-watch, which
+					// would otherwise hold it until the stream ends.
+					if self.watching
+						&& let Some(tx) = self.interrupt.take()
+					{
+						let _ = tx.send(());
 					}
-					Poll::Ready((mut stream, res)) => {
-						self.interrupt = None;
-						// Apply a stop requested while the read was in flight now, not on
-						// the next read: a caller that stops and never reads again must
-						// still send STOP_SENDING.
-						if let Some(code) = self.stop.take() {
-							stream.stop(code);
-						}
-						*self.state.get_mut().unwrap() = Some(RecvState::Idle(stream));
-						// An interrupted read was abandoned for the stop applied
-						// above; the next iteration's read reports the stream state.
-						let Some(res) = res else { continue };
-						if let Ok(None) = &res {
-							self.fin = true;
-						}
-						return Poll::Ready(res);
-					}
-				},
+					let Some(res) = ready!(self.poll_op(cx, fut)) else {
+						continue;
+					};
+					return Poll::Ready(res);
+				}
 			}
 		}
+	}
+
+	/// Poll the in-flight operation, settling it once it resolves; `None` means
+	/// it was interrupted, and the next operation reports the stream state.
+	fn poll_op(
+		&mut self,
+		cx: &mut Context<'_>,
+		mut fut: StreamOp<S, Option<Bytes>, S::Error>,
+	) -> Poll<Option<Result<Option<Bytes>, S::Error>>> {
+		let Poll::Ready((mut stream, res)) = fut.as_mut().poll(cx) else {
+			*self.state.get_mut().unwrap() = Some(RecvState::Reading(fut));
+			return Poll::Pending;
+		};
+		self.interrupt = None;
+		self.watching = false;
+		// Apply a stop requested while the operation was in flight now, not on
+		// the next read: a caller that stops and never reads again must still
+		// send STOP_SENDING.
+		if let Some(code) = self.stop.take() {
+			stream.stop(code);
+		}
+		*self.state.get_mut().unwrap() = Some(RecvState::Idle(stream));
+		if let Some(Ok(None)) = &res {
+			self.fin = true;
+		}
+		Poll::Ready(res)
 	}
 }
 
@@ -702,6 +750,7 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for RecvS
 			if !self.buffer.is_empty() {
 				let n = dst.len().min(self.buffer.len());
 				dst[..n].copy_from_slice(&self.buffer.split_to(n));
+				self.drained();
 				return Poll::Ready(Ok(Some(n)));
 			}
 			if self.fin {
@@ -722,7 +771,9 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for RecvS
 			self.unqueue();
 			if !self.buffer.is_empty() {
 				let n = max.min(self.buffer.len());
-				return Poll::Ready(Ok(Some(self.buffer.split_to(n))));
+				let chunk = self.buffer.split_to(n);
+				self.drained();
+				return Poll::Ready(Ok(Some(chunk)));
 			}
 			if self.fin {
 				return Poll::Ready(Ok(None));
@@ -748,20 +799,36 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for RecvS
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		// Emulated with reads rather than the underlying closed(): that future
-		// would own the stream, deadlocking any later read (the caller reclaims a
-		// dropped watch by simply reading again, which the bridge must preserve).
-		// A FIN or reset therefore surfaces through reads; payload arriving before
-		// it is queued as read-ahead (up to READ_AHEAD_CAP) so a FIN right behind
-		// undelivered data still resolves the watch without an external read.
+		// Emulated with reads rather than held on the underlying closed(): that
+		// future owns the stream, so it is only watched at the read-ahead cap, and
+		// interruptibly, so any read reclaims the stream. Below the cap a FIN or
+		// reset surfaces through reads; payload arriving before it is queued as
+		// read-ahead (up to READ_AHEAD_CAP) so a FIN right behind undelivered data
+		// still resolves the watch without an external read.
 		loop {
 			if self.fin {
 				return Poll::Ready(Ok(()));
 			}
 			if self.buffer.len() + self.queued_len >= READ_AHEAD_CAP {
-				// The caller's own reads are what drain the backlog, and their
-				// re-poll of this watch is what resumes it.
-				return Poll::Pending;
+				// Read no further, but still see a reset or connection close
+				// behind the backlog, and resume reading ahead once the caller's
+				// reads drain below the cap.
+				self.parked = Some(cx.waker().clone());
+				match self.state.get_mut().unwrap().take().expect("in-flight") {
+					RecvState::Idle(stream) => self.start(stream, None),
+					// The caller's own read, which wakes us by draining.
+					RecvState::Reading(fut) if !self.watching => {
+						*self.state.get_mut().unwrap() = Some(RecvState::Reading(fut));
+						return Poll::Pending;
+					}
+					RecvState::Reading(fut) => match ready!(self.poll_op(cx, fut)) {
+						Some(Ok(_)) => return Poll::Ready(Ok(())),
+						Some(Err(err)) => return Poll::Ready(Err(err)),
+						// Interrupted by a stop; watch again.
+						None => {}
+					},
+				}
+				continue;
 			}
 			match ready!(self.poll_fill(cx, 8 * 1024)) {
 				Ok(Some(bytes)) => {
@@ -969,11 +1036,14 @@ mod tests {
 	}
 
 	/// An async-interface receive stream replaying canned chunks, then EOF.
+	#[derive(Default)]
 	struct FakeRecv {
 		chunks: std::collections::VecDeque<Bytes>,
 		stops: Arc<Mutex<Vec<u32>>>,
 		/// Reads park while set, so a test can hold one in flight in the adapter.
 		blocked: Arc<AtomicBool>,
+		/// The peer reset the stream, discarding whatever was not yet read.
+		reset: Arc<AtomicBool>,
 	}
 
 	impl web_transport_trait::RecvStream for FakeRecv {
@@ -988,6 +1058,9 @@ mod tests {
 				Poll::Ready(())
 			})
 			.await;
+			if self.reset.load(Ordering::SeqCst) {
+				return Err(FakeError);
+			}
 			let Some(chunk) = self.chunks.front_mut() else {
 				return Ok(None);
 			};
@@ -1003,8 +1076,18 @@ mod tests {
 			self.stops.lock().unwrap().push(code);
 		}
 
+		/// Ends at a reset, or at the FIN once every chunk was read.
 		async fn closed(&mut self) -> Result<(), Self::Error> {
-			Ok(())
+			std::future::poll_fn(|_| {
+				if self.reset.load(Ordering::SeqCst) {
+					return Poll::Ready(Err(FakeError));
+				}
+				match self.chunks.is_empty() {
+					true => Poll::Ready(Ok(())),
+					false => Poll::Pending,
+				}
+			})
+			.await
 		}
 	}
 
@@ -1210,7 +1293,7 @@ mod tests {
 		let fake = FakeRecv {
 			chunks: [Bytes::from_static(b"abcdef")].into_iter().collect(),
 			stops: stops.clone(),
-			blocked: Default::default(),
+			..Default::default()
 		};
 		let mut recv = RecvStream::new(fake);
 		let mut cx = cx();
@@ -1236,7 +1319,7 @@ mod tests {
 		let fake = FakeRecv {
 			chunks: Default::default(),
 			stops: stops.clone(),
-			blocked: Default::default(),
+			..Default::default()
 		};
 		let mut recv = RecvStream::new(fake);
 
@@ -1254,6 +1337,7 @@ mod tests {
 			chunks: [Bytes::from_static(b"data")].into_iter().collect(),
 			stops: stops.clone(),
 			blocked: blocked.clone(),
+			..Default::default()
 		};
 		let mut recv = RecvStream::new(fake);
 		let mut cx = cx();
@@ -1323,6 +1407,7 @@ mod tests {
 			chunks: [Bytes::from_static(b"data")].into_iter().collect(),
 			stops: stops.clone(),
 			blocked: blocked.clone(),
+			..Default::default()
 		};
 		let mut recv = RecvStream::new(fake);
 		let mut cx = cx();
@@ -1351,7 +1436,7 @@ mod tests {
 		let fake = FakeRecv {
 			chunks: [Bytes::from_static(b"tail")].into_iter().collect(),
 			stops: stops.clone(),
-			blocked: Default::default(),
+			..Default::default()
 		};
 		let mut recv = RecvStream::new(fake);
 		let mut cx = cx();
@@ -1364,6 +1449,80 @@ mod tests {
 		assert_eq!(recv.poll_read(&mut cx, &mut dst), Poll::Ready(Ok(Some(4))));
 		assert_eq!(&dst, b"tail");
 		assert_eq!(recv.poll_read(&mut cx, &mut dst), Poll::Ready(Ok(None)));
+	}
+
+	/// A waker counting its wakes, standing in for a task.
+	#[derive(Default)]
+	struct Wakes(std::sync::atomic::AtomicUsize);
+
+	impl std::task::Wake for Wakes {
+		fn wake(self: Arc<Self>) {
+			self.0.fetch_add(1, Ordering::SeqCst);
+		}
+	}
+
+	/// More payload than the read-ahead cap, in watch-sized chunks.
+	fn flood() -> std::collections::VecDeque<Bytes> {
+		(0..READ_AHEAD_CAP / (8 * 1024) + 1)
+			.map(|_| Bytes::from(vec![7u8; 8 * 1024]))
+			.collect()
+	}
+
+	// A reset behind a full read-ahead still closes the watch, and the payload
+	// read before it is still delivered.
+	#[test]
+	fn recv_closed_sees_a_reset_at_the_cap() {
+		let reset = Arc::new(AtomicBool::new(false));
+		let mut recv = RecvStream::new(FakeRecv {
+			chunks: flood(),
+			reset: reset.clone(),
+			..Default::default()
+		});
+		let mut cx = cx();
+
+		// The watch fills the read-ahead, then waits on the stream's end.
+		assert_eq!(recv.poll_closed(&mut cx), Poll::Pending);
+		reset.store(true, Ordering::SeqCst);
+		assert_eq!(recv.poll_closed(&mut cx), Poll::Ready(Err(FakeError)));
+
+		let mut read = 0;
+		while let Poll::Ready(Ok(Some(chunk))) = recv.poll_read_chunk(&mut cx, usize::MAX) {
+			read += chunk.len();
+		}
+		assert_eq!(read, READ_AHEAD_CAP);
+	}
+
+	// A watch parked at the cap is woken by a read in another task draining
+	// below it, and then reads ahead to the FIN.
+	#[test]
+	fn recv_closed_resumes_when_a_read_drains_the_cap() {
+		let mut recv = RecvStream::new(FakeRecv {
+			chunks: flood(),
+			..Default::default()
+		});
+		let wakes = Arc::new(Wakes::default());
+		let watcher = std::task::Waker::from(wakes.clone());
+		let mut watch = Context::from_waker(&watcher);
+		let mut cx = cx();
+
+		assert_eq!(recv.poll_closed(&mut watch), Poll::Pending);
+		let woken = wakes.0.load(Ordering::SeqCst);
+
+		// The reader drains one chunk, which wakes the watch.
+		let Poll::Ready(Ok(Some(chunk))) = recv.poll_read_chunk(&mut cx, 8 * 1024) else {
+			panic!("the read-ahead serves the reader");
+		};
+		assert_eq!(chunk.len(), 8 * 1024);
+		assert!(wakes.0.load(Ordering::SeqCst) > woken, "the draining read never woke the watch");
+
+		// The watch reclaims the stream and reads through to the FIN.
+		assert_eq!(recv.poll_closed(&mut watch), Poll::Ready(Ok(())));
+		let mut read = chunk.len();
+		while let Poll::Ready(Ok(Some(chunk))) = recv.poll_read_chunk(&mut cx, usize::MAX) {
+			read += chunk.len();
+		}
+		assert_eq!(read, READ_AHEAD_CAP + 8 * 1024);
+		assert_eq!(recv.poll_read_chunk(&mut cx, 1), Poll::Ready(Ok(None)));
 	}
 
 	/// An async-interface session that never accepts, opens, or closes.
