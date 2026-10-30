@@ -81,6 +81,12 @@ Decided 2026-10-26 (maintainer):
   review, and moq-bot joins that bypass list here. Decide with the bypass list
   whether `main` keeps deploying to `publish`, or publishing narrows to
   `release` and release tags. Ask the maintainer; settings changes are theirs.
+- Open, found 2026-10-29: `APP_CLIENT_ID` and `APP_PRIVATE_KEY` are moq-dev
+  organization secrets visible to this repository, so any workflow on a
+  pushed branch can read the moq-bot key, not only jobs in `publish`. Once
+  moq-bot bypasses `main`, that branch could push to `main`. Before cutover,
+  the maintainer restricts the organization secrets and puts the key in
+  `publish` under the same names, so no workflow changes.
 - The gate tests each PR on the latest `main`, not the PR's own base. On
   2026-10-29 [moq-dev/moq#7162](https://github.com/moq-dev/moq/pull/7162)
   passed its own CI but broke in the queue on API renames that landed after
