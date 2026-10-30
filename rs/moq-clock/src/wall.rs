@@ -4,6 +4,8 @@ use std::{
 	time::Duration,
 };
 
+use crate::Instant;
+
 /// A wall-clock time, in nanoseconds since the Unix epoch.
 ///
 /// Read from the same clock as [`Instant`](crate::Instant) but kept apart from it:
@@ -81,6 +83,43 @@ impl From<Wall> for std::time::SystemTime {
 	}
 }
 
+/// Maps wall times read on this host, such as a socket's kernel receive timestamps, onto the
+/// monotonic clock.
+///
+/// NTP or an administrator can step the wall clock, which would read as a datagram arriving
+/// early or late. Each batch samples both clocks, and a batch whose offset between them moved
+/// more than [`WallMap::TOLERANCE`] since the previous batch maps nothing.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WallMap {
+	/// The latest batch's sample of both clocks.
+	sample: Option<(Instant, Wall)>,
+	/// Whether the wall clock stepped between the latest two samples.
+	stepped: bool,
+}
+
+impl WallMap {
+	/// The most the offset between the clocks may move between batches and still map, covering
+	/// reads of the two clocks that are not simultaneous and a slewing wall clock.
+	pub const TOLERANCE: Duration = Duration::from_millis(1);
+
+	/// Starts a batch whose clocks read `now` and `wall` together.
+	pub fn sample(&mut self, now: Instant, wall: Wall) {
+		self.stepped = self.sample.is_some_and(|(last_now, last_wall)| {
+			let elapsed = now.saturating_duration_since(last_now);
+			wall.checked_duration_since(last_wall)
+				.is_none_or(|walled| walled.abs_diff(elapsed) > Self::TOLERANCE)
+		});
+		self.sample = Some((now, wall));
+	}
+
+	/// The instant the wall clock read `at`, or `None` before any batch, when the wall clock
+	/// stepped since the previous batch, or when `at` is after the batch's sample.
+	pub fn map(&self, at: Wall) -> Option<Instant> {
+		let (now, wall) = self.sample.filter(|_| !self.stepped)?;
+		now.checked_sub(wall.checked_duration_since(at)?)
+	}
+}
+
 /// A [`std::time::SystemTime`] before 1970 or past 2554, outside [`Wall`]'s range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutOfRange;
@@ -138,5 +177,34 @@ mod tests {
 		assert_eq!(Wall::try_from(system), Ok(wall));
 		let before = std::time::SystemTime::UNIX_EPOCH - Duration::from_secs(1);
 		assert_eq!(Wall::try_from(before), Err(OutOfRange));
+	}
+
+	#[test]
+	fn maps_across_batches_until_a_step() {
+		let mut map = WallMap::default();
+		let now = Instant::ZERO + Duration::from_secs(100);
+		let wall = Wall::UNIX_EPOCH + Duration::from_secs(1_000);
+		assert_eq!(map.map(wall), None);
+
+		map.sample(now, wall);
+		let at = wall - Duration::from_millis(3);
+		assert_eq!(map.map(at), Some(now - Duration::from_millis(3)));
+		assert_eq!(map.map(wall + Duration::from_millis(1)), None);
+
+		// A second later on both clocks, within tolerance of each other, still maps
+		let later = Duration::from_secs(1);
+		map.sample(now + later, wall + later + Duration::from_micros(500));
+		assert!(map.map(wall + later).is_some());
+
+		// The wall clock stepped forward: this batch maps nothing, and the next one does again
+		let step = Duration::from_secs(2) + Duration::from_millis(5);
+		map.sample(now + Duration::from_secs(2), wall + step);
+		assert_eq!(map.map(wall + step), None);
+		map.sample(now + Duration::from_secs(3), wall + step + later);
+		assert!(map.map(wall + step + later).is_some());
+
+		// And back
+		map.sample(now + Duration::from_secs(4), wall);
+		assert_eq!(map.map(wall), None);
 	}
 }

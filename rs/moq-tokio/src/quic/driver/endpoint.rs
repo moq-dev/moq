@@ -837,6 +837,8 @@ struct RecvState {
 	/// Reused buffer that received datagrams are copied into and split into owned slices.
 	datagrams: BytesMut,
 	recv_limiter: WorkLimiter,
+	/// Maps the kernel's receive timestamps, which count on the wall clock, onto `Instant`s
+	wall: moq_clock::WallMap,
 }
 
 impl RecvState {
@@ -858,6 +860,7 @@ impl RecvState {
 			recv_buf: recv_buf.into(),
 			datagrams: BytesMut::with_capacity(datagram_capacity),
 			recv_limiter: WorkLimiter::new(RECV_TIME_BOUND),
+			wall: moq_clock::WallMap::default(),
 		}
 	}
 
@@ -886,6 +889,8 @@ impl RecvState {
 			match recv(cx, &mut iovs, &mut metas) {
 				Poll::Ready(Ok(msgs)) => {
 					self.recv_limiter.record_work(msgs);
+					let received = Instant::now();
+					self.wall.sample(received, moq_clock::Wall::now());
 					// Copy the received batch into `datagrams` and split each datagram off as
 					// an owned slice. We can't read directly into `datagrams` and drop
 					// `recv_buf`: once a slice has been handed to a connection the allocation
@@ -901,6 +906,13 @@ impl RecvState {
 					}
 					for meta in metas.iter().take(msgs) {
 						let mut data = self.datagrams.split_to(meta.len);
+						// The kernel's stamp, or the receive's own instant without one. One stamp
+						// covers a GRO batch, so only its first datagram reports an arrival.
+						let mut arrival = Some(
+							meta.timestamp
+								.and_then(|ts| self.wall.map(moq_clock::Wall::UNIX_EPOCH.checked_add(ts)?))
+								.unwrap_or(received),
+						);
 						while !data.is_empty() {
 							let buf = data.split_to(meta.stride.min(data.len()));
 							let mut response_buffer = Vec::new();
@@ -909,7 +921,7 @@ impl RecvState {
 								local_ip: meta.dst_ip,
 								ecn: meta.ecn.map(proto_ecn),
 								data: buf,
-								arrival: None,
+								arrival: arrival.take(),
 							};
 							match endpoint.handle(now, received, &mut response_buffer) {
 								Some(DatagramEvent::NewConnection(incoming)) => {
