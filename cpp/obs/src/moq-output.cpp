@@ -840,8 +840,11 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 				return;
 			VideoInit(lower);
 		}
+		// The lower rendition waits on one further down, so this one waits with it.
 		auto below = video_tracks.find(lower);
-		if (below != video_tracks.end() && below->second.producer) {
+		if (below == video_tracks.end())
+			return;
+		if (below->second.producer) {
 			config.lower = below->second.producer;
 			lower_bps = (uint64_t)lower_kbps * 1000ULL;
 		}

@@ -80,6 +80,9 @@ obs_encoder_t *const AUDIO_ENCODER = reinterpret_cast<obs_encoder_t *>(0x3);
 // A second, 2 Mbps video encoder below VIDEO_ENCODER's 8 Mbps, while g_ladder is set.
 obs_encoder_t *const LOW_ENCODER = reinterpret_cast<obs_encoder_t *>(0x5);
 std::atomic<bool> g_ladder{false};
+// A third, 4 Mbps video encoder between the two, while g_ladder and g_mid are set.
+obs_encoder_t *const MID_ENCODER = reinterpret_cast<obs_encoder_t *>(0x6);
+std::atomic<bool> g_mid{false};
 // LOW_ENCODER has no headers yet, as an encoder that only has them after its first frame.
 std::atomic<bool> g_low_headers_pending{false};
 } // namespace
@@ -121,7 +124,9 @@ obs_encoder_t *obs_output_get_video_encoder2(const obs_output_t *, size_t idx)
 {
 	if (idx == 0)
 		return VIDEO_ENCODER;
-	return idx == 1 && g_ladder ? LOW_ENCODER : nullptr;
+	if (idx == 1 && g_ladder)
+		return LOW_ENCODER;
+	return idx == 2 && g_ladder && g_mid ? MID_ENCODER : nullptr;
 }
 
 bool obs_output_begin_data_capture(obs_output_t *, uint32_t)
@@ -199,7 +204,9 @@ const char *obs_data_get_string(obs_data_t *, const char *)
 
 long long obs_data_get_int(obs_data_t *settings, const char *)
 {
-	return settings == reinterpret_cast<obs_data_t *>(LOW_ENCODER) ? 2000 : 8000;
+	if (settings == reinterpret_cast<obs_data_t *>(LOW_ENCODER))
+		return 2000;
+	return settings == reinterpret_cast<obs_data_t *>(MID_ENCODER) ? 4000 : 8000;
 }
 
 // The settings a retune builds carry only the bitrate, so the stub is that bitrate.
@@ -312,6 +319,7 @@ void reset(std::string url)
 	g_rate_control = "CBR";
 	g_encoder_caps = OBS_ENCODER_CAP_DYN_BITRATE;
 	g_ladder = false;
+	g_mid = false;
 	g_low_headers_pending = false;
 	{
 		std::lock_guard<std::mutex> lock(g_updates_mutex);
@@ -732,13 +740,14 @@ int main()
 	}
 	printf("a ladder rung disables, drops packets, and resumes on a keyframe: ok\n");
 
-	// A higher rung whose lower encoder has no headers yet waits for the lower's first
-	// packet rather than start the lower track without them, then opens on its own
-	// next keyframe one priority below it.
+	// A rung whose lower encoder has no headers yet waits for the lower's first packet
+	// rather than start the lower track without them, and so does every rung above it.
+	// Each then opens on its next keyframe one priority below its lower.
 	{
 		TestRelay relay;
 		reset(relay.Url());
 		g_ladder = true;
+		g_mid = true;
 		g_encoder_caps = 0;
 		g_low_headers_pending = true;
 		MoQOutput o(nullptr, OUTPUT);
@@ -751,6 +760,7 @@ int main()
 		o.Data(&early);
 		CHECK(o.GetTotalBytes() == 0);
 		CHECK(!MoQOutputStatsTest::Published(o, LOW_ENCODER).has_value());
+		CHECK(!MoQOutputStatsTest::Published(o, MID_ENCODER).has_value());
 
 		g_low_headers_pending = false;
 		auto first = videoPacket(keyframe, 0);
@@ -769,9 +779,10 @@ int main()
 		CHECK(o.GetTotalBytes() == sent);
 
 		const auto high = MoQOutputStatsTest::Published(o, VIDEO_ENCODER);
+		const auto mid = MoQOutputStatsTest::Published(o, MID_ENCODER);
 		const auto low = MoQOutputStatsTest::Published(o, LOW_ENCODER);
-		CHECK(high.has_value() && low.has_value());
-		CHECK(high && low && high->second == low->second - 1);
+		CHECK(high.has_value() && mid.has_value() && low.has_value());
+		CHECK(high && mid && low && high->second == mid->second - 1 && mid->second == low->second - 1);
 		o.Stop();
 	}
 	printf("a ladder rung waits for its lower rung's headers: ok\n");
