@@ -479,15 +479,35 @@ it("keeps the clock when only the catalog's broadcast is republished", async () 
 	}
 });
 
+it("holds the picture and decoder while the only rendition is disabled", async () => {
+	const playback = await guardedPlayback("legacy", [sample(10, 1000)]);
+	try {
+		const held = playback.decoder.out.frame.peek();
+		expect(held).toBeDefined();
+		const codecs = playback.codecs;
+
+		const video = playback.catalog.peek().video?.renditions.video;
+		if (!video) throw new Error("missing rendition");
+		playback.catalog.set({ video: { renditions: { video: { ...video, enabled: false } } } });
+		await microtasks();
+		// The last picture before the disable stays up; the stock publisher makes it black.
+		expect(playback.decoder.out.frame.peek()).toBe(held);
+
+		playback.catalog.set({ video: { renditions: { video } } });
+		await microtasks();
+		expect(playback.codecs).toBe(codecs);
+	} finally {
+		playback.close();
+	}
+});
+
 it("clears the picture once no rendition is selectable", async () => {
 	const playback = await guardedPlayback("legacy", [sample(10, 1000)]);
 	try {
 		const held = playback.decoder.out.frame.peek();
 		expect(held).toBeDefined();
 
-		const video = playback.catalog.peek().video?.renditions.video;
-		if (!video) throw new Error("missing rendition");
-		playback.catalog.set({ video: { renditions: { video: { ...video, enabled: false } } } });
+		playback.catalog.set({});
 		await microtasks();
 		expect(playback.decoder.out.frame.peek()).toBeUndefined();
 		expect(playback.decoder.out.timestamp.peek()).toBeUndefined();

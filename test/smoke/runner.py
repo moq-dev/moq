@@ -13,6 +13,10 @@ import time
 
 OWN = ('moq-dev-rs', 'moq-dev-js')
 RELAY_IMAGE = 'moq-interop-relay:local'
+# Only our clients against this checkout's relay gate the run. Every other pair
+# depends on a third party or a feature we don't serve, so it is reported but
+# optional, as relays.sh treats every relay but moq-dev's.
+REQUIRED = {(client, 'moq-dev-rs') for client in OWN}
 
 
 def matrices(registry):
@@ -92,15 +96,14 @@ def run(upstream, output):
         raise ValueError(f'runner checkout already contains results: {results}')
     combined = None
     target = None
-    failed = []
     try:
         for index, plan in enumerate(plans):
             registry_file.write_text(json.dumps(plan))
             expected = expected_pairs(plan)
             if not expected:
                 raise ValueError(f'runner matrix {index} has no compatible pairs')
-            if subprocess.run(['bash', 'run-interop-tests.sh', '--docker-only'], cwd=upstream).returncode:
-                failed.append(index)
+            # The runner exits nonzero on any red pair; the validated summary decides instead.
+            subprocess.run(['bash', 'run-interop-tests.sh', '--docker-only'], cwd=upstream)
             summaries = list(results.glob('*/summary.json'))
             if len(summaries) != 1:
                 raise ValueError('runner must produce exactly one summary per matrix')
@@ -134,9 +137,16 @@ def run(upstream, output):
         registry_file.write_text(original)
         subprocess.run(['docker', 'compose', '-f', 'docker-compose.test.yml', 'down', '--timeout', '1'],
                        cwd=upstream, check=True)
-    # Any failure fails the run, but only after the report shows which pairs failed.
+    # Fail only after the report shows every pair. A required pair the registry
+    # no longer pairs fails too, rather than passing unchecked.
+    status = {(run['client'], run['relay']): run['status'] for run in combined['runs']}
+    optional = sorted(pair for pair, verdict in status.items() if verdict != 'pass' and pair not in REQUIRED)
+    if optional:
+        # A workflow annotation, so a green job still shows them.
+        print(f'::warning::optional pairs not passing (reported only): {optional}')
+    failed = sorted(pair for pair in REQUIRED if status.get(pair) != 'pass')
     if failed:
-        raise SystemExit(f'runner matrices {failed} exited nonzero; see the report')
+        raise SystemExit(f'required pairs failed: {failed}; see the report')
 
 
 def main():

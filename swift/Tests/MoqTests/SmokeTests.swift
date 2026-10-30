@@ -9,6 +9,11 @@ private func nextRoute(_ announced: AnnounceConsumer) async throws -> AnnounceEv
 }
 
 final class SmokeTests: XCTestCase {
+    func testDefaultSubscriptionSkipsSupersededGroupsAtOnce() {
+        XCTAssertEqual(Subscription.default.maxDelay, 0)
+        XCTAssertNil(Subscription().maxDelay)
+    }
+
     func testContainerTimebaseBelongsToOneBroadcast() throws {
         let owner = try BroadcastProducer()
         let other = try BroadcastProducer()
@@ -173,7 +178,7 @@ final class SmokeTests: XCTestCase {
         _ = try publication.broadcast.publishTrack(name: "events")
         let consumer = origin.consume()
         do {
-            _ = try await consumer.requestBroadcast(path: "live")
+            _ = try await consumer.request(path: "live")
             XCTFail("an unannounced broadcast must be unroutable")
         } catch {}
 
@@ -190,7 +195,7 @@ final class SmokeTests: XCTestCase {
         }
         XCTAssertEqual(retracted.prefix, "live")
         do {
-            _ = try await consumer.requestBroadcast(path: "live")
+            _ = try await consumer.request(path: "live")
             XCTFail("an unannounced broadcast must be unroutable")
         } catch {}
 
@@ -198,7 +203,7 @@ final class SmokeTests: XCTestCase {
         guard case .start = try await nextRoute(announced) else {
             return XCTFail("expected a reannouncement")
         }
-        _ = try await consumer.requestBroadcast(path: "live")
+        _ = try await consumer.request(path: "live")
     }
 
     /// Releasing a publication keeps its route; closing the broadcast ends it.
@@ -210,11 +215,11 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(broadcast === publication?.broadcast)
         try publication?.announce()
         publication = nil
-        _ = try await consumer.requestBroadcast(path: "live")
+        _ = try await consumer.request(path: "live")
 
         try broadcast.close()
         do {
-            _ = try await consumer.requestBroadcast(path: "live")
+            _ = try await consumer.request(path: "live")
             XCTFail("a closed broadcast must be unroutable")
         } catch {}
     }
@@ -238,7 +243,7 @@ final class SmokeTests: XCTestCase {
                 return XCTFail("expected Closed, got \(error)")
             }
         }
-        _ = try await origin.consume().requestBroadcast(path: "live")
+        _ = try await origin.consume().request(path: "live")
         try replacement.broadcast.close()
     }
 
@@ -281,7 +286,7 @@ final class SmokeTests: XCTestCase {
         let origin = OriginProducer()
         let dynamic = try origin.requests(prefix: "live")
         let pending = Task {
-            try await origin.consume().requestBroadcast(path: "live/cam")
+            try await origin.consume().request(path: "live/cam")
         }
         let request = try await dynamic.requestedBroadcast()
         XCTAssertEqual(try request.path, "live/cam")
@@ -603,7 +608,7 @@ final class SmokeTests: XCTestCase {
         )
         try publication.announce()
 
-        let consumer = try await origin.consume().requestBroadcast(path: "audio-delay")
+        let consumer = try await origin.consume().request(path: "audio-delay")
         let catalogs = try await Media.CatalogConsumer.subscribe(broadcast: consumer)
         // XCTUnwrap takes an autoclosure, which can't hold an await.
         let nextCatalog = try await catalogs.next()
@@ -660,7 +665,7 @@ final class SmokeTests: XCTestCase {
             try video.write(VideoFrame(timestampUs: UInt64(i) * 33_333, data: rgba))
         }
 
-        let consumer = try await origin.consume().requestBroadcast(path: "video-decode-frame")
+        let consumer = try await origin.consume().request(path: "video-decode-frame")
         let catalogs = try await Media.CatalogConsumer.subscribe(broadcast: consumer)
         // XCTUnwrap takes an autoclosure, which can't hold an await.
         let nextCatalog = try await catalogs.next()

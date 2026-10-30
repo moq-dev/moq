@@ -444,6 +444,15 @@ impl ExportSource {
 		}
 	}
 
+	/// Receive group handles and wait for all input bytes while frame delivery is backpressured.
+	pub fn poll_received(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		match &mut self.state {
+			SourceState::Active(consumer) => consumer.poll_received(waiter),
+			SourceState::Ended => Poll::Ready(()),
+			_ => Poll::Pending,
+		}
+	}
+
 	/// Read normalized media or a clean group boundary.
 	pub fn poll_event(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
 		loop {

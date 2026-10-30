@@ -149,9 +149,11 @@ where
 	/// Tracks [`Export::follow`] left on the ended broadcast, resubscribed as the returned
 	/// catalog lists them.
 	stale: HashSet<String>,
-	/// The PAT and PMT `version_number` the program's first tables go out at, advanced by each
-	/// switch to another instance so a demux that caches tables by version reads the new ones.
+	/// The PMT `version_number` the program's first tables go out at, advanced by each switch to
+	/// another instance so a demux that caches tables by version reads the new ones.
 	version: VersionNumber,
+	/// The PAT's, advanced by each switch alike.
+	pat_version: VersionNumber,
 	/// After a switch to another instance, the PIDs whose first packet is queued flagging the
 	/// break. `None` for an export that never switched.
 	flagged: Option<HashSet<u16>>,
@@ -458,16 +460,16 @@ impl Track {
 			self.declared = depth.map(DeclaredClock::new);
 		}
 		let pts = to_ticks(pending.frame.timestamp);
-		let arrived = pending.arrived;
+		let (arrived, bytes) = (pending.arrived, pending.frame.payload.len());
 		let item = (pending, self.source.description().cloned());
 		match &mut self.declared {
 			Some(clock) => clock.push(Some(item), pts)?,
-			None => self.clock.push(item, pts, arrived),
+			None => self.clock.push(item, pts, arrived, bytes),
 		}
 		self.release(name, jitter, false)
 	}
 
-	/// Read until a frame is due, or hold the first frame until the program tables are built.
+	/// Read within the jitter window, or hold the first frame until the program tables are built.
 	fn fill(&mut self, name: &str, waiter: &kio::Waiter, input: &mut Input<'_>) -> crate::Result<()> {
 		if self.key.name.is_empty() {
 			self.key.name = name.to_string();
@@ -479,7 +481,8 @@ impl Track {
 		// A placed frame is judged at release, against the keyframe's departure ([`Export::leads_video`]).
 		let aligned = !is_video && !self.kind.placed();
 		loop {
-			if !input.waiting_for_header && input.jitter.full(&self.key) {
+			if !input.waiting_for_header && input.jitter.full(&self.key, waiter) {
+				let _ = self.source.poll_received(waiter);
 				break;
 			}
 			match self.source.poll_event(waiter)? {
@@ -704,7 +707,9 @@ impl Track {
 		loop {
 			let settle = match flush {
 				true => Settle::All,
-				false => self.clock.settle(lookahead, self.latest, jitter.delay()),
+				false => self
+					.clock
+					.settle(lookahead, self.latest, jitter.delay(), jitter::MAX_BYTES),
 			};
 			let Some(((mut pending, description), dts)) = self.clock.pop(lookahead, delay, settle) else {
 				break;
@@ -775,6 +780,7 @@ impl Track {
 			skip,
 			sync,
 			leading,
+			bytes: frame.payload.len() + self.key.name.len(),
 			item: Queued {
 				frame,
 				decode,
@@ -974,10 +980,10 @@ impl Kind {
 	}
 }
 
-/// The program tables: the PAT, fixed for the program's life but for its network entry, and the
-/// PMT, which lists the streams on the air. The schedule lays them as they stand when each copy
-/// begins to go out ([`Schedule::set_psi`]), so a change is one update of this state, and a
-/// revision overtaken before any copy of it began takes no version.
+/// The program tables: the PAT, fixed for the program's life but for its network entry and the
+/// PID it names for the PMT, and the PMT, which lists the streams on the air. The schedule lays
+/// them as they stand when each copy begins to go out ([`Schedule::set_psi`]), so a change is one
+/// update of this state, and a revision overtaken before any copy of it began takes no version.
 struct Psi {
 	/// The source's `transport_stream_id`, so the rebuilt PAT stays consistent with the carried SI.
 	transport_stream_id: u16,
@@ -986,6 +992,12 @@ struct Psi {
 	/// PID the PMT rides on: the source's original (preserved from the service
 	/// record) or the synthesized [`PMT_PID`] for a media-only source.
 	pmt_pid: u16,
+	/// The PID the catalog moved the PMT to, which it takes once no copy of the tables is on its
+	/// way ([`Export::follow_pmt`]).
+	moving: Option<u16>,
+	/// The PIDs the PMT rode before, which no stream takes: a receiver may still read them as
+	/// the PMT's.
+	left: Vec<u16>,
 	/// The PMT the last tables handed to the schedule listed: the streams the next copy adds.
 	led: Option<psi::Pmt>,
 	/// The tables last set on the schedule, and the PIDs they flag a break on.
@@ -998,13 +1010,16 @@ struct Psi {
 	out: Option<Laid>,
 }
 
-/// Program tables as a copy of them goes out: the PMT at its version, and the PAT.
+/// Program tables as a copy of them goes out: the PMT and the PAT, each at its version.
 #[derive(Clone)]
 struct Laid {
 	version: VersionNumber,
 	pmt: psi::Pmt,
+	/// The PID the PAT names for the PMT, which the PMT rides.
+	pmt_pid: u16,
 	/// Whether the PAT lists the network entry, pointing at the NIT the export carries.
 	network: bool,
+	pat_version: VersionNumber,
 	pat: Bytes,
 }
 
@@ -1020,18 +1035,26 @@ impl Psi {
 			.filter(|&pcr| self.pmt.streams.iter().all(|es| es.pid.as_u16() != pcr))
 	}
 
-	/// The tables as they stand, listing the network entry when `network`. A PMT that differs
-	/// from the last laid goes out at the next version, `first` before any has; the PAT keeps its
-	/// version until its network entry changes, so it never runs ahead of the PMT's.
-	fn current(&self, network: bool, first: VersionNumber) -> anyhow::Result<Laid> {
-		let (version, pat) = match &self.laid {
-			Some(laid) if laid.pmt == self.pmt && laid.network == network => return Ok(laid.clone()),
+	/// The tables as they stand, listing the network entry when `network`. Each table that
+	/// differs from the last laid goes out at the version after that one's own, `first` (the PMT's
+	/// and the PAT's) before any has: the PAT changes only with its network entry or PMT PID.
+	fn current(&self, network: bool, first: (VersionNumber, VersionNumber)) -> anyhow::Result<Laid> {
+		let next = |mut version: VersionNumber| {
+			version.increment();
+			version
+		};
+		let (version, pat_version, pat) = match &self.laid {
 			Some(laid) => {
-				let mut version = laid.version;
-				version.increment();
-				(version, (laid.network == network).then(|| laid.pat.clone()))
+				let version = match laid.pmt == self.pmt {
+					true => laid.version,
+					false => next(laid.version),
+				};
+				match laid.network == network && laid.pmt_pid == self.pmt_pid {
+					true => (version, laid.pat_version, Some(laid.pat.clone())),
+					false => (version, next(laid.pat_version), None),
+				}
 			}
-			None => (first, None),
+			None => (first.0, first.1, None),
 		};
 		let pat = match pat {
 			Some(pat) => pat,
@@ -1040,13 +1063,15 @@ impl Psi {
 				self.pmt.program_number,
 				self.pmt_pid,
 				network,
-				version,
+				pat_version,
 			)?,
 		};
 		Ok(Laid {
 			version,
 			pmt: self.pmt.clone(),
+			pmt_pid: self.pmt_pid,
 			network,
+			pat_version,
 			pat,
 		})
 	}
@@ -1329,6 +1354,7 @@ where
 			instance,
 			stale: HashSet::new(),
 			version: VersionNumber::default(),
+			pat_version: VersionNumber::default(),
 			flagged: None,
 			tables: Vec::new(),
 			psi_due: false,
@@ -1547,9 +1573,14 @@ where
 
 		// Once every source has ended, the tail goes out late if it must: the end of the
 		// stream is not a missed deadline.
-		self.program
-			.schedule
-			.set_ended(!self.program.tracks.is_empty() && self.program.tracks.values().all(|track| track.finished));
+		self.program.schedule.set_ended(
+			!self.program.tracks.is_empty()
+				&& self
+					.program
+					.tracks
+					.values_mut()
+					.all(|track| track.finished || track.source.poll_received(waiter).is_ready()),
+		);
 
 		// 4. Mux each frame the jitter buffer lets go (the first carries the buffered
 		// PAT/PMT), then lay out every grid slot whose time has come ([`Self::lay_due`]).
@@ -1658,9 +1689,12 @@ where
 					self.leave(err)?;
 				}
 				if ended || self.program.retired {
-					self.program
-						.schedule
-						.set_ended(self.program.tracks.values().all(|track| track.finished));
+					self.program.schedule.set_ended(
+						self.program
+							.tracks
+							.values_mut()
+							.all(|track| track.finished || track.source.poll_received(waiter).is_ready()),
+					);
 				}
 			}
 		}
@@ -1854,7 +1888,7 @@ where
 			}
 		}
 
-		// 2. Read each source until it has a frame due, or before the program tables
+		// 2. Read each source within its jitter window, or before the program tables
 		// are built, hold one per track.
 		self.fill(waiter)?;
 
@@ -2004,12 +2038,13 @@ where
 			.psi
 			.as_ref()
 			.and_then(|psi| psi.out.as_ref())
-			.map(|laid| laid.version);
-		next.version = out.unwrap_or(self.program.version);
+			.map(|laid| (laid.version, laid.pat_version));
+		(next.version, next.pat_version) = out.unwrap_or((self.program.version, self.program.pat_version));
 		next.epoch = self.program.epoch;
 		next.emitted_epoch = self.program.emitted_epoch;
 		if out.is_some() {
 			next.version.increment();
+			next.pat_version.increment();
 			next.epoch += 1;
 			next.flagged = Some(HashSet::new());
 			next.pcr_discontinuity = true;
@@ -2026,7 +2061,7 @@ where
 		Ok(())
 	}
 
-	/// Read each source until it has a frame due.
+	/// Read each source within its jitter window.
 	///
 	/// Before the program tables are built, each track holds its first frame instead,
 	/// and slices that arrive before their codec config resolves are dropped: a receiver
@@ -2173,6 +2208,7 @@ where
 				}
 			}
 			self.revise()?;
+			self.move_pmt(&mpegts)?;
 		}
 
 		// Assign a PID to every desired track the PMT does not list yet: prefer the original
@@ -2182,7 +2218,8 @@ where
 		// the first (partial) snapshot. A recorded PID may take over one a stream the catalog
 		// dropped still drains on ([`Self::list`]); any other PID the PMT lists is taken.
 		let pmt_pid = self.pmt_pid();
-		let mut taken: Vec<u16> = vec![0x0000, pmt_pid, 0x1FFF];
+		let mut taken: Vec<u16> = vec![0x0000, 0x1FFF];
+		taken.extend(self.pmt_pids());
 		taken.extend(self.program.psi.as_ref().and_then(|psi| psi.own_clock()));
 		taken.extend(
 			self.program
@@ -2801,7 +2838,8 @@ where
 
 	/// PID the PMT rides on: the source's original (preserved in the service record),
 	/// or the synthesized [`PMT_PID`] for a media-only source or an invalid (zero) value.
-	/// Once the tables are built they keep the PID they went out on.
+	/// Once the tables are built they move only behind a PAT naming the new PID
+	/// ([`Self::move_pmt`]).
 	fn pmt_pid(&self) -> u16 {
 		if let Some(psi) = &self.program.psi {
 			return psi.pmt_pid;
@@ -2812,6 +2850,80 @@ where
 			.map(|s| s.pmt_pid)
 			.filter(|&pid| pid != 0)
 			.unwrap_or(PMT_PID)
+	}
+
+	/// The PIDs no stream takes for the PMT's sake: the one it rides, the one it is moving to,
+	/// and the ones it rode before.
+	fn pmt_pids(&self) -> Vec<u16> {
+		let mut pids = vec![self.pmt_pid()];
+		if let Some(psi) = &self.program.psi {
+			pids.extend(psi.moving);
+			pids.extend(&psi.left);
+		}
+		pids
+	}
+
+	/// Follow a catalog that moves the PMT to another PID: the PAT of the next tables names it,
+	/// at the PAT's next version ([`Psi::current`]). A move onto a PID a stream the catalog
+	/// dropped still drains on waits for it ([`Self::follow_pmt`]); one onto a PID the catalog
+	/// gives a stream or SI, the clock's own PID, or no PID at all is refused, as is a catalog
+	/// that gives the PID to a stream while the move waits. A catalog that records no PID keeps
+	/// the PMT where it is.
+	fn move_pmt(&mut self, mpegts: &catalog::Mpegts) -> anyhow::Result<()> {
+		let Some(pid) = self.program.program.as_ref().map(|s| s.pmt_pid).filter(|&pid| pid != 0) else {
+			// The catalog no longer asks for a move, so drop one that is still waiting.
+			if let Some(psi) = self.program.psi.as_mut() {
+				psi.moving = None;
+			}
+			return Ok(());
+		};
+		let Some(psi) = self.program.psi.as_mut() else {
+			return Ok(());
+		};
+		if pid == psi.pmt_pid {
+			psi.moving = None;
+			return Ok(());
+		}
+		let psi = &*psi;
+		anyhow::ensure!(pid < 0x1fff, "TS export cannot move the PMT to PID {pid:#06x}");
+		let taken = psi.own_clock() == Some(pid)
+			|| mpegts.si.contains_key(&pid)
+			|| self
+				.program
+				.tracks
+				.values()
+				.any(|track| track.cataloged && track.pid == pid);
+		anyhow::ensure!(
+			!taken,
+			"TS export cannot move the PMT from PID {:#06x} to {pid:#06x}, which another stream rides",
+			psi.pmt_pid
+		);
+		self.program.psi.as_mut().expect("checked above").moving = Some(pid);
+		self.follow_pmt()
+	}
+
+	/// Move the PMT to the PID the catalog moved it to once no copy of the tables is on its way,
+	/// so each copy goes out whole on the PID its PAT names, and no stream is left on the PID,
+	/// and lead the next frame with them. Every copy not yet begun takes the move.
+	fn follow_pmt(&mut self) -> anyhow::Result<()> {
+		let Some(psi) = self.program.psi.as_mut() else {
+			return Ok(());
+		};
+		let Some(pid) = psi.moving else {
+			return Ok(());
+		};
+		if !psi.sending.is_empty() || self.program.tracks.values().any(|track| track.pid == pid) {
+			return Ok(());
+		}
+		psi.moving = None;
+		let old = std::mem::replace(&mut psi.pmt_pid, pid);
+		psi.left.retain(|&left| left != pid);
+		psi.left.push(old);
+		tracing::debug!(from = old, to = pid, "moving the PMT");
+		self.program.schedule.set_tables(pid);
+		self.program.schedule.forget(old);
+		self.program.revised = true;
+		self.restate()
 	}
 
 	/// Build the PAT/PMT once every track's PID and codec is known.
@@ -2846,6 +2958,8 @@ where
 			transport_stream_id,
 			pmt,
 			pmt_pid,
+			moving: None,
+			left: Vec::new(),
 			led: None,
 			stated: None,
 			laid: None,
@@ -2879,8 +2993,9 @@ where
 			})
 			.map(|t| t.pid)
 			.or_else(|| {
+				let pmt_pids = self.pmt_pids();
 				(FIRST_ES_PID..0x1fff).find(|pid| {
-					*pid != self.pmt_pid()
+					!pmt_pids.contains(pid)
 						&& self.program.tracks.values().all(|track| track.pid != *pid)
 						&& self.program.si.keys().all(|(si, _)| si != pid)
 				})
@@ -3066,6 +3181,8 @@ where
 		}
 		if changed {
 			self.revise()?;
+			// A move may have waited for a stream that just retired.
+			self.follow_pmt()?;
 		}
 		for name in free {
 			let parked = std::mem::take(&mut self.program.tracks.get_mut(&name).expect("collected above").parked);
@@ -3081,6 +3198,8 @@ where
 		if !std::mem::take(&mut self.program.psi_due) {
 			return Ok(());
 		}
+		// A rewind may have dropped the copy a move waited for.
+		self.follow_pmt()?;
 		self.restate()?;
 		let psi = self.program.psi.as_mut().context("PSI not built")?;
 		let added: Vec<u16> = psi
@@ -3100,12 +3219,12 @@ where
 
 	/// Set the program tables as they stand on the schedule, which every copy of them still to
 	/// begin lays. A NIT acquired or lost after the tables went out revises the PAT's network
-	/// entry, at the next version beside the PMT. The first copy after a switch to another
+	/// entry, at the PAT's next version. The first copy after a switch to another
 	/// instance flags the break on each table PID that owes one ([`Self::breaks`]).
 	fn restate(&mut self) -> anyhow::Result<()> {
 		let network = self.carries_nit();
 		let psi = self.program.psi.as_ref().context("PSI not built")?;
-		let tables = psi.current(network, self.program.version)?;
+		let tables = psi.current(network, (self.program.version, self.program.pat_version))?;
 		let pmt_pid = psi.pmt_pid;
 		let clock = psi.pcr_pid().context("PMT without a clock")?;
 		let section = super::psi::encode_pmt(&tables.pmt, tables.version)?;
@@ -3570,9 +3689,9 @@ where
 	/// grid instead: slots on the media timeline, shared by every exporter of the
 	/// broadcast, like [`due`].
 	fn lay(&mut self, known: Option<u128>) -> anyhow::Result<()> {
-		let Some(pmt_pid) = self.program.psi.as_ref().map(|psi| psi.pmt_pid) else {
+		if self.program.psi.is_none() {
 			return Ok(());
-		};
+		}
 		if known.is_none() {
 			self.flush_packs(|_, _| true)?;
 		}
@@ -3589,6 +3708,7 @@ where
 				break;
 			};
 			let clock = pcr_packet(slot.clock.context("a slot without a clock PID")?, slot.pcr)?;
+			let pmt_pid = self.pmt_pid();
 			let mut payload = slot.layout(&clock, pmt_pid, &NULL_PACKET);
 			// The slot opens with its PCR, in the clock packet or the clock PID's packet that
 			// carries it, whose adaptation field flags the break.
@@ -3625,6 +3745,8 @@ where
 				}
 				self.restate()?;
 			}
+			// The copies a move waited for may have finished.
+			self.follow_pmt()?;
 		}
 		Ok(())
 	}
@@ -4630,13 +4752,13 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::{
-		Buffer, DecodeClock, Dolby, Kind, PSI_INTERVAL, PesPacket, Psi, Settle, dolby_removals, due,
+		Buffer, DecodeClock, Dolby, Kind, Laid, PSI_INTERVAL, PesPacket, Psi, Settle, dolby_removals, due,
 		is_complete_section, si_due, slot, unwrap_pts, verbatim_buffer,
 	};
 
 	/// The tables as they stand take the version after the last laid, whatever was set on the
 	/// schedule meanwhile, and the last laid's own when they come back to it. The PAT keeps its
-	/// version until its network entry changes.
+	/// own version until its network entry or PMT PID changes.
 	#[test]
 	fn a_revision_takes_the_version_after_the_last_laid() {
 		use mpeg2ts::ts::{Pid, VersionNumber};
@@ -4658,28 +4780,45 @@ mod tests {
 			transport_stream_id: 1,
 			pmt: pmt(&[0x100]),
 			pmt_pid: 0x20,
+			moving: None,
+			left: Vec::new(),
 			led: None,
 			stated: None,
 			laid: None,
 			sending: Default::default(),
 			out: None,
 		};
-		let first = VersionNumber::from_u8(3).unwrap();
+		let version = |version| VersionNumber::from_u8(version).unwrap();
+		let first = (version(3), version(7));
+		let versions = |laid: &Laid| (laid.version.as_u8(), laid.pat_version.as_u8());
 		let laid = psi.current(false, first).unwrap();
-		assert_eq!(laid.version.as_u8(), 3);
+		assert_eq!(versions(&laid), (3, 7));
 		psi.laid = Some(laid.clone());
 
 		psi.pmt = pmt(&[0x100, 0x101]);
 		let revised = psi.current(false, first).unwrap();
-		assert_eq!(revised.version.as_u8(), 4);
+		assert_eq!(versions(&revised), (4, 7));
 		assert_eq!(revised.pat, laid.pat);
 
 		psi.pmt = pmt(&[0x100]);
-		assert_eq!(psi.current(false, first).unwrap().version.as_u8(), 3);
+		assert_eq!(versions(&psi.current(false, first).unwrap()), (3, 7));
 
 		let network = psi.current(true, first).unwrap();
-		assert_eq!(network.version.as_u8(), 4);
+		assert_eq!(versions(&network), (3, 8));
 		assert_ne!(network.pat, laid.pat);
+
+		// A moved PMT re-encodes the PAT at its own next version, naming the new PID: after 31
+		// PMT revisions, the PMT's next is the PAT's last.
+		psi.laid = Some(Laid {
+			version: version(31),
+			pat_version: version(0),
+			..laid
+		});
+		psi.pmt_pid = 0x30;
+		let moved = psi.current(false, first).unwrap();
+		assert_eq!(versions(&moved), (31, 1));
+		let pat = super::psi::PatAssembler::default().section(&moved.pat).unwrap();
+		assert_eq!(pat.programs[0].pmt_pid.as_u16(), 0x30);
 	}
 
 	/// The same available video/audio backlog must choose the same start in either fill order.
@@ -4884,7 +5023,7 @@ mod tests {
 		let mut clock = DecodeClock::default();
 		let mut dts = vec![0; pts.len()];
 		for (i, &p) in pts.iter().enumerate() {
-			clock.push(i, p, moq_clock::Instant::ZERO);
+			clock.push(i, p, moq_clock::Instant::ZERO, 0);
 			while let Some((i, d)) = clock.pop(jitter, floor, Settle::Due) {
 				dts[i] = d;
 			}
@@ -4893,6 +5032,77 @@ mod tests {
 			dts[i] = d;
 		}
 		dts
+	}
+
+	/// A burst sharing one PTS, read at once, never settles by time or by a later PTS, so the
+	/// byte budget settles it.
+	#[test]
+	fn a_decode_clock_burst_sharing_a_pts_settles_at_the_byte_budget() {
+		const MAX_BYTES: usize = 10_000;
+		let start = moq_clock::Instant::ZERO;
+		let delay = Duration::from_millis(500);
+		let mut clock = DecodeClock::default();
+		let (mut held, mut most) = (0, 0);
+		for index in 0..1_000u32 {
+			clock.push(index, 0, start, 1_000);
+			held += 1;
+			while clock
+				.pop(90_000, 0, clock.settle(90_000, start, delay, MAX_BYTES))
+				.is_some()
+			{
+				held -= 1;
+			}
+			most = most.max(held);
+		}
+		assert!(
+			most <= 17,
+			"held {most} frames of 1,000 bytes past a {MAX_BYTES} byte budget"
+		);
+	}
+
+	/// One frame alone filling the byte budget does not settle the B-frames reordered around it:
+	/// fewer frames are held than any codec reorders.
+	#[test]
+	fn a_frame_filling_the_byte_budget_keeps_the_reorder() {
+		const MAX_BYTES: usize = 1_000_000;
+		let start = moq_clock::Instant::ZERO;
+		let delay = Duration::from_millis(500);
+		let mut clock = DecodeClock::default();
+		let mut dts = vec![0; 5];
+		let frames = [(0, 16), (4, MAX_BYTES - 8), (2, 8), (1, 8), (3, 8)];
+		for (i, (rank, bytes)) in frames.into_iter().enumerate() {
+			clock.push(i, 900_000 + rank * 18_000, start, bytes);
+			while let Some((i, d)) = clock.pop(90_000, 36_000, clock.settle(90_000, start, delay, MAX_BYTES)) {
+				dts[i] = d;
+			}
+		}
+		while let Some((i, d)) = clock.pop(90_000, 36_000, Settle::All) {
+			dts[i] = d;
+		}
+		assert_eq!(dts, [864_000, 882_000, 900_000, 918_000, 936_000]);
+	}
+
+	/// A budget filled by one frame and the reordered frames around it still counts the B-frames
+	/// already read in the reorder delay, so none decodes after it is presented.
+	#[test]
+	fn a_budget_filled_past_the_reorder_depth_keeps_the_delay() {
+		const MAX_BYTES: usize = 1_000_000;
+		let start = moq_clock::Instant::ZERO;
+		let delay = Duration::from_millis(500);
+		let ranks = [0, 4, 2, 1, 3].into_iter().chain(5..=40);
+		let mut clock = DecodeClock::default();
+		let mut dts = Vec::new();
+		for (i, rank) in ranks.enumerate() {
+			let bytes = if i == 1 { MAX_BYTES - 512 } else { 16 };
+			clock.push(i, 900_000 + rank * 3_000, start, bytes);
+			while let Some((i, d)) = clock.pop(90_000, 0, clock.settle(90_000, start, delay, MAX_BYTES)) {
+				dts.push((i, d));
+			}
+		}
+		assert_eq!(
+			dts[..5],
+			[(0, 894_000), (1, 897_000), (2, 900_000), (3, 903_000), (4, 906_000)]
+		);
 	}
 
 	/// Decode-order PTS for a constant-frame-rate display timeline with `b` B-frames between

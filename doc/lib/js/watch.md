@@ -92,6 +92,7 @@ broadcast consumer, and decode JSON with
 
 ```ts
 import * as Json from "@moq/json";
+import * as Moq from "@moq/net";
 import { Hang } from "@moq/watch";
 
 // Run after the element module has loaded and the node has mounted.
@@ -110,7 +111,10 @@ const dispose = el.signals.run((effect) => {
     const name = metadata?.[0];
     if (!active || !name) return;
 
-    const track = active.track(name).subscribe({ priority: Hang.Catalog.PRIORITY.catalog });
+    const track = active.track(name).subscribe({
+        ...Moq.Track.Subscription.default(),
+        priority: Hang.Catalog.PRIORITY.catalog,
+    });
     effect.cleanup(() => track.close());
 
     const consumer = new Json.Snapshot.Consumer<unknown>({ track });
