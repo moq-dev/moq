@@ -5,7 +5,11 @@ package dev.moq.docs
 
 import dev.moq.media.*
 
-val opusInit: ByteArray get() = TODO()
-val packet: ByteArray get() = TODO()
-val pts: ULong get() = TODO()
-val rgba: ByteArray get() = TODO()
+val opusInit: ByteArray
+    get() = TODO()
+val packet: ByteArray
+    get() = TODO()
+val pts: ULong
+    get() = TODO()
+val rgba: ByteArray
+    get() = TODO()

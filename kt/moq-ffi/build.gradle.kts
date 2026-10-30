@@ -63,28 +63,32 @@ kotlin {
     sourceSets {
         // Gradle 9.6 deprecates the `by getting` / `by creating` delegates,
         // and Kotlin DSL treats those as script compilation errors.
-        val commonMain = getByName("commonMain") {
-            dependencies {
-                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+        val commonMain =
+            getByName("commonMain") {
+                dependencies {
+                    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+                }
             }
-        }
-        val commonTest = getByName("commonTest") {
-            dependencies {
-                implementation(kotlin("test"))
-                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+        val commonTest =
+            getByName("commonTest") {
+                dependencies {
+                    implementation(kotlin("test"))
+                    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+                }
             }
-        }
 
-        val jvmAndAndroidMain = create("jvmAndAndroidMain") {
-            dependsOn(commonMain)
-            dependencies {
-                // compileOnly: each platform's runtime adds its own JNA artifact.
-                compileOnly("net.java.dev.jna:jna:5.19.1")
+        val jvmAndAndroidMain =
+            create("jvmAndAndroidMain") {
+                dependsOn(commonMain)
+                dependencies {
+                    // compileOnly: each platform's runtime adds its own JNA artifact.
+                    compileOnly("net.java.dev.jna:jna:5.19.1")
+                }
             }
-        }
-        val jvmAndAndroidTest = create("jvmAndAndroidTest") {
-            dependsOn(commonTest)
-        }
+        val jvmAndAndroidTest =
+            create("jvmAndAndroidTest") {
+                dependsOn(commonTest)
+            }
 
         getByName("jvmMain") {
             dependsOn(jvmAndAndroidMain)

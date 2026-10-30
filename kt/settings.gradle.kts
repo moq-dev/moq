@@ -29,4 +29,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "moq"
+
 include(":moq-ffi", ":moq")
