@@ -37,8 +37,8 @@ What remains:
   Decide whether that join needs the upstream's answer to confirm the epoch.
 - Tests not yet written, with controlled time: a SUBSCRIBE or FETCH pending
   at the front between its resolve and the takeover (`PendingFront::via`),
-  a takeover naming a predecessor already restarted (the `seen` stamps and
-  `untaken` set in `OriginConsumerState`), conflicting epochs, a diamond of
+  a takeover naming a predecessor already restarted (the `seen` stamps in
+  `OriginConsumerState`), conflicting epochs, a diamond of
   relays, a claim ending before or after its child, and held catalog pins
   through a real player rather than route-table checks.
 

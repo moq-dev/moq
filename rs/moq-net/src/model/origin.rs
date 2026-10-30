@@ -901,12 +901,9 @@ struct OriginConsumerState {
 	delivered: BTreeSet<Path>,
 	/// Each delivered prefix's advertisement, stamped when another instance was last
 	/// delivered there, so a pending takeover can tell its predecessor still stands.
+	/// A prefix without one continues nothing for this consumer.
 	seen: HashMap<Path, u64>,
 	next_stamp: u64,
-	/// Prefixes where a takeover was cancelled before delivery. A consumer may have
-	/// resolved what it continued through the predecessor, so a later takeover there
-	/// is a plain start until a start or restart covering it is delivered.
-	untaken: BTreeSet<Path>,
 	/// Set by the origin's teardown: the cursor drains `pending`, then reports
 	/// the end instead of parking forever on a table that can never fire again.
 	ended: bool,
@@ -1047,17 +1044,13 @@ impl OriginConsumerState {
 	/// itself). The consumer learns it as a takeover only while it holds that
 	/// predecessor when this is delivered; see [`PendingUpdate::Takeover`].
 	fn apply_takeover(&mut self, prefix: Path, meta: RouteMeta, captures: Option<Vec<Pattern>>, predecessor: Path) {
-		let untaken = self
-			.untaken
-			.iter()
-			.any(|untaken| untaken.has_prefix(&prefix) || prefix.has_prefix(untaken));
 		// A predecessor about to change on the consumer is not the one it holds.
 		let settled = prefix == predecessor
 			|| self
 				.pending
 				.get(&predecessor)
 				.is_none_or(|pending| matches!(pending.update, Some(PendingUpdate::Announce(_))));
-		let stamp = self.seen.get(&predecessor).copied().filter(|_| settled && !untaken);
+		let stamp = self.seen.get(&predecessor).copied().filter(|_| settled);
 		let Some(stamp) = stamp else {
 			return match prefix == predecessor {
 				true => self.apply_restart(prefix, meta, captures, None),
@@ -1090,11 +1083,14 @@ impl OriginConsumerState {
 				self.owed -= usize::from(pending.owed);
 			}
 			// Likewise a takeover, but what the consumer resolved through its predecessor
-			// may be what it continued: a later takeover there must not claim it.
-			Some(PendingUpdate::Takeover { .. }) if !self.delivered.contains(&prefix) => {
+			// may be what it continued, so the predecessor continues nothing more for it
+			// until another instance is delivered there.
+			Some(PendingUpdate::Takeover { predecessor, stamp, .. }) if !self.delivered.contains(&prefix) => {
 				let pending = self.remove(&prefix).unwrap();
 				self.owed -= usize::from(pending.owed);
-				self.untaken.insert(prefix);
+				if self.seen.get(&predecessor) == Some(&stamp) {
+					self.seen.remove(&predecessor);
+				}
 			}
 			// Either nothing is pending or the pending announce was a metadata
 			// update on a delivered route; the consumer still owes a retraction.
@@ -1278,11 +1274,6 @@ impl OriginConsumerState {
 				self.seen.insert(prefix.clone(), self.next_stamp);
 				self.next_stamp += 1;
 			}
-		}
-		// Another instance delivered over a cancelled takeover's prefix is what the
-		// consumer follows there now.
-		if matches!(kind, Kind::Start | Kind::Restart) {
-			self.untaken.retain(|untaken| !untaken.has_prefix(&prefix));
 		}
 		let announce = Announce {
 			prefix,
@@ -11399,6 +11390,48 @@ mod tests {
 			.unwrap();
 		announced.assert_next_restarted("room");
 		assert!(matches!(prepared.publish(), Err(Error::Unroutable)));
+		announced.assert_next_wait();
+	}
+
+	/// A takeover withdrawn before the cursor delivers it may have continued what its
+	/// reader resolved through the claim, so the claim continues nothing more for that
+	/// reader: the next answer is a start.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_withdrawn_takeover_ends_the_claims_continuity() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let mut announced = consumer.announced();
+		let claim = producer.requests("room").unwrap();
+		announced.assert_next_active("room");
+
+		let answer = async |path: &str| {
+			let pending = consumer.request(path, None);
+			let published = queued(&claim)
+				.await
+				.prepare(crate::Epoch::mint())
+				.unwrap()
+				.publish()
+				.unwrap();
+			pending.await.unwrap();
+			published
+		};
+
+		let _alice = answer("room/alice").await;
+		match announced.expect_next().await {
+			AnnounceEvent::Takeover { announce, predecessor } => {
+				assert_eq!(announce.prefix.as_str(), "room/alice");
+				assert_eq!(predecessor.as_str(), "room");
+			}
+			other => panic!("should be a takeover: got {other:?}"),
+		}
+
+		answer("room/bob").await.unannounce();
+		let _carol = answer("room/carol").await;
+		match announced.expect_next().await {
+			AnnounceEvent::Start(announce) => assert_eq!(announce.prefix.as_str(), "room/carol"),
+			other => panic!("should be a start: got {other:?}"),
+		}
 		announced.assert_next_wait();
 	}
 
