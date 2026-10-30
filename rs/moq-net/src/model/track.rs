@@ -18731,6 +18731,13 @@ mod test {
 		assert_eq!(held(), [vec![(1, 2)], vec![]], "the active reader took it in");
 		drop(stalled);
 		assert_eq!(held(), [vec![]], "a dropped reader holds nothing");
+		write_group(&producer, 3);
+		evict(&producer, 3);
+		assert_eq!(
+			producer.state.read().inboxes.lock().unwrap().len(),
+			1,
+			"an eviction prunes a dropped reader's inbox"
+		);
 	}
 
 	/// An ordered reader forwarding drops asks nothing below what it took, though its drop

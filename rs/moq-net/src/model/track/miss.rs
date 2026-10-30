@@ -808,8 +808,8 @@ impl Inbox {
 	}
 }
 
-/// Every reader's [`Inbox`], pruned of dropped readers once it doubles past what the last
-/// prune kept.
+/// Every reader's [`Inbox`], pruned of dropped readers on each eviction, or once
+/// registrations double it past what the last prune kept.
 #[derive(Default)]
 pub(super) struct Inboxes {
 	inboxes: Vec<Inbox>,
@@ -823,6 +823,12 @@ impl Inboxes {
 			self.inboxes.retain(|inbox| Arc::strong_count(&inbox.0) > 1);
 			self.kept = self.inboxes.len();
 		}
+	}
+
+	/// How many inboxes are registered, live or not.
+	#[cfg(all(test, feature = "async"))]
+	pub(super) fn len(&self) -> usize {
+		self.inboxes.len()
 	}
 
 	/// What each live reader's inbox holds, in registration order.
@@ -845,13 +851,19 @@ impl Inboxes {
 			return false;
 		};
 		let mut landed = false;
-		for inbox in &self.inboxes {
+		// Every inbox is visited anyway, so a dropped reader's goes here too.
+		self.inboxes.retain(|inbox| {
+			if Arc::strong_count(&inbox.0) == 1 {
+				return false;
+			}
 			let mut judging = inbox.0.lock().unwrap_or_else(PoisonError::into_inner);
 			if cached <= judging.cached && judging.span.as_ref().is_some_and(|span| span.contains(&sequence)) {
 				judging.evicted.insert(sequence..end);
 				landed = true;
 			}
-		}
+			true
+		});
+		self.kept = self.inboxes.len();
 		landed
 	}
 }
