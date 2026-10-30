@@ -352,6 +352,9 @@ struct Track {
 	settle: bool,
 	/// The PTS of the last keyframe queued, which leading pictures present before.
 	keyframe: Option<Timestamp>,
+	/// The `temporal_reference` of the I-picture the last MPEG-1/2 video group opened on, when
+	/// its GOP is open: the B-pictures presented before it reference the group before.
+	open_gop: Option<u16>,
 	/// What the catalog and the SPS declare about the video's reordering.
 	timing: Timing,
 	/// The receiver's buffers for an audio or verbatim track; video's come from [`Timing`].
@@ -398,6 +401,7 @@ impl Track {
 			held: None,
 			settle: false,
 			keyframe: None,
+			open_gop: None,
 			timing: Timing::default(),
 			buffer: None,
 			pack: None,
@@ -423,8 +427,13 @@ impl Track {
 			self.clock = DecodeClock::default();
 			self.declared = None;
 		}
-		let Kind::Video(stream_type) = self.kind else {
-			return self.push(name, pending, None, None, jitter);
+		// MPEG-1/2 video is placed, so its pictures rather than its timestamps say what leads.
+		let stream_type = match self.kind {
+			Kind::Video(stream_type) => Some(stream_type),
+			Kind::PesPacket {
+				stream_type: 0x01 | 0x02,
+			} => None,
+			_ => return self.push(name, pending, None, None, jitter),
 		};
 		// A declared endpoint increments both counters; only delivery loss arms recovery.
 		let gap = pending.skip.saturating_sub(pending.restart);
@@ -433,9 +442,24 @@ impl Track {
 			let ahead = self.held == Some(pending.cut);
 			self.leading_floor = recover.then_some((pending.frame.timestamp, ahead));
 		}
-		if let Some((floor, ahead)) = self.leading_floor
-			&& pending.frame.timestamp < floor
-			&& !radl(stream_type, self.source.description(), &pending.frame)
+		let leading = match stream_type {
+			Some(stream_type) => {
+				self.leading_floor.is_some_and(|(floor, _)| pending.frame.timestamp < floor)
+					&& !radl(stream_type, self.source.description(), &pending.frame)
+			}
+			None => {
+				let picture = Mpeg2Picture::read(&pending.frame.payload);
+				if pending.frame.keyframe {
+					self.open_gop = picture.filter(|picture| picture.gop == Some(false)).map(|picture| picture.temporal_reference);
+				} else if picture.is_some_and(|picture| picture.gop.is_some()) {
+					// A GOP inside the group: its leading pictures reference only the group's own.
+					self.open_gop = None;
+				}
+				self.leads_gop(&pending.frame)
+			}
+		};
+		if let Some((_, ahead)) = self.leading_floor
+			&& leading
 		{
 			jitter.lose(&self.key, ahead);
 			// It still takes its slot, so the group's other frames decode where they do on an
@@ -449,6 +473,9 @@ impl Track {
 			};
 		}
 		self.held = Some(pending.cut);
+		let Some(stream_type) = stream_type else {
+			return self.push(name, pending, None, None, jitter);
+		};
 		if pending.frame.keyframe {
 			self.timing.describe(stream_type, self.source.description(), name);
 			// A group decodes on its own clock at the depth its rendition declares now. The
@@ -467,6 +494,15 @@ impl Track {
 			None => self.clock.push(item, pts, arrived, bytes),
 		}
 		self.release(name, jitter, false)
+	}
+
+	/// Whether an MPEG-1/2 video PES is a B-picture presented before the I-picture of the open
+	/// GOP its group opened on, so it references the group before. A PES holding more than one
+	/// picture is judged by its first.
+	fn leads_gop(&self, frame: &Frame) -> bool {
+		!frame.keyframe
+			&& (self.open_gop.zip(Mpeg2Picture::read(&frame.payload)))
+				.is_some_and(|(opened, picture)| picture.bidirectional && picture.temporal_reference < opened)
 	}
 
 	/// Read within the jitter window, or hold the first frame until the program tables are built.
@@ -751,10 +787,14 @@ impl Track {
 		let dts = dts.map(|ticks| ticks as u64);
 		let (key, pes) = self.release_key(decode, jitter.delay(), &frame)?;
 		let video = matches!(self.kind, Kind::Video(_));
-		let leading = video
-			&& !frame.keyframe
-			&& self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe)
-			&& !matches!(self.kind, Kind::Video(stream_type) if radl(stream_type, description.as_ref(), &frame));
+		let leading = match self.kind {
+			Kind::Video(stream_type) => {
+				!frame.keyframe
+					&& self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe)
+					&& !radl(stream_type, description.as_ref(), &frame)
+			}
+			_ => self.leads_gop(&frame),
+		};
 		if video && frame.keyframe {
 			self.keyframe = Some(frame.timestamp);
 		}
@@ -3263,12 +3303,12 @@ where
 			pes,
 			..
 		} = queued;
-		let is_video = matches!(
-			self.program.tracks.get(name).context("missing track")?.kind,
-			Kind::Video(_)
-		);
-		// Refresh PSI at keyframes or after the interval lapses, and lead with a revision.
-		let cadence = (is_video && frame.keyframe) || due(frame.timestamp, self.program.last_psi, PSI_INTERVAL);
+		let kind = &self.program.tracks.get(name).context("missing track")?.kind;
+		let is_video = matches!(kind, Kind::Video(_));
+		// Refresh PSI at keyframes, MPEG-1/2 video's carried whole among them, or after the
+		// interval lapses, and lead with a revision.
+		let tune_in = frame.keyframe && kind.class() == super::stats::Class::Video;
+		let cadence = tune_in || due(frame.timestamp, self.program.last_psi, PSI_INTERVAL);
 		let psi = std::mem::take(&mut self.program.revised) || cadence;
 		if psi {
 			// A receiver tunes in at the tables, so each AAC PID's next frame repeats its program
@@ -4491,6 +4531,43 @@ fn es_payload(kind: &Kind, description: Option<&Bytes>, frame: &Frame, pce: bool
 /// video: Opus is private-data PES, carried under private_stream_1 like ffmpeg.
 fn stream_id(kind: &Kind) -> Option<u8> {
 	matches!(kind, Kind::Opus { .. }).then_some(StreamId::PRIVATE_STREAM_1)
+}
+
+/// Where an MPEG-1/2 video PES's first picture sits in its GOP (ISO 13818-2 6.2.2.6, 6.2.3).
+#[derive(Clone, Copy)]
+struct Mpeg2Picture {
+	/// Whether a GOP header leads the picture, and if so whether it sets `closed_gop`. A leading
+	/// B-picture of a closed GOP references only the pictures after it.
+	gop: Option<bool>,
+	/// Its place in display order within the GOP.
+	temporal_reference: u16,
+	/// A B-picture (`picture_coding_type` 3).
+	bidirectional: bool,
+}
+
+impl Mpeg2Picture {
+	/// Read the whole PES `pes`, if it holds a picture header. `broken_link` is the encoder's
+	/// own mark of an edit, so an open GOP is judged by `closed_gop` alone.
+	fn read(pes: &[u8]) -> Option<Self> {
+		let es = psi::PesStart::parse(pes).ok()?.data;
+		let mut gop = None;
+		for at in memchr::memmem::find_iter(es, &[0, 0, 1]) {
+			let header = es.get(at + 3..)?;
+			match header {
+				// time_code is 25 bits, then closed_gop.
+				[0xb8, _, _, _, flags, ..] => gop = Some(flags & 0x40 != 0),
+				[0x00, high, low, ..] => {
+					return Some(Self {
+						gop,
+						temporal_reference: u16::from(*high) << 2 | u16::from(low >> 6),
+						bidirectional: (low >> 3) & 0x07 == 3,
+					});
+				}
+				_ => {}
+			}
+		}
+		None
+	}
 }
 
 /// Whether a video frame is an HEVC RADL picture, which leads its keyframe but references only
