@@ -275,19 +275,12 @@ impl Split {
 /// True if an SEI NAL carries a recovery-point message (payload type 6), the
 /// open-GOP random-access marker. The NAL header byte precedes the SEI RBSP.
 fn sei_has_recovery_point(nal: &[u8]) -> bool {
-	use h264_reader::nal::sei::{HeaderType, SeiReader};
+	const SEI_RECOVERY_POINT: u32 = 6;
 
 	let Some(rbsp) = crate::codec::annexb::rbsp_bytes(nal, 1) else {
 		return false;
 	};
-	let mut scratch = Vec::new();
-	let mut messages = SeiReader::from_rbsp_bytes(&rbsp[..], &mut scratch);
-	while let Ok(Some(message)) = messages.next() {
-		if message.payload_type == HeaderType::RecoveryPoint {
-			return true;
-		}
-	}
-	false
+	crate::codec::annexb::sei_messages(&rbsp).any(|(kind, _)| kind == SEI_RECOVERY_POINT)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive)]
@@ -510,6 +503,19 @@ mod tests {
 			second[0].payload.as_ref(),
 			annexb(&[aud, RECOVERY_SEI, sps, pps, islice]).freeze().as_ref()
 		);
+	}
+
+	/// A recovery point after a payload larger than h264-reader's 1 MiB `SeiReader` cap is still found.
+	#[test]
+	fn recovery_point_after_a_large_payload() {
+		let size = (1 << 20) + 1;
+		let mut sei = vec![0x06, 0x05]; // user_data_unregistered
+		sei.extend(std::iter::repeat_n(0xff, size / 255));
+		sei.push((size % 255) as u8);
+		sei.extend(std::iter::repeat_n(0x01, size));
+		sei.extend_from_slice(&RECOVERY_SEI[1..]);
+		assert!(sei_has_recovery_point(&sei));
+		assert!(!sei_has_recovery_point(&sei[..sei.len() - RECOVERY_SEI.len() + 1]));
 	}
 
 	/// An access unit whose SEI is not a recovery point (e.g. pic_timing) stays a

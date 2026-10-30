@@ -140,15 +140,7 @@ const SEI_CONTENT_LIGHT: u32 = 144;
 /// (ITU-T H.264 D.1.29 and D.1.31, H.265 D.2.28 and D.2.35). A malformed message ends the scan.
 pub(crate) fn sei(rbsp: &[u8]) -> Hdr {
 	let mut hdr = Hdr::default();
-	let mut buf = rbsp;
-	// Each message needs at least a type and size byte; the last byte is the RBSP stop bit.
-	while buf.len() > 2 {
-		let Some(kind) = sei_value(&mut buf) else { break };
-		let Some(size) = sei_value(&mut buf) else { break };
-		let Some((payload, rest)) = buf.split_at_checked(size as usize) else {
-			break;
-		};
-		buf = rest;
+	for (kind, payload) in crate::codec::annexb::sei_messages(rbsp) {
 		match kind {
 			SEI_MASTERING_DISPLAY if payload.len() >= 24 => hdr.mastering = Some(sei_mastering(payload)),
 			SEI_CONTENT_LIGHT if payload.len() >= 4 => {
@@ -215,19 +207,6 @@ fn leb128(buf: &mut &[u8]) -> Option<u64> {
 		}
 	}
 	None
-}
-
-/// An SEI `payloadType` or `payloadSize`: a run of 0xFF bytes, each adding 255, then the remainder.
-fn sei_value(buf: &mut &[u8]) -> Option<u32> {
-	let mut value = 0u32;
-	loop {
-		let (&byte, rest) = buf.split_first()?;
-		*buf = rest;
-		value = value.checked_add(byte.into())?;
-		if byte != 0xFF {
-			return Some(value);
-		}
-	}
 }
 
 /// A `mastering_display_colour_volume` payload. Chromaticities count 0.00002 and luminance

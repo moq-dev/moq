@@ -26,6 +26,37 @@ pub(crate) fn rbsp_bytes(nal: &[u8], header: usize) -> Option<Vec<u8>> {
 	Some(out)
 }
 
+/// The `(payloadType, payload)` of each message in an H.264 or H.265 SEI RBSP, which share the
+/// `sei_message` syntax. A malformed message ends the iteration. Unlike h264-reader's
+/// `SeiReader`, a payload of any size is skipped without a copy.
+pub(crate) fn sei_messages(rbsp: &[u8]) -> impl Iterator<Item = (u32, &[u8])> {
+	let mut buf = rbsp;
+	std::iter::from_fn(move || {
+		// Each message needs at least a type and size byte; the last byte is the RBSP stop bit.
+		if buf.len() <= 2 {
+			return None;
+		}
+		let kind = sei_value(&mut buf)?;
+		let size = sei_value(&mut buf)?;
+		let (payload, rest) = buf.split_at_checked(size as usize)?;
+		buf = rest;
+		Some((kind, payload))
+	})
+}
+
+/// An SEI `payloadType` or `payloadSize`: a run of 0xFF bytes, each adding 255, then the remainder.
+fn sei_value(buf: &mut &[u8]) -> Option<u32> {
+	let mut value = 0u32;
+	loop {
+		let (&byte, rest) = buf.split_first()?;
+		*buf = rest;
+		value = value.checked_add(byte.into())?;
+		if byte != 0xFF {
+			return Some(value);
+		}
+	}
+}
+
 fn rbsp_bytes_reader(nal: &[u8], header: usize) -> h264_reader::rbsp::ByteReader<&[u8]> {
 	let payload = nal.get(header..).unwrap_or_default();
 	let end = payload.iter().rposition(|&b| b != 0).map_or(0, |last| last + 1);
