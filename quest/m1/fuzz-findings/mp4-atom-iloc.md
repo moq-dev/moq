@@ -15,10 +15,10 @@ repeats that.
 Fix it in [kixelated/mp4-atom](https://github.com/kixelated/mp4-atom), as
 [#264](https://github.com/kixelated/mp4-atom/pull/264) did for `sgpd`. A
 plain count-versus-remaining-bytes check, which `sgpd` and `evte` use, would
-refuse a valid single zero-size extent at the end of the box. Open, for the
-maintainer before building, with a recommendation: reject zero-size extents
-beyond the first in an item, store a repeated zero-size extent as a count,
-or bound the total extents by the box size plus the item count.
+refuse a valid single zero-size extent at the end of the box. Instead, decode
+fails on a zero-size extent (one that takes no bytes of the box) after an
+item's first extent, so a valid single zero-size extent still decodes
+(decided 2026-10-30, maintainer). The fix does not cut a release.
 
 Then bump moq-mux with the
 [mp4-atom bump](/quest/m1/fuzz-findings/mp4-atom-bump.md), or its own bump if

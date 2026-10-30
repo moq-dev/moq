@@ -16,12 +16,13 @@ it through `SimpleBlock::try_from` in
 `rs/moq-mux/src/container/mkv/import.rs` (the SimpleBlock arm and
 `handle_block_group`). Any MKV publisher can send it.
 
-Recommended: parse the block header in moq-mux (track vint, 16-bit relative
-timestamp, flags, lacing), returning an error on a short header, and stop
-calling webm-iterable for it. [MKV import streams
+Parse the block header in moq-mux (track vint, 16-bit relative timestamp,
+flags, lacing), returning an error on a short header, and stop calling
+webm-iterable for it (decided 2026-10-30, maintainer). [MKV import streams
 blocks](/quest/m1/security-audit/mkv-stream-blocks.md) needs the same small
 header reader to stream the payload, so whichever lands first writes it and
-the other reuses it. webm-iterable is outside the orgs this repository may
-post to, so reporting the panic upstream needs the maintainer's approval.
+the other reuses it. The panic is reported upstream as
+[austinleroy/webm-iterable#11](https://github.com/austinleroy/webm-iterable/issues/11);
+moq-mux does not wait for it.
 
 Public API: none. Wire: none.

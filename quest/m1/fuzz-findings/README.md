@@ -20,13 +20,18 @@ input committed before the fix would fail the merge gate. After the last
 child, run every target nightly for a few sessions; a new finding becomes a
 child here.
 
-Outside the `kixelated` and `moq-dev` orgs (h264-parser, scuffle-h265,
-scuffle-expgolomb, webm-iterable), reporting or fixing upstream needs the
-maintainer's approval first.
+For the crates outside the `kixelated` and `moq-dev` orgs, moq-mux fixes
+the bug on its own side and the bug is reported upstream (decided
+2026-10-30, maintainer): [austinleroy/webm-iterable#11](https://github.com/austinleroy/webm-iterable/issues/11),
+[therishidesai/h264-parser#9](https://github.com/therishidesai/h264-parser/issues/9),
+[ScuffleCloud/scuffle#653](https://github.com/ScuffleCloud/scuffle/issues/653)
+(scuffle-h265), and [ScuffleCloud/scuffle#654](https://github.com/ScuffleCloud/scuffle/issues/654)
+(scuffle-expgolomb). Posting anything further on those repos still needs the
+maintainer's approval.
 
 ## Required
 
-- [moq-mux on a fixed mp4-atom](/quest/m1/fuzz-findings/mp4-atom-bump.md) - waiting on kixelated/mp4-atom#264 and a release, then moq-mux moves off 0.16.2, which also picks up the `iref` fix
+- [moq-mux on a fixed mp4-atom](/quest/m1/fuzz-findings/mp4-atom-bump.md) - waiting on a 0.17.x release containing kixelated/mp4-atom#264, then moq-mux moves off 0.16.2, which also picks up the `iref` fix
 - [MKV block headers never panic](/quest/m1/fuzz-findings/mkv-block-header.md) - a short SimpleBlock or Block is an import error, not a webm-iterable index panic
 - [TS step scan stays ordered](/quest/m1/fuzz-findings/ts-step-scan.md) - the step detector's look-ahead never subtracts past its start
 - [SPS fields cannot overflow](/quest/m1/fuzz-findings/sps-overflow.md) - hostile H.264 and H.265 SPS crop and size fields are refused instead of wrapping
