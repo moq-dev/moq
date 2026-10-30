@@ -51,8 +51,8 @@ const PAYLOAD: usize = 64;
 
 /// Frame counts to sweep. 8192 is the largest legal group (`MAX_GROUP_FRAMES`);
 /// the 8193rd write returns `GroupTooLarge`. The top end is that full group of
-/// tiny frames.
-const COUNTS: [usize; 5] = [4, 5, 512, 2_048, 8_192];
+/// tiny frames. Counts 32 and 33 straddle a full write batch and its next flush.
+const COUNTS: [usize; 7] = [4, 5, 32, 33, 512, 2_048, 8_192];
 
 /// Cached group counts to sweep for the track-level delivery benchmarks. A track
 /// publishing one group per frame at the default 5s retention sits in the hundreds,

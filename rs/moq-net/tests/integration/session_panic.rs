@@ -127,7 +127,7 @@ async fn a_panicking_session_leaves_the_others_serving() {
 		let later = healthy.origin.create_broadcast("later").unwrap();
 		later.announce(Default::default()).unwrap();
 		until(&mut announced, "later", true).await;
-		assert!(relay.consume().routed("healthy").await.is_some());
+		crate::support::announced(&relay.consume(), "healthy").await;
 		drop((healthy, broken.client, later));
 	}
 }

@@ -117,7 +117,7 @@ async fn within<T>(started: Instant, change: impl Future<Output = T>) -> T {
 }
 
 /// Ignore same-instance metadata updates, but keep the actual replacement representation.
-async fn changed(follow: &mut announce::Follow) -> bool {
+async fn changed(follow: &mut announce::Consumer) -> bool {
 	loop {
 		match follow.next().await.unwrap() {
 			announce::Event::Restart(_) => return true,
@@ -146,8 +146,12 @@ async fn replacement(version: &str) {
 		.unwrap();
 	let viewer_origin = moq_tokio::origin::spawn();
 	let viewer = viewer_origin.consume();
-	let mut catalog_follow = viewer.follow("live/catalog.hang").unwrap();
-	let mut media_follow = viewer.follow("live/media").unwrap();
+	let watch = |path| {
+		let path = moq_net::Patterns::from(moq_net::Pattern::literal(path).unwrap());
+		viewer.scope("", &path).unwrap().announced()
+	};
+	let mut catalog_follow = watch("live/catalog.hang");
+	let mut media_follow = watch("live/media");
 	let viewer_client = client(version).with_subscriber(viewer_origin);
 	let _viewer_connection = viewer_client
 		.clone()
@@ -158,7 +162,7 @@ async fn replacement(version: &str) {
 	assert!(matches!(catalog_follow.next().await, Some(announce::Event::Start(_))));
 	assert!(matches!(media_follow.next().await, Some(announce::Event::Start(_))));
 
-	let held = viewer.request_broadcast("live/catalog.hang", None).await.unwrap();
+	let held = viewer.request("live/catalog.hang", None).await.unwrap();
 	let old = moq_mux::Source::new(viewer.clone(), held);
 	let mut catalog = old.catalog::<()>(moq_mux::catalog::CatalogFormat::Hang).await.unwrap();
 	let snapshot = catalog.next().await.unwrap().unwrap();
@@ -249,10 +253,7 @@ async fn replacement(version: &str) {
 	assert!(subscribed.is_err(), "retired handle subscribed to B's late track");
 
 	// Fresh catalog handles start fresh pins instead of sharing the old Source's cache.
-	let fresh = moq_mux::Source::new(
-		viewer.clone(),
-		viewer.request_broadcast("live/catalog.hang", None).await.unwrap(),
-	);
+	let fresh = moq_mux::Source::new(viewer.clone(), viewer.request("live/catalog.hang", None).await.unwrap());
 	let mut fresh_catalog = fresh
 		.catalog::<()>(moq_mux::catalog::CatalogFormat::Hang)
 		.await
@@ -279,7 +280,7 @@ async fn replacement(version: &str) {
 		changed(&mut media_follow).await;
 	})
 	.await;
-	let returned = viewer.request_broadcast("live/media", None).await.unwrap();
+	let returned = viewer.request("live/media", None).await.unwrap();
 	let mut returned = returned.track("audio").unwrap().subscribe(None).await.unwrap();
 	write(&first.media, "A:3");
 	let returned_frame = read(&mut returned).await;

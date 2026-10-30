@@ -55,7 +55,7 @@ Never bypass the queue with `--admin`, with one exception: the maintainer's pre-
 
 # AI
 
-AI-assisted issues, pull requests, reviews, and comments are welcome.
+AI-assisted issues, pull requests, reviews, and comments are encouraged.
 Especially bug reports; dive deep into the root issue before proposing a solution.
 
 GitHub issues are the public front door for brainstorming.
@@ -73,6 +73,7 @@ For each finding:
 
 Wait for a review from any reviewer other than Grok.
 Codex (OpenAI) reacts with a thumbs up when it has no findings; that counts as a review.
+An automated review posted from the maintainer's account also counts.
 A push that gets no new review once CI finishes was judged trivial, so the earlier review still covers it.
 Skipped or rate-limited reviews do not count.
 For a fork with no automatic non-Grok review, ask the maintainer to arrange one.
@@ -93,6 +94,7 @@ For an advisory against Quinn, follow the advisory triage in [`rs/moq-quic/READM
 
 `main` is the trunk; `release` is what ships, and release-plz and every branch-triggered publish run only there.
 
+- Smoke clients call only the latest published APIs. A release cut updates `test/smoke/clients` to the APIs being published, then verifies the affected smoke lanes.
 - A release is cut by hand: a PR merging `main` into `release`, with a merge commit.
 - A breaking cut first writes, on `main`, each changed package's version-transition section in its `MIGRATE.md` (`## 0.3 -> 0.4`) from the migration audit: the `!` subjects since the `release` merge base, each of those PRs' Impact section, and the API diff.
 - Suggest a `release` backport for any serious bug fix (crash, security, data loss, broken interop), whether found on `main` or reported against a release. Land it on `main` first, then port it onto `release` as a separate PR that keeps the published API, so it ships as a patch. The Release gate's API diff (`just api-diff --deny`) fails a backport that changes one; on the cut PR, whose head is `main`, it only reports.

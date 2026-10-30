@@ -16,8 +16,8 @@
 //!
 //! A [`Producer`] advertises its catalog rendition as soon as the track exists,
 //! resolved from the encoder itself via [`Config::probe`], so a subscriber can
-//! discover a track nothing has encoded yet. That's what makes on-demand
-//! encoding possible at all.
+//! discover a track nothing has encoded yet. That's what lets an on-demand
+//! capture wait for its first viewer at all.
 //!
 //! `Capture` (with `capture`) / [`Kind`] / [`Config`] configure them.
 //! [`Config::preset`] picks a [`Preset`], how the encoder trades latency for
