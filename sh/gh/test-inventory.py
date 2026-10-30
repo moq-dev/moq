@@ -278,7 +278,9 @@ class Graph:
                             self.visit_recipe(recipe)
 
     def scripts(self, text: str, cwd: Path, file: Path | None) -> list[Path]:
+        """The script files text names outside its comment lines."""
         found = []
+        text = re.sub(r"(?m)^\s*(?:#(?!!)|//).*$", "", text)
         bases = [cwd, self.root, *([file.parent] if file else [])]
         # A path after a `cd` is relative to where it went.
         bases += [(cwd / directory).resolve() for directory in re.findall(r"\bcd\s+([\w./-]+)", text)]
@@ -808,6 +810,8 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
                 fuzz_words.update(run.words[index + 1:])
             if word == "fuzz" and index and run.words[index - 1] == "cargo":
                 fuzz_words.update(run.words[index + 1:])
+    codspeed = any(run.words[index:index + 3] == ["cargo", "codspeed", "run"]
+                   for run in graph.runs for index in range(len(run.words)))
     for package in cargo:
         fuzz = package.manifest.get("package", {}).get("metadata", {}).get("cargo-fuzz", False)
         for target, _ in package.targets:
@@ -816,7 +820,7 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
                 if target.name not in fuzz_words:
                     orphans.append((f"fuzz {target.package}::{target.name}", where))
             elif target.kind == "bench":
-                if not any(benched(chosen, run, target) for chosen, run in selections):
+                if not any(benched(chosen, run, target, codspeed) for chosen, run in selections):
                     orphans.append((f"bench {target.package}::{target.name}", where))
 
     found = discovered(root, graph)
@@ -851,8 +855,16 @@ def text_closure(graph: Graph, recipe: Recipe) -> str:
     return "\n".join(result)
 
 
-def benched(chosen: Selection, run: Run, target: Target) -> bool:
+def benched(chosen: Selection, run: Run, target: Target, codspeed: bool) -> bool:
+    """Whether a run measures a bench target, not only builds it. A CodSpeed build counts
+    when some reached step runs `cargo codspeed run`."""
     if chosen.packages is not None and target.package not in chosen.packages:
+        return False
+    heads = [index for index, word in enumerate(run.words) if word == "cargo"]
+    command = run.words[heads[-1] + 1:heads[-1] + 3] if heads else []
+    if "--no-run" in run.words or command[:1] in (["build"], ["check"], ["clippy"], ["doc"]):
+        return False
+    if command == ["codspeed", "build"] and not codspeed:
         return False
     if chosen.benches:
         return "*" in chosen.benches or target.name in chosen.benches

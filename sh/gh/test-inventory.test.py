@@ -93,6 +93,8 @@ JUSTFILE = """
         python3 sh/a.test.py
         just rs test -p media --lib --run-ignored only -E 'test(/^gpu::tests::(renders|exports)$/)'
         cargo bench -p media --bench decode
+        # Neither a comment nor a build runs anything: python3 sh/b.test.py
+        cargo bench --no-run -p media --bench encode
 """
 
 RS = """
