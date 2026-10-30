@@ -482,6 +482,10 @@ jobs:
           [ -x "$shim" ]
           dirname "$shim" >> "$GITHUB_PATH"
 
+      # The client's own tests, against the same Git HEAD dependencies.
+      - name: Cloudflare client tests
+        run: just cloudflare-check
+
       - name: Cloudflare interoperability
         run: just cloudflare
 
