@@ -501,7 +501,9 @@ impl MoqFill {
 	pub async fn wanted_changed(&self) -> Result<Option<u64>, MoqError> {
 		// Driven in place, not detached: a cancelled call left unfreed must not advance the
 		// watcher and swallow the change the next call waits for.
-		self.changes.run(|mut fill| async move { Ok(fill.wanted_changed().await) }).await
+		self.changes
+			.run(|mut fill| async move { Ok(fill.wanted_changed().await) })
+			.await
 	}
 
 	/// Insert group `sequence` and return a producer for filling it. The first group starts
