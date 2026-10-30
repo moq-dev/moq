@@ -406,7 +406,14 @@ export class AnnounceHistory {
 			const head = Path.parts(this.#base(msg.pathBase).suffix);
 			const keep = msg.pathBase.keep;
 			if (keep > head.length) throw new ProtocolViolation(`announce keeps ${keep} of ${head.length} segments`);
-			suffix = Path.join(Path.from(...head.slice(0, keep)), suffix);
+			// Joined as text before parsing: a kept segment may end in the `\` of an escaped `/`.
+			const kept = head.slice(0, keep);
+			if (suffix !== Path.empty()) kept.push(suffix);
+			try {
+				suffix = Path.from(kept.join("/"));
+			} catch (cause) {
+				throw new ProtocolViolation("announce keeps half an escape", { cause });
+			}
 			const error = Path.check(suffix);
 			if (error) throw new ProtocolViolation(error);
 		}

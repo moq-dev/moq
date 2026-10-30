@@ -66,7 +66,7 @@ impl Transfer {
 		}
 		let mut stream = conn.send_stream(id);
 		if matches!(self.end, End::Stop)
-			&& let Some(code) = stream.stopped().unwrap()
+			&& let Some(send::End::Stopped(code)) = stream.end().unwrap()
 		{
 			prop_assert_eq!(code, CODE);
 			stream.reset(code).unwrap();
@@ -78,10 +78,10 @@ impl Transfer {
 			_ => self.len,
 		};
 		while self.written < target {
-			match stream.write(&payload(key, self.written..target)) {
+			match stream.write(&mut &payload(key, self.written..target)[..]) {
 				Ok(written) => self.written += written,
-				Err(WriteError::Blocked) => return Ok(()),
-				Err(WriteError::Stopped(code)) if matches!(self.end, End::Stop) => {
+				Err(send::Error::Blocked) => return Ok(()),
+				Err(send::Error::Stopped(code)) if matches!(self.end, End::Stop) => {
 					prop_assert_eq!(code, CODE);
 					stream.reset(code).unwrap();
 					self.sent = true;
@@ -93,7 +93,10 @@ impl Transfer {
 		match self.end {
 			End::Finish => stream.finish().unwrap(),
 			End::Reset => stream.reset(CODE).unwrap(),
-			End::ReliableReset => stream.reset_at((self.cut / 2).max(1) as u64, CODE).unwrap(),
+			End::ReliableReset => {
+				let reliable = stream.offset().rewind((self.cut / 2).max(1) as u64);
+				stream.reset_at(reliable, CODE).unwrap()
+			}
 			// Keep the send half open until the receiver's STOP_SENDING arrives.
 			End::Stop => return Ok(()),
 		}
@@ -104,7 +107,7 @@ impl Transfer {
 	fn receive(&mut self, conn: &mut Connection, id: StreamId, key: usize) -> TestCaseResult {
 		if self.received {
 			if matches!(self.end, End::Stop) {
-				prop_assert!(matches!(conn.recv_stream(id).read(), Err(ReadableError::ClosedStream)));
+				prop_assert!(matches!(conn.recv_stream(id).read(), Err(recv::Error::Closed)));
 			}
 			return Ok(());
 		}
@@ -132,8 +135,8 @@ impl Transfer {
 					self.received = true;
 					break;
 				}
-				Err(ReadError::Blocked) => break,
-				Err(ReadError::Reset(code)) => {
+				Err(recv::Error::Blocked) => break,
+				Err(recv::Error::Reset(code)) => {
 					prop_assert_eq!(code, CODE);
 					prop_assert!(matches!(self.end, End::Reset | End::ReliableReset));
 					prop_assert!(self.read <= self.cut);
@@ -143,6 +146,7 @@ impl Transfer {
 					self.received = true;
 					break;
 				}
+				Err(error) => return Err(TestCaseError::fail(format!("{id} read: {error}"))),
 			}
 		}
 		let _ = chunks.finalize();
@@ -228,7 +232,7 @@ impl Run {
 				let index = self.datagrams_sent[side];
 				conn(pair, self.handles, side)
 					.datagrams()
-					.send(datagram(side, index).into(), Default::default())
+					.send(Bytes::from(datagram(side, index)), Default::default())
 					.unwrap();
 				self.datagrams_sent[side] += 1;
 			}

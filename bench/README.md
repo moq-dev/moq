@@ -286,7 +286,7 @@ process CPU (user + system, every thread) per MB into
 budget (default 1); every received frame is checked byte for byte.
 
 The binding benchmark itself lives in
-[rust2](https://github.com/kixelated/rust2/blob/main/bench/ffi/README.md), with
+[rust2](https://github.com/moq-dev/rust2/blob/main/bench/ffi/README.md), with
 the UniFFI fork whose changes it measures: its `just bench-ffi` runs these
 runners nightly at a pinned moq revision, against the fork, and reports each
 wrapper's ratio to Rust. So that they keep working here, moq's Nightly runs every

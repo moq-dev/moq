@@ -279,7 +279,8 @@ pub struct VideoConfig {
 	pub bitrate: Option<u64>,
 
 	/// Whether this rendition may be selected. When false, no frames are coming and a consumer
-	/// must not select it. Only written when false.
+	/// should not select it, though one may keep it selected while no enabled alternative exists.
+	/// Only written when false.
 	#[serde(
 		default = "crate::catalog::enabled_default",
 		skip_serializing_if = "crate::catalog::enabled_skip"

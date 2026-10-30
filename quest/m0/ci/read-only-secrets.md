@@ -17,11 +17,11 @@ deleted.
 
 ## Plan
 
-Decided 2026-10-28 (maintainer, in kixelated/quest's
-[trust audit](https://github.com/kixelated/quest/pull/264)): enrolled
+Decided 2026-10-28 (maintainer, in moq-dev/quest's
+[trust audit](https://github.com/moq-dev/quest/pull/264)): enrolled
 repositories keep pull-request CI read-only rather than kix shielding CI
 behind forks. moq-dev/moq is a kix pilot repository, so it should pass
-kix's [read-only CI check](https://github.com/kixelated/quest/blob/main/quest/m0/kix/ci-read-only.md)
+kix's [read-only CI check](https://github.com/moq-dev/quest/blob/main/quest/m0/kix/ci-read-only.md)
 before contributors are invited.
 
 Done in [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166): the

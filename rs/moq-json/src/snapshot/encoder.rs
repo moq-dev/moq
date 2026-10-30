@@ -65,6 +65,16 @@ pub struct Config {
 	///
 	/// Defaults to `true`.
 	pub deltas: bool,
+
+	/// The most bytes a group may hold, snapshot and deltas together.
+	///
+	/// A delta that would pass it rolls a fresh snapshot instead, and a snapshot past it is refused
+	/// with [`FrameTooLarge`](moq_net::Error::FrameTooLarge). Lowering it lets a test reach the limit
+	/// without megabytes of JSON; a value above moq-net's cache limit is clamped to it, since moq-net
+	/// refuses a larger group anyway.
+	///
+	/// Defaults to [`moq_net::group::MAX_CACHE_BYTES`].
+	pub max_group_bytes: u64,
 }
 
 impl Config {
@@ -73,11 +83,20 @@ impl Config {
 		self.deltas = deltas;
 		self
 	}
+
+	/// Set [`max_group_bytes`](Self::max_group_bytes).
+	pub fn with_max_group_bytes(mut self, max_group_bytes: u64) -> Self {
+		self.max_group_bytes = max_group_bytes;
+		self
+	}
 }
 
 impl Default for Config {
 	fn default() -> Self {
-		Self { deltas: true }
+		Self {
+			deltas: true,
+			max_group_bytes: moq_net::group::MAX_CACHE_BYTES,
+		}
 	}
 }
 
@@ -206,8 +225,7 @@ pub struct Encoder<T> {
 	/// Frames emitted into the current group, snapshot included.
 	group_frames: usize,
 
-	/// The most bytes a group may hold, the cap a delta is admitted under. A field rather than the
-	/// constant so a test can shrink it to a size it can reach.
+	/// [`Config::max_group_bytes`], clamped to moq-net's cache limit.
 	max_group_bytes: u64,
 
 	/// Whether the next frame has to be a full snapshot, because a frame was lost or the caller cut
@@ -223,12 +241,12 @@ impl<T> Encoder<T> {
 	/// Create an encoder with a cold baseline, so the first [`update`](Self::update) is a snapshot.
 	pub fn new(config: Config) -> Self {
 		Self {
+			max_group_bytes: config.max_group_bytes.min(moq_net::group::MAX_CACHE_BYTES),
 			config,
 			last: None,
 			scratch: RefCell::new(crate::diff::Scratch::memoized()),
 			group_bytes: 0,
 			group_frames: 0,
-			max_group_bytes: moq_net::group::MAX_CACHE_BYTES,
 			resync: false,
 			_marker: PhantomData,
 		}
@@ -274,6 +292,8 @@ impl<T> Encoder<T> {
 			Some(Baseline::Encoded { bytes, .. }) => bytes.clone(),
 			Some(Baseline::Parsed(value)) => Bytes::from(serde_json::to_vec(value)?),
 		};
+		// A baseline built by patches was never held to the budget as one snapshot.
+		self.check_snapshot(&bytes)?;
 		let encoded = self.snapshot_encoded(bytes);
 		Ok(Some(Pending {
 			encoder: self,
@@ -318,7 +338,9 @@ impl<T> Encoder<T> {
 		// deltas off there is no diff to rebase and no reason to pay it at all.
 		//
 		// Every fallible step runs before any state changes, so a failure leaves the encoder exactly
-		// as it was rather than half-advanced with no frame to show for it.
+		// as it was rather than half-advanced with no frame to show for it. The size check runs
+		// first, so a value no reader could hold costs no parse.
+		self.check_snapshot(&snapshot)?;
 		let last = if self.config.deltas {
 			Baseline::Parsed(serde_json::from_slice(&snapshot)?)
 		} else {
@@ -332,6 +354,15 @@ impl<T> Encoder<T> {
 
 		let encoded = self.snapshot_encoded(snapshot);
 		Ok((encoded, Edit::Snapshot(last)))
+	}
+
+	/// Refuse a snapshot past the group budget before anything is published, so the previous value
+	/// stays readable rather than superseded by a frame moq-net would refuse on write.
+	fn check_snapshot(&self, snapshot: &[u8]) -> Result<()> {
+		match snapshot.len() as u64 > self.max_group_bytes {
+			true => Err(moq_net::Error::FrameTooLarge.into()),
+			false => Ok(()),
+		}
 	}
 
 	/// Encode an already-serialized value as a full snapshot, opening a new group.
@@ -556,7 +587,7 @@ mod test {
 		let sequence = (any::<bool>(), property_sequence());
 		runner
 			.run(&sequence, |(deltas, steps)| {
-				let mut encoder = Encoder::<Value>::new(Config { deltas });
+				let mut encoder = Encoder::<Value>::new(Config::default().with_deltas(deltas));
 				let mut decoder = super::super::Decoder::<Value>::new(super::super::consumer::Config::default());
 				for (index, step) in steps.iter().enumerate() {
 					if step.reset {
@@ -682,7 +713,7 @@ mod test {
 	#[test]
 	fn snapshot_restates_the_retained_value() {
 		for deltas in [true, false] {
-			let mut encoder = Encoder::<Value>::new(Config { deltas });
+			let mut encoder = Encoder::<Value>::new(Config::default().with_deltas(deltas));
 			assert!(encoder.snapshot().unwrap().is_none(), "nothing to restate yet");
 
 			commit(&mut encoder, &json!({ "a": 1 })).unwrap();
@@ -864,8 +895,8 @@ mod test {
 		let value = json!({ "v": "x".repeat(1000) });
 		let patched = json!({ "v": "y".repeat(1000) });
 
-		let mut encoder = Encoder::<Value>::new(Config::default());
-		encoder.max_group_bytes = (serde_json::to_vec(&value).unwrap().len() + 500) as u64;
+		let budget = (serde_json::to_vec(&value).unwrap().len() + 500) as u64;
+		let mut encoder = Encoder::<Value>::new(Config::default().with_max_group_bytes(budget));
 		assert!(commit(&mut encoder, &value).unwrap().keyframe);
 		let rolled = commit(&mut encoder, &patched).expect("a rolled snapshot");
 		assert!(
@@ -881,6 +912,33 @@ mod test {
 		// The rolled group is charged afresh, so a small change rides as a delta again.
 		let next = commit(&mut encoder, &json!({ "v": "y".repeat(1000), "q": 1 })).unwrap();
 		assert!(!next.keyframe);
+	}
+
+	/// A snapshot past the budget is refused before its baseline is parsed, with or without deltas.
+	#[test]
+	fn a_snapshot_past_the_budget_is_refused() {
+		for deltas in [false, true] {
+			let config = Config::default().with_deltas(deltas).with_max_group_bytes(100);
+			let mut encoder = Encoder::<Value>::new(config);
+			assert!(
+				matches!(
+					encoder.update(&json!({ "v": "x".repeat(1000) })),
+					Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
+				),
+				"deltas {deltas}"
+			);
+			assert!(
+				encoder.value().is_none(),
+				"a refused snapshot leaves the encoder as it was"
+			);
+		}
+	}
+
+	/// A budget above moq-net's cache limit is clamped to it.
+	#[test]
+	fn the_budget_is_clamped_to_the_cache_limit() {
+		let encoder = Encoder::<Value>::new(Config::default().with_max_group_bytes(u64::MAX));
+		assert_eq!(encoder.max_group_bytes, moq_net::group::MAX_CACHE_BYTES);
 	}
 
 	/// A value whose serialization changes on every call, standing in for a `Serialize` impl backed by

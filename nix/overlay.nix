@@ -23,18 +23,27 @@ let
     filter = filterCargoSources;
   };
 
-  # rs/kio/src on its own, so the dependency layer below only rebuilds when kio does.
-  kioSource = final.lib.cleanSourceWith {
-    src = ../rs/kio/src;
-    name = "kio-source";
-    filter = filterCargoSources;
-  };
+  # Keep the patched registry dependency and its macro implementation together.
+  dependencySources =
+    final.lib.mapAttrs
+      (
+        path: src:
+        final.lib.cleanSourceWith {
+          inherit src;
+          name = "${baseNameOf path}-source";
+          filter = filterCargoSources;
+        }
+      )
+      {
+        "rs/kio" = ../rs/kio/src;
+        "rs/kio/macros" = ../rs/kio/macros/src;
+      };
 
   # `[patch.crates-io] kio = { path = "rs/kio" }` in the root Cargo.toml points
   # registry crates (web-transport-iroh) at the workspace
   # member. crane's dependency-only stage stubs every workspace crate down to an
   # empty lib.rs, so those registry crates no longer find kio's API and fail to
-  # compile. Put kio's real source back into the dummy tree, but keep crane's
+  # compile. Put kio and its macro crate back into the dummy tree, but keep crane's
   # cleaned manifest: the real one inherits `workspace.lints`, which the dummy
   # root manifest drops.
   #
@@ -47,11 +56,13 @@ let
       args
       // {
         doCheck = false;
-        extraDummyScript = ''
-          rm -rf $out/rs/kio/src
-          cp -r ${kioSource} --no-target-directory $out/rs/kio/src
-          chmod -R +w $out/rs/kio/src
-        '';
+        extraDummyScript = final.lib.concatStringsSep "\n" (
+          final.lib.mapAttrsToList (path: source: ''
+            rm -rf "$out/${path}/src"
+            cp -r ${source} --no-target-directory "$out/${path}/src"
+            chmod -R +w "$out/${path}/src"
+          '') dependencySources
+        );
       }
     );
 

@@ -820,7 +820,7 @@ class MoqSubscription {
   final MoqOrder? order;
   MoqSubscription({
     this.priority = 0,
-    this.maxDelay,
+    this.maxDelay = null,
     this.ranges = null,
     this.order = null,
   });
@@ -17309,6 +17309,14 @@ class FfiConverterUint8List {
 }
 
 const _uniffiAssetId = "package:moq_ffi/uniffi:moq_ffi";
+MoqSubscription moqSubscriptionDefaults() {
+  return rustCallWithLifter(
+    (status) => uniffi_moq_ffi_fn_func_moq_subscription_defaults(status),
+    FfiConverterMoqSubscription.lift,
+    null,
+  );
+}
+
 void moqLogLevel({required String level}) {
   return rustCall((status) {
     uniffi_moq_ffi_fn_func_moq_log_level(
@@ -19975,6 +19983,11 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqerror_uniffi_trait_display(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<RustBuffer Function(Pointer<RustCallStatus>)>(assetId: _uniffiAssetId)
+external RustBuffer uniffi_moq_ffi_fn_func_moq_subscription_defaults(
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Void Function(RustBuffer, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -20326,6 +20339,9 @@ external void ffi_moq_ffi_rust_future_complete_void(
   Pointer<Void> handle,
   Pointer<RustCallStatus> uniffiStatus,
 );
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_func_moq_subscription_defaults();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_func_moq_log_level();
@@ -21031,6 +21047,9 @@ void _checkApiVersion() {
 }
 
 void _checkApiChecksums() {
+  if (uniffi_moq_ffi_checksum_func_moq_subscription_defaults() != 37074) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
   if (uniffi_moq_ffi_checksum_func_moq_log_level() != 24625) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
@@ -21349,7 +21368,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqfollowing_cancel() != 37387) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_announced() != 16595) {
+  if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_announced() != 35661) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_follow() != 6409) {

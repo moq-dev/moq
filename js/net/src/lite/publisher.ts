@@ -31,6 +31,7 @@ import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
 	exclusiveGroupEnd,
+	type RangeGroups,
 	type Subscribe,
 	SubscribeDrop,
 	SubscribeEnd,
@@ -345,6 +346,17 @@ class SubscriptionControls {
 		}
 		this.#finish(null);
 	}
+}
+
+// Where each range starts once delivery starts at `from`, `undefined` for one with no group
+// there. Before lite-07 there is one range, which starts there.
+function rangeStarts(ranges: (RangeGroups | undefined)[] | undefined, from: number): (number | undefined)[] {
+	if (!ranges) return [from];
+	return ranges.map((range) => {
+		if (!range) return undefined;
+		const start = Math.max(range.start, from);
+		return range.end === undefined || range.end > start ? start : undefined;
+	});
 }
 
 // The later of two locations, either of which may be unknown.
@@ -832,6 +844,11 @@ export class Publisher {
 			return;
 		}
 
+		if (msg.ranges?.some((range) => range?.unresolved)) {
+			stream.abort(new Error("relative and time subscription anchors are not supported"));
+			return;
+		}
+
 		// The requester leaving while the broadcast and track resolve ends the request, as
 		// Rust polls the requester throughout, so a cancelled subscription gives back its
 		// charge instead of holding it until the track is answered, which may be never. A
@@ -943,6 +960,8 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				apply: (update) => {
+					if (update.ranges?.some((range) => range?.unresolved))
+						throw new Error("relative and time subscription anchors are not supported");
 					Object.assign(datagramBounds, {
 						startGroup: update.startGroup,
 						startFrame: update.startFrame,
@@ -975,6 +994,7 @@ export class Publisher {
 				served,
 				floor,
 				bounds,
+				ranges: msg.ranges,
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -1139,11 +1159,14 @@ export class Publisher {
 			// The read cursor's floor; see {@link cursorFloor}.
 			floor: number;
 			bounds: FrameBounds;
+			// Each lite-07 range, which SUBSCRIBE_START answers for.
+			ranges: (RangeGroups | undefined)[] | undefined;
 		},
 	): Promise<boolean> {
 		const { sub, broadcast, stamp, publisher, compress, served, bounds } = serving;
 		// The read cursor's floor, assigned with the cap in {@link bounds} on every move.
 		let floor = serving.floor;
+		let ranges = serving.ranges;
 		const moveCursor = () =>
 			track.withRange({
 				start: { included: floor },
@@ -1279,6 +1302,7 @@ export class Publisher {
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
+							ranges = update.ranges;
 							moveCursor();
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
@@ -1327,7 +1351,7 @@ export class Publisher {
 								startSent = true;
 								startSequence = bounds.startGroup;
 								raiseFloor(bounds.startGroup);
-								const start = new SubscribeStart(bounds.startGroup, largest);
+								const start = new SubscribeStart(rangeStarts(ranges, bounds.startGroup), largest);
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)
@@ -1410,7 +1434,7 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(startSequence, largest) },
+								{ start: new SubscribeStart(rangeStarts(ranges, startSequence), largest) },
 								this.version,
 							),
 						))

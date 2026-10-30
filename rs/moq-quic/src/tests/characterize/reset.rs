@@ -5,7 +5,7 @@ use super::*;
 const CODE: VarInt = VarInt(7);
 
 /// Every chunk a server stream yields, and how it ended
-fn read_all(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, ReadError) {
+fn read_all(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, recv::Error) {
 	let mut recv = pair.server_recv(ch, s);
 	let mut chunks = recv.read().unwrap();
 	let mut data = Vec::new();
@@ -26,7 +26,7 @@ fn open(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: ConnectionHandl
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, s).write(data).unwrap();
+	pair.client_send(client_ch, s).write(&mut &data[..]).unwrap();
 	pair.drive();
 	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
 	s
@@ -45,10 +45,7 @@ fn received_reset_reports_the_code_once() {
 	// Observing the reset frees the stream, so every later access finds it closed
 	assert_eq!(pair.server_recv(server_ch, s).received_reset(), Ok(Some(CODE)));
 	assert!(pair.server_recv(server_ch, s).received_reset().is_err());
-	assert_eq!(
-		pair.server_recv(server_ch, s).read().err(),
-		Some(ReadableError::ClosedStream)
-	);
+	assert_eq!(pair.server_recv(server_ch, s).read().err(), Some(recv::Error::Closed));
 	assert!(pair.server_recv(server_ch, s).stop(CODE).is_err());
 }
 
@@ -102,14 +99,11 @@ fn chunks_end_in_reset() {
 
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
-	assert_eq!(chunks.next(usize::MAX), Err(ReadError::Reset(CODE)));
+	assert_eq!(chunks.next(usize::MAX), Err(recv::Error::Reset(CODE)));
 	// The end repeats until the chunks are finalized
-	assert_eq!(chunks.next(usize::MAX), Err(ReadError::Reset(CODE)));
+	assert_eq!(chunks.next(usize::MAX), Err(recv::Error::Reset(CODE)));
 	let _ = chunks.finalize();
-	assert_eq!(
-		pair.server_recv(server_ch, s).read().err(),
-		Some(ReadableError::ClosedStream)
-	);
+	assert_eq!(pair.server_recv(server_ch, s).read().err(), Some(recv::Error::Closed));
 }
 
 #[test]
@@ -126,10 +120,7 @@ fn chunks_end_in_finished() {
 	assert_eq!(chunks.next(usize::MAX), Ok(None));
 	assert_eq!(chunks.next(usize::MAX), Ok(None));
 	let _ = chunks.finalize();
-	assert_eq!(
-		pair.server_recv(server_ch, s).read().err(),
-		Some(ReadableError::ClosedStream)
-	);
+	assert_eq!(pair.server_recv(server_ch, s).read().err(), Some(recv::Error::Closed));
 }
 
 /// The reader sees exactly the code the writer reset with, across the varint range
@@ -141,14 +132,17 @@ fn reset_codes() {
 		let s = open(&mut pair, client_ch, server_ch, b"x");
 		pair.client_send(client_ch, s).reset(code).unwrap();
 		pair.drive();
-		assert_eq!(read_all(&mut pair, server_ch, s), (Vec::new(), ReadError::Reset(code)));
+		assert_eq!(
+			read_all(&mut pair, server_ch, s),
+			(Vec::new(), recv::Error::Reset(code))
+		);
 
 		let s = open(&mut pair, client_ch, server_ch, b"x");
 		pair.server_recv(server_ch, s).stop(code).unwrap();
 		pair.drive();
 		assert_eq!(
-			pair.client_send(client_ch, s).write(b"y"),
-			Err(WriteError::Stopped(code))
+			pair.client_send(client_ch, s).write(&mut &b"y"[..]),
+			Err(send::Error::Stopped(code))
 		);
 	}
 }
@@ -163,7 +157,7 @@ fn reset_returns_stream_credit_once_observed() {
 	pair.drive();
 	assert_eq!(pair.client_streams(client_ch).open(Dir::Uni, Default::default()), None);
 
-	assert_eq!(read_all(&mut pair, server_ch, s).1, ReadError::Reset(CODE));
+	assert_eq!(read_all(&mut pair, server_ch, s).1, recv::Error::Reset(CODE));
 	pair.drive();
 	assert!(
 		pair.client_streams(client_ch)
@@ -185,14 +179,19 @@ fn blocked() -> (Pair, ConnectionHandle, ConnectionHandle, StreamId) {
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	assert_eq!(pair.client_send(client_ch, other).write(b"x"), Err(WriteError::Blocked));
+	assert_eq!(
+		pair.client_send(client_ch, other).write(&mut &b"x"[..]),
+		Err(send::Error::Blocked)
+	);
 	(pair, client_ch, server_ch, s)
 }
 
 /// How many bytes a fresh client stream can write
 fn writable(pair: &mut Pair, ch: ConnectionHandle) -> usize {
 	let s = pair.client_streams(ch).open(Dir::Uni, Default::default()).unwrap();
-	pair.client_send(ch, s).write(&[0; 2 * WINDOW as usize]).unwrap_or(0)
+	pair.client_send(ch, s)
+		.write(&mut &[0; 2 * WINDOW as usize][..])
+		.unwrap_or(0)
 }
 
 #[test]

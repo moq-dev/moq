@@ -91,4 +91,3 @@ offering EPOCH and never send its parameter. moq-lite is unchanged.
 ## Related
 
 - [Announcement takeover](/quest/m1/announce-takeover.md) - the lite-07 takeover, which no moq-transport counterpart follows
-- [Our moq-transport publishers serve at most one group](/quest/m1/ietf-publisher-one-group.md) - the same narrowing for FETCH

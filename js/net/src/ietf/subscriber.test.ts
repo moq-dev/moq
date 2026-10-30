@@ -225,6 +225,32 @@ test("an announcement survives the first of its two sources ending", async () =>
 	expect(next).toBe("nothing");
 });
 
+test("announced lists literal matches unless covering asks for overlapping routes too", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
+	const scope = Path.Pattern.parse("**/*.chat");
+	const listed = subscriber.announced(scope);
+	const covering = subscriber.announced(scope, { covering: true });
+
+	// `room` could serve `room/lobby.chat`, but its own name is no match.
+	for (const [requestId, path] of [
+		[0n, "room"],
+		[1n, "lobby.chat"],
+	] as const) {
+		const request = await Stream.open(pair.server, { version: VERSION });
+		void subscriber.runPublishNamespace(
+			new PublishNamespace({ requestId, trackNamespace: Path.from(path) }),
+			request,
+		);
+	}
+	expect(await covering.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
+	expect(await covering.next()).toMatchObject({ prefix: Path.from("lobby.chat"), kind: "start" });
+	expect(await listed.next()).toMatchObject({ prefix: Path.from("lobby.chat"), kind: "start" });
+
+	listed.close();
+	covering.close();
+});
+
 /**
  * The mirror of the above, and the reason the count exists rather than a flag: once the
  * last source goes, the path really is gone and consumers have to hear it.
@@ -651,7 +677,6 @@ test("a consumed broadcast refuses to list its tracks rather than claim it has n
 	// A later reader asks again, and is refused again.
 	await expect(consumer.tracks().next()).rejects.toThrow("track listing requires moq-lite-07");
 	consumer.close();
-	subscriber.close();
 });
 
 /**
