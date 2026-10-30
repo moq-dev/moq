@@ -110,7 +110,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Time stretch](/quest/m2/watch-audio-time-stretch.md) - js/watch: the audio ring converges by time-stretching instead of skipping or going silent
 - [Audio join budget](/quest/m2/audio-join-budget.md) - `moq-audio` joining at the latest group loses no group a publisher bursts before its budget widens
 - [Latest readers use Range::live()](/quest/m2/readers-range-live.md) - after #6278, readers start at the live edge without waiting on `largest()`
-- [Media QA audio cases](/quest/m2/media-qa-audio.md) - AAC, audio codec/rate/channel changes, rendition switches, output mute/volume, and a native publisher's A/V sync are graded like the video cases
 - [Audio outlives video](/quest/m2/audio-bufferbloat-av.md) - under bufferbloat audio stays within budget while video may skip, rendered frames stay in sync, and native audio rows are enforced
 - [ViSQOL grading](/quest/m2/audio-visqol.md) - the nightly scores played audio against a reference clip and fails below measured floors
 - [PulseAudio capture periods](/quest/m2/pulseaudio-capture-period.md) - capture on cpal's PulseAudio host arrives in short periods, not the server's 2 s default fragment, proven on the null sink's monitor

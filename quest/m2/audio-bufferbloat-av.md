@@ -39,9 +39,9 @@ Recommendations:
 - Impair per the repo rule: `moq-shaper --rate` below the combined bitrate but
   above audio's, behind a deep but finite `--queue` whose overflow drops.
   Random loss is not the gate.
-- Prefer the Rust ffmpeg pattern publisher from [media QA audio
-  cases](/quest/m2/media-qa-audio.md) if it has landed; the browser fixture
-  publisher works otherwise.
+- Prefer the Rust ffmpeg pattern publisher media QA uses
+  (`test/interop/clients/js/src/native.ts`, run by `run_native_media` in
+  `test/interop/interop.sh`); the browser fixture publisher works otherwise.
 - Budgets come from nightly runs by the rule in `budgets.json`'s note, not a
   developer machine. The native `pulse` ceilings there are provisional
   developer-host numbers; re-measure them from nightlies before enforcing.
