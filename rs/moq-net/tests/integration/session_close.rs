@@ -292,7 +292,10 @@ async fn close_tail_for(version: &str) {
 	);
 	pair.client_transport.release_unis();
 	let res = close.await.unwrap();
-	assert!(res.is_ok(), "{version}: close drains after the subscriber reads the tail: {res:?}");
+	assert!(
+		res.is_ok(),
+		"{version}: close drains after the subscriber reads the tail: {res:?}"
+	);
 	let (got, end) = reader.await.unwrap();
 	assert_eq!(got, vec![b"last".to_vec()], "{version}");
 	assert!(end.is_ok(), "{version}: track ends cleanly: {end:?}");

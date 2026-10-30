@@ -449,7 +449,7 @@ for (const [alpn, version] of [
 }
 
 /** A publisher serving a finished track to a raw subscriber that has read up to the FIN. */
-async function servedRawSubscription(alpn = ALPN_07_WIP, version = Version.DRAFT_07) {
+async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Version = Version.DRAFT_07) {
 	const pair = createMockTransportPair(alpn);
 	const origin = new Producer();
 	const broadcastPublication = origin.createBroadcast(Path.from("room"));
