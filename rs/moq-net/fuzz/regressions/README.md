@@ -1,7 +1,7 @@
 # Regressions
 
 Crash inputs the fuzzer found, one file per input, in a directory named after its
-target (`lite/`, `ietf/`, `varint/`, `path/`). `fuzz::tests::regressions` replays them
+target (`lite/`, `ietf/`, `request/`, and so on). `fuzz::tests::regressions` replays them
 on the stable toolchain as part of `just check`, so a bug found by fuzzing stays fixed
 without anyone running the fuzzer again.
 

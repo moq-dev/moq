@@ -4557,7 +4557,7 @@ impl Subscriber {
 		let mut producer = crate::recv::Group::new(producer);
 		let observing = producer.handle().clone();
 
-		let mut ingest = GroupIngest::new(self, &group, timescale);
+		let mut ingest = GroupIngest::new(self.version, &group, timescale);
 		ingest.expected_first = Some(start);
 		let res = {
 			kio::wait(|waiter| {
@@ -4731,7 +4731,7 @@ enum Opened {
 
 /// How a subgroup stream ended cleanly.
 #[derive(Debug, PartialEq, Eq)]
-enum Ended {
+pub(crate) enum Ended {
 	/// The stream finished, or carried an explicit end of group.
 	Group,
 	/// It carried an END_OF_TRACK after the group's last object, and whether that
@@ -4958,13 +4958,13 @@ impl Subscriber {
 /// Pumps moq-transport subgroup objects from a reader into a group producer:
 /// the id delta, the extension headers (carrying the timestamp), the size, the
 /// status for empty objects, and the streamed payload.
-struct GroupIngest {
+pub(crate) struct GroupIngest {
 	has_extensions: bool,
 	timescale: Option<Timescale>,
 	version: Version,
 	prior_object: Option<u64>,
 	/// The live tail must begin exactly after the filled head, even if it is quiet.
-	expected_first: Option<u64>,
+	pub(crate) expected_first: Option<u64>,
 	properties: crate::model::object::Properties,
 	/// The property list `properties` was read from, for a status object, which has no frame.
 	raw: bytes::Bytes,
@@ -4991,11 +4991,11 @@ enum IngestPhase {
 }
 
 impl GroupIngest {
-	fn new(subscriber: &Subscriber, group: &ietf::GroupHeader, timescale: Option<Timescale>) -> Self {
+	pub(crate) fn new(version: Version, group: &ietf::GroupHeader, timescale: Option<Timescale>) -> Self {
 		Self {
 			has_extensions: group.flags.has_extensions,
 			timescale,
-			version: subscriber.version,
+			version,
 			prior_object: None,
 			expected_first: None,
 			properties: Default::default(),
@@ -5983,7 +5983,7 @@ impl GroupIngest {
 	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
 	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
 	/// group; an object cut short mid-payload was already aborted here with the reason.
-	fn poll<R: crate::transport::poll::RecvStream>(
+	pub(crate) fn poll<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut crate::recv::Group,

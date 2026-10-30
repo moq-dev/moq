@@ -80,6 +80,12 @@ pub use subscribe_namespace::*;
 pub use subscribe_tracks::*;
 #[cfg(feature = "async")]
 use subscriber::*;
+// The fuzz harness drives a subgroup stream's ingest directly.
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub(crate) use {
+	request_stream::{Framed, NamespaceUpdate, Next, Update},
+	subscriber::GroupIngest,
+};
 pub use track::*;
 pub use version::Version;
 

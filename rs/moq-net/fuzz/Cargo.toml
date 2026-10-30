@@ -62,6 +62,20 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "ingest"
+path = "fuzz_targets/ingest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "request"
+path = "fuzz_targets/request.rs"
+test = false
+doc = false
+bench = false
+
 [dependencies]
 libfuzzer-sys = "0.4"
 moq-net = { workspace = true, features = ["fuzz"] }

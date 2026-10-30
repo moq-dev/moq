@@ -52,7 +52,7 @@ pub(super) fn poll_withdrawn(
 /// One whole `[type][length][body]` message off a request stream, decoded at once so a read
 /// dropped part-way consumes nothing.
 #[derive(Debug)]
-pub(super) struct Framed(pub(super) u64, pub(super) super::Body);
+pub(crate) struct Framed(pub(crate) u64, pub(crate) super::Body);
 
 impl<'a> Decode<'a, Version> for Framed {
 	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
@@ -68,7 +68,7 @@ impl<'a> Decode<'a, Version> for Framed {
 /// A message following the request on a request stream: `T`, or a GOAWAY migrating this
 /// one request (draft-22 section 9.2).
 #[derive(Debug)]
-pub(super) enum Next<T> {
+pub(crate) enum Next<T> {
 	Message(T),
 	/// `redirect` is whether it names a new session, which only a server may do.
 	GoAway {
@@ -79,7 +79,9 @@ pub(super) enum Next<T> {
 impl<'a, T: Decode<'a, Version>> Decode<'a, Version> for Next<T> {
 	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let mut peek = r.clone();
-		if peek.varint()? == super::GoAway::ID {
+		// A type cut short falls through to `T`, whose own read of it records what it
+		// needed on `r`, where the reader looks for it.
+		if peek.varint().is_ok_and(|id| id == super::GoAway::ID) {
 			*r = peek;
 			r.uncounted = r.position();
 			let msg = super::GoAway::decode(r, version)?;
@@ -229,7 +231,7 @@ pub(super) async fn write_error<W: crate::transport::poll::SendStream>(
 
 /// A framed subscription update, preserving omitted preferences.
 #[derive(Debug)]
-pub(super) struct Update {
+pub(crate) struct Update {
 	/// The update's own Request ID.
 	pub(super) request_id: super::RequestId,
 	pub(super) priority: Option<u8>,
@@ -331,7 +333,7 @@ impl<'a> Decode<'a, Version> for Update {
 /// SUBSCRIBE_TRACKS, which from draft-22 may also carry TRACK_PROPERTY_FILTER and
 /// FORWARD.
 #[derive(Debug)]
-pub(super) struct NamespaceUpdate<const TRACKS: bool = false> {
+pub(crate) struct NamespaceUpdate<const TRACKS: bool = false> {
 	pub(super) request_id: super::RequestId,
 	pub(super) prefix: Option<crate::Path>,
 	pub(super) refused: Option<Error>,
