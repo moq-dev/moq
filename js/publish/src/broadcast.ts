@@ -215,7 +215,7 @@ export class Broadcast {
 			throw new Error(`rendition ${name} names another rendition's replacement track`);
 		}
 		// A video or audio rendition's HLS records hold or will hold the name.
-		if (name.endsWith(Hls.SUFFIX)) {
+		if (this.in.hls.peek() && name.endsWith(Hls.SUFFIX)) {
 			const media = name.slice(0, -Hls.SUFFIX.length);
 			const owner = this.#renditions.peek()[media];
 			if (this.#records.peek()[media] || (owner && owner.kind !== "text")) {

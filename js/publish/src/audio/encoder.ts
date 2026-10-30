@@ -388,9 +388,10 @@ export class Encoder {
 		const rendition = broadcast.audio(this.name);
 		errors.set(rendition, failure);
 		effect.cleanup(() => rendition.close());
-		// Groups hold about this much audio, which fixes each new track's HLS segment duration up front.
+		// Audio groups are far shorter than a segment, so any hint declares the grid's own duration up
+		// front; a group per frame (zero) still hints a millisecond.
 		const hint = (duration: Milli) =>
-			Number.isFinite(duration) && duration > 0 ? Micro.fromMilli(duration) : undefined;
+			Micro.fromMilli(Number.isFinite(duration) && duration > 0 ? duration : Milli(1));
 		rendition.hlsHint.set(hint(this.groupDuration.peek()));
 		effect.subscribe(this.groupDuration, (duration) => rendition.hlsHint.set(hint(duration)));
 

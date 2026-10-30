@@ -866,3 +866,15 @@ test("registering a name another rendition's HLS records hold throws", async () 
 	expect(() => broadcast.audio("captions.hls")).not.toThrow();
 	broadcast.close();
 });
+
+test("with hls off, a name ending in the record suffix is free", async () => {
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Origin.Producer(),
+		name: Path.from("free.hang"),
+		hls: false,
+	});
+	broadcast.video("video");
+	expect(() => broadcast.audio("video.hls")).not.toThrow();
+	broadcast.close();
+});
