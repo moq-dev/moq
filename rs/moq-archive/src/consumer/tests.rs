@@ -776,9 +776,15 @@ async fn a_time_range_resolves_from_the_archive() {
 
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = |start, end| track::Range { start, end };
-	assert_eq!(read_range(&broadcast, "video", range(at(4_500), Some(at(6_500)))).await, [4, 5, 6]);
+	assert_eq!(
+		read_range(&broadcast, "video", range(at(4_500), Some(at(6_500)))).await,
+		[4, 5, 6]
+	);
 	// A start on the first frame of its group, in the second object of a pair.
-	assert_eq!(read_range(&broadcast, "video", range(at(3_000), Some(at(3_001)))).await, [3]);
+	assert_eq!(
+		read_range(&broadcast, "video", range(at(3_000), Some(at(3_001)))).await,
+		[3]
+	);
 	// An end alone, from the oldest group.
 	assert_eq!(
 		read_range(&broadcast, "video", range(track::Anchor::Absolute(0), Some(at(1_200)))).await,

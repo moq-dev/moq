@@ -834,9 +834,7 @@ impl Holdings for Seen<'_> {
 	}
 
 	fn gone(&self, sequence: u64) -> Option<u64> {
-		self.state
-			.gone(sequence)
-			.or_else(|| self.misses?.gone(sequence))
+		self.state.gone(sequence).or_else(|| self.misses?.gone(sequence))
 	}
 
 	fn complete(&self) -> bool {
@@ -6574,10 +6572,9 @@ impl Cursor {
 			}
 			let answer = match &lookup.join {
 				None => None,
-				Some(join) => match join
-					.outcome()
-					.poll(waiter, |outcome| outcome.first_accepted().map_or(Poll::Pending, Poll::Ready))
-				{
+				Some(join) => match join.outcome().poll(waiter, |outcome| {
+					outcome.first_accepted().map_or(Poll::Pending, Poll::Ready)
+				}) {
 					Poll::Ready(Ok(group)) => Some(group),
 					// Ended unanswered: its handler couldn't tell.
 					Poll::Ready(Err(closed)) => closed.first_accepted(),
@@ -18601,11 +18598,18 @@ mod test {
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
-		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new(), "the time start waits on its lookup");
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"the time start waits on its lookup"
+		);
 		let Poll::Ready(Ok(lookup)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the time start is looked up");
 		};
-		assert_eq!((lookup.time(), lookup.start().group, lookup.end()), (Some(at(5)), 0, 10));
+		assert_eq!(
+			(lookup.time(), lookup.start().group, lookup.end()),
+			(Some(at(5)), 0, 10)
+		);
 		assert_eq!(lookup.next(), None, "a lookup owes no group");
 		drop(lookup);
 		let mut read = drain_groups(&mut subscriber);
@@ -18642,7 +18646,11 @@ mod test {
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
-		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new(), "nothing reads until it is found");
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"nothing reads until it is found"
+		);
 		let Poll::Ready(Ok(lookup)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the time start is looked up");
 		};

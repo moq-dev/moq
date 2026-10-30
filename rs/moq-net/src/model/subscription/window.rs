@@ -600,7 +600,11 @@ impl Window {
 			let started = group.filter(|group| holdings.next_start(*group).is_some_and(|(found, _)| found == *group));
 			(span.start, span.floored, span.reach) = match started {
 				Some(group) => (group, true, group),
-				None => (0, false, holdings.next_start(0).map_or(span.reach, |(oldest, _)| oldest)),
+				None => (
+					0,
+					false,
+					holdings.next_start(0).map_or(span.reach, |(oldest, _)| oldest),
+				),
 			};
 			// A time end walked from group 0 meanwhile starts its walk again at the start.
 			if let Some(Anchor::Time(end)) = self.ranges[span.index].end {
