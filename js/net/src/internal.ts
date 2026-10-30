@@ -574,6 +574,8 @@ export const hooks: {
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
 	readGroupFrame: (group: GroupConsumer, compressed: boolean) => Promise<ReadGroupFrame | undefined>;
+	/** Notify the owning track when a reader reaches its shed front. */
+	onShedRead: (group: GroupConsumer, notify: () => void) => void;
 	/**
 	 * Make an evicted mirror terminal while its track timeline still contains it. Whether the
 	 * mirror is released too: not when its group reads on, or may yet, from another copy.
@@ -804,6 +806,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	readGroupFrame: () => {
+		throw new Error("group.ts not loaded");
+	},
+	onShedRead: () => {
 		throw new Error("group.ts not loaded");
 	},
 	evictGroup: () => {

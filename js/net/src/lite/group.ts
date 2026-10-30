@@ -1,9 +1,10 @@
 import { race } from "@moq/signals";
 import { FrameTooLarge } from "../error.ts";
-import * as netGroup from "../group.ts";
+import type * as netGroup from "../group.ts";
 import { hooks } from "../internal.ts";
 import type { Cursor, Reader, Writer } from "../stream.ts";
 import * as Time from "../time.ts";
+import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import * as Message from "./message.ts";
 import { hasFrameBounds, type Version } from "./version.ts";
 
@@ -95,8 +96,8 @@ export function frameDecoder({ scale, timed = true, compress = false }: FrameFor
 		const delta = timescale === undefined ? 0n : unzigzag(c.u62());
 		const inflated = compress ? c.u53() : undefined;
 		const size = c.u53();
-		if (size > netGroup.MAX_GROUP_CACHE_BYTES || (inflated ?? 0) > netGroup.MAX_GROUP_CACHE_BYTES)
-			throw new FrameTooLarge();
+		// Retain the whole-frame guard until frames can be consumed in bounded chunks.
+		if (size > MAX_FRAME_BYTES || (inflated ?? 0) > MAX_FRAME_BYTES) throw new FrameTooLarge();
 		const payload = c.read(size);
 		// Commit the delta only after the last read: an incomplete decode gets retried.
 		prevTs += delta;

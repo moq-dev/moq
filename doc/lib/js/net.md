@@ -61,3 +61,9 @@ Examples:
 Runs in the browser and, over WebSocket, in Node, Bun, and Deno; see
 [server-side](/lib/js/#server-side). Path patterns are on the
 [concept page](/concept/moq-lite#path-patterns).
+
+Groups retain a 32 MiB live tail without limiting their lifetime or frame count.
+Readers that fall behind the shed front receive `Evicted`; tracks with a
+`refresh` ratio also request a fresh group. A join never starts at an arbitrary
+frame in the retained tail. Whole-frame reads still require each frame to fit
+32 MiB.

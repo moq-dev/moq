@@ -1,6 +1,6 @@
-import { Group } from "@moq/net";
+import { MAX_FRAME_BYTES } from "../limits.ts";
 
-/** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. Kept well below the net per-group cap so a roll always precedes GroupTooLarge. */
+/** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. Bounds how many operations a joiner must replay after its checkpoint. */
 const MAX_GROUP_FRAMES = 1024;
 
 // A restatement changes nothing on commit; it only opens a group.
@@ -198,7 +198,7 @@ export class Encoder<T> {
 
 		this.#groupFrames += 1;
 		this.#groupBytes += payload.length;
-		if (this.#groupBytes > Group.MAX_GROUP_CACHE_BYTES) {
+		if (this.#groupBytes > MAX_FRAME_BYTES) {
 			this.#resyncGroup();
 			return undefined;
 		}
@@ -224,7 +224,7 @@ export class Encoder<T> {
 		const checkpoint = start === offset ? "" : `,"start":${start}`;
 		const text = `{"offset":${offset}${checkpoint},"records":[${window.join(",")}]}`;
 		const payload = new TextEncoder().encode(text);
-		if (payload.length > Group.MAX_GROUP_CACHE_BYTES) {
+		if (payload.length > MAX_FRAME_BYTES) {
 			throw new Error("window header exceeds the group cache limit");
 		}
 

@@ -339,8 +339,6 @@ export namespace Group {
 	export interface Info {
 		sequence: number;
 	}
-	export const MAX_GROUP_CACHE_BYTES: number;
-	export const MAX_GROUP_FRAMES: 8192;
 	export class Producer {
 		constructor(sequence: number);
 		abort(error: Error): void;

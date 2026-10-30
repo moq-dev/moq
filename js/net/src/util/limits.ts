@@ -1,5 +1,8 @@
 import { Session, SessionCode } from "../error.ts";
 
+/** Allocation guard for whole-frame APIs until chunked frame reads are available. @internal */
+export const MAX_FRAME_BYTES = 32 * 1024 * 1024;
+
 /**
  * How many live requests a peer may hold on one session, as moq-net's `session::Limits`.
  * Subscriptions, FETCHes, and listing PUBLISHes have no cap: each holds a bidi stream, so stream

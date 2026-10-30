@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
-import { Producer as Group, MAX_GROUP_CACHE_BYTES } from "../group.ts";
+import { StreamCode } from "../error.ts";
+import { Producer as Group } from "../group.ts";
 import { hooks } from "../internal.ts";
 import { Producer as Track } from "../track.ts";
 import { Decoder } from "./decoder.ts";
@@ -54,21 +55,29 @@ test("received slices are forwarded byte-for-byte and exact declarations fail al
 	await expect(group.mirror().readFrame()).rejects.toThrow(/declared size/);
 });
 
-test("declared plain bytes consume the group budget before any inflation", () => {
-	const group = new Group(0);
-	hooks.bindGroupCompression(group, true);
-	const inflating = spyOn(Decoder.prototype, "frame");
-	try {
-		expect(() => hooks.writeGroupFrame(group, { payload: new Uint8Array() }, MAX_GROUP_CACHE_BYTES + 1)).toThrow();
-		hooks.writeGroupFrame(group, { payload: new Uint8Array() }, MAX_GROUP_CACHE_BYTES);
-		expect(() => hooks.writeGroupFrame(group, { payload: new Uint8Array() }, 1)).toThrow();
-		expect(inflating).toHaveBeenCalledTimes(0);
-		expect(hooks.groupCacheBytes(group)).toBe(0);
-	} finally {
-		inflating.mockRestore();
+for (const readPlain of [false, true]) {
+	test(`compressed tails shed dictionary prefixes without retaining inflated history (plain=${readPlain})`, async () => {
+		const group = new Group(0);
+		hooks.bindGroupCompression(group, true);
+		const raw = group.consume();
+		const plain = readPlain ? group.consume() : undefined;
+		const slow = group.consume();
+		const encoder = new Encoder();
+		const decoder = new Decoder();
+		const bytes = new Uint8Array(1024 * 1024).fill(42);
+		for (let index = 0; index < 100; index++) {
+			const slice = encoder.frame(bytes);
+			hooks.writeGroupFrame(group, { payload: slice }, bytes.length);
+			const frame = await hooks.readGroupFrame(raw, true);
+			expect(frame?.frame.payload).toBe(slice);
+			expect(decoder.frame(slice, bytes.length)).toEqual(bytes);
+			if (plain) expect((await plain.readFrame())?.payload).toEqual(bytes);
+			expect(hooks.groupCacheBytes(group)).toBeLessThanOrEqual(32 * 1024 * 1024);
+		}
+		await expect(slow.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
 		group.finish();
-	}
-});
+	});
+}
 
 test("empty frames preserve the window", async () => {
 	const track = new Track("compressed").accept({ compress: true });
@@ -101,8 +110,8 @@ test("a shared plain read cannot change a later synchronous write's admission", 
 	const track = new Track("compressed").accept({ compress: true });
 	const group = track.appendGroup();
 	const reader = group.mirror();
-	group.writeFrame({ payload: new Uint8Array(MAX_GROUP_CACHE_BYTES) });
-	expect((await reader.readFrame())?.payload.length).toBe(MAX_GROUP_CACHE_BYTES);
+	group.writeFrame({ payload: new Uint8Array(32 * 1024 * 1024) });
+	expect((await reader.readFrame())?.payload.length).toBe(32 * 1024 * 1024);
 	// The plain-byte budget is full, but another empty frame still fits, regardless of readers.
 	expect(() => group.writeFrame({ payload: new Uint8Array() })).not.toThrow();
 	group.finish();

@@ -1,8 +1,7 @@
 import { expect, setSystemTime, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { GroupTooLarge, NotFound, StreamCode } from "./error.ts";
-import { MAX_GROUP_FRAMES } from "./group.ts";
+import { NotFound, StreamCode } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -510,7 +509,7 @@ test("a late subscriber replays the cached window", async () => {
 	expect(await late.readString()).toBe("later");
 });
 
-test("a read throws GroupTooLarge on an overflow, then resyncs to the next group", async () => {
+test("a read throws Evicted at a shed front, then resyncs to the next group", async () => {
 	const broadcast = new BroadcastProducer();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const sub = broadcast
@@ -518,20 +517,18 @@ test("a read throws GroupTooLarge on an overflow, then resyncs to the next group
 		.subscribe({ maxDelay: Milli(5000) })
 		.ordered();
 
-	// Group 0 overflows its frame cap: the group is aborted.
+	// Group 0 sheds its front without aborting the writer.
 	const g0 = producer.appendGroup();
-	for (let i = 0; i < MAX_GROUP_FRAMES; i++)
-		g0.writeFrame({ payload: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
-	expect(() => g0.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.now() })).toThrow(GroupTooLarge);
+	for (let i = 0; i < 40; i++) g0.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.now() });
 
 	// Group 1 is clean.
 	const g1 = producer.appendGroup();
 	g1.writeFrame({ payload: new TextEncoder().encode("ok"), timestamp: Timestamp.now() });
 	g1.finish();
 
-	// The reader hits the abort in group 0 (error, not a silent skip), then the next
+	// The reader hits the shed front in group 0, then the next
 	// read resyncs from group 1.
-	expect(sub.readFrame()).rejects.toBeInstanceOf(GroupTooLarge);
+	await expect(sub.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
 	expect(await sub.readString()).toBe("ok");
 });
 

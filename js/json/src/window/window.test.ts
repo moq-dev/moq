@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
-import { Group, Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
+import { Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
 
@@ -523,7 +523,7 @@ test("an op that would evict the header rolls first", () => {
 test("a header larger than the group cache is rejected", () => {
 	const encoder = new Encoder<string>();
 
-	expect(() => encoder.push("x".repeat(Group.MAX_GROUP_CACHE_BYTES))).toThrow("group cache limit");
+	expect(() => encoder.push("x".repeat(32 * 1024 * 1024))).toThrow("group cache limit");
 	expect(encoder.window).toEqual([]);
 
 	const frame = encoder.push("ok");

@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
-import { Group, Error as NetError, Time, Track } from "@moq/net";
+import { StreamCode, Time, Track } from "@moq/net";
 import * as z from "@zod/mini";
 import { Consumer, Producer, Rolled } from "./index.ts";
 
@@ -208,50 +208,31 @@ test("each record reads back with its capture timestamp", async () => {
 	]);
 });
 
-// A record past the group budget is refused before anything is written, so the log carries on: the
-// next record lands and decodes.
 for (const compress of [false, true]) {
-	test(`an oversized record is refused and the log continues (compress=${compress})`, async () => {
-		const track = new Track.Producer("test").accept({ compress });
-		const producer = new Producer<Rec | string>({ track });
-		producer.append({ value: { n: 0 } });
-
-		expect(() => producer.append({ value: "x".repeat(Group.MAX_GROUP_CACHE_BYTES) })).toThrow(
-			NetError.GroupTooLarge,
-		);
-
-		producer.append({ value: { n: 1 } });
-		producer.finish();
-		expect(await drain(track.subscribe())).toEqual([0, 1]);
-	});
-}
-
-// A compressed record is charged its plaintext, since that is what a reader inflates: two records
-// that each fit, and deflate to almost nothing, still overflow the budget together.
-test("a compressed log is charged its inflated size", async () => {
-	const track = new Track.Producer("test").accept({ compress: true });
-	const producer = new Producer<{ n: number; pad: string }>({ track });
-	const pad = "x".repeat(Group.MAX_GROUP_CACHE_BYTES / 2);
-	producer.append({ value: { n: 0, pad } });
-	expect(() => producer.append({ value: { n: 1, pad } })).toThrow(NetError.GroupTooLarge);
-	producer.finish();
-	expect(await drain(track.subscribe())).toEqual([0]);
-});
-
-// The budget covers the whole log, so once its frames are spent every append is refused, and the log
-// written so far still finishes cleanly and reads back whole.
-for (const compress of [false, true]) {
-	test(`a spent budget refuses every append (compress=${compress})`, async () => {
+	test(`a stream has no record ceiling (compress=${compress})`, async () => {
 		const track = new Track.Producer("test").accept({ compress });
 		const producer = new Producer<Rec>({ track });
-		for (let n = 0; n < Group.MAX_GROUP_FRAMES; n++) producer.append({ value: { n } });
-
-		expect(() => producer.append({ value: { n: -1 } })).toThrow(NetError.GroupTooLarge);
-		expect(() => producer.append({ value: { n: -2 } })).toThrow(NetError.GroupTooLarge);
+		for (let n = 0; n < 9000; n++) producer.append({ value: { n } });
 		producer.finish();
-
 		const records = await drain(track.subscribe());
-		expect(records.length).toBe(Group.MAX_GROUP_FRAMES);
-		expect(records.at(-1)).toBe(Group.MAX_GROUP_FRAMES - 1);
+		expect(records.length).toBe(9000);
+		expect(records.at(-1)).toBe(8999);
+	});
+
+	test(`a live stream passes several tails and refuses a truncated replay (compress=${compress})`, async () => {
+		const track = new Track.Producer("test").accept({ compress });
+		const producer = new Producer<{ n: number; pad: string }>({ track });
+		const fast = new Consumer<{ n: number; pad: string }>({ track: track.subscribe() });
+		const slow = new Consumer<Rec>({ track: track.subscribe() });
+		const pad = "x".repeat(1024 * 1024);
+		for (let n = 0; n < 100; n++) {
+			producer.append({ value: { n, pad } });
+			expect((await fast.next())?.value.n).toBe(n);
+		}
+		await expect(slow.next()).rejects.toMatchObject({ code: StreamCode.Evicted });
+		const late = new Consumer<Rec>({ track: track.subscribe() });
+		await expect(late.next()).rejects.toMatchObject({ code: StreamCode.Evicted });
+		producer.finish();
+		expect(await fast.next()).toBeUndefined();
 	});
 }

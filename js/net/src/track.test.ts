@@ -4,7 +4,7 @@ import { race } from "@moq/signals";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Decoder } from "./flate/decoder.ts";
 import { Encoder } from "./flate/encoder.ts";
-import { type Consumer as GroupConsumer, type Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
+import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
@@ -2398,18 +2398,17 @@ test("a live-edge reader starts on an empty largest group", async () => {
 	producer.close();
 });
 
-test("largest survives a mirror replay of an aborted group", async () => {
+test("largest survives a mirror replay of a group with a shed front", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 
 	const group = producer.appendGroup();
-	for (let i = 0; i < MAX_GROUP_FRAMES; i++) {
-		group.writeFrame({ payload: enc.encode(`${i}`), timestamp: Timestamp.now() });
+	for (let i = 0; i < 40; i++) {
+		group.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.now() });
 	}
-	expect(() => group.writeFrame({ payload: enc.encode("overflow"), timestamp: Timestamp.now() })).toThrow();
 
-	// Subscribing now replays into a fresh sink; the last legal frame is still the edge.
+	// Subscribing now replays into a fresh sink; shedding leaves the absolute live edge intact.
 	const late = producer.subscribe();
-	expect(await late.largest()).toEqual({ group: 0, frame: MAX_GROUP_FRAMES - 1 });
+	expect(await late.largest()).toEqual({ group: 0, frame: 40 - 1 });
 
 	producer.finish();
 	producer.close();
@@ -3956,3 +3955,23 @@ test("a partial maxDelay widening keeps the older skip owed", () => {
 	expect(drainGroups(subscriber)).toEqual([1]);
 	producer.close();
 });
+
+for (const refresh of [undefined, 0]) {
+	test(`reading a shed front requests refresh only when opted in (${refresh})`, async () => {
+		const producer = new TrackProducer("test").accept({ refresh });
+		const subscriber = producer.subscribe();
+		const ordered = subscriber.ordered();
+		const group = producer.appendGroup();
+		const consumer = await ordered.nextGroup();
+		if (!consumer) throw new Error("missing group");
+		for (let index = 0; index < 40; index++) group.writeFrame({ payload: new Uint8Array(1024 * 1024) });
+		await expect(consumer.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
+		expect(producer.demand().wanted.peek()).toBe(refresh === undefined ? 0 : 1);
+		const joiner = producer.subscribe();
+		expect(producer.demand().wanted.peek()).toBe(refresh === undefined ? 0 : 1);
+		joiner.close();
+		subscriber.close();
+		producer.finish();
+		producer.close();
+	});
+}

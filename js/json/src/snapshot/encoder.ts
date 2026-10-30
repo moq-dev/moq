@@ -1,10 +1,9 @@
-import { Group, Error as NetError } from "@moq/net";
+import { Error as NetError } from "@moq/net";
 import type * as z from "@zod/mini";
-
 import { deepEqual, diff } from "../diff.ts";
+import { MAX_FRAME_BYTES } from "../limits.ts";
 
-// Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced. Kept
-// well below the per-group frame cap so a late joiner can always read the snapshot at frame 0.
+// Bound the number of patches a joiner must apply before reaching the current value.
 const MAX_DELTA_FRAMES = 256;
 
 /** Options shared by an {@link Encoder} and the {@link Producer} that wraps one. */
@@ -34,8 +33,7 @@ export interface Config<T> {
 	 *
 	 * A delta that would pass it rolls a fresh snapshot instead, and a snapshot past it throws
 	 * `FrameTooLarge`. Lowering it lets a test reach the limit without megabytes of JSON; a value
-	 * above moq-net's per-group cache limit is clamped to it, since moq-net refuses a larger group
-	 * anyway. Defaults to that limit.
+	 * above moq-net's current whole-frame limit is clamped to it. Defaults to that limit.
 	 */
 	maxGroupBytes?: number;
 }
@@ -128,7 +126,7 @@ export class Encoder<T> {
 
 	constructor(config: Config<T> = {}) {
 		this.#config = config;
-		this.#maxGroupBytes = Math.min(config.maxGroupBytes ?? Infinity, Group.MAX_GROUP_CACHE_BYTES);
+		this.#maxGroupBytes = Math.min(config.maxGroupBytes ?? Infinity, MAX_FRAME_BYTES);
 	}
 
 	/**
@@ -193,9 +191,7 @@ export class Encoder<T> {
 		// The baseline advances on commit, so it never runs ahead of the wire.
 		if (delta) {
 			// A delta is only readable while the group still holds the snapshot it applies to.
-			// Admitting a patch that pushes the group past that budget would abort it
-			// (`GroupTooLarge`), leaving a late subscriber with no value, so fall through to a fresh
-			// snapshot instead.
+			// Roll before this budget so joiners do not depend on a shed snapshot.
 			if (this.#groupBytes + delta.length <= this.#maxGroupBytes) {
 				this.#groupBytes += delta.length;
 				this.#groupFrames += 1;
