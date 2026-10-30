@@ -6471,13 +6471,13 @@ impl Cursor {
 		})
 	}
 
-	/// Whether a group in `groups` that the live feed still owes is within the drift budget,
-	/// so a read in sequence order waits for it; see `TrackState::owed`. A budget with no
-	/// deadline waits [`ledger::GRACE`], as a subscription's tail does without one, so a hole
-	/// nothing accounts for (a lost datagram, say) cannot hang it.
-	fn poll_owed(&self, groups: ops::Range<u64>, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
+	/// Pending while a group in `groups` that the live feed still owes is within the drift
+	/// budget, so a read in sequence order waits for it; see `TrackState::owed`. A budget
+	/// with no deadline waits [`ledger::GRACE`], as a subscription's tail does without one, so
+	/// a hole nothing accounts for (a lost datagram, say) cannot hang it.
+	fn poll_owed(&self, groups: ops::Range<u64>, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		if groups.is_empty() {
-			return Poll::Ready(Ok(false));
+			return Poll::Ready(Ok(()));
 		}
 		let window = &self.filter.window;
 		let budget = match drift.budget {
@@ -6486,16 +6486,18 @@ impl Cursor {
 		};
 		self.poll(waiter, |state| {
 			let Some(owed) = state.owed(groups.clone(), window) else {
-				return Poll::Ready(Ok(false));
+				return Poll::Ready(Ok(()));
 			};
-			state.cache.wakes().watch_arrival(owed, waiter);
-			Poll::Ready(Ok(!state.poll_drifted(
-				owed,
-				&drift.edge.servable,
-				budget,
-				None,
-				waiter,
-			)))
+			if state.poll_drifted(owed, &drift.edge.servable, budget, None, waiter) {
+				return Poll::Ready(Ok(()));
+			}
+			// The ledger may stop owing it before the budget gives up on it.
+			if let Some(folds) = state.arrivals.folds_at(owed, state.arrival_grace()) {
+				state.cache.watch_wall(folds, waiter);
+			}
+			// Parked on the track too: the group landing, its drop, or a group landing
+			// between it and the candidate, which can convict it sooner.
+			Poll::Pending
 		})
 	}
 
@@ -6941,9 +6943,7 @@ impl Cursor {
 
 			// In order means a group the live feed still owes below this one comes first,
 			// until the budget gives up on it. Its landing, its drop, or that verdict wakes us.
-			if ready!(self.poll_owed(from..group.sequence, &drift, waiter))? {
-				return Poll::Pending;
-			}
+			ready!(self.poll_owed(from..group.sequence, &drift, waiter))?;
 
 			// A conviction the budget walked back: the group is handed over after all,
 			// so it must never reach the stale count.
@@ -14504,6 +14504,58 @@ mod test {
 			.unwrap();
 		assert!(woken.load(Ordering::SeqCst), "the deadline never woke the reader");
 		assert_eq!(drain_ordered(&mut consumer), [7]);
+	}
+
+	/// A group landing between the owed one and the candidate wakes the reader: it can
+	/// convict the owed group sooner, and is then read without waiting.
+	#[test]
+	#[cfg(feature = "async")]
+	fn next_group_rejudges_an_owed_group_when_a_lower_successor_lands() {
+		let producer = received_producer(Info::timed());
+		let mut consumer = producer
+			.subscribe(Subscription::default().with_max_delay(Duration::from_secs(1)))
+			.ordered();
+		put(&producer, 0, Some(0));
+		assert_eq!(drain_ordered(&mut consumer), [0]);
+		let mut edge = producer.create_group(group::Info { sequence: 4 }).unwrap();
+		edge.write_frame(Timestamp::from_millis(4000).unwrap(), &b"edge"[..])
+			.unwrap();
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(consumer.poll_next_group(&waiter).is_pending(), "group 1 is still owed");
+		// Group 1 reaches only to group 2's start, a full budget behind the edge.
+		put(&producer, 2, Some(2000));
+		assert!(woken.load(Ordering::SeqCst), "the lower successor went unjudged");
+		assert_eq!(drain_ordered(&mut consumer), [2], "group 3 is still owed");
+	}
+
+	/// The arrival ledger giving up on a gap wakes the reader, even when the owed group's
+	/// successor now is a later arrival whose own budget runs longer.
+	#[test]
+	#[cfg(feature = "async")]
+	fn next_group_passes_an_owed_group_when_its_gap_folds() {
+		let budget = Duration::from_millis(50);
+		let producer = received_producer(None);
+		let mut consumer = producer
+			.subscribe(Subscription::default().with_max_delay(budget))
+			.ordered();
+		put(&producer, 0, None);
+		assert_eq!(drain_ordered(&mut consumer), [0]);
+		let opener = producer.create_group(group::Info { sequence: 2 }).unwrap();
+		elapse(&producer, Duration::from_millis(40));
+		put(&producer, 3, None);
+		opener.abort(Error::Cancel).unwrap();
+		producer.modify().unwrap().reclaim_aborted(2);
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(consumer.poll_next_group(&waiter).is_pending(), "group 1 is still owed");
+		elapse(&producer, Duration::from_millis(9));
+		assert!(!woken.load(Ordering::SeqCst), "woken before the gap folds");
+		elapse(&producer, Duration::from_millis(1));
+		assert!(woken.load(Ordering::SeqCst), "the fold never woke the reader");
+		assert_eq!(drain_ordered(&mut consumer), [3]);
 	}
 
 	/// What the track knows will never land is passed at once: a drop, a datagram, an
