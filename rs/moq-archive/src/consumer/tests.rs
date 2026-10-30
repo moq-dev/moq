@@ -133,13 +133,14 @@ async fn fetch(broadcast: &broadcast::Producer, track: &str, sequence: u64) -> m
 	Ok(frames)
 }
 
-/// Read every group from 0 on, in order, with no age limit.
+/// Read every group from 0 on, in order. An ordered read needs a finite budget, so a
+/// history read takes a day, far longer than any archive here spans.
 async fn subscribe(broadcast: &broadcast::Producer, track: &str) -> track::Ordered {
 	let track = broadcast.consume().track(track).unwrap();
 	let subscription = Subscription::default()
 		.with_range(0..)
 		.with_order(Order::Ascending)
-		.with_max_delay(None);
+		.with_max_delay(Duration::from_secs(24 * 60 * 60));
 	track.subscribe(subscription).await.unwrap().ordered()
 }
 

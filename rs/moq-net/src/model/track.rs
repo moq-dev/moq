@@ -7865,10 +7865,16 @@ impl Subscriber {
 /// A missing group is waited for only while the track still owes it: on a copy a
 /// subscription feeds, a group that may still land, reordered behind its successor, is
 /// read first, until the same budget gives up on it. So an ordered read needs a budget: it
-/// refuses a [`Subscription::max_delay`] of `None` with [`Error::Unsupported`]. A group the track knows will never land costs nothing:
+/// refuses a [`Subscription::max_delay`] of `None` with [`Error::Unsupported`], and a history
+/// or VOD read takes a long finite one, such as a day, which keeps the whole archive. A group the track knows will never land costs nothing:
 /// one the publisher dropped, one that arrived and was since evicted or aborted, a
 /// datagram's sequence, or one below where the feed starts. A locally produced track owes
 /// nothing, so there the cursor seeks to the lowest cached group in range.
+///
+/// A long budget is only safe where the feed signals its gaps: moq-lite, whose publisher
+/// sends `SUBSCRIBE_DROP` for every group it won't deliver, or an ordered moq-transport
+/// FETCH. A moq-transport SUBSCRIBE signals no gaps, so there a group lost in transit
+/// holds the ordered reader at its hole for up to the whole budget.
 ///
 /// The budget is updatable mid-stream through [`Self::control`]. [`Duration::ZERO`] (the
 /// default) keeps only what nothing newer has superseded, so a consumer that stalls and

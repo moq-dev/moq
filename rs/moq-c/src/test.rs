@@ -2716,10 +2716,11 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 
 	let consume = request_broadcast(origin, path);
 	let frame_cb = Callback::new();
+	// A raw track reads in order, which needs a finite budget: a day keeps the history.
 	let subscription = moq_subscription {
 		priority: 0,
-		max_delay_us: 0,
-		max_delay_present: false,
+		max_delay_us: 24 * 60 * 60 * 1_000_000,
+		max_delay_present: true,
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,

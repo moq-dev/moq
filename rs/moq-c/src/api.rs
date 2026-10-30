@@ -711,7 +711,8 @@ pub struct moq_subscription {
 	/// It caps every range.
 	pub max_delay_us: u64,
 	/// Whether `max_delay_us` is set. When false, there is no subscriber limit, leaving the
-	/// publisher's max age alone to bound it.
+	/// publisher's max age alone to bound it, which [moq_consume_track] refuses: it reads in
+	/// order, so it needs a finite budget.
 	pub max_delay_present: bool,
 
 	/// The spans of the track to deliver, or NULL for everything `max_delay_us` still
