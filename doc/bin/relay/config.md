@@ -379,6 +379,10 @@ secret = "./iroh-secret.key"         # Persist the key so the endpoint id surviv
 # disable_relay = true               # Direct addresses only. Right on a LAN, wrong on the internet.
 ```
 
+The secret path must be a regular file, not a symlink. A missing file is created
+exclusively, with mode `0600` on Unix. Existing Unix files readable by group or
+others are refused; use `chmod 600` to make an existing key private before startup.
+
 See [Transport](/concept/transport#iroh-peer-to-peer-experimental).
 
 ## Shutdown
