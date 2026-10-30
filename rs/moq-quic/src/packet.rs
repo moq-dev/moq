@@ -915,7 +915,7 @@ mod tests {
 		use rustls::quic::Version;
 
 		let dcid = ConnectionId::new(&hex!("06b858ec6f80452b"));
-		let suite = initial_suite(&configured_provider());
+		let suite = initial_suite(&configured_provider()).unwrap();
 		let client = initial_keys(Version::V1, dcid, Side::Client, &suite);
 		let mut buf = Vec::new();
 		let header = Header::Initial(InitialHeader {

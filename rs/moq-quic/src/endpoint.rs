@@ -455,7 +455,11 @@ impl Endpoint {
 
 		// Decoding refused every other version.
 		let version = Version::from_wire(header.version)?;
-		let crypto = server_config.crypto.initial_keys(version, dst_cid);
+		let Some(crypto) = server_config.crypto.initial_keys(version, dst_cid) else {
+			// Without the suite there is no key to protect even a close with.
+			warn!("dropping initial: the server's TLS provider lacks TLS13_AES_128_GCM_SHA256");
+			return None;
+		};
 
 		if let Err(reason) = self.early_validate_first_packet(header) {
 			return Some(DatagramEvent::Response(self.initial_close(

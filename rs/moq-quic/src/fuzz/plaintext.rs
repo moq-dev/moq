@@ -54,8 +54,8 @@ impl crypto::ClientConfig for Plaintext {
 }
 
 impl crypto::ServerConfig for Plaintext {
-	fn initial_keys(&self, _version: Version, _dst_cid: ConnectionId) -> Keys {
-		keys()
+	fn initial_keys(&self, _version: Version, _dst_cid: ConnectionId) -> Option<Keys> {
+		Some(keys())
 	}
 
 	fn retry_tag(&self, _version: Version, _orig_dst_cid: ConnectionId, _packet: &[u8]) -> [u8; 16] {

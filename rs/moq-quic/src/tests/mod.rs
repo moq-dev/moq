@@ -5565,7 +5565,8 @@ fn application_close_in_initial_is_rejected() {
 	// connection ID, which travels in the clear, so anyone who observes the handshake can do this.
 	let keys = server_config()
 		.crypto
-		.initial_keys(Version::from_wire(version).unwrap(), orig_dst_cid);
+		.initial_keys(Version::from_wire(version).unwrap(), orig_dst_cid)
+		.unwrap();
 	let number = PacketNumber::U8(0);
 	let header = Header::Initial(InitialHeader {
 		dst_cid: client_cid,

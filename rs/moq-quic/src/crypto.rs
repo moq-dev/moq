@@ -126,7 +126,9 @@ pub(crate) trait ClientConfig: Send + Sync {
 /// Server-side configuration for the crypto protocol
 pub(crate) trait ServerConfig: Send + Sync {
 	/// Create the initial set of keys given the client's initial destination ConnectionId
-	fn initial_keys(&self, version: Version, dst_cid: ConnectionId) -> Keys;
+	///
+	/// `None` when the config cannot protect Initial packets, so no connection can start.
+	fn initial_keys(&self, version: Version, dst_cid: ConnectionId) -> Option<Keys>;
 
 	/// Generate the integrity tag for a retry packet
 	fn retry_tag(&self, version: Version, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16];
