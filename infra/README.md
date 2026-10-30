@@ -53,7 +53,8 @@ names the Environment, and a branch that is not on the list fails to start it.
 
 | Environment | Deployable from | Holds |
 | --- | --- | --- |
-| `publish` | `main`, `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, deploy, alert, and moq-bot credentials |
+| `bot` | `main`, `release`, `moq-ffi-v*` | The moq-bot key (`APP_CLIENT_ID`, `APP_PRIVATE_KEY`) alone |
+| `publish` | `main`, `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, deploy, and alert credentials, and the moq-bot key for jobs that also need one of those |
 | `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
 | `npm` | `release` | `JSR_TOKEN`; npm's trusted publisher names it |
 | `pypi` | `main`, `release`, `moq-ffi-v*` | Nothing; PyPI's trusted publisher names it |
@@ -61,7 +62,8 @@ names the Environment, and a branch that is not on the list fails to start it.
 | `github-pages` | `main` | Nothing |
 
 `main` is on the `publish` list for `workflow_run`, schedule, and dispatch jobs,
-which run there. A job that also runs dry on other refs names the Environment
+which run there, until [those publishers run on their tag](../quest/m0/ci/publish-release-only.md).
+A job that needs only the moq-bot key, such as the land gate, names `bot`. A job that also runs dry on other refs names the Environment
 only when it publishes, as in `environment: ${{ github.ref_type == 'tag' &&
 'publish' || '' }}`. Read-only secrets, such as the mbx read key, stay at the
 repository level.
@@ -146,15 +148,19 @@ push. The worker receives only a read credential and local compiler caches;
 the hosted push reconstructs the tested chain with Quest from `main`.
 
 A maintainer coordinates the cutover. The land job reads the moq-bot key from
-the `publish` Environment, like the release workflows. The workflow cannot
-replace GitHub's queue until its ruleset is installed with it:
+the `bot` Environment. The workflow cannot replace GitHub's queue until its
+ruleset is installed with it:
 
-1. Add moq-bot to the main ruleset's bypass actors, retain the administrator
+1. Create the `bot` Environment for `main`, `release`, and `moq-ffi-v*`, and
+   put `APP_CLIENT_ID` and `APP_PRIVATE_KEY` in it and in `publish`. Restrict
+   the organization secrets of the same names so only those Environments
+   hold the key.
+2. Add moq-bot to the main ruleset's bypass actors, retain the administrator
    bypass, remove the `merge_queue` rule, and replace `Check` with required
    context `quest land`, pinned to an app that never reports it on PR heads.
    Keep the deletion and non-fast-forward protections. Other required
    checks or review rules must be ones the pinned Quest engine supports.
-2. Install the workflow source and ruleset in a coordinated maintenance
+3. Install the workflow source and ruleset in a coordinated maintenance
    window. A queued PR that removes its own `merge_group` handler cannot
    supply the old queue's required check; changing the ruleset first also
    stops the old queue. Confirm the exact installation path before starting

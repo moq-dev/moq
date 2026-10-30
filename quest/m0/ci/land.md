@@ -75,18 +75,20 @@ Decided 2026-10-26 (maintainer):
   `release`), `dependabot.yml`, and `smoke-toolchain.yml` that use it
   reference the Environment. Only the hosted land job reads it, never the job
   that runs PR code.
-- Open question, added 2026-10-29 (maintainer) from
-  [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166): the `publish`
-  Environment admits `main`, whose ruleset lets repository role 2 bypass
-  review, and moq-bot joins that bypass list here. Decide with the bypass list
-  whether `main` keeps deploying to `publish`, or publishing narrows to
-  `release` and release tags. Ask the maintainer; settings changes are theirs.
+- Decided 2026-10-29 (maintainer), answering the question raised in
+  [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166): the moq-bot
+  key moves to its own `bot` Environment, for `main`, `release`, and
+  `moq-ffi-v*`. The land gate, Dependabot, and the moq-bot-only publishers
+  name it. `publish` keeps the key too, for release-rs, which also needs the
+  crates.io token. Narrowing `publish` to release refs waits on
+  [its own quest](/quest/m0/ci/publish-release-only.md), since `workflow_run`
+  publishers run as `main`.
 - Open, found 2026-10-29: `APP_CLIENT_ID` and `APP_PRIVATE_KEY` are moq-dev
   organization secrets visible to this repository, so any workflow on a
-  pushed branch can read the moq-bot key, not only jobs in `publish`. Once
+  pushed branch can read the moq-bot key, not only jobs in `bot`. Once
   moq-bot bypasses `main`, that branch could push to `main`. Before cutover,
   the maintainer restricts the organization secrets and puts the key in
-  `publish` under the same names, so no workflow changes.
+  `bot` and `publish` under the same names, so no workflow changes.
 - The gate tests each PR on the latest `main`, not the PR's own base. On
   2026-10-29 [moq-dev/moq#7162](https://github.com/moq-dev/moq/pull/7162)
   passed its own CI but broke in the queue on API renames that landed after

@@ -96,9 +96,9 @@ jobs:
     needs: [resolve, check]
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # The moq-bot key lives in the `publish` Environment, which only protected
+    # The moq-bot key lives in the `bot` Environment, which only protected
     # refs can deploy to.
-    environment: publish
+    environment: bot
     permissions:
       contents: write
       pull-requests: write

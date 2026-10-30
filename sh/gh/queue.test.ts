@@ -53,7 +53,7 @@ assert.equal(land.jobs.land["runs-on"], "ubuntu-latest");
 assert.equal(land.jobs.resolve.permissions.contents, "read");
 assert.deepEqual(land.jobs.check.permissions, { contents: "read" });
 assert.equal(land.jobs.check.environment, undefined);
-assert.equal(land.jobs.land.environment, "publish");
+assert.equal(land.jobs.land.environment, "bot");
 assert.deepEqual(land.jobs.land.needs, ["resolve", "check"]);
 for (const job of Object.values(land.jobs) as { steps: { uses?: string; with?: { ref?: string } }[] }[]) {
 	const checkout = job.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
@@ -134,9 +134,10 @@ for (const file of files) {
 	assert.equal(config.on.pull_request, undefined, `${file} must run on release PRs through release-gate.yml`);
 	for (const [id, job] of Object.entries(config.jobs ?? {})) {
 		if (JSON.stringify(job).includes("APP_PRIVATE_KEY")) {
-			assert.equal(
-				(job as { environment?: string }).environment,
-				"publish",
+			// `bot` holds only the key; `publish`, for release refs alone, also
+			// holds it for jobs that need it beside a registry credential.
+			assert.ok(
+				["bot", "publish"].includes((job as { environment?: string }).environment ?? ""),
 				`${file}/${id} must scope the bot key`,
 			);
 		}
