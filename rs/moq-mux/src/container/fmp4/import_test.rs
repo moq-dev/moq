@@ -373,6 +373,160 @@ fn container_aspect_pasp_rejects_invalid_ratios() {
 	);
 }
 
+fn with_spatial(mut codec: mp4_atom::Codec, spatial: mp4_atom::Spatial) -> mp4_atom::Codec {
+	let spatial = Some(Box::new(spatial));
+	match &mut codec {
+		mp4_atom::Codec::Avc1(c) => c.spatial = spatial,
+		mp4_atom::Codec::Avc3(c) => c.spatial = spatial,
+		mp4_atom::Codec::Hvc1(c) => c.spatial = spatial,
+		mp4_atom::Codec::Hev1(c) => c.spatial = spatial,
+		mp4_atom::Codec::Av01(c) => c.spatial = spatial,
+		mp4_atom::Codec::Vp08(c) => c.spatial = spatial,
+		mp4_atom::Codec::Vp09(c) => c.spatial = spatial,
+		_ => unreachable!(),
+	}
+	codec
+}
+
+/// Spherical Video V2 boxes: an `st3d` with `stereo_mode`, and an `sv3d` projecting with `kind`.
+fn spherical(stereo_mode: Option<u8>, kind: Option<mp4_atom::ProjKind>) -> mp4_atom::Spatial {
+	mp4_atom::Spatial {
+		st3d: stereo_mode.map(|stereo_mode| mp4_atom::St3d { stereo_mode }),
+		sv3d: kind.map(|kind| mp4_atom::Sv3d {
+			svhd: Some(mp4_atom::Svhd {
+				metadata_source: "moq".into(),
+			}),
+			proj: Some(mp4_atom::Proj {
+				prhd: Some(mp4_atom::Prhd::default()),
+				kind: Some(kind),
+				unknown: vec![],
+			}),
+			unknown: vec![],
+		}),
+		..Default::default()
+	}
+}
+
+fn equi(top: u32, bottom: u32, left: u32, right: u32) -> Option<mp4_atom::ProjKind> {
+	Some(mp4_atom::ProjKind::Equi(mp4_atom::Equi {
+		projection_bounds_top: top,
+		projection_bounds_bottom: bottom,
+		projection_bounds_left: left,
+		projection_bounds_right: right,
+	}))
+}
+
+#[test]
+fn spherical_boxes_fill_projection_and_stereo() {
+	use hang::catalog::{Projection, Stereo};
+	let quarter = 1 << 30;
+	for (spatial, projection, stereo) in [
+		// Monoscopic 360.
+		(
+			spherical(Some(mp4_atom::St3d::MONO), equi(0, 0, 0, 0)),
+			Some(Projection::Equirectangular { fov: None }),
+			None,
+		),
+		// VR180: half the longitude, side by side.
+		(
+			spherical(Some(mp4_atom::St3d::LEFT_RIGHT), equi(0, 0, quarter, quarter)),
+			Some(Projection::Equirectangular { fov: Some(180.0) }),
+			Some(Stereo::LeftRight),
+		),
+		// Flat stereo, with no sv3d.
+		(
+			spherical(Some(mp4_atom::St3d::TOP_BOTTOM), None),
+			None,
+			Some(Stereo::TopBottom),
+		),
+	] {
+		for codec in aspect_entries(false) {
+			let config = video_config(with_spatial(codec, spatial.clone()));
+			assert_eq!(
+				(&config.projection, &config.stereo),
+				(&projection, &stereo),
+				"{}",
+				config.codec
+			);
+		}
+	}
+	// Without the boxes, the video stays flat and mono.
+	let config = video_config(aspect_entries(false).remove(0));
+	assert_eq!((config.projection, config.stereo), (None, None));
+}
+
+#[test]
+fn spherical_boxes_the_catalog_cannot_describe_are_refused() {
+	let quarter = 1 << 30;
+	let posed = |pose: mp4_atom::Prhd| {
+		let mut spatial = spherical(None, equi(0, 0, 0, 0));
+		spatial.sv3d.as_mut().unwrap().proj.as_mut().unwrap().prhd = Some(pose);
+		spatial
+	};
+	let mut repeated = spherical(Some(mp4_atom::St3d::MONO), None);
+	let mut st3d = Vec::new();
+	mp4_atom::St3d {
+		stereo_mode: mp4_atom::St3d::LEFT_RIGHT,
+	}
+	.encode(&mut st3d)
+	.unwrap();
+	// The body after the 8-byte header; mp4-atom keeps the second st3d it decodes as unknown.
+	repeated.unknown = vec![mp4_atom::Any::Unknown(mp4_atom::St3d::KIND, st3d[8..].to_vec())];
+	let mut unprojected = spherical(None, equi(0, 0, 0, 0));
+	unprojected.sv3d.as_mut().unwrap().proj = None;
+
+	for (name, spatial) in [
+		(
+			"cubemap",
+			spherical(None, Some(mp4_atom::ProjKind::Cbmp(mp4_atom::Cbmp::default()))),
+		),
+		(
+			"mesh VR180",
+			spherical(
+				Some(mp4_atom::St3d::LEFT_RIGHT),
+				Some(mp4_atom::ProjKind::Mshp(mp4_atom::Mshp {
+					crc: 0,
+					encoding_four_cc: b"raw ".into(),
+					data: vec![],
+				})),
+			),
+		),
+		("asymmetric bounds", spherical(None, equi(0, 0, quarter, 0))),
+		("vertical crop", spherical(None, equi(quarter, quarter, 0, 0))),
+		("no picture left", spherical(None, equi(0, 0, 1 << 31, 1 << 31))),
+		(
+			"yawed",
+			posed(mp4_atom::Prhd {
+				pose_yaw_degrees: 90 << 16,
+				..Default::default()
+			}),
+		),
+		(
+			"rolled",
+			posed(mp4_atom::Prhd {
+				pose_roll_degrees: 1,
+				..Default::default()
+			}),
+		),
+		("right-left", spherical(Some(mp4_atom::St3d::RIGHT_LEFT), None)),
+		("custom stereo", spherical(Some(mp4_atom::St3d::STEREO_CUSTOM), None)),
+		("unknown stereo", spherical(Some(5), None)),
+		("repeated st3d", repeated),
+		("sv3d without proj", unprojected),
+	] {
+		for codec in aspect_entries(false) {
+			let err = video_config_result(with_spatial(codec, spatial.clone())).unwrap_err();
+			assert!(
+				matches!(
+					err,
+					crate::Error::Cmaf(crate::container::fmp4::Error::UnsupportedSpatial(_))
+				),
+				"{name}: {err:?}"
+			);
+		}
+	}
+}
+
 #[test]
 fn test_bbb_catalog() {
 	let data = include_bytes!("test_data/bbb.mp4");

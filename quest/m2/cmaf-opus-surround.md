@@ -20,9 +20,9 @@ Alone it only swaps `mp4-atom`'s generic decode error for
 
 Decided 2026-10-28 (maintainer): kixelated/mp4-atom#246 ships in 0.17.0
 beside kixelated/mp4-atom#254, so downstream takes one breaking bump.
-moq-dev/moq#7043 takes 0.17 for the
-[counted trun](/quest/m1/cut-audit/fmp4-sample-resolver.md) and keeps
-refusing a nonzero family explicitly, since `mp4-atom` no longer does.
+0.17.0 is released (2026-10-30), and moq-mux takes it for the counted
+trun (moq-dev/moq#7043, carried by moq-dev/moq#7308), still refusing a
+nonzero family explicitly, since `mp4-atom` no longer does.
 This quest then only does the import and export.
 A git patch to the branch cannot stand in for the release, since `cargo deny`
 refuses unknown git sources.

@@ -143,6 +143,10 @@ pub enum Error {
 	#[error("invalid colr code point: {0}")]
 	InvalidColr(u16),
 
+	/// A Spherical Video V2 `sv3d` or `st3d` box the catalog cannot describe, or a malformed one.
+	#[error("unsupported spherical video: {0}")]
+	UnsupportedSpatial(&'static str),
+
 	/// The sample entry declares an unsupported codec.
 	#[error("unsupported codec: {0:?}")]
 	UnsupportedCodec(Box<mp4_atom::Codec>),
@@ -786,6 +790,67 @@ pub(crate) fn colr_color(colr: &mp4_atom::Colr) -> Result<Option<hang::catalog::
 		code(matrix)?,
 		full_range,
 	))
+}
+
+/// The projection and stereo packing Spherical Video V2's `sv3d` and `st3d` boxes signal, each
+/// `None` for flat or mono video. Apple's `vexu` and `hfov` are not read.
+///
+/// The catalog has no cubemap, mesh, pose, or eye order beyond left-right and top-bottom, and an
+/// absent field claims flat, mono video, so those are refused rather than dropped. So is a box the
+/// sample entry repeats or could not decode, since it may say any of them.
+pub(crate) fn spatial(
+	spatial: Option<&mp4_atom::Spatial>,
+) -> Result<(Option<hang::catalog::Projection>, Option<hang::catalog::Stereo>)> {
+	use mp4_atom::{Atom, Cbmp, Equi, Mshp, Prhd, Proj, ProjKind, St3d, Sv3d};
+
+	let Some(spatial) = spatial else {
+		return Ok((None, None));
+	};
+	let unsupported = |reason| Err(Error::UnsupportedSpatial(reason));
+	let kept =
+		|unknown: &[mp4_atom::Any], kinds: &[mp4_atom::FourCC]| unknown.iter().any(|atom| kinds.contains(&atom.kind()));
+	if kept(&spatial.unknown, &[St3d::KIND, Sv3d::KIND]) {
+		return unsupported("repeated or malformed st3d or sv3d");
+	}
+
+	let stereo = match spatial.st3d.map(|st3d| st3d.stereo_mode) {
+		None | Some(St3d::MONO) => None,
+		Some(St3d::LEFT_RIGHT) => Some(hang::catalog::Stereo::LeftRight),
+		Some(St3d::TOP_BOTTOM) => Some(hang::catalog::Stereo::TopBottom),
+		Some(_) => return unsupported("stereo mode"),
+	};
+
+	let Some(sv3d) = &spatial.sv3d else {
+		return Ok((None, stereo));
+	};
+	if kept(&sv3d.unknown, &[Proj::KIND]) {
+		return unsupported("repeated or malformed proj");
+	}
+	let proj = sv3d
+		.proj
+		.as_ref()
+		.ok_or(Error::UnsupportedSpatial("sv3d without proj"))?;
+	if kept(&proj.unknown, &[Prhd::KIND, Equi::KIND, Cbmp::KIND, Mshp::KIND]) {
+		return unsupported("repeated or malformed projection");
+	}
+	if let Some(prhd) = proj.prhd
+		&& (prhd.pose_yaw_degrees, prhd.pose_pitch_degrees, prhd.pose_roll_degrees) != (0, 0, 0)
+	{
+		return unsupported("nonzero pose");
+	}
+	let projection = match &proj.kind {
+		Some(ProjKind::Equi(equi)) => crate::codec::spatial::equirectangular(
+			equi.projection_bounds_top,
+			equi.projection_bounds_bottom,
+			equi.projection_bounds_left,
+			equi.projection_bounds_right,
+		)
+		.map_err(Error::UnsupportedSpatial)?,
+		Some(ProjKind::Cbmp(_)) => return unsupported("cubemap projection"),
+		Some(ProjKind::Mshp(_)) => return unsupported("mesh projection"),
+		_ => return unsupported("unknown projection"),
+	};
+	Ok((Some(projection), stereo))
 }
 
 /// The `nclx` box for a catalog colour, or `None` when it has no code point or range to carry.
