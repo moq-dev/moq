@@ -192,9 +192,7 @@ impl Workers {
 		// address here would open a QUIC listener nobody asked for.
 		let requested: SocketAddr = {
 			use std::net::ToSocketAddrs;
-			let bind = bind
-				.as_ref()
-				.context("io_uring workers need an explicit listen.bind")?;
+			let bind = bind.as_ref().context("io_uring workers need an explicit listen.bind")?;
 			let bind = bind.to_string();
 			bind.to_socket_addrs()
 				.with_context(|| format!("failed to resolve {bind}"))?
