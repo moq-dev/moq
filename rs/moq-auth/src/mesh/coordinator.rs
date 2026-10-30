@@ -25,8 +25,8 @@ use crate::{Claims, Key, Pattern};
 /// How long a challenge stays valid.
 const CHALLENGE_TTL: Duration = Duration::from_secs(60);
 
-/// The most unexpired challenges remembered as used. Past it, proofs are refused with
-/// `slow_down` until the oldest expire; an outstanding challenge is never dropped.
+/// The most challenges remembered as used by a granted request. Past it, proofs are
+/// refused with `slow_down` until some expire; an outstanding challenge is never dropped.
 const MAX_SPENT: usize = 65536;
 
 /// A challenge is its expiry (unix seconds), a nonce, then a truncated HMAC over both.
@@ -171,7 +171,7 @@ pub struct NewKey {
 #[derive(Default)]
 struct Inner {
 	store: Store,
-	/// Challenges a valid proof already used, until each expires.
+	/// Challenges a granted request already used, until each expires.
 	spent: HashMap<Vec<u8>, moq_clock::Wall>,
 }
 
@@ -233,7 +233,7 @@ impl Coordinator {
 	/// Enroll with an enrollment key.
 	pub fn enroll(&self, request: &EnrollRequest) -> Reply<Enrollment> {
 		let mut inner = self.inner.lock().unwrap();
-		self.check(&mut inner, &request.proof)?;
+		let spent = self.check(&mut inner, &request.proof)?;
 
 		let (id, secret) = request
 			.key
@@ -270,29 +270,33 @@ impl Coordinator {
 		let id = id.to_string();
 
 		let endpoint = request.proof.endpoint;
-		self.commit(&mut inner, |store| {
+		let enrollment = self.commit(&mut inner, |store| {
 			self.admit(store, endpoint, request.name.as_deref(), tags)?;
 			if !reusable && let Some(key) = store.keys.iter_mut().find(|key| key.id == id) {
 				key.used = true;
 			}
 			self.issue(store, endpoint)
-		})
+		})?;
+		inner.spent.insert(request.proof.challenge.clone(), spent);
+		Ok(enrollment)
 	}
 
 	/// Refresh an enrolled device's token, refusing a revoked or unknown one.
 	pub fn refresh(&self, proof: &Proof) -> Reply<Enrollment> {
 		let mut inner = self.inner.lock().unwrap();
-		self.check(&mut inner, proof)?;
-		match inner
+		let spent = self.check(&mut inner, proof)?;
+		let enrollment = match inner
 			.store
 			.devices
 			.iter()
 			.find(|device| device.endpoint == proof.endpoint)
 		{
-			Some(device) if !device.revoked => self.issue(&inner.store, proof.endpoint),
-			Some(_) => Err(ErrorReply::new(ErrorCode::AccessDenied, "the device is revoked")),
-			None => Err(ErrorReply::new(ErrorCode::AccessDenied, "the device is not enrolled")),
-		}
+			Some(device) if !device.revoked => self.issue(&inner.store, proof.endpoint)?,
+			Some(_) => return Err(ErrorReply::new(ErrorCode::AccessDenied, "the device is revoked")),
+			None => return Err(ErrorReply::new(ErrorCode::AccessDenied, "the device is not enrolled")),
+		};
+		inner.spent.insert(proof.challenge.clone(), spent);
+		Ok(enrollment)
 	}
 
 	/// Create an enrollment key, returning it with its secret, which is never shown again.
@@ -388,8 +392,11 @@ impl Coordinator {
 		axum::serve(listener, self.router()).await
 	}
 
-	/// Verify the proof's challenge and signature, then spend the challenge.
-	fn check(&self, inner: &mut Inner, proof: &Proof) -> Reply<()> {
+	/// Verify the proof's challenge and signature, returning when the challenge expires.
+	///
+	/// The caller records the challenge in `spent` only once the request succeeds, so
+	/// only an authorized device or enrollment key takes room there.
+	fn check(&self, inner: &mut Inner, proof: &Proof) -> Reply<moq_clock::Wall> {
 		let invalid = |reason: &str| ErrorReply::new(ErrorCode::InvalidChallenge, reason);
 		let challenge = &proof.challenge;
 		if challenge.len() != CHALLENGE_LEN
@@ -411,9 +418,11 @@ impl Coordinator {
 				"the signature does not verify against the endpoint ID",
 			));
 		}
-		inner.spent.retain(|_, until| *until > now);
 		if inner.spent.contains_key(challenge) {
 			return Err(invalid("the challenge was already used"));
+		}
+		if inner.spent.len() >= MAX_SPENT {
+			inner.spent.retain(|_, until| *until > now);
 		}
 		if inner.spent.len() >= MAX_SPENT {
 			return Err(ErrorReply::new(
@@ -421,8 +430,7 @@ impl Coordinator {
 				"too many proofs at once; retry shortly",
 			));
 		}
-		inner.spent.insert(challenge.clone(), expires);
-		Ok(())
+		Ok(expires)
 	}
 
 	/// The truncated HMAC sealing a challenge's expiry and nonce.
@@ -716,12 +724,17 @@ mod tests {
 	}
 
 	#[test]
-	fn a_full_spent_table_refuses_without_forgetting() {
+	fn only_a_granted_proof_takes_room_in_the_spent_table() {
 		let key = Key::generate(Algorithm::HS256, None).unwrap();
 		let base: url::Url = "https://mesh.example".parse().unwrap();
 		let coordinator = Coordinator::new(Config::new(base.clone(), key)).unwrap();
 		let signer = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
 		let proof = Proof::sign(&signer, &base, coordinator.challenge().challenge);
+
+		// A refused request records nothing, so unknown callers cannot fill the table.
+		let err = coordinator.refresh(&proof).unwrap_err();
+		assert_eq!(err.error, ErrorCode::AccessDenied);
+		assert!(coordinator.inner.lock().unwrap().spent.is_empty());
 
 		let later = moq_clock::wall() + CHALLENGE_TTL;
 		let mut inner = coordinator.inner.lock().unwrap();
@@ -734,6 +747,7 @@ mod tests {
 		// Its challenge stays good once room frees up.
 		inner.spent.clear();
 		coordinator.check(&mut inner, &proof).unwrap();
+		assert!(inner.spent.is_empty(), "checking alone spends nothing");
 	}
 
 	#[test]
