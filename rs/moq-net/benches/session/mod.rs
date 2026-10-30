@@ -122,8 +122,8 @@ struct Shape {
 	viewers: usize,
 	/// Broadcasts each viewer subscribes to.
 	watch: usize,
-	/// Further broadcasts each viewer resolves and holds without subscribing, each
-	/// keeping one more announce request open on its session.
+	/// Further broadcasts each viewer watches the announcements of without subscribing,
+	/// each keeping one more announce request open on its session.
 	follow: usize,
 	/// Payload bytes per frame.
 	frame: usize,
@@ -421,6 +421,8 @@ struct Cluster<B: Backend> {
 	version: Version,
 	window: usize,
 	credit: Option<usize>,
+	/// Whether each viewer asks its relay about everything, rather than only what it reads.
+	discovers_all: bool,
 	relays: Vec<B::Relay>,
 	/// One track per broadcast, indexed like [`path`].
 	tracks: Vec<track::Producer>,
@@ -438,6 +440,8 @@ impl<B: Backend> Cluster<B> {
 			version: version.parse().unwrap(),
 			window: shape.window,
 			credit: shape.credit,
+			// Asking about everything would cover every followed broadcast with one request.
+			discovers_all: shape.follow == 0,
 			relays: Vec::new(),
 			tracks: Vec::new(),
 			_broadcasts: Vec::new(),
@@ -513,6 +517,7 @@ impl<B: Backend> Cluster<B> {
 		// Draft 22, the one IETF version here, keeps its SETUP stream open beside the groups.
 		options.transport.max_concurrent_uni_streams =
 			self.credit.map(|credit| credit + usize::from(!self.version.is_lite()));
+		options.client_discovers_all = self.discovers_all;
 		// Hidden included, as the dash's `.stats/` scope sees its subtree.
 		options.server_publish = Some(B::origin(&self.relays[relay]).consume().with_hidden(true));
 		options.client_subscribe = Some(origin.clone());
@@ -531,8 +536,8 @@ impl<B: Backend> Cluster<B> {
 }
 
 struct Viewer {
-	/// Broadcasts resolved and held without a subscription.
-	following: Vec<(origin::Following, broadcast::Consumer)>,
+	/// Announcements watched without a subscription, one announce request each.
+	following: Vec<moq_net::announce::Consumer>,
 	subscribers: Vec<track::Subscriber>,
 	fetches: Vec<(usize, track::Consumer)>,
 	blocked: usize,
@@ -542,11 +547,17 @@ struct Viewer {
 }
 
 impl Viewer {
-	/// Resolve `path` and hold it, subscribing to nothing.
+	/// Watch the announcements under `path` until it is announced, subscribing to nothing.
 	async fn follow(&mut self, path: &str) {
-		let mut following = self.origin.consume().follow(path, None).unwrap();
-		let broadcast = following.available().await.unwrap();
-		self.following.push((following, broadcast));
+		let mut announced = self
+			.origin
+			.consume()
+			.scope(path, &moq_net::Patterns::from(moq_net::Pattern::all()))
+			.unwrap()
+			.announced();
+		let event = announced.next().await.expect("announced");
+		assert!(matches!(event, moq_net::announce::Event::Start(_)), "{event:?}");
+		self.following.push(announced);
 	}
 
 	/// Resolve `path` and subscribe to each of its `tracks`.
