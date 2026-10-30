@@ -235,7 +235,7 @@ impl Recording {
 					),
 					rendition: None,
 					variant: Variant::of(&rendition),
-					playlist: Playlist::new(rendition.hls().duration),
+					playlist: Playlist::new(rendition.target_duration()),
 					recording: None,
 					queued: VecDeque::new(),
 					instances: 0,
@@ -303,7 +303,7 @@ impl Recording {
 			segment: segment.segment,
 			discontinuity: segment.discontinuity,
 		});
-		let overruns = slot.playlist.push(Entry {
+		slot.playlist.push(Entry {
 			segment: number,
 			duration: segment.duration,
 			gap: segment.media.is_none(),
@@ -311,19 +311,6 @@ impl Recording {
 			program_date_time: segment.program_date_time,
 			map,
 		});
-		// Only on the 1st, 2nd, 4th, 8th... overrun, so a publisher whose every GOP overruns
-		// can't flood the log.
-		if let Some(overruns) = overruns.filter(|overruns| overruns.is_power_of_two()) {
-			tracing::warn!(
-				kind,
-				rendition = %name,
-				segment = number,
-				duration = ?segment.duration,
-				target_duration = slot.playlist.target,
-				overruns,
-				"segment overruns the declared HLS duration; recording it past EXT-X-TARGETDURATION"
-			);
-		}
 
 		self.flush().await?;
 		Ok(Some(Read { key, cursor, init }))
@@ -414,11 +401,9 @@ struct Playlist {
 	entries: Vec<Entry>,
 	/// The highest `EXT-X-VERSION` the entries need.
 	version: u32,
-	/// `EXT-X-TARGETDURATION`, in whole seconds: the first instance's declared duration rounded
-	/// up, kept through reconfigurations so the header never changes for it (RFC 8216 6.2.1).
+	/// `EXT-X-TARGETDURATION`, in whole seconds: the first instance's, which the exporter serves
+	/// too, kept through reconfigurations so the header never changes (RFC 8216 6.2.1).
 	target: u64,
-	/// Entries listed past the target, counted to rate-limit their warning.
-	overruns: u64,
 	/// What the file holds: its header and how many entries.
 	written: Option<(Header, usize)>,
 	/// Added to each entry's source sequence, so a switch to another instance is a discontinuity
@@ -449,10 +434,10 @@ struct Entry {
 }
 
 impl Playlist {
-	/// A playlist of segments declared `duration` long.
-	fn new(duration: Duration) -> Self {
+	/// A playlist whose `EXT-X-TARGETDURATION` is `target` seconds.
+	fn new(target: u64) -> Self {
 		Self {
-			target: (duration.as_secs_f64().ceil() as u64).max(1),
+			target,
 			..Default::default()
 		}
 	}
@@ -462,15 +447,13 @@ impl Playlist {
 		self.entries.last().map_or(source, |last| last.segment + 1)
 	}
 
-	/// Append `entry`, returning how many entries overran the target when this one does.
+	/// Append `entry`.
 	///
 	/// RFC 8216 4.3.3.1 requires every EXTINF, rounded to the nearest second, to fit the target
-	/// duration. An entry past it is listed anyway: refusing it loses content, and raising the
-	/// target would rewrite a header players already read.
-	fn push(&mut self, mut entry: Entry) -> Option<u64> {
+	/// duration. An entry past it is listed anyway, as the exporter lists it (and warns): refusing
+	/// it loses content, and raising the target would rewrite a header players already read.
+	fn push(&mut self, mut entry: Entry) {
 		self.version = self.version.max(if entry.gap { VERSION_GAP } else { VERSION });
-		let overrun = entry.duration.as_secs_f64().round() as u64 > self.target;
-		self.overruns += u64::from(overrun);
 		if std::mem::take(&mut self.switching)
 			&& let Some(last) = self.entries.last()
 		{
@@ -478,7 +461,6 @@ impl Playlist {
 		}
 		entry.discontinuity += self.offset;
 		self.entries.push(entry);
-		overrun.then_some(self.overruns)
 	}
 
 	/// The next entry comes from a reconfigured instance, under a new init: a discontinuity.
@@ -789,6 +771,8 @@ mod tests {
 			let segments = listed(&playlist);
 			assert!(segments.len() > 1 && consecutive(&segments, 0), "{playlist}");
 			assert_eq!(duration(&playlist), Duration::from_secs(6), "{playlist}");
+			// The exporter's target: the 2s declared duration.
+			assert!(playlist.contains("\n#EXT-X-TARGETDURATION:2\n"), "{playlist}");
 			assert!(playlist.contains("\n#EXT-X-MEDIA-SEQUENCE:0\n"), "{playlist}");
 			assert!(
 				playlist.contains("#EXT-X-MAP:URI=\"init.0.mp4\"\n#EXT-X-PROGRAM-DATE-TIME:"),
@@ -1009,7 +993,7 @@ mod tests {
 		assert_eq!(replacement.admit(1, 0).unwrap(), Admit::Record { transition: false });
 
 		// The recording numbers its segments on from the predecessor's.
-		let mut playlist = Playlist::new(Duration::from_secs(2));
+		let mut playlist = Playlist::new(2);
 		for source in 3..=5 {
 			let number = playlist.next(source);
 			playlist.push(entry(number, 0));
@@ -1046,7 +1030,7 @@ mod tests {
 	#[test]
 	fn a_discontinuity_restates_the_program_date_time() {
 		let at = |secs| Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(secs));
-		let mut playlist = Playlist::new(Duration::from_secs(2));
+		let mut playlist = Playlist::new(2);
 		for (segment, discontinuity, secs) in [(0, 0, 0), (1, 0, 2), (2, 1, 10), (3, 1, 12)] {
 			playlist.push(Entry {
 				program_date_time: at(secs),
@@ -1071,7 +1055,7 @@ mod tests {
 	/// sequence starts below the recording's.
 	#[test]
 	fn a_switch_to_a_lower_sequence_is_a_discontinuity() {
-		let mut playlist = Playlist::new(Duration::from_secs(2));
+		let mut playlist = Playlist::new(2);
 		playlist.push(entry(0, 0));
 		playlist.push(entry(1, 2));
 		playlist.transition();
@@ -1092,7 +1076,7 @@ mod tests {
 	async fn a_transition_appends_a_discontinuity() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("media.m3u8");
-		let mut playlist = Playlist::new(Duration::from_secs(2));
+		let mut playlist = Playlist::new(2);
 		for segment in 0..3 {
 			playlist.push(entry(segment, 0));
 			playlist.flush(dir.path()).await.unwrap();
@@ -1126,23 +1110,5 @@ mod tests {
 		);
 		assert!(text.ends_with("#EXT-X-GAP\n#EXTINF:4.50000,\n5.m4s\n"), "{text}");
 		assert_eq!(text.matches("#EXT-X-DISCONTINUITY\n").count(), 2, "{text}");
-	}
-
-	/// The target duration is the declared one rounded up. An entry that rounds to the nearest
-	/// second past it is listed anyway and counted for the warning.
-	#[test]
-	fn an_overrun_keeps_the_declared_target() {
-		let mut playlist = Playlist::new(Duration::from_millis(1_500));
-		let overruns: Vec<_> = (0..)
-			.zip([2_499, 2_500, 1_001, 4_500])
-			.map(|(segment, millis)| {
-				playlist.push(Entry {
-					duration: Duration::from_millis(millis),
-					..entry(segment, 0)
-				})
-			})
-			.collect();
-		assert_eq!(playlist.target, 2);
-		assert_eq!(overruns, [None, Some(1), None, Some(2)]);
 	}
 }

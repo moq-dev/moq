@@ -570,7 +570,7 @@ impl Rendition {
 	}
 
 	/// The `EXT-X-TARGETDURATION` of this rendition's media playlist, in whole seconds.
-	pub(crate) fn target_duration(&self) -> u64 {
+	pub fn target_duration(&self) -> u64 {
 		self.target_duration
 	}
 
