@@ -455,6 +455,7 @@ fn hash(token: &str) -> u64 {
 pub struct Server {
 	policy: Arc<Policy>,
 	sessions: Arc<Mutex<Sessions>>,
+	mesh: Option<crate::mesh::Coordinator>,
 }
 
 impl Server {
@@ -481,7 +482,15 @@ impl Server {
 		Ok(Self {
 			policy: Arc::new(policy),
 			sessions: Default::default(),
+			mesh: None,
 		})
+	}
+
+	/// Also answer the mesh owner's API under `/mesh` with `coordinator`. Like `POST /`,
+	/// it has no authentication of its own.
+	pub fn with_mesh(mut self, coordinator: crate::mesh::Coordinator) -> Self {
+		self.mesh = Some(coordinator);
+		self
 	}
 
 	/// The cadence the session table ages out by, or `None` when no limit needs a table.
@@ -520,9 +529,14 @@ impl Server {
 		}
 	}
 
-	/// The router: `POST /` reading a [`Request`] and writing a [`Grant`].
+	/// The router: `POST /` reading a [`Request`] and writing a [`Grant`], plus the mesh
+	/// owner's API when [`with_mesh`](Self::with_mesh) set one.
 	pub fn router(&self) -> Router {
-		Router::new().route("/", post(handle)).with_state(self.clone())
+		let router = Router::new().route("/", post(handle)).with_state(self.clone());
+		match &self.mesh {
+			Some(mesh) => router.merge(mesh.admin_router()),
+			None => router,
+		}
 	}
 
 	/// Serve on a TCP listener until the task is dropped.

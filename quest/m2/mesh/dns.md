@@ -9,7 +9,8 @@ that peer's served ports, forwarding each connection as a byte stream.
 ## Plan
 
 Decided 2026-10-25 (maintainer): loopback addresses per peer, no TUN device.
-Names come from [enrollment](/quest/m2/mesh/enroll.md). Settle how the
+Names come from enrollment: every `moq_auth::mesh::Enrollment` lists each
+member's unique, DNS-safe name, refreshed with the token. Settle how the
 resolver is installed per OS (split DNS through systemd-resolved, macOS
 `/etc/resolver`) and how the loopback range is chosen and kept stable across
 restarts, and record both here. `install` sets it up; uninstalling removes it.

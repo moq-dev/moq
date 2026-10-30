@@ -20,7 +20,7 @@ pub(crate) fn write(path: &Path, contents: &str, private: bool) -> io::Result<()
 }
 
 #[cfg(unix)]
-fn write_private(path: &Path, contents: &str) -> io::Result<()> {
+pub(crate) fn write_private(path: &Path, contents: &str) -> io::Result<()> {
 	use std::io::Write;
 	use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -40,6 +40,6 @@ fn write_private(path: &Path, contents: &str) -> io::Result<()> {
 
 /// Windows has no cheap equivalent of the Unix mode bits, so the file inherits the directory's ACL.
 #[cfg(not(unix))]
-fn write_private(path: &Path, contents: &str) -> io::Result<()> {
+pub(crate) fn write_private(path: &Path, contents: &str) -> io::Result<()> {
 	std::fs::write(path, contents)
 }
