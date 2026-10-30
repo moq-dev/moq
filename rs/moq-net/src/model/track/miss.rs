@@ -251,10 +251,12 @@ impl Misses {
 	fn release(&mut self, lost: &RangeSet<u64>) {
 		for run in lost.iter() {
 			while let Some((held, &key)) = self.holders.overlapping(run).next() {
-				self.holders.remove(held.start.max(run.start)..held.end.min(run.end));
-				// Releases all of `lost` the join holds, so its other pieces find nothing.
+				// Only this piece: a join split by an earlier release has other pieces in
+				// `lost`, and each must still find the join when its turn comes.
+				let piece = held.start.max(run.start)..held.end.min(run.end);
+				self.holders.remove(piece.clone());
 				let join = self.joins.get_mut(&key).expect("a holder names a join");
-				join.release(lost);
+				join.release(&RangeSet::from_iter([piece]));
 				if join.is_empty() {
 					self.joins.remove(&key);
 				}
@@ -988,6 +990,35 @@ mod tests {
 			"the live cached incarnation is no longer refused"
 		);
 		assert!(given_up.is_empty(), "a live recreation is never given up");
+	}
+
+	#[moq_clock::test]
+	async fn releasing_both_pieces_of_a_split_join_drops_it_once() {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let track = broadcast.create_track("split", crate::track::Info::default()).unwrap();
+		let fills = track.state.read().fills.clone();
+		fills.lock().add_handler();
+		let mut misses = Misses::default();
+		let mut given_up = Vec::new();
+		misses.ask(
+			&track.state.consume(),
+			&fills,
+			&RangeSet::from_iter([0..3]),
+			&Asking {
+				priority: 0,
+				max_delay: None,
+				order: Order::Ascending,
+			},
+			&mut given_up,
+		);
+		assert_eq!(misses.joins.len(), 1, "one fill covers the whole run");
+
+		// Refusing the middle group splits the join's holder in two.
+		misses.release(&RangeSet::from_iter([1..2]));
+		assert_eq!(misses.joins.len(), 1);
+		misses.release(&RangeSet::from_iter([0..1, 2..3]));
+		assert!(misses.joins.is_empty(), "the join goes with its last piece");
+		assert!(misses.holders.is_empty());
 	}
 
 	#[moq_clock::test]
