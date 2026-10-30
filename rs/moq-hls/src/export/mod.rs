@@ -171,13 +171,13 @@ impl Broadcaster {
 	}
 
 	/// How many clones of this broadcaster are alive.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "server"))]
 	pub(crate) fn clones(&self) -> usize {
 		Arc::strong_count(&self._guard)
 	}
 
 	/// A weak reference that reports, through its `strong_count`, whether any clone is alive.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "server"))]
 	pub(crate) fn downgrade(&self) -> std::sync::Weak<impl Sized + use<>> {
 		Arc::downgrade(&self._guard)
 	}
