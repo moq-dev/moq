@@ -761,3 +761,39 @@ test("identity changes before the first announce take a fresh track name", async
 
 	broadcast.close();
 });
+
+// Identity follows hang's `same_identity`: interlacing reinitializes a video decoder.
+test("an interlacing change takes a fresh track name", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("interlaced.hang") });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	await settle();
+	video.config.set({ ...videoConfig, interlaced: true });
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBe("video/1");
+	expect(video.track.peek()?.name).toBe("video/1");
+
+	broadcast.close();
+});
+
+// Names belong to one network broadcast, so a new one serves each rendition under its ID again.
+test("a new network broadcast starts every track name over", async () => {
+	const name = new Signal(Path.from("one.hang"));
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	await settle();
+	video.config.set({ ...videoConfig, codec: "vp8" });
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBe("video/1");
+	expect(() => broadcast.video("video/1")).toThrow("replacement track");
+
+	name.set(Path.from("two.hang"));
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBeUndefined();
+	expect(video.track.peek()?.name).toBe("video");
+	expect(video.track.peek()?.appendGroup().sequence).toBe(0);
+	expect(() => broadcast.video("video/1").close()).not.toThrow();
+
+	broadcast.close();
+});
