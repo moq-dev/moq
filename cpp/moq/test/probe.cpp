@@ -249,7 +249,7 @@ int main() {
     auto session = ok(connecting.get(), "connect");
 
     // Subscriber: resolve the announced broadcast and subscribe to its track.
-    auto announced = ok(session->consume()->announced_broadcast("probe"), "announced_broadcast");
+    auto announced = ok(session->consume()->follow("probe", std::nullopt), "follow");
     auto remote = ok(announced->available().get(), "available");
     auto consumer = ok(remote->subscribe_track("data", std::nullopt).get(), "subscribe_track");
 

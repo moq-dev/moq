@@ -24,6 +24,10 @@ on-demand saved, without losing the past.
 - JS (`js/publish/src/audio/encoder.ts`) and Rust (`rs/moq-audio` capture)
   both switch. The always-on default from their sibling quests becomes the
   opt-out.
+- The CLI's audio mode gains `buffered` as its default (decided
+  2026-10-29). If [The CLI picks each medium's mode](/quest/m1/eager-encode/cli-modes.md)
+  has landed, add it to `--audio`; otherwise that quest adds it. Update
+  `--help` and `doc/bin/cli.md`.
 
 Tests: no subscriber for a few seconds, then a subscriber with `maxDelay`
 covering the last second receives that second, timestamps matching capture

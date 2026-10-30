@@ -16,12 +16,8 @@ with `request` or `follow`; see
 driver's epoch from its announcement, then `_pump_driver` requests the path
 unpinned. A newer run that took over in between is read under the old run's
 lease until its own announcement cancels the task. Pass the announced epoch
-to the Python wrapper's `request(path, epoch)` once the bindings expose it.
+to the Python wrapper's `request(path, epoch=...)`.
 
 Run the demo's sim tests (`demo/carla/sim`).
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Bindings request and follow](/quest/m1/api-audit/resolve/bindings.md) - the Python wrapper's `request` takes an epoch

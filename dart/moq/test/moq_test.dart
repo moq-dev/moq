@@ -219,9 +219,7 @@ void main() {
         (await announcement.timeout(timeout) as AnnounceEventStart).announce;
     expect(announced.prefix, 'live');
 
-    final requested = await client
-        .requestBroadcast(announced.prefix)
-        .timeout(timeout);
+    final requested = await client.request(announced.prefix).timeout(timeout);
     final consumer = await requested
         .subscribeTrack(name: 'events', subscription: null)
         .timeout(timeout);
@@ -402,7 +400,7 @@ void main() {
     broadcast.publishTrack(name: 'events', info: null);
     final consumer = origin.consume();
     await expectLater(
-      consumer.requestBroadcast(path: 'live').timeout(timeout),
+      consumer.request(path: 'live').timeout(timeout),
       throwsA(anything),
     );
 
@@ -417,17 +415,17 @@ void main() {
     expect(retracted, isA<AnnounceEventEnd>());
     expect((retracted as AnnounceEventEnd).announce.prefix, 'live');
     await expectLater(
-      consumer.requestBroadcast(path: 'live').timeout(timeout),
+      consumer.request(path: 'live').timeout(timeout),
       throwsA(anything),
     );
 
     publication.announce(route: AnnounceRoute());
     expect(await nextRoute(announced), isA<AnnounceEventStart>());
-    await consumer.requestBroadcast(path: 'live').timeout(timeout);
+    await consumer.request(path: 'live').timeout(timeout);
 
     // Disposing the publication keeps the route; closing the broadcast ends it.
     publication.dispose();
-    await consumer.requestBroadcast(path: 'live').timeout(timeout);
+    await consumer.request(path: 'live').timeout(timeout);
     broadcast.close();
     expect(await nextRoute(announced), isA<AnnounceEventEnd>());
     announced.cancel();
@@ -447,7 +445,7 @@ void main() {
       throwsA(isA<ClosedMoqException>()),
     );
     expect(() => stale.unannounce(), throwsA(isA<ClosedMoqException>()));
-    await origin.consume().requestBroadcast(path: 'live').timeout(timeout);
+    await origin.consume().request(path: 'live').timeout(timeout);
     replacement.broadcast().close();
   });
 
@@ -490,7 +488,7 @@ void main() {
   test('dynamic serves a request under a prefix', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final dynamic = origin.requests(prefix: 'live');
-    final pending = origin.consume().requestBroadcast(path: 'live/cam');
+    final pending = origin.consume().request(path: 'live/cam');
     final request = await dynamic.requestedBroadcast().timeout(timeout);
     expect(request.path(), 'live/cam');
     final prepared = request.prepare(epoch: mintEpoch());

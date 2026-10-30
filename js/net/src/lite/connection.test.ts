@@ -829,7 +829,7 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 						sub = stream;
 					}
 				}
-				await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart(0) }, version);
+				await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart([0]) }, version);
 
 				let group: GroupMessage;
 				if (violation === "a partial group") {
