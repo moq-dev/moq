@@ -134,7 +134,7 @@ land after this baseline, so the next report should show moq-mux's
 - Public functions never executed, by the scan above, starting with moq-c,
   moq-ffi, and moq-mux's import facades.
 - Whether [Bindings in the interop matrix](/quest/m2/interop-bindings.md),
-  [GPU CI](/quest/m2/gpu-ci.md), [V4L2 virtual camera](/quest/m2/v4l2-virtual-camera.md),
+  [GPU CI](/quest/m2/gpu-ci.md),
   and [MediaCodec on an emulator](/quest/m2/android-mediacodec-ci.md) landed,
   before re-auditing the tests they own.
 
