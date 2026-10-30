@@ -2858,7 +2858,10 @@ mod tests {
 			.streams
 			.tasks
 			.push(tokio::spawn(async { panic!("injected accept loop panic") }));
-		assert!(crate::panic::isolate(listener.accept()).await.is_none(), "the panic resumes in accept");
+		assert!(
+			crate::panic::isolate(listener.accept()).await.is_none(),
+			"the panic resumes in accept"
+		);
 		assert!(
 			tokio::net::TcpListener::bind(address).await.is_ok(),
 			"a dead accept loop left its listener bound"
@@ -2935,10 +2938,19 @@ mod tests {
 			},
 			..Default::default()
 		};
-		let mut listener = config.init(Default::default()).expect("server").listen().await.expect("listen");
+		let mut listener = config
+			.init(Default::default())
+			.expect("server")
+			.listen()
+			.await
+			.expect("listen");
 		// What the endpoint's driver dying looks like from `accept`.
 		listener.server.close();
-		let err = listener.accept().await.err().expect("a stopped endpoint yields no session");
+		let err = listener
+			.accept()
+			.await
+			.err()
+			.expect("a stopped endpoint yields no session");
 		assert!(matches!(err, Error::Accept(Transport::Quic)), "{err}");
 	}
 
@@ -2946,8 +2958,11 @@ mod tests {
 	/// returning as if it had served and stopped.
 	#[tokio::test]
 	async fn serving_nothing_is_an_error() {
-		let server = Server::new(Config::default()).expect("server");
-		let err = server.serve_publish(crate::origin::spawn().consume()).await.unwrap_err();
+		let server = Config::default().init_streams().expect("server");
+		let err = server
+			.serve_publish(crate::origin::spawn().consume())
+			.await
+			.unwrap_err();
 		assert!(matches!(err, Error::NoBackend(_)), "{err}");
 	}
 

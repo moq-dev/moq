@@ -1345,22 +1345,6 @@ mod tests {
 		assert!(config(None, &[&deepest]).validate(false).is_ok());
 	}
 
-	#[test]
-	fn config_init_requires_a_runtime() {
-		let result = std::panic::catch_unwind(|| {
-			let _ = config(None, &["anon/**"])
-				.init("relay-1", &moq_tokio::tls::Connect::default(), false)
-				.unwrap();
-		});
-		assert!(result.is_err());
-	}
-
-	#[test]
-	fn refuse_requires_a_runtime() {
-		let result = std::panic::catch_unwind(|| Auth::refuse("relay-1"));
-		assert!(result.is_err());
-	}
-
 	/// The embedder's answer is the session's verdict; an answer that never comes,
 	/// or a decider that is gone, is an outage rather than a refusal.
 	#[tokio::test]

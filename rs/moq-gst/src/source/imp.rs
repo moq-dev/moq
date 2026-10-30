@@ -4644,7 +4644,7 @@ mod session_tests {
 								for session in &sessions { session.abort(err.clone()); }
 							}
 							request = server.accept() => {
-								let Some(request) = request else { break };
+								let Ok(request) = request else { break };
 								let admit = *admitting.lock().unwrap();
 								match admit {
 									Admit::Serve => {
