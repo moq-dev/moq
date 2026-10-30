@@ -22,10 +22,12 @@ cargo add hang
 
 hang is the format, not the pipeline. [`moq-mux`](/lib/rs/moq-mux) produces the
 catalog for you and decodes any container in group order
-(`moq_mux::container::Consumer`), skipping groups that fall past your max delay.
-It starts no later than the group covering the live edge less that max delay,
-plus a rendition's catalog `warmup` passed to `with_warmup`, and waits up to
-that long for it when the newest group arrives first.
+(`moq_mux::container::Consumer`). Its `Delay { min, max }` says how far behind
+the live edge to play: it skips groups that fall past `max`, and starts at the
+group covering the live edge less `min` (your playout delay), plus a rendition's
+catalog `warmup` passed to `with_warmup`, waiting up to that long for it when the
+newest group arrives first. Both default to zero, which starts at the newest
+group at once; `max` never moves the start.
 [`moq-video`](/lib/rs/moq-video) and [`moq-audio`](/lib/rs/moq-audio) publish
 from a device. Examples:
 [`video.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs)

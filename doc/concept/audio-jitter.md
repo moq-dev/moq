@@ -472,9 +472,10 @@ or one beyond the track's retention window, is an error at configuration time.
 Supported or refused, not warned about and continued.
 
 In the browser this is the numeric `delay` setting; natively it is
-`decode::Options::delay`, where `None` selects the estimator. The two spell the
-same thing the same way on purpose. It is distinct from `max_delay`, which is the
-live-edge skip budget and not a buffer.
+`decode::Options::delay.min`, with `decode::Options::estimate` selecting the
+estimator, which never goes below that `min`. The two spell the same thing the
+same way on purpose. It is distinct from `delay.max`, which is the live-edge skip
+budget and not a buffer. The same `min` is where a cold join starts.
 
 ## Constants
 
