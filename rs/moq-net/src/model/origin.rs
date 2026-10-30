@@ -1866,16 +1866,26 @@ impl Default for OriginScope {
 /// The announce-interest prefixes that cover a pattern scope on a prefix-only
 /// wire: each member's literal head, minus heads another already covers.
 pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<Path> {
-	// A head too long for a path covers none, so it asks for nothing.
-	let mut heads: Vec<Path> = allowed
-		.iter()
-		.filter_map(|pattern| Path::new(pattern.head()).ok())
-		.collect();
+	let mut heads: Vec<Path> = allowed.iter().filter_map(|pattern| covering(pattern.head())).collect();
 	heads.sort();
 	heads.dedup();
 	let covered = heads.clone();
 	heads.retain(|head| !covered.iter().any(|other| other != head && head.has_prefix(other)));
 	heads
+}
+
+/// The nearest path at or above a pattern head.
+///
+/// A head cut at an escaped `/`, such as `a\` from `a\/*`, ends in half an escape, so it
+/// falls back to its parent. A head too long for a path covers none, so it asks for nothing.
+fn covering(mut head: &str) -> Option<Path> {
+	loop {
+		match Path::new(head) {
+			Ok(path) => return Some(path),
+			Err(crate::path::Error::InvalidEscape) => head = head.rsplit_once('/').map_or("", |(parent, _)| parent),
+			Err(_) => return None,
+		}
+	}
 }
 
 /// Which routes beneath a hidden segment an announce cursor reports.
@@ -8912,6 +8922,14 @@ mod tests {
 		};
 		assert_eq!(replacement.prefix.as_str(), "");
 		assert_eq!(replacement.captures, None);
+	}
+
+	#[test]
+	fn interest_prefixes_fall_back_above_an_escaped_slash() {
+		let heads = |pattern: &str| interest_prefixes(&Patterns::from(pattern.parse::<Pattern>().unwrap()));
+		assert_eq!(heads(r"room/a\/*"), [Path::from_static("room")]);
+		assert_eq!(heads(r"a\/b\/*"), [Path::empty()]);
+		assert_eq!(heads(r"a\/b/*"), [Path::from_static(r"a\/b")]);
 	}
 
 	#[moq_clock::test]

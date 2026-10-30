@@ -1280,7 +1280,8 @@ struct SideSlots {
 	seen: u64,
 }
 
-/// The leading `depth` segments of `path`, the group it publishes under.
+/// The leading `depth` segments of `path`, the group it publishes under, or the whole path
+/// when it has no such head: it is shallower, or its `depth`th `/` is escaped.
 fn group_key(path: &Path, depth: usize) -> Path {
 	path.head(depth).unwrap_or_else(|| path.clone())
 }
@@ -1288,7 +1289,7 @@ fn group_key(path: &Path, depth: usize) -> Path {
 /// `<prefix>/node/<node>`, or `<prefix>/node` without a node. The fixed `node`
 /// category leaves room for sibling categories (e.g. `<prefix>/cluster` for
 /// relay-mesh stats) under the same prefix.
-fn advertised_path(prefix: &Path, node: Option<&Path>) -> Result<Path, moq_net::path::Invalid> {
+fn advertised_path(prefix: &Path, node: Option<&Path>) -> Result<Path, moq_net::path::Error> {
 	let path = prefix.join(&Path::from_static("node"))?;
 	match node {
 		Some(node) => path.join(node),

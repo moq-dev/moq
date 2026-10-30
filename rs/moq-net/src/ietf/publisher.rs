@@ -9256,7 +9256,7 @@ mod serve_tests {
 			assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{version}");
 			let code = ietf::RequestError::decode(&mut buf, version).unwrap().error_code;
 			let expected = request::to_code(
-				&Error::from(crate::path::Invalid::TooLong),
+				&Error::from(crate::path::Error::TooLong),
 				request::Kind::Subscribe,
 				version,
 			);
