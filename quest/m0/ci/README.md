@@ -139,3 +139,5 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Cargo aliases in nested checkouts](/quest/m0/ci/cargo-alias-strings.md) - `cargo build-ffi` and `cargo moq` work from a worktree nested inside another checkout
 - [Release credentials off main](/quest/m0/ci/publish-release-only.md) - `publish` admits only `release` and release tags once its `workflow_run` publishers run on their tag
 - [VM checks refuse a host without KVM](/quest/m0/ci/vm-kvm.md) - `check flake` fails fast with a clear message instead of an emulated-boot timeout
+- [The queue host keeps the queue's disk](/quest/m0/ci/queue-host-disk.md) - agent sessions can't starve the queue runner of disk, and a crashed runner restarts
+- [The next test-CPU cuts](/quest/m0/ci/test-cost-followups.md) - the slow-test leftovers from #6987, cut at their source

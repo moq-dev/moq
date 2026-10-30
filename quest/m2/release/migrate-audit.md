@@ -21,7 +21,15 @@ m1 quest on 2026-10-22.
 - Correct Unreleased entries that a later PR overturned. Known: `js/net/MIGRATE.md`
   still describes `request(path, { announced: true })`, which
   [moq-dev/moq#7173](https://github.com/moq-dev/moq/pull/7173) replaced with
-  `follow(path)` (decided 2026-10-29).
+  `follow(path)` (decided 2026-10-29). Also known, from
+  [moq-dev/moq#7036](https://github.com/moq-dev/moq/pull/7036)'s rename of
+  `used` to `wanted` (Decided 2026-10-30 (maintainer, /quest-plan of the 2026-10-30 /quest-complete follow-ups)): `rs/moq-json/MIGRATE.md` and
+  `rs/moq-flate/MIGRATE.md` should say `producer.demand().wanted().is_some()`,
+  not `producer.demand().is_used()`. In `js/net/MIGRATE.md`, the line saying
+  broadcast and group demand keep `used` and `unused()` is false, the line on
+  `unused()` rejecting on close is moot, and
+  "`producer.unused()` is `producer.demand().unused()`" should point at
+  `demand().wanted`.
 - Run the API-diff report on the cut PR and read the diff of the
   hand-written binding wrappers (`py/moq-rs`, `kt/moq`, `dart/moq`,
   `go/wrapper`, `swift`, `cpp/moq`, `cpp/obs`) and of each binary's flags,

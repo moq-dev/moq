@@ -56,6 +56,7 @@ encoder, and record why.
 
 - [`muted` and `invisible` keep capture open](/quest/m1/push-to-talk/mute.md) - the element disables only the encoder, so unmute skips getUserMedia and AudioContext setup
 - [Watch caches audio codec support](/quest/m1/push-to-talk/audio-support-cache.md) - an unmute resumes audio without waiting on a support check
+- [Hidden capture idles](/quest/m1/push-to-talk/capture-idle.md) - an unread capture stops producing frames but stays open for an instant unhide
 
 ## Closes
 

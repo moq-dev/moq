@@ -186,6 +186,8 @@ removed).
 - [Legacy lite close drain](/quest/m1/lite-legacy-close-drain.md) - a lite-01..06 graceful close never cuts a final group the subscriber has not read
 - [moqsrc max-delay](/quest/m1/gst-max-delay.md) - GStreamer's `moqsrc` takes a `max-delay` property instead of a hard-coded 1 s budget
 - [moq-clock moves into kio::clock](/quest/m1/kio-clock.md) - moq-clock and its test macro become `kio::clock` and `#[kio::test]` before the cut publishes them
+- [moq-quic pads in one frame](/quest/m1/quic-padding-frames.md) - a run of padding is one frame, not one per byte
+- [JS join tests cover draft 20](/quest/m1/join-tests-draft20.md) - join.test.ts runs on every supported draft, not just 18 and 22
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
 
 ## Related
