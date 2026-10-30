@@ -915,8 +915,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// independently decodable, so it has no boundary of its own) follow the same segmentation as
 	/// video instead of opening a group per fragment.
 	///
-	/// `mdat_len` bounds the scan: each sample takes at least one byte of the mdat, and the resolver
-	/// refuses any past it, so a forged field-less run of billions of samples isn't walked here.
+	/// `mdat_len` bounds the scan across the whole moof: each sample takes at least one byte of the
+	/// mdat, and the resolver refuses any past it, so forged field-less runs of billions of samples,
+	/// however many trafs repeat them, aren't walked here.
 	fn starts_segment(&self, moof: &Moof, has_video: bool, mdat_len: usize) -> bool {
 		if self.pending_cut {
 			return true;
@@ -936,6 +937,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return false;
 		}
 
+		let mut budget = mdat_len;
 		moof.traf.iter().any(|traf| {
 			let Some(track) = self.tracks.get(&traf.tfhd.track_id) else {
 				return false;
@@ -945,7 +947,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					.trun
 					.iter()
 					.flat_map(|trun| trun.samples.iter())
-					.take(mdat_len)
+					.take_while(|_| {
+						let more = budget > 0;
+						budget = budget.saturating_sub(1);
+						more
+					})
 					.any(|entry| track.defaults.resolve(&traf.tfhd, &entry).is_sync())
 		})
 	}
