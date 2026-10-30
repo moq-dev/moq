@@ -3380,6 +3380,18 @@ impl Producer {
 		}
 	}
 
+	/// The live feed's route answered that it reaches `group`: a relative start counts back
+	/// from it, rather than from whichever group lands first. A no-op unless live.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn report_edge(&self, group: u64) {
+		if let Ok(mut state) = self.modify()
+			&& let Feed::Live { first, edge } = &mut state.feed
+		{
+			*edge = (*edge).max(Some(group));
+			first.get_or_insert(group);
+		}
+	}
+
 	/// Record the upstream Object ID separately from the frame ordinal readers count.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn report_object(&self, group: u64, object: u64) {
@@ -9015,6 +9027,26 @@ mod test {
 
 		framed(&producer, 5, 1).finish().unwrap();
 		assert_eq!(ready_groups(&mut reader), vec![5]);
+	}
+
+	/// A live join's answer anchors a relative start where it says the feed is, both for the
+	/// copy's readers and for the bounds sent upstream, even once a newer group lands before
+	/// the one it named.
+	#[test]
+	fn a_relative_start_counts_from_the_answered_edge() {
+		let producer = track_producer("test", Info::default());
+		let back = Range {
+			start: super::super::subscription::Anchor::Relative(2),
+			end: None,
+		};
+		let mut reader = producer.subscribe(replay().with_ranges([back]));
+		producer.report_edge(4);
+		let upstream = producer.resolve_subscription(&replay().with_ranges([back])).unwrap();
+		assert_eq!(upstream.start(), Some(2), "the answer resolves the upstream bounds");
+
+		framed(&producer, 5, 1).finish().unwrap();
+		assert_eq!(ready_groups(&mut reader), vec![5]);
+		assert_eq!(reader.floor(), Some(2), "the answer anchors the start");
 	}
 
 	/// An idle copy forgets the edge its previous feed answered with, which only a datagram

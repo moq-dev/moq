@@ -3432,6 +3432,11 @@ impl Subscriber {
 		// the group carries over: its first frame is the edge a reader can count on.
 		if let Some(largest) = largest {
 			track.report_object(largest.group, largest.object);
+			// A live join's Largest is where its feed is, which a relative anchor counts back
+			// from even when a newer group lands before the joined one.
+			if live {
+				track.report_edge(largest.group);
+			}
 		}
 		// A live join starts at the publisher's edge; an absolute one where it asked. With
 		// no Largest the join skips nothing, so every group is owed: a lower one's stream
@@ -3443,6 +3448,14 @@ impl Subscriber {
 		if let Some(staged) = staged {
 			staged.commit();
 		}
+		// Resolved while the answer's Largest is still the live edge: no data stream reaches
+		// the copy before its alias is bound below.
+		let settled = match deferred {
+			true => track
+				.subscription()
+				.map(|subscription| (settle_bounds(&mut resolved, &track, &subscription), subscription)),
+			false => None,
+		};
 		let mut fetching: Option<JoiningTask> = None;
 		{
 			let mut state = self.state.lock();
@@ -3502,12 +3515,16 @@ impl Subscriber {
 		let mut priority = priority;
 		let mut sent_bounds = (start, subscription.as_ref().and_then(|subscription| subscription.end()));
 		let mut wanted_bounds = Ok(sent_bounds);
-		// A deferred relative anchor, until the copy learns the live edge it counts back from.
-		// The bounds it then resolves to go upstream as an update, absolute like any other.
-		let mut unsettled = match deferred {
-			true => track.subscription(),
-			false => None,
-		};
+		// A deferred relative anchor, until the copy learns the live edge it counts back from:
+		// an answer with no Largest leaves it to the first group. The bounds it then resolves
+		// to go upstream as an update, absolute like any other.
+		let mut unsettled = None;
+		match settled {
+			Some((Ok(Some(bounds)), _)) => wanted_bounds = Ok(bounds),
+			Some((Ok(None), subscription)) => unsettled = Some(subscription),
+			Some((Err(err), _)) => wanted_bounds = Err(err),
+			None => {}
+		}
 		let mut edge = track.consume();
 		// REQUEST_UPDATEs sent and not yet answered.
 		let unanswered = AtomicU64::new(0);
