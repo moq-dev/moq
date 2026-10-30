@@ -4,9 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `maxDelay: null` is refused ([#7403](https://github.com/moq-dev/moq/pull/7403))
+### `maxDelay: null` sets no subscriber limit ([#7403](https://github.com/moq-dev/moq/pull/7403))
 
-A `Track.Subscription` whose `maxDelay` is `null` throws a `TypeError`. Omit it for the default of zero, or pass how far back to reach in milliseconds.
+A `Track.Subscription` whose `maxDelay` is `null` reaches back as far as the publisher's `Track.Info.maxAge` keeps, as `None` does in Rust. An omitted or `undefined` `maxDelay` is still zero.
 
 ### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 

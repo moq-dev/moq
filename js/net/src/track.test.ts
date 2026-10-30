@@ -826,7 +826,7 @@ test("zero latency takes the latest group when ages are equal", async () => {
 	}
 });
 
-test("an omitted maxDelay is the default zero, and null is refused", async () => {
+test("an omitted maxDelay is the default zero, and null sets no limit", async () => {
 	expect(Subscription.default()).toEqual({ priority: 0, maxDelay: Milli.zero, order: "descending" });
 
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
@@ -842,7 +842,11 @@ test("an omitted maxDelay is the default zero, and null is refused", async () =>
 	expect((await implicit.recvGroup())?.sequence).toBe(2);
 	expect((await bare.recvGroup())?.sequence).toBe(2);
 	expect(producer.subscription.peek()?.maxDelay).toBe(Milli.zero);
-	expect(() => producer.subscribe({ maxDelay: null as unknown as Milli })).toThrow(TypeError);
+
+	// An explicit null leaves the publisher's retention as the only bound.
+	const unlimited = producer.subscribe({ maxDelay: null });
+	for (const sequence of [0, 1, 2]) expect((await unlimited.recvGroup())?.sequence).toBe(sequence);
+	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(5000));
 	producer.finish();
 	producer.close();
 });

@@ -6472,8 +6472,9 @@ impl Cursor {
 	}
 
 	/// Pending while a group in `groups` that the live feed still owes is within the drift
-	/// budget, so a read in sequence order waits for it; see `TrackState::owed`. [`Ordered`]
-	/// refuses a reader without a budget, so the wait always has a deadline.
+	/// budget, so a read in sequence order waits for it; see `TrackState::owed`. A budget
+	/// with no deadline waits until the hole resolves: the group lands, or the track learns
+	/// it won't.
 	fn poll_owed(&self, groups: ops::Range<u64>, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		if groups.is_empty() {
 			return Poll::Ready(Ok(()));
@@ -7004,8 +7005,6 @@ pub struct Control {
 	mirror: Option<super::resume::Mirror>,
 	// Whether the track is timed, so a time anchor on an untimed one is refused.
 	timed: bool,
-	// Whether it came from an [`Ordered`], which refuses an unlimited budget.
-	ordered: bool,
 }
 
 /// What a [`Control`] needs to republish a plain cursor's [`Published`] window.
@@ -7054,14 +7053,10 @@ impl Control {
 	///
 	/// Returns [`Error::Closed`] if the track already ended; the update is
 	/// meaningless at that point and can usually be ignored. Refuses a time anchor on
-	/// an untimed track with [`Error::TimestampMismatch`], and an unlimited max delay on an
-	/// [`Ordered`] reader with [`Error::Unsupported`], leaving the preferences as they were.
+	/// an untimed track with [`Error::TimestampMismatch`], leaving the preferences as they were.
 	pub fn update(&self, subscription: Subscription) -> Result<()> {
 		if !self.timed && subscription.has_time() {
 			return Err(Error::TimestampMismatch);
-		}
-		if self.ordered {
-			refuse_unbounded(&subscription)?;
 		}
 		if subscription.ranges != self.subscription.read().ranges {
 			self.track.refuse_subscription(&subscription)?;
@@ -7086,15 +7081,6 @@ fn refuse_cached_anchors(state: &TrackState, subscription: &Subscription) -> Res
 		}
 	}
 	Ok(())
-}
-
-/// Refuse `subscription` for an [`Ordered`] reader when it sets no max delay: one hole the
-/// track owes but never resolves would hold every later group forever.
-fn refuse_unbounded(subscription: &Subscription) -> Result<()> {
-	match subscription.max_delay {
-		None => Err(Error::Unsupported),
-		Some(_) => Ok(()),
-	}
 }
 
 /// Refuse `subscription` when it asks an untimed track for a presentation time.
@@ -7165,7 +7151,6 @@ impl Subscriber {
 				}),
 				mirror: None,
 				timed,
-				ordered: false,
 			},
 			Inner::Resume(resume, _) => Control {
 				track: self.consume(),
@@ -7173,7 +7158,6 @@ impl Subscriber {
 				republish: None,
 				mirror: Some(resume.mirror()),
 				timed,
-				ordered: false,
 			},
 		}
 	}
@@ -7711,14 +7695,6 @@ impl Subscriber {
 		self.control().subscription()
 	}
 
-	/// This subscriber's own max delay, without cloning its preferences.
-	fn max_delay(&self) -> Option<Duration> {
-		match &self.inner {
-			Inner::Plain(cursor) => cursor.subscription.read().max_delay,
-			Inner::Resume(resume, _) => resume.subscription().read().max_delay,
-		}
-	}
-
 	/// Replace this subscriber's delivery preferences.
 	///
 	/// Stored verbatim; the publisher's max age window is applied to the aggregate, not
@@ -7864,11 +7840,16 @@ impl Subscriber {
 ///
 /// A missing group is waited for only while the track still owes it: on a copy a
 /// subscription feeds, a group that may still land, reordered behind its successor, is
-/// read first, until the same budget gives up on it. So an ordered read needs a budget: it
-/// refuses a [`Subscription::max_delay`] of `None` with [`Error::Unsupported`]. A group the track knows will never land costs nothing:
+/// read first, until the same budget gives up on it. Without a budget (`None`, which a
+/// history or VOD read uses) it waits until the hole resolves. A group the track knows will never land costs nothing:
 /// one the publisher dropped, one that arrived and was since evicted or aborted, a
 /// datagram's sequence, or one below where the feed starts. A locally produced track owes
 /// nothing, so there the cursor seeks to the lowest cached group in range.
+///
+/// An unlimited or long budget only avoids blocking where the feed signals its gaps:
+/// moq-lite, whose publisher sends `SUBSCRIBE_DROP` for every group it won't deliver, or an
+/// ordered moq-transport FETCH. A moq-transport SUBSCRIBE signals no gaps, so there a group
+/// lost in transit can hold the ordered reader at its hole until the track ends.
 ///
 /// The budget is updatable mid-stream through [`Self::control`]. [`Duration::ZERO`] (the
 /// default) keeps only what nothing newer has superseded, so a consumer that stalls and
@@ -7905,13 +7886,7 @@ impl Ordered {
 	/// declared end settled, see [`Producer::abort`]),
 	/// `Poll::Ready(Err(e))` when the track has been aborted short of its end, or
 	/// `Poll::Pending` when no group is available yet.
-	///
-	/// Refuses to read with [`Error::Unsupported`] while [`Subscription::max_delay`] is `None`,
-	/// whatever set it; see [`Self::update`].
 	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		if self.inner.max_delay().is_none() {
-			return Poll::Ready(Err(Error::Unsupported));
-		}
 		self.inner.poll_next_group(waiter)
 	}
 
@@ -7958,12 +7933,9 @@ impl Ordered {
 	}
 
 	/// Create a handle for updating this subscriber's delivery preferences without
-	/// borrowing the read cursor. It refuses an unlimited max delay, as [`Self::update`] does.
+	/// borrowing the read cursor.
 	pub fn control(&self) -> Control {
-		Control {
-			ordered: true,
-			..self.inner.control()
-		}
+		self.inner.control()
 	}
 
 	/// This subscriber's current preferences.
@@ -7973,12 +7945,8 @@ impl Ordered {
 
 	/// Replace this subscriber's delivery preferences.
 	///
-	/// Returns [`Error::Closed`] if the track already ended. Refuses a
-	/// [`Subscription::max_delay`] of `None` with [`Error::Unsupported`], leaving the
-	/// preferences as they were: with no budget, one hole the track owes but never resolves
-	/// would hold every later group forever.
+	/// Returns [`Error::Closed`] if the track already ended.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
-		refuse_unbounded(&subscription)?;
 		self.inner.update(subscription)
 	}
 
@@ -14639,7 +14607,7 @@ mod test {
 	}
 
 	/// The wait follows the reader's budget: a zero budget waits for nothing, a budget
-	/// narrowed mid-wait ends it, and an unbounded one is refused rather than waiting forever.
+	/// narrowed mid-wait ends it, and an unbounded one waits until the hole resolves.
 	#[test]
 	#[cfg(feature = "async")]
 	fn next_group_waits_on_an_owed_group_within_the_budget() {
@@ -14659,25 +14627,16 @@ mod test {
 		assert_eq!(drain_ordered(&mut consumer), [2], "the narrowed budget gave up");
 
 		let producer = received_producer(None);
-		let mut consumer = producer.subscribe(replay()).ordered();
-		let unbounded = Subscription::default().with_max_delay(None);
-		assert!(matches!(consumer.update(unbounded.clone()), Err(Error::Unsupported)));
-		assert!(matches!(
-			consumer.control().update(unbounded.clone()),
-			Err(Error::Unsupported)
-		));
-		assert_eq!(consumer.subscription(), replay(), "a refused update changes nothing");
-
-		// A budget set before the reader turned ordered is refused when it reads.
-		let mut consumer = producer.subscribe(unbounded).ordered();
+		let mut consumer = producer
+			.subscribe(Subscription::default().with_max_delay(None))
+			.ordered();
 		put(&producer, 0, None);
-		let waiter = kio::Waiter::noop();
-		assert!(matches!(
-			consumer.poll_next_group(&waiter),
-			Poll::Ready(Err(Error::Unsupported))
-		));
-		consumer.update(replay()).unwrap();
+		put(&producer, 2, None);
 		assert_eq!(drain_ordered(&mut consumer), [0]);
+		elapse(&producer, Duration::from_secs(3600));
+		assert!(drain_ordered(&mut consumer).is_empty(), "no deadline, however long");
+		put(&producer, 1, None);
+		assert_eq!(drain_ordered(&mut consumer), [1, 2]);
 	}
 
 	#[test]

@@ -35,8 +35,8 @@ pub struct MoqSubscription {
 	pub priority: i8,
 	/// Maximum age of a non-latest group before it is skipped.
 	/// `0` skips immediately; a larger value tolerates that much reordering; null sets no
-	/// subscriber limit and leaves the publisher's max age alone to bound it, which an
-	/// ordered reader refuses. Required, since uniffi can't default a duration to `0`.
+	/// subscriber limit and leaves the publisher's max age alone to bound it. Required,
+	/// since uniffi can't default a duration to `0`.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
