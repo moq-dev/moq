@@ -3,7 +3,8 @@ import * as Catalog from "@moq/hang/catalog";
 import { Path } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
-import { decoderConfigKey, supportCacheKey } from "./config";
+import { supportCacheKey } from "../support-probe";
+import { decoderConfigKey } from "./config";
 import { Source } from "./source";
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
