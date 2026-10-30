@@ -1184,8 +1184,8 @@ int main()
 	report("renditions rank like hang");
 
 	// A disabled rendition is never chosen while an enabled one is available, and an
-	// undecodable top rendition (unknown codec, or a channel count OBS has no layout for)
-	// falls through to the next playable one.
+	// undecodable top rendition (a codec nothing decodes, or a channel count OBS has no
+	// layout for) falls through to the next playable one.
 	{
 		TestRelay relay;
 		reset(relay.Url());
@@ -1221,6 +1221,10 @@ int main()
 		disabled_audio.enabled = false;
 		disabled_audio.bitrate = 10000000;
 		catalog.audio.emplace("a", disabled_audio);
+		auto flac_audio = audio;
+		flac_audio.codec = "flac";
+		flac_audio.bitrate = 6000000;
+		catalog.audio.emplace("flac", flac_audio);
 		auto unplaceable_audio = audio;
 		unplaceable_audio.channel_count = 9;
 		unplaceable_audio.bitrate = 5000000;

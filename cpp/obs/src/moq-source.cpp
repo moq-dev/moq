@@ -864,6 +864,14 @@ static void moq_source_on_audio_subscribed(struct moq_source *ctx, const std::sh
 	moq_source_read_audio(ctx, conn, track);
 }
 
+// Whether moq-ffi's AudioConsumer takes the codec: Opus, AAC, or PCM, the gate it applies
+// before subscribing. moq-audio may still refuse one of these once subscribed, such as an
+// AAC profile it has no decoder for.
+static bool moq_source_audio_codec_supported(const std::string &codec)
+{
+	return codec == "opus" || codec == "pcm" || codec.rfind("mp4a.40.", 0) == 0;
+}
+
 // The channels moq-audio should remix a rendition to, and where OBS puts them. A count
 // names moq-audio's default layout by the WAVE convention: 3 is 2.1, 4 quad, 5 5.0, 6 5.1,
 // 7 6.1, 8 7.1. OBS has no quad, 5.0, or 6.1 (its 4.0 and 4.1 put a center where quad has
@@ -1012,7 +1020,11 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 		if (moq_source_same_audio(conn->pending_audio.get(), id, config))
 			return;
 
-		// A layout OBS can't place falls through to the next rendition.
+		// A codec moq-audio can't decode, or a layout OBS can't place, falls through to the next rendition.
+		if (!moq_source_audio_codec_supported(config.codec)) {
+			LOG_ERROR("Unsupported audio codec '%s' in rendition %s", config.codec.c_str(), id.c_str());
+			continue;
+		}
 		auto layout = moq_source_audio_layout(config.channel_count);
 		if (!layout) {
 			LOG_ERROR("Unsupported audio channel count %u in rendition %s: OBS has no layout for it",
