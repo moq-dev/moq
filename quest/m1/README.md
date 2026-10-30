@@ -141,6 +141,7 @@ removed).
 - [A tightened SUBSCRIBE keeps the start's budget honest](/quest/m1/start-budget-update.md) - a relay copy records the delay its start was resolved under, so a SUBSCRIBE_UPDATE tightening cannot make later readers skip fillable history
 - [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for a per-rendition `hls` field
 - [HLS recorder target](/quest/m1/hls-record-target.md) - the moq-cli HLS recorder takes its target duration from the declared `hls` duration
+- [Lite-07 padding datagram](/quest/m1/lite07-padding-datagram.md) - lite-07 defines a padding datagram that receivers discard, so browser probes can pad below media
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [Smoke token subject](/quest/m1/smoke-token-subject.md) - condition: grant subject ships; then the release smoke test signs with `--subject`
