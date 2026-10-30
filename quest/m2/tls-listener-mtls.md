@@ -33,14 +33,17 @@ that refusal for a server with a `tls://` listener and updates the refusal's
 test.
 
 Decided 2026-10-08: request the certificate optionally, never require it,
-and only on the moq-ALPN TLS config, so once
-[the TCP acceptor](/quest/m2/one-port/tcp-demux.md) shares the port with
-HTTP and RTMPS, those clients are never asked for one. Whichever lands second
-keeps both working.
+and only on the moq-ALPN TLS config, so HTTP and RTMPS clients on the shared
+HTTPS port are never asked for one. That port already serves `tls://`: the
+relay's web acceptor picks `moq_tokio::tcp::TlsAcceptor::config` (built like
+the `listen.tcp` TLS config, by `TcpTls::new` in `rs/moq-tokio/src/server.rs`)
+from the ClientHello, so the optional request goes on that config too. There
+the relay holds the `rustls::ServerConnection` (`listener::Stream::tls`), so it
+reads the peer certificate itself and `TlsAcceptor::accept` needs a way to
+carry it into the `Request`, as `websocket::Options::identity` does.
 
 Public API: relay config may gain a listener option. Wire: none.
 
 ## Related
 
-- [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - carries `tls://` on the shared TCP port, where the certificate request stays on the moq ALPN
 - [qmux drives its own socket](/quest/m2/perf/stream/driver.md) - replaces qmux's reader and writer tasks and its constructors' return type

@@ -329,7 +329,8 @@ impl Relay {
 			.with_extensions(server_extensions)
 			.with_implementation(implementation)
 			.with_timeout(handshake_timeout)
-			.with_sessions(sessions.clone());
+			.with_sessions(sessions.clone())
+			.with_tls_acceptor(server.tls_acceptor());
 		#[cfg(feature = "acme")]
 		let web = web.with_acme(acme.as_ref().map(crate::acme::Acme::resolver));
 		let web = web.bind()?;

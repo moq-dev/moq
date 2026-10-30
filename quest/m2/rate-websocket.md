@@ -33,7 +33,8 @@ excess:
   `SO_SNDBUF` to about the burst, since paced reads cannot stop bytes the
   kernel already accepted and paced writes can queue a send buffer that drains
   faster than the cap. Fixing the size disables autotuning, which is the
-  point. The buffers bound the burst only; the sustained cap comes from the
+  point. The web acceptor keeps the accepted socket reachable through
+  `listener::Stream::tcp` (`rs/moq-relay/src/listener/demux.rs`) for this. The buffers bound the burst only; the sustained cap comes from the
   paced IO. Behind a TCP-terminating proxy, the buffers bound only the
   relay's side.
 - Reads stop at the bucket, so the client's TCP window closes; writes stop
@@ -48,7 +49,3 @@ live session applies.
 ## Required
 
 - [QUIC caps](/quest/m2/rate-quic.md) - introduces the moq-auth cap type this reuses
-
-## Related
-
-- [TCP acceptor: tls:// on the web port](/quest/m2/one-port/tcp-demux.md) - wraps the accepted stream; `listener::Stream::tcp` keeps the socket these buffer sizes need

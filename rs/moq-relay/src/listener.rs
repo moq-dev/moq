@@ -16,7 +16,7 @@
 
 mod demux;
 mod idle;
-pub(crate) use demux::{Classified, Stream, classify};
+pub(crate) use demux::{Classified, Stream, Tls, classify};
 pub(crate) use idle::Admission;
 
 use std::{

@@ -231,6 +231,83 @@ async fn connect_addrs(
 	.await
 }
 
+/// Serves `tls://` on TCP connections another listener accepted, such as a web
+/// server that reads each ClientHello so HTTPS and `tls://` share its port.
+///
+/// From [`crate::Server::tls_acceptor`]: the listen TLS identity, offering the
+/// same `qmux-01.<protocol>` ALPNs as a [`Listener`] serving `tls://`.
+#[cfg(feature = "_certs")]
+#[derive(Clone)]
+pub struct TlsAcceptor {
+	config: std::sync::Arc<rustls::ServerConfig>,
+	qmux: qmux::tls::Server,
+	server: moq_net::Server,
+	timeout: Option<std::time::Duration>,
+}
+
+#[cfg(feature = "_certs")]
+impl TlsAcceptor {
+	pub(crate) fn new(
+		config: std::sync::Arc<rustls::ServerConfig>,
+		server: moq_net::Server,
+		timeout: Option<std::time::Duration>,
+	) -> Self {
+		let qmux = qmux::tls::Server::new(config.clone()).with_session_config(crate::qmux_config());
+		Self {
+			config,
+			qmux,
+			server,
+			timeout,
+		}
+	}
+
+	/// The config to finish the TLS handshake with: the listen identity and its moq ALPNs.
+	pub fn config(&self) -> std::sync::Arc<rustls::ServerConfig> {
+		self.config.clone()
+	}
+
+	/// Whether a ClientHello offering `alpns` asks for `tls://`: it names one of
+	/// [`config`](Self::config)'s ALPNs.
+	pub fn offered<'a>(&self, mut alpns: impl Iterator<Item = &'a [u8]>) -> bool {
+		alpns.any(|offered| self.config.alpn_protocols.iter().any(|alpn| alpn == offered))
+	}
+
+	/// Run the qmux handshake and read SETUP on a connection whose TLS handshake
+	/// finished with [`config`](Self::config).
+	///
+	/// `link.alpn` names the ALPN that handshake negotiated, which picks the qmux
+	/// wire format. An unset `link.remote` or `link.local` is read from the socket.
+	/// The listen timeout bounds the handshake from this call, and `active` keeps
+	/// the connection counted toward the drain.
+	pub async fn accept<T>(
+		&self,
+		stream: T,
+		mut link: crate::server::Link,
+		active: moq_net::server::Active,
+	) -> crate::Result<crate::server::Request>
+	where
+		T: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRef<tokio::net::TcpStream> + Send + Unpin + 'static,
+	{
+		crate::runtime::scope(async move {
+			let deadline = self.timeout.and_then(|timeout| moq_clock::now().checked_add(timeout));
+			let tcp: &tokio::net::TcpStream = stream.as_ref();
+			link.remote = link.remote.or_else(|| tcp.peer_addr().ok());
+			link.local = link.local.or_else(|| tcp.local_addr().ok());
+			let stats = qmux::tcp::adopt(tcp).map_err(Error::Io)?;
+			let alpn = link.alpn.clone();
+			let handshake = async {
+				self.qmux
+					.accept_established(stream, alpn.as_deref(), stats)
+					.await
+					.map_err(|err| Error::Accept(crate::error::message(err)))
+			};
+			let session = crate::server::within(deadline, handshake).await?;
+			crate::server::accept_stream(&self.server, session, crate::Transport::Tcp, link, deadline, active).await
+		})
+		.await
+	}
+}
+
 /// Listens for incoming qmux connections on a TCP port, plaintext or TLS.
 pub struct Listener {
 	listener: tokio::net::TcpListener,
