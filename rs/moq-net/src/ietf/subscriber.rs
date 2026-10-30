@@ -3999,9 +3999,12 @@ impl Subscriber {
 
 			match step {
 				Step::Fill(fill) => {
-					let fetch =
-						self.clone()
-							.serve_fill(broadcast_path.clone(), track_name.to_owned(), fill, idle.properties.timescale);
+					let fetch = self.clone().serve_fill(
+						broadcast_path.clone(),
+						track_name.to_owned(),
+						fill,
+						idle.properties.timescale,
+					);
 					group_fetches.push(fetch);
 				}
 				Step::Subscribe => break true,

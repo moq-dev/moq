@@ -1778,8 +1778,21 @@ mod tests {
 		let (mut stream, wanted, _) = accept(h.peer.clone()).await;
 		assert!(wanted);
 		write(&mut stream, ietf::SubscribeOk::ID, &subscribe_ok(true)).await;
-		let first = moq_clock::timeout(TIMEOUT, first).await.expect("never accepted").unwrap();
-		let copy = h.subscriber.state.lock().subscribes.values().next().unwrap().producer.clone().unwrap();
+		let first = moq_clock::timeout(TIMEOUT, first)
+			.await
+			.expect("never accepted")
+			.unwrap();
+		let copy = h
+			.subscriber
+			.state
+			.lock()
+			.subscribes
+			.values()
+			.next()
+			.unwrap()
+			.producer
+			.clone()
+			.unwrap();
 		let mut group = copy.create_group(crate::model::group::Info { sequence: 5 }).unwrap();
 		group.write_frame(None, b"key".as_slice()).unwrap();
 		group.write_frame(None, b"delta".as_slice()).unwrap();
@@ -1789,7 +1802,10 @@ mod tests {
 		settle().await;
 		let (id, body) = read(&mut stream).await;
 		assert_eq!(id, ietf::SubscribeUpdate::ID);
-		assert_eq!(body.message::<ietf::SubscribeUpdate>(version).unwrap().new_group, Some(6));
+		assert_eq!(
+			body.message::<ietf::SubscribeUpdate>(version).unwrap().new_group,
+			Some(6)
+		);
 		write(&mut stream, ietf::RequestOk::ID, &answer).await;
 
 		// Everyone leaves, and the copy lingers.
@@ -1802,7 +1818,10 @@ mod tests {
 		assert!(!wanted, "the resume opts out");
 		assert_eq!(new_group, Some(6));
 		write(&mut stream, ietf::SubscribeOk::ID, &subscribe_ok(false)).await;
-		let reader = moq_clock::timeout(TIMEOUT, reader).await.expect("never accepted").unwrap();
+		let reader = moq_clock::timeout(TIMEOUT, reader)
+			.await
+			.expect("never accepted")
+			.unwrap();
 
 		// Skipped in the listing, so this subscription becomes the entry and pauses.
 		let skipped = ietf::PublishSkipped {
@@ -1814,7 +1833,10 @@ mod tests {
 		drop(reader);
 		let (id, body) = read(&mut stream).await;
 		assert_eq!(id, ietf::SubscribeUpdate::ID, "not paused");
-		assert_eq!(body.message::<ietf::SubscribeUpdate>(version).unwrap().forward, Some(false));
+		assert_eq!(
+			body.message::<ietf::SubscribeUpdate>(version).unwrap().forward,
+			Some(false)
+		);
 		write(&mut stream, ietf::RequestOk::ID, &answer).await;
 
 		// The resume still asks for group 6, since the track declared DYNAMIC_GROUPS.
