@@ -26,7 +26,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [In-memory unsafe runs under Miri](/quest/m2/miri-memory.md) - kio's and moq-net's memory-only unsafe runs under a nightly Miri job
 - [VA-API renderer tests](/quest/m2/vaapi-render-tests.md) - the VA-API renderer, decode, and transcode tests run in `just rs gpu` on AMD and Intel and fail instead of skipping, and hosted CI reports them ignored
 - [Every opt-in test target has a CI caller](/quest/m2/test-inventory.md) - the merge gate flags ignored tests, fuzz and bench targets, recipes, and scripts no workflow runs
-- [Workflow and dependency security linting](/quest/m2/workflow-security.md) - zizmor gates workflow changes, and Nightly audits Go and Python dependencies
 - [Worklet bundler matrix and React hooks run in CI](/quest/m2/browser-test-gaps.md) - the worklet matrix runs nightly on pinned bundlers, and the React signal hooks have tests
 - [Every handwritten language has a format gate](/quest/m2/format-gates.md) - gofmt, ktfmt, swift-format, and clang-format join `just check`, and Ruff covers all Python
 - [Weekly mutation testing on critical modules](/quest/m2/mutants.md) - cargo-mutants runs weekly on moq-auth and moq-net's permission, resume, and expiry code
