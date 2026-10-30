@@ -1,0 +1,131 @@
+/* Stats cards (statCard, statLine) and sparklines (graph).
+ * Each overlay imports this into its shadow stylesheet, which defines the variables. */
+.stat-card {
+	display: flex;
+	flex-direction: column;
+	gap: var(--spacing-8);
+	padding: var(--spacing-12);
+	background: var(--color-white-alpha-05);
+	border-radius: var(--border-radius-md);
+}
+
+.stat-head {
+	display: flex;
+	align-items: center;
+	gap: var(--spacing-8);
+}
+
+.stat-icon {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.5rem;
+	height: 1.5rem;
+	border-radius: var(--border-radius-sm);
+}
+
+.stat-icon svg {
+	width: 0.875rem;
+	height: 0.875rem;
+}
+
+.stat-title {
+	font-size: 0.75rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+
+.stat-status {
+	margin-left: auto;
+	font-size: 0.5625rem;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--color-gray-100);
+	background: var(--color-white-alpha-10);
+	padding: 0.05rem var(--spacing-8);
+	border-radius: var(--border-radius-sm);
+}
+
+.stat-card--video .stat-icon {
+	background: var(--color-purple-900);
+	color: var(--color-purple-400);
+}
+.stat-card--video .stat-title {
+	color: var(--color-purple-400);
+}
+
+.stat-card--audio .stat-icon {
+	background: var(--color-green-900);
+	color: var(--color-green-400);
+}
+.stat-card--audio .stat-title {
+	color: var(--color-green-400);
+}
+
+.stat-card--network .stat-icon {
+	background: var(--color-blue-900);
+	color: var(--color-blue-400);
+}
+.stat-card--network .stat-title {
+	color: var(--color-blue-400);
+}
+
+.stat-grid {
+	display: grid;
+	grid-template-columns: auto 1fr;
+	gap: var(--spacing-2) var(--spacing-12);
+}
+
+.stat-line {
+	display: contents;
+}
+
+.stat-key {
+	font-size: 0.75rem;
+	color: var(--color-white-alpha-60);
+}
+
+.stat-value {
+	font-size: 0.75rem;
+	font-weight: 600;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Sparkline graph. */
+.graph {
+	display: flex;
+	flex-direction: column;
+	gap: var(--spacing-2);
+	margin-top: var(--spacing-4);
+}
+
+.graph-header {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+}
+
+.graph-label {
+	font-size: 0.625rem;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--color-white-alpha-40);
+}
+
+.graph-value {
+	font-size: 0.6875rem;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+
+.graph-canvas {
+	width: 100%;
+	height: 2.5rem;
+	display: block;
+}

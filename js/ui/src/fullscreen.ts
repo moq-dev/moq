@@ -1,11 +1,11 @@
-// Cross-browser fullscreen for the player.
+// Cross-browser fullscreen for the watch player and the publish preview.
 //
-// We fullscreen the shadow `.player` container (not the bare <moq-watch>) so the
+// We fullscreen the shadow `.player` container (not the bare custom element) so the
 // overlay chrome stays visible. Safari needs webkit-prefixed methods, and iPhone
 // has no element fullscreen API at all: there we fall back to a CSS pseudo-fullscreen
 // that pins the player to the viewport. The native iOS fullscreen API is only exposed
 // on <video>, which we never render into.
-import type { Effect } from "@moq/signals";
+import { type Effect, type Getter, Signal } from "@moq/signals";
 
 type WebkitDocument = Document & {
 	webkitFullscreenElement?: Element | null;
@@ -18,33 +18,42 @@ type WebkitElement = HTMLElement & {
 
 const PSEUDO_CLASS = "player--pseudo-fullscreen";
 
+/** A fullscreen controller created by {@link createFullscreen}. */
 export interface Fullscreen {
 	/** Whether the player is currently maximized (real or pseudo fullscreen). */
-	active(): boolean;
+	active: Getter<boolean>;
 	/** Enter if windowed, exit if fullscreen. Must run inside a user gesture. */
 	toggle(): void;
-	/** Subscribe to state changes; returns an unsubscribe function. */
-	onChange(fn: () => void): () => void;
 }
 
 /**
+ * Maximize `player`, falling back to the `player--pseudo-fullscreen` class where the browser
+ * has no element fullscreen API or refuses the request. The overlay styles that class.
+ *
  * @param parent Effect that owns the document listeners (auto-removed on cleanup).
  * @param player The shadow container to maximize.
  */
 export function createFullscreen(parent: Effect, player: HTMLElement): Fullscreen {
 	const doc = document as WebkitDocument;
-	const listeners = new Set<() => void>();
-	const notify = () => {
-		for (const fn of listeners) fn();
-	};
-
-	// Real fullscreen changes (incl. Esc / browser chrome) flow through notify too.
-	parent.event(document, "fullscreenchange", notify);
-	parent.event(document, "webkitfullscreenchange", notify);
 
 	const realActive = () => !!(document.fullscreenElement || doc.webkitFullscreenElement);
 	const pseudoActive = () => player.classList.contains(PSEUDO_CLASS);
-	const active = () => realActive() || pseudoActive();
+
+	const active = new Signal(realActive() || pseudoActive());
+	const refresh = () => active.set(realActive() || pseudoActive());
+
+	// Real fullscreen changes (incl. Esc / browser chrome) refresh the state too.
+	parent.event(document, "fullscreenchange", refresh);
+	parent.event(document, "webkitfullscreenchange", refresh);
+
+	const enterPseudo = () => {
+		player.classList.add(PSEUDO_CLASS);
+		refresh();
+	};
+	const exitPseudo = () => {
+		player.classList.remove(PSEUDO_CLASS);
+		refresh();
+	};
 
 	const enter = () => {
 		const el = player as WebkitElement;
@@ -74,21 +83,8 @@ export function createFullscreen(parent: Effect, player: HTMLElement): Fullscree
 		doc.webkitExitFullscreen?.();
 	};
 
-	const enterPseudo = () => {
-		player.classList.add(PSEUDO_CLASS);
-		notify();
-	};
-	const exitPseudo = () => {
-		player.classList.remove(PSEUDO_CLASS);
-		notify();
-	};
+	// Read the live state rather than the signal, whose writes land a microtask later.
+	const toggle = () => (realActive() || pseudoActive() ? exit() : enter());
 
-	const toggle = () => (active() ? exit() : enter());
-
-	const onChange = (fn: () => void): (() => void) => {
-		listeners.add(fn);
-		return () => listeners.delete(fn);
-	};
-
-	return { active, toggle, onChange };
+	return { active, toggle };
 }

@@ -1,6 +1,6 @@
 import type { Effect } from "@moq/signals";
+import { formatMillis } from "@moq/ui";
 import type MoqWatch from "../../element";
-import { formatMillis } from "../format";
 import type { UiState } from "../state";
 
 type Variant = "live" | "loading" | "connecting" | "error";

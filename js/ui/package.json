@@ -11,7 +11,8 @@
 		"directory": "js/ui"
 	},
 	"exports": {
-		".": "./src/index.ts"
+		".": "./src/index.ts",
+		"./stats.css": "./src/stats.css"
 	},
 	"sideEffects": false,
 	"scripts": {

@@ -1,4 +1,5 @@
 @import "./base.css";
 @import "./player.css";
 @import "./controls.css";
+@import "@moq/ui/stats.css";
 @import "./panel.css";

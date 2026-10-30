@@ -1,26 +1,11 @@
 import { Milli, Nano, now } from "@moq/clock";
 import type { Effect, Getter } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
-import { graph } from "@moq/ui";
+import { formatBitrate, formatFps, formatHz, graph, statCard, statLine } from "@moq/ui";
 import type MoqPublish from "../../element";
-import { formatBitrate, formatFps, formatHz } from "../format";
-import { audio as audioIcon, icon, video as videoIcon, wifi as wifiIcon } from "../icons";
+import { audio as audioIcon, video as videoIcon, wifi as wifiIcon } from "../icons";
 
 const POLL = Nano.fromMilli(Milli(250));
-
-type Kind = "network" | "video" | "audio";
-
-function card(kind: Kind, label: string, svg: string): { el: HTMLElement; grid: HTMLElement; status: HTMLElement } {
-	const el = DOM.create("div", { className: `stat-card stat-card--${kind}` });
-	const head = DOM.create("div", { className: "stat-head" });
-	const iconWrap = DOM.create("div", { className: "stat-icon" });
-	iconWrap.appendChild(icon(svg));
-	const status = DOM.create("span", { className: "stat-status", style: { display: "none" } });
-	head.append(iconWrap, DOM.create("span", { className: "stat-title" }, label), status);
-	const grid = DOM.create("div", { className: "stat-grid" });
-	el.append(head, grid);
-	return { el, grid, status };
-}
 
 /** Show an active/idle pill: an encoder only runs (and uses bandwidth) while a viewer is subscribed. */
 function trackActive(parent: Effect, status: HTMLElement, active: Getter<boolean | undefined>) {
@@ -32,22 +17,14 @@ function trackActive(parent: Effect, status: HTMLElement, active: Getter<boolean
 	});
 }
 
-function line(grid: HTMLElement, label: string): HTMLSpanElement {
-	const row = DOM.create("div", { className: "stat-line" });
-	const value = DOM.create("span", { className: "stat-value" }, "—");
-	row.append(DOM.create("span", { className: "stat-key" }, label), value);
-	grid.appendChild(row);
-	return value;
-}
-
 /** The Stats tab: what we're capturing and publishing. */
 export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	const container = DOM.create("div", { className: "tab-body" });
 
 	// Video card: static detail as rows, live capture fps + upload bitrate as graphs.
-	const videoCard = card("video", "Video", videoIcon);
-	const vRes = line(videoCard.grid, "Resolution");
-	const vCodec = line(videoCard.grid, "Codec");
+	const videoCard = statCard("video", "Video", videoIcon);
+	const vRes = statLine(videoCard.grid, "Resolution");
+	const vCodec = statLine(videoCard.grid, "Codec");
 	const vBitrateGraph = graph(parent, "Bitrate", { color: "#a855f7", format: formatBitrate });
 	const vFpsGraph = graph(parent, "Frame rate", { color: "#facc15", format: formatFps });
 	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
@@ -55,17 +32,17 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	// active = a viewer is subscribed and we're actually encoding/sending.
 	trackActive(parent, videoCard.status, publish.video.out.active);
 
-	const audioCard = card("audio", "Audio", audioIcon);
-	const aCodec = line(audioCard.grid, "Codec");
-	const aRate = line(audioCard.grid, "Sample rate");
-	const aChannels = line(audioCard.grid, "Channels");
-	const aBitrate = line(audioCard.grid, "Bitrate");
+	const audioCard = statCard("audio", "Audio", audioIcon);
+	const aCodec = statLine(audioCard.grid, "Codec");
+	const aRate = statLine(audioCard.grid, "Sample rate");
+	const aChannels = statLine(audioCard.grid, "Channels");
+	const aBitrate = statLine(audioCard.grid, "Bitrate");
 	trackActive(parent, audioCard.status, publish.audio.out.active);
 
-	const netCard = card("network", "Connection", wifiIcon);
-	const nStatus = line(netCard.grid, "Status");
-	const nServer = line(netCard.grid, "Server");
-	const nName = line(netCard.grid, "Broadcast");
+	const netCard = statCard("network", "Connection", wifiIcon);
+	const nStatus = statLine(netCard.grid, "Status");
+	const nServer = statLine(netCard.grid, "Server");
+	const nName = statLine(netCard.grid, "Broadcast");
 
 	container.append(videoCard.el, audioCard.el, netCard.el);
 

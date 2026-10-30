@@ -1,4 +1,4 @@
-// Shared human-readable formatters for the watch UI.
+// Human-readable formatters for the watch and publish stats.
 
 /** Format a bitrate (bits per second) as Mbps/kbps/bps. */
 export function formatBitrate(bps: number): string {
