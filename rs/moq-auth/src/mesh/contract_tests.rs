@@ -30,7 +30,7 @@ impl Mesh {
 		config.device_interval = Duration::ZERO;
 		config.token_ttl = ttl;
 		let coordinator = Coordinator::new(config).unwrap();
-		let router = axum::Router::new().nest("/mesh", coordinator.router());
+		let router = coordinator.router();
 		tokio::spawn(async move { axum::serve(listener, router).await });
 		Self { coordinator, base, key }
 	}
@@ -224,6 +224,41 @@ async fn renew_refreshes_before_expiry() {
 	let renewed = device.renew(&enrollment).await.unwrap();
 	assert!(moq_clock::wall() < enrollment.expires);
 	assert!(renewed.expires > enrollment.expires);
+}
+
+#[test]
+fn a_key_that_cannot_sign_refuses_to_start() {
+	let key = Key::generate(Algorithm::ES256, None).unwrap().to_public().unwrap();
+	let config = Config::new("https://mesh.example".parse().unwrap(), key);
+	assert!(Coordinator::new(config).is_err());
+}
+
+#[test]
+fn a_failed_save_spends_nothing() {
+	let dir = tempfile::tempdir().unwrap();
+	let key = Key::generate(Algorithm::HS256, None).unwrap();
+	let mut config = Config::new("https://mesh.example".parse().unwrap(), key);
+	config.state = Some(dir.path().join("mesh.json"));
+	let coordinator = Coordinator::new(config).unwrap();
+	let secret = coordinator.create_key(&NewKey::default()).unwrap().key.unwrap();
+
+	// A directory where the temporary file goes makes every save fail.
+	std::fs::create_dir(dir.path().join("mesh.tmp")).unwrap();
+	let signer = Ed25519KeyPair::generate().unwrap();
+	let base: url::Url = "https://mesh.example".parse().unwrap();
+	let enroll = |coordinator: &Coordinator| EnrollRequest {
+		proof: Proof::sign(&signer, &base, coordinator.challenge().challenge),
+		key: secret.clone(),
+		name: None,
+	};
+	let err = coordinator.enroll(&enroll(&coordinator)).unwrap_err();
+	assert_eq!(err.error, ErrorCode::ServerError);
+	assert!(coordinator.devices().is_empty());
+	assert!(!coordinator.keys()[0].used);
+
+	std::fs::remove_dir(dir.path().join("mesh.tmp")).unwrap();
+	coordinator.enroll(&enroll(&coordinator)).unwrap();
+	assert!(coordinator.keys()[0].used);
 }
 
 #[tokio::test]

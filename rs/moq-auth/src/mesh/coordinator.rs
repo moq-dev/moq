@@ -82,7 +82,7 @@ impl Config {
 }
 
 /// The state that survives a restart.
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct Store {
 	#[serde(default)]
 	keys: Vec<StoredKey>,
@@ -238,6 +238,11 @@ impl Coordinator {
 			},
 			None => Store::default(),
 		};
+		// Sign once now, so a key that cannot sign these claims fails at startup rather
+		// than after an enrollment key is spent.
+		config
+			.key
+			.sign(&claims(EndpointId::from_bytes([0; 32]), moq_clock::wall(), None))?;
 		Ok(Self {
 			config: Arc::new(config),
 			inner: Arc::new(Mutex::new(Inner {
@@ -311,19 +316,20 @@ impl Coordinator {
 		let id = id.to_string();
 
 		let endpoint = request.proof.endpoint;
-		self.admit(&mut inner, endpoint, request.name.as_deref(), tags)?;
-		if !reusable && let Some(key) = inner.store.keys.iter_mut().find(|key| key.id == id) {
-			key.used = true;
-		}
-		self.save(&inner)?;
-		self.issue(&inner, endpoint)
+		self.commit(&mut inner, |store| {
+			self.admit(store, endpoint, request.name.as_deref(), tags)?;
+			if !reusable && let Some(key) = store.keys.iter_mut().find(|key| key.id == id) {
+				key.used = true;
+			}
+			self.issue(store, endpoint)
+		})
 	}
 
 	/// Start a device grant for a human to approve.
 	pub fn device(&self, request: &DeviceRequest) -> Reply<DeviceAuthorization> {
 		let mut inner = self.inner.lock().unwrap();
 		self.check(&mut inner, &request.proof)?;
-		self.refuse_revoked(&inner, request.proof.endpoint)?;
+		refuse_revoked(&inner.store, request.proof.endpoint)?;
 
 		let now = Instant::now();
 		inner.pending.retain(|_, pending| pending.expires > now);
@@ -387,10 +393,14 @@ impl Coordinator {
 				Err(ErrorReply::new(ErrorCode::AccessDenied, "the device grant was denied"))
 			}
 			Decision::Approved => {
-				let pending = inner.pending.remove(&hash).expect("found above");
-				self.admit(&mut inner, pending.endpoint, pending.name.as_deref(), Vec::new())?;
-				self.save(&inner)?;
-				self.issue(&inner, pending.endpoint)
+				let (endpoint, name) = (pending.endpoint, pending.name.clone());
+				// The grant stays redeemable until its enrollment is saved.
+				let enrollment = self.commit(&mut inner, |store| {
+					self.admit(store, endpoint, name.as_deref(), Vec::new())?;
+					self.issue(store, endpoint)
+				})?;
+				inner.pending.remove(&hash);
+				Ok(enrollment)
 			}
 		}
 	}
@@ -405,7 +415,7 @@ impl Coordinator {
 			.iter()
 			.find(|device| device.endpoint == proof.endpoint)
 		{
-			Some(device) if !device.revoked => self.issue(&inner, proof.endpoint),
+			Some(device) if !device.revoked => self.issue(&inner.store, proof.endpoint),
 			Some(_) => Err(ErrorReply::new(ErrorCode::AccessDenied, "the device is revoked")),
 			None => Err(ErrorReply::new(ErrorCode::AccessDenied, "the device is not enrolled")),
 		}
@@ -429,9 +439,10 @@ impl Coordinator {
 		};
 		let mut info = KeyInfo::from(&stored);
 		info.key = Some(format!("{id}.{secret}"));
-		inner.store.keys.push(stored);
-		self.save(&inner)
-			.map_err(|err| crate::Error::MeshState(err.to_string()))?;
+		self.commit(&mut inner, |store| {
+			store.keys.push(stored);
+			Ok(())
+		})?;
 		Ok(info)
 	}
 
@@ -451,13 +462,11 @@ impl Coordinator {
 	/// Returns whether the key exists.
 	pub fn revoke_key(&self, id: &str) -> crate::Result<bool> {
 		let mut inner = self.inner.lock().unwrap();
-		let Some(key) = inner.store.keys.iter_mut().find(|key| key.id == id) else {
-			return Ok(false);
-		};
-		key.revoked = true;
-		self.save(&inner)
-			.map_err(|err| crate::Error::MeshState(err.to_string()))?;
-		Ok(true)
+		let found = self.commit(&mut inner, |store| {
+			let key = store.keys.iter_mut().find(|key| key.id == id);
+			Ok(key.map(|key| key.revoked = true).is_some())
+		})?;
+		Ok(found)
 	}
 
 	/// Every device, revoked ones included.
@@ -469,18 +478,11 @@ impl Coordinator {
 	/// Returns whether the device exists.
 	pub fn revoke_device(&self, endpoint: EndpointId) -> crate::Result<bool> {
 		let mut inner = self.inner.lock().unwrap();
-		let Some(device) = inner
-			.store
-			.devices
-			.iter_mut()
-			.find(|device| device.endpoint == endpoint)
-		else {
-			return Ok(false);
-		};
-		device.revoked = true;
-		self.save(&inner)
-			.map_err(|err| crate::Error::MeshState(err.to_string()))?;
-		Ok(true)
+		let found = self.commit(&mut inner, |store| {
+			let device = store.devices.iter_mut().find(|device| device.endpoint == endpoint);
+			Ok(device.map(|device| device.revoked = true).is_some())
+		})?;
+		Ok(found)
 	}
 
 	/// The device grants waiting for a human.
@@ -515,15 +517,19 @@ impl Coordinator {
 		true
 	}
 
-	/// The device-facing contract, to serve at [`Config::url`].
+	/// The device-facing contract, mounted at [`Config::url`]'s path.
 	pub fn router(&self) -> Router {
-		Router::new()
+		let router = Router::new()
 			.route("/challenge", post(challenge_handler))
 			.route("/enroll", post(enroll_handler))
 			.route("/device", post(device_handler).get(verification_handler))
 			.route("/device/token", post(device_token_handler))
 			.route("/refresh", post(refresh_handler))
-			.with_state(self.clone())
+			.with_state(self.clone());
+		match self.config.url.path().trim_end_matches('/') {
+			"" => router,
+			base => Router::new().nest(base, router),
+		}
 	}
 
 	/// The owner's API under `/mesh`, with no authentication of its own: mount it only on
@@ -571,22 +577,20 @@ impl Coordinator {
 		Ok(())
 	}
 
-	fn refuse_revoked(&self, inner: &Inner, endpoint: EndpointId) -> Reply<()> {
-		if inner
-			.store
-			.devices
-			.iter()
-			.any(|device| device.endpoint == endpoint && device.revoked)
-		{
-			return Err(ErrorReply::new(ErrorCode::AccessDenied, "the device is revoked"));
-		}
-		Ok(())
+	/// Apply `change` to a copy of the store and save it, adopting the copy only once it
+	/// is on disk, so a failed save leaves no credential spent and no device admitted.
+	fn commit<T>(&self, inner: &mut Inner, change: impl FnOnce(&mut Store) -> Reply<T>) -> Reply<T> {
+		let mut store = inner.store.clone();
+		let out = change(&mut store)?;
+		self.save(&store)?;
+		inner.store = store;
+		Ok(out)
 	}
 
 	/// Record `endpoint` as enrolled, or update its name and tags if it already is.
-	fn admit(&self, inner: &mut Inner, endpoint: EndpointId, name: Option<&str>, tags: Vec<String>) -> Reply<()> {
-		self.refuse_revoked(inner, endpoint)?;
-		let devices = &mut inner.store.devices;
+	fn admit(&self, store: &mut Store, endpoint: EndpointId, name: Option<&str>, tags: Vec<String>) -> Reply<()> {
+		refuse_revoked(store, endpoint)?;
+		let devices = &mut store.devices;
 		let current = devices.iter().position(|device| device.endpoint == endpoint);
 		let name = match (name, current) {
 			(None, Some(index)) => devices[index].name.clone(),
@@ -609,7 +613,7 @@ impl Coordinator {
 	}
 
 	/// Sign a token for an enrolled `endpoint` and list the mesh.
-	fn issue(&self, inner: &Inner, endpoint: EndpointId) -> Reply<Enrollment> {
+	fn issue(&self, store: &Store, endpoint: EndpointId) -> Reply<Enrollment> {
 		let internal = |err: crate::Error| ErrorReply::new(ErrorCode::ServerError, err.to_string());
 		let now = moq_clock::wall();
 		// `exp` is whole seconds on the wire; truncate so the reply matches the token.
@@ -618,14 +622,12 @@ impl Coordinator {
 			.unwrap_or_default()
 			.as_secs();
 		let expires = moq_clock::Wall::UNIX_EPOCH.saturating_add(Duration::from_secs(secs) + self.config.token_ttl);
-		let claims = Claims::default()
-			.with_publish([endpoint.publish()])
-			.with_subscribe([Pattern::subtree("mesh").expect("a valid path")])
-			.with_issued(now)
-			.with_expires(expires);
-		let token = self.config.key.sign(&claims).map_err(internal)?;
-		let device = inner
-			.store
+		let token = self
+			.config
+			.key
+			.sign(&claims(endpoint, now, Some(expires)))
+			.map_err(internal)?;
+		let device = store
 			.devices
 			.iter()
 			.find(|device| device.endpoint == endpoint)
@@ -635,8 +637,7 @@ impl Coordinator {
 			expires,
 			relays: self.config.relays.clone(),
 			name: device.name.clone(),
-			members: inner
-				.store
+			members: store
 				.devices
 				.iter()
 				.filter(|device| !device.revoked)
@@ -650,7 +651,7 @@ impl Coordinator {
 	}
 
 	/// Write the store atomically: a temporary file beside it, renamed over it.
-	fn save(&self, inner: &Inner) -> Reply<()> {
+	fn save(&self, store: &Store) -> Reply<()> {
 		let Some(path) = &self.config.state else {
 			return Ok(());
 		};
@@ -658,11 +659,31 @@ impl Coordinator {
 			tracing::error!(path = %path.display(), %err, "failed to save the mesh state");
 			ErrorReply::new(ErrorCode::ServerError, "the coordinator could not save its state")
 		};
-		let json = serde_json::to_string_pretty(&inner.store).expect("the store serializes");
+		let json = serde_json::to_string_pretty(store).expect("the store serializes");
 		let tmp = path.with_extension("tmp");
 		crate::fs::write_private(&tmp, &json).map_err(failed)?;
 		std::fs::rename(&tmp, path).map_err(failed)
 	}
+}
+
+fn refuse_revoked(store: &Store, endpoint: EndpointId) -> Reply<()> {
+	if store
+		.devices
+		.iter()
+		.any(|device| device.endpoint == endpoint && device.revoked)
+	{
+		return Err(ErrorReply::new(ErrorCode::AccessDenied, "the device is revoked"));
+	}
+	Ok(())
+}
+
+/// The grant every mesh token carries: publish under its own ID, subscribe to the mesh.
+fn claims(endpoint: EndpointId, issued: moq_clock::Wall, expires: Option<moq_clock::Wall>) -> Claims {
+	Claims::default()
+		.with_publish([endpoint.publish()])
+		.with_subscribe([Pattern::subtree("mesh").expect("a valid path")])
+		.with_issued(issued)
+		.with_expires(expires)
 }
 
 /// `name` as one DNS label: lowercase ASCII letters, digits, and inner hyphens, at most
