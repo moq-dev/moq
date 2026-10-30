@@ -72,15 +72,36 @@ control pace a single client; Node `pipe()` to several destinations paces the
 slowest. This is `tee()` with a bounded buffer that drops the branch that
 falls off it ([whatwg/streams#1235](https://github.com/whatwg/streams/issues/1235)).
 
-Open, for the implementer to measure and record: the readiness API's shape,
-which is an API decision to bring to the maintainer before coding. qmux transports carry the same rule through their
-own stream credit ([qmux receive lease](/quest/m2/qmux-receive-lease.md)).
+Landed in [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388) (Rust,
+session ingest only): readers report the byte end of each frame they take
+(`Pace` in `rs/moq-net/src/model/pace.rs`), and the shared transport reader's
+payload loop (`coding::Reader::poll_read_frame`) waits on
+`group::Producer::poll_ready` before taking more, so moq-lite and
+moq-transport ingest both pause past the 16 MB window. A reader that took every
+committed frame counts as waiting on the writer, so a frame larger than the
+window never stalls it. Tests cover one hop on lite-06, lite-07-wip, and
+moq-transport-22: an idle reader holds the relay copy near the window and then
+receives every frame, and a slow reader ends `Evicted` while the fast one keeps
+up.
 
-Tests: a relay chain where a fast reader paces a publisher that writes faster
-than the link, with memory held near the window; a second, slower reader ending
-`Evicted` without slowing the fast one; a track with no readers never blocking
-its publisher; Rust and JS parity. Benchmark the hot path in `group.rs` and
-record any regression.
+What remains:
 
-Docs: the moq-lite concept page's congestion section and the relay cache docs
-change inline.
+- The receive-credit cap for paused streams above, which has to land before
+  pacing can reset nothing it means to keep lossless. Bring the mechanism to
+  the maintainer before coding.
+- The readiness future for origin producers: its shape is an API decision to
+  bring to the maintainer before coding. Until it lands, a local byte-stream
+  writer more than 32 MB ahead of its session's egress sheds its own front.
+- JS parity.
+- A two-relay chain test with memory measured near the window.
+- Benchmarks of the hot path in `group.rs`: the cursor's report is one
+  relaxed load per frame or batch, and a store only for the fastest reader.
+  They were not run on the busy host that landed the first slice.
+- Fills that write a whole batch of groups at once evict their own earlier
+  groups before the reader takes them (the follow-up from
+  [moq-dev/moq#7339](https://github.com/moq-dev/moq/pull/7339)). Pacing within
+  a group does not cover this; decide whether it belongs here or with
+  [flights](/quest/m1/unbounded-groups/flights.md).
+
+qmux transports carry the same rule through their own stream credit
+([qmux receive lease](/quest/m2/qmux-receive-lease.md)).

@@ -380,6 +380,15 @@ Put together, a conference might use:
 Under light congestion video drops the tail of a group; under heavy congestion
 video stops and audio lags by at most 500 ms. No protocol change, just knobs.
 
+A long group is paced by its fastest reader instead. Each hop receives at most
+16 MB of a group past its fastest reader, then stops reading the group's stream,
+so stream flow control pushes back hop by hop to the publisher, and a reader
+that keeps up loses nothing. A slower reader is never waited on: one that trails
+the fastest by more than the group's 32 MB tail reaches a shed frame, and asks
+for a new group on tracks that opt into [refresh](#refresh) or ends with
+`Evicted`. A hop with no reader keeps receiving and shedding, so pacing never
+stalls an unwatched track, and the publisher's own writes never wait.
+
 ### Refresh
 
 A publisher can opt a track into refresh by setting its byte ratio. A new

@@ -19,7 +19,7 @@
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use super::flate;
-use super::pace::{self, Pace};
+use super::pace::Pace;
 mod content;
 use crate::cache;
 use crate::frame::{self, Cached, FrameBuf, Payload};
@@ -663,7 +663,7 @@ impl Inflate {
 						},
 						fields: slice.fields.clone(),
 						inflated: 0,
-						end: 0,
+						end: slice.end,
 					};
 					let cost = Plain::cost(&entry);
 					self.plain.bill.add(cost);
@@ -883,13 +883,15 @@ impl GroupState {
 		}
 		let base = self.log.base() as usize;
 		if base < end {
-			let (mut charged, mut payload, mut fields) = (0, 0, 0);
+			let (mut charged, mut payload, mut fields, mut shed) = (0, 0, 0, 0);
 			for entry in (base..end).map(|index| self.log.get(index as u64).expect("committed below the end")) {
+				shed = entry.end;
 				charged += self.entry_bytes(entry);
 				payload += entry.frame.payload.len() as u64;
 				fields += entry.fields.as_ref().map_or(0, |fields| fields.heap());
 			}
 			self.forget(payload, fields);
+			self.pace.shed(shed);
 			let heap = kio::log::Writer::<Entry>::HEAP;
 			let before = self.log.heap().max(heap);
 			self.log.evict(end as u64);
@@ -970,7 +972,9 @@ impl GroupState {
 	/// tail does, so a paced writer of tiny frames is bounded too.
 	fn push(&mut self, mut entry: Entry) -> u64 {
 		let slots = self.reserve_frame();
-		entry.end = self.pace.commit(entry.frame.payload.len() as u64 + size_of::<Entry>() as u64);
+		entry.end = self
+			.pace
+			.commit(entry.frame.payload.len() as u64 + size_of::<Entry>() as u64);
 		self.log.push(entry);
 		slots
 	}
@@ -1078,6 +1082,7 @@ impl GroupState {
 	///
 	/// A compressed group hands a plain reader each frame whole once it completes, as the
 	/// slices to inflate, and a `raw` one the stored slice, streaming one still arriving.
+	/// A frame handed out counts as taken, pacing the writer (see [`Pace`]).
 	fn poll_frame_source(&self, index: usize, raw: bool) -> Poll<Result<Option<Source>>> {
 		self.check_read(index, raw)?;
 		if index < self.held()
@@ -1091,6 +1096,7 @@ impl GroupState {
 			// walk spare a group a consumer is actively draining.
 			self.charge.refresh();
 			if let Some(flate) = self.flate.as_ref().filter(|_| !raw) {
+				self.pace.took(entry.end);
 				return Poll::Ready(Ok(Some(Source::Inflate {
 					job: self.inflate(flate, index, index)?,
 					local: index,
@@ -1099,6 +1105,7 @@ impl GroupState {
 				})));
 			}
 			let (header, source) = entry.read(self.flate.is_some());
+			self.pace.took(entry.end);
 			return Poll::Ready(Ok(Some(Source::Ready(header, source))));
 		}
 		if index == self.committed()
@@ -1107,6 +1114,8 @@ impl GroupState {
 			&& (raw || self.flate.is_none())
 		{
 			self.charge.refresh();
+			// A reader streaming the open frame is at the writer's edge.
+			self.pace.took_committed();
 			let info = frame::Info {
 				size: p.buf.size() as u64,
 				timestamp: p.timestamp,
@@ -1382,39 +1391,6 @@ fn modify(state: &kio::Producer<GroupState>) -> Result<kio::Mut<'_, GroupState>>
 pub struct Producer {
 	handle: Handle,
 	stats: stats::Meter,
-	// Where the fastest reader's next frame starts, for [`Self::poll_ready`].
-	ahead: Ahead,
-}
-
-/// A paced writer's view of the frame log, measuring how far it runs ahead of its
-/// fastest reader without the group's lock.
-struct Ahead {
-	log: kio::log::Reader<Entry>,
-	// The fastest reader's next frame and where it starts, while the copy holds it.
-	start: Option<(usize, u64)>,
-}
-
-impl Ahead {
-	/// Whether the writer, `partial` bytes into its open frame, is more than
-	/// [`pace::AHEAD`] past the start of frame `read`.
-	///
-	/// Not while the log holds no frame `read`: either it is not committed yet, so the
-	/// fastest reader is waiting on the writer, or it was shed, so that reader fell off.
-	fn paced(&mut self, pace: &Pace, read: usize, partial: u64) -> bool {
-		let start = match self.start {
-			Some((index, start)) if index == read => start,
-			_ => {
-				let mut log = self.log.read();
-				let Ok(Some(entry)) = log.get(read as u64) else {
-					return false;
-				};
-				let start = entry.end - (entry.frame.payload.len() + size_of::<Entry>()) as u64;
-				self.start = Some((read, start));
-				start
-			}
-		};
-		pace.written().saturating_add(partial).saturating_sub(start) > pace::AHEAD
-	}
 }
 
 /// Shared group state without permission to write frames or finish the group.
@@ -1627,7 +1603,7 @@ impl Producer {
 			failed: AtomicBool::new(false),
 			started: AtomicBool::new(false),
 			access,
-			log: log.clone(),
+			log,
 			pace,
 			arrived: super::clock::now(),
 		});
@@ -1640,7 +1616,6 @@ impl Producer {
 				alive,
 			},
 			stats: stats::Meter::default(),
-			ahead: Ahead { log, start: None },
 		}
 	}
 
@@ -1705,8 +1680,6 @@ impl Producer {
 		state.offset = index;
 		state.next_index = index;
 		state.log.evict(index as u64);
-		// The frames below are not this copy's, so no reader of it is behind them.
-		state.pace.took(index);
 		Ok(())
 	}
 
@@ -2238,8 +2211,8 @@ impl Producer {
 		kio::wait(|waiter| self.handle.poll_closed(waiter)).await
 	}
 	/// Poll until the writer may take more from upstream, `partial` bytes into a frame
-	/// it has not committed: until it is at most [`pace::AHEAD`] past the start of the
-	/// first frame its fastest reader has not taken.
+	/// it has not committed: until it is at most [`super::pace::AHEAD`] past the end of the last
+	/// frame its fastest reader took.
 	///
 	/// Ready at once while no reader holds the group, so a group nobody watches keeps
 	/// writing and sheds its front, and once it is closed, so the next write surfaces why.
@@ -2249,16 +2222,16 @@ impl Producer {
 	///
 	/// Only a paced writer, a session's ingest, waits on this; a local write never does.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_ready(&mut self, waiter: &kio::Waiter, partial: u64) -> Poll<()> {
+	pub(crate) fn poll_ready(&self, waiter: &kio::Waiter, partial: u64) -> Poll<()> {
 		let pace = &self.handle.alive.pace;
-		if !self.ahead.paced(pace, pace.read(), partial) {
+		if !pace.ahead(partial) {
 			return Poll::Ready(());
 		}
 		// Either wakes the writer: the last reader leaving, or the group closing.
 		if self.handle.poll_unused(waiter).is_ready() || self.handle.state.poll_closed(waiter).is_ready() {
 			return Poll::Ready(());
 		}
-		match self.ahead.paced(pace, pace.park(waiter), partial) {
+		match pace.paced(pace.park(waiter), partial) {
 			true => Poll::Pending,
 			false => Poll::Ready(()),
 		}
@@ -2478,6 +2451,8 @@ impl Handle {
 			if state.canonicalize(index, &mut entry).is_err() {
 				return;
 			}
+			// Below the log, so off this copy's pace scale: taking it reports nothing.
+			entry.end = 0;
 			adopted.push(entry);
 		}
 		// Below the log's first frame, so these never enter it: readers find them here.
@@ -3055,6 +3030,8 @@ struct Prefetch {
 	inflated: Option<Box<[u64; Self::CAP]>>,
 	pos: usize,
 	len: usize,
+	// Where the last frame buffered ends on the group's pace scale.
+	end: u64,
 }
 
 impl Prefetch {
@@ -3160,6 +3137,7 @@ impl Prefetch {
 		if inflated {
 			self.inflated.get_or_insert_default()[at] = entry.inflated;
 		}
+		self.end = self.end.max(entry.end);
 		self.len += 1;
 	}
 
@@ -4075,13 +4053,10 @@ impl Cursor {
 		// A committed frame comes from the log without the lock, unless a plain read of a
 		// compressed group has to inflate it under the lock.
 		let committed = match !self.compressed || raw {
-			true => self
-				.log
-				.read()
-				.get(index as u64)
-				.ok()
-				.flatten()
-				.map(|entry| entry.read(self.compressed)),
+			true => self.log.read().get(index as u64).ok().flatten().map(|entry| {
+				self.pace.took(entry.end);
+				entry.read(self.compressed)
+			}),
 			false => None,
 		};
 		let (info, source) = match committed {
@@ -4118,9 +4093,6 @@ impl Cursor {
 		};
 
 		self.index += 1;
-		// Taking the in-flight frame counts as taking it whole: a reader streaming it is
-		// at the writer's edge, which a paced writer never waits on.
-		self.pace.took(self.index);
 		// A direct read (not prefetched): count the frame here; the frame::Consumer
 		// counts its bytes per chunk as they're read out.
 		stats.frames(1);
@@ -4157,7 +4129,7 @@ impl Cursor {
 		// read of a compressed group has to inflate under it.
 		if (!self.compressed || self.raw) && self.prefetch.fill_log(&mut self.log, index, budget, self.compressed) > 0 {
 			// The batch is this cursor's whatever the group sheds, so it counts as taken.
-			self.pace.took(index + self.prefetch.len);
+			self.pace.took(self.prefetch.end);
 			self.refresh_if_stale();
 			let (frames, bytes) = self.prefetch.buffered();
 			stats.frames(frames);
@@ -4199,7 +4171,7 @@ impl Cursor {
 
 		// The refill already updated the eviction rank under the group lock.
 		self.refreshed = self.cache.pool().now();
-		self.pace.took(index + self.prefetch.len);
+		self.pace.took(self.prefetch.end);
 
 		// A fresh batch was just filled (empty only on a clean end). Count the whole
 		// batch once here, under no lock, so the drained pops that follow stay free.

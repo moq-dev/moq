@@ -346,6 +346,12 @@ newest 32 MB. A reader of a track's newest group that reaches a shed frame asks
 for a new group on tracks that opt into refresh. Any other reader of a shed
 frame sees `Evicted`.
 
+While a group has readers, the relay receives at most 16 MB of it past the
+fastest one, then stops reading its stream until that reader catches up, so
+flow control slows the upstream hop and the publisher. A slower reader is never
+waited on: one that trails the fastest by more than the rest of the 32 MB
+reaches a shed frame. A group nobody reads keeps arriving and shedding.
+
 ## \[stats]
 
 ```toml

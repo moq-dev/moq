@@ -101,7 +101,9 @@ async fn an_idle_reader_paces_the_relay_and_loses_nothing() {
 				.expect("a frame");
 			assert_eq!(frame.payload.len(), MB, "{version}: frame {index}");
 		}
-		let end = moq_clock::timeout(TIMEOUT, reader.read_frame()).await.expect("end timeout");
+		let end = moq_clock::timeout(TIMEOUT, reader.read_frame())
+			.await
+			.expect("end timeout");
 		assert!(matches!(end, Ok(None)), "{version}: {end:?}");
 	}
 }
@@ -135,7 +137,9 @@ async fn a_slow_reader_falls_off_without_slowing_the_fast_one() {
 		}
 		group.finish().unwrap();
 
-		let fell = moq_clock::timeout(TIMEOUT, slow.read_frame()).await.expect("read timeout");
+		let fell = moq_clock::timeout(TIMEOUT, slow.read_frame())
+			.await
+			.expect("read timeout");
 		assert!(
 			matches!(fell, Err(moq_net::Error::Evicted)),
 			"{version}: the slow reader got {fell:?}"

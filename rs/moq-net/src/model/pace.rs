@@ -1,15 +1,21 @@
 //! Fastest-reader pacing: how far a group's writer reads ahead of its furthest reader.
 //!
 //! Readers report the frames they take; a paced writer (a session's ingest) stops reading
-//! its upstream stream while it is more than [`AHEAD`] past the first frame the fastest
-//! reader has not taken, so stream flow control pushes back to the publisher. Only the
+//! its upstream stream while it is more than [`AHEAD`] past the end of the last frame the
+//! fastest reader took, so stream flow control pushes back to the publisher. Only the
 //! fastest reader counts: a slower one is never waited on, and falls off the group's
 //! front as the live tail sheds.
+//!
+//! Progress is in bytes on one scale per group copy: each frame entering the copy's log
+//! ends where the frames before it, payload and slot, add up to. A frame larger than the
+//! window never stalls its writer, since a reader that took every committed frame is
+//! waiting on the writer.
 
 use std::sync::{
 	Mutex, PoisonError,
-	atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+	atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use std::task::Waker;
 
 use super::group::MAX_CACHE_BYTES;
 
@@ -20,58 +26,82 @@ pub(super) const AHEAD: u64 = MAX_CACHE_BYTES / 2;
 /// One group copy's reader progress, shared by its writer and every cursor.
 #[derive(Default)]
 pub(super) struct Pace {
-	// One past the furthest frame any reader of the copy has taken.
-	read: AtomicUsize,
-	// What the frames committed to the copy's log cost, cumulatively: each entry records
-	// where it ends on this scale.
+	// Where the last frame the fastest reader took ends.
+	read: AtomicU64,
+	// Where the last committed frame ends.
 	written: AtomicU64,
-	// Set while a writer waits on `read`, so a read wakes it without locking otherwise.
+	// Where the last frame shed from the copy's front ends: a reader short of it fell off.
+	front: AtomicU64,
+	// Set while the writer waits on `read`, so a read wakes it without locking otherwise.
 	parked: AtomicBool,
-	waiters: Mutex<kio::WaiterList>,
+	// The writer's waker: a group has one writer, so one slot, far smaller than a list.
+	writer: Mutex<Option<Waker>>,
 }
 
 impl Pace {
-	/// A reader took every frame below `index`.
-	pub fn took(&self, index: usize) {
+	/// A reader took the frame ending at `end`, and every frame before it.
+	pub fn took(&self, end: u64) {
 		// The common case, a reader trailing the fastest one, writes nothing.
-		if self.read.load(Ordering::Relaxed) >= index {
+		if self.read.load(Ordering::Relaxed) >= end {
 			return;
 		}
 		// SeqCst pairs with `park`: either this sees the writer parked, or it sees the read.
-		self.read.fetch_max(index, Ordering::SeqCst);
-		if self.parked.load(Ordering::SeqCst) {
-			let mut waiters = self.waiters.lock().unwrap_or_else(PoisonError::into_inner);
-			self.parked.store(false, Ordering::SeqCst);
-			let mut woken = waiters.take();
-			drop(waiters);
-			woken.wake();
+		self.read.fetch_max(end, Ordering::SeqCst);
+		if self.parked.swap(false, Ordering::SeqCst) {
+			let writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner).take();
+			if let Some(writer) = writer {
+				writer.wake();
+			}
 		}
 	}
 
-	/// One past the furthest frame any reader has taken.
-	pub fn read(&self) -> usize {
-		self.read.load(Ordering::SeqCst)
+	/// A reader took every frame committed so far, such as by taking the open one.
+	pub fn took_committed(&self) {
+		self.took(self.written());
 	}
 
 	/// Count a committed frame costing `cost`, returning where it ends.
 	///
 	/// Called under the group's lock, so commits never race.
 	pub fn commit(&self, cost: u64) -> u64 {
-		let end = self.written.load(Ordering::Relaxed) + cost;
-		self.written.store(end, Ordering::Relaxed);
+		let end = self.written() + cost;
+		self.written.store(end, Ordering::Release);
 		end
 	}
 
-	/// Where the last committed frame ends.
-	pub fn written(&self) -> u64 {
-		self.written.load(Ordering::Relaxed)
+	/// The copy shed every frame up to the one ending at `end`.
+	pub fn shed(&self, end: u64) {
+		self.front.fetch_max(end, Ordering::Release);
+	}
+
+	fn written(&self) -> u64 {
+		self.written.load(Ordering::Acquire)
+	}
+
+	/// Whether a writer `partial` bytes into an uncommitted frame is more than [`AHEAD`]
+	/// past the fastest reader, given it read up to `read`.
+	///
+	/// Never while that reader took every committed frame, since it is waiting on the
+	/// writer, nor once the frames it has yet to take were shed, since it fell off.
+	pub fn paced(&self, read: u64, partial: u64) -> bool {
+		let written = self.written();
+		read < written && read >= self.front.load(Ordering::Acquire) && written.saturating_add(partial) - read > AHEAD
+	}
+
+	/// Whether the writer is paced, as [`Self::paced`] judges it now.
+	pub fn ahead(&self, partial: u64) -> bool {
+		self.paced(self.read.load(Ordering::SeqCst), partial)
 	}
 
 	/// Register `waiter` for the next read, returning how far readers got, read after
 	/// registering so a read in between is never missed.
-	pub fn park(&self, waiter: &kio::Waiter) -> usize {
-		let mut waiters = self.waiters.lock().unwrap_or_else(PoisonError::into_inner);
-		waiter.register(&mut waiters);
+	pub fn park(&self, waiter: &kio::Waiter) -> u64 {
+		let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+		match &mut *writer {
+			Some(waker) => waker.clone_from(waiter.waker()),
+			None => *writer = Some(waiter.waker().clone()),
+		}
+		drop(writer);
 		self.parked.store(true, Ordering::SeqCst);
 		self.read.load(Ordering::SeqCst)
 	}
@@ -151,7 +181,12 @@ mod tests {
 		let (_flag, waiter) = flag();
 		let group = written(15);
 		let _reader = group.consume();
-		let mut frame = group.create_frame(frame::Info { size: 2 * MB as u64, timestamp: None }).unwrap();
+		let mut frame = group
+			.create_frame(frame::Info {
+				size: 2 * MB as u64,
+				timestamp: None,
+			})
+			.unwrap();
 		assert_eq!(frame.poll_ready(&waiter), Poll::Ready(()));
 		frame.write(Bytes::from(vec![0u8; MB])).unwrap();
 		assert_eq!(frame.poll_ready(&waiter), Poll::Pending);
@@ -162,11 +197,15 @@ mod tests {
 	#[test]
 	fn a_group_without_readers_never_waits() {
 		let (flag, waiter) = flag();
-		let mut group = written(16);
+		let group = written(16);
 		assert_eq!(group.poll_ready(&waiter, 0), Poll::Ready(()));
 
 		let reader = group.consume();
-		assert_eq!(group.poll_ready(&waiter, 0), Poll::Pending, "a reader that took nothing");
+		assert_eq!(
+			group.poll_ready(&waiter, 0),
+			Poll::Pending,
+			"a reader that took nothing"
+		);
 		drop(reader);
 		assert!(flag.woken(), "the last reader leaving wakes the writer");
 		assert_eq!(group.poll_ready(&waiter, 0), Poll::Ready(()));
@@ -182,7 +221,12 @@ mod tests {
 		read(&mut reader);
 		assert!(reader.poll_read_frame(&kio::Waiter::noop()).is_pending());
 
-		let mut frame = group.create_frame(frame::Info { size: 20 * MB as u64, timestamp: None }).unwrap();
+		let mut frame = group
+			.create_frame(frame::Info {
+				size: 20 * MB as u64,
+				timestamp: None,
+			})
+			.unwrap();
 		frame.write(Bytes::from(vec![0u8; 18 * MB])).unwrap();
 		assert_eq!(frame.poll_ready(&waiter), Poll::Ready(()));
 	}
@@ -205,7 +249,7 @@ mod tests {
 	#[test]
 	fn an_abort_wakes_a_parked_writer() {
 		let (flag, waiter) = flag();
-		let mut group = written(17);
+		let group = written(17);
 		let _reader = group.consume();
 		assert_eq!(group.poll_ready(&waiter, 0), Poll::Pending);
 		group.handle().abort(Error::Cancel).unwrap();
