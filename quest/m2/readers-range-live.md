@@ -25,7 +25,3 @@ Public API: none expected. Wire: none.
 ## Required
 
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/room` chat needs relative ranges in `@moq/net`
-
-## Related
-
-- [Audio join budget](/quest/m2/audio-join-budget.md) - moq-audio's join at the latest group
