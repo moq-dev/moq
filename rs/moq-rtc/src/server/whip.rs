@@ -81,14 +81,8 @@ async fn accept_offer(
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	accept(
-		server,
-		publisher,
-		moq_net::Path::new(path).map_err(moq_net::Error::from)?,
-		offer,
-		&rate::Limit::unlimited(),
-	)
-	.await
+	let broadcast = moq_net::Path::new(path).map_err(moq_net::Error::from)?;
+	accept(server, Request::new(publisher, broadcast, offer)).await
 }
 
 #[cfg(feature = "server")]
@@ -96,8 +90,36 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 	crate::server::delete(&state.server, &path)
 }
 
-/// Accept a WHIP SDP offer and publish the negotiated WebRTC media into
-/// `publisher` under `broadcast` (a path relative to that producer's root).
+/// A WHIP publish for [`accept`]: the raw SDP offer, the producer and broadcast its media
+/// goes to, and an optional bitrate cap.
+pub struct Request<'a> {
+	publisher: &'a moq_net::origin::Producer,
+	broadcast: moq_net::Path,
+	offer: &'a str,
+	rate: rate::Limit,
+}
+
+impl<'a> Request<'a> {
+	/// Publish the media negotiated by `offer` into `publisher` under `broadcast` (a path
+	/// relative to that producer's root), uncapped.
+	pub fn new(publisher: &'a moq_net::origin::Producer, broadcast: impl Into<moq_net::Path>, offer: &'a str) -> Self {
+		Self {
+			publisher,
+			broadcast: broadcast.into(),
+			offer,
+			rate: rate::Limit::unlimited(),
+		}
+	}
+
+	/// Cap the session's media at `rate`, a live handle (see [`accept`]).
+	pub fn with_rate(mut self, rate: rate::Limit) -> Self {
+		self.rate = rate;
+		self
+	}
+}
+
+/// Accept a WHIP SDP offer and publish the negotiated WebRTC media into the
+/// [`Request`]'s producer under its broadcast.
 ///
 /// This is the negotiation core behind [`Server::publish_router`], exposed so an embedder can
 /// own the HTTP route and authentication: verify the request, resolve the
@@ -113,27 +135,26 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 /// `Location` header. The caller must run the returned [`Response`] to drive the
 /// RTP->MoQ session.
 ///
-/// `offer` is the raw SDP body; the caller is responsible for checking the
+/// The offer is the raw SDP body; the caller is responsible for checking the
 /// `Content-Type: application/sdp` request header. Fails with
 /// [`Error::InvalidSdp`] on a malformed offer and surfaces
-/// [`moq_net::Error::Unauthorized`] if `broadcast` is
-/// outside `publisher`'s scope.
+/// [`moq_net::Error::Unauthorized`] if the broadcast is
+/// outside the producer's scope.
 ///
-/// `rate` caps the session's media; pass [`rate::Limit::unlimited`] for none. The answer
+/// [`Request::with_rate`] caps the session's media; a request is uncapped by default. The answer
 /// carries a `b=TIAS` line at the cap it holds when the offer is accepted, and the session
 /// repeats a REMB on every video line that negotiated one, following [`rate::Limit::set`]
 /// at once. Both steer to nine tenths of the cap, leaving room for audio and keyframe
 /// overshoot. A publisher that ignores them, sending media past the cap plus its burst,
 /// ends [`Response::run`] with [`Error::RateLimited`].
-pub async fn accept(
-	server: &Server,
-	publisher: &moq_net::origin::Producer,
-	broadcast: impl Into<moq_net::Path>,
-	offer: &str,
-	rate: &rate::Limit,
-) -> Result<Response> {
+pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
+	let Request {
+		publisher,
+		broadcast,
+		offer,
+		rate,
+	} = request;
 	let offer = sdp::parse_offer(offer)?;
-	let broadcast: moq_net::Path = broadcast.into();
 
 	// Create the broadcast hidden up front, so an out-of-scope offer is refused before
 	// any mux work. It announces only once negotiation succeeds (below).
@@ -169,7 +190,7 @@ pub async fn accept(
 
 	let resource_id = sdp::new_resource_id();
 	let socket = moq_ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
-	let session = session::Session::ingest(rtc, socket, sink)?.with_rate(rate);
+	let session = session::Session::ingest(rtc, socket, sink)?.with_rate(&rate);
 
 	// Register before returning so a DELETE that races the first packet still
 	// finds the session; Response::run unregisters itself when it ends.
@@ -243,17 +264,15 @@ mod tests {
 		let server = Server::new(crate::server::Config::default());
 		let origin = moq_tokio::origin::spawn();
 		let cap = rate::Cap::new(moq_net::bandwidth::Rate::from_mbps(1));
+		let offer = offer();
 		let path = moq_net::Path::from_static("live/capped");
-		let capped = accept(&server, &origin, path, &offer(), &rate::Limit::new(cap))
-			.await
-			.unwrap();
+		let capped = Request::new(&origin, path, &offer).with_rate(rate::Limit::new(cap));
+		let capped = accept(&server, capped).await.unwrap();
 		assert!(capped.answer.contains("\r\nb=TIAS:900000\r\n"), "{}", capped.answer);
 		str0m::change::SdpAnswer::from_sdp_string(&capped.answer).expect("str0m parses the capped answer");
 
 		let path = moq_net::Path::from_static("live/uncapped");
-		let uncapped = accept(&server, &origin, path, &offer(), &rate::Limit::unlimited())
-			.await
-			.unwrap();
+		let uncapped = accept(&server, Request::new(&origin, path, &offer)).await.unwrap();
 		assert!(!uncapped.answer.contains("\r\nb="), "{}", uncapped.answer);
 	}
 
@@ -267,10 +286,7 @@ mod tests {
 		let consumer = origin.consume();
 		let session = accept(
 			&server,
-			&origin,
-			moq_net::Path::from_static("live/cam0"),
-			&offer(),
-			&rate::Limit::unlimited(),
+			Request::new(&origin, moq_net::Path::from_static("live/cam0"), &offer()),
 		)
 		.await
 		.unwrap();
@@ -304,10 +320,7 @@ mod tests {
 		let consumer = origin.consume();
 		let _stale_session = accept(
 			&server,
-			&origin,
-			moq_net::Path::from_static("live/cam0"),
-			&offer(),
-			&rate::Limit::unlimited(),
+			Request::new(&origin, moq_net::Path::from_static("live/cam0"), &offer()),
 		)
 		.await
 		.unwrap();
@@ -321,10 +334,7 @@ mod tests {
 
 		let _fresh_session = accept(
 			&server,
-			&origin,
-			moq_net::Path::from_static("live/cam0"),
-			&offer(),
-			&rate::Limit::unlimited(),
+			Request::new(&origin, moq_net::Path::from_static("live/cam0"), &offer()),
 		)
 		.await
 		.unwrap();

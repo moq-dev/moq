@@ -270,10 +270,7 @@ mod tests {
 				async move {
 					let response = server::whip::accept(
 						&server,
-						&origin,
-						moq_net::Path::from_static("ingested"),
-						&offer,
-						&Default::default(),
+						server::whip::Request::new(&origin, moq_net::Path::from_static("ingested"), &offer),
 					)
 					.await
 					.unwrap();
@@ -330,10 +327,9 @@ mod tests {
 				let (server, origin, rate, sessions) =
 					(server.clone(), origin.clone(), rate.clone(), sessions_tx.clone());
 				async move {
-					let path = moq_net::Path::from_static("ingested");
-					let response = server::whip::accept(&server, &origin, path, &offer, &rate)
-						.await
-						.unwrap();
+					let request = server::whip::Request::new(&origin, moq_net::Path::from_static("ingested"), &offer)
+						.with_rate(rate);
+					let response = server::whip::accept(&server, request).await.unwrap();
 					let answer = response.answer.clone();
 					sessions.send(tokio::spawn(response.run())).await.unwrap();
 					answer
@@ -482,10 +478,7 @@ mod tests {
 					async move {
 						let response = server::whip::accept(
 							&server,
-							&origin,
-							moq_net::Path::from_static("ingested"),
-							&offer,
-							&Default::default(),
+							server::whip::Request::new(&origin, moq_net::Path::from_static("ingested"), &offer),
 						)
 						.await
 						.unwrap();

@@ -1,6 +1,8 @@
 //! Bitrate caps for WHIP ingest.
 //!
-//! An embedder hands [`whip::accept`](crate::whip::accept) a [`Limit`], and moq-rtc steers the publisher's encoder under its [`Cap`]: a `b=TIAS`
+//! An embedder hands [`whip::accept`](crate::whip::accept) a [`Limit`] through
+//! [`Request::with_rate`](crate::whip::Request::with_rate), and moq-rtc steers the
+//! publisher's encoder under its [`Cap`]: a `b=TIAS`
 //! line in the SDP answer, and periodic REMB where the publisher negotiated
 //! it. WebRTC has no receiver backpressure, so a publisher that ignores both is metered
 //! and closed with [`Error::RateLimited`](crate::Error::RateLimited) past the cap plus its
