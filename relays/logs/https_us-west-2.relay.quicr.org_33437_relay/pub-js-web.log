@@ -1,10 +1,10 @@
-publishing smoke-js-web-4954-1968.hang (fake camera, vite) to https://us-west-2.relay.quicr.org:33437/relay
+publishing smoke-js-web-4711-19344.hang (fake camera, vite) to https://us-west-2.relay.quicr.org:33437/relay
 [page] negotiated protocol: moqt-18
-[page] subscribe_namespace written: requestId=0
+[page] subscribe_namespace written: requestId=2
 [page] announced: broadcast=metrics/us-west-2.relay.public active=true
-[page] publish ok: broadcast=smoke-js-web-4954-1968.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4954-1968.hang track=video
-[page] publish done: broadcast=smoke-js-web-4954-1968.hang track=catalog.json
-[page] publish error: broadcast=smoke-js-web-4954-1968.hang track=catalog.json error=subscription update failed
-[page] publish done: broadcast=smoke-js-web-4954-1968.hang track=video
-[page] publish error: broadcast=smoke-js-web-4954-1968.hang track=video error=subscription update failed
+[page] publish ok: broadcast=smoke-js-web-4711-19344.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4711-19344.hang track=video
+[page] publish done: broadcast=smoke-js-web-4711-19344.hang track=video
+[page] publish error: broadcast=smoke-js-web-4711-19344.hang track=video error=subscription update failed
+[page] publish done: broadcast=smoke-js-web-4711-19344.hang track=catalog.json
+[page] publish error: broadcast=smoke-js-web-4711-19344.hang track=catalog.json error=subscription update failed

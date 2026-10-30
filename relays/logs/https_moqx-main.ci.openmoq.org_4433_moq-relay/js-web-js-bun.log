@@ -3,20 +3,20 @@ https://moqx-main.ci.openmoq.org:4433/moq-relay negotiated ALPN: moqt-16
 connected version=moq-transport-16
 subscribe_namespace written: requestId=0
 announced: broadcast=openmoq/mtt/aiomoqt/bbb_4k30/moq_test_tracks_00/msf/cmaf/catalog/h264/1080/30/6000/2000/0/aac/2/128/1/0/clip/0 active=true
-announced: broadcast=smoke-js-web-4954-5276.hang active=true
-subscribe start: id=2 broadcast=smoke-js-web-4954-5276.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-js-web-4954-5276.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-js-web-4954-5276.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-js-web-4954-5276.hang track=video
-subscribe written: id=4 broadcast=smoke-js-web-4954-5276.hang track=video
-subscribe ok: id=4 broadcast=smoke-js-web-4954-5276.hang track=video
-received 7366 bytes from smoke-js-web-4954-5276.hang
+announced: broadcast=smoke-js-web-4711-18836.hang active=true
+subscribe start: id=2 broadcast=smoke-js-web-4711-18836.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-js-web-4711-18836.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-js-web-4711-18836.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-js-web-4711-18836.hang track=video
+subscribe written: id=4 broadcast=smoke-js-web-4711-18836.hang track=video
+subscribe ok: id=4 broadcast=smoke-js-web-4711-18836.hang track=video
+received 7366 bytes from smoke-js-web-4711-18836.hang
 adapter: close() called
-subscribe error: id=2 broadcast=smoke-js-web-4954-5276.hang track=catalog.json error=subscribe stream ended without PUBLISH_DONE
-subscribe error: id=4 broadcast=smoke-js-web-4954-5276.hang track=video error=subscribe stream ended without PUBLISH_DONE
+subscribe error: id=2 broadcast=smoke-js-web-4711-18836.hang track=catalog.json error=subscribe stream ended without PUBLISH_DONE
+subscribe error: id=4 broadcast=smoke-js-web-4711-18836.hang track=video error=subscribe stream ended without PUBLISH_DONE
 subscribe_namespace error: remote error: 386759528
 announced: broadcast=openmoq/mtt/aiomoqt/bbb_4k30/moq_test_tracks_00/msf/cmaf/catalog/h264/1080/30/6000/2000/0/aac/2/128/1/0/clip/0 active=false
-announced: broadcast=smoke-js-web-4954-5276.hang active=false
+announced: broadcast=smoke-js-web-4711-18836.hang active=false
 broadcast discovery failed; broadcasts resolve on request only. Stream: remote error: 386759528
  code: 0,
 

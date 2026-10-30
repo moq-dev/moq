@@ -1,3 +1,11 @@
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-decoded 0 frames from smoke-rust-4954-19067.hang (vite)
+[page] announced: broadcast=smoke-rust-4711-9628.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4711-9628.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-rust-4711-9628.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-rust-4711-9628.hang track=catalog.json
+[page] received catalog hang smoke-rust-4711-9628.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4711-9628.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4711-9628.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4711-9628.hang track=0.avc3
+decoded 14 frames from smoke-rust-4711-9628.hang (vite)

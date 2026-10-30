@@ -2,12 +2,13 @@
 [page] subscribe_namespace written: requestId=0
 [page] announced: broadcast=openmoq/mtt/aiomoqt/bbb_4k30/moq_test_tracks_00/msf/cmaf/catalog/h264/1080/30/6000/2000/0/aac/2/128/1/0/clip/0 active=true
 [page] announced: broadcast=openmoq/mtt/aiomoqt/artemis_directors/moq_test_tracks_00/msf/loc/catalog/h264/1080/30/6000/2000/0/aac/2/128/1/0/clip/0 active=true
-[page] announced: broadcast=smoke-rust-4954-10999.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-rust-4954-10999.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-rust-4954-10999.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-rust-4954-10999.hang track=catalog.json
-[page] received catalog hang smoke-rust-4954-10999.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-rust-4954-10999.hang track=0.avc3
-[page] subscribe written: id=4 broadcast=smoke-rust-4954-10999.hang track=0.avc3
-[page] subscribe ok: id=4 broadcast=smoke-rust-4954-10999.hang track=0.avc3
-decoded 15 frames from smoke-rust-4954-10999.hang (vite)
+[page] announced: broadcast=smoke-rust-4711-6335.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4711-6335.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-rust-4711-6335.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-rust-4711-6335.hang track=catalog.json
+[page] received catalog hang smoke-rust-4711-6335.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4711-6335.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4711-6335.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4711-6335.hang track=0.avc3
+[page] received catalog hang smoke-rust-4711-6335.hang {video: Object, audio: Object, archive: Object, clock: Object}
+decoded 33 frames from smoke-rust-4711-6335.hang (vite)
