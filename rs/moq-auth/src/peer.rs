@@ -106,15 +106,19 @@ fn same_public(a: &KeyMaterial, b: &KeyMaterial) -> bool {
 	match (a, b) {
 		(
 			KeyMaterial::EC {
-				curve: ca, x: xa, y: ya, ..
+				curve: ca,
+				x: xa,
+				y: ya,
+				..
 			},
 			KeyMaterial::EC {
-				curve: cb, x: xb, y: yb, ..
+				curve: cb,
+				x: xb,
+				y: yb,
+				..
 			},
 		) => ca == cb && xa == xb && ya == yb,
-		(KeyMaterial::OKP { curve: ca, x: xa, .. }, KeyMaterial::OKP { curve: cb, x: xb, .. }) => {
-			ca == cb && xa == xb
-		}
+		(KeyMaterial::OKP { curve: ca, x: xa, .. }, KeyMaterial::OKP { curve: cb, x: xb, .. }) => ca == cb && xa == xb,
 		(KeyMaterial::RSA { public: a, .. }, KeyMaterial::RSA { public: b, .. }) => a.n == b.n && a.e == b.e,
 		_ => false,
 	}
@@ -332,14 +336,21 @@ mod tests {
 		assert!(relay.to_peer_set().unwrap().keys.is_empty());
 
 		let key = &relay.keys[0];
-		assert!(matches!(key.sign_peer(&grant(&presenter())), Err(crate::Error::NoPeerKey)));
+		assert!(matches!(
+			key.sign_peer(&grant(&presenter())),
+			Err(crate::Error::NoPeerKey)
+		));
 	}
 
 	#[test]
 	fn peer_set_drops_hmac_and_private_material() {
 		let mut relay = relay(Algorithm::ES256);
-		relay.keys.push(Arc::new(Key::generate(Algorithm::HS256, None).unwrap()));
-		relay.keys.push(Arc::new(Key::generate(Algorithm::RS256, None).unwrap()));
+		relay
+			.keys
+			.push(Arc::new(Key::generate(Algorithm::HS256, None).unwrap()));
+		relay
+			.keys
+			.push(Arc::new(Key::generate(Algorithm::RS256, None).unwrap()));
 
 		let peers = relay.to_peer_set().unwrap();
 		assert_eq!(peers.keys.len(), 1);
@@ -361,7 +372,12 @@ mod tests {
 		assert!(relay.to_peer_set().unwrap().verify_peer(&token).is_err());
 
 		// Even a receiver holding that HMAC key refuses it.
-		let hmac = Jwk::new(Algorithm::HS256, KeyMaterial::OCT { secret: secret.to_vec() });
+		let hmac = Jwk::new(
+			Algorithm::HS256,
+			KeyMaterial::OCT {
+				secret: secret.to_vec(),
+			},
+		);
 		let mut hmac = hmac;
 		hmac.kid = Some(crate::KeyId::decode("relay").unwrap());
 		assert!(matches!(
@@ -420,7 +436,10 @@ mod tests {
 			publish: Patterns::default(),
 			subscribe: ["**".parse::<moq_pattern::Pattern>().unwrap()].into_iter().collect(),
 		};
-		let key = Key::generate(Algorithm::ES256, None).unwrap().with_scope(scope).unwrap();
+		let key = Key::generate(Algorithm::ES256, None)
+			.unwrap()
+			.with_scope(scope)
+			.unwrap();
 		assert!(matches!(
 			key.sign_peer(&grant(&presenter())),
 			Err(crate::Error::ScopeExceeded)
