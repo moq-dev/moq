@@ -159,7 +159,10 @@ const enqueue = request.steps.find((step: { name?: string }) => step.name === "R
 // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
 assert.equal(enqueue.env.PR_HEAD, "${{ github.event.pull_request.head.sha }}");
 assert.ok(enqueue.run.includes('quest merge "$PR_URL" "$hold" --land "$PR_HEAD"'));
-assert.ok(enqueue.run.includes("quest land resolve --base main"));
+assert.ok(enqueue.run.includes('GH_TOKEN="$READ_TOKEN" quest land resolve --base main'));
+// The resolver reads check results, which moq-bot's installation cannot.
+assert.equal(request.permissions.checks, "read");
+assert.equal(request.permissions.statuses, "read");
 assert.ok(!JSON.stringify(request).includes("gh pr merge"));
 
 // Release PRs report one context for every optional workflow, retargeted PRs included.

@@ -116,6 +116,11 @@ Remaining before completion:
   pass the old queue, and changing protection first stops that queue.
 - Decided 2026-10-29 (maintainer): CONTRIBUTING no longer prescribes the
   squash commit body; the engine's default message stands.
+- **Forks.** The land job's moq-bot token is scoped to this repository, and
+  whether an installation token can push to an editable fork's branch is
+  unverified (moq-dev/quest's land-adopt quest tests it live). Until then a
+  fork PR may be ejected as `push_failed`, which CONTRIBUTING's fallback
+  covers. Forks were 2 of the last 200 merged PRs on 2026-10-30.
 - **Live evidence.** Exercise the gate and its ejections after the
   maintainer's cutover, including an editable fork, and measure a busy
   day's merged PRs/hour and enqueue-to-merged latency against the baseline.

@@ -50,6 +50,7 @@ Local and hosted checks select only what the diff touches, so a break can reach 
 To check cfg-gated macOS or Windows code before merging, dispatch `platform.yml` on the branch; never dispatch the full Nightly.
 
 An ejected PR carries its reason and the Land run link in a comment and in `quest status` under `landing-stopped`. Fix the cause and request landing for the new head.
+A fork PR ejected as `push_failed` is one whose branch the gate's moq-bot token could not move; the maintainer lands it with `gh pr merge --admin --squash` after a local `just ci` on it merged with `main`, until [the fork path](quest/m0/ci/land.md) is verified.
 
 Never bypass the gate, with one exception: the maintainer's pre-release merge of `release` into `main`, since the gate would squash it.
 
