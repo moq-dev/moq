@@ -1567,7 +1567,7 @@ impl Connection {
 	/// The most receive credit one stream may hold: the largest per-stream window ever in force,
 	/// since credit already granted outlives a shrink; see [`Limits::stream_receive_window`]
 	pub fn stream_receive_window(&self) -> u64 {
-		self.streams.stream_receive_window()
+		self.streams.peak_stream_receive_window()
 	}
 
 	/// Change every limit `limits` sets, leaving the others as they are

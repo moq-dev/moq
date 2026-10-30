@@ -1074,7 +1074,7 @@ impl StreamsState {
 
 	/// The most credit one receive stream may hold: the largest window ever in force, since
 	/// credit already granted outlives a shrink.
-	pub(crate) fn stream_receive_window(&self) -> u64 {
+	pub(crate) fn peak_stream_receive_window(&self) -> u64 {
 		self.peak_stream_receive_window
 	}
 
@@ -2825,10 +2825,10 @@ mod tests {
 	#[test]
 	fn stream_receive_window_reports_its_peak() {
 		let mut server = make(Side::Server);
-		let initial = server.stream_receive_window();
+		let initial = server.peak_stream_receive_window();
 		server.set_stream_receive_window(initial * 4);
 		server.set_stream_receive_window(initial / 2);
-		assert_eq!(server.stream_receive_window(), initial * 4);
+		assert_eq!(server.peak_stream_receive_window(), initial * 4);
 	}
 
 	#[test]
