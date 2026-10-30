@@ -4,10 +4,11 @@
 
 When the route serving an epochless broadcast is withdrawn, or its session
 dies, while another route for the path remains, a follower downstream of the
-relay is announced a restart: an end then a start on lite-06 and older, and
-`ANNOUNCE_RESTART` on lite-07-wip. A re-request then resumes on the survivor.
-Integration tests in the merge gate pin this over the wire on every
-version that can carry an epochless route.
+relay is announced the restart its version carries, such as an end then a
+start on lite-06 and older and `ANNOUNCE_RESTART` on lite-07-wip. A re-request
+then resumes on the survivor. Integration tests in the merge gate pin this
+over the wire, with an epochless route, on lite-04 to 06, lite-07-wip, and
+moq-transport 18 and 22.
 
 ## Plan
 
@@ -32,15 +33,20 @@ Decided in quest-plan (2026-10-30):
 - Rust assertion only. `route_dies_without_an_epoch` in
   `rs/moq-net/tests/integration/route_change.rs` already covers the
   `Disconnect` and `Unannounce` triggers over lite-04 to 06 under mock time.
-  It checks that the subscription ends and a re-request reaches the survivor.
+  Its `Topology::new` mints an epoch, which only those versions drop, so it
+  is epochless there alone. It checks that the subscription ends and a
+  re-request reaches the survivor.
   Extend it, or a sibling sharing its topology, so a follower one wire hop
   past the relay observes the restart for both triggers. Watching
   `announced()` on the relay's own origin only sees its local model event,
   which `better_route_restarts` already covers; the follower must see what the
   relay sends over the wire.
-  Cover lite-07-wip with an epochless route too, if the topology can produce
-  one. Player-level resume is already covered on a graceful leave by
-  `just test native-play` (lite-06 publishers) and
+  Lite-07-wip and moq-transport 18 and 22 are required too, through a
+  topology that announces without an epoch, as `replacement.rs` already does
+  for its newcomer cases. Moq-transport routes all become epochless with
+  [moq-transport carries no epoch](/quest/m1/ietf-epoch-cut.md), so this
+  path must hold there whichever lands first. Player-level resume is already
+  covered on a graceful leave by `just test native-play` (lite-06 publishers) and
   `just test media --media-cases replacement`. A crash differs only in when
   the relay notices, which the `Disconnect` trigger already exercises, so no
   new browser or native harness case.
