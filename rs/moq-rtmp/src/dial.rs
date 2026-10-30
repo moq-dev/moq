@@ -231,17 +231,12 @@ impl<S: Stream> Client<S> {
 	/// mux the broadcast to FLV, and send each tag as an RTMP audio/video message
 	/// until the broadcast ends or the connection drops.
 	///
-	/// `path` names the broadcast to restream on `origin`; the FLV export resolves it
-	/// (and any sibling broadcast a rendition's catalog `broadcast` field references)
-	/// through the origin. This future resolves when the broadcast ends, so callers
-	/// usually run it on its own task.
-	pub async fn publish(
-		mut self,
-		stream_key: &str,
-		origin: origin::Consumer,
-		path: impl Into<moq_net::Path>,
-	) -> Result<()> {
-		let path: moq_net::Path = path.into();
+	/// `source` is the resolved broadcast to restream; the FLV export resolves any sibling
+	/// broadcast a rendition's catalog `broadcast` field references through its origin.
+	/// This future resolves when the broadcast ends, so callers usually run it on its own
+	/// task.
+	pub async fn publish(mut self, stream_key: &str, source: moq_mux::Source) -> Result<()> {
+		let path = source.broadcast().info().path.clone();
 		let request = self
 			.session
 			.request_publishing(stream_key.to_string(), PublishRequestType::Live)
@@ -257,8 +252,6 @@ impl<S: Stream> Client<S> {
 		let queued = std::mem::take(&mut self.work);
 		self.drain(queued).await?;
 
-		let broadcast = origin.request_broadcast(path, None).await?;
-		let source = moq_mux::Source::new(origin, broadcast);
 		let catalog = source
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
 			.await
@@ -772,6 +765,12 @@ mod tests {
 		(broadcast, catalog, importer)
 	}
 
+	/// Resolve `live/cam0` on `origin` to push it.
+	async fn exported(origin: origin::Consumer) -> moq_mux::Source {
+		let broadcast = origin.request("live/cam0", None).await.unwrap();
+		moq_mux::Source::new(origin, broadcast)
+	}
+
 	/// A clean end crosses an RTMP hop in both directions: a finished export unpublishes,
 	/// so the server it pushes to lingers, and a server whose play completes lets a pull
 	/// linger. Each lingering side serves its finished copy for its linger.
@@ -801,14 +800,11 @@ mod tests {
 						.unwrap(),
 				}
 			});
-			let exported = upstream.consume();
+			let origin = upstream.consume();
 			let client = tokio::spawn(async move {
 				let client = Client::with_stream(client_io, "live").await.unwrap();
 				match push {
-					true => client
-						.publish("cam0", exported, moq_net::Path::from_static("live/cam0"))
-						.await
-						.unwrap(),
+					true => client.publish("cam0", exported(origin).await).await.unwrap(),
 					false => client
 						.with_linger(linger)
 						.pull("cam0", &pulled, moq_net::Path::from_static("live/cam0"))
@@ -818,8 +814,7 @@ mod tests {
 			});
 
 			let consumer = downstream.consume();
-			consumer.routed("live/cam0").await.unwrap();
-			let copy = consumer.request_broadcast("live/cam0", None).await.unwrap();
+			let copy = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
 			// The catalog goes out once the keyframe landed, so the copy holds media to linger with.
 			let mut listed = copy.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 			assert!(listed.recv_group().await.unwrap().is_some());
@@ -889,18 +884,15 @@ mod tests {
 			};
 			let _ = publish.accept(&ingest, moq_net::Path::from_static("live/cam0")).await;
 		});
-		let exported = upstream.consume();
+		let origin = upstream.consume();
 		let pushed = tokio::spawn(async move {
 			let client = Client::with_stream(client_io, "live").await.unwrap();
-			client
-				.publish("cam0", exported, moq_net::Path::from_static("live/cam0"))
-				.await
+			client.publish("cam0", exported(origin).await).await
 		});
 
 		// Read what reaches the remote back out as FLV.
 		let consumer = downstream.consume();
-		consumer.routed("live/cam0").await.unwrap();
-		let copy = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let copy = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
 		let source = moq_mux::Source::new(consumer, copy);
 		let catalog = source
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
@@ -994,11 +986,12 @@ mod tests {
 		});
 
 		// The republished broadcast should show up in the client's origin.
-		tokio::time::timeout(Duration::from_secs(5), announced.routed("pulled/cam0"))
+		let broadcast = announced
+			.follow("pulled/cam0", None)
+			.unwrap()
+			.available()
 			.await
-			.expect("client republish timed out")
-			.expect("broadcast announced in client origin");
-		let broadcast = announced.request_broadcast("pulled/cam0", None).await.unwrap();
+			.unwrap();
 
 		// It should carry a hang catalog track (proof the FLV demux produced real
 		// media on the far side): subscribe to it and read one catalog frame.

@@ -20,7 +20,6 @@ on:
 jobs:
   request-landing:
     name: Request landing
-    environment: moq-bot
     permissions:
       pull-requests: read
     # head.repo guards the `pull_request_target` trigger: Dependabot pushes its
@@ -30,6 +29,9 @@ jobs:
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    # The moq-bot key lives in the `publish` Environment, which only protected
+    # refs can deploy to; pull_request_target runs on the base branch.
+    environment: publish
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

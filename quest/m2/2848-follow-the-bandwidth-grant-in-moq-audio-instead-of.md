@@ -44,8 +44,9 @@ grant; `Options::bandwidth` documents that
   grant below it disables the rendition until bandwidth recovers (decided
   2026-10-04 with the enabled flag), through the disable and re-enable rule
   [simulcast rung disable](/quest/m1/simulcast-rung-disable.md) puts beside
-  `Control` rather than a second one; the encoder never errors. Once viewers
-  deselect it, its demand and so its grant go away, so recovery evaluates a
+  `Control` rather than a second one; the encoder never errors. Viewers with
+  no enabled alternative hold it ([push-to-talk](/quest/m1/push-to-talk/README.md)),
+  so its demand can stay while its grant is below the floor; recovery evaluates a
   hypothetical share against the current estimate, as the ladder controller
   does. The reservation's ceiling is
   the configured bitrate; only the policy target moves.

@@ -210,13 +210,13 @@ impl Announced {
 }
 
 /// Follows one exact path, resolving each publisher instance that serves it.
-struct AnnouncedBroadcast {
-	inner: moq_net::origin::AnnouncedBroadcast,
+struct Following {
+	inner: moq_net::origin::Following,
 	origin: moq_net::origin::Consumer,
 	driver: Background,
 }
 
-impl AnnouncedBroadcast {
+impl Following {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self.driver.watch(async { Ok(self.inner.available().await?) }).await?;
 		Ok(Arc::new(MoqBroadcastConsumer::routed(
@@ -230,7 +230,7 @@ impl AnnouncedBroadcast {
 /// A route over a prefix, carried by a [`MoqAnnounceEvent`].
 ///
 /// Carries no broadcast: resolve a specific path with
-/// `MoqOriginConsumer::request_broadcast` (after an event proves it is
+/// `MoqOriginConsumer::request` (after an event proves it is
 /// covered). The application decides which paths name broadcasts.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MoqAnnounce {
@@ -302,8 +302,8 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 
 /// Follows a specific broadcast across the publisher instances that serve it.
 #[derive(uniffi::Object)]
-pub struct MoqAnnouncedBroadcast {
-	task: Task<AnnouncedBroadcast>,
+pub struct MoqFollowing {
+	task: Task<Following>,
 }
 
 impl MoqOriginProducer {
@@ -462,21 +462,23 @@ impl MoqOriginConsumer {
 		}))
 	}
 
-	/// Follow the broadcast at `path`, resolving each publisher instance that serves it.
+	/// Follow the broadcast at `path` across the publisher instances that serve it.
 	///
-	/// This is how you resolve a path right after connecting: announcements arrive over the
-	/// session after it opens, so `request_broadcast` on its own races them. A
-	/// broadcast created on this origin resolves once it is announced, like a
-	/// remote one.
-	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
+	/// Unlike `request`, this waits for future announcements and keeps following publisher
+	/// instances. A local broadcast resolves once announced, like a remote one. Pass an
+	/// `epoch` (UUIDv7 text) to follow only that instance: another one taking over is never
+	/// handed out, and the instance is handed out again if it returns after an end.
+	#[uniffi::method(default(epoch = None))]
+	pub fn follow(&self, path: String, epoch: Option<String>) -> Result<Arc<MoqFollowing>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
+		let epoch: Option<moq_net::Epoch> = epoch.as_deref().map(str::parse).transpose()?;
 		// Following checks the permission eagerly, so an unreachable path fails here rather
 		// than surfacing later as a `Closed` the caller can't tell from the origin ending.
-		let inner = self.inner.announced_broadcast(path.as_str(), None)?;
+		let inner = self.inner.follow(path.as_str(), epoch)?;
 
-		Ok(Arc::new(MoqAnnouncedBroadcast {
-			task: Task::new(AnnouncedBroadcast {
+		Ok(Arc::new(MoqFollowing {
+			task: Task::new(Following {
 				inner,
 				origin: self.inner.clone(),
 				driver: self.driver.clone(),
@@ -484,23 +486,21 @@ impl MoqOriginConsumer {
 		}))
 	}
 
-	/// Request a broadcast by path, resolving as soon as it can be served.
+	/// Request the broadcast at `path`, resolving one publisher instance as soon as it can be served.
 	///
 	/// Resolves through the best announced route covering the path: an announced broadcast
 	/// on this origin, a route a session announced (served on demand by that session), or a
 	/// dynamic handler on the origin. The most specific prefix wins, then the cheapest. An
-	/// unannounced broadcast is unroutable. Unlike `announced_broadcast`, this answers for what is
-	/// reachable *now* and errors if nothing can serve the path. Drop the returned future to
-	/// cancel.
-	///
-	/// Calling this straight after connecting therefore races the session's announcements
-	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first. A
-	/// client only asks the relay about paths something watches, through `announced` or
-	/// `announced_broadcast`, so a path nothing watches stays unroutable.
-	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+	/// unannounced broadcast is unroutable once discovery has synced without a covering route.
+	/// The request owns discovery of its path and retries route churn until then; no separate
+	/// announcement stream is needed. Pass an `epoch` (UUIDv7 text) to refuse any other
+	/// publisher instance. Drop the returned future to cancel.
+	#[uniffi::method(default(epoch = None))]
+	pub async fn request(&self, path: String, epoch: Option<String>) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		let epoch: Option<moq_net::Epoch> = epoch.as_deref().map(str::parse).transpose()?;
 		let broadcast = self
 			.driver
-			.watch(async { Ok(self.inner.request_broadcast(path.as_str(), None).await?) })
+			.watch(async { Ok(self.inner.request(path.as_str(), epoch).await?) })
 			.await?;
 		Ok(Arc::new(MoqBroadcastConsumer::routed(
 			broadcast,
@@ -658,10 +658,10 @@ impl MoqAnnounceConsumer {
 	}
 }
 
-// ---- MoqAnnouncedBroadcast ----
+// ---- MoqFollowing ----
 
 #[uniffi::export]
-impl MoqAnnouncedBroadcast {
+impl MoqFollowing {
 	/// Wait for the next publisher instance serving the broadcast. Returns `Closed` if cancelled
 	/// or the origin is closed.
 	///
@@ -699,7 +699,7 @@ mod supervision_tests {
 		let healthy = MoqOriginProducer::new(Default::default());
 		let publication = healthy.create_broadcast("healthy".into()).unwrap();
 		publication.announce(Default::default()).unwrap();
-		healthy.consume().request_broadcast("healthy".into()).await.unwrap();
+		healthy.consume().request("healthy".into(), None).await.unwrap();
 	}
 
 	#[tokio::test]
@@ -808,7 +808,7 @@ mod supervision_tests {
 		let broadcast = publication.broadcast();
 		let track = broadcast.publish_track("data".into(), None).unwrap();
 		let open = track.append_group().unwrap();
-		let consumer = origin.consume().request_broadcast("routed".into()).await.unwrap();
+		let consumer = origin.consume().request("routed".into(), None).await.unwrap();
 		let subscriber = consumer.subscribe_track("data".into(), None).await.unwrap();
 		let group = subscriber.recv_group().await.unwrap().unwrap();
 		let catalog = crate::media::MoqMediaCatalogConsumer::subscribe(&consumer)

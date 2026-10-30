@@ -74,8 +74,6 @@ pub(crate) enum Child {
 	Video(Id),
 	JsonSnapshot(Id),
 	JsonStream(Id),
-	BinarySnapshot(Id),
-	BinaryStream(Id),
 }
 
 /// A child's handle, which ends what it still publishes when its broadcast closes.
@@ -224,18 +222,6 @@ impl Abort for Data<moq_mux::json::Stream<serde_json::Value>> {
 	}
 }
 
-impl Abort for Data<moq_mux::binary::Snapshot> {
-	fn abort(self, err: moq_net::Error) {
-		let _ = self.producer.abort(err);
-	}
-}
-
-impl Abort for Data<moq_mux::binary::Stream> {
-	fn abort(self, err: moq_net::Error) {
-		let _ = self.producer.abort(err);
-	}
-}
-
 /// The cause a failed import ends its tracks with, so a reader sees the publisher fail rather than
 /// `Dropped`. Only a moq-net error has a wire code; any other reaches readers as `Internal`.
 fn cause(err: &moq_mux::Error) -> moq_net::Error {
@@ -307,12 +293,6 @@ pub struct Publish {
 
 	/// JSON stream producers (lossless append-log tracks), advertised the same way.
 	json_stream: NonZeroSlab<Data<moq_mux::json::Stream<serde_json::Value>>>,
-
-	/// Binary snapshot producers (lossy latest-value tracks of opaque bytes), advertised the same way.
-	binary_snapshot: NonZeroSlab<Data<moq_mux::binary::Snapshot>>,
-
-	/// Binary stream producers (lossless append-log tracks of opaque bytes), advertised the same way.
-	binary_stream: NonZeroSlab<Data<moq_mux::binary::Stream>>,
 
 	/// Demand watchers. Close signals shutdown; the task delivers a final callback, then removes itself.
 	demand: NonZeroSlab<DemandEntry>,
@@ -528,7 +508,15 @@ impl Publish {
 		children.insert(&mut self.media, media, Child::Media)
 	}
 
-	pub fn audio(&mut self, broadcast: Id, init: import::AudioInit) -> Result<Id, Error> {
+	/// `hls` is the longest span between the track's group starts, when known (see [`Reserved::with_hls_hint`]).
+	///
+	/// [`Reserved::with_hls_hint`]: moq_mux::catalog::Reserved::with_hls_hint
+	pub fn audio(
+		&mut self,
+		broadcast: Id,
+		init: import::AudioInit,
+		hls: Option<std::time::Duration>,
+	) -> Result<Id, Error> {
 		let Broadcast {
 			producer: broadcast,
 			catalog,
@@ -539,12 +527,18 @@ impl Publish {
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast.reserve_track(name)?;
 
-		let track = import::Track::audio(request, catalog.reserve(), init)?;
+		let track = import::Track::audio(request, catalog.reserve().with_hls_hint(hls), init)?;
 		let children = children.clone();
 		self.insert_media(track, children)
 	}
 
-	pub fn video(&mut self, broadcast: Id, init: import::VideoInit) -> Result<Id, Error> {
+	/// `hls` as in [`Self::audio`].
+	pub fn video(
+		&mut self,
+		broadcast: Id,
+		init: import::VideoInit,
+		hls: Option<std::time::Duration>,
+	) -> Result<Id, Error> {
 		let Broadcast {
 			producer: broadcast,
 			catalog,
@@ -555,7 +549,7 @@ impl Publish {
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast.reserve_track(name)?;
 
-		let track = import::Track::video(request, catalog.reserve(), init)?;
+		let track = import::Track::video(request, catalog.reserve().with_hls_hint(hls), init)?;
 		let children = children.clone();
 		self.insert_media(track, children)
 	}
@@ -672,12 +666,18 @@ impl Publish {
 
 	/// Insert or replace a caller-authored video rendition in the broadcast's catalog.
 	///
-	/// Errors if a media importer owns the name, since it publishes and retires its own rendition.
-	/// The catalog is republished automatically.
+	/// Errors if a media importer owns the name, since it publishes and retires its own rendition,
+	/// or if the config changes the rendition's track identity, which takes a new name. The catalog
+	/// is republished automatically.
 	pub fn video_config(&mut self, broadcast: Id, name: &str, config: hang::catalog::VideoConfig) -> Result<(), Error> {
 		let broadcast = self.broadcast_mut(broadcast)?;
 		if !broadcast.video.contains_key(name) && broadcast.catalog.is_claimed::<hang::catalog::VideoConfig>(name) {
 			return Err(Error::Hang(hang::Error::Duplicate(name.to_string())));
+		}
+		if let Some(previous) = broadcast.video.get(name)
+			&& !previous.same_identity(&config)
+		{
+			return Err(moq_mux::Error::IdentityChanged(name.to_string()).into());
 		}
 		broadcast.video.insert(name.to_string(), config.clone());
 		let mut catalog = broadcast.catalog.modify()?;
@@ -693,6 +693,11 @@ impl Publish {
 		let broadcast = self.broadcast_mut(broadcast)?;
 		if !broadcast.audio.contains_key(name) && broadcast.catalog.is_claimed::<hang::catalog::AudioConfig>(name) {
 			return Err(Error::Hang(hang::Error::Duplicate(name.to_string())));
+		}
+		if let Some(previous) = broadcast.audio.get(name)
+			&& !previous.same_identity(&config)
+		{
+			return Err(moq_mux::Error::IdentityChanged(name.to_string()).into());
 		}
 		broadcast.audio.insert(name.to_string(), config.clone());
 		let mut catalog = broadcast.catalog.modify()?;
@@ -1007,26 +1012,36 @@ impl Publish {
 	}
 
 	/// Accept a track request as an audio track, returning a media handle like [`Self::audio`].
-	pub fn track_request_audio(&mut self, request: Id, init: import::AudioInit) -> Result<Id, Error> {
+	pub fn track_request_audio(
+		&mut self,
+		request: Id,
+		init: import::AudioInit,
+		hls: Option<std::time::Duration>,
+	) -> Result<Id, Error> {
 		let TrackRequest {
 			broadcast,
 			children,
 			request,
 		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
 		let catalog = self.catalog(broadcast)?;
-		let track = import::Track::audio(request, catalog.reserve(), init)?;
+		let track = import::Track::audio(request, catalog.reserve().with_hls_hint(hls), init)?;
 		self.insert_media(track, children)
 	}
 
 	/// Accept a track request as a video track, returning a media handle like [`Self::video`].
-	pub fn track_request_video(&mut self, request: Id, init: import::VideoInit) -> Result<Id, Error> {
+	pub fn track_request_video(
+		&mut self,
+		request: Id,
+		init: import::VideoInit,
+		hls: Option<std::time::Duration>,
+	) -> Result<Id, Error> {
 		let TrackRequest {
 			broadcast,
 			children,
 			request,
 		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
 		let catalog = self.catalog(broadcast)?;
-		let track = import::Track::video(request, catalog.reserve(), init)?;
+		let track = import::Track::video(request, catalog.reserve().with_hls_hint(hls), init)?;
 		self.insert_media(track, children)
 	}
 
@@ -1168,7 +1183,10 @@ impl Publish {
 		publish: impl FnOnce(&moq_mux::catalog::Producer<Extra>, moq_net::track::Producer) -> moq_mux::Result<T>,
 	) -> Result<Data<T>, Error> {
 		let broadcast = self.broadcast_mut(broadcast)?;
-		let mut info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		// Compressed: JSON is small and repetitive.
+		let mut info = moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_compress(true);
 		info.refresh = refresh;
 		let track = broadcast.producer.create_track(name, info)?;
 		let producer = publish(&broadcast.catalog, track)?;
@@ -1282,60 +1300,6 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Create a binary snapshot track (lossy latest-value) on a broadcast, advertised in its catalog
-	/// as `binary.tracks.<name>`, `mode: snapshot`.
-	pub fn binary_snapshot(&mut self, broadcast: Id, name: &str, config: moq_mux::binary::Config) -> Result<Id, Error> {
-		let producer = self.data_track(broadcast, name, None, |catalog, track| {
-			catalog.binary_snapshot(track, config)
-		})?;
-		let children = producer.children.clone();
-		children.insert(&mut self.binary_snapshot, producer, Child::BinarySnapshot)
-	}
-
-	/// Publish a new payload to a binary snapshot track, superseding the last.
-	pub fn binary_snapshot_update(&mut self, binary: Id, payload: &[u8]) -> Result<(), Error> {
-		let producer = self.binary_snapshot.get_mut(binary).ok_or(Error::TrackNotFound)?;
-		producer
-			.producer
-			.update(moq_net::Timed::from(bytes::Bytes::copy_from_slice(payload)).at(producer.clock.now()))?;
-		Ok(())
-	}
-
-	/// Finish a binary snapshot track and retire its catalog entry.
-	pub fn binary_snapshot_finish(&mut self, binary: Id) -> Result<(), Error> {
-		let producer = self.binary_snapshot.remove(binary).ok_or(Error::TrackNotFound)?;
-		producer.children.forget(Child::BinarySnapshot(binary));
-		producer.producer.finish()?;
-		Ok(())
-	}
-
-	/// Create a binary stream track (lossless append-log) on a broadcast, advertised in its catalog
-	/// as `binary.tracks.<name>`, `mode: stream`.
-	pub fn binary_stream(&mut self, broadcast: Id, name: &str, config: moq_mux::binary::Config) -> Result<Id, Error> {
-		let producer = self.data_track(broadcast, name, None, |catalog, track| {
-			catalog.binary_stream(track, config)
-		})?;
-		let children = producer.children.clone();
-		children.insert(&mut self.binary_stream, producer, Child::BinaryStream)
-	}
-
-	/// Append one payload to a binary stream track.
-	pub fn binary_stream_append(&mut self, stream: Id, payload: &[u8]) -> Result<(), Error> {
-		let producer = self.binary_stream.get_mut(stream).ok_or(Error::TrackNotFound)?;
-		producer
-			.producer
-			.append(moq_net::Timed::from(bytes::Bytes::copy_from_slice(payload)).at(producer.clock.now()))?;
-		Ok(())
-	}
-
-	/// Finish a binary stream track and retire its catalog entry.
-	pub fn binary_stream_finish(&mut self, stream: Id) -> Result<(), Error> {
-		let producer = self.binary_stream.remove(stream).ok_or(Error::TrackNotFound)?;
-		producer.children.forget(Child::BinaryStream(stream));
-		producer.producer.finish()?;
-		Ok(())
-	}
-
 	/// Write a frame into a raw group with an explicit timestamp.
 	pub fn group_frame(&mut self, group: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<(), Error> {
 		let group = self.groups.get_mut(group).ok_or(Error::GroupNotFound)?;
@@ -1392,16 +1356,6 @@ impl State {
 					.remove(id)
 					.map(|json| json.abort(err.clone())),
 				Child::JsonStream(id) => self.publish.json_stream.remove(id).map(|json| json.abort(err.clone())),
-				Child::BinarySnapshot(id) => self
-					.publish
-					.binary_snapshot
-					.remove(id)
-					.map(|data| data.abort(err.clone())),
-				Child::BinaryStream(id) => self
-					.publish
-					.binary_stream
-					.remove(id)
-					.map(|data| data.abort(err.clone())),
 			};
 		}
 		Ok(Closing { encoders, broadcast })
@@ -1447,7 +1401,7 @@ mod children_tests {
 		head.extend_from_slice(&[1, 2, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0]);
 		let media = state
 			.publish
-			.audio(broadcast, import::AudioInit::new(import::AudioFormat::Opus, head))
+			.audio(broadcast, import::AudioInit::new(import::AudioFormat::Opus, head), None)
 			.unwrap();
 		let name = state.publish.media_demand(media).unwrap().name().to_string();
 		let readers = [
@@ -1486,22 +1440,13 @@ mod children_tests {
 			.unwrap();
 		let consumer = state.publish.broadcast(broadcast).unwrap().producer.consume();
 		let json = moq_mux::json::Config::default;
-		let binary = moq_mux::binary::Config::default;
 		let json_snapshot = state
 			.publish
 			.json_snapshot(broadcast, "json-snapshot", json(), Default::default())
 			.unwrap();
 		let json_stream = state.publish.json_stream(broadcast, "json-stream", json()).unwrap();
-		let binary_snapshot = state
-			.publish
-			.binary_snapshot(broadcast, "binary-snapshot", binary())
-			.unwrap();
-		let binary_stream = state
-			.publish
-			.binary_stream(broadcast, "binary-stream", binary())
-			.unwrap();
 		let mut readers = Vec::new();
-		for name in ["json-snapshot", "json-stream", "binary-snapshot", "binary-stream"] {
+		for name in ["json-snapshot", "json-stream"] {
 			readers.push(consumer.track(name).unwrap().subscribe(None).await.unwrap());
 		}
 
@@ -1520,14 +1465,6 @@ mod children_tests {
 		));
 		assert!(matches!(
 			state.publish.json_stream_append(json_stream, json),
-			Err(Error::TrackNotFound)
-		));
-		assert!(matches!(
-			state.publish.binary_snapshot_update(binary_snapshot, b"late"),
-			Err(Error::TrackNotFound)
-		));
-		assert!(matches!(
-			state.publish.binary_stream_append(binary_stream, b"late"),
 			Err(Error::TrackNotFound)
 		));
 	}
@@ -1578,7 +1515,7 @@ mod supervision_tests {
 	async fn admission_must_match_the_broadcast_it_filled() {
 		let origin = moq_tokio::origin::spawn();
 		let claim = origin.requests("room").unwrap();
-		let pending = origin.consume().request_broadcast("room/first", None);
+		let pending = origin.consume().request("room/first", None);
 		let prepared = claim
 			.requested_broadcast()
 			.await
@@ -1607,7 +1544,7 @@ mod supervision_tests {
 		pending.await.unwrap();
 		publish.unannounce(publication).unwrap();
 
-		let pending = origin.consume().request_broadcast("room/second", None);
+		let pending = origin.consume().request("room/second", None);
 		let prepared = claim
 			.requested_broadcast()
 			.await

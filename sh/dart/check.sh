@@ -68,7 +68,7 @@ record_cargo() {
     local phase=$1 flags=$2
     cat >"$generated/bin/cargo" <<EOF
 #!/usr/bin/env bash
-if [[ "\${1:-}" == build ]]; then
+if [[ "\${1:-}" == build-ffi ]]; then
     env -u PWD -u OLDPWD -u SHLVL -u _ -0 | sort -z >"$generated/$phase.env"
     set -- "\$@" $flags
 fi

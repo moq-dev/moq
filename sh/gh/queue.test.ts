@@ -53,7 +53,7 @@ assert.equal(land.jobs.land["runs-on"], "ubuntu-latest");
 assert.equal(land.jobs.resolve.permissions.contents, "read");
 assert.deepEqual(land.jobs.check.permissions, { contents: "read" });
 assert.equal(land.jobs.check.environment, undefined);
-assert.equal(land.jobs.land.environment, "moq-bot");
+assert.equal(land.jobs.land.environment, "publish");
 assert.deepEqual(land.jobs.land.needs, ["resolve", "check"]);
 for (const job of Object.values(land.jobs) as { steps: { uses?: string; with?: { ref?: string } }[] }[]) {
 	const checkout = job.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
@@ -136,7 +136,7 @@ for (const file of files) {
 		if (JSON.stringify(job).includes("APP_PRIVATE_KEY")) {
 			assert.equal(
 				(job as { environment?: string }).environment,
-				"moq-bot",
+				"publish",
 				`${file}/${id} must scope the bot key`,
 			);
 		}

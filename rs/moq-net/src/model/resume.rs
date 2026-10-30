@@ -627,6 +627,30 @@ impl Subscriber {
 		&self.subscription
 	}
 
+	/// A handle that mirrors the reader's preferences into its copies; see [`Mirror`].
+	pub(super) fn mirror(&self) -> Mirror {
+		Mirror(Arc::downgrade(&self.reader))
+	}
+}
+
+/// Mirrors a reader's changed preferences into its copies at once, so the change reaches
+/// their sources without waiting for the reader's next poll: a reader that demotes a track
+/// it has stopped reading would otherwise keep its old priority upstream.
+#[derive(Clone)]
+pub(super) struct Mirror(Weak<Mutex<Reader>>);
+
+impl Mirror {
+	pub(super) fn sync(&self) {
+		if let Some(reader) = self.0.upgrade() {
+			reader
+				.lock()
+				.unwrap_or_else(PoisonError::into_inner)
+				.sync(&kio::Waiter::noop());
+		}
+	}
+}
+
+impl Subscriber {
 	/// Poll for the next group not in `delivered`: in arrival order, or in sequence order
 	/// for `ordered`.
 	pub(super) fn poll_group(
@@ -715,6 +739,11 @@ impl Subscriber {
 	/// The lowest group the reader's ranges name; see [`track::Subscriber::floor`].
 	pub(super) fn floor(&self) -> Option<u64> {
 		self.reader().window().start()
+	}
+
+	/// Where each of the reader's ranges starts; see [`track::Subscriber::starts`].
+	pub(super) fn starts(&self, from: u64) -> Vec<Option<u64>> {
+		self.reader().window().starts(from)
 	}
 
 	/// The lowest group at or above `from` the reader's ranges cover; see
@@ -897,7 +926,7 @@ impl Reader {
 	/// while a relative anchor waits on a copy to resolve it.
 	fn window(&mut self) -> &Window {
 		for index in 0..self.copies.len() {
-			if !self.window.is_pending() {
+			if self.window.is_settled() {
 				break;
 			}
 			let copy = &mut self.copies[index];
@@ -910,9 +939,11 @@ impl Reader {
 		&self.window
 	}
 
-	/// Resolve a pending [`Self::window`] with a copy's resolution of the reader's ranges,
+	/// Resolve unsettled [`Self::window`] anchors with a copy's resolution of the reader's ranges,
 	/// unless a relative anchor still waits there too.
 	fn resolve(&mut self, resolved: &[Option<Resolved>]) {
+		// Once placed, relative/time starts stay pinned even while a time end settles.
+		let placed = (!self.window.is_pending()).then(|| self.window.resolved());
 		let ranges: Vec<_> = self
 			.mirrored
 			.ranges
@@ -922,15 +953,18 @@ impl Reader {
 				let Some(resolved) = resolved.get(index).copied().flatten() else {
 					return *range;
 				};
+				let previous = placed.as_ref().and_then(|placed| placed[index]);
+				let start = previous.map_or(resolved.start, |previous| previous.start);
+				let end = previous.and_then(|previous| previous.end).or(resolved.end);
 				track::Range {
 					start: match range.start {
 						// The farthest offset reaches back to the oldest group, which names no floor.
-						Anchor::Relative(back) if back != u64::MAX => Anchor::Absolute(resolved.start),
-						Anchor::Time(_) => Anchor::Absolute(resolved.start),
+						Anchor::Relative(back) if back != u64::MAX => Anchor::Absolute(start),
+						Anchor::Time(_) => Anchor::Absolute(start),
 						start => start,
 					},
 					// A time end the copy has not settled stays one: its cap is not the end.
-					end: match (range.end, resolved.end) {
+					end: match (range.end, end) {
 						(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(end)) => Some(Anchor::Absolute(end)),
 						(end, _) => end,
 					},
@@ -973,7 +1007,7 @@ impl Reader {
 			// failover cap raised them, so the reader takes that resolution now.
 			if replaced {
 				for index in (0..self.copies.len()).rev() {
-					if !self.window.is_pending() {
+					if self.window.is_settled() {
 						break;
 					}
 					if matches!(self.copies[index].sub, Sub::Ready(_)) {
@@ -2257,6 +2291,77 @@ mod test {
 					Poll::Ready(Err(Error::NotFound))
 				));
 			}
+		}
+	}
+
+	/// A short-budget reader sharing the replacement copy never settles a refused group for
+	/// an hour-budget one, whichever recovers first: each reader subscribes to the new route
+	/// before judging, so the copy's combined budget always covers its own. Nor does the
+	/// hour-budget reader keep the short one waiting past its own budget.
+	#[moq_clock::test]
+	async fn a_refused_group_waits_for_its_own_readers_grace() {
+		let waiter = kio::Waiter::noop();
+		let short = Duration::from_millis(100);
+		let hour = Duration::from_secs(3600);
+		for short_first in [true, false] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut quick = subscribe(&logical, short);
+			let mut patient = subscribe(&logical, hour);
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"first".as_ref()).unwrap();
+			let mut quick_held = recv(&mut quick);
+			let mut patient_held = recv(&mut patient);
+			assert_eq!(read(&mut quick_held), Some(b"first".to_vec()));
+			assert_eq!(read(&mut patient_held), Some(b"first".to_vec()));
+
+			let b = copy();
+			let dynamic = b.requests();
+			let mut newer = b.create_group(group::Info { sequence: 1 }).unwrap();
+			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
+			newer.finish().unwrap();
+			routes.serve(b.consume());
+			open.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
+			a.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
+			let mut held = [&mut quick_held, &mut patient_held];
+			if !short_first {
+				held.reverse();
+			}
+			for group in held {
+				assert!(group.poll_read_frame(&waiter).is_pending());
+			}
+			let mut refused = 0;
+			while let Poll::Ready(request) = dynamic.poll_requested_fill_group(&waiter) {
+				request.unwrap().reject(Error::NotFound);
+				refused += 1;
+			}
+			assert!(refused > 0, "short_first={short_first}: the recovery fetch arrives");
+
+			moq_clock::sleep(short).await;
+			let res = quick_held.poll_read_frame(&waiter);
+			assert!(
+				matches!(res, Poll::Ready(Err(Error::Old | Error::NotFound))),
+				"short_first={short_first}: {res:?}"
+			);
+			assert!(
+				patient_held.poll_read_frame(&waiter).is_pending(),
+				"short_first={short_first}: still within the hour"
+			);
+			drop(quick_held);
+			drop(quick);
+			let mut late = b.create_group(group::Info { sequence: 0 }).unwrap();
+			late.write_frame(ts(0), b"first".as_ref()).unwrap();
+			late.write_frame(ts(1), b"continued".as_ref()).unwrap();
+			late.finish().unwrap();
+			assert_eq!(
+				read(&mut patient_held),
+				Some(b"continued".to_vec()),
+				"short_first={short_first}"
+			);
 		}
 	}
 
@@ -4424,6 +4529,25 @@ mod test {
 		assert!(matches!(sub.recv_group().now_or_never(), Some(Err(Error::Unsupported))));
 	}
 
+	/// A changed preference reaches the serving copy without the reader polling again,
+	/// through the subscriber or its control: a reader demoting a track it stopped reading
+	/// would otherwise keep its old priority upstream.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_update_reaches_the_copy_without_a_read() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(30));
+		assert_eq!(a.subscription().unwrap().priority, 0);
+
+		sub.update(sub.subscription().with_priority(-2)).unwrap();
+		assert_eq!(a.subscription().unwrap().priority, -2);
+		sub.control().update(sub.subscription().with_priority(3)).unwrap();
+		assert_eq!(a.subscription().unwrap().priority, 3);
+	}
+
 	/// Capping a replaced copy never replaces a time end it has not settled: the copy keeps
 	/// filtering by time, so a group below the cap that starts past the end stays out.
 	#[test]
@@ -5876,6 +6000,36 @@ mod test {
 			"the relative range resolved on the serving copy"
 		);
 		assert_eq!(sub.floor(), Some(0));
+	}
+
+	/// A time end resolves on the serving copy even when the start is already absolute.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_resumed_reader_reports_starts_within_its_time_end() {
+		for start in [Anchor::Absolute(0), Anchor::Relative(0)] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			write(&a, 0);
+			routes.serve(a.consume());
+			let subscription = Subscription::default().with_max_delay(HOUR).with_ranges([track::Range {
+				start,
+				end: Some(Anchor::Time(ts(1))),
+			}]);
+			let mut sub = logical
+				.consume()
+				.subscribe(subscription)
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			let _ = sub.poll_start(&kio::Waiter::noop());
+			assert_eq!(sub.starts(0), [Some(0)]);
+			for sequence in 1..3 {
+				write(&a, sequence);
+			}
+			assert_eq!(sub.starts(10), [None]);
+			assert_eq!(sub.starts(0), [Some(0)], "the start stays pinned while the end settles");
+		}
 	}
 
 	/// A resumed reader names the next group its ranges cover, so a reader waiting on each

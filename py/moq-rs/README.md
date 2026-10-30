@@ -33,7 +33,7 @@ async def main():
             if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart)):
                 continue  # AnnounceEventUpdate or AnnounceEventEnd
             # A route covers a prefix and carries no broadcast, so resolve the path.
-            broadcast = await client.request_broadcast(event.announce.prefix)
+            broadcast = await client.request(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)
 
             for id, audio in catalog.audio.items():
@@ -226,8 +226,9 @@ subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()
 optional capture time. A window keeps a sliding run of records a reader can join at any point,
 and `.cut()` ends its open group so the next edit opens one restating the window; the catalog has
 no window mode, so `WindowProducer` takes only the track.
-`moq.flate.SnapshotProducer` and `moq.flate.StreamProducer` offer the same operations for bytes.
-Omitting time leaves data untimed; choose the track's `timescale` to match.
+Omitting time leaves data untimed; choose the track's `timescale` to match. Publish JSON tracks with
+`TrackInfo(compress=True)`: the track compresses each group on the wire, and consumers read it the
+same either way. Opaque bytes go on a plain `TrackProducer`.
 
 ### Subscribing
 
@@ -244,7 +245,7 @@ Omitting time leaves data untimed; choose the track's `timescale` to match.
 - **`GroupConsumer`**. Async iterator of raw `Frame`s.
   - `.read_frame() -> Frame | None` returns a raw frame with optional capture time.
 
-Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginRequests`, `BroadcastRequests`, `TrackRequests`).
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `Following`) and the dynamic sources (`OriginRequests`, `BroadcastRequests`, `TrackRequests`).
 
 ### Origin (advanced)
 
@@ -260,8 +261,8 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, or `AnnounceEventRestart`, each carrying an `Announce` whose `.route.epoch` names the publisher run; on a restart, request the path again); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches
-  - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits until something serves the path)
-  - `.request_broadcast(path) → BroadcastConsumer` (awaitable; announced now or a dynamic fallback, else raises)
+  - `.follow(path, epoch=None) → Following` (awaitable, waits until something serves the path, then each instance that takes over; an `epoch` follows only that instance)
+  - `.request(path, epoch=None) → BroadcastConsumer` (awaitable; owns discovery and resolves one instance, or raises once synced without a route; an `epoch` refuses any other instance)
 
 ### Types
 

@@ -76,6 +76,16 @@ Decided 2026-10-26 (maintainer):
   `release`), `dependabot.yml`, and `smoke-toolchain.yml` that use it
   reference the Environment. Only the hosted land job reads it, never the job
   that runs PR code.
+- Open question, added 2026-10-29 (maintainer) from
+  [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166): the `publish`
+  Environment admits `main`, whose ruleset lets repository role 2 bypass
+  review, and moq-bot joins that bypass list here. Decide with the bypass list
+  whether `main` keeps deploying to `publish`, or publishing narrows to
+  `release` and release tags. Ask the maintainer; settings changes are theirs.
+- The gate tests each PR on the latest `main`, not the PR's own base. On
+  2026-10-29 [moq-dev/moq#7162](https://github.com/moq-dev/moq/pull/7162)
+  passed its own CI but broke in the queue on API renames that landed after
+  its last base merge; that is the case the gate must catch before `main`.
 
 Draft source in [moq-dev/moq#7024](https://github.com/moq-dev/moq/pull/7024)
 prepares the three phases, trusted Quest installation, the read-only worker,
@@ -91,13 +101,6 @@ Remaining before completion:
   pinned to an app that never reports it on PR heads. Coordinate source
   installation with that ruleset change: removing `merge_group` cannot
   pass the old queue, and changing protection first stops that queue.
-- **Protect the credential's refs.** The `moq-bot` Environment does not yet
-  exist. Create it for `main`, `release`, and `moq-ffi-v*`, with the FFI tag
-  creation/update/deletion restrictions installed first. The current
-  protected release-tag list lacks `moq-ffi-v*`. Put the bot key there, and
-  ensure the workflows still running from `release` name the Environment
-  before removing repository-level keys. See `infra/README.md` for the
-  prepared setup sequence; the maintainer decides the cutover window.
 - **Squash body policy.** The pinned engine is available, but
   [its message builder](https://github.com/kixelated/quest/blob/fd1d88fb19317afc1c0cbca34cc23e9cf4d32375/src/cli/land.ts#L511)
   preserves individual commit messages as well as co-author trailers.

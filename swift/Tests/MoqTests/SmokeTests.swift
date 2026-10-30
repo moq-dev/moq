@@ -173,7 +173,7 @@ final class SmokeTests: XCTestCase {
         _ = try publication.broadcast.publishTrack(name: "events")
         let consumer = origin.consume()
         do {
-            _ = try await consumer.requestBroadcast(path: "live")
+            _ = try await consumer.request(path: "live")
             XCTFail("an unannounced broadcast must be unroutable")
         } catch {}
 
@@ -190,7 +190,7 @@ final class SmokeTests: XCTestCase {
         }
         XCTAssertEqual(retracted.prefix, "live")
         do {
-            _ = try await consumer.requestBroadcast(path: "live")
+            _ = try await consumer.request(path: "live")
             XCTFail("an unannounced broadcast must be unroutable")
         } catch {}
 
@@ -198,7 +198,7 @@ final class SmokeTests: XCTestCase {
         guard case .start = try await nextRoute(announced) else {
             return XCTFail("expected a reannouncement")
         }
-        _ = try await consumer.requestBroadcast(path: "live")
+        _ = try await consumer.request(path: "live")
     }
 
     /// Releasing a publication keeps its route; closing the broadcast ends it.
@@ -210,11 +210,11 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(broadcast === publication?.broadcast)
         try publication?.announce()
         publication = nil
-        _ = try await consumer.requestBroadcast(path: "live")
+        _ = try await consumer.request(path: "live")
 
         try broadcast.close()
         do {
-            _ = try await consumer.requestBroadcast(path: "live")
+            _ = try await consumer.request(path: "live")
             XCTFail("a closed broadcast must be unroutable")
         } catch {}
     }
@@ -238,7 +238,7 @@ final class SmokeTests: XCTestCase {
                 return XCTFail("expected Closed, got \(error)")
             }
         }
-        _ = try await origin.consume().requestBroadcast(path: "live")
+        _ = try await origin.consume().request(path: "live")
         try replacement.broadcast.close()
     }
 
@@ -281,7 +281,7 @@ final class SmokeTests: XCTestCase {
         let origin = OriginProducer()
         let dynamic = try origin.requests(prefix: "live")
         let pending = Task {
-            try await origin.consume().requestBroadcast(path: "live/cam")
+            try await origin.consume().request(path: "live/cam")
         }
         let request = try await dynamic.requestedBroadcast()
         XCTAssertEqual(try request.path, "live/cam")
@@ -379,10 +379,9 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let producer = try Json.SnapshotProducer<Status>(
             broadcast: broadcast,
-            track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000)),
-            compression: true)
+            track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000, compress: true)))
         let consumer = try Json.SnapshotConsumer<Status>(
-            track: try await broadcast.consume().subscribeTrack(name: "status"), compression: true)
+            track: try await broadcast.consume().subscribeTrack(name: "status"))
 
         for viewers in 1...4 {
             try producer.update(Status(state: "live", viewers: viewers), timestampUs: UInt64(viewers) * 1000)
@@ -430,9 +429,9 @@ final class SmokeTests: XCTestCase {
 
         let broadcast = try BroadcastProducer()
         let producer = try Json.WindowProducer<Event>(
-            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000)), compression: true)
+            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000, compress: true)))
         let consumer = try Json.WindowConsumer<Event>(
-            track: try await broadcast.consume().subscribeTrack(name: "log"), compression: true)
+            track: try await broadcast.consume().subscribeTrack(name: "log"))
 
         for n in 0..<3 {
             try producer.push(Event(n: n), timestampUs: UInt64(n) * 1000)
@@ -485,32 +484,6 @@ final class SmokeTests: XCTestCase {
         while try await streamDemand.wantedChanged() != nil {}
 
         try broadcast.close()
-    }
-
-    func testFlateTimestampsRoundTrip() async throws {
-        for timestamp in [nil, UInt64(123_456)] {
-            for mode in ["snapshot", "stream"] {
-                let broadcast = try BroadcastProducer()
-                let info: TrackInfo? = timestamp.map { _ in TrackInfo(timescale: 1_000_000) }
-                let track = try broadcast.publishTrack(name: "data", info: info)
-                let consumer = try track.consume()
-                let payload = Data("payload".utf8)
-                if mode == "snapshot" {
-                    let producer = try Flate.SnapshotProducer(broadcast: broadcast, track: track)
-                    try producer.update(payload, timestampUs: timestamp)
-                    try producer.finish()
-                } else {
-                    let producer = try Flate.StreamProducer(broadcast: broadcast, track: track)
-                    try producer.append(payload, timestampUs: timestamp)
-                    try producer.finish()
-                }
-                let received = try await consumer.readFrame()
-                let frame = try XCTUnwrap(received)
-                XCTAssertEqual(frame.payload, payload)
-                XCTAssertEqual(frame.timestampUs, timestamp)
-                try broadcast.close()
-            }
-        }
     }
 
     func testRawTrackWithoutTimestampStaysUntimed() async throws {
@@ -630,7 +603,7 @@ final class SmokeTests: XCTestCase {
         )
         try publication.announce()
 
-        let consumer = try await origin.consume().requestBroadcast(path: "audio-delay")
+        let consumer = try await origin.consume().request(path: "audio-delay")
         let catalogs = try await Media.CatalogConsumer.subscribe(broadcast: consumer)
         // XCTUnwrap takes an autoclosure, which can't hold an await.
         let nextCatalog = try await catalogs.next()
@@ -687,7 +660,7 @@ final class SmokeTests: XCTestCase {
             try video.write(VideoFrame(timestampUs: UInt64(i) * 33_333, data: rgba))
         }
 
-        let consumer = try await origin.consume().requestBroadcast(path: "video-decode-frame")
+        let consumer = try await origin.consume().request(path: "video-decode-frame")
         let catalogs = try await Media.CatalogConsumer.subscribe(broadcast: consumer)
         // XCTUnwrap takes an autoclosure, which can't hold an await.
         let nextCatalog = try await catalogs.next()

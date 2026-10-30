@@ -44,6 +44,36 @@ maintainer's `wrangler login`. Whether Editor alone passes wrangler's
 custom-domain check on every deploy is unproven until the first `release`
 run; [the deploy quest](../quest/m2/release/moq-sh-deploy.md) tracks it.
 
+## Write credentials
+
+Any branch pushed to this repository runs its own workflows with the
+repository's Actions secrets, so a credential that can write or publish lives
+in an Environment whose deployment policy admits only protected refs. A job
+names the Environment, and a branch that is not on the list fails to start it.
+
+| Environment | Deployable from | Holds |
+| --- | --- | --- |
+| `publish` | `main`, `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, deploy, alert, and moq-bot credentials |
+| `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
+| `npm` | `release` | `JSR_TOKEN`; npm's trusted publisher names it |
+| `pypi` | `main`, `release`, `moq-ffi-v*` | Nothing; PyPI's trusted publisher names it |
+| `pub.dev` | `moq-dart-v*`, `moq-ffi-v*` | Nothing; pub.dev's automated publishing names it |
+| `github-pages` | `main` | Nothing |
+
+`main` is on the `publish` list for `workflow_run`, schedule, and dispatch jobs,
+which run there. A job that also runs dry on other refs names the Environment
+only when it publishes, as in `environment: ${{ github.ref_type == 'tag' &&
+'publish' || '' }}`. Read-only secrets, such as the mbx read key, stay at the
+repository level.
+
+A tag policy only helps if the tag itself is protected, so the `release tags`
+ruleset ([below](#bootstrapping-the-nix-cache)) also covers `moq-ffi-v*`
+and `moq-dart-v*`. A `workflow_run` job that checks out the triggering commit
+first requires its `head_branch` to be such a tag at that commit, since a
+branch can share a release's name. JSR's GitHub trust checks only the repository, not an
+Environment, so `release-js` publishes to JSR with `JSR_TOKEN` instead and the
+JSR packages do not trust the repository.
+
 ## Bootstrapping a new package repository
 
 The CI workflows (`.github/workflows/apt-repo.yml`,
@@ -95,8 +125,8 @@ domain, and signing key already exist. To stand them up the first time:
      --file moq-keyring.asc --remote
    ```
 
-5. **Configure GitHub Actions secrets** (Settings -> Secrets and variables
-   -> Actions):
+5. **Configure GitHub Actions secrets** in the `publish` Environment (see
+   [Write credentials](#write-credentials)):
 
    - `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`: R2 API token with
      object read/write on both buckets.
@@ -115,25 +145,16 @@ regenerates the repository metadata, signs it, and uploads the diff.
 push. The worker receives only a read credential and local compiler caches;
 the hosted push reconstructs the tested chain with Quest from `main`.
 
-A maintainer coordinates the cutover. The workflow cannot replace GitHub's
-queue until its ruleset and credential boundary are installed together:
+A maintainer coordinates the cutover. The land job reads the moq-bot key from
+the `publish` Environment, like the release workflows. The workflow cannot
+replace GitHub's queue until its ruleset is installed with it:
 
-1. Protect `moq-ffi-v*` creation, updates, and deletion with the same bot and
-   administrator restrictions as the other release tags. The FFI mirror
-   publishers need the bot key on these tags.
-2. Create a `moq-bot` Environment with custom branch policies for `main` and
-   `release`, and a tag policy for `moq-ffi-v*`. Put `APP_CLIENT_ID` and
-   `APP_PRIVATE_KEY` there. Do not admit arbitrary branches or unprotected
-   tags: a workflow on one could otherwise read the key that bypasses `main`.
-3. Ensure every release workflow that still runs from `release` names that
-   Environment before deleting the repository-level copies of the key.
-   Older release commits do not acquire these job declarations from `main`.
-4. Add moq-bot to the main ruleset's bypass actors, retain the administrator
+1. Add moq-bot to the main ruleset's bypass actors, retain the administrator
    bypass, remove the `merge_queue` rule, and replace `Check` with required
    context `quest land`, pinned to an app that never reports it on PR heads.
    Keep the deletion and non-fast-forward protections. Other required
    checks or review rules must be ones the pinned Quest engine supports.
-5. Install the workflow source and ruleset in a coordinated maintenance
+2. Install the workflow source and ruleset in a coordinated maintenance
    window. A queued PR that removes its own `merge_group` handler cannot
    supply the old queue's required check; changing the ruleset first also
    stops the old queue. Confirm the exact installation path before starting
@@ -282,7 +303,8 @@ done.
      "enforcement": "active",
      "conditions": {"ref_name": {"exclude": [], "include": [
        "refs/tags/moq-relay-v*", "refs/tags/moq-cli-v*", "refs/tags/moq-boy-v*",
-       "refs/tags/moq-c-v*", "refs/tags/moq-gst-v*"
+       "refs/tags/moq-c-v*", "refs/tags/moq-gst-v*",
+       "refs/tags/moq-ffi-v*", "refs/tags/moq-dart-v*"
      ]}},
      "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}],
      "bypass_actors": [
