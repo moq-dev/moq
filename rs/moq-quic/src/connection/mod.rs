@@ -2178,7 +2178,12 @@ impl Connection {
 			Some(x) if self.state.is_established() => x,
 			_ => return,
 		};
-		self.timers.set(Timer::KeepAlive, now + interval);
+		// A peer may advertise an idle timeout whose derived interval is too far out to represent;
+		// that keep-alive never fires.
+		match now.checked_add(interval) {
+			Some(deadline) => self.timers.set(Timer::KeepAlive, deadline),
+			None => self.timers.stop(Timer::KeepAlive),
+		}
 	}
 
 	fn reset_cid_retirement(&mut self) {

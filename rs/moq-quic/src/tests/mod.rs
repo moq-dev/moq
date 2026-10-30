@@ -2769,6 +2769,22 @@ fn keep_alive_explicit_cap_and_disable() {
 	assert!(pair.time - start < 2 * IDLE, "{:?}", pair.time - start);
 }
 
+/// A peer advertising the largest idle timeout the wire carries derives a keep-alive too far
+/// out to schedule, which must not panic.
+#[test]
+fn keep_alive_derived_from_a_huge_peer_idle_timeout() {
+	let _guard = subscribe();
+	let mut server = server_config();
+	server.transport.idle_timeout = Some(Duration::from_millis(VarInt::MAX.into_inner()));
+	let mut client = client_config();
+	client.transport.idle_timeout = None;
+	let mut pair = Pair::new(Default::default(), server);
+	let (client_ch, _) = pair.connect_with(client);
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive();
+	assert!(!pair.client_conn_mut(client_ch).is_closed());
+}
+
 #[test]
 fn keep_alive_interval_derivation() {
 	use transport::keep_alive_interval as interval;
