@@ -804,6 +804,52 @@ fn batch_within_probe_inflight() {
 	);
 }
 
+/// The inflight the controller allows a probe holds the sender back only once an attempt has
+/// sent a duplicate: media alone past it leaves the sender application-limited
+#[test]
+fn probe_inflight_limits_only_an_attempt() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	pair.latency = Duration::from_millis(20);
+	let (client_ch, _) = pair.connect();
+	pair.client_conn_mut(client_ch).set_probe_target(1000 * TARGET);
+	let inflight = pair
+		.client_conn_mut(client_ch)
+		.congestion_state()
+		.metrics()
+		.probe_inflight
+		.expect("probing in Startup");
+
+	// More media than the probe may fill, within the initial window
+	let media = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, media)
+		.write(&mut &vec![0; inflight as usize + 2400][..])
+		.unwrap();
+	// Past the pacer's bursts, short of the first ACK
+	for _ in 0..10 {
+		pair.drive_client();
+		pair.time += Duration::from_millis(1);
+	}
+	let conn = pair.client_conn_mut(client_ch);
+	assert!(conn.bytes_in_flight() > inflight);
+	assert_eq!(conn.stats().path.sent_bandwidth_probes, 0);
+	assert!(conn.app_limited(), "media alone past the bound held the sender back");
+
+	// Once the media drains, an attempt fills up to the bound, which then holds it back
+	pair.drive();
+	pair.client_send(client_ch, media).write(&mut &[0; 1400][..]).unwrap();
+	pair.drive_client();
+	let conn = pair.client_conn_mut(client_ch);
+	assert!(conn.stats().path.sent_bandwidth_probes > 0);
+	assert!(
+		!conn.app_limited(),
+		"an attempt held back by the bound was application-limited"
+	);
+}
+
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn steps_keyframes() {

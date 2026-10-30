@@ -359,13 +359,14 @@ jobs:
         # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
-        # `gate` runs the queue's Check over every package, catching
-        # what a diff-scoped queue run let into main.
+        # `gate -rs_shapes` runs the queue's Check over every package, catching
+        # what a diff-scoped queue run let into main. Features runs the rest,
+        # the isolated feature shapes, which outgrow one hosted job beside it.
         # `rs audio-devices` plays moq-audio's device tests into a private null sink.
         # `rs multicast` runs the mDNS tests, which loop multicast back on the runner.
         # `rs render-sw` renders through wgpu on Mesa's software Vulkan driver.
         # `test qmux` runs js/qmux against the in-tree Rust qmux, per draft.
-        recipe: ["gate", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux"]
+        recipe: ["gate -rs_shapes", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux"]
         include:
           - recipe: rs send-depth
             nightly: true
