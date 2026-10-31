@@ -132,8 +132,8 @@ pub(crate) struct Framing {
 }
 
 impl Framing {
-	/// How `version` frames a track accepted as `info`. Lite05/06 stamp every frame, so a
-	/// track received untimed there still has timestamps to read past.
+	/// How `version` frames a track accepted as `info`. Lite05/06 stamp every frame, an
+	/// untimed track's with its send time in milliseconds.
 	pub fn new(info: &crate::track::Info, version: Version) -> Self {
 		Self {
 			timescale: version.wire_timescale(info.timescale),
