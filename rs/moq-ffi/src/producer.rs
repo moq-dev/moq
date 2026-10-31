@@ -273,7 +273,7 @@ impl RequestsProducer {
 impl TrackDynamicProducer {
 	async fn requested_fill(&mut self) -> Result<Arc<MoqFill>, MoqError> {
 		let fill = self.inner.requested_fill().await?;
-		Ok(Arc::new(MoqFill { inner: Arc::new(fill) }))
+		Ok(Arc::new(MoqFill::new(fill)))
 	}
 }
 
@@ -458,13 +458,22 @@ impl MoqTrackRequests {
 /// A run of groups readers miss, mirroring [`moq_net::track::Fill`].
 ///
 /// Call [`accept`](Self::accept) for each group you have and [`drop_groups`](Self::drop_groups)
-/// for the rest; [`next`](Self::next) names what is still owed, in the fill's order. Releasing
+/// for the rest; [`wanted`](Self::wanted) names what is still owed, in the fill's order. Releasing
 /// it names whatever is left as dropped while a reader still wants it; once nobody does, it is
-/// withdrawn, so stop serving it when [`unused`](Self::unused) resolves. Stop serving a single
+/// withdrawn, so stop serving it once [`wanted`](Self::wanted) is null. Stop serving a single
 /// group when [`unwanted`](Self::unwanted) resolves for it, and move on to the next.
 #[derive(uniffi::Object)]
 pub struct MoqFill {
-	inner: Arc<moq_net::track::Fill>,
+	inner: moq_net::track::Fill,
+	// The watcher `wanted_changed` advances, kept apart so concurrent waits queue in turn.
+	changes: crate::ffi::Task<moq_net::track::Fill>,
+}
+
+impl MoqFill {
+	fn new(inner: moq_net::track::Fill) -> Self {
+		let changes = crate::ffi::Task::new(inner.clone());
+		Self { inner, changes }
+	}
 }
 
 #[uniffi::export]
@@ -500,9 +509,19 @@ impl MoqFill {
 		self.inner.order().into()
 	}
 
-	/// The next group still owed in the fill's order, or null once every group is answered.
-	pub fn next(&self) -> Option<u64> {
-		self.inner.next()
+	/// The next group still owed in the fill's order, or null once every group is answered or
+	/// no reader waits on the fill.
+	pub fn wanted(&self) -> Option<u64> {
+		self.inner.wanted()
+	}
+
+	/// Wait for `wanted` to change and return the new value. The first call returns at once.
+	pub async fn wanted_changed(&self) -> Result<Option<u64>, MoqError> {
+		// Driven in place, not detached: a cancelled call left unfreed must not advance the
+		// watcher and swallow the change the next call waits for.
+		self.changes
+			.run(|mut fill| async move { Ok(fill.wanted_changed().await) })
+			.await
 	}
 
 	/// Insert group `sequence` and return a producer for filling it. The first group starts
@@ -520,21 +539,6 @@ impl MoqFill {
 	pub fn drop_groups(&self, start: u64, end: u64) {
 		let _guard = crate::ffi::enter();
 		self.inner.drop_groups(start..end);
-	}
-
-	/// Whether a reader still waits on this fill.
-	pub fn is_used(&self) -> bool {
-		self.inner.is_used()
-	}
-
-	/// Wait until no reader waits on this fill.
-	pub async fn unused(&self) -> Result<(), MoqError> {
-		let fill = self.inner.clone();
-		crate::ffi::detached(async move {
-			fill.unused().await;
-			Ok::<_, MoqError>(())
-		})
-		.await
 	}
 
 	/// Whether a reader still waits for group `sequence` from this fill: false once every

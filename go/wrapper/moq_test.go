@@ -657,8 +657,8 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if fill.StartGroup() != 7 || fill.EndGroup() != 8 || fill.Priority() != 11 {
 		t.Fatalf("unexpected fill: start=%d end=%d priority=%d", fill.StartGroup(), fill.EndGroup(), fill.Priority())
 	}
-	if next := fill.Next(); next == nil || *next != 7 || !fill.IsUsed() {
-		t.Fatalf("unexpected fill: next=%v used=%v", next, fill.IsUsed())
+	if wanted := fill.Wanted(); wanted == nil || *wanted != 7 {
+		t.Fatalf("unexpected fill: wanted=%v", wanted)
 	}
 	if !fill.IsWanted(7) || fill.IsWanted(8) {
 		t.Fatalf("unexpected wants: 7=%v 8=%v", fill.IsWanted(7), fill.IsWanted(8))

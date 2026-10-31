@@ -3554,13 +3554,13 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Abort an unused track, returning the producer unchanged if consumers remain.
+	/// Abort an unwanted track, returning the producer unchanged if consumers remain.
 	///
-	/// Consumer creation and the unused check share a lock, so demand returning
+	/// Consumer creation and the unwanted check share a lock, so demand returning
 	/// after [`Demand::wanted`] went to `None` prevents the abort. `Ok(())` means
 	/// the track is closed, including when it was already closed; existing handles
 	/// may still observe its final state. `Err(producer)` leaves the track unchanged
-	/// so the caller can continue serving and wait for the next unused wake.
+	/// so the caller can continue serving and wait for the next unwanted wake.
 	///
 	/// The abort is the same as [`Self::abort`]. A reader still in a group it was handed
 	/// counts as a consumer until it reads the group's end.
@@ -3571,16 +3571,16 @@ impl Producer {
 			reason = "return the owned producer without allocating on an idle check"
 		)
 	)]
-	pub fn abort_unused(self, err: Error) -> std::result::Result<(), Self> {
-		let used = match self.state.write_unused() {
-			kio::Unused::Idle(guard) => {
+	pub fn abort_unwanted(self, err: Error) -> std::result::Result<(), Self> {
+		let wanted = match self.state.write_unwanted() {
+			kio::Unwanted::Idle(guard) => {
 				commit_abort(guard, err).abort();
 				false
 			}
-			kio::Unused::Closed => false,
-			kio::Unused::Used => true,
+			kio::Unwanted::Closed => false,
+			kio::Unwanted::Wanted => true,
 		};
-		if used {
+		if wanted {
 			return Err(self);
 		}
 		// After the track's own lock is released; a later track of the name, listed in
@@ -4031,7 +4031,7 @@ impl TrackWeak {
 	/// Join the cached track's demand, or `None` once it has closed.
 	///
 	/// The count moves under the same lock the close takes, which is the other half
-	/// of [`Producer::abort_unused`]: a request either joins in time to decline the
+	/// of [`Producer::abort_unwanted`]: a request either joins in time to decline the
 	/// teardown, or gets nothing and re-requests the track. It is never handed a track
 	/// that is already on its way out.
 	pub(super) fn try_consume(
@@ -4085,8 +4085,8 @@ impl TrackWeak {
 
 	/// Whether anyone is consuming the track right now. A closed track doesn't
 	/// count even if consumers linger to drain its cache: no new work is owed.
-	pub(super) fn is_used(&self) -> bool {
-		!self.state.is_closed() && self.state.is_used()
+	pub(super) fn is_wanted(&self) -> bool {
+		!self.state.is_closed() && self.state.wanted()
 	}
 
 	/// A [`Demand`] on the cached track, for a broadcast to watch.
@@ -4106,32 +4106,32 @@ impl TrackWeak {
 	/// End the track with `err` unless a reader holds it, atomically with lookups: a
 	/// lookup either gets a consumer in time to keep it, or finds it closed and asks
 	/// afresh. True once the track is gone.
-	pub(super) fn abort_unused(&self, err: Error) -> bool {
+	pub(super) fn abort_unwanted(&self, err: Error) -> bool {
 		let Some(producer) = self.state.produce() else {
 			return true;
 		};
-		match producer.write_unused() {
-			kio::Unused::Idle(guard) => {
+		match producer.write_unwanted() {
+			kio::Unwanted::Idle(guard) => {
 				commit_abort(guard, err).abort();
 				true
 			}
-			kio::Unused::Closed => true,
-			kio::Unused::Used => false,
+			kio::Unwanted::Closed => true,
+			kio::Unwanted::Wanted => false,
 		}
 	}
 
 	/// `Ready(Ok)` while anyone reads the open track, `Ready(Err)` once it closed, and
 	/// otherwise park `waiter` for the next reader. Only `Pending` registers: act on the
-	/// answer, not a later [`Self::is_used`], or a reader leaving in between is never seen.
-	pub(super) fn poll_used(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<(), kio::Closed>> {
-		self.state.poll_used(waiter)
+	/// answer, not a later [`Self::is_wanted`], or a reader leaving in between is never seen.
+	pub(super) fn poll_wanted(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<(), kio::Closed>> {
+		self.state.poll_wanted_changed(waiter, false).map_ok(drop)
 	}
 
 	/// `Ready(Ok)` while nobody reads the track, `Ready(Err)` once it closed, and
 	/// otherwise park `waiter` for the last reader leaving. Only `Pending` registers,
-	/// as with [`Self::poll_used`].
-	pub(super) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<(), kio::Closed>> {
-		self.state.poll_unused(waiter)
+	/// as with [`Self::poll_wanted`].
+	pub(super) fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<(), kio::Closed>> {
+		self.state.poll_wanted_changed(waiter, true).map_ok(drop)
 	}
 }
 
@@ -4193,7 +4193,7 @@ impl Demand {
 	/// moves the ask past. `n` never goes back, so once a group reaches it nothing is
 	/// pending until another join asks.
 	pub fn wanted(&self) -> Option<u64> {
-		if !self.is_used() {
+		if !self.is_wanted() {
 			return None;
 		}
 		let wanted = self.subscriptions().lock().wanted();
@@ -4218,13 +4218,13 @@ impl Demand {
 
 	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
-		let used = match self.poll_state(waiter) {
+		let active = match self.poll_state(waiter) {
 			DemandState::Closed => return Poll::Ready(Err(self.abort_reason())),
 			DemandState::Active => true,
 			DemandState::Idle => false,
 		};
 		let wanted = self.subscriptions().lock().poll_wanted(waiter);
-		let next = used.then_some(wanted);
+		let next = active.then_some(wanted);
 		if self.prev == Some(next) {
 			return Poll::Pending;
 		}
@@ -4256,8 +4256,8 @@ impl Demand {
 	}
 
 	/// Whether the track is open and anyone consumes it right now, without waiting.
-	pub(super) fn is_used(&self) -> bool {
-		!self.state.is_closed() && self.state.is_used()
+	pub(super) fn is_wanted(&self) -> bool {
+		!self.state.is_closed() && self.state.wanted()
 	}
 
 	/// Whether the track is gone, without waiting.
@@ -4272,17 +4272,17 @@ impl Demand {
 	/// to track which edge it's waiting for.
 	pub(super) fn poll_state(&self, waiter: &kio::Waiter) -> DemandState {
 		loop {
-			match self.state.poll_used(waiter) {
+			match self.state.poll_wanted_changed(waiter, false) {
 				Poll::Ready(Err(_)) => return DemandState::Closed,
-				// Not used, and armed for it becoming used.
+				// Not wanted, and armed for it becoming wanted.
 				Poll::Pending => return DemandState::Idle,
-				// Used, so arm for the reverse.
-				Poll::Ready(Ok(())) => match self.state.poll_unused(waiter) {
+				// Wanted, so arm for the reverse.
+				Poll::Ready(Ok(_)) => match self.state.poll_wanted_changed(waiter, true) {
 					Poll::Ready(Err(_)) => return DemandState::Closed,
 					Poll::Pending => return DemandState::Active,
 					// Went idle between the two reads, so neither poll armed anything.
 					// Start over rather than returning a state with no waker behind it.
-					Poll::Ready(Ok(())) => continue,
+					Poll::Ready(Ok(_)) => continue,
 				},
 			}
 		}
@@ -8156,14 +8156,14 @@ impl Request {
 	/// share one lock, so demand returning after `Demand::wanted` went to `None` wins the race, and the
 	/// close under that lock stops a later consumer attaching to a dead request.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn reject_unused(&self, err: Error) -> bool {
-		match self.state.write_unused() {
-			kio::Unused::Idle(guard) => {
+	pub(crate) fn reject_unwanted(&self, err: Error) -> bool {
+		match self.state.write_unwanted() {
+			kio::Unwanted::Idle(guard) => {
 				commit_abort(guard, err).abort();
 				true
 			}
-			kio::Unused::Closed => true,
-			kio::Unused::Used => false,
+			kio::Unwanted::Closed => true,
+			kio::Unwanted::Wanted => false,
 		}
 	}
 
@@ -13118,7 +13118,7 @@ mod test {
 	/// so only its leaving lets an unused abort end the group's writer.
 	#[test]
 	#[cfg(feature = "async")]
-	fn abort_unused_waits_for_a_pulled_open_group() {
+	fn abort_unwanted_waits_for_a_pulled_open_group() {
 		let producer = track_producer("test", Info::timed());
 		let mut consumer = producer.subscribe(None);
 		let mut writer = producer.append_group().unwrap();
@@ -13130,10 +13130,10 @@ mod test {
 		drop(consumer);
 
 		let producer = producer
-			.abort_unused(Error::Cancel)
+			.abort_unwanted(Error::Cancel)
 			.expect_err("the group's reader keeps the track");
 		drop(group);
-		assert!(producer.abort_unused(Error::Cancel).is_ok());
+		assert!(producer.abort_unwanted(Error::Cancel).is_ok());
 		let write = writer.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"y"));
 		assert!(matches!(write, Err(Error::Cancel)), "{write:?}");
 	}
@@ -15393,9 +15393,9 @@ mod test {
 		let second = consumer.fetch_group(5, None);
 
 		drop(first);
-		assert!(req.poll_unused(&kio::Waiter::noop()).is_pending());
+		assert!(req.poll_unwanted(&kio::Waiter::noop()).is_pending());
 		drop(second);
-		assert!(req.poll_unused(&kio::Waiter::noop()).is_ready());
+		assert!(req.poll_unwanted(&kio::Waiter::noop()).is_ready());
 
 		let retry = consumer.fetch_group(5, None);
 		let fresh = dynamic
@@ -15404,7 +15404,7 @@ mod test {
 			.expect("the retry queues a fresh request")
 			.unwrap();
 		drop(req);
-		assert!(fresh.poll_unused(&kio::Waiter::noop()).is_pending());
+		assert!(fresh.poll_unwanted(&kio::Waiter::noop()).is_pending());
 		fresh.accept(Info::timed()).unwrap().finish().unwrap();
 		assert_eq!(retry.await.unwrap().sequence, 5);
 	}
@@ -15486,7 +15486,7 @@ mod test {
 
 		let mut fetched = retry.await.unwrap();
 		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"hi");
-		assert!(!fresh.is_used(), "the retry left the fresh request");
+		assert!(!fresh.is_wanted(), "the retry left the fresh request");
 		assert!(matches!(fresh.accept(Info::timed()), Err(Error::Duplicate)));
 	}
 
@@ -15522,7 +15522,7 @@ mod test {
 
 		let hit = consumer.fetch_group(5, None);
 		assert!(
-			!group.handle().abort_unused(Error::Cancel),
+			!group.handle().abort_unwanted(Error::Cancel),
 			"the pending hit wants the group"
 		);
 		let mut fetched = hit.await.unwrap();
@@ -15952,7 +15952,7 @@ mod test {
 			.unwrap();
 		let group = req.accept(Info::timed()).unwrap();
 		drop(first.await.unwrap());
-		assert!(group.handle().abort_unused(Error::Cancel));
+		assert!(group.handle().abort_unwanted(Error::Cancel));
 
 		let retry = consumer.fetch_group(5, None);
 		let req = dynamic
@@ -17870,7 +17870,7 @@ mod test {
 		assert_eq!(producer.demand().wanted(), Some(0), "the cap is not the group's end");
 		drop(group);
 		let producer = producer
-			.abort_unused(Error::Cancel)
+			.abort_unwanted(Error::Cancel)
 			.expect_err("the capped reader can raise its cap");
 
 		writing.write_frame(Timestamp::ZERO, &b"delta"[..]).unwrap();
@@ -18006,12 +18006,12 @@ mod test {
 		let dynamic = request.requests();
 		let demand = request.demand();
 		let consumer = request.consume();
-		assert!(!demand.is_used(), "a bare handle is not demand");
+		assert!(!demand.is_wanted(), "a bare handle is not demand");
 		let query = consumer.info();
-		assert!(demand.is_used());
-		assert!(dynamic.demand().is_used());
+		assert!(demand.is_wanted());
+		assert!(dynamic.demand().is_wanted());
 		drop(query);
-		assert!(!demand.is_used());
+		assert!(!demand.is_wanted());
 		let producer = request.accept(Info::timed());
 		assert_eq!(producer.demand().name(), demand.name());
 		drop(producer);
@@ -18037,11 +18037,12 @@ mod test {
 		};
 		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "the second joined");
 		assert_eq!((fill.start(), fill.end()), (Position::group(3), 4));
-		assert!(fill.is_used());
+		assert_eq!(fill.wanted(), Some(3));
 		drop(first);
-		assert!(fill.poll_unused(&waiter).is_pending());
+		assert!(fill.poll_withdrawn(&waiter).is_pending());
 		drop(second);
-		assert!(fill.poll_unused(&waiter).is_ready());
+		assert!(fill.poll_withdrawn(&waiter).is_ready());
+		assert_eq!(fill.wanted(), None);
 		drop(fill);
 		assert!(
 			!producer.state.read().drops.contains_key(&3),
@@ -18082,7 +18083,6 @@ mod test {
 		(producer, dynamic, subscriber)
 	}
 
-	#[cfg(feature = "async")]
 	fn write_filled(group: Result<group::Producer>, millis: u64) {
 		let mut group = group.unwrap();
 		group
@@ -18206,7 +18206,7 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		while let Some(sequence) = fill.next() {
+		while let Some(sequence) = fill.wanted() {
 			write_filled(fill.accept(sequence, None), sequence);
 		}
 		let mut newcomer = producer.subscribe(replay().with_range(0..));
@@ -18238,7 +18238,7 @@ mod test {
 			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 				panic!("below the start is a miss");
 			};
-			while let Some(sequence) = fill.next() {
+			while let Some(sequence) = fill.wanted() {
 				write_filled(fill.accept(sequence, None), sequence);
 			}
 			let mut read = Vec::new();
@@ -18276,7 +18276,7 @@ mod test {
 		// Group 2 is as stale as the groups below it, superseded by group 3 as long ago.
 		assert_eq!(next(&mut subscriber), Some(3));
 		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
-		assert!(!fill.is_used(), "nobody waits on the stale fill");
+		assert_eq!(fill.wanted(), None, "nobody waits on the stale fill");
 	}
 
 	/// Groups arriving out of order inside a stalled fill judge each stretch between them by
@@ -18473,7 +18473,74 @@ mod test {
 		};
 		assert_eq!(group.sequence, 0);
 		drop(group);
-		assert!(fill.poll_unused(&waiter).is_ready(), "nobody waits on the fill now");
+		assert!(fill.poll_withdrawn(&waiter).is_ready(), "nobody waits on the fill now");
+	}
+
+	/// A parked [`Fill::poll_wanted_changed`] wakes on every move of the group owed: a
+	/// reader narrowing past it, an answer, and the last reader leaving, which ends at `None`.
+	#[test]
+	fn fill_wanted_changed_follows_the_group_owed() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
+		let mut subscriber = producer.subscribe(ascending(0..));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let noop = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&noop) {}
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&noop) else {
+			panic!("below the start is a miss");
+		};
+		let (flag, waiter) = Flag::waiter();
+		assert_eq!(
+			fill.poll_wanted_changed(&waiter),
+			Poll::Ready(Some(0)),
+			"the first poll reports"
+		);
+		assert!(fill.poll_wanted_changed(&waiter).is_pending());
+
+		subscriber.update(ascending(8..)).unwrap();
+		assert!(subscriber.poll_recv_group(&noop).is_pending());
+		assert!(flag.take(), "narrowing woke the parked poll");
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(8)));
+		assert!(fill.poll_wanted_changed(&waiter).is_pending());
+
+		write_filled(fill.accept(8, None), 8);
+		assert!(flag.take(), "an answer woke the parked poll");
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(9)));
+		assert!(fill.poll_wanted_changed(&waiter).is_pending());
+
+		drop(subscriber);
+		assert!(flag.take(), "the last reader leaving woke the parked poll");
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(None));
+		assert_eq!(fill.wanted(), None);
+	}
+
+	/// The owed group arriving through the live feed wakes a parked
+	/// [`Fill::poll_wanted_changed`]: the cache answers it, so the fill no longer owes it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn fill_wanted_changed_follows_a_live_arrival() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
+		let mut subscriber = producer.subscribe(ascending(9..));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let noop = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&noop) {}
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&noop) else {
+			panic!("below the start is a miss");
+		};
+		let (flag, waiter) = Flag::waiter();
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(9)));
+		assert!(fill.poll_wanted_changed(&waiter).is_pending());
+
+		write_group(&producer, 9);
+		assert!(flag.take(), "the owed group arriving live woke the parked poll");
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(None));
+		assert_eq!(fill.wanted(), None);
+		drop(subscriber);
 	}
 
 	/// A reader narrowing its ranges leaves the part of its fill it no longer reads: the
@@ -18493,7 +18560,7 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		assert_eq!(fill.next(), Some(0));
+		assert_eq!(fill.wanted(), Some(0));
 		assert!(fill.is_wanted(0));
 		assert!(fill.poll_unwanted(0, &waiter).is_pending());
 
@@ -18503,9 +18570,9 @@ mod test {
 		assert!(!fill.is_wanted(0));
 		assert!(fill.is_wanted(8));
 		assert!(fill.poll_unwanted(8, &waiter).is_pending());
-		assert_eq!(fill.next(), Some(8), "nobody reads below 8 any more");
+		assert_eq!(fill.wanted(), Some(8), "nobody reads below 8 any more");
 		write_filled(fill.accept(8, None), 8);
-		assert_eq!(fill.next(), Some(9));
+		assert_eq!(fill.wanted(), Some(9));
 		// Over, so what the fill refuses is a drop rather than a group still to come.
 		producer.finish().unwrap();
 		fill.drop_groups(0..9);
@@ -18572,12 +18639,15 @@ mod test {
 		let group = fill.group(0);
 		let readers = group.readers();
 		let _writing = group.accept(None).unwrap();
-		assert!(readers.poll_unused(&waiter).is_pending());
+		assert!(readers.poll_unwanted(&waiter).is_pending());
 
 		subscriber.update(ascending(1..)).unwrap();
 		assert!(subscriber.poll_recv_group(&waiter).is_pending());
-		assert!(readers.poll_unused(&waiter).is_ready(), "nobody reads group 0 now");
-		assert!(fill.poll_unused(&waiter).is_pending(), "the fill still owes 1 and up");
+		assert!(readers.poll_unwanted(&waiter).is_ready(), "nobody reads group 0 now");
+		assert!(
+			fill.poll_withdrawn(&waiter).is_pending(),
+			"the fill still owes 1 and up"
+		);
 	}
 
 	/// A time start before every group held asks no fill below the oldest, since which of
@@ -18610,7 +18680,7 @@ mod test {
 			(0, 2),
 			"nothing below 10 for the time start"
 		);
-		while let Some(sequence) = fill.next() {
+		while let Some(sequence) = fill.wanted() {
 			write_filled(fill.accept(sequence, None), sequence);
 		}
 		drop(fill);
@@ -18636,7 +18706,7 @@ mod test {
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 100));
 		for sequence in 0..50 {
-			assert_eq!(fill.next(), Some(sequence));
+			assert_eq!(fill.wanted(), Some(sequence));
 			fill.group(sequence).reject(Error::App(sequence as u16));
 			let _ = subscriber.poll_recv_group(&waiter);
 			assert!(fill.answers() <= 1, "group {sequence}: {} answers held", fill.answers());
@@ -18668,7 +18738,7 @@ mod test {
 			panic!("what the first fill stopped owing is asked afresh");
 		};
 		assert_eq!((again.start().group, again.end()), (0, 8));
-		assert_eq!(fill.next(), Some(8), "the first fill still owes only 8 and up");
+		assert_eq!(fill.wanted(), Some(8), "the first fill still owes only 8 and up");
 		assert!(!fill.is_wanted(0), "a group stops being wanted for good");
 	}
 
@@ -18870,11 +18940,11 @@ mod test {
 			panic!("the miss below the start is asked");
 		};
 		for _ in 0..REFUSED {
-			let sequence = fill.next().unwrap();
+			let sequence = fill.wanted().unwrap();
 			fill.drop_groups(sequence..sequence + 1);
 			assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
 		}
-		assert_eq!(fill.next(), Some(WIDE - REFUSED - 1));
+		assert_eq!(fill.wanted(), Some(WIDE - REFUSED - 1));
 	}
 
 	/// A descending reader joining a queued fill makes it newest first, as any descending
@@ -18926,7 +18996,7 @@ mod test {
 			(3, Order::Ascending),
 			"refreshed while queued"
 		);
-		assert_eq!(fill.next(), Some(0));
+		assert_eq!(fill.wanted(), Some(0));
 		write_filled(fill.accept(0, None), 0);
 
 		let budget = Duration::from_secs(20);
@@ -18940,7 +19010,7 @@ mod test {
 		assert_eq!(fill.priority(), -2);
 		assert_eq!(fill.max_delay(), Some(budget));
 		assert_eq!(fill.order(), Order::Descending);
-		assert_eq!(fill.next(), Some(3), "the rest is served newest first");
+		assert_eq!(fill.wanted(), Some(3), "the rest is served newest first");
 	}
 
 	/// An ordered reader waits on a fill for its miss rather than skipping past it.
@@ -18978,7 +19048,7 @@ mod test {
 			panic!("the gap is a miss");
 		};
 		drop(subscriber);
-		assert!(!fill.is_used());
+		assert_eq!(fill.wanted(), None);
 		drop(fill);
 		assert!(drops(&producer).is_empty());
 	}
