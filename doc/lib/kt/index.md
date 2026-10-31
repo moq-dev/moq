@@ -51,10 +51,12 @@ import dev.moq.media.*
 // Subscribe. The Flow is live, so run it in its own coroutine.
 Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = listOf("ca.pem")))).use { moq ->
     moq.announced(AnnounceConfig(prefix = "live/", filter = "*/camera")).updates().collect { event ->
-        // A restart is a new publisher run at the same path: request it again.
+        // A restart is a new publisher run at the same path: request it again. A takeover
+        // continues what an earlier route served, like a start.
         val announce = when (event) {
             is AnnounceEventStart -> event.announce
             is AnnounceEventRestart -> event.announce
+            is AnnounceEventTakeover -> event.announce
             else -> return@collect // Update or End
         }
         // Prefixes stay origin-relative; captures reports what each wildcard matched.
@@ -101,7 +103,7 @@ shows which module holds each.
 - **`end`, not `close`.** `broadcast.end()` ends a broadcast for good. `close()`, or leaving `use { }`, releases the handle, which ends the broadcast only once no other handle to it remains, such as its publication or a `requests()` handle.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
-- **Media reads.** `dev.moq.media.TrackConsumer`, `dev.moq.audio.Consumer`, and `dev.moq.video.Consumer` return a `Read` in order: `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh.
+- **Media reads.** `dev.moq.media.TrackConsumer`, `dev.moq.audio.Consumer`, and `dev.moq.video.Consumer` return a `Read` in order: `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start = DecodeStart.LATEST` in its decoder output, which joins at the newest group and skips the cached backlog.
 - **Decoded frames hold decoder buffers.** `close()` each frame from a `dev.moq.video.Consumer` promptly (or `use { }` it), or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `moq.shutdown()` requests a drain immediately; suspending `moq.session.closed()` waits up to one second and reports its result. `Moq.close()`, and so `use { }`, cancels at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
 - **Ending cleanly.** When the input ends, finish every track, then call `finish()` on its `CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.end()` takes it offline. How long to keep it up is yours to decide. A track still open at the end, or released without a finish, ends with `Unroutable`, which readers take as the publisher leaving.
@@ -110,7 +112,7 @@ shows which module holds each.
 - **Tokens.** Pass `ClientConfig(tokens = listOf(...))` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `moq.tokens().set(listOf(...))` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. Suspending `tokens().answered()` returns once the relay accepts them and throws its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
 - **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
-- **Subscription defaults.** `Subscription.default()` returns moq-net's defaults, whose zero `maxDelay` skips a superseded group at once; passing no subscription means the same. `copy` it rather than starting from `Subscription()`, whose null `maxDelay` sets no subscriber limit.
+- **Subscription defaults.** `Subscription.default()` returns moq-net's defaults, whose zero `maxDelay` skips a superseded group at once; passing no subscription means the same. `copy` it to change a field; building a `Subscription(...)` must name `maxDelay`, where null sets no subscriber limit.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 ## Runtime
