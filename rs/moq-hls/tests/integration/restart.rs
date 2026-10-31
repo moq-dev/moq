@@ -71,7 +71,7 @@ async fn takeover(version: &str, case: Case) {
 	let deadline = moq_clock::now() + TIMEOUT;
 	let current = loop {
 		let current = server.broadcaster("live").await.expect("announced");
-		if !std::sync::Arc::ptr_eq(&current, &replaced) {
+		if !current.is_clone(&replaced) {
 			break current;
 		}
 		assert!(moq_clock::now() < deadline, "the new instance never took over");
