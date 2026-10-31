@@ -82,7 +82,7 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 			event = announced.next() => {
 				let announce = match event.context("announcements ended")? {
 					// Another publisher instance, or the same one announced again.
-					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => announce,
+					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) | moq_net::announce::Event::Takeover { announce, .. } => announce,
 					_ => continue,
 				};
 				if !announce.prefix.has_prefix(&prefix) {
@@ -107,7 +107,7 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 		let store = moq_archive::Store::new(store.clone(), key);
 		// Requested now, so an announcement resolves the instance serving it when read, not
 		// whichever one serves by the time its task runs.
-		let request = origin.request_broadcast(&instance.0, instance.1.clone());
+		let request = origin.request(&instance.0, instance.1.clone());
 		recordings.spawn(record(request, instance, store, config.clone(), claims.clone()));
 	}
 }
@@ -430,7 +430,7 @@ mod tests {
 		})
 		.await
 		.expect("the replay is announced");
-		let broadcast = origin.consume().request_broadcast("replay", None).await.unwrap();
+		let broadcast = origin.consume().request("replay", None).await.unwrap();
 		let track = broadcast.track("video").unwrap();
 		let mut group = track.fetch_group(0, None).await.unwrap();
 		let frame = group.read_frame().await.unwrap().unwrap();

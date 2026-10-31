@@ -2,31 +2,31 @@
 //!
 //! [`Connection`] multiplexes QUIC streams, flow control, and datagrams over one reliable,
 //! ordered transport such as TCP, TLS, or a WebSocket (draft-ietf-quic-qmux). It drives the
-//! same stream state machine as a QUIC [`crate::Connection`], through the same receive and
+//! same stream state machine as a QUIC [`crate::connection::Connection`], through the same receive and
 //! write entry points. The draft has acknowledgment happen "as soon as data is passed to the
 //! underlying transport", so every frame counts as acknowledged the moment it is serialized
 //! into a record, and nothing is retransmitted.
 //!
-//! Like [`crate::Connection`], it performs no I/O. Feed it each record (each frame on
+//! Like [`crate::connection::Connection`], it performs no I/O. Feed it each record (each frame on
 //! draft-00) the transport delimits with [`Connection::handle_record`], write out what
 //! [`Connection::poll_transmit`] returns, run [`Connection::handle_timeout`] at
 //! [`Connection::poll_timeout`], and drain [`Connection::poll`] for events.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, num::NonZeroU64};
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use tracing::{debug, trace};
 
 use super::{
-	ConnectionError, State as ConnectionState, ThinRetransmits,
+	Error as ConnectionError, State as ConnectionState, ThinRetransmits,
 	datagrams::DatagramState,
 	spaces::Retransmits,
 	stats::FrameStats,
-	streams::{Leased, RecvStream, SendGroups, SendOptions, SendStream, StreamEvent, Streams, StreamsState},
+	streams::{StreamEvent, Streams, StreamsState, recv, send},
 };
 use crate::{
-	ApplicationClose, Dir, Duration, Instant, MAX_STREAM_COUNT, SendDatagramError, Side, TransportError, VarInt,
-	frame::{self, Close, Datagram},
+	ApplicationClose, Dir, Duration, Instant, Limits, MAX_STREAM_COUNT, Side, TransportError, VarInt,
+	frame::{self, Close, Datagram, OutgoingDatagram},
 	transport_parameters::TransportParameters,
 };
 
@@ -56,21 +56,15 @@ const MAX_RECORD_BUDGET: usize = MAX_STREAM_PAYLOAD + 2;
 pub struct Config {
 	/// The wire format
 	pub version: Version,
-	/// How many bidirectional streams the peer may have open at once
-	pub max_concurrent_bidi_streams: VarInt,
-	/// How many unidirectional streams the peer may have open at once
-	pub max_concurrent_uni_streams: VarInt,
-	/// Bytes the peer may send across all streams before we read them
-	pub receive_window: VarInt,
-	/// Bytes the peer may send on one stream before we read them
-	pub stream_receive_window: VarInt,
-	/// Bytes we buffer across all streams before a write blocks
-	pub send_window: u64,
+	/// Flow-control windows and stream counts; each `None` takes its default: 100 streams of
+	/// each direction, a 1 MiB connection window, a 256 KiB stream window, and 8 MiB of
+	/// unacknowledged outgoing data
+	pub limits: Limits,
 	/// Whether streams of equal priority take turns frame by frame, rather than one finishing
 	/// first
 	pub send_fairness: bool,
 	/// How long a silent peer is kept, or `None` for forever; record versions only
-	pub max_idle_timeout: Option<Duration>,
+	pub idle_timeout: Option<Duration>,
 	/// The largest record Size field the peer may send, at least 16382
 	pub max_record_size: VarInt,
 	/// The largest DATAGRAM frame the peer may send, or `None` to refuse datagrams; record
@@ -96,13 +90,9 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			version: Version::QMux02,
-			max_concurrent_bidi_streams: VarInt::from_u32(100),
-			max_concurrent_uni_streams: VarInt::from_u32(100),
-			receive_window: VarInt::from_u32(1 << 20),
-			stream_receive_window: VarInt::from_u32(256 << 10),
-			send_window: 8 << 20,
+			limits: Limits::default(),
 			send_fairness: true,
-			max_idle_timeout: Some(Duration::from_secs(30)),
+			idle_timeout: Some(Duration::from_secs(30)),
 			max_record_size: VarInt::from_u64(DEFAULT_MAX_RECORD_SIZE).unwrap(),
 			max_datagram_frame_size: Some(VarInt::from_u64(DEFAULT_MAX_RECORD_SIZE).unwrap()),
 			datagram_receive_buffer_size: 1 << 20,
@@ -112,6 +102,29 @@ impl Default for Config {
 			protocols: None,
 		}
 	}
+}
+
+impl Config {
+	fn max_streams(&self) -> VarInt {
+		limit(self.limits.max_streams, 100)
+	}
+
+	fn receive_window(&self) -> VarInt {
+		limit(self.limits.receive_window, 1 << 20)
+	}
+
+	fn stream_receive_window(&self) -> VarInt {
+		limit(self.limits.stream_receive_window, 256 << 10)
+	}
+
+	fn send_window(&self) -> u64 {
+		self.limits.send_window.map_or(8 << 20, NonZeroU64::get)
+	}
+}
+
+/// A limit on the wire, or its default when unset; one [`Limits::validate`] refused saturates
+fn limit(limit: Option<NonZeroU64>, default: u64) -> VarInt {
+	VarInt::from_u64(limit.map_or(default, NonZeroU64::get)).unwrap_or(VarInt::MAX)
 }
 
 /// Events from [`Connection::poll`]
@@ -166,17 +179,17 @@ impl Connection {
 	/// Start a connection; `side` decides which stream IDs are ours
 	pub fn new(mut config: Config, side: Side, now: Instant) -> Self {
 		if !config.version.uses_records() {
-			config.max_idle_timeout = None;
+			config.idle_timeout = None;
 			config.max_datagram_frame_size = None;
 			config.rtt_interval = None;
 		}
 		let streams = StreamsState::new(
 			side,
-			config.max_concurrent_uni_streams,
-			config.max_concurrent_bidi_streams,
-			config.send_window,
-			config.receive_window,
-			config.stream_receive_window,
+			config.max_streams(),
+			config.max_streams(),
+			config.send_window(),
+			config.receive_window(),
+			config.stream_receive_window(),
 		);
 		let timer = Timer::new(config.handshake_timeout, now);
 		Self {
@@ -289,12 +302,18 @@ impl Connection {
 	///
 	/// The frame comes from the next [`Self::poll_transmit`]; flush it before shutting down
 	/// the transport.
-	pub fn close(&mut self, error_code: VarInt, reason: Bytes) {
+	pub fn close(&mut self, error_code: VarInt, reason: String) {
 		if self.error.is_some() {
 			return;
 		}
-		self.close = Some(Close::Application(ApplicationClose { error_code, reason }));
-		self.lost(ConnectionError::LocallyClosed);
+		self.close = Some(Close::Application(ApplicationClose {
+			error_code,
+			reason: reason.clone(),
+		}));
+		self.lost(ConnectionError::LocallyClosed {
+			code: error_code,
+			reason,
+		});
 	}
 
 	/// The next record to write, without its Size field, or the next frame on draft-00
@@ -326,7 +345,7 @@ impl Connection {
 		let due = self.timer.poll(now);
 		if due.handshake {
 			debug!("qmux handshake timed out");
-			self.lost(ConnectionError::TimedOut);
+			self.lost(ConnectionError::HandshakeTimeout);
 		} else if due.idle {
 			// The idle timeout closes silently, as on QUIC
 			debug!("qmux idle timeout");
@@ -353,15 +372,15 @@ impl Connection {
 	}
 
 	/// Schedule outgoing streams in send groups
-	pub fn send_groups(&mut self) -> SendGroups<'_> {
-		SendGroups {
+	pub fn send_groups(&mut self) -> send::Groups<'_> {
+		send::Groups {
 			state: &mut self.streams,
 		}
 	}
 
 	/// The send half of stream `id`
-	pub fn send_stream(&mut self, id: crate::StreamId) -> SendStream<'_> {
-		SendStream {
+	pub fn send_stream(&mut self, id: crate::StreamId) -> send::Stream<'_> {
+		send::Stream {
 			id,
 			state: &mut self.streams,
 			pending: &mut self.pending,
@@ -370,8 +389,8 @@ impl Connection {
 	}
 
 	/// The receive half of stream `id`
-	pub fn recv_stream(&mut self, id: crate::StreamId) -> RecvStream<'_> {
-		RecvStream {
+	pub fn recv_stream(&mut self, id: crate::StreamId) -> recv::Stream<'_> {
+		recv::Stream {
 			id,
 			state: &mut self.streams,
 			pending: &mut self.pending,
@@ -381,11 +400,6 @@ impl Connection {
 	/// Send and receive datagrams
 	pub fn datagrams(&mut self) -> Datagrams<'_> {
 		Datagrams { conn: self }
-	}
-
-	/// The bytes leased from receive stream `id` with [`RecvStream::lease()`], if it has a lease
-	pub fn leased(&self, id: crate::StreamId) -> Option<&Leased> {
-		self.streams.leased(id)
 	}
 
 	/// The frame space of a record: the peer's `max_record_size`, under the STREAM ceiling
@@ -400,15 +414,15 @@ impl Connection {
 	fn local_params(&self) -> Params {
 		let config = &self.config;
 		let mut tp = TransportParameters::default();
-		tp.max_idle_timeout = config.max_idle_timeout.map_or(VarInt::from_u32(0), |timeout| {
+		tp.max_idle_timeout = config.idle_timeout.map_or(VarInt::from_u32(0), |timeout| {
 			VarInt::from_u64(timeout.as_millis() as u64).unwrap_or(VarInt::MAX)
 		});
-		tp.initial_max_data = config.receive_window;
-		tp.initial_max_stream_data_bidi_local = config.stream_receive_window;
-		tp.initial_max_stream_data_bidi_remote = config.stream_receive_window;
-		tp.initial_max_stream_data_uni = config.stream_receive_window;
-		tp.initial_max_streams_bidi = config.max_concurrent_bidi_streams;
-		tp.initial_max_streams_uni = config.max_concurrent_uni_streams;
+		tp.initial_max_data = config.receive_window();
+		tp.initial_max_stream_data_bidi_local = config.stream_receive_window();
+		tp.initial_max_stream_data_bidi_remote = config.stream_receive_window();
+		tp.initial_max_stream_data_uni = config.stream_receive_window();
+		tp.initial_max_streams_bidi = config.max_streams();
+		tp.initial_max_streams_uni = config.max_streams();
 		// A datagram must fit one record
 		tp.max_datagram_frame_size = config
 			.max_datagram_frame_size
@@ -539,7 +553,11 @@ impl Connection {
 				break;
 			};
 			let frame_len = before - payload.len();
-			frames += 1;
+			// A PADDING run decodes as one frame but is a frame per byte on the wire
+			frames += match frame {
+				wire::Frame::Quic(frame::Frame::Padding) => frame_len,
+				_ => 1,
+			};
 			if frames > 1 && !self.config.version.uses_records() {
 				return Err(TransportError::FRAME_ENCODING_ERROR(
 					"draft-00 message carries more than one frame",
@@ -754,7 +772,7 @@ impl Connection {
 		let idle = match self.config.version.uses_records() {
 			true => super::negotiate_max_idle_timeout(
 				self.config
-					.max_idle_timeout
+					.idle_timeout
 					.map(|timeout| VarInt::from_u64(timeout.as_millis() as u64).unwrap_or(VarInt::MAX)),
 				Some(peer.tp.max_idle_timeout),
 			),
@@ -802,16 +820,18 @@ impl Datagrams<'_> {
 	///
 	/// # Panics
 	/// - when `options.group` was opened on another connection
-	pub fn send(&mut self, data: Bytes, options: SendOptions<'_>) -> Result<(), SendDatagramError> {
+	pub fn send(&mut self, data: impl Buf, options: send::Options<'_>) -> Result<(), send::Error> {
 		if self.conn.config.max_datagram_frame_size.is_none() {
-			return Err(SendDatagramError::Disabled);
+			return Err(send::Error::Unsupported);
 		}
-		let max = self.max_size().ok_or(SendDatagramError::UnsupportedByPeer)?;
+		let max = self.max_size().ok_or(send::Error::Unsupported)?;
 		let budget = self.conn.config.datagram_send_buffer_size;
-		let datagram = Datagram { data };
-		if datagram.data.len() > max || datagram.size(true) > budget {
-			return Err(SendDatagramError::TooLarge);
+		// Checked before taking the payload, which copies whatever is not already `Bytes`.
+		let len = data.remaining();
+		if len > max || OutgoingDatagram::frame_size(len) > budget {
+			return Err(send::Error::TooLarge);
 		}
+		let datagram = OutgoingDatagram::new(data);
 		if !self.conn.streams.queue_datagram(datagram, options, budget) {
 			trace!("dropping outgoing datagram");
 		}

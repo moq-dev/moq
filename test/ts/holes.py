@@ -4,9 +4,12 @@
     ./holes.py capture.ts source.ts [--shed]
 
 Every audio and video stream of a generated clip has a constant frame duration, so the step
-between consecutive decode timestamps is the same throughout. A capture's step past one and a
-half of its source's is a hole: media the round-trip lost, whether the path dropped it, the relay evicted
-it, or the exporter missed its deadline. A lost prefix or tail leaves no step behind, so each
+between consecutive presentation timestamps, in presentation order, is the same throughout. A
+capture's step past one and a half of its source's is a hole: media the round-trip lost, whether
+the path dropped it, the relay evicted it, or the exporter missed its deadline. Presentation
+timestamps, because the export keeps them while it derives each group's decode timestamps from
+that group's frames alone: a reordered group's first frames decode just before its earliest
+presentation, not a frame apart, which leaves a decode step at every group with nothing lost. A lost prefix or tail leaves no step behind, so each
 source stream must also be in the capture, on its PID, ending where the source's does: the
 export keeps the source's timestamps. It may start later, by up to JOIN: the subscriber joins
 at the relay's latest group once the catalog is out, which skips the first second or two of
@@ -43,15 +46,15 @@ from fractions import Fraction
 JOIN = Fraction(3)
 
 
-def step(dts: list[int]) -> int:
-    """A stream's frame step: its most common decode-timestamp step, or 0 with fewer than two frames."""
-    steps = [b - a for a, b in zip(dts, dts[1:])]
+def step(times: list[int]) -> int:
+    """A stream's frame step: its most common step between ascending timestamps, or 0 with fewer than two frames."""
+    steps = [b - a for a, b in zip(times, times[1:])]
     return Counter(steps).most_common(1)[0][0] if steps else 0
 
 
-def holes(dts: list[int], frame: int) -> list[tuple[int, int]]:
-    """The (dts, step) of each step past one and a half frames."""
-    return [(a, b - a) for a, b in zip(dts, dts[1:]) if 2 * (b - a) > 3 * frame]
+def holes(times: list[int], frame: int) -> list[tuple[int, int]]:
+    """The (timestamp, step) of each step past one and a half frames between ascending timestamps."""
+    return [(a, b - a) for a, b in zip(times, times[1:]) if 2 * (b - a) > 3 * frame]
 
 
 @dataclass
@@ -158,7 +161,7 @@ def main() -> None:
     for pid, src in sorted(source.items()):
         label = f"PID {pid} {src.info['codec_name']}"
         # The source's step, not the capture's: a capture that kept every other frame has a step of its own.
-        frame = step(src.dts)
+        frame = step(sorted(src.pts))
         if frame == 0:
             sys.exit(f"error: {label} has fewer than two frames in {args.source}")
         if pid not in capture:
@@ -187,7 +190,7 @@ def main() -> None:
                 reasons.append(f"starts {float(late):.3f}s after its source, past the {float(JOIN)}s join")
             summary = f"{graded.missing} frames ({float(graded.missing * frame * base):.1f} s) shed"
         else:
-            found = holes(got.dts, frame)
+            found = holes(sorted(got.pts), frame)
             reasons = [f"at {float(at * base):.3f}s: {float(gap * base) * 1000:.0f} ms step" for at, gap in found[:5]]
             reasons += cuts(src.span, got.span, frame * base)
             missing = sum(gap - frame for _, gap in found) * base

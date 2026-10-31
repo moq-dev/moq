@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Compression moves to the track
+
+`Flate` is removed: publish opaque bytes on a `TrackProducer`.
+The `Json` producers and consumers drop their `compression` argument. Publish the track with `TrackInfo(compress: true)` instead; a consumer reads a compressed track with no option of its own.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 Publishing, serving, or requesting a broadcast at a path with a leading, trailing, or doubled `/` throws instead of collapsing it. Pass the canonical path, such as `room/cam`.
@@ -26,7 +31,7 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 Every duration is a `TimeInterval` in seconds instead of a `UInt64` `...Us` field, and drops the suffix: `Client(timeout:race:resolutionDelay:)`, `Backoff(initial:max:timeout:)`, `QuicConfig(idleTimeout:keepAlive:)`, `WebSocketConfig(delay:)`, `ConnectionStats.rtt`, `Grant.expires`, `TrackInfo.maxAge`, `Subscription.maxDelay`, `Fill.maxDelay`, `Audio.Consumer.delay`, and the decoder outputs' `maxDelay` and `delay`.
 Divide a microsecond value by 1,000,000. A negative interval traps.
 `AudioEncoderOutput.frameDuration` is optional: pass `nil` where you passed `frameDurationUs: 0` for the codec's own frame.
-`Subscription.maxDelay` has no default: pass `0` for the old one.
+`Subscription.maxDelay` has no default: start from `Subscription.default`, or pass `0`, for the old default. `nil` sets no subscriber limit.
 `TrackConsumer.info()` no longer throws.
 
 ### Connection state

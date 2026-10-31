@@ -36,14 +36,18 @@ test("consumer options omit producer-only knobs", () => {
 	expect([delta, initial, op, checkpoint]).toEqual([false, false, false, false]);
 
 	const track: Has<"track", SnapshotConsumerInit> = true;
-	const compression: Has<"compression", SnapshotConsumerInit> = true;
 	const schema: Has<"schema", SnapshotConsumerInit> = true;
-	expect([track, compression, schema]).toEqual([true, true, true]);
+	expect([track, schema]).toEqual([true, true]);
 
 	const producerDelta: Has<"deltas", SnapshotProducerInit> = true;
 	const producerOp: Has<"ops", WindowProducerInit> = true;
-	const streamCompression: Has<"compression", StreamProducerInit> = true;
-	expect([producerDelta, producerOp, streamCompression]).toEqual([true, true, true]);
+	expect([producerDelta, producerOp]).toEqual([true, true]);
+
+	// Compression is the track's, not a codec option.
+	const snapshotCompression: Has<"compression", SnapshotProducerInit> = false;
+	const streamCompression: Has<"compression", StreamProducerInit> = false;
+	const windowCompression: Has<"compression", WindowProducerInit> = false;
+	expect([snapshotCompression, streamCompression, windowCompression]).toEqual([false, false, false]);
 });
 
 test("object literals reject producer knobs and positional tracks", () => {
@@ -73,10 +77,10 @@ test("object literals reject producer knobs and positional tracks", () => {
 		new Stream.Encoder({ track: new Track.Producer("test") });
 		// @ts-expect-error Decoder does not take a track
 		new Window.Decoder({ track });
-		// @ts-expect-error compression is an enum, not a boolean
-		new Snapshot.Producer({ track: new Track.Producer("test"), compression: true });
-		// @ts-expect-error compression is an enum, not a boolean
-		new Stream.Producer({ track: new Track.Producer("test"), compression: true });
+		// @ts-expect-error compression is set on the track
+		new Snapshot.Producer({ track: new Track.Producer("test"), compression: "deflate" });
+		// @ts-expect-error compression is set on the track
+		new Stream.Producer({ track: new Track.Producer("test"), compression: "deflate" });
 	};
 	expect(reject).toBeDefined();
 });

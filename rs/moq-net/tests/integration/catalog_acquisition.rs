@@ -33,8 +33,14 @@ async fn acquisition(version: &str, carries_epoch: bool) {
 		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.unwrap();
 	let _old = link(version, &publisher, &subscriber, 100).await;
-	let remote = subscriber.consume().routed_broadcast("live").await.unwrap();
-	let mut announced = subscriber.consume().follow("live").unwrap();
+	let remote = subscriber
+		.consume()
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
+	let mut announced = subscriber.consume().announced();
 	let old_cost = match announced.next().await {
 		Some(moq_net::announce::Event::Start(announce)) => announce.route.cost,
 		other => panic!("expected the first route, got {other:?}"),

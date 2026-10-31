@@ -219,6 +219,13 @@ impl Version {
 		)
 	}
 
+	/// Whether a copy's fills stop at the start its publisher resolved from the budget.
+	/// Lite-06 resolves the start, but drops media time and sends FETCH without a max
+	/// delay, so nothing judges a group below that start against a reader's budget.
+	pub(crate) fn fills_from_start(self) -> bool {
+		self.resolves_start() && !self.has_media_time() && !self.has_fetch_max_delay()
+	}
+
 	/// Whether subscription completion waits for the subscriber's FIN.
 	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
 		!matches!(
@@ -275,6 +282,15 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE_END carries the error the track ended with, so an errored end
+	/// keeps its history across a hop. Added in lite-07; earlier versions can only reset.
+	pub(crate) fn has_end_error(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether announcements and track requests carry the publisher epoch, the
 	/// identity that says two routes serve the same bytes. Added in lite-07.
 	/// Older versions carry nothing, so a received route has no epoch and is
@@ -300,6 +316,16 @@ impl Version {
 	/// replacing an advertisement in place. Added in lite-07. Older versions send an
 	/// ANNOUNCE_END then an ANNOUNCE_START.
 	pub fn has_announce_restart(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
+	/// Whether the announce stream has ANNOUNCE_TAKEOVER: a new advertisement that
+	/// continues what a live one served beneath its prefix. Added in lite-07. Older
+	/// versions send an ANNOUNCE_START, which the receiver treats as another instance.
+	pub(crate) fn has_announce_takeover(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06

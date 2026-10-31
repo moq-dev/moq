@@ -38,7 +38,7 @@ mod video;
 pub use api::*;
 pub use audio::*;
 pub use bandwidth::*;
-pub use decode::{moq_decode_gap, moq_decode_read_kind};
+pub use decode::{moq_decode_gap, moq_decode_read_kind, moq_decode_start};
 pub use error::*;
 pub use ffi::{moq_state_callback, moq_status_callback};
 pub use id::*;

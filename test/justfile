@@ -64,13 +64,14 @@ harness:
 [positional-arguments]
 interop *args:
     cd .. && bun install --frozen-lockfile
-    just rs test -p moq-net --lib \
+    just rs test -p moq-net -p moq-sign --lib \
         auth_unsupported_interop \
         ietf_compression_fallback_interop \
         ietf_datagram_interop \
         ietf_track_status_interop \
         ietf_range_updates_interop \
         padding_interop \
+        sign_interop \
         tracks_interop \
         varint_interop \
         --run-ignored all
@@ -121,7 +122,8 @@ interop-negative *args:
 # republish, late join). Ends with negative controls that inject a frozen picture, silence, a
 # shifted tone, and a leaked session; each must fail the assertion it names. --timeout 30 gives
 
-# headless Chromium cold-start headroom. --media-engines selects player engines; the fixture stays Chromium.
+# headless Chromium cold-start headroom. --media-engines selects player engines, --media-publisher the
+# fixture's (chromium or firefox).
 [positional-arguments]
 media *args:
     ./interop/interop.sh --media --timeout 30 "$@"
@@ -265,6 +267,10 @@ bare-fin:
 # Explore JSON snapshot codec sequences with a fresh replayable seed.
 json-properties:
     bash ../sh/local.sh bash json-properties.sh
+
+# Check resume against its model of one logical track from a fresh replayable seed.
+resume-model:
+    bash ../sh/local.sh bash resume-model.sh
 
 # The TypeScript qmux peer as client and server against the in-tree Rust qmux
 # interop examples, per draft. The manifest path names the in-tree crate, which

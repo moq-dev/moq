@@ -11,8 +11,8 @@ it is compared against; missing or failed cases are not imputed.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-26, from kixelated/rust2's
-[test selection report](https://github.com/kixelated/rust2/pull/69): the slowest 1%
+Decided with the maintainer on 2026-10-26, from moq-dev/rust2's
+[test selection report](https://github.com/moq-dev/rust2/pull/69): the slowest 1%
 of tests make up 57% of what either package selection or a function-level selector
 would run, so cutting them beats building a selector.
 

@@ -46,14 +46,19 @@ function decodeGroupOrder(value: number): Order {
 }
 
 /**
- * The filter this implementation joins a live track with.
+ * How this implementation joins a live track: at the current group, from its first object,
+ * as the Rust subscriber does.
  *
- * moq-lite joins at the start of the current group, which is a decodable point, and
- * draft-22's relative form is the first that can name it without knowing Largest Object.
- * Earlier drafts request unfiltered delivery because this client does not send joining FETCH.
+ * The subscription itself starts at the next object (draft 18's Largest Object), and the
+ * group's head comes on a fetch stream. Draft 22 asks for it with a fill one group back from
+ * the next, its current-group join (section 3.5); earlier drafts have no fill, so the
+ * subscriber sends a Relative Joining FETCH once SUBSCRIBE_OK names Largest. Spelling the
+ * filter keeps a peer from reading an absent one its own way.
  */
-export function joinFilter(version: IetfVersion): Filter.Filter {
-	return Filter.isDraft22(version) ? { kind: "relative", groups: 1n } : { kind: "unfiltered" };
+export function joinFilter(version: IetfVersion): { filter: Filter.Filter; fill?: Filter.Fill } {
+	const filter: Filter.Filter = { kind: "nextObject" };
+	if (!Filter.isDraft20(version)) return { filter };
+	return { filter, fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false } };
 }
 
 export class Subscribe {
@@ -151,7 +156,7 @@ export class Subscribe {
 		// FILL_PARAMETERS and INCLUDE_PROPERTIES arrived in draft-22. An older peer reads
 		// either as an unknown parameter, which is a protocol violation, so they are
 		// dropped rather than downgraded.
-		if (Filter.isDraft22(version)) {
+		if (Filter.isDraft20(version)) {
 			if (this.fill) {
 				params.fillParameters = Filter.encodeFill(this.fill, version);
 			}
@@ -185,7 +190,7 @@ export class Subscribe {
 		// additions. An unknown message parameter is a protocol violation, so
 		// they stay rejected on the drafts that predate them rather than being quietly
 		// tolerated.
-		const draft22 = Filter.isDraft22(version);
+		const draft22 = Filter.isDraft20(version);
 		if ((params.fillParameters !== undefined || params.includeProperties !== undefined) && !draft22) {
 			throw new Error("FILL_PARAMETERS and INCLUDE_PROPERTIES need draft-22");
 		}

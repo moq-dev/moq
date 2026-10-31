@@ -1,6 +1,6 @@
 use crate::driver::Transport;
 use crate::transport::poll::Session as _;
-use std::task::{Context, Poll, ready};
+use std::task::{Poll, ready};
 
 use super::{Message, Version};
 use crate::{
@@ -18,16 +18,16 @@ pub(super) fn poll_cancel(
 	finished: &mut bool,
 	messages: &mut Messages,
 	version: Version,
-	cx: &mut Context<'_>,
+	waiter: &kio::Waiter,
 ) -> Poll<Result<(), Error>> {
 	if !*finished {
-		match messages.poll_end(&mut stream.reader, cx) {
+		match messages.poll_end(&mut stream.reader, waiter) {
 			Poll::Ready(Ok(())) if !fin_cancels(version) => *finished = true,
 			Poll::Ready(result) => return Poll::Ready(result),
 			Poll::Pending => {}
 		}
 	}
-	stream.writer.poll_closed(cx)
+	stream.writer.poll_closed(waiter)
 }
 
 /// Watch for the requester ending a request it has not been answered on yet, without consuming
@@ -37,12 +37,12 @@ pub(super) fn poll_cancel(
 pub(super) fn poll_withdrawn(
 	stream: &mut Stream<Transport, Version>,
 	version: Version,
-	cx: &mut Context<'_>,
+	waiter: &kio::Waiter,
 ) -> Poll<()> {
-	if stream.writer.poll_closed(cx).is_ready() {
+	if stream.writer.poll_closed(waiter).is_ready() {
 		return Poll::Ready(());
 	}
-	match stream.reader.poll_has_more(cx) {
+	match stream.reader.poll_has_more(waiter) {
 		Poll::Ready(Ok(false)) if fin_cancels(version) => Poll::Ready(()),
 		Poll::Ready(Err(_)) => Poll::Ready(()),
 		_ => Poll::Pending,
@@ -52,7 +52,7 @@ pub(super) fn poll_withdrawn(
 /// One whole `[type][length][body]` message off a request stream, decoded at once so a read
 /// dropped part-way consumes nothing.
 #[derive(Debug)]
-pub(super) struct Framed(pub(super) u64, pub(super) super::Body);
+pub(crate) struct Framed(pub(crate) u64, pub(crate) super::Body);
 
 impl<'a> Decode<'a, Version> for Framed {
 	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
@@ -68,7 +68,7 @@ impl<'a> Decode<'a, Version> for Framed {
 /// A message following the request on a request stream: `T`, or a GOAWAY migrating this
 /// one request (draft-22 section 9.2).
 #[derive(Debug)]
-pub(super) enum Next<T> {
+pub(crate) enum Next<T> {
 	Message(T),
 	/// `redirect` is whether it names a new session, which only a server may do.
 	GoAway {
@@ -79,7 +79,9 @@ pub(super) enum Next<T> {
 impl<'a, T: Decode<'a, Version>> Decode<'a, Version> for Next<T> {
 	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let mut peek = r.clone();
-		if peek.varint()? == super::GoAway::ID {
+		// A type cut short falls through to `T`, whose own read of it records what it
+		// needed on `r`, where the reader looks for it.
+		if peek.varint().is_ok_and(|id| id == super::GoAway::ID) {
 			*r = peek;
 			r.uncounted = r.position();
 			let msg = super::GoAway::decode(r, version)?;
@@ -120,10 +122,10 @@ impl GoAways {
 	pub fn poll_next<T: for<'a> Decode<'a, Version> + std::fmt::Debug, R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
-		cx: &mut Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<T>, Error>> {
 		loop {
-			match ready!(reader.poll_decode_maybe::<Next<T>>(cx))? {
+			match ready!(reader.poll_decode_maybe::<Next<T>>(waiter))? {
 				Some(Next::GoAway { redirect }) => self.receive(redirect)?,
 				Some(Next::Message(message)) => return Poll::Ready(Ok(Some(message))),
 				None => return Poll::Ready(Ok(None)),
@@ -164,16 +166,16 @@ impl Messages {
 	pub fn poll_next<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
-		cx: &mut Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Framed>, Error>> {
-		self.goaways.poll_next(reader, cx).map_err(|err| self.failed(err))
+		self.goaways.poll_next(reader, waiter).map_err(|err| self.failed(err))
 	}
 
 	pub async fn next<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
 	) -> Result<Option<Framed>, Error> {
-		std::future::poll_fn(|cx| self.poll_next(reader, cx)).await
+		kio::wait(|waiter| self.poll_next(reader, waiter)).await
 	}
 
 	pub async fn message<R: crate::transport::poll::RecvStream>(
@@ -188,9 +190,9 @@ impl Messages {
 	pub fn poll_end<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
-		cx: &mut Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
-		match ready!(self.poll_next(reader, cx))? {
+		match ready!(self.poll_next(reader, waiter))? {
 			None => Poll::Ready(Ok(())),
 			Some(_) => Poll::Ready(Err(self.failed(Error::UnexpectedMessage))),
 		}
@@ -224,12 +226,12 @@ pub(super) async fn write_error<W: crate::transport::poll::SendStream>(
 			retry_interval: 0,
 		},
 	)?;
-	std::future::poll_fn(|cx| writer.poll_flush(cx)).await
+	kio::wait(|waiter| writer.poll_flush(waiter)).await
 }
 
 /// A framed subscription update, preserving omitted preferences.
 #[derive(Debug)]
-pub(super) struct Update {
+pub(crate) struct Update {
 	/// The update's own Request ID.
 	pub(super) request_id: super::RequestId,
 	pub(super) priority: Option<u8>,
@@ -263,7 +265,7 @@ impl Update {
 			0x10 => forward: Option<bool>,
 			0x20 => priority: Option<u8>,
 			0x21 => filter: Option<Filter>,
-			0x23 => fill: Option<Fill> where Filter::is_draft22(version),
+			0x23 => fill: Option<Fill> where Filter::is_draft20(version),
 			0x25 => subgroup_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x26 => object_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x27 => priority_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
@@ -331,7 +333,7 @@ impl<'a> Decode<'a, Version> for Update {
 /// SUBSCRIBE_TRACKS, which from draft-22 may also carry TRACK_PROPERTY_FILTER and
 /// FORWARD.
 #[derive(Debug)]
-pub(super) struct NamespaceUpdate<const TRACKS: bool = false> {
+pub(crate) struct NamespaceUpdate<const TRACKS: bool = false> {
 	pub(super) request_id: super::RequestId,
 	pub(super) prefix: Option<crate::Path>,
 	pub(super) refused: Option<Error>,
@@ -361,7 +363,7 @@ impl<'a, const TRACKS: bool> Decode<'a, Version> for NamespaceUpdate<TRACKS> {
 			let request_id = super::RequestId::decode(&mut data, version)?;
 			decode_params!(&mut data, version,
 				0x03 => token: Vec<super::token::RequestToken>,
-				0x10 => _forward: Option<bool> where TRACKS && super::Filter::is_draft22(version),
+				0x10 => _forward: Option<bool> where TRACKS && super::Filter::is_draft20(version),
 				0x29 => _track_filter: Vec<super::Opaque> where TRACKS && super::subscribe::has_range_filters(version),
 				0x34 => prefix: Option<NamespacePrefix>,
 			);
@@ -388,7 +390,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn request_messages_keep_goaway_state_across_response_phases() {
 		use crate::lite::test_transport::ScriptedSession;
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			// GOAWAY, REQUEST_OK, then another GOAWAY on the same stream.
 			let script = vec![0x10, 0, 2, 0, 0, 0x07, 0, 0, 0x10, 0, 2, 0, 0];
 			let session = ScriptedSession::eof(script);
@@ -432,7 +434,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_goaway_does_not_cancel_a_pending_request() {
 		use crate::lite::test_transport::ScriptedSession;
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
 			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
 				.await
@@ -440,12 +442,12 @@ mod tests {
 			let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), false);
 			let mut finished = false;
 			assert!(
-				futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+				futures::poll!(kio::wait(|waiter| poll_cancel(
 					&mut stream,
 					&mut finished,
 					&mut messages,
 					version,
-					cx,
+					waiter,
 				)))
 				.is_pending(),
 				"{version}"
@@ -454,12 +456,12 @@ mod tests {
 			// A second GOAWAY is still session-fatal while the response is pending.
 			session.push(&[0x10, 0, 2, 0, 0]);
 			assert!(matches!(
-				futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+				futures::poll!(kio::wait(|waiter| poll_cancel(
 					&mut stream,
 					&mut finished,
 					&mut messages,
 					version,
-					cx,
+					waiter,
 				))),
 				Poll::Ready(Err(Error::ProtocolViolation))
 			));
@@ -469,7 +471,7 @@ mod tests {
 
 	#[test]
 	fn delivery_timeouts_on_subscription_updates_are_accepted() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			// Request ID 2; OBJECT_DELIVERY_TIMEOUT=7, SUBGROUP_DELIVERY_TIMEOUT=9.
 			let mut buf = bytes::Bytes::from_static(&[2, 2, 0x02, 7, 0x04, 9]);
 			let update = crate::coding::decode_buf(&mut buf, version, Update::decode_body).unwrap();

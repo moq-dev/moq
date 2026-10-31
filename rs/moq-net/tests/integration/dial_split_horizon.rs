@@ -101,7 +101,8 @@ async fn learned_hop(dialer: &origin::Producer, path: &str) -> Hop {
 			let announce = match event {
 				moq_net::announce::Event::Start(announce)
 				| moq_net::announce::Event::Update(announce)
-				| moq_net::announce::Event::Restart(announce) => announce,
+				| moq_net::announce::Event::Restart(announce)
+				| moq_net::announce::Event::Takeover { announce, .. } => announce,
 				moq_net::announce::Event::End(_) => continue,
 			};
 			if announce.prefix.as_str() == path {
@@ -193,7 +194,7 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2])
 	// session it arrived on.
 	let viewed = subscriber
 		.consume()
-		.request_broadcast("room", None)
+		.request("room", None)
 		.await
 		.expect("subscriber resolves the namespace");
 	let subscription = moq_net::track::Subscription::default();

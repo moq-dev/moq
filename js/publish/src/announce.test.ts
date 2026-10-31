@@ -170,8 +170,8 @@ test("capture gaps keep the broadcast epoch and same-identity track sequences", 
 	await start(env);
 	const net = env.broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer");
-	const request = env.broadcast.in.origin.peek()?.request(env.broadcast.in.name.peek(), { announced: true });
-	if (!request) throw new Error("expected an announced request");
+	const request = env.broadcast.in.origin.peek()?.follow(env.broadcast.in.name.peek());
+	if (!request) throw new Error("expected a follower");
 	const epoch = request.active.peek()?.epoch;
 	const active: boolean[] = [];
 	const stop = request.active.subscribe((value) => active.push(value !== undefined));

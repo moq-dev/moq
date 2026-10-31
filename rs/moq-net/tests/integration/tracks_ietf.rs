@@ -17,7 +17,7 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Every draft that has SUBSCRIBE_TRACKS.
-const DRAFTS: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
+const DRAFTS: [&str; 3] = ["moq-transport-18", "moq-transport-20", "moq-transport-22"];
 
 /// SUBSCRIBE (0x03), as the first byte of a request stream.
 const SUBSCRIBE: u8 = 0x03;
@@ -64,7 +64,7 @@ async fn connect(publisher: &moq_net::origin::Producer, version: &str) -> (moq_n
 }
 
 async fn resolve(origin: &moq_net::origin::Producer, path: &str) -> moq_net::broadcast::Consumer {
-	moq_clock::timeout(TIMEOUT, origin.consume().routed_broadcast(path))
+	moq_clock::timeout(TIMEOUT, origin.consume().follow(path, None).unwrap().available())
 		.await
 		.expect("announce timeout")
 		.expect("routed")
