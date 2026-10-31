@@ -377,6 +377,45 @@ they gate admission without revoking.
 loopback address needs `--listen-public`: the server has no authentication of
 its own. See `moq auth serve --help` for the rest.
 
+### Mesh enrollment
+
+`--mesh-url URL` also makes the server a mesh coordinator: a device holding an
+Ed25519 endpoint key enrolls and receives the relay URLs to dial and a JWT that
+publishes `mesh/<id>/**` and subscribes `mesh/**`, where `<id>` is the key in
+z-base-32 (52 characters, the form pkarr and iroh's DNS discovery use). It is
+verified like any other token, so the verifying keys (`--key`, `--key-dir`,
+or `--key-set`) must include `--mesh-key`'s public half.
+
+```bash
+moq auth serve --key-dir /etc/moq/keys \
+  --mesh-url https://mesh.example.com --mesh-listen 127.0.0.1:4441 \
+  --mesh-key /etc/moq/mesh.jwk --mesh-state /var/lib/moq/mesh.json \
+  --mesh-relay https://relay.example.com
+moq auth mesh create-key --tag robot --reusable --expires 7d
+moq auth mesh revoke <endpoint id>
+```
+
+Every request proves the endpoint key by signing a fresh, single-use
+challenge bound to `--mesh-url`, so no token is issued for a key the caller
+does not hold. A device joins with an enrollment key, with no human in the
+loop (single-use unless `--reusable`; revoked or expired keys enroll
+nothing). It refreshes its token
+two thirds of the way through `--mesh-token-ttl` (default 1h) by proving
+the key again, so a revoked device is cut off within one token lifetime. A
+revoked device cannot enroll again. Each enrollment and refresh also returns
+every member's unique, DNS-safe name, defaulting to the device's hostname.
+
+The device-facing API on `--mesh-listen` is meant to be public behind a TLS
+proxy, since devices refuse plain `http://` beyond loopback. A challenge holds
+no state until a proof uses it, so unauthenticated requests cannot crowd out a
+device's; the proxy should still rate-limit each client. The owner's
+commands go to `--listen` (`moq auth mesh --url`, `unix:///path` for a
+socket), which has no authentication, so `--mesh-url` refuses
+`--listen-public`. A hosted coordinator implements
+the same JSON contract, documented in
+[`moq_auth::mesh`](https://docs.rs/moq-auth/latest/moq_auth/mesh/); it adds
+no token claims.
+
 ### Migrating from the relay flags
 
 The 0.14 relay's auth flags moved to `moq auth serve`, and the relay points
