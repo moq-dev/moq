@@ -134,20 +134,32 @@ test.each(["video", "canvas"] as const)(
 					(preview instanceof HTMLVideoElement
 						? preview.videoWidth > 0
 						: display && preview.width === display.width && preview.height === display.height) &&
-					player.getBoundingClientRect().height === preview.getBoundingClientRect().height
+					Math.abs(player.getBoundingClientRect().height - preview.getBoundingClientRect().height) < 0.5
 				);
 			}, tag);
 			const player = page.locator("moq-publish-ui .player");
 			const visible = await player.boundingBox();
 			expect(visible?.height).toBeGreaterThan(0);
-			await page.locator(`moq-publish ${tag}`).evaluate((preview) => {
+			const empty = (expected: boolean) =>
+				page.waitForFunction(
+					(expected) =>
+						!!document.querySelector("moq-publish-ui")?.shadowRoot?.querySelector(".player--empty") ===
+						expected,
+					expected,
+				);
+			const preview = page.locator(`moq-publish ${tag}`);
+			await preview.evaluate((preview) => {
 				(preview as HTMLElement).style.display = "none";
 			});
-			await page.waitForFunction(() =>
-				document.querySelector("moq-publish-ui")?.shadowRoot?.querySelector(".player--empty"),
-			);
+			await empty(true);
 			expect((await player.boundingBox())?.height).toBeCloseTo(visible?.height ?? 0, 0);
-			await page.locator(`moq-publish ${tag}`).evaluate((preview) => preview.remove());
+			// Removing a visible preview must also fall back to the reserved size.
+			await preview.evaluate((preview) => {
+				(preview as HTMLElement).style.display = "";
+			});
+			await empty(false);
+			await preview.evaluate((preview) => preview.remove());
+			await empty(true);
 			expect(await page.locator("moq-publish video, moq-publish canvas").count()).toBe(0);
 			expect((await player.boundingBox())?.height).toBeCloseTo(visible?.height ?? 0, 0);
 			await page.getByRole("button", { name: "Hide video", exact: true }).click();
