@@ -7,6 +7,7 @@ import { joinFilter } from "./subscribe.ts";
 import { Version } from "./version.ts";
 
 const OLD = Version.DRAFT_18;
+const FIELDS = Version.DRAFT_20;
 const NEW = Version.DRAFT_22;
 
 test("a live join is Next Object, its head left to a joining FETCH or a StartGroup=1 fill", () => {
@@ -14,14 +15,83 @@ test("a live join is Next Object, its head left to a joining FETCH or a StartGro
 	expect([...Filter.encode(old.filter, OLD)]).toEqual([0x02]);
 	expect(old.fill).toBeUndefined();
 
+	const draft20 = joinFilter(FIELDS);
+	expect([...Filter.encode(draft20.filter, FIELDS)]).toEqual([0x00, 0x00]);
+	expect(draft20.fill).toEqual({ filter: { kind: "relative", groups: 1n }, rangeFilters: false });
+
 	const draft22 = joinFilter(NEW);
 	expect([...Filter.encode(draft22.filter, NEW)]).toEqual([0x05]);
 	expect(draft22.fill).toEqual({ filter: { kind: "relative", groups: 1n }, rangeFilters: false });
 });
 
-function roundTrip(filter: Filter.Filter, version: typeof OLD | typeof NEW): Filter.Filter {
+function roundTrip(filter: Filter.Filter, version: typeof OLD | typeof FIELDS | typeof NEW): Filter.Filter {
 	return Filter.decode(Filter.encode(filter, version), version);
 }
+
+test("draft-20 selects the meaning by field count", () => {
+	expect([...Filter.encode({ kind: "nextObject" }, FIELDS)]).toEqual([0x00, 0x00]);
+	expect([...Filter.encode({ kind: "relative", groups: 0n }, FIELDS)]).toEqual([0x00]);
+	expect([...Filter.encode({ kind: "relative", groups: 1n }, FIELDS)]).toEqual([0x01]);
+	expect([...Filter.encode({ kind: "absolute", startGroup: 7n, startObject: 3n }, FIELDS)]).toEqual([0x07, 0x03]);
+	// End is a delta from the start group, not an absolute group id.
+	expect([...Filter.encode({ kind: "absolute", startGroup: 7n, startObject: 3n, endGroup: 9n }, FIELDS)]).toEqual([
+		0x07, 0x03, 0x02,
+	]);
+	// The value is framed by a Length, unlike draft-22's typed form.
+	expect([...Filter.encodeParam({ kind: "nextObject" }, FIELDS)]).toEqual([0x02, 0x00, 0x00]);
+});
+
+test("draft-20 round trips", () => {
+	const filters: Filter.Filter[] = [
+		{ kind: "unfiltered" },
+		{ kind: "nextObject" },
+		{ kind: "relative", groups: 0n },
+		{ kind: "relative", groups: 5n },
+		{ kind: "relative", groups: 128n },
+		{ kind: "absolute", startGroup: 12n, startObject: 0n, endGroup: undefined, endObject: undefined },
+		{ kind: "absolute", startGroup: 12n, startObject: 4n, endGroup: 20n, endObject: undefined },
+	];
+	for (const filter of filters) {
+		expect(roundTrip(filter, FIELDS)).toEqual(filter);
+	}
+});
+
+// An open ended absolute {0, 0} is defined as equivalent to unfiltered, so it must not
+// collide with the two-zero-field spelling of Next Object.
+test("draft-20 absolute origin is unfiltered", () => {
+	const origin: Filter.Filter = { kind: "absolute", startGroup: 0n, startObject: 0n };
+	expect(Filter.encode(origin, FIELDS).length).toBe(0);
+	expect(roundTrip(origin, FIELDS)).toEqual({ kind: "unfiltered" });
+});
+
+// The fourth field bounds the last object in the end group. Dropping it on decode would
+// let a publisher deliver past the Location the subscriber asked for.
+test("draft-20 keeps the end object", () => {
+	const bounded: Filter.Filter = {
+		kind: "absolute",
+		startGroup: 7n,
+		startObject: 3n,
+		endGroup: 9n,
+		endObject: 4n,
+	};
+	expect([...Filter.encode(bounded, FIELDS)]).toEqual([0x07, 0x03, 0x02, 0x04]);
+	expect(roundTrip(bounded, FIELDS)).toEqual(bounded);
+});
+
+test("draft-20 rejects too many fields", () => {
+	expect(() => Filter.decode(new Uint8Array([0, 0, 0, 0, 0]), FIELDS)).toThrow();
+});
+
+// Draft-20's nested LOCATION_FILTER keeps its Length.
+test("draft-20 fill frames its filter with a Length", () => {
+	const encoded = Filter.encodeFill({ filter: { kind: "relative", groups: 1n }, rangeFilters: false }, FIELDS);
+	// count=1, type=0x21, len=1, StartGroup=1
+	expect([...encoded]).toEqual([0x01, 0x21, 0x01, 0x01]);
+	expect(Filter.decodeFill(encoded, FIELDS)).toEqual({
+		filter: { kind: "relative", groups: 1n },
+		rangeFilters: false,
+	});
+});
 
 test("draft-18 uses tags", () => {
 	expect([...Filter.encode({ kind: "nextObject" }, OLD)]).toEqual([0x02]);

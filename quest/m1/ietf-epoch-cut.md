@@ -69,9 +69,9 @@ Implementation:
   and the rest under `rs/moq-net/tests/integration`), and the interop clients
   in `test/interop/clients`, expect epochless behavior on moq-transport
   instead of epoch behavior. Delete the cases that only pinned EPOCH framing.
-  [A demoted subscriber priority reaches the publisher](/quest/m1/ts-reliability/stitch-catch-up.md)
-  has a "moq-transport-18 after an epoch switch, relayed" case. Whichever
-  lands second turns that case into an epochless restart. If a compat cell
+  The priority-update coverage in `rs/moq-net-tests/tests/integration/restart.rs`
+  has a "moq-transport-18 after an epoch switch, relayed" case; turn it into an
+  epochless restart. If a compat cell
   in `test/interop/compat.sh` asserted an epoch across moq-transport, add a
   planned break to `test/interop/compat/planned-breaks.json`.
 - **Docs.** Say moq-lite 07 only where a doc promises epochs or redundant

@@ -63,7 +63,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 	};
 	let groups = request.requests();
 	let _track = request.accept(timed());
-	let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
+	let mut request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
 		futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 		futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 	};
@@ -71,9 +71,11 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 	match stage {
 		Stage::Unanswered => {
 			drop(waiting);
-			moq_clock::timeout(Duration::from_secs(5), kio::wait(|waiter| request.poll_unused(waiter)))
-				.await
-				.unwrap_or_else(|_| panic!("{ctx}: the publisher's fetch is still wanted"));
+			moq_clock::timeout(Duration::from_secs(5), async {
+				while request.wanted_changed().await.is_some() {}
+			})
+			.await
+			.unwrap_or_else(|_| panic!("{ctx}: the publisher's fetch is still wanted"));
 		}
 		Stage::MidResponse => {
 			let mut group = request.accept(0, timed()).unwrap();
