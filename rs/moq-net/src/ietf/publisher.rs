@@ -1382,9 +1382,7 @@ impl Publisher {
 						None => return Ok(Subscribed::Withdrawn),
 					};
 					let cache = track;
-					// A subscriber that opted out of this SUBSCRIBE_OK's properties learns the
-					// Timestamp's units from TRACK_STATUS, so the opt-out strips nothing from the
-					// objects.
+					// The fill stamps its objects as the subscription does.
 					let timescale = track_serve.timescale;
 					let properties = match track_properties(
 						track_serve.track.info(),
@@ -1976,9 +1974,9 @@ impl Publisher {
 		}
 		range.apply(&mut subscription);
 		let _ = subscribed.update(subscription);
-		// A Timestamp goes out wherever the track has units. An untimed track declares none,
-		// so its objects stay unstamped.
-		let timescale = subscribed.info().timescale;
+		// Only the TIMESCALE in SUBSCRIBE_OK opts the answer into timestamps, so an untimed
+		// track, or a subscriber that opted out of the properties, gets unstamped objects.
+		let timescale = subscribed.info().timescale.filter(|_| msg.properties_wanted);
 
 		// Serve the track while reading updates; only abrupt closure cancels on draft-22. A
 		// fill or joining FETCH ranks in the same subscription as the group it carries.
@@ -8938,10 +8936,10 @@ mod serve_tests {
 		}
 	}
 
-	/// Opting out of SUBSCRIBE_OK's properties does not strip the objects' timestamps:
-	/// their units come from TRACK_STATUS instead.
+	/// Opting out of SUBSCRIBE_OK's properties also opts out of timestamps: with no
+	/// TIMESCALE declared, the objects go out unstamped.
 	#[moq_clock::test]
-	async fn the_properties_opt_out_keeps_object_timestamps() {
+	async fn the_properties_opt_out_strips_object_timestamps() {
 		let version = Version::Draft22;
 		let stamp = crate::Timestamp::from_millis(123_456).unwrap();
 		let mut properties = Vec::new();
@@ -8963,7 +8961,11 @@ mod serve_tests {
 			run_live(&mut h, msg).await;
 
 			assert_eq!(occurrences(&h.log, b"stamped"), 1, "wanted={wanted}");
-			assert_eq!(occurrences(&h.log, &properties), 1, "wanted={wanted}: object unstamped");
+			assert_eq!(
+				occurrences(&h.log, &properties),
+				usize::from(wanted),
+				"wanted={wanted}: stamped only when TIMESCALE is declared"
+			);
 		}
 	}
 
