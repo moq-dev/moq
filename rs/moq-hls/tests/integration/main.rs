@@ -3,6 +3,7 @@
 
 #![cfg(feature = "server")]
 
+mod conformance;
 mod disconnect;
 mod finish;
 mod restart;
