@@ -6,6 +6,7 @@ test("claims root the token at the room and scope publish to the identity", () =
 		root: "meet/demo",
 		subscribe: ["**"],
 		publish: ["alice/**"],
+		sub: "alice",
 	});
 });
 
@@ -20,6 +21,7 @@ test("claims accepts a multi-segment identity", () => {
 		root: "hang/room",
 		subscribe: ["**"],
 		publish: ["guest/uuid/**"],
+		sub: "guest/uuid",
 	});
 });
 

@@ -985,7 +985,7 @@ mod tests {
 			);
 		}
 
-		let legacy = sign_raw(&key, serde_json::json!({"root": "/room/", "publish": ["**"]}));
+		let legacy = sign_raw(&key, serde_json::json!({"root": "/room/", "publish": ["**"], "sub": "alice"}));
 		assert_eq!(
 			key.verify(&legacy).unwrap().authorize("room").unwrap().publish,
 			patterns(&["**"])

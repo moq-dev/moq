@@ -40,6 +40,7 @@ export namespace Chat {
 export type Claims = {
 	publish: string[];
 	root: string;
+	sub: string;
 	subscribe: string[];
 };
 
