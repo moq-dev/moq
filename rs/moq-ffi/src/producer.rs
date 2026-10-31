@@ -10,6 +10,24 @@ use crate::error::MoqError;
 use crate::ffi::{Background, Task};
 use crate::media::MoqFrame;
 
+/// A location within a track, mirroring [`moq_net::track::Position`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MoqPosition {
+	/// The group sequence.
+	pub group: u64,
+	/// The frame index within the group, numbered from 0 in write order.
+	pub frame: u64,
+}
+
+impl From<moq_net::track::Position> for MoqPosition {
+	fn from(position: moq_net::track::Position) -> Self {
+		Self {
+			group: position.group,
+			frame: position.frame,
+		}
+	}
+}
+
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
@@ -779,6 +797,32 @@ impl MoqTrackProducer {
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
 		Ok(track.append_datagram(timestamp, frame.payload)?)
+	}
+
+	/// Send `frame` as a best-effort datagram at an explicit `sequence`.
+	///
+	/// [`append_datagram`](Self::append_datagram) assigns the next sequence; this is for a
+	/// caller that allocates its own, such as an encryption layer binding the sequence into
+	/// its nonce. The same payload, transport, and timedness rules apply, and a sequence at or
+	/// past a [`finish_at`](Self::finish_at) boundary is refused with `Closed`.
+	pub fn insert_datagram(&self, sequence: u64, frame: MoqFrame) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let timestamp = frame.timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
+		let mut guard = self.inner.lock().unwrap();
+		let track = guard.as_mut().ok_or(MoqError::Closed)?;
+		Ok(track.insert_datagram(sequence, timestamp, frame.payload)?)
+	}
+
+	/// The newest content this track holds: its newest group or datagram, at that group's
+	/// newest frame (0 while it is empty), or null before anything was written.
+	///
+	/// A publisher compares it with [`MoqTrackDemand`]'s wanted group to tell whether a join
+	/// is already served by a group it wrote.
+	pub fn largest(&self) -> Result<Option<MoqPosition>, MoqError> {
+		let _guard = crate::ffi::enter();
+		let guard = self.inner.lock().unwrap();
+		let track = guard.as_ref().ok_or(MoqError::Closed)?;
+		Ok(track.largest().map(MoqPosition::from))
 	}
 
 	/// Abort this track with an application error code.

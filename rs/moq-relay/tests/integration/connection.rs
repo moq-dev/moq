@@ -100,7 +100,8 @@ async fn next_active(announced: &mut moq_net::announce::Consumer) -> String {
 		{
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => return route.prefix.to_string(),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => return route.prefix.to_string(),
 			moq_net::announce::Event::End(_) => {}
 		}
 	}

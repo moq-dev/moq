@@ -70,6 +70,8 @@ for event, err := range announced.All(ctx) {
         ann = event.Announce
     case moq.AnnounceEventRestart: // a new publisher run at the same path: request it again
         ann = event.Announce
+    case moq.AnnounceEventTakeover: // continues what an earlier route served, like a start
+        ann = event.Announce
     default:
         continue // AnnounceEventUpdate or AnnounceEventEnd
     }

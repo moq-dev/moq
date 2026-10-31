@@ -174,6 +174,8 @@ fn announce_info(announced: u32) -> moq_announce_event {
 				len: 0,
 			},
 		},
+		predecessor: std::ptr::null(),
+		predecessor_len: 0,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
 	info
