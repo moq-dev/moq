@@ -423,22 +423,17 @@ impl<T: Serialize> Encoder<T> {
 		};
 
 		// Diff without building a full `Value` for the new value first. The memoized encoder writes
-		// `T` with `serde_json` (the same writer a snapshot uses) and diffs those bytes entry by entry,
-		// which keeps a table's per-row serialization monomorphic. Without the memo, the type-erased
+		// `T` with the same `serde_json` writer a snapshot uses and diffs those bytes entry by entry,
+		// so a table's rows are serialized once, monomorphically. Without the memo, the type-erased
 		// diff walks `T` directly.
-		let scratch = self.scratch.get_mut();
-		let diffed = if scratch.is_memoized() {
-			let mut serialized = std::mem::take(&mut scratch.serialized);
-			serialized.clear();
-			let diffed = serde_json::to_writer(&mut serialized, value)
-				.map_err(crate::Error::from)
-				.and_then(|()| crate::diff::serialized(last, &serialized, &self.scratch).map_err(crate::Error::Json));
-			self.scratch.get_mut().serialized = serialized;
-			diffed
-		} else {
-			crate::diff::bytes(last, value, &self.scratch).map_err(crate::Error::Json)
+		let diffed = match self.scratch.get_mut().next_buffer() {
+			Some(buffer) => {
+				serde_json::to_writer(buffer, value)?;
+				crate::diff::serialized(last, &self.scratch)
+			}
+			None => crate::diff::bytes(last, value, &self.scratch),
 		};
-		let crate::diff::PatchBytes { patch, forced_snapshot } = diffed?;
+		let crate::diff::PatchBytes { patch, forced_snapshot } = diffed.map_err(crate::Error::Json)?;
 
 		// An empty object patch with no forced null means the value is unchanged: encode nothing.
 		if !forced_snapshot && patch.is_empty() {
