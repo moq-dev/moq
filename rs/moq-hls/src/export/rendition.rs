@@ -9,7 +9,6 @@ use std::time::Duration;
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, Clock, Hls, Reference, VideoConfig};
 use moq_mux::container::fmp4::Muxer;
-use sha2::{Digest, Sha256};
 
 use super::playlist::{Segment, Snapshot};
 use super::{mpd, renditions, segments};
@@ -83,7 +82,7 @@ struct Init {
 impl Init {
 	fn new(bytes: Bytes) -> Self {
 		// 64 bits: the URL only has to tell apart the inits one rendition name ever carries.
-		let hash = Sha256::digest(&bytes)[..8].iter().map(|b| format!("{b:02x}")).collect();
+		let hash = rind::digest::digest(&rind::digest::SHA256, &bytes).as_ref()[..8].iter().map(|b| format!("{b:02x}")).collect();
 		Self { bytes, hash }
 	}
 }

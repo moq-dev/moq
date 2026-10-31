@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use hang::moq_net;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreScheme};
 use object_store::path::{Path, PathPart};
 use url::Url;
 
@@ -271,12 +271,38 @@ pub async fn import(
 /// Open the object store `url` names, taking cloud credentials from the `AWS_*`, `GOOGLE_*`,
 /// and `AZURE_*` environment variables, with the prefix the URL names.
 fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
-	let credentials = std::env::vars_os()
-		.filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
-		.filter(|(key, _)| ["AWS_", "GOOGLE_", "AZURE_"].iter().any(|cloud| key.starts_with(cloud)));
-	let (store, prefix) =
-		object_store::parse_url_opts(url, credentials).with_context(|| format!("unsupported archive store {url}"))?;
-	Ok((Arc::from(store), prefix))
+	let unsupported = || format!("unsupported archive store {url}");
+	let (scheme, prefix) = ObjectStoreScheme::parse(url).with_context(unsupported)?;
+	// Each cloud builder signs through rind, which `parse_url_opts` has no way to pass.
+	let store: Arc<dyn ObjectStore> = match scheme {
+		ObjectStoreScheme::Local => Arc::new(object_store::local::LocalFileSystem::new()),
+		#[cfg(feature = "s3")]
+		ObjectStoreScheme::AmazonS3 => Arc::new(
+			object_store::aws::AmazonS3Builder::from_env()
+				.with_url(url.as_str())
+				.with_crypto_provider(rind_object_store::default_provider()?)
+				.build()
+				.with_context(unsupported)?,
+		),
+		#[cfg(feature = "gcs")]
+		ObjectStoreScheme::GoogleCloudStorage => Arc::new(
+			object_store::gcp::GoogleCloudStorageBuilder::from_env()
+				.with_url(url.as_str())
+				.with_crypto_provider(rind_object_store::default_provider()?)
+				.build()
+				.with_context(unsupported)?,
+		),
+		#[cfg(feature = "azure")]
+		ObjectStoreScheme::MicrosoftAzure => Arc::new(
+			object_store::azure::MicrosoftAzureBuilder::from_env()
+				.with_url(url.as_str())
+				.with_crypto_provider(rind_object_store::default_provider()?)
+				.build()
+				.with_context(unsupported)?,
+		),
+		_ => anyhow::bail!(unsupported()),
+	};
+	Ok((store, prefix))
 }
 
 /// [`open_store`] as one recorded broadcast.

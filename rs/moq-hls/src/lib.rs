@@ -17,6 +17,10 @@
 //! export via [`moq_mux::container::fmp4::Muxer`]) lives in `moq-mux`; this
 //! crate owns the HLS playlist and DASH manifest generation, the
 //! record-driven playlist window, and the HTTP surface.
+//!
+//! Its cryptography is [rind](https://docs.rs/rind), which panics on a CPU missing a feature it
+//! requires. [`import`] refuses such a CPU with [`Error::UnsupportedCpu`]; before serving
+//! [`export`], call `rind::cpu::check()` at startup.
 
 #![warn(missing_docs)]
 

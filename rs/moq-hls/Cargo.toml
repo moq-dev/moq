@@ -29,10 +29,12 @@ moq-mux = { workspace = true }
 moq-net = { workspace = true }
 percent-encoding = { workspace = true }
 rand = { workspace = true }
-reqwest = { workspace = true, features = ["rustls", "gzip"] }
+reqwest = { workspace = true, features = ["rustls-no-provider", "gzip"] }
+rind = { workspace = true }
+# Installed as rustls's process default when the host installed none, since reqwest reads it.
+rind-rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }

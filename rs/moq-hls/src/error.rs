@@ -177,6 +177,10 @@ pub enum Error {
 		/// The segment whose media cannot be recorded.
 		segment: u64,
 	},
+
+	/// This CPU lacks a feature rind, the crate's cryptography, requires.
+	#[error("unsupported CPU: {0}")]
+	UnsupportedCpu(#[from] rind::cpu::MissingFeature),
 }
 
 impl Error {
@@ -250,6 +254,8 @@ mod tests {
 		let address = listener.local_addr().expect("local address");
 		drop(listener);
 
+		// reqwest reads rustls's process default, as the importer installs it.
+		let _ = rind_rustls::default_provider().expect("supported CPU").install_default();
 		let err: Error = reqwest::get(format!("http://user:pass@{address}/media.m3u8?jwt=secret"))
 			.await
 			.expect_err("dial a closed port")

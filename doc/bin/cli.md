@@ -11,6 +11,11 @@ it locally. On macOS or Linux, install it with
 `curl -fsSL https://moq.sh | sh`, or use cargo, brew, apt, dnf, winget, or
 Docker; see [Install](/setup/install).
 
+Its cryptography comes from [rind](https://github.com/moq-dev/rind), which
+needs an x86\_64 CPU from about 2014 onward, and on aarch64 the crypto
+extensions, so a Raspberry Pi 4 or earlier needs a 32-bit ARM build. On a CPU
+missing one, `moq` exits at startup naming it.
+
 ## What it does
 
 | Verb | Endpoint | |
