@@ -9,11 +9,11 @@ use std::{
 	time::Duration,
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 use futures::stream::{FuturesUnordered, Stream, StreamExt};
 use kio::Waiter;
 
-use crate::quic::driver::SendOptions;
+use crate::quic::driver::send;
 use crate::quic::web::fan::Fan;
 use crate::quic::web::{
 	ClientError, CloseReason, Connected, RecvStream, SendStream, SessionError, Settings, WebTransportError,
@@ -81,7 +81,7 @@ pub struct Session {
 
 	// The send side of the CONNECT stream, used to write the CloseWebTransportSession capsule.
 	// Wrapped in Arc<Mutex<Option<...>>> so close() can take it exactly once.
-	connect_send: Arc<Mutex<Option<crate::quic::driver::SendStream>>>,
+	connect_send: Arc<Mutex<Option<crate::quic::driver::send::Stream>>>,
 
 	// Why the session closed: set once by a local close() or the background task
 	// when a remote CloseWebTransportSession capsule is received.
@@ -159,7 +159,7 @@ impl Session {
 	// then record the close error and tear down the connection.
 	async fn run_recv(
 		conn: crate::quic::driver::connection::Connection,
-		recv: crate::quic::driver::RecvStream,
+		recv: crate::quic::driver::recv::Stream,
 		close: Arc<CloseReason>,
 	) {
 		let close_info = Self::read_capsules(&conn, recv).await;
@@ -195,7 +195,7 @@ impl Session {
 	// or None if the stream closed without a capsule.
 	async fn read_capsules(
 		conn: &crate::quic::driver::connection::Connection,
-		recv: crate::quic::driver::RecvStream,
+		recv: crate::quic::driver::recv::Stream,
 	) -> Option<(u32, String)> {
 		let mut reader = web_transport_proto::Http3CapsuleReader::new(recv);
 		loop {
@@ -246,7 +246,7 @@ impl Session {
 		.await
 	}
 
-	/// Accept a new unidirectional stream. See [`crate::quic::driver::Connection::accept_uni`].
+	/// Accept a new unidirectional stream. See [`crate::quic::driver::connection::Connection::accept_uni`].
 	pub async fn accept_uni(&self) -> Result<RecvStream, SessionError> {
 		if let Some(accept) = &self.accept {
 			// `kio::wait` owns the waiter, so dropping this future — a `timeout` that
@@ -260,7 +260,7 @@ impl Session {
 		}
 	}
 
-	/// Accept a new bidirectional stream. See [`crate::quic::driver::Connection::accept_bi`].
+	/// Accept a new bidirectional stream. See [`crate::quic::driver::connection::Connection::accept_bi`].
 	pub async fn accept_bi(&self) -> Result<(SendStream, RecvStream), SessionError> {
 		if let Some(accept) = &self.accept {
 			kio::wait(|waiter| poll_accept_bi_shared(accept, waiter))
@@ -276,13 +276,13 @@ impl Session {
 	}
 
 	/// Open a new unidirectional stream, its sending half scheduled by `options`.
-	/// See [`crate::quic::driver::Connection::open_uni`].
-	pub async fn open_uni(&self, options: SendOptions<'_>) -> Result<SendStream, SessionError> {
+	/// See [`crate::quic::driver::connection::Connection::open_uni`].
+	pub async fn open_uni(&self, options: send::Options<'_>) -> Result<SendStream, SessionError> {
 		// Write the stream header ungrouped at the highest priority, before scheduling the stream.
 		// Otherwise the application could write data with lower priority than the header, resulting
 		// in queuing. Also the header is very important for determining the session ID
 		// without reliable reset.
-		let header = SendOptions {
+		let header = send::Options {
 			group: None,
 			priority: i64::MAX,
 		};
@@ -291,22 +291,22 @@ impl Session {
 			.await
 			.map_err(|e| self.map_error(e))?;
 
-		send.set_priority(options.priority).ok();
+		send.set_priority(options.priority);
 		if let Some(group) = options.group {
-			send.set_group(Some(group)).ok();
+			send.set_group(Some(group));
 		}
-		let header = self.header_uni.len() as u64;
+		let header = send.offset();
 		Ok(SendStream::new(send, self.close.clone(), Some(header)))
 	}
 
 	/// Open a new bidirectional stream, its sending half scheduled by `options`.
-	/// See [`crate::quic::driver::Connection::open_bi`].
-	pub async fn open_bi(&self, options: SendOptions<'_>) -> Result<(SendStream, RecvStream), SessionError> {
+	/// See [`crate::quic::driver::connection::Connection::open_bi`].
+	pub async fn open_bi(&self, options: send::Options<'_>) -> Result<(SendStream, RecvStream), SessionError> {
 		// Write the stream header ungrouped at the highest priority, before scheduling the stream.
 		// Otherwise the application could write data with lower priority than the header, resulting
 		// in queuing. Also the header is very important for determining the session ID
 		// without reliable reset.
-		let header = SendOptions {
+		let header = send::Options {
 			group: None,
 			priority: i64::MAX,
 		};
@@ -315,11 +315,11 @@ impl Session {
 			.await
 			.map_err(|e| self.map_error(e))?;
 
-		send.set_priority(options.priority).ok();
+		send.set_priority(options.priority);
 		if let Some(group) = options.group {
-			send.set_group(Some(group)).ok();
+			send.set_group(Some(group));
 		}
-		let header = self.header_bi.len() as u64;
+		let header = send.offset();
 		Ok((
 			SendStream::new(send, self.close.clone(), Some(header)),
 			RecvStream::new(recv, self.close.clone()),
@@ -331,12 +331,13 @@ impl Session {
 		let Some((mut send, recv)) = self.conn.open_request().map_err(|err| self.map_error(err))? else {
 			return Ok(None);
 		};
-		send.set_priority(i64::MAX).ok();
+		send.set_priority(i64::MAX);
 		Self::write_full(&mut send, &self.header_bi)
 			.await
 			.map_err(|err| self.map_error(err))?;
+		let header = send.offset();
 		Ok(Some((
-			SendStream::new(send, self.close.clone(), Some(self.header_bi.len() as u64)),
+			SendStream::new(send, self.close.clone(), Some(header)),
 			RecvStream::new(recv, self.close.clone()),
 		)))
 	}
@@ -369,32 +370,24 @@ impl Session {
 	///
 	/// Datagrams are unreliable and may be dropped or delivered out of order.
 	/// The data must be smaller than [`max_datagram_size`](Self::max_datagram_size).
-	/// See [`Connection::send_datagram`](crate::quic::driver::Connection::send_datagram) for how
+	/// See [`Connection::send_datagram`](crate::quic::driver::connection::Connection::send_datagram) for how
 	/// `options` schedule it.
-	pub fn send_datagram(&self, data: Bytes, options: SendOptions<'_>) -> Result<(), SessionError> {
-		let result = if !self.header_datagram.is_empty() {
-			// The driver sends a single contiguous buffer, including the session header.
-			let mut buf = BytesMut::with_capacity(self.header_datagram.len() + data.len());
-
-			// Prepend the datagram with the header indicating the session ID.
-			buf.extend_from_slice(&self.header_datagram);
-			buf.extend_from_slice(&data);
-
-			self.conn.send_datagram(buf.into(), options)
-		} else {
-			self.conn.send_datagram(data, options)
-		};
-
-		result.map_err(|e| self.map_error(e))?;
+	pub fn send_datagram(&self, data: Bytes, options: send::Options<'_>) -> Result<(), SessionError> {
+		// Prepend the header naming the session, which is empty for a raw QUIC session. The
+		// payload is chained rather than copied.
+		let datagram = (&self.header_datagram[..]).chain(data);
+		self.conn
+			.send_datagram(datagram, options)
+			.map_err(|e| self.map_error(e))?;
 		Ok(())
 	}
 
-	/// Open a send group at `priority`, for streams and datagrams to join with [`SendOptions`]
+	/// Open a send group at `priority`, for streams and datagrams to join with [`send::Options`]
 	/// or [`SendStream::set_group`].
 	///
-	/// See [`crate::quic::driver::SendGroup`]. The HTTP/3 streams stay outside every group,
+	/// See [`crate::quic::driver::send::Group`]. The HTTP/3 streams stay outside every group,
 	/// so they go first.
-	pub fn send_group(&self, priority: i64) -> crate::quic::driver::SendGroup {
+	pub fn send_group(&self, priority: i64) -> crate::quic::driver::send::Group {
 		self.conn.send_group(priority)
 	}
 
@@ -470,7 +463,7 @@ impl Session {
 	/// Deliver the close capsule and FIN, then give the peer its teardown grace.
 	async fn close_with_capsule(
 		&self,
-		mut send: crate::quic::driver::SendStream,
+		mut send: crate::quic::driver::send::Stream,
 		capsule: web_transport_proto::Capsule,
 		code: u32,
 		timeout: std::time::Duration,
@@ -494,18 +487,14 @@ impl Session {
 		frame.extend_from_slice(&capsule_bytes);
 
 		// Write the DATA frame to the CONNECT send stream.
-		if let Err(e) = send.write_all(&frame).await {
+		if let Err(e) = send.write_all(&frame[..]).await {
 			tracing::warn!(?e, "failed to write CloseWebTransportSession capsule");
 			self.conn.close(http3_code, "");
 			return;
 		}
 
 		// FIN the send stream so the peer knows no more capsules are coming.
-		if let Err(e) = send.finish() {
-			tracing::warn!(?e, "failed to finish CONNECT send stream");
-			self.conn.close(http3_code, "");
-			return;
-		}
+		let send = send.finish();
 
 		// A queued write is not delivery: tearing down QUIC before the DATA and FIN
 		// are acknowledged can discard the capsule during loss recovery. Transport
@@ -530,12 +519,12 @@ impl Session {
 		}
 	}
 
-	/// Wait until the session is closed, returning the error. See [`crate::quic::driver::Connection::closed`].
+	/// Wait until the session is closed, returning the error. See [`crate::quic::driver::connection::Connection::closed`].
 	///
 	/// If the peer sent a `CloseWebTransportSession` capsule, the returned error will be
 	/// [`WebTransportError::Closed`] with the code and reason from the capsule.
 	///
-	/// Unlike [`crate::quic::driver::Connection::closed`], this does **not** return early when
+	/// Unlike [`crate::quic::driver::connection::Connection::closed`], this does **not** return early when
 	/// [`close()`](Self::close) has been called. It waits for the underlying QUIC
 	/// connection to shut down, ensuring the `CloseWebTransportSession` capsule has
 	/// been delivered. Use [`close_reason()`](Self::close_reason) for a non-blocking check.
@@ -544,7 +533,7 @@ impl Session {
 	}
 
 	/// Return why the session was closed, or None if it's not closed. See
-	/// [`crate::quic::driver::Connection::close_reason`].
+	/// [`crate::quic::driver::connection::Connection::close_reason`].
 	pub fn close_reason(&self) -> Option<SessionError> {
 		self.conn.close_reason().map(|e| self.map_error(e))
 	}
@@ -554,10 +543,10 @@ impl Session {
 		self.close.map(e.into())
 	}
 
-	async fn write_full(send: &mut crate::quic::driver::SendStream, buf: &[u8]) -> Result<(), SessionError> {
+	async fn write_full(send: &mut crate::quic::driver::send::Stream, buf: &[u8]) -> Result<(), SessionError> {
 		match send.write_all(buf).await {
 			Ok(_) => Ok(()),
-			Err(crate::quic::driver::WriteError::ConnectionLost(err)) => Err(err.into()),
+			Err(crate::quic::driver::send::Error::Connection(err)) => Err(err.into()),
 			Err(err) => Err(WebTransportError::WriteError(err).into()),
 		}
 	}
@@ -708,20 +697,21 @@ fn poll_accept_bi_shared(
 
 // Type aliases just so clippy doesn't complain about the complexity.
 type AcceptUni =
-	dyn Stream<Item = Result<crate::quic::driver::RecvStream, crate::quic::driver::connection::Error>> + Send;
+	dyn Stream<Item = Result<crate::quic::driver::recv::Stream, crate::quic::driver::connection::Error>> + Send;
 type AcceptBi = dyn Stream<
 		Item = Result<
-			(crate::quic::driver::SendStream, crate::quic::driver::RecvStream),
+			(crate::quic::driver::send::Stream, crate::quic::driver::recv::Stream),
 			crate::quic::driver::connection::Error,
 		>,
 	> + Send;
 /// A unidirectional stream's header: its type, the session a WebTransport stream names, and the
 /// stream positioned after it.
-pub(crate) type UniHeader = (StreamUni, Option<VarInt>, crate::quic::driver::RecvStream);
+pub(crate) type UniHeader = (StreamUni, Option<VarInt>, crate::quic::driver::recv::Stream);
 /// A unidirectional stream whose header is being read.
 pub(crate) type PendingUni = dyn Future<Output = Result<UniHeader, SessionError>> + Send;
-type PendingBi = dyn Future<Output = Result<Option<(crate::quic::driver::SendStream, crate::quic::driver::RecvStream)>, SessionError>>
-	+ Send;
+type PendingBi = dyn Future<
+		Output = Result<Option<(crate::quic::driver::send::Stream, crate::quic::driver::recv::Stream)>, SessionError>,
+	> + Send;
 
 // Logic just for accepting streams, which is annoying because of the stream header.
 pub struct SessionAccept {
@@ -732,8 +722,8 @@ pub struct SessionAccept {
 
 	// We also need to keep a reference to the qpack streams if the endpoint (incorrectly) creates
 	// them. Again, this is just so they don't get closed until we drop the session.
-	qpack_encoder: Option<crate::quic::driver::RecvStream>,
-	qpack_decoder: Option<crate::quic::driver::RecvStream>,
+	qpack_encoder: Option<crate::quic::driver::recv::Stream>,
+	qpack_decoder: Option<crate::quic::driver::recv::Stream>,
 
 	accept_uni: Pin<Box<AcceptUni>>,
 	// Pending WebTransport headers must be decoded before returning this error.
@@ -927,10 +917,10 @@ impl SessionAccept {
 
 	// Reads the stream header, returning Some if it's a WebTransport stream.
 	async fn decode_bi(
-		send: crate::quic::driver::SendStream,
-		mut recv: crate::quic::driver::RecvStream,
+		send: crate::quic::driver::send::Stream,
+		mut recv: crate::quic::driver::recv::Stream,
 		expected_session: VarInt,
-	) -> Result<Option<(crate::quic::driver::SendStream, crate::quic::driver::RecvStream)>, SessionError> {
+	) -> Result<Option<(crate::quic::driver::send::Stream, crate::quic::driver::recv::Stream)>, SessionError> {
 		let typ = read_varint(&mut recv).await?;
 		if Frame(typ) != Frame::WEBTRANSPORT {
 			tracing::debug!(?typ, "ignoring unknown bidirectional stream");
@@ -949,7 +939,7 @@ impl SessionAccept {
 
 /// Read a unidirectional stream's header: its type, then the session ID if it is a WebTransport
 /// stream. Which session is the caller's to check.
-pub(crate) async fn read_uni_header(mut recv: crate::quic::driver::RecvStream) -> Result<UniHeader, SessionError> {
+pub(crate) async fn read_uni_header(mut recv: crate::quic::driver::recv::Stream) -> Result<UniHeader, SessionError> {
 	let typ = StreamUni(read_varint(&mut recv).await?);
 	let session = match typ {
 		StreamUni::WEBTRANSPORT => Some(read_varint(&mut recv).await?),
@@ -961,7 +951,7 @@ pub(crate) async fn read_uni_header(mut recv: crate::quic::driver::RecvStream) -
 // Read a stream header VarInt, keeping the read's real cause. `VarInt::read` reports any
 // failure as a truncation, which would hide a stream the peer reset before its header
 // arrived.
-async fn read_varint(recv: &mut crate::quic::driver::RecvStream) -> Result<VarInt, WebTransportError> {
+async fn read_varint(recv: &mut crate::quic::driver::recv::Stream) -> Result<VarInt, WebTransportError> {
 	let mut buf = [0u8; 8];
 	recv.read_exact(&mut buf[..1]).await?;
 
@@ -977,9 +967,7 @@ async fn read_varint(recv: &mut crate::quic::driver::RecvStream) -> Result<VarIn
 pub(crate) fn log_header_error(err: SessionError, direction: &'static str) {
 	match err {
 		SessionError::WebTransportError(WebTransportError::ReadError(
-			crate::quic::driver::ReadExactError::ReadError(
-				crate::quic::driver::ReadError::Reset(_) | crate::quic::driver::ReadError::ConnectionLost(_),
-			),
+			crate::quic::driver::recv::Error::Reset(_) | crate::quic::driver::recv::Error::Connection(_),
 		)) => tracing::debug!(?err, direction, "stream closed before its header"),
 		_ => tracing::warn!(?err, direction, "failed to decode stream header"),
 	}
@@ -1036,11 +1024,11 @@ impl web_transport_trait::Session for Session {
 	}
 
 	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-		Self::open_bi(self, SendOptions::default()).await
+		Self::open_bi(self, send::Options::default()).await
 	}
 
 	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-		Self::open_uni(self, SendOptions::default()).await
+		Self::open_uni(self, send::Options::default()).await
 	}
 
 	fn close(&self, code: u32, reason: &str) {
@@ -1052,7 +1040,7 @@ impl web_transport_trait::Session for Session {
 	}
 
 	fn send_datagram(&self, data: Bytes) -> Result<(), Self::Error> {
-		Self::send_datagram(self, data, SendOptions::default())
+		Self::send_datagram(self, data, send::Options::default())
 	}
 
 	async fn recv_datagram(&self) -> Result<Bytes, Self::Error> {
@@ -1227,9 +1215,9 @@ mod tests {
 				Poll::Ready(Ok(None))
 			));
 		}
-		send.finish().unwrap();
+		let send = send.finish();
 		let (mut peer_send, mut peer_recv) = server.accept_bi().await.unwrap();
-		peer_send.finish().unwrap();
+		let peer_send = peer_send.finish();
 		assert!(peer_recv.read_chunk(1).await.unwrap().is_none());
 		assert!(recv.read_chunk(1).await.unwrap().is_none());
 		drop((send, recv, peer_send, peer_recv));
@@ -1324,7 +1312,7 @@ mod tests {
 			matches!(
 				&err,
 				SessionError::WebTransportError(WebTransportError::ReadError(
-					crate::quic::driver::ReadExactError::ReadError(crate::quic::driver::ReadError::Reset(code))
+					crate::quic::driver::recv::Error::Reset(code)
 				)) if code.into_inner() == 7
 			),
 			"{err:?}"
@@ -1339,7 +1327,7 @@ mod tests {
 
 		// A zero-length reserved frame, so the server sees the stream without a capsule.
 		let (mut send, _recv) = client.open_bi(Default::default()).await.unwrap();
-		send.write_all(&[0x21, 0x00]).await.unwrap();
+		send.write_all(&[0x21, 0x00][..]).await.unwrap();
 		let (_send, recv) = server.accept_bi().await.unwrap();
 
 		client.close(0u32.into(), "done");
@@ -1355,8 +1343,8 @@ mod tests {
 
 		// A DATA frame that promises 5 bytes and carries 1.
 		let (mut send, _recv) = client.open_bi(Default::default()).await.unwrap();
-		send.write_all(&[0x00, 0x05, 0x01]).await.unwrap();
-		send.finish().unwrap();
+		send.write_all(&[0x00, 0x05, 0x01][..]).await.unwrap();
+		send.finish();
 		let (_send, recv) = server.accept_bi().await.unwrap();
 
 		assert!(Session::read_capsules(&server, recv).await.is_none());
@@ -1371,10 +1359,10 @@ mod tests {
 		let (client, server, _endpoints) = pair().await;
 		let mut send = client.open_uni(Default::default()).await.unwrap();
 		// WebTransport stream type, session ID 0, then the application payload.
-		send.write_all(&[0x40, 0x54, 0x00, b'l', b'a', b's', b't'])
+		send.write_all(&[0x40, 0x54, 0x00, b'l', b'a', b's', b't'][..])
 			.await
 			.unwrap();
-		send.finish().unwrap();
+		let send = send.finish();
 		assert!(send.stopped().await.unwrap().is_none());
 		client.close(0u32.into(), "done");
 		server.closed().await;
@@ -1393,8 +1381,8 @@ mod tests {
 
 		// The stream type alone, so the reset also cuts off the session ID.
 		let mut send = client.open_uni(Default::default()).await.unwrap();
-		send.write_all(&[0x40, 0x54]).await.unwrap();
-		send.reset(7u32.into()).unwrap();
+		send.write_all(&[0x40, 0x54][..]).await.unwrap();
+		send.reset(7u32.into());
 
 		let recv = server.accept_uni().await.unwrap();
 		let err = read_uni_header(recv).await.err().unwrap();
@@ -1406,8 +1394,8 @@ mod tests {
 	async fn bi_reset_before_header() {
 		let (client, server, _endpoints) = pair().await;
 
-		let (mut send, _recv) = client.open_bi(Default::default()).await.unwrap();
-		send.reset(7u32.into()).unwrap();
+		let (send, _recv) = client.open_bi(Default::default()).await.unwrap();
+		send.reset(7u32.into());
 
 		let (send, recv) = server.accept_bi().await.unwrap();
 		let err = SessionAccept::decode_bi(send, recv, SESSION).await.err().unwrap();
@@ -1425,9 +1413,9 @@ mod tests {
 		);
 		let (client, server) = (client.unwrap(), server.unwrap());
 
-		client.open_uni(Default::default()).await.unwrap().reset(7).unwrap();
+		client.open_uni(Default::default()).await.unwrap().reset(7);
 		let (mut send, _recv) = client.open_bi(Default::default()).await.unwrap();
-		send.reset(8).unwrap();
+		send.reset(8);
 
 		let read = async {
 			let mut uni = server.accept_uni().await.unwrap();
@@ -1455,10 +1443,10 @@ mod tests {
 		let (client, server) = (client.unwrap(), server.unwrap());
 
 		let mut uni = client.open_uni(Default::default()).await.unwrap();
-		uni.write_all(b"truncated").await.unwrap();
+		uni.write_all(&b"truncated"[..]).await.unwrap();
 		drop(uni);
 		let (mut send, mut client_bi) = client.open_bi(Default::default()).await.unwrap();
-		send.write_all(b"request").await.unwrap();
+		send.write_all(&b"request"[..]).await.unwrap();
 		send.finish().unwrap();
 
 		let read = async {
@@ -1493,9 +1481,9 @@ mod tests {
 		let (client, server) = (client.unwrap(), server.unwrap());
 
 		let mut uni = client.open_uni(Default::default()).await.unwrap();
-		uni.write_all(b"unread").await.unwrap();
+		uni.write_all(&b"unread"[..]).await.unwrap();
 		let (mut bi, _client_recv) = client.open_bi(Default::default()).await.unwrap();
-		bi.write_all(b"unread").await.unwrap();
+		bi.write_all(&b"unread"[..]).await.unwrap();
 
 		let mut recv = server.accept_uni().await.unwrap();
 		recv.read_chunk(usize::MAX).await.unwrap();
@@ -1506,7 +1494,7 @@ mod tests {
 
 		let stopped = |mut send: SendStream| async move {
 			loop {
-				if let Err(err) = send.write(b"more").await {
+				if let Err(err) = send.write(&mut &b"more"[..]).await {
 					return err;
 				}
 			}
@@ -1528,9 +1516,9 @@ mod tests {
 
 		for header in [[0x40, 0x54, 0x04], [0x40, 0x54, 0x00]] {
 			let mut send = client.open_uni(Default::default()).await.unwrap();
-			send.write_all(&header).await.unwrap();
+			send.write_all(&header[..]).await.unwrap();
 			send.write_all(&header[2..]).await.unwrap();
-			send.finish().unwrap();
+			send.finish();
 		}
 
 		let mut accept = SessionAccept::new(server, SESSION, Arc::new(CloseReason::new(false)), Vec::new());
@@ -1541,11 +1529,11 @@ mod tests {
 	/// Run the HTTP/3 handshake on both ends once `before` has opened the client's streams that
 	/// precede its control stream.
 	async fn handshake_after(
-		before: impl AsyncFnOnce(&crate::quic::driver::connection::Connection) -> Vec<crate::quic::driver::SendStream>,
+		before: impl AsyncFnOnce(&crate::quic::driver::connection::Connection) -> Vec<crate::quic::driver::send::Stream>,
 	) -> (
 		Session,
 		Session,
-		Vec<crate::quic::driver::SendStream>,
+		Vec<crate::quic::driver::send::Stream>,
 		[crate::quic::driver::endpoint::Endpoint; 2],
 	) {
 		let (client_conn, server_conn, endpoints) = pair().await;
@@ -1574,7 +1562,7 @@ mod tests {
 		.await;
 
 		let mut send = client.open_uni(Default::default()).await.unwrap();
-		send.write_all(b"after").await.unwrap();
+		send.write_all(&b"after"[..]).await.unwrap();
 		send.finish().unwrap();
 		let mut recv = server.accept_uni().await.unwrap();
 		assert_eq!(recv.read_to_end(64).await.unwrap(), b"after");
@@ -1591,14 +1579,14 @@ mod tests {
 		let (_client, server, mut early, _endpoints) = handshake_after(async |conn| {
 			let mut send = conn.open_uni(Default::default()).await.unwrap();
 			// The first byte of the two-byte WebTransport stream type.
-			send.write_all(&[0x40]).await.unwrap();
+			send.write_all(&[0x40][..]).await.unwrap();
 			vec![send]
 		})
 		.await;
 
 		let mut send = early.remove(0);
-		send.write_all(&[0x54, 0x00, b'l', b'a', b't', b'e']).await.unwrap();
-		send.finish().unwrap();
+		send.write_all(&[0x54, 0x00, b'l', b'a', b't', b'e'][..]).await.unwrap();
+		send.finish();
 		let mut recv = server.accept_uni().await.unwrap();
 		assert_eq!(recv.read_to_end(64).await.unwrap(), b"late");
 	}
@@ -1608,11 +1596,12 @@ mod tests {
 	async fn handshake_keeps_an_early_webtransport_stream() {
 		let (_client, server, _early, _endpoints) = handshake_after(async |conn| {
 			let mut send = conn.open_uni(Default::default()).await.unwrap();
-			send.write_all(&[0x40, 0x54, 0x00, b'e', b'a', b'r', b'l', b'y'])
+			send.write_all(&[0x40, 0x54, 0x00, b'e', b'a', b'r', b'l', b'y'][..])
 				.await
 				.unwrap();
-			send.finish().unwrap();
-			vec![send]
+			// A finished stream delivers its data and FIN without its handle.
+			send.finish();
+			Vec::new()
 		})
 		.await;
 
@@ -1626,7 +1615,7 @@ mod tests {
 	async fn handshake_ends_with_the_connection() {
 		let (client, server, _endpoints) = pair().await;
 		let mut send = client.open_uni(Default::default()).await.unwrap();
-		send.write_all(&[0x02]).await.unwrap();
+		send.write_all(&[0x02][..]).await.unwrap();
 		client.close(0u32.into(), "done");
 		assert!(crate::quic::web::Request::accept(server).await.is_err());
 	}

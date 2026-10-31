@@ -69,6 +69,10 @@ check-changed $LIST:
 lint-changed $LIST:
     sh/rs/select.sh lint "$LIST"
 
+# `feature-shapes` for the crates in a changed-file list plus their dependents.
+feature-shapes-changed $LIST:
+    sh/rs/select.sh feature-shapes "$LIST"
+
 # Like `check-test`, but only the crates in a changed-file list plus their dependents.
 check-test-changed $LIST:
     sh/rs/select.sh check-test "$LIST"

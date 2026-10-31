@@ -55,8 +55,8 @@ and their alternatives:
   does not move toward sans-IO. Pull pure wire rules into plain functions where
   that turns scripted async tests into plain ones, as ordinary refactors.
 - **Gate the wrappers regardless** of the build measurement, because poll-first is
-  the style moq wants. kixelated/rust2's
-  [semantic API hash quest](https://github.com/kixelated/rust2/blob/main/quest/m3/api-cutoff.md)
+  the style moq wants. moq-dev/rust2's
+  [semantic API hash quest](https://github.com/moq-dev/rust2/blob/main/quest/m3/api-cutoff.md)
   replays moq-net's history with and without the wrappers, to report the build
   effect.
 - **Adopt `#[kio::machine]` for straight-line code only**, decided with the
