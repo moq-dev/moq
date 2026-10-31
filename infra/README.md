@@ -85,15 +85,19 @@ names the Environment, and a branch that is not on the list fails to start it.
 | Environment | Deployable from | Holds |
 | --- | --- | --- |
 | `bot` | `main`, `release`, `moq-ffi-v*` | The moq-bot key (`APP_CLIENT_ID`, `APP_PRIVATE_KEY`) alone |
-| `publish` | `main`, `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, deploy, and alert credentials, and the moq-bot key for jobs that also need one of those |
-| `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
+| `publish` | `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, and deploy credentials, and the moq-bot key for jobs that also need one of those |
+| `alert` | `main` | `DISCORD_WEBHOOK`, for `alert.yml`'s failure posts |
+| `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)), and `CACHIX_AUTH_TOKEN` for Smoke's push until Cachix retires |
 | `npm` | `release` | `JSR_TOKEN`; npm's trusted publisher names it |
 | `pypi` | `main`, `release`, `moq-ffi-v*` | Nothing; PyPI's trusted publisher names it |
 | `pub.dev` | `moq-dart-v*`, `moq-ffi-v*` | Nothing; pub.dev's automated publishing names it |
 | `github-pages` | `main` | Nothing |
 
-`main` is on the `publish` list for `workflow_run`, schedule, and dispatch jobs,
-which run there, until [those publishers run on their tag](../quest/m0/ci/publish-release-only.md).
+`workflow_run`, schedule, and default dispatch jobs run as `main`, so no job
+that names `publish` runs that way: a tag's own run calls its publishers as
+reusable workflows, and release dispatches name `--ref release`. The
+`workflow_run` publishers that remain need only the moq-bot key and name `bot`. `publish` keeps
+admitting `main` until [the maintainer drops it](../quest/m0/ci/publish-release-only.md).
 A job that needs only the moq-bot key, such as Dependabot's, names `bot`; the land gate holds no key
 and gets its token from [the token broker](#the-token-broker). A job that also runs dry on other refs names the Environment
 only when it publishes, as in `environment: ${{ github.ref_type == 'tag' &&
@@ -302,8 +306,8 @@ ARTIFACTS_DIR=artifacts \
 Or trigger the GitHub Actions workflow manually:
 
 ```bash
-gh workflow run apt-repo.yml -f tag=moq-relay-v1.2.3
-gh workflow run rpm-repo.yml -f tag=moq-relay-v1.2.3
+gh workflow run apt-repo.yml --ref release -f tag=moq-relay-v1.2.3
+gh workflow run rpm-repo.yml --ref release -f tag=moq-relay-v1.2.3
 ```
 
 ## Bootstrapping the Nix cache

@@ -57,8 +57,8 @@ Decided 2026-10-26 (maintainer):
   `moq-ffi-v*`. Dependabot, the Smoke toolchain update, and the moq-bot-only
   publishers name it. `publish` keeps the key too, for release-rs, which also needs the
   crates.io token. Narrowing `publish` to release refs waits on
-  [its own quest](/quest/m0/ci/publish-release-only.md), since `workflow_run`
-  publishers run as `main`.
+  [its own quest](/quest/m0/ci/publish-release-only.md), now only the
+  maintainer's settings change.
 - Open, found 2026-10-29: `APP_CLIENT_ID` and `APP_PRIVATE_KEY` are moq-dev
   organization secrets visible to this repository, so any workflow on a
   pushed branch can read the moq-bot key, not only jobs in `bot`. Once

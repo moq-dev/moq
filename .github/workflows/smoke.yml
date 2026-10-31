@@ -44,9 +44,10 @@ jobs:
     # gets longer: compiling a moq HEAD that isn't in cachix yet has taken 43
     # minutes on its own, and that build is what seeds the cache (see below).
     timeout-minutes: ${{ matrix.channel == 'nix' && 75 || 45 }}
-    # CACHIX_AUTH_TOKEN lives in the `publish` Environment, which only
-    # protected refs can deploy to. Without it the cachix push is skipped.
-    environment: ${{ github.ref == 'refs/heads/main' && matrix.channel == 'nix' && 'publish' || '' }}
+    # CACHIX_AUTH_TOKEN lives in the `cache-write` Environment beside the other
+    # cache write keys, which only protected refs can deploy to. Without it the
+    # cachix push is skipped.
+    environment: ${{ github.ref == 'refs/heads/main' && matrix.channel == 'nix' && 'cache-write' || '' }}
 
     # smoke.sh resolves the latest libmoq release via the GitHub API. Without a
     # token that call is anonymous (60 req/hr per IP), which the heavily-NAT'd

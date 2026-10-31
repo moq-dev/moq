@@ -1,9 +1,9 @@
 name: release-binary
 
-# Builds, packages, and (on a tag) attests and releases one workspace binary.
-# moq-cli.yml and moq-relay.yml call it; they keep the tag trigger and the
-# workflow name that alert.yml, release-brew.yml, and release-winget.yml match
-# on, and grant the attest job's `id-token` and `attestations` permissions.
+# Builds, packages, and (on a tag) attests and releases one workspace binary,
+# then submits its winget manifest. moq-cli.yml and moq-relay.yml call it; they
+# keep the tag trigger and the workflow name that alert.yml and release-brew.yml
+# match on, and grant the attest job's `id-token` and `attestations` permissions.
 
 on:
   workflow_call:
@@ -283,3 +283,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: just gh trigger-repo-publish
+
+  # Called rather than chained by workflow_run, so the submission runs as this
+  # tag, which the `publish` Environment admits, instead of as `main`.
+  winget:
+    name: Winget
+    needs: [release]
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/release-winget.yml
+    with:
+      submit: true
+    permissions:
+      contents: read

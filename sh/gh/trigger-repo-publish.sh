@@ -6,6 +6,10 @@
 # because release:published events created via GITHUB_TOKEN don't cascade
 # to other workflows automatically.
 #
+# Each runs on `release`: their credentials live in the `publish` Environment,
+# which admits `release` and the release tags but not `main`, where a dispatch
+# without --ref would run. `release` serves every tag, including `moq-gst-v*`.
+#
 # Required env:
 #   GH_TOKEN    GitHub token with workflow:write
 #   TAG         Release tag, e.g. moq-relay-v1.2.3
@@ -14,11 +18,11 @@ set -euo pipefail
 
 TAG="${TAG:?TAG must be set}"
 
-echo "Dispatching apt-repo.yml for tag $TAG..."
-gh workflow run apt-repo.yml -f "tag=$TAG"
+echo "Dispatching apt-repo.yml on release for tag $TAG..."
+gh workflow run apt-repo.yml --ref release -f "tag=$TAG"
 
-echo "Dispatching rpm-repo.yml for tag $TAG..."
-gh workflow run rpm-repo.yml -f "tag=$TAG"
+echo "Dispatching rpm-repo.yml on release for tag $TAG..."
+gh workflow run rpm-repo.yml --ref release -f "tag=$TAG"
 
 # moq.sh bakes in the newest moq-cli as its default version. Deploy from
 # `release`, which holds the installer that ships.
