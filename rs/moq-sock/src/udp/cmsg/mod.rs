@@ -234,16 +234,20 @@ mod tests {
 
 	use super::*;
 
+	/// Room for the synthetic messages below. [`LEN`] fits only the socket's own option set, which
+	/// on macOS is 48 bytes: too small for the round trip's three messages.
+	const BUF: usize = 128;
+
 	/// Encode a few control messages and decode them again through the same buffer
 	///
 	/// This exercises the pointer handling in `Encoder`, `Iter` and `decode` without needing a
 	/// socket, so it can be run under Miri to check for aliasing violations.
 	#[test]
 	fn roundtrip() {
-		let mut buf = Aligned([0u8; LEN]);
+		let mut buf = Aligned([0u8; BUF]);
 		let mut hdr = unsafe { mem::zeroed::<libc::msghdr>() };
 		hdr.msg_control = buf.0.as_mut_ptr() as _;
-		hdr.msg_controllen = LEN as _;
+		hdr.msg_controllen = BUF as _;
 
 		let mut encoder = unsafe { Encoder::new(&mut hdr) };
 		encoder.push(1, 2, 0x1234_5678u32);
@@ -271,10 +275,10 @@ mod tests {
 	/// A payload shorter than the requested type decodes to `None` instead of reading past it.
 	#[test]
 	fn short_payload_decodes_to_none() {
-		let mut buf = Aligned([0u8; LEN]);
+		let mut buf = Aligned([0u8; BUF]);
 		let mut hdr = unsafe { mem::zeroed::<libc::msghdr>() };
 		hdr.msg_control = buf.0.as_mut_ptr() as _;
-		hdr.msg_controllen = LEN as _;
+		hdr.msg_controllen = BUF as _;
 
 		let mut encoder = unsafe { Encoder::new(&mut hdr) };
 		encoder.push(1, 2, 0x12u8);
@@ -292,11 +296,11 @@ mod tests {
 		let header_len = libc::cmsghdr::cmsg_len(0);
 		let space = libc::cmsghdr::cmsg_space(size_of::<u32>());
 		// Past the end by one byte, and far enough to overflow alignment arithmetic.
-		for len in [0, header_len - 1, LEN - space + 1, usize::MAX] {
-			let mut buf = Aligned([0u8; LEN]);
+		for len in [0, header_len - 1, BUF - space + 1, usize::MAX] {
+			let mut buf = Aligned([0u8; BUF]);
 			let mut hdr = unsafe { mem::zeroed::<libc::msghdr>() };
 			hdr.msg_control = buf.0.as_mut_ptr() as _;
-			hdr.msg_controllen = LEN as _;
+			hdr.msg_controllen = BUF as _;
 
 			let mut encoder = unsafe { Encoder::new(&mut hdr) };
 			encoder.push(1, 2, 0x1234_5678u32);
