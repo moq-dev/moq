@@ -584,12 +584,22 @@ fn check_segment(stmt: &Stmt) -> syn::Result<()> {
 		let mut tokens = tokens.into_iter().peekable();
 		while let Some(token) = tokens.next() {
 			match token {
-				// `Pending<..>` and `Pending::..` name a type, such as `kio::Pending`, never the variant.
-				TokenTree::Ident(ident)
-					if ident == "Pending"
-						&& !matches!(tokens.peek(), Some(TokenTree::Punct(next)) if matches!(next.as_char(), '<' | ':')) =>
-				{
-					return Some(ident.span());
+				// `Pending<..>` and `Pending::name` name a type, such as `kio::Pending`, never the
+				// variant. The turbofish `Pending::<..>` is still the variant.
+				TokenTree::Ident(ident) if ident == "Pending" => {
+					let next: Vec<_> = tokens.clone().take(3).collect();
+					let named = match next.as_slice() {
+						[TokenTree::Punct(a), TokenTree::Punct(b), TokenTree::Ident(_)]
+							if a.as_char() == ':' && b.as_char() == ':' =>
+						{
+							true
+						}
+						[TokenTree::Punct(lt), ..] => lt.as_char() == '<',
+						_ => false,
+					};
+					if !named {
+						return Some(ident.span());
+					}
 				}
 				TokenTree::Ident(ident)
 					if (ident == "ready" || ident == "pending")
