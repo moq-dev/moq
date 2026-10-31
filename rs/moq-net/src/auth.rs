@@ -2298,6 +2298,28 @@ impl RequestGrant {
 			None => Poll::Pending,
 		}))
 	}
+
+	/// [`Self::guard`] under the grant `named` holds, which the request may name only later,
+	/// such as with an update's first token.
+	pub(crate) fn guard_named<F: std::future::Future + kio::MaybeSend>(
+		named: kio::Shared<Option<Self>>,
+		body: F,
+	) -> impl std::future::Future<Output = std::result::Result<F::Output, Refusal>> + kio::MaybeSend {
+		crate::util::sendable(until(body, move |waiter| poll_named_ended(&named, waiter)))
+	}
+}
+
+/// Resolve once the grant `named` holds ends, registering before one is named so naming the
+/// first one wakes the waiter.
+fn poll_named_ended(named: &kio::Shared<Option<RequestGrant>>, waiter: &kio::Waiter) -> Poll<Refusal> {
+	let mut ended = Poll::Pending;
+	let _ = named.poll(waiter, |grant| {
+		if let Some(grant) = &**grant {
+			ended = grant.poll_ended(waiter);
+		}
+		Poll::Pending
+	});
+	ended
 }
 
 /// The authority a request names, shared by its update loop and its lifetime guard.
@@ -2388,15 +2410,7 @@ impl RequestBinding {
 	}
 
 	pub(crate) fn poll_ended(&self, waiter: &kio::Waiter) -> Poll<Refusal> {
-		let mut ended = Poll::Pending;
-		// Register even before a token is named, so binding the first one wakes the guard.
-		let _ = self.token.poll(waiter, |token| {
-			if let Some(token) = &**token {
-				ended = token.poll_ended(waiter);
-			}
-			Poll::Pending
-		});
-		ended
+		poll_named_ended(&self.token, waiter)
 	}
 }
 
@@ -3772,6 +3786,41 @@ mod request_token_tests {
 		assert!(observer.poll_ended(&waiter).is_pending());
 		source.end(Refusal::new(Error::Unauthorized, "renewal refused"));
 		assert!(observer.poll_ended(&waiter).is_ready());
+	}
+
+	/// A request guarded by a grant it names only later, such as with an update's first
+	/// token, ends with that grant even while its body is stuck at an await.
+	#[moq_clock::test]
+	async fn a_guard_follows_a_grant_named_later() {
+		let runtime = crate::time::sim();
+		let handle = Link::new(true);
+		let mut requests = handle.handle().requests();
+		let named = kio::Shared::new(None);
+		let mut guarded = std::pin::pin!(RequestGrant::guard_named(named.clone(), std::future::pending::<()>()));
+		assert!((&mut guarded).now_or_never().is_none());
+
+		let verdict = handle.verify_request(token(b"room", 0), None);
+		let issued = requests.next().await.unwrap().accept(subscribe_only("room"));
+		let answer = verdict.grant().await;
+		let grant = RequestGrant::new(
+			&runtime,
+			verdict,
+			answer,
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		)
+		.unwrap();
+		*named.lock() = Some(grant);
+		assert!(
+			(&mut guarded).now_or_never().is_none(),
+			"a standing grant ended the request"
+		);
+		issued.revoke(SessionError::Unauthorized, "revoked");
+		assert!(
+			matches!((&mut guarded).now_or_never(), Some(Err(_))),
+			"the request outlived the grant it named later"
+		);
 	}
 
 	/// Naming and releasing a request token touches nothing the session's permits watch, so

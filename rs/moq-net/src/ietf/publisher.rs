@@ -599,6 +599,9 @@ struct Namespaces {
 	permit: crate::auth::Permit,
 	/// The dispatcher-owned gate for a solicited namespace request.
 	gate: Option<crate::auth::Gate>,
+	/// The gate's token, which the request's lifetime guard watches, so one a later update
+	/// names guards every await from then on.
+	token: Option<kio::Shared<Option<crate::auth::RequestGrant>>>,
 	/// The auth epoch last applied to `permit`.
 	epoch: u64,
 	/// Whether this discovery cursor includes hidden namespaces.
@@ -620,6 +623,7 @@ impl Namespaces {
 			woken: Default::default(),
 			permit: Default::default(),
 			gate: None,
+			token: None,
 			epoch: 0,
 			hidden: false,
 			epochs: false,
@@ -4174,12 +4178,13 @@ impl Publisher {
 
 		let target = Target::Inline(stream);
 
-		let token = gate.token_guard();
+		let token = kio::Shared::new(gate.token_guard());
 		let mut ns = Namespaces::new(peer, target);
 		ns.gate = Some(gate);
+		ns.token = Some(token.clone());
 		ns.hidden = !declared.hidden || msg.hidden || self.origin.includes_hidden();
 		ns.epochs = declared.epoch;
-		crate::auth::RequestGrant::guard(token.as_ref(), self.run_namespaces(announced, prefix, ns, initial))
+		crate::auth::RequestGrant::guard_named(token, self.run_namespaces(announced, prefix, ns, initial))
 			.await
 			.map_err(|refusal| refusal.error)?
 	}
@@ -4389,6 +4394,13 @@ impl Publisher {
 						match self.admit_request(stream, gate, update.authorization_token).await {
 							Ok(true) => {
 								ns.epoch = 0;
+								// A first token now guards the request, as the one it named at the
+								// start would have. A renewal replaces the grant in place.
+								if let Some(token) = &ns.token
+									&& token.read().is_none()
+								{
+									*token.lock() = gate.token_guard();
+								}
 							}
 							Ok(false) => break Ok(()),
 							Err(refusal) => {
