@@ -73,6 +73,15 @@ class QueryTests(unittest.TestCase):
         self.change("quest/m1/example.md")
         self.expect(True, rust=False)
 
+    def test_biome_checks_files_outside_the_js_impact_map(self):
+        for path in ("cpp/obs/buildspec.json", "sh/gh/setup.test.ts", ".github/ci-selection-audit.json"):
+            with self.subTest(path=path):
+                self.change(path)
+                calls = self.run_ci()
+                self.assertIn("biome", calls)
+                self.assertFalse(any(call.startswith("js check-changed ") for call in calls), calls)
+                (self.repo / path).unlink()
+
     def test_rust_cache_follows_modules_that_compile_rust(self):
         for path, rust in (("rs/moq-net/src/lib.rs", True), ("py/moq-rs/example.py", True),
                            ("js/net/src/index.ts", True), ("kt/example.kt", True),

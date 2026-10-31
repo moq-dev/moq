@@ -15,8 +15,8 @@ match CI. `just check` and `just fix` refuse to run outside it; set
 | `just` | Start the local relay, test publisher, and web demo. |
 | `just --list` | List recipes; use `just --list test` or another module to narrow the list. |
 | `just ci-select` | Report whether CI and Rust build setup are needed, without running checks. |
-| `just fix` | Format and lint the packages this branch changed, and regenerate their committed JS API reports (`js/*/api/`). |
-| `just check` | Compile, lint, and test the same scope. |
+| `just fix` | Format and lint the repository, and regenerate committed JS API reports (`js/*/api/`) for affected packages. |
+| `just check` | Lint the repository, and compile and test affected packages. |
 | `just ci` | Run the batched landing gate locally, strictly. PRs into `main` get no other CI, so run it before every push. |
 | `just gate` | `just ci` over every package, as nightly and release PRs run it, split into the isolated feature shapes (`just gate rs_shapes`) and the rest (`just gate -rs_shapes`). |
 | `just fix --all`, `just check --all` | The same, over every package. |
@@ -40,7 +40,8 @@ adapt. Commands below run from the repository root.
 ## Checks and tests
 
 `just check` selects affected packages and their dependents from the branch
-diff, including local changes. Each language runner prints its selected
+diff, including local changes. Repository lints, including Biome over every
+supported file, run on every diff. Each language runner prints its selected
 packages when it starts. Pass a base explicitly, such as
 `just check origin/main`, when needed. Independent modules finish even when
 another fails, and any failure keeps the run failing. On `x86_64` Linux, if the

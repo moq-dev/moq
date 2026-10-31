@@ -122,6 +122,11 @@ ci-select $BASE="":
 ci-select-platform $BASE="":
     sh/dispatch.sh ci-platform "$BASE" --query
 
+# Check every supported source file; exclusions live in biome.jsonc.
+biome *args:
+    bun install --frozen-lockfile
+    bun biome check --error-on-warnings {{ args }} .
+
 # Auto-fix lint and formatting for what the branch changed since BASE.
 fix $BASE="":
     sh/dispatch.sh fix "$BASE"

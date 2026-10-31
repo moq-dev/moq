@@ -59,7 +59,6 @@ fi
 declare -A scope=(
     # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
     # fails a check that reads a cross-tree input this pattern misses.
-    # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
     # Root Nix inputs own the browser version every npm Playwright pin matches.
     [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)'
     # Workers with lockfiles outside the Bun workspace.
@@ -105,6 +104,7 @@ declare -A scope=(
     # ts.yml's crate filters against the closure test/ts/run.sh builds, which
     # moves only with a manifest, the lockfile, or the harness's packages.
     [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)'
+    [biome]=''
     [markdown]=''
     [shell]=''
     [large_files]=''
@@ -168,6 +168,7 @@ declare -A tools=(
     [obs]='clang-format cmake gersemi jq'
     [flake]='nix'
     [ts_paths]='cargo python3'
+    [biome]='bun'
     [markdown]='bun'
     [shell]='shellcheck shfmt'
     [large_files]=''
@@ -192,8 +193,8 @@ declare -A compiles=(
 # Lanes start in this order, so the slowest come first. dart runs alone (see
 # below), so it waits for the rest.
 case "$action" in
-    check | ci) modules=(py rs rs_shapes c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
-    fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
+    check | ci) modules=(py rs rs_shapes c cpp obs_compile js kt flake bench carla swift go drafts biome markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
+    fix) modules=(js rs py carla dart obs biome markdown shell toml nix justfile) ;;
 esac
 
 # Modules that share mutable state run in one lane, in module order; every
@@ -204,6 +205,7 @@ declare -A lane=(
     # `bun install` relinks the root workspace's packages even when nothing
     # changed, so a concurrent install or import of them fails.
     [js]=bun
+    [biome]=bun
     [drafts]=bun
     [markdown]=bun
     [gh]=bun
@@ -354,6 +356,7 @@ step() {
             }
             ;;
         check:ts_paths) python3 sh/gh/ts-paths.py ;;
+        check:biome) just biome ;;
         check:markdown)
             bun install --frozen-lockfile
             sh/markdown.sh check
@@ -368,6 +371,7 @@ step() {
         test:gh) just gh test ;;
         fix:rs) just rs fix-changed "$rs_list" ;;
         fix:js) just js fix "$js_list" ;;
+        fix:biome) just biome --write ;;
         fix:markdown)
             bun install
             sh/markdown.sh fix
