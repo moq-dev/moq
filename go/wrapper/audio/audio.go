@@ -58,14 +58,22 @@ type DecoderOutput struct {
 	// Estimate measures the playout delay from arrival timing, never below Delay.Min; false holds
 	// exactly Delay.Min. nil estimates.
 	Estimate *bool
+	// Start is where to begin on a track that already holds groups; zero is media.DecodeStartOldest.
+	// A live player sets media.DecodeStartLatest so a reopened decoder skips the cached backlog.
+	Start media.DecodeStart
 }
 
 func (o DecoderOutput) ffi() (ffi.MoqAudioDecoderOutput, error) {
 	if err := delay(o.Delay, "audio"); err != nil {
 		return ffi.MoqAudioDecoderOutput{}, err
 	}
+	// Go's zero value is the native null: the oldest group.
+	var start *media.DecodeStart
+	if o.Start != 0 {
+		start = &o.Start
+	}
 	estimate := o.Estimate == nil || *o.Estimate
-	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, Delay: o.Delay, Estimate: estimate}, nil
+	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, Delay: o.Delay, Estimate: estimate, Start: start}, nil
 }
 
 // delay refuses a negative bound, which the FFI cannot carry.

@@ -178,6 +178,11 @@ pub struct MoqAudioDecoderOutput {
 	/// `false` holds exactly `delay.min`.
 	#[uniffi(default = true)]
 	pub estimate: bool,
+	/// Where to start on a track that already holds groups, or `None` for the oldest. A live
+	/// player picks [`Latest`](crate::media::MoqDecodeStart::Latest) so a reopened decoder
+	/// skips the backlog.
+	#[uniffi(default = None)]
+	pub start: Option<crate::media::MoqDecodeStart>,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -667,6 +672,10 @@ impl MoqAudioConsumer {
 		config.output.layout = output.channels.map(moq_audio::Layout::from_channels).transpose()?;
 		config.delay = output.delay.map(Into::into).unwrap_or_default();
 		config.estimate = output.estimate;
+		config.start = match output.start.unwrap_or_default() {
+			crate::media::MoqDecodeStart::Oldest => moq_audio::decode::Start::Oldest,
+			crate::media::MoqDecodeStart::Latest => moq_audio::decode::Start::Latest,
+		};
 
 		let consumer = broadcast
 			.driver

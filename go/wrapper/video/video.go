@@ -59,17 +59,25 @@ func packet(raw ffi.MoqVideoPacket) Packet {
 	return Packet{Timestamp: time.Duration(raw.TimestampUs) * time.Microsecond, Data: raw.Data, Keyframe: raw.Keyframe}
 }
 
-// DecoderOutput configures an optional resize, a delay, and whether frames keep the decoder's surface (macOS only).
+// DecoderOutput configures an optional resize, a delay, whether frames keep the decoder's surface (macOS only), and where to start.
 type DecoderOutput struct {
 	Resize *media.Dimensions
 	// Delay.Min is the playout delay, where a cold join starts; Delay.Max is how far a stalled
 	// group may fall behind before it is skipped. nil is zero for both.
 	Delay   *media.Delay
 	Surface bool
+	// Start is where to begin on a track that already holds groups; zero is media.DecodeStartOldest.
+	// A live player sets media.DecodeStartLatest so a reopened decoder skips the cached backlog.
+	Start media.DecodeStart
 }
 
 func (o DecoderOutput) ffi() (ffi.MoqVideoDecoderOutput, error) {
-	out := ffi.MoqVideoDecoderOutput{Resize: o.Resize, Delay: o.Delay, Surface: o.Surface}
+	// Go's zero value is the native null: the oldest group.
+	var start *media.DecodeStart
+	if o.Start != 0 {
+		start = &o.Start
+	}
+	out := ffi.MoqVideoDecoderOutput{Resize: o.Resize, Delay: o.Delay, Surface: o.Surface, Start: start}
 	if o.Delay == nil {
 		return out, nil
 	}

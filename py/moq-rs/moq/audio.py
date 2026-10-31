@@ -21,7 +21,7 @@ from moq_ffi import (
 from ._read import End, Gap, _end, _gap
 from ._records import _from_us, _to_us
 from ._stream import _Stream
-from .media import Audio, AudioInit, CatalogProducer, Delay
+from .media import Audio, AudioInit, CatalogProducer, DecodeStart, Delay
 from .publish import TrackDemand
 from .session import Allocator, Reservation
 from .subscribe import BroadcastConsumer
@@ -87,6 +87,9 @@ class DecoderOutput:
     cold join starts; with ``estimate`` (the default) it floors the delay measured
     from arrival timing instead. ``delay.max`` only bounds how stale a group may
     get before it is skipped, and adds no buffering. ``None`` is zero for both.
+    ``start`` picks where to begin on a track that already holds groups, ``None``
+    for the oldest: a live player passes ``DecodeStart.LATEST`` so a reopened
+    decoder skips the cached backlog.
     """
 
     format: SampleFormat
@@ -94,6 +97,7 @@ class DecoderOutput:
     channels: int | None = None
     delay: Delay | None = None
     estimate: bool = True
+    start: DecodeStart | None = None
 
     def _ffi(self) -> MoqAudioDecoderOutput:
         return MoqAudioDecoderOutput(
@@ -102,6 +106,7 @@ class DecoderOutput:
             channels=self.channels,
             delay=self.delay,
             estimate=self.estimate,
+            start=self.start,
         )
 
 
