@@ -1990,7 +1990,7 @@ mod tests {
 	use super::*;
 	use crate::Timescale;
 	use crate::coding::{Decode, Encode};
-	use crate::lite::test_transport::SinkSession;
+	use crate::lite::test_transport::{Sent, SinkSession};
 	use crate::model::ProduceTest;
 	use futures::FutureExt;
 
@@ -4085,6 +4085,60 @@ mod tests {
 				"{stage}: an unused track kept waiting on TRACK_INFO"
 			);
 		}
+	}
+
+	/// TRACK opens its stream before the fetches sent alongside it: TRACK fails fast without
+	/// stream credit, where a fetch waits for it, so fetches opened first could leave TRACK
+	/// none and fail the track with every fetch.
+	#[moq_clock::test]
+	async fn track_opens_before_the_fetches_sent_alongside() {
+		let session = SinkSession::gated_bi(kio::Producer::new(true).consume());
+		let log = session.log.clone();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+
+		let broadcast = crate::broadcast::Info::new().produce();
+		let mut dynamic = broadcast.requests();
+		let consumer = broadcast.consume();
+		let _waiting = Box::pin(consumer.track("video").unwrap().subscribe(None));
+		let request = dynamic.requested_track().await.expect("request");
+		let copy = request.consume();
+
+		let mut run = TrackServeRun::new(
+			TrackServe {
+				validity: Default::default(),
+				route: None,
+				subscriber,
+				path: Path::from_static("room"),
+				epoch: None,
+				name: "video".to_string(),
+			},
+			request,
+		);
+		// Queued before the run first polls, as several fetches can be.
+		let mut fetching = Box::pin(copy.fetch_group(0, None));
+		assert!(futures::poll!(fetching.as_mut()).is_pending());
+		assert!(kio::Task::poll(&mut run, &kio::Waiter::noop()).is_pending());
+
+		let first = |control: lite::ControlType| {
+			log.trail().into_iter().find_map(|(stream, sent)| match sent {
+				Sent::Write(bytes) if bytes.first() == Some(&(u64::from(control) as u8)) => Some(stream),
+				_ => None,
+			})
+		};
+		let track = first(lite::ControlType::Track).expect("TRACK went out");
+		let fetch = first(lite::ControlType::Fetch).expect("FETCH went out alongside");
+		assert!(track < fetch, "a FETCH opened its stream before TRACK");
 	}
 
 	/// A lite-07 source of `room` over `session`, a consumer to list it through, and the
@@ -7186,9 +7240,14 @@ impl kio::Task for TrackServeRun {
 					while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(waiter) {
 						fetches.push(FillServeRun::new(self.serve.clone(), fill, known.later()));
 					}
-					let _ = fetches.poll(waiter);
 					// Abandonment was checked at the top of this poll, arming its wait.
-					let res = ready!(info.poll_fetch(&self.serve, waiter));
+					let res = info.poll_fetch(&self.serve, waiter);
+					// TRACK opens first: its stream fails fast without credit, where a fetch's
+					// waits for it, so fetches opened ahead could starve their own prerequisite.
+					let Poll::Ready(res) = res else {
+						let _ = fetches.poll(waiter);
+						return Poll::Pending;
+					};
 					let TrackRunState::Info {
 						request,
 						dynamic,
