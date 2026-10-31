@@ -563,7 +563,11 @@ test("a failed encoder stays failed until the capture source changes", async () 
 		close: () => {},
 	};
 	const encoder = new Encoder("audio", {
-		broadcast: { audio: () => rendition, order: new Order() } as never,
+		broadcast: {
+			audio: () => rendition,
+			order: new Order(),
+			in: { maxAge: new Signal(undefined), onDemand: new Signal(false) },
+		} as never,
 		capture,
 		enabled,
 	});

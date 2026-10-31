@@ -177,8 +177,7 @@ impl Control {
 	///
 	/// Called when `capture` opens a device, so the allocation lands there
 	/// rather than in the first callback. This runs again every time capture
-	/// reopens, after a stop, a device failure, or an on-demand listener coming
-	/// back: the adaptive filter survives that as long as the format hasn't
+	/// reopens after a stop or device failure: the adaptive filter survives that as long as the format hasn't
 	/// changed, since it is still the same room.
 	pub(crate) fn attach(&self, sample_rate: u32, channels: u32) -> Result<Attachment, Error> {
 		// sonora reports a bad format per call, by which point we are on the
