@@ -2,8 +2,8 @@
 
 ## Goal
 
-[kixelated/rust2](https://github.com/kixelated/rust2) has merged its
-[UniFFI import quest](https://github.com/kixelated/rust2/blob/main/quest/m1/uniffi.md)
+[moq-dev/rust2](https://github.com/moq-dev/rust2) has merged its
+[UniFFI import quest](https://github.com/moq-dev/rust2/blob/main/quest/m1/uniffi.md)
 and published `rust2-uniffi` and `rust2-uniffi-bindgen` to crates.io, with a
 tag moq can pin as a flake input. Check: `cargo search rust2-uniffi` lists a
 release, and rust2's `quest/m1/uniffi.md` is gone from its `main`. Delete this
