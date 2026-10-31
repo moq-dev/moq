@@ -1740,14 +1740,18 @@ test("a route superseded while its properties are checked stops being asked", as
 	const sub = front.consumer.track("seq").subscribe();
 	await sub.info();
 	// b never answers what the track is, so its splice waits on it.
-	void wireOf(b).requested();
+	const pulled = wireOf(b).requested();
 	front.serve(b.consume());
 	await settle();
-	expect(b.demand().used.peek()).toBe(true);
+	const request = await pulled;
+	if (!request) throw new Error("b was never asked");
 
 	front.serve(c.consume());
 	await settle();
-	expect(b.demand().used.peek()).toBe(false);
+	// Nobody asks b any more, so its late answer is let go.
+	const late = request.accept();
+	await settle();
+	expect(late.closed.peek()).toBeDefined();
 
 	sub.close();
 	front.consumer.close();
@@ -2404,7 +2408,7 @@ test("an end a replaced copy declared holds once the copy is let go in the same 
 	b.close();
 });
 
-test("a replaced copy whose session closed locally binds no end", async () => {
+test("a replaced copy whose session closed binds no end", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
@@ -2419,8 +2423,8 @@ test("a replaced copy whose session closed locally binds no end", async () => {
 
 	front.serve(b.consume());
 	await settle();
-	// A clean close would declare an end at group 1, refusing b's next group.
-	hooks.releaseTrack(ta.producer);
+	// A session close, local or remote, cancels the copy: a failed route, not an end at group 1.
+	ta.producer.abort(new SessionError(SessionCode.Cancel));
 	tb.write(1);
 	await settle();
 	expect(drain(sub)).toEqual([1]);

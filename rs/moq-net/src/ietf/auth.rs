@@ -330,6 +330,7 @@ impl Present {
 		}
 
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			enum Next {
 				Withdrawn,
@@ -380,6 +381,9 @@ impl Present {
 							expires,
 						},
 					);
+					// Each grant recomputes the session's permits, so a peer streaming them
+					// must not hold the session's other tasks.
+					kio::wait(|waiter| budget.poll_yield(waiter)).await;
 				}
 				AuthError::ID => {
 					let refused: AuthError = match decode_reply(&body, self.version) {
@@ -643,7 +647,7 @@ mod tests {
 	/// Every draft that negotiates the extension round-trips the option.
 	#[test]
 	fn setup_option_round_trips_on_supported_drafts() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut params = super::super::Parameters::default();
 			assert_eq!(from_setup(&params), None);
 			into_setup(&mut params);

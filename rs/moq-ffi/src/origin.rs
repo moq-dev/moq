@@ -236,7 +236,7 @@ impl Following {
 pub struct MoqAnnounce {
 	/// The covered prefix, relative to the origin.
 	pub prefix: String,
-	/// What each wildcard matched, or `None` when the route only overlaps the scope.
+	/// What each wildcard matched. Only full matches are listed, so it is always set.
 	pub captures: Option<Vec<String>>,
 	/// The route serving the prefix: its epoch, hops, and a static cost.
 	pub route: MoqRoute,
@@ -278,6 +278,14 @@ pub enum MoqAnnounceEvent {
 		/// The broadcast announcement affected by this event.
 		announce: MoqAnnounce,
 	},
+	/// A route now covers the prefix and continues what the route at `predecessor`
+	/// served beneath it: keep what was resolved through that one.
+	Takeover {
+		/// The broadcast announcement affected by this event.
+		announce: MoqAnnounce,
+		/// The prefix of the route it continues, at or above `announce`'s.
+		predecessor: String,
+	},
 }
 
 impl From<moq_net::announce::Event> for MoqAnnounceEvent {
@@ -295,6 +303,10 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 			},
 			Event::Restart(announce) => Self::Restart {
 				announce: announce.into(),
+			},
+			Event::Takeover { announce, predecessor } => Self::Takeover {
+				announce: announce.into(),
+				predecessor: predecessor.to_string(),
 			},
 		}
 	}
@@ -441,7 +453,7 @@ impl MoqOriginProducer {
 
 #[uniffi::export]
 impl MoqOriginConsumer {
-	/// Subscribe to routes matching a pattern scope; updates stay relative to the origin.
+	/// Subscribe to routes whose names match a pattern scope; updates stay relative to the origin.
 	pub fn announced(&self, config: MoqAnnounceConfig) -> Result<Arc<MoqAnnounceConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
