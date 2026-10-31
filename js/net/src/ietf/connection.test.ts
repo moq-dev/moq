@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
-import { SessionCode, StreamCode, StreamError } from "../error.ts";
+import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -119,10 +119,13 @@ for (const [version, alpn] of [
 	}
 }
 
-/** Refusing repeated listings leaves the session usable and still spends their request IDs. */
-for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
-	test(`${version}: SUBSCRIBE_TRACKS is refused on its own stream`, async () => {
-		const pair = createMockTransportPair(ALPN.DRAFT_22);
+/** We list no tracks by PUBLISH: each SUBSCRIBE_TRACKS gets NOT_SUPPORTED, and the session stays usable. */
+for (const [version, alpn] of [
+	[Version.DRAFT_18, ALPN.DRAFT_18],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
+] as const) {
+	test(`SUBSCRIBE_TRACKS is refused on its own stream on ${alpn}`, async () => {
+		const pair = createMockTransportPair(alpn);
 		const control = await Stream.open(pair.server, { version });
 		const connection = new Connection({
 			url: new URL("https://example.com"),
@@ -133,7 +136,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 		});
 
 		try {
-			// Reusing the prefix must still be refused, without retaining an overlapping listing.
+			// A second listing of the same prefix is refused the same way, each spending its Request ID.
 			for (let i = 0; i < 2; i++) {
 				const stream = await Stream.open(pair.client, { version });
 				await stream.writer.u62(BigInt(SUBSCRIBE_TRACKS_ID));
@@ -143,7 +146,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 					await writer.u53(0);
 				});
 				expect(await stream.reader.u53()).toBe(RequestError.id);
-				expect((await RequestError.decode(stream.reader, version)).errorCode).toBe(0x9);
+				expect((await RequestError.decode(stream.reader, version)).errorCode).toBe(0x3);
 				expect(await stream.reader.done()).toBe(true);
 			}
 		} finally {
