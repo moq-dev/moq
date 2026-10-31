@@ -4,6 +4,8 @@
 # them in order and streams their output. CHECK_MODULES limits the selection to
 # the modules it names, or skips those named with a leading `-`, so a gate too
 # large for one job splits across several.
+# CHECK_FAIL_FAST=1 stops every lane at the first failed module, for the land
+# gate, which ejects a failing batch either way and gains nothing from the rest.
 # `--query` prints the selection before CI installs its toolchain and caches.
 # `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
@@ -452,6 +454,7 @@ run_lane() {
                 record failed
                 ((lane_status)) || lane_status=$status
                 current=
+                [[ -z "${CHECK_FAIL_FAST:-}" ]] || return "$lane_status"
                 break
             fi
             record
@@ -522,10 +525,12 @@ trap 'exit 143' TERM
 # run's stderr as it starts and ends, so a run cut off mid-phase, such as by a
 # job timeout that never reaches this script, names the phase it stopped in.
 # Every lane completes even when another fails, so one unavailable check cannot
-# hide unrelated failures.
+# hide unrelated failures; under CHECK_FAIL_FAST the first failure cancels the
+# running lanes and starts no more.
 set -m
+stopping=
 while true; do
-    while [[ -z "$lone" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
+    while [[ -z "$lone$stopping" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
         name=${lanes[next]}
         if [[ -v "alone[$name]" ]] && ((${#running[@]})); then
             break
@@ -547,9 +552,13 @@ while true; do
     name=${running[$pid]}
     unset "running[$pid]"
     [[ "$pid" != "$lone" ]] || lone=
-    if ((status)); then
+    if ((status)) && [[ -z "$stopping" ]]; then
         failed+=("$name")
         ((failed_status)) || failed_status=$status
+        if [[ -n "${CHECK_FAIL_FAST:-}" ]]; then
+            stopping=1
+            cancel
+        fi
     fi
     ((limit == 1)) || cat "$logs/$name.log"
 done

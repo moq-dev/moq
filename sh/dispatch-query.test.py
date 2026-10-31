@@ -262,6 +262,45 @@ class QueryTests(unittest.TestCase):
         self.assertIn("obs compile", calls)
         self.assertIn("dart check", calls)
 
+    def test_fail_fast_cancels_running_lanes_and_starts_no_more(self):
+        # The land gate opts in: the parked lanes never finish on their own, so
+        # only the cancellation can end the run.
+        blocked = {}
+        for name, call in (("rs", '"rs test-changed "*'), ("cpp", '"cpp check"')):
+            started = self.root / f"{name}.started"
+            released = self.root / f"{name}.released"
+            os.mkfifo(started)
+            os.mkfifo(released)
+            blocked[name] = (call, started, released)
+        stub = "".join(f'    {call}) echo >"{started}"; read -r <"{released}" ;;\n'
+                       for call, started, released in blocked.values())
+        reads = "; ".join(f'read -r <"{started}"' for _, started, _ in blocked.values())
+        self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\nesac\n')
+        self.change("rs/moq-ffi/src/lib.rs")
+        self.change("js/net/src/index.ts")
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
+                                env=dict(self.env, CHECK_FAIL_FAST="1"), text=True, capture_output=True,
+                                timeout=60)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("ci: test gh failed", result.stderr)
+        self.assertRegex(result.stderr, r"\d+  test rs \(cancelled\)")
+        self.assertRegex(result.stderr, r"\d+  check cpp \(cancelled\)")
+        self.assertNotIn("ci: test rs failed", result.stderr)
+        calls = (self.root / "calls").read_text().splitlines()
+        self.assertNotIn("go check", calls)
+        self.assertNotIn("obs compile", calls)
+
+    def test_fail_fast_stops_a_serial_run_at_the_first_failure(self):
+        self.stub_ci('case "$*" in "js check-changed "*) exit 3 ;; "gh check") exit 4 ;; esac\n')
+        self.change("js/net/src/index.ts")
+        self.change("dart/example.dart")
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
+                                env=dict(self.env, CHECK_JOBS="1", CHECK_FAIL_FAST="1"), text=True,
+                                capture_output=True)
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        failures = [line for line in result.stderr.splitlines() if line.startswith("ci: ") and line.endswith(" failed")]
+        self.assertEqual(len(failures), 1, result.stderr)
+
     def test_failure_continues_independent_modules_in_the_same_lane(self):
         for jobs in ("1", "3"):
             with self.subTest(jobs=jobs):
