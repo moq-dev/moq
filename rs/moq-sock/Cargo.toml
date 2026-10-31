@@ -34,7 +34,7 @@ rand = "0.10"
 tracing-test = "0.2"
 
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
-nix = { version = "0.31.3", default-features = false, features = ["net"] }
+nix = { workspace = true }
 
 [lints]
 workspace = true
