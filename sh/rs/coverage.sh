@@ -5,7 +5,7 @@ crate=${1:-workspace}
 report=()
 if [[ $crate == workspace ]]; then
     # Fuzz targets require nightly; wasm has no native implementation to measure.
-    packages=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-wasm)
+    packages=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz --exclude moq-wasm)
 elif [[ $crate =~ ^[a-zA-Z0-9_-]+$ ]]; then
     packages=(-p "$crate")
     report=(-p "$crate")

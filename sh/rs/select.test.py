@@ -37,7 +37,7 @@ class SelectTest(unittest.TestCase):
                 with self.subTest(action=action, github_actions=github_actions):
                     suffix = f" --features {DEVICE_FEATURES} moq-tokio/webrtc" if action == "test" else ""
                     suffix += " --timings" if github_actions and action == "test" else ""
-                    self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz{suffix}",
+                    self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz{suffix}",
                                   self.selected("sh/rs/nextest.sh", action=action,
                                                 github_actions=github_actions))
         selected = self.selected("sh/rs/nextest.sh")
@@ -69,7 +69,7 @@ class SelectTest(unittest.TestCase):
                                  [defaults.replace("rs lint ", "rs feature-shapes ", 1)])
         for owner in ("tokio", "media", "net"):
             calls = self.selected(f"sh/rs/{owner}-features.sh", action="feature-shapes")
-            self.assertIn("rs feature-shapes --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz", calls)
+            self.assertIn("rs feature-shapes --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz", calls)
 
     def test_boundary_checks_follow_reverse_dependencies(self):
         self.assertIn("rs tokio-features", self.selected("rs/moq-tokio/src/lib.rs"))
