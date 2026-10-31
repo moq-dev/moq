@@ -141,6 +141,7 @@ removed).
 - [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for a per-rendition `hls` field
 - [HLS recorder target](/quest/m1/hls-record-target.md) - the moq-cli HLS recorder takes its target duration from the declared `hls` duration
 - [Lite-07 padding datagram](/quest/m1/lite07-padding-datagram.md) - lite-07 defines a padding datagram that receivers discard, so browser probes can pad below media
+- [Subscriptions take a Delay { min, max }](/quest/m1/subscription-delay.md) - one Delay type across every subscription API, and omitted max means 0 in every binding
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [Smoke token subject](/quest/m1/smoke-token-subject.md) - condition: grant subject ships; then the release smoke test signs with `--subject`
@@ -186,6 +187,7 @@ removed).
 - [moqsrc max-delay](/quest/m1/gst-max-delay.md) - GStreamer's `moqsrc` takes a `max-delay` property instead of a hard-coded 1 s budget
 - [moq-clock moves into kio::clock](/quest/m1/kio-clock.md) - moq-clock and its test macro become `kio::clock` and `#[kio::test]` before the cut publishes them
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
+- [JS ordered reads wait only on owed groups](/quest/m1/js-ordered-owed.md) - @moq/net matches Rust's owed-group wait
 - [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - a decoder-identity change under the same codec string starts a new init and segment tag
 - [The last AAC segment advertises its full duration](/quest/m1/hls-final-aac-segment.md) - a TS import's final audio segment's EXTINF matches what decodes
 - [A JS reader finishes after a clean close](/quest/m1/js-close-range-finish.md) - a range ending below the cache delivers what's held and then ends
