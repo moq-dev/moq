@@ -357,7 +357,12 @@ impl Driver {
 		match &result {
 			Ok(()) => {
 				self.update(Status::Ended, None, None);
-				if let Err(err) = track.finish() {
+				// The final flush encodes retained history, but not what has outlived its max age.
+				let now = self.clock.now();
+				let expired = track
+					.producer()
+					.map_or(Ok(()), |producer| producer.set_active(false, now));
+				if let Err(err) = expired.and_then(|()| track.finish()) {
 					tracing::debug!(error = %err, "audio track finish after capture ended");
 				}
 			}

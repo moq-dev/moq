@@ -99,7 +99,8 @@ pub struct Producer {
 	anchor_us: Option<u64>,
 	/// An encoder reset that still needs a marker group before its next packet.
 	pending_discontinuity: bool,
-	/// Whether a marker group already separates the next packet from prior codec state.
+	/// Whether no packet has been published since the last marker group, or the track began, so a
+	/// break needs no marker of its own.
 	decoder_boundary: bool,
 	/// How the encoder classified the packet it published most recently.
 	activity: Activity,
@@ -333,7 +334,7 @@ impl Producer {
 	/// `reanchor`. If the codec had started, a marker group is published before
 	/// the next packet so subscribers jump the playhead.
 	pub fn reanchor(&mut self) {
-		if (self.encoder.as_ref().is_some_and(Encoder::started) || !self.backlog.is_empty()) && !self.decoder_boundary {
+		if self.encoder.as_ref().is_some_and(Encoder::started) || !self.backlog.is_empty() {
 			self.pending_discontinuity = true;
 		}
 		self.reset_state();
@@ -422,7 +423,6 @@ impl Producer {
 				reset: std::mem::take(&mut self.reset_pending),
 				discontinuity: std::mem::take(&mut self.pending_discontinuity),
 			};
-			self.decoder_boundary = false;
 			if self.active && self.backlog.is_empty() {
 				self.encode_raw(raw)?;
 			} else {
@@ -434,8 +434,11 @@ impl Producer {
 	}
 
 	fn encode_raw(&mut self, raw: Raw) -> Result<(), Error> {
-		if raw.discontinuity {
+		// A break before anything was published, such as history expiring before the first
+		// subscriber, has nothing to separate.
+		if raw.discontinuity && !self.decoder_boundary {
 			self.track.discontinuity()?;
+			self.decoder_boundary = true;
 		}
 		let encoder = self.encoder.as_mut().ok_or(moq_net::Error::Closed)?;
 		if raw.reset {
@@ -443,7 +446,9 @@ impl Producer {
 		}
 		let packet = encoder.encode(&raw.samples)?;
 		self.activity = packet.activity;
-		self.publish(packet, raw.timestamp)
+		self.publish(packet, raw.timestamp)?;
+		self.decoder_boundary = false;
+		Ok(())
 	}
 
 	/// Capture controls encoding independently of keeping its input open.
@@ -766,7 +771,13 @@ mod tests {
 				break;
 			}
 		}
-		for index in 100..150 {
+		// History expiring before anything was published leaves no epoch to end with a marker.
+		let first = reader.read().await.unwrap().unwrap();
+		assert!(
+			matches!(&first, moq_mux::container::Read::Frame { frame, .. } if frame.timestamp == at(100)),
+			"{first:?}"
+		);
+		for index in 101..150 {
 			let frame = packet(&mut reader).await.unwrap();
 			assert_eq!(frame.timestamp, at(index));
 			assert_eq!(frame.payload.len(), 1920 * 4);

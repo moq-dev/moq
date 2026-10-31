@@ -127,8 +127,8 @@ export type EncoderOutput = {
 	// The head of the capture graph, so callers can tap the raw capture. Volume is applied to the
 	// PCM rather than in the graph, so this is pre-gain. Undefined for a source that isn't a track.
 	root: Signal<AudioNode | undefined>;
-	// True while encoding: enabled with a captured format and a track, which with the broadcast's
-	// `onDemand` also takes a subscriber.
+	// True while encoding: enabled with a captured format and a track, which also takes a
+	// subscriber unless the broadcast's `onDemand` is false.
 	active: Signal<boolean>;
 	// Cumulative output totals (frames, bytes) measured while serving.
 	stats: Signal<Stats>;
@@ -766,6 +766,9 @@ export class Encoder {
 					channelCount: config.numberOfChannels,
 					drain: () => {
 						backlog.expire(clock());
+						// Expired history is a real gap, unlike a loss of demand: end the epoch where
+						// the encoded audio stops, so its last frame isn't stretched across the gap.
+						if (backlog.takeEvicted()) this.#cut();
 						for (let frame = backlog.shift(); frame; frame = backlog.shift()) submit(frame);
 						deadline.set(backlog.deadline);
 					},

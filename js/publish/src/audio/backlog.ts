@@ -10,6 +10,7 @@ export class Backlog {
 	#frames: (Entry | undefined)[] = [];
 	#head = 0;
 	#samples = 0;
+	#evicted = false;
 
 	/** Retain at most this much audio at the codec's sample rate. */
 	constructor(retention: Micro, sampleRate: number) {
@@ -22,12 +23,24 @@ export class Backlog {
 		this.#frames.push({ frame, end });
 		this.#samples += frame.channels[0].length;
 		this.expire(Micro(Math.max(now, end)));
-		while (this.#samples > this.#limit) this.shift();
+		while (this.#samples > this.#limit) this.#evict();
 	}
 
 	/** Drop expired frames even when capture has stopped delivering samples. */
 	expire(now: Micro): void {
-		while (this.deadline !== undefined && this.deadline <= now) this.shift();
+		while (this.deadline !== undefined && this.deadline <= now) this.#evict();
+	}
+
+	/** Whether frames were dropped unencoded since the last call, leaving a gap in the timeline. */
+	takeEvicted(): boolean {
+		const evicted = this.#evicted;
+		this.#evicted = false;
+		return evicted;
+	}
+
+	#evict(): void {
+		this.#evicted = true;
+		this.shift();
 	}
 
 	/** The oldest frame's expiry, or undefined while empty. */

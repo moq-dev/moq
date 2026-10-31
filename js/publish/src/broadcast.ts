@@ -62,7 +62,7 @@ export type BroadcastInput = {
 	/**
 	 * Override when renditions encode. Omitted: audio retains raw PCM until subscribed, while
 	 * video encodes continuously. False encodes both continuously; true gates video too, losing
-	 * its past. Audio keeps raw history up to `maxAge` either way. Capture stays open.
+	 * its past. Unless false, audio keeps raw history up to `maxAge`. Capture stays open.
 	 */
 	onDemand: Getter<boolean | undefined>;
 };

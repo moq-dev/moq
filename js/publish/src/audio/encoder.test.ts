@@ -1097,6 +1097,59 @@ test("default audio replays the last second after three seconds without a subscr
 	}
 });
 
+// Losing demand keeps the epoch, but history that expires unencoded is a real gap: the frame
+// before it must not read as lasting until the replay resumes.
+test("expired raw audio ends the epoch before the replay resumes", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("evicted.hang"),
+		maxAge: Milli(1000),
+	});
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
+	let subscriber: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		let index = 0;
+		const push = async (count: number) => {
+			for (const end = index + count; index < end; index++) {
+				await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });
+				await feed.drain();
+				await clock.advance(Nano.fromMilli(Milli(20)));
+			}
+		};
+
+		subscriber = net.track("audio").subscribe();
+		await settle();
+		await push(4);
+		subscriber.close();
+		subscriber = undefined;
+		await settle();
+		expect(discontinuity).not.toHaveBeenCalled();
+
+		// Twice the retention unwatched: the first half expires before anyone returns.
+		await push(100);
+		subscriber = net.track("audio").subscribe();
+		await settle();
+		expect(discontinuity).toHaveBeenCalledTimes(1);
+		expect(discontinuity.mock.calls[0][0]).toBe(Micro(4 * 20_000));
+	} finally {
+		discontinuity.mockRestore();
+		subscriber?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
 test("Opus description is probed with the exact live config before advertising", async () => {
 	using _codecs = installFakeWebCodecs();
 	LaggingAudioEncoder.description = (config) => new TextEncoder().encode(JSON.stringify(config));
