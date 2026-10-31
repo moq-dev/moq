@@ -13,13 +13,16 @@ Reachable means some workflow `run:` step leads to it through `just` recipes,
 their dependencies, and the scripts they name. The walk is static: a `just`
 call whose recipe is only known at runtime resolves through the values a
 `for` loop in the same file gives its variable, and sh/dispatch.sh's module
-dispatch is followed explicitly. A local-only target needs an entry in
+dispatch is followed explicitly. A call's literal arguments bind the recipe's
+parameters, and a script's top-level `case "$1"` runs only the branch its
+callers' first argument selects. A local-only target needs an entry in
 test-inventory.allow naming the quest that owns it.
 
 `--root DIR` checks another tree, for the tests.
 """
 
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import fnmatch
 import itertools
@@ -42,6 +45,9 @@ RUNNER = re.compile(
     r"|--run-ignored|--include-ignored|-- --ignored"
 )
 LOOP = re.compile(r"\bfor\s+(\w+)\s+in\s+([^;\n]+?)\s*;\s*do\b")
+# A script's top-level dispatch on its first argument, and one of its branch labels.
+DISPATCH = re.compile(r'case "\$\{?1(?::-)?\}?" in')
+LABEL = re.compile(r"(\s+)([^()\s#][^()#]*)\)(.*)")
 # Options whose next word is their value, so it is not a test-name filter.
 VALUED = {
     "-p", "--package", "-E", "--filterset", "--filter-expr", "-F", "--features", "--test", "--bench", "--bin",
@@ -70,10 +76,21 @@ class Recipe:
     cwd: Path
     text: str
     dependencies: list[str]
+    # The leading parameters a call's arguments bind, and the body with them bound.
+    parameters: list[str] = field(default_factory=list)
+    render: Callable[[dict[str, str]], str] | None = None
 
     @property
     def path(self) -> str:
         return f"{self.module.name}::{self.name}" if self.module.name else self.name
+
+    def bind(self, arguments: list[str]) -> dict[str, str]:
+        """The parameters a call's literal arguments give values."""
+        return {name: argument for name, argument in zip(self.parameters, arguments) if literal(argument)}
+
+
+def literal(word: str) -> bool:
+    return not re.search(r"[$`{]", word)
 
 
 @dataclass
@@ -139,11 +156,20 @@ def load_justfile(root: Path, justfile: Path, name: str) -> Module:
         assignments = {key: value["value"] for key, value in node["assignments"].items()}
         module = Module(name, source, top, first=node.get("first"))
         for key, recipe in node["recipes"].items():
-            text = "\n".join("".join(part if isinstance(part, str) else
-                                      evaluate(part[0], assignments, source.parent, root) for part in line)
-                              for line in recipe["body"])
-            module.recipes[key] = Recipe(key, module, directory, text,
-                                         [dependency["recipe"] for dependency in recipe["dependencies"]])
+            def render(bound: dict[str, str], body=recipe["body"], source=source, assignments=assignments) -> str:
+                scope = {**assignments, **bound}
+                return "\n".join("".join(part if isinstance(part, str) else
+                                          evaluate(part[0], scope, source.parent, root) for part in line)
+                                  for line in body)
+
+            parameters = []
+            for parameter in recipe["parameters"]:
+                if parameter["kind"] != "singular":
+                    break
+                parameters.append(parameter["name"])
+            module.recipes[key] = Recipe(key, module, directory, render({}),
+                                         [dependency["recipe"] for dependency in recipe["dependencies"]],
+                                         parameters, render)
         for key, alias in node["aliases"].items():
             target = alias["target"] if isinstance(alias["target"], str) else alias["target"]["name"]
             if target in module.recipes:
@@ -173,11 +199,12 @@ def load_recipes(root: Path) -> dict[Path, Module]:
 
 
 def logical_lines(text: str):
-    """Lines with continuations joined and comment lines dropped."""
+    """Lines with continuations joined and comments dropped."""
     pending = ""
     for line in text.splitlines():
         if line.lstrip().startswith("#"):
             continue
+        line = uncommented(line)
         if line.endswith("\\"):
             pending += line[:-1] + " "
             continue
@@ -185,6 +212,53 @@ def logical_lines(text: str):
         pending = ""
     if pending:
         yield pending
+
+
+def uncommented(line: str) -> str:
+    """A line up to its comment: an unquoted `#` that starts a word."""
+    quote, escaped = None, False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            quote = None if char == quote else quote
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (index == 0 or line[index - 1] in " \t;&|()<>"):
+            return line[:index].rstrip()
+    return line
+
+
+def dispatch(text: str) -> tuple[str, list[list[tuple[list[str], str]]]]:
+    """A script's text outside its top-level `case "$1"` blocks, and each block's branches:
+    their patterns and body."""
+    rest, blocks = [], []
+    branches, indent = None, None
+    for line in text.splitlines():
+        if branches is None:
+            if DISPATCH.fullmatch(line.rstrip()):
+                branches, indent = [], None
+            else:
+                rest.append(line)
+            continue
+        if line.rstrip() == "esac":
+            blocks.append(branches)
+            branches = None
+            continue
+        label = LABEL.fullmatch(line)
+        if label and not line.lstrip().startswith("#") and indent in (None, label.group(1)):
+            indent = label.group(1)
+            patterns = [pattern.strip().strip("'\"") for pattern in label.group(2).split("|")]
+            branches.append((patterns, label.group(3)))
+        elif branches:
+            patterns, body = branches[-1]
+            branches[-1] = (patterns, f"{body}\n{line}")
+    if branches is not None:
+        # An unterminated block is not a dispatch this reads.
+        return text, []
+    return "\n".join(rest), blocks
 
 
 def commands(text: str):
@@ -228,7 +302,9 @@ class Graph:
         self.justfiles = justfiles
         self.recipes = justfiles[root]
         self.reached: dict[str, Recipe] = {}
+        self.bindings: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
         self.files: set[Path] = set()
+        self.branches: set[tuple[Path, int, int]] = set()
         self.runs: list[Run] = []
         self.queue: list[tuple[str, str, Path, Path | None]] = []
 
@@ -241,6 +317,10 @@ class Graph:
 
     def resolve(self, words: list[str], cwd: Path) -> list[Recipe]:
         """The recipes a `just` call's words name, from its justfile and then, as `set fallback` does, its tree's root."""
+        return [recipe for recipe, _ in self.calls(words, cwd)]
+
+    def calls(self, words: list[str], cwd: Path) -> list[tuple[Recipe, list[str]]]:
+        """The recipe a `just` call's words name, with the arguments that follow it."""
         words = [word for word in words if not word.startswith("-")]
         module = self.context(cwd)
         for start in (module, module.top or module):
@@ -249,68 +329,104 @@ class Graph:
                 node = node.modules[words[index]]
                 index += 1
             if index < len(words) and words[index] in node.recipes:
-                return [node.recipes[words[index]]]
+                return [(node.recipes[words[index]], words[index + 1:])]
             if index == len(words) and index > 0 and node.first:
-                return [node.recipes[node.first]]
+                return [(node.recipes[node.first], [])]
         return []
 
-    def visit_recipe(self, recipe: Recipe):
-        if recipe.path in self.reached:
+    def visit_recipe(self, recipe: Recipe, arguments: list[str] | None = None):
+        bound = recipe.bind(arguments or [])
+        key = (recipe.path, tuple(sorted(bound.items())))
+        if key in self.bindings:
             return
-        self.reached[recipe.path] = recipe
+        self.bindings.add(key)
+        self.reached.setdefault(recipe.path, recipe)
         for dependency in recipe.dependencies:
             if dependency in recipe.module.recipes:
                 self.visit_recipe(recipe.module.recipes[dependency])
-        self.queue.append((recipe.text, f"recipe {recipe.path}", recipe.cwd, None))
+        text = recipe.render(bound) if recipe.render and bound else recipe.text
+        self.queue.append((text, f"recipe {recipe.path}", recipe.cwd, None))
 
-    def visit_file(self, path: Path, cwd: Path):
-        if path in self.files:
-            return
-        self.files.add(path)
+    def visit_file(self, path: Path, cwd: Path, arguments: list[list[str]] | None):
+        """Queue a script's text, once, and the branches of its `case "$1"` dispatch that the
+        calls' arguments select. A call whose first argument is unknown selects every branch."""
         text = path.read_text(errors="replace")
-        self.queue.append((text, str(path.relative_to(self.root)), cwd, path))
-        # The module dispatch passes its own names: `just <module> check` and the like.
-        if path == self.root / "sh/dispatch.sh":
-            for line in re.findall(r"modules=\(([^)]*)\)", text):
-                for name in line.split():
-                    for verb in ("check", "fix"):
-                        for recipe in self.resolve([name, verb], self.root):
-                            self.visit_recipe(recipe)
+        rest, blocks = dispatch(text) if shell(text, path) else (text, [])
+        where = str(path.relative_to(self.root))
+        if path not in self.files:
+            self.files.add(path)
+            self.queue.append((rest, where, cwd, path))
+            # The module dispatch passes its own names: `just <module> check` and the like.
+            if path == self.root / "sh/dispatch.sh":
+                for line in re.findall(r"modules=\(([^)]*)\)", text):
+                    for name in line.split():
+                        for verb in ("check", "fix"):
+                            for recipe in self.resolve([name, verb], self.root):
+                                self.visit_recipe(recipe)
+        for first in [call[0] if call else "" for call in arguments] if arguments is not None else [None]:
+            for block, branches in enumerate(blocks):
+                if first is None or not literal(first):
+                    chosen = range(len(branches))
+                else:
+                    # The first matching pattern wins, as in the shell.
+                    chosen = next(([index] for index, (patterns, _) in enumerate(branches)
+                                   if any(fnmatch.fnmatchcase(first, pattern) for pattern in patterns)), [])
+                for index in chosen:
+                    if (path, block, index) not in self.branches:
+                        self.branches.add((path, block, index))
+                        self.queue.append((branches[index][1], where, cwd, path))
 
-    def scripts(self, text: str, cwd: Path, file: Path | None) -> list[Path]:
-        """The script files text names outside its comments."""
-        found = []
-        text = re.sub(r"(?m)(?:^|\s)(?:#(?!!)|//).*$", "", text)
+    def bases(self, text: str, cwd: Path, file: Path | None) -> list[Path]:
+        """The directories a script path in text may be relative to."""
         bases = [cwd, self.root, *([file.parent] if file else [])]
         # A path after a `cd` is relative to where it went.
-        bases += [(cwd / directory).resolve() for directory in re.findall(r"\bcd\s+([\w./-]+)", text)]
-        for match in SCRIPT.findall(text):
-            parts = match.split("/")
-            # A `$ROOT/` or `$(dirname "$0")/` prefix is dropped by trying each suffix.
-            for start in range(len(parts)):
-                suffix = "/".join(parts[start:])
-                if "$" in suffix or "{" in suffix:
-                    continue
-                candidates = [(base / suffix).resolve() for base in bases]
-                hit = next((path for path in candidates if path.is_file() and path.is_relative_to(self.root)), None)
-                if hit:
-                    found.append(hit)
-                    break
-        return found
+        return bases + [(cwd / directory).resolve() for directory in re.findall(r"\bcd\s+([\w./-]+)", text)]
+
+    def script(self, match: str, bases: list[Path]) -> Path | None:
+        """The file a script path names."""
+        parts = match.split("/")
+        # A `$ROOT/` or `$(dirname "$0")/` prefix is dropped by trying each suffix.
+        for start in range(len(parts)):
+            suffix = "/".join(parts[start:])
+            if "$" in suffix or "{" in suffix:
+                continue
+            candidates = [(base / suffix).resolve() for base in bases]
+            hit = next((path for path in candidates if path.is_file() and path.is_relative_to(self.root)), None)
+            if hit:
+                return hit
+        return None
+
+    def scripts(self, text: str, cwd: Path, file: Path | None) -> list[Path]:
+        """The script files text names outside its comments, once per mention."""
+        text = re.sub(r"(?m)(?:^|\s)(?:#(?!!)|//).*$", "", text)
+        bases = self.bases(text, cwd, file)
+        return [hit for match in SCRIPT.findall(text) if (hit := self.script(match, bases))]
 
     def walk(self, entries: list[tuple[str, str, Path]]):
         for text, where, cwd in entries:
             self.queue.append((text, where, cwd, None))
         while self.queue:
             text, where, cwd, file = self.queue.pop()
-            for words in commands(text) if shell(text, file) else []:
+            # The arguments each command that runs a script passes it.
+            arguments: dict[Path, list[list[str]]] = defaultdict(list)
+            bases = self.bases(text, cwd, file)
+            runs = shell(text, file)
+            for words in commands(text) if runs else []:
                 self.runs.append(Run(words, where, cwd))
                 for index, word in enumerate(words):
                     if word == "just":
-                        for recipe in self.resolve(words[index + 1:], cwd):
-                            self.visit_recipe(recipe)
-            for path in self.scripts(text, cwd, file):
-                self.visit_file(path, cwd)
+                        for recipe, rest in self.calls(words[index + 1:], cwd):
+                            self.visit_recipe(recipe, rest)
+                    elif SCRIPT.fullmatch(word) and (path := self.script(word, bases)):
+                        arguments[path].append(words[index + 1:])
+            mentions = Counter(self.scripts(text, cwd, file))
+            for path, count in mentions.items():
+                # Other languages only name a script, like a test running it under stubs, so they
+                # select none of its branches. A shell mention that is not a command may pass any.
+                if not runs:
+                    self.visit_file(path, cwd, [])
+                else:
+                    self.visit_file(path, cwd, arguments[path] if len(arguments[path]) == count else None)
 
 
 def shell(text: str, file: Path | None) -> bool:
@@ -763,7 +879,7 @@ def discovered(root: Path, graph: Graph) -> set[Path]:
         found.update(lock.parent for lock in tracked(root, "*/bun.lock"))
     for manifest in tracked(root, "package.json", "*/package.json"):
         for script in json.loads(manifest.read_text()).get("scripts", {}).values():
-            for match in re.finditer(r"\bbun test((?: +[^&|;]+?)*)\s*(?:$|&&|\|\||;)", script):
+            for match in re.finditer(r"\bbun test\b([^&|;]*)", script):
                 paths = [word for word in match.group(1).split() if not word.startswith("-")]
                 found.update((manifest.parent / path).resolve() for path in paths or ["."])
     return found

@@ -194,6 +194,48 @@ class InventoryTest(unittest.TestCase):
         self.assertNotIn("recipe infra/worker::test", orphans)
         self.assertNotIn("script infra/worker/src/policy.test.ts", orphans)
 
+    def test_a_commented_out_caller_covers_nothing(self):
+        caller = "just rs test -p media --lib --run-ignored only -E 'test(/^gpu::tests::(renders|exports)$/)'"
+        self.write("justfile", JUSTFILE.replace(caller, f"echo disabled # {caller}"))
+        orphans = self.orphans()
+        self.assertIn("ignore media::gpu::tests::renders", orphans)
+        self.assertIn("ignore media::gpu::tests::exports", orphans)
+
+        # A `#` inside a word or quotes is not a comment.
+        self.write("justfile", JUSTFILE.replace(caller, f"echo 'a # b' a#b && {caller}"))
+        self.assertNotIn("ignore media::gpu::tests::renders", self.orphans())
+
+    def test_a_dispatcher_runs_only_the_branch_its_caller_selects(self):
+        self.write("sh/group.sh", """
+            #!/usr/bin/env bash
+            case "${1:-}" in
+                # The sweep needs its own branch.
+                sweep)
+                    just rs sweep
+                    ;;
+                quick) echo quick ;;
+                *) exit 2 ;;
+            esac
+        """)
+        # A test that runs the script under stubs selects no branch.
+        self.write("sh/group.test.py", 'SCRIPT = "sh/group.sh"\n')
+        self.write("justfile", JUSTFILE.replace("gate:", "gate: groups") + """
+    group name:
+        sh/group.sh {{ quote(name) }}
+
+    groups:
+        python3 sh/group.test.py
+        just group quick
+""")
+        orphans = self.orphans()
+        self.assertIn("recipe rs::sweep", orphans)
+        self.assertIn("ignore media::probe::long_sweep", orphans)
+
+        self.write("justfile", (self.root / "justfile").read_text().replace("just group quick", "just group sweep"))
+        orphans = self.orphans()
+        self.assertNotIn("recipe rs::sweep", orphans)
+        self.assertNotIn("ignore media::probe::long_sweep", orphans)
+
     def test_a_selection_outside_the_ignored_set_covers_nothing(self):
         # Same filter, but without --run-ignored nextest skips the ignored tests.
         self.write("justfile", JUSTFILE.replace("--run-ignored only ", ""))
