@@ -16,13 +16,13 @@ pub(super) const PCR_HZ: u64 = 27_000_000;
 /// PCR ticks: one second.
 const FALLBACK_TICKS: u64 = PCR_HZ;
 
-/// The most bytes a group holds before its next object starts another: half of what `moq-net`
-/// caches of one group, so the frame headers and an object of slack never reach the cap.
-pub(super) const GROUP_BYTES_MAX: u64 = moq_net::group::MAX_CACHE_BYTES / 2;
+/// The most bytes a group holds before its next object starts another, so a source with sparse
+/// random access points still gives a joiner a group it can take whole.
+pub(super) const GROUP_BYTES_MAX: u64 = 16 * 1024 * 1024;
 
-/// The most objects a group holds before its next object starts another: half of `moq-net`'s
-/// frame cap, which a source stamping PCRs far more often than the 40 ms norm could reach.
-pub(super) const GROUP_OBJECTS_MAX: usize = moq_net::group::MAX_GROUP_FRAMES / 2;
+/// The most objects a group holds before its next object starts another, which a source stamping
+/// PCRs far more often than the 40 ms norm could otherwise grow without a boundary.
+pub(super) const GROUP_OBJECTS_MAX: usize = 4096;
 
 /// The bytes a PCR sits into its packet: four of header, the adaptation field's length and flags,
 /// and the five bytes the 33-bit base ends in.

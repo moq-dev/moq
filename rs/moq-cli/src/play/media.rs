@@ -1,7 +1,7 @@
 //! The media task: subscribe, pick renditions, and decode into the window and
 //! the speaker.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -130,8 +130,9 @@ impl<O: Output> Media<O> {
 		let mut catalogs = catalog::Consumer::<()>::new(&broadcast, self.args.catalog_format(&self.broadcast))
 			.await
 			.context("failed to subscribe to the catalog")?;
-		// Applied by hand rather than with `select`, which drops disabled renditions: a disabled
-		// rendition stops now, while one that leaves the catalog plays out its tail.
+		// Applied by hand rather than with `select`, so each snapshot holds the renditions that are
+		// actually playing, and so the player can tell a disabled rendition it lets go, which stops
+		// now, from one that leaves the catalog, which plays out its tail.
 		let selection = self.args.select.selection(None);
 		let mut tasks = tokio::task::JoinSet::new();
 		let mut playback = Playback::default();
@@ -189,9 +190,17 @@ impl<O: Output> Media<O> {
 					snapshot = catalogs.next(), if playback.following() => {
 						match snapshot.context("failed to read the catalog")? {
 							Some(mut snapshot) => {
-								stop_disabled(&mut video_demand, snapshot.video.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
-								stop_disabled(&mut audio_demand, snapshot.audio.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
-								selection.retain(&mut snapshot);
+								// A playing rendition its publisher disabled is held while nothing else
+								// of its kind is enabled, so an unmute plays without a resubscribe.
+								let video_disabled = disabled(&video_demand, &snapshot.video.renditions, |config| config.enabled);
+								let audio_disabled = disabled(&audio_demand, &snapshot.audio.renditions, |config| config.enabled);
+								let playing = moq_mux::select::Selected {
+									video: video_demand.iter().map(|demand| demand.name.clone()).collect(),
+									audio: audio_demand.iter().map(|demand| demand.name.clone()).collect(),
+								};
+								selection.retain(&mut snapshot, &playing);
+								stop_released(&mut video_demand, video_disabled, &snapshot.video.renditions);
+								stop_released(&mut audio_demand, audio_disabled, &snapshot.audio.renditions);
 								if let Some(demand) = &mut video_demand
 									&& demand.retire_moved(&source, snapshot.video.renditions.get(&demand.name))
 								{
@@ -441,13 +450,20 @@ impl Demand {
 	}
 }
 
-// Cancel through the task's own result so it still reports which half ended.
-fn stop_disabled<'a>(playing: &mut Option<Demand>, mut disabled: impl Iterator<Item = &'a String>) {
-	if playing
+/// Whether the catalog still lists the rendition `playing` names, disabled.
+fn disabled<C>(playing: &Option<Demand>, renditions: &BTreeMap<String, C>, enabled: impl Fn(&C) -> bool) -> bool {
+	playing
 		.as_ref()
-		.is_some_and(|playing| disabled.any(|disabled| *disabled == playing.name))
-	{
-		let _ = playing.take().unwrap().stop.send(());
+		.and_then(|playing| renditions.get(&playing.name))
+		.is_some_and(|config| !enabled(config))
+}
+
+/// Stop the rendition `playing` if it was `disabled` and the selection let it go, because
+/// another of its kind is enabled. Cancelled through the task's own result so it still reports
+/// which half ended.
+fn stop_released<C>(playing: &mut Option<Demand>, disabled: bool, selected: &BTreeMap<String, C>) {
+	if disabled && let Some(demand) = playing.take_if(|playing| !selected.contains_key(&playing.name)) {
+		let _ = demand.stop.send(());
 	}
 }
 
@@ -1451,6 +1467,43 @@ mod tests {
 			recorder.played().iter().any(|part| part.sample == 0.5),
 			"the live disabled track prevented fallback"
 		);
+	}
+
+	/// Muting the only audio rendition holds it, so the unmute plays on the subscription it
+	/// already had rather than a new one.
+	#[tokio::test]
+	async fn a_muted_rendition_is_held_through_the_unmute() {
+		tokio::time::pause();
+		let origin = moq_tokio::origin::spawn();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let mut catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
+		let mut audio = rendition(&broadcast, &catalog, "audio");
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		let mut enable = |enabled: bool| {
+			catalog
+				.mutate(|catalog| catalog.audio.renditions.get_mut("audio").unwrap().enabled = enabled)
+				.unwrap()
+		};
+
+		write(&mut audio, 10, 0.25).await;
+		enable(false);
+		// Half a second muted, with the timeline running on through it.
+		let demand = audio.demand();
+		for _ in 0..25 {
+			tokio::time::sleep(PACKET_DURATION).await;
+			assert!(demand.wanted().is_some(), "the mute unsubscribed");
+		}
+		enable(true);
+		for index in 35..60 {
+			audio.write(packet(index, 0.5)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+
+		settle(player, &recorder).await;
+		assert!(played(&recorder, 0.25).0 > Duration::ZERO);
+		assert!(played(&recorder, 0.5).0 > Duration::ZERO, "the unmute did not play");
 	}
 
 	/// A publisher retires an audio rendition by naming its replacement and then

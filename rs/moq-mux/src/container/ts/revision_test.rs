@@ -50,6 +50,13 @@ struct Span<'a> {
 /// as a live one keeps up with the catalog, and runs to its end after the last. Returns
 /// every PMT it wrote, each run of repeats once.
 async fn reexport(spans: &[Span<'_>], intervals: u64) -> Vec<Table> {
+	let spans: Vec<_> = spans.iter().map(|span| (PMT_PID, span)).collect();
+	tables(&reexport_frames(&spans, intervals).await, PMT_PID)
+}
+
+/// [`reexport`], each span's PAT naming its PMT on the PID beside it. Returns every frame
+/// the export wrote.
+async fn reexport_frames(spans: &[(u16, &Span<'_>)], intervals: u64) -> Vec<Frame> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(
@@ -62,10 +69,10 @@ async fn reexport(spans: &[Span<'_>], intervals: u64) -> Vec<Table> {
 	let mut ticks = 1_000 * MS;
 	let mut export = None;
 	let mut frames = Vec::new();
-	for (version, span) in spans.iter().enumerate() {
+	for (version, &(pmt_pid, span)) in spans.iter().enumerate() {
 		let mut mux = Mux::default();
-		mux.pat(&[(1, PMT_PID)])
-			.pmt_at(version as u8 % 32, PMT_PID, 1, CLOCK_PID, span.streams, 0);
+		mux.pat(&[(1, pmt_pid)])
+			.pmt_at(version as u8 % 32, pmt_pid, 1, CLOCK_PID, span.streams, 0);
 		// The import publishes its catalog once it has measured the multiplex rate.
 		let intervals = if version == 0 { 75 } else { intervals };
 		for _ in 0..intervals {
@@ -104,7 +111,7 @@ async fn reexport(spans: &[Span<'_>], intervals: u64) -> Vec<Table> {
 	catalog.finish().unwrap();
 
 	drain(&mut export.unwrap(), &mut frames).await;
-	tables(&frames, PMT_PID)
+	frames
 }
 
 /// Run `export` until it waits on its source, as a live one keeps up with each catalog
@@ -233,6 +240,33 @@ fn tables_at(frames: &[Frame], pmt_pid: u16) -> Vec<(usize, Table)> {
 		out.push((index, table));
 	}
 	out
+}
+
+/// Every PAT in `frames` as its `version_number` and PMT PID, each run of repeats once.
+fn pats(frames: &[Frame]) -> Vec<(u8, u16)> {
+	let mut out = Vec::new();
+	for pat in packets(frames).filter_map(pat) {
+		if out.last() != Some(&pat) {
+			out.push(pat);
+		}
+	}
+	out
+}
+
+/// The `version_number` and PMT PID of the PAT `packet` starts, if it starts one.
+fn pat(packet: &[u8; 188]) -> Option<(u8, u16)> {
+	if pid(packet) != 0 || packet[1] & 0x40 == 0 {
+		return None;
+	}
+	let mut at = 4;
+	if packet[3] & 0x20 != 0 {
+		at += 1 + usize::from(packet[4]);
+	}
+	let section = &packet[at + 1 + usize::from(packet[at])..];
+	Some((
+		(section[5] >> 1) & 0x1f,
+		u16::from(section[10] & 0x1f) << 8 | u16::from(section[11]),
+	))
 }
 
 /// Each table's version and streams as `(stream_type, PID)`.
@@ -1079,9 +1113,8 @@ async fn a_pid_taken_from_a_stream_that_never_ends_cuts_it() {
 	drop(old);
 }
 
-/// The PMT stays on the PID and program its tables went out with, whatever a later catalog
-/// records, so a track a later catalog records on that PID takes another, and each revision is
-/// still the program the PAT names.
+/// A track the catalog records on the PMT's PID as it moves the PMT takes another, and the
+/// PMT moves behind a new PAT, still the program the first named.
 #[tokio::test(start_paused = true)]
 async fn a_track_recorded_on_the_pmt_pid_after_the_catalog_moves_it_takes_another() {
 	let program = |pmt_pid: u16, program_number: u16| super::catalog::Program {
@@ -1118,12 +1151,299 @@ async fn a_track_recorded_on_the_pmt_pid_after_the_catalog_moves_it_takes_anothe
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
-	assert!(tables(&frames, OWN_PMT_PID).is_empty(), "the PMT stays on its PID");
-	let tables = tables(&frames, PMT_PID);
+	assert_eq!(pats(&frames), [(0, PMT_PID), (1, OWN_PMT_PID)]);
+	let tables = tables(&frames, OWN_PMT_PID);
 	let pids: Vec<u16> = tables.last().unwrap().streams.iter().map(|es| es.1).collect();
 	assert_eq!(pids.len(), 2, "{tables:?}");
-	assert!(!pids.contains(&PMT_PID), "{tables:?}");
+	assert!(!pids.contains(&PMT_PID) && !pids.contains(&OWN_PMT_PID), "{tables:?}");
 	assert!(tables.iter().all(|table| table.program == 1), "{tables:?}");
+}
+
+/// The program a catalog records, its PMT on `pmt_pid`.
+fn program(pmt_pid: u16) -> super::catalog::Program {
+	super::catalog::Program {
+		transport_stream_id: 1,
+		program_number: 1,
+		pmt_pid,
+	}
+}
+
+/// A catalog that moves the PMT to another PID is followed by a PAT at the next version
+/// naming it, and from then on the PMT rides the new PID alone.
+#[tokio::test(start_paused = true)]
+async fn a_moved_pmt_moves_behind_a_new_pat() {
+	const MOVED_PMT_PID: u16 = 0x30;
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+	)
+	.unwrap();
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(PMT_PID));
+	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 0, 3_000).await;
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(MOVED_PMT_PID));
+	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 3_000, 6_000).await;
+	audio.finish().unwrap();
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	assert_eq!(pats(&frames), [(0, PMT_PID), (1, MOVED_PMT_PID)]);
+	assert_eq!(
+		layouts(&tables(&frames, MOVED_PMT_PID)),
+		[(0, vec![(AUDIO, AUDIO_PID)])]
+	);
+	let moved = packets(&frames)
+		.position(|packet| pat(packet) == Some((1, MOVED_PMT_PID)))
+		.expect("the PAT naming the new PID");
+	assert!(
+		packets(&frames).take(moved).all(|packet| pid(packet) != MOVED_PMT_PID),
+		"no PMT on the new PID before the PAT naming it"
+	);
+	assert!(
+		packets(&frames).skip(moved).all(|packet| pid(packet) != PMT_PID),
+		"no PMT on the old PID after the PAT that moved it"
+	);
+}
+
+/// A catalog that moves the PMT onto the PID a stream it lists rides fails the export: the
+/// PMT cannot follow it there.
+#[tokio::test(start_paused = true)]
+async fn a_pmt_moved_onto_a_stream_fails_the_export() {
+	let (mut broadcast, consumer, mut catalog) = broadcast();
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(PMT_PID));
+	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 0, 3_000).await;
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(AUDIO_PID));
+	let err = tokio::time::timeout(DELAY * 2, async {
+		loop {
+			if let Err(err) = export.next().await {
+				return err;
+			}
+		}
+	})
+	.await
+	.expect("the export fails");
+	assert!(err.to_string().contains("another stream rides"), "{err}");
+	assert_eq!(pats(&frames), [(0, PMT_PID)]);
+}
+
+/// A catalog that moves the PMT onto the PID of a stream it dropped moves it once that stream
+/// has drained: the stream's packets all go out ahead of the PAT naming its PID, and only the
+/// PMT rides it after.
+#[tokio::test(start_paused = true)]
+async fn a_pmt_moved_onto_a_draining_stream_waits_for_it() {
+	let (mut broadcast, consumer, mut catalog) = broadcast();
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(PMT_PID));
+	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let (name, mut leaving) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	live(
+		&mut export,
+		&mut frames,
+		start,
+		&mut [(&mut audio, 0x21), (&mut leaving, 0x22)],
+		0,
+		3_000,
+	)
+	.await;
+	remove(&mut catalog, &name);
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(OTHER_AUDIO_PID));
+	live(
+		&mut export,
+		&mut frames,
+		start,
+		&mut [(&mut audio, 0x21), (&mut leaving, 0x22)],
+		3_000,
+		4_000,
+	)
+	.await;
+	leaving.finish().unwrap();
+	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 4_000, 6_000).await;
+	audio.finish().unwrap();
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	assert_eq!(pats(&frames), [(0, PMT_PID), (1, OTHER_AUDIO_PID)]);
+	let moved = packets(&frames)
+		.position(|packet| pat(packet) == Some((1, OTHER_AUDIO_PID)))
+		.expect("the PAT naming the new PID");
+	// What each unit starting on the PID opens: a PES, or a section behind its pointer field.
+	let starts = |packets: Vec<&[u8; 188]>| -> Vec<u8> {
+		packets
+			.into_iter()
+			.filter(|packet| pid(packet) == OTHER_AUDIO_PID && packet[1] & 0x40 != 0)
+			.map(|packet| {
+				let at = match packet[3] & 0x20 != 0 {
+					true => 5 + usize::from(packet[4]),
+					false => 4,
+				};
+				match packet[at..at + 3] == [0, 0, 1] {
+					true => 0xff,
+					false => packet[at + 1 + usize::from(packet[at])],
+				}
+			})
+			.collect()
+	};
+	let before = starts(packets(&frames).take(moved).collect());
+	assert!(
+		!before.is_empty() && before.iter().all(|&start| start == 0xff),
+		"{before:?}"
+	);
+	let after = starts(packets(&frames).skip(moved).collect());
+	assert!(
+		!after.is_empty() && after.iter().all(|&start| start == 0x02),
+		"{after:?}"
+	);
+}
+
+/// A catalog that stops recording a PMT PID while a move waits for a draining stream cancels
+/// the move: the PMT stays where it is once the stream has drained.
+#[tokio::test(start_paused = true)]
+async fn a_catalog_dropping_the_pmt_pid_cancels_a_waiting_move() {
+	let (mut broadcast, consumer, mut catalog) = broadcast();
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(PMT_PID));
+	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let (name, mut leaving) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	let mut tracks = [(&mut audio, 0x21), (&mut leaving, 0x22)];
+	live(&mut export, &mut frames, start, &mut tracks, 0, 3_000).await;
+	remove(&mut catalog, &name);
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(OTHER_AUDIO_PID));
+	live(&mut export, &mut frames, start, &mut tracks, 3_000, 3_500).await;
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(0));
+	live(&mut export, &mut frames, start, &mut tracks, 3_500, 4_000).await;
+	leaving.finish().unwrap();
+	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 4_000, 6_000).await;
+	audio.finish().unwrap();
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	assert_eq!(pats(&frames), [(0, PMT_PID)]);
+}
+
+/// A catalog that gives a stream back the PID the PMT waits to move onto fails the export.
+#[tokio::test(start_paused = true)]
+async fn a_stream_returning_to_the_pid_the_pmt_waits_for_fails_the_export() {
+	let (mut broadcast, consumer, mut catalog) = broadcast();
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(PMT_PID));
+	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let (name, mut leaving) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
+	let config = catalog.snapshot().audio.renditions[&name].clone();
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	let mut tracks = [(&mut audio, 0x21), (&mut leaving, 0x22)];
+	live(&mut export, &mut frames, start, &mut tracks, 0, 3_000).await;
+	remove(&mut catalog, &name);
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(OTHER_AUDIO_PID));
+	live(&mut export, &mut frames, start, &mut tracks, 3_000, 3_500).await;
+	{
+		let mut guard = catalog.modify().unwrap();
+		guard.audio.renditions.insert(name.clone(), config);
+		guard
+			.ext
+			.mpegts
+			.tracks
+			.insert(name, super::catalog::Track::new(OTHER_AUDIO_PID));
+	}
+	let err = tokio::time::timeout(DELAY * 2, async {
+		loop {
+			if let Err(err) = export.next().await {
+				return err;
+			}
+		}
+	})
+	.await
+	.expect("the export fails");
+	assert!(err.to_string().contains("another stream rides"), "{err}");
+	assert_eq!(pats(&frames), [(0, PMT_PID)]);
+}
+
+/// A move landing while a copy of the tables is on its way waits for that copy: at a rate low
+/// enough that a copy spans slots, every PMT packet rides the PID the PAT before it names, and
+/// no two PATs at one version name different PIDs.
+#[tokio::test(start_paused = true)]
+async fn a_pmt_moved_while_its_tables_go_out_moves_behind_them() {
+	const MOVED_PMT_PID: u16 = 0x30;
+	let (mut broadcast, consumer, mut catalog) = broadcast();
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(PMT_PID));
+	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await.with_mux_rate(rate(4));
+	for millis in (0..6_000).step_by(50) {
+		tokio::time::sleep_until(start + Duration::from_millis(millis)).await;
+		match millis {
+			// Three packets of PMT from here, in slots of four.
+			2_500 => {
+				catalog.modify().unwrap().ext.mpegts.program_descriptors = (0x80..0x82)
+					.map(|tag| super::catalog::Descriptor {
+						tag,
+						data: bytes::Bytes::from(vec![tag; 250]),
+					})
+					.collect();
+			}
+			// Back and forth, landing at each point of the copies going out.
+			3_000..4_000 => {
+				let pmt_pid = match millis / 50 % 2 {
+					0 => MOVED_PMT_PID,
+					_ => PMT_PID,
+				};
+				catalog.modify().unwrap().ext.mpegts.program = Some(program(pmt_pid));
+			}
+			_ => {}
+		}
+		write_marked(&mut audio, millis, 0x21);
+		settle(&mut export, &mut frames).await;
+	}
+	audio.finish().unwrap();
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	let pats = pats(&frames);
+	assert!(pats.len() > 2, "{pats:?}");
+	let mut named = std::collections::HashMap::new();
+	for &(version, pmt_pid) in &pats {
+		assert_eq!(*named.entry(version).or_insert(pmt_pid), pmt_pid, "{pats:?}");
+	}
+	let mut pmt_pid = None;
+	for packet in packets(&frames) {
+		if let Some((_, pid)) = pat(packet) {
+			pmt_pid = Some(pid);
+		}
+		if [PMT_PID, MOVED_PMT_PID].contains(&pid(packet)) {
+			assert_eq!(Some(pid(packet)), pmt_pid, "a PMT packet off the PID its PAT names");
+		}
+	}
+}
+
+/// A PAT that moves the PMT before any table has gone out takes every copy queued with it:
+/// the PAT names the new PID at the version the first had, and nothing goes out on the old.
+#[tokio::test(start_paused = true)]
+async fn a_pmt_moved_before_its_tables_go_out_moves_every_copy() {
+	const MOVED_PMT_PID: u16 = 0x30;
+	let span = Span {
+		streams: &[(AUDIO, AUDIO_PID, &[])],
+	};
+	let frames = reexport_frames(&[(PMT_PID, &span), (MOVED_PMT_PID, &span)], 25).await;
+	assert_eq!(pats(&frames), [(0, MOVED_PMT_PID)]);
+	assert_eq!(
+		layouts(&tables(&frames, MOVED_PMT_PID)),
+		[(0, vec![(AUDIO, AUDIO_PID)])]
+	);
+	assert!(packets(&frames).all(|packet| pid(packet) != PMT_PID));
 }
 
 /// An SCTE-35 `splice_null` section.

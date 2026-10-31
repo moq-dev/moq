@@ -29,7 +29,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true }
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 object_store = { workspace = true, features = ["fs", "aws"] }
 s3s = "0.17"
 s3s-fs = "0.17"

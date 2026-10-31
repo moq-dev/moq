@@ -1,14 +1,116 @@
-use std::collections::hash_map::Entry;
-use std::mem;
+//! Incoming streams: their handles, leases, and errors.
+
+use std::collections::hash_map::{self, Entry};
+use std::{io, mem};
 
 use thiserror::Error;
 use tracing::debug;
 
+use super::lease::Leased;
 use super::state::get_or_insert_recv;
-use super::{ClosedStream, Leased, Retransmits, ShouldTransmit, StreamId, StreamsState};
-use crate::connection::assembler::{Assembler, Chunk};
+use super::{Retransmits, ShouldTransmit, StreamId, StreamsState};
+use crate::connection::assembler::Assembler;
+pub use crate::connection::assembler::Chunk;
 use crate::connection::streams::state::StreamRecv;
 use crate::{TransportError, VarInt, frame};
+
+pub use super::lease::Lease;
+
+/// An incoming stream, from [`Connection::recv_stream`](crate::connection::Connection::recv_stream)
+///
+/// A borrowed view by ID: the stream lives on in the connection after this is dropped, and
+/// calls on an ID the stream no longer has state for fail with [`Error::Closed`].
+pub struct Stream<'a> {
+	pub(crate) id: StreamId,
+	pub(crate) state: &'a mut StreamsState,
+	pub(crate) pending: &'a mut Retransmits,
+}
+
+impl Stream<'_> {
+	/// Read the stream's next contiguous bytes without copying.
+	pub fn read(&mut self) -> Result<Chunks<'_>, Error> {
+		Chunks::new(self.id, self.state, self.pending)
+	}
+
+	/// Stop accepting data on the given receive stream
+	///
+	/// Discards unread and leased data, returning its credit, and notifies the peer to stop
+	/// transmitting. Once stopped, further calls on the stream fail with [`Error::Closed`].
+	pub fn stop(&mut self, error_code: VarInt) -> Result<(), Error> {
+		let hash_map::Entry::Occupied(mut entry) = self.state.recv.entry(self.id) else {
+			return Err(Error::Closed);
+		};
+		let stream = get_or_insert_recv(entry.get_mut(), self.state.initial_stream_receive_window);
+
+		// An eviction already discarded the buffer, leaving the peer and the bytes the reader
+		// took to this stop.
+		let (read_credits, stop_sending) = match stream.lease.evicted {
+			true => (0, stream.final_offset_unknown()),
+			false => {
+				let (credits, stop_sending) = stream.stop()?;
+				(credits, stop_sending.should_transmit())
+			}
+		};
+		let mut lease = std::mem::take(&mut stream.lease);
+		if stop_sending {
+			self.pending.stop_sending.push(frame::StopSending {
+				id: self.id,
+				error_code,
+			});
+		}
+
+		// We need to keep stopped streams around until they're finished or reset so we can update
+		// connection-level flow control to account for discarded data. Otherwise, we can discard
+		// state immediately.
+		if !stream.final_offset_unknown() {
+			let recv = entry.remove().expect("must have recv when stopping");
+			// The lease was taken out above, so this returns no credit.
+			let _ = self.state.stream_recv_freed(self.id, recv);
+			self.state.queue_max_stream_id(self.pending);
+		}
+
+		let leased = self.state.discard_lease(self.id, &mut lease);
+		let transmit = self.state.add_read_credits(read_credits);
+		self.pending.max_data |= leased.should_transmit() || transmit.should_transmit();
+		// The credit returned may only have paid a shrunk window's debt.
+		self.unstick();
+
+		Ok(())
+	}
+
+	/// Check whether this stream has been reset by the peer, returning the reset error code if so
+	///
+	/// After returning `Ok(Some(_))` once, stream state will be discarded and all future calls will
+	/// fail with [`Error::Closed`].
+	pub fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
+		let hash_map::Entry::Occupied(entry) = self.state.recv.entry(self.id) else {
+			return Err(Error::Closed);
+		};
+		let Some(s) = entry.get().as_ref().and_then(|s| s.as_open_recv()) else {
+			return Ok(None);
+		};
+		if s.stopped {
+			return Err(Error::Closed);
+		}
+		let Some(code) = s.reset_code() else {
+			return Ok(None);
+		};
+
+		// Clean up state after application observes the reset, since there's no reason for the
+		// application to attempt to read or stop the stream once it knows it's reset. A lease still
+		// holding credit returns it here, since nothing is left to release or stop it.
+		let (_, recv) = entry.remove_entry();
+		let transmit = self
+			.state
+			.stream_recv_freed(self.id, recv.expect("must have recv on reset"));
+		self.pending.max_data |= transmit.should_transmit();
+		self.state.queue_max_stream_id(self.pending);
+		// The credit returned may only have paid a shrunk window's debt.
+		self.unstick();
+
+		Ok(Some(code))
+	}
+}
 
 #[derive(Debug, Default)]
 pub(super) struct Recv {
@@ -111,9 +213,9 @@ impl Recv {
 		Ok((new_bytes, frame.fin && self.stopped))
 	}
 
-	pub(super) fn stop(&mut self) -> Result<(u64, ShouldTransmit), ClosedStream> {
+	pub(super) fn stop(&mut self) -> Result<(u64, ShouldTransmit), Error> {
 		if self.stopped {
-			return Err(ClosedStream { _private: () });
+			return Err(Error::Closed);
 		}
 
 		let read_credits = self.unread_credit();
@@ -294,7 +396,7 @@ impl Recv {
 	}
 }
 
-/// Chunks returned from [`RecvStream::read()`][crate::RecvStream::read].
+/// Chunks returned from [`Stream::read()`].
 ///
 /// ### Note: Finalization Needed
 /// Bytes read from the stream are not released from the congestion window until
@@ -318,15 +420,15 @@ impl<'a> Chunks<'a> {
 		id: StreamId,
 		streams: &'a mut StreamsState,
 		pending: &'a mut Retransmits,
-	) -> Result<Self, ReadableError> {
+	) -> Result<Self, Error> {
 		let mut entry = match streams.recv.entry(id) {
 			Entry::Occupied(entry) => entry,
-			Entry::Vacant(_) => return Err(ReadableError::ClosedStream),
+			Entry::Vacant(_) => return Err(Error::Closed),
 		};
 
 		let recv = get_or_insert_recv(entry.get_mut(), streams.initial_stream_receive_window);
 		if recv.stopped {
-			return Err(ReadableError::ClosedStream);
+			return Err(Error::Closed);
 		}
 		let recv = entry.remove().unwrap().into_inner(); // initialized above
 		Ok(Self {
@@ -338,14 +440,15 @@ impl<'a> Chunks<'a> {
 		})
 	}
 
-	/// Next
+	/// The next contiguous chunk of at most `max_length` bytes, or `None` once the stream finished
 	///
-	/// Should call finalize() when done calling this.
-	pub fn next(&mut self, max_length: usize) -> Result<Option<Chunk>, ReadError> {
+	/// Fails with [`Error::Blocked`] until more arrives, or [`Error::Reset`]. Call
+	/// [`Self::finalize()`] when done.
+	pub fn next(&mut self, max_length: usize) -> Result<Option<Chunk>, Error> {
 		let rs = match &mut self.state {
 			ChunksState::Readable(rs) => rs,
 			ChunksState::Reset(error_code) => {
-				return Err(ReadError::Reset(*error_code));
+				return Err(Error::Reset(*error_code));
 			}
 			ChunksState::Finished => {
 				return Ok(None);
@@ -361,7 +464,7 @@ impl<'a> Chunks<'a> {
 		match rs.state {
 			RecvState::ResetRecvd { reliable_size, .. } if rs.assembler.unread_before(reliable_size) > 0 => {
 				// The data below the Reliable Size is still in flight
-				Err(ReadError::Blocked)
+				Err(Error::Blocked)
 			}
 			RecvState::ResetRecvd { error_code, .. } => {
 				let state = mem::replace(&mut self.state, ChunksState::Reset(error_code));
@@ -371,7 +474,7 @@ impl<'a> Chunks<'a> {
 					_ => unreachable!("state must be ChunkState::Readable"),
 				};
 				self.pending.max_data |= self.streams.stream_recv_freed(self.id, recv).should_transmit();
-				Err(ReadError::Reset(error_code))
+				Err(Error::Reset(error_code))
 			}
 			RecvState::Recv { size } => {
 				if size == Some(rs.end) && rs.assembler.bytes_read() == rs.end {
@@ -388,7 +491,7 @@ impl<'a> Chunks<'a> {
 					// retrying a read harmlessly re-traces our steps back to returning
 					// `Err(Blocked)` again. The buffers can't refill and the stream's own state
 					// can't change so long as this `Chunks` exists.
-					Err(ReadError::Blocked)
+					Err(Error::Blocked)
 				}
 			}
 		}
@@ -451,28 +554,43 @@ enum ChunksState {
 	Finalized,
 }
 
-/// Errors triggered when reading from a recv stream
-#[derive(Debug, Error, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum ReadError {
-	/// No more data is currently available on this stream.
-	///
-	/// If more data on this stream is received from the peer, an `Event::StreamReadable` will be
-	/// generated for this stream, indicating that retrying the read might succeed.
+/// Why a read or lease failed
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Error {
+	/// Nothing more has arrived yet; a [`StreamEvent::Readable`](super::StreamEvent::Readable)
+	/// says when to retry
 	#[error("blocked")]
 	Blocked,
-	/// The peer abandoned transmitting data on this stream.
-	///
-	/// Carries an application-defined error code.
+	/// The peer abandoned the stream, with its code
 	#[error("reset by peer: code {0}")]
 	Reset(VarInt),
+	/// The connection window was stuck and this stream was discarded to free it
+	///
+	/// The peer has not been told: stop the stream with [`Stream::stop()`] and a code of the
+	/// caller's choosing. Until then the peer may keep sending, which costs bandwidth but no
+	/// window, since it is credited on arrival, and the bytes the reader took keep their credit,
+	/// which holds further eviction off.
+	#[error("evicted")]
+	Evicted,
+	/// A lease wanted more bytes than the connection receive window can ever hold
+	#[error("want exceeds the receive window")]
+	TooLarge,
+	/// The stream was stopped, or never opened, or already read to its end
+	#[error("closed stream")]
+	Closed,
 }
 
-/// Errors triggered when opening a recv stream for reading
-#[derive(Debug, Error, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum ReadableError {
-	/// The stream has not been opened or was already stopped, finished, or reset
-	#[error("closed stream")]
-	ClosedStream,
+impl From<Error> for io::Error {
+	fn from(err: Error) -> Self {
+		let kind = match err {
+			Error::Blocked => io::ErrorKind::WouldBlock,
+			Error::Reset(_) | Error::Evicted => io::ErrorKind::ConnectionReset,
+			Error::TooLarge => io::ErrorKind::InvalidInput,
+			Error::Closed => io::ErrorKind::NotConnected,
+		};
+		Self::new(kind, err)
+	}
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

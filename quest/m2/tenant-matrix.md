@@ -15,8 +15,7 @@ matrix as a scratch harness at
 both runtimes. Today `rs/moq-relay/tests/integration/` checks tenant roots,
 mounts, and revalidation on Tokio only (`public_rules`, `auth_lifetime`,
 `session_revalidate`); io_uring has `runtime_uring`'s refusal counter.
-[SETUP Path refused on URL bindings](/quest/m1/security-audit/setup-path.md)
-shows the runtimes already diverge at admission.
+`refusals` checks both runtimes' SETUP Path refusal and request URI handling.
 
 The matrix, with credential `a` granted root `tenant-a` and `b` granted
 `tenant-b` whatever URL they dial:
@@ -57,7 +56,3 @@ coverage were not planned, since they can't run the syscall and C-caller
 paths and the audit's unsafe review found nothing.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [SETUP Path refused on URL bindings](/quest/m1/security-audit/setup-path.md) - its both-runtime test can share this matrix's setup

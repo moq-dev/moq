@@ -89,7 +89,12 @@ async fn decode(
 	let rendition = source.resolve(audio.broadcast.as_ref(), audio.epoch.as_ref()).await?;
 	let mut options = moq_audio::decode::Options::new();
 	options.output.format = moq_audio::Format::F32;
-	options.max_delay = Duration::from_secs(1);
+	// How far the read may fall behind live before it skips. A gap fails the run, which a reader
+	// skipping behind live would cause itself: the matrix starts every subscriber at once, and a
+	// runtime starved by the others can fall a second behind. That is this reader's speed, not the
+	// delivery under test. A track's max-age caps it, so interop.sh's Rust publisher keeps its
+	// media at least this long.
+	options.max_delay = Duration::from_secs(5);
 	let mut decoder = moq_audio::decode::Consumer::new(&rendition, audio, name, options).await?;
 	let rate = decoder.sample_rate();
 	let channels = decoder.layout().channels();

@@ -13,16 +13,28 @@ func TestStreamAbortProtocolDetails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	broadcast, err := moq.NewBroadcastProducer()
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	track, err := broadcast.PublishTrack("errors", nil)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	producer, err := track.AppendGroup()
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	consumer, err := broadcast.Consume()
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	group, err := consumer.FetchGroup(ctx, "errors", 0, nil)
-	if err != nil { t.Fatal(err) }
-	if err := producer.Abort(404); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := producer.Abort(404); err != nil {
+		t.Fatal(err)
+	}
 	_, err = group.ReadFrame(ctx)
 	details, ok := moq.ProtocolError(err)
 	if !ok || details.Scope != moq.ErrorScopeStream || details.Code != 468 || details.Kind != moq.ProtocolKindApp {

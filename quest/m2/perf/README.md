@@ -95,3 +95,5 @@ revisions on the same host and worker count, and profiles with
 - [Lite request allocations](/quest/m2/perf/lite-request-allocs.md) - `Path::concat` allocates once and the lite request handler keeps one track-name copy
 - [Coverage before START](/quest/m2/perf/covered-before-start.md) - the lite-07 publisher's coverage check costs O(1) per wake before SUBSCRIBE_START
 - [io_uring demux churn](/quest/m2/perf/uring-demux-churn.md) - the demux snapshots stats and builds its fed list once per completion, not per datagram
+- [Lock-free single-delivery writes](/quest/m2/perf/single-delivery-write.md) - a frame with one delivery writes without a lock, recovering #6922's remaining FETCH cost
+- [JS publisher per-frame cost](/quest/m2/perf/js-publisher-frame-cost.md) - fewer promise races per frame, and a per-frame cost that stays flat as streams grow
