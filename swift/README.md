@@ -36,10 +36,11 @@ let session = try await client.connect(to: "https://relay.example.com")
 let announced = try session.consume.announced(prefix: "demos/", filter: "*/camera")
 for try await event in announced {
     // `.update` reprices a route and `.end` retracts it. A `.restart` is a new
-    // publisher run at the same path: request it again.
+    // publisher run at the same path: request it again. A `.takeover` continues what an
+    // earlier route served, like a `.start`.
     let announcement: Announce
     switch event {
-    case .start(let started), .restart(let started): announcement = started
+    case .start(let started), .restart(let started), .takeover(let started, _): announcement = started
     default: continue
     }
     // Prefix stays origin-relative; captures reports what * matched.
@@ -78,7 +79,8 @@ Every consumer conforms to `AsyncSequence`, so `for try await x in consumer` wor
 Incoming server `Request` values expose the query-free `path` before acceptance. It is consistent across transports and is empty for the root or missing path. The encoded `query` may contain credentials.
 
 Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(_:timestampUs:)`
-returns the assigned sequence number, `TrackConsumer.recvDatagram()` receives one datagram,
+returns the assigned sequence number (`insertDatagram(_:sequence:timestampUs:)` takes the
+caller's own), `TrackConsumer.recvDatagram()` receives one datagram,
 and `TrackConsumer.datagrams` streams them in arrival order. Payloads are capped at 1200 bytes.
 Datagrams require a datagram-capable transport and lite-05 or newer moq-lite, or moq-transport;
 pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
