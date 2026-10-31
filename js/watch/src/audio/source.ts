@@ -2,7 +2,7 @@ import { Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { type CacheableSupported, supportCacheKey } from "../support-cache";
+import { SupportProbe } from "../support-probe";
 
 /** What the viewer wants from the audio rendition. */
 export type Target = {
@@ -33,6 +33,11 @@ export type SourceInput = {
 export type SourceOutput = {
 	catalog: Signal<Catalog.Audio | undefined>;
 	available: Signal<Record<string, Catalog.AudioConfig>>;
+
+	// Why no rendition can be chosen, or undefined while healthy or still probing. A
+	// `NotSupportedError` means the browser can decode none of the catalog's renditions.
+	error: Signal<Error | undefined>;
+
 	track: Signal<string | undefined>;
 	config: Signal<Catalog.AudioConfig | undefined>;
 
@@ -48,18 +53,20 @@ export class Source {
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<SourceInput>;
 
+	#probe = new SupportProbe<Catalog.AudioConfig>("audio");
+
 	readonly #out: SourceOutput = {
 		catalog: new Signal<Catalog.Audio | undefined>(undefined),
 		available: new Signal<Record<string, Catalog.AudioConfig>>({}),
+		error: this.#probe.error,
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.AudioConfig | undefined>(undefined),
 		jitter: new Signal<Milli | undefined>(undefined),
 	};
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
-	#pending = new Signal(false);
 	/** Whether rendition support is still being resolved. @internal */
-	readonly pending: Getter<boolean> = this.#pending;
+	readonly pending: Getter<boolean> = this.#probe.pending;
 
 	// The last selection, which a disable holds while no enabled rendition remains.
 	#held?: { broadcast: Broadcast; track: string };
@@ -69,7 +76,6 @@ export class Source {
 	#probed = new Signal<Broadcast | undefined>(undefined);
 
 	#signals = new Effect();
-	#supportCache = new WeakMap<Supported, Map<string, { key: string; supported: boolean }>>();
 
 	constructor(props?: Inputs<SourceInput>) {
 		this.in = {
@@ -94,62 +100,13 @@ export class Source {
 	}
 
 	#runSupported(effect: Effect): void {
+		const supported = effect.get(this.in.supported);
 		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
 		const broadcast = effect.get(this.in.broadcast);
 		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.audio?.renditions) ?? {};
-		const supported = effect.get(this.in.supported);
-		if (!supported) return;
-
-		let cache = this.#supportCache.get(supported);
-		if (!cache) {
-			cache = new Map();
-			this.#supportCache.set(supported, cache);
-		}
-		// Retain only the latest config per current rendition, not a catalog's history.
-		const names = new Set(Object.keys(renditions));
-		for (const name of cache.keys()) {
-			if (!names.has(name)) cache.delete(name);
-		}
-		const cacheKey = (supported as CacheableSupported<Catalog.AudioConfig>)[supportCacheKey];
-
-		effect.set(this.#pending, true, false);
-		effect.spawn(async () => {
-			try {
-				const available: Record<string, Catalog.AudioConfig> = {};
-
-				for (const [name, config] of Object.entries(renditions)) {
-					const key = cacheKey ? cacheKey(config) : JSON.stringify(config);
-					const cached = cache.get(name);
-					let isSupported = cached?.key === key ? cached.supported : undefined;
-					if (isSupported === undefined) {
-						try {
-							// A consumer's probe may never settle; teardown must still release this run.
-							isSupported = await effect.race(supported(config));
-						} catch (err) {
-							if (effect.abort.aborted) return;
-							console.warn(
-								`[Source] audio rendition ${name} (${config.codec}) support probe failed; treating as unsupported`,
-								err,
-							);
-						}
-
-						// A canceled or rejected probe supplies no verdict for the next run.
-						if (effect.abort.aborted) return;
-						if (isSupported !== undefined) cache.set(name, { key, supported: isSupported });
-					}
-
-					if (isSupported) available[name] = config;
-				}
-
-				if (Object.keys(available).length === 0 && Object.keys(renditions).length > 0) {
-					console.warn("no supported audio renditions found:", renditions);
-				}
-
-				this.#probed.set(broadcast);
-				this.#out.available.set(available);
-			} finally {
-				this.#pending.set(false);
-			}
+		this.#probe.run(effect, supported, renditions, (available) => {
+			this.#probed.set(broadcast);
+			this.#out.available.set(available);
 		});
 	}
 
@@ -200,6 +157,5 @@ export class Source {
 	/** Stop and release everything this holds. */
 	close(): void {
 		this.#signals.close();
-		this.#supportCache = new WeakMap();
 	}
 }

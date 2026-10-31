@@ -5,7 +5,7 @@ import { Signal } from "@moq/signals";
 import { decoderConfigKey } from "../src/audio/config";
 import { Source } from "../src/audio/source";
 import type { Broadcast } from "../src/broadcast";
-import { supportCacheKey } from "../src/support-cache";
+import { supportCacheKey } from "../src/support-probe";
 
 /** Measure metadata updates over rendition count, checking every published config. */
 export async function run(): Promise<void> {

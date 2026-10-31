@@ -17,7 +17,7 @@ import {
 import { rotateVideoDimensions } from "@moq/video";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
-import { supportCacheKey } from "../support-cache";
+import { supportCacheKey } from "../support-probe";
 import type { Sync } from "../sync";
 import { type DecoderConfig, decoderConfigKey, type PlaybackIdentity, playbackIdentity } from "./config";
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";

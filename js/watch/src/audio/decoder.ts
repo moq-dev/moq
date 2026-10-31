@@ -17,7 +17,7 @@ import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
-import { supportCacheKey } from "../support-cache";
+import { supportCacheKey } from "../support-probe";
 import type { Sync } from "../sync";
 import { AudioBuffer } from "./buffer";
 import {

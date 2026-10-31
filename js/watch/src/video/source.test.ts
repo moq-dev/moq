@@ -3,7 +3,7 @@ import * as Catalog from "@moq/hang/catalog";
 import { Path } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
-import { supportCacheKey } from "../support-cache";
+import { supportCacheKey } from "../support-probe";
 import { decoderConfigKey } from "./config";
 import { Source } from "./source";
 
