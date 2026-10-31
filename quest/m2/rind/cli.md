@@ -23,4 +23,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [rind covers MoQ](/quest/m2/rind/covered.md) - the rind release this switches to
+- [rind 0.1.0 is on crates.io](/quest/m2/rind/released.md) - the rind release this switches to
