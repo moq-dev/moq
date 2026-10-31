@@ -86,10 +86,11 @@ async fn segments_match_their_manifests() {
 		import.decode(chunk).expect("decode");
 		if i == CHUNKS / 3 {
 			// What a publisher's estimator writes back: the rendition keeps its instance and its URLs.
+			// A published jitter only ever rises, so the edit raises it and never lowers it.
 			let mut catalog = catalog.modify().expect("catalog open");
 			for config in catalog.video.renditions.values_mut() {
 				config.bitrate = Some(1_234_567);
-				config.jitter = Some(Duration::from_millis(40));
+				config.jitter = config.jitter.max(Some(Duration::from_millis(40)));
 			}
 		}
 		settle().await;
@@ -185,6 +186,8 @@ async fn encode(dir: &Path) -> Vec<u8> {
 		"aac",
 		"-b:a",
 		"96k",
+		"-max_interleave_delta",
+		"0",
 		"-f",
 		"mpegts",
 		ts.to_str().expect("utf-8"),
@@ -821,13 +824,13 @@ fn reorder(init: &[u8], segment: &[u8]) -> f64 {
 					.traf
 					.iter()
 					.flat_map(|traf| &traf.trun)
-					.flat_map(|trun| &trun.entries);
-				offset = offsets.filter_map(|entry| entry.cts).fold(offset, i32::min);
+					.flat_map(|trun| trun.samples.iter());
+				offset = offsets.filter_map(|entry| entry.cts).fold(offset, i64::min);
 			}
 			_ => {}
 		}
 	}
-	-f64::from(offset) / f64::from(timescale.expect("an init"))
+	-(offset as f64) / f64::from(timescale.expect("an init"))
 }
 
 /// Decode a whole fMP4 with ffprobe.
