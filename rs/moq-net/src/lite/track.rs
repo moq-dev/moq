@@ -17,9 +17,9 @@ const LEGACY_UNLIMITED: u64 = (1u64 << 53) - 1;
 #[derive(Clone, Debug)]
 pub struct Track<'a> {
 	pub broadcast: Path,
-	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
+	/// The identity the subscriber expects; see [`crate::origin::Route::identity`].
 	/// Lite07+ only.
-	pub epoch: Option<crate::Epoch>,
+	pub identity: Option<crate::Identity>,
 	pub track: Cow<'a, str>,
 }
 
@@ -28,7 +28,7 @@ impl Track<'_> {
 	pub fn into_owned(self) -> Track<'static> {
 		Track {
 			broadcast: self.broadcast,
-			epoch: self.epoch,
+			identity: self.identity,
 			track: Cow::Owned(self.track.into_owned()),
 		}
 	}
@@ -42,12 +42,12 @@ impl<'a> Message<'a> for Track<'a> {
 		}
 
 		let broadcast = Path::decode(r, version)?;
-		let epoch = super::epoch::decode_epoch(r, version)?;
+		let identity = super::identity::decode_pin(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 
 		Ok(Self {
 			broadcast,
-			epoch,
+			identity,
 			track,
 		})
 	}
@@ -58,7 +58,7 @@ impl<'a> Message<'a> for Track<'a> {
 		}
 
 		self.broadcast.encode(w, version)?;
-		super::epoch::encode_epoch(w, version, self.epoch.as_ref())?;
+		super::identity::encode_pin(w, version, self.identity.as_ref())?;
 		w.string(&self.track)?;
 		Ok(())
 	}
@@ -493,7 +493,7 @@ mod test {
 	#[test]
 	fn track_request_roundtrips_on_lite05() {
 		let msg = Track {
-			epoch: None,
+			identity: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};
@@ -509,7 +509,7 @@ mod test {
 	#[test]
 	fn track_request_errors_before_lite05() {
 		let msg = Track {
-			epoch: None,
+			identity: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};

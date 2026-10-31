@@ -3,16 +3,17 @@
 //! A subscription survives its route changing, end to end over real sessions.
 //!
 //! A publisher `P` is pulled by two relays `A` and `B`, both of which re-advertise
-//! it to the subscribing relay `R`. Both routes carry `P`'s epoch, so `R` may resume
+//! it to the subscribing relay `R`. Both routes carry `P`'s identity, so `R` may resume
 //! a subscription served through one onto the other. The reader on `R` must see
 //! every frame exactly once, in order, whether the route changes between groups or
 //! in the middle of one, and however it changes.
 //!
-//! moq-transport and older lite versions carry no epoch, so `R` cannot tell the
-//! two routes serve the same bytes: its subscription stays on its route and ends with
-//! it, while a better route restarts the path for new requests.
+//! Only lite-07 carries the identity. Older lite versions and moq-transport carry none,
+//! so `R` mints one per route and cannot tell the two serve the same bytes: its
+//! subscription stays on its route and ends with it, while a better route restarts the
+//! path for new requests.
 //!
-//! Two publishers sharing one explicit epoch, a redundant pair, are one source the
+//! Two publishers sharing one stable identity, a redundant pair, are one source the
 //! same way.
 
 use crate::support;
@@ -115,7 +116,7 @@ impl Topology {
 		let broadcast = publisher.create_broadcast("live").unwrap();
 		let track = broadcast.create_track("video", timed()).unwrap();
 		broadcast
-			.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+			.announce(origin::Route::default().with_identity(moq_net::Identity::random(), 0))
 			.unwrap();
 
 		let p_to_a = link(version, &publisher, &relay_a).await;
@@ -321,10 +322,10 @@ async fn route_flaps(version: &str) {
 	assert!(rx.try_recv().is_err(), "{version}: trailing delivery");
 }
 
-/// A wire without epochs: the subscription stays on `A` while `B` stands by, and
+/// A wire without identities: the subscription stays on `A` while `B` stands by, and
 /// ends when `A`'s route goes instead of resuming through `B`. A re-request then
 /// lands on `B`.
-async fn route_dies_without_an_epoch(version: &str, trigger: Trigger) {
+async fn route_dies_across_identities(version: &str, trigger: Trigger) {
 	let version: Version = version.parse().unwrap();
 	let (mut topology, sub) = Topology::new(version).await;
 	let mut rx = read(sub);
@@ -367,7 +368,7 @@ async fn route_dies_without_an_epoch(version: &str, trigger: Trigger) {
 	while next(&mut rx).await != (2, payload(2, 0)) {}
 }
 
-/// A wire without epochs: a better route is another source. `R` restarts the path, the
+/// A wire without identities: a better route is another source. `R` restarts the path, the
 /// subscription already on `A` stays there, and a re-request lands on the better route.
 async fn better_route_restarts(version: &str) {
 	let version: Version = version.parse().unwrap();
@@ -473,7 +474,7 @@ macro_rules! pinned_tests {
 				use super::*;
 
 				async fn run(trigger: Trigger) {
-					moq_clock::timeout(TEST_TIMEOUT, route_dies_without_an_epoch($version, trigger))
+					moq_clock::timeout(TEST_TIMEOUT, route_dies_across_identities($version, trigger))
 						.await
 						.expect("timed out");
 				}
@@ -488,7 +489,7 @@ macro_rules! pinned_tests {
 					run(Trigger::Unannounce).await;
 				}
 
-				/// A better route without an epoch wins new requests and announces as a
+				/// A better route under another identity wins new requests and announces as a
 				/// restart, while the incumbent's subscriptions continue.
 				#[moq_clock::test]
 				async fn better_route_keeps_the_incumbent() {
@@ -502,11 +503,11 @@ macro_rules! pinned_tests {
 }
 
 pinned_tests! {
-	ietf_18: "moq-transport-18",
-	ietf_22: "moq-transport-22",
 	lite_06: "moq-lite-06",
 	lite_05: "moq-lite-05",
 	lite_04: "moq-lite-04",
+	ietf_18: "moq-transport-18",
+	ietf_22: "moq-transport-22",
 }
 
 /// `P` feeds `A` slowly and `B` promptly, and `R` reads through `A` until that route dies
@@ -542,7 +543,7 @@ async fn lagging_route_dies(version: Version) {
 	let broadcast = p.create_broadcast("live").unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast
-		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(origin::Route::default().with_identity(moq_net::Identity::random(), 0))
 		.unwrap();
 	let p_a = lagged(version, &p, &a, Duration::from_millis(300)).await;
 	let p_b = lagged(version, &p, &b, Duration::ZERO).await;
@@ -631,7 +632,7 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 	let broadcast = p.create_broadcast("live").unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast
-		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(origin::Route::default().with_identity(moq_net::Identity::random(), 0))
 		.unwrap();
 	let p_o = link(version, &p, &o).await;
 	let o_m1 = link(version, &o, &m1).await;
@@ -755,22 +756,19 @@ struct Replica {
 	link: Option<MockPair>,
 }
 
-/// A redundant pair: `P1` and `P2` publish `live` under one explicit epoch and write
-/// the same frames, tagged with their name. `R` reads through `P1`, priced below `P2`
-/// so it starts there, until `P1` goes mid-group. `R` resumes on `P2` from the first frame its reader
-/// lacks: every frame once, in order, and no timestamp ever rewinds.
-async fn redundant_pair_fails_over(version: &str, loss: Loss) {
+/// A redundant pair: `P1` and `P2` publish `live`, each its own stream under its own
+/// identity, priced so `R` starts on `P1`. Each writes frames tagged with its name. When
+/// `P1` goes, its broadcast ends rather than stitching `P2`'s groups onto what the reader
+/// already has, and `follow` hands out `P2`'s broadcast next.
+async fn redundant_pair_follows_the_next_identity(version: &str, loss: Loss) {
 	let version: Version = version.parse().unwrap();
-	let epoch = moq_net::Epoch::mint();
 	let subscriber = produce_origin(4);
 	let mut replicas = Vec::new();
 	for (name, hop, cost) in [("P1", 1, 1), ("P2", 2, 5)] {
 		let publisher = produce_origin(hop);
 		let broadcast = publisher.create_broadcast("live").unwrap();
 		let track = broadcast.create_track("video", timed()).unwrap();
-		broadcast
-			.announce(origin::Route::default().with_epoch(epoch.clone()).with_cost(cost))
-			.unwrap();
+		broadcast.announce(origin::Route::default().with_cost(cost)).unwrap();
 		let link = link(version, &publisher, &subscriber).await;
 		replicas.push(Replica {
 			name,
@@ -783,90 +781,98 @@ async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 	}
 	settle().await;
 
-	let consumer = subscriber.consume();
-	let remote = consumer.request("live", None).await.unwrap();
+	let mut follow = subscriber.consume().follow("live", None).unwrap();
+	let first = follow.available().await.unwrap();
 	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
-	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
+	let mut rx = read(first.track("video").unwrap().subscribe(prefs.clone()).await.unwrap());
+	let write = |replicas: &mut Vec<Replica>, sequence: u64| {
+		for replica in replicas.iter_mut() {
+			let mut group = replica.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			group
+				.write_frame(
+					Timestamp::from_micros(1_000_000 + sequence * 1_000).unwrap(),
+					tagged(replica.name, sequence, 0),
+				)
+				.unwrap();
+			group.finish().unwrap();
+		}
+	};
+	write(&mut replicas, 0);
+	assert_eq!(next(&mut rx).await, (0, tagged("P1", 0, 0)), "{version} {loss:?}");
 
-	let mut expected = Vec::new();
-	let mut seen = Vec::new();
-	let mut kept = None;
-	for sequence in 0..3 {
-		for replica in &mut replicas {
-			replica.group = Some(replica.track.append_group().unwrap());
+	let Replica {
+		origin,
+		broadcast,
+		link,
+		..
+	} = replicas.remove(0);
+	let link = link.unwrap();
+	let kept = match loss {
+		Loss::Unreachable => {
+			link.server.abort(Error::Cancel);
+			link.client.abort(Error::Cancel);
+			None
 		}
-		for frame in 0..FRAMES {
-			if sequence == 1 && frame == FRAMES / 2 {
-				let Replica {
-					origin,
-					broadcast,
-					link,
-					..
-				} = replicas.remove(0);
-				let link = link.unwrap();
-				match loss {
-					Loss::Unreachable => {
-						link.server.abort(Error::Cancel);
-						link.client.abort(Error::Cancel);
-					}
-					// Keep the session and its origin up: only the broadcast, its track, and its open group go.
-					Loss::Ends => kept = Some((link, origin)),
-				}
-				drop(broadcast);
-				settle().await;
-			}
-			let timestamp = Timestamp::from_micros(1_000_000 + sequence * 100_000 + frame * 1_000).unwrap();
-			for replica in &mut replicas {
-				let group = replica.group.as_mut().unwrap();
-				group
-					.write_frame(timestamp, tagged(replica.name, sequence, frame))
-					.unwrap();
-			}
-			// The cheapest replica still up serves it.
-			expected.push((sequence, tagged(replicas[0].name, sequence, frame)));
-			seen.push(next_timed(&mut rx).await);
-		}
-		for replica in &mut replicas {
-			replica.group.take().unwrap().finish().unwrap();
-		}
-	}
-
-	let frames: Vec<_> = seen.iter().map(|(group, _, frame)| (*group, frame.clone())).collect();
-	assert_eq!(frames, expected, "{version} {loss:?}");
-	for pair in seen.windows(2) {
-		assert!(
-			pair[0].1.expect("timed") < pair[1].1.expect("timed"),
-			"{version} {loss:?}: timestamp rewound at {pair:?}"
-		);
-	}
+		// Keep the session and its origin up: only the broadcast goes.
+		Loss::Ends => Some((link, origin)),
+	};
+	drop(broadcast);
 	settle().await;
-	assert!(rx.try_recv().is_err(), "{version} {loss:?}: trailing delivery");
+
+	let second = follow.available().await.unwrap();
+	assert!(
+		!second.is_clone(&first),
+		"{version} {loss:?}: handed out the old broadcast"
+	);
+	assert_ne!(second.info().identity, first.info().identity, "{version} {loss:?}");
+	// A fresh subscription on `P2`'s own stream, starting from its latest group.
+	let mut next_rx = read(second.track("video").unwrap().subscribe(prefs).await.unwrap());
+	assert_eq!(next(&mut next_rx).await, (0, tagged("P2", 0, 0)), "{version} {loss:?}");
+	write(&mut replicas, 1);
+	assert_eq!(next(&mut next_rx).await, (1, tagged("P2", 1, 0)), "{version} {loss:?}");
+
+	// Nothing of `P2` was stitched onto the first broadcast.
+	settle().await;
+	while let Ok((group, frame)) = rx.try_recv() {
+		if let Ok((_, frame)) = frame {
+			panic!(
+				"{version} {loss:?}: stitched onto the first broadcast at {group}:{}",
+				String::from_utf8_lossy(&frame)
+			);
+		}
+	}
 	drop(kept);
 }
 
 #[moq_clock::test]
-async fn redundant_pair_fails_over_when_unreachable() {
-	moq_clock::timeout(
-		TEST_TIMEOUT,
-		redundant_pair_fails_over("moq-lite-07-wip", Loss::Unreachable),
-	)
-	.await
-	.expect("timed out");
+async fn redundant_pair_follows_the_next_identity_when_unreachable() {
+	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"] {
+		moq_clock::timeout(
+			TEST_TIMEOUT,
+			redundant_pair_follows_the_next_identity(version, Loss::Unreachable),
+		)
+		.await
+		.expect("timed out");
+	}
 }
 
 #[moq_clock::test]
-async fn redundant_pair_fails_over_when_the_incumbent_ends() {
-	moq_clock::timeout(TEST_TIMEOUT, redundant_pair_fails_over("moq-lite-07-wip", Loss::Ends))
+async fn redundant_pair_follows_the_next_identity_when_the_incumbent_ends() {
+	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"] {
+		moq_clock::timeout(
+			TEST_TIMEOUT,
+			redundant_pair_follows_the_next_identity(version, Loss::Ends),
+		)
 		.await
 		.expect("timed out");
+	}
 }
 
-/// `P1` and `P2` both publish `live` to the relay `R`, `P2` priced to stand by, and
-/// `D` reads through `R`. `P1`'s session to `R` dies mid-group. When both name one
-/// epoch on a wire that carries it, `R` resumes on `P2` and `D` sees every frame once.
-/// Otherwise `D`'s track ends with the error: a re-request through `R` would be
-/// answered by `P2`, another instance, stitched onto what `D` already read.
-async fn replaced_behind_a_relay(version: &str, epoch: Option<moq_net::Epoch>, resumes: bool) {
+/// `P1` and `P2` both publish `live` to the relay `R`, each under its own identity, `P2`
+/// priced to stand by, and `D` reads through `R`. `P1`'s session to `R` dies mid-group.
+/// `D`'s track ends with the error: a re-request through `R` would be answered by `P2`,
+/// another stream, stitched onto what `D` already read.
+async fn replaced_behind_a_relay(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let relay = produce_origin(3);
 	let downstream = produce_origin(4);
@@ -875,11 +881,7 @@ async fn replaced_behind_a_relay(version: &str, epoch: Option<moq_net::Epoch>, r
 		let publisher = produce_origin(hop);
 		let broadcast = publisher.create_broadcast("live").unwrap();
 		let track = broadcast.create_track("video", timed()).unwrap();
-		let route = match &epoch {
-			Some(epoch) => origin::Route::default().with_epoch(epoch.clone()),
-			None => origin::Route::default(),
-		};
-		broadcast.announce(route).unwrap();
+		broadcast.announce(origin::Route::default()).unwrap();
 		let link = priced_link(version, &publisher, &relay, cost).await;
 		replicas.push(Replica {
 			name,
@@ -918,7 +920,7 @@ async fn replaced_behind_a_relay(version: &str, epoch: Option<moq_net::Epoch>, r
 					.write_frame(timestamp, tagged(replica.name, sequence, frame))
 					.unwrap();
 			}
-			if resumes || dead.is_none() {
+			if dead.is_none() {
 				let expected = (sequence, tagged(replicas[0].name, sequence, frame));
 				assert_eq!(next(&mut rx).await, expected, "{version}");
 			}
@@ -929,52 +931,30 @@ async fn replaced_behind_a_relay(version: &str, epoch: Option<moq_net::Epoch>, r
 	}
 	settle().await;
 
-	if resumes {
-		assert!(rx.try_recv().is_err(), "{version}: trailing delivery");
-	} else {
-		let mut failed = false;
-		while let Ok((group, frame)) = rx.try_recv() {
-			match frame {
-				Ok((_, frame)) => panic!(
-					"{version}: stitched onto the replacement at {group}:{}",
-					String::from_utf8_lossy(&frame)
-				),
-				Err(_) => failed = true,
-			}
+	let mut failed = false;
+	while let Ok((group, frame)) = rx.try_recv() {
+		match frame {
+			Ok((_, frame)) => panic!(
+				"{version}: stitched onto the replacement at {group}:{}",
+				String::from_utf8_lossy(&frame)
+			),
+			Err(_) => failed = true,
 		}
-		assert!(failed, "{version}: the track did not end with the upstream error");
 	}
+	assert!(failed, "{version}: the track did not end with the upstream error");
 	drop((dead, replicas));
 }
 
 #[moq_clock::test]
-async fn replaced_without_an_epoch_ends_lite_06() {
-	moq_clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-06", None, false))
+async fn replaced_under_another_identity_ends_lite_06() {
+	moq_clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-06"))
 		.await
 		.expect("timed out");
 }
 
 #[moq_clock::test]
-async fn replaced_without_an_epoch_ends_lite_07() {
-	moq_clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-07-wip", None, false))
-		.await
-		.expect("timed out");
-}
-
-/// The relay resumes a pair sharing an epoch, so nothing reaches `D`.
-#[moq_clock::test]
-async fn pair_behind_a_relay_fails_over_lite_07() {
-	let epoch = Some(moq_net::Epoch::mint());
-	moq_clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-07-wip", epoch, true))
-		.await
-		.expect("timed out");
-}
-
-/// lite-06 carries no epoch, so the relay cannot tell the pair is one broadcast.
-#[moq_clock::test]
-async fn pair_behind_a_relay_ends_lite_06() {
-	let epoch = Some(moq_net::Epoch::mint());
-	moq_clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-06", epoch, false))
+async fn replaced_under_another_identity_ends_lite_07() {
+	moq_clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-07-wip"))
 		.await
 		.expect("timed out");
 }
@@ -986,7 +966,7 @@ async fn pair_behind_a_relay_ends_lite_06() {
 /// reads `P2`'s groups under `P1`'s framing, and the track ends with the refusal.
 async fn compression_changes_behind_a_relay(compress: bool) {
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
-	let epoch = moq_net::Epoch::mint();
+	let epoch = moq_net::Identity::random();
 	let relay = produce_origin(3);
 	let downstream = produce_origin(4);
 	let mut replicas = Vec::new();
@@ -997,7 +977,7 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 			.create_track("video", timed().with_compress(compress))
 			.unwrap();
 		broadcast
-			.announce(origin::Route::default().with_epoch(epoch.clone()))
+			.announce(origin::Route::default().with_identity(epoch.clone(), 0))
 			.unwrap();
 		let link = priced_link(version, &publisher, &relay, cost).await;
 		replicas.push(Replica {
@@ -1091,7 +1071,7 @@ async fn producer_replaced(version: &str) {
 	let broadcast = publisher.create_broadcast("live").unwrap();
 	let mut dynamic = broadcast.requests();
 	broadcast
-		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(origin::Route::default().with_identity(moq_net::Identity::random(), 0))
 		.unwrap();
 	let (tx, mut producers) = mpsc::unbounded();
 	moq_clock::sim::spawn(async move {

@@ -7272,7 +7272,7 @@ impl Subscriber {
 	/// edge and writes the rest off; raise it to read history. [`Self::with_range`] and
 	/// [`Subscription::ranges`] are filters, not exemptions: backfill needs a budget that
 	/// covers it. [`Consumer::fetch_group`] is the way to ask for one old group outright.
-	/// Across same-epoch route copies, the lowest next buffered group is delivered
+	/// Across same-identity route copies, the lowest next buffered group is delivered
 	/// first; a lower group that arrives later is still delivered in arrival order.
 	/// The budget remains attached to a returned group: if it stalls while newer data
 	/// advances, its pending frame read ends with [`Error::Old`].

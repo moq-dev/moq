@@ -21,7 +21,7 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, 
 	connect_mock(options).await
 }
 
-/// `carries_epoch`: the wire carries the epoch, as lite-07 does.
+/// `carries_epoch`: the wire carries the publisher's identity, as only lite-07 does.
 async fn acquisition(version: &str, carries_epoch: bool) {
 	let version: Version = version.parse().unwrap();
 	let publisher = origin(1);
@@ -29,7 +29,7 @@ async fn acquisition(version: &str, carries_epoch: bool) {
 	let broadcast = publisher.create_broadcast("live").unwrap();
 	let mut dynamic = broadcast.requests();
 	broadcast
-		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(origin::Route::default().with_identity(moq_net::Identity::random(), 0))
 		.unwrap();
 	let _old = link(version, &publisher, &subscriber, 100).await;
 	let remote = subscriber
@@ -52,7 +52,8 @@ async fn acquisition(version: &str, carries_epoch: bool) {
 	// The publisher is still available and the old session remains alive. Holding
 	// TRACK_INFO makes the replacement happen during acquisition without sleeps.
 	let _new = link(version, &publisher, &subscriber, 1).await;
-	// An epochless replacement restarts the advertisement; a matching epoch only updates it.
+	// A replacement under a minted identity restarts the advertisement; a carried one only
+	// updates it.
 	let new_cost = match announced.next().await {
 		Some(moq_net::announce::Event::Update(announce)) if carries_epoch => announce.route.cost,
 		Some(moq_net::announce::Event::Restart(announce)) if !carries_epoch => announce.route.cost,
@@ -71,20 +72,20 @@ async fn acquisition(version: &str, carries_epoch: bool) {
 	} else {
 		assert!(
 			matches!(result, Err(Error::Unroutable)),
-			"epochless replacement: {:?}",
+			"minted replacement: {:?}",
 			result.err()
 		);
 	}
 }
 
 #[moq_clock::test]
-async fn epochless_replacement_refuses_pending_catalog() {
+async fn minted_replacement_refuses_pending_catalog() {
 	acquisition("moq-lite-06", false).await;
 	acquisition("moq-transport-18", false).await;
 	acquisition("moq-transport-22", false).await;
 }
 
 #[moq_clock::test]
-async fn same_epoch_replacement_acquires_pending_catalog() {
+async fn carried_replacement_acquires_pending_catalog() {
 	acquisition("moq-lite-07-wip", true).await;
 }

@@ -705,7 +705,7 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 		let broadcast = publisher.create_broadcast("bench").unwrap();
 		let track = broadcast.create_track("catalog", timed()).unwrap();
 		broadcast
-			.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+			.announce(moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0))
 			.unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"catalog".as_ref()).unwrap();
@@ -785,7 +785,7 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 			.write_frame(Timestamp::from_millis(1000).unwrap(), b"newer".as_ref())
 			.unwrap();
 		newer.finish().unwrap();
-		// Epochless wires end the old holder on takeover. The late reader uses the
+		// Unnamed wires end the old holder on takeover. The late reader uses the
 		// current route on every version, and keeps that copy live for the expiry check.
 		assert_eq!(later.recv_group().await.unwrap().unwrap().sequence, 1, "{version}");
 		moq_clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;

@@ -349,8 +349,10 @@ impl AnnounceWriter {
 		let msg = match announced {
 			Announced::Start(suffix, hops) => {
 				let (_, suffix, hops) = self.encoder.start(suffix.clone(), hops.clone());
+				// A fixed identity, so the bytes stay pinned and match what `js/net` writes.
 				lite::AnnounceBroadcast::Active {
-					epoch: None,
+					identity: self.version.has_identity().then(|| "a".parse().unwrap()),
+					epoch: 0,
 					suffix,
 					hops,
 					cost: Default::default(),
@@ -620,7 +622,7 @@ impl LiteSample {
 			.unwrap(),
 			Self::Subscribe => lite::Subscribe {
 				order: crate::track::Order::Descending,
-				epoch: None,
+				identity: None,
 				id: 3,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -825,7 +827,7 @@ impl Default for Messages {
 		Self {
 			lite_subscribe: lite::Subscribe {
 				order: crate::track::Order::Descending,
-				epoch: None,
+				identity: None,
 				id: 7,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -1004,7 +1006,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 		false => lite::Subscribe {
 			id: 0,
 			broadcast: broadcast.clone(),
-			epoch: None,
+			identity: None,
 			track: track.into(),
 			priority: 0,
 			max_delay: std::time::Duration::ZERO,

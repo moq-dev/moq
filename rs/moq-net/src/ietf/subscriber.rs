@@ -2453,6 +2453,8 @@ impl Subscriber {
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(entry) => {
 				let entry = entry.into_mut();
+				// Another advertisement of a namespace the peer holds is the same stream.
+				route.identity = entry.route.identity.clone();
 				match entry.adverts.iter().position(|(advert, _)| *advert == id) {
 					Some(index) => entry.adverts[index].1 = route,
 					None => entry.adverts.push((id, route)),
@@ -2470,6 +2472,9 @@ impl Subscriber {
 				Ok(())
 			}
 			Entry::Vacant(entry) => {
+				// moq-transport carries no identity, so each namespace the peer advertises anew
+				// is a stream of its own, even one it advertised before on this session.
+				route.identity = Some(crate::Identity::minted());
 				// A peer past its limits loses the session, not just this namespace.
 				let slot = match slot {
 					Some(slot) => slot,
@@ -7511,7 +7516,7 @@ mod tests {
 		}
 	}
 
-	/// An unanswered epochless request cannot prove which instance the peer resolved.
+	/// An unanswered unnamed request cannot prove which instance the peer resolved.
 	/// Retiring its source cancels it even while the caller keeps its demand.
 	#[moq_clock::test]
 	async fn a_retirement_before_subscribe_ok_refuses_the_subscription() {
@@ -8627,7 +8632,7 @@ mod tests {
 	}
 
 	/// Two sessions assigned the same identity announce the same anonymous chain.
-	/// Without an epoch the fresh session is another source, so consumers restart
+	/// Under another identity the fresh session is another source, so consumers restart
 	/// once, and retracting the stale session leaves the fresh route standing quietly.
 	#[moq_clock::test]
 	async fn reconnecting_peer_restarts_the_route() {

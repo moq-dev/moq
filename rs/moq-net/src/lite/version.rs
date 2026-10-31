@@ -291,11 +291,10 @@ impl Version {
 		)
 	}
 
-	/// Whether announcements and track requests carry the publisher epoch, the
-	/// identity that says two routes serve the same bytes. Added in lite-07.
-	/// Older versions carry nothing, so a received route has no epoch and is
-	/// never resumed through another route.
-	pub fn has_epoch(self) -> bool {
+	/// Whether announcements carry their identity and epoch, and track requests the
+	/// identity they pin. Added in lite-07. Older versions carry nothing, so the
+	/// receiving session mints an identity for each announcement.
+	pub fn has_identity(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06

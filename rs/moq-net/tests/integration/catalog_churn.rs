@@ -283,7 +283,7 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 	let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 	let track = broadcast.create_track("catalog.json", info).unwrap();
 	broadcast
-		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(origin::Route::default().with_identity(moq_net::Identity::random(), 0))
 		.unwrap();
 
 	let upstream = vec![

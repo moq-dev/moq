@@ -19,8 +19,8 @@ const SYNCED: u64 = 0x4;
 #[derive(Clone, Debug)]
 pub struct Tracks {
 	pub broadcast: Path,
-	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
-	pub epoch: Option<crate::Epoch>,
+	/// The identity the subscriber expects; see [`crate::origin::Route::identity`].
+	pub identity: Option<crate::Identity>,
 }
 
 impl<'a> Message<'a> for Tracks {
@@ -30,8 +30,8 @@ impl<'a> Message<'a> for Tracks {
 			return Err(DecodeError::Version);
 		}
 		let broadcast = Path::decode(r, version)?;
-		let epoch = super::epoch::decode_epoch(r, version)?;
-		Ok(Self { broadcast, epoch })
+		let identity = super::identity::decode_pin(r, version)?;
+		Ok(Self { broadcast, identity })
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -39,7 +39,7 @@ impl<'a> Message<'a> for Tracks {
 			return Err(EncodeError::Version);
 		}
 		self.broadcast.encode(w, version)?;
-		super::epoch::encode_epoch(w, version, self.epoch.as_ref())
+		super::identity::encode_pin(w, version, self.identity.as_ref())
 	}
 }
 
@@ -206,22 +206,22 @@ mod test {
 
 	#[test]
 	fn the_request_roundtrips() {
-		let epoch: crate::Epoch = "01900000-0000-7000-8000-000000000001".parse().unwrap();
+		let identity: crate::Identity = "alice".parse().unwrap();
 		let msg = Tracks {
 			broadcast: Path::from_static("room/alice"),
-			epoch: Some(epoch.clone()),
+			identity: Some(identity.clone()),
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
 		let (got, _) = Tracks::decode_slice(&buf, Version::Lite07).unwrap();
 		assert_eq!(got.broadcast, Path::from_static("room/alice"));
-		assert_eq!(got.epoch, Some(epoch));
+		assert_eq!(got.identity, Some(identity));
 	}
 
 	#[test]
 	fn older_versions_have_no_tracks_stream() {
 		let msg = Tracks {
 			broadcast: Path::from_static("room"),
-			epoch: None,
+			identity: None,
 		};
 		assert!(msg.encode_bytes(Version::Lite06).is_err());
 		assert!(TracksEvent::Synced.encode_bytes(Version::Lite06).is_err());

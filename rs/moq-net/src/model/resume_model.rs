@@ -4,8 +4,8 @@
 //! reader joins and leaves drive an origin's fronts on the simulated clock. Every reader's
 //! groups, frames, drops, and end are checked against what one plain cursor on the logical
 //! track would see: every group its range and budget allow, each once, in its order. A
-//! newer publisher epoch wins the path while older readers stay on theirs until it has no
-//! route left, then end with an error.
+//! second identity, priced below the first, wins the path while older readers stay on
+//! theirs until it has no route left, then end with an error.
 //!
 //! `MOQ_RESUME_SEED` and `MOQ_RESUME_CASES` pick the cases; nightly sweeps a fresh seed.
 
@@ -20,13 +20,13 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed, TestCaseError, TestRunner};
 
 use super::origin::{Producer, Route};
-use crate::{Epoch, Error, Hop, Hops, SessionError, StreamError, Timestamp, broadcast, group, origin, track};
+use crate::{Error, Hop, Hops, Identity, SessionError, StreamError, Timestamp, broadcast, group, origin, track};
 
 /// Groups in the logical track; group `g` has `1 + g % 3` frames.
 const GROUPS: u64 = 12;
-/// Routes per epoch, cheaper the higher the slot.
+/// Routes per identity, cheaper the higher the slot.
 const SLOTS: usize = 3;
-/// The older publisher instance, then a newer one.
+/// The first identity, then one whose routes all undercut it.
 const EPOCHS: usize = 2;
 const READERS: usize = 4;
 const PATH: &str = "room/alice";
@@ -39,19 +39,13 @@ fn frames(group: u64) -> usize {
 	1 + (group % 3) as usize
 }
 
-/// Frame `frame` of `group` as `epoch` publishes it: every route of one epoch carries it.
+/// Frame `frame` of `group` as `epoch` publishes it: every route of one identity carries it.
 fn payload(epoch: usize, group: u64, frame: usize) -> Vec<u8> {
 	format!("e{epoch}:{group}.{frame}").into_bytes()
 }
 
-fn epoch(index: usize) -> Epoch {
-	// UUIDv7s minted in order, so the second is the newer instance.
-	[
-		"01900000-0000-7000-8000-000000000001",
-		"01900000-0001-7000-8000-000000000001",
-	][index]
-		.parse()
-		.unwrap()
+fn epoch(index: usize) -> Identity {
+	["first", "second"][index].parse().unwrap()
 }
 
 /// How a route fails: its session closes on the far side.
@@ -450,9 +444,10 @@ impl Model {
 		hops.push(Hop::new(10 * (epoch as u64 + 1) + slot as u64).unwrap())
 			.unwrap();
 		let route = Route::default()
-			.with_epoch(self::epoch(epoch))
+			.with_identity(self::epoch(epoch), 0)
 			.with_hops(hops)
-			.with_cost((SLOTS - slot) as u64);
+			// The second identity's routes all undercut the first's.
+			.with_cost(((EPOCHS - epoch) * SLOTS - slot) as u64);
 		let requests = self.origin.requests_route(PATH, route, None).unwrap();
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
@@ -588,7 +583,7 @@ impl Model {
 			.await
 			.map_err(|err| fail(index, format!("request failed: {err}")))?;
 		let instance = (0..EPOCHS)
-			.find(|epoch| broadcast.info().epoch.as_ref() == Some(&self::epoch(*epoch)))
+			.find(|epoch| broadcast.info().identity.as_ref() == Some(&self::epoch(*epoch)))
 			.ok_or_else(|| fail(index, "resolved no known instance"))?;
 		if instance != expected {
 			return Err(fail(

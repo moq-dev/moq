@@ -9,7 +9,7 @@ use crate::support;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Epoch, Hop, Timestamp, Version, announce, origin, track};
+use moq_net::{Hop, Timestamp, Version, announce, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
@@ -50,7 +50,7 @@ impl Worker {
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
-				let prepared = request.prepare(Epoch::mint()).unwrap();
+				let prepared = request.prepare().unwrap();
 				let track = prepared
 					.broadcast()
 					.create_track(

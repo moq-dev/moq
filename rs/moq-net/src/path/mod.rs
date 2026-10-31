@@ -288,7 +288,7 @@ impl Path {
 	/// assert_eq!(path.parts().collect::<Vec<_>>(), ["foo", "bar", "baz"]);
 	/// assert_eq!(Path::empty().parts().count(), 0);
 	/// ```
-	pub fn parts(&self) -> impl Iterator<Item = &str> {
+	pub fn parts(&self) -> impl Iterator<Item = &str> + Clone {
 		// Segments are never empty, so only the empty path ends in an empty substring,
 		// which a terminator split skips; the route table walks this on every lookup.
 		self.as_str().split_terminator('/')
@@ -1142,7 +1142,7 @@ mod tests {
 		// A message carrying the longest path still fits the lite message limit.
 		let tracks = crate::lite::Tracks {
 			broadcast: Path::new(&longest).unwrap(),
-			epoch: None,
+			identity: None,
 		};
 		let buf = tracks.encode_bytes(Version::Lite07).unwrap();
 		let (decoded, _) = crate::lite::Tracks::decode_slice(&buf, Version::Lite07).unwrap();

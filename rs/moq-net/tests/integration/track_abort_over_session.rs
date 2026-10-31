@@ -78,7 +78,7 @@ async fn recreate(finish: bool) {
 	let origin = produce_origin(1);
 	let broadcast = origin.create_broadcast("bench").unwrap();
 	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0))
 		.unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
 	let remote = origin.consume().request("bench", None).await.unwrap();

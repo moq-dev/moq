@@ -14829,9 +14829,12 @@ mod tests {
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		// One epoch, so the second route re-prices the instance rather than restart it.
-		let epoch = crate::Epoch::mint();
+		let epoch = crate::Identity::random();
 		let cam = origin
-			.announce("solo-cam", crate::origin::Route::default().with_epoch(epoch.clone()))
+			.announce(
+				"solo-cam",
+				crate::origin::Route::default().with_identity(epoch.clone(), 0),
+			)
 			.unwrap();
 		settle().await;
 
@@ -14866,7 +14869,7 @@ mod tests {
 		let _standby = origin
 			.announce(
 				"solo-cam",
-				crate::origin::Route::default().with_epoch(epoch).with_cost(0),
+				crate::origin::Route::default().with_identity(epoch, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -14930,11 +14933,13 @@ mod tests {
 		}
 		.produce();
 		// One epoch, so the warm route re-prices the instance rather than restart it.
-		let epoch = crate::Epoch::mint();
+		let epoch = crate::Identity::random();
 		let _cold = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
+				crate::origin::Route::default()
+					.with_identity(epoch.clone(), 0)
+					.with_cost(4),
 			)
 			.unwrap();
 		settle().await;
@@ -14967,7 +14972,10 @@ mod tests {
 
 		// We start carrying it: a free route outranks the cold one.
 		let _warm = origin
-			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_identity(epoch, 0).with_cost(0),
+			)
 			.unwrap();
 
 		// The request consumed id 1, so the update takes the next of our parity. The
@@ -15002,11 +15010,13 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let epoch = crate::Epoch::mint();
+		let epoch = crate::Identity::random();
 		let _cold = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
+				crate::origin::Route::default()
+					.with_identity(epoch.clone(), 0)
+					.with_cost(4),
 			)
 			.unwrap();
 		settle().await;
@@ -15056,7 +15066,10 @@ mod tests {
 		peer.push(&counted);
 		// Repricing sends the REQUEST_UPDATE whose OK is counted.
 		let _warm = origin
-			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_identity(epoch, 0).with_cost(0),
+			)
 			.unwrap();
 
 		let res = moq_clock::timeout(Duration::from_secs(5), run)
@@ -15068,7 +15081,7 @@ mod tests {
 		assert!(log.closes().iter().any(|(c, _)| *c == code), "{:?}", log.closes());
 	}
 
-	/// A route from a different original publisher under the same epoch (a replica)
+	/// A route from a different original publisher under the same identity (a replica)
 	/// updates the advertisement in place, like any other change within an instance:
 	/// withdrawing it would make the namespace briefly vanish downstream just because
 	/// its replica moved.
@@ -15084,12 +15097,12 @@ mod tests {
 		.produce();
 		let publisher_a = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let publisher_b = crate::Hops::try_from(vec![crate::Hop::new(8).unwrap()]).unwrap();
-		let epoch = crate::Epoch::mint();
+		let epoch = crate::Identity::random();
 		let _from_a = origin
 			.announce(
 				"cam",
 				crate::origin::Route::default()
-					.with_epoch(epoch.clone())
+					.with_identity(epoch.clone(), 0)
 					.with_hops(publisher_a)
 					.with_cost(4),
 			)
@@ -15127,7 +15140,7 @@ mod tests {
 			.announce(
 				"cam",
 				crate::origin::Route::default()
-					.with_epoch(epoch)
+					.with_identity(epoch, 0)
 					.with_hops(publisher_b)
 					.with_cost(0),
 			)
@@ -15673,7 +15686,7 @@ mod tests {
 		);
 	}
 
-	/// moq-transport has no restart: another source winning a namespace without an epoch
+	/// moq-transport has no restart: another source winning a namespace under another identity
 	/// withdraws it and advertises it afresh, so the peer resubscribes.
 	#[moq_clock::test]
 	async fn a_restart_re_advertises_the_namespace() {
@@ -15738,11 +15751,13 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let epoch = crate::Epoch::mint();
+		let epoch = crate::Identity::random();
 		let _cold = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
+				crate::origin::Route::default()
+					.with_identity(epoch.clone(), 0)
+					.with_cost(4),
 			)
 			.unwrap();
 		settle().await;
@@ -15778,7 +15793,10 @@ mod tests {
 
 		peer.push(&refusal);
 		let _warm = origin
-			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_identity(epoch, 0).with_cost(0),
+			)
 			.unwrap();
 
 		for _ in 0..100 {

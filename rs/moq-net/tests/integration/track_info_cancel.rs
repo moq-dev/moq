@@ -74,7 +74,7 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 	let mut dynamic = broadcast.requests();
 	let mut route = origin::Route::default();
 	if explicit {
-		route.epoch = Some("019a1234-5678-7000-8000-000000000001".parse().unwrap());
+		route.identity = Some("019a1234-5678-7000-8000-000000000001".parse().unwrap());
 	}
 	broadcast.announce(route).unwrap();
 	let mut options = MockConnectOptions::new(version);

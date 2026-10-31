@@ -13,9 +13,9 @@ use super::{Message, Version};
 #[derive(Clone, Debug)]
 pub struct Fetch<'a> {
 	pub broadcast: Path,
-	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
+	/// The identity the subscriber expects; see [`crate::origin::Route::identity`].
 	/// Lite07+ only.
-	pub epoch: Option<crate::Epoch>,
+	pub identity: Option<crate::Identity>,
 	pub track: Cow<'a, str>,
 	pub priority: i8,
 	/// Reader freshness budget. Lite07+ only; omission uses publisher retention alone.
@@ -33,7 +33,7 @@ impl Fetch<'_> {
 	pub fn into_owned(self) -> Fetch<'static> {
 		Fetch {
 			broadcast: self.broadcast,
-			epoch: self.epoch,
+			identity: self.identity,
 			track: Cow::Owned(self.track.into_owned()),
 			priority: self.priority,
 			max_delay: self.max_delay,
@@ -55,7 +55,7 @@ impl<'a> Message<'a> for Fetch<'a> {
 		}
 
 		let broadcast = Path::decode(r, version)?;
-		let epoch = super::epoch::decode_epoch(r, version)?;
+		let identity = super::identity::decode_pin(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 		let priority = super::priority::from_wire(r.u8()?);
 		let max_delay = match version.has_fetch_max_delay() {
@@ -75,7 +75,7 @@ impl<'a> Message<'a> for Fetch<'a> {
 
 		Ok(Self {
 			broadcast,
-			epoch,
+			identity,
 			track,
 			priority,
 			max_delay,
@@ -94,7 +94,7 @@ impl<'a> Message<'a> for Fetch<'a> {
 		}
 
 		self.broadcast.encode(w, version)?;
-		super::epoch::encode_epoch(w, version, self.epoch.as_ref())?;
+		super::identity::encode_pin(w, version, self.identity.as_ref())?;
 		w.string(&self.track)?;
 		w.u8(super::priority::to_wire(self.priority));
 		match version.has_fetch_max_delay() {
@@ -127,7 +127,7 @@ mod test {
 
 	fn fetch_sample() -> Fetch<'static> {
 		Fetch {
-			epoch: None,
+			identity: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 			priority: 3,

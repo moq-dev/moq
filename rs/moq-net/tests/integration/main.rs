@@ -32,6 +32,7 @@ mod finite_relay;
 mod goaway;
 mod group_order;
 mod history_groups;
+mod identity;
 mod idle_cancel_refetch;
 mod idle_session;
 mod implementation;
