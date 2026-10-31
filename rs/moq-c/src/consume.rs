@@ -263,13 +263,14 @@ impl Consume {
 		self.catalog_task.spawn(
 			on_catalog,
 			|state| &mut state.consume.catalog_task,
-			|close| async move {
+			|mut close| async move {
 				driver
 					.watch(async move {
-						let catalog = broadcast
-							.track(hang::catalog::Catalog::DEFAULT_NAME)?
-							.subscribe(hang::catalog::Catalog::default_subscription())
-							.await?;
+						let subscription = hang::catalog::Catalog::default_subscription();
+						let subscribe = Self::subscribe(&broadcast, hang::catalog::Catalog::DEFAULT_NAME, subscription);
+						let Some(catalog) = Self::until_closed(&mut close, subscribe).await? else {
+							return Ok(());
+						};
 						Self::run_catalog(on_catalog, broadcast.clone(), origin, catalog.into(), close).await
 					})
 					.await
@@ -519,18 +520,20 @@ impl Consume {
 		self.track_task.spawn(
 			on_read,
 			|state| &mut state.consume.track_task,
-			|close| async move {
+			|mut close| async move {
 				driver
 					.watch(async move {
-						let broadcast = resolve(broadcast, origin, reference).await?;
-						let track = broadcast
-							.track(&name)?
-							.subscribe(
-								moq_net::track::Subscription::default()
-									.with_priority(C::PRIORITY)
-									.with_max_delay(max_delay),
-							)
-							.await?;
+						let subscription = moq_net::track::Subscription::default()
+							.with_priority(C::PRIORITY)
+							.with_max_delay(max_delay);
+						// Resolving a sibling broadcast can wait too, so the close races both steps.
+						let setup = async {
+							let broadcast = resolve(broadcast, origin, reference).await?;
+							Self::subscribe(&broadcast, &name, subscription).await
+						};
+						let Some(track) = Self::until_closed(&mut close, setup).await? else {
+							return Ok(());
+						};
 						let track = moq_mux::container::Consumer::new(track, container);
 						Self::run_track(on_read, track, close).await
 					})
@@ -607,6 +610,30 @@ impl Consume {
 		Ok(())
 	}
 
+	/// Subscribe to `name`, waiting for SUBSCRIBE_OK.
+	async fn subscribe(
+		broadcast: &moq_net::broadcast::Consumer,
+		name: &str,
+		subscription: impl Into<Option<moq_net::track::Subscription>>,
+	) -> Result<moq_net::track::Subscriber, Error> {
+		Ok(broadcast.track(name)?.subscribe(subscription).await?)
+	}
+
+	/// Run a consumer's `setup`, or return `None` once `close` fires first.
+	///
+	/// A publisher can leave SUBSCRIBE_OK pending forever, so a cancel must not wait on it.
+	/// `close` is left unpolled once it fires, since a oneshot panics if polled again.
+	async fn until_closed<T>(
+		close: &mut oneshot::Receiver<()>,
+		setup: impl Future<Output = Result<T, Error>>,
+	) -> Result<Option<T>, Error> {
+		tokio::select! {
+			biased;
+			_ = close => Ok(None),
+			res = setup => res.map(Some),
+		}
+	}
+
 	/// Subscribe to a raw track by name, delivering each frame's payload as-is.
 	///
 	/// No catalog lookup or container parsing. This is the moq-net primitive for
@@ -628,14 +655,18 @@ impl Consume {
 		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
-		let (task, close) = Task::new(on_frame);
+		let (task, mut close) = Task::new(on_frame);
 		let control = RawControl::Pending(None);
 		let id = self.raw_task.insert(RawTaskEntry { task, control })?;
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = crate::ffi::run(driver.watch(async move {
-				let track = broadcast.track(&name)?.subscribe(subscription.clone()).await?.ordered();
+				let subscribe = Self::subscribe(&broadcast, &name, subscription.clone());
+				let Some(track) = Self::until_closed(&mut close, subscribe).await? else {
+					return Ok(());
+				};
+				let track = track.ordered();
 				let control = track.control();
 				Self::update_raw(&control, Self::raw_subscription(subscription))?;
 				// Go live under the lock, so no later update lands before the pending one.
@@ -799,10 +830,14 @@ impl Consume {
 		self.datagram_task.spawn(
 			on_datagram,
 			|state| &mut state.consume.datagram_task,
-			|close| async move {
+			|mut close| async move {
 				driver
 					.watch(async move {
-						let track = broadcast.track(&name)?.subscribe(None).await?;
+						let Some(track) =
+							Self::until_closed(&mut close, Self::subscribe(&broadcast, &name, None)).await?
+						else {
+							return Ok(());
+						};
 						Self::run_datagrams(on_datagram, track, close).await
 					})
 					.await
@@ -859,22 +894,6 @@ impl Consume {
 		Ok(())
 	}
 
-	/// Subscribe a JSON consumer to `name`, or return `None` once `close` fires first.
-	///
-	/// A publisher can leave SUBSCRIBE_OK pending forever, so a cancel must not wait on it.
-	async fn json_subscribe(
-		broadcast: &moq_net::broadcast::Consumer,
-		name: &str,
-		close: &mut oneshot::Receiver<()>,
-	) -> Result<Option<moq_net::track::Subscriber>, Error> {
-		let subscribe = broadcast.track(name)?.subscribe(None);
-		tokio::select! {
-			biased;
-			_ = close => Ok(None),
-			track = subscribe => Ok(Some(track?)),
-		}
-	}
-
 	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
 	///
 	/// `on_value` is called with a value ID for each state, in order; a group superseded by a
@@ -897,7 +916,9 @@ impl Consume {
 			|mut close| async move {
 				driver
 					.watch(async move {
-						let Some(track) = Self::json_subscribe(&broadcast, &name, &mut close).await? else {
+						let Some(track) =
+							Self::until_closed(&mut close, Self::subscribe(&broadcast, &name, None)).await?
+						else {
 							return Ok(());
 						};
 						let consumer =
@@ -954,7 +975,9 @@ impl Consume {
 			|mut close| async move {
 				driver
 					.watch(async move {
-						let Some(track) = Self::json_subscribe(&broadcast, &name, &mut close).await? else {
+						let Some(track) =
+							Self::until_closed(&mut close, Self::subscribe(&broadcast, &name, None)).await?
+						else {
 							return Ok(());
 						};
 						let consumer = moq_json::stream::Consumer::<serde_json::Value>::new(track, Default::default());
@@ -1008,7 +1031,9 @@ impl Consume {
 			|mut close| async move {
 				driver
 					.watch(async move {
-						let Some(track) = Self::json_subscribe(&broadcast, &name, &mut close).await? else {
+						let Some(track) =
+							Self::until_closed(&mut close, Self::subscribe(&broadcast, &name, None)).await?
+						else {
 							return Ok(());
 						};
 						let consumer = moq_json::window::Consumer::<serde_json::Value>::new(track, Default::default());
