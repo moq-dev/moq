@@ -2722,7 +2722,7 @@ test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while 
  * A PROBE stream to a peer whose SETUP advertised `level`: `sent` reads back what the
  * subscriber wrote, and `finish` plays the peer's FIN.
  */
-function probeTargetHarness(level: ProbeLevel) {
+function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean }) {
 	const version = Version.DRAFT_06;
 	let written!: ReadableStreamDefaultController<Uint8Array>;
 	const sent = new Reader(
@@ -2731,11 +2731,16 @@ function probeTargetHarness(level: ProbeLevel) {
 		version,
 	);
 	let inbound!: ReadableStreamDefaultController<Uint8Array>;
+	let writes = 0;
 	const quic = {
 		createBidirectionalStream: async () => ({
 			readable: new ReadableStream<Uint8Array>({ start: (controller) => (inbound = controller) }),
 			writable: new WritableStream<Uint8Array>({
-				write: (chunk) => written.enqueue(new Uint8Array(chunk)),
+				write: (chunk) => {
+					// Only the stream type precedes the first target.
+					if (options?.failTarget && writes++ > 0) throw new Error("write failed");
+					written.enqueue(new Uint8Array(chunk));
+				},
 				close: () => written.close(),
 			}),
 		}),
@@ -2777,6 +2782,21 @@ test("the PROBE stream sends the viewers' target to an Increase peer", async () 
 	finish();
 	await running;
 	expect(await sent.done()).toBe(true);
+	subscriber.close();
+	viewers.close();
+});
+
+// The writer and reader are independent: a failed target write ends the probe even while
+// the peer keeps its side open.
+test("a failed PROBE target write ends the probe", async () => {
+	const { subscriber, sent } = probeTargetHarness(ProbeLevel.Increase, { failTarget: true });
+	const viewers = new Viewers();
+	const viewer = viewers.watch(1_000_000);
+	const running = subscriber.runProbe(undefined, viewers.target);
+	expect(await sent.u53()).toBe(StreamId.Probe);
+
+	await running;
+	viewer.close();
 	subscriber.close();
 	viewers.close();
 });

@@ -1912,7 +1912,9 @@ export class Subscriber {
 					await new Probe({ bitrate: next > 0 ? next : undefined }).encode(stream.writer, this.version);
 				}
 			} catch {
-				// A failed write surfaces through the stream's reader, which ends the probe.
+				// The writer and reader are independent, so a failed write does not end the
+				// reads: end the probe here, which also closes the stream.
+				scope.close();
 			} finally {
 				writing = false;
 			}

@@ -369,6 +369,16 @@ test("the viewers' target sums their ceilings until overridden", () => {
 	viewers.close();
 });
 
+test("a closed viewers registry claims nothing", () => {
+	const viewers = new Viewers(new Signal<number | undefined>(1_000_000));
+	viewers.close();
+
+	const viewer = viewers.watch(2_000_000);
+	expect(viewers.target.peek()).toBe(0);
+	expect(viewer.peek()).toBeUndefined();
+	viewer.close();
+});
+
 // Observing a connection's receive estimate is what requests PROBE, so a registry with
 // nobody watching must not hold that demand.
 test("an idle viewers registry does not observe the estimate", async () => {

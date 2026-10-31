@@ -83,7 +83,7 @@ export type ReloadDelay = {
  */
 export type ReloadProps = Omit<
 	ConnectProps,
-	"url" | "signal" | "transport" | "implementation" | "extensions" | "tokens"
+	"url" | "signal" | "transport" | "implementation" | "extensions" | "tokens" | "viewers"
 > & {
 	/** See {@link ConnectProps.tokens}; pass a `Signal` to replace them before they expire. */
 	tokens?: readonly string[] | Signal<readonly string[]>;
@@ -93,6 +93,9 @@ export type ReloadProps = Omit<
 
 	/** A one-shot transport cannot be reused by the reconnect loop. */
 	transport?: never;
+
+	/** A reload owns its {@link Reload.viewers}, fed by its own sessions' estimates. */
+	viewers?: never;
 
 	/** Whether to reload the connection when it disconnects (default: true). */
 	enabled?: boolean | Signal<boolean>;

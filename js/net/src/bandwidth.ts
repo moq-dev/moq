@@ -175,9 +175,12 @@ class Divider {
 
 		const id = this.#nextId++;
 		const rate = new Signal<number | undefined>(undefined);
-		this.entries.mutate((entries) => {
-			entries.push({ id, demand, priority, max, rate });
-		});
+		// A closed registry hands back an inert reservation, so its target stays zero.
+		if (this.#alive.peek()) {
+			this.entries.mutate((entries) => {
+				entries.push({ id, demand, priority, max, rate });
+			});
+		}
 
 		const reservation = makeReservation(this.#registry, id, rate);
 		this.#publish();
