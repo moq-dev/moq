@@ -1287,7 +1287,16 @@ impl Publisher {
 					},
 					cache: track.clone(),
 					namespace: namespace.clone(),
-					binding: None,
+					// A joining FETCH is held to the PUBLISH's token too, once one authorized it.
+					binding: gate.token_guard().map(|grant| {
+						crate::auth::RequestBinding::new(
+							&self.runtime,
+							namespace.clone(),
+							crate::auth::RequestKind::Subscribe,
+							None,
+							Some(grant),
+						)
+					}),
 					ranking: serve.ranking.clone(),
 				},
 				(Filter::NextObject, None) => Joined::Empty,
@@ -2607,6 +2616,72 @@ mod tests {
 				assert_eq!(next(stream).await.0, ietf::PublishDone::ID, "{version}");
 			}
 		}
+	}
+
+	/// A joining FETCH on a PUBLISH a token listing sent is held to that token, as the PUBLISH
+	/// is, rather than to a session scope that never covered it.
+	#[moq_clock::test]
+	async fn a_joining_fetch_on_a_token_listed_publish_follows_the_token() {
+		let version = Version::Draft18;
+		let mut h = harness(version);
+		let video = h.tracks.remove("video").unwrap();
+		let mut group = video.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"head".as_slice()).unwrap();
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::default());
+		let mut requests = auth.handle().requests();
+		h.publisher = h.publisher.clone().with_auth(auth.clone());
+
+		let mut msg = listing(false);
+		msg.authorization_token = Some(crate::ietf::token::RequestToken(crate::setup::Token {
+			kind: 0,
+			value: b"listing".to_vec(),
+		}));
+		let mut request = h.request(&msg).await;
+		let _issued = timeout(requests.next())
+			.await
+			.unwrap()
+			.accept(crate::auth::Grant::all());
+		assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID);
+		let (mut stream, publish) = loop {
+			let mut stream = timeout(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version,
+			))
+			.await
+			.unwrap();
+			assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
+			let body: ietf::Body = stream.reader.decode().await.unwrap();
+			let publish: ietf::Publish = body.message(version).unwrap();
+			if publish.track_name == "video" {
+				break (stream, publish.request_id);
+			}
+		};
+		publish_ok(&mut stream).await;
+		send(&mut stream, &update(2, true)).await;
+		assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID);
+
+		let mut fetch = h
+			.request(&ietf::Fetch {
+				authorization_token: None,
+				request_id: RequestId(4),
+				subscriber_priority: 128,
+				group_order: GroupOrder::Ascending,
+				fetch_type: ietf::FetchType::RelativeJoining {
+					subscriber_request_id: publish,
+					group_offset: 0,
+				},
+				range_filters: false,
+				fill_timeout: false,
+				properties_wanted: true,
+				epoch: None,
+			})
+			.await;
+		assert_eq!(
+			next(&mut fetch).await.0,
+			ietf::FetchOk::ID,
+			"the joining FETCH was held to the session scope"
+		);
 	}
 
 	/// Tracks under a namespace our grant does not cover are not listed until it does, and
