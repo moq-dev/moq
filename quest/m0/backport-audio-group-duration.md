@@ -4,8 +4,8 @@
 
 `@moq/publish` on `release` gains `Audio.Encoder`'s `groupDuration`, as
 [moq-dev/moq#4910](https://github.com/moq-dev/moq/pull/4910) added on main,
-and publishes it as 0.5.4 (npm has up to 0.5.3). A publisher can then pack
-several Opus frames per group. On relays that end a subscription when a newer
+and publishes it in the next `@moq/publish` release after 0.5.4. A publisher
+can then pack several Opus frames per group. On relays that end a subscription when a newer
 group starts while an older one is still arriving
 ([cloudflare/moq-rs#238](https://github.com/cloudflare/moq-rs/issues/238)),
 that makes the bug rarer but does not avoid it: congestion near a group
@@ -31,10 +31,19 @@ open group's start, and reset the start at a discontinuity. Update
 `release`'s `doc/lib/js/publish.md` and `js/publish/README.md` if they
 document the encoder's props, and the API report if `release` keeps one.
 Skip #4910's Rust `moq-audio`, bench, and Nightly changes. Bump
-`@moq/publish` to 0.5.4 in `js/publish/package.json` and `bun.lock`.
+`@moq/publish` in `js/publish/package.json` and `bun.lock`.
 
 Public API: additive (`groupDuration` on `Audio.Encoder` and its props). Wire:
 none.
+
+Status 2026-10-30: the code backport is
+[moq-dev/moq#7290](https://github.com/moq-dev/moq/pull/7290), without a version
+bump. 0.5.4 is no longer available:
+[moq-dev/moq#7276](https://github.com/moq-dev/moq/pull/7276) bumped
+`@moq/publish` to 0.5.4 on `release` for the Opus DTX backport alone, and Release
+JS published it to npm. What remains is to merge #7290, then bump `@moq/publish`
+on `release` (version and timing are the maintainer's call) and confirm npm
+carries `groupDuration`.
 
 ## Closes
 
