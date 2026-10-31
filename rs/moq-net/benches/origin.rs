@@ -119,6 +119,46 @@ fn bench_announce(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Matched and overlap-only route churn, swept over table size and watching cursors,
+/// for listing cursors and covering ones.
+fn bench_announce_covering(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/announce_covering");
+	for routes in [10, 1_000] {
+		for readers in [1, 100] {
+			for covering in [false, true] {
+				group.bench_function(format!("{routes}routes_{readers}readers_covering{covering}"), |b| {
+					let (producer, _driver) = origin::Producer::new(origin::Config::default());
+					let _routes: Vec<_> = (0..routes)
+						.map(|i| producer.requests(format!("room/{i}/mic.hang")).unwrap())
+						.collect();
+					let consumer = producer
+						.consume()
+						.scope("", &Patterns::from("**/*.chat".parse::<Pattern>().unwrap()))
+						.unwrap();
+					let consumer = if covering { consumer.covering() } else { consumer };
+					let mut cursors: Vec<_> = (0..readers).map(|_| consumer.announced()).collect();
+					for cursor in &mut cursors {
+						while cursor.next().now_or_never().flatten().is_some() {}
+					}
+					b.iter(|| {
+						for (name, delivered) in [("room/live.chat", true), ("room/mic.hang", covering)] {
+							let route = producer.requests(name).unwrap();
+							for cursor in &mut cursors {
+								assert_eq!(cursor.next().now_or_never().flatten().is_some(), delivered);
+							}
+							drop(route);
+							for cursor in &mut cursors {
+								assert_eq!(cursor.next().now_or_never().flatten().is_some(), delivered);
+							}
+						}
+					});
+				});
+			}
+		}
+	}
+	group.finish();
+}
+
 /// Cancel unseen additions while every cursor stalls on its initial replay.
 fn bench_pending_churn(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/pending_churn");
@@ -1635,6 +1675,7 @@ fn bench_resume_overlap(c: &mut Criterion) {
 criterion_group!(
 	benches,
 	bench_announce,
+	bench_announce_covering,
 	bench_pending_churn,
 	bench_withdraw,
 	bench_withdraw_wave,

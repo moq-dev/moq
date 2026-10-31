@@ -28,6 +28,7 @@ from moq_ffi import (
     MoqSubscription,
     MoqTrackInfo,
     MoqWebSocketConfig,
+    moq_subscription_defaults,
 )
 
 _MICROSECOND = timedelta(microseconds=1)
@@ -111,16 +112,34 @@ class Subscription:
 
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
     ``max_delay`` is how far a non-latest group may fall behind before it is skipped;
-    zero skips at once, ``None`` leaves the publisher's max age alone to bound it, and it
-    caps every range. ``ranges`` are the spans of the track to
-    deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which pending
-    group the publisher sends first, ``None`` for newest first.
+    zero skips at once, ``None`` sets no subscriber limit and leaves the publisher's max
+    age alone to bound it, and it caps every range. ``ranges`` are the spans of the track
+    to deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which
+    pending group the publisher sends first, ``None`` for newest first.
+
+    Start from :meth:`default` for moq-net's defaults; a bare ``Subscription()`` sets no
+    max delay.
     """
 
     priority: int = 0
-    max_delay: timedelta | None = timedelta(0)
+    max_delay: timedelta | None = None
     ranges: Sequence[MoqRange] | None = None
     order: MoqOrder | None = None
+
+    @classmethod
+    def default(cls) -> Subscription:
+        """moq-net's defaults, whose zero ``max_delay`` skips a superseded group at once.
+
+        A ``None`` subscription means the same; ``dataclasses.replace`` this one to change
+        a field.
+        """
+        defaults = moq_subscription_defaults()
+        return cls(
+            priority=defaults.priority,
+            max_delay=defaults.max_delay,
+            ranges=defaults.ranges,
+            order=defaults.order,
+        )
 
     def _ffi(self) -> MoqSubscription:
         return MoqSubscription(

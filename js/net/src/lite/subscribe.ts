@@ -10,7 +10,6 @@ import {
 	hasDropCode,
 	hasFrameBounds,
 	hasGroupOrder,
-	hasLargest,
 	hasOrder,
 	hasRanges,
 	hasRefresh,
@@ -118,6 +117,19 @@ interface Span {
 	startFrame: number;
 	endGroup?: number;
 	endFrame?: number;
+	/** See {@link Subscribe.ranges}. */
+	ranges?: (RangeGroups | undefined)[];
+}
+
+/**
+ * The groups of one lite-07 range: from `start` up to the exclusive `end`, or through the
+ * live edge without one. An unresolved anchor must be refused by the publisher.
+ */
+export interface RangeGroups {
+	start: number;
+	end?: number;
+	/** Whether a relative or time anchor still needs resolution this publisher cannot do. */
+	unresolved?: true;
 }
 
 /**
@@ -163,15 +175,14 @@ function before(a: Point, b: Point): boolean {
 }
 
 /**
- * Decode one lite-07 range end, `undefined` for none. A relative or time anchor is also
- * `undefined`: this publisher resolves neither, so it serves from the oldest group its
- * budget allows, or through the live edge, and the subscriber keeps what it asked for.
+ * Decode one lite-07 range end: its position, `null` for none, or `undefined` for a relative
+ * or time anchor, which the publisher refuses rather than widening it.
  */
-async function decodeAnchor(r: Reader): Promise<Point | undefined> {
+async function decodeAnchor(r: Reader): Promise<Point | null | undefined> {
 	const kind = await r.u53();
 	switch (kind) {
 		case 0:
-			return undefined;
+			return null;
 		case 1:
 			return [await r.u53(), await r.u53()];
 		case 2:
@@ -202,12 +213,25 @@ async function decodeSpan(r: Reader, version: Version): Promise<Span> {
 	let end: Point | undefined;
 	let floor = true;
 	let live = false;
+	// Not preallocated: each range costs at least two bytes of the bounded message.
+	const ranges: (RangeGroups | undefined)[] = [];
 	for (let i = 0; i < count; i++) {
 		const from = await decodeAnchor(r);
 		const to = await decodeAnchor(r);
-		if (from === undefined) floor = false;
+		// An end partway through a group still covers it.
+		const empty = from && to && !before(from, to);
+		ranges.push(
+			empty
+				? undefined
+				: {
+						start: from?.[0] ?? 0,
+						end: to ? to[0] + (to[1] > 0 ? 1 : 0) : undefined,
+						...(from === undefined || to === undefined ? { unresolved: true as const } : {}),
+					},
+		);
+		if (!from) floor = false;
 		else if (start === undefined || before(from, start)) start = from;
-		if (to === undefined) live = true;
+		if (!to) live = true;
 		else if (end === undefined || before(end, to)) end = to;
 	}
 	if (!floor) start = undefined;
@@ -221,6 +245,7 @@ async function decodeSpan(r: Reader, version: Version): Promise<Span> {
 		startFrame,
 		endGroup: end === undefined ? undefined : end[1] === 0 ? end[0] - 1 : end[0],
 		endFrame: end === undefined || end[1] === 0 ? undefined : end[1] - 1,
+		ranges,
 	};
 }
 
@@ -318,6 +343,9 @@ export class SubscribeUpdate {
 	/** See {@link Subscribe.endFrame}. */
 	endFrame?: number;
 
+	/** See {@link Subscribe.ranges}. */
+	ranges?: (RangeGroups | undefined)[];
+
 	constructor(props: {
 		priority: number;
 		wantedGroup?: number;
@@ -327,6 +355,7 @@ export class SubscribeUpdate {
 		endGroup?: number;
 		startFrame?: number;
 		endFrame?: number;
+		ranges?: (RangeGroups | undefined)[];
 	}) {
 		if (props.wantedGroup !== undefined && (!Number.isSafeInteger(props.wantedGroup) || props.wantedGroup < 0))
 			throw new RangeError("wanted group must be a safe non-negative integer");
@@ -338,6 +367,7 @@ export class SubscribeUpdate {
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
+		this.ranges = props.ranges;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -427,6 +457,12 @@ export class Subscribe {
 	 */
 	endFrame?: number;
 
+	/**
+	 * The groups of each lite-07 range in turn, `undefined` for an empty one. Decoded only,
+	 * so SUBSCRIBE_START can answer for every range.
+	 */
+	ranges?: (RangeGroups | undefined)[];
+
 	constructor(props: {
 		id: bigint;
 		broadcast: Path.Valid;
@@ -439,6 +475,7 @@ export class Subscribe {
 		endGroup?: number;
 		startFrame?: number;
 		endFrame?: number;
+		ranges?: (RangeGroups | undefined)[];
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
@@ -451,6 +488,7 @@ export class Subscribe {
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
+		this.ranges = props.ranges;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -600,16 +638,20 @@ export class SubscribeOk {
 }
 
 /**
- * Resolves the absolute start group of a Draft-05+ subscription. The first message
- * the publisher sends, once the start group is known. A value greater than the
- * requested start implicitly drops the leading range.
+ * Resolves where a Draft-05+ subscription starts. The first message the publisher sends,
+ * once the start is known. A start above the requested one implicitly drops the groups
+ * below it.
  *
- * There is no start frame: a partial group is only served to a subscriber that asked
- * for one, so delivery begins either at the requested `startFrame` (when this is the
- * requested group) or at frame 0 (when the publisher resolved to a later one).
+ * There is no start frame: a partial group is only served to a subscriber that asked for
+ * one, so a range begins at its requested frame when it starts at its requested group,
+ * and at frame 0 of a later one otherwise.
  */
 export class SubscribeStart {
-	group: number;
+	/**
+	 * The group each range's delivery starts at, in turn, `undefined` for a range with no
+	 * group there. Before draft-07 the wire carries the one range's start as `Group`.
+	 */
+	starts: (number | undefined)[];
 
 	/**
 	 * The publisher's largest (group, frame) when it answered, or `undefined` for a track
@@ -617,15 +659,19 @@ export class SubscribeStart {
 	 */
 	largest?: Position;
 
-	constructor(group: number, largest?: Position) {
-		this.group = group;
+	constructor(starts: (number | undefined)[], largest?: Position) {
+		this.starts = starts;
 		this.largest = largest;
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		return Message.encode(w, async (w) => {
-			await w.u53(this.group);
-			if (!hasLargest(version)) return;
+			// Draft-07 added the largest position along with the ranges.
+			if (!hasRanges(version)) {
+				const [group, ...rest] = this.starts;
+				if (group === undefined || rest.length > 0) throw new Error("one start group before draft-07");
+				return w.u53(group);
+			}
 			// Group + 1, so 0 is a track with nothing yet; the frame follows only otherwise.
 			if (this.largest === undefined) {
 				await w.u53(0);
@@ -633,16 +679,23 @@ export class SubscribeStart {
 				await w.u53(this.largest.group + 1);
 				await w.u53(this.largest.frame);
 			}
+			await w.u53(this.starts.length);
+			for (const start of this.starts) await w.u53(start === undefined ? 0 : start + 1);
 		});
 	}
 
 	static async decode(r: Reader, version: Version): Promise<SubscribeStart> {
 		return Message.decode(r, async (r) => {
-			const group = await r.u53();
-			if (!hasLargest(version)) return new SubscribeStart(group);
-			const largest = await r.u53();
-			if (largest === 0) return new SubscribeStart(group);
-			return new SubscribeStart(group, { group: largest - 1, frame: await r.u53() });
+			if (!hasRanges(version)) return new SubscribeStart([await r.u53()]);
+			const wire = await r.u53();
+			const largest = wire === 0 ? undefined : { group: wire - 1, frame: await r.u53() };
+			// Not preallocated: each start costs a byte of the bounded message.
+			const starts: (number | undefined)[] = [];
+			for (let count = await r.u53(); count > 0; count--) {
+				const start = await r.u53();
+				starts.push(start === 0 ? undefined : start - 1);
+			}
+			return new SubscribeStart(starts, largest);
 		});
 	}
 }

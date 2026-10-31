@@ -774,10 +774,44 @@ root = ["ca.pem"]
 			"[auth] auth_api -> ",
 			"[auth] domains -> ",
 			"[auth] mtls_tier -> --auth-url to `moq auth serve --tier`",
-			"[auth.tls] -> --connect-tls-*",
+			"[auth.tls] -> --connect-tls-cert/--connect-tls-key for identity; --auth-root for server trust",
 		] {
 			assert!(err.contains(old), "{old}: {err}");
 		}
+	}
+
+	#[test]
+	fn auth_roots_merge_without_changing_mesh_roots() {
+		if !test_env::Env::default().set("MOQ_AUTH_ROOT", "env.pem").isolate() {
+			return;
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("relay.toml");
+		std::fs::write(
+			&path,
+			"[auth]\nroot = ['file.pem']\n[connect.tls]\nroot = ['mesh.pem']\n",
+		)
+		.unwrap();
+		let config = Config::parse_and_merge(["moq-relay", path.to_str().unwrap()]).unwrap();
+		assert_eq!(config.auth.root, vec![std::path::PathBuf::from("env.pem")]);
+		assert_eq!(config.connect.tls.root, vec![std::path::PathBuf::from("mesh.pem")]);
+		let config = Config::parse_and_merge([
+			"moq-relay",
+			path.to_str().unwrap(),
+			"--auth-root",
+			"cli.pem",
+			"--auth-root",
+			"other.pem",
+		])
+		.unwrap();
+		assert_eq!(
+			config.auth.root,
+			vec![
+				std::path::PathBuf::from("cli.pem"),
+				std::path::PathBuf::from("other.pem")
+			]
+		);
+		assert_eq!(config.connect.tls.root, vec![std::path::PathBuf::from("mesh.pem")]);
 	}
 
 	/// The released auth variables, each with the spelling its refusal names.
