@@ -315,21 +315,16 @@ impl Connection {
 		self.shared.conn.borrow().stats()
 	}
 
-	/// The peer's certificate chain in DER, leaf first, or `None` if it
-	/// presented none.
+	/// The certificate chain the peer presented, end entity first, or `None`
+	/// if it presented none.
 	///
 	/// A server only sees one when it asked
 	/// ([`ClientAuth`](crate::quic::server::ClientAuth)), and TLS already
 	/// validated it against the configured roots by the time this connection
 	/// exists: an invalid chain fails the handshake instead. So a `Some` here
 	/// is an authenticated peer, and the chain is what names it.
-	pub fn peer_chain(&self) -> Option<Vec<Vec<u8>>> {
-		let conn = self.shared.conn.borrow();
-		let identity = conn.crypto_session().peer_identity()?;
-		let chain = identity
-			.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
-			.ok()?;
-		Some(chain.iter().map(|cert| cert.to_vec()).collect())
+	pub fn peer_identity(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+		self.shared.conn.borrow().peer_identity()
 	}
 
 	/// The peer's address as of the handshake; a peer that migrates later
@@ -485,13 +480,9 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 
 	let (alpn, server_name, remote) = {
 		let conn = shared.conn.borrow();
-		let handshake = conn
-			.crypto_session()
-			.handshake_data()
-			.and_then(|data| data.downcast::<moq_quic::crypto::rustls::HandshakeData>().ok());
-		let (alpn, server_name) = match handshake {
+		let (alpn, server_name) = match conn.handshake_data() {
 			Some(data) => (
-				data.protocol.map(|proto| String::from_utf8_lossy(&proto).into_owned()),
+				data.alpn.map(|proto| String::from_utf8_lossy(&proto).into_owned()),
 				data.server_name,
 			),
 			None => (None, None),

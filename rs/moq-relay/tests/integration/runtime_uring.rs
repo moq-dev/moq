@@ -885,10 +885,9 @@ async fn uring_forwards_the_setup_token() {
 		} else {
 			b"moqt-18".to_vec()
 		}];
-		let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
 		let conn = client
 			.connect(
-				&driver::client::Config::new(std::sync::Arc::new(crypto)),
+				&driver::client::Config::new(std::sync::Arc::new(tls)),
 				addr,
 				"localhost",
 			)
@@ -1081,10 +1080,9 @@ fn uring_workers_bound_stalled_handshakes() {
 		let crypto = |alpn: &[u8]| {
 			let mut tls = tls.clone();
 			tls.alpn_protocols = vec![alpn.to_vec()];
-			let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC crypto");
 			let mut transport = driver::transport::Config::default();
 			transport.congestion = std::sync::Arc::new(moq_congestion::Unlimited);
-			let mut config = driver::client::Config::new(std::sync::Arc::new(crypto));
+			let mut config = driver::client::Config::new(std::sync::Arc::new(tls));
 			config.transport = transport;
 			config
 		};

@@ -86,7 +86,6 @@ pub async fn web_connect(
 	tls.insecure = Some(true);
 	let mut crypto = tls.build().expect("tls");
 	crypto.alpn_protocols = vec![web::ALPN.as_bytes().to_vec()];
-	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(crypto).expect("quic crypto");
 	let mut config = driver::client::Config::new(std::sync::Arc::new(crypto));
 	config.transport = transport;
 

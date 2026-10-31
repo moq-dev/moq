@@ -1,7 +1,5 @@
 //! Packet-level defenses and path changes
 
-use std::any::Any;
-
 use super::*;
 use crate::crypto::{self, KeyPair, Keys};
 
@@ -65,10 +63,10 @@ impl crypto::Session for LimitedSession {
 	fn initial_keys(&self, dst_cid: ConnectionId, side: Side) -> Keys {
 		limit(self.0.initial_keys(dst_cid, side))
 	}
-	fn handshake_data(&self) -> Option<Box<dyn Any>> {
+	fn handshake_data(&self) -> Option<crypto::HandshakeData> {
 		self.0.handshake_data()
 	}
-	fn peer_identity(&self) -> Option<Box<dyn Any>> {
+	fn peer_identity(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
 		self.0.peer_identity()
 	}
 	fn is_handshaking(&self) -> bool {
@@ -104,7 +102,8 @@ impl crypto::Session for LimitedSession {
 fn aead_integrity_limit() {
 	let _guard = subscribe();
 	let mut pair = pair_with(|_| {});
-	let mut config = client::Config::new(Arc::new(Limited(Arc::new(client_crypto()))));
+	let quic = Arc::new(crypto::rustls::QuicClientConfig::new(Arc::new(client_crypto())));
+	let mut config = client::Config::from_crypto(Arc::new(Limited(quic)));
 	config.transport = transport();
 	let (client_ch, server_ch) = pair.connect_with(config);
 

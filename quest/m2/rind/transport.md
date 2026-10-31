@@ -43,4 +43,3 @@ Unsupported CPUs now fail at startup. Wire: none.
 ## Required
 
 - [rind covers MoQ](/quest/m2/rind/covered.md) - the rind release this switches to
-- [moq-quic's crypto is rustls](/quest/m1/quic-api/crypto.md) - the sealed crypto surface rind plugs into, without the per-provider gates

@@ -22,12 +22,7 @@ use std::{
 use crate::quic::driver::runtime::{AsyncUdpSocket, wrap_udp_socket};
 use crate::quic::driver::{Duration, Instant};
 use bytes::{Buf, Bytes};
-use moq_quic::{
-	ConnectionId, RandomConnectionIdGenerator, Version,
-	crypto::rustls::{QuicClientConfig, QuicServerConfig},
-	crypto::{Keys, ServerConfig as ProtoServerConfig, Session},
-	transport_parameters::TransportParameters,
-};
+use moq_quic::RandomConnectionIdGenerator;
 use moq_sock::udp::RecvMeta;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rustls::{
@@ -176,53 +171,6 @@ fn read_after_close() {
 	});
 }
 
-#[test]
-fn export_keying_material() {
-	let _guard = subscribe();
-	let runtime = rt_basic();
-	let endpoint = {
-		let _guard = runtime.enter();
-		endpoint()
-	};
-
-	runtime.block_on(async move {
-		let outgoing_conn_fut = tokio::spawn({
-			let endpoint = endpoint.clone();
-			async move {
-				endpoint
-					.dial(endpoint.local_addr(), "localhost")
-					.unwrap()
-					.await
-					.expect("connect")
-			}
-		});
-		let incoming_conn_fut = tokio::spawn({
-			let endpoint = endpoint.clone();
-			async move {
-				endpoint
-					.accept()
-					.await
-					.expect("endpoint")
-					.accept()
-					.expect("accept")
-					.await
-					.expect("connection")
-			}
-		});
-		let outgoing_conn = outgoing_conn_fut.await.unwrap();
-		let incoming_conn = incoming_conn_fut.await.unwrap();
-		let mut i_buf = [0u8; 64];
-		incoming_conn
-			.export_keying_material(&mut i_buf, b"asdf", b"qwer")
-			.unwrap();
-		let mut o_buf = [0u8; 64];
-		outgoing_conn
-			.export_keying_material(&mut o_buf, b"asdf", b"qwer")
-			.unwrap();
-		assert_eq!(&i_buf[..], &o_buf[..]);
-	});
-}
-
 #[tokio::test]
 async fn ip_blocking() {
 	let _guard = subscribe();
@@ -330,13 +278,13 @@ impl EndpointFactory {
 	}
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct HandshakeBlocker {
 	state: Mutex<HandshakeBlockerState>,
 	changed: Condvar,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct HandshakeBlockerState {
 	started: bool,
 	released: bool,
@@ -376,23 +324,17 @@ impl Drop for HandshakeReleaseGuard {
 	}
 }
 
-struct BlockingServerConfig {
-	inner: Arc<dyn ProtoServerConfig>,
+/// Blocks the server's handshake on the ClientHello, which `Incoming::accept` processes
+#[derive(Debug)]
+struct BlockingResolver {
+	key: Arc<rustls::sign::CertifiedKey>,
 	blocker: Arc<HandshakeBlocker>,
 }
 
-impl ProtoServerConfig for BlockingServerConfig {
-	fn initial_keys(&self, version: Version, dst_cid: ConnectionId) -> Keys {
-		self.inner.initial_keys(version, dst_cid)
-	}
-
-	fn retry_tag(&self, version: Version, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16] {
-		self.inner.retry_tag(version, orig_dst_cid, packet)
-	}
-
-	fn start_session(self: Arc<Self>, version: Version, params: &TransportParameters) -> Box<dyn Session> {
+impl rustls::server::ResolvesServerCert for BlockingResolver {
+	fn resolve(&self, _hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
 		self.blocker.block();
-		self.inner.clone().start_session(version, params)
+		Some(self.key.clone())
 	}
 }
 
@@ -465,25 +407,24 @@ fn blocking_server_pair(
 ) -> (Endpoint, Endpoint, Arc<HandshakeBlocker>) {
 	let factory = EndpointFactory::new();
 	let key = PrivateKeyDer::Pkcs8(factory.cert.signing_key.serialize_der().into());
-	let mut server_crypto = rustls::ServerConfig::builder_with_provider(default_provider().into())
+	let provider = Arc::new(default_provider());
+	let key = rustls::sign::CertifiedKey::from_der(vec![factory.cert.cert.der().clone()], key, &provider).unwrap();
+	let blocker = Arc::new(HandshakeBlocker::default());
+	let mut server_crypto = rustls::ServerConfig::builder_with_provider(provider)
 		.with_protocol_versions(&[&rustls::version::TLS13])
 		.unwrap()
 		.with_no_client_auth()
-		.with_single_cert(vec![factory.cert.cert.der().clone()], key)
-		.unwrap();
+		.with_cert_resolver(Arc::new(BlockingResolver {
+			key: Arc::new(key),
+			blocker: blocker.clone(),
+		}));
 	server_crypto.alpn_protocols = vec![server_alpn.to_vec()];
-	let mut server_config =
-		crate::quic::driver::server::Config::new(Arc::new(QuicServerConfig::try_from(server_crypto).unwrap()));
+	let mut server_config = crate::quic::driver::server::Config::new(Arc::new(server_crypto));
 	// Loopback answers in microseconds. The default 333 ms initial RTT would hold every
 	// connection closed before its handshake in draining for three seconds.
 	let mut transport = transport::Config::default();
 	transport.initial_rtt = Duration::from_millis(10);
 	server_config.transport = transport.clone();
-	let blocker = Arc::new(HandshakeBlocker::default());
-	server_config.crypto = Arc::new(BlockingServerConfig {
-		inner: server_config.crypto.clone(),
-		blocker: blocker.clone(),
-	});
 
 	let server = Endpoint::new(
 		factory.endpoint_config.clone().with_server(server_config),
@@ -507,7 +448,7 @@ fn blocking_server_pair(
 		.with_root_certificates(roots)
 		.with_no_client_auth();
 	client_crypto.alpn_protocols = vec![client_alpn.to_vec()];
-	let mut client_config = client::Config::new(Arc::new(QuicClientConfig::try_from(client_crypto).unwrap()));
+	let mut client_config = client::Config::new(Arc::new(client_crypto));
 	client_config.transport = transport;
 	client.set_default_client_config(client_config);
 
@@ -803,7 +744,7 @@ fn run_echo(args: EchoArgs) {
 			let _guard = error_span!("client").entered();
 			client_endpoint(args.client_addr).unwrap()
 		};
-		let mut client_config = client::Config::new(Arc::new(QuicClientConfig::try_from(client_crypto).unwrap()));
+		let mut client_config = client::Config::new(Arc::new(client_crypto));
 		client_config.transport = transport_config;
 		client.set_default_client_config(client_config);
 

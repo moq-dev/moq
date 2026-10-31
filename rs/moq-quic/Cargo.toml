@@ -20,19 +20,15 @@ ignored = ["rustls-pki-types"]
 
 [features]
 default = ["ring"]
-aws-lc-rs = ["dep:aws-lc-rs", "aws-lc-rs?/aws-lc-sys", "aws-lc-rs?/prebuilt-nasm", "dep:rustls", "rustls/aws-lc-rs"]
+aws-lc-rs = ["dep:aws-lc-rs", "aws-lc-rs?/aws-lc-sys", "aws-lc-rs?/prebuilt-nasm", "rustls/aws-lc-rs"]
 # Enable rustls with the aws-lc-rs crypto provider.
 rustls-aws-lc-rs = ["aws-lc-rs"]
-ring = ["dep:ring", "dep:rustls", "rustls/ring"]
+ring = ["dep:ring", "rustls/ring"]
 # Enable qlog support
 qlog = ["dep:qlog"]
 # The sans-IO QMux connection, which runs the stream state machine over a reliable, ordered
 # transport. Driven by the `qmux` crate.
 mux = []
-# Internal (PRIVATE!) features used to aid testing.
-# Don't rely on these whatsoever. They may disappear at any time.
-
-__rustls-post-quantum-test = []
 
 # Exposes the `fuzz/` harness's target bodies, and the plaintext crypto the connection
 # target and the benches run on, through the hidden `fuzz` module. ring keys the endpoint's
@@ -53,7 +49,7 @@ qlog = { version = "0.18", optional = true }
 rand = { workspace = true }
 ring = { version = "0.17", optional = true }
 rustc-hash = { workspace = true }
-rustls = { version = "0.23.5", default-features = false, features = ["std"], optional = true }
+rustls = { version = "0.23.5", default-features = false, features = ["std"] }
 slab = { workspace = true }
 thiserror = { workspace = true }
 tinyvec = { version = "1.1", features = ["alloc"] }

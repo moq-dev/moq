@@ -3710,10 +3710,9 @@ mod tests {
 			.iter()
 			.map(|alpn| alpn.as_bytes().to_vec())
 			.collect();
-		let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
 		let mut transport = driver::transport::Config::default();
 		transport.idle_timeout = Some(idle);
-		let mut server_config = driver::server::Config::new(Arc::new(crypto));
+		let mut server_config = driver::server::Config::new(Arc::new(tls));
 		server_config.transport = transport;
 		driver::endpoint::Endpoint::new(
 			driver::endpoint::Config::default().with_server(server_config),

@@ -425,12 +425,11 @@ async fn web_peer(addr: SocketAddr, alpn: &str) -> moq_tokio::quic::web::Session
 	tls.insecure = Some(true);
 	let mut tls = tls.build().unwrap();
 	tls.alpn_protocols = vec![b"h3".to_vec()];
-	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
 	let endpoint =
 		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap()).unwrap();
 	let conn = endpoint
 		.connect(
-			&driver::client::Config::new(std::sync::Arc::new(crypto)),
+			&driver::client::Config::new(std::sync::Arc::new(tls)),
 			addr,
 			"localhost",
 		)

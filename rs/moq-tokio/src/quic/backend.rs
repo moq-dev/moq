@@ -184,10 +184,6 @@ pub enum Error {
 	#[error("failed to build client certificate verifier")]
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
 
-	/// The TLS config lacks a cipher suite QUIC can use for initial packets.
-	#[error("no cipher suite available for QUIC initial packets")]
-	NoInitialCipherSuite,
-
 	/// The connection could not be started, usually a bad config or address.
 	#[error("{0}")]
 	Connect(String),
@@ -259,12 +255,6 @@ crate::error::from_message! {
 	driver::connection::Error => Connection,
 	web::ServerError => Server,
 	hex::FromHexError => InvalidFingerprint,
-}
-
-impl From<driver::crypto::rustls::NoInitialCipherSuite> for Error {
-	fn from(_: driver::crypto::rustls::NoInitialCipherSuite) -> Self {
-		Self::NoInitialCipherSuite
-	}
 }
 
 impl From<web::ClientError> for Error {
@@ -419,7 +409,6 @@ impl Client {
 			config.key_log = keylog.clone();
 		}
 
-		let config: driver::crypto::rustls::QuicClientConfig = config.try_into()?;
 		let mut config = driver::client::Config::new(Arc::new(config));
 		config.transport = self.transport.clone();
 
@@ -472,7 +461,6 @@ impl Error {
 			| Self::UnsupportedScheme(_)
 			| Self::InvalidDnsName
 			| Self::Config(_)
-			| Self::NoInitialCipherSuite
 			| Self::ConnectRejected(_)
 			| Self::Limits(_) => true,
 			Self::Tls(err) => err.is_terminal(),
@@ -594,7 +582,6 @@ impl Server {
 			tls.key_log = keylog;
 		}
 
-		let tls: driver::crypto::rustls::QuicServerConfig = tls.try_into()?;
 		let mut server = driver::server::Config::new(Arc::new(tls));
 		server.transport = transport;
 		// Advertise the preferred_address transport parameter (RFC 9000 §9.6).
@@ -725,19 +712,10 @@ pub(crate) async fn accept(
 ) -> Result<crate::server::Accepted<web::Session>> {
 	let mut conn = conn.accept()?;
 
-	// Scoped so the `!Send` boxed handshake data is gone before the next await.
-	let (alpn, host) = {
-		let handshake = conn
-			.handshake_data()
-			.await?
-			.downcast::<driver::crypto::rustls::HandshakeData>()
-			.unwrap();
-		(handshake.protocol, handshake.server_name)
-	};
-
-	let alpn = alpn.ok_or(Error::MissingAlpn)?;
+	let handshake = conn.handshake_data().await?;
+	let alpn = handshake.alpn.ok_or(Error::MissingAlpn)?;
 	let alpn = String::from_utf8(alpn)?;
-	let host = host.unwrap_or_default();
+	let host = handshake.server_name.unwrap_or_default();
 
 	let remote = conn.remote_address();
 	tracing::debug!(%host, ip = %remote, %alpn, "accepting");
@@ -764,7 +742,7 @@ pub(crate) async fn accept(
 				.await
 				.map_err(|err| Error::RecvRequest(crate::error::message(err)))?;
 			let url = Some(request.url.clone());
-			let identity = crate::tls::PeerIdentity::from_any(request.conn().peer_identity());
+			let identity = request.conn().peer_identity().map(crate::tls::PeerIdentity::from_chain);
 			// The authority the client put in its CONNECT URL.
 			let authority = request.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 
@@ -791,7 +769,7 @@ pub(crate) async fn accept(
 		// this also covers versions omitted from `moq_net::ALPNS` but enabled
 		// in this server's configuration.
 		alpn if alpns.contains(&alpn) => {
-			let identity = crate::tls::PeerIdentity::from_any(conn.peer_identity());
+			let identity = conn.peer_identity().map(crate::tls::PeerIdentity::from_chain);
 			// Raw QUIC carries no request URL; the path rides the SETUP. The TLS SNI is the
 			// only authority the client can offer here, and it is optional.
 			let authority = (!host.is_empty()).then_some(host);
