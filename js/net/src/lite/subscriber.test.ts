@@ -21,7 +21,7 @@ import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
-import type { Producer } from "../track.ts";
+import type { Producer, Subscriber as TrackSubscriber } from "../track.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Group } from "./group.ts";
@@ -2312,6 +2312,50 @@ test("a lite-07 publisher FIN keeps a covered bounded subscription's copy", asyn
 		expect(track.closed.peek()).toBeUndefined();
 		expect(closes).toEqual([]);
 	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A widening reopens a covered copy, and its readers leaving while the publisher never takes the
+// new SUBSCRIBE gives the setup up: its stream is reset and the copy released, not held forever.
+test("a reopened lite-07 subscription ends once its readers leave", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession([], [2]);
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0 }, end: { absolute: 2 } }] });
+	let next: TrackSubscriber | undefined;
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const stream = await opened(1);
+		await stream.reading;
+		const chunks: Uint8Array[] = [];
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+			version,
+		);
+		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0]) }, version);
+		await encodeSubscribeResponse(
+			writer,
+			{ drop: new SubscribeDrop({ start: 0, end: 1, error: StreamCode.NotFound }) },
+			version,
+		);
+		for (const chunk of chunks) stream.inbound.enqueue(chunk);
+		stream.inbound.close();
+		await drainReactions();
+
+		track.update({ ranges: [{ start: { absolute: 0 }, end: { absolute: 3 } }] });
+		await (await opened(2)).writing;
+		track.close();
+		await drainReactions();
+		// A reader arriving now asks afresh, rather than join a copy held by the stalled setup.
+		next = broadcast.track("video").subscribe();
+		await opened(3);
+	} finally {
+		next?.close();
 		track.close();
 		broadcast.close();
 		subscriber.close();

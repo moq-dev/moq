@@ -966,6 +966,12 @@ export class Subscriber {
 			const id = this.#subscribeNext++;
 			const msg = this.#subscribeMessage(id, broadcast, consumed, producer.name, subscription, ranges);
 			console.debug(`subscribe reopen: id=${id} broadcast=${broadcast} track=${producer.name}`);
+			// Bounded like the first setup, and given up once nobody wants the track, so a peer
+			// that stops reading holds neither the stream nor its entry.
+			const left = new AbortController();
+			const leave = () => left.abort(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+			void abandoned(producer.demand()).then(leave, leave);
+			let sent: Promise<Stream> | undefined;
 			valid?.addEventListener("abort", retire);
 			try {
 				if (valid?.aborted) retire();
@@ -979,12 +985,23 @@ export class Subscriber {
 					entry.timescale,
 					entry.scale,
 				);
-				stream = await this.#sendSubscribe(state, msg, new Deadline());
+				const deadline = new Deadline();
+				sent = this.#sendSubscribe(state, msg, deadline);
+				stream = await deadline.wait(untilAborted(untilAborted(sent, valid), left.signal));
 				current = { id, msg };
 			} catch (err) {
-				const e = state.revoked ?? (await sessionCause(this.#quic, err));
+				const e =
+					state.revoked ?? (left.signal.aborted ? left.signal.reason : await sessionCause(this.#quic, err));
+				state.cancel.abort(e);
 				this.#subscribes.delete(id);
-				state.stream?.abort(e);
+				// A stream that opens late is reset too, as the first setup's are.
+				const close = () => state.stream?.abort(e);
+				close();
+				sent?.then(close, close);
+				if (left.signal.aborted && !state.revoked) {
+					hooks.releaseTrack(producer);
+					return;
+				}
 				producer.abort(e);
 				console.warn(
 					`subscribe error: id=${id} broadcast=${broadcast} track=${producer.name} error=${reason(e)}`,
