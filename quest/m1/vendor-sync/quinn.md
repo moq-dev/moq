@@ -39,18 +39,21 @@ application-limited marker renewal, and saturating probe growth. Four BBR
 regressions were reproduced before fixing them. The focused QUIC, socket,
 and controller suite passed 808 tests; the benchmark covers recovery too.
 
+The full local gate ran with the captured Bash environment reload disabled
+(`BASH_ENV=/dev/null`) and the Nix Cargo path selected explicitly. All Rust
+lint, workspace tests, isolated feature shapes, and CI self-tests passed.
+That invocation exited 1 only for README formatting; formatting was fixed
+and the Markdown check passed separately. The normal captured environment
+still makes broad Cargo launches report `mbx: Argument list too long`.
+
 Remaining before completing this run:
 
-- Pass the full local `just ci`. Broad Cargo launches currently fail in `mbx`
-  with `Argument list too long`, including CI's own Clippy fixture; the
-  focused package commands work. The captured Bash environment reload overrides
-  PATH-only fixes. A gate attempt using `BASH_ENV=/dev/null` and the Nix Cargo
-  path is testing the full selection. Do not treat partial results as success.
 - Run the Apple source-override regression on macOS at default features and
   with `fast-apple-datapath`. This Linux host cannot reproduce or run that
   platform-specific behavior.
 - Obtain the required local other-vendor review and fix or refute every
-  finding. `quest review` on `9d15d25a720ec0d0f1b761fdc896b0740c8c275e`
+  finding. `quest review` on
+  [`9d15d25a`](https://github.com/moq-dev/moq/commit/9d15d25a720ec0d0f1b761fdc896b0740c8c275e)
   failed before review: Claude reported its weekly limit, resetting
   2026-11-02 at 02:00 America/Los_Angeles. No completed review is claimed.
 
