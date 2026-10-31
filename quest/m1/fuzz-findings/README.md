@@ -31,7 +31,7 @@ maintainer's approval.
 
 ## Required
 
-- [moq-mux on a fixed mp4-atom](/quest/m1/fuzz-findings/mp4-atom-bump.md) - waiting on a 0.17.x release containing kixelated/mp4-atom#264, then moq-mux moves off 0.16.2, which also picks up the `iref` fix
+- [moq-mux on a fixed mp4-atom](/quest/m1/fuzz-findings/mp4-atom-bump.md) - waiting on a 0.17.x release containing kixelated/mp4-atom#264, then moq-mux bumps to it and commits the `sgpd` and `iref` regressions
 - [MKV block headers never panic](/quest/m1/fuzz-findings/mkv-block-header.md) - a short SimpleBlock or Block is an import error, not a webm-iterable index panic
 - [TS step scan stays ordered](/quest/m1/fuzz-findings/ts-step-scan.md) - the step detector's look-ahead never subtracts past its start
 - [SPS fields cannot overflow](/quest/m1/fuzz-findings/sps-overflow.md) - hostile H.264 and H.265 SPS crop and size fields are refused instead of wrapping
