@@ -25,8 +25,9 @@ fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
 ///
 /// Start from [`moq_subscription_defaults`] for moq-net's defaults (priority 0, a `max_delay`
-/// of 0, everything still fresh, newest first) and change the fields you care about. A record
-/// built field by field must name `max_delay`, so none is unlimited by accident.
+/// of 0, everything still fresh, newest first) and change the fields you care about. Kotlin and
+/// Swift make a record built field by field name `max_delay`; Dart, Go, and C can still omit it,
+/// which means no subscriber limit.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
