@@ -236,6 +236,21 @@ class InventoryTest(unittest.TestCase):
         self.assertNotIn("recipe rs::sweep", orphans)
         self.assertNotIn("ignore media::probe::long_sweep", orphans)
 
+    def test_a_bun_workspace_covers_its_tests_once_its_runner_is_reached(self):
+        self.write("package.json", '{"workspaces": ["js/net"]}')
+        for package in ("js/net", "js/loose"):
+            self.write(f"{package}/package.json", '{"scripts": {"test": "bun test src"}}')
+            self.write(f"{package}/src/codec.test.ts", "")
+        orphans = self.orphans()
+        self.assertIn("script js/net/src/codec.test.ts", orphans)
+        self.assertIn("script js/loose/src/codec.test.ts", orphans)
+
+        self.write("sh/js/workspace.py", "")
+        self.write("justfile", JUSTFILE + "        python3 sh/js/workspace.py test --all\n")
+        orphans = self.orphans()
+        self.assertNotIn("script js/net/src/codec.test.ts", orphans)
+        self.assertIn("script js/loose/src/codec.test.ts", orphans)
+
     def test_a_selection_outside_the_ignored_set_covers_nothing(self):
         # Same filter, but without --run-ignored nextest skips the ignored tests.
         self.write("justfile", JUSTFILE.replace("--run-ignored only ", ""))
