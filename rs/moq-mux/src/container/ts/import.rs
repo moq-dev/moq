@@ -348,8 +348,18 @@ impl<E: catalog::Catalog> Import<E> {
 		self
 	}
 
-	/// Whether this importer reassembles the PMT sections on `pid`, and counts their CRC errors.
-	pub(super) fn reads_pmt(&self, pid: u16) -> bool {
+	/// The PID this importer reads its PMT from.
+	pub(super) fn pmt_pid(&self) -> Option<u16> {
+		self.pmt.as_ref().map(|(pid, _)| pid.as_u16())
+	}
+
+	/// The PID this importer takes its program clock from.
+	pub(super) fn pcr_pid(&self) -> Option<u16> {
+		self.pcr_pid.map(|pid| pid.as_u16())
+	}
+
+	/// Whether this importer reassembles the PMT sections on `pid`.
+	fn reads_pmt(&self, pid: u16) -> bool {
 		self.pmt.as_ref().is_some_and(|(pmt, _)| pmt.as_u16() == pid)
 	}
 
@@ -358,11 +368,20 @@ impl<E: catalog::Catalog> Import<E> {
 		self.sections.contains_key(&pid) || Pid::new(pid).is_ok_and(|pid| self.streams.contains_key(&pid))
 	}
 
-	/// Whether this importer holds a PMT section begun on `pid`, which it counts if corrupt.
-	pub(super) fn assembling_pmt(&self, pid: u16) -> bool {
-		self.pmt
-			.as_ref()
-			.is_some_and(|(pmt, sections)| pmt.as_u16() == pid && sections.assembling())
+	/// The TR 101 290 intervals this importer times, and its clock, for another to take over.
+	pub(super) fn timing(&self) -> (&Health, Option<u64>) {
+		(&self.health, self.liveness.now())
+	}
+
+	/// Take over the TR 101 290 intervals `health` timed on `pid` at clock reading `now`, from a
+	/// program that read the same packets, to count the PID from here on. See
+	/// [`Health::hand_over`].
+	pub(super) fn take_over(&mut self, pid: u16, (health, now): (&Health, Option<u64>)) {
+		let cadenced = Pid::new(pid)
+			.ok()
+			.and_then(|pid| self.streams.get(&pid))
+			.is_some_and(Stream::cadenced);
+		health.hand_over(pid, &mut self.health, cadenced, now, self.liveness.now());
 	}
 
 	/// A reservation on this program's timebase, so every stream shifts by its offset.
@@ -1243,9 +1262,7 @@ impl<E: catalog::Catalog> Import<E> {
 
 		let is_video = stream.video();
 		let is_clock = matches!(stream, Stream::Clock);
-		// Verbatim streams with no cadence (SCTE-35, DVB subtitles) are left ungraded
-		// rather than watched against an invented one.
-		if pes.pts.is_some() && (is_video || !matches!(stream, Stream::PesPacket(_) | Stream::Ignored)) {
+		if pes.pts.is_some() && stream.cadenced() {
 			self.health.pts(pid.as_u16(), self.liveness.now());
 		}
 		// Resolve the wrap at PES start so every elementary stream and private section shares
@@ -1945,13 +1962,14 @@ impl<E: catalog::Catalog> Import<E> {
 		stats
 	}
 
-	/// The TR 101 290 counts this program timed, for merging programs that read the same
-	/// multiplex.
+	/// The TR 101 290 counts this program timed, for [`Programs`](super::Programs) to count each
+	/// PID once.
 	pub(super) fn errors(&self) -> &super::health::Errors {
 		self.health.errors()
 	}
 
-	/// PMT sections dropped for a bad CRC per PID, for merging programs that read the same PMT.
+	/// PMT sections dropped for a bad CRC per PID.
+	#[cfg(test)]
 	pub(super) fn crc_errors(&self) -> &BTreeMap<u16, u64> {
 		&self.crc_errors
 	}
@@ -3029,21 +3047,9 @@ pub(super) struct SectionReassembler {
 	span: Option<Span>,
 	/// Shared with the PES path: a broken chain drops the partial either way.
 	continuity: Continuity,
-	/// Whether the first section the latest packet completed began in an earlier packet.
-	resumed: bool,
 }
 
 impl SectionReassembler {
-	/// Whether the first section the latest packet completed began in an earlier packet.
-	pub(super) fn resumed(&self) -> bool {
-		self.resumed
-	}
-
-	/// Whether a partial section is left assembling.
-	pub(super) fn assembling(&self) -> bool {
-		!self.acc.is_empty()
-	}
-
 	/// Consume one 188-byte TS packet, appending every completed section to `out`.
 	pub(super) fn push(&mut self, pkt: &[u8], out: &mut Vec<Vec<u8>>) {
 		let mut completed = Vec::new();
@@ -3053,7 +3059,6 @@ impl SectionReassembler {
 
 	fn push_at(&mut self, pkt: &[u8], source: Option<(u64, &Placement)>, out: &mut Vec<(Option<Span>, Vec<u8>)>) {
 		let pkt: &[u8; 188] = pkt.try_into().expect("section packet must be 188 bytes");
-		self.resumed = false;
 		match self.continuity.observe(pkt) {
 			Continuation::Duplicate => return,
 			// A packet flagged corrupt takes its own payload down with the partial: this is
@@ -3094,9 +3099,7 @@ impl SectionReassembler {
 				// progress (stream just joined, or a reset dropped the partial) these
 				// bytes are an orphaned fragment, so skip straight to the pointer_field.
 				self.acc.extend_from_slice(&payload[1..1 + ptr]);
-				let completed = out.len();
 				self.drain(out, source, end - (payload.len() - 1 - ptr) as u64);
-				self.resumed = out.len() > completed;
 			}
 			// The pointer_field is a hard section boundary: drop any leftover partial
 			// and start the section it points to.
@@ -3111,9 +3114,7 @@ impl SectionReassembler {
 			// discontinuity, or corrupt pointer dropped the partial, rather than
 			// resuming on stray bytes that merely look like a section.
 			self.acc.extend_from_slice(payload);
-			let completed = out.len();
 			self.drain(out, source, end);
-			self.resumed = out.len() > completed;
 		}
 	}
 
@@ -3451,6 +3452,12 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::PesPacket(stream) => stream.abort(err),
 			Stream::Clock | Stream::Ignored => {}
 		}
+	}
+
+	/// Whether the stream's PTS keeps a cadence `PTS_error` grades. Verbatim streams with none
+	/// (SCTE-35, DVB subtitles) are left ungraded rather than watched against an invented one.
+	fn cadenced(&self) -> bool {
+		self.video() || !matches!(self, Stream::PesPacket(_) | Stream::Ignored)
 	}
 
 	/// This route's track and the frame sync it has lost (only the self-describing audio
