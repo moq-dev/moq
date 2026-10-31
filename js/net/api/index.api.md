@@ -2,6 +2,7 @@
 
 ```ts
 import { $ZodBranded } from "zod/v4/core";
+import { Instant } from "@moq/clock";
 import { Milli } from "@moq/clock";
 import { ZodMiniBigInt } from "@zod/mini";
 import { infer } from "@zod/mini";
@@ -23,6 +24,7 @@ export namespace Announce {
 		kind: "start" | "update" | "restart" | "end";
 	} & Announce.Announce;
 	export interface Options {
+		covering?: boolean;
 		hidden?: boolean;
 	}
 }
@@ -314,6 +316,7 @@ export namespace Error {
 
 export namespace Group {
 	export class Consumer {
+		get arrived(): Instant;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		get done(): boolean;
@@ -334,6 +337,7 @@ export namespace Group {
 		} & Group.Frame | undefined;
 	}
 	export interface Frame {
+		arrived?: Instant;
 		payload: Uint8Array;
 		timestamp?: Time.Timestamp;
 	}
@@ -364,6 +368,7 @@ export namespace Origin {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		get closed(): Signals.GetPromise<Error | null>;
 		get discovery(): Signals.Getter<boolean | undefined>;
+		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 	}
 	export type Cost = bigint;
@@ -383,6 +388,7 @@ export namespace Origin {
 		consume(): Origin.Consumer;
 		createBroadcast(path: Path.Valid): Origin.Publication;
 		get discovery(): Signals.Getter<boolean | undefined>;
+		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		requests(prefix: Path.Valid): Origin.Requests;
 		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
@@ -404,7 +410,6 @@ export namespace Origin {
 		reject(err: Error): void;
 	}
 	export interface RequestOptions {
-		announced?: boolean;
 		epoch?: Epoch.Valid;
 	}
 	export class Requesting {
@@ -430,6 +435,7 @@ export namespace Origin {
 		readonly closed: Signals.GetPromise<Error | null>;
 		createBroadcast(path: Path.Valid): Origin.Publication;
 		readonly discovery: Signals.Getter<boolean | undefined>;
+		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		requests(prefix: Path.Valid): Origin.Requests;
 	}
@@ -621,7 +627,7 @@ export namespace Track {
 		createGroup(sequence: number): Group.Producer;
 		demand(): Track.Demand;
 		finish(): void;
-		finishAt(end: Track.Position): void;
+		finishAt(end: Track.Position, error?: Error): void;
 		info(): Promise<Track.Info>;
 		insertDatagram(sequence: number, timestamp: Time.Timestamp | undefined, payload: Uint8Array): void;
 		largest(): Track.Position | undefined;
@@ -636,7 +642,7 @@ export namespace Track {
 		demand(): Track.Demand;
 		readonly name: string;
 		get priority(): number;
-		reject(err?: Error): void;
+		reject(err: Error): void;
 		get subscription(): Readonly<Track.Subscription>;
 	}
 	export class Subscriber {
@@ -654,9 +660,12 @@ export namespace Track {
 		update(options: Track.Subscription): void;
 		withRange(groups: Track.Groups): this;
 	}
+	export const Subscription: {
+		default(): Track.Subscription;
+	};
 	export interface Subscription {
 		groups?: Track.Groups;
-		maxDelay?: Milli;
+		maxDelay?: Milli | null;
 		order?: Track.Order;
 		priority?: number;
 	}

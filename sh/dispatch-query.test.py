@@ -31,9 +31,10 @@ class QueryTests(unittest.TestCase):
         self.env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
                         GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
         # The runner's own Actions variables would move the run's error
-        # annotations to stdout and append to the real job summary.
-        for key in ("IN_MOQ_DEV_SHELL", "ALLOW_HOST_TOOLCHAIN", "CHECK_JOBS", "GITHUB_BASE_REF",
-                    "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY"):
+        # annotations to stdout and append to the real job summary, and a
+        # gate's CHECK_MODULES split would skip the modules these tests expect.
+        for key in ("IN_MOQ_DEV_SHELL", "ALLOW_HOST_TOOLCHAIN", "CHECK_JOBS", "CHECK_MODULES",
+                    "GITHUB_BASE_REF", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY"):
             self.env.pop(key, None)
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "test")
@@ -124,12 +125,13 @@ class QueryTests(unittest.TestCase):
     def test_release_pr_base_and_merge_group_base(self):
         self.env["GITHUB_BASE_REF"] = "release"
         self.expect(True, base="", rust=False)
+        # The entry queued ahead changes Rust and has not merged; this one changes a quest.
         self.change("rs/moq-net/src/lib.rs")
         self.git("add", ".")
         self.git("commit", "-qm", "queued source")
-        group_base = self.git("rev-parse", "HEAD")
         self.change("quest/m1/example.md")
-        self.expect(True, base=group_base, rust=False)
+        # Check's merge group base: a passing head can merge the entry ahead, so it selects that too.
+        self.expect(True, base="origin/main", rust=True)
         self.expect(True, base="origin/release")
 
     def test_invalid_base_fails_instead_of_reporting_no_work(self):
@@ -187,7 +189,7 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
 
     def stub_ci(self, just=""):
-        for tool in ("bun", "python3", "cargo", "wasm-bindgen", "jq", "shellcheck",
+        for tool in ("bun", "python3", "cargo", "cargo-hack", "wasm-bindgen", "jq", "shellcheck",
                      "shfmt", "taplo", "nixfmt", "actionlint", "quest", "nix",
                      "c++", "clang-format", "cmake", "dart", "dash", "gersemi", "go",
                      "gradle", "java", "kramdown-rfc", "pkg-config", "uniffi-bindgen-cpp",
@@ -279,7 +281,7 @@ class QueryTests(unittest.TestCase):
             self.assertIn("local Nix builder cannot create user namespaces", result.stdout + result.stderr)
             self.assertRegex(result.stderr, r"\d+  check flake \(skipped\)")
             calls = (self.root / "calls").read_text().splitlines()
-            self.assertNotIn("nix flake check", calls)
+            self.assertNotIn("nix flake check --print-build-logs", calls)
             self.assertIn("gh test", calls)
             probe, = [call for call in calls if call.startswith("nix build ")]
             self.assertIn("--builders  --max-jobs 1", probe)
@@ -297,7 +299,7 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("(skipped)", result.stderr)
         calls = (self.root / "calls").read_text().splitlines()
-        self.assertIn("nix flake check", calls)
+        self.assertIn("nix flake check --print-build-logs", calls)
         self.assertEqual(sum(call.startswith("nix build ") for call in calls), 1)
 
     @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
@@ -305,7 +307,7 @@ class QueryTests(unittest.TestCase):
         self.stub_ci()
         self.change("flake.nix")
         nix = self.bin / "nix"
-        nix.write_text(nix.read_text() + 'case "$*" in "flake check") exit 77 ;; esac\n')
+        nix.write_text(nix.read_text() + 'case "$*" in "flake check --print-build-logs") exit 77 ;; esac\n')
         self.env.pop("CI_STRICT")
         result = subprocess.run(["bash", "sh/dispatch.sh", "check", "origin/main"], cwd=self.repo,
                                 env=self.env, text=True, capture_output=True)
@@ -326,13 +328,13 @@ class QueryTests(unittest.TestCase):
         self.assertIn("check: check flake failed", result.stderr)
         self.assertNotIn("(skipped)", result.stderr)
         calls = (self.root / "calls").read_text().splitlines()
-        self.assertNotIn("nix flake check", calls)
+        self.assertNotIn("nix flake check --print-build-logs", calls)
         self.assertIn("gh test", calls)
 
     def test_strict_ci_runs_the_full_flake_without_a_probe(self):
         self.change("flake.nix")
         calls = self.run_ci()
-        self.assertIn("nix flake check", calls)
+        self.assertIn("nix flake check --print-build-logs", calls)
         self.assertFalse(any(call.startswith("nix build ") for call in calls))
         nix = self.bin / "nix"
         nix.write_text(nix.read_text() + 'exit 77\n')
@@ -355,11 +357,17 @@ esac
             with self.subTest(jobs=jobs):
                 run = subprocess.Popen(["bash", "sh/dispatch.sh", "ci", "origin/main"],
                                        cwd=self.repo, env=dict(self.env, CHECK_JOBS=jobs),
-                                       text=True, stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.PIPE)
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 started.read_text()
+                # A job timeout can kill the run without a signal it traps, so
+                # a buffered lane names its running phase before the phase ends.
+                os.set_blocking(run.stderr.fileno(), False)
+                live = (run.stderr.read() or b"").decode()
+                if jobs != "1":
+                    self.assertIn("ci: check rs started", live)
                 run.terminate()
-                _, stderr = run.communicate(timeout=60)
+                os.set_blocking(run.stderr.fileno(), True)
+                stderr = live + run.communicate(timeout=60)[1].decode()
                 self.assertEqual(run.returncode, 143, stderr)
                 self.assertRegex(stderr, r"\d+  check rs \(cancelled\)")
                 with self.assertRaises(ProcessLookupError):
@@ -374,6 +382,27 @@ esac
         self.assertEqual(sum(call.startswith("rs test-changed ") for call in calls), 1)
         self.assertLess(next(i for i, call in enumerate(calls) if call.startswith("rs lint-changed ")),
                         next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")))
+
+    def test_feature_shapes_follow_the_rust_tests_in_their_lane(self):
+        self.change("rs/moq-clock/src/lib.rs")
+        calls = [call.split()[1] for call in self.run_ci() if call.startswith("rs ")]
+        self.assertEqual(calls, ["lint-changed", "test-changed", "feature-shapes-changed"])
+
+    def test_module_filter_splits_the_gate(self):
+        modules = {"rs_shapes": ["rs feature-shapes-changed --all"],
+                   "-rs_shapes": ["rs lint-changed --all", "rs test-changed --all"]}
+        for filter, expected in modules.items():
+            with self.subTest(filter=filter):
+                self.env["CHECK_MODULES"] = filter
+                calls = self.run_ci("--all")
+                self.assertEqual([call for call in calls if call.startswith("rs ")], expected)
+                # Every other module runs in the job that does not name one.
+                self.assertEqual("gh check" in calls, filter.startswith("-"))
+        self.env["CHECK_MODULES"] = "rs_shape"
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "--all"], cwd=self.repo,
+                                env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("CHECK_MODULES names 'rs_shape'", result.stderr)
 
     def test_flake_checks_follow_nix_inputs_instead_of_rust_source(self):
         for path, expected in ((".cargo/config.toml", True),
@@ -392,8 +421,8 @@ esac
                 self.change(path)
                 calls = self.run_ci()
                 (self.repo / path).unlink()
-                self.assertEqual("nix flake check" in calls, expected)
-        self.assertIn("nix flake check", self.run_ci("--all"))
+                self.assertEqual("nix flake check --print-build-logs" in calls, expected)
+        self.assertIn("nix flake check --print-build-logs", self.run_ci("--all"))
 
 
 def benchmark():

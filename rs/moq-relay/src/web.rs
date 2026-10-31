@@ -1052,7 +1052,8 @@ async fn serve_announced(
 	while let Some(event) = announced.try_next() {
 		if let moq_net::announce::Event::Start(update)
 		| moq_net::announce::Event::Update(update)
-		| moq_net::announce::Event::Restart(update) = event
+		| moq_net::announce::Event::Restart(update)
+		| moq_net::announce::Event::Takeover { announce: update, .. } = event
 		{
 			broadcasts.push(update.prefix);
 		}
@@ -1101,7 +1102,8 @@ async fn serve_fetch(
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until a route covers the broadcast (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before the announce arrives.
-		let broadcast = origin.routed_broadcast("").await.map_err(|_| StatusCode::NOT_FOUND)?;
+		let mut following = origin.follow("", None).map_err(|_| StatusCode::NOT_FOUND)?;
+		let broadcast = following.available().await.map_err(|_| StatusCode::NOT_FOUND)?;
 		let sequence = match params.group {
 			FetchGroup::Num(sequence) => Some(sequence),
 			FetchGroup::Latest => None,

@@ -10,10 +10,12 @@ on-demand request surface `@moq/net` gains in
 ## Plan
 
 Decided 2026-10-27 (maintainer): split out of
-[cached JavaScript FETCH](/quest/m1/js-fetch.md), which starts now, so only
-this half waits on JS ranges. Decided in the 2026-10-05 audit: the
-producer-side request surface folded into JS ranges, so it takes range
-requests from the start, and this half only dispatches IETF FETCH onto it.
+cached JavaScript FETCH, which landed first, so only this half waits on JS
+ranges. The cached responder (`#runFetch` in `js/net/src/ietf/publisher.ts`)
+answers from the cache alone and refuses what it does not hold. Decided in
+the 2026-10-05 audit: the producer-side request surface folded into JS
+ranges, so it takes range requests from the start, and this half only
+dispatches IETF FETCH onto it.
 
 Verify with an in-memory application responder: a browser publisher serves a
 native IETF subscriber after a group is evicted or was never cached. Run the
@@ -25,4 +27,3 @@ half's FETCH support.
 ## Required
 
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - the on-demand request surface this dispatches onto
-- [Cached JavaScript FETCH](/quest/m1/js-fetch.md) - the IETF FETCH dispatch and codecs this extends

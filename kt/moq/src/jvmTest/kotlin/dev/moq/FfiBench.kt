@@ -80,7 +80,8 @@ class FfiBench {
     private suspend fun throughput(case: Case, results: MutableList<Result>) = kotlinx.coroutines.coroutineScope {
         // Close every handle inside the case, so native teardown never lands in a later one.
         val origin = OriginProducer(OriginConfig(cacheCapacityBytes = CACHE_BYTES))
-        val broadcast = origin.createBroadcast("bench")
+        val publication = origin.createBroadcast("bench")
+        val broadcast = publication.broadcast()
         val tracks = (0 until case.publishers).map { broadcast.publishTrack("$it", TrackInfo(timescale = 1_000_000uL)) }
         val consumers = tracks.flatMap { track -> (0 until case.subscribers).map { track.consume(null) } }
         // A non-uniform payload, so a zero-filled or truncated copy fails the check.
@@ -121,7 +122,7 @@ class FfiBench {
         val mb = (n - WARMUP) * case.delivered / 1e6
         results += Result("throughput/${case.name}", "MB/s", mb / (wallNs / 1e9))
         results += Result("cpu/${case.name}", "ms/MB", cpuUsedNs / 1e6 / mb)
-        (consumers + tracks + listOf(broadcast, origin)).forEach { it.close() }
+        (consumers + tracks + listOf(broadcast, publication, origin)).forEach { it.close() }
     }
 
     private inline fun call(name: String, results: MutableList<Result>, fn: () -> Unit) {

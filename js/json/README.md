@@ -64,4 +64,4 @@ for await (const { value, at } of consumer) {
 
 Producers take `{ value, at }`, where `at` is the capture time written as the frame timestamp, and consumers return the same shape. Nothing fills in now: a timed track needs `at` on every write, and an untimed track takes none and reads back without one.
 
-Both modes support optional group-scoped DEFLATE compression (`{ compression: "deflate" }` on both sides), interoperable with the Rust `moq-json` crate. `Config` is the codec options; `Producer.Config` / `Consumer.Config` add the track.
+Compression is the track's: create it with `compress: true` (`new Track.Producer(name).accept({ compress: true })`) and `@moq/net` compresses each group on the wire, while every reader sees plain JSON. JSON is small and repetitive, so set it on JSON tracks. `Config` is the codec options; `Producer.Config` / `Consumer.Config` add the track.

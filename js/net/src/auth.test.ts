@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import { Duplicate, type Grant, Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
@@ -16,7 +16,6 @@ import * as Path from "./path.ts";
 import { Stream, Writer } from "./stream.ts";
 import { abandoned } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
-import { nextTask } from "./util/yield.ts";
 import { wireOf } from "./wire.ts";
 
 const url = new URL("https://localhost:4443/test");
@@ -54,7 +53,7 @@ function waited(logged: { mock: { calls: unknown[][] } }, path: string): boolean
 
 /** Yield until `done` holds, failing if it never does. */
 async function settles(done: () => boolean): Promise<void> {
-	for (let i = 0; i < 50 && !done(); i++) await nextTask();
+	for (let i = 0; i < 50 && !done(); i++) await yieldNow();
 	expect(done()).toBe(true);
 }
 
@@ -112,7 +111,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		void token.closed.then(() => {
 			ended = true;
 		});
-		await nextTask();
+		await yieldNow();
 		expect(ended).toBe(false);
 
 		const second = await connect({ publish: new OriginProducer(), protocol, auth: handle });
@@ -162,7 +161,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 			streams[0]?.abort(new StreamError(StreamCode.Internal, { message: "lost" }));
 			await waitFor(token.grant, (g) => g === undefined);
 			await clock.advance(Nano.fromMilli(Milli(999)));
-			for (let i = 0; i < 10; i++) await nextTask();
+			for (let i = 0; i < 10; i++) await yieldNow();
 			expect(streams.length).toBe(1);
 			await clock.advance(Nano.fromMilli(Milli(1)));
 			await waitFor(token.grant, (g) => g?.publish.equals(patterns("a")) === true);
@@ -374,9 +373,9 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 			if (!unanswered) throw new Error("missing token");
 			const withdrawn = origin.createBroadcast(Path.from("foo/bar"));
 			withdrawn.announce();
-			await nextTask();
+			await yieldNow();
 			withdrawn.unannounce();
-			await nextTask();
+			await yieldNow();
 			const issued = unanswered.accept(grant(["other"], []));
 			await adding;
 			// Still enforcing: the next uncovered broadcast is the one named.
@@ -516,7 +515,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 			const unanswered = await requests.next();
 			if (!unanswered) throw new Error("missing token");
 			const track = wireOf(client).consume(Path.from("room/x")).track("video").subscribe();
-			await nextTask();
+			await yieldNow();
 			expect(track.closed.peek()).toBeUndefined();
 			clock.jump(Nano.fromMilli(Milli(7)));
 			const firstGrant = unanswered.accept(grant([], ["room"]));
@@ -538,7 +537,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 			const renewedGrant = renewal.accept(grant([], ["room"]));
 			const renewed = await renewing;
 			first.close();
-			await nextTask();
+			await yieldNow();
 			expect(track.closed.peek()).toBeUndefined();
 			published.appendGroup().writeFrame({ payload: new Uint8Array([2]) });
 			expect(await track.recvGroup()).toBeDefined();
@@ -576,7 +575,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 			void ready.then(() => {
 				settled = true;
 			});
-			await nextTask();
+			await yieldNow();
 			expect(settled).toBe(false);
 			reader.close();
 			expect(await ready).toBe(false);
@@ -607,13 +606,13 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 			const unanswered = await requests.next();
 			if (!unanswered) throw new Error("missing token");
 			const track = wireOf(client).consume(Path.from("room/x")).track("video").subscribe();
-			await nextTask();
+			await yieldNow();
 			track.close();
 			await settles(() => waited(logged, "room/x"));
 			const opened = transport.sendStreams.bidi.length;
 			const issued = unanswered.accept(grant([], ["room"]));
 			await adding;
-			for (let i = 0; i < 10; i++) await nextTask();
+			for (let i = 0; i < 10; i++) await yieldNow();
 			expect(transport.sendStreams.bidi.length).toBe(opened);
 			issued.close();
 		} finally {
@@ -648,7 +647,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 				if (!unanswered) throw new Error("missing token");
 				const track = wireOf(client).consume(Path.from("room/x")).track("video");
 				const first = track.subscribe();
-				await nextTask();
+				await yieldNow();
 				first.close();
 				for (let i = 0; i < gap; i++) await Promise.resolve();
 				const second = track.subscribe();
@@ -685,11 +684,13 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		// reaches the subscription; force that order.
 		wireOf(client).auth.close();
 		expect(wireOf(client).auth.grant.peek()?.subscribe.size).toBe(0);
-		await nextTask();
+		await yieldNow();
 		expect(track.closed.peek()).toBeUndefined();
 
 		client.abort();
-		expect(await track.closed).toBeNull();
+		const closed = await track.closed;
+		expect(closed).toBeInstanceOf(SessionError);
+		expect((closed as SessionError).code).toBe(SessionCode.Cancel);
 		server.abort();
 	});
 
@@ -748,7 +749,7 @@ test("closing a session settles its unanswered setup token", async () => {
 			.then(() => {
 				settled = true;
 			});
-		for (let i = 0; i < 10; i++) await nextTask();
+		for (let i = 0; i < 10; i++) await yieldNow();
 		expect(settled).toBe(false);
 		client.abort();
 		await settles(() => settled);
@@ -786,7 +787,7 @@ test("lite-07 presents a transiently refused token again after a backoff", async
 			return request;
 		});
 		await clock.advance(Nano.fromMilli(Milli(backoff - 1)));
-		for (let i = 0; i < 10; i++) await nextTask();
+		for (let i = 0; i < 10; i++) await yieldNow();
 		expect(presented).toBe(false);
 		expect(added).toBe(false);
 		await clock.advance(Nano.fromMilli(Milli(1)));
@@ -859,7 +860,7 @@ test("lite-07 presents a shared token again when its retry stream is reset", asy
 		);
 		await clock.advance(Nano.fromMilli(Milli(1000)));
 		await settles(() => logged("auth token ended") > 0);
-		for (let i = 0; i < 10; i++) await nextTask();
+		for (let i = 0; i < 10; i++) await yieldNow();
 		expect(rejected).toBeUndefined();
 
 		await clock.advance(Nano.fromMilli(Milli(2000)));
@@ -904,7 +905,7 @@ test("lite-07 presents a token added after a GOAWAY only on the successor", asyn
 	answer(successor.server.auth.requests(), (token) => (token ? grant(["second"], []) : grant([], [])));
 	await late;
 	await waitFor(handle.grant, (g) => g?.publish.equals(patterns("second")) === true);
-	for (let i = 0; i < 10; i++) await nextTask();
+	for (let i = 0; i < 10; i++) await yieldNow();
 	expect(seen).not.toContain("late");
 
 	client.abort();
@@ -968,7 +969,7 @@ test("lite-07 ignores a draining session's late refusal once its successor grant
 	unanswered?.reject(SessionCode.Unauthorized, "stale");
 	try {
 		await settles(() => warned.mock.calls.some(([line]) => line === "auth token refused"));
-		for (let i = 0; i < 10; i++) await nextTask();
+		for (let i = 0; i < 10; i++) await yieldNow();
 		expect(ended).toBe(false);
 		expect(token.grant.peek()?.publish.equals(patterns("second"))).toBe(true);
 	} finally {
@@ -1033,7 +1034,7 @@ test("lite-07 ignores a draining session's late refusal while its successor retr
 		const stale = refusals();
 		unanswered?.reject(SessionCode.Unauthorized, "stale");
 		await settles(() => refusals() > stale);
-		for (let i = 0; i < 10; i++) await nextTask();
+		for (let i = 0; i < 10; i++) await yieldNow();
 		expect(ended).toBe(false);
 
 		const retried = successorRequests.next();
@@ -1080,14 +1081,14 @@ test("a fetch abandoned while its token waits never reaches the wire", async () 
 			.consume(Path.from("room/x"))
 			.track("video")
 			.fetchGroup(0, { signal: abort.signal });
-		await nextTask();
+		await yieldNow();
 		abort.abort(new Error("left"));
 		await expect(fetched).rejects.toThrow();
 		await settles(() => waited(logged, "room/x"));
 		const opened = transport.sendStreams.bidi.length;
 		const issued = unanswered.accept(grant([], ["room"]));
 		await adding;
-		for (let i = 0; i < 10; i++) await nextTask();
+		for (let i = 0; i < 10; i++) await yieldNow();
 		expect(transport.sendStreams.bidi.length).toBe(opened);
 		issued.close();
 	} finally {
@@ -1118,7 +1119,7 @@ test("a listing waits for its token before reaching the wire", async () => {
 		if (!unanswered) throw new Error("missing token");
 		const opened = transport.sendStreams.bidi.length;
 		const tracks = wireOf(client).consume(Path.from("room/x")).tracks();
-		for (let i = 0; i < 10; i++) await nextTask();
+		for (let i = 0; i < 10; i++) await yieldNow();
 		expect(transport.sendStreams.bidi.length).toBe(opened);
 		const issued = unanswered.accept(grant([], ["room"]));
 		await adding;
@@ -1160,7 +1161,7 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 			const track = wireOf(client).consume(Path.from("room/x")).track("video");
 			const abort = new AbortController();
 			const first = track.fetchGroup(0, { signal: abort.signal });
-			await nextTask();
+			await yieldNow();
 			// The last caller leaves and another coalesces before the wait observes it.
 			abort.abort(new Error("left"));
 			for (let i = 0; i < gap; i++) await Promise.resolve();
@@ -1275,7 +1276,7 @@ test("a GOING_AWAY refusal leaves a shared token for the next session on moq-tra
 	});
 	try {
 		await settles(() => warned.mock.calls.some(([line]) => line === "auth token refused"));
-		for (let i = 0; i < 10; i++) await nextTask();
+		for (let i = 0; i < 10; i++) await yieldNow();
 		expect(rejected).toBeUndefined();
 	} finally {
 		read.mockRestore();

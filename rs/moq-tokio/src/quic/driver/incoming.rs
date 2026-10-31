@@ -1,22 +1,16 @@
-use std::future::{IntoFuture, Ready, ready};
 #[cfg(test)]
 use std::net::{IpAddr, SocketAddr};
 
-use futures::future::Either;
+use moq_quic::connection::Error as ConnectionError;
 
-use moq_quic::ConnectionError;
-
-use crate::quic::driver::{
-	connection::{Connecting, Connection},
-	endpoint::EndpointRef,
-};
+use crate::quic::driver::{connection::Connecting, endpoint::EndpointRef};
 
 /// An incoming connection for which the server has not yet begun its part of the handshake
 #[derive(Debug)]
 pub struct Incoming(Option<State>);
 
 impl Incoming {
-	pub(crate) fn new(inner: moq_quic::Incoming, endpoint: EndpointRef) -> Self {
+	pub(crate) fn new(inner: moq_quic::endpoint::Incoming, endpoint: EndpointRef) -> Self {
 		Self(Some(State { inner, endpoint }))
 	}
 
@@ -27,6 +21,7 @@ impl Incoming {
 	}
 
 	/// Reject this incoming connection attempt
+	#[cfg(any(test, feature = "quic"))]
 	pub(crate) fn refuse(mut self) {
 		let state = self.0.take().unwrap();
 		state.endpoint.refuse(state.inner);
@@ -34,7 +29,7 @@ impl Incoming {
 
 	/// Retry an incoming connection in driver tests.
 	#[cfg(test)]
-	pub(super) fn retry(mut self) -> Result<(), moq_quic::RetryError> {
+	pub(super) fn retry(mut self) -> Result<(), moq_quic::endpoint::RetryError> {
 		let state = self.0.take().unwrap();
 		state.endpoint.retry(state.inner)
 	}
@@ -73,18 +68,6 @@ impl Drop for Incoming {
 
 #[derive(Debug)]
 struct State {
-	inner: moq_quic::Incoming,
+	inner: moq_quic::endpoint::Incoming,
 	endpoint: EndpointRef,
-}
-
-impl IntoFuture for Incoming {
-	type Output = Result<Connection, ConnectionError>;
-	type IntoFuture = Either<Connecting, Ready<Self::Output>>;
-
-	fn into_future(self) -> Self::IntoFuture {
-		match self.accept() {
-			Ok(connecting) => Either::Left(connecting),
-			Err(error) => Either::Right(ready(Err(error))),
-		}
-	}
 }

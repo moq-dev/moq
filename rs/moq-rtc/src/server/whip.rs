@@ -193,7 +193,9 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 #[cfg(feature = "server")]
 fn status_for(err: &Error) -> StatusCode {
 	match err {
-		Error::InvalidSdp(_) | Error::Moq(moq_net::Error::EmptySegment) => StatusCode::BAD_REQUEST,
+		Error::InvalidSdp(_) | Error::Moq(moq_net::Error::EmptySegment | moq_net::Error::InvalidEscape) => {
+			StatusCode::BAD_REQUEST
+		}
 		Error::UnsupportedCodec(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
 		Error::SessionNotFound => StatusCode::NOT_FOUND,
 		Error::Moq(moq_net::Error::Unauthorized) => StatusCode::UNAUTHORIZED,
@@ -231,7 +233,7 @@ mod tests {
 		let session = accept(&server, &origin, moq_net::Path::from_static("live/cam0"), &offer())
 			.await
 			.unwrap();
-		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let broadcast = consumer.request("live/cam0", None).await.unwrap();
 		let mut catalog = broadcast
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -262,7 +264,7 @@ mod tests {
 		let _stale_session = accept(&server, &origin, moq_net::Path::from_static("live/cam0"), &offer())
 			.await
 			.unwrap();
-		let stale = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let stale = consumer.request("live/cam0", None).await.unwrap();
 		let mut catalog = stale
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -284,7 +286,7 @@ mod tests {
 		})
 		.await;
 		assert!(stale_viewer.is_err(), "the stale viewer ended: {stale_viewer:?}");
-		let fresh = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let fresh = consumer.request("live/cam0", None).await.unwrap();
 		assert!(!fresh.is_clone(&stale), "viewers reach the reconnected session");
 	}
 }

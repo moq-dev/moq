@@ -16,7 +16,7 @@
 //! Each codec's out-of-band config record (avcC / hvcC / av1C / `AudioSpecificConfig`
 //! / `OpusHead`) becomes the catalog `description`; VP9 and the verbatim audio
 //! codecs (MP3 / AC-3 / E-AC-3) carry their config in band, so they configure from
-//! the first frame instead. Sample bytes already match the codec payload, so no codec
+//! the frames instead, a changed config starting a new track. Sample bytes already match the codec payload, so no codec
 //! transform is needed before the selected media container wraps them. FLAC (`fLaC`)
 //! enhanced audio, and any other unsupported codec, fail the import.
 
@@ -349,11 +349,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		if sound_format == AUDIO_FORMAT_MP3 {
 			// Legacy MP3: the raw frame follows the one-byte tag header, with the
-			// config in band. Configure from the first frame, then write it.
+			// config in band. Configure from each frame, which starts a new track only
+			// when the header changes, then write it.
 			let frame = &body[1..];
-			if !self.audio.contains_key(&DEFAULT_TRACK_ID) {
-				self.init_audio(DEFAULT_TRACK_ID, config_from_mp3(frame)?)?;
-			}
+			self.init_audio(DEFAULT_TRACK_ID, config_from_mp3(frame)?)?;
 			return self.write_audio(DEFAULT_TRACK_ID, frame, timestamp);
 		}
 		if sound_format != AUDIO_FORMAT_AAC {
@@ -437,18 +436,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				self.init_audio(track_id, config)
 			}
 			AUDIO_PACKET_CODED_FRAMES => {
-				// MP3 / AC-3 / E-AC-3 carry their config in the frame header, so
-				// configure from the first frame when no sequence header preceded it.
-				if !self.audio.contains_key(&track_id) {
-					let config = match fourcc {
-						b".mp3" => Some(config_from_mp3(payload)?),
-						b"ac-3" => Some(config_from_ac3(payload)?),
-						b"ec-3" => Some(config_from_eac3(payload)?),
-						_ => None,
-					};
-					if let Some(config) = config {
-						self.init_audio(track_id, config)?;
-					}
+				// MP3 / AC-3 / E-AC-3 carry their config in the frame header, so configure from
+				// each frame, which starts a new track only when the header changes.
+				let config = match fourcc {
+					b".mp3" => Some(config_from_mp3(payload)?),
+					b"ac-3" => Some(config_from_ac3(payload)?),
+					b"ec-3" => Some(config_from_eac3(payload)?),
+					_ => None,
+				};
+				if let Some(config) = config {
+					self.init_audio(track_id, config)?;
 				}
 				self.write_audio(track_id, payload, timestamp)
 			}

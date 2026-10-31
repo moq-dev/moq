@@ -72,9 +72,7 @@ Implementation:
   every reply decodes from its first frame, plain and barge-in, with no
   overflow.
 
-Decided 2026-10-27 (maintainer): the runtime mode-switch bug found by the
-2026-10-24 pre-cut audit is its own ready quest,
-[Switching buffer at runtime](/quest/m1/watch-buffer-switch.md). This quest
+Runtime buffer changes switch the audio ring and reader mode. This quest
 keeps waiting on lite-07 for the head-hold simplification.
 
 ## Required
@@ -83,6 +81,5 @@ keeps waiting on lite-07 for the head-hold simplification.
 
 ## Related
 
-- [Switching buffer at runtime](/quest/m1/watch-buffer-switch.md) - the audio ring follows `buffer` changes; whichever lands second re-runs the other's decoder tests
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS consumer stops delivering groups below its cursor
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - owns the wire's `Group Order` and the ordered cursor's floor

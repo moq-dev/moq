@@ -7,7 +7,7 @@ use std::hint::black_box;
 
 use bytes::{BufMut, BytesMut};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_quic::DatagramEvent;
+use moq_quic::endpoint::{DatagramEvent, Received};
 
 #[allow(
 	dead_code,
@@ -39,7 +39,16 @@ fn bench_route(c: &mut Criterion<ThreadCpu>) {
 						|| datagrams.clone(),
 						|datagrams| {
 							for datagram in datagrams {
-								let event = pair.server.endpoint.handle(now, remote, None, None, datagram, &mut buf);
+								let event = pair.server.endpoint.handle(
+									now,
+									Received {
+										remote,
+										local_ip: None,
+										ecn: None,
+										data: datagram,
+									},
+									&mut buf,
+								);
 								assert!(matches!(event, Some(DatagramEvent::ConnectionEvent(..))));
 								black_box(event);
 							}

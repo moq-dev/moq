@@ -56,8 +56,13 @@ async fn routing(version: &str, cluster: bool) {
 	options.client_subscribe = Some(reader.clone());
 	links.push(connect_mock(options).await);
 
-	reader.consume().routed(NAMESPACE).await.unwrap();
-	let remote = reader.consume().request_broadcast(NAMESPACE, None).await.unwrap();
+	let remote = reader
+		.consume()
+		.follow(NAMESPACE, None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
 	let mut subscription = remote.track("test").unwrap().subscribe(None).await.unwrap();
 	crate::support::harness::subscribed(&track).await;
 	let mut group = track.append_group().unwrap();

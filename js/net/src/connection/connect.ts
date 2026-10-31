@@ -17,7 +17,7 @@ import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
-import { type Credential, credential, fallback, hold } from "./tokens.ts";
+import { credential, fallback, hold, type Presentation } from "./tokens.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = Milli(500);
@@ -96,6 +96,7 @@ const VERSIONS: Record<string, { alpn: string; setup?: Lite.Version }> = {
 	"moq-lite-02": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_02 },
 	"moq-lite-01": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_01 },
 	"moq-transport-22": { alpn: Ietf.ALPN.DRAFT_22 },
+	"moq-transport-20": { alpn: Ietf.ALPN.DRAFT_20 },
 	"moq-transport-18": { alpn: Ietf.ALPN.DRAFT_18 },
 };
 
@@ -107,6 +108,7 @@ const DEFAULT_VERSIONS = Object.keys(VERSIONS).filter((name) => name !== "moq-li
 // it knows and the server pick one.
 const QMUX: Record<string, QmuxVersion | QmuxVersion[] | null> = {
 	[Ietf.ALPN.DRAFT_22]: "qmux-01",
+	[Ietf.ALPN.DRAFT_20]: "qmux-01",
 	[Ietf.ALPN.DRAFT_18]: "qmux-01",
 };
 
@@ -208,7 +210,7 @@ export interface ConnectProps {
 	 * nothing.
 	 *
 	 * What the peer announces under the prefixes the origin's readers watch
-	 * (`announced(scope)` or `request(path, { announced: true })`) appears in its table for
+	 * (`announced(scope)`, `request(path)`, or `follow(path)`) appears in its table for
 	 * the session's lifetime, consumable by path; nothing is asked until something watches,
 	 * and the entries retract when the session dies. Pass the producer behind
 	 * {@link ConnectProps.publish} to route both directions through one origin: a locally
@@ -357,12 +359,12 @@ async function connectInner(
 	tokens: readonly string[],
 	props: Omit<ConnectProps, "url">,
 	abort: Promise<void>,
-): Promise<[Established, Credential]> {
+): Promise<[Established, Presentation]> {
 	const offered = offer(props.versions);
 	const dial = credential(raw, tokens, offered.setupToken);
 	const url = dialable(dial.url);
 	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, offered.setupToken);
-	const wiring = (presented: Credential): SessionProps => ({
+	const wiring = (presented: Presentation): SessionProps => ({
 		publish: props.publish,
 		handle: props.auth,
 		client: true,
@@ -494,9 +496,11 @@ async function negotiate(
 	const ietf =
 		protocol === Ietf.ALPN.DRAFT_22
 			? Ietf.Version.DRAFT_22
-			: protocol === Ietf.ALPN.DRAFT_18
-				? Ietf.Version.DRAFT_18
-				: undefined;
+			: protocol === Ietf.ALPN.DRAFT_20
+				? Ietf.Version.DRAFT_20
+				: protocol === Ietf.ALPN.DRAFT_18
+					? Ietf.Version.DRAFT_18
+					: undefined;
 	if (ietf !== undefined) {
 		return await handshakeAlpn(url, session, ietf, wiring);
 	} else if (protocol === Lite.ALPN_07_WIP) {

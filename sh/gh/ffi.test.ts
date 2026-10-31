@@ -72,6 +72,39 @@ test("wrapper gates preserve trusted tag inputs and inspect only their publisher
 	}
 });
 
+// The tag patterns the `release tags` ruleset protects (infra/README.md).
+const PROTECTED = /^moq-(relay|cli|boy|c|gst|ffi|dart)-v$/;
+
+test("privileged workflow_run jobs require a protected release tag before running its code", async () => {
+	for (const [file, job] of [
+		["release-go", "ffi-release"],
+		["release-kt-lib", "ffi-release"],
+		["release-swift-lib", "ffi-release"],
+		["release-py", "build"],
+		["release-brew", "publish"],
+		["release-winget", "publish"],
+	]) {
+		const gated = (await read(file)).jobs[job];
+		// Every accepted head_branch prefix must be one the `release tags` ruleset
+		// protects, or a pusher could create a matching tag on their own commit.
+		const prefixes = [...(gated.if ?? "").matchAll(/head_branch, '([^']+)'\)/g)].map((match) => match[1]);
+		expect([file, prefixes.length > 0]).toEqual([file, true]);
+		for (const prefix of prefixes) expect([file, prefix]).toEqual([file, expect.stringMatching(PROTECTED)]);
+		const steps = gated.steps ?? [];
+		const gate = steps.findIndex((step) => step.name === "Require a release tag at the run's commit");
+		expect([file, gate]).not.toEqual([file, -1]);
+		expect(steps[gate].env).toEqual({
+			GH_TOKEN: "${{ github.token }}",
+			TAG: "${{ github.event.workflow_run.head_branch }}",
+			SHA: "${{ github.event.workflow_run.head_sha }}",
+		});
+		expect(steps[gate].run).toContain('commits/refs/tags/$TAG"');
+		// Nothing from the triggering commit runs before the gate.
+		const head = steps.findIndex((step) => step.with?.ref?.includes("workflow_run.head_sha"));
+		expect([file, head === -1 || head > gate]).toEqual([file, true]);
+	}
+});
+
 test("Nightly and alert chains retain packaged outputs with one shared producer", async () => {
 	const nightly = await read("nightly");
 	expect(nightly.jobs["release-shared-ffi"].uses).toBe("./.github/workflows/release-shared-ffi.yml");
