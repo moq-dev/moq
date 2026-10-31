@@ -2442,42 +2442,39 @@ mod tests {
 		);
 	}
 
-	/// Wide ranges cost one held entry per model fill, shared until the last reader leaves.
+	/// A held fill costs one entry, shared by every reader that joins it, until the last leaves.
 	#[moq_clock::test]
 	async fn held_feed_fills_follow_shared_demand() {
-		const WIDTH: u64 = 1 << 40;
 		let start = crate::time::Instant::now();
 		let clock = crate::time::Deadlines::new(start);
 		let tail = kio::Producer::new(Tail::default());
 		let sub = feed_sub(&tail).await;
-		let info = track::Info::default().with_timescale(None);
-		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+		let (track, mut callers, requests) = feed_batch([1, 2, 3]);
 		let dynamic = track.requests();
 		let mut fetches = FeedFetches::new(&clock);
-		let mut callers = Vec::new();
-		for span in [1..WIDTH, WIDTH..WIDTH * 2, WIDTH * 2..WIDTH * 3] {
-			callers.push(track.consume().fill_groups(span, 0));
-			let fill = dynamic.requested_fill().now_or_never().expect("queued").unwrap();
-			fetches.push(fill, &track.consume());
+		for req in requests {
+			fetches.push(req, &track.consume());
 		}
 		let waiter = kio::Waiter::noop();
 		fetches.poll(&sub, start, &waiter);
-		assert_eq!(fetches.held.len(), 3, "one entry per fill, independent of its width");
+		assert_eq!(fetches.held.len(), 3, "one entry per fill");
 		assert!(callers.iter_mut().all(|caller| caller.now_or_never().is_none()));
 
-		let mut joined = track.consume().fill_groups(1..WIDTH * 3, 0);
+		let mut joined: Vec<_> = (1..=3)
+			.map(|sequence| track.consume().fetch_group(sequence, None))
+			.collect();
 		assert!(
 			dynamic.requested_fill().now_or_never().is_none(),
 			"joins existing fills"
 		);
 		drop(callers);
 		fetches.poll(&sub, start, &waiter);
-		assert_eq!(fetches.held.len(), 3, "the joined reader still owns the demand");
-		assert!((&mut joined).now_or_never().is_none());
+		assert_eq!(fetches.held.len(), 3, "the joined readers still own the demand");
+		assert!(joined.iter_mut().all(|caller| caller.now_or_never().is_none()));
 
 		drop(joined);
 		fetches.poll(&sub, start, &waiter);
-		assert!(fetches.held.is_empty(), "last reader leaving releases every fill");
+		assert!(fetches.held.is_empty(), "the last reader leaving releases every fill");
 		assert!(fetches.ready.read().is_empty());
 		assert_eq!(fetches.fold.deadline(), None);
 		assert!(dynamic.requested_fill().now_or_never().is_none());
