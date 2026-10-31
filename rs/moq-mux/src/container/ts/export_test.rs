@@ -9836,6 +9836,70 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	assert_eq!(start.elapsed(), follow);
 }
 
+/// A program that ends while stitching, then returns after the unresolved replacement goes,
+/// resumes at normal priority.
+#[tokio::test(start_paused = true)]
+async fn a_return_after_an_abandoned_switch_restores_priority() {
+	let origin = crate::source::produce_origin();
+	let epoch = moq_net::Epoch::mint();
+	let (old, mut old_catalog) = publish_bare(&origin, Some(&epoch));
+	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
+	write_aac(&mut old_audio, 0);
+	let export = open_export(crate::source::resolved(&origin, "live").await)
+		.await
+		.unwrap()
+		.with_delay(Duration::from_millis(500))
+		.with_replay();
+	let mut follower = super::Follower::new(export)
+		.unwrap()
+		.with_follow(Duration::from_secs(10))
+		.with_stitch(true);
+	assert!(
+		follower.next().await.unwrap().is_some(),
+		"the old program emitted media"
+	);
+	pump(&mut follower).await;
+
+	// Replaced, but the replacement's catalog request is never answered.
+	let replacement = origin
+		.publish(
+			"live",
+			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+		)
+		.unwrap();
+	let unanswered = replacement.requests();
+	pump(&mut follower).await;
+	assert_eq!(
+		old_audio.track().subscription().unwrap().priority,
+		-1,
+		"the old program yields while acquiring"
+	);
+
+	// The old program ends mid-switch. The replacement goes without serving its catalog,
+	// allowing the older epoch to serve again.
+	old_audio.finish().unwrap();
+	finish((old, old_catalog));
+	pump(&mut follower).await;
+	drop((replacement, unanswered));
+	let (back, mut back_catalog) = publish_bare(&origin, Some(&epoch));
+	let mut back_audio = aac_rendition(&mut back.broadcast().clone(), &mut back_catalog, "a.aac");
+	write_aac(&mut back_audio, 1000);
+	pump(&mut follower).await;
+	assert_eq!(
+		back_audio.track().subscription().unwrap().priority,
+		0,
+		"the resumed program keeps normal priority"
+	);
+	drop((back, back_catalog));
+
+	/// Take what the follower muxes until it idles for a second, well within the follow.
+	async fn pump(follower: &mut super::Follower) {
+		while let Ok(next) = tokio::time::timeout(Duration::from_secs(1), follower.next()).await {
+			assert!(next.unwrap().is_some(), "the follower keeps waiting");
+		}
+	}
+}
+
 /// A track that lost its route is the publisher leaving, so the return that follows is carried
 /// on into.
 #[tokio::test(start_paused = true)]
@@ -11514,6 +11578,7 @@ async fn a_healthy_stitch_feeds_the_old_generation_until_the_new_clock_acquires(
 		.with_stitch(true)
 		.with_follow(Duration::from_secs(10));
 	let mut replacement = None;
+	let mut demoted = false;
 	let mut frames = Vec::new();
 	let step = Duration::from_millis(20);
 	let start = tokio::time::Instant::now();
@@ -11537,8 +11602,17 @@ async fn a_healthy_stitch_feeds_the_old_generation_until_the_new_clock_acquires(
 				Poll::Pending => break,
 			}
 		}
+		if let Some((_, _, audio)) = &replacement {
+			if let Some(subscription) = old_audio.track().subscription() {
+				demoted |= subscription.priority == -1;
+			}
+			if let Some(subscription) = audio.track().subscription() {
+				assert_eq!(subscription.priority, 0, "the replacement keeps normal priority");
+			}
+		}
 		tokio::time::advance(step).await;
 	}
+	assert!(demoted, "the healthy old program yielded to the acquiring one");
 	let switch = frames
 		.iter()
 		.position(|(_, epoch, _)| *epoch == 1)
@@ -11838,6 +11912,7 @@ async fn a_replacement_leaving_before_it_commits_keeps_the_old_program() {
 			let stream = crate::catalog::Consumer::new(&target, Default::default())
 				.await
 				.unwrap();
+			export.source().priority(-1).unwrap();
 			export.followed(&target, stream, Duration::from_secs(10)).unwrap();
 			replacement = Some((new, catalog, audio));
 		}
@@ -11857,6 +11932,11 @@ async fn a_replacement_leaving_before_it_commits_keeps_the_old_program() {
 		}
 		tokio::time::advance(Duration::from_millis(20)).await;
 	}
+	assert_eq!(
+		old_audio.track().subscription().unwrap().priority,
+		0,
+		"a cancelled switch restores priority"
+	);
 	assert_eq!(export.discontinuity(), 0, "the replacement never went out");
 	let pts = audio_pts(&frames);
 	assert!(

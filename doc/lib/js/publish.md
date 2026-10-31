@@ -31,7 +31,7 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
 | `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `source` | `camera`, `screen`, or `file`. |
-| `muted`, `invisible` | Disable audio or video capture. |
+| `muted`, `invisible` | Stop publishing audio or video. The microphone and camera stay open, so unmuting or unhiding is instant and the browser's capture indicators stay lit; clear `source` or remove the element to release them. `source` covers both devices, so releasing one while keeping the other takes the library: toggle `Source.Microphone` or `Source.Camera` `enabled`. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
@@ -170,7 +170,7 @@ browsers suspend Web Audio until then. Every input and output is a signal from
 `out.error` and disables only its rendition; siblings and the broadcast keep
 running. It does not retry on demand or bandwidth changes, and enable cycles
 that keep the same capture do not retry. A new capture source (such as the
-track a camera or microphone reopens on unmute), changed encoder settings, or
+track a camera or microphone reopens after a device swap), changed encoder settings, or
 a replacement encoder recovers it. Recovery keeps the catalog ID and uses a
 fresh `track` name.
 

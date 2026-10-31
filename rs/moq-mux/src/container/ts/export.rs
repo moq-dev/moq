@@ -487,6 +487,9 @@ impl Track {
 			}
 			match self.source.poll_event(waiter)? {
 				Poll::Ready(Some(Event::Frame { frame, arrived })) => {
+					if is_video && frame.keyframe && input.waiting_for_header {
+						tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "keyframe", now = ?moq_clock::now(), program = self.key.program, ?arrived);
+					}
 					let arrived = arrived.max(self.subscribed);
 					// The frame settles what its group's end left held, so they are ready as it lands.
 					self.latest = self.latest.max(arrived);
@@ -1149,6 +1152,7 @@ impl Pack {
 /// reduces its newest complete group into the current section set, and remembers
 /// when it last hit the wire so it re-emits on its own cadence.
 struct SiTrack {
+	source: crate::Source,
 	/// The catalog's track name for this entry, so a catalog update that repoints
 	/// the entry at a different track (a restarted publisher) is detected and the
 	/// subscription rebuilt rather than left repeating the old track's sections.
@@ -1185,7 +1189,10 @@ enum SiState {
 	Subscribing(kio::Pending<moq_net::track::Subscribing>),
 	/// The resolved subscription, reading snapshot groups. Boxed: a reader is far larger
 	/// than the other states.
-	Active(Box<moq_net::track::Ordered>),
+	Active {
+		track: Box<moq_net::track::Ordered>,
+		_priority: crate::source::Priority,
+	},
 	/// The track ended or failed; the last complete snapshot keeps re-emitting,
 	/// mirroring how a real mux repeats its tables between (absent) revisions.
 	Done,
@@ -1205,6 +1212,7 @@ impl SiTrack {
 			(SiState::Done, Self::inline(entry))
 		};
 		Self {
+			source: source.clone(),
 			track: entry.track.clone(),
 			interval: entry.interval,
 			state,
@@ -1246,7 +1254,10 @@ impl SiTrack {
 			self.state = match resolved {
 				Ok((broadcast, name)) => match broadcast.track(&name) {
 					Ok(track) => SiState::Subscribing(
-						track.subscribe(moq_net::track::Subscription::default().with_max_delay(self.max_age)),
+						track.subscribe(
+							self.source
+								.subscription(moq_net::track::Subscription::default().with_max_delay(self.max_age)),
+						),
 					),
 					Err(err) => {
 						tracing::warn!(%err, track = %name, "SI track unavailable; carrying the last snapshot");
@@ -1266,12 +1277,18 @@ impl SiTrack {
 					unreachable!("just matched Subscribing");
 				};
 				match pending.poll_ok(waiter) {
-					Poll::Ready(result) => result,
+					Poll::Ready(result) => result.and_then(|track| {
+						let priority = self.source.control(track.control())?;
+						Ok((track, priority))
+					}),
 					Poll::Pending => return,
 				}
 			};
 			self.state = match resolved {
-				Ok(track) => SiState::Active(Box::new(track.ordered())),
+				Ok((track, priority)) => SiState::Active {
+					track: Box::new(track.ordered()),
+					_priority: priority,
+				},
 				Err(err) => {
 					tracing::warn!(%err, "SI subscription failed; carrying the last snapshot");
 					SiState::Done
@@ -1280,7 +1297,7 @@ impl SiTrack {
 		}
 
 		let mut ended = false;
-		if let SiState::Active(track) = &mut self.state {
+		if let SiState::Active { track, .. } = &mut self.state {
 			loop {
 				// Drain to the newest group first: a snapshot obsoletes every older
 				// one, including a partially-read pending group.
@@ -1339,7 +1356,8 @@ impl<S: Stream> Program<S>
 where
 	S::Ext: catalog::Catalog,
 {
-	fn new(source: crate::Source, catalog: S) -> Self {
+	fn new(mut source: crate::Source, catalog: S) -> Self {
+		source.isolate();
 		let instance = source.broadcast().info().epoch.clone();
 		Self {
 			id: 0,
@@ -1509,6 +1527,7 @@ where
 					}
 					tracing::warn!(%err, "replacement left before it went out, keeping the old program");
 					self.cancel_pending();
+					self.program.source.priority(0)?;
 					self.follow_until = None;
 					self.follow_timer = None;
 					break;
@@ -2618,6 +2637,7 @@ where
 		if self.pending.is_some() && self.program.instance.is_some() && broadcast.info().epoch == self.program.instance
 		{
 			self.cancel_pending();
+			self.program.source.priority(0)?;
 			self.follow_until = None;
 			self.follow_timer = None;
 		}
