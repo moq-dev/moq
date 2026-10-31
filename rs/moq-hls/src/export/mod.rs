@@ -3839,7 +3839,11 @@ mod tests {
 		test.sync();
 		let new = test.rendition("video0");
 		assert!(!Arc::ptr_eq(&old, &new), "the reconfigure replaces the rendition");
-		assert_eq!(numbers(&new.snapshot()), [0, 1], "nothing the predecessor listed is dropped");
+		assert_eq!(
+			numbers(&new.snapshot()),
+			[0, 1],
+			"nothing the predecessor listed is dropped"
+		);
 		let id = |tag: &str, segment| segments::Id {
 			generation: None,
 			tag: tag.to_string(),
@@ -3867,7 +3871,10 @@ mod tests {
 		}
 		let snapshot = test.listed("video0", 22).await;
 		assert!(snapshot.segments.iter().all(|s| s.segment > 3 && s.map.is_none()));
-		assert_eq!(snapshot.discontinuity_sequence, 1, "the slid-out break is still counted");
+		assert_eq!(
+			snapshot.discontinuity_sequence, 1,
+			"the slid-out break is still counted"
+		);
 		assert_eq!(Arc::strong_count(&old), 1, "the replacement released its predecessor");
 		assert!(new.segment(&id(old.tag(), 2)).await.unwrap().is_none());
 	}

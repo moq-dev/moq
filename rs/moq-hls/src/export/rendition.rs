@@ -960,7 +960,9 @@ impl Rendition {
 		generation: Option<Arc<str>>,
 	) -> Snapshot {
 		let media_sequence = inherited.first().map_or(window.sequence, |(_, row)| row.segment);
-		let discontinuity_sequence = inherited.first().map_or(window.discontinuity, |(_, row)| row.discontinuity);
+		let discontinuity_sequence = inherited
+			.first()
+			.map_or(window.discontinuity, |(_, row)| row.discontinuity);
 		let rows = inherited
 			.iter()
 			.map(|(rendition, row)| {
