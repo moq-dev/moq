@@ -791,7 +791,8 @@ struct TrackState {
 	fetch_id: Option<RequestId>,
 	// The groups replaced fills failed to head. Their mid-group tails can still arrive
 	// after a later fill settles, and have the same hole at the front. A group leaves once
-	// its stream opens, since only one subgroup stream carries it.
+	// its stream opens, since only one subgroup stream carries it, or once the tail stops
+	// waiting for it.
 	headless: BTreeSet<u64>,
 
 	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
@@ -3780,6 +3781,11 @@ impl Subscriber {
 						}
 						filling.cancel();
 						drop(filling);
+						// A group the tail accounts for needs no record: its stream opened, or
+						// the grace gave up on it.
+						let tail = held.tail.read();
+						held.headless.retain(|&sequence| !tail.covers(sequence..sequence + 1));
+						drop(tail);
 						held.fill = kio::Producer::new(Fill::Requested);
 						held.fill_start = match update.fill.and_then(|fill| fill.filter.or(update.filter)) {
 							Some(Filter::Absolute { start, .. }) => Some(start),
@@ -16797,11 +16803,10 @@ mod new_group_tests {
 		relay.serving.abort();
 	}
 
-	/// A widening update replaces a fill that failed to head its group, while that group's
-	/// mid-group tail can still be in flight. The tail stays headless both to a stream
-	/// already opening on the old fill and to one opening after the replacement.
-	#[moq_clock::test]
-	async fn a_replaced_failed_fill_keeps_its_group_headless() {
+	/// Fail the fills of widenings whose Largest Groups are 5 and then 6, and replace each
+	/// with the next widening. The tail accounts for the `opened` groups' streams before the
+	/// last replacement. Returns the groups the subscription still records as headless.
+	async fn replace_failed_fills(opened: &[u64]) -> BTreeSet<u64> {
 		use crate::{coding::Encode, lite::test_transport::ScriptedSession};
 
 		let header = |request_id| async move {
@@ -16826,6 +16831,12 @@ mod new_group_tests {
 		// for good, and the next widening replaces it.
 		let mut failed = Vec::new();
 		for (range, largest) in [(Some(4), 5), (Some(2), 6), (None, 6)] {
+			if range.is_none() {
+				let tail = relay.probe.state.lock().subscribes[&subscription].tail.clone();
+				for &sequence in opened {
+					drop(Reading::open(&tail, Some(sequence), relay.probe.runtime.now()));
+				}
+			}
 			let wanted = track::Subscription::default();
 			first
 				.update(match range {
@@ -16865,12 +16876,24 @@ mod new_group_tests {
 				"a stream already opening on the old fill still finds group {sequence} headless"
 			);
 		}
-		assert_eq!(
-			relay.probe.state.lock().subscribes[&subscription].headless,
-			BTreeSet::from([5, 6]),
-			"a stream opening after either replacement does too"
-		);
+		let headless = relay.probe.state.lock().subscribes[&subscription].headless.clone();
 		relay.serving.abort();
+		headless
+	}
+
+	/// A widening update replaces a fill that failed to head its group, while that group's
+	/// mid-group tail can still be in flight. The tail stays headless both to a stream
+	/// already opening on the old fill and to one opening after either replacement.
+	#[moq_clock::test]
+	async fn a_replaced_failed_fill_keeps_its_group_headless() {
+		assert_eq!(replace_failed_fills(&[]).await, BTreeSet::from([5, 6]));
+	}
+
+	/// A group whose stream the tail already accounts for needs no headless record, so the
+	/// next replacement forgets it.
+	#[moq_clock::test]
+	async fn a_replacement_forgets_a_headless_group_whose_stream_opened() {
+		assert_eq!(replace_failed_fills(&[5]).await, BTreeSet::from([6]));
 	}
 }
 
