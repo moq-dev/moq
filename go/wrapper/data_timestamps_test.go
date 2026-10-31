@@ -7,12 +7,11 @@ import (
 	"time"
 
 	"moq.dev/moq"
-	"moq.dev/moq/flate"
 	moqjson "moq.dev/moq/json"
 )
 
 func TestDataTimestamps(t *testing.T) {
-	for _, mode := range []string{"json snapshot", "json stream", "flate snapshot", "flate stream"} {
+	for _, mode := range []string{"json snapshot", "json stream"} {
 		for _, timed := range []bool{false, true} {
 			name := mode + "/untimed"
 			if timed {
@@ -42,7 +41,6 @@ func TestDataTimestamps(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer consumer.Cancel()
-				payload := []byte("opaque payload")
 				switch mode {
 				case "json snapshot":
 					producer, err := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{})
@@ -57,34 +55,12 @@ func TestDataTimestamps(t *testing.T) {
 						t.Fatal(err)
 					}
 				case "json stream":
-					producer, err := moqjson.NewStreamProducer(broadcast, track, moqjson.StreamOptions{})
+					producer, err := moqjson.NewStreamProducer(broadcast, track)
 					if err != nil {
 						t.Fatal(err)
 					}
 					err = producer.Append(map[string]int{"n": 1}, timestamp)
 					if err != nil {
-						t.Fatal(err)
-					}
-					if err := producer.Finish(); err != nil {
-						t.Fatal(err)
-					}
-				case "flate snapshot":
-					producer, err := flate.NewSnapshotProducer(broadcast, track, flate.Options{})
-					if err != nil {
-						t.Fatal(err)
-					}
-					if err := producer.Update(payload, timestamp); err != nil {
-						t.Fatal(err)
-					}
-					if err := producer.Finish(); err != nil {
-						t.Fatal(err)
-					}
-				case "flate stream":
-					producer, err := flate.NewStreamProducer(broadcast, track, flate.Options{})
-					if err != nil {
-						t.Fatal(err)
-					}
-					if err := producer.Append(payload, timestamp); err != nil {
 						t.Fatal(err)
 					}
 					if err := producer.Finish(); err != nil {
@@ -101,16 +77,12 @@ func TestDataTimestamps(t *testing.T) {
 				if (frame.Timestamp == nil) != (timestamp == nil) || timestamp != nil && *frame.Timestamp != *timestamp {
 					t.Fatalf("timestamp = %v, want %v", frame.Timestamp, timestamp)
 				}
-				if mode == "json snapshot" || mode == "json stream" {
-					var value map[string]int
-					if err := json.Unmarshal(frame.Payload, &value); err != nil {
-						t.Fatal(err)
-					}
-					if value["n"] != 1 {
-						t.Fatalf("payload = %s", frame.Payload)
-					}
-				} else if string(frame.Payload) != string(payload) {
-					t.Fatalf("payload = %q", frame.Payload)
+				var value map[string]int
+				if err := json.Unmarshal(frame.Payload, &value); err != nil {
+					t.Fatal(err)
+				}
+				if value["n"] != 1 {
+					t.Fatalf("payload = %s", frame.Payload)
 				}
 			})
 		}

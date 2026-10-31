@@ -4,8 +4,9 @@
 // [moq.TrackProducer] (the snapshot and stream producers also advertise it in
 // their broadcast's catalog, which has no window mode), and a consumer takes
 // over a [moq.TrackConsumer] that has not read a group yet. The track can come
-// from a request as well as by name. Import it under an alias
-// next to encoding/json:
+// from a request as well as by name. Compression is the track's: publish JSON
+// with [moq.TrackInfo] Compress set, and a consumer reads it with no option of
+// its own. Import it under an alias next to encoding/json:
 //
 //	import moqjson "moq.dev/moq/json"
 package json
@@ -29,8 +30,6 @@ type SnapshotOptions struct {
 	// update as a full snapshot in its own group. With deltas on, give the track a
 	// refresh ratio so a joiner past it gets the value restated in a fresh group.
 	Deltas *bool
-	// Compression enables group-scoped DEFLATE and must match on the consumer.
-	Compression bool
 }
 
 // deltas resolves the configured switch. Go has no field defaults, so this restates the
@@ -40,30 +39,13 @@ func (o SnapshotOptions) deltas() bool {
 	return o.Deltas == nil || *o.Deltas
 }
 
-// StreamOptions configures a lossless append-log JSON producer.
-type StreamOptions struct {
-	// Compression enables group-scoped DEFLATE and must match on the consumer.
-	Compression bool
-}
-
 // WindowOptions configures a sliding-window JSON producer.
 type WindowOptions struct {
-	// Compression enables group-scoped DEFLATE and must match on the consumer.
-	Compression bool
 	// CheckpointRecords bounds the records retained and restated when a group rolls,
 	// for a window that is never popped: a reader that keeps up still sees every
 	// record, while a later joiner gets a WindowSkip for the older ones. Nil restates
 	// the whole window; zero is refused.
 	CheckpointRecords *uint64
-}
-
-// ConsumerOptions configures reading any kind of JSON track.
-//
-// Delta encoding and checkpoints are producer-side choices the consumer follows
-// automatically, so only the compression setting has to match.
-type ConsumerOptions struct {
-	// Compression enables group-scoped DEFLATE and must match the producer.
-	Compression bool
 }
 
 // SnapshotProducer publishes a JSON value as lossy latest state.
@@ -78,7 +60,7 @@ func NewSnapshotProducer(broadcast *moq.BroadcastProducer, track *moq.TrackProdu
 	inner, err := ffi.NewMoqJsonSnapshotProducer(
 		bridge.BroadcastProducer(broadcast),
 		bridge.TrackProducer(track),
-		ffi.MoqJsonSnapshotConfig{Deltas: options.deltas(), Compression: options.Compression},
+		ffi.MoqJsonSnapshotConfig{Deltas: options.deltas()},
 	)
 	if err != nil {
 		return nil, err
@@ -122,12 +104,8 @@ type StreamProducer struct {
 // NewStreamProducer publishes track as a lossless append-log JSON track, advertised in
 // broadcast's catalog until it finishes. It takes over track, whose handle is closed
 // afterward, and fails if the catalog already carries the track's name.
-func NewStreamProducer(broadcast *moq.BroadcastProducer, track *moq.TrackProducer, options StreamOptions) (*StreamProducer, error) {
-	inner, err := ffi.NewMoqJsonStreamProducer(
-		bridge.BroadcastProducer(broadcast),
-		bridge.TrackProducer(track),
-		ffi.MoqJsonStreamConfig{Compression: options.Compression},
-	)
+func NewStreamProducer(broadcast *moq.BroadcastProducer, track *moq.TrackProducer) (*StreamProducer, error) {
+	inner, err := ffi.NewMoqJsonStreamProducer(bridge.BroadcastProducer(broadcast), bridge.TrackProducer(track))
 	if err != nil {
 		return nil, err
 	}
@@ -190,12 +168,8 @@ type SnapshotConsumer struct {
 
 // NewSnapshotConsumer reads track as a lossy latest-value JSON track. It takes over
 // track, whose handle is closed afterward, and fails if track has already read a group.
-func NewSnapshotConsumer(track *moq.TrackConsumer, options ConsumerOptions) (*SnapshotConsumer, error) {
-	// Deltas is producer-only; the consumer ignores it.
-	inner, err := ffi.NewMoqJsonSnapshotConsumer(
-		bridge.TrackConsumer(track),
-		ffi.MoqJsonSnapshotConfig{Compression: options.Compression},
-	)
+func NewSnapshotConsumer(track *moq.TrackConsumer) (*SnapshotConsumer, error) {
+	inner, err := ffi.NewMoqJsonSnapshotConsumer(bridge.TrackConsumer(track))
 	if err != nil {
 		return nil, err
 	}
@@ -234,11 +208,8 @@ type StreamConsumer struct {
 
 // NewStreamConsumer reads track as a lossless append-log JSON track. It takes over
 // track, whose handle is closed afterward, and fails if track has already read a group.
-func NewStreamConsumer(track *moq.TrackConsumer, options ConsumerOptions) (*StreamConsumer, error) {
-	inner, err := ffi.NewMoqJsonStreamConsumer(
-		bridge.TrackConsumer(track),
-		ffi.MoqJsonStreamConfig{Compression: options.Compression},
-	)
+func NewStreamConsumer(track *moq.TrackConsumer) (*StreamConsumer, error) {
+	inner, err := ffi.NewMoqJsonStreamConsumer(bridge.TrackConsumer(track))
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +246,7 @@ type WindowProducer struct {
 func NewWindowProducer(track *moq.TrackProducer, options WindowOptions) (*WindowProducer, error) {
 	inner, err := ffi.NewMoqJsonWindowProducer(
 		bridge.TrackProducer(track),
-		ffi.MoqJsonWindowConfig{Compression: options.Compression, CheckpointRecords: options.CheckpointRecords},
+		ffi.MoqJsonWindowConfig{CheckpointRecords: options.CheckpointRecords},
 	)
 	if err != nil {
 		return nil, err
@@ -401,11 +372,8 @@ type WindowConsumer struct {
 
 // NewWindowConsumer reads track as a JSON window track. It takes over track,
 // whose handle is closed afterward, and fails if track has already read a group.
-func NewWindowConsumer(track *moq.TrackConsumer, options ConsumerOptions) (*WindowConsumer, error) {
-	inner, err := ffi.NewMoqJsonWindowConsumer(
-		bridge.TrackConsumer(track),
-		ffi.MoqJsonWindowConfig{Compression: options.Compression},
-	)
+func NewWindowConsumer(track *moq.TrackConsumer) (*WindowConsumer, error) {
+	inner, err := ffi.NewMoqJsonWindowConsumer(bridge.TrackConsumer(track))
 	if err != nil {
 		return nil, err
 	}

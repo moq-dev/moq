@@ -157,12 +157,13 @@ export default class MoqPublish extends HTMLElement {
 	// The preview element, either a <video> (raw source via srcObject) or a <canvas> (rendered frames).
 	#preview = new Signal<HTMLVideoElement | HTMLCanvasElement | undefined>(undefined);
 
-	// The connected tracks allowed by `muted` and `invisible`.
-	#videoEnabled: Signal<boolean>;
-	#audioEnabled: Signal<boolean>;
-	#eitherEnabled: Signal<boolean>;
+	// Whether to encode each track: connected and allowed by `muted` and `invisible`. Capture follows
+	// `#enabled` instead, so muting or hiding keeps the devices open and resuming is instant.
+	#videoEnabled = new Signal(false);
+	#audioEnabled = new Signal(false);
 
-	// Set when the element is connected to the DOM.
+	// Set when the element is connected to the DOM. Gates capture: devices stay open while connected
+	// with a source selected, whatever `muted` and `invisible` say.
 	#enabled = new Signal(false);
 	#connected = false;
 	#invalid = new Signal<ReadonlySet<string>>(new Set());
@@ -190,19 +191,10 @@ export default class MoqPublish extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.connection.close());
 
-		// The connected tracks allowed by `muted` and `invisible`.
-		// TODO make this.signals.computed to simplify the code.
-		this.#videoEnabled = new Signal(false);
-		this.#audioEnabled = new Signal(false);
-		this.#eitherEnabled = new Signal(false);
-
 		this.signals.run((effect) => {
 			const enabled = effect.get(this.#enabled);
-			const muted = effect.get(this.controls.muted);
-			const invisible = effect.get(this.controls.invisible);
-			this.#videoEnabled.set(enabled && !invisible);
-			this.#audioEnabled.set(enabled && !muted);
-			this.#eitherEnabled.set(enabled && (!muted || !invisible));
+			this.#videoEnabled.set(enabled && !effect.get(this.controls.invisible));
+			this.#audioEnabled.set(enabled && !effect.get(this.controls.muted));
 		});
 
 		this.#capture = new Video.Capture({ source: this.#videoSource, orientation: this.#orientation });
@@ -211,7 +203,7 @@ export default class MoqPublish extends HTMLElement {
 		// Reached as `audio.capture` rather than a field of its own, so audio and video read alike.
 		const audioCapture = new Audio.Capture({
 			source: this.#audioSource,
-			enabled: this.#audioEnabled,
+			enabled: this.#enabled,
 		});
 		this.signals.cleanup(() => audioCapture.close());
 
@@ -295,7 +287,8 @@ export default class MoqPublish extends HTMLElement {
 				return;
 			}
 
-			const source = effect.get(this.#videoSource);
+			// A hidden camera stays open, so blank the preview to match what viewers get.
+			const source = effect.get(this.#videoEnabled) ? effect.get(this.#videoSource) : undefined;
 			if (!source) {
 				preview.style.display = "none";
 				return;
@@ -423,12 +416,13 @@ export default class MoqPublish extends HTMLElement {
 		effect.set(this.#orientation, 0, 0);
 
 		// Sources stay alive while disconnected so device and file selections survive a reconnect;
-		// the connection-gated enabled signals release their capture and device discovery.
+		// the connection gate releases their capture and device discovery. `muted` and `invisible`
+		// only stop the encoders, so a source holds its devices until it is deselected or disconnected.
 		if (!source) return;
 
 		if (source === "camera") {
-			const video = new Source.Camera({ enabled: this.#videoEnabled, device: { enabled: this.#enabled } });
-			const audio = new Source.Microphone({ enabled: this.#audioEnabled, device: { enabled: this.#enabled } });
+			const video = new Source.Camera({ enabled: this.#enabled, device: { enabled: this.#enabled } });
+			const audio = new Source.Microphone({ enabled: this.#enabled, device: { enabled: this.#enabled } });
 
 			effect.set(this.#sources.video, video);
 			effect.set(this.#sources.audio, audio);
@@ -448,7 +442,7 @@ export default class MoqPublish extends HTMLElement {
 
 		if (source === "screen") {
 			const screen = new Source.Screen({
-				enabled: this.#eitherEnabled,
+				enabled: this.#enabled,
 			});
 
 			effect.run((nested) => {
@@ -471,7 +465,7 @@ export default class MoqPublish extends HTMLElement {
 			const fileSource = new Source.File({
 				// If a File is provided, use it directly.
 				file: source instanceof File ? source : undefined,
-				enabled: this.#eitherEnabled,
+				enabled: this.#enabled,
 			});
 
 			// Otherwise prompt the user to pick one. The selection click is still the
@@ -539,7 +533,11 @@ export default class MoqPublish extends HTMLElement {
 		this.#accept("source");
 	}
 
-	/** Whether audio is muted, mirrored by the `muted` attribute. */
+	/**
+	 * Whether audio is muted, mirrored by the `muted` attribute. Muting stops encoding but keeps the
+	 * microphone open, so unmuting is instant and the browser's microphone indicator stays lit.
+	 * Clear `source` (or remove the element) to release the device.
+	 */
 	get muted(): boolean {
 		return this.controls.muted.peek();
 	}
@@ -549,7 +547,11 @@ export default class MoqPublish extends HTMLElement {
 		this.#accept("muted");
 	}
 
-	/** Whether video is disabled, mirrored by the `invisible` attribute. */
+	/**
+	 * Whether video is hidden, mirrored by the `invisible` attribute. Hiding stops encoding and the
+	 * preview but keeps the camera open, so showing it again is instant and the browser's camera
+	 * indicator stays lit. Clear `source` (or remove the element) to release the device.
+	 */
 	get invisible(): boolean {
 		return this.controls.invisible.peek();
 	}

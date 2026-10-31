@@ -88,18 +88,11 @@ Future<_Resolved> _resolveLibrary(
 /// another recipe with different features. Cargo's own timestamp check makes
 /// the no-op case cheap.
 Future<_Resolved> _build(Uri workspace, String target, String library) async {
-  final cargoArgs = [
-    'build',
-    '--locked',
-    '--package',
-    'moq-ffi',
-    // The software H.264 fallback is opt-in in Rust; the published library ships it.
-    // A checkout build is a test build, carrying the hooks leak_test.dart reads.
-    '--features',
-    'openh264,testing',
-    '--manifest-path',
-    workspace.resolve('Cargo.toml').toFilePath(),
-  ];
+  // The shared default build, an alias .cargo/config.toml defines for Cargo
+  // runs in the workspace; it ships the software H.264 fallback. A checkout build is a test build, carrying the hooks
+  // leak_test.dart reads; `--target` keeps it out of the default build's
+  // directory, since a cdylib's file name carries no feature hash.
+  final cargoArgs = ['build-ffi', '--features', 'testing'];
 
   // Android needs the NDK's linker and sysroot, which only cargo-ndk sets up.
   // This mirrors rs/moq-ffi/build.sh.
@@ -112,6 +105,7 @@ Future<_Resolved> _build(Uri workspace, String target, String library) async {
   final result = await Process.run(
     'cargo',
     args,
+    workingDirectory: workspace.toFilePath(),
     environment: target.contains('-apple-ios')
         ? const {'IPHONEOS_DEPLOYMENT_TARGET': '16.0'}
         : null,

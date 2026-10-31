@@ -43,7 +43,6 @@
 		"js/auth",
 		"js/e2ee",
 		"js/sign",
-		"js/flate",
 		"js/json",
 		"js/libav",
 		"js/hang",

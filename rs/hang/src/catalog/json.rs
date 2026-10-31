@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, btree_map};
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::Mode;
 use crate::catalog::millis::MillisCeil;
-use crate::catalog::{Compression, Mode};
 
 /// The JSON tracks a broadcast publishes, keyed by track name.
 ///
 /// These are application data tracks, not media: a chat log, a telemetry feed, a status document.
-/// Each entry says how to read the track ([`mode`](JsonConfig::mode) and
-/// [`compression`](JsonConfig::compression)) without a consumer having to know the application.
+/// Each entry says how to read the track (its [`mode`](JsonConfig::mode)) without a consumer having to
+/// know the application.
 ///
 /// Marked `#[non_exhaustive]` so additional optional fields can be added without bumping the major
 /// version. External callers start from [`Json::default`] and fill in what they need
@@ -95,11 +95,6 @@ pub struct JsonConfig {
 	#[serde_as(as = "serde_with::DisplayFromStr")]
 	pub mode: Mode,
 
-	/// The compression applied to each frame, or `None` when they are plaintext.
-	#[serde(default)]
-	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
-	pub compression: Option<Compression>,
-
 	/// An optional identifier for the shape of each value, typically a JSON Schema URL. Purely
 	/// descriptive: a consumer that doesn't recognize it can still read the track.
 	#[serde(default)]
@@ -125,7 +120,7 @@ pub struct JsonConfig {
 
 	/// Fields this build doesn't recognize, kept so the entry round-trips.
 	///
-	/// A future [`Mode`] or [`Compression`] almost certainly comes with fields describing it, and
+	/// A future [`Mode`] almost certainly comes with fields describing it, and
 	/// preserving the discriminant without them would leave a relay republishing an entry nothing
 	/// can act on. Same reason [`Container`](crate::catalog::Container) keeps an unknown container
 	/// verbatim.
@@ -134,14 +129,13 @@ pub struct JsonConfig {
 }
 
 impl JsonConfig {
-	/// A config for a track read in `mode`, uncompressed and with no optional fields set.
+	/// A config for a track read in `mode`, with no optional fields set.
 	pub fn new(mode: Mode) -> Self {
 		Self {
 			broadcast: None,
 			track: None,
 			epoch: None,
 			mode,
-			compression: None,
 			schema: None,
 			bitrate: None,
 			jitter: None,

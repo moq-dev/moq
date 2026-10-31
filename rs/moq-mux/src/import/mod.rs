@@ -101,7 +101,10 @@ mod tests {
 	/// frees while every published track is still held.
 	fn retire(sources: usize, import: Import) -> isize {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		// No HLS records: retiring them frees their compressed groups' encoders, which the
+		// catalog owns rather than the importer.
+		let config = crate::catalog::Config::default().with_hls(None);
+		let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
 		let consumer = broadcast.consume();
 
 		let finished: Vec<Finished> = (0..sources).map(|_| import(&broadcast, &catalog)).collect();

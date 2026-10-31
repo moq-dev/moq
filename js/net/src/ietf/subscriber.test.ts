@@ -1,5 +1,5 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import * as Epoch from "../epoch.ts";
@@ -223,6 +223,32 @@ test("an announcement survives the first of its two sources ending", async () =>
 		new Promise<"nothing">((resolve) => setTimeout(() => resolve("nothing"), 250)),
 	]);
 	expect(next).toBe("nothing");
+});
+
+test("announced lists literal matches unless covering asks for overlapping routes too", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
+	const scope = Path.Pattern.parse("**/*.chat");
+	const listed = subscriber.announced(scope);
+	const covering = subscriber.announced(scope, { covering: true });
+
+	// `room` could serve `room/lobby.chat`, but its own name is no match.
+	for (const [requestId, path] of [
+		[0n, "room"],
+		[1n, "lobby.chat"],
+	] as const) {
+		const request = await Stream.open(pair.server, { version: VERSION });
+		void subscriber.runPublishNamespace(
+			new PublishNamespace({ requestId, trackNamespace: Path.from(path) }),
+			request,
+		);
+	}
+	expect(await covering.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
+	expect(await covering.next()).toMatchObject({ prefix: Path.from("lobby.chat"), kind: "start" });
+	expect(await listed.next()).toMatchObject({ prefix: Path.from("lobby.chat"), kind: "start" });
+
+	listed.close();
+	covering.close();
 });
 
 /**
@@ -651,7 +677,6 @@ test("a consumed broadcast refuses to list its tracks rather than claim it has n
 	// A later reader asks again, and is refused again.
 	await expect(consumer.tracks().next()).rejects.toThrow("track listing requires moq-lite-07");
 	consumer.close();
-	subscriber.close();
 });
 
 /**
@@ -761,6 +786,35 @@ async function subscribeTrack({
 
 	return { subscriber, track };
 }
+
+// A refusal already ended the request: a reset back would tell the publisher we failed.
+test("a refused SUBSCRIBE or SUBSCRIBE_NAMESPACE ends its stream cleanly", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
+	const refuse = async (peer: Stream) => {
+		await peer.writer.u53(RequestError.id);
+		await new RequestError({ errorCode: 0x10, reasonPhrase: "not here" }).encode(peer.writer, VERSION);
+		peer.writer.close();
+	};
+
+	const announced = subscriber.announced();
+	const namespace = await nextStream(pair.client);
+	if (!namespace) throw new Error("no SUBSCRIBE_NAMESPACE was sent");
+	expect(await namespace.reader.u53()).toBe(SubscribeNamespace.id);
+	await SubscribeNamespace.decode(namespace.reader, VERSION);
+	await refuse(namespace);
+	expect(await namespace.reader.done()).toBe(true);
+	announced.close();
+
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	const subscribe = await nextStream(pair.client);
+	if (!subscribe) throw new Error("no SUBSCRIBE was sent");
+	expect(await subscribe.reader.u53()).toBe(Subscribe.id);
+	await Subscribe.decode(subscribe.reader, VERSION);
+	await refuse(subscribe);
+	expect(await subscribe.reader.done()).toBe(true);
+	track.close();
+});
 
 /** One object carrying `properties` as its raw extension bytes, then a one-byte payload. */
 function encodeStamped(properties: number[]): Uint8Array {
@@ -892,7 +946,8 @@ test("SUBSCRIBE_OK's largest is known before any group arrives", async () => {
 });
 
 test.each(["acceptance", "timeout"])("returning demand preserves pending setup until %s", async (outcome) => {
-	jest.useFakeTimers();
+	const clock = new Manual();
+	const installed = clock.install();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
@@ -932,7 +987,7 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 		return request;
 	});
 	const first = broadcast.track("video").subscribe();
-	// Restore real timers even if an injection promise outlives the test.
+	// Restore the ambient clock even if an injection promise outlives the test.
 	onTestFinished(() => {
 		captured.mockRestore();
 		unwantedSpy.mockRestore();
@@ -941,13 +996,13 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 		returned?.close();
 		broadcast.close();
 		session.close();
-		jest.useRealTimers();
+		installed.close();
 	});
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("missing pending subscribe");
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
 	await Subscribe.decode(peer.reader, VERSION);
-	jest.advanceTimersByTime(6_000);
+	await clock.advance(Nano.fromMilli(Milli(6_000)));
 	first.close();
 	await resumed.promise;
 	if (!returned) throw new Error("demand did not return");
@@ -964,7 +1019,7 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 		expect(await info).toMatchObject({ priority: 127 - 128 });
 		expect(returned.closed.peek()).toBeUndefined();
 	} else {
-		jest.advanceTimersByTime(4_000);
+		await clock.advance(Nano.fromMilli(Milli(4_000)));
 		expect(await info).toBeInstanceOf(Error);
 		expect(((await info) as Error).message).toContain("request timed out after 10000ms");
 	}
@@ -1412,7 +1467,7 @@ test("an object datagram is a datagram group", async () => {
 	await send({ trackAlias: ALIAS + 1n });
 	await send({ endOfGroup: false, body: { status: 3 } });
 	await send({ groupId: 5, objectId: 0 });
-	const properties = await encodeObjectExtensions(Timestamp.fromMillis(1234), Timescale.MILLI, VERSION);
+	const properties = encodeObjectExtensions(Timestamp.fromMillis(1234), Timescale.MILLI, VERSION);
 	await send({ groupId: 9, objectId: 0, publisherPriority: 7, properties, body: { payload: Uint8Array.of(1) } });
 
 	const datagram = await track.recvDatagram();

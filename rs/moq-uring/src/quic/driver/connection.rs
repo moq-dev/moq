@@ -6,12 +6,13 @@ use std::net::SocketAddr;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll};
 
-use bytes::Bytes;
-use moq_quic::{ConnectionHandle, Dir, StreamId, VarInt};
+use bytes::{Buf, Bytes};
+use moq_quic::endpoint::ConnectionHandle;
+use moq_quic::stream::{Dir, Id as StreamId};
 use rustc_hash::FxHashMap;
 
-use super::super::Error;
-use super::endpoint;
+use super::super::{Error, VarInt};
+use super::{endpoint, recv, send};
 use crate::udp;
 use crate::worker::Owner;
 
@@ -28,7 +29,7 @@ const TRAIN_SEGMENTS: usize = 63;
 /// operation can mutate the connection, drop that borrow, and then register a
 /// waiter without ever holding both.
 pub(crate) struct Inner {
-	pub(crate) conn: RefCell<moq_quic::Connection>,
+	pub(crate) conn: RefCell<moq_quic::connection::Connection>,
 	/// Updated by packet ingress and egress, so readers never wake the worker to sample.
 	pub(crate) wire: moq_net::transport::Wire,
 	/// The session's probe target, read before every egress, or `None` when the congestion
@@ -66,15 +67,6 @@ pub(crate) struct State {
 	/// Send streams waiting for their end: a FIN the peer acknowledged, or a
 	/// `STOP_SENDING`.
 	finishing: FxHashMap<StreamId, kio::WaiterList>,
-	/// Every send stream a handle still holds, and how it ended once the
-	/// driver has seen that happen. That is what makes a later close mean
-	/// "already delivered" rather than "we never found out".
-	///
-	/// Keyed on the live handles, because the verdict arrives as an event: a
-	/// stream finished and then dropped before its FIN was acknowledged would
-	/// otherwise leave an entry nobody can ever remove, one per group, for as
-	/// long as the connection lives.
-	sends: FxHashMap<StreamId, Option<End>>,
 
 	datagram_recv_waiters: kio::WaiterList,
 
@@ -86,10 +78,9 @@ pub(crate) struct State {
 	/// waiting out a drain it could never transmit.
 	dead: bool,
 
-	/// The close this side asked for, until the driver has put it on the wire.
-	/// moq-quic raises no event for it, so this is what the terminal error is
-	/// built from.
-	local_close: Option<(u64, String)>,
+	/// The close this side asked for, as moq-quic reported it, until the driver
+	/// has put it on the wire.
+	local_close: Option<Error>,
 }
 
 impl State {
@@ -105,7 +96,6 @@ impl State {
 			readable: FxHashMap::default(),
 			writable: FxHashMap::default(),
 			finishing: FxHashMap::default(),
-			sends: FxHashMap::default(),
 			datagram_recv_waiters: kio::WaiterList::new(),
 			closed: None,
 			closed_waiters: kio::WaiterList::new(),
@@ -116,7 +106,6 @@ impl State {
 
 	/// Drop send stream `id`'s bookkeeping, parking included.
 	fn forget_send(&mut self, id: StreamId) {
-		self.sends.remove(&id);
 		self.finishing.remove(&id);
 		self.writable.remove(&id);
 	}
@@ -191,29 +180,6 @@ impl Inner {
 		waiter.register(state.finishing.entry(id).or_default());
 	}
 
-	/// Start tracking send stream `id`, which a handle now owns.
-	///
-	/// Seeded from moq-quic rather than empty: a peer can open a bidirectional
-	/// stream and stop it before the application ever accepts it, and that
-	/// event arrives with no handle to record it against. moq-quic still knows,
-	/// so a `poll_closed` on the fresh handle reports the stop instead of
-	/// waiting for an event that has already been and gone.
-	pub(crate) fn track(&self, id: StreamId) {
-		// Err means moq-quic has no send half for the id, which is nothing to
-		// report either way.
-		let stopped = self.conn.borrow_mut().send_stream(id).stopped().ok().flatten();
-		self.state
-			.borrow_mut()
-			.sends
-			.insert(id, stopped.map(|code| End::Stopped(code.into_inner())));
-	}
-
-	/// How send stream `id` ended, if the driver saw it end while a handle
-	/// still held it.
-	pub(crate) fn ended(&self, id: StreamId) -> Option<End> {
-		self.state.borrow().sends.get(&id).copied().flatten()
-	}
-
 	/// Forget send stream `id`'s bookkeeping; called when its handle drops.
 	///
 	/// The parking table goes with it. A stream reset on the way out is never
@@ -238,16 +204,9 @@ impl Inner {
 		self.conn.borrow_mut().close(
 			self.owner.now(),
 			VarInt::from_u64(code).unwrap_or(VarInt::MAX),
-			Bytes::copy_from_slice(reason.as_bytes()),
+			reason.to_string(),
 		);
-		// moq-quic raises no event for a close the application asked for, so the
-		// terminal error is ours to publish. Not here though: the driver
-		// publishes it once it has staged the CONNECTION_CLOSE, so a caller
-		// that stops driving the worker the moment `poll_closed` resolves has
-		// at least handed the packet over first.
-		let mut state = self.state.borrow_mut();
-		state.local_close.get_or_insert((code, reason.to_string()));
-		state.driver.wake();
+		self.state.borrow_mut().driver.wake();
 	}
 }
 
@@ -298,32 +257,62 @@ impl Connection {
 	}
 
 	/// Open a send group at `priority`, for streams to join with
-	/// [`SendStream::set_group`](super::SendStream::set_group) and datagrams with
-	/// [`SendOptions`](super::SendOptions).
-	pub fn send_group(&self, priority: i64) -> super::SendGroup {
-		super::SendGroup::new(self.shared.clone(), priority)
+	/// [`send::Stream::set_group`] and datagrams with [`send::Options`].
+	pub fn send_group(&self, priority: i64) -> send::Group {
+		send::Group::new(self.shared.clone(), priority)
 	}
 
 	/// Send a datagram scheduled by `options`, like one of its group's streams at its priority,
 	/// or among the ungrouped streams without a group.
 	///
 	/// Never blocks: a full buffer drops the oldest datagram of the lowest-priority group,
-	/// see [`moq_quic::Datagrams::send`].
+	/// see [`moq_quic::Datagrams::send`]. A [`Bytes`] payload, or a chain of them, is queued
+	/// without copying.
 	///
 	/// # Panics
 	/// - when `options.group` belongs to another connection
-	pub fn send_datagram(&self, payload: Bytes, options: super::SendOptions<'_>) -> Result<(), Error> {
+	pub fn send_datagram(&self, data: impl Buf, options: send::Options<'_>) -> Result<(), send::Error> {
 		if let Some(err) = self.shared.closed() {
-			return Err(err);
+			return Err(send::Error::Connection(err));
 		}
-		self.shared
-			.conn
-			.borrow_mut()
-			.datagrams()
-			.send(payload, super::group::to_quic(options))
-			.map_err(|err| Error::Quic(err.to_string()))?;
+		let sent = self.shared.conn.borrow_mut().datagrams().send(data, options.to_quic());
+		match sent {
+			Ok(()) => {}
+			Err(moq_quic::send::Error::TooLarge) => return Err(send::Error::TooLarge),
+			Err(_) => return Err(send::Error::Unsupported),
+		}
 		self.shared.kick();
 		Ok(())
+	}
+
+	/// The largest datagram [`Self::send_datagram`] takes, or `None` if datagrams are
+	/// unsupported by the peer or disabled locally.
+	pub fn max_datagram_size(&self) -> Option<usize> {
+		self.shared.conn.borrow_mut().datagrams().max_size()
+	}
+
+	/// The negotiated ALPN protocol, if any.
+	pub fn protocol(&self) -> Option<&str> {
+		self.alpn.as_deref()
+	}
+
+	/// Close the connection immediately with `error_code` and `reason`.
+	///
+	/// Only records the close: the driver task frames the CONNECTION_CLOSE, so keep the worker
+	/// running until [`Self::closed`] resolves.
+	pub fn close(&self, error_code: VarInt, reason: &[u8]) {
+		self.shared
+			.close_code(error_code.into_inner(), &String::from_utf8_lossy(reason));
+	}
+
+	/// Wait for the connection to close, returning why.
+	pub async fn closed(&self) -> Error {
+		kio::wait(|waiter| poll_closed(&self.shared, waiter)).await
+	}
+
+	/// The connection's statistics.
+	pub fn stats(&self) -> moq_quic::connection::Stats {
+		self.shared.conn.borrow().stats()
 	}
 
 	/// The peer's certificate chain in DER, leaf first, or `None` if it
@@ -412,7 +401,7 @@ pub(crate) fn launch(
 	socket: Rc<udp::Socket>,
 	endpoint: Weak<endpoint::Inner>,
 	key: ConnectionHandle,
-	conn: moq_quic::Connection,
+	conn: moq_quic::connection::Connection,
 ) -> (Shared, impl Future<Output = ()> + use<>) {
 	// The handshake's first datagrams arrived before this driver existed.
 	let stats = conn.stats();
@@ -524,7 +513,7 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 }
 
 impl Connection {
-	pub(crate) fn open_request(&self) -> Result<Option<(super::SendStream, super::RecvStream)>, Error> {
+	pub(crate) fn open_request(&self) -> Result<Option<(send::Stream, recv::Stream)>, Error> {
 		if let Some(err) = self.shared.closed() {
 			return Err(err);
 		}
@@ -536,148 +525,93 @@ impl Connection {
 			.open(Dir::Bi, Default::default());
 		Ok(id.map(|id| {
 			(
-				super::SendStream::new(self.shared.clone(), id),
-				super::RecvStream::new(self.shared.clone(), id),
+				send::Stream::new(self.shared.clone(), id),
+				recv::Stream::new(self.shared.clone(), id),
 			)
 		}))
 	}
 }
 
-impl web_transport_trait::poll::Session for Connection {
-	type SendStream = super::SendStream;
-	type RecvStream = super::RecvStream;
-	type Error = Error;
-
-	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
-		let waiter = self.park.hold(cx);
-		if let Some(id) = self.shared.conn.borrow_mut().streams().accept(Dir::Uni) {
-			return Poll::Ready(Ok(super::RecvStream::new(self.shared.clone(), id)));
-		}
-		let mut state = self.shared.state.borrow_mut();
-		if let Some(err) = &state.closed {
-			return Poll::Ready(Err(err.clone()));
-		}
-		waiter.register(&mut state.accept_uni_waiters);
-		Poll::Pending
+impl Connection {
+	/// Accept the next unidirectional stream the peer opens.
+	pub async fn accept_uni(&self) -> Result<recv::Stream, Error> {
+		kio::wait(|waiter| accept_uni(&self.shared, waiter)).await
 	}
 
-	fn poll_accept_bi(
+	/// Accept the next bidirectional stream the peer opens.
+	pub async fn accept_bi(&self) -> Result<(send::Stream, recv::Stream), Error> {
+		kio::wait(|waiter| accept_bi(&self.shared, waiter)).await
+	}
+
+	/// Open a unidirectional stream scheduled by `options`, once the peer's stream credit
+	/// allows.
+	///
+	/// # Panics
+	/// - when `options.group` belongs to another connection
+	pub async fn open_uni(&self, options: send::Options<'_>) -> Result<send::Stream, Error> {
+		kio::wait(|waiter| open(&self.shared, Dir::Uni, options, waiter))
+			.await
+			.map(|(send, _)| send)
+	}
+
+	/// Open a bidirectional stream scheduled by `options`, once the peer's stream credit
+	/// allows.
+	///
+	/// # Panics
+	/// - when `options.group` belongs to another connection
+	pub async fn open_bi(&self, options: send::Options<'_>) -> Result<(send::Stream, recv::Stream), Error> {
+		kio::wait(|waiter| open(&self.shared, Dir::Bi, options, waiter))
+			.await
+			.map(|(send, recv)| (send, recv.expect("bidirectional")))
+	}
+
+	/// Receive the next datagram.
+	pub async fn read_datagram(&self) -> Result<Bytes, Error> {
+		kio::wait(|waiter| recv_datagram(&self.shared, waiter)).await
+	}
+
+	/// [`Self::accept_uni`], as a poll.
+	pub(crate) fn poll_accept_uni(&mut self, cx: &Context<'_>) -> Poll<Result<recv::Stream, Error>> {
+		accept_uni(&self.shared, self.park.hold(cx))
+	}
+
+	/// [`Self::accept_bi`], as a poll.
+	pub(crate) fn poll_accept_bi(&mut self, cx: &Context<'_>) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
+		accept_bi(&self.shared, self.park.hold(cx))
+	}
+
+	/// [`Self::open_uni`], as a poll.
+	pub(crate) fn poll_open_uni(
 		&mut self,
-		cx: &mut Context<'_>,
-	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
-		let waiter = self.park.hold(cx);
-		// The borrow ends before the handles are built: constructing a send
-		// stream reaches back into the connection.
-		let accepted = self.shared.conn.borrow_mut().streams().accept(Dir::Bi);
-		if let Some(id) = accepted {
-			return Poll::Ready(Ok((
-				super::SendStream::new(self.shared.clone(), id),
-				super::RecvStream::new(self.shared.clone(), id),
-			)));
-		}
-		let mut state = self.shared.state.borrow_mut();
-		if let Some(err) = &state.closed {
-			return Poll::Ready(Err(err.clone()));
-		}
-		waiter.register(&mut state.accept_bi_waiters);
-		Poll::Pending
+		cx: &Context<'_>,
+		options: send::Options<'_>,
+	) -> Poll<Result<send::Stream, Error>> {
+		open(&self.shared, Dir::Uni, options, self.park.hold(cx)).map_ok(|(send, _)| send)
 	}
 
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-		let waiter = self.park.hold(cx);
-		if let Some(err) = self.shared.closed() {
-			return Poll::Ready(Err(err));
-		}
-		// The peer's MAX_STREAMS credit is what gates us: `open` hands back
-		// nothing while it is spent.
-		let opened = self
-			.shared
-			.conn
-			.borrow_mut()
-			.streams()
-			.open(Dir::Uni, Default::default());
-		match opened {
-			Some(id) => Poll::Ready(Ok(super::SendStream::new(self.shared.clone(), id))),
-			None => {
-				let mut state = self.shared.state.borrow_mut();
-				waiter.register(&mut state.open_waiters);
-				Poll::Pending
-			}
-		}
-	}
-
-	fn poll_open_bi(
+	/// [`Self::open_bi`], as a poll.
+	pub(crate) fn poll_open_bi(
 		&mut self,
-		cx: &mut Context<'_>,
-	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
-		let waiter = self.park.hold(cx);
-		if let Some(err) = self.shared.closed() {
-			return Poll::Ready(Err(err));
-		}
-		let opened = self
-			.shared
-			.conn
-			.borrow_mut()
-			.streams()
-			.open(Dir::Bi, Default::default());
-		match opened {
-			Some(id) => Poll::Ready(Ok((
-				super::SendStream::new(self.shared.clone(), id),
-				super::RecvStream::new(self.shared.clone(), id),
-			))),
-			None => {
-				let mut state = self.shared.state.borrow_mut();
-				waiter.register(&mut state.open_waiters);
-				Poll::Pending
-			}
-		}
+		cx: &Context<'_>,
+		options: send::Options<'_>,
+	) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
+		open(&self.shared, Dir::Bi, options, self.park.hold(cx))
+			.map_ok(|(send, recv)| (send, recv.expect("bidirectional")))
 	}
 
-	fn poll_send_datagram(&mut self, _: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Self::send_datagram(
-			self,
-			Bytes::copy_from_slice(payload),
-			Default::default(),
-		))
+	/// [`Self::read_datagram`], as a poll.
+	pub(crate) fn poll_recv_datagram(&mut self, cx: &Context<'_>) -> Poll<Result<Bytes, Error>> {
+		recv_datagram(&self.shared, self.park.hold(cx))
 	}
 
-	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
-		let waiter = self.park.hold(cx);
-		if let Some(datagram) = self.shared.conn.borrow_mut().datagrams().recv() {
-			return Poll::Ready(Ok(datagram));
-		}
-		let mut state = self.shared.state.borrow_mut();
-		if let Some(err) = &state.closed {
-			return Poll::Ready(Err(err.clone()));
-		}
-		waiter.register(&mut state.datagram_recv_waiters);
-		Poll::Pending
+	/// [`Self::closed`], as a poll.
+	pub(crate) fn poll_closed(&mut self, cx: &Context<'_>) -> Poll<Error> {
+		poll_closed(&self.shared, self.park.hold(cx))
 	}
 
-	fn max_datagram_size(&self) -> usize {
-		self.shared.conn.borrow_mut().datagrams().max_size().unwrap_or(0)
-	}
-
-	fn protocol(&self) -> Option<&str> {
-		self.alpn.as_deref()
-	}
-
-	fn close(&mut self, code: u32, reason: &str) {
-		self.shared.close_code(u64::from(code), reason);
-	}
-
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
-		let waiter = self.park.hold(cx);
-		let mut state = self.shared.state.borrow_mut();
-		if let Some(err) = &state.closed {
-			return Poll::Ready(err.clone());
-		}
-		waiter.register(&mut state.closed_waiters);
-		Poll::Pending
-	}
-
-	fn stats(&self) -> impl web_transport_trait::Stats {
-		let stats = self.shared.conn.borrow().stats();
+	/// The connection's counters in [`web_transport_trait::Stats`] shape.
+	pub(crate) fn transport_stats(&self) -> impl web_transport_trait::Stats + use<> {
+		let stats = self.stats();
 		Stats {
 			bytes_sent: stats.udp_tx.bytes,
 			bytes_received: stats.udp_rx.bytes,
@@ -689,6 +623,76 @@ impl web_transport_trait::poll::Session for Connection {
 			bandwidth: stats.path.bandwidth_estimate,
 		}
 	}
+}
+
+fn accept_uni(shared: &Shared, waiter: &kio::Waiter) -> Poll<Result<recv::Stream, Error>> {
+	if let Some(id) = shared.conn.borrow_mut().streams().accept(Dir::Uni) {
+		return Poll::Ready(Ok(recv::Stream::new(shared.clone(), id)));
+	}
+	let mut state = shared.state.borrow_mut();
+	if let Some(err) = &state.closed {
+		return Poll::Ready(Err(err.clone()));
+	}
+	waiter.register(&mut state.accept_uni_waiters);
+	Poll::Pending
+}
+
+fn accept_bi(shared: &Shared, waiter: &kio::Waiter) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
+	let accepted = shared.conn.borrow_mut().streams().accept(Dir::Bi);
+	if let Some(id) = accepted {
+		return Poll::Ready(Ok((
+			send::Stream::new(shared.clone(), id),
+			recv::Stream::new(shared.clone(), id),
+		)));
+	}
+	let mut state = shared.state.borrow_mut();
+	if let Some(err) = &state.closed {
+		return Poll::Ready(Err(err.clone()));
+	}
+	waiter.register(&mut state.accept_bi_waiters);
+	Poll::Pending
+}
+
+/// Open a stream in `dir`, with its receive half when bidirectional.
+fn open(
+	shared: &Shared,
+	dir: Dir,
+	options: send::Options<'_>,
+	waiter: &kio::Waiter,
+) -> Poll<Result<(send::Stream, Option<recv::Stream>), Error>> {
+	if let Some(err) = shared.closed() {
+		return Poll::Ready(Err(err));
+	}
+	// The peer's MAX_STREAMS credit is what gates us: `open` hands back nothing while it is
+	// spent.
+	let opened = shared.conn.borrow_mut().streams().open(dir, options.to_quic());
+	let Some(id) = opened else {
+		waiter.register(&mut shared.state.borrow_mut().open_waiters);
+		return Poll::Pending;
+	};
+	let recv = (dir == Dir::Bi).then(|| recv::Stream::new(shared.clone(), id));
+	Poll::Ready(Ok((send::Stream::new(shared.clone(), id), recv)))
+}
+
+fn recv_datagram(shared: &Shared, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+	if let Some(datagram) = shared.conn.borrow_mut().datagrams().recv() {
+		return Poll::Ready(Ok(datagram));
+	}
+	let mut state = shared.state.borrow_mut();
+	if let Some(err) = &state.closed {
+		return Poll::Ready(Err(err.clone()));
+	}
+	waiter.register(&mut state.datagram_recv_waiters);
+	Poll::Pending
+}
+
+fn poll_closed(shared: &Shared, waiter: &kio::Waiter) -> Poll<Error> {
+	let mut state = shared.state.borrow_mut();
+	if let Some(err) = &state.closed {
+		return Poll::Ready(err.clone());
+	}
+	waiter.register(&mut state.closed_waiters);
+	Poll::Pending
 }
 
 impl std::fmt::Debug for Connection {
@@ -857,6 +861,12 @@ impl Driver {
 					state.established = true;
 					state.establish_waiters.wake();
 				}
+				// The driver publishes a local close once it has staged the
+				// CONNECTION_CLOSE, so a caller that stops driving the worker the
+				// moment `poll_closed` resolves has at least handed the packet over.
+				moq_quic::Event::ConnectionLost {
+					reason: reason @ moq_quic::connection::Error::LocallyClosed { .. },
+				} => state.local_close = Some(reason.into()),
 				moq_quic::Event::ConnectionLost { reason } => state.fail(reason.into()),
 				moq_quic::Event::DatagramReceived => state.datagram_recv_waiters.wake(),
 				moq_quic::Event::HandshakeDataReady => {}
@@ -869,18 +879,16 @@ impl Driver {
 
 	/// Publish the terminal error for a close this side asked for.
 	///
-	/// moq-quic raises no event for it, so the driver is what reports it, and
-	/// only once the CONNECTION_CLOSE is staged (or the drain is over), since
+	/// Only once the CONNECTION_CLOSE is staged (or the drain is over), since
 	/// an application is free to stop driving the worker the moment
 	/// `poll_closed` resolves. Staged is not delivered: the send is
 	/// fire-and-forget, so a worker torn down in the same breath can still
 	/// take the packet with it and leave the peer to idle out.
 	fn publish_close(&mut self) {
 		let mut state = self.shared.state.borrow_mut();
-		let Some((code, reason)) = state.local_close.take() else {
-			return;
-		};
-		state.fail(Error::App { code, reason });
+		if let Some(err) = state.local_close.take() {
+			state.fail(err);
+		}
 	}
 
 	/// Stage one GSO train, then yield so another connection sharing the
@@ -943,10 +951,10 @@ impl Driver {
 		// A lone datagram is its own segment size, and the socket's GSO
 		// stride has to match what moq-quic actually packed.
 		let transmit = udp::Transmit {
-			to: transmit.destination,
+			to: transmit.remote,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
 			ecn: transmit.ecn.map(super::ecn_from_quic),
-			src_ip: transmit.src_ip,
+			src_ip: transmit.local_ip,
 		};
 		if let Err(err) = tx.send(transmit) {
 			return Poll::Ready(Err(Error::Io(err.to_string())));
@@ -956,23 +964,8 @@ impl Driver {
 	}
 }
 
-/// How a send stream ended, once the driver has seen it happen.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum End {
-	/// The peer acknowledged the FIN.
-	Delivered,
-	/// The peer sent `STOP_SENDING` with this code.
-	Stopped(u64),
-}
-
-/// Record how a send stream ended, and wake whoever is watching it.
-///
-/// A stream whose handle has already dropped records nothing: nobody is left
-/// to read the verdict, and the entry would outlive every use for it.
-fn end(state: &mut State, id: StreamId, end: End) {
-	if let Some(slot) = state.sends.get_mut(&id) {
-		*slot = Some(end);
-	}
+/// Wake whoever waits for send stream `id` to end.
+fn ended(state: &mut State, id: StreamId) {
 	if let Some(mut waiters) = state.finishing.remove(&id) {
 		waiters.wake();
 	}
@@ -996,9 +989,9 @@ fn sweep_stream(state: &mut State, event: moq_quic::StreamEvent) {
 				waiters.wake();
 			}
 		}
-		moq_quic::StreamEvent::Finished { id } => end(state, id, End::Delivered),
-		moq_quic::StreamEvent::Stopped { id, error_code } => {
-			end(state, id, End::Stopped(error_code.into_inner()));
+		moq_quic::StreamEvent::Finished { id } => ended(state, id),
+		moq_quic::StreamEvent::Stopped { id, .. } => {
+			ended(state, id);
 			// A writer blocked on capacity has to learn it will never come.
 			if let Some(mut waiters) = state.writable.remove(&id) {
 				waiters.wake();
@@ -1027,12 +1020,10 @@ mod tests {
 		state.writable.entry(id).or_default();
 		state.readable.entry(id).or_default();
 		state.finishing.entry(id).or_default();
-		state.sends.insert(id, None);
 
 		state.forget_send(id);
 		assert!(state.writable.is_empty(), "the write half's parking");
 		assert!(state.finishing.is_empty(), "the finish watch");
-		assert!(state.sends.is_empty(), "the end bookkeeping");
 		// The read half is a separate handle, which may still be parked.
 		assert!(!state.readable.is_empty(), "the read half's parking survives");
 

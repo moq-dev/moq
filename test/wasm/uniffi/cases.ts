@@ -335,10 +335,11 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 		const subscriber = await connect(relay);
 		try {
 			const path = `uniffi/u64/${crypto.randomUUID()}`;
-			const broadcast = publisher.publish().createBroadcast(path);
+			const publication = publisher.publish().createBroadcast(path);
+			const broadcast = publication.broadcast();
 			const track = broadcast.publishTrack("data", TIMED);
-			broadcast.announce(MoqAnnounceRoute.create({}));
-			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
+			publication.announce(MoqAnnounceRoute.create({}));
+			const consumer = await within(subscriber.consume().follow(path).available(), 5000, "announce");
 			const sub = await consumer.subscribeTrack("data", undefined);
 			const seen: string[] = [];
 			for (const sequence of [5n, 2n ** 32n, 2n ** 53n - 1n, ...HIGH]) {
@@ -367,10 +368,11 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 		const subscriber = await connect(relay);
 		try {
 			const path = `uniffi/refuse/${crypto.randomUUID()}`;
-			const broadcast = publisher.publish().createBroadcast(path);
+			const publication = publisher.publish().createBroadcast(path);
+			const broadcast = publication.broadcast();
 			broadcast.publishTrack("data", TIMED);
-			broadcast.announce(MoqAnnounceRoute.create({}));
-			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
+			publication.announce(MoqAnnounceRoute.create({}));
+			const consumer = await within(subscriber.consume().follow(path).available(), 5000, "announce");
 			const outcome = await settle(
 				consumer.subscribeTrack("missing", undefined).then((track) => track.recvGroup()),
 				5000,
@@ -391,10 +393,11 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 		const subscriber = await connect(relay);
 		try {
 			const path = `uniffi/close/${crypto.randomUUID()}`;
-			const broadcast = publisher.publish().createBroadcast(path);
+			const publication = publisher.publish().createBroadcast(path);
+			const broadcast = publication.broadcast();
 			const track = broadcast.publishTrack("data", TIMED);
-			broadcast.announce(MoqAnnounceRoute.create({}));
-			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
+			publication.announce(MoqAnnounceRoute.create({}));
+			const consumer = await within(subscriber.consume().follow(path).available(), 5000, "announce");
 			const sub = await consumer.subscribeTrack("data", undefined);
 			const group = track.appendGroup();
 			group.writeFrame({ payload: payload(4), timestampUs: 0n });

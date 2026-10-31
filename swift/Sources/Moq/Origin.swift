@@ -25,19 +25,19 @@ public final class OriginProducer: Sendable {
     /// A route claims `prefix` and every path beneath it (`""` claims every path).
     /// A service that only serves some of them rejects the rest as they are
     /// requested. Create, `requests` if tracks are served on demand, populate,
-    /// then `BroadcastProducer.announce`.
+    /// then `Publication.announce`.
     public func requests(prefix: String) throws -> OriginRequests {
         OriginRequests(try ffi.requests(prefix: prefix))
     }
 
-    /// Create a broadcast at `path`, returning the producer that feeds it.
+    /// Create a broadcast at `path`, returning its publication.
     ///
     /// The broadcast is invisible and unroutable, for this origin's consumers
-    /// and peers alike, until `BroadcastProducer.announce(route:)`. Announce it
-    /// after populating tracks. `BroadcastProducer.close()` ends it for good;
-    /// releasing the last handle does the same.
-    public func createBroadcast(path: String) throws -> BroadcastProducer {
-        BroadcastProducer(try ffi.createBroadcast(path: path))
+    /// and peers alike, until `Publication.announce(route:)`. Announce it after
+    /// populating `Publication.broadcast`. `BroadcastProducer.close()` ends it for
+    /// good; releasing its last handle, the publication included, does the same.
+    public func createBroadcast(path: String) throws -> Publication {
+        Publication(try ffi.createBroadcast(path: path))
     }
 }
 
@@ -69,18 +69,40 @@ public final class BroadcastRequest: Sendable {
 public final class BroadcastPrepared: Sendable {
     let ffi: MoqBroadcastPrepared
 
+    /// The unannounced broadcast to fill before publishing; only `publish` announces it.
+    public let broadcast: BroadcastProducer
+
     init(_ ffi: MoqBroadcastPrepared) {
         self.ffi = ffi
-    }
-
-    /// The unannounced broadcast to fill before publishing; only `publish` announces it.
-    public var broadcast: BroadcastProducer {
-        BroadcastProducer(ffi.broadcast())
+        broadcast = BroadcastProducer(ffi.broadcast())
     }
 
     /// Announce the filled broadcast and resolve every waiting requester.
-    public func publish() throws -> BroadcastProducer {
-        BroadcastProducer(try ffi.publish())
+    public func publish() throws -> Publication {
+        Publication(try ffi.publish(), broadcast: broadcast)
+    }
+}
+
+/// A broadcast's announcement on an origin; releasing it keeps the route, closing the broadcast ends it.
+public final class Publication: Sendable {
+    let ffi: MoqPublication
+
+    /// The broadcast to fill, without announcement control.
+    public let broadcast: BroadcastProducer
+
+    init(_ ffi: MoqPublication, broadcast: BroadcastProducer? = nil) {
+        self.ffi = ffi
+        self.broadcast = broadcast ?? BroadcastProducer(ffi.broadcast())
+    }
+
+    /// Advertise the broadcast's exact path as a route, or re-price it; throws `Closed` once the broadcast closed.
+    public func announce(route: AnnounceRoute = AnnounceRoute()) throws {
+        try ffi.announce(route: route)
+    }
+
+    /// Retract the advertisement, if any, keeping the tracks alive; throws `Closed` once the broadcast closed.
+    public func unannounce() throws {
+        try ffi.unannounce()
     }
 }
 
@@ -131,17 +153,19 @@ public final class OriginConsumer: Sendable {
     }
 
     /// Follow an exact path, resolving each publisher instance that serves it.
-    public func announcedBroadcast(path: String) throws -> AnnouncedBroadcast {
-        AnnouncedBroadcast(try ffi.announcedBroadcast(path: path))
+    /// Pass an `epoch` (UUIDv7 text) to follow only that instance.
+    public func follow(path: String, epoch: String? = nil) throws -> Following {
+        Following(try ffi.follow(path: path, epoch: epoch))
     }
 
-    /// Request a broadcast by path, resolving as soon as it can be served through the
-    /// best announced route covering it: an announced broadcast on this origin, a route
-    /// a session announced (served on demand by that session), or a dynamic handler on
-    /// the origin, or an error if nothing can serve it. Unlike `announcedBroadcast`,
-    /// this does not wait for a future announcement.
-    public func requestBroadcast(path: String) async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.requestBroadcast(path: path))
+    /// Request a broadcast by path, resolving one publisher instance as soon as it can be
+    /// served through the best announced route covering it: an announced broadcast on this
+    /// origin, a route a session announced (served on demand by that session), or a dynamic
+    /// handler on the origin, or an error if nothing can serve it. Unlike `follow`, this
+    /// does not wait for a future announcement. Pass an `epoch` (UUIDv7 text) to refuse
+    /// any other instance.
+    public func request(path: String, epoch: String? = nil) async throws -> BroadcastConsumer {
+        BroadcastConsumer(try await ffi.request(path: path, epoch: epoch))
     }
 }
 
@@ -177,11 +201,11 @@ public final class AnnounceConsumer: AsyncSequence, Sendable {
     }
 }
 
-/// A pending wait for a specific broadcast path.
-public final class AnnouncedBroadcast: Sendable {
-    let ffi: MoqAnnouncedBroadcast
+/// Follows a specific broadcast path across the publisher instances that serve it.
+public final class Following: Sendable {
+    let ffi: MoqFollowing
 
-    init(_ ffi: MoqAnnouncedBroadcast) {
+    init(_ ffi: MoqFollowing) {
         self.ffi = ffi
     }
 

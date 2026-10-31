@@ -14,13 +14,13 @@ pub enum ConnectError {
 	ProtoError(#[from] web_transport_proto::ConnectError),
 
 	#[error("connection error")]
-	ConnectionError(#[from] crate::quic::driver::ConnectionError),
+	ConnectionError(#[from] crate::quic::driver::connection::Error),
 
 	#[error("read error")]
-	ReadError(#[from] crate::quic::driver::ReadError),
+	ReadError(#[from] crate::quic::driver::recv::Error),
 
 	#[error("write error")]
-	WriteError(#[from] crate::quic::driver::WriteError),
+	WriteError(#[from] crate::quic::driver::send::Error),
 
 	#[error("http error status: {0}")]
 	ErrorStatus(http::StatusCode),
@@ -35,12 +35,12 @@ pub struct Connecting {
 	pub request: ConnectRequest,
 
 	// A reference to the send/recv stream, so we don't close it until dropped.
-	pub(crate) send: crate::quic::driver::SendStream,
-	pub(crate) recv: crate::quic::driver::RecvStream,
+	pub(crate) send: crate::quic::driver::send::Stream,
+	pub(crate) recv: crate::quic::driver::recv::Stream,
 }
 
 impl Connecting {
-	pub async fn accept(conn: &crate::quic::driver::Connection) -> Result<Self, ConnectError> {
+	pub async fn accept(conn: &crate::quic::driver::connection::Connection) -> Result<Self, ConnectError> {
 		// Accept the stream that will be used to send the HTTP CONNECT request.
 		// If they try to send any other type of HTTP request, we will error out.
 		let (send, mut recv) = conn.accept_bi().await?;
@@ -75,8 +75,8 @@ impl Connecting {
 	}
 
 	pub async fn reject(self, status: http::StatusCode) -> Result<(), ConnectError> {
-		let mut connect = self.respond(status).await?;
-		connect.send.finish().ok();
+		let connect = self.respond(status).await?;
+		connect.send.finish();
 		Ok(())
 	}
 }
@@ -97,8 +97,8 @@ pub struct Connected {
 	pub response: ConnectResponse,
 
 	// A reference to the send/recv stream, so we don't close it until dropped.
-	pub(crate) send: crate::quic::driver::SendStream,
-	pub(crate) recv: crate::quic::driver::RecvStream,
+	pub(crate) send: crate::quic::driver::send::Stream,
+	pub(crate) recv: crate::quic::driver::recv::Stream,
 }
 
 impl Connected {
@@ -107,7 +107,7 @@ impl Connected {
 	/// You may add any number of subprotocols allowing the server to select from.
 	/// If the list is empty the field will be omitted in the request header.
 	pub async fn open(
-		conn: &crate::quic::driver::Connection,
+		conn: &crate::quic::driver::connection::Connection,
 		request: impl Into<ConnectRequest>,
 	) -> Result<Self, ConnectError> {
 		let request = request.into();

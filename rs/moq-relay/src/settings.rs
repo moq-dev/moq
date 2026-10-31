@@ -140,6 +140,9 @@ struct Auth {
 	#[usage(env = "MOQ_AUTH_URL", cli("--auth-url"))]
 	url: Option<String>,
 
+	#[usage(env = "MOQ_AUTH_ROOT", cli("--auth-root"))]
+	root: Option<Vec<String>>,
+
 	#[usage(env = "MOQ_AUTH_PUBLIC", cli("--auth-public"), parse = "list_by_comma")]
 	public: Option<Vec<String>>,
 
