@@ -1,7 +1,7 @@
 name: Alert
 
 # Posts cron, release, and deployment failures to the Discord #alerts channel.
-# PRs, merge queues, branch validation, and cache warming stay on GitHub.
+# PRs, the landing gate, branch validation, and cache warming stay on GitHub.
 #
 # Needs a DISCORD_WEBHOOK repo secret (Discord: Channel > Integrations >
 # Webhooks). Nothing else reads it.
@@ -66,7 +66,6 @@ jobs:
       github.event.workflow_run.conclusion == 'timed_out') &&
       github.event.workflow_run.event != 'pull_request' &&
       github.event.workflow_run.event != 'pull_request_target' &&
-      github.event.workflow_run.event != 'merge_group' &&
       (github.event.workflow_run.event == 'schedule' ||
       !contains(fromJSON('["Interop", "Nightly", "Smoke", "Smoke toolchain update", "TS", "Video"]'), github.event.workflow_run.name))
     runs-on: ubuntu-latest

@@ -209,7 +209,13 @@ a literal `*`. The empty pattern matches the empty path.
 
 A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route
-its scope can use.
+its scope can use. A listing reports only routes whose literal name matches its
+patterns: under `**/*.chat`, a claim at `room` is left out even though it could
+serve `room/lobby.chat`, and so is a route above the root. Requests still
+resolve through such covering routes, and a session still forwards them to its
+peer, which routes through them. Code that routes or forwards opts in with the
+origin consumer's covering view: `covering()` in Rust, `{ covering: true }` in
+JS.
 
 ## Authorization
 
@@ -300,8 +306,9 @@ moq-lite-07 carries range by range and older wire versions as the single span
 covering them. A relative or time anchor resolves on the hop that publishes the
 track, and over moq-lite-07, which carries a relative or time start upstream and
 reports the live edge and media time, so a copy resolves the ends itself. A Rust
-moq-transport copy accepts anchors its cache can already
-resolve and sends group bounds upstream; it refuses an unknown time end. Older
+moq-transport copy resolves a relative anchor from the Largest Object its live join
+reports, accepts time anchors its cache can already resolve, and sends group bounds
+upstream; it refuses any other time anchor. Older
 moq-lite versions accept absolute anchors but refuse time anchors and relative anchors other
 than the live and default starts. An untimed track refuses a time anchor. At the live
 edge, a time end

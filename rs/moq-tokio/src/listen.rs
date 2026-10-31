@@ -259,6 +259,35 @@ pub struct Reset {
 	pub secret: Option<std::path::PathBuf>,
 }
 
+/// The QUIC listener settings with defaults applied, produced by [`Config::resolve`].
+///
+/// Exhaustive on purpose, unlike [`crate::connect::Resolved`]: a QUIC runtime outside
+/// this crate destructures it without `..`, so a setting added here fails to compile
+/// until every runtime honors or refuses it.
+#[derive(Clone, Debug)]
+pub struct Resolved {
+	/// The QUIC listen address; unset leaves the choice of default to the runtime.
+	pub bind: Option<Bind>,
+	/// The versions to accept, every one when none was configured.
+	pub versions: moq_net::Versions,
+	/// The extensions to offer in SETUP.
+	pub extensions: moq_net::setup::Extensions,
+	/// The implementation to advertise in SETUP, or the runtime's own when unset.
+	pub implementation: Option<String>,
+	/// The handshake deadline, from [`Config::resolved_timeout`].
+	pub timeout: Option<std::time::Duration>,
+	/// The served identity and the roots that authenticate mTLS clients.
+	pub tls: crate::tls::Listen,
+	/// The IPv4 QUIC preferred_address to advertise.
+	pub preferred_v4: Option<std::net::SocketAddrV4>,
+	/// The IPv6 QUIC preferred_address to advertise.
+	pub preferred_v6: Option<std::net::SocketAddrV6>,
+	/// The QUIC-LB connection-ID encoding.
+	pub lb: LoadBalancer,
+	/// The file the stateless reset key is derived from.
+	pub reset_secret: Option<std::path::PathBuf>,
+}
+
 /// One server's socket in a complete `SO_REUSEPORT` group.
 ///
 /// Crate-private on purpose: [`crate::worker::Workers`] is the only thing that
@@ -476,6 +505,56 @@ impl Config {
 	pub fn resolved_timeout(&self) -> Option<std::time::Duration> {
 		let timeout = self.timeout.map(Into::into).unwrap_or(DEFAULT_TIMEOUT);
 		(!timeout.is_zero() && moq_clock::now().checked_add(timeout).is_some()).then_some(timeout)
+	}
+
+	/// The QUIC listener settings, for a runtime outside this crate to map.
+	///
+	/// Refuses released spellings and invalid combinations, as [`crate::Server::new`]
+	/// does. Destructures every field, so a new one fails to compile here until it is
+	/// either carried into [`Resolved`] or named as something a QUIC listener never
+	/// reads.
+	#[cfg(feature = "_transport")]
+	pub fn resolve(&self) -> crate::Result<Resolved> {
+		let deprecated = self.deprecated();
+		if !deprecated.is_empty() {
+			return Err(crate::Error::Deprecated(deprecated));
+		}
+		self.validate()?;
+
+		let Self {
+			bind,
+			version: _,
+			extensions,
+			implementation,
+			timeout: _,
+			tls,
+			preferred_v4,
+			preferred_v6,
+			lb,
+			reset: Reset { secret: reset_secret },
+			// Served by `Server` on the caller's runtime, never by a QUIC listener.
+			#[cfg(feature = "tcp")]
+				tcp: _,
+			#[cfg(all(feature = "uds", unix))]
+				unix: _,
+			// Refused above as deprecated.
+			listen: _,
+			legacy: _,
+			quic: _,
+		} = self;
+
+		Ok(Resolved {
+			bind: bind.clone(),
+			versions: self.versions(),
+			extensions: *extensions,
+			implementation: implementation.clone(),
+			timeout: self.resolved_timeout(),
+			tls: tls.clone(),
+			preferred_v4: *preferred_v4,
+			preferred_v6: *preferred_v6,
+			lb: lb.clone(),
+			reset_secret: reset_secret.clone(),
+		})
 	}
 
 	#[cfg(feature = "quic")]

@@ -928,23 +928,6 @@ impl FrameStruct for Datagram {
 }
 
 impl Datagram {
-	pub(crate) fn encode(&self, length: bool, out: &mut Vec<u8>) {
-		out.write(FrameType(*DATAGRAM_TYS.start() | u64::from(length))); // 1 byte
-		if length {
-			// Safe to unwrap because we check length sanity before queueing datagrams
-			out.write(VarInt::from_u64(self.data.len() as u64).unwrap()); // <= 8 bytes
-		}
-		out.extend_from_slice(&self.data);
-	}
-
-	pub(crate) fn size(&self, length: bool) -> usize {
-		1 + if length {
-			VarInt::from_u64(self.data.len() as u64).unwrap().size()
-		} else {
-			0
-		} + self.data.len()
-	}
-
 	/// The largest payload whose length-prefixed frame fits in `budget` bytes, if any frame does
 	///
 	/// Exact, rather than reserving [`SIZE_BOUND`](FrameStruct::SIZE_BOUND)'s 8-byte length: a
@@ -956,6 +939,53 @@ impl Datagram {
 			payload -= 1;
 		}
 		Some(payload)
+	}
+}
+
+/// An outgoing datagram's payload, kept as the chunks it was handed in
+///
+/// A header chained in front of a payload costs no copy of the payload.
+#[derive(Debug)]
+pub(crate) struct OutgoingDatagram {
+	chunks: tinyvec::TinyVec<[Bytes; 2]>,
+	len: usize,
+}
+
+impl OutgoingDatagram {
+	/// Take all of `data`, a chunk at a time.
+	pub(crate) fn new(mut data: impl Buf) -> Self {
+		let len = data.remaining();
+		let mut chunks = tinyvec::TinyVec::new();
+		while data.has_remaining() {
+			let chunk = data.chunk().len();
+			chunks.push(data.copy_to_bytes(chunk));
+		}
+		Self { chunks, len }
+	}
+
+	/// The payload's length.
+	pub(crate) fn len(&self) -> usize {
+		self.len
+	}
+
+	/// The length-prefixed frame's size.
+	pub(crate) fn size(&self) -> usize {
+		Self::frame_size(self.len)
+	}
+
+	/// The size of the length-prefixed frame of a `len`-byte payload.
+	pub(crate) fn frame_size(len: usize) -> usize {
+		1 + VarInt::from_u64(len as u64).map_or(8, |len| len.size()) + len
+	}
+
+	/// Write the length-prefixed frame.
+	pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+		out.write(FrameType(*DATAGRAM_TYS.start() | 1)); // 1 byte
+		// Safe to unwrap because we check length sanity before queueing datagrams
+		out.write(VarInt::from_u64(self.len as u64).unwrap()); // <= 8 bytes
+		for chunk in &self.chunks {
+			out.extend_from_slice(chunk);
+		}
 	}
 }
 
@@ -1168,18 +1198,35 @@ mod test {
 	];
 
 	#[test]
+	fn outgoing_datagram_chains_without_copying() {
+		let payload = Bytes::from(vec![7; 100]);
+		let datagram = OutgoingDatagram::new((&b"hdr"[..]).chain(payload.clone()));
+		assert_eq!(datagram.len(), 103);
+		assert_eq!(
+			datagram.chunks[1].as_ptr(),
+			payload.as_ptr(),
+			"the payload is not copied"
+		);
+
+		let mut out = Vec::new();
+		datagram.encode(&mut out);
+		assert_eq!(out.len(), datagram.size());
+		let frame = Iter::new(Bytes::from(out)).unwrap().next().unwrap().unwrap();
+		let Frame::Datagram(frame) = frame else {
+			panic!("{frame:?}")
+		};
+		assert_eq!(&frame.data[..3], b"hdr");
+		assert_eq!(frame.data[3..], payload[..]);
+	}
+
+	#[test]
 	fn datagram_max_payload_is_exact() {
 		// Not even an empty frame fits
 		assert_eq!(Datagram::max_payload(0), None);
 		assert_eq!(Datagram::max_payload(1), None);
 		for budget in [2u64, 3, 64, 65, 66, 1200, 16385, 16386, 1 << 20] {
 			let payload = Datagram::max_payload(budget).unwrap();
-			let frame = |n: u64| {
-				Datagram {
-					data: Bytes::from(vec![0; n as usize]),
-				}
-				.size(true) as u64
-			};
+			let frame = |n: u64| OutgoingDatagram::new(Bytes::from(vec![0; n as usize])).size() as u64;
 			assert!(frame(payload) <= budget, "{budget}: {payload} overflows");
 			assert!(frame(payload + 1) > budget, "{budget}: {payload} isn't the largest");
 		}
