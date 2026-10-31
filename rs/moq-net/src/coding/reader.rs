@@ -475,7 +475,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		Poll::Ready(result)
 	}
 
-	/// Poll until `group`'s writer may admit a frame of `size` bytes from this stream: until
+	/// Poll until `group`'s writer may admit the frame `header` opens from this stream: until
 	/// that leaves no byte its fastest reader has yet to take for the live tail to shed.
 	///
 	/// Pacing before the frame exists matters because admitting it trims the tail to fit
@@ -485,12 +485,12 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		&mut self,
 		waiter: &kio::Waiter,
 		group: &crate::recv::Group,
-		size: u64,
+		header: &crate::frame::Header,
 	) -> Poll<Result<(), Error>>
 	where
 		S: Pause,
 	{
-		self.poll_pace(waiter, group.poll_admit(waiter, size))
+		self.poll_pace(waiter, group.poll_admit(waiter, header))
 	}
 
 	/// Wait out `paced`, the group's pace gate, if the session has room for the credit this
@@ -992,10 +992,14 @@ mod tests {
 
 		let (group, _idle) = paced_group();
 		let group = crate::recv::Group::new(group);
+		let header = crate::frame::Header::from(crate::frame::Info {
+			size: 1,
+			timestamp: Some(crate::Timestamp::ZERO),
+		});
 		let mut reader = queue(&[], crate::lite::Version::Lite05);
-		assert!(reader.poll_admit(noop, &group, 1).is_pending(), "paused to admit");
+		assert!(reader.poll_admit(noop, &group, &header).is_pending(), "paused to admit");
 		reader.stream.get_mut().reset = true;
-		assert!(matches!(reader.poll_admit(noop, &group, 1), Poll::Ready(Err(_))));
+		assert!(matches!(reader.poll_admit(noop, &group, &header), Poll::Ready(Err(_))));
 
 		let (group, _idle) = paced_group();
 		let mut frame = group

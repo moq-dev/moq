@@ -968,13 +968,14 @@ impl GroupState {
 
 	/// Append a completed frame, returning the slot growth it charged.
 	///
-	/// The frame's place on the pace scale costs its payload and its slot, as the live
-	/// tail does, so a paced writer of tiny frames is bounded too.
+	/// The frame's place on the pace scale costs its payload, metadata, and slot, as the
+	/// live tail does, so a paced writer of tiny frames is bounded too.
 	fn push(&mut self, mut entry: Entry) -> u64 {
 		let slots = self.reserve_frame();
+		let metadata = entry.fields.as_ref().map_or(0, |fields| fields.heap());
 		entry.end = self
 			.pace
-			.commit(entry.frame.payload.len() as u64 + size_of::<Entry>() as u64);
+			.commit(entry.frame.payload.len() as u64 + metadata + size_of::<Entry>() as u64);
 		self.log.push(entry);
 		slots
 	}

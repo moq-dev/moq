@@ -1278,7 +1278,7 @@ impl FrameIngest {
 					};
 				}
 				IngestPhase::Admit { header } => {
-					ready!(reader.poll_admit(waiter, group, header.info.size))?;
+					ready!(reader.poll_admit(waiter, group, header))?;
 					let IngestPhase::Admit { header } = std::mem::replace(&mut self.phase, IngestPhase::Timing) else {
 						unreachable!()
 					};

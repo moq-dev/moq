@@ -186,6 +186,50 @@ mod tests {
 		assert_eq!(group.poll_paced(&waiter, 0), Poll::Ready(()));
 	}
 
+	/// A one-byte frame whose properties hold `metadata` bytes.
+	fn fielded(id: u64, metadata: usize) -> frame::Header {
+		use crate::model::object::{Block, Fields, Properties};
+		let block = Block {
+			bytes: Bytes::from(vec![0u8; metadata]),
+			immutable: false,
+		};
+		frame::Header {
+			info: frame::Info {
+				size: 1,
+				timestamp: None,
+			},
+			fields: Some(Arc::new(Fields {
+				id,
+				properties: Properties {
+					block: Some(block),
+					..Default::default()
+				},
+			})),
+			inflated: None,
+		}
+	}
+
+	/// Metadata counts toward the window as it does toward the live tail, both committed
+	/// and to admit a frame, so frames whose properties outweigh their payloads are paced.
+	#[test]
+	fn metadata_counts_toward_the_window() {
+		let (_flag, waiter) = flag();
+		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		let _reader = group.consume();
+		for id in 0..15 {
+			let mut frame = group.create_object(fielded(id, MB)).unwrap();
+			frame.write(Bytes::from_static(b"f")).unwrap();
+			group = frame.finish().unwrap();
+		}
+		let group = crate::recv::Group::new(group);
+		assert_eq!(group.poll_admit(&waiter, &fielded(15, 0)), Poll::Ready(()));
+		assert_eq!(
+			group.poll_admit(&waiter, &fielded(15, 2 * MB)),
+			Poll::Pending,
+			"its metadata would pass the window"
+		);
+	}
+
 	/// Bytes measure the window, not frames, so an open frame counts as it fills.
 	#[test]
 	fn an_open_frame_counts_toward_the_window() {

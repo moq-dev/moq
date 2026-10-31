@@ -5360,7 +5360,7 @@ impl Subscriber {
 			fields,
 			inflated: super::object::inflated(decoded.inflated, producer.compressed())?,
 		};
-		kio::wait(|waiter| stream.poll_admit(waiter, producer, size)).await?;
+		kio::wait(|waiter| stream.poll_admit(waiter, producer, &header)).await?;
 		let mut frame = producer.create_object(header)?;
 		if let Err(err) = kio::wait(|waiter| stream.poll_read_frame(waiter, &mut frame)).await {
 			let _ = frame.abort(err.clone());
@@ -6088,7 +6088,7 @@ impl GroupIngest {
 					self.phase = IngestPhase::Admit { header };
 				}
 				IngestPhase::Admit { header } => {
-					ready!(reader.poll_admit(waiter, group, header.info.size))?;
+					ready!(reader.poll_admit(waiter, group, header))?;
 					let IngestPhase::Admit { header } = std::mem::replace(&mut self.phase, IngestPhase::Delta) else {
 						unreachable!()
 					};
