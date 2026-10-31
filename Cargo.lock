@@ -4723,7 +4723,6 @@ dependencies = [
  "syn 2.0.119",
  "test-env",
  "trybuild",
- "workspace-hack",
 ]
 
 [[package]]
