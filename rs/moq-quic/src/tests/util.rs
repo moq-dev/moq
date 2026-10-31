@@ -17,7 +17,7 @@ use rustls::{
 	client::WebPkiServerVerifier,
 	pki_types::{CertificateDer, PrivateKeyDer},
 };
-use tracing::{info_span, trace};
+use tracing::{debug_span, trace};
 
 use super::crypto::rustls::{QuicClientConfig, QuicServerConfig, configured_provider};
 use super::*;
@@ -159,7 +159,7 @@ impl Pair {
 	}
 
 	pub(super) fn drive_client(&mut self) {
-		let span = info_span!("client");
+		let span = debug_span!("client");
 		let _guard = span.enter();
 		self.client.drive(self.time, self.server.addr);
 		for (packet, buffer) in self.client.outbound.drain(..) {
@@ -191,7 +191,7 @@ impl Pair {
 	}
 
 	pub(super) fn drive_server(&mut self) {
-		let span = info_span!("server");
+		let span = debug_span!("server");
 		let _guard = span.enter();
 		self.server.drive(self.time, self.client.addr);
 		for (packet, buffer) in self.server.outbound.drain(..) {
@@ -232,7 +232,7 @@ impl Pair {
 
 	/// Just start connecting the client
 	pub(super) fn begin_connect(&mut self, config: client::Config) -> ConnectionHandle {
-		let span = info_span!("client");
+		let span = debug_span!("client");
 		let _guard = span.enter();
 		let (client_ch, client_conn) = self
 			.client
@@ -759,9 +759,18 @@ impl ::std::ops::DerefMut for TestEndpoint {
 	}
 }
 
+/// Logs the test's own events, and the stack's per-packet trace when `RUST_LOG` asks for it.
+///
+/// Formatting every trace event costs more than the simulation it describes, and the runs are
+/// deterministic, so a failure replays with `RUST_LOG=trace` to read it. The per-step side spans
+/// are debug for the same reason: they only label the stack's own events.
 pub(super) fn subscribe() -> tracing::subscriber::DefaultGuard {
+	let filter = tracing_subscriber::EnvFilter::builder()
+		.with_default_directive(tracing::Level::INFO.into())
+		.from_env()
+		.expect("RUST_LOG");
 	let builder = tracing_subscriber::FmtSubscriber::builder()
-		.with_max_level(tracing::Level::TRACE)
+		.with_env_filter(filter)
 		.with_writer(|| TestWriter);
 	// tracing uses std::time to trace time, which panics in wasm.
 	#[cfg(all(target_family = "wasm", target_os = "unknown"))]

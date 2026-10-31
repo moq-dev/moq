@@ -148,8 +148,12 @@ fn intersect_matches_exactly_what_both_match() {
 		for (i, a) in patterns.iter().enumerate() {
 			for (j, b) in patterns.iter().enumerate() {
 				let both = a.intersect(b).unwrap();
-				for (k, path) in paths.iter().enumerate() {
-					assert_eq!(both.matches(path), table[i][k] && table[j][k], "{a} & {b} on {path:?}");
+				// Below the diagonal, the commute check makes this the union `b & a` already
+				// matched against every path.
+				if i <= j {
+					for (k, path) in paths.iter().enumerate() {
+						assert_eq!(both.matches(path), table[i][k] && table[j][k], "{a} & {b} on {path:?}");
+					}
 				}
 				assert_eq!(both, b.intersect(a).unwrap(), "{a} & {b} commutes");
 				assert_eq!(both.is_empty(), !a.overlaps(b), "{a} & {b} empty iff disjoint");

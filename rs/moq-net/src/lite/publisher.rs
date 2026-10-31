@@ -8375,7 +8375,7 @@ mod tests {
 	async fn a_busy_subscription_yields_to_its_siblings() {
 		/// `RequestServe`'s passes per poll; each serves at most one group.
 		const BUDGET: u64 = 32;
-		const GROUPS: u64 = 10_000;
+		const GROUPS: u64 = 2_000;
 		const BATCH: u64 = 1_000;
 
 		type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;

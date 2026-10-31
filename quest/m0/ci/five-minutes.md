@@ -38,13 +38,12 @@ understate the tail.
 
 - First find which routes and steps exceed 5 minutes on representative diffs,
   separating admission wait, compile, and test time.
-- Prefer the epic's levers, such as [slow tests](/quest/m0/ci/slow-tests.md),
-  [hakari](/quest/m0/ci/hakari.md), and cache hits, and tighter diff selection,
+- Prefer the epic's levers, such as [hakari](/quest/m0/ci/hakari.md) and cache
+  hits, and tighter diff selection,
   over moving coverage. Move a check to the queue or nightly only under the
   epic's rule: evidence and an explicit coverage tradeoff for each.
 - Split any large single lever into its own quest.
 
 ## Related
 
-- [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the largest test-time lever
 - [Land main through quest land](/quest/m0/ci/land.md) - the queue gate that keeps checks moved out of the local gate

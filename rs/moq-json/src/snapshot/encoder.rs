@@ -581,6 +581,7 @@ mod test {
 		let mut runner = TestRunner::new(PropertyConfig {
 			cases,
 			rng_seed: RngSeed::Fixed(u64::from(seed)),
+			rng_algorithm: proptest::test_runner::RngAlgorithm::XorShift,
 			failure_persistence: None,
 			..Default::default()
 		});

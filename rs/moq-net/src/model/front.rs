@@ -1695,6 +1695,8 @@ mod tests {
 		];
 
 		fn walk(front: &Front, alphabet: &[Event], depth: usize, sequences: &mut usize) {
+			// Rendered only when an event needs it: formatting dominates the walk.
+			let mut before = None;
 			for event in alphabet {
 				// Ids are minted once per resolution, so a source can never resolve
 				// while it is already serving; the alphabet reuses ids for brevity.
@@ -1704,7 +1706,6 @@ mod tests {
 					continue;
 				}
 				let mut next = front.clone();
-				let before = format!("{next:?}");
 				let actions = next.step(event.clone());
 				*sequences += 1;
 
@@ -1713,11 +1714,32 @@ mod tests {
 
 				// An event that changes nothing produces nothing, except letting
 				// go of a source the front never took.
-				if format!("{next:?}") == before {
-					assert!(
-						actions.iter().all(|action| matches!(action, Action::Detach { .. })),
-						"no-op event {event:?} produced {actions:?}"
-					);
+				if !actions.iter().all(|action| matches!(action, Action::Detach { .. })) {
+					// The cheap fields settle most events; the rest compare as rendered.
+					let flags = |f: &Front| {
+						(
+							f.serving,
+							f.serving_closing,
+							f.upstream,
+							f.resolved,
+							f.armed,
+							f.held,
+							f.retiring,
+							f.ended,
+						)
+					};
+					let moved = flags(&next) != flags(front)
+						|| next.parked != front.parked
+						|| next.excluded != front.excluded
+						|| next.tracks.len() != front.tracks.len();
+					if !moved {
+						let before = before.get_or_insert_with(|| format!("{front:?}"));
+						assert_ne!(
+							&format!("{next:?}"),
+							before,
+							"no-op event {event:?} produced {actions:?}"
+						);
+					}
 				}
 				// Nothing after the end.
 				if front.ended() {

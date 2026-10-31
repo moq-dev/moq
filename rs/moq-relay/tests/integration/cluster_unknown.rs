@@ -54,11 +54,13 @@ async fn spawn_relay(id: u64, connect: Vec<String>, cluster_version: Option<moq_
 
 /// Wait until the relay behind `internal` holds a session with each of the
 /// `dialed` peers it connects to.
-async fn wait_dialed(internal: u16, dialed: usize) {
+async fn wait_dialed(http: &reqwest::Client, internal: u16, dialed: usize) {
 	let url = format!("http://127.0.0.1:{internal}/nodes");
 	let deadline = tokio::time::Instant::now() + TIMEOUT;
 	loop {
-		let body = reqwest::get(&url)
+		let body = http
+			.get(&url)
+			.send()
 			.await
 			.expect("fetch /nodes")
 			.text()
@@ -95,8 +97,10 @@ impl Mesh {
 		)
 		.await;
 		let d = spawn_relay(14, vec![format!("tcp://127.0.0.1:{}", c.port)], cluster_version).await;
+		// One client for every poll: building one loads the system trust roots.
+		let http = reqwest::Client::new();
 		for (node, dialed) in [(&b, 1), (&c, 2), (&d, 1)] {
-			wait_dialed(node.internal, dialed).await;
+			wait_dialed(&http, node.internal, dialed).await;
 		}
 		Self { nodes: [a, b, c, d] }
 	}

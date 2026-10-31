@@ -680,7 +680,11 @@ struct Front {
 pub struct Net {
 	cfg: Config,
 	nodes: Vec<State>,
-	links: BTreeMap<(Node, Node), Link>,
+	/// `links[a][b]`: `a`'s side of its link to `b`. Dense rather than a map,
+	/// since selection looks a side up per route and the sweeps select constantly.
+	links: Vec<Vec<Option<Link>>>,
+	/// Every `(subject, scope)` a configured link grants.
+	grants: BTreeSet<(&'static str, &'static str)>,
 	up: BTreeSet<(Node, Node)>,
 	/// `(node, peer)`: the identity `node` proved on its session to `peer`. A
 	/// session proves one key, once.
@@ -710,7 +714,8 @@ impl Net {
 					..State::default()
 				})
 				.collect(),
-			links: BTreeMap::new(),
+			links: vec![vec![None; nodes]; nodes],
+			grants: BTreeSet::new(),
 			up: BTreeSet::new(),
 			proved: BTreeMap::new(),
 			draining: BTreeSet::new(),
@@ -737,8 +742,16 @@ impl Net {
 			rule.admits(ab.cost) && rule.admits(ba.cost),
 			"zero-cost link {a}-{b} refused"
 		);
-		self.links.insert((a, b), ab);
-		self.links.insert((b, a), ba);
+		self.links[a][b] = Some(ab);
+		self.links[b][a] = Some(ba);
+		self.grants = self
+			.links
+			.iter()
+			.flatten()
+			.flatten()
+			.filter_map(|link| link.grant)
+			.map(|grant| (grant.subject, grant.scope))
+			.collect();
 		self.connect(a, b);
 	}
 
@@ -747,13 +760,18 @@ impl Net {
 		self.link(a, b, Link::cost(cost), Link::cost(cost));
 	}
 
+	/// `node`'s side of its configured link to `peer`.
+	fn side(&self, node: Node, peer: Node) -> &Link {
+		self.links[node][peer].as_ref().expect("a configured link")
+	}
+
 	fn pair(a: Node, b: Node) -> (Node, Node) {
 		(a.min(b), a.max(b))
 	}
 
 	/// Open a session; each side replays what it currently advertises.
 	pub fn connect(&mut self, a: Node, b: Node) {
-		assert!(self.links.contains_key(&(a, b)), "unknown link {a}-{b}");
+		assert!(self.links[a][b].is_some(), "unknown link {a}-{b}");
 		self.up.insert(Self::pair(a, b));
 		for (x, y) in [(a, b), (b, a)] {
 			if let Some(id) = self.nodes[x].proven {
@@ -817,18 +835,17 @@ impl Net {
 
 	/// Re-open every configured link of `node`.
 	pub fn reconnect(&mut self, node: Node) {
-		let peers: Vec<Node> = self.links.keys().filter(|(a, _)| *a == node).map(|(_, b)| *b).collect();
+		let peers: Vec<Node> = (0..self.nodes.len())
+			.filter(|&b| self.links[node][b].is_some())
+			.collect();
 		for peer in peers {
 			self.connect(node, peer);
 		}
 	}
 
+	/// Every neighbor `node` has a session up with, in ascending order.
 	fn peers(&self, node: Node) -> impl Iterator<Item = Node> + '_ {
-		self.up.iter().filter_map(move |&(a, b)| match node {
-			n if n == a => Some(b),
-			n if n == b => Some(a),
-			_ => None,
-		})
+		(0..self.nodes.len()).filter(move |&peer| self.links[node][peer].is_some() && self.connected(node, peer))
 	}
 
 	/// `node` starts originating `id` at seqno `seqno`, proving it on every session.
@@ -1169,7 +1186,7 @@ impl Net {
 
 	/// The key `at` files `id` under when `from` names it, or `None` when refused.
 	fn key(&self, at: Node, from: Node, id: Id) -> Option<Id> {
-		match self.links[&(at, from)].grant {
+		match self.side(at, from).grant {
 			Some(grant) if self.proved.get(&(from, at)) != Some(&id) => {
 				if id & QUALIFIED != 0 && !self.cfg.requalify {
 					return None;
@@ -1225,7 +1242,7 @@ impl Net {
 				let Some(id) = self.key(at, from, id) else {
 					return;
 				};
-				let scope = match self.links[&(at, from)].grant {
+				let scope = match self.side(at, from).grant {
 					Some(grant) if id & QUALIFIED != 0 => Some(grant.scope),
 					_ => None,
 				};
@@ -1372,44 +1389,59 @@ impl Net {
 				down_only: false,
 			});
 		}
-		state
-			.rx
-			.get(&id)?
-			.iter()
-			.filter(|(next, entry)| !entry.held && !except.contains(next) && self.feasible(node, id, entry.advert))
-			.filter_map(|(&next, entry)| {
-				let advert = entry.advert;
-				let link = self.links[&(node, next)];
-				let metric = self.cfg.rule.add(advert.metric, link.cost)?;
-				let selected = Selected {
-					next: Some(next),
-					seqno: advert.seqno,
-					metric,
-					advertised: advert.metric,
-					down_only: self.cfg.export == Export::DownOnly && (link.upstream || advert.down_only),
-				};
-				let draining = self.draining.contains(&(node, next));
-				Some(((draining, Reverse(link.priority), metric, next), selected))
-			})
-			.min_by_key(|(rank, _)| *rank)
-			.map(|(_, selected)| selected)
+		// A plain loop rather than an iterator chain: selection dominates the
+		// sweeps, and unoptimized test builds pay for every adapter.
+		type Rank = (bool, Reverse<i8>, Metric, Node);
+		let mut best: Option<(Rank, Selected)> = None;
+		for (&next, entry) in state.rx.get(&id)? {
+			if entry.held || except.contains(&next) || !self.feasible(node, id, entry.advert) {
+				continue;
+			}
+			let advert = entry.advert;
+			let link = self.side(node, next);
+			let Some(metric) = self.cfg.rule.add(advert.metric, link.cost) else {
+				continue;
+			};
+			let rank = (
+				self.draining.contains(&(node, next)),
+				Reverse(link.priority),
+				metric,
+				next,
+			);
+			if best.as_ref().is_some_and(|(best, _)| *best <= rank) {
+				continue;
+			}
+			let selected = Selected {
+				next: Some(next),
+				seqno: advert.seqno,
+				metric,
+				advertised: advert.metric,
+				down_only: self.cfg.export == Export::DownOnly && (link.upstream || advert.down_only),
+			};
+			best = Some((rank, selected));
+		}
+		best.map(|(_, selected)| selected)
 	}
 
 	/// The usable but infeasible routes `node` holds for `id`, best first.
 	fn infeasible(&self, node: Node, id: Id) -> Vec<Node> {
-		let Some(routes) = self.nodes[node].rx.get(&id) else {
-			return Vec::new();
-		};
-		let mut out: Vec<(Metric, Node)> = routes
-			.iter()
-			.filter(|(_, entry)| !entry.held && !self.feasible(node, id, entry.advert))
-			.filter_map(|(&next, entry)| {
-				let metric = self.cfg.rule.add(entry.advert.metric, self.links[&(node, next)].cost)?;
-				Some((metric, next))
-			})
-			.collect();
+		let mut out: Vec<(Metric, Node)> = self.infeasible_unordered(node, id).collect();
 		out.sort();
 		out.into_iter().map(|(_, next)| next).collect()
+	}
+
+	/// [`Net::infeasible`] with each route's metric, in neighbor order.
+	fn infeasible_unordered(&self, node: Node, id: Id) -> impl Iterator<Item = (Metric, Node)> + '_ {
+		self.nodes[node]
+			.rx
+			.get(&id)
+			.into_iter()
+			.flatten()
+			.filter(move |(_, entry)| !entry.held && !self.feasible(node, id, entry.advert))
+			.filter_map(move |(&next, entry)| {
+				let metric = self.cfg.rule.add(entry.advert.metric, self.side(node, next).cost)?;
+				Some((metric, next))
+			})
 	}
 
 	/// Where `node` sends a request for `id` on behalf of `from`: a feasible
@@ -1437,31 +1469,38 @@ impl Net {
 
 	/// Whether `node` may follow only exportable routes for a request from `from`.
 	fn exports_only(&self, node: Node, from: Option<Node>) -> bool {
-		self.cfg.recheck && from.is_some_and(|from| self.links[&(node, from)].upstream)
+		self.cfg.recheck && from.is_some_and(|from| self.side(node, from).upstream)
 	}
 
 	/// Whether `node` holds a reachable route to `id` but none is feasible: it
 	/// needs the origin to advance its seqno.
 	pub fn starved(&self, node: Node, id: Id) -> bool {
-		self.route(node, id).is_none() && !self.infeasible(node, id).is_empty()
+		self.route(node, id).is_none() && self.infeasible_unordered(node, id).next().is_some()
 	}
 
 	/// Whether `node`, with no usable route to `id`, holds a held route it could
-	/// recover through. A held route counts only if its last finite advertisement
-	/// is feasible here, so holds follow a strictly decreasing metric toward a
-	/// starved node and cannot hold each other up.
+	/// recover through.
 	pub fn grounded(&self, node: Node, id: Id) -> bool {
-		self.route(node, id).is_none()
-			&& self.nodes[node].rx.get(&id).is_some_and(|routes| {
-				routes
-					.values()
-					.any(|entry| entry.held && self.feasible(node, id, entry.advert))
-			})
+		self.route(node, id).is_none() && self.recoverable(node, id)
 	}
 
-	/// Whether `node` keeps showing `id`'s announcements.
-	pub fn live(&self, node: Node, id: Id) -> bool {
-		self.route(node, id).is_some() || self.starved(node, id) || self.grounded(node, id)
+	/// Whether `node` holds a held route to `id`. One counts only if its last
+	/// finite advertisement is feasible here, so holds follow a strictly
+	/// decreasing metric toward a starved node and cannot hold each other up.
+	fn recoverable(&self, node: Node, id: Id) -> bool {
+		self.nodes[node].rx.get(&id).is_some_and(|routes| {
+			routes
+				.values()
+				.any(|entry| entry.held && self.feasible(node, id, entry.advert))
+		})
+	}
+
+	/// Whether `node`, having selected `route` for `id`, keeps showing `id`'s
+	/// announcements: it is routed, [starved](Self::starved), or
+	/// [grounded](Self::grounded). The caller passes the route it already
+	/// selected, since selecting dominates the sweeps.
+	fn live(&self, node: Node, id: Id, route: Option<Selected>) -> bool {
+		route.is_some() || self.infeasible_unordered(node, id).next().is_some() || self.recoverable(node, id)
 	}
 
 	/// The neighbors whose views can certify `id` at `node`: those whose last
@@ -1478,18 +1517,21 @@ impl Net {
 		})
 	}
 
-	/// The regions of `id` that `node`'s certifiers certify, or `None` while it
-	/// holds no route or a certifier has not yet answered the current interest:
-	/// its announcements may still trail its route.
-	fn certified(&self, node: Node, id: Id) -> Option<Vec<&'static str>> {
+	/// The regions of `id` that `node`'s certifiers certify, those whose route
+	/// is held only when `held`, or `None` while it holds no route or a
+	/// certifier has not yet answered the current interest: its announcements
+	/// may still trail its route.
+	fn certified(&self, node: Node, id: Id, held: bool) -> Option<Vec<&'static str>> {
 		let state = &self.nodes[node];
-		state.rx.get(&id)?;
+		let routes = state.rx.get(&id)?;
 		let mut regions = Vec::new();
 		for next in self.certifiers(node, id) {
 			if state.heard_on.get(&(next, id)) != Some(&state.interest) {
 				return None;
 			}
-			regions.extend(state.heard[&(next, id)].floors.keys());
+			if held || !routes[&next].held {
+				regions.extend(state.heard[&(next, id)].floors.keys());
+			}
 		}
 		Some(regions)
 	}
@@ -1506,7 +1548,7 @@ impl Net {
 		if self.nodes[node].origins.contains_key(&id) || self.route(node, id).is_none() {
 			return;
 		}
-		let Some(regions) = self.certified(node, id) else {
+		let Some(regions) = self.certified(node, id, true) else {
 			return;
 		};
 		let state = &self.nodes[node];
@@ -1544,19 +1586,18 @@ impl Net {
 		forget(&mut state.forgot, id, &remembered);
 	}
 
-	/// The view `node` shows and forwards for `id`.
-	fn adopted(&self, node: Node, id: Id) -> Option<&View> {
+	/// The view `node` shows and forwards for `id`, having selected `route` for it.
+	fn adopted(&self, node: Node, id: Id, route: Option<Selected>) -> Option<&View> {
 		let state = &self.nodes[node];
 		if state.origins.contains_key(&id) {
 			return state.views.get(&id);
 		}
 		match self.cfg.freshness {
-			Freshness::NextHop => self
-				.route(node, id)
+			Freshness::NextHop => route
 				.and_then(|route| route.next)
 				.and_then(|next| state.heard.get(&(next, id))),
 			Freshness::Barrier | Freshness::Floors { .. } => {
-				self.live(node, id).then(|| state.views.get(&id)).flatten()
+				self.live(node, id, route).then(|| state.views.get(&id)).flatten()
 			}
 		}
 	}
@@ -1607,18 +1648,29 @@ impl Net {
 			if let Some(selected) = selected
 				&& peers
 					.iter()
-					.any(|&peer| !(self.links[&(node, peer)].upstream && selected.down_only))
+					.any(|&peer| !(self.side(node, peer).upstream && selected.down_only))
 			{
 				self.record(node, id, selected);
 			}
-			let live = serves && self.live(node, id);
-			let view = self.adopted(node, id).cloned().unwrap_or_default();
+			// Recording may have tightened the feasibility distance: select again.
+			let route = self.route(node, id);
+			let live = serves && self.live(node, id, route);
+			let adopted = self.adopted(node, id, route);
 			// A sender that certifies anything answers every stream, even one
 			// whose interest none of its regions meets, so the receiver knows it
 			// certifies nothing there.
-			let answers = !view.floors.is_empty();
+			let answers = adopted.is_some_and(|view| !view.floors.is_empty());
+			// Each floor names its region: the stream's interest, or a scope
+			// below it. Peers mostly share an interest, so restrict once per interest.
+			let mut restricted: Vec<(&'static str, View)> = Vec::new();
 			for &peer in &peers {
-				let upstream = self.links[&(node, peer)].upstream;
+				let watch = self.nodes[peer].watch;
+				if !restricted.iter().any(|(interest, _)| *interest == watch) {
+					restricted.push((watch, adopted.map_or_else(View::default, |view| view.restrict(watch))));
+				}
+			}
+			for &peer in &peers {
+				let upstream = self.side(node, peer).upstream;
 				let state = &self.nodes[node];
 				let reach = match selected {
 					Some(route) if !(upstream && route.down_only) => Some(Reach::Finite(Advert {
@@ -1650,12 +1702,11 @@ impl Net {
 					state.sent_views.remove(&(peer, id));
 					continue;
 				}
-				// Each floor names its region: the stream's interest, or a scope below it.
 				let watch = self.nodes[peer].watch;
-				let view = view.restrict(watch);
+				let (_, view) = restricted.iter().find(|(interest, _)| *interest == watch).unwrap();
 				let state = &mut self.nodes[node];
 				let unchanged = match state.sent_views.get(&(peer, id)) {
-					Some(sent) => *sent == view,
+					Some(sent) => sent == view,
 					None => !answers,
 				};
 				if unchanged {
@@ -1668,7 +1719,7 @@ impl Net {
 				self.stats.claim_bytes += bytes;
 				self.queues.entry((node, peer)).or_default().push_back(Msg::Claims {
 					id,
-					view,
+					view: view.clone(),
 					interest: self.nodes[peer].interest,
 				});
 			}
@@ -1677,15 +1728,12 @@ impl Net {
 		// identity and every neighbor echoed its ROUTE_END: no node then holds an
 		// advertisement from this one, so no older one can return as a loop.
 		let state = &mut self.nodes[node];
-		let busy: BTreeSet<Id> = state
-			.rx
-			.keys()
-			.chain(state.origins.keys())
-			.chain(state.sent.keys().map(|(_, id)| id))
-			.chain(state.unacked.keys().map(|(_, id)| id))
-			.copied()
-			.collect();
-		state.fd.retain(|id, _| busy.contains(id));
+		state.fd.retain(|id, _| {
+			state.rx.contains_key(id)
+				|| state.origins.contains_key(id)
+				|| state.sent.keys().any(|(_, sent)| sent == id)
+				|| state.unacked.keys().any(|(_, unacked)| unacked == id)
+		});
 		self.requests(node);
 		self.show(node);
 	}
@@ -1695,16 +1743,20 @@ impl Net {
 		if self.cfg.requests == Requests::Off {
 			return;
 		}
+		// Every pending or starved identity; one neither pending nor starved
+		// falls through untouched below.
 		let state = &self.nodes[node];
 		let mut ids: BTreeSet<Id> = state.pending.keys().copied().collect();
-		ids.extend(state.rx.keys().filter(|id| self.starved(node, **id)));
+		ids.extend(state.rx.keys());
 		for id in ids {
 			let state = &self.nodes[node];
 			if state.origins.contains_key(&id) {
 				self.nodes[node].pending.remove(&id);
 				continue;
 			}
-			let starved = self.starved(node, id);
+			// Nothing below changes a selection, so one serves the whole pass.
+			let route = self.route(node, id);
+			let starved = route.is_none() && self.infeasible_unordered(node, id).next().is_some();
 			if starved {
 				let want = state.fd[&id].0 + 1;
 				match self.cfg.requests {
@@ -1739,7 +1791,11 @@ impl Net {
 			let Some(pending) = self.nodes[node].pending.get(&id).cloned() else {
 				continue;
 			};
-			let answered = self.route(node, id).is_some_and(|route| route.seqno >= pending.seqno);
+			let answered = route.is_some_and(|route| route.seqno >= pending.seqno);
+			if answered || (pending.from.is_empty() && !starved) {
+				self.nodes[node].pending.remove(&id);
+				continue;
+			}
 			// Hop by hop, a request follows the next hop even back through a
 			// requester: next hops form no loop, one pending request per hop stops
 			// a bounce, and no requester ever cancels, so excluding one can strand
@@ -1748,17 +1804,15 @@ impl Net {
 				Requests::HopByHop => BTreeSet::new(),
 				_ => pending.from.clone(),
 			};
-			let target = self.target(node, id, &except);
-			if answered || target.is_none() || (pending.from.is_empty() && !starved) {
+			let Some(target) = self.target(node, id, &except) else {
 				self.nodes[node].pending.remove(&id);
 				continue;
-			}
+			};
 			let resend = match self.cfg.requests {
-				Requests::HopByHop => target != pending.asked,
+				Requests::HopByHop => Some(target) != pending.asked,
 				_ => pending.asked.is_none(),
 			};
 			if resend {
-				let target = target.unwrap();
 				self.nodes[node].pending.get_mut(&id).unwrap().asked = Some(target);
 				self.send_request(node, target, id, pending.seqno);
 			}
@@ -1772,20 +1826,18 @@ impl Net {
 		ids.extend(state.heard.keys().map(|(_, id)| *id));
 		let mut shown = BTreeMap::new();
 		for id in ids {
-			let Some(view) = self.adopted(node, id) else {
+			let route = self.route(node, id);
+			let Some(view) = self.adopted(node, id, route) else {
 				continue;
 			};
-			let usable = self.route(node, id).is_some();
+			let usable = route.is_some();
 			// A claim is available only through a certifier that is not held:
-			// another scope's usable route cannot serve it.
+			// another scope's usable route cannot serve it. Only claims behind a
+			// usable route need the certifiers.
 			let serving: Option<Vec<&str>> = match self.cfg.freshness {
-				Freshness::Floors { .. } if !state.origins.contains_key(&id) => self.certified(node, id).map(|_| {
-					self.certifiers(node, id)
-						.into_iter()
-						.filter(|next| !state.rx[&id][next].held)
-						.flat_map(|next| state.heard[&(next, id)].floors.keys().copied())
-						.collect()
-				}),
+				Freshness::Floors { .. } if usable && !view.items.is_empty() && !state.origins.contains_key(&id) => {
+					self.certified(node, id, false)
+				}
 				_ => None,
 			};
 			let current = state.current.get(&id);
@@ -1827,11 +1879,11 @@ impl Net {
 			// A claim no routed neighbor's region covers was let go, not ended.
 			let uncertified = matches!(self.cfg.freshness, Freshness::Floors { .. })
 				&& self
-					.certified(node, id)
+					.certified(node, id, true)
 					.is_some_and(|regions| !regions.iter().any(|region| overlaps(claim, region)));
 			let kind = if !overlaps(claim, self.nodes[node].watch) {
 				Kind::Unwatched
-			} else if self.live(node, id) && !uncertified {
+			} else if self.live(node, id, self.route(node, id)) && !uncertified {
 				Kind::End
 			} else {
 				Kind::Offline
@@ -1940,12 +1992,7 @@ impl Net {
 		if key & QUALIFIED == 0 {
 			return None;
 		}
-		let subjects: BTreeSet<&str> = self
-			.links
-			.values()
-			.filter_map(|link| link.grant)
-			.map(|grant| grant.subject)
-			.collect();
+		let subjects: BTreeSet<&str> = self.grants.iter().map(|(subject, _)| *subject).collect();
 		let known: BTreeSet<Id> = self
 			.nodes
 			.iter()
@@ -1983,19 +2030,13 @@ impl Net {
 	}
 
 	fn candidates(&self, node: Node, path: &str, from: Option<Node>) -> Vec<Candidate> {
-		let grants: BTreeSet<(&str, &str)> = self
-			.links
-			.values()
-			.filter_map(|link| link.grant)
-			.map(|grant| (grant.subject, grant.scope))
-			.collect();
 		let mut out = Vec::new();
 		for (index, claim) in self.claims.iter().enumerate() {
 			if !claim.covers(path) || self.hidden.contains(&(node, index)) {
 				continue;
 			}
 			// A claim counts under its bare identity, and under a qualified key only inside that grant's scope.
-			let inside = grants.iter().filter(|(_, scope)| within(claim.prefix, scope));
+			let inside = self.grants.iter().filter(|(_, scope)| within(claim.prefix, scope));
 			for id in iter::once(claim.id).chain(inside.map(|(subject, _)| qualified(subject, claim.id))) {
 				let Some(route) = self.route_from(node, id, from) else {
 					continue;
@@ -2010,7 +2051,7 @@ impl Net {
 					total,
 					advertised: route.advertised,
 					draining: route.next.is_some_and(|next| self.draining.contains(&(node, next))),
-					priority: route.next.map_or(0, |next| self.links[&(node, next)].priority),
+					priority: route.next.map_or(0, |next| self.side(node, next).priority),
 					prefix: claim.prefix.len(),
 					epoch: claim.epoch,
 					down_only: route.down_only,

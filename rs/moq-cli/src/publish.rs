@@ -1647,10 +1647,11 @@ pub(crate) mod tests {
 				.into_iter()
 				.map(|(sequence, frames)| (sequence, frames.expect("the recording reads every group whole")))
 				.collect();
-			let output: Vec<u8> = recording
+			let output = recording
 				.iter()
-				.flat_map(|(_, frames)| frames.iter().flat_map(|frame| frame.payload.iter().copied()))
-				.collect();
+				.flat_map(|(_, frames)| frames.iter().map(|frame| &frame.payload[..]))
+				.collect::<Vec<_>>()
+				.concat();
 			assert!(output.len() > KYRION.len(), "{version}: both copies crossed");
 			assert!(
 				input.ends_with(&output),

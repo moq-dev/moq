@@ -55,18 +55,18 @@ impl Mux {
 	/// One packet on `pid`, its payload filled with the PID's low byte.
 	pub(super) fn packet(&mut self, pid: u16, flags: Flags) -> &mut Self {
 		let cc = self.cc(pid);
-		let mut pkt = vec![0x47, (pid >> 8) as u8 & 0x1f, pid as u8];
+		let mut pkt = [pid as u8; 188];
+		pkt[..3].copy_from_slice(&[0x47, (pid >> 8) as u8 & 0x1f, pid as u8]);
 		let marked = flags.pcr.is_some() || flags.random_access || flags.discontinuity;
 		if marked {
-			pkt.push(0x30 | cc);
-			let mut field = vec![
-				u8::from(flags.discontinuity) << 7
-					| u8::from(flags.random_access) << 6
-					| u8::from(flags.pcr.is_some()) << 4,
-			];
+			pkt[3] = 0x30 | cc;
+			pkt[5] = u8::from(flags.discontinuity) << 7
+				| u8::from(flags.random_access) << 6
+				| u8::from(flags.pcr.is_some()) << 4;
+			pkt[4] = 1;
 			if let Some(pcr) = flags.pcr {
 				let (base, ext) = (pcr / 300, pcr % 300);
-				field.extend_from_slice(&[
+				pkt[6..12].copy_from_slice(&[
 					(base >> 25) as u8,
 					(base >> 17) as u8,
 					(base >> 9) as u8,
@@ -74,13 +74,11 @@ impl Mux {
 					((base & 1) << 7) as u8 | 0x7e | (ext >> 8) as u8,
 					ext as u8,
 				]);
+				pkt[4] = 7;
 			}
-			pkt.push(field.len() as u8);
-			pkt.extend_from_slice(&field);
 		} else {
-			pkt.push(0x10 | cc);
+			pkt[3] = 0x10 | cc;
 		}
-		pkt.resize(188, pid as u8);
 		self.out.extend_from_slice(&pkt);
 		self
 	}

@@ -1925,11 +1925,12 @@ mod tests {
 	///
 	/// PCM rather than Opus only for speed: the frame term comes from the decoded
 	/// sample count either way, and an unoptimized Opus codec takes minutes over
-	/// the whole corpus. [`opus_states_its_own_frame_duration`] covers Opus.
+	/// the whole corpus. [`opus_states_its_own_frame_duration`] covers Opus. The
+	/// lowest common rate keeps each packet small, since only its duration counts.
 	async fn replay(case: &crate::jitter::tests::Case) -> Vec<f64> {
 		use crate::jitter::tests::duration;
 
-		let rate = 48_000;
+		let rate = 8_000;
 		let samples = (case.frame * rate as f64 / 1000.0) as usize;
 		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, rate, 1);
 		catalog.jitter = case.advertised.map(duration);
