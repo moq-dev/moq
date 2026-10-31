@@ -16,7 +16,7 @@ The existing split-frame EOF test now checks the final HLS stop record. Before t
 
 The existing conformance test from [moq-dev/moq#7387](https://github.com/moq-dev/moq/pull/7387) was run locally using a temporary overlay adapted to the checkout's mp4-atom API. All 13 AAC segments' HLS and DASH durations pass its 2.5 ms tolerance. The final segment advertises 1.387 s and decodes 1.386667 s. The whole test still fails on 13 video decoder-identity/recording findings owned by the related quest; its assertions were kept intact. No conformance changes are included here.
 
-Remaining before completion: run `just ci` and obtain the required other-vendor local review. The host's Claude weekly review quota is reportedly exhausted; keep the PR draft if that blocks the review.
+Remaining before completion: finish the required full checks and other-vendor review after host blockers clear. `quest gate just ci` stayed queued for host capacity and was stopped at handoff. `quest gate just test interop --all` passed its nine protocol tests, then failed to launch the media matrix's Cargo build with mbx's `Argument list too long (os error 7)`. `quest review --base origin/main --json` failed because Claude's weekly limit resets November 2 at 02:00 America/Los_Angeles. No review verdict was obtained, so the PR remains draft and this quest remains open. The launcher and harness hooks were left untouched.
 
 Public API: none. Wire: none.
 
