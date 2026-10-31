@@ -341,6 +341,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Samples must be nonempty, have forwards per-track byte ranges, and use moof-relative
 	/// offsets; absolute `base_data_offset` addressing is unsupported. With ffmpeg, use
 	/// `default_base_moof`. Forward gaps and interleaved tracks are supported.
+	///
+	/// Media samples stream into their frames as bytes arrive. What must be held whole is
+	/// bounded: a `moov` or `moof` body, or a text sample, larger than
+	/// [`MAX_HELD_BYTES`](super::MAX_HELD_BYTES), or a `moof` declaring more than
+	/// [`MAX_FRAGMENT_SAMPLES`](super::MAX_FRAGMENT_SAMPLES) samples, is refused before it is
+	/// held.
+	///
+	/// A refused box or fragment publishes nothing more, and the rest of its body is discarded.
+	/// The rest of the refused call's input is not read, so input fed in box-aligned chunks (such
+	/// as one HLS segment per call) resumes at the next call.
 	pub fn decode(&mut self, mut data: &[u8]) -> Result<()> {
 		loop {
 			let Some(body) = self.body.take() else {
@@ -366,19 +376,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						.checked_add(header_size)
 						.ok_or(Error::InvalidDataOffset)?;
 				}
-				if header.kind == Moov::KIND && self.moov.is_some() {
-					return Err(Error::DuplicateMoov.into());
-				}
-				if header.kind == Moof::KIND && self.moof.is_some() {
-					return Err(Error::DuplicateMoof.into());
-				}
-				self.body = Some(match header.kind.as_ref() {
-					b"moov" | b"moof" => Body::Metadata {
-						kind: header.kind,
-						remaining: header.size.ok_or(mp4_atom::Error::InvalidSize)?,
-						header_size,
-					},
-					b"mdat" => Body::Media(self.begin_mdat(header.size)?),
+				let body = match header.kind.as_ref() {
+					b"moov" | b"moof" => self.begin_metadata(header.kind, header.size, header_size),
+					b"mdat" => self.begin_mdat(header.size).map(Body::Media),
 					kind => {
 						if kind == b"styp" {
 							self.pending_cut = true;
@@ -389,9 +389,25 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 								tracing::warn!(count = self.dropped_metadata, "discarding fMP4 emsg metadata");
 							}
 						}
-						Body::Skip(header.size)
+						Ok(Body::Skip(header.size))
 					}
-				});
+				};
+				match body {
+					Ok(body) => self.body = Some(body),
+					Err(err) => {
+						// Nothing of a refused box is held or published. Discard its body, including
+						// what this call carries, so framing resumes at the next box.
+						let count = header.size.unwrap_or(data.len()).min(data.len());
+						let remaining = header.size.map(|size| size - count);
+						if self.moof.is_some() {
+							self.moof_span = self.moof_span.saturating_add(count);
+						}
+						if remaining != Some(0) {
+							self.body = Some(Body::Skip(remaining));
+						}
+						return Err(err);
+					}
+				}
 				continue;
 			};
 			match body {
@@ -418,20 +434,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					data = &data[count..];
 					remaining -= count;
 					if remaining == 0 {
-						match kind.as_ref() {
-							b"moov" => self.init(Moov::decode_body(&mut self.buffer.as_ref())?)?,
-							b"moof" => {
-								if self.moof.is_some() {
-									return Err(Error::DuplicateMoof.into());
-								}
-								self.moof = Some(Moof::decode_body(&mut self.buffer.as_ref())?);
-								self.moof_span = header_size
-									.checked_add(self.buffer.len())
-									.ok_or(Error::InvalidDataOffset)?;
-							}
-							_ => unreachable!(),
-						}
-						self.buffer = BytesMut::new();
+						// Release the held body before parsing, so a refused box leaves no partial
+						// header behind for the next one.
+						let body = std::mem::take(&mut self.buffer).freeze();
+						self.end_metadata(kind, body, header_size)?;
 					} else {
 						self.body = Some(Body::Metadata {
 							kind,
@@ -472,6 +478,50 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				return Ok(());
 			}
 		}
+	}
+
+	// Start holding a moov or moof body, refusing one too large to hold before buffering any of it.
+	fn begin_metadata(&mut self, kind: mp4_atom::FourCC, size: Option<usize>, header_size: usize) -> Result<Body> {
+		if kind == Moov::KIND && self.moov.is_some() {
+			return Err(Error::DuplicateMoov.into());
+		}
+		if kind == Moof::KIND && self.moof.is_some() {
+			return Err(Error::DuplicateMoof.into());
+		}
+		let size = size.ok_or(mp4_atom::Error::InvalidSize)?;
+		if size > super::MAX_HELD_BYTES {
+			return Err(Error::MetadataTooLarge { kind, size }.into());
+		}
+		Ok(Body::Metadata {
+			kind,
+			remaining: size,
+			header_size,
+		})
+	}
+
+	// Parse a held moov or moof body once its last byte has arrived.
+	fn end_metadata(&mut self, kind: mp4_atom::FourCC, body: Bytes, header_size: usize) -> Result<()> {
+		if kind == Moov::KIND {
+			return self.init(Moov::decode_body(&mut body.as_ref())?);
+		}
+		if self.moof.is_some() {
+			return Err(Error::DuplicateMoof.into());
+		}
+		let moof = Moof::decode_body(&mut body.as_ref())?;
+		// Planning resolves every sample, and a run without per-sample fields declares its count
+		// in four bytes, so the byte bound alone does not limit what planning would hold.
+		let samples: u64 = moof
+			.traf
+			.iter()
+			.flat_map(|traf| &traf.trun)
+			.map(|trun| trun.samples.len() as u64)
+			.sum();
+		if samples > super::MAX_FRAGMENT_SAMPLES {
+			return Err(Error::TooManySamples(samples).into());
+		}
+		self.moof = Some(moof);
+		self.moof_span = header_size.checked_add(body.len()).ok_or(Error::InvalidDataOffset)?;
+		Ok(())
 	}
 
 	fn init(&mut self, moov: Moov) -> Result<()> {
@@ -1909,7 +1959,123 @@ mod tests {
 			let err = import.decode(&header).unwrap_err();
 			assert!(matches!(err, crate::Error::Cmaf(Error::BackwardsDataOffset)), "{err:?}");
 			assert!(consumer.recv_group().now_or_never().is_none());
+			// The refused mdat is discarded rather than parsed as boxes.
+			import.decode(&[0xA5; 8]).unwrap();
+			import.decode(&media_header(id, 1024, &[0], 4, Some(4))).unwrap();
+			import.decode(&[0xA5; 4]).unwrap();
+			import.finish().unwrap();
+			assert!(consumer.recv_group().now_or_never().is_some());
 		}
+	}
+
+	fn box_header(kind: &[u8; 4], size: Option<usize>) -> Vec<u8> {
+		let mut header = Vec::new();
+		mp4_atom::Header {
+			kind: (*kind).into(),
+			size,
+		}
+		.encode(&mut header)
+		.unwrap();
+		header
+	}
+
+	#[test]
+	fn oversized_metadata_is_refused_at_its_header() {
+		for kind in [b"moov", b"moof"] {
+			for size in [super::super::MAX_HELD_BYTES + 1, 1usize << 62] {
+				let mut import = importer();
+				let header = box_header(kind, Some(size));
+				let (last, prefix) = header.split_last().unwrap();
+				for byte in prefix {
+					import.decode(&[*byte]).unwrap();
+				}
+				let err = import.decode(&[*last]).unwrap_err();
+				assert!(
+					matches!(err, crate::Error::Cmaf(Error::MetadataTooLarge { size: refused, .. }) if refused == size),
+					"{kind:?}: {err:?}"
+				);
+				// Its body is discarded as it arrives, across segments.
+				for _ in 0..256 {
+					import.cut().unwrap();
+					import.decode(&[0xA5; 1024]).unwrap();
+					assert!(import.buffer.is_empty(), "{kind:?}: {} held bytes", import.buffer.len());
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn metadata_at_the_bound_holds_only_what_arrived() {
+		let mut import = importer();
+		import
+			.decode(&box_header(b"moof", Some(super::super::MAX_HELD_BYTES)))
+			.unwrap();
+		import.decode(&[0xA5; 1024]).unwrap();
+		assert!(matches!(import.body, Some(Body::Metadata { .. })));
+		assert_eq!(import.buffer.len(), 1024);
+	}
+
+	// A moof whose runs carry no per-sample fields, each declaring `count` samples in a few bytes.
+	fn inherited_moof(id: u32, counts: &[u32]) -> Vec<u8> {
+		let moof = Moof {
+			mfhd: Default::default(),
+			traf: vec![mp4_atom::Traf {
+				tfhd: mp4_atom::Tfhd {
+					track_id: id,
+					default_sample_size: Some(1),
+					default_sample_duration: Some(1024),
+					..Default::default()
+				},
+				tfdt: Some(mp4_atom::Tfdt {
+					base_media_decode_time: 0,
+				}),
+				trun: counts
+					.iter()
+					.map(|&count| mp4_atom::Trun {
+						data_offset: None,
+						samples: mp4_atom::TrunSamples::Inherited {
+							count,
+							first_flags: None,
+						},
+					})
+					.collect(),
+				..Default::default()
+			}],
+		};
+		let mut data = Vec::new();
+		moof.encode(&mut data).unwrap();
+		data
+	}
+
+	#[test]
+	fn huge_trun_sample_counts_are_refused() {
+		let max = super::super::MAX_FRAGMENT_SAMPLES;
+		let half = (max / 2) as u32;
+		for counts in [vec![u32::MAX], vec![half, half + 1], vec![u32::MAX; 4]] {
+			let (mut import, id, _) = initialized(false);
+			let moof = inherited_moof(id, &counts);
+			assert!(moof.len() < 256, "the declaration costs only a few bytes");
+			let err = import.decode(&moof).unwrap_err();
+			let total: u64 = counts.iter().map(|&count| count as u64).sum();
+			assert!(
+				matches!(err, crate::Error::Cmaf(Error::TooManySamples(count)) if count == total),
+				"{counts:?}: {err:?}"
+			);
+			assert!(import.moof.is_none());
+			assert!(import.buffer.is_empty());
+			// With no moof, the mdat after it is refused and discarded.
+			let err = import.decode(&box_header(b"mdat", Some(4))).unwrap_err();
+			assert!(matches!(err, crate::Error::Cmaf(Error::NoMoof)), "{err:?}");
+			import.decode(&[0xA5; 4]).unwrap();
+			import.decode(&media_header(id, 0, &[0], 4, Some(4))).unwrap();
+			import.decode(&[0xA5; 4]).unwrap();
+			import.finish().unwrap();
+		}
+
+		// At the bound, the moof is accepted.
+		let (mut import, id, _) = initialized(false);
+		import.decode(&inherited_moof(id, &[half, half])).unwrap();
+		assert!(import.moof.is_some());
 	}
 
 	#[test]

@@ -65,6 +65,10 @@ impl Track {
 		let mut samples = Vec::new();
 		for resolved in resolver.resolve(traf, self.defaults)? {
 			let sample::Resolved { sample, cts, range } = resolved?;
+			// A text sample is staged whole before it is rewritten.
+			if range.len() > super::MAX_HELD_BYTES {
+				return Err(Error::TextSampleTooLarge(range.len()).into());
+			}
 			let duration = sample.duration.ok_or(Error::MissingSampleDuration)?;
 			let pts = dts.checked_add_signed(cts).ok_or(Error::PtsOverflow)?;
 			let duration = Timestamp::new(duration as u64, self.timescale)?;
