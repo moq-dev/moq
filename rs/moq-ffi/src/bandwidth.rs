@@ -309,7 +309,7 @@ mod consumer_tests {
 		tokio::time::pause();
 		let producer = moq_net::bandwidth::Producer::new();
 		let consumer = MoqBandwidthConsumer::new(producer.consume());
-		assert!(producer.is_used());
+		assert!(producer.demand().wanted());
 		let mut changed = std::pin::pin!(consumer.rate_changed());
 		assert!(
 			changed
@@ -328,7 +328,7 @@ mod consumer_tests {
 				.is_pending()
 		);
 		consumer.cancel();
-		assert!(!producer.is_used());
+		assert!(!producer.demand().wanted());
 		assert_eq!(consumer.rate(), None);
 		assert!(matches!(changed.await, Err(MoqError::Cancelled)));
 	}
@@ -337,9 +337,9 @@ mod consumer_tests {
 	fn dropping_the_owned_consumer_releases_demand() {
 		let producer = moq_net::bandwidth::Producer::new();
 		let consumer = MoqBandwidthConsumer::new(producer.consume());
-		assert!(producer.is_used());
+		assert!(producer.demand().wanted());
 		drop(consumer);
-		assert!(!producer.is_used());
+		assert!(!producer.demand().wanted());
 	}
 
 	#[tokio::test]
