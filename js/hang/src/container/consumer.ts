@@ -60,9 +60,10 @@ export interface ConsumerProps {
 	 * newest first, so when none that arrived covers that point the start waits for an earlier one,
 	 * until one covers it, group 0 arrived, the track finishes, the max buffer fills, or the newest
 	 * group's arrival is that whole reach ago. The wall clock bounds a quiet or paused track, which
-	 * never ages out in media time. Delivery then starts at the lowest group that arrived. The age
-	 * skip also tolerates the warmup until the reader is that far past its first frame, so the
-	 * warming media is not dropped as stale. After that, the max delay alone governs it.
+	 * never ages out in media time. Delivery then starts at the lowest group that arrived. Until the
+	 * reader is the warmup past both its first frame and that point, the age skip keeps a group that
+	 * covers the reach and tolerates the warmup, so the media leading up to the start is not dropped
+	 * as stale. After that, the max delay alone governs it.
 	 */
 	warmup?: Milli;
 	/**
@@ -173,7 +174,10 @@ export class Consumer {
 	#starting = true;
 	// When the newest group had landed as the first one arrived, once the start waits.
 	#anchor?: Instant;
-	// Where the warmup ends: the first frame read plus the warmup. Undefined before the first frame.
+	// The point the start reached back to, the live edge less the reach, once its wait ended.
+	#target?: number;
+	// Where the warming ends: the warmup past the first frame read, or past the start's target when
+	// that is later. Undefined before the first frame.
 	#warmed?: Micro;
 	// What the buffered groups hold, against the max buffer.
 	#used = 0;
@@ -507,8 +511,8 @@ export class Consumer {
 
 			const age = max - min;
 			if (age <= threshold) break;
-			// Until the warmup is read, a group may cover the start's reach though it began before it: it
-			// is stale only once its successor starts a whole budget behind the newest content.
+			// Until the reader warms, a group may cover the start's reach though it began before it: it is
+			// stale only once its successor starts a whole budget behind the newest content.
 			if (this.#warming()) {
 				const nextStart = this.#groups[1].start;
 				if (nextStart === undefined || max - nextStart < threshold) break;
@@ -797,7 +801,10 @@ export class Consumer {
 					}
 					this.#mediaGroup = seq;
 
-					this.#warmed ??= Micro(frame.timestamp + Micro.fromMilli(this.#warmup));
+					// A group covering the target began before it, so the reader warms until the target too.
+					this.#warmed ??= Micro(
+						Math.max(frame.timestamp, this.#target ?? frame.timestamp) + Micro.fromMilli(this.#warmup),
+					);
 					if (this.#start === undefined || seq > this.#start.group) {
 						this.#floor = this.#start?.timestamp;
 						this.#start = { group: seq, timestamp: frame.timestamp };
@@ -929,19 +936,20 @@ export class Consumer {
 		const elapsed = Instant.durationSince(now(), this.#anchor) >= reach * 1000;
 		if (ended || this.#full() || edge === undefined || covered || lowest || elapsed) {
 			this.#starting = false;
+			this.#target = target;
 			return undefined;
 		}
 		return this.#anchor;
 	}
 
 	// How stale the buffered span may get before the age skip drops its oldest group, in microseconds:
-	// the max delay, plus the warmup until the reader is that far past its first frame.
+	// the max delay, plus the warmup while the reader warms.
 	#ageBudget(): number {
 		const maxDelay = maxMicros(this.#delay.peek());
 		return this.#warming() ? maxDelay + Micro.fromMilli(this.#warmup) : maxDelay;
 	}
 
-	// The reader has not yet read the warmup past its first frame.
+	// The reader has not yet read past the start's target and the warmup past its first frame.
 	#warming(): boolean {
 		return this.#warmed === undefined || (this.#edge ?? 0) < this.#warmed;
 	}

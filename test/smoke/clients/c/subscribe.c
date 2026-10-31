@@ -74,8 +74,7 @@ static void on_catalog(void *ud, int32_t catalog) {
         moq_video_config vcfg;
         memset(&vcfg, 0, sizeof(vcfg));
         if (moq_consume_video_config((uint32_t)catalog, 0, &vcfg) == 0) {
-            moq_delay delay = {.max_us = 1000000};
-            int32_t track = moq_consume_video((uint32_t)catalog, 0, &delay, on_frame, ud);
+            int32_t track = moq_consume_video((uint32_t)catalog, 0, 1000000, on_frame, ud); // max_age_us
             if (track > 0) {
                 pthread_mutex_lock(&c->mu);
                 c->video_started = 1;

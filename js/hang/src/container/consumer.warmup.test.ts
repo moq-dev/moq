@@ -180,3 +180,21 @@ test("the covering group is kept while its warmup arrives after the first read",
 	await flush();
 	expect(frames(results)).toEqual(["4@4400000", "4@4420000", "4@4700000", "4@4900000", "5@5000000"]);
 });
+
+test("the covering group is kept while it arrives after the first read, without a warmup", async () => {
+	const { track, results, flush } = setup(200);
+	group(track, 5, [5_000_000]);
+	await flush();
+	// Group 4 covers the 4.8s target, so its media before that point is older than the max delay.
+	const covering = group(track, 4, [4_400_000]);
+	await flush();
+	expect(frames(results)).toEqual(["4@4400000"]);
+
+	for (const timestamp of [4_433_000, 4_700_000, 4_900_000]) {
+		write(covering, timestamp);
+		await flush();
+	}
+	covering.finish();
+	await flush();
+	expect(frames(results)).toEqual(["4@4400000", "4@4433000", "4@4700000", "4@4900000", "5@5000000"]);
+});
