@@ -7,8 +7,7 @@
 //! The whole log rides a **single group** that is never rolled: on a
 //! [`compress`](moq_net::track::Info::compress)ed track, that one group is one DEFLATE window, so
 //! every record compresses against all the earlier ones. There is deliberately no group rolling (and so no
-//! catch-up machinery): the only reason to roll would be moq-net's per-group frame cap, which
-//! isn't worth working around here. A caller that wants to bound the record rate throttles at
+//! catch-up machinery): a moq-net group has no size cap. A caller that wants to bound the record rate throttles at
 //! the source (e.g. the timeline's segment cadence); a consumer that finds a gap can fetch or
 //! extrapolate.
 //!
@@ -18,23 +17,17 @@
 //!
 //! # Budget
 //!
-//! That single group is what bounds the log. moq-net caps a group at
-//! [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES) (32 MiB) of payload and
-//! [`MAX_GROUP_FRAMES`](moq_net::group::MAX_GROUP_FRAMES) (8192) frames, and a consumer always
-//! starts at frame 0, so the cap is never met by dropping a prefix some readers missed.
-//!
-//! Instead an append that does not fit is refused with [`moq_net::Error::GroupTooLarge`] before
-//! it is written, and the log stays intact and writable. Each record is charged its JSON size
-//! whether or not the track is compressed: moq-net holds a compressed group to the same budget by
-//! what it inflates to, so compression shrinks the wire but not how much a log can hold. The budget covers the whole log rather than a single record, so once
-//! it is spent every append is refused: the live stream is bounded history by design, a publisher
-//! with more to say opens a new track, and deep history is served from a recording.
+//! A log accepts appends for its track's life; only a record larger than one frame may be
+//! ([`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), 32 MiB) is refused, with
+//! [`moq_net::Error::FrameTooLarge`], before it is written. moq-net holds only the group's newest
+//! 32 MiB and sheds older records from its front, so a consumer that falls further behind, or
+//! joins after the front is shed, gets [`moq_net::Error::Evicted`].
 //!
 //! # Choosing a layer
 //!
 //! [`Producer`] and [`Consumer`] own a track. [`Encoder`] and [`Decoder`] are the same logic
-//! without it, for when something else is already in charge of the track; they carry the group's
-//! budget and nothing else, since a log has no group boundaries to report.
+//! without it, for when something else is already in charge of the track. A log has no group
+//! boundaries to report, so they carry no state.
 
 pub mod consumer;
 mod decoder;
@@ -384,10 +377,10 @@ mod test {
 	}
 
 	fn refused(result: crate::Result<usize>) -> bool {
-		matches!(result, Err(crate::Error::Net(moq_net::Error::GroupTooLarge)))
+		matches!(result, Err(crate::Error::Net(moq_net::Error::FrameTooLarge)))
 	}
 
-	/// A record past the group budget is refused before anything is written, so the log carries on:
+	/// A record larger than a frame is refused before anything is written, so the log carries on:
 	/// the next record lands and decodes.
 	#[test]
 	fn an_oversized_record_is_refused_and_the_log_continues() {
@@ -409,48 +402,19 @@ mod test {
 		}
 	}
 
-	/// A compressed record is charged its plaintext, since that is what a reader inflates: two
-	/// records that each fit, and deflate to almost nothing, still overflow the budget together.
+	/// A log has no budget: it carries more records than a group once could, and reads back whole.
 	#[test]
-	fn a_compressed_log_is_charged_its_inflated_size() {
-		let (mut producer, track) = producer_on(Config::default(), compressed());
-		let half = Value::String("x".repeat(moq_net::group::MAX_CACHE_BYTES as usize / 2));
-		producer.append(&half).unwrap();
-		assert!(refused(producer.append(&half)));
-		producer.finish().unwrap();
-		assert_eq!(drain(consume(track)), vec![half]);
-	}
-
-	/// The budget covers the whole log, so once its frames are spent every append is refused, and
-	/// the log written so far still finishes cleanly and reads back whole.
-	#[test]
-	fn a_spent_budget_refuses_every_append() {
+	fn a_log_accepts_every_append() {
 		for compression in [false, true] {
 			let (mut producer, track) = producer_on(Config::default(), info(compression));
-			for n in 0..moq_net::group::MAX_GROUP_FRAMES {
+			for n in 0..10_000 {
 				producer.append(&json!({ "n": n })).unwrap();
 			}
-
-			assert!(
-				refused(producer.append(&json!({ "n": -1 }))),
-				"compression={compression}"
-			);
-			assert!(
-				refused(producer.append(&json!({ "n": -2 }))),
-				"compression={compression}"
-			);
 			producer.finish().unwrap();
 
 			let records = drain(consume(track));
-			assert_eq!(
-				records.len(),
-				moq_net::group::MAX_GROUP_FRAMES,
-				"compression={compression}"
-			);
-			assert_eq!(
-				records.last(),
-				Some(&json!({ "n": moq_net::group::MAX_GROUP_FRAMES - 1 }))
-			);
+			assert_eq!(records.len(), 10_000, "compression={compression}");
+			assert_eq!(records.last(), Some(&json!({ "n": 9_999 })));
 		}
 	}
 

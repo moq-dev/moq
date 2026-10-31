@@ -2501,7 +2501,7 @@ mod tests {
 				[Open::Stream(input), Open::Stream(resumed)],
 			);
 			let mut live = Vec::new();
-			let mut records = None;
+			let mut hls = None;
 
 			for samples in [&first, &second] {
 				let mut track = fixture.subscribe().await;
@@ -2509,15 +2509,12 @@ mod tests {
 				drop(track);
 				// The break is marked when the second run resumes, and its stop declares the unhinted
 				// duration.
-				if records.is_none() && live.len() > 1 {
-					let hls = fixture.catalog.snapshot().audio.renditions["audio"]
-						.hls
-						.clone()
-						.expect("the audio track declares its HLS records once the first run stops");
-					records = Some(
-						moq_mux::hls::Consumer::subscribe(&fixture.consumer, &hls)
-							.await
-							.unwrap(),
+				if hls.is_none() && live.len() > 1 {
+					hls = Some(
+						fixture.catalog.snapshot().audio.renditions["audio"]
+							.hls
+							.clone()
+							.expect("the audio track declares its HLS records once the first run stops"),
 					);
 				}
 				wait_for(&mut fixture.publication, Status::Waiting).await;
@@ -2525,9 +2522,13 @@ mod tests {
 				tokio::time::sleep(moq_mux::hls::DEFAULT_DURATION + Duration::from_millis(100)).await;
 			}
 
-			let (mut catalog, _consumer) = fixture.finish().await;
+			let (mut catalog, consumer) = fixture.finish().await;
 			catalog.finish().unwrap();
-			let mut records = records.unwrap();
+			// Read only now: a record reader is demand too, and would have kept the capture from
+			// idling between the runs.
+			let mut records = moq_mux::hls::Consumer::subscribe(&consumer, &hls.unwrap())
+				.await
+				.unwrap();
 			let mut listed = Vec::new();
 			while let Some(event) = records.next().await.unwrap() {
 				match event {

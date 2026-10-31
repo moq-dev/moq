@@ -224,7 +224,7 @@ mod tests {
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
-		let consumer = egress.request_broadcast(path, None).await.expect("resolve");
+		let consumer = egress.request(path, None).await.expect("resolve");
 		let sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
 		Feed {
@@ -241,11 +241,7 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let (update, active) = next_update(&mut consumer).await.expect("expected announce");
 		assert!(active);
-		origin
-			.consume()
-			.request_broadcast(&update.prefix, None)
-			.await
-			.expect("resolve")
+		origin.consume().request(&update.prefix, None).await.expect("resolve")
 	}
 
 	async fn drive_tick() {

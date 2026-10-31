@@ -54,11 +54,7 @@ async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Se
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -117,8 +113,7 @@ async fn track_info_interest_precedes_a_subscription() {
 		options.client_subscribe = Some(subscriber.clone());
 		let _pair = connect_mock(options).await;
 		let consumer = subscriber.consume();
-		consumer.routed("bcast").await.unwrap();
-		let remote = consumer.request_broadcast("bcast", None).await.unwrap();
+		let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
 		let copy = remote.track("video").unwrap();
 		copy.info().await.expect("TRACK_INFO");
 		crate::support::wanted(track.demand())
@@ -238,7 +233,7 @@ async fn close_withdraws_announcements_before_closing_the_transport() {
 		options.client_publish = Some(publisher.consume());
 		options.server_subscribe = Some(subscriber.clone());
 		let pair = connect_mock(options).await;
-		subscriber.consume().routed("bcast").await.unwrap();
+		crate::support::announced(&subscriber.consume(), "bcast").await;
 		let before = pair.client_transport.finished_streams();
 		pair.client.close().await.unwrap();
 		assert!(
@@ -259,7 +254,7 @@ async fn close_times_out_waiting_for_announcement_acknowledgements() {
 		options.client_publish = Some(publisher.consume());
 		options.server_subscribe = Some(subscriber.clone());
 		let pair = connect_mock(options).await;
-		subscriber.consume().routed("bcast").await.unwrap();
+		crate::support::announced(&subscriber.consume(), "bcast").await;
 		pair.client_transport.hold_fin_acknowledgements();
 		let started = moq_clock::now();
 		assert!(matches!(pair.client.close().await, Err(Error::Timeout)), "{version}");

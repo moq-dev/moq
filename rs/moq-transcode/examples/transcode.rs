@@ -50,29 +50,21 @@ async fn main() -> anyhow::Result<()> {
 		.with_subscriber(remote.clone())
 		.connect(args.url.clone());
 
-	// Wait for the source to be announced rather than for the session to connect:
-	// `request_broadcast` answers on the spot, so asking the moment a session exists
-	// races the announcement that makes the path routable.
+	// Follow the source until it is announced rather than asking once the session
+	// connects: the announcement that makes the path routable may still be in flight.
 	//
 	// Raced against the session ending, since the wait itself never fails: the origin
 	// outlives the session here, so a rejected token or an exhausted retry budget would
-	// otherwise leave us waiting for an announcement that can never arrive.
-	let consumer = remote.consume();
-	tokio::select! {
-		routed = consumer.routed(&source_path) => {
-			routed.context("origin closed before the source broadcast was announced")?;
-		}
+	// otherwise leave us waiting for an announcement that can never arrive. The session
+	// subscribes upstream on demand.
+	let mut following = remote.consume().follow(&source_path, None)?;
+	let source = tokio::select! {
+		resolved = following.available() => resolved.context("source broadcast unavailable")?,
 		closed = session.closed() => {
 			closed.context("session failed before the source broadcast was announced")?;
 			anyhow::bail!("session closed before the source broadcast was announced");
 		}
-	}
-
-	// Resolve it for real; the session subscribes upstream on demand.
-	let source = consumer
-		.request_broadcast(&source_path, None)
-		.await
-		.context("source broadcast unavailable")?;
+	};
 
 	// The default ladder and encoder (hardware first: NVENC on Linux) apply.
 	let mut config = moq_transcode::Config::default();

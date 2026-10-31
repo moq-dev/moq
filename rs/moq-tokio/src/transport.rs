@@ -1,7 +1,7 @@
 //! Adapts the async transport interface to the poll one moq-net requires.
 //!
 //! moq-net accepts its own `moq_net::transport::poll` traits.
-//! A backend that offers only the async interface (iroh, quic) is wrapped
+//! Native QUIC, which still offers only the async interface, is wrapped
 //! in [`Session`] here, at the edge where async already lives. The wrapping
 //! costs one allocation per operation and one copy per write, and its
 //! closed-watch emulation is weaker than a native implementation (see
@@ -64,15 +64,14 @@ impl std::fmt::Display for Transport {
 
 /// A stored in-flight operation future. Native transports are Send, so the
 /// plain boxed flavor suffices.
-type OpBox<T> = futures::future::BoxFuture<'static, T>;
+pub(crate) type OpBox<T> = futures::future::BoxFuture<'static, T>;
 
 /// A stream op that hands the stream back with its result, or `None` if interrupted.
 type StreamOp<S, T, E> = OpBox<(S, Option<Result<T, E>>)>;
 
-/// Adapts one of this crate's async backends (qmux, iroh, quic) to the poll interface
-/// moq-net requires.
+/// Adapts this crate's async QUIC backend to the poll interface moq-net requires.
 ///
-/// Only those backends fit: the bound goes through a sealed trait, so another
+/// Only that backend fits: the bound goes through a sealed trait, so another
 /// [`web_transport_trait::Session`] cannot be wrapped. A custom transport implements
 /// moq-net's `transport::poll` traits instead.
 ///
@@ -140,12 +139,12 @@ type RequestResult<S> = Result<
 >;
 
 /// A stored in-flight operation, `None` when idle, which every task polling it shares.
-type OpSlot<T> = moq_net::kio::Bridge<Option<OpBox<T>>>;
+pub(crate) type OpSlot<T> = moq_net::kio::Bridge<Option<OpBox<T>>>;
 
 /// Lazily start and poll the operation in `slot`, clearing it when it resolves.
 ///
 /// Whichever caller polls it once it resolves takes the output; the rest start the next.
-fn poll_op<T>(slot: &OpSlot<T>, waiter: &moq_net::kio::Waiter, start: impl FnOnce() -> OpBox<T>) -> Poll<T> {
+pub(crate) fn poll_op<T>(slot: &OpSlot<T>, waiter: &moq_net::kio::Waiter, start: impl FnOnce() -> OpBox<T>) -> Poll<T> {
 	slot.poll(waiter, |slot, cx| {
 		let fut = slot.get_or_insert_with(start);
 		let output = ready!(fut.as_mut().poll(cx));
@@ -829,16 +828,16 @@ impl Grouped for crate::quic::web::Session {
 		Some(crate::quic::driver::connection::Connection::stats(self).credit.evicted)
 	}
 
-	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::SendGroup> {
+	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::send::Group> {
 		Some(Self::send_group(self, priority))
 	}
 
 	fn send_datagram(
 		&self,
 		payload: Bytes,
-		options: moq_net::transport::poll::SendOptions<'_, crate::quic::driver::SendGroup>,
+		options: moq_net::transport::poll::SendOptions<'_, crate::quic::driver::send::Group>,
 	) -> Result<(), Self::Error> {
-		let options = crate::quic::driver::SendOptions {
+		let options = crate::quic::driver::send::Options {
 			group: options.group,
 			priority: options.priority,
 		};
@@ -848,40 +847,21 @@ impl Grouped for crate::quic::web::Session {
 
 #[cfg(feature = "quic")]
 impl GroupedSend for crate::quic::web::SendStream {
-	type Group = crate::quic::driver::SendGroup;
+	type Group = crate::quic::driver::send::Group;
 
 	fn set_group(&mut self, group: &Self::Group) {
-		// A closed stream has nothing left to schedule.
-		Self::set_group(self, Some(group)).ok();
+		Self::set_group(self, Some(group));
 	}
 
 	fn set_priority(&mut self, priority: i64) {
-		crate::quic::web::SendStream::set_priority(self, priority).ok();
+		crate::quic::web::SendStream::set_priority(self, priority);
 	}
 }
 
 #[cfg(feature = "quic")]
-impl moq_net::transport::poll::SendGroup for crate::quic::driver::SendGroup {
+impl moq_net::transport::poll::SendGroup for crate::quic::driver::send::Group {
 	fn set_priority(&mut self, priority: i64) {
 		Self::set_priority(self, priority)
-	}
-}
-
-#[cfg(feature = "iroh")]
-impl Grouped for web_transport_iroh::Session {
-	type Recv = moq_net::transport::poll::Buffered<RecvStream<Self::RecvStream>>;
-
-	fn recv(stream: RecvStream<Self::RecvStream>) -> Self::Recv {
-		moq_net::transport::poll::Buffered::new(stream)
-	}
-}
-
-#[cfg(feature = "iroh")]
-impl GroupedSend for web_transport_iroh::SendStream {
-	type Group = moq_net::transport::poll::Ungrouped;
-
-	fn set_group(&mut self, group: &Self::Group) {
-		match *group {}
 	}
 }
 

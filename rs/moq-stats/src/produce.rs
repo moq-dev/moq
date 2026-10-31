@@ -412,10 +412,9 @@ impl<T: Serialize> Snapshot<T> {
 	/// written; `None` means the value was unchanged, the interval already has a group for a
 	/// snapshot, or the track already ended, and nothing was written.
 	///
-	/// A frame over the cache limit aborts the track with
+	/// A frame over the group budget aborts the track with
 	/// [`moq_net::Error::FrameTooLarge`]: skipping it would leave readers on the
-	/// previous snapshot with no sign it stopped tracking. A compressed track
-	/// holds a frame to the same limit by its uncompressed size.
+	/// previous snapshot with no sign it stopped tracking.
 	fn update(&mut self, value: &T, stamp: Stamp) -> moq_json::Result<Option<usize>> {
 		#[cfg(feature = "bench")]
 		{
@@ -433,9 +432,10 @@ impl<T: Serialize> Snapshot<T> {
 			self.encoder.reset();
 		}
 		let frame = match self.encoder.update(value) {
-			Ok(Some(frame)) if frame.payload.len() as u64 <= moq_net::group::MAX_CACHE_BYTES => frame,
+			Ok(Some(frame)) => frame,
 			Ok(None) => return Ok(None),
-			Ok(Some(_)) | Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge)) => {
+			// The encoder refuses a frame past the group budget before anything is written.
+			Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge)) => {
 				let err = moq_net::Error::FrameTooLarge;
 				if let Some(group) = self.group.take() {
 					let _ = group.abort(err.clone());
@@ -505,6 +505,15 @@ fn info() -> track::Info {
 		.with_refresh(8)
 }
 
+/// The snapshot codec every stats track encodes with.
+fn config() -> moq_json::snapshot::Config {
+	let config = moq_json::snapshot::Config::default();
+	// A test overflows a group with a few KiB rather than moq-net's 32 MiB.
+	#[cfg(test)]
+	let config = config.with_max_group_bytes(tests::MAX_GROUP_BYTES);
+	config
+}
+
 impl<V: Serialize> Output<V> {
 	fn create(broadcast: &broadcast::Producer, name: &str) -> Result<Self, moq_net::Error> {
 		Ok(Self::new(broadcast.create_track(name, info())?))
@@ -524,7 +533,7 @@ impl<V: Serialize> Output<V> {
 
 	fn new(track: track::Producer) -> Self {
 		Self {
-			snapshot: Snapshot::new(track, moq_json::snapshot::Config::default()),
+			snapshot: Snapshot::new(track, config()),
 			frame: Frame::default(),
 		}
 	}
@@ -808,7 +817,7 @@ impl GroupTrack {
 		let track = broadcast.create_track(name.as_str(), info())?;
 		Ok(Self {
 			name,
-			snapshot: Snapshot::new(track, moq_json::snapshot::Config::default()),
+			snapshot: Snapshot::new(track, config()),
 			body: GroupBody {
 				// A new instance of the name: readers keep its counters apart from
 				// an earlier instance's.
@@ -1280,7 +1289,8 @@ struct SideSlots {
 	seen: u64,
 }
 
-/// The leading `depth` segments of `path`, the group it publishes under.
+/// The leading `depth` segments of `path`, the group it publishes under, or the whole path
+/// when it has no such head: it is shallower, or its `depth`th `/` is escaped.
 fn group_key(path: &Path, depth: usize) -> Path {
 	path.head(depth).unwrap_or_else(|| path.clone())
 }
@@ -1288,7 +1298,7 @@ fn group_key(path: &Path, depth: usize) -> Path {
 /// `<prefix>/node/<node>`, or `<prefix>/node` without a node. The fixed `node`
 /// category leaves room for sibling categories (e.g. `<prefix>/cluster` for
 /// relay-mesh stats) under the same prefix.
-fn advertised_path(prefix: &Path, node: Option<&Path>) -> Result<Path, moq_net::path::Invalid> {
+fn advertised_path(prefix: &Path, node: Option<&Path>) -> Result<Path, moq_net::path::Error> {
 	let path = prefix.join(&Path::from_static("node"))?;
 	match node {
 		Some(node) => path.join(node),
@@ -1298,6 +1308,10 @@ fn advertised_path(prefix: &Path, node: Option<&Path>) -> Result<Path, moq_net::
 
 #[cfg(test)]
 mod tests {
+	/// The group budget every stats track has under test, small enough that a test
+	/// overflows it with a handful of paths.
+	pub(super) const MAX_GROUP_BYTES: u64 = 64 * 1024;
+
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
@@ -1444,7 +1458,7 @@ mod tests {
 			let (route, active) = next_update(&mut events).await.unwrap();
 			assert!(active);
 			assert_eq!(route.prefix.as_str(), ".stats/node");
-			let broadcast = consumer.request_broadcast(".stats/node", None).await.unwrap();
+			let broadcast = consumer.request(".stats/node", None).await.unwrap();
 			let name = presence_track(moq_net::Path::from_static("room"));
 			let mut previous = None;
 			for (reading, delta) in [(40, 11), (1_000, 7)] {
@@ -1523,10 +1537,8 @@ mod tests {
 		}
 	}
 
-	/// A frame that outgrows the cache ends the track with `FrameTooLarge`
-	/// instead of leaving readers on their last snapshot. DEFLATE would shrink
-	/// the frame under the limit, but a reader inflates it whole, so the track
-	/// holds it to the same budget by its uncompressed size.
+	/// A frame that outgrows the group budget ends the track with `FrameTooLarge`
+	/// instead of leaving readers on their last snapshot.
 	#[tokio::test]
 	async fn oversized_frame_ends_the_track() {
 		use futures::FutureExt;
@@ -1565,11 +1577,11 @@ mod tests {
 		));
 	}
 
-	/// Distinct paths under `prefix` whose JSON overflows a group's cache, since one
-	/// path holds at most [`Path::MAX_BYTES`].
+	/// Distinct paths under `prefix` whose JSON overflows [`MAX_GROUP_BYTES`], since
+	/// one path holds at most [`Path::MAX_BYTES`].
 	fn oversized_paths(prefix: &str) -> Vec<Path> {
 		let filler = "a".repeat(Path::MAX_BYTES - 16);
-		(0..=moq_net::group::MAX_CACHE_BYTES as usize / filler.len())
+		(0..=MAX_GROUP_BYTES as usize / filler.len())
 			.map(|i| Path::new(&format!("{prefix}{i}/{filler}")).unwrap())
 			.collect()
 	}
@@ -1651,7 +1663,7 @@ mod tests {
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
-		let consumer = egress.request_broadcast(path, None).await.expect("resolve");
+		let consumer = egress.request(path, None).await.expect("resolve");
 
 		let sub = if subscribe {
 			let mut sub = consumer
@@ -1692,11 +1704,7 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let (update, active) = next_update(&mut consumer).await.expect("expected announce");
 		assert!(active);
-		let broadcast = origin
-			.consume()
-			.request_broadcast(&update.prefix, None)
-			.await
-			.expect("resolve");
+		let broadcast = origin.consume().request(&update.prefix, None).await.expect("resolve");
 		(update.prefix.as_str().to_string(), broadcast)
 	}
 
@@ -1852,7 +1860,7 @@ mod tests {
 		step(0).await;
 		let broadcast = origin
 			.consume()
-			.request_broadcast(".stats/node/sjc", None)
+			.request(".stats/node/sjc", None)
 			.await
 			.expect("resolve");
 		let mut totals = reader::<TotalsFrame>(&broadcast, crate::TOTALS).await;
@@ -1949,11 +1957,7 @@ mod tests {
 		let [(path, true, before)] = &take_epochs(&mut events)[..] else {
 			panic!("expected one announce");
 		};
-		let stats = origin
-			.consume()
-			.request_broadcast(path.as_str(), None)
-			.await
-			.expect("resolve");
+		let stats = origin.consume().request(path.as_str(), None).await.expect("resolve");
 		let mut old = subscribe(&stats, &crate::group_track(moq_net::Path::from_static(""))).await;
 		while try_next_frame(&mut old).is_some() {}
 
@@ -1967,11 +1971,7 @@ mod tests {
 		assert!(after > before);
 		drop(old);
 
-		let stats = origin
-			.consume()
-			.request_broadcast(path.as_str(), None)
-			.await
-			.expect("resolve");
+		let stats = origin.consume().request(path.as_str(), None).await.expect("resolve");
 		assert_eq!(read_egress(&stats).await["foo/bar"].bytes, 30);
 	}
 
@@ -2085,7 +2085,7 @@ mod tests {
 		);
 
 		async fn view(egress: &origin::Consumer, video: &mut track::Producer, size: usize) {
-			let broadcast = egress.request_broadcast("foo/bar", None).await.expect("resolve");
+			let broadcast = egress.request("foo/bar", None).await.expect("resolve");
 			let mut sub = broadcast
 				.track("video")
 				.expect("track")
@@ -2368,11 +2368,7 @@ mod tests {
 			drain.publish(moq_clock::now());
 			drain.node.presence.len()
 		};
-		let broadcast = origin
-			.consume()
-			.request_broadcast(".stats/node", None)
-			.await
-			.expect("resolve");
+		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
 
 		// Let the request reach the stats broadcast's queue before the drain.
 		let subscribing = broadcast
@@ -2538,7 +2534,7 @@ mod tests {
 				.tier(Tier::default())
 				.session(moq_net::Path::from_static("viewer")),
 		);
-		let broadcast = egress.request_broadcast("acme/live", None).await.expect("resolve");
+		let broadcast = egress.request("acme/live", None).await.expect("resolve");
 		let mut subs = Vec::new();
 		for _ in 0..300 {
 			let track = broadcast.track("video").expect("track");
@@ -2627,11 +2623,7 @@ mod tests {
 			drain.publish(moq_clock::now());
 			drain.node.prefixes.len()
 		};
-		let broadcast = origin
-			.consume()
-			.request_broadcast(".stats/node", None)
-			.await
-			.expect("resolve");
+		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
 
 		let subscribing = broadcast
 			.track(&prefix_track(moq_net::Path::from_static("acme")))
@@ -2953,7 +2945,7 @@ mod tests {
 		let (route, active) = next_update(&mut announced).await.unwrap();
 		assert!(active);
 		assert_eq!(route.prefix.as_str(), ".stats/node");
-		let broadcast = consumer.request_broadcast(".stats/node", None).await.unwrap();
+		let broadcast = consumer.request(".stats/node", None).await.unwrap();
 		let mut tracks = broadcast.tracks().unwrap();
 		assert_eq!(next_listed(&mut drain, start, &mut tracks).await, ("acme".into(), true));
 

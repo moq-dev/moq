@@ -263,7 +263,7 @@ async fn a_resolved_broadcast_keeps_its_route() {
 		let lazy = Lazy::new(version).await;
 		let mut watch = lazy.watch("a");
 		synced(&mut watch).await;
-		let broadcast = lazy.subscriber.consume().request_broadcast("a/x", None).await.unwrap();
+		let broadcast = lazy.subscriber.consume().request("a/x", None).await.unwrap();
 		drop(watch);
 
 		moq_clock::sleep(LINGERED).await;
@@ -280,11 +280,11 @@ async fn waiting_on_a_path_asks_about_it() {
 	for version in VERSIONS {
 		let lazy = Lazy::new(version).await;
 		let consumer = lazy.subscriber.consume();
-		moq_clock::timeout(SETTLE, consumer.routed_broadcast("a/x"))
+		moq_clock::timeout(SETTLE, consumer.follow("a/x", None).unwrap().available())
 			.await
 			.expect("routed in time")
 			.unwrap();
-		let mut followed = consumer.announced_broadcast("b/y", None).unwrap();
+		let mut followed = consumer.follow("b/y", None).unwrap();
 		moq_clock::timeout(SETTLE, followed.available())
 			.await
 			.expect("announced in time")
@@ -308,7 +308,7 @@ async fn a_relay_link_asks_for_everything() {
 			assert_eq!(lazy.requests(), 1, "{version}");
 			// Read through a plain handle: one taken from an upstream link hides its routes.
 			for path in ["a/x", "b/y"] {
-				relay.consume().request_broadcast(path, None).await.unwrap();
+				relay.consume().request(path, None).await.unwrap();
 			}
 		}
 	}
@@ -327,7 +327,7 @@ async fn a_server_asks_for_everything() {
 		options.server_subscribe = Some(relay.clone());
 		let _pair = connect_mock(options).await;
 		moq_clock::sleep(SETTLE).await;
-		relay.consume().request_broadcast("a/x", None).await.unwrap();
+		relay.consume().request("a/x", None).await.unwrap();
 	}
 }
 
@@ -358,7 +358,7 @@ async fn serving_the_peer_asks_nothing() {
 			.count();
 		assert_eq!(requests, 0, "{version}");
 		// An application request is a reader, unlike the peer's serving view.
-		let _read = local.consume().request_broadcast("a/x", None).await.unwrap();
+		let _read = local.consume().request("a/x", None).await.unwrap();
 		let requests = pair
 			.client_transport
 			.bidi_types()
@@ -378,7 +378,7 @@ async fn requesting_an_unwatched_path_discovers_its_instance() {
 		let broadcast = lazy
 			.subscriber
 			.consume()
-			.request_broadcast("a/x", None)
+			.request("a/x", None)
 			.await
 			.expect("request discovers the announced instance without a separate watcher");
 		assert_eq!(broadcast.info().path.as_str(), "a/x");
@@ -391,12 +391,12 @@ async fn requesting_an_unwatched_path_discovers_its_instance() {
 async fn an_unwatched_missing_path_is_unroutable_after_sync() {
 	for version in VERSIONS {
 		let lazy = Lazy::new(version).await;
-		let result = moq_clock::timeout(SETTLE, lazy.subscriber.consume().request_broadcast("missing", None))
+		let result = moq_clock::timeout(SETTLE, lazy.subscriber.consume().request("missing", None))
 			.await
 			.expect("the peer synced");
 		assert!(matches!(result, Err(Error::Unroutable)), "{version}");
 		assert_eq!(lazy.requests(), 1, "{version}");
-		let broadcast = lazy.subscriber.consume().request_broadcast("a/x", None).await.unwrap();
+		let broadcast = lazy.subscriber.consume().request("a/x", None).await.unwrap();
 		moq_clock::sleep(LINGERED).await;
 		assert!(
 			lazy.routes("a/x").await,
@@ -523,7 +523,7 @@ async fn ietf_waiting_on_a_path_asks_about_it() {
 	for version in IETF {
 		let lazy = Lazy::new(version).await;
 		let consumer = lazy.subscriber.consume();
-		moq_clock::timeout(SETTLE, consumer.routed_broadcast("a/x"))
+		moq_clock::timeout(SETTLE, consumer.follow("a/x", None).unwrap().available())
 			.await
 			.expect("routed in time")
 			.unwrap();
@@ -538,7 +538,7 @@ async fn ietf_a_relay_link_asks_for_everything() {
 		let relay = produce_origin(2);
 		let _lazy = Lazy::with(version, relay.clone().with_link(moq_net::origin::Link::Peer)).await;
 		for path in ["a/x", "b/y"] {
-			relay.consume().request_broadcast(path, None).await.unwrap();
+			relay.consume().request(path, None).await.unwrap();
 		}
 	}
 }

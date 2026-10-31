@@ -63,7 +63,10 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   counts as the echo.
   The hop list leaves lite-07, and with it the
   `Hop Base`/`Hop Keep` compression; `cluster.max_hops` then stops applying
-  to lite-07.
+  to lite-07. Most of the 62% saving measured in
+  [moq-dev/moq#4196](https://github.com/moq-dev/moq/pull/4196) came from hop
+  chains, so rerun its announce bench on path-less ANNOUNCE and drop
+  `Path Base`/`Path Keep` too unless it still pays for its rules.
 
   ```text
   ROUTE_START  node=0x7a3f seqno=41 metric=12   -> route 0

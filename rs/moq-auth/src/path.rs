@@ -5,9 +5,33 @@
 //! from this crate so a token minting service does not pull in the wire stack. The
 //! boundary rules must stay identical to `moq_net::Path`, which the relay applies to
 //! the same strings. `moq_net::Path` refuses the empty segments [`normalize`] drops, so
-//! a string spelled with one is refused there rather than read as another path.
+//! a string spelled with one is refused there rather than read as another path. Minting
+//! checks a root with [`validate`] instead, so a token never names a path no peer can spell.
 //!
-//! Every function below assumes its arguments are already [`normalize`]d.
+//! Every function below but [`validate`] assumes its arguments are already [`normalize`]d.
+
+/// The most bytes a path may hold, matching `moq_net::Path::MAX_BYTES`.
+const MAX_BYTES: usize = 4096;
+
+/// Refuse a root `moq_net::Path::new` would: one longer than 4096 bytes, with a leading,
+/// trailing, or doubled `/`, or with a `\` before anything but `\` or `/`.
+pub fn validate(root: &str) -> crate::Result<()> {
+	let invalid = |reason: &str| Err(crate::Error::InvalidRoot(format!("{root:?} {reason}")));
+	if root.len() > MAX_BYTES {
+		return invalid("is longer than 4096 bytes");
+	}
+	if !root.is_empty() && (root.starts_with('/') || root.ends_with('/') || root.contains("//")) {
+		return invalid("contains an empty segment");
+	}
+	let mut rest = root.as_bytes();
+	while let Some(i) = rest.iter().position(|&b| b == b'\\') {
+		match rest.get(i + 1) {
+			Some(b'\\' | b'/') => rest = &rest[i + 2..],
+			_ => return invalid(r"contains a `\` that escapes neither `\` nor `/`"),
+		}
+	}
+	Ok(())
+}
 
 /// Trim leading and trailing slashes and collapse consecutive ones, so all
 /// slashes are implicit at boundaries and `/foo//bar/` == `foo/bar`.
@@ -44,6 +68,18 @@ mod tests {
 		assert_eq!(normalize("foo"), "foo");
 		assert_eq!(normalize("/foo/bar/"), "foo/bar");
 		assert_eq!(normalize("//foo///bar//"), "foo/bar");
+	}
+
+	#[test]
+	fn test_validate() {
+		for root in ["", "foo", "foo/bar", r"a\\b", r"a\/b", ".hidden/x"] {
+			assert!(validate(root).is_ok(), "{root:?}");
+		}
+		let long = "a".repeat(MAX_BYTES + 1);
+		for root in ["/", "/foo", "foo/", "foo//bar", r"a\b", r"a\", long.as_str()] {
+			assert!(matches!(validate(root), Err(crate::Error::InvalidRoot(_))), "{root:?}");
+		}
+		assert!(validate(&long[1..]).is_ok());
 	}
 
 	#[test]

@@ -157,12 +157,13 @@ fn partial_frame_gives_way() {
 			});
 
 			let consumer = sub.consume();
-			within(&handle, "the route", consumer.routed("room"))
-				.await
-				.expect("routed");
-			let remote = within(&handle, "the broadcast", consumer.request_broadcast("room", None))
-				.await
-				.expect("broadcast resolves");
+			let remote = within(
+				&handle,
+				"the broadcast",
+				consumer.follow("room", None).unwrap().available(),
+			)
+			.await
+			.expect("broadcast resolves");
 			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {
@@ -313,12 +314,13 @@ fn javascript_partial_frame_gives_way() {
 			});
 
 			let consumer = sub.consume();
-			within(&handle, "the route", consumer.routed("room"))
-				.await
-				.expect("routed");
-			let remote = within(&handle, "the broadcast", consumer.request_broadcast("room", None))
-				.await
-				.expect("broadcast resolves");
+			let remote = within(
+				&handle,
+				"the broadcast",
+				consumer.follow("room", None).unwrap().available(),
+			)
+			.await
+			.expect("broadcast resolves");
 			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {

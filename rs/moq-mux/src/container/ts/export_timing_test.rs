@@ -86,6 +86,8 @@ struct Live {
 	reorder: bool,
 	/// Payload bytes in each non-key video frame.
 	delta_size: usize,
+	/// Added to every timestamp written, in µs: changing it steps the timeline with no marker.
+	offset: i64,
 	start: Instant,
 	tick: u64,
 	audio_index: u64,
@@ -150,6 +152,7 @@ impl Live {
 			audio_lag,
 			reorder: false,
 			delta_size: 400,
+			offset: 0,
 			start: moq_clock::now(),
 			tick: 0,
 			audio_index: 0,
@@ -268,7 +271,7 @@ impl Live {
 						.write(
 							group,
 							&[Frame {
-								timestamp: Timestamp::from_micros(presented).unwrap(),
+								timestamp: Timestamp::from_micros(presented.strict_add_signed(self.offset)).unwrap(),
 								duration: None,
 								payload: length_prefixed(&[&slice]),
 								keyframe,
@@ -289,7 +292,7 @@ impl Live {
 		let index = self.audio_index;
 		self.audio
 			.write(Frame {
-				timestamp: Timestamp::from_micros(index * AUDIO_US).unwrap(),
+				timestamp: Timestamp::from_micros((index * AUDIO_US).strict_add_signed(self.offset)).unwrap(),
 				duration: None,
 				payload: Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8)),
 				keyframe: index.is_multiple_of(AUDIO_GROUP),
@@ -625,6 +628,33 @@ async fn a_track_sent_later_than_the_delay_loses_nothing() {
 		"frames went late on a clean source:\n{}",
 		lost.join("\n")
 	);
+}
+
+/// A changeover between two encoders whose clocks started hours apart steps the whole timeline
+/// forward with no marker, mid-group, as in the field. The export re-acquires its clock as at
+/// startup, rather than read the step as drift and end, and renders on without a drop. (A step
+/// back further than the group before its own never reaches it: the reader refuses it.)
+#[tokio::test(start_paused = true)]
+async fn an_unmarked_step_keeps_the_export_rendering() {
+	for step in [16_844_500_000, 2_000_000] {
+		for lag in [0, LAGS[0], LAGS[1]] {
+			let mut live = Live::new(1.0, lag).await;
+			let mut leg = live.join(Duration::ZERO).await;
+			live.run(8 * GOP + GOP / 2, &mut [&mut leg], |_| false).await;
+			live.offset += step;
+			let stepped = moq_clock::now();
+			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;
+
+			let case = format!("{} s step, lag {lag}", step as f64 / 1e6);
+			assert_eq!(leg.export.dropped(), 0, "{case}");
+			let video = leg
+				.units()
+				.into_iter()
+				.filter(|unit| unit.pid == VIDEO_PID && unit.sent >= stepped)
+				.count() as u64;
+			assert!(video >= 6 * GOP, "{case}: only {video} video units after it");
+		}
+	}
 }
 
 // A publisher that dies leaves the last video frames it sent held for their DTS, and nothing

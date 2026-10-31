@@ -64,7 +64,7 @@ async fn transfer(offerer: &Offerer, answerer: &Answerer, payload: &[u8]) {
 			panic!("expected the broadcast to be announced");
 		};
 		assert_eq!(route.prefix.as_str(), "test");
-		let broadcast = consumer.request_broadcast("test", None).await.unwrap();
+		let broadcast = consumer.request("test", None).await.unwrap();
 		let mut track = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.recv_group().await.unwrap().unwrap();
 		group.read_frame().await.unwrap().unwrap()

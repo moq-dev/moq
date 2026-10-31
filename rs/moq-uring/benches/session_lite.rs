@@ -178,9 +178,10 @@ mod linux {
 					});
 					let bc = {
 						let consumer = sub_origin.consume();
-						consumer.routed("bench").await.expect("broadcast announced");
 						consumer
-							.request_broadcast("bench", None)
+							.follow("bench", None)
+							.unwrap()
+							.available()
 							.await
 							.expect("broadcast resolves")
 					};

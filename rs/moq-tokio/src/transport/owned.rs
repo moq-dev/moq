@@ -247,7 +247,7 @@ impl<S: wt::RecvStream + 'static> poll::Chunks for super::RecvStream<S> {
 #[cfg(feature = "quic")]
 impl poll::RecvStream for crate::quic::web::RecvStream {
 	type Error = Error<crate::quic::web::ReadError>;
-	type Lease<'a> = crate::quic::driver::Lease<'a>;
+	type Lease<'a> = crate::quic::driver::recv::Lease<'a>;
 
 	fn poll_lease(&mut self, waiter: &moq_net::kio::Waiter, want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
 		crate::quic::web::RecvStream::poll_lease(self, &mut waiter.context(), want).map_err(Error)
@@ -257,20 +257,20 @@ impl poll::RecvStream for crate::quic::web::RecvStream {
 	}
 	fn stop(&mut self, code: u32) {
 		// A stream already closed has nobody left to tell.
-		crate::quic::web::RecvStream::stop(self, code).ok();
+		crate::quic::web::RecvStream::stop(self, code);
 	}
 }
 
 #[cfg(feature = "quic")]
-impl poll::Lease for crate::quic::driver::Lease<'_> {
+impl poll::Lease for crate::quic::driver::recv::Lease<'_> {
 	fn is_fin(&self) -> bool {
-		crate::quic::driver::Lease::is_fin(self)
+		crate::quic::driver::recv::Lease::is_fin(self)
 	}
 	fn chunks(&self) -> impl Iterator<Item = &[u8]> {
-		crate::quic::driver::Lease::chunks(self)
+		crate::quic::driver::recv::Lease::chunks(self)
 	}
 	fn release(self) {
-		crate::quic::driver::Lease::release(self)
+		crate::quic::driver::recv::Lease::release(self)
 	}
 }
 
@@ -285,15 +285,6 @@ fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
 		return match error {
 			SessionError::ConnectionError(ConnectionError::TimedOut) => moq::CloseKind::IdleTimeout,
 			SessionError::ConnectionError(ConnectionError::LocallyClosed { .. }) => moq::CloseKind::Closed,
-			_ => moq::CloseKind::Transport,
-		};
-	}
-	#[cfg(feature = "iroh")]
-	if let Some(error) = error.downcast_ref::<web_transport_iroh::iroh::endpoint::ConnectionError>() {
-		use web_transport_iroh::iroh::endpoint::ConnectionError;
-		return match error {
-			ConnectionError::TimedOut => moq::CloseKind::IdleTimeout,
-			ConnectionError::LocallyClosed => moq::CloseKind::Closed,
 			_ => moq::CloseKind::Transport,
 		};
 	}
@@ -321,26 +312,6 @@ mod outcome_tests {
 			code: 0u32.into(),
 			reason: String::new(),
 		}));
-		assert!(matches!(
-			moq_net::Error::from_transport(local),
-			moq_net::Error::Session(moq_net::SessionError::Cancel)
-		));
-	}
-}
-
-#[cfg(all(test, feature = "iroh"))]
-mod iroh_outcome_tests {
-	use super::*;
-	use web_transport_iroh::{SessionError, iroh::endpoint::ConnectionError};
-
-	#[test]
-	fn typed_iroh_close_kinds_survive_the_error_source_chain() {
-		let idle = Error(SessionError::ConnectionError(ConnectionError::TimedOut));
-		assert!(matches!(
-			moq_net::Error::from_transport(idle),
-			moq_net::Error::IdleTimeout
-		));
-		let local = Error(SessionError::ConnectionError(ConnectionError::LocallyClosed));
 		assert!(matches!(
 			moq_net::Error::from_transport(local),
 			moq_net::Error::Session(moq_net::SessionError::Cancel)

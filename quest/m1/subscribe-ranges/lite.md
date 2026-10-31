@@ -2,9 +2,7 @@
 
 ## Goal
 
-A relay fills a lite-07 upstream by subscribing to the missing ranges, and
-SUBSCRIBE_OK carries the resolved start. Older wires and moq-transport carry
-the anchors they can, and refuse only the rest. FETCH stays on lite-07 until
+A relay fills a lite-07 upstream by subscribing to the missing ranges. FETCH stays on lite-07 until
 [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md)
 removes it from both implementations.
 
@@ -16,12 +14,6 @@ moves out of this quest (to its own quest since 2026-10-27), since JS still requ
 (`track.Consumer.fetchGroup`), so a Rust-only removal would drop a current
 cross-language capability. This quest keeps FETCH on lite-07 and makes the
 range fill work without it.
-
-Decided 2026-10-22 (maintainer): SUBSCRIBE_OK carries the resolved start for
-a relative range start, so a reader's ordered cursor takes its floor from it
-([Container reads drop backfill](/quest/m1/read-backfill.md)). Decided
-2026-10-27 (maintainer): it is part of the Goal, since read-backfill now
-requires this quest for it.
 
 ### Range fill through the subscription
 
@@ -58,25 +50,9 @@ resolve no SUBSCRIBE_START, so a FIN overtaking them leaves the receiver no
 owed range to wait on. Datagram fills need the receiver told what is owed
 first.
 
-### moq-transport anchors
-
-Decided 2026-10-27 (maintainer): a bridge never sends a relative anchor to
-moq-transport. It resolves `Relative(n)` to an absolute Group ID, from its
-cache or the live edge, before sending, replacing the planned mapping of
-`Relative(n)..` onto draft-22's `Filter::Relative(n + 1)` and draft 18's
-relative joining FETCH. Reason: both count back by Group ID arithmetic, which
-breaks once [time addressing](/quest/m1/time-addressing/model.md) makes legacy
-Group IDs sparse start ticks. A range with a bounded end
-resolves both bounds against the Largest Object and goes upstream as an
-absolute range. Live keeps today's join (`ietf::subscriber::subscribe_join`).
-Each mapping that makes a wire carry an anchor lifts that wire's
-`Unsupported` refusal for it, and extends the per-wire table in
-`rs/moq-net/tests/integration/range_anchors.rs`.
-
 Update `drafts/draft-lcurley-moq-lite.md` with each wire change here. Run
 `just drafts check` and `just test interop --all`.
 
 ## Related
 
-- [Container reads drop backfill](/quest/m1/read-backfill.md) - floors its ordered cursor on the resolved start
 - [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - removes FETCH from lite-07 in both implementations once this and JS ranges land

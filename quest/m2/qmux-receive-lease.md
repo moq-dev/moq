@@ -33,6 +33,11 @@ control frames, so the window, not the socket, is what bounds the bytes a
 slow reader's peer parks in userspace. Going from 1 MiB to 64 MiB multiplies
 that by every browser fallback, TCP, and WebRTC session a relay serves.
 
+The 2026-10-27 security audit (NET-3) reached the same gap from
+`poll::Buffered::poll_lease`, which buffers a peer-declared message size up
+to the lite-01/02 `AnnounceInit` cap with nothing bounding the total across
+streams; this quest owns it.
+
 Bring the options to the maintainer with a recommendation before building:
 
 - **The native floor.** Lease at `MIN_RECEIVE_WINDOW` or native's 128 MiB.

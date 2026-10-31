@@ -162,7 +162,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "test");
 		assert!(active, "expected announce, got retraction");
-		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request("test", None))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} request timeout"))
 			.expect("announced broadcast resolves");
@@ -267,7 +267,7 @@ async fn uring_workers_serve_every_configured_version() {
 			// moq-lite-02 has no in-band path, so a raw QUIC session sits at the root.
 			let path = update.prefix.as_str().to_owned();
 			assert!(active && path.ends_with("test"), "{scheme} {name}: announced {path}");
-			let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast(&path, None))
+			let broadcast = tokio::time::timeout(TIMEOUT, consumer.request(&path, None))
 				.await
 				.unwrap_or_else(|_| panic!("{scheme} {name}: request timeout"))
 				.expect("announced broadcast resolves");
@@ -625,7 +625,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+	let announced = tokio::time::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");
@@ -906,14 +906,14 @@ async fn uring_forwards_the_setup_token() {
 		let params = [&[0x03, encoded.len() as u8][..], &encoded].concat();
 		let setup = [&[0xaf, 0x00][..], &(params.len() as u16).to_be_bytes(), &params].concat();
 		let mut send = session.open_uni(Default::default()).await.unwrap();
-		send.write_all(&setup).await.unwrap();
+		send.write_all(&setup[..]).await.unwrap();
 		let mut recv = tokio::time::timeout(TIMEOUT, session.accept_uni())
 			.await
 			.unwrap()
 			.unwrap();
 		let mut reply = [0u8; 1];
 		assert_eq!(
-			tokio::time::timeout(TIMEOUT, recv.read(&mut reply))
+			tokio::time::timeout(TIMEOUT, recv.read(&mut &mut reply[..]))
 				.await
 				.unwrap()
 				.unwrap(),

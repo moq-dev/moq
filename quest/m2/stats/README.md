@@ -85,7 +85,7 @@ kind.
     [#2733](https://github.com/moq-dev/moq/issues/2733)-style counters land.
 - **Encoding**: cumulative counters about once a second through
   `moq_json::snapshot` on one track with `compress: true`, produced whenever
-  stats are enabled. The [m1 compression migration](/quest/m1/compress/README.md)
+  stats are enabled. The [m1 compression migration](https://github.com/moq-dev/moq/pull/7046)
   removed the `.z` siblings and kept merge-patch deltas on the single track. An unsubscribed stats track never leaves the process.
   Gauges are carried but never summed.
 - **On main.** Every change is additive: optional sections on
@@ -126,4 +126,4 @@ connection view and the dashboard flow.
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   adapts its bitrate to what its viewers report
 - [Latency ledger](/quest/m2/latency-ledger.md) - adds the viewer's latency
-  stages to the same stats and feedback snapshots
+  stages to the same feedback snapshot

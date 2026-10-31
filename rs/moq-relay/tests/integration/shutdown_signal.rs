@@ -481,8 +481,9 @@ async fn a_reconnecting_client_rides_out_a_restart_inner() {
 		.established()
 		.await
 		.expect("connect");
+	let mut following = consumer.follow("cam", None).unwrap();
 	tokio::select! {
-		res = consumer.routed_broadcast("cam") => {
+		res = following.available() => {
 			res.expect("the publisher's broadcast never resolved");
 		}
 		res = publisher.closed() => panic!("the publisher gave up during the restart: {res:?}"),
