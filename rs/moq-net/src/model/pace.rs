@@ -187,6 +187,7 @@ mod tests {
 	}
 
 	/// A one-byte frame whose properties hold `metadata` bytes.
+	#[cfg(feature = "async")]
 	fn fielded(id: u64, metadata: usize) -> frame::Header {
 		use crate::model::object::{Block, Fields, Properties};
 		let block = Block {
@@ -212,6 +213,7 @@ mod tests {
 	/// Metadata counts toward the window as it does toward the live tail, both committed
 	/// and to admit a frame, so frames whose properties outweigh their payloads are paced.
 	#[test]
+	#[cfg(feature = "async")]
 	fn metadata_counts_toward_the_window() {
 		let (_flag, waiter) = flag();
 		let mut group = group::Info { sequence: 0 }.produce_untimed();
