@@ -1606,7 +1606,10 @@ mod tests {
 		assert!(estimate.demand().wanted());
 		let grant = viewer.consume();
 		drop(viewer);
-		assert!(estimate.demand().wanted(), "a grant read from the viewer still wants it");
+		assert!(
+			estimate.demand().wanted(),
+			"a grant read from the viewer still wants it"
+		);
 		drop(grant);
 		assert!(!estimate.demand().wanted());
 	}
