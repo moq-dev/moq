@@ -697,7 +697,7 @@ impl Resolved {
 	}
 
 	/// The keep-alive interval against a peer whose idle timeout is no shorter than
-	/// ours, using the default idle timeout when neither peer sets one.
+	/// ours, using moq-quic's 30s default (a 9s interval) when neither peer sets one.
 	#[cfg(feature = "_transport")]
 	pub fn keep_alive_interval(&self) -> Duration {
 		let idle_timeout = (!self.idle_timeout.is_zero()).then_some(self.idle_timeout);

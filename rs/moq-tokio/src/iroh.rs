@@ -600,9 +600,7 @@ mod tests {
 	}
 
 	/// The connection keep-alive is the resolved interval, not iroh's 5s heartbeat,
-	/// and unset derives from the idle timeout.
-	///
-	/// The setter cannot store `None`, so a disabled interval is not asserted here.
+	/// and unset or zero derives from the idle timeout.
 	#[test]
 	fn keep_alive_interval_follows_resolved_config() {
 		use std::time::Duration;
@@ -611,7 +609,9 @@ mod tests {
 			(secs(10), Some(secs(3)), secs(3)),
 			(secs(10), Some(Duration::from_millis(500)), Duration::from_millis(500)),
 			(secs(10), None, secs(3)),
+			(secs(10), Some(Duration::ZERO), secs(3)),
 			(secs(30), None, secs(9)),
+			(Duration::ZERO, None, secs(9)),
 		] {
 			let quic = crate::quic::Resolved {
 				idle_timeout: idle,
