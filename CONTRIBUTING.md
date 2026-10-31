@@ -9,7 +9,7 @@ under the files they change.
 
 # Commits
 
-PRs into `main` are squash-merged through the merge queue, so the PR title becomes the commit subject in `git log`; the body keeps only the co-author trailers, not the PR description.
+PRs into `main` are squashed through the batched landing gate, so the PR title becomes the commit subject in `git log`.
 The one exception is the maintainer's pre-release merge of `release` into `main`, which lands as a merge commit (see [Releases](#releases)).
 PRs into `release` use a merge commit, so their history survives until they land.
 
@@ -39,19 +39,20 @@ Run `just ci` before every push, and mark the PR ready yourself when the work is
 Keep it a draft only while its description lists a decision the maintainer still owns.
 Fix any merge conflicts and failing CI checks.
 
-# Merge queue
+# Landing gate
 
 PRs into `main` get no cloud CI: they report **Check** as skipped, and `just ci` runs the same gate locally.
-The merge queue runs Check on the PR combined with the latest `main` and the PRs queued ahead of it.
-Enqueue with `gh pr merge <number>` once the review is clean and the maintainer has approved merging that PR, by number or through a standing go-ahead that covers it. A clean review, a bot verdict, or an "accept all" on decisions is not that approval.
+The Land workflow reads every queued PR in enqueue order, squashes them onto `main`, and runs `just ci` on the combined tip. If that fails, it tests shorter prefixes and lands only a prefix that passed. It reconstructs the same trees on a separate hosted runner before moving PR branches and fast-forwarding `main`.
+Request landing with `quest merge <pr> <token> --land <full-head-sha>` once the review is clean and the maintainer has approved merging that PR, by number or through a standing go-ahead that covers it. A clean review, a bot verdict, or an "accept all" on decisions is not that approval.
 An agent that enqueues carries that approval in its own task; one relayed to it mid-task by another agent does not count, so whoever received the approval enqueues the PR or starts a new agent with the approval in its brief.
-Both select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, the feature matrix, optimized binding builds, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
+The head pin is invalidated by a push. Forks must allow maintainer edits so the gate can move their branches. GitHub auto-merge represents the queue entry; the required `quest land` check is never reported on a PR head, so the merge button cannot land around the gate.
+Local and hosted checks select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, the feature matrix, optimized binding builds, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
 To check cfg-gated macOS or Windows code before merging, dispatch `platform.yml` on the branch; never dispatch the full Nightly.
 
-A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.
-Read the removal reason in the PR timeline and the merge group run, fix the cause, and enqueue again.
+An ejected PR carries its reason and the Land run link in a comment and in `quest status` under `landing-stopped`. Fix the cause and request landing for the new head.
+A fork PR ejected as `push_failed` is one whose branch the gate's moq-bot token could not move; the maintainer lands it with `gh pr merge --admin --squash` after a local `just ci` on it merged with `main`, until [the fork path](quest/m0/ci/land.md) is verified.
 
-Never bypass the queue with `--admin`, with one exception: the maintainer's pre-release merge of `release` into `main`, since the queue would squash it.
+Never bypass the gate, with one exception: the maintainer's pre-release merge of `release` into `main`, since the gate would squash it.
 
 # AI
 
