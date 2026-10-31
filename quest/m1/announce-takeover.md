@@ -13,8 +13,9 @@ job never inherits those readers. Rust and JS expose the transition as
 Decided in the 2026-10-10 quest audit interview: replace response-only claim
 epochs with `ANNOUNCE_TAKEOVER`. Keep this shared-model and lite-07 work in
 m1 and a prerequisite of the lite-07 cut, not the m0 release. moq-transport
-gets no counterpart, since [moq-transport carries no epoch](/quest/m1/ietf-epoch-cut.md)
-(decided 2026-10-28), so a moq-transport hop uses Start/Restart. Ordinary
+gets no counterpart, since moq-transport carries no epoch (decided 2026-10-28,
+removed in [moq-dev/moq#7239](https://github.com/moq-dev/moq/pull/7239)), so a
+moq-transport hop uses Start/Restart. Ordinary
 Start/Restart is a supported fallback, including the accepted cold-start
 reset before this lands.
 
