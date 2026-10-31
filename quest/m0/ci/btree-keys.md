@@ -30,15 +30,16 @@ measured before adoption.
 
 Public API: none.
 
-The [2026-10-26 experiment](/.github/btree-build-audit.md) inventories 38 concrete
-map key/value spellings and preserves an exact candidate patch plus eight raw
-samples. Sharing the expiry wall index's lossless u64 nanosecond key removes
-6,485 LLVM lines from both library and unit-test targets, but CPU ranges overlap
-and their median directions disagree on the shared host. The candidate was
-removed after measurement, so no production representation change is retained.
+The [build-cost audit](/.github/btree-build-audit.md) inventories 38 concrete
+map key/value spellings and preserves an exact candidate patch: sharing the
+expiry wall index's lossless u64 nanosecond key removes 6,485 LLVM lines. Its
+2026-10-31 quiet-host repeat (12 interleaved samples per variant under
+`perf stat`) shows that cut is real in instructions (-0.19% library, -0.06%
+unit tests, about 30 ms of CPU per build) but not in CPU time, which stays
+within noise. The candidate is not retained, so no production representation
+change ships.
 
-Remaining decision: repeat that patch on a quiet host (recommended), try a
-larger local candidate with its own runtime benchmarks, or deprioritize the
-build-cost work. Do not infer a speedup from the IR count alone. Retain a
-candidate only after the CPU evidence distinguishes it from noise, then run
-its semantic/runtime checks and the selected local gates.
+Each removed instantiation is worth about 0.2% of moq-net's build, so this quest
+no longer earns its m0 slot. Remaining decision: delete it (recommended), or
+keep it for a larger candidate that brings its own runtime benchmarks. Do not
+infer a speedup from the IR count alone.

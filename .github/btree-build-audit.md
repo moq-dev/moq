@@ -1,9 +1,12 @@
 # moq-net BTree build-cost experiment, 2026-10-26
 
 Sharing the expiry wall index's numeric key removes one BTreeMap instantiation
-and 6,485 LLVM lines. It does not demonstrate a CPU-time improvement on this
-shared host. The original source is restored; no production key representation changes.
-Repeat on a quiet host before adopting this conversion or expanding the experiment.
+and 6,485 LLVM lines. A quiet-host repeat on 2026-10-31 (below) confirms a real
+but tiny instruction-count reduction (0.19% of the library build, 0.06% of the
+unit-test build, about 30 ms of CPU) that CPU time cannot distinguish from
+noise. The conversion is not retained; no production key representation changes.
+At roughly 0.2% per instantiation removed, sharing BTree key and value types is
+not worth its own work.
 
 [Raw samples, type inventory, and exact candidate patch](btree-build-audit.json)
 preserve the measured candidate and its context.
@@ -91,8 +94,55 @@ It is a reproducible spelling inventory, not a count of every tree operation or
 an attribution of all BTree lines to each pair. The candidate removes only
 `Instant, kio::WaiterList`; the existing `u64, kio::WaiterList` remains.
 
-Recommend repeating the preserved patch on a quiet host before retaining it.
 Other candidates, such as sorted vectors for small counted priority/budget maps
 or indexed values, need their own runtime fan-out and cardinality measurements;
-this experiment does not justify them. The existing BTree quest retains that
-decision and the remaining local/runtime validation.
+this experiment does not justify them.
+
+## Quiet-host repeat, 2026-10-31
+
+Base: [51836997ce](https://github.com/moq-dev/moq/commit/51836997ce9352e3594f33a75d4ae69ec268bb95).
+The preserved patch applies unchanged. Same toolchain (Rust 1.98.1, LLVM 22.1.8,
+cargo-llvm-lines 0.4.48) and environment (`MBX_DISABLE=1`,
+`CARGO_INCREMENTAL=0`, `CARGO_BUILD_JOBS=2`, dev debug info off, private
+target), on a dedicated idle host: Intel Core i7-8700, 6 cores / 12 threads,
+one-minute load 1.14 to 1.71 for the whole run.
+
+Instead of `cargo llvm-lines`, each sample times a plain rebuild of moq-net
+alone (touching its `lib.rs`) under `perf stat`, counting user-space
+instructions, cycles, and task-clock over the cargo process tree:
+
+```sh
+cargo build --locked -p moq-net --lib
+cargo test --locked -p moq-net --lib --no-run
+```
+
+Six rounds of baseline/candidate/candidate/baseline give 12 samples per variant
+and target. The p-values are two-sided permutation tests on the difference of
+means. Raw samples are in the JSON's `quiet_host_repeat`.
+
+| Target | Metric | Baseline median | Candidate median | Mean change | p |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Library | LLVM lines | 1,379,943 | 1,373,458 | -0.47% | exact |
+| Library | Instructions | 78.609 G | 78.455 G | -0.19% | < 0.0001 |
+| Library | Task clock | 16.35 s | 16.32 s | +0.61% | 0.32 |
+| Unit tests | LLVM lines | 3,451,146 | 3,444,661 | -0.19% | exact |
+| Unit tests | Instructions | 216.80 G | 216.65 G | -0.06% | < 0.0001 |
+| Unit tests | Task clock | 47.36 s | 47.09 s | -0.32% | 0.40 |
+
+The 6,485-line reduction repeats exactly. Instruction counts have a standard deviation under
+0.03% between runs, so the drop of about 150 M instructions per target is real.
+At this host's roughly 4.8 instructions per nanosecond of task clock, it is
+worth about 30 ms per build. Task-clock spread (standard deviation 66 to 495 ms)
+is larger than that, and the means move in opposite directions across targets,
+so CPU time does not drop beyond noise.
+
+Rows naming BTree internals are 332,566 of the library's 1,379,943 lines at this
+base (24.1%). Each removed instantiation saves about 6.5 k of them and about
+0.2% of instructions. Removing a handful of the 38 spellings would save well
+under a second of CPU per moq-net build, while each conversion adds a key
+translation that callers and reviewers must keep lossless.
+
+Decision: the conversion is not retained. The quest's own acceptance rule, a CPU
+drop beyond noise, is not met by the cheapest candidate, and larger candidates
+(sorted vectors, slab-indexed values) trade runtime complexity for at most a few
+tenths of a percent each.
