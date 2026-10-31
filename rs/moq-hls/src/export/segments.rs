@@ -163,6 +163,9 @@ pub(crate) struct Window {
 	pub ended: bool,
 	/// Why the window failed, if it did.
 	pub failed: Option<crate::Error>,
+	/// Whether the window is closed, so these are all the rows it will ever list (see
+	/// [`Producer::closed`]).
+	pub closed: bool,
 }
 
 /// The next segment a [`Consumer`] should emit, resolved from the window.
@@ -188,6 +191,7 @@ impl State {
 			segments: self.rows.iter().cloned().collect(),
 			ended: self.ended,
 			failed: self.failed.clone(),
+			closed: false,
 		}
 	}
 
@@ -307,7 +311,11 @@ impl Producer {
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
 	pub fn window(&self) -> Window {
-		self.state.read().window()
+		let state = self.state.read();
+		Window {
+			closed: state.is_closed(),
+			..state.window()
+		}
 	}
 
 	/// The row of segment `segment` numbered by the record track tagged `tag`, or `None` if it
@@ -362,6 +370,32 @@ impl Producer {
 		}) {
 			Poll::Ready(_) => Poll::Ready(()),
 			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Poll until the window lists a row, even after it closed: a predecessor whose rows its
+	/// replacement still lists (see [`Rendition::after`]).
+	pub fn poll_rows(&self, waiter: &kio::Waiter) -> Poll<()> {
+		match self.state.poll_ref(waiter, |state| match state.rows.is_empty() {
+			false => Poll::Ready(()),
+			true => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(())) => Poll::Ready(()),
+			Poll::Ready(Err(state)) if !state.rows.is_empty() => Poll::Ready(()),
+			_ => Poll::Pending,
+		}
+	}
+
+	/// Resolve once the window is closed: its records watcher lists no more rows.
+	pub async fn closed(&self) {
+		self.state.closed().await;
+	}
+
+	/// Whether the window lists segment `at` of the record track tagged `tag`.
+	pub fn holds(&self, tag: &str, at: At) -> bool {
+		match at {
+			At::Sequence(segment) => self.row(tag, segment).is_some(),
+			At::Pts(time) => self.segment_number_at(tag, time).is_some(),
 		}
 	}
 

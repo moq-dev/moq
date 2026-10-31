@@ -281,6 +281,9 @@ pub(crate) struct Handoff {
 	next: u64,
 	/// Its `EXT-X-TARGETDURATION`, which a replacement serving the same playlist URI keeps.
 	target_duration: u64,
+	/// The retired instance, while it lists or still waits to list a segment: the replacement
+	/// keeps listing those (see [`Rendition::after`]).
+	previous: Option<Arc<Rendition>>,
 }
 
 /// Which records a rendition lists, shared by its records watcher and [`Rendition::retire`] so a
@@ -294,6 +297,8 @@ struct Claim {
 	next: u64,
 	/// Set by [`Rendition::retire`]: nothing at or past `next` is listed.
 	retired: bool,
+	/// A record waits on its successor to be listed.
+	pending: bool,
 }
 
 /// A single HLS rendition: master-playlist metadata, its window over its own HLS records (which
@@ -347,6 +352,10 @@ pub struct Rendition {
 	retiring: tokio::sync::watch::Sender<bool>,
 	/// Which records this instance lists.
 	claim: Mutex<Claim>,
+	/// The retired instance this one replaced on the same records, whose segments its playlist
+	/// still lists ahead of its own until the window slides past them (see [`after`](Self::after)).
+	/// Released once none is listed, or by a restart.
+	previous: Mutex<Option<Arc<Rendition>>>,
 	/// The broadcast serving this rendition's media. A sibling is bound when the rendition is
 	/// created, and ends the rendition when it ends. Shared with a background init build.
 	media: Arc<Media>,
@@ -461,6 +470,7 @@ impl Rendition {
 			watcher: Mutex::new(None),
 			retiring: tokio::sync::watch::Sender::new(false),
 			claim: Mutex::default(),
+			previous: Mutex::new(None),
 			media: Arc::new(media),
 			run: kio::Producer::default(),
 			building: Arc::new(tokio::sync::Mutex::new(())),
@@ -501,6 +511,7 @@ impl Rendition {
 			watcher: Mutex::new(None),
 			retiring: tokio::sync::watch::Sender::new(false),
 			claim: Mutex::default(),
+			previous: Mutex::new(None),
 			media: Arc::new(media),
 			run: kio::Producer::default(),
 			building: Arc::new(tokio::sync::Mutex::new(())),
@@ -523,6 +534,12 @@ impl Rendition {
 	/// Take over from a retired predecessor (see [`retire`](Self::retire)): keep its target
 	/// duration and list only the records it won't. One reading another record track shares no
 	/// numbering with it, so it lists all.
+	///
+	/// On the same records, the playlist URI keeps listing the predecessor's segments, under the
+	/// init they were muxed for, until the window slides past them: a server never removes a
+	/// segment from the middle or end of a live playlist (RFC 8216 6.2.2). This instance lists its
+	/// own behind a discontinuity, once the predecessor has listed all it will, so the two never
+	/// interleave.
 	pub(crate) fn after(mut self, handoff: Option<&Handoff>) -> Self {
 		let Some(handoff) = handoff else {
 			return self;
@@ -537,8 +554,10 @@ impl Rendition {
 			start,
 			next: start,
 			retired: false,
+			pending: false,
 		});
 		self.live = Arc::new(segments::Producer::new(start));
+		self.previous = Mutex::new(handoff.previous.clone());
 		self
 	}
 
@@ -548,18 +567,94 @@ impl Rendition {
 	/// Its records go on (a replacement follows them too, and the publisher never finishes a
 	/// dropped track's), so they can't end it. Ending it at once would lose the last segment of
 	/// every recording, since it is listed only when the record after it arrives.
-	pub(crate) fn retire(&self) -> Handoff {
-		let next = {
+	pub(crate) fn retire(self: &Arc<Self>) -> Handoff {
+		let (next, pending) = {
 			let mut claim = self.claim.lock().expect("claim lock poisoned");
 			claim.retired = true;
-			claim.next
+			(claim.next, claim.pending)
 		};
 		self.retiring.send_replace(true);
+		// Once retired, one that neither lists nor waits to list a segment never will, so the
+		// replacement keeps only what this one was keeping: churn can't stack empty instances.
+		let lists = pending || !self.live.window().segments.is_empty();
 		Handoff {
 			track: self.hls.track.clone(),
 			next,
 			target_duration: self.target_duration,
+			previous: match lists {
+				true => Some(self.clone()),
+				false => self.previous(),
+			},
 		}
+	}
+
+	fn previous(&self) -> Option<Arc<Rendition>> {
+		self.previous.lock().expect("previous lock poisoned").clone()
+	}
+
+	/// The retired instances whose segments this one's playlist still lists, oldest first.
+	fn lineage(&self) -> Vec<Arc<Rendition>> {
+		let mut lineage = Vec::new();
+		let mut next = self.previous();
+		while let Some(rendition) = next {
+			next = rendition.previous();
+			lineage.push(rendition);
+		}
+		lineage.reverse();
+		lineage
+	}
+
+	/// The predecessors' rows listed ahead of `own`, oldest first, each with its instance.
+	///
+	/// They are trimmed as one window with `own`, as if one instance had listed them all, and a
+	/// predecessor none of whose rows is left is released, along with every older one, once none
+	/// of them can list another.
+	fn inherited(&self, own: &[segments::Row]) -> Vec<(Arc<Rendition>, segments::Row)> {
+		let lineage = self.lineage();
+		if lineage.is_empty() {
+			return Vec::new();
+		}
+		// Each read whole, so its rows are all it will ever list once it reads closed.
+		let windows: Vec<_> = lineage.iter().map(|rendition| rendition.live.window()).collect();
+		let closed = windows.iter().all(|window| window.closed);
+		let mut rows: std::collections::VecDeque<_> = lineage
+			.iter()
+			.zip(windows)
+			.flat_map(|(rendition, window)| {
+				window
+					.segments
+					.into_iter()
+					.map(move |row| (Some(rendition.clone()), row))
+			})
+			.collect();
+		let inherited = rows.len();
+		rows.extend(own.iter().map(|row| (None, row.clone())));
+		let window = self.fanout.window();
+		let mut trimmed = 0;
+		while trimmed < inherited {
+			let rest = match rows.get(1) {
+				Some((_, second)) => rows.back().expect("two rows").1.end.saturating_sub(second.pts.into()),
+				None => Duration::ZERO,
+			};
+			if !segments::evicts(window, rows.len(), rest) {
+				break;
+			}
+			rows.pop_front();
+			trimmed += 1;
+		}
+		let rows: Vec<_> = rows
+			.into_iter()
+			.take(inherited - trimmed)
+			.map(|(rendition, row)| (rendition.expect("an inherited row"), row))
+			.collect();
+		// Nothing lists anything older than the oldest instance left, whose rows followed every
+		// older one's last.
+		match rows.first() {
+			Some((oldest, _)) => *oldest.previous.lock().expect("previous lock poisoned") = None,
+			None if closed => *self.previous.lock().expect("previous lock poisoned") = None,
+			None => {}
+		}
+		rows
 	}
 
 	/// Advertise `target_duration` seconds as `EXT-X-TARGETDURATION`: the one this rendition's
@@ -612,6 +707,10 @@ impl Rendition {
 	fn push(&self, row: segments::Row) {
 		if self.media.admits(&self.live) {
 			self.live.push(row, self.fanout.window());
+			// Release the predecessors this push slid out, even with nobody rendering.
+			if self.previous().is_some() {
+				self.inherited(&self.live.window().segments);
+			}
 		}
 	}
 
@@ -631,6 +730,8 @@ impl Rendition {
 			build.abort();
 		}
 		self.live.clear();
+		// Its predecessors' rows are the previous run's too.
+		*self.previous.lock().expect("previous lock poisoned") = None;
 		let mut run = self.run_mut();
 		*run = Run {
 			generation,
@@ -701,7 +802,16 @@ impl Rendition {
 		if self.media.refusal().is_some() {
 			return Poll::Ready(());
 		}
-		self.live.poll_listed(waiter)
+		// A replacement's playlist lists its predecessors' segments until it has its own.
+		if self.live.poll_listed(waiter).is_ready()
+			|| self
+				.lineage()
+				.iter()
+				.any(|rendition| rendition.live.poll_rows(waiter).is_ready())
+		{
+			return Poll::Ready(());
+		}
+		Poll::Pending
 	}
 
 	/// End the window if the bound sibling ended, registering `waiter` to wake when it does, and
@@ -739,6 +849,14 @@ impl Rendition {
 		let Some(init) = self.built_init(&run) else {
 			return Ok(None);
 		};
+		// The snapshot released every predecessor it no longer lists; each left maps its own init.
+		if self
+			.lineage()
+			.iter()
+			.any(|rendition| rendition.built_init(&rendition.run()).is_none())
+		{
+			return Ok(None);
+		}
 		let playable = !snapshot.segments.is_empty() || snapshot.finished;
 		Ok(playable.then(|| super::render_media(&snapshot, &init.hash, query)))
 	}
@@ -761,6 +879,12 @@ impl Rendition {
 		// player's follow-up GET of the init is free.
 		if self.load_init().await?.is_none() {
 			return Ok(None);
+		}
+		// The predecessors' segments still listed map their own inits.
+		for rendition in self.lineage() {
+			if rendition.load_init().await?.is_none() {
+				return Ok(None);
+			}
 		}
 		self.media_playlist(query)
 	}
@@ -785,7 +909,8 @@ impl Rendition {
 			return Err(err);
 		}
 		let finished = window.ended;
-		Ok(self.snapshot_from_window(window, finished, generation))
+		let inherited = self.inherited(&window.segments);
+		Ok(self.snapshot_from_window(inherited, window, finished, generation))
 	}
 
 	/// Why listings refuse: the referenced media is denied, or the window failed.
@@ -832,16 +957,37 @@ impl Rendition {
 		}
 	}
 
-	fn snapshot_from_window(&self, window: segments::Window, finished: bool, generation: Option<Arc<str>>) -> Snapshot {
-		let mut previous = None;
-		let segments = window
-			.segments
+	/// The snapshot listing `inherited` (see [`inherited`](Self::inherited)), then `window`.
+	///
+	/// An inherited segment maps its instance's init, or `""` while that is not built, which
+	/// [`media_playlist`](Self::media_playlist) refuses to render.
+	fn snapshot_from_window(
+		&self,
+		inherited: Vec<(Arc<Rendition>, segments::Row)>,
+		window: segments::Window,
+		finished: bool,
+		generation: Option<Arc<str>>,
+	) -> Snapshot {
+		let media_sequence = inherited.first().map_or(window.sequence, |(_, row)| row.segment);
+		let discontinuity_sequence = inherited
+			.first()
+			.map_or(window.discontinuity, |(_, row)| row.discontinuity);
+		let rows = inherited
 			.iter()
-			.map(|s| {
+			.map(|(rendition, row)| {
+				// Cached once built, so this is a read for every row after the first.
+				let map = rendition.built_init(&rendition.run());
+				(Some(map.map_or_else(String::new, |init| init.hash.clone())), row)
+			})
+			.chain(window.segments.iter().map(|row| (None, row)));
+		let mut previous = None;
+		let segments = rows
+			.map(|(map, s)| {
 				let discontinuity = previous.replace(s.discontinuity).is_some_and(|p| p != s.discontinuity);
 				Segment {
 					segment: s.segment,
 					tag: s.tag.to_string(),
+					map,
 					duration: s.duration,
 					gap: s.stop,
 					discontinuity,
@@ -851,8 +997,8 @@ impl Rendition {
 			.collect();
 		Snapshot {
 			target_duration: self.target_duration,
-			media_sequence: window.sequence,
-			discontinuity_sequence: window.discontinuity,
+			media_sequence,
+			discontinuity_sequence,
 			segments,
 			finished,
 			generation,
@@ -990,7 +1136,16 @@ impl Rendition {
 	/// read.
 	pub async fn init(&self, hash: &str) -> Result<Option<Bytes>> {
 		let init = self.load_init().await?;
-		Ok(init.filter(|init| init.hash == hash).map(|init| init.bytes.clone()))
+		if let Some(init) = init.filter(|init| init.hash == hash) {
+			return Ok(Some(init.bytes.clone()));
+		}
+		// A predecessor's segments still listed map its init.
+		for rendition in self.lineage() {
+			if let Some(init) = rendition.load_init().await?.filter(|init| init.hash == hash) {
+				return Ok(Some(init.bytes.clone()));
+			}
+		}
+		Ok(None)
 	}
 
 	/// The current CMAF init segment, whatever its hash, built on first request and cached.
@@ -1121,6 +1276,21 @@ impl Rendition {
 	/// [generation](super::Broadcaster::set_generation), since a restart reuses segment numbers
 	/// and another run's URL would name different bytes.
 	pub async fn segment(&self, id: &segments::Id) -> Result<Option<Bytes>> {
+		// A predecessor's segments still listed are muxed under its config. A config that returns
+		// gets its tag back, but the instances' segment numbers never overlap.
+		if let Some(rendition) = self
+			.lineage()
+			.into_iter()
+			.find(|rendition| *rendition.tag == *id.tag && rendition.live.holds(&id.tag, id.at))
+		{
+			return rendition.own_segment(id).await;
+		}
+		self.own_segment(id).await
+	}
+
+	/// Fetch and transmux the segment `id` names among this instance's own rows; see
+	/// [`segment`](Self::segment).
+	async fn own_segment(&self, id: &segments::Id) -> Result<Option<Bytes>> {
 		self.authorize()?;
 		let current = || self.generation().as_deref() == id.generation.as_deref();
 		if !current() {
@@ -1232,14 +1402,23 @@ async fn watch_records(
 	mut retiring: tokio::sync::watch::Receiver<bool>,
 ) {
 	let result: Result<()> = async {
+		// A replacement lists nothing until its predecessor has listed all it will, so their
+		// segments never interleave and its own start a new discontinuity: they decode under
+		// another init.
+		let previous = rendition.upgrade().and_then(|rendition| rendition.previous());
+		let mut broken = previous.is_some();
+		if let Some(previous) = previous {
+			tokio::select! {
+				_ = previous.live.closed() => {}
+				_ = retiring.wait_for(|retiring| *retiring) => return Ok(()),
+			}
+		}
 		let mut records = tokio::select! {
 			records = moq_mux::hls::Consumer::subscribe(&broadcast, &hls) => records?,
 			_ = retiring.wait_for(|retiring| *retiring) => return Ok(()),
 		};
 		// The newest record, waiting for its successor.
 		let mut pending: Option<moq_mux::hls::Entry> = None;
-		// The next listed segment starts a new discontinuity.
-		let mut broken = false;
 		loop {
 			let event = tokio::select! {
 				event = records.next() => match event? {
@@ -1285,6 +1464,7 @@ async fn watch_records(
 					if !entry.is_stop() {
 						pending = Some(entry);
 					}
+					claim.pending = pending.is_some();
 				}
 				moq_mux::hls::Event::Pop(range) => {
 					// HLS assigns consecutive positions within a playlist. Removing an interior
@@ -1299,6 +1479,7 @@ async fn watch_records(
 						return Ok(());
 					}
 					pending = None;
+					claim.pending = false;
 					broken = true;
 					claim.next = claim.next.max(range.end);
 					rendition.live.clear();

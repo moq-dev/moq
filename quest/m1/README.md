@@ -185,7 +185,7 @@ removed).
 - [moq-clock moves into kio::clock](/quest/m1/kio-clock.md) - moq-clock and its test macro become `kio::clock` and `#[kio::test]` before the cut publishes them
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
 - [Binding announcements always carry captures](/quest/m1/ffi-required-captures.md) - moq-ffi and its generated bindings make `captures` a required list, as #7266 always sets it
-- [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - a decoder-identity change under the same codec string starts a new init and segment tag
+- [HLS export hands a rendition over at a same-codec config change](/quest/m1/hls-reinit-same-codec.md) - a resolution change under the same codec string keeps the playlist and lists the first new group under the new init
 - [The last AAC segment advertises its full duration](/quest/m1/hls-final-aac-segment.md) - a TS import's final audio segment's EXTINF matches what decodes
 - [A JS reader finishes after a clean close](/quest/m1/js-close-range-finish.md) - a range ending below the cache delivers what's held and then ends
 - [fMP4 decode times keep increasing](/quest/m1/fmp4-bframe-decode-time.md) - fragments shorter than a GOP of B-frame video never step `tfdt` backwards
