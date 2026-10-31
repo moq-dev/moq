@@ -997,6 +997,7 @@ impl Connection {
 				builder.exact_number,
 				bandwidth_probe,
 			);
+			debug_assert!(buf.len() <= builder.max_size, "frames overflowed the packet");
 
 			// ACK-only packets should only be sent when explicitly allowed. If we write them due to
 			// any other reason, there is a bug which leads to one component announcing write
@@ -3352,24 +3353,7 @@ impl Connection {
 			self.stats.frame_tx.immediate_ack += 1;
 		}
 
-		// Only 1-RTT ACKs carry receive timestamps, and the Data space sends no 0-RTT ACK
-		let mut timestamps = self.receive_timestamps.as_mut().filter(|_| space_id == SpaceId::Data);
-
-		// ACK
-		if space.pending_acks.can_send() {
-			Self::try_populate_acks(
-				now,
-				self.receiving_ecn,
-				timestamps.as_deref_mut(),
-				&mut sent,
-				space,
-				buf,
-				&mut self.stats,
-				max_size,
-			);
-		}
-
-		// ACK_FREQUENCY
+		// ACK_FREQUENCY, ahead of the ACK, whose receive timestamps fill the space left
 		if mem::replace(&mut space.pending.ack_frequency, false) {
 			let sequence_number = self.ack_frequency.next_sequence_number();
 
@@ -3398,6 +3382,23 @@ impl Connection {
 				.congestion
 				.on_ack_frequency_update(config.ack_eliciting_threshold.into_inner(), max_ack_delay);
 			self.stats.frame_tx.ack_frequency += 1;
+		}
+
+		// Only 1-RTT ACKs carry receive timestamps, and the Data space sends no 0-RTT ACK
+		let mut timestamps = self.receive_timestamps.as_mut().filter(|_| space_id == SpaceId::Data);
+
+		// ACK
+		if space.pending_acks.can_send() {
+			Self::try_populate_acks(
+				now,
+				self.receiving_ecn,
+				timestamps.as_deref_mut(),
+				&mut sent,
+				space,
+				buf,
+				&mut self.stats,
+				max_size,
+			);
 		}
 
 		// PATH_CHALLENGE
