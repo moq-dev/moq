@@ -6089,10 +6089,7 @@ fn zero_with_a_flag_set_is_a_real_value() {
 		defaults.connect.backoff.timeout,
 		Some((std::time::Duration::ZERO).into())
 	);
-	assert_eq!(
-		defaults.quic.resolve().keep_alive,
-		Some(std::time::Duration::from_secs(3))
-	);
+	assert_eq!(defaults.quic.resolve().keep_alive, None);
 }
 
 #[test]
