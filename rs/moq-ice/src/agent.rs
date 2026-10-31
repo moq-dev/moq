@@ -46,7 +46,7 @@ pub enum Error {
 
 	/// ICE never connected before the establishment deadline, or before the DTLS
 	/// handshake gave up waiting for it.
-	#[error("ICE did not connect before the establishment deadline")]
+	#[error("ICE did not connect in time")]
 	Timeout,
 
 	/// str0m failed (SDP, DTLS, SCTP, or ICE state).
