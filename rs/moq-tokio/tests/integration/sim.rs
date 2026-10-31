@@ -206,6 +206,10 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 			let sequence = group.sequence;
 			let frame = group.read_frame().await.unwrap().expect("a group is cut short");
 			assert_eq!(frame.payload.len(), FRAME, "group {sequence} is cut short");
+			assert!(
+				frame.payload.iter().all(|&byte| byte == sequence as u8),
+				"group {sequence} is corrupted"
+			);
 			arrivals.push((sequence, moq_clock::now()));
 		}
 		arrivals
