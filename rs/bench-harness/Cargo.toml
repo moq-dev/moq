@@ -17,5 +17,8 @@ codspeed-criterion-compat = "6"
 [target.'cfg(not(codspeed))'.dependencies]
 criterion = "0.8"
 
+[dev-dependencies]
+workspace-hack = { path = "../workspace-hack" }
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(codspeed)"] }

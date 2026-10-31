@@ -62,6 +62,7 @@ moq-clock = { path = "../moq-clock", features = ["sim"] }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["aws-lc-rs", "net"] }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "chunk_interleaving"

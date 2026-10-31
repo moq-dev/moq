@@ -41,5 +41,8 @@ wasm-bindgen-futures = "0.4"
 web-async = { workspace = true }
 web-transport-wasm = { workspace = true }
 
+[dev-dependencies]
+workspace-hack = { path = "../workspace-hack" }
+
 [lints]
 workspace = true

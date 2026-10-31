@@ -17,5 +17,8 @@ categories = ["development-tools::testing"]
 [lib]
 proc-macro = true
 
+[dev-dependencies]
+workspace-hack = { path = "../../workspace-hack" }
+
 [lints]
 workspace = true

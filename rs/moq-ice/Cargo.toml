@@ -22,6 +22,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [lints]
 workspace = true

@@ -174,6 +174,8 @@
             # Per-crate feature matrices (`just rs features`), where workspace
             # unification would otherwise hide a broken single-crate build.
             cargo-hack
+            # The workspace-hack that gives every build one feature set per dependency.
+            cargo-hakari
             cargo-nextest
             cargo-codspeed
             # Source-based test coverage (`just rs coverage`).

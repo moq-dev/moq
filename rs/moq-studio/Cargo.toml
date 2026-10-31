@@ -60,6 +60,7 @@ usage-rs = { workspace = true, features = ["completions", "config"] }
 [dev-dependencies]
 moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
 tempfile = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 [lints]
 workspace = true

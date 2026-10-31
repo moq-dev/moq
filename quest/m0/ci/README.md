@@ -133,7 +133,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm releases use `nix.moq.dev`, check its bucket sizes, and retire Cachix
-- [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs
+- [Unify dependency features](/quest/m0/ci/hakari.md) - align the FFI builds' features and record the hosted platform jobs' hits once the workspace-hack lands
 - [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
 - [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the slowest 1% of tests take under half their 289 CPU-seconds, with coverage kept
 - [Gate send-depth](/quest/m0/ci/send-depth-gate.md) - the merge gate runs send-depth on a pinned nightly when moq-net changes, after #6890 fixes main

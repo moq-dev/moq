@@ -43,6 +43,7 @@ moq-audio = { path = "../moq-audio", default-features = false }
 # Runs the tests that need a variable set or unset in a child process given it.
 test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["test-util"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "catalog"

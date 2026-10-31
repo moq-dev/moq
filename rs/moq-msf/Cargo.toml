@@ -17,5 +17,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true }
 
+[dev-dependencies]
+workspace-hack = { path = "../workspace-hack" }
+
 [lints]
 workspace = true

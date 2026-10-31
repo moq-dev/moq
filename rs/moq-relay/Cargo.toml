@@ -126,6 +126,7 @@ test-env = { path = "../test-env" }
 time = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Workers built inside a runtime with a manual clock installed run on that clock.

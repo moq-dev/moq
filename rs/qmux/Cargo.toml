@@ -46,6 +46,7 @@ qmux06 = { package = "qmux", version = "0.6.3", default-features = false, featur
 tokio = { workspace = true, features = ["full", "test-util"] }
 # The 0.6 release's stream API, for driving it in the interop tests.
 web-transport-trait = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 [[example]]
 name = "interop-client"

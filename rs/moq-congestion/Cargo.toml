@@ -19,6 +19,7 @@ rand_pcg = { workspace = true }
 [dev-dependencies]
 moq-clock = { path = "../moq-clock" }
 stats_alloc = "0.1.10"
+workspace-hack = { path = "../workspace-hack" }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 cpu-time = "1.0.0"

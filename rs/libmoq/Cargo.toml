@@ -12,5 +12,8 @@ rust-version.workspace = true
 keywords = ["quic", "media", "live"]
 categories = ["multimedia", "network-programming"]
 
+[dev-dependencies]
+workspace-hack = { path = "../workspace-hack" }
+
 [lints]
 workspace = true

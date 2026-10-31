@@ -35,6 +35,7 @@ s3s = "0.17"
 s3s-fs = "0.17"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "test-util", "time"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "producer"

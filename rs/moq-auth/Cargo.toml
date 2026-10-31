@@ -48,6 +48,7 @@ moq-token = "0.7"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 wiremock = "0.6"
+workspace-hack = { path = "../workspace-hack" }
 
 [lints]
 workspace = true

@@ -41,6 +41,7 @@ base64 = { workspace = true }
 moq-clock = { path = "../moq-clock", features = ["manual"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-test = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 [lints]
 workspace = true

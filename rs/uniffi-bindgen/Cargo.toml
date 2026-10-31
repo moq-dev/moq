@@ -23,5 +23,8 @@ cli = ["dep:uniffi"]
 # published package has no git dependencies.
 uniffi = { git = "https://github.com/kixelated/uniffi-rs", rev = "88d835d", features = ["cli"], optional = true }
 
+[dev-dependencies]
+workspace-hack = { path = "../workspace-hack" }
+
 [lints]
 workspace = true
