@@ -5406,6 +5406,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.23.1",
+ "bench-harness",
  "jsonwebtoken",
  "kio 0.6.2",
  "moq-auth 0.2.1",

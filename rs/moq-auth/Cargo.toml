@@ -23,7 +23,7 @@ jsonwebtoken = { workspace = true }
 kio = { workspace = true }
 moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false, features = ["serde"] }
 moq-pattern = { workspace = true, features = ["serde"] }
-pkcs1 = { workspace = true }
+pkcs1 = { workspace = true, features = ["std"] }
 pkcs8 = { workspace = true }
 rand = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["rustls-no-provider", "json"], optional = true }
@@ -43,6 +43,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 moq-auth = { path = ".", features = ["client", "serve"] }
 moq-auth-published = { package = "moq-auth", version = "=0.2.1", default-features = false }
 moq-clock = { path = "../moq-clock", features = ["sim"] }
@@ -51,6 +52,10 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-test = { workspace = true }
 wiremock = "0.6"
+
+[[bench]]
+name = "jwt"
+harness = false
 
 [lints]
 workspace = true
