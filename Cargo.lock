@@ -3599,12 +3599,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "h264-parser"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c16ee729d5d4a75be0f5181682a17cf0fce29497d0fa5273d57fe477409f02e6"
-
-[[package]]
 name = "h264-reader"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5142,6 +5136,7 @@ name = "moq-audio"
 version = "0.1.10"
 dependencies = [
  "bench-harness",
+ "bitstream-io 4.10.0",
  "block2 0.6.2",
  "bytes",
  "cpal",
@@ -5546,11 +5541,11 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "bench-harness",
+ "bitstream-io 4.10.0",
  "bytes",
  "crc",
  "ebml-iterable",
  "futures",
- "h264-parser",
  "h264-reader 0.9.0",
  "hang",
  "kio 0.6.2",

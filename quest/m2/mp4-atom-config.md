@@ -23,7 +23,3 @@ hand-written path only for a reproduced case and test it. `moq_mux` exports
 `codec::h264::Avcc`, so replacing or removing it is a breaking change;
 prefer keeping the type and changing only how it is
 filled when that is simpler. No wire change.
-
-## Related
-
-- [H.264 parsing with maintained crates](/quest/m2/h264-reader.md) - the SPS side of the same codec config

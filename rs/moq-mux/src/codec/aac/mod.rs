@@ -155,7 +155,7 @@ impl Config {
 /// Read an AudioSpecificConfig's leading fields: the audioObjectType, sample rate, and
 /// channelConfiguration.
 fn read_header<T: Buf>(reader: &mut BitReader<T>) -> Result<(u8, u32, u8)> {
-	if reader.buf.remaining() < 2 {
+	if reader.remaining().is_none_or(|remaining| remaining < 2) {
 		return Err(Error::ConfigTooShort);
 	}
 	let object_type = read_object_type(reader)?;
@@ -363,15 +363,14 @@ const SAMPLE_RATES: [u32; 13] = [
 	96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
 ];
 
-/// MSB-first bit reader that pulls bytes from a [`Buf`] on demand.
+/// MSB-first bit reader that pulls bytes from a [`Buf`] on demand, so the buffer advances only
+/// past the bytes it reads.
 ///
 /// AudioSpecificConfig is bit-packed: an explicit 24-bit sample rate pushes the
 /// following channelConfiguration off byte boundaries, so the fields can't be
 /// read a whole byte at a time.
 struct BitReader<'a, T: Buf> {
-	buf: &'a mut T,
-	current: u8,
-	bits_left: u8,
+	bits: bitstream_io::BitReader<bytes::buf::Reader<&'a mut T>, bitstream_io::BigEndian>,
 	/// Every bit read is copied here when set, with alignment redone on the writer's own bytes.
 	record: Option<BitWriter>,
 }
@@ -379,16 +378,19 @@ struct BitReader<'a, T: Buf> {
 impl<'a, T: Buf> BitReader<'a, T> {
 	fn new(buf: &'a mut T) -> Self {
 		Self {
-			buf,
-			current: 0,
-			bits_left: 0,
+			bits: bitstream_io::BitReader::new(buf.reader()),
 			record: None,
 		}
 	}
 
+	/// Bytes left in the buffer, `None` partway through one.
+	fn remaining(&mut self) -> Option<usize> {
+		Some(self.bits.reader()?.get_ref().remaining())
+	}
+
 	/// Skip to the next byte boundary.
 	fn align(&mut self) {
-		self.bits_left = 0;
+		bitstream_io::BitRead::byte_align(&mut self.bits);
 		if let Some(record) = &mut self.record {
 			record.align();
 		}
@@ -396,18 +398,7 @@ impl<'a, T: Buf> BitReader<'a, T> {
 
 	/// Read `n` bits (n <= 32) MSB-first, returning `short` if the buffer runs dry.
 	fn read(&mut self, n: u8, short: Error) -> Result<u32> {
-		let mut value = 0u32;
-		for _ in 0..n {
-			if self.bits_left == 0 {
-				if !self.buf.has_remaining() {
-					return Err(short);
-				}
-				self.current = self.buf.get_u8();
-				self.bits_left = 8;
-			}
-			self.bits_left -= 1;
-			value = (value << 1) | u32::from((self.current >> self.bits_left) & 1);
-		}
+		let value = bitstream_io::BitRead::read_var(&mut self.bits, n.into()).map_err(|_| short)?;
 		if let Some(record) = &mut self.record {
 			record.write(n, value);
 		}

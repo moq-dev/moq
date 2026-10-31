@@ -272,19 +272,33 @@ impl Split {
 	}
 }
 
-/// True if an SEI NAL carries a recovery-point message (payload type 6), the
+/// True if an SEI NAL carries a well-formed recovery-point message (payload type 6), the
 /// open-GOP random-access marker. The NAL header byte precedes the SEI RBSP.
 fn sei_has_recovery_point(nal: &[u8]) -> bool {
-	let Some(ebsp) = nal.get(1..) else {
+	use h264_reader::nal::sei::{
+		HeaderType, SeiMessage,
+		recovery_point::{RecoveryPoint, RecoveryPointError},
+	};
+	use h264_reader::rbsp::BitReaderError;
+
+	const SEI_RECOVERY_POINT: u32 = 6;
+
+	let Some(rbsp) = crate::codec::annexb::rbsp_bytes(nal, 1) else {
 		return false;
 	};
-	let rbsp = h264_parser::nal::ebsp_to_rbsp(ebsp);
-	let Ok(messages) = h264_parser::sei::SeiMessage::parse(&rbsp) else {
-		return false;
-	};
-	messages
-		.iter()
-		.any(|m| matches!(m.payload, h264_parser::sei::SeiPayload::RecoveryPoint { .. }))
+	crate::codec::annexb::sei_messages(&rbsp)
+		.filter(|&(kind, _)| kind == SEI_RECOVERY_POINT)
+		.any(|(_, payload)| {
+			let msg = SeiMessage {
+				payload_type: HeaderType::RecoveryPoint,
+				payload,
+			};
+			// Data after the fields is a payload extension, which a later spec revision may define.
+			matches!(
+				RecoveryPoint::read(&msg),
+				Ok(_) | Err(RecoveryPointError::ReaderError(BitReaderError::RemainingData))
+			)
+		})
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive)]
@@ -460,9 +474,9 @@ mod tests {
 		assert_eq!(tail[0].payload.as_ref(), annexb(&[sps, pps, idr]).freeze().as_ref());
 	}
 
-	/// A recovery-point SEI (payload type 6) with `recovery_frame_cnt == 0`,
-	/// followed by the recovery point's flag byte, then the RBSP stop bit.
-	const RECOVERY_SEI: &[u8] = &[0x06, 0x06, 0x02, 0x00, 0x40, 0x80];
+	/// A recovery-point SEI (payload type 6, size 1): `recovery_frame_cnt == 0`, clear flags,
+	/// and payload alignment in `0x84`, then the RBSP stop bit.
+	const RECOVERY_SEI: &[u8] = &[0x06, 0x06, 0x01, 0x84, 0x80];
 
 	/// Open-GOP broadcast H.264: the random-access point is a non-IDR I-slice
 	/// flagged by a recovery-point SEI, not an IDR. The splitter must still flag
@@ -506,6 +520,46 @@ mod tests {
 		assert_eq!(
 			second[0].payload.as_ref(),
 			annexb(&[aud, RECOVERY_SEI, sps, pps, islice]).freeze().as_ref()
+		);
+	}
+
+	/// A recovery point after a payload larger than h264-reader's 1 MiB `SeiReader` cap is still found.
+	#[test]
+	fn recovery_point_after_a_large_payload() {
+		let size = (1 << 20) + 1;
+		let mut sei = vec![0x06, 0x05]; // user_data_unregistered
+		sei.extend(std::iter::repeat_n(0xff, size / 255));
+		sei.push((size % 255) as u8);
+		sei.extend(std::iter::repeat_n(0x01, size));
+		sei.extend_from_slice(&RECOVERY_SEI[1..]);
+		assert!(sei_has_recovery_point(&sei));
+		assert!(!sei_has_recovery_point(&sei[..sei.len() - RECOVERY_SEI.len() + 1]));
+	}
+
+	/// A type-6 SEI without the recovery-point fields is not a random-access marker.
+	#[test]
+	fn malformed_recovery_point_is_ignored() {
+		// Empty payload, then a payload cut off inside `recovery_frame_cnt`.
+		assert!(!sei_has_recovery_point(&[0x06, 0x06, 0x00, 0x80]));
+		assert!(!sei_has_recovery_point(&[0x06, 0x06, 0x01, 0x00, 0x80]));
+		// A malformed message before a valid one doesn't hide it.
+		assert!(sei_has_recovery_point(&[0x06, 0x06, 0x00, 0x06, 0x01, 0x84, 0x80]));
+	}
+
+	/// An empty recovery-point SEI before a non-IDR slice leaves that slice a delta frame.
+	#[tokio::test(start_paused = true)]
+	async fn empty_recovery_point_slice_is_delta() {
+		let aud: &[u8] = &[0x09, 0x10];
+		let sei: &[u8] = &[0x06, 0x06, 0x00, 0x80];
+		let pslice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+
+		let mut split = Split::new();
+		let frames = decode_one(&mut split, &mut annexb(&[aud, sei, pslice]), ts());
+
+		assert_eq!(frames.len(), 1);
+		assert!(
+			!frames[0].keyframe,
+			"an empty recovery-point SEI must not flag a keyframe"
 		);
 	}
 
