@@ -6,19 +6,31 @@ if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
 fi
 
 all=0
+isolated=()
 if [[ $# == 1 && $1 == --all ]]; then
     all=1
-elif [[ $# != 0 ]]; then
-    echo 'usage: just rs media-features [--all]' >&2
-    exit 2
+    isolated=(moq-video moq-audio moq-transcode)
+else
+    while (($#)); do
+        if [[ $# -lt 2 || $1 != --package || ! $2 =~ ^moq-(video|audio|transcode)$ ]]; then
+            echo 'usage: just rs media-features [--all | --package CRATE ...]' >&2
+            exit 2
+        fi
+        isolated+=("$2")
+        shift 2
+    done
 fi
 
 targets=(--tests)
 if ((all)); then targets=(--all-targets); fi
 
+isolates() {
+    [[ " ${isolated[*]} " == *" $1 "* ]]
+}
+
 check() {
     echo "media features: cargo check $*"
-    cargo check --locked "${targets[@]}" "$@"
+    CARGO_BUILD_WARNINGS=deny cargo check --locked "${targets[@]}" "$@"
 }
 
 # Resolved for Linux, the platform every asserted dependency targets: moq-nvenc
@@ -55,13 +67,13 @@ for crate in openh264 openh264-sys2 wgpu cpal; do
 done
 cargo nextest run --locked -p moq-video --no-default-features
 
-if ((all)); then check -p moq-video --no-default-features --features openh264; fi
+if isolates moq-video; then check -p moq-video --no-default-features --features openh264; fi
 software=$(tree -p moq-video --no-default-features --features openh264)
 require_crate "$software" openh264 "moq-video software-only"
 require_crate "$software" openh264-sys2 "moq-video software-only"
 forbid_crate "$software" wgpu "moq-video software-only"
 
-if ((all)); then check -p moq-video --no-default-features --features nvidia; fi
+if isolates moq-video; then check -p moq-video --no-default-features --features nvidia; fi
 native=$(tree -p moq-video --no-default-features --features nvidia)
 require_crate "$native" moq-nvenc "moq-video native-only"
 for crate in openh264 openh264-sys2 wgpu; do
@@ -79,7 +91,7 @@ for crate in openh264 openh264-sys2 wgpu; do
 done
 cargo nextest run --locked -p moq-video --no-default-features --features vpx -E 'test(/::vpx::/)'
 
-if ((all)); then check -p moq-video --no-default-features --features render; fi
+if isolates moq-video; then check -p moq-video --no-default-features --features render; fi
 render=$(tree -p moq-video --no-default-features --features render)
 require_crate "$render" wgpu "moq-video rendering"
 for crate in openh264 openh264-sys2; do
@@ -92,12 +104,12 @@ for crate in openh264 openh264-sys2 wgpu moq-nvenc; do
     forbid_crate "$transcode_minimal" "$crate" "moq-transcode minimal"
 done
 
-if ((all)); then check -p moq-transcode --no-default-features --features openh264; fi
+if isolates moq-transcode; then check -p moq-transcode --no-default-features --features openh264; fi
 transcode_software=$(tree -p moq-transcode --no-default-features --features openh264)
 require_crate "$transcode_software" openh264 "moq-transcode software-only"
 forbid_crate "$transcode_software" wgpu "moq-transcode software-only"
 
-if ((all)); then check -p moq-transcode --no-default-features --features nvidia; fi
+if isolates moq-transcode; then check -p moq-transcode --no-default-features --features nvidia; fi
 transcode_native=$(tree -p moq-transcode --no-default-features --features nvidia)
 require_crate "$transcode_native" moq-nvenc "moq-transcode native-only"
 for crate in openh264 openh264-sys2 wgpu; do
@@ -108,7 +120,7 @@ check -p moq-audio --no-default-features --features pipewire
 audio_host=$(tree -p moq-audio --no-default-features --features pipewire)
 forbid_crate "$audio_host" cpal "moq-audio host-only"
 
-if ((all)); then check -p moq-audio --no-default-features --features capture,pipewire; fi
+if isolates moq-audio; then check -p moq-audio --no-default-features --features capture,pipewire; fi
 audio_capture=$(tree -p moq-audio --no-default-features --features capture,pipewire)
 require_crate "$audio_capture" cpal "moq-audio PipeWire capture"
 

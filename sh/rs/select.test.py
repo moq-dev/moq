@@ -72,15 +72,33 @@ class SelectTest(unittest.TestCase):
             self.assertIn("rs feature-shapes --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz", calls)
 
     def test_boundary_checks_follow_reverse_dependencies(self):
-        self.assertIn("rs tokio-features", self.selected("rs/moq-tokio/src/lib.rs"))
+        self.assertIn("rs tokio-features", self.selected("rs/moq-sock/src/lib.rs"))
         self.assertIn("rs net-features", self.selected("rs/moq-net/src/lib.rs"))
         self.assertIn("rs quic-features", self.selected("rs/moq-quic/src/lib.rs"))
-        self.assertIn("rs media-features", self.selected("rs/moq-video/src/lib.rs"))
+        self.assertIn("rs media-features", self.selected("rs/moq-mux/src/lib.rs"))
         calls = self.selected("rs/kio/src/lib.rs")
         for owner in ("tokio", "net", "quic", "media"):
             self.assertIn(f"rs {owner}-features", calls)
         calls = self.selected("rs/moq-stats/benches/producer_tick.rs")
         self.assertFalse(any(call.endswith("-features") for call in calls), calls)
+
+    def test_isolated_shapes_follow_their_own_source_and_manifest(self):
+        for action in ("check", "check-test", "lint"):
+            for owner in ("moq-tokio", "moq-video", "moq-audio", "moq-transcode"):
+                for source in ("src/added.rs", "Cargo.toml", "build.rs"):
+                    with self.subTest(action=action, owner=owner, source=source):
+                        calls = self.selected(f"rs/{owner}/{source}", action=action)
+                        expected = ("rs tokio-features --all" if owner == "moq-tokio"
+                                    else f"rs media-features --package {owner}")
+                        self.assertIn(expected, calls)
+        calls = self.selected("rs/moq-video/src/added.rs", "rs/moq-audio/src/added.rs")
+        self.assertIn("rs media-features --package moq-video --package moq-audio", calls)
+        calls = self.selected("Cargo.lock")
+        self.assertIn("rs tokio-features --all", calls)
+        self.assertIn("rs media-features --all", calls)
+        for path in ("rs/moq-video/benches/added.rs", "rs/moq-tokio/README.md"):
+            calls = self.selected(path)
+            self.assertFalse(any("-features --" in call for call in calls), calls)
 
     def test_loom_compiles_only_when_its_model_changes(self):
         for action in ("check", "check-test", "lint"):
@@ -259,7 +277,7 @@ class FeatureTest(unittest.TestCase):
             result = subprocess.run(["bash", f"sh/rs/{owner}-features.sh", *args],
                                     cwd=ROOT, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, expected_returncode, result.stdout + result.stderr)
-            return calls.read_text().splitlines()
+            return calls.read_text().splitlines() if calls.exists() else []
 
     def test_net_keeps_model_and_browser_contracts(self):
         boundary = self.trace("net")
@@ -298,6 +316,26 @@ class FeatureTest(unittest.TestCase):
         self.assertTrue(any(" --all-targets " in call for call in exhaustive))
         self.assertEqual([call for call in boundary if not call.startswith("check ")],
                          [call for call in exhaustive if not call.startswith("check ")])
+
+    def test_media_isolates_only_the_edited_owners(self):
+        boundary = self.trace("media")
+        exhaustive = self.trace("media", "--all")
+        for owners in (("moq-video",), ("moq-transcode",), ("moq-audio",),
+                       ("moq-video", "moq-audio")):
+            with self.subTest(owners=owners):
+                calls = self.trace("media", *(arg for owner in owners for arg in ("--package", owner)))
+                # Keep all dependency contracts and tests, adding only the
+                # edited owners' checks without Nightly's bench/example targets.
+                expected = [call.replace(" --all-targets ", " --tests ") for call in exhaustive
+                            if not call.startswith("check ") or
+                            call.replace(" --all-targets ", " --tests ") in boundary or
+                            any(f" -p {owner} " in call for owner in owners)]
+                self.assertEqual(calls, expected)
+
+    def test_media_rejects_unsupported_selections(self):
+        for args in (("--package",), ("--package", "moq-net"), ("--all", "--package", "moq-video")):
+            with self.subTest(args=args):
+                self.assertEqual(self.trace("media", *args, expected_returncode=2), [])
 
 
 CARGO_STUB = r"""#!/usr/bin/env bash

@@ -118,6 +118,13 @@ wants() {
     [[ "$packages" == ALL ]] || grep -qwE "$1" <<<"$names"
 }
 
+# Isolated permutations protect the edited crate's own feature gates. A
+# dependency edit still runs its consumers' boundary checks without rebuilding
+# every permutation of every consumer. Shared build inputs select them all.
+changed() {
+    [[ "$packages" == ALL ]] || grep -qE "^rs/$1/(src/|tests/|examples/|Cargo\\.toml$|build\\.rs$)" "$list"
+}
+
 case "$packages" in
     "")
         echo "rs: no crates affected; skipping."
@@ -156,8 +163,22 @@ case "$action" in
         if wants '(kio|moq-net)'; then just rs loom --no-run; fi
         if wants moq-net; then just rs net-features; fi
         if wants moq-quic; then just rs quic-features; fi
-        if wants moq-tokio; then just rs tokio-features; fi
-        if wants '(moq-video|moq-audio|moq-transcode)'; then just rs media-features; fi
+        if wants moq-tokio; then
+            isolated=()
+            if changed moq-tokio; then isolated=(--all); fi
+            just rs tokio-features "${isolated[@]}"
+        fi
+        if wants '(moq-video|moq-audio|moq-transcode)'; then
+            isolated=()
+            if [[ "$packages" == ALL ]]; then
+                isolated=(--all)
+            else
+                for crate in moq-video moq-audio moq-transcode; do
+                    if changed "$crate"; then isolated+=(--package "$crate"); fi
+                done
+            fi
+            just rs media-features "${isolated[@]}"
+        fi
         # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a
         # wasm32 pass checks it. moq-mux, moq-ffi, and moq-clock ride along in that pass, and
         # nothing depends on moq-ffi, so each has to reach it on its own.
