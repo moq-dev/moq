@@ -16,7 +16,12 @@ nothing on a direct connection.
 is a separate type (`moq_auth::PeerGrant`) so presenting one as `?jwt=`
 fails verification rather than widening a relay session. It carries the
 session's publish and subscribe patterns, a presenter public key (`cnf`),
-`iat`, and a short `exp`, and no routing identity. The presenter key is
+`iat`, and a short `exp`, and no routing identity. Landed in `moq-auth`:
+the type (a `root` plus patterns, `cnf.jwk` per RFC 7800), ES256/EdDSA-only
+`KeySet::sign_peer`/`verify_peer`, the public `KeySet::to_peer_set`, and
+`PeerGrant::binds` for the roster and proven-key checks, with the docs.
+What remains is the relay issuance, the wire, the possession proof, and
+`@moq/auth`. The presenter key is
 public on the roster, so a copied JWT is not enough: the presenter proves
 possession of the matching private key on the direct AUTH stream. A roster peer that
 received someone else's grant cannot replay it.
@@ -42,9 +47,13 @@ Verification on a direct session: the opener writes `AUTH { Token (b) }`
 with the JWT and proves possession of the `cnf` key bound to this session.
 The proof prototype ([#6310](https://github.com/moq-dev/moq/pull/6310)) found
 that mutual fresh nonces alone let a keyless intermediary forward both honest
-exchanges, so the proof binds an authenticated transport exporter or
-authenticates every routing control the session sends; settle which here and
-add replay tests before the wire is fixed. The
+exchanges. ✅ Decided 2026-10-30 (maintainer): the presenter signs each
+routing control the session sends with the `cnf` key, over a session
+transcript. This works over WebRTC data channels, which expose no DTLS
+exporter, and keeps one code path and one set of replay tests. Binding a
+transport exporter was rejected: browsers expose none, so it covered only
+native QUIC pairs, and a hybrid would need both. The wire work defines the
+transcript and adds the replay tests before the wire is fixed. The
 receiver verifies the relay signature against the JWKS from its own
 AUTH_KEYS, checks `exp`, matches `cnf` against the presenter key in the
 peer's roster entry, and requires `cnf` to equal the key the session proved.
@@ -68,8 +77,8 @@ rather than the auth line (decided in the 2026-09-30 audit).
 
 Docs: `doc/bin/relay/auth.md` states that peer grants need an asymmetric
 key, that HS256 operators get none, and that the public JWKS is not a
-secret. Tests: ES256 round trip; an HS256-only relay issues nothing; a
-peer grant fails `Claims` verification; a key that does not match the
+secret; update its last paragraph once the relay issues them. Tests
+remaining, on the wire: a key that does not match the
 peer's roster entry is refused; a
 grant whose `cnf` is not the session's proven key is refused; a grant copied onto another
 session without the private key is refused; copying both grant and a prior

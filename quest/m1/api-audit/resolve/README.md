@@ -52,7 +52,6 @@ Wire: none.
 
 ## Required
 
-- [The carla demo pins its driver epoch](/quest/m1/api-audit/resolve/callers.md) - the demo's driver watcher requests each run pinned to its announced epoch
 
 ## Related
 
