@@ -97,6 +97,12 @@ export interface Advertised {
 	readonly route: Route;
 	/** The paths a scoped route may serve beneath its prefix, relative like its key; unset for the whole subtree. */
 	readonly claim?: Path.Patterns;
+	/**
+	 * The prefix the route was advertised at, when a scope's projection merged several covering
+	 * prefixes under one key; unset when the key is its prefix. Supersession compares only routes
+	 * of one prefix.
+	 */
+	readonly prefix?: Path.Valid;
 }
 
 /** What names a stream: an advertisement, and the identity its route serves. */

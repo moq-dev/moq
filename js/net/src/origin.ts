@@ -157,7 +157,8 @@ class Scope {
 			}
 			// Hold the empty path's place in the order until every covering prefix is known.
 			if (covering.length === 0) out.set(Path.empty(), []);
-			covering.push([path, visible]);
+			// Each keeps its own prefix, so supersession never compares across the merged prefixes.
+			covering.push([path, visible.map((value) => ({ ...value, prefix: path }))]);
 		}
 		if (covering.length > 0) {
 			covering.sort(([a], [b]) => b.length - a.length);
@@ -1065,8 +1066,13 @@ class OriginState {
 		if (!local || !this.local.peek()?.has(path)) return false;
 		if (!entry || !this.routes.peek()?.get(path)?.includes(entry)) return true;
 		const remote = entry.route.peek();
-		// Within one identity only the higher epoch is eligible, however cheap the other is.
-		if (superseded(local, [remote])) return false;
+		// Within one identity only the higher epoch is eligible, however cheap the other is, so
+		// any route at the path the request could take supersedes the local broadcast, not only
+		// the best one.
+		const rivals = (this.routes.peek()?.get(path) ?? [])
+			.filter((candidate) => candidate.server && candidate.scope.matches(path))
+			.map((candidate) => candidate.route.peek());
+		if (superseded(local, rivals)) return false;
 		if (superseded(remote, [local])) return true;
 		return compareRoutes(local, remote) <= 0;
 	}

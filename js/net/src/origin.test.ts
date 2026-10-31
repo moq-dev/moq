@@ -6,7 +6,7 @@ import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } fro
 import { StreamCode, StreamError } from "./error.ts";
 import { HopSchema, Route } from "./hop.ts";
 import * as Identity from "./identity.ts";
-import { chainHash, hooks, spreadHash } from "./internal.ts";
+import { chainHash, hooks, presented, spreadHash } from "./internal.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
@@ -2340,6 +2340,47 @@ test("a higher epoch of a dynamic route supersedes a cheaper local broadcast of 
 	dynamic.close();
 	localPublication.broadcast.close();
 	served.close();
+	origin.close();
+});
+
+test("a higher epoch that is not the best route still supersedes a local broadcast", async () => {
+	const origin = new Producer();
+	const path = Path.from("camera");
+	const stale = Identity.random();
+	const localPublication = origin.createBroadcast(path);
+	localPublication.announce({ identity: stale, epoch: 1n, cost: 0n });
+	const newer = origin.requestsRoute(path, { identity: stale, epoch: 2n, cost: 10n });
+	const other = origin.requestsRoute(path, { identity: Identity.random(), cost: 5n });
+	const served = new BroadcastProducer();
+	const requests = other.requested();
+	const request = origin.consume().request(path);
+	// The stale local broadcast is ineligible, so the cheapest eligible route answers.
+	const asked = await requests.next();
+	hooks.acceptRequest(asked.value, served);
+	await settle();
+	expect(readsFrom(request.active.peek(), served)).toBe(true);
+	request.close();
+	await requests.return?.();
+	other.close();
+	newer.close();
+	localPublication.broadcast.close();
+	served.close();
+	origin.close();
+});
+
+test("a scope's merged covering prefixes never supersede across prefixes", async () => {
+	const origin = new Producer();
+	const identity = Identity.random();
+	const room = origin.requestsRoute(Path.from("room"), { identity, epoch: 2n });
+	const video = origin.requestsRoute(Path.from("room/video"), { identity, epoch: 1n });
+	const reader = origin.scope(Path.from("room/video"), new Path.Patterns([Path.Pattern.all()])).consume();
+	await settle();
+	const table = wireOf(reader).advertised.peek();
+	if (!table) throw new Error("expected a table");
+	// The more specific prefix wins, whatever epoch the covering one carries.
+	expect(presented(Path.empty(), table, () => true).get(Path.empty())?.route.epoch).toBe(1n);
+	video.close();
+	room.close();
 	origin.close();
 });
 

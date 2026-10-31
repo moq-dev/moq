@@ -112,13 +112,18 @@ export function presented(
  * candidate supersedes. Supersession is decided among what the reader may see, so a higher epoch
  * it cannot see never hides a route it can.
  */
-export function firstEligible<T extends { readonly route: Route }>(
+export function firstEligible<T extends { readonly route: Route; readonly prefix?: Path.Valid }>(
 	candidates: readonly T[],
 	admits: (candidate: T) => boolean = () => true,
 ): T | undefined {
 	const admitted = candidates.filter(admits);
-	const routes = admitted.map((candidate) => candidate.route);
-	return admitted.find((candidate) => !superseded(candidate.route, routes));
+	return admitted.find(
+		(candidate) =>
+			!superseded(
+				candidate.route,
+				admitted.filter((other) => other.prefix === candidate.prefix).map((other) => other.route),
+			),
+	);
 }
 
 /** Whether the announced prefix's subtree overlaps `scope`. */
