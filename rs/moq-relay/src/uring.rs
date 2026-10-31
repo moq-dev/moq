@@ -479,6 +479,11 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		moq_net::transport::MIN_RECEIVE_WINDOW
 	);
 
+	anyhow::ensure!(
+		quic.controller.is_none(),
+		"the io_uring runtime cannot run a custom congestion controller; drop quic.controller or use the tokio runtime"
+	);
+
 	let mut transport = moq_uring::quic::transport::Config::default();
 	#[cfg(feature = "qlog")]
 	if let Some(dir) = quic.qlog.as_deref() {

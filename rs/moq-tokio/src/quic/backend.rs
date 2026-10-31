@@ -26,7 +26,10 @@ fn transport(quic: &Resolved, role: &str) -> Result<driver::transport::Config> {
 	if let Some(gso) = quic.gso {
 		transport.segmentation_offload = gso;
 	}
-	transport.congestion = congestion_factory(quic.congestion());
+	transport.congestion = match &quic.controller {
+		Some(controller) => controller.0.clone(),
+		None => congestion_factory(quic.congestion()),
+	};
 	transport.validate()?;
 	apply_qlog(&mut transport, quic, role)?;
 	Ok(transport)
@@ -1060,6 +1063,91 @@ mod tests {
 		})
 		.await
 		.expect("test timed out");
+	}
+
+	/// A factory that counts the controllers it builds, each a BBRv3.
+	#[derive(Default)]
+	struct Counted(std::sync::atomic::AtomicUsize);
+
+	impl moq_congestion::ControllerFactory for Counted {
+		fn build(self: Arc<Self>, init: moq_congestion::Init) -> Box<dyn moq_congestion::Controller> {
+			self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+			Arc::new(moq_congestion::Bbr3Config::default()).build(init)
+		}
+	}
+
+	/// Loopback test: an application's controller runs both ends' live connections in
+	/// place of the configured family, here CUBIC.
+	#[tokio::test]
+	async fn a_custom_controller_reaches_the_live_connection() {
+		let server_config = listen::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			tls: crate::tls::Listen {
+				generate: vec!["localhost".into()],
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let server_factory = Arc::new(Counted::default());
+		let server_quic = crate::quic::Config {
+			congestion_control: Some(CongestionControl::Loss),
+			controller: Some(crate::quic::Controller(server_factory.clone())),
+			..Default::default()
+		};
+
+		let tls = server_config.tls.load().unwrap();
+		let server = Server::new(Options {
+			config: server_config,
+			quic: server_quic,
+			member: None,
+			tls,
+		})
+		.expect("server init");
+		let addr = server.local_addr();
+
+		let accepted = tokio::spawn(async move {
+			let incoming = server.accept().await.expect("no incoming connection");
+			let conn = incoming.accept().expect("accept").await.expect("handshake");
+			is_bbr3(&conn)
+		});
+
+		let mut tls_config = crate::tls::Connect::default();
+		tls_config.insecure = Some(true);
+		let client_config = connect::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			tls: tls_config,
+			..Default::default()
+		};
+
+		let client_factory = Arc::new(Counted::default());
+		let client_quic = crate::quic::Config {
+			congestion_control: Some(CongestionControl::Loss),
+			controller: Some(crate::quic::Controller(client_factory.clone())),
+			..Default::default()
+		};
+
+		let tls = client_config.tls.build().expect("tls config");
+		let client = Client::new(&client_config, &client_quic).expect("client init");
+		let url: Url = format!("moqt://127.0.0.1:{}", addr.port()).parse().unwrap();
+
+		tokio::time::timeout(Duration::from_secs(5), async move {
+			let session = client
+				.connect(&tls, url.into(), &moq_net::Versions::default())
+				.await
+				.expect("connect failed");
+
+			assert!(is_bbr3(&session), "client connection is not running its own controller");
+			assert!(
+				accepted.await.expect("server task panicked"),
+				"server connection is not running its own controller"
+			);
+		})
+		.await
+		.expect("test timed out");
+
+		assert!(client_factory.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
+		assert!(server_factory.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
 	}
 
 	/// Whether a live connection is running BBRv3.
