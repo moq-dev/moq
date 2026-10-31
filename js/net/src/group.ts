@@ -582,14 +582,12 @@ export class Producer {
 	}
 
 	#writeFrame(frame: Frame, inflated?: number) {
-		// Refuse further writes before inspecting or changing committed content.
-		if (this.#state.closed.peek() !== undefined) throw new Error("group is closed");
 		// A plain frame written whole is the writer's own buffer, at any size.
 		if ((this.#state.flate && frame.payload.byteLength > MAX_FRAME_BYTES) || (inflated ?? 0) > MAX_FRAME_BYTES)
 			throw new FrameTooLarge();
+		const commits = this.#admit(frame);
 		if (inflated !== undefined && (!this.#state.flate || !Number.isSafeInteger(inflated) || inflated < 0))
 			throw new ProtocolViolation("unexpected inflated frame size");
-		const commits = this.#admit(frame);
 
 		const arrived = now();
 		frame = new Landed(frame, arrived);
@@ -1353,9 +1351,10 @@ export class Consumer {
 		return front !== undefined && !(front instanceof Chunked && front.done.peek() === undefined);
 	}
 
-	// Take the next frame: whole, or `streaming` as chunks once it is a chunked frame, even
-	// one still being written. A whole read leaves an incomplete frame buffered.
-	#readBufferedFrame(compressed = false, streaming = false): ReadGroupFrame | undefined {
+	// Take the next frame whole, or as chunks when it is a chunked frame `streaming` reads, or
+	// one still being written that a `collect` read gathers itself. A plain whole read leaves an
+	// incomplete frame buffered.
+	#readBufferedFrame(compressed = false, take: "whole" | "collect" | "stream" = "whole"): ReadGroupFrame | undefined {
 		const frames = this.#bufferedFrames();
 		const closed = this.#state.closed.peek();
 		if (closed instanceof StreamError && closed.code === StreamCode.Evicted) {
@@ -1366,7 +1365,7 @@ export class Consumer {
 		const front = frames.first;
 		if (!front) return undefined;
 		if (front instanceof Chunked) {
-			if (streaming) {
+			if (take === "stream" || (take === "collect" && front.done.peek() === undefined)) {
 				frames.shift();
 				const sequence = this.#state.start++;
 				this.#streamed = front;
@@ -1506,9 +1505,7 @@ export class Consumer {
 
 			// A whole read streams a frame still being written into its own buffer, rather
 			// than waiting for it whole while the group sheds its head.
-			const read =
-				this.#readBufferedFrame(compressed, streaming) ??
-				(streaming ? undefined : this.#readBufferedFrame(compressed, true));
+			const read = this.#readBufferedFrame(compressed, streaming ? "stream" : "collect");
 			if (read) {
 				if (read.sequence < from) {
 					if (read.chunks) this.#streamed = undefined;
