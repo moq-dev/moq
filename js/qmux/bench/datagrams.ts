@@ -49,7 +49,7 @@ async function measure(backlog: number): Promise<number> {
 	return elapsed;
 }
 
-console.log("backlog,median_us_per_read");
+console.log("backlog,us_per_read");
 for (const backlog of [1, 32, 1024, 16384]) {
 	const samples: number[] = [];
 	for (let run = 0; run < 7; run++) samples.push(await measure(backlog));
