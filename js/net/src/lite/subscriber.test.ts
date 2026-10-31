@@ -2271,9 +2271,10 @@ test("an empty START remains resolved when its range widens", async () => {
 });
 
 // A lite-07 publisher FINs a bounded subscription without SUBSCRIBE_END once it covered the range,
-// which ends the subscription cleanly rather than violating the protocol. Covering a range is
-// not ending the track, so no end is declared.
-test("a lite-07 publisher FIN ends a covered bounded subscription", async () => {
+// which is no protocol violation. Covering a range is not ending the track, so the copy stays for
+// its readers, as the Rust copy does: they park, and widening the range asks again on the same
+// track. Decided 2026-10-31 (maintainer).
+test("a lite-07 publisher FIN keeps a covered bounded subscription's copy", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
@@ -2297,9 +2298,18 @@ test("a lite-07 publisher FIN ends a covered bounded subscription", async () => 
 		);
 		for (const chunk of chunks) stream.inbound.enqueue(chunk);
 		stream.inbound.close();
-		expect(await track.closed).toBeNull();
-		await expect(track.finished()).rejects.toThrow("track closed before its end was known");
 		await drainReactions();
+		expect(track.closed.peek()).toBeUndefined();
+		expect(streams).toHaveLength(2);
+
+		track.update({ ranges: [{ start: { absolute: 0 }, end: { absolute: 3 } }] });
+		const reopened = await opened(2);
+		await reopened.reading;
+		const reader = new Reader(undefined, new Uint8Array(Buffer.concat(reopened.written)), version);
+		expect(await reader.u53()).toBe(StreamId.Subscribe);
+		const msg = await Subscribe.decode(reader, version);
+		expect(msg.ranges).toEqual([{ start: { absolute: 0 }, end: { absolute: 3 } }]);
+		expect(track.closed.peek()).toBeUndefined();
 		expect(closes).toEqual([]);
 	} finally {
 		track.close();

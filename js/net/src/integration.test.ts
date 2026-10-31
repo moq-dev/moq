@@ -466,10 +466,69 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 				],
 			})
 			.ordered();
+		// Covering the ranges ends the subscription upstream, not the reader, which parks.
 		const got: number[] = [];
-		for (let group = await reader.nextGroup(); group; group = await reader.nextGroup()) got.push(group.sequence);
+		for (let i = 0; i < 4; i++) got.push((await reader.nextGroup())?.sequence ?? -1);
 		expect(got).toEqual([1, 2, 7, 8]);
+		const parked = new Promise((resolve) => setTimeout(() => resolve("parked"), 50));
+		expect(await Promise.race([reader.nextGroup(), parked])).toBe("parked");
 		reader.close();
+	} finally {
+		remote.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+	}
+});
+
+// A lite-07 publisher ends a bounded subscription once it covered the range, releasing its
+// demand, and the subscriber keeps the copy: the reader parks rather than ends, the same range
+// reads again from the cache, and a wider one subscribes again for the rest. Mirrors the Rust
+// `a_covered_bounded_subscription_ends_on_lite07`; decided 2026-10-31 (maintainer).
+test("integration: lite-07 keeps a covered bounded subscription's copy", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	for (const sequence of [0, 1, 2, 4, 5]) producer.createGroup(sequence).finish();
+
+	const remote = wireOf(client).consume(Path.from("test"));
+	const bounded = (end: number) =>
+		remote
+			.track("video")
+			.subscribe({
+				maxDelay: Milli(60_000),
+				order: "ascending",
+				ranges: [{ start: { absolute: 1 }, end: { absolute: end } }],
+			})
+			.ordered();
+	const read = async (reader: ReturnType<typeof bounded>, count: number) => {
+		const got: number[] = [];
+		for (let i = 0; i < count; i++) got.push((await reader.nextGroup())?.sequence ?? -1);
+		return got;
+	};
+	try {
+		const reader = bounded(3);
+		expect(await read(reader, 2)).toEqual([1, 2]);
+		// The publisher's demand ends with the covered subscription.
+		while (producer.subscription.peek() !== undefined) await producer.subscription.changed();
+		const parked = new Promise((resolve) => setTimeout(() => resolve("parked"), 50));
+		expect(await Promise.race([reader.nextGroup(), parked])).toBe("parked");
+
+		const again = bounded(3);
+		expect(await read(again, 2)).toEqual([1, 2]);
+		expect(producer.subscription.peek()).toBeUndefined();
+
+		const wider = bounded(6);
+		expect(await read(wider, 4)).toEqual([1, 2, 4, 5]);
+		reader.close();
+		again.close();
+		wider.close();
 	} finally {
 		remote.close();
 		broadcast.close();

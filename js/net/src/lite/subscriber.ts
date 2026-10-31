@@ -1102,21 +1102,25 @@ export class Subscriber {
 				break;
 			}
 
-			// A publisher that covered the range before reading an update widening it sent fewer
-			// groups than the demand asks for, so the caller asks again for the rest. Otherwise
-			// only a received SUBSCRIBE_END, or before lite-05 a FIN, declares the track's end:
-			// a range covered or a subscription nobody wants anymore is a released copy, not
-			// finished content.
-			const reopen = short && reason_ !== idle && hooks.trackReleased(producer).peek() === undefined;
-			if (!reopen) {
-				if (tailSettled && entry.finished) producer.finish();
-				hooks.releaseTrack(producer);
-			}
 			// A settled lite07 tail acknowledges completion with FIN, without cancelling
 			// the publisher's already-finished receive half.
 			if (tailSettled && waitsForSubscriberFin(this.version)) stream.writer.close();
 			else stream.close();
 			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${producer.name}`);
+
+			// A publisher that covered the range before reading an update widening it sent fewer
+			// groups than the demand asks for, so the caller asks again for the rest. A lite-07
+			// FIN without SUBSCRIBE_END that covered the demand leaves the copy to its readers
+			// until the demand moves past it. Otherwise only a received SUBSCRIBE_END, or before
+			// lite-05 a FIN, declares the track's end: a subscription nobody wants anymore is a
+			// released copy, not finished content.
+			const live = reason_ !== idle && hooks.trackReleased(producer).peek() === undefined;
+			const covered = live && tailSettled && entry.end === undefined && hasRanges(this.version);
+			const reopen = live && (short || (covered && (await this.#parkCovered(entry))));
+			if (!reopen) {
+				if (tailSettled && entry.finished) producer.finish();
+				hooks.releaseTrack(producer);
+			}
 			return reopen;
 		} catch (err) {
 			const e = await sessionCause(this.#quic, err);
@@ -1128,6 +1132,21 @@ export class Subscriber {
 			answering?.removeEventListener("abort", replaced);
 			entry.held?.close();
 			this.#subscribes.delete(id);
+		}
+	}
+
+	// Keep a copy whose lite-07 publisher covered its bounded ranges, as the Rust copy does: its
+	// readers park rather than end, the cache answers the same ranges, and an update can still
+	// widen them. Resolves true once the demand asks for groups it lacks, to ask again on the
+	// same track, and false once nobody wants the track or it closed.
+	async #parkCovered(entry: SubscribeEntry): Promise<boolean> {
+		const producer = entry.track;
+		const demand = producer.demand();
+		const released = hooks.trackReleased(producer);
+		for (;;) {
+			if (released.peek() !== undefined || isAbandoned(demand)) return false;
+			if (!this.#demandCovered(entry)) return true;
+			await race([Signal.race(producer.subscription, demand.wanted, hooks.demandReleased(demand)), released]);
 		}
 	}
 

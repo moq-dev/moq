@@ -295,7 +295,10 @@ Ranges are both a request and a filter. A subscriber reads only the groups its
 own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
-served. A group they cover below the live feed that the cache lacks (evicted
+served. A reader that has read every group its ranges cover waits rather than
+ends, since the track goes on: a moq-lite-07 publisher ends a bounded
+subscription once it covered it, and the copy stays cached for the same ranges
+until a wider demand asks again. A group they cover below the live feed that the cache lacks (evicted
 before the subscriber first looked for it, skipped, or below where the feed
 starts) is asked of the track's dynamic handler
 as a fill, which a relay serves by fetching upstream one group at a time, skipping
