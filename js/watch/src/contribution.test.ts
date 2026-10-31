@@ -132,6 +132,31 @@ it("reads an unavailable contribution as offline without touching the parent", a
 	}
 });
 
+it("reports a contribution outside the origin's scope as an error, leaving the parent live", async () => {
+	const origin = new Origin.Producer();
+	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*")]));
+	publish(scoped, "room/main.hang");
+	const parent = new Broadcast({
+		origin: scoped,
+		name: Path.from("room/main.hang"),
+		catalogFormat: "manual",
+		catalog: Catalog.RootSchema.parse({ contributions: { outside: { broadcast: "../other/extra.hang" } } }),
+		follow: false,
+	});
+	const owner = new Effect();
+	try {
+		const child = parent.contribution(owner, "outside");
+		await settle();
+		expect(child.out.active.peek()).toBeUndefined();
+		expect(child.out.error.peek()?.message).toContain("outside the origin scope");
+		expect(parent.out.status.peek()).toBe("live");
+	} finally {
+		owner.close();
+		parent.close();
+		origin.close();
+	}
+});
+
 it("tracks the contribution entry without reopening it on unrelated catalog updates", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");

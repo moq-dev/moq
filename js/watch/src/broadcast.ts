@@ -283,7 +283,15 @@ export class Broadcast {
 
 		const resolve = effect.get(this.#resolve);
 		if (resolve) {
-			effect.set(this.#out.active, resolve(effect), undefined);
+			// Like the origin request below, a path outside the origin's scope throws.
+			let active: Moq.Broadcast.Consumer | undefined;
+			try {
+				active = resolve(effect);
+			} catch (err) {
+				effect.set(this.#out.error, err instanceof Error ? err : new Error(String(err)), undefined);
+				return;
+			}
+			effect.set(this.#out.active, active, undefined);
 			return;
 		}
 

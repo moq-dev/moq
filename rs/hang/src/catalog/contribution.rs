@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 pub struct Contribution {
 	/// The contribution's broadcast, relative to the broadcast serving this catalog.
 	///
-	/// Resolve it with [`Path::resolve`](moq_net::Path::resolve): a reference that walks
+	/// Resolve it with [`Path::try_resolve`](moq_net::Path::try_resolve): a reference that walks
 	/// above the root names no broadcast, so the catalog is rejected.
 	pub broadcast: moq_net::path::Relative,
 
