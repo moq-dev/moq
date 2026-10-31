@@ -58,9 +58,16 @@ pub(crate) struct Scratch {
 	last_capacity: usize,
 	/// `None` for a one-off diff, where nothing would ever read it back.
 	memo: Option<Memo>,
+	/// The memoized encoder's buffer for the value it hands to [`serialized`].
+	pub(crate) serialized: Vec<u8>,
 }
 
 impl Scratch {
+	/// Whether this scratch memoizes root entries, which is what [`serialized`] diffs through.
+	pub(crate) fn is_memoized(&self) -> bool {
+		self.memo.is_some()
+	}
+
 	/// Scratch for a long-lived encoder, which memoizes the root's entries across diffs.
 	pub(crate) fn memoized() -> Self {
 		Self {
@@ -203,6 +210,70 @@ pub(crate) fn bytes(
 			depth: 0,
 		},
 	);
+	patch(old, node, &forced, scratch)
+}
+
+/// Diff a value that `serde_json` already wrote to `new`, reading its root entries from those bytes.
+///
+/// This is the memoized encoder's path. Its caller serializes the value with its own concrete
+/// `serde_json` writer, which the snapshot path compiles anyway, so a table's rows are written
+/// without going through the type-erased diff serializer that [`bytes`] would. Every entry is then
+/// settled by the [`Memo`]. Without a memo, or with a root that is not an object, this parses `new`
+/// and diffs that instead.
+pub(crate) fn serialized(old: &Value, new: &[u8], scratch: &RefCell<Scratch>) -> Result<PatchBytes, String> {
+	if new.first() != Some(&b'{') || scratch.borrow().memo.is_none() {
+		let new: Value = serde_json::from_slice(new).map_err(|err| err.to_string())?;
+		return bytes(old, &new, scratch);
+	}
+	if let Some(memo) = scratch.borrow_mut().memo.as_mut() {
+		memo.next.clear();
+	}
+	let forced = Cell::new(false);
+	let differ = Differ {
+		baseline: old,
+		present: true,
+		forced: &forced,
+		scratch,
+		depth: 0,
+	};
+	let node = entries(differ, new);
+	patch(old, node, &forced, scratch)
+}
+
+/// Feed each root entry of the compact object `new` to the root's [`MapDiff`].
+fn entries(differ: Differ<'_>, new: &[u8]) -> Result<Node, Error> {
+	let malformed = || Error("serde_json emitted a malformed object".into());
+	let mut map = differ.serialize_map(None)?;
+	let mut index = 1;
+	while new.get(index) != Some(&b'}') {
+		let key_end = skip(new, index).ok_or_else(malformed)?;
+		let key = &new[index..key_end];
+		let inner = key.get(1..key.len() - 1).ok_or_else(malformed)?;
+		let key: std::borrow::Cow<'_, str> = match inner.contains(&b'\\') {
+			false => std::str::from_utf8(inner).map_err(|_| malformed())?.into(),
+			true => serde_json::from_slice::<String>(key)
+				.map_err(|err| Error(err.to_string()))?
+				.into(),
+		};
+		let start = key_end + 1;
+		let end = skip(new, start).ok_or_else(malformed)?;
+		map.value_bytes(&key, &new[start..end])?;
+		index = match new.get(end) {
+			Some(b',') => end + 1,
+			Some(b'}') => end,
+			_ => return Err(malformed()),
+		};
+	}
+	map.finish()
+}
+
+/// Turn the root's verdict into the patch bytes left in its buffer.
+fn patch(
+	old: &Value,
+	node: Result<Node, Error>,
+	forced: &Cell<bool>,
+	scratch: &RefCell<Scratch>,
+) -> Result<PatchBytes, String> {
 	match node {
 		Ok(Node::Same) => Ok(PatchBytes {
 			patch: Vec::new(),
@@ -749,11 +820,37 @@ struct MapDiff<'a> {
 impl MapDiff<'_> {
 	/// Diff one entry, through the [`Memo`] when there is one.
 	fn value<T: Serialize + ?Sized>(&mut self, key: &str, value: &T) -> Result<(), Error> {
-		let (node, existed) = match self.memoized(key, value)? {
+		self.value_with(
+			key,
+			|bytes| serde_json::to_writer(bytes, value).map_err(|err| Error(err.to_string())),
+			|child| value.serialize(child),
+		)
+	}
+
+	/// Diff one root entry that `serde_json` already serialized, which only the [`Memo`] can read.
+	fn value_bytes(&mut self, key: &str, value: &[u8]) -> Result<(), Error> {
+		self.value_with(
+			key,
+			|bytes| {
+				bytes.extend_from_slice(value);
+				Ok(())
+			},
+			|_| Err(Error("a serialized entry needs a memoized root".into())),
+		)
+	}
+
+	/// Diff one entry: `write` serializes it for the [`Memo`], and `walk` diffs it without one.
+	fn value_with(
+		&mut self,
+		key: &str,
+		write: impl FnOnce(&mut Vec<u8>) -> Result<(), Error>,
+		walk: impl FnOnce(Differ<'_>) -> Result<Node, Error>,
+	) -> Result<(), Error> {
+		let (node, existed) = match self.memoized(key, write)? {
 			Memoized::Hit(node) => (node, true),
 			Memoized::Off => {
 				let (child, existed) = self.differ.child(key);
-				(value.serialize(child)?, existed)
+				(walk(child)?, existed)
 			}
 			Memoized::Miss => {
 				// Diff the bytes the memo just recorded rather than serializing `value` again, so the
@@ -779,7 +876,11 @@ impl MapDiff<'_> {
 	/// Equal bytes mean the baseline holds exactly the value they parse to, so the entry is unchanged
 	/// without walking its subtree. Unequal bytes of the same shape are diffed by [`lockstep`], with
 	/// the patch left in the child buffer like any other [`Node::Diff`].
-	fn memoized<T: Serialize + ?Sized>(&mut self, key: &str, value: &T) -> Result<Memoized, Error> {
+	fn memoized(
+		&mut self,
+		key: &str,
+		write: impl FnOnce(&mut Vec<u8>) -> Result<(), Error>,
+	) -> Result<Memoized, Error> {
 		if self.differ.depth != 0 {
 			return Ok(Memoized::Off);
 		}
@@ -795,7 +896,7 @@ impl MapDiff<'_> {
 		}
 		next.bytes.extend_from_slice(key.as_bytes());
 		let key_end = next.bytes.len();
-		serde_json::to_writer(&mut next.bytes, value).map_err(|err| Error(err.to_string()))?;
+		write(&mut next.bytes)?;
 		next.ends.push((key_end, next.bytes.len()));
 
 		let Some(index) = current.find(key.as_bytes(), &mut self.memo_cursor) else {

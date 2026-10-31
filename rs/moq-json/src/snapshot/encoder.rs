@@ -422,9 +422,23 @@ impl<T: Serialize> Encoder<T> {
 			return self.encode_snapshot(value).map(Some);
 		};
 
-		// Diff straight off `T`, without building a full `Value` for the new value first.
-		let crate::diff::PatchBytes { patch, forced_snapshot } =
-			crate::diff::bytes(last, value, &self.scratch).map_err(crate::Error::Json)?;
+		// Diff without building a full `Value` for the new value first. The memoized encoder writes
+		// `T` with `serde_json` (the same writer a snapshot uses) and diffs those bytes entry by entry,
+		// which keeps a table's per-row serialization monomorphic. Without the memo, the type-erased
+		// diff walks `T` directly.
+		let scratch = self.scratch.get_mut();
+		let diffed = if scratch.is_memoized() {
+			let mut serialized = std::mem::take(&mut scratch.serialized);
+			serialized.clear();
+			let diffed = serde_json::to_writer(&mut serialized, value)
+				.map_err(crate::Error::from)
+				.and_then(|()| crate::diff::serialized(last, &serialized, &self.scratch).map_err(crate::Error::Json));
+			self.scratch.get_mut().serialized = serialized;
+			diffed
+		} else {
+			crate::diff::bytes(last, value, &self.scratch).map_err(crate::Error::Json)
+		};
+		let crate::diff::PatchBytes { patch, forced_snapshot } = diffed?;
 
 		// An empty object patch with no forced null means the value is unchanged: encode nothing.
 		if !forced_snapshot && patch.is_empty() {
@@ -1131,8 +1145,13 @@ mod test {
 			let mut plain = Encoder::<Rows>::new(config);
 			plain.scratch = RefCell::new(crate::diff::Scratch::default());
 
+			// Seed 2's keys need escaping, which the memoized encoder reads back out of its bytes.
+			let key = |i: u64| match seed {
+				2 => format!("r\"o\\w\n\u{e9}-{i:03}"),
+				_ => format!("row-{i:03}"),
+			};
 			let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ seed);
-			let mut rows: Vec<(String, Value)> = (0..40).map(|i| (format!("row-{i:03}"), rng.row())).collect();
+			let mut rows: Vec<(String, Value)> = (0..40).map(|i| (key(i), rng.row())).collect();
 			let mut emitted = 0;
 			for tick in 0..400 {
 				for row in rows.iter_mut() {
@@ -1145,7 +1164,7 @@ mod test {
 					rows.remove(index);
 				}
 				if rng.below(3) == 0 {
-					rows.push((format!("row-{:03}", 40 + rng.below(40)), rng.row()));
+					rows.push((key(40 + rng.below(40)), rng.row()));
 				}
 				rows.sort_by(|a, b| a.0.cmp(&b.0));
 				rows.dedup_by(|a, b| a.0 == b.0);
