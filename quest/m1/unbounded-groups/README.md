@@ -156,4 +156,4 @@ covered only at the model layer (maintainer, 2026-10-30).
 - [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md) - `@moq/net` reads a huge frame as chunks and mirrors the byte-offset wire
 - [Log lock profile](/quest/m1/unbounded-groups/log-lock-profile.md) - a lock profile on a perf host confirms the epoch-based `kio::log` cut `GroupState` contention
 - [Compressed frames have no size cap and inflate as a bounded stream](/quest/m1/unbounded-groups/compressed-stream.md) - A compressed frame of any size publishes and is received in Rust and `@moq/net`, like a plain one
-- [FETCH egress and ingest stream large frames without buffering](/quest/m1/unbounded-groups/fetch-stream.md) - `@moq/net` serves a moq-transport FETCH object by object as it reads them, never collecting a requested group slice whole, so a FETCH of a group with large frames holds
+- [FETCH egress and ingest stream large frames without buffering](/quest/m1/unbounded-groups/fetch-stream.md) - `@moq/net` serves a moq-transport FETCH object by object as it reads them, never collecting a requested group slice whole, so a FETCH of a group with large frames holds no more than the group tail

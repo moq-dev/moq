@@ -25,8 +25,10 @@ which finishes [viewer targets](/quest/m2/probe/viewer-target.md).
 - Stalled PROBE: [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090) fixed targets piling up behind a blocked PROBE
   writer but couldn't test it, since the test setups can't stall a stream.
   Use a transport double whose PROBE stream stops granting credit (Rust:
-  the in-memory session; JS: a fake writer that never resolves), change the
-  target several times, then release it.
+  the in-memory session; JS: a fake writer whose pending write the test
+  resolves by hand). Assert one target is in flight, change the target
+  several times, release the write, and assert exactly the latest target is
+  sent.
 - Python docs: list the five types with one-line descriptions, following
   the file's existing sections.
 

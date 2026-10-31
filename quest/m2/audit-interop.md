@@ -159,7 +159,8 @@ as read by [moq-dev/moq#7050](https://github.com/moq-dev/moq/pull/7050) and
   limitation under Check first; the aiomoqt docker cell is unexplained.
 - The same nightly shows moq-dev-js `setup-only` failures against
   libquicr, moqlivemock, moq-dev-rs, moqtail, moqx, quiche-moq, red5,
-  stitcher-moq, and xquic-draft-18. Classify them together.
+  stitcher-moq, and xquic-draft-18. Classify each cell from its own log,
+  and group cells only when their logs show a shared cause.
 - imquic: moq-dev-js `subscribe-before-announce` fails in both remote cells
   (`lminiero.it`), and `publish-namespace-done` in the remote-quic cell; all
   three pass in the docker cell.

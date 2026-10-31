@@ -38,7 +38,6 @@ Public API: breaking for moq-auth (`mesh::EndpointId` becomes
 
 ## Required
 
-- [Signed broadcasts](/quest/m2/mesh/sign.md) - [moq-dev/moq#7092](https://github.com/moq-dev/moq/pull/7092) adds `moq_sign::PublicKey`
 - [Enrollment](/quest/m2/mesh/enroll.md) - [moq-dev/moq#7301](https://github.com/moq-dev/moq/pull/7301) adds `moq_auth::mesh::EndpointId`
 
 ## Related

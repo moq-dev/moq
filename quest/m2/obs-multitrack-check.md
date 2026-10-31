@@ -12,7 +12,7 @@ profile's layer count instead of creating a single encoder.
 ## Plan
 
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7333](https://github.com/moq-dev/moq/pull/7333),
-which finishes [OBS multitrack](/quest/m2/obs-multitrack.md) as docs only.
+which finished the OBS multitrack quest as docs only.
 [moq-dev/moq#7333](https://github.com/moq-dev/moq/pull/7333) derived the recipe from OBS and obs-websocket sources without running
 OBS, so the manual run never happened.
 
@@ -33,10 +33,6 @@ OBS, so the manual run never happened.
   its own bitrate; add that here if this lands second.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [OBS multitrack video as simulcast renditions](/quest/m2/obs-multitrack.md) - its PR, [moq-dev/moq#7333](https://github.com/moq-dev/moq/pull/7333), documents the recipe this verifies
 
 ## Related
 

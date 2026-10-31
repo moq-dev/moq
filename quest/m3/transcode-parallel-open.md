@@ -19,7 +19,10 @@ The resolve for an unmemoized shape runs serially inside the `select!` in
 `Transcoder::run` (`rs/moq-transcode/src/lib.rs:117`, loop at `:170`),
 blocking every rung meanwhile. Open the per-rung encoders concurrently (a
 `kio::Tasks` or joined futures), and have the loop keep encoding while the
-resolve is pending. Extend [moq-dev/moq#7375](https://github.com/moq-dev/moq/pull/7375)'s `ladder` bench
+resolve is pending. Only the resolve for the newest source shape may
+commit: a late resolve for a superseded shape is dropped (or the pending
+one is cancelled), so a source changing A, B, C ends on C even when B
+resolves last; test that order. Extend [moq-dev/moq#7375](https://github.com/moq-dev/moq/pull/7375)'s `ladder` bench
 (`rs/moq-transcode/benches/ladder.rs`) `flapping` case with unseen shapes
 to show the difference.
 

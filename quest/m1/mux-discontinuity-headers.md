@@ -26,9 +26,15 @@ Milestone: ✅ m1. Not chosen: m2.
   a keyframe has not adopted into the retained parameter-set cache yet. An
   encoder that sends headers only as extra data, such as OBS's x264, never
   repeats them, so the first group is undecodable.
-- Fix it in the splitters, not in callers: on `reset`, keep header NALs (or
-  OBUs) that no slice has followed, or adopt them into the retained cache, so
-  the next keyframe re-injects them. Drop only slice data and pending frames.
+- Fix it in the splitters, not in callers: on `reset`, keep header NALs
+  that no slice has followed, or adopt them into the retained cache, so the
+  next keyframe re-injects them. Drop only slice data and pending frames.
+- AV1 differs: `av1::Split` keeps no parameter-set cache and re-inserts
+  nothing (`rs/moq-mux/src/codec/av1/split.rs:7-8`). First write the av01
+  test below; if a reset before the first frame does lose the extra-data
+  sequence header, keep that pending sequence-header OBU across `reset`
+  without adding a cache. If the test passes on main, drop av01 from the
+  Goal in the PR.
 - [moq-dev/moq#7029](https://github.com/moq-dev/moq/pull/7029) worked around it in OBS by gating the discontinuity on `Track::started`
   (`cpp/obs/src/moq-output.cpp`). Once the splitters keep the headers, that
   gate can stay as a no-op guard or go; keep its regression test either way.

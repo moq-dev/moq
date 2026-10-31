@@ -3,8 +3,8 @@
 ## Goal
 
 Every lint suppression in first-party code, in every language, is still
-needed and says why, or is removed. Nothing calls a deprecated upstream API,
-and our own deprecated items are removed or planned for removal once their
+needed and says why, or is removed. Nothing calls an upstream API
+deprecated at the supported toolchain (the workspace MSRV), and our own deprecated items are removed or planned for removal once their
 migration window has passed.
 
 ## Plan
@@ -80,9 +80,12 @@ Python wrapper. This run only reviews what those gates can't see.
   nightly warns that it is deprecated in favor of `try_update`. Eight files
   call it on 2026-10-31 (`git grep fetch_update -- rs`), five in moq-net,
   plus kio, moq-c, and moq-mux. `try_update` is stable since Rust 1.95 and
-  the workspace `rust-version` is 1.91, so switching needs that MSRV bump;
-  otherwise leave them and record why. Fixing it keeps the nightly pin easy
-  to bump.
+  the workspace `rust-version` is 1.91, so switching needs that MSRV bump.
+  `fetch_update` is not deprecated at the 1.91 MSRV, so keeping it there is
+  what the Goal allows: if the MSRV stays, keep the calls, list them under
+  this run's Results with the MSRV that unblocks `try_update`, and allow the
+  nightly's deprecation warning where it fires. Fixing it keeps the nightly
+  pin easy to bump.
 
 ### Results (m1, 2026-10-24)
 

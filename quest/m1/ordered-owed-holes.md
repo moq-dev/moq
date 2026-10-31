@@ -36,7 +36,3 @@ Milestone: ✅ m1 (moved from m2). Not chosen: m2.
 
 Public API: adds an `Ordered` read (Rust); `snapshot::Consumer::latest()`
 stops waiting at owed holes. Wire: none.
-
-## Required
-
-- [Ordered reads wait only on owed groups](/quest/m2/ordered-owed-wait.md) - [moq-dev/moq#7403](https://github.com/moq-dev/moq/pull/7403) adds the owed-hole wait this read skips

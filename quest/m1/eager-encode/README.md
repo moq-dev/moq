@@ -54,7 +54,7 @@ The epic's own work, once the children land:
 ## Required
 
 - [Raw audio on demand](/quest/m1/eager-encode/raw-audio.md) - audio encodes on demand again, from raw frames kept up to `maxAge`
-- [Buffered audio survives a capture stop and a disable](/quest/m1/eager-encode/audio-across-stop.md) - audio retained by default
+- [Buffered audio survives a capture stop and a disable](/quest/m1/eager-encode/audio-across-stop.md) - audio retained by buffered capture is still served, or expires on its own `max_age`, after capture stops or the input is disabled
 
 ## Related
 

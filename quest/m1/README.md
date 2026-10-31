@@ -198,10 +198,10 @@ removed).
 - [A lite close drain keeps the streams queued when the session closed](/quest/m1/lite-close-drain-queued.md) - when a `@moq/net` lite session drains after the peer's close, a group stream the peer opened before closing is delivered even if it was still queued, not yet accepted
 - [One Ed25519 public key type with one z-base-32 codec](/quest/m1/mesh-key-codec.md) - `moq_auth::mesh::EndpointId` is merged into `moq_sign::PublicKey`
 - [moqsink reports track demand only once the track is in the catalog](/quest/m1/moqsink-demand-catalog.md) - A `moqsink` request pad's `track-demand` stays null until its track is listed in the published catalog, and only then reports `wanted`
-- [A discontinuity before the first frame keeps the init's parameter sets](/quest/m1/mux-discontinuity-headers.md) - an avc3, hev1, or av01 track that marks a discontinuity
+- [A discontinuity before the first frame keeps the init's parameter sets](/quest/m1/mux-discontinuity-headers.md) - an avc3, hev1, or av01 track that marks a discontinuity before its first frame still publishes that first keyframe with its init's parameter sets
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
-- [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving
-- [The Python wrapper publish can be retried by hand](/quest/m1/release-py-dispatch.md) - `.github/workflows/release-py.yml` has a `workflow_dispatch` trigger, so a maintainer can retry a failed `moq-rs` publish from `release` without a new `moq-ffi-v*` tag
+- [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
+- [The Python wrapper publish can be retried by hand](/quest/m1/release-py-dispatch.md) - `.github/workflows/release-py.yml` has a `workflow_dispatch` trigger, so a maintainer can retry a failed `moq-rs` publish from `release` without a new `moq-ffi-v*` tag or a path-matching push
 - [A returning route serves past the cap its old copy was given](/quest/m1/returning-route-cap.md) - when a resumed reader's route returns, the reused serving copy asks with the reader's current resolution, not the capped resolution it was left with when it was replaced
 
 ## Related

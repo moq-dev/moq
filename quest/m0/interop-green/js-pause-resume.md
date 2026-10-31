@@ -23,7 +23,9 @@ The cell fails on `main` in scheduled Interop
   waiting for playback to resume after a pause. After the resume, the
   browser publisher ends the resumed subscriptions and the relay forwards
   `PUBLISH_DONE` INTERNAL_ERROR. It fails the same way on main at
-  `1d8bf24998`.
+  `1d8bf24998`. That report names no draft-20 result; record it in the
+  reproduction. The Goal's drafts are 20 and 22; draft 18's cells must stay
+  green but are not this quest's target.
 - In 41075505055 the cell fails earlier: the browser subscriber's
   `catalog.json` SUBSCRIBE gets SUBSCRIBE_OK and then
   `publish done: status=0x0 reason=internal error`, so playback never starts.

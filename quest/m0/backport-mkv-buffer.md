@@ -40,9 +40,13 @@ bound fixes the exhaustion on `release` without changing what it imports.
   `Segment`, which [MKV import streams blocks](/quest/m1/security-audit/mkv-stream-blocks.md)
   ruled out. Pick the cap from the largest legitimate block `release` can
   publish (its transport frame limit, if it has one), and name the choice in
-  the PR.
+  the PR. The cap applies to every held element, so it must also clear the
+  largest legitimate `Tracks`/`TrackEntry` (CodecPrivate) and `Void`; if one
+  cap can't cover both blocks and metadata, use a cap per element kind, or
+  skip an ignored leaf such as `Void` without holding its bytes.
 - Tests on `release`: the reproduction now fails with the error and
-  bounded memory, and an ordinary file larger than the cap still imports.
+  bounded memory, a single element just over its cap fails while one just
+  under imports, and an ordinary file larger than the cap still imports.
 - Version bumps stay with a human, per `CONTRIBUTING.md`: this PR bumps
   nothing.
 

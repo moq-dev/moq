@@ -29,8 +29,8 @@ Milestone: ✅ m1. Not chosen: m2.
 - JS overlaps [push-to-talk](/quest/m1/push-to-talk/README.md)'s plan to keep
   the codec setup alive across a disable; share that mechanism rather than
   adding a second one.
-- The CLI's `buffered` audio default is owned by
-  [cli-modes](/quest/m1/eager-encode/cli-modes.md), not this quest.
+- The CLI's `buffered` audio default belongs to
+  [moq-dev/moq#7261](https://github.com/moq-dev/moq/pull/7261) (merged), not this quest.
 
 Public API: none expected. Wire: none.
 

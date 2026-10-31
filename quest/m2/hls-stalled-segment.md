@@ -26,8 +26,8 @@ instance's cut and a live recording hang the same way. After [moq-dev/moq#7399](
 find where a cursor waits on a listed row's media
 (`rs/moq-hls/src/export/rendition.rs`, the read [moq-dev/moq#7399](https://github.com/moq-dev/moq/pull/7399)'s Codex P2 pointed
 at) and surface the wait through the existing status or stats the export
-exposes, plus one `warn` per stalled segment once it has waited past the
-segment's own listed duration (a report threshold, not a cut).
+exposes, plus one `warn` per stalled segment, logged when the wait starts
+on a group that is still open, so no wakeup or timer is needed.
 
 Test: a publisher that lists a segment then holds its group open shows the
 segment and group in status and logs, and the recording completes normally

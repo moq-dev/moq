@@ -21,7 +21,10 @@ futures in the FFI layers may sit just under the edge the same way.
   `[lints]`, or crate attributes, since both inherit the workspace lints)
   with a `future-size-threshold` chosen from what the audit finds, and box
   or split what it flags at the spawn or `block_on` boundary rather than
-  deep inside moq-net.
+  deep inside moq-net. The lint measures futures where they are awaited, so
+  it can miss one handed straight to a spawn or `block_on`; check those
+  calls by hand (or with a `size_of_val` assertion in a test) and record the
+  sizes.
 - Measure the worst remaining case: run each crate's tests in a debug build
   on a smaller stack (the existing
   `accept_on_a_foreign_thread` in `rs/moq-ffi/src/server.rs` uses

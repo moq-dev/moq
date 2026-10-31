@@ -20,8 +20,11 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /que
   `moq-relay`, `moq-cli`, its examples, and moq-c's library from there for
   the whole matrix; `test/interop/compat.sh:71-72` does the same. Confirm
   from mbx's logs or `mbx gc --dry-run` which collection removes them.
-  Then either copy what the run executes into the run's own directory
-  (`$HARNESS_RUN`) right after building, which needs no mbx change, or use
+  Then either copy everything the run loads from the target into the run's
+  own directory (`$HARNESS_RUN`) right after building, which needs no mbx
+  change: binaries, examples, moq-c's headers and library, and any
+  GStreamer plugin the matrix loads, with every consumer pointed at the
+  copies. Or use
   an mbx lease or pin if mbx offers one. Prefer whichever keeps one rule for
   every long-running script.
 - **`Argument list too long`**: seen once in an interop Cargo launch

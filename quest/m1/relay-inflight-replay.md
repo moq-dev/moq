@@ -21,8 +21,9 @@ pipeline-requests epic, so this sits at the m1 top level.
   copy has none yet. [moq-dev/moq#7328](https://github.com/moq-dev/moq/pull/7328) re-reads the newest group of an unresolved track
   once it resolves, but only for lite-05+ (`SubscribeServe`, `:1987`). JS no
   longer replays for any version.
-- Extend the re-read to lite-03/04, or floor them at the first group the
-  resolved copy reports; match whichever JS does.
+- Extend the re-read to lite-03/04, so a resolved copy floors them at its
+  newest group, never at a lower first group it reports; match what JS
+  does.
 - Test with a lite-03 and a lite-04 subscriber on a relay whose upstream
   answers after the SUBSCRIBE, with cached groups below the live edge.
   [moq-dev/moq#7328](https://github.com/moq-dev/moq/pull/7328)'s interop was not rerun after its last changes; run the lite-03/04

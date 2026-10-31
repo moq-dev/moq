@@ -26,7 +26,12 @@ Milestone: ✅ m1. Not chosen: m2.
   importer's `Liveness`. When the PCR stops, `now` stops, and no interval
   check fires. Fall back to a clock that keeps running, such as the multiplex
   clock (`mux_rate`) or arrival time, while the PCR is stalled, and report the
-  stall through the PCR checks.
+  stall through the PCR checks. Today `health.tick` runs only on the
+  PCR-bearing packet path and `Health::pcr` checks only when a PCR arrives,
+  so advance the checks from every packet on the fallback clock. A fully
+  stopped input has no packet to advance them: the next packet or EOF
+  reports that outage, with no timer. Report a missing PCR once per outage;
+  a returning PCR clears it so a later outage reports again.
 - Test single-program and shared-PID streams with a PCR that stops while
   tables and PES continue, and with all three stopping: the outage shows in
   the counters either way. Add the case to the TS guide's coverage table.
