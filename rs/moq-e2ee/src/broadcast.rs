@@ -62,7 +62,12 @@ impl Producer {
 		let name = self.generation.name(semantic)?;
 		let request = self.inner.reserve_track(name.as_str())?;
 		match self.generation.claim(semantic) {
-			Ok(keys) => Ok(track::Request::new(request, keys, semantic.to_string())),
+			Ok(keys) => Ok(track::Request::new(
+				request,
+				self.generation.clone(),
+				keys,
+				semantic.to_string(),
+			)),
 			Err(err) => {
 				request.reject(moq_net::Error::Cancel);
 				Err(err)
@@ -85,7 +90,8 @@ impl Producer {
 /// Yields each requested track under its semantic name, as
 /// [`moq_net::broadcast::Requests`] does for a plaintext broadcast. A requested name that this
 /// generation did not issue, such as one a relay forged or another epoch's, is answered as
-/// [`moq_net::Error::NotFound`] after at most one open, and keeps no state.
+/// [`moq_net::Error::NotFound`] after at most one open, and keeps no state. A name it did issue
+/// is claimed only when the handler accepts its request.
 #[derive(Clone)]
 pub struct Requests {
 	inner: moq_net::broadcast::Requests,
@@ -106,19 +112,23 @@ impl Requests {
 	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<track::Request>> {
 		loop {
 			let request = ready!(self.inner.poll_requested_track(waiter))?;
-			match self.claim(request.name()) {
-				Ok((keys, semantic)) => return Poll::Ready(Ok(track::Request::new(request, keys, semantic))),
+			match self.open(request.name()) {
+				Ok((keys, semantic)) => {
+					let generation = self.generation.clone();
+					return Poll::Ready(Ok(track::Request::new(request, generation, keys, semantic)));
+				}
 				Err(_) => request.reject(moq_net::Error::NotFound),
 			}
 		}
 	}
 
-	/// Open a requested physical name and claim its semantic name. A refusal holds nothing.
-	fn claim(&self, name: &str) -> Result<(track::Keys, String)> {
+	/// Open a requested physical name to its semantic name and keys, claiming nothing: the
+	/// request claims the name only once the handler accepts it.
+	fn open(&self, name: &str) -> Result<(track::Keys, String)> {
 		// Syntax first, so a name that cannot be one costs no open.
 		let name: Name = name.parse()?;
 		let semantic = self.generation.open(&name)?;
-		Ok((self.generation.claim(&semantic)?, semantic))
+		Ok((self.generation.peek(&semantic)?, semantic))
 	}
 
 	/// Block until a consumer requests a track, returning a [`track::Request`] to serve.

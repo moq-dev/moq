@@ -191,18 +191,31 @@ fn reserve(next: u64, sequence: Option<u64>) -> Result<u64> {
 ///
 /// Yielded by [`broadcast::Requests::poll_requested_track`](crate::broadcast::Requests::poll_requested_track)
 /// or made by [`broadcast::Producer::reserve_track`](crate::broadcast::Producer::reserve_track),
-/// with its name already claimed. Accept it once its [`demand`](Self::demand) shows a
-/// subscriber, or up front. Dropping it without [`accept`](Self::accept) rejects the waiting
-/// subscribers.
+/// which claims its name up front. A requested name is claimed only once accepted, so a
+/// subscriber cannot make the publisher hold names it never serves. Accept it once its
+/// [`demand`](Self::demand) shows a subscriber, or up front. Dropping it without
+/// [`accept`](Self::accept) rejects the waiting subscribers.
 pub struct Request {
 	inner: moq_net::track::Request,
+	generation: crate::generation::Producer,
+	// From `generation::Producer::peek` or `claim`; claimed by `accept`.
 	keys: Keys,
 	semantic: String,
 }
 
 impl Request {
-	pub(crate) fn new(inner: moq_net::track::Request, keys: Keys, semantic: String) -> Self {
-		Self { inner, keys, semantic }
+	pub(crate) fn new(
+		inner: moq_net::track::Request,
+		generation: crate::generation::Producer,
+		keys: Keys,
+		semantic: String,
+	) -> Self {
+		Self {
+			inner,
+			generation,
+			keys,
+			semantic,
+		}
 	}
 
 	/// The semantic track name.
@@ -215,12 +228,13 @@ impl Request {
 		self.inner.demand()
 	}
 
-	/// Serve the track, resolving every waiting subscriber.
+	/// Serve the track, claiming its name and resolving every waiting subscriber.
 	pub fn accept(self, info: impl Into<Option<moq_net::track::Info>>) -> Producer {
-		Producer::new(self.inner.accept(info), self.keys)
+		let keys = self.generation.adopt(&self.semantic, self.keys);
+		Producer::new(self.inner.accept(info), keys)
 	}
 
-	/// Fail every waiting subscriber with `err`. The name stays claimed.
+	/// Fail every waiting subscriber with `err`. This claims nothing, and releases no earlier claim.
 	pub fn reject(self, err: moq_net::Error) {
 		self.inner.reject(err);
 	}

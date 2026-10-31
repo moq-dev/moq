@@ -227,6 +227,25 @@ impl Producer {
 		self.consumer.keys(semantic)
 	}
 
+	/// The keys for `semantic` without claiming it: its claim's if it has one, otherwise fresh
+	/// keys that hold nothing until [`Self::adopt`].
+	///
+	/// # Errors
+	///
+	/// [`Error::Identity`](crate::Error::Identity) if `semantic` exceeds 65535 bytes.
+	pub(crate) fn peek(&self, semantic: &str) -> Result<track::Keys> {
+		if let Some(keys) = self.consumer.0.keys.lock().expect("generation keys").get(semantic) {
+			return Ok(keys.clone());
+		}
+		self.consumer.derive(semantic)
+	}
+
+	/// Claim `semantic` with keys from [`Self::peek`], resuming any claim made since instead.
+	pub(crate) fn adopt(&self, semantic: &str, keys: track::Keys) -> track::Keys {
+		let mut claims = self.consumer.0.keys.lock().expect("generation keys");
+		claims.entry(semantic.to_string()).or_insert(keys).clone()
+	}
+
 	/// How many semantic names this generation holds keys for.
 	#[cfg(test)]
 	pub(crate) fn claims(&self) -> usize {

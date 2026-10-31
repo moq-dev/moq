@@ -662,9 +662,10 @@ fn requests_serve_undeclared_names() {
 	let request = requested(&mut requests);
 	assert_eq!(request.name(), "stats/viewers");
 	assert!(request.demand().wanted().is_some());
-	assert_eq!(protected.producer.generation().claims(), 1);
+	assert_eq!(protected.producer.generation().claims(), 0);
 
 	let mut track = request.accept(timed());
+	assert_eq!(protected.producer.generation().claims(), 1);
 	let mut reader = resolve(&subscribing).unwrap();
 	let mut group = track.append_group().unwrap();
 	group.write_frame(ms(1), b"42").unwrap();
@@ -717,7 +718,41 @@ fn requests_refuse_names_the_generation_did_not_issue() {
 			Poll::Ready(Err(moq_net::Error::NotFound))
 		));
 	}
+	// Not accepted, so not claimed either.
+	assert_eq!(generation.claims(), 0);
+}
+
+#[test]
+fn requests_claim_only_accepted_names() {
+	let protected = protected();
+	let mut requests = protected.producer.requests();
+	let generation = protected.producer.generation();
+
+	// A credential holder can name any track: rejecting or dropping its requests keeps nothing.
+	for i in 0..256 {
+		let name = generation.name(&format!("unknown/{i}")).unwrap();
+		let subscribing = subscribe_raw(&protected.raw, name.as_str());
+		let request = requested(&mut requests);
+		assert_eq!(request.name(), format!("unknown/{i}"));
+		if i % 2 == 0 {
+			request.reject(moq_net::Error::NotFound);
+		} else {
+			drop(request);
+		}
+		assert!(subscribing.poll_ok(&kio::Waiter::noop()).is_ready());
+	}
+	assert_eq!(generation.claims(), 0);
+
+	// A name claimed while its request waits resumes that claim once accepted.
+	let subscribing = protected.consumer.subscribe("video", subscribe_all()).unwrap();
+	let _ = subscribing.poll_ok(&kio::Waiter::noop());
+	let request = requested(&mut requests);
+	assert_eq!(generation.claims(), 0);
+	let other = crate::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), generation.clone());
+	other.create_track("video", timed()).unwrap().create_group(5).unwrap();
+	let mut video = request.accept(timed());
 	assert_eq!(generation.claims(), 1);
+	assert_eq!(video.append_group().unwrap().sequence(), 6);
 }
 
 #[test]
