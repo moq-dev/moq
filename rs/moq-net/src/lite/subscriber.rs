@@ -617,12 +617,6 @@ impl SubscriberDriver {
 		self.cleanup.abort(err);
 	}
 
-	pub fn close(&self) {
-		self.subscriber.note_end(&Error::Cancel);
-		self.cleanup
-			.abort(&Error::Stream(crate::StreamError::Session(crate::SessionError::Cancel)));
-	}
-
 	/// Read what the closed transport already delivered: the buffered uni streams, then
 	/// the subscribe responses. Serve machines wait for the group streams, since ending a
 	/// subscription removes the state their tails are delivered into.
@@ -791,8 +785,6 @@ enum UniState {
 	/// Discarding a lite-07+ padding stream until FIN.
 	Padding {
 		reader: Reader<crate::transport::boxed::RecvStream, Version>,
-		/// A peer that keeps chunks ready must not hold the driver for as long as they arrive.
-		budget: kio::coop::Budget,
 	},
 	Group(GroupRecv),
 	Done,
@@ -819,9 +811,7 @@ impl UniServe {
 	/// Abort the stream with the given error, wherever the reader currently lives.
 	fn abort(&mut self, err: &Error) {
 		match &mut self.state {
-			UniState::Start { reader } | UniState::Setup { reader } | UniState::Padding { reader, .. } => {
-				reader.abort(err)
-			}
+			UniState::Start { reader } | UniState::Setup { reader } | UniState::Padding { reader } => reader.abort(err),
 			UniState::Group(recv) => recv.reader.abort(err),
 			UniState::Done => {}
 		}
@@ -848,10 +838,7 @@ impl UniServe {
 							reader.set_priority(crate::priority::RECV_CONTROL);
 							UniState::Setup { reader }
 						}
-						lite::DataType::Padding => UniState::Padding {
-							reader,
-							budget: kio::coop::Budget::new(32),
-						},
+						lite::DataType::Padding => UniState::Padding { reader },
 					};
 				}
 				UniState::Setup { reader } => {
@@ -876,18 +863,12 @@ impl UniServe {
 						}
 					}
 				}
-				UniState::Padding { reader, budget } => {
+				UniState::Padding { reader } => {
 					if !self.subscriber.version.has_padding() {
 						self.abort(&Error::UnexpectedStream);
 						return Poll::Ready(Ok(()));
 					}
-					// Reading rather than cancelling returns credit as each chunk arrives.
-					loop {
-						ready!(budget.poll_yield(waiter));
-						if ready!(reader.poll_read_chunk(waiter, usize::MAX))?.is_none() {
-							return Poll::Ready(Ok(()));
-						}
-					}
+					return reader.poll_discard(waiter);
 				}
 
 				UniState::Group(recv) => {
@@ -1051,7 +1032,7 @@ impl GroupRecv {
 
 /// Pumps bare FRAME messages from a reader into a group producer: the wire
 /// format shared by GROUP streams and FETCH responses.
-struct FrameIngest {
+pub(crate) struct FrameIngest {
 	/// A timescale decodes the lite-05 zigzag-delta timestamp prefix; none leaves frames
 	/// untimed (pre-lite-05).
 	framing: lite::Framing,
@@ -1112,7 +1093,7 @@ enum IngestPhase {
 
 impl FrameIngest {
 	/// `ietf` when the session negotiated the extension, so the stream starts with a Group State.
-	fn new(framing: lite::Framing, version: Version, ietf: bool, frame_start: u64) -> Self {
+	pub(crate) fn new(framing: lite::Framing, version: Version, ietf: bool, frame_start: u64) -> Self {
 		Self {
 			framing,
 			prev_ts: 0,
@@ -1149,12 +1130,13 @@ impl FrameIngest {
 	/// `Ready(Ok(()))` once the stream FINs on a frame boundary. The caller
 	/// finishes or aborts the group; a frame cut short mid-payload was already
 	/// aborted here with the reason.
-	fn poll<R: crate::transport::poll::RecvStream>(
+	pub(crate) fn poll<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut crate::recv::Group,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			match &mut self.phase {
 				IngestPhase::State => {
@@ -1314,6 +1296,9 @@ impl FrameIngest {
 							return Poll::Ready(Err(err));
 						}
 					}
+					// An empty frame is a few bytes, so a peer keeping them ready must not
+					// hold the session's other tasks.
+					ready!(budget.poll_yield(waiter));
 				}
 			}
 		}
@@ -1347,7 +1332,10 @@ impl DatagramRecv {
 		if !self.enabled {
 			return Poll::Ready(Ok(()));
 		}
+		// A peer keeping datagrams ready must not hold the session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
+			ready!(budget.poll_yield(waiter));
 			let payload = ready!(self.recv.poll_recv_datagram(waiter)).map_err(crate::lite::error::from_transport)?;
 			if let Err(err) = self.subscriber.route_datagram(payload) {
 				tracing::debug!(%err, "dropping datagram");
@@ -1474,7 +1462,11 @@ impl ProbeStream {
 		wait!(Send => stream.writer.poll_flush(waiter))?;
 		Poll::Ready(wait!(Read => {
 			let bandwidth = self.subscriber.recv_bandwidth.as_ref().expect("gated by RecvBandwidth");
+			// Each estimate wakes every reader, so a peer streaming them must not hold
+			// the session's other tasks.
+			let mut budget = kio::coop::Budget::new(32);
 			loop {
+				ready!(budget.poll_yield(waiter));
 				let Some(probe) = ready!(stream.reader.poll_decode_maybe::<lite::Probe>(waiter))? else {
 					break Poll::Ready(Ok(()));
 				};
@@ -1650,7 +1642,11 @@ impl AnnouncePrefix {
 			{
 				run.announced.limit(&permit, &self.subscriber);
 			}
-			loop {
+			// Each announce routes into the origin, so a peer streaming them must not hold
+			// the session's other tasks. A yield has woken the task, and this arm always
+			// ends Pending, so the routes below are still served this turn.
+			let mut budget = kio::coop::Budget::new(32);
+			while budget.poll_yield(waiter).is_ready() {
 				match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(waiter) {
 					Poll::Ready(Ok(Some(announce))) => {
 						if matches!(announce, lite::AnnounceBroadcast::Synced) {
@@ -2754,6 +2750,41 @@ mod tests {
 			assert!(!log.stops().is_empty());
 		}
 		assert!(log.closes().is_empty());
+	}
+
+	/// A peer keeping datagrams ready gets a budget of them routed per poll, leaving the
+	/// rest for later so the session's other tasks run in between.
+	#[moq_clock::test]
+	async fn a_flood_of_datagrams_yields() {
+		use crate::transport::poll::Session as _;
+
+		let (local, peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(local.clone()),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: Version::Lite07,
+			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let mut recv = DatagramRecv::new(subscriber);
+		assert!(recv.enabled);
+		// Each names no subscription, so it is dropped once routed.
+		for _ in 0..1024 {
+			peer.send_datagram(bytes::Bytes::from_static(b"x"), Default::default())
+				.unwrap();
+		}
+
+		assert!(recv.poll(&kio::Waiter::noop()).is_pending());
+		let other = local.clone();
+		assert!(
+			other.poll_recv_datagram(&kio::Waiter::noop()).is_ready(),
+			"one poll routed every datagram"
+		);
 	}
 
 	#[moq_clock::test]
@@ -5931,6 +5962,37 @@ mod tests {
 		)
 	}
 
+	/// A peer streaming announces gets a budget of them read per poll, so the session's
+	/// other tasks run between them, and the announce behind the flood still arrives.
+	#[moq_clock::test]
+	async fn a_flood_of_announces_yields() {
+		const VERSION: Version = Version::Lite06;
+		/// `AnnouncePrefix`'s announces per poll.
+		const BUDGET: usize = 32;
+		const SKIPS: usize = 4096;
+		let mut script = announce_script(VERSION, &[&announce_ok(VERSION, 0)]);
+		for _ in 0..SKIPS {
+			// An unknown announce type with an empty body: no change.
+			script.extend([0x3f, 0x00]);
+		}
+		script.extend(announce_script(VERSION, &[&announce_start(VERSION, "a")]));
+		let (mut prefix, consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
+		let mut cursor = consumer.announced();
+
+		let mut polls = 0;
+		kio::wait(|waiter| {
+			assert!(prefix.poll(waiter).is_pending(), "the announce stream ended");
+			polls += 1;
+			if cursor.try_next().is_some() {
+				return Poll::Ready(());
+			}
+			assert!(polls <= SKIPS, "the announces stalled");
+			Poll::Pending
+		})
+		.await;
+		assert!(polls * BUDGET >= SKIPS, "{SKIPS} announces read in {polls} polls");
+	}
+
 	/// The origin's consumers sync once the counted starts are in and read, never before.
 	#[moq_clock::test]
 	async fn a_counted_initial_set_catches_up() {
@@ -7745,6 +7807,7 @@ impl ServeLoop {
 		{
 			self.held = None;
 		}
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			match &mut self.mode {
 				ServeMode::Establish(est) => {
@@ -8042,6 +8105,9 @@ impl ServeLoop {
 										tracing::debug!(track = %serve.name, ?msg, "subscribe response")
 									}
 								}
+								// Each pass re-polls the whole loop, so a peer streaming
+								// responses must not hold the session's other tasks.
+								ready!(budget.poll_yield(waiter));
 								continue;
 							}
 							// Lite-07 FINs a covered bounded subscription without SUBSCRIBE_END,

@@ -458,6 +458,12 @@ def test_track_info_keeps_native_default_priority():
     assert moq.TrackInfo(timescale=90_000)._ffi().priority == native
 
 
+def test_default_subscription_skips_superseded_groups_at_once():
+    """Only the default carries moq-net's zero max delay; a bare record sets no limit."""
+    assert moq.Subscription.default()._ffi().max_delay == timedelta(0)
+    assert moq.Subscription()._ffi().max_delay is None
+
+
 def test_string_sequences_refuse_a_bare_string():
     """A bare str would split into characters, so the config refuses it up front."""
     with pytest.raises(TypeError, match="roots"):
@@ -1646,11 +1652,8 @@ async def test_announced_pattern_captures():
     consumer = origin.consume()
     announced = consumer.announced("room", filter="*/chat")
 
+    # A claim at "room" could serve a match, but its own name is none, so it is not listed.
     dynamic = origin.requests("room")
-    overlap = await next_route(announced)
-    assert isinstance(overlap, moq.AnnounceEventStart)
-    assert overlap.announce.prefix == "room"
-    assert overlap.announce.captures is None
 
     audio = create_announced(origin, "room/alice/audio")
     chat = create_announced(origin, "room/alice/chat")

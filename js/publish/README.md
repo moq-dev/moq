@@ -67,8 +67,8 @@ The simplest way to publish a stream:
 | `name`      | string  | required | Broadcast name                  |
 | `versions`  | string  | stable versions | Comma-separated protocol versions to offer, most preferred first, like `moq-transport-18,moq-lite-06` |
 | `source`    | string  | —        | `"camera"`, `"screen"`, `"file"` |
-| `muted`     | boolean | false    | Mute audio capture              |
-| `invisible` | boolean | false    | Disable video capture           |
+| `muted`     | boolean | false    | Stop publishing audio; the microphone stays open |
+| `invisible` | boolean | false    | Stop publishing video; the camera stays open |
 | `preview`   | string  | `"source"` | What the preview renders: `"source"`, `"encoded"`, `"none"` |
 | `backend`   | string  | `"auto"` | Graphics API for a `<canvas>` preview: `"auto"`, `"webgpu"`, `"2d"` |
 | `announce`  | string  | `"source"` | When to advertise: `"always"` or `"source"` (once media is captured). A camera source waits for every enabled track, and `"source"` waits until each captured track's config resolves or fails, so the first catalog lists every rendition. After its first announcement, a camera stays announced until deselected or disconnected, including mute, hide, device swaps, and capture retries. The broadcast is created while connected either way. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |

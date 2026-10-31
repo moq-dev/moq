@@ -741,7 +741,7 @@ async fn a_pcr_pid_switch_places_each_side_on_its_own_timebase() {
 /// flood of tiny ones refuses the import long before their bookkeeping outgrows the byte bound.
 #[test]
 fn tiny_whole_pes_held_for_a_timestamp_are_bounded_by_count() {
-	let units = moq_net::group::MAX_GROUP_FRAMES / 2;
+	let units = super::passthrough::GROUP_OBJECTS_MAX;
 	let mut feed = Feed::new(0x06, KLVA);
 	feed.pcr(1_000 * MS);
 	for _ in 0..=units {

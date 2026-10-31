@@ -265,7 +265,6 @@ export class Connection implements Established {
 	/** End the session immediately without waiting for delivery. */
 	abort(): void {
 		if (this.#closed) return;
-		this.#subscriber.close();
 		this.#close();
 	}
 

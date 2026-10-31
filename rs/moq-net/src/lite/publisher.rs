@@ -1628,9 +1628,14 @@ impl<R: Request> RequestServe<R> {
 			ready!(self.budget.poll_yield(waiter));
 			// Once answered, the requester's FIN is the normal end, not a cancel.
 			if matches!(self.state, RequestState::Resolve { .. } | RequestState::Serve(_))
-				&& let Poll::Ready(res) = self.poll_requester(waiter)
+				&& let Poll::Ready(next) = self.poll_requester(waiter)
 			{
-				res?;
+				// One update per pass, so the budget above charges each; reading again before
+				// serving keeps the reader's waker registered.
+				if let Some(update) = next? {
+					self.apply(update);
+					continue;
+				}
 				if !R::GRACEFUL {
 					return Poll::Ready(Err(Error::Cancel));
 				}
@@ -1705,7 +1710,7 @@ impl<R: Request> RequestServe<R> {
 						// A reply blocked on flow control may never unblock, so a requester
 						// leaving before it is out cancels it and lets go of the request.
 						if stream.writer.poll_flush(waiter)?.is_pending() {
-							let closed = ready!(self.poll_requester(waiter));
+							let closed = ready!(self.poll_closed(waiter));
 							self.state = RequestState::Finish { finished: false };
 							closed?;
 							return Poll::Ready(Err(Error::Cancel));
@@ -1719,7 +1724,7 @@ impl<R: Request> RequestServe<R> {
 					if delivered {
 						self.settle();
 					}
-					let closed = ready!(self.poll_requester(waiter));
+					let closed = ready!(self.poll_closed(waiter));
 					// Let go of the request now, not when the serve is dropped.
 					self.state = RequestState::Finish { finished: true };
 					// A FIN or a reset both end the requester's interest; only a stray byte
@@ -1742,7 +1747,7 @@ impl<R: Request> RequestServe<R> {
 					// A transport ACK does not say the application read the tail: a lite-07
 					// subscriber FINs once its tail accounting settles, so wait for that.
 					if R::GRACEFUL && self.shared.version.waits_for_subscriber_fin() {
-						ready!(self.poll_requester(waiter))?;
+						ready!(self.poll_closed(waiter))?;
 					}
 					let stream = self.stream.as_mut().expect("stream present");
 					return stream.writer.poll_close(waiter);
@@ -1751,23 +1756,32 @@ impl<R: Request> RequestServe<R> {
 		}
 	}
 
-	/// Read what the requester sends while we answer: ready once it closes its send
-	/// direction, `Ok` for a FIN. Each update reaches the reply, or waits for it to start.
-	fn poll_requester(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	/// Read the requester's next message while we answer: an update, or `None` once it FINs
+	/// its send direction.
+	fn poll_requester(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<R::Update>, Error>> {
 		let stream = self.stream.as_mut().expect("stream present");
-		loop {
-			let update = match ready!(stream.reader.poll_decode_maybe::<R::Update>(waiter)) {
-				Ok(Some(update)) => update,
-				Ok(None) => return Poll::Ready(Ok(())),
-				Err(err) => {
-					self.malformed = matches!(err, Error::Decode(_));
-					return Poll::Ready(Err(err));
-				}
-			};
-			match &mut self.state {
-				RequestState::Serve(request) => request.update(update),
-				_ => self.update = Some(update),
-			}
+		let res = ready!(stream.reader.poll_decode_maybe::<R::Update>(waiter));
+		if let Err(err) = &res {
+			self.malformed = matches!(err, Error::Decode(_));
+		}
+		Poll::Ready(res)
+	}
+
+	/// Ready once the requester closes its send direction, `Ok` for a FIN. Updates until then
+	/// still reach the reply, each charged to the budget.
+	fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		while let Some(update) = ready!(self.poll_requester(waiter))? {
+			self.apply(update);
+			ready!(self.budget.poll_yield(waiter));
+		}
+		Poll::Ready(Ok(()))
+	}
+
+	/// Each update reaches the reply, or waits for it to start.
+	fn apply(&mut self, update: R::Update) {
+		match &mut self.state {
+			RequestState::Serve(request) => request.update(update),
+			_ => self.update = Some(update),
 		}
 	}
 }
@@ -3912,15 +3926,19 @@ impl TrackRun {
 		{
 			self.track.join();
 		}
-		if let Ok(mut value) = self.steer_tx.write() {
-			*value = Steer {
-				priority: upd.priority,
-				order: upd.order,
-			};
-		}
-		// One move for the whole subscription; its streams keep their order within it.
-		if let Some(group) = &mut self.ctx.group {
-			group.set_priority(crate::priority::group(upd.priority, self.ctx.publisher));
+		// The steer wakes every in-flight group, so an update that keeps it wakes none.
+		let steer = Steer {
+			priority: upd.priority,
+			order: upd.order,
+		};
+		if *self.steer_tx.read() != steer {
+			if let Ok(mut value) = self.steer_tx.write() {
+				*value = steer;
+			}
+			// One move for the whole subscription; its streams keep their order within it.
+			if let Some(group) = &mut self.ctx.group {
+				group.set_priority(crate::priority::group(upd.priority, self.ctx.publisher));
+			}
 		}
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
@@ -3964,6 +3982,7 @@ impl TrackRun {
 			}
 			floor => floor,
 		};
+		let range = (self.floor, self.cap);
 		if let Some(start) = floor {
 			self.floor = start;
 			// Before SUBSCRIBE_START nothing is owed yet; the start accounts for it.
@@ -3975,7 +3994,10 @@ impl TrackRun {
 			}
 		}
 		self.cap = end.map_or(Bound::Unbounded, Bound::Excluded);
-		self.move_cursor();
+		// Moving the cursor wakes its readers, so an update that keeps the range moves nothing.
+		if (self.floor, self.cap) != range {
+			self.move_cursor();
+		}
 		self.bounded = bounds.ends(self.ctx.version);
 		self.frames = bounds.frames;
 	}
@@ -8247,19 +8269,27 @@ mod tests {
 		assert_eq!(track.demand().wanted(), Some(2), "a stale wanted group joined");
 	}
 
-	/// A subscription that always has another group ready yields within its budget, so a
-	/// sibling (the transport's driver, say) runs between its polls. Without it, one poll
-	/// served every group the producer kept appending and starved the rest of the runtime
-	/// (a go publisher's 2.5 ms audio groups timed its session out).
-	#[moq_clock::test]
-	async fn a_busy_subscription_yields_to_its_siblings() {
-		/// `RequestServe`'s passes per poll; each serves at most one group.
-		const BUDGET: u64 = 32;
-		const GROUPS: u64 = 10_000;
-		const BATCH: u64 = 1_000;
+	/// A lite-07 SUBSCRIBE to `room/video`, served until it runs.
+	struct Running {
+		serve: RequestServe<SubscribeServe>,
+		session: ScriptedSession,
+		track: track::Producer,
+		_broadcast: crate::origin::Publication,
+		_origin: crate::origin::Producer,
+	}
 
-		type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
+	/// The SUBSCRIBE [`running`] sends, which an update restates to change nothing.
+	fn running_update() -> lite::SubscribeUpdate {
+		lite::SubscribeUpdate {
+			wanted_group: None,
+			order: crate::track::Order::Descending,
+			priority: 0,
+			max_delay: Duration::from_secs(3600),
+			ranges: vec![lite::Range::span(None, 0, None, None)],
+		}
+	}
 
+	async fn running() -> Running {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let broadcast = origin.create_broadcast("room").unwrap();
 		let mut dynamic = broadcast.requests();
@@ -8316,8 +8346,49 @@ mod tests {
 			.unwrap()
 			.accept(crate::track::Info::timed());
 		assert!(!drive(&mut serve).await, "the subscription ended");
+		assert!(
+			matches!(serve.state, RequestState::Serve(SubscribeServe::Run(_))),
+			"the subscription is not running"
+		);
+		Running {
+			serve,
+			session,
+			track,
+			_broadcast: broadcast,
+			_origin: origin,
+		}
+	}
+
+	/// The steer of a running subscription.
+	fn steer(serve: &RequestServe<SubscribeServe>) -> &kio::Producer<Steer> {
 		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
 			panic!("the subscription is not running");
+		};
+		&run.steer_tx
+	}
+
+	/// A subscription that always has another group ready yields within its budget, so a
+	/// sibling (the transport's driver, say) runs between its polls. Without it, one poll
+	/// served every group the producer kept appending and starved the rest of the runtime
+	/// (a go publisher's 2.5 ms audio groups timed its session out).
+	#[moq_clock::test]
+	async fn a_busy_subscription_yields_to_its_siblings() {
+		/// `RequestServe`'s passes per poll; each serves at most one group.
+		const BUDGET: u64 = 32;
+		const GROUPS: u64 = 10_000;
+		const BATCH: u64 = 1_000;
+
+		type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
+
+		let Running {
+			mut serve,
+			session,
+			track,
+			_broadcast,
+			_origin,
+		} = running().await;
+		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
+			unreachable!()
 		};
 		let outcomes = run.ctx.outcomes.clone();
 
@@ -8375,6 +8446,95 @@ mod tests {
 			session.log.resets().is_empty(),
 			"a group was reset: {:?}",
 			session.log.resets()
+		);
+	}
+
+	/// A requester streaming SUBSCRIBE_UPDATEs gets at most a budget of them applied per
+	/// poll, so its siblings run between them, yet every update still applies in order.
+	#[moq_clock::test]
+	async fn a_flood_of_updates_yields_to_its_siblings() {
+		/// `RequestServe`'s passes per poll; each applies at most one update.
+		const BUDGET: usize = 32;
+		const UPDATES: usize = 10_000;
+
+		let Running {
+			mut serve,
+			session,
+			_broadcast,
+			_origin,
+			track: _track,
+		} = running().await;
+		// Each differs from the one before, so none is skipped as a repeat, and only the
+		// last carries `i8::MAX`, so seeing it means every update has applied.
+		let priority = |i: usize| if i == UPDATES - 1 { i8::MAX } else { (i % 100) as i8 + 1 };
+		let mut bytes = Vec::new();
+		for i in 0..UPDATES {
+			let update = lite::SubscribeUpdate {
+				priority: priority(i),
+				..running_update()
+			};
+			update
+				.encode(
+					&mut crate::coding::Encoder::new(&mut bytes, Version::Lite07.into()),
+					Version::Lite07,
+				)
+				.unwrap();
+		}
+		session.push(&bytes);
+
+		let mut polls = 0;
+		kio::wait(|waiter| {
+			assert!(serve.poll(waiter).is_pending(), "the subscription ended");
+			polls += 1;
+			if steer(&serve).read().priority == priority(UPDATES - 1) {
+				return Poll::Ready(());
+			}
+			assert!(polls <= UPDATES, "the updates stalled");
+			Poll::Pending
+		})
+		.await;
+		assert!(polls * BUDGET >= UPDATES, "{UPDATES} updates applied in {polls} polls");
+	}
+
+	/// An update that restates the subscription wakes none of its groups.
+	#[moq_clock::test]
+	async fn a_repeated_update_wakes_no_group() {
+		#[derive(Default)]
+		struct Count(std::sync::atomic::AtomicUsize);
+		impl std::task::Wake for Count {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+
+		let Running {
+			mut serve,
+			session,
+			_broadcast,
+			_origin,
+			track: _track,
+		} = running().await;
+		let steered = steer(&serve).consume();
+		let wakes = Arc::new(Count::default());
+		let waiter = kio::Waiter::new(std::task::Waker::from(wakes.clone()));
+		assert!(steered.poll(&waiter, |_| Poll::<()>::Pending).is_pending());
+
+		for _ in 0..100 {
+			session.push(&running_update().encode_bytes(Version::Lite07).unwrap());
+		}
+		assert!(!drive(&mut serve).await, "the subscription ended");
+		assert_eq!(wakes.0.load(Ordering::Relaxed), 0, "a repeated update woke the groups");
+
+		let update = lite::SubscribeUpdate {
+			priority: 1,
+			..running_update()
+		};
+		session.push(&update.encode_bytes(Version::Lite07).unwrap());
+		assert!(!drive(&mut serve).await, "the subscription ended");
+		assert_eq!(
+			wakes.0.load(Ordering::Relaxed),
+			1,
+			"a new priority did not reach the groups"
 		);
 	}
 

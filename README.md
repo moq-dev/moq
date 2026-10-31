@@ -142,6 +142,8 @@ scheduling. Rust builds still use the dev shell's mbx Cargo shim.
 
 `just check` and `just ci` run three module lanes at once, each admitted per
 command; set `CHECK_JOBS` to change that, or to 1 to run them in order.
+`CHECK_MODULES` runs only the modules it names, or skips each one named with a
+leading `-`, as `just gate rs_shapes` and `just gate -rs_shapes` split the gate.
 Local nextest runs default to at most four test workers; set
 `NEXTEST_TEST_THREADS` to override it. Bun workspace scripts run sequentially
 locally, preserving dependency order, while CI keeps its workspace parallelism.
