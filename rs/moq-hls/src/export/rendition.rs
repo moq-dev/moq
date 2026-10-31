@@ -614,12 +614,14 @@ impl Rendition {
 		if lineage.is_empty() {
 			return Vec::new();
 		}
+		// Each read whole, so its rows are all it will ever list once it reads closed.
+		let windows: Vec<_> = lineage.iter().map(|rendition| rendition.live.window()).collect();
+		let closed = windows.iter().all(|window| window.closed);
 		let mut rows: std::collections::VecDeque<_> = lineage
 			.iter()
-			.flat_map(|rendition| {
-				rendition
-					.live
-					.window()
+			.zip(windows)
+			.flat_map(|(rendition, window)| {
+				window
 					.segments
 					.into_iter()
 					.map(move |row| (Some(rendition.clone()), row))
@@ -649,9 +651,7 @@ impl Rendition {
 		// older one's last.
 		match rows.first() {
 			Some((oldest, _)) => *oldest.previous.lock().expect("previous lock poisoned") = None,
-			None if lineage.iter().all(|rendition| rendition.live.is_closed()) => {
-				*self.previous.lock().expect("previous lock poisoned") = None
-			}
+			None if closed => *self.previous.lock().expect("previous lock poisoned") = None,
 			None => {}
 		}
 		rows

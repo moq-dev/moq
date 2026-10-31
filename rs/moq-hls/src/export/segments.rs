@@ -163,6 +163,9 @@ pub(crate) struct Window {
 	pub ended: bool,
 	/// Why the window failed, if it did.
 	pub failed: Option<crate::Error>,
+	/// Whether the window is closed, so these are all the rows it will ever list (see
+	/// [`Producer::closed`]).
+	pub closed: bool,
 }
 
 /// The next segment a [`Consumer`] should emit, resolved from the window.
@@ -188,6 +191,7 @@ impl State {
 			segments: self.rows.iter().cloned().collect(),
 			ended: self.ended,
 			failed: self.failed.clone(),
+			closed: false,
 		}
 	}
 
@@ -307,7 +311,11 @@ impl Producer {
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
 	pub fn window(&self) -> Window {
-		self.state.read().window()
+		let state = self.state.read();
+		Window {
+			closed: state.is_closed(),
+			..state.window()
+		}
 	}
 
 	/// The row of segment `segment` numbered by the record track tagged `tag`, or `None` if it
@@ -381,11 +389,6 @@ impl Producer {
 	/// Resolve once the window is closed: its records watcher lists no more rows.
 	pub async fn closed(&self) {
 		self.state.closed().await;
-	}
-
-	/// Whether the window is closed (see [`closed`](Self::closed)).
-	pub fn is_closed(&self) -> bool {
-		self.state.read().is_closed()
 	}
 
 	/// Whether the window lists segment `at` of the record track tagged `tag`.
