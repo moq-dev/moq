@@ -17,10 +17,10 @@ pub struct Config {
 	/// whole handshake, or `None` (the default) for no deadline. Without one,
 	/// only inactivity ends a stalled handshake: moq-quic's fixed 10 s
 	/// handshake idle timeout until QUIC is established, which
-	/// [`Transport::idle_timeout`] does not change, then
-	/// [`Transport::idle_timeout`] through the layers on top.
+	/// [`transport::Config::idle_timeout`] does not change, then
+	/// [`transport::Config::idle_timeout`] through the layers on top.
 	///
-	/// [`Transport::idle_timeout`]: super::Transport::idle_timeout
+	/// [`transport::Config::idle_timeout`]: super::transport::Config::idle_timeout
 	pub timeout: Option<Duration>,
 }
 

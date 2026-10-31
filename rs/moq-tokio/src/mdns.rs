@@ -336,7 +336,7 @@ impl Config {
 	/// returning, so a caller can treat success as "the mesh is live" and gate
 	/// process readiness on it. Errors if no interface works within 5 seconds.
 	pub async fn advertise(self) -> Result<Discovery> {
-		Discovery::new(self).await
+		crate::runtime::scope(Discovery::new(self)).await
 	}
 }
 

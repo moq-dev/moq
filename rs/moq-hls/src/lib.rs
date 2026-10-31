@@ -42,9 +42,6 @@ pub use axum;
 #[cfg(test)]
 pub(crate) async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> moq_mux::Source {
 	let consumer = origin.consume();
-	let broadcast = consumer
-		.request_broadcast(path, None)
-		.await
-		.expect("the broadcast resolves");
+	let broadcast = consumer.request(path, None).await.expect("the broadcast resolves");
 	moq_mux::Source::new(consumer, broadcast)
 }

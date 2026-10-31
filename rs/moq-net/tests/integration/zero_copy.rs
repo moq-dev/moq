@@ -59,11 +59,7 @@ async fn frames_cross_without_a_copy() {
 		broadcast.announce(Default::default()).unwrap();
 
 		let consumer = subscriber.consume();
-		moq_clock::timeout(TIMEOUT, consumer.routed("room"))
-			.await
-			.expect("announce timeout")
-			.unwrap();
-		let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+		let remote = moq_clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");

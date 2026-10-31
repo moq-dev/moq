@@ -323,7 +323,7 @@ process CPU (user + system, every thread) per MB into
 budget (default 1); every received frame is checked byte for byte.
 
 The binding benchmark itself lives in
-[rust2](https://github.com/kixelated/rust2/blob/main/bench/ffi/README.md), with
+[rust2](https://github.com/moq-dev/rust2/blob/main/bench/ffi/README.md), with
 the UniFFI fork whose changes it measures: its `just bench-ffi` runs these
 runners nightly at a pinned moq revision, against the fork, and reports each
 wrapper's ratio to Rust. So that they keep working here, moq's Nightly runs every
@@ -551,6 +551,26 @@ nix develop --command just gh benchmark-report gate target/bench/nightly/rust-be
 Each run's evidence directory keeps both builds' estimates (`criterion` and
 `criterion-base`), the confirmation rounds under `confirm/`, and the run's
 `paired.json`.
+
+### CodSpeed
+
+The CodSpeed workflow adds instruction counts for every `main` commit that
+touches Rust, at <https://codspeed.io/moq-dev/moq>. Its CPU simulation runs
+each bench under Valgrind on a hosted runner, so a change of a few percent
+shows without the paired comparison's rounds. It does not see syscalls, I/O,
+contention, or caches, and skips `iter_custom` benches, so `just rs codspeed`
+builds only single-threaded targets without I/O, and Nightly keeps measuring
+every bench. Workspace benches import `criterion`, which `rs/bench-harness`
+resolves to Criterion, or to CodSpeed's instrumented Criterion under
+`cargo codspeed`. Nothing gates on it.
+
+```bash
+nix develop --command just rs codspeed
+nix develop --command cargo codspeed run
+```
+
+Run locally, the benches only check that each case runs; there is no
+measurement outside CodSpeed's runner.
 
 ## Local check capacity
 

@@ -1105,7 +1105,7 @@ fn build_audio_trak(track_id: u32, timescale: u32, sample_entry: mp4_atom::Codec
 /// [`extract_init`] normalizes a passed-through trak to match.
 pub(crate) fn encode_init(
 	ftyp: Option<mp4_atom::Ftyp>,
-	traks: Vec<mp4_atom::Trak>,
+	mut traks: Vec<mp4_atom::Trak>,
 	trexs: Vec<mp4_atom::Trex>,
 ) -> Result<Bytes> {
 	use mp4_atom::Encode;
@@ -1115,6 +1115,24 @@ pub(crate) fn encode_init(
 		minor_version: 0x200,
 		compatible_brands: vec![b"isom".into(), b"iso6".into(), b"mp41".into()],
 	});
+	// Hang places every decoded Opus sample one pre-skip before its packet timestamp.
+	// dOps alone describes decoder priming; ISO BMFF needs an edit to express that
+	// presentation shift. Rebuild it after the output track timescales are settled.
+	for trak in &mut traks {
+		if let [mp4_atom::Codec::Opus(opus)] = trak.mdia.minf.stbl.stsd.codecs.as_slice() {
+			let skip = u64::from(opus.dops.pre_skip) * u64::from(trak.mdia.mdhd.timescale) / 48_000;
+			trak.edts = (skip != 0).then(|| mp4_atom::Edts {
+				elst: Some(mp4_atom::Elst {
+					entries: vec![mp4_atom::ElstEntry {
+						// A live edit's duration is implicit in the fragments that follow.
+						segment_duration: 0,
+						media_time: Some(skip),
+						media_rate: mp4_atom::FixedPoint::from(1),
+					}],
+				}),
+			});
+		}
+	}
 	let timescale = traks.first().map(|t| t.mdia.mdhd.timescale).unwrap_or(1000);
 	let next_track_id = traks.iter().map(|t| t.tkhd.track_id).max().unwrap_or(0) + 1;
 
@@ -1500,6 +1518,65 @@ mod tests {
 		let moov = moov(&init);
 		assert_eq!(moov.mvhd.duration, u64::MAX);
 		assert_eq!(moov.trak[0].tkhd.duration, u64::MAX);
+	}
+
+	/// Opus media time counts priming; Hang time places the first kept sample at the
+	/// first frame timestamp. Both init sources must express the same inverse mapping.
+	#[test]
+	fn opus_init_maps_hang_timestamps_to_media() {
+		for timescale in [48_000, 1_000_000] {
+			for pre_skip in [0, 312, u16::MAX] {
+				let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+				config.description = Some(
+					crate::codec::opus::Config::new(48_000, 2)
+						.with_pre_skip(pre_skip)
+						.encode()
+						.unwrap(),
+				);
+				for source_edit in [false, true] {
+					let mut trak = synthesize_audio_trak(1, timescale, &config).unwrap();
+					if source_edit {
+						trak.edts = Some(mp4_atom::Edts {
+							elst: Some(mp4_atom::Elst {
+								entries: vec![mp4_atom::ElstEntry {
+									media_time: Some(96000),
+									..Default::default()
+								}],
+							}),
+						});
+						let mut init = Vec::new();
+						mp4_atom::Encode::encode(
+							&mp4_atom::Moov {
+								trak: vec![trak],
+								..Default::default()
+							},
+							&mut init,
+						)
+						.unwrap();
+						let mut traks = Vec::new();
+						extract_init(&Bytes::from(init), 1, &mut None, &mut traks, &mut Vec::new()).unwrap();
+						trak = traks.pop().unwrap();
+					}
+					let init = encode_init(None, vec![trak], Vec::new()).unwrap();
+					let moov = moov(&init);
+					let trak = &moov.trak[0];
+					let skip = u64::from(pre_skip) * timescale / 48_000;
+					if skip == 0 {
+						assert!(trak.edts.is_none());
+					} else {
+						let entries = &trak.edts.as_ref().unwrap().elst.as_ref().unwrap().entries;
+						assert_eq!(entries.len(), 1);
+						assert_eq!(entries[0].media_time, Some(skip));
+						assert_eq!(entries[0].segment_duration, 0, "the live duration is implicit");
+						assert_eq!(entries[0].media_rate, mp4_atom::FixedPoint::from(1));
+					}
+					let edit = edit::Edit::new(trak, moov.mvhd.timescale).unwrap();
+					for pts in [0, skip, timescale * 10] {
+						assert_eq!(edit.present(pts).unwrap(), Some(pts), "the importer inverts the edit");
+					}
+				}
+			}
+		}
 	}
 
 	// The header defaults are all the "off" value: a track the presentation doesn't claim, a

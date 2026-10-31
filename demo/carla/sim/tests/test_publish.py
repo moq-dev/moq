@@ -217,7 +217,7 @@ class Drivers:
         assert (prefix, filter) == ("viewer/carla/truck1", "*")
         return self.announcements
 
-    async def request_broadcast(self, path: str):
+    async def request(self, path: str):
         self.requested.append(path)
         sequence = len(self.requested)
 

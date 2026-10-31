@@ -4,6 +4,7 @@
  * @module
  */
 
+import { Milli } from "@moq/clock";
 import { ProtocolViolation } from "../error.ts";
 import { concat, type Reader } from "../stream.ts";
 import type { Order } from "../track.ts";
@@ -288,6 +289,9 @@ export interface Fill {
 	/** The filled groups' order, or the subscription's order when omitted. */
 	groupOrder?: Order;
 
+	/** FILL_TIMEOUT, bounding the fill's wait as it does a FETCH's; see {@link Parameters.fillTimeout}. */
+	fillTimeout?: Milli;
+
 	/**
 	 * The range to fill. `undefined` means the Location Filter was omitted, which inherits
 	 * the subscription's own filter; `unfiltered` (a zero length filter, or type 0x00 from
@@ -305,12 +309,14 @@ export interface Fill {
 
 /** LOCATION_FILTER, the parameter that selects the fill's objects. */
 const FILL_LOCATION_FILTER = 0x21n;
+/** FILL_TIMEOUT, the fill's budget for waiting on objects not yet available. */
+const FILL_TIMEOUT = 0x0an;
 
-type Framing = "byte" | "varint" | "bytes";
+type Framing = "byte" | "bytes";
 
 /**
- * The parameters draft-22 allows inside FILL_PARAMETERS besides LOCATION_FILTER, and how
- * each frames its value.
+ * The parameters draft-22 allows inside FILL_PARAMETERS besides LOCATION_FILTER and
+ * FILL_TIMEOUT, and how each frames its value.
  *
  * Tabulated rather than derived, because neither shortcut is right. The Key-Value-Pair rule
  * keys framing off the id's parity, but the Range Filters (0x25-0x28) carry an explicit
@@ -319,7 +325,6 @@ type Framing = "byte" | "varint" | "bytes";
  * mistake desyncs every parameter after it.
  */
 const FILL_ALLOWED = new Map<bigint, Framing>([
-	[0x0an, "varint"], // FILL_TIMEOUT
 	[0x20n, "byte"], // SUBSCRIBER_PRIORITY, a uint8
 	[0x22n, "byte"], // GROUP_ORDER, a uint8
 	[0x25n, "bytes"], // SUBGROUP_FILTER
@@ -334,16 +339,25 @@ const FILL_ALLOWED = new Map<bigint, Framing>([
  * The value is a nested parameter scope, encoded like a message's parameters.
  */
 export function encodeFill(fill: Fill, version: IetfVersion): Uint8Array {
-	const parts = [varint(BigInt(Number(fill.filter !== undefined) + Number(fill.groupOrder !== undefined)))];
+	const count = [fill.fillTimeout, fill.filter, fill.groupOrder].filter((v) => v !== undefined).length;
+	const parts = [varint(BigInt(count))];
+	// Parameters sort by id, each a delta from the one before.
+	let prev = 0n;
+	const key = (id: bigint) => {
+		parts.push(varint(id - prev));
+		prev = id;
+	};
+	if (fill.fillTimeout !== undefined) {
+		key(FILL_TIMEOUT);
+		parts.push(varint(BigInt(fill.fillTimeout)));
+	}
 	if (fill.filter !== undefined) {
-		parts.push(varint(FILL_LOCATION_FILTER), encodeParam(fill.filter, version));
+		key(FILL_LOCATION_FILTER);
+		parts.push(encodeParam(fill.filter, version));
 	}
 	if (fill.groupOrder !== undefined) {
-		// Parameters sort by id; GROUP_ORDER follows LOCATION_FILTER by one.
-		parts.push(
-			varint(fill.filter !== undefined ? 1n : 0x22n),
-			new Uint8Array([fill.groupOrder === "ascending" ? 1 : 2]),
-		);
+		key(0x22n);
+		parts.push(new Uint8Array([fill.groupOrder === "ascending" ? 1 : 2]));
 	}
 	return concat(parts);
 }
@@ -358,6 +372,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 	let rest = afterCount;
 	let filter: Filter | undefined;
 	let groupOrder: Order | undefined;
+	let fillTimeout: Milli | undefined;
 	let rangeFilters = false;
 	let prev = 0n;
 	for (let i = 0n; i < count; i++) {
@@ -381,6 +396,15 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 			continue;
 		}
 
+		if (key === FILL_TIMEOUT) {
+			if (fillTimeout !== undefined) throw new Error("duplicate FILL_TIMEOUT inside FILL_PARAMETERS");
+			let value: bigint;
+			[value, rest] = unvarint(rest);
+			// Saturated like a FETCH's, since no wait lasts that long anyway.
+			fillTimeout = Milli(value > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(value));
+			continue;
+		}
+
 		const framing = FILL_ALLOWED.get(key);
 		if (framing === undefined) {
 			throw new Error(`parameter ${key} is not allowed inside FILL_PARAMETERS`);
@@ -391,10 +415,6 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 		rangeFilters ||= key >= 0x25n && key <= 0x28n;
 
 		// Each parameter must consume its own value or the remaining keys desync.
-		if (framing === "varint") {
-			[, rest] = unvarint(rest);
-			continue;
-		}
 		if (framing === "byte") {
 			if (rest.length < 1) throw new Error("truncated value inside FILL_PARAMETERS");
 			if (key === 0x22n) {
@@ -415,7 +435,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 		throw new Error("trailing bytes in FILL_PARAMETERS");
 	}
 
-	return { filter, groupOrder, rangeFilters };
+	return { filter, groupOrder, fillTimeout, rangeFilters };
 }
 
 /** Split a length-prefixed value off the front of `data`, returning it and what follows. */

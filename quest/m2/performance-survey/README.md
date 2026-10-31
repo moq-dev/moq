@@ -155,9 +155,9 @@ No duplicate quest or workflow edit belongs here.
   and fixed QMux copying in
   [moq-dev/moq#6381](https://github.com/moq-dev/moq/pull/6381). MKV
   fragmentation below concerns parser replay before those queues.
-- [Binding bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md),
-  [foreign polling](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md),
-  [Kotlin calls](https://github.com/kixelated/rust2/blob/main/quest/m1/kt-ffi-calls.md),
+- [Binding bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md),
+  [foreign polling](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-poll-protocol.md),
+  [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md),
   [NVENC pooling](/quest/m2/nvenc-pool.md), and
   [watch worker planning](/quest/m2/plan-watch-worker.md) retain their scopes.
 - [Route wakes](/quest/m2/route-wakes.md),

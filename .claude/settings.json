@@ -6,10 +6,6 @@
 				"hooks": [
 					{
 						"type": "command",
-						"command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/submodule.sh"
-					},
-					{
-						"type": "command",
 						"command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/direnv.sh"
 					}
 				]
