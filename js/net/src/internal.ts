@@ -39,9 +39,19 @@ export function groupBounds(groups: Groups = {}): { start: number; end?: number 
 /**
  * The announce-interest prefix a scope needs on a prefix-shaped wire: its literal head.
  * The peer echoes every suffix beneath it, and the caller filters what arrives.
+ *
+ * A head cut at an escaped `/`, such as `a\` from `a\/*`, ends in half an escape, so it
+ * falls back to its parent.
  */
 export function scopeHead(scope: Path.Pattern): Path.Valid {
-	return Path.from(scope.head);
+	let head = scope.head;
+	for (;;) {
+		try {
+			return Path.from(head);
+		} catch {
+			head = head.slice(0, Math.max(head.lastIndexOf("/"), 0));
+		}
+	}
 }
 
 /**
@@ -405,10 +415,10 @@ export const hooks: {
 	 * Declare the first group a wire subscription's live feed serves (lite SUBSCRIBE_START, or
 	 * IETF SUBSCRIBE_OK's Largest) for the floor its SUBSCRIBE requested: while the demand keeps
 	 * that floor, a pending tail owes nothing below it. Mirrors the Rust `start_at`; assigned by
-	 * `track.ts`. Without `start`, the SUBSCRIBE is still waiting on the START that resolves it,
-	 * as the Rust `request_start`.
+	 * `track.ts`. A null `start` resolves an empty range; without `start`, the SUBSCRIBE still
+	 * waits on its START, as the Rust `request_start`.
 	 */
-	startTrack: (producer: Producer, served: { start?: number; requested?: number }) => void;
+	startTrack: (producer: Producer, served: { start?: number | null; requested?: number }) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -544,6 +554,8 @@ export const hooks: {
 	 * Assigned by `group.ts`.
 	 */
 	releaseGroupReader: (group: GroupConsumer, abort?: Error) => void;
+	/** Whether a group reader still reads the copy it was mirrored from, not one its recovery moved it to. */
+	readsMirrored: (group: GroupConsumer) => boolean;
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
 	/** Return when a group joined its track at this hop, on the installed clock. */
@@ -562,8 +574,11 @@ export const hooks: {
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
 	readGroupFrame: (group: GroupConsumer, compressed: boolean) => Promise<ReadGroupFrame | undefined>;
-	/** Make an evicted mirror terminal while its track timeline still contains it. */
-	evictGroup: (group: GroupConsumer) => void;
+	/**
+	 * Make an evicted mirror terminal while its track timeline still contains it. Whether the
+	 * mirror is released too: not when its group reads on, or may yet, from another copy.
+	 */
+	evictGroup: (group: GroupConsumer) => boolean;
 	/** Attach the origin advertisement of a created broadcast. */
 	attachAnnouncer: (
 		producer: BroadcastProducer,
@@ -759,6 +774,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	releaseGroupReader: () => {
+		throw new Error("group.ts not loaded");
+	},
+	readsMirrored: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupTimestamp: () => {
