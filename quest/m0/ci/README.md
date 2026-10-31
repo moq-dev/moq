@@ -141,3 +141,9 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Biome checks every file it can parse](/quest/m0/ci/biome-whole-repo.md) - Biome runs over the whole repository and main is clean under it
 - [workspace.test.py ignores the caller's gate filter](/quest/m0/ci/workspace-test-env.md) - the dispatcher test passes under any `just gate` module filter
 - [PRs build the feature shapes they can break](/quest/m0/ci/pr-feature-builds.md) - a PR touching a crate's source runs that crate's isolated feature builds
+- [The bench comparison builds moq-gst's catalog bench on its base](/quest/m0/ci/bench-base-build.md) - A paired bench comparison that selects `rust/gst/moq-gst/catalog` against `origin/main` builds the base side and reports a comparison, instead of marking it unavailable
+- [The gate selects checks for every input that can break them](/quest/m0/ci/check-selection.md) - `just check`'s Rust selection runs without jq errors, a change to the pinned `rust-nightly` in `flake.nix` runs send-depth, and a change to `rs/moq-ffi` or
+- [Code scanning has no untriaged alert on main](/quest/m0/ci/code-scanning-triage.md) - every open code-scanning alert on `main`'s default branch is either fixed or dismissed with a reason and a comment that names the evidence
+- [The workspace-hack refuses trybuild edges and spares non-media builds](/quest/m0/ci/hakari-followups.md) - `hakari.py` refuses trybuild dev-dependency edges, non-media Linux test builds stop needing libpipewire, and the dev shell has `cargo-hakari`
+- [Pullfrog reviews finish inside their time limit](/quest/m0/ci/pullfrog-timeout.md) - A Pullfrog review of a large PR finishes instead of failing on the action's run limit
+- [Long test runs keep their built binaries](/quest/m0/ci/shared-target.md) - A long `just test interop` or wire-compat run never fails because the binaries it built were removed from the shared Cargo target mid-run, such as by mbx pruning its

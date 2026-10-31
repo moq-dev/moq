@@ -146,6 +146,32 @@ moq-transport drafts 14 to 17 (Cloudflare's draft-14 and draft-16 relays),
 quiche-moq (connect idle timeout), xquic's docker relay (binds loopback),
 and moqtopus and xquic-draft-18 over WebTransport (raw QUIC only).
 
+Added 2026-10-31, from the runner's 2026-10-31 nightly
+[41149054952](https://github.com/englishm/moq-interop-runner/actions/runs/41149054952)
+as read by [moq-dev/moq#7050](https://github.com/moq-dev/moq/pull/7050) and
+[moq-dev/moq#7104](https://github.com/moq-dev/moq/pull/7104) (moq-dev-js on
+`@moq/net` 0.4.7):
+
+- moq-dev-js fails `setup-only` in about 505 ms with an empty message in
+  three cells: remote QUIC against Cloudflare draft-18, remote QUIC against
+  aiomoqt, and aiomoqt docker, on 0.4.4 and 0.4.7 alike. WebTransport to the
+  same hosts passes. The two remote QUIC cells are probably the raw-QUIC
+  limitation under Check first; the aiomoqt docker cell is unexplained.
+- The same nightly shows moq-dev-js `setup-only` failures against
+  libquicr, moqlivemock, moq-dev-rs, moqtail, moqx, quiche-moq, red5,
+  stitcher-moq, and xquic-draft-18. Classify them together.
+- imquic: moq-dev-js `subscribe-before-announce` fails in both remote cells
+  (`lminiero.it`), and `publish-namespace-done` in the remote-quic cell; all
+  three pass in the docker cell.
+- Runner image staleness: a merged moq-dev-* bump reaches the nightly only
+  after someone dispatches an image rebuild, because the schedule in the
+  runner's `rebuild-all-images.yml` is commented out. After a bump merges,
+  check its GHCR tag. Asking upstream to restore the schedule is outside
+  the standing approval, so get the maintainer's first.
+- The runner's `moq-rs-draft-18-relay` and `moq-rs-draft-18-client` image
+  builds (Cloudflare draft-18) failed in the 2026-10-22 rebuild and both
+  2026-10-28 rebuilds, so those cells run stale images.
+
 ## Required
 
 - [Release cut](/quest/m2/release/cut.md) - waits for the release in flight to ship

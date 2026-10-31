@@ -74,6 +74,16 @@ Python wrapper. This run only reviews what those gates can't see.
   enable `reportUnnecessaryTypeIgnoreComment` without falsely flagging its
   three needed ignores. Audit it with the bindings installed.
 
+- Atomic `fetch_update` (added 2026-10-31, from
+  [moq-dev/moq#7280](https://github.com/moq-dev/moq/pull/7280) and
+  [moq-dev/moq#7315](https://github.com/moq-dev/moq/pull/7315)): the pinned
+  nightly warns that it is deprecated in favor of `try_update`. Eight files
+  call it on 2026-10-31 (`git grep fetch_update -- rs`), five in moq-net,
+  plus kio, moq-c, and moq-mux. `try_update` is stable since Rust 1.95 and
+  the workspace `rust-version` is 1.91, so switching needs that MSRV bump;
+  otherwise leave them and record why. Fixing it keeps the nightly pin easy
+  to bump.
+
 ### Results (m1, 2026-10-24)
 
 - Rust: removed the Apple-only `msghdr_x` `non_camel_case_types` (Rust

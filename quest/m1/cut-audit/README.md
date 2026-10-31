@@ -59,6 +59,7 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [The export clock keeps only the rules admission still needs](/quest/m1/cut-audit/jitter-admission.md) - the clock rules the time and byte admission bound made redundant are measured and removed
 - [Stream-accept loops yield on a per-poll budget](/quest/m1/cut-audit/accept-budget.md) - a peer opening many streams cannot monopolize a session driver
 - [Rust and JS accept the same catalogs](/quest/m1/cut-audit/catalog-parity.md) - one strictness, per rendition, with a shared fixture corpus
+- [Each export-clock rule kept by the jitter audit has its own test](/quest/m1/cut-audit/jitter-rule-tests.md) - `stale`, `unheard_lag`, and the horizon shift in `rs/moq-mux/src/jitter.rs` each have a test that fails when that rule alone is removed
 
 ## Related
 
