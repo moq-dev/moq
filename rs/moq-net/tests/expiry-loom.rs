@@ -22,7 +22,7 @@ mod loom {
 			let publisher = thread::spawn(move || {
 				let mut track = writer.1.write().unwrap();
 				*track = true;
-				if writer.0.has_landing_waiters() {
+				if writer.0.land(1) {
 					writer.0.landed(None, 1, 0);
 				}
 			});
@@ -31,7 +31,7 @@ mod loom {
 				if held {
 					shared.0.watch_held(0, waiter);
 				} else {
-					shared.0.watch_landing(0, waiter);
+					let _ = shared.0.watch_landing(0, waiter);
 				}
 				if *track { Poll::Ready(()) } else { Poll::Pending }
 			}));
@@ -47,5 +47,25 @@ mod loom {
 	#[test]
 	fn insertion_observes_a_registered_held_reader_or_the_reader_observes_it() {
 		insertion_race(true);
+	}
+
+	/// A group's expiry judges it without the track lock: the insert publishes the landing
+	/// and the read registers, each before checking the other.
+	#[test]
+	fn insertion_wakes_a_lock_free_reader_or_the_reader_sees_it() {
+		::loom::model(|| {
+			let wakes = Arc::new(Wakes::default());
+			let writer = wakes.clone();
+			let publisher = thread::spawn(move || {
+				if writer.land(1) {
+					writer.landed(None, 1, 0);
+				}
+			});
+			block_on(kio::wait(|waiter| match wakes.watch_landing(0, waiter) {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}));
+			publisher.join().unwrap();
+		});
 	}
 }
