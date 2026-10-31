@@ -1315,7 +1315,7 @@ export class Subscriber {
 			priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 			// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
-			unchecked: true,
+			ietf: version,
 		});
 		const producer = staged.producer;
 		const tail = new Tail();
