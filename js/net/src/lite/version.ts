@@ -405,6 +405,12 @@ export function hasAnnounceRestart(version: Version): boolean {
 	}
 }
 
+/** Whether the announce stream has ANNOUNCE_TAKEOVER: a new advertisement continuing what a
+ * live one served beneath its path. Added in lite-07. Older versions send an ANNOUNCE_START. */
+export function hasAnnounceTakeover(version: Version): boolean {
+	return hasAnnounceRestart(version);
+}
+
 /** Whether ANNOUNCE_START, TRACK, SUBSCRIBE, and FETCH carry the publisher epoch. Added in lite-07.
  * Older versions carry nothing, so a received route has no epoch and is never resumed elsewhere. */
 export function hasEpoch(version: Version): boolean {
