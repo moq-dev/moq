@@ -15,7 +15,6 @@
 #include <string>
 #include <vector>
 #include "logger.h"
-#include "moq-rate.h"
 #include "moq-worker.h"
 
 class MoQOutput {
@@ -68,8 +67,9 @@ public:
 	void CopyLastFailure(int *code, std::string *reason);
 
 	// The bitrate the video encoders follow the bandwidth grant at, summed over
-	// every encoder that follows, beside the configured rate that caps it.
-	// False when no video encoder follows the grant.
+	// every encoder that follows, beside the configured rate that caps it. A rung
+	// disabled for lack of bandwidth counts as zero. False when no video encoder
+	// follows the grant.
 	struct VideoRate {
 		uint64_t target_bps = 0;
 		uint64_t configured_bps = 0;
@@ -129,10 +129,20 @@ private:
 		uint64_t bitrate_bps = 0;
 		// Claimed on the first frame after the session connects.
 		std::shared_ptr<moq::Reservation> reservation;
-		// Video only, when the encoder can retune: the grant it follows, and a
+		// Video only, when the encoder can retune: the grant it follows, which
+		// disables it while the grant cannot fund it above a lower rendition, and a
 		// weak ref so Reset() can hand the configured bitrate back.
-		std::optional<MoQRate> rate;
+		std::shared_ptr<moq::RateControl> rate;
 		OBSWeakEncoder encoder;
+		// The bitrate the encoder was last told, which Reset() restores when it moved.
+		uint64_t applied_bps = 0;
+		// Whether the last target enabled this rendition.
+		bool enabled = true;
+		// False from a disable until the keyframe that resumes it, dropping packets.
+		bool sending = true;
+		// Whether a frame was written. Until one is, the importer still holds the
+		// init's parameter sets, which a discontinuity would discard.
+		bool started = false;
 	};
 
 	void VideoInit(obs_encoder_t *encoder);
@@ -141,6 +151,9 @@ private:
 	void AudioData(struct encoder_packet *packet);
 	// NOTE: Caller must hold media_mutex.
 	void Reserve(Track &track);
+	// Apply a rate target to `encoder`'s track: retune it, or stop sending it.
+	// NOTE: Caller must hold media_mutex.
+	void Retarget(obs_encoder_t *encoder, Track &track, const moq::RateTarget &target);
 
 	obs_output_t *output;
 

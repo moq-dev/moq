@@ -67,6 +67,15 @@ Saving Settings > Stream afterwards replaces the MoQ service. The dock's Go
 Live publishes one rendition. OBS's Enhanced Broadcasting (multitrack video)
 always streams through its RTMP output, so it cannot drive MoQ.
 
+With several video encoders on the output, each one is a rendition, and one
+above a lower-bitrate encoder stops sending while its share of the estimate
+cannot fund it, advertised as disabled so viewers switch down. Only an encoder
+that follows the estimate, as above, stops; one that cannot retune while live,
+or uses CQP or CRF, keeps sending. A stopped encoder keeps encoding, since OBS
+cannot pause one encoder of a live output, and resumes at that encoder's next
+keyframe once the estimate recovers. This needs the session to probe for
+bandwidth, which takes moq-quic with BBR3.
+
 ## Source quality and moq-transcode
 
 Without simulcast layers, OBS publishes **one** rendition. When a

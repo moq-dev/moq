@@ -8,6 +8,8 @@ from moq_ffi import (
     MoqAllocator,
     MoqBandwidthConsumer,
     MoqGrantConsumer,
+    MoqRateControl,
+    MoqRatePolicy,
     MoqReservation,
     MoqSession,
     MoqTokens,
@@ -17,7 +19,7 @@ from ._records import _strs
 from .errors import is_shutdown
 from .origin import OriginConsumer, OriginProducer
 from .publish import TrackDemand
-from .types import ConnectionState, ConnectionStats, Grant
+from .types import ConnectionState, ConnectionStats, Grant, RateTarget
 
 
 class Session:
@@ -269,3 +271,29 @@ class Reservation:
     def update(self, max_bps: int) -> None:
         """Change the ceiling, keeping the same claim."""
         self._inner.update(max_bps)
+
+
+class RateControl:
+    """Turns a :class:`Reservation`'s grant into a sender's :data:`RateTarget`.
+
+    The same policy moq's own encoders follow: drops apply at once, raises climb
+    at most 25% per second, and moves under 5% are ignored. For a sender that
+    encodes on its own, such as a pre-encoded track: call :meth:`update` on every
+    frame and apply what it returns.
+
+    Pass ``lower_bps``, the next lower rendition's ``max_bps``, for a rendition
+    encoded beside lower ones of the same source: a grant below
+    ``(max_bps + 2 * lower_bps) / 3`` then disables it while a session probes for
+    the reservation.
+    """
+
+    def __init__(self, max_bps: int, *, lower_bps: int | None = None) -> None:
+        self._inner = MoqRateControl(MoqRatePolicy(max_bps=max_bps, lower_bps=lower_bps))
+
+    def target(self) -> RateTarget:
+        """What the sender should currently be doing."""
+        return self._inner.target()
+
+    def update(self, reservation: Reservation) -> RateTarget | None:
+        """Feed ``reservation``'s grant, returning a new target worth applying, or ``None``."""
+        return self._inner.update(reservation._inner)

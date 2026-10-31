@@ -176,6 +176,44 @@ func (r *Reservation) Update(maxBps uint64) {
 	r.inner.Update(maxBps)
 }
 
+// RatePolicy maps a reservation's grant onto a sender's bitrate: MaxBps caps it,
+// and LowerBps, the next lower rendition's MaxBps, disables this rendition while
+// the grant is below (MaxBps + 2*LowerBps) / 3 and a session probes for it.
+type RatePolicy = ffi.MoqRatePolicy
+
+// RateTarget is what a sender following a RateControl should be doing: a
+// RateTargetEnabled bitrate, or RateTargetDisabled.
+type RateTarget = ffi.MoqRateTarget
+
+// RateTargetEnabled produces at BitrateBps and advertises the rendition as enabled.
+type RateTargetEnabled = ffi.MoqRateTargetEnabled
+
+// RateTargetDisabled stops sending and advertises the rendition as disabled.
+type RateTargetDisabled = ffi.MoqRateTargetDisabled
+
+// RateControl turns a Reservation's grant into a sender's RateTarget, with the
+// policy moq's own encoders follow: drops apply at once, raises climb at most 25%
+// per second, and moves under 5% are ignored. For a sender that encodes on its
+// own, call Update on every frame and apply what it returns.
+type RateControl struct {
+	inner *ffi.MoqRateControl
+}
+
+// NewRateControl starts at policy.MaxBps until a grant says otherwise.
+func NewRateControl(policy RatePolicy) *RateControl {
+	return &RateControl{inner: ffi.NewMoqRateControl(policy)}
+}
+
+// Target returns what the sender should currently be doing.
+func (c *RateControl) Target() RateTarget {
+	return c.inner.Target()
+}
+
+// Update feeds reservation's grant, returning a new target worth applying, or nil.
+func (c *RateControl) Update(reservation *Reservation) *RateTarget {
+	return c.inner.Update(reservation.inner)
+}
+
 // Publish returns the origin used to advertise local broadcasts to the remote.
 func (s *Session) Publish() *OriginProducer {
 	return &OriginProducer{inner: s.inner.Publish()}

@@ -347,6 +347,11 @@ pub struct MoqVideoInit {
 	/// Catalog fields the stream cannot reveal itself.
 	#[uniffi(default = None)]
 	pub hint: Option<MoqVideoHint>,
+	/// The next lower video rendition of the same source, when this one is published beside
+	/// it. This track then sits one priority below it, so a bandwidth allocator funds the
+	/// lower rendition first.
+	#[uniffi(default = None)]
+	pub lower: Option<Arc<MoqMediaTrackProducer>>,
 }
 
 /// Shares one source's timestamp offset across containers without keeping its broadcast open.
@@ -508,14 +513,23 @@ impl From<MoqAudioInit> for moq_mux::import::AudioInit {
 	}
 }
 
-impl From<MoqVideoInit> for moq_mux::import::VideoInit {
-	fn from(init: MoqVideoInit) -> Self {
-		let mut out = moq_mux::import::VideoInit::new(init.format.into(), init.data);
-		out.label = init.label;
-		if let Some(hint) = init.hint {
+impl MoqVideoInit {
+	/// The importer's init, at one priority below the [`lower`](Self::lower) rendition's.
+	fn resolve(self) -> Result<moq_mux::import::VideoInit, MoqError> {
+		let mut out = moq_mux::import::VideoInit::new(self.format.into(), self.data);
+		out.label = self.label;
+		if let Some(hint) = self.hint {
 			out.hint = hint.into();
 		}
-		out
+		if let Some(lower) = self.lower {
+			let guard = lower.inner.lock().unwrap();
+			let below = guard.as_ref().ok_or(MoqError::Closed)?;
+			let priority = below.video.ok_or_else(|| MoqError::Codec {
+				reason: "the lower rendition is not a video track".into(),
+			})?;
+			out.priority = priority.saturating_sub(1);
+		}
+		Ok(out)
 	}
 }
 
@@ -817,6 +831,8 @@ impl MoqMediaCatalogProducer {
 struct MediaProducer {
 	// Boxed because the codec splitters/imports make this much larger than the container one.
 	import: Box<moq_mux::import::Track>,
+	/// A video track's priority, which a higher rung takes one below; `None` for audio.
+	video: Option<i8>,
 }
 
 /// An importer for a container, which may publish several tracks.
@@ -928,7 +944,7 @@ impl MoqMediaTrackProducer {
 					reason: format!("init failed: {err}"),
 				}
 			})?;
-			MoqMediaTrackProducer::from_import(import, &state.children)
+			MoqMediaTrackProducer::from_import(import, None, &state.children)
 		})
 	}
 }
@@ -946,8 +962,9 @@ impl MoqMediaTrackProducer {
 		init: MoqVideoInit,
 	) -> Result<Arc<MoqMediaTrackProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
+		let init = init.resolve()?;
 		broadcast.with_state(|state| {
-			let init: moq_mux::import::VideoInit = init.into();
+			let priority = init.priority;
 			let request = target.resolve(&state.broadcast, &init.format)?;
 
 			let import = moq_mux::import::Track::video(request, state.catalog.reserve(), init).map_err(|err| {
@@ -955,7 +972,7 @@ impl MoqMediaTrackProducer {
 					reason: format!("init failed: {err}"),
 				}
 			})?;
-			MoqMediaTrackProducer::from_import(import, &state.children)
+			MoqMediaTrackProducer::from_import(import, Some(priority), &state.children)
 		})
 	}
 }
@@ -998,8 +1015,8 @@ impl MoqMediaTrackStreamProducer {
 		init: MoqVideoInit,
 	) -> Result<Arc<MoqMediaTrackStreamProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
+		let init = init.resolve()?;
 		broadcast.with_state(|state| {
-			let init: moq_mux::import::VideoInit = init.into();
 			let request = target.resolve(&state.broadcast, &init.format)?;
 
 			let import =
@@ -1020,11 +1037,16 @@ impl MoqMediaTrackStreamProducer {
 }
 
 impl MoqMediaTrackProducer {
-	/// Wrap a single-codec importer.
-	fn from_import(import: moq_mux::import::Track, children: &Children) -> Result<Arc<Self>, MoqError> {
+	/// Wrap a single-codec importer, capturing the priority a video track was published at.
+	fn from_import(
+		import: moq_mux::import::Track,
+		video: Option<i8>,
+		children: &Children,
+	) -> Result<Arc<Self>, MoqError> {
 		children.adopt(Arc::new(Self {
 			inner: std::sync::Mutex::new(Some(MediaProducer {
 				import: Box::new(import),
+				video,
 			})),
 			children: children.clone(),
 		}))
@@ -1076,6 +1098,24 @@ impl MoqMediaTrackProducer {
 		let mut guard = self.inner.lock().unwrap();
 		let media = guard.as_mut().ok_or(MoqError::Closed)?;
 		media.import.discontinuity()?;
+		Ok(())
+	}
+
+	/// Advertise whether this video rendition is being produced, as its catalog `enabled`.
+	///
+	/// Disable it when its sender stops for lack of bandwidth (a
+	/// [`MoqRateTarget::Disabled`](crate::bandwidth::MoqRateTarget::Disabled)) and mark a
+	/// [`discontinuity`](Self::discontinuity), so viewers select a lower rendition instead of
+	/// waiting for frames. Enable it again just before writing the keyframe that resumes it.
+	/// The rest of the rendition, its maximum bitrate included, stays as advertised. An audio
+	/// track refuses.
+	pub fn set_enabled(&self, enabled: bool) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let media = guard.as_mut().ok_or(MoqError::Closed)?;
+		media.import.set_enabled(enabled).map_err(|err| MoqError::Codec {
+			reason: format!("set enabled failed: {err}"),
+		})?;
 		Ok(())
 	}
 

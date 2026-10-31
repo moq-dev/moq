@@ -172,6 +172,12 @@ typealias Allocator = uniffi.moq.MoqAllocator
 typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
 /** One track's standing claim on an [Allocator]. */
 typealias Reservation = uniffi.moq.MoqReservation
+/** Turns a [Reservation]'s grant into a sender's [RateTarget]; call `update` on every frame. */
+typealias RateControl = uniffi.moq.MoqRateControl
+/** How a [RateControl] maps a grant onto a bitrate, and the lower rendition that disables it. */
+typealias RatePolicy = uniffi.moq.MoqRatePolicy
+/** What a sender following a [RateControl] should be doing: an enabled bitrate, or disabled. */
+typealias RateTarget = uniffi.moq.MoqRateTarget
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
 /** Follows the grant a session's peer gave it; cancel it to release a pending wait. */

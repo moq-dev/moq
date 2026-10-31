@@ -214,6 +214,7 @@ fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
 		data,
 		label: None,
 		hint: None,
+		lower: None,
 	}
 }
 
@@ -2787,6 +2788,51 @@ async fn video_publish_named_track() {
 		.unwrap()
 		.expect("expected a catalog");
 	assert!(catalog.video.contains_key("hd"), "catalog: {:?}", catalog.video.keys());
+}
+
+/// A pre-encoded rung above a lower rendition sits one priority below it, so an allocator
+/// funds the lower one first, and disables in the catalog without leaving it.
+#[tokio::test]
+async fn video_rung_sits_below_its_lower_and_disables() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+
+	let named = |name: &str| MoqMediaTarget::Named {
+		name: Some(name.into()),
+	};
+	let low =
+		MoqMediaTrackProducer::video(&broadcast, named("low"), video_init(MoqVideoFormat::Avc3, h264_init())).unwrap();
+	let high = MoqMediaTrackProducer::video(
+		&broadcast,
+		named("high"),
+		MoqVideoInit {
+			lower: Some(low.clone()),
+			..video_init(MoqVideoFormat::Avc3, h264_init())
+		},
+	)
+	.unwrap();
+
+	let priority = |name: &str| {
+		let consumer = consumer.clone();
+		let name = name.to_string();
+		async move { consumer.subscribe_track(name, None).await.unwrap().info().priority }
+	};
+	assert_eq!(priority("low").await, hang::catalog::PRIORITY.video);
+	assert_eq!(priority("high").await, hang::catalog::PRIORITY.video - 1);
+
+	high.set_enabled(false).unwrap();
+	let disabled = loop {
+		let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+			.await
+			.expect("timed out waiting for catalog")
+			.unwrap()
+			.expect("expected a catalog");
+		if catalog.video.get("high").is_some_and(|high| !high.enabled) {
+			break catalog;
+		}
+	};
+	assert!(disabled.video["low"].enabled);
 }
 
 /// A keyframe whose SPS names another level is a new decoder identity, so the track producer moves

@@ -58,3 +58,33 @@ public final class Reservation: Sendable {
         ffi.update(maxBps: maxBps)
     }
 }
+
+/// What a sender following a ``RateControl`` should be doing.
+public typealias RateTarget = MoqRateTarget
+
+/// Turns a ``Reservation``'s grant into a sender's ``RateTarget``.
+///
+/// The same policy moq's own encoders follow: drops apply at once, raises climb at most 25% per
+/// second, and moves under 5% are ignored. For a sender that encodes on its own, such as a
+/// pre-encoded track: call `update(_:)` on every frame and apply what it returns.
+///
+/// Pass `lowerBps`, the next lower rendition's `maxBps`, for a rendition encoded beside lower
+/// ones of the same source: a grant below `(maxBps + 2 * lowerBps) / 3` then disables it while
+/// a session probes for the reservation.
+public final class RateControl: Sendable {
+    let ffi: MoqRateControl
+
+    public init(maxBps: UInt64, lowerBps: UInt64? = nil) {
+        ffi = MoqRateControl(policy: MoqRatePolicy(maxBps: maxBps, lowerBps: lowerBps))
+    }
+
+    /// What the sender should currently be doing.
+    public func target() -> RateTarget {
+        ffi.target()
+    }
+
+    /// Feed `reservation`'s grant, returning a new target worth applying, or nil.
+    public func update(_ reservation: Reservation) -> RateTarget? {
+        ffi.update(reservation: reservation.ffi)
+    }
+}
