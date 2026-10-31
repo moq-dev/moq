@@ -131,59 +131,71 @@ fn weak_downgrade_upgrade_races_the_last_drop() {
 	});
 }
 
-/// The first consumer appearing must wake a producer parked on `used()`, however the
+/// The first consumer appearing must wake a producer parked on `wanted_changed()`, however the
 /// `fetch_add` interleaves with the waiter registration.
 #[test]
-fn first_consumer_wakes_used() {
+fn first_consumer_wakes_wanted_changed() {
 	loom::model(|| {
 		let producer = Producer::new(0u32);
 		let second = producer.clone();
 
-		// The consumer rides back on the join handle so it outlives the `used()` poll.
+		// The consumer rides back on the join handle so it outlives the `wanted_changed()` poll.
 		let maker = thread::spawn(move || second.consume());
 
-		assert_eq!(block_on(producer.used()), Ok(()), "the new consumer was missed");
+		assert_eq!(
+			block_on(producer.wanted_changed(false)),
+			Ok(true),
+			"the new consumer was missed"
+		);
 		drop(maker.join().unwrap());
 	});
 }
 
 /// The mirror image: the last consumer leaving must wake a producer parked on
-/// `unused()`.
+/// `wanted_changed()`.
 #[test]
-fn last_consumer_wakes_unused() {
+fn last_consumer_wakes_wanted_changed() {
 	loom::model(|| {
 		let producer = Producer::new(0u32);
 		let consumer = producer.consume();
 
 		let dropper = thread::spawn(move || drop(consumer));
 
-		assert_eq!(block_on(producer.unused()), Ok(()), "the last drop was missed");
+		assert_eq!(
+			block_on(producer.wanted_changed(true)),
+			Ok(false),
+			"the last drop was missed"
+		);
 		dropper.join().unwrap();
 	});
 }
 
-/// A consumer created and dropped while `unused()` is parked must not leave it
+/// A consumer created and dropped while `wanted_changed()` is parked must not leave it
 /// parked on a stale count.
 #[test]
-fn consumer_churn_resolves_unused() {
+fn consumer_churn_resolves_unwanted() {
 	loom::model(|| {
 		let producer = Producer::new(0u32);
 		let second = producer.clone();
 
 		let churn = thread::spawn(move || drop(second.consume()));
 
-		assert_eq!(block_on(producer.unused()), Ok(()), "unused() stalled on churn");
+		assert_eq!(
+			block_on(producer.wanted_changed(true)),
+			Ok(false),
+			"wanted_changed() stalled on churn"
+		);
 		churn.join().unwrap();
 	});
 }
 
-/// The invariant `write_unused` exists for: a consumer and a teardown racing must
+/// The invariant `write_unwanted` exists for: a consumer and a teardown racing must
 /// never both win. Either the consumer is minted and the teardown is declined, or
 /// the teardown closes the channel and the weak handle mints nothing.
 ///
 /// Without the count moving under the state lock, the "closed and minted" corner
 /// is reachable: the bump lands after the teardown read zero, and the consumer is
-/// left holding a channel that was torn down for being unused.
+/// left holding a channel that was torn down for being unwanted.
 #[test]
 fn a_teardown_and_a_consumer_never_both_win() {
 	loom::model(|| {
@@ -192,13 +204,13 @@ fn a_teardown_and_a_consumer_never_both_win() {
 
 		let consumer = thread::spawn(move || weak.try_consume());
 
-		let committed = match producer.write_unused() {
-			crate::Unused::Idle(guard) => {
+		let committed = match producer.write_unwanted() {
+			crate::Unwanted::Idle(guard) => {
 				guard.close();
 				true
 			}
-			crate::Unused::Used => false,
-			crate::Unused::Closed => unreachable!("nothing else closes this channel"),
+			crate::Unwanted::Wanted => false,
+			crate::Unwanted::Closed => unreachable!("nothing else closes this channel"),
 		};
 
 		let consumer = consumer.join().unwrap();
@@ -326,9 +338,9 @@ fn consumer_creation_cannot_cross_an_idle_guard() {
 		let weak = producer.weak();
 		let minting = thread::spawn(move || weak.consume());
 		drop(existing);
-		if let crate::Unused::Idle(guard) = producer.write_unused() {
+		if let crate::Unwanted::Idle(guard) = producer.write_unwanted() {
 			thread::yield_now();
-			assert!(!producer.is_used(), "consumer appeared while idle guard was held");
+			assert!(!producer.wanted(), "consumer appeared while idle guard was held");
 			guard.close();
 		}
 		drop(minting.join().unwrap());
