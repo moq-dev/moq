@@ -289,7 +289,14 @@ impl<O: Output> Media<O> {
 							subscriber = subscriber.with_range(largest.group..);
 						}
 						let format = catalog::hang::Container::try_from(config)?;
-						Ok::<_, anyhow::Error>((moq_mux::container::Consumer::new(subscriber, format), decoder))
+						// The playout delay is the target latency; the live-edge floor above means
+						// the start waits on nothing, but the consumer still learns both bounds.
+						let delay = moq_mux::container::Delay {
+							min: self.args.video_delay(),
+							max: Some(max_delay),
+						};
+						let track = moq_mux::container::Consumer::new(subscriber, format).with_delay(delay);
+						Ok::<_, anyhow::Error>((track, decoder))
 					}
 					.await;
 					match opened {
@@ -355,8 +362,11 @@ impl<O: Output> Media<O> {
 					// asked for, so a smaller budget would skip a group the playhead could
 					// still have reached, and would size the hole fill below to a playhead
 					// that does not exist.
-					decode.max_delay = self.args.max_delay().max(AUDIO_BUFFER_MIN);
-					decode.delay = self.args.fixed_delay();
+					decode.delay = moq_audio::decode::Delay {
+						min: self.args.fixed_delay().unwrap_or_default(),
+						max: Some(self.args.max_delay().max(AUDIO_BUFFER_MIN)),
+					};
+					decode.estimate = self.args.fixed_delay().is_none();
 					// The sink and the frame-duration math below both assume f32,
 					// so ask for it rather than inheriting the decoder default.
 					decode.output.format = moq_audio::Format::F32;
@@ -863,8 +873,11 @@ mod tests {
 			.unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
-		options.delay = Some(delay);
-		options.max_delay = delay;
+		options.delay = moq_audio::decode::Delay {
+			min: delay,
+			max: Some(delay),
+		};
+		options.estimate = false;
 		options.output.format = moq_audio::Format::F32;
 		let consumer = moq_audio::decode::Consumer::new(
 			&broadcast.consume(),
@@ -966,8 +979,11 @@ mod tests {
 		let mut audio = moq_mux::container::Producer::new(audio, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut video = moq_mux::container::Producer::new(video, Container::Legacy(moq_mux::container::Kind::Video));
 		let mut options = moq_audio::decode::Options::new();
-		options.delay = Some(delay);
-		options.max_delay = delay;
+		options.delay = moq_audio::decode::Delay {
+			min: delay,
+			max: Some(delay),
+		};
+		options.estimate = false;
 		options.output.format = moq_audio::Format::F32;
 		let consumer = moq_audio::decode::Consumer::new(
 			&broadcast.consume(),
@@ -1121,8 +1137,11 @@ mod tests {
 			.unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
-		options.delay = Some(delay);
-		options.max_delay = delay;
+		options.delay = moq_audio::decode::Delay {
+			min: delay,
+			max: Some(delay),
+		};
+		options.estimate = false;
 		options.output.format = moq_audio::Format::F32;
 		options.output.sample_rate = Some(SAMPLE_RATE);
 		let consumer = moq_audio::decode::Consumer::new(
@@ -1204,8 +1223,11 @@ mod tests {
 		producer.discontinuity().unwrap();
 		// Joins at the end marker: the stopped encoder's media is already behind it.
 		let mut options = moq_audio::decode::Options::new();
-		options.delay = Some(delay);
-		options.max_delay = delay;
+		options.delay = moq_audio::decode::Delay {
+			min: delay,
+			max: Some(delay),
+		};
+		options.estimate = false;
 		options.start = moq_audio::decode::Start::Latest;
 		options.output.format = moq_audio::Format::F32;
 		let consumer = moq_audio::decode::Consumer::new(
@@ -1256,8 +1278,11 @@ mod tests {
 			.unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
-		options.delay = Some(delay);
-		options.max_delay = delay;
+		options.delay = moq_audio::decode::Delay {
+			min: delay,
+			max: Some(delay),
+		};
+		options.estimate = false;
 		options.output.format = moq_audio::Format::F32;
 		let consumer = moq_audio::decode::Consumer::new(
 			&broadcast.consume(),
@@ -2104,7 +2129,7 @@ mod tests {
 		});
 		let mut options = moq_video::decode::Options::new();
 		options.decoder.kind = moq_video::decode::Kind::Software;
-		options.max_delay = delay;
+		options.delay.max = Some(delay);
 		let decoder = moq_video::decode::Sink::open(&catalog, &options.decoder).await.unwrap();
 		let subscriber = broadcast
 			.consume()

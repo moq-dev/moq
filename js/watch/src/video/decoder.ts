@@ -5,6 +5,7 @@ import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import {
 	type Computed,
+	Derived,
 	Effect,
 	type Getter,
 	getter,
@@ -491,7 +492,8 @@ class DecoderTrack {
 	#consume(effect: Effect, sub: Moq.Track.Subscriber, format: Container.Format): Container.Consumer {
 		const consumer = new Container.Consumer(sub, {
 			format,
-			maxDelay: this.sync.out.maxDelay,
+			// The playout delay is where a cold join starts, and the shared max delay how late it may fall.
+			delay: new Derived([this.sync.out.delay, this.sync.out.maxDelay], (min, max) => ({ min, max })),
 			predecessor: this.consumer ?? this.#predecessor,
 		});
 		effect.cleanup(() => consumer.close());

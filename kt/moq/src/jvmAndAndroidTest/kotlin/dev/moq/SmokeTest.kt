@@ -761,7 +761,11 @@ class SmokeTest {
                     val catalog = CatalogConsumer.subscribe(consumer).next()!!
                     val rendition = catalog.audio["mic"]!!
 
-                    val fixedOutput = AudioDecoderOutput(format = AudioSampleFormat.F32, delay = java.time.Duration.ofMillis(80))
+                    val fixedOutput = AudioDecoderOutput(
+                        format = AudioSampleFormat.F32,
+                        delay = Delay(min = java.time.Duration.ofMillis(80), max = java.time.Duration.ZERO),
+                        estimate = false,
+                    )
                     val fixed = AudioConsumer.subscribe(consumer, "mic", rendition, fixedOutput)
                     val estimated = AudioConsumer.subscribe(consumer, "mic", rendition, AudioDecoderOutput(format = AudioSampleFormat.F32))
                     assertEquals(java.time.Duration.ofMillis(80), fixed.delay())

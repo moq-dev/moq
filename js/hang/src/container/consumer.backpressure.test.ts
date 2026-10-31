@@ -57,7 +57,7 @@ test("Consumer holds frames sharing a timestamp within the max buffer", async ()
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format,
-		maxDelay: Milli(5_000),
+		delay: { max: Milli(5_000) },
 		maxBuffer,
 	});
 	try {
@@ -92,7 +92,7 @@ test("Consumer holds many groups within the max buffer and reaches the live edge
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format,
-		maxDelay: Milli(100),
+		delay: { max: Milli(100) },
 		maxBuffer,
 	});
 	try {
@@ -127,7 +127,7 @@ test("Consumer skips a stalled group once group overhead alone fills the max buf
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format,
-		maxDelay: Milli(5_000),
+		delay: { max: Milli(5_000) },
 		// Two groups' overhead, so nothing past the stalled head would decode without its successor leading.
 		maxBuffer: 512,
 	});
@@ -154,7 +154,7 @@ test("Consumer reaches a readable group past a stalled successor once group over
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format,
-		maxDelay: Milli.zero,
+		delay: { max: Milli.zero },
 		// Three groups' overhead: the readable group cannot decode until the stalled ones are moved past.
 		maxBuffer: 768,
 	});
@@ -183,7 +183,7 @@ test("Consumer admits reads completing together one at a time against the max bu
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format,
-		maxDelay: Milli(5_000),
+		delay: { max: Milli(5_000) },
 		maxBuffer: 4096,
 	});
 	try {
@@ -218,7 +218,7 @@ test("Consumer charges a small view of a large wire frame the wire frame", async
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Header("data"),
-		maxDelay: Milli(5_000),
+		delay: { max: Milli(5_000) },
 		maxBuffer: 16 * 1024,
 	});
 	try {
@@ -254,7 +254,7 @@ test("Consumer stamps frames the max buffer held back with when they landed, not
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay: Milli(5_000),
+		delay: { max: Milli(5_000) },
 		// One group's overhead and one frame: the second frame waits in the transport until the first is read.
 		maxBuffer: 300,
 	});
@@ -283,7 +283,7 @@ test("Consumer expires a hole behind a full max buffer from when the group past 
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay: Milli(500),
+		delay: { max: Milli(500) },
 		// Two groups' overhead: group 3 waits in the transport until groups 0 and 1 are read.
 		maxBuffer: 512,
 	});
@@ -316,7 +316,7 @@ for (const maxBuffer of [0, 256]) {
 		const track = new Track.Producer("test");
 		const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 			format: new Format("data"),
-			maxDelay: Milli(5_000),
+			delay: { max: Milli(5_000) },
 			// No more than one group's overhead: the successor is pulled anyway, so the head can be skipped.
 			maxBuffer,
 		});
@@ -343,7 +343,7 @@ test("Consumer moves past a stalled backlog group below the cursor once the max 
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay: Milli(5_000),
+		delay: { max: Milli(5_000) },
 		// Two groups' overhead: the backlog group and the active one leave no room for the newer group.
 		maxBuffer: 512,
 	});
@@ -371,7 +371,7 @@ test("Consumer reads what a promoted head already holds before skipping it under
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay: Milli(5_000),
+		delay: { max: Milli(5_000) },
 		maxBuffer: 1024,
 	});
 	try {
@@ -419,7 +419,7 @@ test("Consumer raises a malformed frame in a head promoted under pressure", asyn
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay: Milli(5_000),
+		delay: { max: Milli(5_000) },
 		maxBuffer: 1024,
 	});
 	try {
@@ -452,7 +452,7 @@ test("Consumer raises a malformed group an age skip passes after the track finis
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay: Milli(500),
+		delay: { max: Milli(500) },
 	});
 	try {
 		const first = track.createGroup(0);
@@ -482,7 +482,7 @@ test("Consumer reads a finished marker group's end before skipping under pressur
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay: Milli(5_000),
+		delay: { max: Milli(5_000) },
 		maxBuffer: 1024,
 	});
 	try {
@@ -518,7 +518,7 @@ test("Consumer reads a group whose frame fails to read as cut short while the re
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay: Milli(5_000),
+		delay: { max: Milli(5_000) },
 	});
 	try {
 		const stalled = track.createGroup(0);

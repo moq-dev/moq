@@ -121,7 +121,7 @@ void audio_roundtrip() {
     decoded.format = moq::AudioSampleFormat::kF32;
     // The track's whole retention: reading starts only after finish, and the budget ages
     // groups by wall clock, so a stalled host would otherwise skip the start.
-    decoded.max_delay = std::chrono::seconds(30);
+    decoded.delay = moq::Delay{std::chrono::seconds(0), std::chrono::seconds(30)};
     auto consumer = ok(moq::AudioConsumer::subscribe(receiver, "tone", snapshot->audio.at("tone"), decoded).get(), "audio consumer");
     for (size_t packet = 0; packet < 8; packet++) {
         std::vector<uint8_t> data(960 * 2 * sizeof(float));

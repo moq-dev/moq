@@ -37,7 +37,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("data"),
-		maxDelay: 5000 as Milli,
+		delay: { max: 5000 as Milli },
 	});
 
 	// Group A at a large sequence, completed so the cursor advances past it.

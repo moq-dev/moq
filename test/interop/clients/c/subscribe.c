@@ -245,7 +245,7 @@ static void start_audio(ctx_t *c, int32_t catalog) {
         moq_audio_decoder_output out;
         memset(&out, 0, sizeof(out));
         out.format = MOQ_AUDIO_SAMPLE_FORMAT_F32;
-        out.max_delay_us = MAX_DELAY_US;
+        out.delay.max_us = MAX_DELAY_US;
         int32_t track = moq_decode_audio((uint32_t)catalog, i, &out, on_audio, &c->audio[i]);
         pthread_mutex_lock(&c->mu);
         if (track > 0) c->audio[i].track = track;
@@ -324,7 +324,8 @@ static void on_catalog(void *ud, int32_t catalog) {
         moq_video_config vcfg;
         memset(&vcfg, 0, sizeof(vcfg));
         if (moq_consume_video_config((uint32_t)catalog, 0, &vcfg) == 0) {
-            int32_t track = moq_consume_video((uint32_t)catalog, 0, MAX_DELAY_US, on_frame, ud);
+            moq_delay delay = {.max_us = MAX_DELAY_US};
+            int32_t track = moq_consume_video((uint32_t)catalog, 0, &delay, on_frame, ud);
             if (track > 0) {
                 pthread_mutex_lock(&c->mu);
                 c->video_track = track;

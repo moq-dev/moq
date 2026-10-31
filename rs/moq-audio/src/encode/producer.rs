@@ -736,7 +736,10 @@ mod tests {
 				&decoder_config,
 				"audio",
 				DecodeOptions {
-					max_delay: Duration::from_secs(1),
+					delay: crate::decode::Delay {
+						max: Some(Duration::from_secs(1)),
+						..Default::default()
+					},
 					..DecodeOptions::new()
 				},
 			)
@@ -916,7 +919,10 @@ mod tests {
 			&decoder_config,
 			"audio",
 			DecodeOptions {
-				max_delay: Duration::from_millis(500),
+				delay: crate::decode::Delay {
+					max: Some(Duration::from_millis(500)),
+					..Default::default()
+				},
 				..DecodeOptions::new()
 			},
 		)
