@@ -45,6 +45,9 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
+# `join_all`, so the ladder bench feeds every rung at once like the rung tasks do.
+futures = { workspace = true }
 moq-clock = { workspace = true }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs", "websocket"] }
 # The tests encode with OpenH264, the one encoder a GPU-less host has, so they
@@ -54,6 +57,14 @@ moq-video = { path = "../moq-video", features = ["openh264"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 url = { workspace = true }
 usage-rs = { workspace = true }
+
+# The ladder bench reads the driving thread's CPU clock.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
+
+[[bench]]
+name = "ladder"
+harness = false
 
 [lints]
 workspace = true
