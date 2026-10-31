@@ -10,8 +10,12 @@ this quest does not switch the public package's default implementation.
 ## Plan
 
 Decided 2026-10-12: reuse the existing Rust implementation, including async.
-Inventory `@moq/net` and its in-tree consumers against the bindings first.
-Preserve frame metadata as well as bytes, exact sequence/id values, ownership,
+The inventory of `@moq/net`'s in-tree consumers against the bindings is in
+[`test/wasm/README.md`](/test/wasm/README.md#parity-with-moqnet); close its rows,
+updating the table as each lands. The connection rows (reconnect with backoff,
+WebSocket fallback, `probe`) are the largest; the WebSocket fallback needs qmux to
+build on wasm32 (its `Transport` traits require `Send` and it spawns on tokio) and a
+browser `WebSocket` transport beneath it. Preserve frame metadata as well as bytes, exact sequence/id values, ownership,
 close/error behavior, cancellation, and backpressure. Validate supported
 versions and transports with the browser fixtures and `just test interop --all`.
 Wire new tests into CI, at least nightly.
@@ -27,7 +31,7 @@ moves to [adoption](/quest/m2/rs2ts/wasm-adopt.md). Until
 
 Gaps the spike found against `@moq/net` and moq-wasm: moq-ffi has no WebSocket
 fallback on wasm, and payload copies cost about 7 to 8 ns
-per byte (see [Payload bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md)). Measure boundary calls, Promise allocation,
+per byte (see [Payload bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md)). Measure boundary calls, Promise allocation,
 payload copies, and retained memory. Compare a batched poll/event-drain
 boundary if these dominate, including latency and backpressure effects;
 do not require a sans-IO rewrite or impose batching latency to win throughput.

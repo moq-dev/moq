@@ -828,7 +828,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }
@@ -906,14 +907,14 @@ async fn uring_forwards_the_setup_token() {
 		let params = [&[0x03, encoded.len() as u8][..], &encoded].concat();
 		let setup = [&[0xaf, 0x00][..], &(params.len() as u16).to_be_bytes(), &params].concat();
 		let mut send = session.open_uni(Default::default()).await.unwrap();
-		send.write_all(&setup).await.unwrap();
+		send.write_all(&setup[..]).await.unwrap();
 		let mut recv = tokio::time::timeout(TIMEOUT, session.accept_uni())
 			.await
 			.unwrap()
 			.unwrap();
 		let mut reply = [0u8; 1];
 		assert_eq!(
-			tokio::time::timeout(TIMEOUT, recv.read(&mut reply))
+			tokio::time::timeout(TIMEOUT, recv.read(&mut &mut reply[..]))
 				.await
 				.unwrap()
 				.unwrap(),

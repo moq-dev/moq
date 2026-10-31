@@ -165,8 +165,7 @@ impl Live {
 /// answered or nobody waits on it.
 pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mutex<Index>>, fill: Fill) {
 	let mut last = None;
-	while fill.is_used()
-		&& let Some(sequence) = fill.next()
+	while let Some(sequence) = fill.wanted()
 		&& last != Some(sequence)
 	{
 		last = Some(sequence);
