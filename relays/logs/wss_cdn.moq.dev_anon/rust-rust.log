@@ -1,13 +1,13 @@
-[2m2026-10-31T12:58:56.206462Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m4417861882658312 [3mconfigured[0m[2m=[0mfalse
-[2m2026-10-31T12:58:56.212140Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-10-31T12:58:56.213747Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-10-31T12:58:56.217655Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mwss://cdn.moq.dev
-[2m2026-10-31T12:58:56.217803Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-10-31T12:58:56.569512Z[0m [33m WARN[0m [2mmoq_tokio::websocket[0m[2m:[0m using WebSocket fallback [3mpeer[0m[2m=[0mwss://cdn.moq.dev
-[2m2026-10-31T12:58:56.569653Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-lite-06
-[2m2026-10-31T12:58:56.569661Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mwss://cdn.moq.dev
-[2m2026-10-31T12:58:56.797180Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe started [3mid[0m[2m=[0m0 [3mbroadcast[0m[2m=[0msmoke-rust-4717-18223.hang [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-10-31T12:58:56.991164Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe started [3mid[0m[2m=[0m1 [3mbroadcast[0m[2m=[0msmoke-rust-4717-18223.hang [3mtrack[0m[2m=[0m0.avc3
-[2m2026-10-31T12:58:57.125141Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe canceled (idle) [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-10-31T12:58:57.125186Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe canceled (idle) [3mtrack[0m[2m=[0m0.avc3
+[2m2026-10-31T14:24:18.508126Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m2622213638696406 [3mconfigured[0m[2m=[0mfalse
+[2m2026-10-31T14:24:18.511070Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-10-31T14:24:18.511085Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-10-31T14:24:18.513908Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mwss://cdn.moq.dev
+[2m2026-10-31T14:24:18.514062Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-10-31T14:24:18.838878Z[0m [33m WARN[0m [2mmoq_tokio::websocket[0m[2m:[0m using WebSocket fallback [3mpeer[0m[2m=[0mwss://cdn.moq.dev
+[2m2026-10-31T14:24:18.839036Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-lite-06
+[2m2026-10-31T14:24:18.839044Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mwss://cdn.moq.dev
+[2m2026-10-31T14:24:19.019285Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe started [3mid[0m[2m=[0m0 [3mbroadcast[0m[2m=[0msmoke-rust-4974-16248.hang [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-10-31T14:24:19.168982Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe started [3mid[0m[2m=[0m1 [3mbroadcast[0m[2m=[0msmoke-rust-4974-16248.hang [3mtrack[0m[2m=[0m0.avc3
+[2m2026-10-31T14:24:19.264105Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe canceled (idle) [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-10-31T14:24:19.264150Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe canceled (idle) [3mtrack[0m[2m=[0m0.avc3
 Error: Broken pipe (os error 32)

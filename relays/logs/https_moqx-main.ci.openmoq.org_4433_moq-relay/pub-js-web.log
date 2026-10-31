@@ -1,8 +1,8 @@
-publishing smoke-js-web-4717-11944.hang (fake camera, vite) to https://moqx-main.ci.openmoq.org:4433/moq-relay
+publishing smoke-js-web-4974-5140.hang (fake camera, vite) to https://moqx-main.ci.openmoq.org:4433/moq-relay
 [page] negotiated protocol: moqt-16
-[page] subscribe_namespace written: requestId=2
+[page] subscribe_namespace written: requestId=0
 [page] announced: broadcast=openmoq/mtt/aiomoqt/bbb_4k30/moq_test_tracks_00/clip/msf/cmaf/h264/1080/30/aac/2 active=true
-[page] publish ok: broadcast=smoke-js-web-4717-11944.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4717-11944.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4974-5140.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4974-5140.hang track=video
 [page] adapter: closing stream requestId=1
-[page] publish done: broadcast=smoke-js-web-4717-11944.hang track=catalog.json
+[page] publish done: broadcast=smoke-js-web-4974-5140.hang track=catalog.json
