@@ -116,7 +116,6 @@ const files = (await Bun.stdin.text()).split("\n").filter(Boolean);
 // only by these needs no entry.
 const UNWATCHED = new Set(["pull_request", "pull_request_target", "merge_group", "workflow_call"]);
 // These workflows validate branches, warm caches, or run an agent on request; none publishes.
-// These workflows validate branches, warm caches, or run an agent on request; none publishes.
 const CI_ONLY = new Set(["Cache", "OBS", "Platform", "Pullfrog", "Quest", "Runner VM"]);
 const names = [];
 for (const file of files) {
