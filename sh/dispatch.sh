@@ -375,7 +375,7 @@ step() {
         test:py) just py test ;;
         test:gh) just gh test ;;
         fix:rs) just rs fix-changed "$rs_list" ;;
-        fix:js) just js fix "$js_list" ;;
+        fix:js) just js fix-changed "$js_list" ;;
         fix:biome) just biome --write ;;
         fix:markdown)
             bun install

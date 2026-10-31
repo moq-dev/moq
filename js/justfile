@@ -39,10 +39,14 @@ workers:
 audit:
     bash ../sh/js/audit.sh
 
-# Fix repository lint and rebuild the changed packages (or `--all`) to update their API reports.
-fix list="--all":
-    bun install
+# Fix repository lint and rebuild all packages to update their API reports.
+fix:
     just --justfile ../justfile biome --write
+    just fix-changed --all
+
+# Rebuild changed workspace packages (or `--all`) to update their API reports.
+fix-changed list:
+    bun install
     MOQ_API_REPORT=update python3 ../sh/js/workspace.py build '{{ list }}'
 
 # Run all unit tests.
