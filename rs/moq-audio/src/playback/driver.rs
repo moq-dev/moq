@@ -955,7 +955,7 @@ impl Driver {
 	/// Jittered so a host running many streams doesn't reopen the device in lockstep after a
 	/// suspend or a driver reload.
 	fn schedule(&mut self) -> Instant {
-		let wait = self.retry.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+		let wait = self.retry.mul_f64(0.5 + moq_clock::rng().random::<f64>() / 2.0);
 		self.retry = (self.retry * 2).min(RETRY_MAX);
 		Instant::now() + wait
 	}

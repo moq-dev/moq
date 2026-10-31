@@ -17,6 +17,10 @@
 //! Caller-driven state machines take time from their caller:
 //! [`drive`](crate::drive) polls one with the simulated instant, and [`attach`]
 //! keeps a [`Deadlines`] queue in step.
+//!
+//! Each run seeds [`rng`](crate::rng) and [`seed`](crate::seed) from `MOQ_SIM_SEED`,
+//! or at random when it is unset, and a run that panics prints its seed, so setting
+//! `MOQ_SIM_SEED` to it replays the run bit-exact.
 
 use std::{
 	cell::{Cell, RefCell},
@@ -33,6 +37,7 @@ use std::{
 };
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+use rand::SeedableRng;
 
 use crate::{Deadlines, Instant, Manual, Wall, deadline::WeakDeadlines};
 
@@ -57,6 +62,8 @@ struct Runtime {
 	queues: RefCell<Vec<WeakDeadlines>>,
 	/// Awaiting [`idle`]: each flag is raised, and its waker woken, once nothing else can run.
 	idle: RefCell<Vec<(Rc<Cell<bool>>, Waker)>>,
+	seed: u64,
+	rng: RefCell<rand::rngs::StdRng>,
 }
 
 struct Time {
@@ -68,7 +75,7 @@ struct Time {
 }
 
 impl Runtime {
-	fn enter() -> Rc<Self> {
+	fn enter(seed: u64) -> Rc<Self> {
 		static RUNS: AtomicU64 = AtomicU64::new(0);
 		let runtime = Rc::new(Runtime {
 			id: RUNS.fetch_add(1, Ordering::Relaxed),
@@ -81,6 +88,8 @@ impl Runtime {
 			}),
 			queues: RefCell::new(Vec::new()),
 			idle: RefCell::new(Vec::new()),
+			seed,
+			rng: RefCell::new(rand::rngs::StdRng::seed_from_u64(seed)),
 		});
 		CURRENT.with(|current| {
 			let mut current = current.borrow_mut();
@@ -186,6 +195,44 @@ pub(crate) fn anchor() -> Option<(Instant, Wall)> {
 	})
 }
 
+/// The run's seed, when the calling thread is inside [`run`].
+pub(crate) fn seed() -> Option<u64> {
+	current().map(|runtime| runtime.seed)
+}
+
+/// The run's generator behind [`Rng`](crate::Rng).
+///
+/// Holds plain data rather than the runtime, like [`Timer`], so it finds its run as the
+/// thread's current one.
+pub(crate) struct Rng {
+	run: u64,
+}
+
+impl Rng {
+	/// The current run's generator, or `None` outside [`run`].
+	pub(crate) fn new() -> Option<Self> {
+		Some(Self { run: current()?.id })
+	}
+
+	pub(crate) fn with<T>(&self, f: impl FnOnce(&mut rand::rngs::StdRng) -> T) -> T {
+		let runtime = current()
+			.filter(|runtime| runtime.id == self.run)
+			.expect("a simulated rng used outside its moq_clock::sim::run");
+		f(&mut runtime.rng.borrow_mut())
+	}
+}
+
+/// The seed `MOQ_SIM_SEED` names, or a random one when it is unset.
+fn seed_from_env() -> u64 {
+	match std::env::var("MOQ_SIM_SEED") {
+		Ok(seed) => seed
+			.parse()
+			.unwrap_or_else(|_| panic!("MOQ_SIM_SEED must be a u64, not {seed:?}")),
+		Err(std::env::VarError::NotPresent) => rand::random(),
+		Err(err) => panic!("MOQ_SIM_SEED: {err}"),
+	}
+}
+
 /// Whether the calling thread is inside [`run`].
 pub fn is_running() -> bool {
 	CURRENT.with(|current| current.borrow().is_some())
@@ -200,12 +247,18 @@ impl Wake for Flag {
 	}
 }
 
-/// Clears the thread's runtime when [`run`] returns or unwinds.
-struct Enter;
+/// Clears the thread's runtime when [`run`] returns or unwinds, printing the seed
+/// that replays an unwinding run.
+struct Enter {
+	seed: u64,
+}
 
 impl Drop for Enter {
 	fn drop(&mut self) {
 		CURRENT.with(|current| current.borrow_mut().take());
+		if std::thread::panicking() {
+			eprintln!("moq_clock::sim run panicked; replay it with MOQ_SIM_SEED={}", self.seed);
+		}
 	}
 }
 
@@ -217,10 +270,15 @@ impl Drop for Enter {
 ///
 /// When called inside another `run`, and when every task is parked with no timer
 /// armed and none awaits [`idle`], which is a deadlock. Also when one root poll
-/// exceeds the ready kio poll limit, or a detached task panics.
+/// exceeds the ready kio poll limit, a detached task panics, or `MOQ_SIM_SEED` is
+/// not a `u64`.
 pub fn run<F: IntoFuture>(future: F) -> F::Output {
-	let runtime = Runtime::enter();
-	let enter = Enter;
+	run_seeded(seed_from_env(), future)
+}
+
+fn run_seeded<F: IntoFuture>(seed: u64, future: F) -> F::Output {
+	let runtime = Runtime::enter(seed);
+	let enter = Enter { seed };
 
 	let mut future = pin!(future.into_future());
 	let mut output = None;
@@ -1139,5 +1197,33 @@ mod tests {
 		.await;
 		assert_eq!(err, "done");
 		assert_eq!(polls, [at(0), at(1), at(3)]);
+	}
+
+	/// Draws across awaits and spawned tasks, so replay covers the run's whole schedule.
+	async fn draws() -> (u64, Vec<u64>) {
+		use rand::Rng as _;
+		let task = spawn(async {
+			crate::sleep(Duration::from_secs(1)).await;
+			crate::rng().next_u64()
+		});
+		let first = crate::rng().next_u64();
+		let second = task.await.unwrap();
+		(crate::seed(), vec![first, second, crate::rng().next_u64()])
+	}
+
+	#[test]
+	fn a_seed_replays_its_draws() {
+		let (seed, replayed) = run_seeded(7, draws());
+		assert_eq!(seed, 7);
+		assert_eq!(replayed, run_seeded(7, draws()).1);
+		assert_ne!(replayed, run_seeded(8, draws()).1);
+	}
+
+	#[test]
+	#[should_panic(expected = "used outside its moq_clock::sim::run")]
+	fn an_rng_drawn_in_another_run_panics() {
+		use rand::Rng as _;
+		let mut rng = run(async { crate::rng() });
+		run(async move { rng.next_u64() });
 	}
 }

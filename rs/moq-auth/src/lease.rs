@@ -252,7 +252,7 @@ impl Producer {
 		clock.failures = clock.failures.saturating_add(1);
 		let base = Duration::from_secs(1) * 2u32.saturating_pow(clock.failures.saturating_sub(1).min(16));
 		let base = base.min(clock.cadence.unwrap_or(BACKOFF_MAX)).min(BACKOFF_MAX);
-		let delay = base.mul_f64(rand::rng().random_range(0.75..=1.25));
+		let delay = base.mul_f64(moq_clock::rng().random_range(0.75..=1.25));
 		clock.next = Some(moq_clock::now() + delay);
 		clock.revision = clock.revision.wrapping_add(1);
 		drop(clock);

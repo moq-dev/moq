@@ -19,9 +19,13 @@
 //! the ambient clock of one tokio runtime. It moves only when told to, never on
 //! idle, so a test harness outside the runtime decides when native time passes.
 //!
+//! - [`rng`] and [`seed`] are the ambient randomness, so a simulated run that jitters
+//!   its timers still replays.
+//!
 //! The `sim` feature adds the `sim` module, a deterministic executor whose clock
-//! starts at [`Instant::ZERO`], and the `#[moq_clock::test]` attribute that runs an
-//! `async fn` test on it. Enable it for dev-dependencies only.
+//! starts at [`Instant::ZERO`] and whose randomness comes from one seed, and the
+//! `#[moq_clock::test]` attribute that runs an `async fn` test on it. Enable it for
+//! dev-dependencies only.
 //!
 //! The `serde` feature adds `serde::UnixSeconds`, matching existing integer
 //! Unix-second JSON encodings for wall times.
@@ -35,6 +39,7 @@ mod instant;
 #[cfg(all(feature = "manual", target_arch = "wasm32", not(target_os = "wasi")))]
 compile_error!("the `manual` feature installs on a tokio runtime, which the browser has none of");
 mod manual;
+mod random;
 mod runtime;
 #[cfg(feature = "serde")]
 pub mod serde;
@@ -48,6 +53,7 @@ pub use deadline::{Deadline, Deadlines, Entered};
 pub use installed::Installed;
 pub use instant::Instant;
 pub use manual::Manual;
+pub use random::{Rng, rng, seed};
 pub use timer::{
 	Elapsed, Interval, MissedTickBehavior, Sleep, Timeout, drive, interval, interval_at, sleep, sleep_until, timeout,
 	timeout_at,

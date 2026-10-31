@@ -418,7 +418,7 @@ impl Server {
 						// rather than slept on here, so the loop keeps serving in-flight handshakes
 						// through the pause.
 						tracing::warn!(%err, "failed to accept RTMP connection; continuing");
-						let wait = self.accept_delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+						let wait = self.accept_delay.mul_f64(0.5 + moq_clock::rng().random::<f64>() / 2.0);
 						self.accept_delay = (self.accept_delay * 2).min(ACCEPT_RETRY_MAX);
 						self.accept_retry = Some(moq_clock::Instant::now() + wait);
 					}
