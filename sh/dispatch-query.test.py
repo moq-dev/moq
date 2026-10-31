@@ -186,7 +186,7 @@ class QueryTests(unittest.TestCase):
 
     def stub_ci(self, just=""):
         for tool in ("bun", "python3", "cargo", "cargo-hack", "wasm-bindgen", "jq", "shellcheck",
-                     "shfmt", "taplo", "nixfmt", "actionlint", "quest", "nix",
+                     "shfmt", "taplo", "nixfmt", "actionlint", "zizmor", "quest", "nix",
                      "c++", "clang-format", "cmake", "dart", "dash", "gersemi", "go",
                      "gradle", "java", "kramdown-rfc", "pkg-config", "uniffi-bindgen-cpp",
                      "clippy-driver", "dpkg-deb", "nfpm", "rpm",
