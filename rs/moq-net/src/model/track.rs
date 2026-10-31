@@ -18013,7 +18013,6 @@ mod test {
 		(producer, dynamic, subscriber)
 	}
 
-	#[cfg(feature = "async")]
 	fn write_filled(group: Result<group::Producer>, millis: u64) {
 		let mut group = group.unwrap();
 		group
