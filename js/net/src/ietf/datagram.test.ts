@@ -4,7 +4,7 @@ import { encodeVarint } from "../stream.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_22];
+const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22];
 
 function single(publisherPriority?: number): ObjectDatagram {
 	return new ObjectDatagram({
