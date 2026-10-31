@@ -943,7 +943,9 @@ enum Kind {
 	/// element, which leads the first raw data block after each PAT/PMT, so a receiver that tunes
 	/// in at the tables can decode from there. `repeat` marks that the next frame carries it.
 	Aac { config: aac::InBand, repeat: bool },
-	/// Description-less AAC carries its ADTS framing in each frame.
+	/// Description-less AAC carries its ADTS framing in each frame, so frames pass through as
+	/// they are. The catalog's profile, rate, and channels are kept only so [`Export::rebind`]
+	/// refuses a rendition announced differently, as it does for [`Kind::Aac`]'s config.
 	Adts {
 		profile: u8,
 		sample_rate: u32,

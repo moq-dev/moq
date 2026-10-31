@@ -7278,8 +7278,7 @@ pub(super) mod test {
 
 	// The AAC counterpart of the above. Worth its own test rather than trusting the shared
 	// `Resync`: this path scans for the ADTS sync byte rather than a descriptor's, and
-	// builds its give-up error by adding context to the `anyhow` one `adts::Header::parse`
-	// returns, where the legacy path wraps a `thiserror` value.
+	// builds its give-up error from the one `adts::Header::parse` returns.
 	#[test]
 	fn aac_gives_up_when_nothing_ever_parses() {
 		const AAC_PID: u16 = 0x0060;
