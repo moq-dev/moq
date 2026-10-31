@@ -1857,7 +1857,7 @@ mod test {
 		drop((group, second, track));
 
 		let mut third = producer.create_track("media", crate::track::Info::timed()).unwrap();
-		third.finish_at(crate::track::Position::group(0)).unwrap();
+		third.finish_at(crate::track::Position::group(0), None).unwrap();
 	}
 
 	/// Names that are gone leave nothing behind, served or not, so churning distinct names
