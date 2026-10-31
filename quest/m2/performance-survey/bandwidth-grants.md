@@ -50,9 +50,10 @@ registrations, which the sweep must count as well.
 Consider calculating a shared allocation once per relevant change, but retain
 strict priority, max-min fairness, rounding, ties, immediate peek behavior and
 closed-demand removal. An idle sender still sees the share it would regain
-without shrinking its active siblings' grants; that is intended. Cover both languages in this quest. Coordinate with
-[viewer targets](/quest/m2/probe/viewer-target.md), which changes how the same
-allocator feeds probes.
+without shrinking its active siblings' grants; that is intended. Cover both languages in this quest. Viewer grants
+(`bandwidth::Viewers`, `Bandwidth.Viewers`, [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090)) divide the receive estimate
+through the same registry and `Share::grant`, so the fix covers them too; the
+`bandwidth/viewers` bench sweeps their count.
 
 Follow the [survey's benchmark contract](/quest/m2/performance-survey/README.md):
 measure the baseline before optimizing, retain paired evidence, verify equivalent

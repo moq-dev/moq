@@ -3,11 +3,13 @@
 //! - update: one reservation's ceiling moves and the session reads the new target.
 //!   Swept over the reservations sharing the allocator, so an update that rescans
 //!   every reservation shows up as a slope.
+//! - viewers: one viewer's ceiling moves and the session reads the new PROBE target.
+//!   Swept over the viewers sharing the connection, for the same slope.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench bandwidth`.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use moq_net::bandwidth::{Allocator, Rate, Reservation};
+use moq_net::bandwidth::{Allocator, Rate, Reservation, Viewers};
 use moq_net::{broadcast, fuzz, track};
 
 /// Reservations sharing the allocator.
@@ -46,5 +48,25 @@ fn bench_update(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_update);
+fn bench_viewers(c: &mut Criterion) {
+	let mut group = c.benchmark_group("bandwidth/viewers");
+	for count in RESERVATIONS {
+		group.bench_function(BenchmarkId::from_parameter(count), |b| {
+			let viewers = Viewers::default();
+			let watched: Vec<_> = (0..count).map(|_| viewers.watch(Rate::from_kbps(1_000))).collect();
+			let mut target = fuzz::ProbeTarget::viewers(&viewers);
+			target.poll().expect("the first poll reports the target");
+			let touched = &watched[count / 2];
+			let mut raised = false;
+			b.iter(|| {
+				raised = !raised;
+				touched.update(Rate::from_kbps(if raised { 2_000 } else { 1_000 }));
+				std::hint::black_box(target.poll().expect("the target moved"));
+			});
+		});
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench_update, bench_viewers);
 criterion_main!(benches);

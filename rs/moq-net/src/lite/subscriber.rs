@@ -90,6 +90,8 @@ pub(super) struct Subscriber {
 	auth: crate::auth::Link,
 	/// Broadcasts the peer may have announced at once (`session::Limits::announces`).
 	pub(super) announces: crate::session::Slots,
+	/// The viewers whose sum the PROBE stream sends as its target.
+	pub(super) viewers: bandwidth::Viewers,
 }
 
 #[derive(Clone)]
@@ -128,6 +130,7 @@ impl Subscriber {
 			going_away: config.going_away,
 			auth: config.auth,
 			announces: Default::default(),
+			viewers: Default::default(),
 		}
 	}
 
@@ -1425,7 +1428,8 @@ impl DatagramRecv {
 	}
 }
 
-/// Opens a PROBE stream on demand while a consumer is interested.
+/// Opens a PROBE stream on demand while a consumer is interested, and sends it the
+/// viewers' target when the peer probes up to one.
 ///
 /// Loops forever: wait for a consumer, race the probe stream against the
 /// consumer leaving, then loop back. Transport errors stay per-stream; malformed
@@ -1433,6 +1437,10 @@ impl DatagramRecv {
 struct RecvBandwidth {
 	subscriber: Subscriber,
 	state: BandwidthState,
+	/// The viewers' target, followed only once the peer advertised `Increase`.
+	target: Option<bandwidth::Target>,
+	/// The target last read from it.
+	wanted: bandwidth::Rate,
 }
 
 #[expect(
@@ -1455,6 +1463,8 @@ impl RecvBandwidth {
 		Self {
 			subscriber,
 			state: BandwidthState::Gate,
+			target: None,
+			wanted: bandwidth::Rate::ZERO,
 		}
 	}
 
@@ -1465,11 +1475,16 @@ impl RecvBandwidth {
 					if self.subscriber.recv_bandwidth.is_none() {
 						return Poll::Ready(Ok(()));
 					}
-					if self.subscriber.version.has_setup_stream()
-						&& ready!(self.subscriber.peer_setup.poll_probe_level(waiter)) < lite::ProbeLevel::Report
-					{
-						tracing::debug!("peer does not support probing; skipping probe stream");
-						return Poll::Ready(Ok(()));
+					if self.subscriber.version.has_setup_stream() {
+						let level = ready!(self.subscriber.peer_setup.poll_probe_level(waiter));
+						if level < lite::ProbeLevel::Report {
+							tracing::debug!("peer does not support probing; skipping probe stream");
+							return Poll::Ready(Ok(()));
+						}
+						// A Report-level peer ignores a target, so only a peer that probes is sent one.
+						if level >= lite::ProbeLevel::Increase {
+							self.target = Some(self.subscriber.viewers.target());
+						}
 					}
 					self.state = BandwidthState::WaitUsed;
 				}
@@ -1495,7 +1510,12 @@ impl RecvBandwidth {
 						Poll::Ready(Err(_)) => return Poll::Ready(Ok(())),
 						Poll::Pending => {}
 					}
-					match ready!(probe.poll(waiter)) {
+					if let Some(target) = &mut self.target {
+						while let Poll::Ready(rate) = target.poll_changed(waiter) {
+							self.wanted = rate;
+						}
+					}
+					match ready!(probe.poll(waiter, self.wanted)) {
 						Ok(()) => tracing::debug!("probe stream closed"),
 						Err(err) => {
 							let err = lite::error::control(&mut self.subscriber.session.clone(), err);
@@ -1520,11 +1540,13 @@ impl RecvBandwidth {
 }
 
 /// One PROBE stream: send the type, then feed the peer's estimates into the
-/// bandwidth producer until it FINs.
+/// bandwidth producer until it FINs, sending each new target along the way.
 struct ProbeStream {
 	subscriber: Subscriber,
 	session: Transport,
 	state: ProbeState,
+	/// The target last sent; zero sends none.
+	sent: bandwidth::Rate,
 }
 
 #[kio::machine(self.state: ProbeState)]
@@ -1534,10 +1556,12 @@ impl ProbeStream {
 			subscriber: subscriber.clone(),
 			session: subscriber.session.clone(),
 			state: ProbeState::Start,
+			sent: bandwidth::Rate::ZERO,
 		}
 	}
 
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	/// Run the stream, sending `target` whenever it differs from the last one sent.
+	fn poll(&mut self, waiter: &kio::Waiter, target: bandwidth::Rate) -> Poll<Result<(), Error>> {
 		let mut stream: Stream<Transport, Version> = wait!(Open => {
 			// Probe is best-effort telemetry; a session that is going away
 			// has no use for a new estimate, so skip it rather than erroring.
@@ -1550,6 +1574,21 @@ impl ProbeStream {
 		stream.writer.buffer(&lite::ControlType::Probe)?;
 		wait!(Send => stream.writer.poll_flush(waiter))?;
 		Poll::Ready(wait!(Read => {
+			// Deliver the target without holding up the estimates behind it. Only a flushed
+			// writer takes the next one, so a peer that stops reading holds one target, and
+			// the latest is sent once it drains.
+			if let Poll::Ready(res) = stream.writer.poll_flush(waiter) {
+				res?;
+				if target != self.sent {
+					// Zero reads as unknown on the wire, which retracts the last target.
+					let bitrate = (target > bandwidth::Rate::ZERO).then_some(target.as_bps());
+					stream.writer.buffer(&lite::Probe { bitrate, rtt: None })?;
+					self.sent = target;
+					if let Poll::Ready(res) = stream.writer.poll_flush(waiter) {
+						res?;
+					}
+				}
+			}
 			let bandwidth = self.subscriber.recv_bandwidth.as_ref().expect("gated by RecvBandwidth");
 			// Each estimate wakes every reader, so a peer streaming them must not hold
 			// the session's other tasks.

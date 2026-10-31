@@ -72,6 +72,20 @@ export namespace Bandwidth {
 		get rate(): Signals.Getter<number | undefined>;
 		update(max: number): void;
 	}
+	export class Viewer implements Disposable {
+		[Symbol.dispose](): void;
+		close(): void;
+		peek(): number | undefined;
+		get rate(): Signals.Getter<number | undefined>;
+		update(max: number): void;
+	}
+	export class Viewers {
+		constructor(estimate?: Signals.Getter<number | undefined>);
+		close(): void;
+		setTarget(target: number | undefined): void;
+		readonly target: Signals.Getter<number>;
+		watch(max: number): Bandwidth.Viewer;
+	}
 }
 
 export namespace Broadcast {
@@ -148,6 +162,7 @@ export namespace Connection {
 		transport?: WebTransport;
 		url: URL;
 		versions?: readonly string[];
+		viewers?: Bandwidth.Viewers;
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;
 	}
@@ -238,6 +253,7 @@ export class Connection {
 	readonly transport: Signals.Getter<Connection.Transport | undefined>;
 	url: Signals.Signal<URL | undefined>;
 	versions: Signals.Signal<readonly string[] | undefined>;
+	readonly viewers: Signals.Getter<Pick<Bandwidth.Viewers, "watch" | "setTarget" | "target"> | undefined>;
 }
 
 export namespace Epoch {

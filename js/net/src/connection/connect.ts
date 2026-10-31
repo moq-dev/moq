@@ -1,8 +1,9 @@
 import { Elapsed, Milli, Nano, sleep, timeout } from "@moq/clock";
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
-import { race } from "@moq/signals";
+import { type Getter, race } from "@moq/signals";
 import type * as Auth from "../auth.ts";
 import { vacant } from "../auth_session.ts";
+import type { Viewers } from "../bandwidth.ts";
 import { ConnectTimeout, error, fromClose, ProtocolViolation, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
@@ -253,6 +254,13 @@ export interface ConnectProps {
 	implementation?: string;
 
 	/**
+	 * The viewers whose ceilings summed the session sends as its PROBE target, so a peer
+	 * that advertised `Increase` probes the connection up to it (moq-lite-05+). Omit to send
+	 * no target. The registry is borrowed, so the same one can span reconnects.
+	 */
+	viewers?: Viewers;
+
+	/**
 	 * Maximum time for one connect, covering the dial and the MoQ handshake, which has no
 	 * deadline of its own (default: 30000ms). `0` waits forever. Past it, the connect rejects
 	 * with {@link ConnectTimeout} and closes whatever it had opened.
@@ -280,6 +288,8 @@ type SessionProps = {
 	token?: Uint8Array;
 	/** The implementation this side advertises in SETUP; empty sends nothing. */
 	implementation: string;
+	/** The PROBE target to send a peer that advertised `Increase`. */
+	probeTarget?: Getter<number>;
 };
 
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
@@ -371,6 +381,7 @@ async function connectInner(
 		extensions: Extensions.offered(props.extensions),
 		token: presented.setup === undefined ? undefined : new TextEncoder().encode(presented.setup),
 		implementation: props.implementation ?? IMPLEMENTATION,
+		probeTarget: props.viewers?.target,
 	});
 
 	if (props.transport) {

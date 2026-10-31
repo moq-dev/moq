@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { Signal } from "@moq/signals";
-import { Allocator, allocate, type Want } from "./bandwidth.ts";
+import { Allocator, allocate, Viewers, type Want } from "./bandwidth.ts";
 import { Producer as TrackProducer } from "./track.ts";
+import { Observed } from "./util/observed.ts";
 
 /** Priorities matching hang's, which is what the allocator sees in practice. */
 const AUDIO = 80;
@@ -313,3 +314,98 @@ test("reserve and update reject a non-finite or negative ceiling", () => {
 
 	allocator.close();
 });
+
+// Several players on one connection must not each select against the whole downlink:
+// the receive estimate splits max-min fair by each viewer's ceiling, and never sums above it.
+test("viewers split the receive estimate max-min fair", () => {
+	const estimate = new Signal<number | undefined>(6_000_000);
+	const viewers = new Viewers(estimate);
+
+	const small = viewers.watch(1_000_000);
+	const large = viewers.watch(8_000_000);
+	expect(small.peek()).toBe(1_000_000);
+	expect(large.peek()).toBe(5_000_000);
+
+	// Three even claims on a link too small for any of them: an even cut each, never above it.
+	estimate.set(2_000_000);
+	small.update(4_000_000);
+	large.update(4_000_000);
+	const third = viewers.watch(4_000_000);
+	const grants = [small.peek() ?? 0, large.peek() ?? 0, third.peek() ?? 0];
+	for (const grant of grants) expect(Math.abs(grant - 666_666)).toBeLessThanOrEqual(1);
+	expect(grants.reduce((sum, grant) => sum + grant, 0)).toBe(2_000_000);
+
+	// No estimate is "hold your selection", not zero.
+	estimate.set(undefined);
+	expect(small.peek()).toBeUndefined();
+
+	viewers.close();
+});
+
+test("the viewers' target sums their ceilings until overridden", () => {
+	const viewers = new Viewers(new Signal<number | undefined>(1_000_000));
+	expect(viewers.target.peek()).toBe(0);
+
+	const first = viewers.watch(1_000_000);
+	const second = viewers.watch(2_000_000);
+	expect(viewers.target.peek()).toBe(3_000_000);
+
+	second.update(4_000_000);
+	expect(viewers.target.peek()).toBe(5_000_000);
+
+	// Zero turns probing off; clearing the override follows the viewers again.
+	viewers.setTarget(0);
+	expect(viewers.target.peek()).toBe(0);
+	viewers.setTarget(10_000_000);
+	expect(viewers.target.peek()).toBe(10_000_000);
+	viewers.setTarget(undefined);
+	expect(viewers.target.peek()).toBe(5_000_000);
+
+	first.close();
+	expect(viewers.target.peek()).toBe(4_000_000);
+	second.close();
+	expect(viewers.target.peek()).toBe(0);
+
+	viewers.close();
+});
+
+test("a closed viewers registry claims nothing", () => {
+	const viewers = new Viewers(new Signal<number | undefined>(1_000_000));
+	viewers.close();
+
+	const viewer = viewers.watch(2_000_000);
+	expect(viewers.target.peek()).toBe(0);
+	expect(viewer.peek()).toBeUndefined();
+	viewer.close();
+});
+
+// Observing a connection's receive estimate is what requests PROBE, so a registry with
+// nobody watching must not hold that demand.
+test("an idle viewers registry does not observe the estimate", async () => {
+	const estimate = new Observed<number | undefined>(1_000_000);
+	const viewers = new Viewers(estimate);
+	expect(estimate.wanted.peek()).toBe(false);
+
+	const viewer = viewers.watch(1_000_000);
+	await settled();
+	expect(estimate.wanted.peek()).toBe(true);
+
+	viewer.close();
+	await settled();
+	expect(estimate.wanted.peek()).toBe(false);
+
+	viewers.close();
+});
+
+// Let queued signal reactions run without relying on host timers.
+function settled(): Promise<void> {
+	return new Promise((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve();
+		};
+		channel.port2.postMessage(null);
+	});
+}

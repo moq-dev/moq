@@ -33,6 +33,12 @@ negotiated IETF AUTH extension and `drafts/draft-lcurley-moq-auth.md`
 unchanged: extending cap reporting to IETF is outside this quest. Keeping
 that boundary avoids expanding the agreed lite-only wire change.
 
+A sending session also clamps the peer's PROBE target to the cap it enforces
+on that peer, as viewer targets decided rather than adding a constant: a target
+past the cap only buys probing overhead the peer can never receive. The session
+takes the larger of its own and the peer's target in `Probing`
+(`rs/moq-net/src/session.rs`, [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090)); clamp the peer's half there.
+
 Tests: a capped session's grant carries the rates; the publisher's video
 target never exceeds the cap minus overhead; a raised cap lets it climb back.
 

@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Instant, Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
+import { Viewers } from "../bandwidth.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { ConnectTimeout, SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
 import { Route } from "../hop.ts";
@@ -85,6 +86,14 @@ test("ReloadProps excludes transport", () => {
 	// @ts-expect-error transport is not part of ReloadProps
 	const props: ReloadProps = withTransport;
 	expect(props.enabled).toBeUndefined();
+});
+
+test("ReloadProps excludes viewers", () => {
+	const withViewers = { viewers: new Viewers() };
+	// @ts-expect-error a reload owns its viewers registry
+	const props: ReloadProps = withViewers;
+	expect(props.enabled).toBeUndefined();
+	withViewers.viewers.close();
 });
 
 test("closing mid-connect aborts the pending attempt", async () => {

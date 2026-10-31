@@ -172,6 +172,10 @@ typealias Allocator = uniffi.moq.MoqAllocator
 typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
 /** One track's standing claim on an [Allocator]. */
 typealias Reservation = uniffi.moq.MoqReservation
+/** Divides one connection's receive estimate among the broadcasts watched over it. */
+typealias Viewers = uniffi.moq.MoqViewers
+/** One watched broadcast's standing claim on [Viewers]; holding it requests PROBE, closing it releases the claim. */
+typealias Viewer = uniffi.moq.MoqViewer
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
 /** Follows the grant a session's peer gave it; cancel it to release a pending wait. */

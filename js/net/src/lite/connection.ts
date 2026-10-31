@@ -71,6 +71,8 @@ export interface ConnectionProps {
 	token?: Uint8Array;
 	/** The implementation our SETUP advertises (lite-05+). Defaults to {@link IMPLEMENTATION}; empty sends nothing. */
 	implementation?: string;
+	/** The PROBE target to send a peer that advertised `Increase`, in bits per second; zero sends none. */
+	probeTarget?: Getter<number>;
 }
 
 /**
@@ -136,6 +138,8 @@ export class Connection implements Established {
 	#token?: Uint8Array;
 	// What our SETUP advertises; see {@link ConnectionProps.implementation}.
 	#implementation: string;
+	// See {@link ConnectionProps.probeTarget}.
+	#probeTarget?: Getter<number>;
 	#peerImplementation = Promise.withResolvers<string | undefined>();
 
 	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
@@ -172,6 +176,7 @@ export class Connection implements Established {
 		client = true,
 		token,
 		implementation = IMPLEMENTATION,
+		probeTarget,
 	}: ConnectionProps) {
 		this.url = url;
 		// Older versions carry the credential in the URL instead.
@@ -228,6 +233,7 @@ export class Connection implements Established {
 		);
 		this.#client = client;
 		this.#implementation = implementation;
+		this.#probeTarget = probeTarget;
 		// Only the lite-05+ Setup Stream carries it.
 		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
@@ -294,7 +300,7 @@ export class Connection implements Established {
 
 		const probes = new Effect((effect) => {
 			if (!effect.get(this.#probe.wanted)) return;
-			effect.spawn(() => this.#subscriber.runProbe(effect.abort));
+			effect.spawn(() => this.#subscriber.runProbe(effect.abort, this.#probeTarget));
 		});
 
 		// Fail loud on a publication our grant never covers, once the peer has answered the

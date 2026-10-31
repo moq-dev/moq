@@ -11,6 +11,10 @@
 //! The same reservations set the connection's probe target: their ceilings summed,
 //! which the session hands to its transport's [`Probe`](crate::transport::Probe) so
 //! the estimate can rise to fund them.
+//!
+//! The receive direction mirrors it: [Viewers] divides the receive estimate among the
+//! broadcasts watched over one connection, and their ceilings summed are the PROBE
+//! target the session asks its peer to probe up to.
 
 use std::{collections::BTreeMap, task::Poll};
 
@@ -110,7 +114,6 @@ impl Producer {
 	}
 
 	/// A handle that mints consumers without being one, so holding it is not demand.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn weak(&self) -> Weak {
 		Weak(self.state.weak())
 	}
@@ -189,12 +192,10 @@ impl Default for Producer {
 
 /// Mints [`Consumer`]s on demand without counting as one, nor keeping the channel open.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub struct Weak(kio::ProducerWeak<State>);
 
 impl Weak {
 	/// A new consumer, which reports the closure once the producer is gone.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			inner: Inner::Whole(self.0.consume()),
@@ -344,9 +345,11 @@ impl Allocator {
 	pub fn reserve(&self, track: &track::Demand, max: Rate) -> Reservation {
 		// Read the track before taking the registry lock, so the two are never held
 		// at once and there's no order to get wrong.
-		let priority = track.priority();
-		let demand = track.clone();
+		self.claim(self.estimate.clone(), Some(track.clone()), track.priority(), max)
+	}
 
+	/// Claim up to `max` of `estimate`, active whenever `demand` is, or always without one.
+	fn claim(&self, estimate: Consumer, demand: Option<track::Demand>, priority: i8, max: Rate) -> Reservation {
 		let id = {
 			// Nothing ever closes this channel: the allocator holds the only producer
 			// and never aborts it, so it's open for as long as `self` is.
@@ -358,7 +361,7 @@ impl Allocator {
 			let closed: Vec<u64> = registry
 				.entries
 				.iter()
-				.filter(|(_, entry)| entry.demand.is_closed())
+				.filter(|(_, entry)| entry.demand.as_ref().is_some_and(track::Demand::is_closed))
 				.map(|(id, _)| *id)
 				.collect();
 			for id in closed {
@@ -374,7 +377,7 @@ impl Allocator {
 
 		Reservation {
 			share: Share {
-				estimate: self.estimate.clone(),
+				estimate,
 				registry: self.registry.consume(),
 				id,
 			},
@@ -473,6 +476,130 @@ impl std::fmt::Debug for Allocator {
 	}
 }
 
+/// Divides one connection's receive estimate among the broadcasts watched over it.
+///
+/// The receive-side mirror of [`Allocator`]. Every player on a connection reads the
+/// same receive estimate, so N players each selecting against all of it oversubscribe
+/// the downlink N times over. [`watch`](Self::watch) a broadcast here and its
+/// [`Viewer`] reports only its own slice, split max-min fair by each viewer's ceiling,
+/// so the slices sum to the estimate instead of each matching it. Viewers carry no
+/// priority: a viewer asking for less than an even cut takes all it asked for and
+/// leaves the rest to the others.
+///
+/// The viewers' ceilings summed are also the PROBE target the session sends its
+/// peer, which probes the connection up to it when it advertised `Increase`, so the
+/// estimate can rise to fund a larger rendition. The target never leaves this hop:
+/// a relay probes its own downlink for its viewers, and never forwards them upstream.
+///
+/// Holding a [`Viewer`] (or a [`Consumer`] read from one) requests PROBE, like
+/// holding `Session::recv_bandwidth`. Take it from `Session::viewers` (with the
+/// `async` feature) rather than building one, since only a session sends the target.
+/// Clones share one registry.
+#[derive(Clone, Default)]
+pub struct Viewers {
+	/// The registry, whose own estimate is unused: each viewer reads one minted from
+	/// `estimate`, so holding the registry is not demand.
+	registry: Allocator,
+	/// Mints the receive estimate each viewer reads, or `None` when there is none.
+	estimate: Option<Weak>,
+}
+
+impl Viewers {
+	/// Divide the receive estimate `estimate` mints, with no session sending the target.
+	///
+	/// For an estimate that outlives a session, such as one a reconnect loop feeds
+	/// from each session it dials. Hand the same registry to `Client::with_viewers`
+	/// (with the `async` feature) so every session it dials sends the target.
+	pub fn new(estimate: Weak) -> Self {
+		Self {
+			registry: Allocator::unlimited(),
+			estimate: Some(estimate),
+		}
+	}
+
+	/// The same registry dividing the estimate `estimate` mints instead, or nothing when it is `None`.
+	#[cfg(feature = "async")]
+	pub(crate) fn with_estimate(&self, estimate: Option<Weak>) -> Self {
+		Self {
+			registry: self.registry.clone(),
+			estimate,
+		}
+	}
+
+	/// Watch a broadcast receiving at most `max`, returning its viewer.
+	///
+	/// `max` is a ceiling: what the largest rendition the player would switch to
+	/// needs, not what it happens to be receiving. The claim lasts as long as the
+	/// returned [`Viewer`]: change the ceiling with [`update`](Viewer::update), and drop
+	/// it once the broadcast stops being watched.
+	pub fn watch(&self, max: Rate) -> Viewer {
+		let estimate = match &self.estimate {
+			Some(estimate) => estimate.consume(),
+			None => Consumer {
+				inner: Inner::Unavailable,
+				last: None,
+				probed: false,
+			},
+		};
+		Viewer(self.registry.claim(estimate, None, 0, max))
+	}
+
+	/// Send `target` as the PROBE target instead of the viewers' sum, or `None` to follow them again.
+	///
+	/// `Some(Rate::ZERO)` turns probing off: the session sends no target. The override is
+	/// the registry's, so it holds for every clone and across the reconnects a persistent
+	/// registry spans.
+	pub fn set_target(&self, target: Option<Rate>) {
+		self.registry.set_target(target);
+	}
+
+	/// Follow the PROBE target, for the session that sends it to a peer that probes up to it.
+	///
+	/// Holding it is what marks the viewers [`probed`](Consumer::probed).
+	#[cfg(any(feature = "async", test))]
+	pub(crate) fn target(&self) -> Target {
+		self.registry.target()
+	}
+}
+
+// Hand-written so the config structs that carry a registry can still derive `Debug`.
+impl std::fmt::Debug for Viewers {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Viewers")
+			.field("watched", &self.registry.registry.read().entries.len())
+			.finish()
+	}
+}
+
+/// One watched broadcast's standing claim on [`Viewers`], held for as long as it is watched.
+///
+/// Holding it requests PROBE. Dropping it releases the claim and lowers the PROBE target.
+#[must_use = "a dropped Viewer is released, so the broadcast claims nothing and the PROBE target drops"]
+pub struct Viewer(Reservation);
+
+impl Viewer {
+	/// This viewer's slice of the receive estimate right now.
+	///
+	/// `None` while the connection has no receive estimate, telling a player to hold its
+	/// current selection.
+	pub fn rate(&self) -> Option<Rate> {
+		self.0.rate()
+	}
+
+	/// A handle reading this viewer's current slice of the receive estimate.
+	///
+	/// Cloneable and independent of the viewer: once the viewer is dropped these report
+	/// `None`. [`Consumer::probed`] reports whether the peer is asked to probe for it.
+	pub fn consume(&self) -> Consumer {
+		self.0.consume()
+	}
+
+	/// Change the ceiling, keeping the same claim, as when a catalog enables or disables a rendition.
+	pub fn update(&self, max: Rate) {
+		self.0.update(max);
+	}
+}
+
 /// Every track registered with one [`Allocator`].
 #[derive(Default)]
 struct Registry {
@@ -504,7 +631,8 @@ impl Registry {
 
 /// One registered track's standing reservation.
 struct Entry {
-	demand: track::Demand,
+	/// The track whose demand gates the claim, or `None` for a claim that is always active.
+	demand: Option<track::Demand>,
 	priority: i8,
 	max: Rate,
 }
@@ -594,9 +722,10 @@ impl Share {
 			// Its own track counts while idle too, so an unwatched sender reads the slice
 			// it would get back: a rendition stopped for lack of bandwidth, whose viewers
 			// then left, needs that to know when to resume.
-			.filter(|(want, demand)| match want.id == self.id {
-				true => !demand.is_closed(),
-				false => demand.is_wanted(),
+			.filter(|(want, demand)| match (demand, want.id == self.id) {
+				(None, _) => true,
+				(Some(demand), true) => !demand.is_closed(),
+				(Some(demand), false) => demand.is_wanted(),
 			})
 			.map(|(want, _)| want)
 			.collect();
@@ -639,15 +768,17 @@ impl Share {
 		let wants: Vec<Want> = self
 			.claims()
 			.into_iter()
-			.filter(|(want, demand)| match demand.poll_state(waiter) {
-				track::DemandState::Active => true,
-				// An idle track claims nothing from its siblings, so an unwatched encoder's
-				// reservation goes to whoever is actually sending. Its own reader still
-				// sees the slice it would get back; see `grant`.
-				track::DemandState::Idle => want.id == self.id,
-				// Gone for good, and pruned by the next `register`.
-				track::DemandState::Closed => false,
-			})
+			.filter(
+				|(want, demand)| match demand.as_ref().map(|demand| demand.poll_state(waiter)) {
+					None | Some(track::DemandState::Active) => true,
+					// An idle track claims nothing from its siblings, so an unwatched encoder's
+					// reservation goes to whoever is actually sending. Its own reader still
+					// sees the slice it would get back; see `grant`.
+					Some(track::DemandState::Idle) => want.id == self.id,
+					// Gone for good, and pruned by the next `register`.
+					Some(track::DemandState::Closed) => false,
+				},
+			)
 			.map(|(want, _)| want)
 			.collect();
 
@@ -659,7 +790,7 @@ impl Share {
 	}
 
 	/// Snapshot the registry so the tracks can be read without holding its lock.
-	fn claims(&self) -> Vec<(Want, track::Demand)> {
+	fn claims(&self) -> Vec<(Want, Option<track::Demand>)> {
 		self.registry
 			.read()
 			.entries
@@ -755,7 +886,9 @@ impl Consumer {
 	/// estimate can rise to fund it even while its sender is stopped.
 	///
 	/// Only a session whose transport has a sender probes, and none does while
-	/// [`Allocator::set_target`] turns probing off. Without one the estimate
+	/// [`Allocator::set_target`] turns probing off. For a [`Viewer`]'s slice, whether
+	/// the session asks a peer that advertised `Increase` to probe for it, which
+	/// [`Viewers::set_target`] can turn off the same way. Without one the estimate
 	/// stops learning once the connection is app-limited, so a sender that stops for
 	/// lack of bandwidth could never see enough to resume. Always `false` for a whole
 	/// estimate, which no reservation backs. [`poll_changed`](Self::poll_changed)
@@ -1410,5 +1543,74 @@ mod tests {
 
 		allocator.set_target(None);
 		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(4_000_000)));
+	}
+
+	/// Several broadcasts on one connection each read their own slice of the receive
+	/// estimate, max-min fair by ceiling, so together they never claim more than it.
+	#[test]
+	fn viewers_split_the_estimate_max_min_fair() {
+		let estimate = Producer::new();
+		let viewers = Viewers::new(estimate.weak());
+		let small = viewers.watch(bps(1_000_000));
+		let large = viewers.watch(bps(8_000_000));
+		assert_eq!(small.rate(), None, "no estimate yet: hold the selection");
+
+		estimate.set(Some(bps(6_000_000))).unwrap();
+		assert_eq!(small.rate(), Some(bps(1_000_000)));
+		assert_eq!(large.rate(), Some(bps(5_000_000)));
+
+		let third = viewers.watch(bps(4_000_000));
+		let grants = [&small, &large, &third].map(|viewer| viewer.rate().unwrap());
+		assert_eq!(grants, [bps(1_000_000), bps(2_500_000), bps(2_500_000)]);
+		assert!(grants.iter().map(|rate| rate.as_bps()).sum::<u64>() <= 6_000_000);
+
+		// A viewer that leaves hands its slice back.
+		drop(third);
+		assert_eq!(large.rate(), Some(bps(5_000_000)));
+	}
+
+	/// The PROBE target sums every live viewer's ceiling until overridden.
+	#[test]
+	fn the_viewers_target_sums_their_ceilings() {
+		let viewers = Viewers::default();
+		let mut target = viewers.target();
+		let waiter = kio::Waiter::noop();
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(Rate::ZERO));
+
+		let first = viewers.watch(bps(3_000_000));
+		let second = viewers.clone().watch(bps(2_000_000));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(5_000_000)));
+		first.update(bps(1_000_000));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(3_000_000)));
+
+		viewers.set_target(Some(Rate::ZERO));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(Rate::ZERO));
+		viewers.set_target(None);
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(3_000_000)));
+
+		drop(second);
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(1_000_000)));
+		drop(first);
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(Rate::ZERO));
+	}
+
+	/// A held viewer is what requests the receive estimate (and so PROBE); the registry
+	/// alone is not, so a session holding one opens no PROBE stream.
+	#[test]
+	fn a_viewer_requests_the_estimate() {
+		let estimate = Producer::new();
+		let viewers = Viewers::new(estimate.weak());
+		assert!(!estimate.demand().wanted());
+
+		let viewer = viewers.watch(bps(1_000_000));
+		assert!(estimate.demand().wanted());
+		let grant = viewer.consume();
+		drop(viewer);
+		assert!(
+			estimate.demand().wanted(),
+			"a grant read from the viewer still wants it"
+		);
+		drop(grant);
+		assert!(!estimate.demand().wanted());
 	}
 }
