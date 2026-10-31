@@ -1518,10 +1518,10 @@ int main()
 		std::promise<void> cancelled;
 		auto cancellation = cancelled.get_future();
 		std::atomic<bool> finished{false};
+		// Bounded like WaitFor, so joining before cancelling fails instead of hanging.
 		CHECK(ctx->worker.Executor()([&] {
 			started.set_value();
-			cancellation.wait();
-			finished = true;
+			finished = cancellation.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
 		}));
 		started.get_future().wait();
 
