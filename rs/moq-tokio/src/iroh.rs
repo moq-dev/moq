@@ -4,7 +4,7 @@
 //! falling back to an iroh relay. Both WebTransport-over-H3 and raw QUIC are
 //! negotiated via ALPN.
 
-use std::{net, path::PathBuf, str::FromStr, sync::Arc};
+use std::{net, path::Path, str::FromStr, sync::Arc};
 
 mod session;
 pub(crate) use session::Session;
@@ -197,6 +197,8 @@ pub struct Config {
 
 	/// Secret key for the iroh endpoint, either a hex-encoded string or a path to a file.
 	/// If the file does not exist, a random key will be generated and written to the path.
+	/// Files must be regular, with no symlinks; on Unix, new files use mode 0600 and
+	/// existing files readable by group or others are refused without changing permissions.
 	#[usage(
 		name = "iroh-secret",
 		long = "iroh-secret",
@@ -284,17 +286,9 @@ impl Config {
 			let secret_key = if let Some(secret) = self.secret.as_ref().and_then(|s| SecretKey::from_str(s).ok()) {
 				secret
 			} else if let Some(path) = self.secret {
-				let path = PathBuf::from(path);
-				if !path.exists() {
-					// Generate a new random secret and write it to the file.
-					let secret = SecretKey::generate();
-					tokio::fs::write(path, hex::encode(secret.to_bytes())).await?;
-					secret
-				} else {
-					// Otherwise, read the secret from a file.
-					let key_str = tokio::fs::read_to_string(&path).await?;
-					SecretKey::from_str(&key_str).map_err(|err| Error::Secret(crate::error::message(err)))?
-				}
+				let generated = hex::encode(SecretKey::generate().to_bytes());
+				let key_str = crate::secret::load_or_create(Path::new(&path), &generated).await?;
+				SecretKey::from_str(&key_str).map_err(|err| Error::Secret(crate::error::message(err)))?
 			} else {
 				// Otherwise, generate a new random secret.
 				SecretKey::generate()

@@ -31,7 +31,7 @@ test("rendition broadcast reference is parsed and normalized", () => {
 		video: {
 			renditions: {
 				video: {
-					broadcast: "././source/",
+					broadcast: "././source",
 					codec: "avc1.64001f",
 					container: { kind: "legacy" },
 				},
@@ -40,8 +40,14 @@ test("rendition broadcast reference is parsed and normalized", () => {
 	};
 	const parsed = RootSchema.parse(catalog);
 	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
-	// Normalized like Rust path::Relative: redundant `.` and empty segments are dropped.
+	// Normalized like Rust path::Relative: redundant `.` segments are dropped.
 	expect(parsed.video.renditions.video?.broadcast).toBe("source" as RelativeBroadcast);
+
+	// Spelled like a path, so an empty segment or a lone backslash refuses the catalog.
+	for (const broadcast of ["./source/", "/source", "a//b", "a\\b"]) {
+		const video = { broadcast, codec: "avc1.64001f", container: { kind: "legacy" } };
+		expect(RootSchema.safeParse({ video: { renditions: { video } } }).success).toBe(false);
+	}
 });
 
 // Mirrors Rust's `reference_epochs_roundtrip_in_every_section`.
