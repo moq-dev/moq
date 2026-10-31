@@ -157,14 +157,16 @@ impl Session {
 			let _publish = publish;
 			let _consume = consume;
 
-			// A panic ends only this session, reported through the terminal callback.
-			let res = ffi::run(publish_driver.watch(consume_driver.watch(async move {
+			// A panic ends only this session, reported through the terminal callback. Boxed so
+			// each wrapper holds a pointer: unoptimized builds otherwise copy the future into
+			// every layer's frame, overflowing the runtime thread's stack.
+			let res = ffi::run(publish_driver.watch(consume_driver.watch(Box::pin(async move {
 				tokio::select! {
 					// close() requested: drain what the session queued, then close it.
 					_ = closed => reconnect.clone().close().await.map_err(map_connect_error),
 					res = Self::report(callback, &reconnect, &monitor) => res,
 				}
-			})))
+			}))))
 			.await;
 			// The terminal callback waits for the close to reach the peer, so a caller that exits
 			// on it doesn't leave the peer to time the connection out.
@@ -221,13 +223,14 @@ impl Session {
 			let _publish = publish;
 			let _consume = consume;
 
-			// A panic ends only this session, reported through the terminal callback.
-			let mut res = ffi::run(publish_driver.watch(consume_driver.watch(async move {
+			// A panic ends only this session, reported through the terminal callback. Boxed
+			// like the dialed session's.
+			let mut res = ffi::run(publish_driver.watch(consume_driver.watch(Box::pin(async move {
 				tokio::select! {
 					_ = closed => Ok(()),
 					res = Self::serve(id, callback, request) => res,
 				}
-			})))
+			}))))
 			.await;
 
 			let entry = State::lock().session.task.remove(id);
