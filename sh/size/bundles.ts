@@ -59,8 +59,7 @@ for (const [name, code] of Object.entries({
 	for (const [path, output] of Object.entries(outputs)) if (output.entryPoint === `${name}.js`) visit(path);
 	if (!first.size) throw new Error(`entry output missing: ${name}`);
 	// CMAF is an optional synchronous export, never part of these initial entry points.
-	const hasCmaf = (path: string) =>
-		Object.keys(outputs[path].inputs).some((input) => /[/]cmaf[/]/.test(input));
+	const hasCmaf = (path: string) => Object.keys(outputs[path].inputs).some((input) => /[/]cmaf[/]/.test(input));
 	if ([...first].some(hasCmaf)) throw new Error(`CMAF reached the first load: ${name}`);
 	const lazyCmaf = new Set(Object.keys(outputs).filter((path) => !first.has(path) && hasCmaf(path)));
 	if (name.startsWith("watch") && !lazyCmaf.size) throw new Error(`missing lazy CMAF chunk: ${name}`);

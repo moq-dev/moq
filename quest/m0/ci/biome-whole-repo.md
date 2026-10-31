@@ -6,12 +6,12 @@
 
 ## Plan
 
-Found by the agent on [moq-dev/moq#7305](https://github.com/moq-dev/moq/pull/7305). Biome's paths are listed in `sh/js/workspace.py:201` and `js/justfile:45`, so these files are never checked:
+Implementation is checkpointed in [moq-dev/moq#7434](https://github.com/moq-dev/moq/pull/7434): Biome is a repository-wide lint lane, `just fix` covers the same scope, and the reported diagnostics are fixed. Exclusions live in `biome.jsonc`, including MPEG transport-stream fixtures whose `.ts` extension is not TypeScript. JSON fixture values are unchanged.
 
-- JSON formatting: `.github/ci-selection-audit.json`, `cpp/obs/buildspec.json`, `rs/hang/fixtures/*.json`, `rs/moq-pattern/tests/pattern.json`.
-- TS formatting: `sh/gh/cpp.test.ts`, `sh/size/bundles.ts`.
-- `noTemplateCurlyInString` in `sh/gh/setup.test.ts:109-119`, whose plain strings hold GitHub's `${{ ... }}`; suppress it there with a reason rather than rewrite the fixtures.
+Remaining: pass the full local `just ci` gate, obtain the required other-vendor local review, and mark the PR ready. On 2026-10-31, the gate's Rust lint and feature-shape commands failed in the host's `mbx` Cargo wrapper with `Argument list too long (os error 7)`. Repair the host launcher before retrying; do not bypass or weaken checks. Claude's weekly review quota was reported exhausted by the parent task, so review capacity must also be restored.
 
-Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run). Fix the files and widen the paths in one PR so the gate stays green. Exclude generated or vendored trees (fixtures written by tools, `node_modules`, build output) through `biome.json` rather than by listing directories in two scripts. The bigint `useMathMinMax` false positive in Biome 2.6 belongs to #7305; no upstream report was approved.
+The dispatcher and JS workspace selector suites passed, as did whole-repository Biome and quest validation. The full gate was stopped after the host failure; other lanes are unverified.
+
+Decided unattended within the maintainer's scope: run Biome on every diff in its own Bun lane instead of expanding the JS package-build selection to every repository path. Keep YAML and Markdown formatters disabled under their existing quests. No package versions change.
 
 Public API: none. Wire: none.
