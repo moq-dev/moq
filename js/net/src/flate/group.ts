@@ -3,6 +3,7 @@ import { StreamCode, StreamError } from "../error.ts";
 import type { Frame } from "../group.ts";
 import { Queue } from "../queue.ts";
 import type { Timestamp } from "../time.ts";
+import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
 
@@ -30,6 +31,14 @@ class SliceFrame implements Frame {
 }
 
 const slices = new WeakMap<Frame, Stored>();
+
+/**
+ * Whether a local plain payload of `size` bytes encodes to a slice a peer accepts, whatever it
+ * holds: checked before encoding, since an encoded frame has already advanced the dictionary.
+ */
+export function encodable(size: number): boolean {
+	return Encoder.bound(size) <= MAX_FRAME_BYTES;
+}
 
 /** Read a compressed frame's stored form without inflating it. */
 export function stored(frame: Frame): Stored | undefined {

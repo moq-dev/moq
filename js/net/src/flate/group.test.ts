@@ -5,7 +5,7 @@ import { hooks } from "../internal.ts";
 import { Producer as Track } from "../track.ts";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
-import { stored } from "./group.ts";
+import { encodable, stored } from "./group.ts";
 
 const payload = new TextEncoder().encode("one shared compression window ".repeat(100));
 
@@ -122,8 +122,11 @@ test("a shared plain read cannot change a later synchronous write's admission", 
 	const track = new Track("compressed").accept({ compress: true });
 	const group = track.appendGroup();
 	const reader = group.mirror();
-	group.writeFrame({ payload: new Uint8Array(32 * 1024 * 1024) });
-	expect((await reader.readFrame())?.payload.length).toBe(32 * 1024 * 1024);
+	// The largest local frame whose worst-case slice fits the frame cap.
+	let size = 32 * 1024 * 1024;
+	while (!encodable(size)) size--;
+	group.writeFrame({ payload: new Uint8Array(size) });
+	expect((await reader.readFrame())?.payload.length).toBe(size);
 	// The plain-byte budget is full, but another empty frame still fits, regardless of readers.
 	expect(() => group.writeFrame({ payload: new Uint8Array() })).not.toThrow();
 	group.finish();

@@ -6,7 +6,7 @@
 import { type Instant, now } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import { FrameTooLarge, ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
-import { Compression, stored } from "./flate/group.ts";
+import { Compression, encodable, stored } from "./flate/group.ts";
 import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
 import { Queue } from "./queue.ts";
 import type { Timestamp } from "./time.ts";
@@ -353,6 +353,9 @@ export class Producer {
 			if (compressed && state.start !== 0) throw new ProtocolViolation("compressed group lacks its prefix");
 			if (compressed && Array.from(state.frames.peek()).some((frame) => frame instanceof Chunked))
 				throw new ProtocolViolation("compressed group holds a streamed frame");
+			// A frame written before the track chose compression is encoded and sent whole too.
+			if (compressed && Array.from(state.frames.peek()).some((frame) => !encodable(frame.payload.byteLength)))
+				throw new FrameTooLarge();
 			state.compressed = compressed;
 			if (!compressed) return;
 			const flate = new Compression();
@@ -522,7 +525,7 @@ export class Producer {
 		const frame = { payload: EMPTY, timestamp };
 		if (this.#state.flate) {
 			// A compressed frame is encoded whole once written, as `writeFrame` does.
-			if (size > MAX_FRAME_BYTES) throw new FrameTooLarge();
+			if (!encodable(size)) throw new FrameTooLarge();
 			this.#admit(frame);
 			const payload = new Uint8Array(size);
 			let written = 0;
@@ -572,9 +575,12 @@ export class Producer {
 	}
 
 	#writeFrame(frame: Frame, inflated?: number) {
-		// A plain frame written whole is the writer's own buffer, at any size.
-		if ((this.#state.flate && frame.payload.byteLength > MAX_FRAME_BYTES) || (inflated ?? 0) > MAX_FRAME_BYTES)
+		// A plain frame written whole is the writer's own buffer, at any size. A compressed one
+		// is sent whole, so its slice must fit: a received one as declared, a local one encoded.
+		const size = frame.payload.byteLength;
+		if (this.#state.flate && (inflated === undefined ? !encodable(size) : size > MAX_FRAME_BYTES))
 			throw new FrameTooLarge();
+		if ((inflated ?? 0) > MAX_FRAME_BYTES) throw new FrameTooLarge();
 		const commits = this.#admit(frame);
 		if (inflated !== undefined && (!this.#state.flate || !Number.isSafeInteger(inflated) || inflated < 0))
 			throw new ProtocolViolation("unexpected inflated frame size");
@@ -1531,7 +1537,7 @@ export class Consumer {
 	}
 
 	// Read a streamed frame whole. Losing any of it ends this reader, since the frame is gone.
-	async #join(sequence: number, chunks: FrameConsumer): Promise<ReadGroupFrame> {
+	async #join(sequence: number, chunks: FrameConsumer): Promise<ReadGroupFrame | undefined> {
 		const parts: Uint8Array[] = [];
 		let size = 0;
 		try {
@@ -1544,9 +1550,15 @@ export class Consumer {
 					size += chunk.byteLength;
 					continue;
 				}
+				// A released reader stops waiting on a frame its producer may never finish.
+				if (this.#released) {
+					const closed = this.#state.closed.peek();
+					if (closed instanceof Error) throw closed;
+					return undefined;
+				}
 				// A frame stalled partway is the stall the drift budget bounds, as an empty group is.
 				if (this.#expire()) continue;
-				await Signal.race(...chunkChanged(chunks), ...(this.#expiry?.changed ?? []));
+				await Signal.race(...chunkChanged(chunks), this.#state.closed, ...(this.#expiry?.changed ?? []));
 			}
 			const payload = parts.length === 0 ? EMPTY : joined(parts, size);
 			return { sequence, frame: { payload, timestamp: chunks.timestamp, arrived: chunks.arrived } };

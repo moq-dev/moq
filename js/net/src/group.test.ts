@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { FrameTooLarge, StreamCode, StreamError } from "./error.ts";
+import { encodable } from "./flate/group.ts";
 import { Producer } from "./group.ts";
 import { hooks, type Replacement } from "./internal.ts";
 import { textFrame } from "./mock.ts";
@@ -532,6 +533,51 @@ test("a plain frame has no size cap, while a compressed one keeps its whole-fram
 	expect(() => compressed.createFrame({ size: 32 * 1024 * 1024 + 1 })).toThrow(FrameTooLarge);
 	expect(hooks.groupFrameCount(compressed)).toBe(0);
 	compressed.finish();
+});
+
+test("a compressed frame is refused unless its worst-case slice fits a peer's frame cap", async () => {
+	const MAX = 32 * 1024 * 1024;
+	let largest = MAX;
+	while (!encodable(largest)) largest--;
+	const compressed = new Producer(0);
+	hooks.bindGroupCompression(compressed, true);
+	const reader = compressed.consume();
+	// High-entropy input expands under DEFLATE, so even the cap itself may not encode within it.
+	expect(() => compressed.writeFrame({ payload: new Uint8Array(largest + 1) })).toThrow(FrameTooLarge);
+	expect(() => compressed.createFrame({ size: largest + 1 })).toThrow(FrameTooLarge);
+	const payload = new Uint8Array(largest);
+	for (let i = 0; i < largest; i += 65536) crypto.getRandomValues(payload.subarray(i, i + 65536));
+	compressed.writeFrame({ payload });
+	const read = await hooks.readGroupFrame(reader, true);
+	expect(read?.frame.payload.byteLength).toBeGreaterThan(largest);
+	expect(read?.frame.payload.byteLength).toBeLessThanOrEqual(MAX);
+	compressed.finish();
+
+	// A frame written before the track chose compression is held to the same cap.
+	const early = new Producer(1);
+	early.writeFrame({ payload: new Uint8Array(largest + 1) });
+	expect(() => hooks.bindGroupCompression(early, true)).toThrow(FrameTooLarge);
+});
+
+test("closing a reader ends a whole read of a stalled frame", async () => {
+	const producer = new Producer(0);
+	const aborted = producer.consume();
+	const closed = producer.consume();
+	const open = producer.createFrame({ size: 10 });
+	open.write(new Uint8Array(4));
+	const failing = aborted.readFrame();
+	const ending = closed.readFrame();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	hooks.releaseGroupReader(aborted, new Error("cancelled"));
+	closed.close();
+	await expect(failing).rejects.toThrow("cancelled");
+	expect(await ending).toBeUndefined();
+	// The producer and its other readers are untouched.
+	const live = producer.consume();
+	open.write(new Uint8Array(6));
+	open.finish();
+	expect((await live.readFrame())?.payload.byteLength).toBe(10);
+	producer.finish();
 });
 
 // A deterministic byte at each frame offset, so a reordered or dropped chunk shows.
