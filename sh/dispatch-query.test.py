@@ -204,6 +204,14 @@ class QueryTests(unittest.TestCase):
         result = self.platform()
         self.assertEqual((result["moq_sh"], result["rs"]), ("true", "false"))
 
+    def test_platform_shared_clang_format_inputs_select_c_and_cpp(self):
+        for path in ("sh/clang-format.sh", "cpp/obs/.clang-format"):
+            with self.subTest(path=path):
+                self.change(path)
+                result = self.platform()
+                self.assertEqual((result["c"], result["cpp"], result["rs"]), ("true", "true", "false"))
+                (self.repo / path).unlink()
+
     def test_platform_shared_configuration_selects_everything(self):
         for path in (".cargo/config.toml", ".github/workflows/platform.yml", "rs/justfile"):
             with self.subTest(path=path):

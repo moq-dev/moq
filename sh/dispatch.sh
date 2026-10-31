@@ -89,10 +89,11 @@ declare -A scope=(
     [swift]='^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
     [go]='^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)'
     [dart]='^(\.cargo/config\.toml$|dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)'
-    # The C package links moq-c's native-libs lists, and the C++ package's FFI pin.
-    [c]='^(\.cargo/config\.toml$|c/|sh/c/|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)'
+    # The C package links moq-c's native-libs lists, and the C++ package's FFI
+    # pin. Both packages format with sh/clang-format.sh and OBS's style file.
+    [c]='^(\.cargo/config\.toml$|c/|sh/c/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)'
     # The package links moq-c's native-libs lists, and compiles its doc samples.
-    [cpp]='^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
+    [cpp]='^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
     # The plugin and its tests call through the bindings generated from cpp/moq
     # and moq-ffi and link through moq-c's native-libs lists, and flake.nix owns
     # the libobs headers it compiles against.
