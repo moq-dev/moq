@@ -150,7 +150,7 @@ impl Session {
 
 		// Run a background task to read capsules from the CONNECT recv stream.
 		let conn2 = this.conn.clone();
-		crate::runtime::spawn(Self::run_recv(conn2, connect.recv, close));
+		crate::runtime::detach(Self::run_recv(conn2, connect.recv, close));
 
 		this
 	}
@@ -450,7 +450,7 @@ impl Session {
 				// control and QPACK streams before the capsule is delivered, which a
 				// browser treats as a connection error, losing the code and reason.
 				let session = self.clone();
-				crate::runtime::spawn(async move {
+				crate::runtime::detach(async move {
 					session.close_with_capsule(send, capsule, code, timeout).await;
 				});
 			}

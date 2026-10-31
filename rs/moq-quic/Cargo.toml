@@ -29,6 +29,10 @@ qlog = ["dep:qlog"]
 # The sans-IO QMux connection, which runs the stream state machine over a reliable, ordered
 # transport. Driven by the `qmux` crate.
 mux = []
+# The seeded, impaired network path (`sim::Link`) the tests run endpoints across, for a
+# driver that runs QUIC on moq-clock's simulator. Hidden from the docs; meant for
+# dev-dependencies.
+sim = []
 # Internal (PRIVATE!) features used to aid testing.
 # Don't rely on these whatsoever. They may disappear at any time.
 
