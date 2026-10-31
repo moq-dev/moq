@@ -34,7 +34,3 @@ Start by reproducing the race on `release` with one of those tests. If
 `release` cannot hit it, delete this quest and say why in the PR.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - lands the fix this quest ports, on main
