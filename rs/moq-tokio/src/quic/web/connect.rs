@@ -17,10 +17,10 @@ pub enum ConnectError {
 	ConnectionError(#[from] crate::quic::driver::connection::Error),
 
 	#[error("read error")]
-	ReadError(#[from] crate::quic::driver::ReadError),
+	ReadError(#[from] crate::quic::driver::recv::Error),
 
 	#[error("write error")]
-	WriteError(#[from] crate::quic::driver::WriteError),
+	WriteError(#[from] crate::quic::driver::send::Error),
 
 	#[error("http error status: {0}")]
 	ErrorStatus(http::StatusCode),
@@ -35,8 +35,8 @@ pub struct Connecting {
 	pub request: ConnectRequest,
 
 	// A reference to the send/recv stream, so we don't close it until dropped.
-	pub(crate) send: crate::quic::driver::SendStream,
-	pub(crate) recv: crate::quic::driver::RecvStream,
+	pub(crate) send: crate::quic::driver::send::Stream,
+	pub(crate) recv: crate::quic::driver::recv::Stream,
 }
 
 impl Connecting {
@@ -75,8 +75,8 @@ impl Connecting {
 	}
 
 	pub async fn reject(self, status: http::StatusCode) -> Result<(), ConnectError> {
-		let mut connect = self.respond(status).await?;
-		connect.send.finish().ok();
+		let connect = self.respond(status).await?;
+		connect.send.finish();
 		Ok(())
 	}
 }
@@ -97,8 +97,8 @@ pub struct Connected {
 	pub response: ConnectResponse,
 
 	// A reference to the send/recv stream, so we don't close it until dropped.
-	pub(crate) send: crate::quic::driver::SendStream,
-	pub(crate) recv: crate::quic::driver::RecvStream,
+	pub(crate) send: crate::quic::driver::send::Stream,
+	pub(crate) recv: crate::quic::driver::recv::Stream,
 }
 
 impl Connected {

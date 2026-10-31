@@ -159,7 +159,10 @@ fn export_as(relay: &Relay, global: &[&str], format: Format, flags: &[&str]) -> 
 	let mut child = moq(relay, global)
 		.args(["export", format.name])
 		.args(flags)
-		.env("RUST_LOG", "warn,moq_mux::container::ts::follower=info")
+		.env(
+			"RUST_LOG",
+			"warn,moq_mux::container::ts::follower=info,moq_mux::container::ts::handoff=debug",
+		)
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped())
 		.spawn()
@@ -969,13 +972,19 @@ async fn redundant_failover(bufferbloat: bool) {
 	first.kill().await.unwrap();
 	second.kill().await.unwrap();
 	feeding.abort();
-	for mut export in exports {
+	for (viewer, mut export) in exports.into_iter().enumerate() {
 		export.child.kill().await.unwrap();
 		let output = export.output.clone();
 		let arrivals = export.arrivals.clone();
 		let (status, errors) = export.wait().await;
 		assert!(!status.success(), "test terminates the export");
 		assert!(!errors.contains("rewind"), "{errors}");
+		for phase in errors
+			.lines()
+			.filter(|line| line.contains("moq_mux::container::ts::handoff:"))
+		{
+			eprintln!("bufferbloat={bufferbloat}, viewer {viewer}, {phase}");
+		}
 		let output = output.lock().unwrap();
 		let versions: Vec<_> = packets(&output).filter_map(|packet| pat_version(packet)).collect();
 		let mut distinct = versions.clone();
@@ -1006,7 +1015,7 @@ async fn redundant_failover(bufferbloat: bool) {
 			let gap = at
 				.checked_sub(1)
 				.map_or(Duration::ZERO, |before| arrivals[at].0 - arrivals[before].0);
-			eprintln!("bufferbloat={bufferbloat}, program {version}, viewer output gap={gap:?}");
+			eprintln!("bufferbloat={bufferbloat}, viewer {viewer}, program {version}, viewer output gap={gap:?}");
 			switches.push((version, at, gap));
 		}
 		let arrivals = arrivals.lock().unwrap();
@@ -1020,11 +1029,13 @@ async fn redundant_failover(bufferbloat: bool) {
 		// The output's 25ms PCR grid plus this fixture's 20ms switch polling, on top of the
 		// scheduling noise measured on the same stdout reader.
 		let margin = Duration::from_millis(25 + 20);
-		eprintln!("bufferbloat={bufferbloat}, steady output max={steady:?}, cadence margin={margin:?}");
+		eprintln!(
+			"bufferbloat={bufferbloat}, viewer {viewer}, steady output max={steady:?}, cadence margin={margin:?}"
+		);
 		// A healthy switch adds no hole only when the replacement is usable within the follow.
-		// Behind this link, slower than either leg alone, both legs' audio outranks all video,
-		// so the replacement's first keyframe lands only after the follow stops the old input;
-		// its late start then costs whatever the old tail does not cover, the honest result.
+		// Behind this link, slower than either leg alone, prioritizing the replacement can
+		// starve the old program before acquisition completes. Measure the output hole as
+		// well as keyframe arrival; earlier acquisition alone does not prove a better switch.
 		for (version, _, gap) in switches {
 			if version != 2 && !bufferbloat {
 				assert!(
