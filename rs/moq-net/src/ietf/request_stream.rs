@@ -1,6 +1,6 @@
 use crate::driver::Transport;
 use crate::transport::poll::Session as _;
-use std::task::{Context, Poll, ready};
+use std::task::{Poll, ready};
 
 use super::{Message, Version};
 use crate::{
@@ -18,16 +18,16 @@ pub(super) fn poll_cancel(
 	finished: &mut bool,
 	messages: &mut Messages,
 	version: Version,
-	cx: &mut Context<'_>,
+	waiter: &kio::Waiter,
 ) -> Poll<Result<(), Error>> {
 	if !*finished {
-		match messages.poll_end(&mut stream.reader, cx) {
+		match messages.poll_end(&mut stream.reader, waiter) {
 			Poll::Ready(Ok(())) if !fin_cancels(version) => *finished = true,
 			Poll::Ready(result) => return Poll::Ready(result),
 			Poll::Pending => {}
 		}
 	}
-	stream.writer.poll_closed(cx)
+	stream.writer.poll_closed(waiter)
 }
 
 /// Watch for the requester ending a request it has not been answered on yet, without consuming
@@ -37,12 +37,12 @@ pub(super) fn poll_cancel(
 pub(super) fn poll_withdrawn(
 	stream: &mut Stream<Transport, Version>,
 	version: Version,
-	cx: &mut Context<'_>,
+	waiter: &kio::Waiter,
 ) -> Poll<()> {
-	if stream.writer.poll_closed(cx).is_ready() {
+	if stream.writer.poll_closed(waiter).is_ready() {
 		return Poll::Ready(());
 	}
-	match stream.reader.poll_has_more(cx) {
+	match stream.reader.poll_has_more(waiter) {
 		Poll::Ready(Ok(false)) if fin_cancels(version) => Poll::Ready(()),
 		Poll::Ready(Err(_)) => Poll::Ready(()),
 		_ => Poll::Pending,
@@ -120,10 +120,10 @@ impl GoAways {
 	pub fn poll_next<T: for<'a> Decode<'a, Version> + std::fmt::Debug, R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
-		cx: &mut Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<T>, Error>> {
 		loop {
-			match ready!(reader.poll_decode_maybe::<Next<T>>(cx))? {
+			match ready!(reader.poll_decode_maybe::<Next<T>>(waiter))? {
 				Some(Next::GoAway { redirect }) => self.receive(redirect)?,
 				Some(Next::Message(message)) => return Poll::Ready(Ok(Some(message))),
 				None => return Poll::Ready(Ok(None)),
@@ -164,16 +164,16 @@ impl Messages {
 	pub fn poll_next<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
-		cx: &mut Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Framed>, Error>> {
-		self.goaways.poll_next(reader, cx).map_err(|err| self.failed(err))
+		self.goaways.poll_next(reader, waiter).map_err(|err| self.failed(err))
 	}
 
 	pub async fn next<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
 	) -> Result<Option<Framed>, Error> {
-		std::future::poll_fn(|cx| self.poll_next(reader, cx)).await
+		kio::wait(|waiter| self.poll_next(reader, waiter)).await
 	}
 
 	pub async fn message<R: crate::transport::poll::RecvStream>(
@@ -188,9 +188,9 @@ impl Messages {
 	pub fn poll_end<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
-		cx: &mut Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
-		match ready!(self.poll_next(reader, cx))? {
+		match ready!(self.poll_next(reader, waiter))? {
 			None => Poll::Ready(Ok(())),
 			Some(_) => Poll::Ready(Err(self.failed(Error::UnexpectedMessage))),
 		}
@@ -224,7 +224,7 @@ pub(super) async fn write_error<W: crate::transport::poll::SendStream>(
 			retry_interval: 0,
 		},
 	)?;
-	std::future::poll_fn(|cx| writer.poll_flush(cx)).await
+	kio::wait(|waiter| writer.poll_flush(waiter)).await
 }
 
 /// A framed subscription update, preserving omitted preferences.
@@ -440,12 +440,12 @@ mod tests {
 			let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), false);
 			let mut finished = false;
 			assert!(
-				futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+				futures::poll!(kio::wait(|waiter| poll_cancel(
 					&mut stream,
 					&mut finished,
 					&mut messages,
 					version,
-					cx,
+					waiter,
 				)))
 				.is_pending(),
 				"{version}"
@@ -454,12 +454,12 @@ mod tests {
 			// A second GOAWAY is still session-fatal while the response is pending.
 			session.push(&[0x10, 0, 2, 0, 0]);
 			assert!(matches!(
-				futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+				futures::poll!(kio::wait(|waiter| poll_cancel(
 					&mut stream,
 					&mut finished,
 					&mut messages,
 					version,
-					cx,
+					waiter,
 				))),
 				Poll::Ready(Err(Error::ProtocolViolation))
 			));

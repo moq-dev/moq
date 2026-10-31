@@ -51,8 +51,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 		group.finish().unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let consumer = viewer.consume();
-		consumer.routed("live").await.unwrap();
-		let remote = consumer.request_broadcast("live", None).await.unwrap();
+		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 		let cache = remote.track("catalog").unwrap();
 		let prefs = |millis| track::Subscription::default().with_max_delay(Duration::from_millis(millis));
 		let mut short = cache.subscribe(prefs(250)).await.unwrap();

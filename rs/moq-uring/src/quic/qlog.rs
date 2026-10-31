@@ -61,7 +61,7 @@ impl Side {
 /// A directory of qlog traces, and the thread that writes them.
 ///
 /// Build one per process (or per worker group) and hand clones to every
-/// [`Transport`](super::Transport) that should capture: clones share the
+/// [`transport::Config`](super::transport::Config) that should capture: clones share the
 /// directory and the writer thread, so the cost is one thread however many
 /// workers and connections there are. Dropping the last clone flushes and
 /// closes every open trace before returning.

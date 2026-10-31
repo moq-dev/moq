@@ -65,11 +65,12 @@ impl Table {
 	}
 }
 
-/// The two encoders the stats producer runs per track: `.json.z` and the plain `.json` sibling.
+/// A stats track's encoder with and without merge-patch deltas.
 fn configs() -> [(&'static str, Config); 2] {
-	let mut compressed = Config::default();
-	compressed.compression = moq_json::Compression::Deflate;
-	[("json.z", compressed), ("json", Config::default().with_deltas(false))]
+	[
+		("deltas", Config::default()),
+		("snapshots", Config::default().with_deltas(false)),
+	]
 }
 
 fn table(c: &mut Criterion) {

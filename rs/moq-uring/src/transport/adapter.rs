@@ -128,107 +128,148 @@ pub trait GroupedSend: backend::SendStream {
 }
 
 /// A WebTransport session adapted to moq-net.
-#[derive(Clone)]
-pub struct Session<S>(S, moq::Address);
-impl<S> Session<S> {
+///
+/// The backend's polls keep one waker per handle and operation, so each operation that may
+/// wait polls its own clone of the session, bridged to every waiter parked on it.
+pub struct Session<S> {
+	accept_uni: kio::Bridge<S>,
+	accept_bi: kio::Bridge<S>,
+	open_uni: kio::Bridge<S>,
+	open_bi: kio::Bridge<S>,
+	open_request: kio::Bridge<S>,
+	datagram: kio::Bridge<S>,
+	closed: kio::Bridge<S>,
+	/// The operations that never wait and need an exclusive borrow.
+	control: kio::Bridge<S>,
+	/// The operations that only read.
+	session: S,
+	address: moq::Address,
+}
+impl<S: backend::Session + Clone> Session<S> {
 	/// Wrap a backend poll session.
 	pub fn new(session: S, address: moq::Address) -> Self {
-		Self(session, address)
+		let bridge = || kio::Bridge::new(session.clone());
+		Self {
+			accept_uni: bridge(),
+			accept_bi: bridge(),
+			open_uni: bridge(),
+			open_bi: bridge(),
+			open_request: bridge(),
+			datagram: bridge(),
+			closed: bridge(),
+			control: bridge(),
+			session,
+			address,
+		}
 	}
 }
-impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> poll::Session for Session<S> {
+impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + 'static> poll::Session for Session<S> {
 	type SendStream = SendStream<S::SendStream>;
 	type RecvStream = S::Recv;
 	type Error = Error<S::Error>;
-	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
-		backend::Session::poll_accept_uni(&mut self.0, cx)
+	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		self.accept_uni
+			.poll(waiter, backend::Session::poll_accept_uni)
 			.map_err(Error)
 			.map(|res| res.map(|recv| S::recv(RecvStream(recv))))
 	}
-	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
-		backend::Session::poll_accept_bi(&mut self.0, cx)
+	fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+		self.accept_bi
+			.poll(waiter, backend::Session::poll_accept_bi)
 			.map_err(Error)
-			.map(|res| res.map(|(send, recv)| (SendStream(send), S::recv(RecvStream(recv)))))
+			.map(|res| res.map(|(send, recv)| (SendStream::new(send), S::recv(RecvStream(recv)))))
 	}
 	fn poll_open_uni(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>,
 	) -> Poll<Result<Self::SendStream, Self::Error>> {
-		backend::Session::poll_open_uni(&mut self.0, cx)
+		self.open_uni
+			.poll(waiter, backend::Session::poll_open_uni)
 			.map_err(Error)
-			.map(|res| res.map(|send| SendStream(send).scheduled(options)))
+			.map(|res| res.map(|send| SendStream::new(send).scheduled(options)))
 	}
 	fn poll_open_bi(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>,
 	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
-		backend::Session::poll_open_bi(&mut self.0, cx)
+		self.open_bi
+			.poll(waiter, backend::Session::poll_open_bi)
 			.map_err(Error)
-			.map(|res| res.map(|(send, recv)| (SendStream(send).scheduled(options), S::recv(RecvStream(recv)))))
+			.map(|res| res.map(|(send, recv)| (SendStream::new(send).scheduled(options), S::recv(RecvStream(recv)))))
 	}
 
 	fn poll_open_request(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>,
 	) -> Poll<Result<Option<poll::BiStreams<Self>>, Self::Error>> {
-		Grouped::poll_open_request(&mut self.0, cx)
+		self.open_request
+			.poll(waiter, Grouped::poll_open_request)
 			.map_err(Error)
 			.map_ok(|streams| {
-				streams.map(|(send, recv)| (SendStream(send).scheduled(options), S::recv(RecvStream(recv))))
+				streams.map(|(send, recv)| (SendStream::new(send).scheduled(options), S::recv(RecvStream(recv))))
 			})
 	}
-	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as GroupedSend>::Group> {
-		Grouped::send_group(&mut self.0, priority)
+	fn send_group(&self, priority: i64) -> Option<<S::SendStream as GroupedSend>::Group> {
+		Grouped::send_group(&mut *self.control.lock(), priority)
 	}
 	fn send_datagram(
-		&mut self,
+		&self,
 		payload: Bytes,
 		options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>,
 	) -> Result<(), Self::Error> {
-		Grouped::send_datagram(&mut self.0, payload, options).map_err(Error)
+		Grouped::send_datagram(&mut *self.control.lock(), payload, options).map_err(Error)
 	}
-	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
-		backend::Session::poll_recv_datagram(&mut self.0, cx).map_err(Error)
+	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Self::Error>> {
+		self.datagram
+			.poll(waiter, backend::Session::poll_recv_datagram)
+			.map_err(Error)
 	}
 	fn max_datagram_size(&self) -> usize {
-		backend::Session::max_datagram_size(&self.0)
+		backend::Session::max_datagram_size(&self.session)
 	}
 	fn address(&self) -> moq::Address {
-		self.1
+		self.address
 	}
 	fn protocol(&self) -> Option<&str> {
-		backend::Session::protocol(&self.0)
+		backend::Session::protocol(&self.session)
 	}
-	fn close(&mut self, code: u32, reason: &str) {
-		backend::Session::close(&mut self.0, code, reason)
+	fn close(&self, code: u32, reason: &str) {
+		backend::Session::close(&mut *self.control.lock(), code, reason)
 	}
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
-		backend::Session::poll_closed(&mut self.0, cx).map(Error)
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+		self.closed.poll(waiter, backend::Session::poll_closed).map(Error)
 	}
 	fn metrics(&self) -> impl moq::Metrics {
 		Metrics {
-			inner: backend::Session::stats(&self.0),
-			streams_evicted: Grouped::streams_evicted(&self.0),
+			inner: backend::Session::stats(&self.session),
+			streams_evicted: Grouped::streams_evicted(&self.session),
 		}
 	}
 	fn wire(&self) -> Option<moq::Wire> {
-		Grouped::wire(&self.0)
+		Grouped::wire(&self.session)
 	}
 	fn probe(&self) -> Option<moq::Probe> {
-		Grouped::probe(&self.0)
+		Grouped::probe(&self.session)
 	}
 }
 /// An outgoing WebTransport stream adapted to moq-net.
-pub struct SendStream<S>(S);
+///
+/// Bridged, so its close can be watched through a shared borrow.
+pub struct SendStream<S>(kio::Bridge<S>);
 impl<S: GroupedSend + 'static> SendStream<S> {
+	fn new(stream: S) -> Self {
+		Self(kio::Bridge::new(stream))
+	}
+
 	/// Schedule a newly opened stream by its options.
 	fn scheduled(mut self, options: poll::SendOptions<'_, S::Group>) -> Self {
-		GroupedSend::set_priority(&mut self.0, options.priority);
+		let stream = self.0.get_mut();
+		GroupedSend::set_priority(stream, options.priority);
 		if let Some(group) = options.group {
-			GroupedSend::set_group(&mut self.0, group);
+			GroupedSend::set_group(stream, group);
 		}
 		self
 	}
@@ -236,34 +277,34 @@ impl<S: GroupedSend + 'static> SendStream<S> {
 impl<S: GroupedSend + 'static> poll::SendStream for SendStream<S> {
 	type Error = Error<S::Error>;
 	type Group = S::Group;
-	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
-		backend::SendStream::poll_write(&mut self.0, cx, buf).map_err(Error)
+	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		backend::SendStream::poll_write(self.0.get_mut(), &mut waiter.context(), buf).map_err(Error)
 	}
-	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
-		backend::SendStream::poll_write_buf(&mut self.0, cx, buf).map_err(Error)
+	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
+		backend::SendStream::poll_write_buf(self.0.get_mut(), &mut waiter.context(), buf).map_err(Error)
 	}
 	fn set_priority(&mut self, priority: i64) {
-		GroupedSend::set_priority(&mut self.0, priority)
+		GroupedSend::set_priority(self.0.get_mut(), priority)
 	}
 	fn set_group(&mut self, group: &Self::Group) {
-		GroupedSend::set_group(&mut self.0, group)
+		GroupedSend::set_group(self.0.get_mut(), group)
 	}
 	fn finish(&mut self) -> Result<(), Self::Error> {
-		backend::SendStream::finish(&mut self.0).map_err(Error)
+		backend::SendStream::finish(self.0.get_mut()).map_err(Error)
 	}
 	fn reset(&mut self, code: u32) {
-		backend::SendStream::reset(&mut self.0, code)
+		backend::SendStream::reset(self.0.get_mut(), code)
 	}
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		backend::SendStream::poll_closed(&mut self.0, cx).map_err(Error)
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
+		self.0.poll(waiter, backend::SendStream::poll_closed).map_err(Error)
 	}
 }
 /// An incoming WebTransport stream adapted to moq-net.
 pub struct RecvStream<S>(pub(super) S);
 impl<S: backend::RecvStream + 'static> poll::Chunks for RecvStream<S> {
 	type Error = Error<S::Error>;
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
-		backend::RecvStream::poll_read_chunk(&mut self.0, cx, max).map_err(Error)
+	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		backend::RecvStream::poll_read_chunk(&mut self.0, &mut waiter.context(), max).map_err(Error)
 	}
 	fn stop(&mut self, code: u32) {
 		backend::RecvStream::stop(&mut self.0, code)
@@ -418,21 +459,20 @@ mod tests {
 	fn forwards_thread_local_streams_and_keeps_error_codes() {
 		use moq_net::transport::Metrics as _;
 		let state = Rc::new(Cell::new(0));
-		let mut session = Session::new(Backend(state.clone()), moq::Address::Setup);
-		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let session = Session::new(Backend(state.clone()), moq::Address::Setup);
+		let waiter = &kio::Waiter::noop();
 		assert_eq!(poll::Session::protocol(&session), Some("moq-lite-06"));
 		assert_eq!(
 			poll::Session::metrics(&session).rtt(),
 			Some(std::time::Duration::from_millis(7))
 		);
-		let Poll::Ready(Ok((mut send, mut recv))) =
-			poll::Session::poll_open_bi(&mut session, &mut cx, Default::default())
+		let Poll::Ready(Ok((mut send, mut recv))) = poll::Session::poll_open_bi(&session, waiter, Default::default())
 		else {
 			panic!("open failed")
 		};
 		let mut buf = Bytes::from_static(b"abcd");
 		assert!(matches!(
-			poll::SendStream::poll_write_buf(&mut send, &mut cx, &mut buf),
+			poll::SendStream::poll_write_buf(&mut send, waiter, &mut buf),
 			Poll::Ready(Ok(2))
 		));
 		assert_eq!(buf, b"cd"[..]);
@@ -440,13 +480,13 @@ mod tests {
 		assert_eq!(state.get(), 9);
 		poll::SendStream::reset(&mut send, 11);
 		assert_eq!(state.get(), 11);
-		let Poll::Ready(Ok(Some(chunk))) = poll::RecvStream::poll_read_chunk(&mut recv, &mut cx, 2) else {
+		let Poll::Ready(Ok(Some(chunk))) = poll::RecvStream::poll_read_chunk(&mut recv, waiter, 2) else {
 			panic!("read failed")
 		};
 		assert_eq!(chunk, b"hi"[..]);
 		poll::RecvStream::stop(&mut recv, 13);
 		assert_eq!(state.get(), 13);
-		let Poll::Ready(Err(error)) = poll::SendStream::poll_closed(&mut send, &mut cx) else {
+		let Poll::Ready(Err(error)) = poll::SendStream::poll_closed(&send, waiter) else {
 			panic!("missing stream failure")
 		};
 		assert_eq!(error.stream_error(), Some(0x33));
@@ -455,7 +495,7 @@ mod tests {
 			moq_net::Error::from_transport(error),
 			moq_net::Error::Stream(moq_net::StreamError::NotFound)
 		));
-		poll::Session::close(&mut session, 21, "done");
+		poll::Session::close(&session, 21, "done");
 		assert_eq!(state.get(), 21);
 	}
 }

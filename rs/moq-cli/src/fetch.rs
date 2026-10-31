@@ -119,7 +119,8 @@ async fn fetch_from<C>(
 		// is still in flight right after connecting.
 		let broadcast = origin
 			.consume()
-			.routed_broadcast(path)
+			.follow(path, None)?
+			.available()
 			.await
 			.with_context(|| format!("broadcast `{}` not found", crate::display_name(path)))?;
 		let track = broadcast.track(&args.track)?;

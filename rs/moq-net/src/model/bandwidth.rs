@@ -922,7 +922,7 @@ mod tests {
 		assert_eq!(second_share.rate(), Some(bps(1_000_000)));
 	}
 
-	/// An unwatched track releases its reservation to the others, since `publish_capture`
+	/// An unwatched track releases its reservation to the others, since an on-demand sender
 	/// stops encoding entirely while nothing is subscribed, but still reads the slice it
 	/// would get back, which is what a stopped rendition its viewers left resumes on.
 	#[test]

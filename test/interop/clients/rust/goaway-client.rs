@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
 		connection.version() == Some(version.parse().map_err(anyhow::Error::msg)?),
 		"wrong negotiated version"
 	);
-	let broadcast = consumer.routed_broadcast("handover").await?;
+	let broadcast = consumer.follow("handover", None)?.available().await?;
 	let mut track = broadcast.track("video")?.subscribe(None).await?;
 	let input = child.stdin.as_mut().context("stdin")?;
 	for sequence in 0..2 {
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
 			input.write_all(b"first group\n").await?;
 			// The first endpoint's publisher scope excludes this broadcast, so its bytes
 			// prove that the replacement session is serving beyond its SETUP handshake.
-			let ready = consumer.routed_broadcast("replacement").await?;
+			let ready = consumer.follow("replacement", None)?.available().await?;
 			let mut marker = ready.track("ready")?.subscribe(None).await?;
 			let mut marker = marker.recv_group().await?.context("replacement marker")?;
 			ensure!(
