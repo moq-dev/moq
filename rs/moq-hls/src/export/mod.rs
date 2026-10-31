@@ -370,6 +370,20 @@ impl Broadcaster {
 		}
 	}
 
+	/// End every playlist and recording cursor at the segments listed now, because another
+	/// publisher run took the broadcast over, and stop following this one's catalog and records.
+	/// The replaced publisher may keep sending, so nothing else would end them.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature follows takeovers")
+	)]
+	pub(crate) fn replaced(&self) {
+		if let Some(watcher) = self.watcher.lock().unwrap().take() {
+			watcher.abort();
+		}
+		self.renditions.cut();
+	}
+
 	/// Whether the current catalog contains no servable renditions (serve path).
 	#[cfg_attr(
 		not(feature = "server"),
@@ -1702,6 +1716,30 @@ mod tests {
 			rendition.media_playlist(None).unwrap().is_none(),
 			"clearing the generation is a change too"
 		);
+	}
+
+	// A replaced instance's ended playlists keep their URLs: a generation set after the cut would
+	// otherwise relabel its frozen rows under a run they never belonged to.
+	#[tokio::test]
+	async fn a_replaced_instance_keeps_its_generation() {
+		let origin = produce_origin();
+		let broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let (_catalog, _media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
+
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+		let tag = rendition.tag().to_string();
+		broadcaster.set_generation(Some("run-1")).unwrap();
+		broadcaster.replaced();
+		let ended = rendition.media_playlist(None).unwrap().expect("the cut keeps the rows");
+		assert!(ended.contains("#EXT-X-ENDLIST"), "{ended}");
+
+		broadcaster.set_generation(Some("run-2")).unwrap();
+		assert_eq!(rendition.media_playlist(None).unwrap().as_deref(), Some(ended.as_str()));
+		assert!(ended.contains(&format!("\nseg/run-1.{tag}.0.m4s\n")), "{ended}");
 	}
 
 	// A restarted inline-codec publisher can carry new parameter sets under the same catalog, so
