@@ -256,10 +256,10 @@ once.
 ```bash
 moq --connect https://relay.example.com/anon --broadcast cam.hang import capture
 moq ... import capture --display --system-audio          # share a screen with its sound (macOS)
-moq ... import capture --window 39193 --audio off         # one window (macOS, Windows, X11)
-moq ... import capture --window --audio off               # system window picker (Linux Portal)
+moq ... import capture --window 39193 --audio off        # one window (macOS, Windows, X11)
+moq ... import capture --window --audio off              # system window picker (Linux Portal)
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
-moq ... import capture --video demand --audio demand  # capture only while someone watches
+moq ... import capture --video demand --audio demand     # capture only while someone watches
 ```
 
 Video goes through the platform hardware encoder, with an H.264 software

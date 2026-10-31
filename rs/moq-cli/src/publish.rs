@@ -148,6 +148,14 @@ pub struct CaptureArgs {
 	/// subscribed; off publishes no audio.
 	#[usage(long, value_enum, default = "on")]
 	pub audio: Mode,
+
+	/// The released spelling of `--video off`.
+	#[usage(long = "no-video", hide = true)]
+	no_video: bool,
+
+	/// The released spelling of `--audio off`.
+	#[usage(long = "no-audio", hide = true)]
+	no_audio: bool,
 }
 
 enum PublishDecoder {
@@ -974,6 +982,17 @@ fn feed(
 
 #[cfg(feature = "capture")]
 impl CaptureArgs {
+	pub(crate) fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		let mut found = moq_tokio::cli::Deprecated::default();
+		if self.no_video {
+			found.flag("--no-video", None, "--video off");
+		}
+		if self.no_audio {
+			found.flag("--no-audio", None, "--audio off");
+		}
+		found
+	}
+
 	/// Refuse disabled sources and an invocation with nothing to capture before publishing.
 	pub(crate) fn validate(&self) -> anyhow::Result<()> {
 		anyhow::ensure!(

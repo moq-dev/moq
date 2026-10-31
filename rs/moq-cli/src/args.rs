@@ -840,6 +840,10 @@ impl Import {
 		if self.latency_max.is_some() {
 			found.flag("--latency-max", None, "--max-age");
 		}
+		#[cfg(feature = "capture")]
+		if let ImportSource::Capture(capture) = &self.source {
+			found.extend(capture.deprecated());
+		}
 		found
 	}
 }
@@ -1658,6 +1662,19 @@ mod tests {
 					"{command:?} {flag} was removed"
 				);
 			}
+		}
+	}
+
+	/// Capture's released `--no-*` spellings name their replacement instead of an unknown flag.
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_names_the_released_spellings() {
+		for (old, new) in [("--no-video", "--video off"), ("--no-audio", "--audio off")] {
+			let Err(err) = Invocation::try_parse_from(["moq", "import", "capture", old]) else {
+				panic!("{old} parsed");
+			};
+			let err = err.to_string();
+			assert!(err.contains(&format!("{old} -> {new}")), "{err}");
 		}
 	}
 
