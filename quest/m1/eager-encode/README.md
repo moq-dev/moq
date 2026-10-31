@@ -5,8 +5,8 @@
 First-party publishers capture and encode while a source is enabled,
 whatever the subscriber demand, so the recent past exists for FETCH and a
 subscription's `maxDelay` to serve. On-demand encoding stays available as an
-explicit opt-in. Video stays always-on. Audio becomes on-demand again once it
-can keep raw frames up to `maxAge` while nobody listens.
+explicit opt-in. Video stays always-on. Audio encodes on demand, from raw
+frames kept up to `maxAge` while nobody listens.
 
 ## Plan
 
@@ -18,8 +18,8 @@ Decided 2026-10-28 (maintainer), from [#7101](https://github.com/moq-dev/moq/iss
   in the networking. On-demand becomes an opt-in on each publisher that has
   it today.
 - **Rejected for video:** keeping a backbuffer of raw frames, too costly.
-  Audio does keep one, in [raw audio on demand](/quest/m1/eager-encode/raw-audio.md),
-  where it is cheap.
+  Audio does keep one, where it is cheap
+  ([moq-dev/moq#7238](https://github.com/moq-dev/moq/pull/7238)).
 - **Stay on-demand by default:** moq-transcode rungs (a server-side ladder per
   broadcast, and a past FETCH is already served by transcoding from the
   source), the moq-boy demo, and the CARLA demo. Each has its own gating,
@@ -54,7 +54,6 @@ The epic's own work, once the children land:
 ## Required
 
 - [The CLI picks each medium's mode](/quest/m1/eager-encode/cli-modes.md) - `--video`/`--audio` take `on|demand|off` in capture and `on|off` in export and play, replacing `--no-*` and `--on-demand`
-- [Raw audio on demand](/quest/m1/eager-encode/raw-audio.md) - audio encodes on demand again, from raw frames kept up to `maxAge`
 
 ## Related
 
