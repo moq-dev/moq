@@ -997,6 +997,8 @@ mod test {
 	/// it evicts behind them.
 	#[test]
 	fn concurrent_readers_see_every_entry() {
+		// Miri takes minutes over the full run; a tenth still evicts under the readers.
+		const ENTRIES: u64 = if cfg!(miri) { 1_000 } else { 10_000 };
 		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let readers: Vec<_> = (0..4)
@@ -1005,7 +1007,7 @@ mod test {
 				std::thread::spawn(move || {
 					let mut index = 0;
 					let mut evicted = 0;
-					while index < 10_000 {
+					while index < ENTRIES {
 						match reader.read().get(index) {
 							Ok(Some(value)) => assert_eq!(*value, index),
 							Ok(None) => {
@@ -1020,7 +1022,7 @@ mod test {
 				})
 			})
 			.collect();
-		for i in 0..10_000u64 {
+		for i in 0..ENTRIES {
 			writer.push(i);
 			if i % 100 == 0 {
 				writer.evict(i.saturating_sub(500));
