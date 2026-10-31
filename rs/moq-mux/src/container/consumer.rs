@@ -157,6 +157,13 @@ pub struct Consumer<F: Container> {
 	// When the newest group had landed as the first one arrived, once an unfloored start waits.
 	anchor: Option<Instant>,
 
+	// The point an unfloored start reached back to, the live edge less the reach, once it chose.
+	target: Option<std::time::Duration>,
+
+	// Where the warming ends: the warmup past the first frame delivered, or past the start's target
+	// when that is later. `None` before the first frame.
+	warmed: Option<std::time::Duration>,
+
 	// How far we may drift from the live edge before skipping a group.
 	max_delay: std::time::Duration,
 
@@ -324,6 +331,8 @@ impl<F: Container> Consumer<F> {
 			min_delay: std::time::Duration::ZERO,
 			warmup: std::time::Duration::ZERO,
 			anchor: None,
+			target: None,
+			warmed: None,
 			max_delay,
 			hole_timer: None,
 			edge: None,
@@ -363,7 +372,9 @@ impl<F: Container> Consumer<F> {
 	/// start waits for an earlier one, until one covers it, the subscription's ranges hold none
 	/// earlier, the track finishes, the max buffer fills, or the newest group's arrival is that whole
 	/// reach ago. The wall clock bounds a quiet or paused track, which never ages out in media time.
-	/// The start is then the lowest group that arrived, and the max delay skips from there.
+	/// The start is then the lowest group that arrived, and the max delay skips from there. Until the
+	/// reader is the warmup past both its first frame and that point, the skip also tolerates the
+	/// warmup, so the media leading up to the start is not dropped as stale.
 	///
 	/// A subscription that names a start already waits for it, and a live start takes the newest
 	/// group.
@@ -568,6 +579,10 @@ impl<F: Container> Consumer<F> {
 						if self.start.is_none_or(|(start, _)| start != seq) {
 							self.start = Some((seq, ts));
 						}
+						// A group covering the target began before it, so the reader warms until the target too.
+						let first = std::time::Duration::from(ts);
+						self.warmed
+							.get_or_insert_with(|| first.max(self.target.unwrap_or(first)).saturating_add(self.warmup));
 						let end = std::time::Duration::from(ts)
 							+ frame.duration.map(std::time::Duration::from).unwrap_or_default();
 						self.advance(end);
@@ -752,9 +767,13 @@ impl<F: Container> Consumer<F> {
 			// while the newer groups race ahead on their own streams. Skip early too
 			// once it has presented up to where the next group begins (duration
 			// coverage), since nothing is left worth waiting for.
+			// While the reader warms, the start reached the warmup further back than the max delay.
+			let budget = match self.warming() {
+				true => self.max_delay.saturating_add(self.warmup),
+				false => self.max_delay,
+			};
 			let should_skip = next_group.is_some_and(|(_, next_start)| {
-				max_timestamp.saturating_sub(next_start) >= self.max_delay
-					|| current_end.is_some_and(|end| end >= next_start)
+				max_timestamp.saturating_sub(next_start) >= budget || current_end.is_some_and(|end| end >= next_start)
 			});
 			let target = match should_skip {
 				true => next_group.map(|(i, start)| (i, Some(start))),
@@ -831,6 +850,7 @@ impl<F: Container> Consumer<F> {
 			return Some(lowest);
 		};
 		let target = edge.saturating_sub(reach);
+		self.target = Some(target);
 		let covered = self.pending.iter().any(|group| {
 			group
 				.min_timestamp
@@ -862,6 +882,12 @@ impl<F: Container> Consumer<F> {
 			let _ = waiter.poll_future(timer.as_mut());
 		}
 		None
+	}
+
+	// The reader has not yet read past the start's target and the warmup past its first frame.
+	fn warming(&self) -> bool {
+		self.warmed
+			.is_none_or(|warmed| self.edge.is_none_or(|edge| edge < warmed))
 	}
 
 	// The subscription, which only an error ending the reader drops.
@@ -3171,7 +3197,7 @@ mod tests {
 		}
 	}
 
-	/// Once started, the max delay alone governs lateness: the warmup does not widen the skip.
+	/// A hole is skipped at the max delay alone: the warmup does not widen it.
 	#[tokio::test]
 	async fn the_warmup_does_not_widen_the_skip() {
 		tokio::time::pause();
@@ -3196,6 +3222,54 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		assert_eq!(frame.timestamp, ts(100_000));
+	}
+
+	/// The group covering the reach stays while the rest of its warmup arrives after the first read,
+	/// though its successor starts past the max delay alone.
+	#[tokio::test]
+	async fn the_covering_group_is_kept_while_its_warmup_arrives_after_the_first_read() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut consumer = reach_consumer(&mut track, Duration::ZERO, Duration::ZERO, Duration::from_millis(80));
+
+		write_group(&mut track, 5, &[ts(5_000_000)]);
+		// Group 4 covers the 4.92s target, and its first frame is read before the rest of it lands.
+		let mut covering = track.create_group(moq_net::group::Info { sequence: 4 }).unwrap();
+		let write = |group: &mut moq_net::group::Producer, micros| {
+			let frame = Frame {
+				timestamp: ts(micros),
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: false,
+				duration: None,
+			};
+			Container::Legacy(crate::container::Kind::Data)
+				.write(group, &[frame])
+				.unwrap();
+		};
+		write(&mut covering, 4_900_000);
+		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+			.await
+			.expect("group 4 covers the reach")
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.timestamp, ts(4_900_000));
+		assert!(
+			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+				.await
+				.is_err(),
+			"the covering group's next frame is waited for"
+		);
+
+		write(&mut covering, 4_950_000);
+		covering.finish().unwrap();
+		track.finish().unwrap();
+		let micros: Vec<u128> = read_all(&mut consumer)
+			.await
+			.unwrap()
+			.iter()
+			.map(|f| f.timestamp.as_micros())
+			.collect();
+		assert_eq!(micros, vec![4_950_000, 5_000_000], "the warmup is not skipped as stale");
 	}
 
 	/// The warmup is carved out of the requested budget before the retention clamp, so a max delay
