@@ -55,13 +55,20 @@ class SelectTest(unittest.TestCase):
     def test_queue_checks_selected_feature_shapes(self):
         for path in ("rs/kio/src/lib.rs", "rs/moq-tokio/src/lib.rs",
                      "rs/moq-video/src/lib.rs", "Cargo.lock", "sh/rs/nextest.sh"):
-            for action in ("check", "check-test", "lint"):
+            for action in ("check", "check-test"):
                 with self.subTest(path=path, action=action):
                     calls = self.selected(path, action=action)
                     defaults = next(call for call in calls if call.startswith(f"rs {action} "))
                     self.assertIn(defaults.replace(f"rs {action} ", "rs feature-shapes ", 1), calls)
+            # The dispatcher runs lint and the shapes as separate modules.
+            with self.subTest(path=path, action="feature-shapes"):
+                lint = self.selected(path)
+                defaults = next(call for call in lint if call.startswith("rs lint "))
+                self.assertFalse(any(call.startswith("rs feature-shapes") for call in lint), lint)
+                self.assertEqual(self.selected(path, action="feature-shapes"),
+                                 [defaults.replace("rs lint ", "rs feature-shapes ", 1)])
         for owner in ("tokio", "media", "net"):
-            calls = self.selected(f"sh/rs/{owner}-features.sh")
+            calls = self.selected(f"sh/rs/{owner}-features.sh", action="feature-shapes")
             self.assertIn("rs feature-shapes --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz", calls)
 
     def test_boundary_checks_follow_reverse_dependencies(self):
@@ -123,6 +130,13 @@ class SelectTest(unittest.TestCase):
                     self.assertTrue(any(call.startswith(f"rs {action} ") and "/rs/moq-cli#" in call
                                         for call in calls), calls)
         self.assertEqual(self.selected("test/interop/compat/container.rs"), [])
+
+    def test_relay_nixos_module_selects_the_relay(self):
+        # moq-relay's tests read the module.
+        calls = self.selected("nix/modules/moq-relay.nix", action="test")
+        self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
+        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        self.assertRegex("nix/modules/moq-relay.nix", scope)
 
     def test_dispatch_scope_covers_out_of_crate_targets(self):
         scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)

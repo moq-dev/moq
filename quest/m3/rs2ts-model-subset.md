@@ -3,14 +3,14 @@
 ## Goal
 
 moq-net's model, and the kio, moq-clock, and moq-pattern code it calls, stay inside the
-subset [rust2-ts](https://github.com/kixelated/rust2/blob/main/ts/README.md) translates,
+subset [rust2-ts](https://github.com/moq-dev/rust2/blob/main/ts/README.md) translates,
 so the [source-translator route](/quest/m2/rs2ts-wasm2js.md) can be measured on the model
 with no hand-written stand-ins for moq's own logic.
 
 ## Plan
 
 Decided with the rust2 maintainer on 2026-10-27, from a census of the model in
-[rust2's model epic](https://github.com/kixelated/rust2/blob/main/quest/m2/ts-model/README.md):
+[rust2's model epic](https://github.com/moq-dev/rust2/blob/main/quest/m2/ts-model/README.md):
 rust2-ts stays general, translating safe dependencies from source and refusing `unsafe`
 and trait objects, so the moq-specific changes are made here. Waits until rust2's epic
 reaches the model; none of these changes behavior.

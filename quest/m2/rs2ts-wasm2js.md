@@ -36,7 +36,7 @@ Options to retain in the report:
 | Charon MIR/LLBC -> TS | Control JS representations and preserve Rust ownership semantics | A custom emitter/runtime, extraction coverage, source maps, and pinned toolchain |
 | rust-js | Reuse an existing Rust-to-JS compiler and runtime | Audit its supported subset and semantic differences, especially eager Promise execution versus lazy Rust futures |
 | Component Model + jco | Reusable typed binding and distribution machinery | Additional interface/adapters; default output still uses WASM, while `--js` offers JS-only output |
-| Own MIR/THIR backend | Control the extraction and lowering choices; under research in kixelated/rust2 | Highest direct ownership of compiler integration and runtime semantics |
+| Own MIR/THIR backend | Control the extraction and lowering choices; under research in moq-dev/rust2 | Highest direct ownership of compiler integration and runtime semantics |
 
 Sources: [Charon](https://github.com/AeneasVerif/charon),
 [rust-js](https://github.com/rust-js-lang/rust-js), and
@@ -53,8 +53,8 @@ Split independently landable prerequisites into quests.
 
 Decided with the maintainer on 2026-10-23: an own rustc-driver translator is
 developed as a parallel research track in
-[kixelated/rust2](https://github.com/kixelated/rust2), starting with moq-net's
-codec ([its quest](https://github.com/kixelated/rust2/blob/main/quest/m2/ts.md)).
+[moq-dev/rust2](https://github.com/moq-dev/rust2), starting with moq-net's
+codec ([its quest](https://github.com/moq-dev/rust2/blob/main/quest/m2/ts.md)).
 It does not replace wasm2js as the first route here. Once it translates
 reachable moq-net code, compare it as the source-translator row below; moq
 consumes it as a pinned flake input, never by vendoring.

@@ -20,14 +20,14 @@ config mapping also found at `rs/moq-tokio/src/server.rs:424` and
 (listen.extensions), 8a13d58910 (MTU), 6bd1306d6e (SETUP tokens),
 1f56330d21 (handshake deadline), d17b84ee7f (drain across handshakes),
 4576bb1231 (admission bound), c11192c7e6, 67df70012d.
-[Every runtime honors or refuses each listen setting](/quest/m1/cut-audit/uring-listen-config.md)
-is the next instance.
+`Workers::bind` now destructures `moq_tokio::listen::Resolved` (from
+`listen::Config::resolve`) exhaustively, so a new listen field fails to
+compile there; the tokio sites still read `listen::Config` directly.
 
 Implement the sealed `incoming::Sealed` for a uring `Request` whose
 `Driver` runs on the worker handle, with admission hopping to the shared
 runtime through `Lifecycle::shared`, so one `Connection::serve` serves
-every runtime. Export one config mapping from moq-tokio and use it at all
-three sites. Do this before the io_uring packaging work publishes the
+every runtime. Use that one config mapping at all three sites. Do this before the io_uring packaging work publishes the
 duplicated path.
 
 Public API: none. Wire: none.

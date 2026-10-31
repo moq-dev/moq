@@ -50,7 +50,7 @@ source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN CLI_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN CLI_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_PUB_LIVE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
@@ -74,13 +74,14 @@ NEGATIVE=0
 MEDIA=0
 MEDIA_CASES=""
 MEDIA_ENGINES="chromium"
+MEDIA_PUBLISHER="chromium"
 TAIL_ONLY=0
 FINISH_ONLY=0
 # The versions the matrix runs on, one pass each. `auto` leaves every client its defaults,
 # except the clients the harness reads a grant from, which offer $AUTH_VERSION alone. Any other
 # entry pins every client in its pass to that version, and `ietf` expands to IETF_VERSIONS.
 VERSIONS="auto"
-IETF_VERSIONS="moq-transport-18,moq-transport-22"
+IETF_VERSIONS="moq-transport-18,moq-transport-20,moq-transport-22"
 
 # Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
@@ -146,6 +147,12 @@ while [[ $# -gt 0 ]]; do
         --media-engines)
             require_value "$@"
             MEDIA_ENGINES="$2"
+            MEDIA=1
+            shift 2
+            ;;
+        --media-publisher)
+            require_value "$@"
+            MEDIA_PUBLISHER="$2"
             MEDIA=1
             shift 2
             ;;
@@ -216,6 +223,11 @@ if [[ ! "$MEDIA_ENGINES" =~ ^(chromium|firefox|webkit)(,(chromium|firefox|webkit
     exit 2
 fi
 IFS=',' read -r -a MEDIA_ENGINE_LIST <<<"$MEDIA_ENGINES"
+# WebKit's publishing stays with the Safari work; Playwright's WebKit is not Safari.
+if [[ ! "$MEDIA_PUBLISHER" =~ ^(chromium|firefox)$ ]]; then
+    echo "error: the media publisher must be chromium or firefox" >&2
+    exit 2
+fi
 
 IFS=',' read -r -a PUB_LIST <<<"$PUBLISHERS"
 IFS=',' read -r -a SUB_LIST <<<"$SUBSCRIBERS"
@@ -370,14 +382,15 @@ publisher_codecs() {
 }
 # phase_checked <round> <subscriber> <codec>: whether tone.py also holds the tone's phase to the
 # decode's timestamps, which fails a misapplied pre-skip. Every publisher's tone starts at
-# timestamp zero except the browser's, which stamps its file from its own page clock. The native-JS
+# timestamp zero except the browser's, which stamps its file from its own page clock, and a CLI_BIN
+# whose fMP4 import restamps on arrival (INTEROP_PUB_LIVE=1: a released CLI's live import). The native-JS
 # subscriber hands WebCodecs raw Opus without the OpusHead, as the player does, which keeps the
 # pre-skip for the player to trim, and its libav fallback stamps milliseconds. GStreamer's AAC is
 # skipped for its decoder: `faad`, which decodebin picks, drops the first frame's output and stamps
 # the rest a frame early, so it reads the priming 1024 samples early whatever the timestamps say.
 # shellcheck disable=SC2329  # reached from run_cell, which 'harness_spawn' invokes
 phase_checked() {
-    [[ "$1" != js* && "$2" != js-native-* && ("$2" != gst || "$3" == opus) ]]
+    [[ "$1" != js* && ("$1" != rust || "${INTEROP_PUB_LIVE:-0}" != 1) && "$2" != js-native-* && ("$2" != gst || "$3" == opus) ]]
 }
 
 # Record a case for the CI report: `record <outcome> case=C [field=value...]` (see
@@ -390,17 +403,20 @@ record() {
 # Call <action> <name> <media.ts args...> for each media run on <engine>. The planning
 # pass and the real one share it, so they cannot disagree on which runs exist.
 media_runs() {
-    local action="$1" engine="$2"
+    local action="$1" engine="$2" who="$2"
+    local roles=(--publisher-engine "$MEDIA_PUBLISHER" --player-engine "$engine")
+    # Chromium publishing keeps the names earlier reports used.
+    [[ "$MEDIA_PUBLISHER" == chromium ]] || who="$MEDIA_PUBLISHER to $engine"
     if [[ -n "$MEDIA_CASES" ]]; then
-        "$action" "$engine: media cases: $MEDIA_CASES" --player-engine "$engine" --cases "$MEDIA_CASES" --focused
+        "$action" "$who: media cases: $MEDIA_CASES" "${roles[@]}" --cases "$MEDIA_CASES" --focused
         return
     fi
-    "$action" "$engine: media output + lifecycle" --player-engine "$engine"
-    "$action" "$engine: control: frozen video" --player-engine "$engine" --fault frozen-video --cases none --expect-fail "video progress"
-    "$action" "$engine: control: silent audio" --player-engine "$engine" --fault silent-audio --cases none --expect-fail "audio tone"
-    "$action" "$engine: control: offset audio" --player-engine "$engine" --fault audio-offset --cases none --expect-fail "audio/video sync"
-    "$action" "$engine: control: leaked session" --player-engine "$engine" --leak --cases detach --expect-fail "resource baseline"
-    "$action" "$engine: control: lagging latecomer" --player-engine "$engine" --lag --cases late-join --expect-fail "late join reaches live"
+    "$action" "$who: media output + lifecycle" "${roles[@]}"
+    "$action" "$who: control: frozen video" "${roles[@]}" --fault frozen-video --cases none --expect-fail "video progress"
+    "$action" "$who: control: silent audio" "${roles[@]}" --fault silent-audio --cases none --expect-fail "audio tone"
+    "$action" "$who: control: offset audio" "${roles[@]}" --fault audio-offset --cases none --expect-fail "audio/video sync"
+    "$action" "$who: control: leaked session" "${roles[@]}" --leak --cases detach --expect-fail "resource baseline"
+    "$action" "$who: control: lagging latecomer" "${roles[@]}" --lag --cases late-join --expect-fail "late join reaches live"
 }
 
 # shellcheck disable=SC2329  # invoked indirectly via media_runs
@@ -1285,13 +1301,15 @@ PYCODE
                 # frame's timestamp and length for tone.py. The outputs are the verdict: a CLI may
                 # exit on EPIPE with a plain error once ffmpeg has what it needs. The WAV cannot say
                 # which codec it came from, so this takes a publisher of one audio rendition.
+                # Keep demuxed PTS: Opus priming can start before zero, and FFmpeg's default
+                # start-time shift would move the kept samples after their actual media time.
                 if [[ "$codecs" == *,* ]]; then
                     echo "error: the ffmpeg decode reads one audio rendition, not $codecs" >&2
                     return 1
                 fi
                 (timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" \
                     ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} --broadcast "$broadcast" export fmp4 || [[ "$?" == 141 ]]) |
-                    ffmpeg -hide_banner -loglevel error -i - \
+                    ffmpeg -hide_banner -loglevel error -copyts -i - \
                         -map 0:v:0 -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/$broadcast.raw" \
                         -map 0:a:0 -af "atrim=duration=${AUDIO_MS}ms" -c:a pcm_f32le \
                         -stats_enc_pre "$audio_out.stats" -stats_enc_pre_fmt '{tb} {pts} {samp}' -f wav "$audio_out.wav"

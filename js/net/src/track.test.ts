@@ -9,7 +9,7 @@ import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import { infoDefaults, type Subscription, Producer as TrackProducer } from "./track.ts";
+import { infoDefaults, Subscription, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 
 const enc = new TextEncoder();
@@ -415,7 +415,7 @@ test("appendDatagram rejects a payload over the QUIC datagram frame ceiling", ()
 
 test("subscriber options and updates are forwarded to the producer's aggregate", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe({ groups: { start: { included: 0 } } });
+	const track = producer.subscribe({ maxDelay: Milli.zero, groups: { start: { included: 0 } } });
 
 	// The initial options are available before the request is accepted or put on the wire.
 	expect(producer.subscription.peek()).toEqual({
@@ -826,6 +826,27 @@ test("zero latency takes the latest group when ages are equal", async () => {
 	}
 });
 
+test("the default subscription skips superseded groups and a bare options object sets no limit", async () => {
+	expect(Subscription.default()).toEqual({ priority: 0, maxDelay: Milli.zero, order: "descending" });
+
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
+	const explicit = producer.subscribe(Subscription.default());
+	const implicit = producer.subscribe();
+	const bare = producer.subscribe({});
+	for (const timestamp of [0, 1000, 2000]) {
+		producer.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
+	}
+
+	// No options means the default subscription, whose zero budget keeps only the newest group.
+	expect((await explicit.recvGroup())?.sequence).toBe(2);
+	expect((await implicit.recvGroup())?.sequence).toBe(2);
+	// An omitted maxDelay leaves the publisher's retention as the only bound.
+	for (const sequence of [0, 1, 2]) expect((await bare.recvGroup())?.sequence).toBe(sequence);
+	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(5000));
+	producer.finish();
+	producer.close();
+});
+
 test("latency budget admits groups within its presentation-time window", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
 	const track = producer.subscribe({ maxDelay: Milli(1500) });
@@ -884,7 +905,7 @@ test("a named start is a floor, not a request", async () => {
 
 	// Naming group 1 at real time still delivers the live edge alone: the zero budget
 	// calls everything older stale.
-	const named = producer.subscribe({ groups: { start: { included: 1 } } });
+	const named = producer.subscribe({ maxDelay: Milli.zero, groups: { start: { included: 1 } } });
 	expect((await named.recvGroup())?.sequence).toBe(4);
 });
 
@@ -1711,7 +1732,7 @@ test("subscription updates narrow the cursor before its first read", async () =>
 test("a subscription cap chooses its own live edge", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
 	const everything = producer.subscribe({ maxDelay: Milli(5000) });
-	const track = producer.subscribe({ groups: { end: { excluded: 2 } } });
+	const track = producer.subscribe({ maxDelay: Milli.zero, groups: { end: { excluded: 2 } } });
 	try {
 		for (let sequence = 0; sequence < 5; sequence++) {
 			producer.writeFrame({
@@ -1720,7 +1741,7 @@ test("a subscription cap chooses its own live edge", async () => {
 			});
 		}
 		expect((await track.recvGroup())?.sequence).toBe(1);
-		track.update({ groups: { start: { included: 3 }, end: { excluded: 4 } } });
+		track.update({ maxDelay: Milli.zero, groups: { start: { included: 3 }, end: { excluded: 4 } } });
 		expect((await track.recvGroup())?.sequence).toBe(3);
 	} finally {
 		track.close();
@@ -3021,7 +3042,7 @@ test("an untimed subscriber starts at the oldest fresh group", () => {
 test("an untimed subscriber without a start begins at the latest group under its end", () => {
 	const producer = untimedTrack(5);
 	// As the lite publisher serves a SUBSCRIBE with an end and no start.
-	const subscriber = producer.subscribe({ groups: { end: { excluded: 3 } } });
+	const subscriber = producer.subscribe({ maxDelay: Milli.zero, groups: { end: { excluded: 3 } } });
 	subscriber.withRange({ end: { excluded: 3 } });
 	expect(drain(subscriber)).toEqual([2]);
 });
@@ -3061,7 +3082,7 @@ test("an explicit start floors an untimed track", () => {
 
 	const resumed = producer.subscribe({ maxDelay: Milli(60_000), groups: { start: { included: 2 } } });
 	expect(drain(resumed)).toEqual([2, 3, 4]);
-	const live = producer.subscribe({ groups: { start: { included: 2 } } });
+	const live = producer.subscribe({ maxDelay: Milli.zero, groups: { start: { included: 2 } } });
 	expect(drain(live)).toEqual([4]);
 });
 

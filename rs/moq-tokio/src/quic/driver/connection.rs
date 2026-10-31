@@ -14,10 +14,9 @@ use std::{
 	task::{Context, Poll, Waker, ready},
 };
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use pin_project_lite::pin_project;
 use rustc_hash::FxHashMap;
-use thiserror::Error;
 use tokio::sync::{
 	Notify,
 	futures::{Notified, OwnedNotified},
@@ -26,18 +25,14 @@ use tokio::sync::{
 use tracing::{Instrument, Span, debug_span};
 
 use crate::quic::driver::{
-	ConnectionEvent, Duration, Instant, VarInt,
-	mutex::Mutex,
-	recv_stream::RecvStream,
-	runtime::Slot,
-	send_group::{self, SendGroup, SendOptions},
-	send_stream::SendStream,
-	udp_transmit,
+	ConnectionEvent, Duration, Instant, VarInt, mutex::Mutex, recv, runtime::Slot, send, udp_transmit,
 };
 use moq_congestion::Controller;
 pub use moq_quic::connection::{Error, Stats};
 use moq_quic::{
-	Dir, EndpointEvent, StreamEvent, StreamId, TransportError, TransportErrorCode, endpoint::ConnectionHandle,
+	EndpointEvent, StreamEvent, TransportError, TransportErrorCode,
+	endpoint::ConnectionHandle,
+	stream::{Dir, Id as StreamId},
 };
 
 /// In-progress connection attempt future
@@ -268,7 +263,10 @@ impl Connection {
 	///
 	/// # Panics
 	/// - when `options.group` belongs to another connection
-	pub fn open_uni<'a>(&'a self, options: SendOptions<'a>) -> impl Future<Output = Result<SendStream, Error>> + 'a {
+	pub fn open_uni<'a>(
+		&'a self,
+		options: send::Options<'a>,
+	) -> impl Future<Output = Result<send::Stream, Error>> + 'a {
 		OpenUni {
 			conn: &self.0,
 			options,
@@ -276,31 +274,27 @@ impl Connection {
 		}
 	}
 
-	/// Open a send group at `priority`, for streams and datagrams to join with [`SendOptions`]
-	/// or [`SendStream::set_group`].
-	///
-	/// [`SendStream::set_group`]: crate::quic::driver::SendStream::set_group
-	pub fn send_group(&self, priority: i64) -> SendGroup {
-		SendGroup::new(self.0.0.clone(), priority)
+	/// Open a send group at `priority`, for streams and datagrams to join with [`send::Options`]
+	/// or [`send::Stream::set_group`].
+	pub fn send_group(&self, priority: i64) -> send::Group {
+		send::Group::new(self.0.0.clone(), priority)
 	}
 
 	/// Initiate a new outgoing bidirectional stream, its sending half scheduled by `options`.
 	///
 	/// Streams are cheap and instantaneous to open unless blocked by flow control. As a
 	/// consequence, the peer won't be notified that a stream has been opened until the stream is
-	/// actually used. Calling [`open_bi()`] then waiting on the [`RecvStream`] without writing
-	/// anything to [`SendStream`] will never succeed.
+	/// actually used. Calling [`open_bi()`] then waiting on the [`recv::Stream`] without writing
+	/// anything to [`send::Stream`] will never succeed.
 	///
 	/// [`open_bi()`]: crate::quic::driver::connection::Connection::open_bi
-	/// [`SendStream`]: crate::quic::driver::SendStream
-	/// [`RecvStream`]: crate::quic::driver::RecvStream
 	///
 	/// # Panics
 	/// - when `options.group` belongs to another connection
 	pub fn open_bi<'a>(
 		&'a self,
-		options: SendOptions<'a>,
-	) -> impl Future<Output = Result<(SendStream, RecvStream), Error>> + 'a {
+		options: send::Options<'a>,
+	) -> impl Future<Output = Result<(send::Stream, recv::Stream), Error>> + 'a {
 		OpenBi {
 			conn: &self.0,
 			options,
@@ -310,7 +304,7 @@ impl Connection {
 
 	/// Open a request stream using only the credit already granted by the peer.
 	#[cfg(feature = "net")]
-	pub(crate) fn open_request(&self) -> Result<Option<(SendStream, RecvStream)>, Error> {
+	pub(crate) fn open_request(&self) -> Result<Option<(send::Stream, recv::Stream)>, Error> {
 		let mut state = self.0.state.lock();
 		if let Some(err) = &state.error {
 			return Err(err.clone());
@@ -320,8 +314,8 @@ impl Connection {
 		};
 		drop(state);
 		Ok(Some((
-			SendStream::new(self.0.clone(), id),
-			RecvStream::new(self.0.clone(), id),
+			send::Stream::new(self.0.clone(), id),
+			recv::Stream::new(self.0.clone(), id),
 		)))
 	}
 
@@ -330,7 +324,7 @@ impl Connection {
 	/// # Cancel safety
 	///
 	/// This method is cancellation safe. If this does not resolve, no streams were consumed.
-	pub fn accept_uni(&self) -> impl Future<Output = Result<RecvStream, Error>> + '_ {
+	pub fn accept_uni(&self) -> impl Future<Output = Result<recv::Stream, Error>> + '_ {
 		AcceptUni {
 			conn: &self.0,
 			notify: self.0.shared.stream_incoming[Dir::Uni as usize].notified(),
@@ -339,19 +333,17 @@ impl Connection {
 
 	/// Accept the next incoming bidirectional stream
 	///
-	/// **Important Note**: The `Connection` that calls [`open_bi()`] must write to its [`SendStream`]
+	/// **Important Note**: The `Connection` that calls [`open_bi()`] must write to its [`send::Stream`]
 	/// before the other `Connection` is able to `accept_bi()`. Calling [`open_bi()`] then
-	/// waiting on the [`RecvStream`] without writing anything to [`SendStream`] will never succeed.
+	/// waiting on the [`recv::Stream`] without writing anything to [`send::Stream`] will never succeed.
 	///
 	/// [`accept_bi()`]: crate::quic::driver::connection::Connection::accept_bi
 	/// [`open_bi()`]: crate::quic::driver::connection::Connection::open_bi
-	/// [`SendStream`]: crate::quic::driver::SendStream
-	/// [`RecvStream`]: crate::quic::driver::RecvStream
 	///
 	/// # Cancel safety
 	///
 	/// This method is cancellation safe. If this does not resolve, no streams were consumed.
-	pub fn accept_bi(&self) -> impl Future<Output = Result<(SendStream, RecvStream), Error>> + '_ {
+	pub fn accept_bi(&self) -> impl Future<Output = Result<(send::Stream, recv::Stream), Error>> + '_ {
 		AcceptBi {
 			conn: &self.0,
 			notify: self.0.shared.stream_incoming[Dir::Bi as usize].notified(),
@@ -450,17 +442,22 @@ impl Connection {
 	///
 	/// The datagram is scheduled like one of its group's streams at its priority, or among the
 	/// ungrouped streams without a group. Sending never blocks: a full buffer drops the oldest
-	/// datagram of the lowest-priority group, see [`moq_quic::Datagrams::send`].
+	/// datagram of the lowest-priority group, see [`moq_quic::Datagrams::send`]. A header chained
+	/// in front of a [`Bytes`] payload costs no copy of the payload.
 	///
 	/// # Panics
 	/// - when `options.group` belongs to another connection
-	pub fn send_datagram(&self, data: Bytes, options: SendOptions<'_>) -> Result<(), SendDatagramError> {
-		let options = send_group::to_quic(options, &self.0.0);
+	pub fn send_datagram(&self, data: impl Buf, options: send::Options<'_>) -> Result<(), send::Error> {
+		let options = options.to_quic(&self.0.0);
 		let conn = &mut *self.0.state.lock();
 		if let Some(x) = &conn.error {
-			return Err(SendDatagramError::ConnectionLost(x.clone()));
+			return Err(send::Error::Connection(x.clone()));
 		}
-		conn.inner.datagrams().send(data, options)?;
+		match conn.inner.datagrams().send(data, options) {
+			Ok(()) => {}
+			Err(moq_quic::send::Error::TooLarge) => return Err(send::Error::TooLarge),
+			Err(_) => return Err(send::Error::Unsupported),
+		}
 		conn.wake();
 		Ok(())
 	}
@@ -506,14 +503,13 @@ impl Connection {
 		self.0.state.lock().inner.stats()
 	}
 
-	/// Whether the connection has freed the send stream's state
+	/// How many send streams the connection still holds state for
 	#[cfg(test)]
-	pub(crate) fn send_stream_freed(&self, id: StreamId) -> bool {
-		let mut state = self.0.state.lock();
-		state.inner.send_stream(id).stopped().is_err()
+	pub(crate) fn send_streams(&self) -> usize {
+		self.0.state.lock().inner.streams().send_streams()
 	}
 
-	/// How many streams have `SendStream::stopped` waiters registered, to check none leak
+	/// How many streams have `send::Stream::stopped` waiters registered, to check none leak
 	#[cfg(test)]
 	pub(crate) fn stopped_waiters(&self) -> usize {
 		self.0.state.lock().stopped.len()
@@ -605,18 +601,18 @@ pin_project! {
 	/// Future produced by [`Connection::open_uni`]
 	struct OpenUni<'a> {
 		conn: &'a ConnectionRef,
-		options: SendOptions<'a>,
+		options: send::Options<'a>,
 		#[pin]
 		notify: Notified<'a>,
 	}
 }
 
 impl Future for OpenUni<'_> {
-	type Output = Result<SendStream, Error>;
+	type Output = Result<send::Stream, Error>;
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
 		let (conn, id) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Uni))?;
-		Poll::Ready(Ok(SendStream::new(conn, id)))
+		Poll::Ready(Ok(send::Stream::new(conn, id)))
 	}
 }
 
@@ -624,30 +620,30 @@ pin_project! {
 	/// Future produced by [`Connection::open_bi`]
 	struct OpenBi<'a> {
 		conn: &'a ConnectionRef,
-		options: SendOptions<'a>,
+		options: send::Options<'a>,
 		#[pin]
 		notify: Notified<'a>,
 	}
 }
 
 impl Future for OpenBi<'_> {
-	type Output = Result<(SendStream, RecvStream), Error>;
+	type Output = Result<(send::Stream, recv::Stream), Error>;
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
 		let (conn, id) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Bi))?;
 
-		Poll::Ready(Ok((SendStream::new(conn.clone(), id), RecvStream::new(conn, id))))
+		Poll::Ready(Ok((send::Stream::new(conn.clone(), id), recv::Stream::new(conn, id))))
 	}
 }
 
 fn poll_open<'a>(
 	ctx: &mut Context<'_>,
 	conn: &'a ConnectionRef,
-	options: SendOptions<'_>,
+	options: send::Options<'_>,
 	mut notify: Pin<&mut Notified<'a>>,
 	dir: Dir,
 ) -> Poll<Result<(ConnectionRef, StreamId), Error>> {
-	let options = send_group::to_quic(options, &conn.0);
+	let options = options.to_quic(&conn.0);
 	let mut state = conn.state.lock();
 	if let Some(e) = &state.error {
 		return Poll::Ready(Err(e.clone()));
@@ -675,12 +671,12 @@ pin_project! {
 }
 
 impl Future for AcceptUni<'_> {
-	type Output = Result<RecvStream, Error>;
+	type Output = Result<recv::Stream, Error>;
 
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
 		let (conn, id) = ready!(poll_accept(ctx, this.conn, this.notify, Dir::Uni))?;
-		Poll::Ready(Ok(RecvStream::new(conn, id)))
+		Poll::Ready(Ok(recv::Stream::new(conn, id)))
 	}
 }
 
@@ -694,12 +690,12 @@ pin_project! {
 }
 
 impl Future for AcceptBi<'_> {
-	type Output = Result<(SendStream, RecvStream), Error>;
+	type Output = Result<(send::Stream, recv::Stream), Error>;
 
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
 		let (conn, id) = ready!(poll_accept(ctx, this.conn, this.notify, Dir::Bi))?;
-		Poll::Ready(Ok((SendStream::new(conn.clone(), id), RecvStream::new(conn, id))))
+		Poll::Ready(Ok((send::Stream::new(conn.clone(), id), recv::Stream::new(conn, id))))
 	}
 }
 
@@ -765,7 +761,7 @@ impl Future for ReadDatagram<'_> {
 pub(crate) struct ConnectionRef(pub(crate) Arc<ConnectionInner>);
 
 impl ConnectionRef {
-	fn stable_id(&self) -> usize {
+	pub(crate) fn stable_id(&self) -> usize {
 		&*self.0 as *const _ as usize
 	}
 }
@@ -1119,7 +1115,7 @@ fn wake_all(wakers: &mut FxHashMap<StreamId, Waker>) {
 	wakers.drain().for_each(|(_, waker)| waker.wake())
 }
 
-/// The `SendStream::stopped` futures waiting on one stream
+/// The `send::Stream::stopped` futures waiting on one stream
 #[derive(Debug, Default)]
 pub(crate) struct StopWaiters {
 	pub(crate) notify: Notify,
@@ -1130,18 +1126,6 @@ pub(crate) struct StopWaiters {
 
 fn wake_all_notify(wakers: &mut FxHashMap<StreamId, Arc<StopWaiters>>) {
 	wakers.drain().for_each(|(_, waiters)| waiters.notify.notify_waiters())
-}
-
-/// Errors that can arise when sending a datagram
-#[derive(Debug, Error, Clone, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum SendDatagramError {
-	/// The connection refused the datagram.
-	#[error(transparent)]
-	Refused(#[from] moq_quic::SendDatagramError),
-	/// The connection was lost
-	#[error("connection lost")]
-	ConnectionLost(#[from] Error),
 }
 
 /// The maximum amount of datagrams which will be produced in a single `drive_transmit` call

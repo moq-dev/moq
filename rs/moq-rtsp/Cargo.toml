@@ -40,7 +40,7 @@ base64 = { workspace = true }
 # A clock only the stall tests move, so a loaded runner never fires a deadline early.
 moq-clock = { path = "../moq-clock", features = ["manual"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
-tracing-test = { workspace = true, features = ["no-env-filter"] }
+tracing-test = { workspace = true }
 
 [lints]
 workspace = true

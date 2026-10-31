@@ -11,7 +11,7 @@ on:
     paths:
       - "infra/moq-sh/**"
       - ".github/workflows/moq-sh.yml"
-  # Release PRs, through release-gate.yml. Main PRs skip it: the merge queue's
+  # Release PRs, through release-gate.yml. Main PRs skip it: the landing gate's
   # Check runs its fixtures on Linux, and nightly.yml's platform.yml call runs
   # them and the smoke on macOS.
   workflow_call:
