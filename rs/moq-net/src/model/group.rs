@@ -2681,6 +2681,16 @@ impl Handle {
 		}
 	}
 
+	/// Where the group starts in presentation time, accepted unverified or not: what a time
+	/// range counts on a track whose history a local handler serves, where no remote
+	/// publisher wrote it (see [`Self::timestamp`]).
+	pub(super) fn first_timestamp(&self) -> Option<Timestamp> {
+		match self.state.read().timeline {
+			Timeline::Timed { start, .. } => Some(start),
+			_ => None,
+		}
+	}
+
 	/// The start this group lends its neighbors' rewind check: its first frame's timestamp,
 	/// once frame 0 was checked to fit between theirs.
 	pub(super) fn bound(&self) -> Option<Timestamp> {

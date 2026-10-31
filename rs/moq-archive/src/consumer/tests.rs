@@ -730,3 +730,224 @@ async fn an_unordered_listing_is_sorted() {
 	}
 	assert_eq!(super::tests::sequence(&mut reader).await, Some(3));
 }
+
+/// Read `range` in order with no age limit: the sequences of the groups it delivers before
+/// it stops delivering. A range ending before the live edge parks once read, as on any live
+/// track.
+async fn read_range(broadcast: &broadcast::Producer, track: &str, range: track::Range) -> Vec<u64> {
+	let track = broadcast.consume().track(track).unwrap();
+	let subscription = Subscription::default()
+		.with_ranges([range])
+		.with_order(Order::Ascending)
+		.with_max_delay(None);
+	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
+	let mut read = Vec::new();
+	while let Ok(group) = timeout(5 * REFRESH, reader.next_group()).await {
+		match group.unwrap() {
+			Some(group) => read.push(group.sequence),
+			None => break,
+		}
+	}
+	read
+}
+
+fn at(millis: u64) -> track::Anchor {
+	track::Anchor::Time(Timestamp::from_millis(millis).unwrap())
+}
+
+/// Groups `sequences` of a timed track, two to an object, each group starting at its
+/// sequence in seconds.
+async fn stored(archive: &Archive, sequences: impl IntoIterator<Item = u64>) {
+	let sequences: Vec<u64> = sequences.into_iter().collect();
+	for pair in sequences.chunks(2) {
+		let entries = pair.iter().map(|sequence| frames(true, *sequence, 0..3)).collect();
+		archive.object("video", 0, entries).await;
+	}
+}
+
+/// A time range older than the newest group resolves from the archive's keys, not from
+/// the one group its cache holds: the start reaches the group containing it, and the end
+/// stops just after the group containing it.
+#[tokio::test(start_paused = true)]
+async fn a_time_range_resolves_from_the_archive() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	stored(&archive, 0..10).await;
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let range = |start, end| track::Range { start, end };
+	assert_eq!(
+		read_range(&broadcast, "video", range(at(4_500), Some(at(6_500)))).await,
+		[4, 5, 6]
+	);
+	// A start on the first frame of its group, in the second object of a pair.
+	assert_eq!(
+		read_range(&broadcast, "video", range(at(3_000), Some(at(3_001)))).await,
+		[3]
+	);
+	// An end alone, from the oldest group.
+	assert_eq!(
+		read_range(&broadcast, "video", range(track::Anchor::Absolute(0), Some(at(1_200)))).await,
+		[0, 1]
+	);
+	// The cache now holds groups 6 and 9, but not what lies between: still looked up.
+	assert_eq!(
+		read_range(&broadcast, "video", range(at(8_500), Some(at(8_600)))).await,
+		[8]
+	);
+
+	// A start alone reads on through the live edge.
+	let track = broadcast.consume().track("video").unwrap();
+	let subscription = Subscription::default()
+		.with_ranges([range(at(7_002), None)])
+		.with_order(Order::Ascending)
+		.with_max_delay(None);
+	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
+	for expected in 7..10 {
+		assert_eq!(sequence(&mut reader).await, Some(expected));
+	}
+}
+
+/// A completed archive's track ends only once a time range's lookup answers, so the range
+/// still reads its history.
+#[tokio::test(start_paused = true)]
+async fn a_completed_archive_reads_a_time_range() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	stored(&archive, 0..6).await;
+	archive.end("video", End::Finish(At { group: 6, frame: 0 })).await;
+	archive.complete().await;
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let range = track::Range {
+		start: at(2_500),
+		end: None,
+	};
+	assert_eq!(read_range(&broadcast, "video", range).await, [2, 3, 4, 5]);
+}
+
+/// A time older than every stored object reaches back to the oldest stored group.
+#[tokio::test(start_paused = true)]
+async fn a_time_before_the_archive_starts_at_its_oldest_group() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	// Groups 0 to 2 were pruned.
+	stored(&archive, 3..8).await;
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let range = track::Range {
+		start: at(500),
+		end: Some(at(4_500)),
+	};
+	assert_eq!(read_range(&broadcast, "video", range).await, [3, 4]);
+}
+
+/// A time older than an archive whose oldest object continues a pruned group reaches back to
+/// the oldest group stored whole.
+#[tokio::test(start_paused = true)]
+async fn a_time_before_a_pruned_head_starts_at_the_oldest_whole_group() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	archive
+		.object("video", 2, vec![frames(true, 5, 2..4), frames(true, 6, 0..2)])
+		.await;
+	archive.object("video", 0, vec![frames(true, 7, 0..2)]).await;
+	archive.object("video", 0, vec![frames(true, 8, 0..1)]).await;
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let range = track::Range {
+		start: at(500),
+		end: Some(at(7_500)),
+	};
+	assert_eq!(read_range(&broadcast, "video", range).await, [6, 7]);
+}
+
+/// A time in a gap the archive never stored starts at the group before the gap, the newest
+/// starting before it, and the gap reads as missing.
+#[tokio::test(start_paused = true)]
+async fn a_time_in_a_gap_starts_before_it() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	stored(&archive, [0, 1, 2, 3, 6, 7, 8, 9]).await;
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let range = track::Range {
+		start: at(4_500),
+		end: Some(at(6_500)),
+	};
+	assert_eq!(read_range(&broadcast, "video", range).await, [3, 6]);
+}
+
+/// A continuation's first frame bounds no group start: an object continuing group 0 at a
+/// later timestamp than the group 1 it then starts still holds the group containing a time
+/// between the two.
+#[tokio::test(start_paused = true)]
+async fn a_continuation_does_not_bound_a_group_start() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	let frame = |sequence: u64, index: u64, pts: u64| Frame {
+		timestamp: Some(pts),
+		payload: Bytes::from(format!("{sequence}/{index}")),
+	};
+	archive
+		.object(
+			"video",
+			0,
+			vec![Entry::Group {
+				sequence: 0,
+				frames: vec![frame(0, 0, 0)],
+			}],
+		)
+		.await;
+	archive
+		.object(
+			"video",
+			1,
+			vec![
+				Entry::Group {
+					sequence: 0,
+					frames: vec![frame(0, 1, 1_000)],
+				},
+				Entry::Group {
+					sequence: 1,
+					frames: vec![frame(1, 0, 500)],
+				},
+			],
+		)
+		.await;
+	stored(&archive, 2..4).await;
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let range = track::Range {
+		start: at(600),
+		end: Some(at(700)),
+	};
+	assert_eq!(read_range(&broadcast, "video", range).await, [1]);
+}
+
+/// An untimed track refuses a time range rather than looking it up.
+#[tokio::test(start_paused = true)]
+async fn an_untimed_track_refuses_a_time_range() {
+	let archive = Archive::new();
+	archive.track("log", 0, false).await;
+	for sequence in 0..4 {
+		archive.object("log", 0, vec![frames(false, sequence, 0..1)]).await;
+	}
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let track = broadcast.consume().track("log").unwrap();
+	let subscription = Subscription::default()
+		.with_ranges([track::Range {
+			start: at(1_000),
+			end: None,
+		}])
+		.with_max_delay(None);
+	let result = match track.subscribe(subscription).await {
+		Ok(subscriber) => timeout(Duration::from_secs(10), subscriber.ordered().next_group())
+			.await
+			.expect("the read is refused")
+			.map(|group| group.map(|group| group.sequence)),
+		Err(err) => Err(err),
+	};
+	assert!(matches!(result, Err(moq_net::Error::TimestampMismatch)), "{result:?}");
+}

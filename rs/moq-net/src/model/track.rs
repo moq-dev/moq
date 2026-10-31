@@ -690,16 +690,23 @@ impl Slot {
 
 	/// Where the group starts in presentation time, from a live copy holding frame 0. A
 	/// copy joined mid-group stamps a later frame, which proves nothing about the start.
-	fn start(&self) -> Option<Timestamp> {
+	///
+	/// Only for time anchors. `unverified` counts a start accepted below the eviction
+	/// watermark too, which a track whose history a local handler serves trusts (see
+	/// [`Holdings::looks_up`]): no remote publisher wrote it.
+	fn start(&self, unverified: bool) -> Option<Timestamp> {
 		self.copies()
 			.filter(|group| group.live_first_frame() == Some(0))
-			.find_map(group::Handle::timestamp)
+			.find_map(|group| match unverified {
+				true => group.first_timestamp(),
+				false => group.timestamp(),
+			})
 	}
 
-	/// Whether the group has no start yet but may still get one: a copy holding frame 0
-	/// has not presented it.
-	fn may_start(&self) -> bool {
-		self.start().is_none() && self.copies().any(group::Handle::may_start)
+	/// Whether the group has no [`Self::start`] yet but may still get one: a copy holding
+	/// frame 0 has not presented it.
+	fn may_start(&self, unverified: bool) -> bool {
+		self.start(unverified).is_none() && self.copies().any(group::Handle::may_start)
 	}
 
 	/// The checked start of whichever copy began at frame 0.
@@ -738,6 +745,11 @@ impl Holdings for TrackState {
 		self.received && !self.anchored
 	}
 
+	fn looks_up(&self) -> bool {
+		// A received copy's handler is its session, which fetches by group alone.
+		!self.received && self.fills.read().has_handlers()
+	}
+
 	fn containing(&self, pts: Timestamp) -> Containing {
 		let starts = self.starts.lock().unwrap_or_else(PoisonError::into_inner);
 		let (Some((&first, &first_at)), Some((&last, &last_at))) = (starts.first_key_value(), starts.last_key_value())
@@ -771,28 +783,74 @@ impl Holdings for TrackState {
 
 	fn next_held(&self, from: u64) -> Option<(u64, Held)> {
 		let (&sequence, slot) = self.lookup.range(from..).next()?;
-		let held = match slot.start() {
+		let held = match slot.start(self.looks_up()) {
 			Some(at) => Held::Started(at),
-			None if slot.may_start() => Held::Pending,
+			None if slot.may_start(self.looks_up()) => Held::Pending,
 			None => Held::Never,
 		};
 		Some((sequence, held))
 	}
 
 	fn gone(&self, sequence: u64) -> Option<u64> {
+		let dropped = self.drops.get_key_value(&sequence).map(|(dropped, _)| dropped.end);
+		// The history a handler serves may still hold what the live feed never delivered, or
+		// delivered and the cache evicted, starting anywhere: only a drop, or a reader's own
+		// refused fills (see `Seen`), says it is gone.
+		if self.looks_up() {
+			return dropped;
+		}
 		// Without a declared start, the first arrival stands in for it, as the tail's does.
 		let floor = self.start_sequence.or(self.arrivals.first()).unwrap_or(0);
 		if sequence < floor {
 			return Some(floor);
 		}
-		self.drops
-			.get_key_value(&sequence)
-			.map(|(dropped, _)| dropped.end)
-			.or_else(|| self.arrivals.run_end(sequence))
+		dropped.or_else(|| self.arrivals.run_end(sequence))
 	}
 
 	fn complete(&self) -> bool {
 		self.sealed || self.abort.is_some()
+	}
+}
+
+/// Where a cursor's groups start, for resolving its time anchors: its track's, with the
+/// runs its own fills refused or it gave up counted gone, so a time end walking history a
+/// handler serves passes what that history lacks.
+struct Seen<'a> {
+	state: &'a TrackState,
+	misses: Option<&'a miss::Misses>,
+}
+
+impl Holdings for Seen<'_> {
+	fn timed(&self) -> bool {
+		self.state.timed()
+	}
+
+	fn drops_anchors(&self) -> bool {
+		self.state.drops_anchors()
+	}
+
+	fn looks_up(&self) -> bool {
+		self.state.looks_up()
+	}
+
+	fn containing(&self, pts: Timestamp) -> Containing {
+		self.state.containing(pts)
+	}
+
+	fn next_start(&self, from: u64) -> Option<(u64, Timestamp)> {
+		self.state.next_start(from)
+	}
+
+	fn next_held(&self, from: u64) -> Option<(u64, Held)> {
+		self.state.next_held(from)
+	}
+
+	fn gone(&self, sequence: u64) -> Option<u64> {
+		self.state.gone(sequence).or_else(|| self.misses?.gone(sequence))
+	}
+
+	fn complete(&self) -> bool {
+		self.state.complete()
 	}
 }
 
@@ -900,9 +958,11 @@ impl TrackState {
 	}
 
 	/// Index where cached group `sequence` starts, read back through its slot so only the
-	/// cached copy holding frame 0 counts, and wake the reads a time end parks on it.
+	/// cached copy holding frame 0 counts, and wake the reads a time end parks on it. On a
+	/// track whose history a handler serves, a start accepted unverified counts: the fills
+	/// below the eviction watermark that a time range walks are all unverified.
 	fn index_start(&self, sequence: u64) {
-		let Some(start) = self.lookup.get(&sequence).and_then(Slot::start) else {
+		let Some(start) = self.lookup.get(&sequence).and_then(|slot| slot.start(self.looks_up())) else {
 			return;
 		};
 		self.starts
@@ -5261,6 +5321,7 @@ fn queue(fills: &kio::Shared<FillState>, sequence: u64, request: &FetchOptions) 
 			// One group either way, so it never turns a wider fill it joins newest first.
 			order: Order::Ascending,
 		},
+		time: None,
 	};
 	// The handler gate is atomic with a handler dropping (no fill stranded on a queue
 	// nobody drains); with no handler, `Fetching::poll` fails fast.
@@ -5952,6 +6013,13 @@ struct Cursor {
 	misses: Option<Box<miss::Misses>>,
 }
 
+/// A time start a [`Cursor`]'s window looks up through a fill.
+struct Lookup {
+	pts: Timestamp,
+	/// The fill looking it up, `None` once its answer was taken in.
+	join: Option<fill::Join>,
+}
+
 struct Peeked {
 	group: group::Consumer,
 	taken: Taken,
@@ -6098,6 +6166,8 @@ struct Filter {
 	/// budget, scanned in the cache in the subscription's order and handed out ahead of the
 	/// walk: each cached group in them is visited once.
 	owed: RangeInclusiveSet<u64>,
+	/// The time starts [`Self::window`] looks up from the track's history, each asked once.
+	lookups: Vec<Lookup>,
 }
 
 impl Cursor {
@@ -6140,6 +6210,7 @@ impl Cursor {
 				admitted: RangeInclusiveSet::new(),
 				admitted_at: None,
 				owed: RangeInclusiveSet::new(),
+				lookups: Vec::new(),
 			};
 			(filter, state.datagram_offset + start, state.cache.clone())
 		};
@@ -6252,6 +6323,7 @@ impl Cursor {
 					Ok(window) => {
 						self.filter.window = window;
 						self.filter.refused = None;
+						self.filter.lookups.clear();
 					}
 					Err(err) => self.filter.refused = Some(err),
 				}
@@ -6262,7 +6334,13 @@ impl Cursor {
 			// the first to arrive, or the newest once it went live, however many have arrived
 			// or left since.
 			None if self.filter.window.is_pending() => self.filter.window.settle(state.first_live(), &*state),
-			None => self.filter.window.settle(state.latest_live(), &*state),
+			None => {
+				let seen = Seen {
+					state: &state,
+					misses: self.misses.as_deref(),
+				};
+				self.filter.window.settle(state.latest_live(), &seen)
+			}
 		};
 		drop(state);
 		if moved {
@@ -6562,10 +6640,70 @@ impl Cursor {
 		}))
 	}
 
+	/// Look up each time start the window can't resolve from the cache, once, and take in
+	/// the answers, parking `waiter` on the lookups still out.
+	fn look_up(&mut self, asking: &miss::Asking, waiter: &kio::Waiter) {
+		let lookups: Vec<(Timestamp, u64)> = self.filter.window.lookups().collect();
+		if lookups.is_empty() && self.filter.lookups.iter().all(|lookup| lookup.join.is_none()) {
+			return;
+		}
+		let fills = self.state.read().fills.clone();
+		for (pts, reach) in lookups {
+			if self.filter.lookups.iter().any(|lookup| lookup.pts == pts) {
+				continue;
+			}
+			let ask = fill::Ask {
+				start: Position::group(0),
+				end: reach,
+				frame_end: None,
+				asking: *asking,
+				time: Some(pts),
+			};
+			let (joins, _) = fills.lock().join(&fills, &ask);
+			self.filter.lookups.push(Lookup {
+				pts,
+				join: joins.into_iter().next(),
+			});
+		}
+		let mut moved = false;
+		for lookup in &mut self.filter.lookups {
+			// The window stops looking once replaced; with no join, nothing can answer.
+			if !self.filter.window.lookups().any(|(pts, _)| pts == lookup.pts) {
+				lookup.join = None;
+				continue;
+			}
+			let answer = match &lookup.join {
+				None => None,
+				Some(join) => match join.outcome().poll(waiter, |outcome| {
+					outcome.first_accepted().map_or(Poll::Pending, Poll::Ready)
+				}) {
+					Poll::Ready(Ok(group)) => Some(group),
+					// Ended unanswered: its handler couldn't tell.
+					Poll::Ready(Err(closed)) => closed.first_accepted(),
+					Poll::Pending => continue,
+				},
+			};
+			let state = self.state.read();
+			// The answer's first frame says whether it starts at or before the time.
+			if let Some(group) = answer
+				&& let Some(slot) = state.lookup.get(&group)
+				&& slot.may_start(state.looks_up())
+			{
+				let _ = slot.serving().poll_started(waiter);
+				continue;
+			}
+			lookup.join = None;
+			moved |= self.filter.window.found(lookup.pts, answer, &*state);
+		}
+		if moved {
+			self.filter.revision += 1;
+			self.update_servable();
+		}
+	}
+
 	/// Ask fills for what this cursor misses from `from`, and take in what they answered,
 	/// parking `waiter` on the fills still out. Whatever it gives up goes to the drop cursor.
 	fn probe(&mut self, from: u64, drift: &Drift, waiter: &kio::Waiter) {
-		let (window, cap, revision) = (&self.filter.window, self.end_sequence, self.filter.revision);
 		let asking = {
 			let subscription = self.subscription.read();
 			miss::Asking {
@@ -6574,6 +6712,8 @@ impl Cursor {
 				order: subscription.order,
 			}
 		};
+		self.look_up(&asking, waiter);
+		let (window, cap, revision) = (&self.filter.window, self.end_sequence, self.filter.revision);
 		let fills = self.state.read().fills.clone();
 		let misses = self.misses.get_or_insert_with(Box::default);
 		let mut given_up = Vec::new();
@@ -6616,6 +6756,11 @@ impl Cursor {
 				drops.give_up(run);
 			}
 		}
+		// A refusal taken in may move a time end walking history past it, widening what
+		// is missed: the read goes again to ask for it.
+		if !self.filter.window.is_settled() && self.sync() {
+			waiter.waker().wake_by_ref();
+		}
 	}
 
 	/// The next group a fill answered for this cursor in its order, cached and not handed
@@ -6635,7 +6780,7 @@ impl Cursor {
 
 	/// Whether a fill still owes this cursor a group, so the end of the feed is not its end.
 	fn awaits_fill(&self) -> bool {
-		self.misses.as_ref().is_some_and(|misses| misses.is_waiting())
+		self.misses.as_ref().is_some_and(|misses| misses.is_waiting()) || self.filter.window.lookups().next().is_some()
 	}
 
 	fn poll_recv_group(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
@@ -18650,9 +18795,10 @@ mod test {
 		);
 	}
 
-	/// A time start before every group held asks no fill below the oldest, since which of
-	/// those groups it reaches is unknown until they start; another range still asks for its
-	/// own misses.
+	/// A time start before every group held looks up its group through a fill that owes
+	/// none: a handler that can't resolve times drops it, and the start reaches back to the
+	/// oldest group held, asking no fill below it, since which of those groups it reaches is
+	/// unknown until they start. Another range still asks for its own misses.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_time_start_before_the_cache_asks_nothing_below_it() {
@@ -18671,13 +18817,27 @@ mod test {
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"the time start waits on its lookup"
+		);
+		let Poll::Ready(Ok(lookup)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start is looked up");
+		};
+		assert_eq!(
+			(lookup.time(), lookup.start().group, lookup.end()),
+			(Some(at(5)), 0, 10)
+		);
+		assert_eq!(lookup.next(), None, "a lookup owes no group");
+		drop(lookup);
 		let mut read = drain_groups(&mut subscriber);
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the group range misses its groups");
 		};
 		assert_eq!(
-			(fill.start().group, fill.end()),
-			(0, 2),
+			(fill.time(), fill.start().group, fill.end()),
+			(None, 0, 2),
 			"nothing below 10 for the time start"
 		);
 		while let Some(sequence) = fill.wanted() {
@@ -18687,6 +18847,91 @@ mod test {
 		read.extend(drain_groups(&mut subscriber));
 		assert_eq!(read, [10, 0, 1]);
 		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
+	}
+
+	/// A time start before every group held starts at the group its lookup answers, once that
+	/// group's first frame says where it starts, asking nothing below it; a time end walks the
+	/// history below the feed's start through fills, stopping just past the group containing it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_looked_up_time_range_reads_the_history() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Time(at(5)),
+			end: Some(Anchor::Time(at(7))),
+		}]));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"nothing reads until it is found"
+		);
+		let Poll::Ready(Ok(lookup)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start is looked up");
+		};
+		assert_eq!(lookup.time(), Some(at(5)));
+		let found = lookup.accept(5, None);
+		drop(lookup);
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"nothing reads until the group found starts"
+		);
+		write_filled(found, 5);
+		let mut read = drain_groups(&mut subscriber);
+		// One group at a time past the start, until one starts after the end.
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			assert_eq!(fill.time(), None);
+			while let Some(sequence) = fill.next() {
+				assert!(sequence >= 5, "group {sequence} is below the looked-up start");
+				write_filled(fill.accept(sequence, None), sequence);
+			}
+			drop(fill);
+			read.extend(drain_groups(&mut subscriber));
+		}
+		assert_eq!(read, [5, 6, 7]);
+	}
+
+	/// A time end walking the history a handler serves takes no group the live feed
+	/// delivered and the cache evicted as gone: the history still holds it, and it may start
+	/// inside the end, so the end settles on what the history answers.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_end_walks_evicted_arrivals_through_the_history() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		for sequence in 0..10 {
+			write_group(&producer, sequence);
+		}
+		for sequence in [0, 1, 2, 3, 5, 6, 7, 8] {
+			evict(&producer, sequence);
+		}
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Time(at(5)),
+			end: Some(Anchor::Time(at(6))),
+		}]));
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
+		let Poll::Ready(Ok(lookup)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start in the evicted gap is looked up");
+		};
+		assert_eq!(lookup.time(), Some(at(5)));
+		write_filled(lookup.accept(5, None), 5);
+		drop(lookup);
+		let mut read = drain_groups(&mut subscriber);
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			while let Some(sequence) = fill.next() {
+				write_filled(fill.accept(sequence, None), sequence);
+			}
+			drop(fill);
+			read.extend(drain_groups(&mut subscriber));
+		}
+		assert_eq!(read, [5, 6], "groups 7 and 8 start past the end");
 	}
 
 	/// A wide fill refused group by group, each with its own error, holds only the answers its
