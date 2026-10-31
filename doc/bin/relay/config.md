@@ -334,7 +334,8 @@ A draining upstream may name a replacement URI. `same-host` follows it only
 onto the host already dialed, so a peer can move us between ports and schemes;
 `follow` also lets it choose the host, which trusts it not to point us into
 the local network; `ignore` keeps the current address. `handover` caps how long
-the old connection keeps serving after a GOAWAY.
+the old connection keeps serving after a GOAWAY; it closes sooner, once the
+replacement is up and it carries no subscription or fetch.
 
 ## \[cache]
 
