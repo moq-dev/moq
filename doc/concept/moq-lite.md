@@ -109,7 +109,10 @@ authorization and hidden names work exactly as without one.
   its worker answers each requested path by announcing that exact path under
   the output's own epoch. Restarting one output is then a new epoch every hop
   sees, so a viewer returning within a relay's cache window never gets the old
-  output's groups.
+  output's groups. On moq-lite 07 that announcement is a takeover of the claim:
+  what a viewer already resolved through the claim keeps playing from the
+  output rather than being reset to the new route. A different worker, or a
+  replacement output, never inherits those viewers.
 - **Newest wins.** Among routes at the same prefix, the newest epoch ranks
   first, ahead of cost, and a route without an epoch ranks last. Newest means
   the latest UUIDv7 timestamp, so hosts with skewed clocks can lose a restart
@@ -137,7 +140,9 @@ authorization and hidden names work exactly as without one.
   name instead of stalling viewers on the old sequence. A relay drops its copy
   of the old instance, so a new subscriber never sees its cached groups.
 
-The epoch and the restart message travel on moq-lite 07, which is opt-in.
+The epoch and the restart and takeover messages travel on moq-lite 07, which is
+opt-in. Older versions carry a takeover as an ordinary announcement, so the
+first subscription through a claim is reset once the output's route arrives.
 moq-transport carries the epoch when both sides offer the [epoch
 extension](/draft/moq-epoch), on by default. A restart onto another epoch is
 advertised before the old one is withdrawn, so the path is never absent, and one
