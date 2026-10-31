@@ -19289,7 +19289,7 @@ mod test {
 			panic!("group 1 is a miss now");
 		};
 		assert_eq!((fill.start().group, fill.end()), (1, 2), "group 0 was taken");
-		assert_eq!(fill.next(), Some(1));
+		assert_eq!(fill.wanted(), Some(1));
 		write_filled(fill.accept(1, None), 1);
 		drop(fill);
 		assert_eq!(drain_groups(&mut subscriber), [1]);
@@ -19393,7 +19393,7 @@ mod test {
 			panic!("groups 1 and 2 are misses now");
 		};
 		assert_eq!((fill.start().group, fill.end()), (1, 3));
-		while let Some(sequence) = fill.next() {
+		while let Some(sequence) = fill.wanted() {
 			write_filled(fill.accept(sequence, None), sequence);
 		}
 		drop(fill);
@@ -19453,7 +19453,7 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("group 1 is a miss now");
 		};
-		assert_eq!(fill.next(), Some(1));
+		assert_eq!(fill.wanted(), Some(1));
 		write_filled(fill.accept(1, None), 1);
 		drop(fill);
 		evict(&producer, 1);
@@ -19482,7 +19482,7 @@ mod test {
 		let mut refilled = 0;
 		let mut serve = || {
 			while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
-				while let Some(sequence) = fill.next() {
+				while let Some(sequence) = fill.wanted() {
 					write(fill.accept(sequence, None), sequence);
 					refilled += 1;
 				}
