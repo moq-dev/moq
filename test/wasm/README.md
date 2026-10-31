@@ -203,7 +203,6 @@ Still missing or partial, by what the consumer does:
 | frame `arrived` time | hang | `MoqFrame` carries no arrival time |
 | `group.tryReadFrame()` | hang | async `read_frame` only |
 | `abort(err: Error)` on a track or group | hang | `abort(code)` only |
-| `Time.Timestamp` in a track's timescale | hang, publish | microseconds only |
 | `Group.MAX_GROUP_CACHE_BYTES` and `_FRAMES` | json | not exported |
 
 Arrival times need the Rust and JS clocks to agree on origin and units first. Tokens and

@@ -130,7 +130,7 @@ class TrackProducer:
         """
         return self._inner.append_datagram(Frame(payload, timestamp)._ffi())
 
-    def insert_datagram(self, sequence: int, payload: bytes, timestamp: timedelta | None = None) -> None:
+    def insert_datagram(self, sequence: int, payload: bytes, timestamp: Timestamp | None = None) -> None:
         """Send a best-effort datagram at an explicit sequence number.
 
         For a caller that allocates its own sequences; :meth:`append_datagram`
