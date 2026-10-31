@@ -16,6 +16,10 @@
 //! threads, swept over threads, readers, and frames appended per round, so contention
 //! on the group's shared state shows up as a slope across cores.
 //!
+//! `group_shed` writes one live group far past what it holds, swept over the frames it
+//! holds (a small pool's debt, or the 32 MiB live tail) and the frames it sheds, so
+//! shedding the front stays a flat cost per frame.
+//!
 //! Run with `cargo bench -p moq-net`.
 
 #![expect(
@@ -49,9 +53,9 @@ fn timed() -> track::Info {
 /// overhead rather than payload allocation.
 const PAYLOAD: usize = 64;
 
-/// Frame counts to sweep. 8192 is the largest legal group (`MAX_GROUP_FRAMES`);
-/// the 8193rd write returns `GroupTooLarge`. The top end is that full group of
-/// tiny frames. Counts 32 and 33 straddle a full write batch and its next flush.
+/// Frame counts to sweep. The top end is a long group of tiny frames, the most the
+/// group cap used to allow. Counts 32 and 33 straddle a full write batch and its next
+/// flush.
 const COUNTS: [usize; 7] = [4, 5, 32, 33, 512, 2_048, 8_192];
 
 /// Cached group counts to sweep for the track-level delivery benchmarks. A track
@@ -665,6 +669,59 @@ fn bench_contended(c: &mut Criterion) {
 	g.finish();
 }
 
+/// A frame for the shedding benchmark: large enough that a group outgrows a small pool
+/// in a few hundred frames.
+const SHED_PAYLOAD: usize = 16 * 1024;
+
+/// A live group cached in a pool of `capacity` bytes, or an unbounded one.
+fn pooled_group(capacity: Option<u64>) -> Ctx {
+	let mut info = broadcast::Info::default();
+	if let Some(capacity) = capacity {
+		info.pool = moq_net::cache::Pool::new(moq_net::cache::Config::default().with_capacity(capacity));
+	}
+	let broadcast = broadcast::Producer::new(info);
+	let track = broadcast.create_track("bench", timed()).unwrap();
+	let group = track.append_group().unwrap();
+	Ctx {
+		_broadcast: broadcast,
+		_track: track,
+		group,
+	}
+}
+
+/// Write a live group far past what it holds, which sheds its front to make room: under
+/// a small pool's debt, or past the 32 MiB live tail with no pool capacity.
+///
+/// The time per frame should stay flat across both axes: a shed costs the frames it
+/// drops, never the frames the group still holds.
+fn bench_shed(c: &mut Criterion) {
+	let payload = Bytes::from(vec![0u8; SHED_PAYLOAD]);
+	let mut g = c.benchmark_group("group_shed");
+	for (held, pool) in [
+		("pool-1MiB", Some(1 << 20)),
+		("pool-16MiB", Some(16 << 20)),
+		("tail-32MiB", None),
+	] {
+		// Twice what the tail holds, and sixteen times.
+		for frames in [4_096, 32_768] {
+			g.throughput(Throughput::Elements(frames as u64));
+			g.bench_function(BenchmarkId::new(held, frames), |b| {
+				b.iter_batched(
+					|| pooled_group(pool),
+					|mut ctx| {
+						for _ in 0..frames {
+							ctx.group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+						}
+						ctx
+					},
+					BatchSize::PerIteration,
+				);
+			});
+		}
+	}
+	g.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_write,
@@ -674,6 +731,7 @@ criterion_group!(
 	bench_stamp,
 	bench_relay_frames,
 	bench_inflate,
-	bench_contended
+	bench_contended,
+	bench_shed
 );
 criterion_main!(benches);

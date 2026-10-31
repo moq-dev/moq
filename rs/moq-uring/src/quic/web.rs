@@ -23,7 +23,7 @@ use std::task::{Context, Poll, ready};
 use bytes::{Buf, Bytes, BytesMut};
 use web_transport_proto as proto;
 
-use super::{Connection, Error};
+use super::{Connection, Error, VarInt, recv, send};
 
 /// The frame type WebTransport bidirectional streams lead with.
 const FRAME_WEBTRANSPORT: u64 = 0x41;
@@ -77,16 +77,16 @@ pub struct Request {
 	/// Closes the connection on every way out of here that is not an answer.
 	guard: Guard,
 	request: proto::ConnectRequest,
-	send: super::SendStream,
-	recv: super::RecvStream,
+	send: send::Stream,
+	recv: recv::Stream,
 	/// The peer's control and QPACK streams, held open for the session's
 	/// life: closing them reads as tearing the H3 connection down.
-	held: Vec<super::RecvStream>,
+	held: Vec<recv::Stream>,
 	/// Our control stream, same deal.
-	control: super::SendStream,
+	control: send::Stream,
 	/// WebTransport streams a pipelining peer opened before its CONNECT was
 	/// answered, headers consumed, keyed by the session id they claimed.
-	early: Vec<(u64, super::RecvStream)>,
+	early: Vec<(u64, recv::Stream)>,
 	/// Streams that arrived during the handshake and are still mid-header;
 	/// the session goes on classifying them.
 	pending: Vec<PendingUni>,
@@ -159,7 +159,7 @@ impl Request {
 
 	async fn handshake(mut conn: Connection) -> Result<Self, Error> {
 		// Our control stream: the SETTINGS advertising WebTransport support.
-		let mut control = open_uni(&mut conn).await?;
+		let mut control = conn.open_uni(Default::default()).await?;
 		let mut settings = proto::Settings::default();
 		settings.enable_webtransport(1);
 		let mut buf = Vec::new();
@@ -191,7 +191,7 @@ impl Request {
 				// cancel a legitimate stream on a handshake that then succeeds.
 				let mut over = false;
 				while !over {
-					match web_transport_trait::poll::Session::poll_accept_uni(&mut conn, cx) {
+					match conn.poll_accept_uni(cx) {
 						Poll::Ready(Ok(recv)) => {
 							arrivals += 1;
 							pending.push(PendingUni::new(recv));
@@ -248,7 +248,7 @@ impl Request {
 		// The CONNECT request rides the client's first bidirectional stream,
 		// which arrives first: QUIC creates lower-numbered streams
 		// implicitly, and the accept queue is in id order.
-		let (send, mut recv) = accept_bi(&mut conn).await?;
+		let (send, mut recv) = conn.accept_bi().await?;
 		let request = read_connect(&mut recv).await?;
 
 		Ok(Self {
@@ -315,16 +315,15 @@ impl Request {
 		let mut buf = Vec::new();
 		response.encode(&mut buf).map_err(|err| Error::Web(err.to_string()))?;
 		write_all(&mut self.send, &buf).await?;
-		web_transport_trait::poll::SendStream::finish(&mut self.send)?;
+		let mut send = self.send.finish();
 
 		// The guard stays armed across the wait below. Cancelling this future
 		// mid-grace would otherwise skip the deliberate close and leak the
 		// connection, which is the very thing the guard is here to prevent.
 		let mut deadline = self.conn.owner().after(CLOSE_GRACE);
-		let send = &mut self.send;
 		kio::wait(|waiter| {
-			let mut cx = waiter.context();
-			if web_transport_trait::poll::SendStream::poll_closed(send, &mut cx).is_ready() {
+			let cx = waiter.context();
+			if send.poll_stopped(&cx).is_ready() {
 				return Poll::Ready(());
 			}
 			deadline.poll(waiter)
@@ -416,13 +415,13 @@ struct State {
 	pending_uni: Vec<PendingUni>,
 	pending_bi: Vec<PendingBi>,
 	/// Classified application streams nobody has accepted yet.
-	ready_uni: VecDeque<super::RecvStream>,
-	ready_bi: VecDeque<(super::SendStream, super::RecvStream)>,
+	ready_uni: VecDeque<recv::Stream>,
+	ready_bi: VecDeque<(send::Stream, recv::Stream)>,
 	/// Streams held open, never read: control and QPACK, ours and theirs.
-	held_recv: Vec<super::RecvStream>,
-	_control_send: Option<super::SendStream>,
+	held_recv: Vec<recv::Stream>,
+	_control_send: Option<send::Stream>,
 	/// The CONNECT stream's send half; taken exactly once by the close path.
-	connect_send: Option<super::SendStream>,
+	connect_send: Option<send::Stream>,
 }
 
 /// A MoQ transport over the worker: raw QUIC, or a WebTransport session.
@@ -463,27 +462,28 @@ impl Session {
 	/// Open a send group at `priority`, for streams to join with
 	/// [`SendStream::set_group`]. The HTTP/3 streams stay outside every
 	/// group, so they go first.
-	pub fn send_group(&self, priority: i64) -> super::SendGroup {
+	pub fn send_group(&self, priority: i64) -> send::Group {
 		self.conn.send_group(priority)
 	}
 
 	/// Send a datagram scheduled by `options`, like one of its group's streams.
 	///
 	/// See [`Connection::send_datagram`].
-	pub fn send_datagram(&self, payload: Bytes, options: super::SendOptions<'_>) -> Result<(), Error> {
+	pub fn send_datagram(&self, payload: Bytes, options: send::Options<'_>) -> Result<(), Error> {
 		let Some(web) = &self.web else {
-			return self.conn.send_datagram(payload, options);
+			return Ok(self.conn.send_datagram(payload, options)?);
 		};
-		let mut framed = BytesMut::with_capacity(web.header_datagram.len() + payload.len());
-		framed.extend_from_slice(&web.header_datagram);
-		framed.extend_from_slice(&payload);
-		self.conn.send_datagram(framed.freeze(), options).map_err(unmap_err)
+		// The session id goes ahead of the payload as its own chunk, so neither is copied.
+		let framed = web.header_datagram.clone().chain(payload);
+		self.conn
+			.send_datagram(framed, options)
+			.map_err(|err| unmap_err(err.into()))
 	}
 
 	/// Wrap a raw-QUIC connection in a session, with no
 	/// WebTransport layering: streams and datagrams pass through untouched.
 	pub fn raw(conn: Connection) -> Self {
-		let protocol = web_transport_trait::poll::Session::protocol(&conn).map(str::to_owned);
+		let protocol = conn.protocol().map(str::to_owned);
 		Self {
 			handles: Rc::new(()),
 			conn,
@@ -514,7 +514,7 @@ impl Session {
 			pending,
 		} = request;
 
-		let session_id = send.id();
+		let session_id = u64::from(send.id());
 		let mut header_uni = Vec::new();
 		encode_varint(STREAM_WEBTRANSPORT, &mut header_uni);
 		encode_varint(session_id, &mut header_uni);
@@ -618,7 +618,7 @@ impl Session {
 			};
 			let web = self.web.is_some();
 			let header = self.web.as_ref().map(|web| web.header_bi.clone()).unwrap_or_default();
-			self.opening_bi = Some((SendStream::new(send, web), RecvStream { inner: recv, web }, header));
+			self.opening_bi = Some((SendStream::new(send, web), RecvStream::new(recv, web), header));
 		}
 		web_transport_trait::poll::Session::poll_open_bi(self, cx).map_ok(Some)
 	}
@@ -631,20 +631,20 @@ impl web_transport_trait::poll::Session for Session {
 
 	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
 		let Some(web) = self.web.clone() else {
-			let inner = ready!(web_transport_trait::poll::Session::poll_accept_uni(&mut self.conn, cx))?;
-			return Poll::Ready(Ok(RecvStream { inner, web: false }));
+			let inner = ready!(self.conn.poll_accept_uni(cx))?;
+			return Poll::Ready(Ok(RecvStream::new(inner, false)));
 		};
 
 		loop {
 			if let Some(inner) = web.state.borrow_mut().ready_uni.pop_front() {
-				return Poll::Ready(Ok(RecvStream { inner, web: true }));
+				return Poll::Ready(Ok(RecvStream::new(inner, true)));
 			}
 
 			// Adopt every new arrival, then try to classify the pending set.
 			// Each mid-header stream parks the caller in its own stream's
 			// waiters, so progress on any of them re-polls us.
 			let ended = loop {
-				match web_transport_trait::poll::Session::poll_accept_uni(&mut self.conn, cx) {
+				match self.conn.poll_accept_uni(cx) {
 					Poll::Ready(Ok(recv)) => web.state.borrow_mut().pending_uni.push(PendingUni::new(recv)),
 					Poll::Ready(Err(err)) => break Some(err),
 					Poll::Pending => break None,
@@ -669,23 +669,17 @@ impl web_transport_trait::poll::Session for Session {
 		cx: &mut Context<'_>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		let Some(web) = self.web.clone() else {
-			let (send, recv) = ready!(web_transport_trait::poll::Session::poll_accept_bi(&mut self.conn, cx))?;
-			return Poll::Ready(Ok((
-				SendStream::new(send, false),
-				RecvStream {
-					inner: recv,
-					web: false,
-				},
-			)));
+			let (send, recv) = ready!(self.conn.poll_accept_bi(cx))?;
+			return Poll::Ready(Ok((SendStream::new(send, false), RecvStream::new(recv, false))));
 		};
 
 		loop {
 			if let Some((send, recv)) = web.state.borrow_mut().ready_bi.pop_front() {
-				return Poll::Ready(Ok((SendStream::new(send, true), RecvStream { inner: recv, web: true })));
+				return Poll::Ready(Ok((SendStream::new(send, true), RecvStream::new(recv, true))));
 			}
 
 			loop {
-				match web_transport_trait::poll::Session::poll_accept_bi(&mut self.conn, cx) {
+				match self.conn.poll_accept_bi(cx) {
 					Poll::Ready(Ok((send, recv))) => web.state.borrow_mut().pending_bi.push(PendingBi::new(send, recv)),
 					Poll::Ready(Err(err)) => return Poll::Ready(Err(unmap_err(err))),
 					Poll::Pending => break,
@@ -700,8 +694,7 @@ impl web_transport_trait::poll::Session for Session {
 
 	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
 		if self.opening_uni.is_none() {
-			let inner = ready!(web_transport_trait::poll::Session::poll_open_uni(&mut self.conn, cx))
-				.map_err(|err| self.map_err(err))?;
+			let inner = ready!(self.conn.poll_open_uni(cx, Default::default())).map_err(|err| self.map_err(err))?;
 			let header = self.web.as_ref().map(|web| web.header_uni.clone()).unwrap_or_default();
 			self.opening_uni = Some((SendStream::new(inner, self.web.is_some()), header));
 		}
@@ -716,11 +709,11 @@ impl web_transport_trait::poll::Session for Session {
 		cx: &mut Context<'_>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		if self.opening_bi.is_none() {
-			let (send, recv) = ready!(web_transport_trait::poll::Session::poll_open_bi(&mut self.conn, cx))
-				.map_err(|err| self.map_err(err))?;
+			let (send, recv) =
+				ready!(self.conn.poll_open_bi(cx, Default::default())).map_err(|err| self.map_err(err))?;
 			let web = self.web.is_some();
 			let header = self.web.as_ref().map(|web| web.header_bi.clone()).unwrap_or_default();
-			self.opening_bi = Some((SendStream::new(send, web), RecvStream { inner: recv, web }, header));
+			self.opening_bi = Some((SendStream::new(send, web), RecvStream::new(recv, web), header));
 		}
 		let (send, _, header) = self.opening_bi.as_mut().expect("opening");
 		let result = ready!(send.poll_header(cx, header));
@@ -738,14 +731,10 @@ impl web_transport_trait::poll::Session for Session {
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
 		let Some(web) = self.web.clone() else {
-			return web_transport_trait::poll::Session::poll_recv_datagram(&mut self.conn, cx);
+			return self.conn.poll_recv_datagram(cx);
 		};
 		loop {
-			let datagram = ready!(web_transport_trait::poll::Session::poll_recv_datagram(
-				&mut self.conn,
-				cx
-			))
-			.map_err(unmap_err)?;
+			let datagram = ready!(self.conn.poll_recv_datagram(cx)).map_err(unmap_err)?;
 			// The prefix names the session; anything else is not ours.
 			let mut peek: &[u8] = &datagram;
 			match decode_varint(&mut peek) {
@@ -759,7 +748,7 @@ impl web_transport_trait::poll::Session for Session {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		let inner = web_transport_trait::poll::Session::max_datagram_size(&self.conn);
+		let inner = self.conn.max_datagram_size().unwrap_or(0);
 		match &self.web {
 			Some(web) => inner.saturating_sub(web.header_datagram.len()),
 			None => inner,
@@ -772,7 +761,7 @@ impl web_transport_trait::poll::Session for Session {
 
 	fn close(&mut self, code: u32, reason: &str) {
 		let Some(web) = &self.web else {
-			return web_transport_trait::poll::Session::close(&mut self.conn, code, reason);
+			return self.conn.close_code(u64::from(code), reason);
 		};
 
 		{
@@ -788,7 +777,7 @@ impl web_transport_trait::poll::Session for Session {
 
 		let connect_send = web.state.borrow_mut().connect_send.take();
 		let http3 = proto::error_to_http3(code);
-		let Some(mut send) = connect_send else {
+		let Some(send) = connect_send else {
 			self.conn.close_code(http3, reason);
 			return;
 		};
@@ -820,25 +809,30 @@ impl web_transport_trait::poll::Session for Session {
 		// connection error, which a browser reports instead of the capsule.
 		let web = web.clone();
 		self.conn.owner().spawn(async move {
-			let mut offset = 0;
+			let mut frame = Bytes::from(frame);
+			// Taken to finish once the frame is all written, and kept until the close.
+			let mut send = Some(send);
+			let mut finished = None;
 			kio::wait(|waiter| {
-				let mut cx = waiter.context();
+				let cx = waiter.context();
 
 				// Stop writing once the connection is gone; the deadline is the
 				// only other thing that ends this.
-				if web_transport_trait::poll::Session::poll_closed(&mut conn, &mut cx).is_ready() {
+				if conn.poll_closed(&cx).is_ready() {
 					return Poll::Ready(());
 				}
-				while offset < frame.len() {
-					match web_transport_trait::poll::SendStream::poll_write(&mut send, &mut cx, &frame[offset..]) {
-						Poll::Ready(Ok(n)) => offset += n,
-						// The stream is unusable, so the connection close below
-						// is all the peer is going to get.
-						Poll::Ready(Err(_)) => return Poll::Ready(()),
-						Poll::Pending => break,
+				if let Some(stream) = &mut send {
+					while frame.has_remaining() {
+						match stream.poll_write(&cx, &mut frame) {
+							Poll::Ready(Ok(_)) => {}
+							// The stream is unusable, so the connection close below
+							// is all the peer is going to get.
+							Poll::Ready(Err(_)) => return Poll::Ready(()),
+							Poll::Pending => break,
+						}
 					}
-					if offset == frame.len() {
-						let _ = web_transport_trait::poll::SendStream::finish(&mut send);
+					if !frame.has_remaining() {
+						finished = send.take().map(send::Stream::finish);
 					}
 				}
 
@@ -847,12 +841,12 @@ impl web_transport_trait::poll::Session for Session {
 			.await;
 			conn.close_code(http3, &reason);
 			// Only now, so the critical streams end with the connection.
-			drop(web);
+			drop((web, finished));
 		});
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
-		let err = ready!(web_transport_trait::poll::Session::poll_closed(&mut self.conn, cx));
+		let err = ready!(self.conn.poll_closed(cx));
 		let Some(web) = &self.web else {
 			return Poll::Ready(err);
 		};
@@ -865,7 +859,7 @@ impl web_transport_trait::poll::Session for Session {
 	}
 
 	fn stats(&self) -> impl web_transport_trait::Stats {
-		web_transport_trait::poll::Session::stats(&self.conn)
+		self.conn.transport_stats()
 	}
 }
 
@@ -875,38 +869,60 @@ impl web_transport_trait::poll::Session for Session {
 /// reset still delivers the header and the peer can tell which session the
 /// reset belongs to.
 pub struct SendStream {
-	inner: super::SendStream,
+	state: SendState,
 	/// The end of the WebTransport header on a stream we opened, for a reset
 	/// to deliver.
-	header: Option<u64>,
+	header: Option<send::Offset>,
 	web: bool,
 }
 
+/// Where the stream is, since `web_transport_trait` finishes and resets through `&mut self`.
+enum SendState {
+	Open(send::Stream),
+	Finished(send::Finished),
+	/// Reset, by us or by echoing the peer's stop.
+	Reset,
+}
+
 impl SendStream {
-	fn new(inner: super::SendStream, web: bool) -> Self {
+	fn new(mut inner: send::Stream, web: bool) -> Self {
+		// The driver's raw 0 reads to a browser as an HTTP/3 stream error rather than the
+		// WebTransport cancellation that dropping a stream means. moq cancels subscriptions by
+		// dropping, so this is the ordinary path.
+		if web {
+			inner.set_drop_reset(None, http3_code(proto::error_to_http3(0)));
+		}
 		Self {
-			inner,
+			state: SendState::Open(inner),
 			header: None,
 			web,
 		}
 	}
 
-	fn map(&self, err: Error) -> Error {
+	fn map(&self, err: impl Into<Error>) -> Error {
 		match self.web {
-			true => unmap_err(err),
-			false => unmap_legacy(err),
+			true => unmap_err(err.into()),
+			false => unmap_legacy(err.into()),
 		}
 	}
 
 	/// Set the priority within the stream's send group, or session-wide when ungrouped.
 	pub fn set_priority(&mut self, priority: i64) {
-		self.inner.set_priority(priority);
+		match &mut self.state {
+			SendState::Open(stream) => stream.set_priority(priority),
+			SendState::Finished(stream) => stream.set_priority(priority),
+			SendState::Reset => {}
+		}
 	}
 
 	/// Move the stream into a send group, or with `None` back out. See
-	/// [`super::SendStream::set_group`].
-	pub fn set_group(&mut self, group: Option<&super::SendGroup>) {
-		self.inner.set_group(group);
+	/// [`send::Stream::set_group`].
+	pub fn set_group(&mut self, group: Option<&send::Group>) {
+		match &mut self.state {
+			SendState::Open(stream) => stream.set_group(group),
+			SendState::Finished(stream) => stream.set_group(group),
+			SendState::Reset => {}
+		}
 	}
 
 	/// Write the WebTransport header of a stream we opened, noting where it
@@ -915,104 +931,147 @@ impl SendStream {
 		if !self.web {
 			return Poll::Ready(Ok(()));
 		}
-		while !header.is_empty() {
-			let n = ready!(web_transport_trait::poll::SendStream::poll_write(
-				&mut self.inner,
-				cx,
-				header
-			))
-			.map_err(|err| self.map(err))?;
-			header.advance(n);
+		let SendState::Open(stream) = &mut self.state else {
+			unreachable!("the header goes first");
+		};
+		while header.has_remaining() {
+			if let Err(err) = ready!(stream.poll_write(cx, header)) {
+				return Poll::Ready(Err(self.map(err)));
+			}
 		}
-		self.header = Some(self.inner.offset());
+		let offset = stream.offset();
+		stream.set_drop_reset(Some(offset), http3_code(proto::error_to_http3(0)));
+		self.header = Some(offset);
 		Poll::Ready(Ok(()))
 	}
 
-	/// Reset a WebTransport stream, still delivering the header of one we
-	/// opened.
-	fn reset_web(&mut self, code: u64) {
-		self.inner.reset_code(code, self.header.take());
+	fn poll_write_any(&mut self, cx: &mut Context<'_>, buf: &mut impl Buf) -> Poll<Result<usize, Error>> {
+		let SendState::Open(stream) = &mut self.state else {
+			return Poll::Ready(Err(Error::Quic("stream already finished".to_string())));
+		};
+		match ready!(stream.poll_write(cx, buf)) {
+			Ok(n) => Poll::Ready(Ok(n)),
+			Err(err) => Poll::Ready(Err(self.map(err))),
+		}
 	}
 }
 
 impl web_transport_trait::poll::SendStream for SendStream {
 	type Error = Error;
 
-	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
-		match web_transport_trait::poll::SendStream::poll_write(&mut self.inner, cx, buf) {
-			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
-			other => other,
-		}
+	fn poll_write(&mut self, cx: &mut Context<'_>, mut buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		self.poll_write_any(cx, &mut buf)
 	}
 
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
-		match web_transport_trait::poll::SendStream::poll_write_buf(&mut self.inner, cx, buf) {
-			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
-			other => other,
-		}
+		self.poll_write_any(cx, buf)
 	}
 
 	fn set_priority(&mut self, order: i32) {
-		self.inner.set_priority(order.into());
+		SendStream::set_priority(self, order.into());
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
-		web_transport_trait::poll::SendStream::finish(&mut self.inner).map_err(|err| self.map(err))
+		let stream = match std::mem::replace(&mut self.state, SendState::Reset) {
+			SendState::Open(stream) => stream,
+			// Already finished or reset, so the FIN it wanted is out. A finished stream keeps
+			// its handle, which `poll_closed` and `reset` still need.
+			done => {
+				self.state = done;
+				return Ok(());
+			}
+		};
+		// A STOP_SENDING beat us here. Carry the code like `poll_write` does, or
+		// `moq_net::Error::from_transport` cannot decode a routine cancellation. Dropping the
+		// stream echoes the code.
+		if let Some(code) = stream.stop_code() {
+			return Err(self.map(send::Error::Stopped(code)));
+		}
+		self.state = SendState::Finished(stream.finish());
+		Ok(())
 	}
 
 	fn reset(&mut self, code: u32) {
-		match self.web {
-			true => self.reset_web(proto::error_to_http3(code)),
-			false => web_transport_trait::poll::SendStream::reset(&mut self.inner, code),
+		let code = match self.web {
+			true => http3_code(proto::error_to_http3(code)),
+			false => VarInt::from_u32(code),
+		};
+		match std::mem::replace(&mut self.state, SendState::Reset) {
+			SendState::Open(stream) => match self.header {
+				Some(header) => stream.reset_at(header, code),
+				None => stream.reset(code),
+			},
+			SendState::Finished(stream) => match self.header {
+				Some(header) => stream.reset_at(header, code),
+				None => stream.reset(code),
+			},
+			SendState::Reset => {}
 		}
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		match web_transport_trait::poll::SendStream::poll_closed(&mut self.inner, cx) {
-			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
-			other => other,
-		}
-	}
-}
-
-impl Drop for SendStream {
-	fn drop(&mut self) {
-		// The inner `Drop` resets with a raw 0, which reads to a browser as an
-		// HTTP/3 stream error rather than the WebTransport cancellation that
-		// dropping a stream means. moq cancels subscriptions by dropping, so
-		// this is the ordinary path.
-		if self.web && !self.inner.ended() {
-			self.reset_web(proto::error_to_http3(0));
-		}
+		let stopped = match &mut self.state {
+			SendState::Open(stream) => ready!(stream.poll_stopped(cx)),
+			SendState::Finished(stream) => ready!(stream.poll_stopped(cx)),
+			SendState::Reset => return Poll::Ready(Ok(())),
+		};
+		Poll::Ready(match stopped {
+			Ok(None) => Ok(()),
+			Ok(Some(code)) => Err(self.map(send::Error::Stopped(code))),
+			Err(err) => Err(self.map(err)),
+		})
 	}
 }
 
 impl std::fmt::Debug for SendStream {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		self.inner.fmt(f)
+		match &self.state {
+			SendState::Open(stream) => stream.fmt(f),
+			SendState::Finished(stream) => stream.fmt(f),
+			SendState::Reset => f.write_str("Reset"),
+		}
 	}
+}
+
+/// An HTTP/3 error code as a QUIC one; every code HTTP/3 maps to fits.
+fn http3_code(code: u64) -> VarInt {
+	VarInt::from_u64(code).expect("HTTP/3 codes are varints")
 }
 
 /// An incoming stream; its WebTransport header was consumed on accept.
 pub struct RecvStream {
-	inner: super::RecvStream,
+	/// Taken by [`stop`](web_transport_trait::poll::RecvStream::stop), since
+	/// `web_transport_trait` stops through `&mut self`.
+	inner: Option<recv::Stream>,
 	web: bool,
 }
 
 impl RecvStream {
-	fn map(&self, err: Error) -> Error {
-		map(self.web, err)
+	fn new(mut inner: recv::Stream, web: bool) -> Self {
+		// Same as the send side: the driver stops with a raw 0.
+		if web {
+			inner.set_drop_stop(http3_code(proto::error_to_http3(0)));
+		}
+		Self {
+			inner: Some(inner),
+			web,
+		}
 	}
 
-	/// Lease the stream's unreleased bytes. See [`super::RecvStream::poll_lease`].
-	pub fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<super::Lease<'_>, Error>> {
+	/// Lease the stream's unreleased bytes. See [`recv::Stream::poll_lease`].
+	pub fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<recv::Lease<'_>, Error>> {
 		let web = self.web;
-		self.inner.poll_lease(cx, want).map_err(|err| map(web, err))
+		match &mut self.inner {
+			Some(inner) => inner.poll_lease(cx, want).map_err(|err| map(web, err.into())),
+			None => Poll::Ready(Err(Error::Closed)),
+		}
 	}
 
-	/// Rank this stream for eviction. See [`super::RecvStream::set_priority`].
+	/// Rank this stream for eviction. See [`recv::Stream::set_priority`].
 	pub fn set_priority(&mut self, priority: i64) {
-		self.inner.set_priority(priority);
+		if let Some(inner) = &mut self.inner {
+			inner.set_priority(priority);
+		}
 	}
 }
 
@@ -1027,47 +1086,54 @@ fn map(web: bool, err: Error) -> Error {
 impl web_transport_trait::poll::RecvStream for RecvStream {
 	type Error = Error;
 
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		match web_transport_trait::poll::RecvStream::poll_read(&mut self.inner, cx, dst) {
-			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
-			other => other,
-		}
+	fn poll_read(&mut self, cx: &mut Context<'_>, mut dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		let web = self.web;
+		let Some(inner) = &mut self.inner else {
+			return Poll::Ready(Err(Error::Closed));
+		};
+		inner.poll_read(cx, &mut dst).map_err(|err| map(web, err.into()))
 	}
 
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
-		match web_transport_trait::poll::RecvStream::poll_read_chunk(&mut self.inner, cx, max) {
-			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
-			other => other,
+		let web = self.web;
+		let Some(inner) = &mut self.inner else {
+			return Poll::Ready(Err(Error::Closed));
+		};
+		if max == 0 {
+			return Poll::Ready(Ok(Some(Bytes::new())));
 		}
+		inner.poll_read_chunk(cx, max).map_err(|err| map(web, err.into()))
 	}
 
 	fn stop(&mut self, code: u32) {
-		match self.web {
-			true => self.inner.stop_code(proto::error_to_http3(code)),
-			false => web_transport_trait::poll::RecvStream::stop(&mut self.inner, code),
+		let code = match self.web {
+			true => http3_code(proto::error_to_http3(code)),
+			false => VarInt::from_u32(code),
+		};
+		if let Some(inner) = self.inner.take() {
+			inner.stop(code);
 		}
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		match web_transport_trait::poll::RecvStream::poll_closed(&mut self.inner, cx) {
-			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
-			other => other,
-		}
-	}
-}
-
-impl Drop for RecvStream {
-	fn drop(&mut self) {
-		// Same as the send side: the inner `Drop` stops with a raw 0.
-		if self.web && !self.inner.ended() {
-			self.inner.stop_code(proto::error_to_http3(0));
-		}
+		let web = self.web;
+		let Some(inner) = &mut self.inner else {
+			return Poll::Ready(Ok(()));
+		};
+		Poll::Ready(match ready!(inner.poll_closed(cx)) {
+			Ok(None) => Ok(()),
+			Ok(Some(code)) => Err(map(web, Error::Reset(code.into_inner()))),
+			Err(err) => Err(map(web, err.into())),
+		})
 	}
 }
 
 impl std::fmt::Debug for RecvStream {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		self.inner.fmt(f)
+		match &self.inner {
+			Some(inner) => inner.fmt(f),
+			None => f.write_str("Stopped"),
+		}
 	}
 }
 
@@ -1136,7 +1202,7 @@ enum VarPoll {
 }
 
 impl VarRead {
-	fn poll(&mut self, cx: &mut Context<'_>, recv: &mut super::RecvStream) -> Poll<VarPoll> {
+	fn poll(&mut self, cx: &mut Context<'_>, recv: &mut recv::Stream) -> Poll<VarPoll> {
 		loop {
 			let need = match self.have {
 				0 => 1,
@@ -1149,11 +1215,7 @@ impl VarRead {
 				}
 				return Poll::Ready(VarPoll::Value(value));
 			}
-			match ready!(web_transport_trait::poll::RecvStream::poll_read(
-				recv,
-				cx,
-				&mut self.buf[self.have..need]
-			)) {
+			match ready!(recv.poll_read(cx, &mut &mut self.buf[self.have..need])) {
 				Ok(Some(n)) => self.have += n,
 				Ok(None) | Err(_) => return Poll::Ready(VarPoll::End),
 			}
@@ -1203,14 +1265,14 @@ enum UniClass {
 
 /// An incoming unidirectional stream mid-header.
 struct PendingUni {
-	recv: super::RecvStream,
+	recv: recv::Stream,
 	typ: VarRead,
 	session: VarRead,
 	typ_value: Option<u64>,
 }
 
 impl PendingUni {
-	fn new(recv: super::RecvStream) -> Self {
+	fn new(recv: recv::Stream) -> Self {
 		Self {
 			recv,
 			typ: VarRead::default(),
@@ -1282,15 +1344,15 @@ fn classify_uni(web: &Rc<Web>, cx: &mut Context<'_>) -> bool {
 
 /// An incoming bidirectional stream mid-header: frame type, then session id.
 struct PendingBi {
-	send: super::SendStream,
-	recv: super::RecvStream,
+	send: send::Stream,
+	recv: recv::Stream,
 	typ: VarRead,
 	session: VarRead,
 	typ_value: Option<u64>,
 }
 
 impl PendingBi {
-	fn new(send: super::SendStream, recv: super::RecvStream) -> Self {
+	fn new(send: send::Stream, recv: recv::Stream) -> Self {
 		Self {
 			send,
 			recv,
@@ -1347,29 +1409,17 @@ fn classify_bi(web: &Rc<Web>, cx: &mut Context<'_>) -> bool {
 
 // ── Handshake plumbing ──────────────────────────────────────────────
 
-async fn open_uni(conn: &mut Connection) -> Result<super::SendStream, Error> {
-	std::future::poll_fn(|cx| web_transport_trait::poll::Session::poll_open_uni(conn, cx)).await
-}
-
-async fn accept_bi(conn: &mut Connection) -> Result<(super::SendStream, super::RecvStream), Error> {
-	std::future::poll_fn(|cx| web_transport_trait::poll::Session::poll_accept_bi(conn, cx)).await
-}
-
-async fn write_all(send: &mut super::SendStream, mut buf: &[u8]) -> Result<(), Error> {
-	while !buf.is_empty() {
-		let n = std::future::poll_fn(|cx| web_transport_trait::poll::SendStream::poll_write(send, cx, buf)).await?;
-		buf = &buf[n..];
-	}
-	Ok(())
+async fn write_all(send: &mut send::Stream, buf: &[u8]) -> Result<(), Error> {
+	Ok(send.write_all(buf).await?)
 }
 
 /// Read another chunk into `buf`; `false` once the stream has ended.
 ///
 /// Fails rather than letting `buf` grow past [`MESSAGE_LIMIT`], which is what
 /// bounds a peer that declares a huge frame and never finishes it.
-async fn read_some(recv: &mut super::RecvStream, buf: &mut BytesMut) -> Result<bool, Error> {
+async fn read_some(recv: &mut recv::Stream, buf: &mut BytesMut) -> Result<bool, Error> {
 	let mut chunk = [0u8; 4096];
-	let n = std::future::poll_fn(|cx| web_transport_trait::poll::RecvStream::poll_read(recv, cx, &mut chunk)).await?;
+	let n = recv.read(&mut &mut chunk[..]).await?;
 	match n {
 		Some(n) => {
 			if buf.len() + n > MESSAGE_LIMIT {
@@ -1384,7 +1434,7 @@ async fn read_some(recv: &mut super::RecvStream, buf: &mut BytesMut) -> Result<b
 
 /// Read the SETTINGS off a control stream whose type varint was already
 /// consumed by classification.
-async fn read_settings(recv: &mut super::RecvStream) -> Result<proto::Settings, Error> {
+async fn read_settings(recv: &mut recv::Stream) -> Result<proto::Settings, Error> {
 	let mut buf = BytesMut::new();
 	// The decoder expects the stream to start with its type; re-seed the one
 	// byte classification took.
@@ -1403,7 +1453,7 @@ async fn read_settings(recv: &mut super::RecvStream) -> Result<proto::Settings, 
 }
 
 /// Read the CONNECT request off the first bidirectional stream.
-async fn read_connect(recv: &mut super::RecvStream) -> Result<proto::ConnectRequest, Error> {
+async fn read_connect(recv: &mut recv::Stream) -> Result<proto::ConnectRequest, Error> {
 	let mut buf = BytesMut::new();
 	loop {
 		let mut peek: &[u8] = &buf;
@@ -1423,7 +1473,7 @@ async fn read_connect(recv: &mut super::RecvStream) -> Result<proto::ConnectRequ
 /// Read the CONNECT stream until it ends, surfacing the peer's
 /// `CloseWebTransportSession` capsule (carried in HTTP/3 DATA frames) as the
 /// session's error, then close the connection.
-async fn read_capsules(web: Rc<Web>, conn: Connection, mut recv: super::RecvStream) {
+async fn read_capsules(web: Rc<Web>, conn: Connection, mut recv: recv::Stream) {
 	let mut capsules = Capsules::default();
 	let capsule = loop {
 		match capsules.take() {
