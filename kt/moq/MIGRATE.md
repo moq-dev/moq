@@ -32,7 +32,7 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 The records carry durations as `java.time.Duration` fields instead of `*Us` microsecond integers, so the duration extension properties are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
 Convert with `toKotlinDuration()` and `toJavaDuration()` where you want `kotlin.time.Duration`.
 `AudioEncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs = 0u` for the codec's own frame.
-`Subscription.maxDelay` has no default: pass `java.time.Duration.ZERO` for the old one.
+`Subscription.maxDelay` defaults to null, which sets no subscriber limit: start from `Subscription.default()`, or pass `java.time.Duration.ZERO`, for the old default.
 `TrackConsumer.info()` no longer throws.
 
 ### Connection state

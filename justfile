@@ -103,9 +103,10 @@ check $BASE="":
 ci $BASE="":
     CI_STRICT=1 NEXTEST_PROFILE=ci sh/dispatch.sh ci "$BASE"
 
-# Run the queue's Linux gate over every package.
-gate:
-    just ci --all
+# Run the queue's Linux gate over every package: `just gate [MODULE|-MODULE]...`
+# runs only the named modules, or skips each `-` one (see CHECK_MODULES).
+gate *modules:
+    CHECK_MODULES={{ quote(modules) }} just ci --all
 
 # Diff every published API against its last release: `just api-diff [--deny] [rust|js|ffi]...`.
 # `--deny` fails on any break, as backports into `release` must.

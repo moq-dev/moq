@@ -4,7 +4,7 @@
 
 moq-ffi depends on the UniFFI fork's renamed crates from crates.io, and every
 generator moq uses (Kotlin, Swift, Python, Go, Dart, C++, and C) comes from
-[kixelated/rust2](https://github.com/kixelated/rust2) through one pinned flake
+[moq-dev/rust2](https://github.com/moq-dev/rust2) through one pinned flake
 input. `rs/uniffi-bindgen`, `nix/uniffi-dart-*`, and the per-generator pins are
 deleted, and the three `kixelated/uniffi-*` generator forks are archived.
 The browser's TypeScript, generated through ubrn's `wasm2` flavour, still
@@ -17,7 +17,7 @@ undoes.
 Decided with the maintainer on 2026-10-13, after a review of how moq uses
 UniFFI:
 
-- **Base**: UniFFI. [The BoltFFI spike](https://github.com/kixelated/rust2/blob/main/bench/ffi/README.md#boltffi-comparison)
+- **Base**: UniFFI. [The BoltFFI spike](https://github.com/moq-dev/rust2/blob/main/bench/ffi/README.md#boltffi-comparison)
   recommended it. Decided later in #5838 (2026-10-17, maintainer):
   UniFFI-generated moq-ffi serves the browser too, through ubrn's `wasm2`
   flavour (chosen over BoltFFI and hand-written moq-wasm), so one binding
@@ -36,11 +36,11 @@ UniFFI:
   silently with upstream UniFFI.
 
 Decided with the maintainer on 2026-10-23: the hard fork lives in
-`kixelated/rust2`, not a new `moq-dev/uniffi`. rust2 groups Rust-to-other-language
+`moq-dev/rust2`, not a new `moq-dev/uniffi`. rust2 groups Rust-to-other-language
 tools (bindings, a TypeScript translator, build-speed work) under one setup.
 moq's generator code moves with it, including `rs/uniffi-bindgen`. The import
 and crates.io publishing are rust2's
-[UniFFI import quest](https://github.com/kixelated/rust2/blob/main/quest/m1/uniffi.md),
+[UniFFI import quest](https://github.com/moq-dev/rust2/blob/main/quest/m1/uniffi.md),
 which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
 `rust2-uniffi-bindgen`. This quest is the moq side:
 
@@ -53,7 +53,7 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
   differences.
 - **C names** (maintainer, 2026-10-24 and 2026-10-25): rust2's C generator
   names in GLib style
-  ([kixelated/rust2#66](https://github.com/kixelated/rust2/pull/66)).
+  ([moq-dev/rust2#66](https://github.com/moq-dev/rust2/pull/66)).
   Types are CamelCase with the namespace prefix (`MoqError`, `MoqStringList`,
   enum tags `<Enum>Tag`, async callbacks `<Function>Callback`), functions and
   enum constants keep their names, and any remaining clash fails generation
@@ -98,6 +98,6 @@ none.
 ## Related
 
 - [ubrn generates UniFFI 0.32 TypeScript](/quest/m2/rs2ts/ubrn-032.md) - the browser generator this switch must keep working
-- [Payload bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md) - the first patch the fork carries
-- [Kotlin calls](https://github.com/kixelated/rust2/blob/main/quest/m1/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
-- [Foreign poll for hot reads](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md) - a generated poll protocol the fork carries; dropping a future at cancel is optional here, since no moq quest waits on it
+- [Payload bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md) - the first patch the fork carries
+- [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
+- [Foreign poll for hot reads](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-poll-protocol.md) - a generated poll protocol the fork carries; dropping a future at cancel is optional here, since no moq quest waits on it
