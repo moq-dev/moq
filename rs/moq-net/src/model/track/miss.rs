@@ -560,7 +560,11 @@ impl Misses {
 		for run in self.wanted.iter().chain(self.given_up.iter()) {
 			again.remove(run.clone());
 		}
-		for (run, refill) in refills.iter().map(|run| (run, true)).chain(again.iter().map(|run| (run, false))) {
+		for (run, refill) in refills
+			.iter()
+			.map(|run| (run, true))
+			.chain(again.iter().map(|run| (run, false)))
+		{
 			// A fill's answer evicted before it was taken is no longer held for this reader.
 			let filled: Vec<u64> = self.filled.range(run.clone()).copied().collect();
 			for sequence in filled {
