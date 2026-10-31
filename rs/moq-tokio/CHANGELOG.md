@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.32](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.31...moq-tokio-v0.19.32) - 2026-10-31
+
+### Fixed
+
+- *(tokio)* refuse SETUP paths on URI bindings and keep iroh keys private on release
+
+### Other
+
+- format the release backport
+
 ## [0.19.31](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.30...moq-tokio-v0.19.31) - 2026-10-30
 
 ### Fixed
