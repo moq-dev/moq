@@ -5917,6 +5917,7 @@ dependencies = [
  "cfg_aliases",
  "core_affinity",
  "libc",
+ "nix",
  "rand 0.10.3",
  "socket2 0.6.5",
  "thiserror 2.0.21",

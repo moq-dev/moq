@@ -135,7 +135,8 @@ impl Sampler {
 
         if self.app_limited != 0 && self.delivered > self.app_limited {
             self.app_limited = 0;
-        } else if ack.app_limited {
+        }
+        if ack.app_limited {
             self.mark_app_limited(ack.in_flight);
         }
 

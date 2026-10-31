@@ -74,6 +74,46 @@ fn basic_src_ip() {
 	);
 }
 
+/// A wildcard sender must use the requested source even when the route prefers loopback.
+#[test]
+#[cfg(apple)]
+fn ipv4_source_address_override() {
+	use nix::{ifaddrs::getifaddrs, net::if_::InterfaceFlags};
+
+	let src_ip = getifaddrs()
+		.unwrap()
+		.filter(|interface| interface.flags.contains(InterfaceFlags::IFF_UP))
+		.filter_map(|interface| Some(interface.address?.as_sockaddr_in()?.ip()))
+		.find(|ip| !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast() && !ip.is_broadcast())
+		.expect("source override test needs an assigned non-loopback IPv4 address");
+	let send = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+	let recv = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+	recv.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+	let state = UdpSocketState::new((&send).into()).unwrap();
+	#[cfg(apple_fast)]
+	// SAFETY: the macOS test host supports sendmsg_x.
+	unsafe {
+		state.set_apple_fast_path()
+	};
+	socket2::SockRef::from(&send).set_nonblocking(false).unwrap();
+	state
+		.try_send(
+			(&send).into(),
+			&Transmit {
+				destination: recv.local_addr().unwrap(),
+				ecn: None,
+				contents: b"hello",
+				segment_size: None,
+				src_ip: Some(src_ip.into()),
+			},
+		)
+		.unwrap();
+	let mut buf = [0; 32];
+	let (received, source) = recv.recv_from(&mut buf).unwrap();
+	assert_eq!(&buf[..received], b"hello");
+	assert_eq!(source.ip(), src_ip);
+}
+
 // The WASI backend sets no ECN codepoint and always reports `None`.
 #[test]
 #[cfg(not(target_os = "wasi"))]

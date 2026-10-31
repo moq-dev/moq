@@ -48,7 +48,6 @@ fn send_via_sendmsg_x(state: &UdpSocketState, io: SockRef<'_>, transmit: &Transm
 			&mut hdrs[i],
 			&mut iovs[i],
 			&mut ctrls[i],
-			true,
 			state.sendmsg_einval(),
 		);
 		hdrs[i].msg_datalen = chunk.len();
@@ -69,7 +68,6 @@ fn prepare_msg_x(
 	hdr: &mut msghdr_x,
 	iov: &mut libc::iovec,
 	ctrl: &mut cmsg::Aligned<[u8; cmsg::LEN]>,
-	#[allow(unused_variables, reason = "kept for parity with the unix `prepare_msg` signature")] encode_src_ip: bool,
 	sendmsg_einval: bool,
 ) {
 	iov.iov_base = transmit.contents.as_ptr() as *const _ as *mut _;
@@ -99,12 +97,14 @@ fn prepare_msg_x(
 	if let Some(ip) = &transmit.src_ip {
 		match ip {
 			IpAddr::V4(v4) => {
-				if encode_src_ip {
-					let addr = libc::in_addr {
+				let pktinfo = libc::in_pktinfo {
+					ipi_ifindex: 0,
+					ipi_spec_dst: libc::in_addr {
 						s_addr: u32::from_ne_bytes(v4.octets()),
-					};
-					encoder.push(libc::IPPROTO_IP, libc::IP_RECVDSTADDR, addr);
-				}
+					},
+					ipi_addr: libc::in_addr { s_addr: 0 },
+				};
+				encoder.push(libc::IPPROTO_IP, libc::IP_PKTINFO, pktinfo);
 			}
 			IpAddr::V6(v6) => {
 				let pktinfo = libc::in6_pktinfo {

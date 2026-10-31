@@ -11,10 +11,18 @@ static ALLOCATOR: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 const PACKET: u16 = 1200;
 
+#[derive(Clone, Copy, Debug)]
+enum Mode {
+    Drain,
+    Steady,
+    Recovery,
+}
+
 /// Times the controller callbacks for `flight` packets acknowledged `batch` at a time, refilled as
 /// they are acknowledged if `steady`. The timed region includes copying each packet's state into
 /// the ACK, as a transport does, and excludes the fixture's own bookkeeping.
-fn measure(flight: usize, batch: usize, steady: bool) -> (Duration, usize) {
+fn measure(flight: usize, batch: usize, mode: Mode) -> (Duration, usize) {
+    let steady = !matches!(mode, Mode::Drain);
     let base = Instant::now();
     let region = Region::new(ALLOCATOR);
     let config = Bbr3Config {
@@ -36,6 +44,14 @@ fn measure(flight: usize, batch: usize, steady: bool) -> (Duration, usize) {
             bytes: PACKET,
             in_flight: (pn as u64 + 1) * bytes,
         }));
+    }
+    // End a persistent-congestion episode with this flight's ACKs. The loss itself happened
+    // before the flight was sent, so its first ACK exercises window restoration.
+    if matches!(mode, Mode::Recovery) {
+        bbr.prior_cwnd = bbr.cwnd;
+        bbr.recovery_start_time = Some(base - Duration::from_millis(1));
+        bbr.in_recovery = true;
+        bbr.cwnd = bbr.min_pipe_cwnd;
     }
     let mut acked = Vec::with_capacity(batch);
     let retained = || {
@@ -94,19 +110,19 @@ fn benchmark_per_packet() {
         size_of::<Bbr3>(),
         size_of::<Packet>()
     );
-    for steady in [false, true] {
+    for mode in [Mode::Drain, Mode::Steady, Mode::Recovery] {
         for flight in [16, 64, 1000, 4000, 16000] {
             for batch in [1, 8, 32] {
                 let mut samples = [Duration::ZERO; 3];
                 let mut bytes = 0;
                 for sample in &mut samples {
-                    let (elapsed, retained) = measure(flight, batch, steady);
+                    let (elapsed, retained) = measure(flight, batch, mode);
                     *sample = elapsed;
                     bytes = bytes.max(retained);
                 }
                 samples.sort();
                 println!(
-                    "bbr_packet steady={steady} flight={flight} batch={batch} cpu_ns={} peak_bytes={bytes}",
+                    "bbr_packet mode={mode:?} flight={flight} batch={batch} cpu_ns={} peak_bytes={bytes}",
                     samples[1].as_nanos()
                 );
             }
