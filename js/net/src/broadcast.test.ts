@@ -125,7 +125,7 @@ test("createTrack answers a queued request", async () => {
 	// No handler ever sees the request, and the lookup that opened it leaves the track open.
 	expect(await pendingRequest(broadcast)).toBeUndefined();
 	subscriber.close();
-	await broadcast.demand().unused();
+	await unwanted(producer.demand());
 	expect(producer.closed.peek()).toBeUndefined();
 
 	// Later subscriptions read the created track, and the name stays taken.
@@ -183,11 +183,11 @@ test("publishing-side subscriptions coalesce onto one request", async () => {
 	expect(await a.readString()).toBe("hello");
 	expect(await b.readString()).toBe("hello");
 	await info;
-	// The lookup leaves the shared producer to its subscribers, and stops counting as demand.
+	// The lookup leaves the shared producer to its subscribers.
 	expect(producer.closed.peek()).toBeUndefined();
 	a.close();
 	b.close();
-	await broadcast.demand().unused();
+	await unwanted(producer.demand());
 	expect(producer.closed.peek()).toBeUndefined();
 
 	producer.finish();
@@ -195,9 +195,8 @@ test("publishing-side subscriptions coalesce onto one request", async () => {
 	broadcast.close();
 });
 
-test("an info lookup joining a subscription's request stays demand after the subscriber leaves", async () => {
+test("an info lookup joining a subscription's request is answered after the subscriber leaves", async () => {
 	const broadcast = new BroadcastProducer();
-	const demand = broadcast.demand();
 	const pulled = wireOf(broadcast).requested();
 	const subscriber = broadcast.track("media").subscribe();
 	const info = broadcast.track("media").info();
@@ -208,11 +207,9 @@ test("an info lookup joining a subscription's request stays demand after the sub
 	subscriber.close();
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	expect(request.demand().wanted.peek()).toBeUndefined();
-	expect(demand.used.peek()).toBe(true);
 
-	request.accept({ timescale: Timescale.MILLI });
-	await info;
-	await demand.unused();
+	request.accept({ timescale: Timescale.MILLI, priority: 2 });
+	expect((await info).priority).toBe(2);
 	broadcast.close();
 });
 
@@ -235,7 +232,6 @@ test("an info lookup releases a request nobody subscribed to", async () => {
 
 test("held info lookups keep a request until the last one lets go", async () => {
 	const broadcast = new BroadcastProducer();
-	const demand = broadcast.demand();
 	const pulled = wireOf(broadcast).requested();
 	const first = new AbortController();
 	const opened = wireOf(broadcast).resolveTrackInfo("media", first.signal);
@@ -249,27 +245,22 @@ test("held info lookups keep a request until the last one lets go", async () => 
 	// The lookup that opened the request lets go first, under the one still holding it.
 	first.abort();
 	expect(producer.closed.peek()).toBeUndefined();
-	expect(demand.used.peek()).toBe(true);
 
 	second.abort();
 	expect(producer.closed.peek()).toBeDefined();
-	expect(demand.used.peek()).toBe(false);
 	broadcast.close();
 });
 
-test("an abandoned info lookup stops counting as demand, and its request goes once answered", async () => {
+test("an abandoned info lookup's request goes once answered", async () => {
 	const broadcast = new BroadcastProducer();
-	const demand = broadcast.demand();
 	const pulled = wireOf(broadcast).requested();
 	const hold = new AbortController();
 	const info = wireOf(broadcast).resolveTrackInfo("media", hold.signal);
 	const request = await pulled;
 	if (!request) throw new Error("expected request");
-	expect(demand.used.peek()).toBe(true);
 
 	hold.abort();
 	await expect(info).rejects.toThrow();
-	expect(demand.used.peek()).toBe(false);
 
 	// The handler still gets an open track, and the answer lets it go.
 	const producer = request.accept({ timescale: Timescale.MILLI });
@@ -278,45 +269,19 @@ test("an abandoned info lookup stops counting as demand, and its request goes on
 	broadcast.close();
 });
 
-test("a held info lookup on an inserted track counts as demand until it lets go", async () => {
+test("a held info lookup on an inserted track leaves it open when it lets go", async () => {
 	const broadcast = new BroadcastProducer();
-	const demand = broadcast.demand();
 	const track = broadcast.createTrack("media", { timescale: Timescale.MILLI });
 	const hold = new AbortController();
 	await wireOf(broadcast).resolveTrackInfo("media", hold.signal);
-	expect(demand.used.peek()).toBe(true);
 
 	hold.abort();
-	expect(demand.used.peek()).toBe(false);
 	expect(track.closed.peek()).toBeUndefined();
-	broadcast.close();
-});
-
-test("a held info lookup ending after removeTrack leaves demand alone", async () => {
-	const broadcast = new BroadcastProducer();
-	const demand = broadcast.demand();
-	const track = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	const subscriber = track.subscribe();
-	const hold = new AbortController();
-	await wireOf(broadcast).resolveTrackInfo("media", hold.signal);
-	expect(demand.used.peek()).toBe(true);
-
-	broadcast.removeTrack("media");
-	expect(demand.used.peek()).toBe(false);
-	hold.abort();
-	expect(demand.used.peek()).toBe(false);
-	subscriber.close();
-	await Promise.resolve();
-	expect(demand.used.peek()).toBe(false);
-
-	track.finish();
-	track.close();
 	broadcast.close();
 });
 
 test("removeTrack leaves a track that only a request serves", async () => {
 	const broadcast = new BroadcastProducer();
-	const demand = broadcast.demand();
 	const pulled = wireOf(broadcast).requested();
 	const subscriber = broadcast.track("media").subscribe();
 	const request = await pulled;
@@ -324,7 +289,6 @@ test("removeTrack leaves a track that only a request serves", async () => {
 	const producer = request.accept();
 
 	broadcast.removeTrack("media");
-	expect(demand.used.peek()).toBe(true);
 	expect(producer.closed.peek()).toBeUndefined();
 
 	subscriber.close();
@@ -713,59 +677,11 @@ test("aborting a fetch rejects with the signal's reason", async () => {
 	broadcast.close();
 });
 
-test("broadcast demand watches static and pending tracks rather than broadcast handles", async () => {
+test("a pending track info query is answered by its request, and closing rejects it", async () => {
 	const broadcast = new BroadcastProducer();
-	const demand = broadcast.demand();
-	const consumer = broadcast.consume();
-	expect(demand.used.peek()).toBe(false);
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const first = video.subscribe();
-	await Promise.resolve();
-	expect(demand.used.peek()).toBe(true);
-	const pulled = wireOf(broadcast).requested();
-	const second = consumer.track("audio").subscribe();
-	const request = await pulled;
-	if (!request) throw new Error("expected request");
-	const requested = request.demand();
-	expect(requested.wanted.peek()).toBeDefined();
-	first.close();
-	await Promise.resolve();
-	expect(demand.used.peek()).toBe(true);
-	second.close();
-	await unwanted(requested);
-	await demand.unused();
-	expect(demand.used.peek()).toBe(false);
-	request.reject(new Error("request refused"));
-	video.finish();
-	video.close();
-	broadcast.close();
-	expect(await demand.closed).toBeNull();
-	consumer.close();
-});
-
-test("broadcast closure clears active demand and subscriptions", async () => {
-	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const subscriber = track.subscribe();
-	const demand = broadcast.demand();
-	await Promise.resolve();
-	expect(demand.used.peek()).toBe(true);
-	broadcast.close();
-	expect(demand.used.peek()).toBe(false);
-	// Like Rust, a closed broadcast rejects rather than reporting it unused.
-	await expect(demand.unused()).rejects.toThrow("broadcast is closed");
-	subscriber.close();
-	track.finish();
-	track.close();
-});
-
-test("a pending track info query counts as broadcast demand", async () => {
-	const broadcast = new BroadcastProducer();
-	const demand = broadcast.demand();
 
 	const pending = wireOf(broadcast).requested();
 	const info = wireOf(broadcast).resolveTrackInfo("video");
-	expect(demand.used.peek()).toBe(true);
 
 	const request = await pending;
 	if (!request) throw new Error("expected request");
@@ -773,30 +689,8 @@ test("a pending track info query counts as broadcast demand", async () => {
 	expect(request.demand().wanted.peek()).toBeUndefined();
 	request.accept({ timescale: Timescale.MILLI, priority: 2 });
 	expect((await info).priority).toBe(2);
-	await demand.unused();
-	expect(demand.used.peek()).toBe(false);
 
-	// Closing the broadcast ends a query's demand at once.
 	const rejected = wireOf(broadcast).resolveTrackInfo("audio");
-	expect(demand.used.peek()).toBe(true);
 	broadcast.close();
-	expect(demand.used.peek()).toBe(false);
 	await expect(rejected).rejects.toThrow();
-});
-
-test("removeTrack stops counting the removed track's demand at once", async () => {
-	const broadcast = new BroadcastProducer();
-	const demand = broadcast.demand();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const subscriber = video.subscribe();
-	await Promise.resolve();
-	expect(demand.used.peek()).toBe(true);
-
-	broadcast.removeTrack("video");
-	expect(demand.used.peek()).toBe(false);
-
-	subscriber.close();
-	video.finish();
-	video.close();
-	broadcast.close();
 });

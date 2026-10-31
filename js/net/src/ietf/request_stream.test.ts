@@ -39,7 +39,7 @@ const GOAWAY = [0x10, 0, 2, 0, 0];
 
 test("an oversized or truncated request stream message type is a protocol violation", async () => {
 	// Both drafts use leading-ones varints.
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const oversized = Varint.encodeLeadingOnes(2n ** 53n);
 		// A two-byte varint prefix with its second byte missing.
 		const truncated = Uint8Array.of(0x80);
@@ -52,7 +52,7 @@ test("an oversized or truncated request stream message type is a protocol violat
 });
 
 test("namespace update framing refuses duplicate prefix parameters", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const body = [2, 2, 0x34, 1, 1, 97, 0, 1, 1, 98];
 		const reader = new Reader(undefined, Uint8Array.from([0, body.length, ...body]), version);
 		await expect(namespaceUpdate({ type: 2, reader }, version)).rejects.toBeInstanceOf(ProtocolViolation);
@@ -60,7 +60,7 @@ test("namespace update framing refuses duplicate prefix parameters", async () =>
 });
 
 test("a repeated namespace update token is a request refusal", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const body = [2, 2, 3, 3, 3, 0, 170, 0, 3, 3, 0, 170];
 		const reader = new Reader(undefined, Uint8Array.from([0, body.length, ...body]), version);
 		expect(await namespaceUpdate({ type: 2, reader }, version)).toEqual({
@@ -70,7 +70,7 @@ test("a repeated namespace update token is a request refusal", async () => {
 	}
 });
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 	test(`${versionName(version)} a request nobody reads yet still refuses a second GOAWAY`, async () => {
 		const { request, closes } = requested(version, Uint8Array.of(...GOAWAY, ...GOAWAY));
 		await request.ended;
@@ -109,7 +109,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 	});
 }
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 	test(`${versionName(version)} keeps GOAWAY state across request response phases`, async () => {
 		// GOAWAY, an empty REQUEST_OK, and another GOAWAY on the same stream.
 		const reader = new Reader(undefined, Uint8Array.of(0x10, 0, 2, 0, 0, 7, 0, 0, 0x10, 0, 2, 0, 0), version);

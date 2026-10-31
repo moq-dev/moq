@@ -26,7 +26,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [In-memory unsafe runs under Miri](/quest/m2/miri-memory.md) - kio's and moq-net's memory-only unsafe runs under a nightly Miri job
 - [VA-API renderer tests](/quest/m2/vaapi-render-tests.md) - the VA-API renderer, decode, and transcode tests run in `just rs gpu` on AMD and Intel and fail instead of skipping, and hosted CI reports them ignored
 - [Every opt-in test target has a CI caller](/quest/m2/test-inventory.md) - the merge gate flags ignored tests, fuzz and bench targets, recipes, and scripts no workflow runs
-- [Workflow and dependency security linting](/quest/m2/workflow-security.md) - zizmor gates workflow changes, and Nightly audits Go and Python dependencies
 - [Worklet bundler matrix and React hooks run in CI](/quest/m2/browser-test-gaps.md) - the worklet matrix runs nightly on pinned bundlers, and the React signal hooks have tests
 - [Every handwritten language has a format gate](/quest/m2/format-gates.md) - gofmt, ktfmt, swift-format, and clang-format join `just check`, and Ruff covers all Python
 - [Weekly mutation testing on critical modules](/quest/m2/mutants.md) - cargo-mutants runs weekly on moq-auth and moq-net's permission, resume, and expiry code
@@ -67,7 +66,6 @@ lite-07; bitrate enforcement is not part of this release.
 
 - [Pipelined requests](/quest/m2/pipeline-requests/README.md) - SUBSCRIBE and the first FETCH go out with the track-info request at every hop, so first data arrives a round trip sooner per hop
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
-- [OBS multitrack](/quest/m2/obs-multitrack.md) - the obs-moq output publishes OBS's native multitrack video encoders as simulcast renditions, configured like OBS multitrack and over obs-websocket
 - [MoQ in obs-studio](/quest/m2/obs-studio/README.md) - a native MoQ output and service merged into obs-studio, once its maintainers agree; the plugin carries it until then
 - [OBS source renditions](/quest/m2/obs-source-renditions.md) - the OBS source picks the best enabled decodable rendition, using a `preference` the bindings now carry, and resubscribes when a referenced publisher's epoch changes
 - [CMake qlog option for OBS](/quest/m2/obs-qlog.md) - an OBS build can opt into qlog trace capture through moq-ffi's `qlog` feature
@@ -89,24 +87,17 @@ lite-07; bitrate enforcement is not part of this release.
 - [Shared group serving and ingest](/quest/m2/shared-serve.md) - Rust's moq-lite and moq-transport sessions serve and ingest groups through one poll machine each, with only wire encoding per protocol
 - [Shared group serving and ingest in JS](/quest/m2/shared-serve-js.md) - the same split in js/net, following the Rust seam
 - [Paired bench BASE](/quest/m2/bench-base-paired.md) - `just bench <base>` uses the nightly's paired comparison and the old one is deleted
-- [Relay NixOS module](/quest/m2/nix-relay-module.md) - module edits run moq-relay's tests, and `cluster.rootUrl` takes several peers
-- [Read-only lookup](/quest/m2/read-only-lookup.md) - a live track lookup stops waking the front and every demand watcher
-- [Ordered owed wait](/quest/m2/ordered-owed-wait.md) - an ordered reader waits within max_delay for a missing group only while the track still owes it
-- [lite-05/06 gap judgement](/quest/m2/lite-legacy-gap.md) - a resumed copy on lite-05/06 never reads a descending track's newest group as its start
 - [Receive pool](/quest/m2/receive-pool.md) - one byte budget per worker covers every connection's receive credit and the cache, billing each frame once
 - [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) - measure browser baselines, complete WASM bindings, and adopt Rust behind @moq/net before the later JS-only stage
 - [Front parking](/quest/m2/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [Route wakes](/quest/m2/route-wakes.md) - a route change wakes only the fronts it can move, so pool churn stops scaling with served paths
-- [Flatten nested Options](/quest/m2/nested-options.md) - three moq-net functions stop building `Option<Option<_>>`, so the TS translation reaches them
 - [Fewer allocations in announce fan-out](/quest/m2/announce-fanout-allocs.md) - a deep path costs no more allocations per subscriber than a shallow one
-- [Keyed prefix polling](/quest/m2/keyed-prefix-polling.md) - `SubscriberDriver` polls only the prefixes a wake concerns, if a bench shows the slope
 - [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive track recovery over metadata-only subscriptions
 - [Wrapper traits over moq-net](/quest/m2/net-wrap/README.md) - moq-net exports producer and consumer traits, and every writer and reader above it takes them, so a wrapper such as e2ee passes through unchanged
 - [E2EE](/quest/m2/e2ee/README.md) - TypeScript and Rust peers interoperate over encrypted broadcasts no relay can decrypt
 - [iOS capture](/quest/m2/mobile-capture-ios.md) - Rust captures the camera and screen on iOS, setting the catalog rotation
 - [Android capture](/quest/m2/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs and setting the catalog rotation
 - [Time stretch](/quest/m2/watch-audio-time-stretch.md) - js/watch: the audio ring converges by time-stretching instead of skipping or going silent
-- [Audio join budget](/quest/m2/audio-join-budget.md) - `moq-audio` joining at the latest group loses no group a publisher bursts before its budget widens
 - [Latest readers use Range::live()](/quest/m2/readers-range-live.md) - after #6278, readers start at the live edge without waiting on `largest()`
 - [Media QA audio cases](/quest/m2/media-qa-audio.md) - AAC, audio codec/rate/channel changes, rendition switches, output mute/volume, and a native publisher's A/V sync are graded like the video cases
 - [Audio outlives video](/quest/m2/audio-bufferbloat-av.md) - under bufferbloat audio stays within budget while video may skip, rendered frames stay in sync, and native audio rows are enforced
@@ -119,7 +110,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Go cancelled results](/quest/m2/go-cancelled-result.md) - a Go call cancelled as it completes destroys the handle it produced instead of leaving it to the finalizer
 - [Dart on iOS](/quest/m2/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
 - [Mobile completion](/quest/m2/mobile-completion.md) - verify the Swift and Kotlin bindings over Rust-owned capture
-- [Browser publishing paths under test](/quest/m2/publish-firefox.md) - the media harness publishes from Firefox too, covering the worker capture and video-element fallback Chromium never takes
+- [Browser publishing paths under test](/quest/m2/publish-firefox.md) - the media harness publishes from Firefox in Nightly and passes, covering the `<video>` capture fallback Chromium never takes
 - [Bindings in the interop matrix](/quest/m2/interop-bindings.md) - Kotlin, Swift, and Dart publish and subscribe against every other interop client
 - [WebGPU HDR](/quest/m2/webgpu-hdr.md) - HDR renditions play as HDR where the browser and display can show it, and tone-map to SDR elsewhere
 - [HLS restart drain cutoff](/quest/m2/hls-restart-drain-cutoff.md) - a moq-hls recording of a replaced run finishes at a finite boundary while the successor starts at once
@@ -150,7 +141,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Shared fullscreen, formatters, and stats cards in @moq/ui](/quest/m2/ui-shared-controls.md) - watch and publish stop keeping copies of their shared controls
 - [moqsrc A/V sync](/quest/m2/moqsrc-av-sync.md) - a nightly test measures A/V skew from `moqsrc` through clock-synced sinks
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
-- [Importers fill the VR fields](/quest/m2/mux-vr-fields.md) - MP4, Matroska, and Opus imports set the catalog's projection, stereo, and ambisonic layout
 - [fMP4 ambisonic layout](/quest/m2/mux-vr-ambisonic-fmp4.md) - fMP4 Opus import fills `ambisonic` from the `dOps` mapping table
 - [Linux decoded frames](/quest/m2/obs-decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
@@ -194,8 +184,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - moq-uring receives from the buffer ring and transmits into caller-owned buffers with no copy, once a profile says where
 - [BBR media study](/quest/m2/quic-bbr-study.md) - whether Google's growth recognition and precautionary probe stop help media, measured on a shaped media harness
 - [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - native publishers pick `Realtime`, a receive-ts delay-based controller that keeps the uplink queue near empty for teleoperation
-- [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides
-- [Socket close](/quest/m2/quic-socket-close.md) - moq-tokio's QUIC endpoint releases its socket on close, so it drops its wrapper
 - [Windows.Graphics.Capture](/quest/m2/capture-wgc.md) - the WGC display and window backend verified on real Windows hardware
 - [Windows capture parity](/quest/m2/capture-windows.md) - system and per-app audio and a settled app-capture policy
 - [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture, per-app audio, and explicit display-selection and app-capture limits
@@ -213,7 +201,6 @@ lite-07; bitrate enforcement is not part of this release.
 
 - [Archive time ranges](/quest/m2/archive-time-ranges.md) - a `Time(pts)` range on an archive consumer broadcast resolves from the archive's keys, however old
 - [DVR rewind](/quest/m2/archive-dvr.md) - follow-on capability after the release contract is stable
-- [An errored track end keeps its history](/quest/m2/errored-end.md) - a replayed archive ends with its source's error after serving every stored group, instead of a clean finish
 
 - [JS HLS field](/quest/m2/js-hls.md) - follow-on capability after the release contract is stable
 
@@ -223,7 +210,6 @@ lite-07; bitrate enforcement is not part of this release.
 
 - [Task supervision](/quest/m2/task-supervision.md) - the auth decider loop, stats publisher, and moq-tokio's token and WebSocket internals are supervised like #5447's tasks
 - [Auth serve bound address](/quest/m2/auth-serve-bound-addr.md) - `moq auth serve` logs the port it actually bound
-- [Relay exposes a verified peer address](/quest/m2/relay-peer-addr.md) - WebRTC and other embedded routes know the client's socket address
 - [RTMP client reports a publish or play error](/quest/m2/rtmp-client-error.md) - a refused publish or play surfaces its reason
 - [H.264 parsing with maintained crates](/quest/m2/h264-reader.md) - moq-mux parses SPS VUI with h264-reader and shares one bit reader across codec config parsers
 - [avcC and hvcC through mp4-atom](/quest/m2/mp4-atom-config.md) - moq-mux stops hand-writing the decoder config records its mp4-atom dependency already parses
@@ -238,7 +224,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Dead code and API surface audit](/quest/m2/audit-dead-code.md) - repeat the removal audit before the next major release
 - [Typecheck with bun check](/quest/m2/bun-check.md) - workspace packages typecheck through bun once nixpkgs ships bun 1.4.4
 - [Declare each check module once in the dispatcher](/quest/m2/dispatch-modules.md) - one registration call per module replaces its parallel tables
-- [Upgrade Biome to 2.6](/quest/m2/biome-2-6.md) - the workspace runs Biome 2.6.4+ with its new formatters off and no file reformatted
 - [Format YAML with Biome](/quest/m2/biome-yaml.md) - `just check` fails on unformatted YAML
 - [Format Markdown with Biome](/quest/m2/biome-markdown.md) - Biome formats every Markdown file and remark is gone, landed in a quiet window
 - [Test coverage audit](/quest/m2/audit-test-coverage.md) - repeat the coverage audit against the m1 baselines after the next release ships
@@ -262,11 +247,9 @@ lite-07; bitrate enforcement is not part of this release.
 - [Branch checks lint examples](/quest/m2/lint-examples.md) - `just check` runs clippy on the selected crates' examples
 - [Drop kio's epoch fence](/quest/m2/crossbeam-pin-fence.md) - waiting on crossbeam#1352, then the `Read::drop` fence goes
 - [A cancelled miss stops waiting](/quest/m2/fill-wait-cancel-test.md) - a test proves a relay miss waiting on its own fill ends when no reader wants it
-- [Quiet logs for clean ends](/quest/m2/quiet-clean-close-logs.md) - clean probe ends and unroutable requests log at debug
 - [No MOQ_* knobs outside the binaries](/quest/m2/env-knobs.md) - test, bench, and library knobs leave the `MOQ_*` prefix
 - [Clean ALSA playback onset](/quest/m2/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
 - [Interop audit](/quest/m2/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
-- [Open-GOP MPEG-2 export](/quest/m2/mpeg2-open-gop-export.md) - a TS export resuming in an open GOP trims the B-pictures that reference the previous one
 - [Resume delivers late groups below its resume point](/quest/m2/resume-late-groups.md) - a bonus: groups that arrive late after a route change are delivered instead of written off
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
 - [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
@@ -281,3 +264,4 @@ lite-07; bitrate enforcement is not part of this release.
 - [An ended HLS playlist has no trailing gap](/quest/m2/hls-trailing-gap.md) - no zero-duration `EXT-X-GAP` before `EXT-X-ENDLIST`
 - [moq-video's Apple Sink encodes on its own thread](/quest/m2/apple-sink-thread.md) - macOS and iOS ladders never encode on a tokio worker
 - [The test inventory sees JS bench scripts](/quest/m2/js-bench-inventory.md) - JS bench entry points are resolved by the inventory gate
+- [/fetch answers from the announce sync](/quest/m2/fetch-synced.md) - a missing broadcast gets a 404 once announcements are synced, not after 30 s
