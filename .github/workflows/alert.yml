@@ -1,18 +1,20 @@
 name: Alert
 
 # Posts cron, release, and deployment failures to the Discord #alerts channel.
-# PRs, merge queues, branch validation, and cache warming stay on GitHub.
+# PRs, the landing gate, branch validation, and cache warming stay on GitHub.
 #
 # Needs a DISCORD_WEBHOOK repo secret (Discord: Channel > Integrations >
 # Webhooks). Nothing else reads it.
 
 on:
-  workflow_run:
+  # Reads only the run's metadata; it never checks out or runs the run's code.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     # Matched by workflow `name:`, not filename. Watch cron and publishing
     # workflows only, avoiding a skipped Alert run on every CI completion.
     # `just gh check` enforces coverage and the exclusions in alert.sh.
     workflows:
       - apt-repo
+      - CodSpeed
       - Docker
       - Interop
       - moq-c
@@ -65,7 +67,6 @@ jobs:
       github.event.workflow_run.conclusion == 'timed_out') &&
       github.event.workflow_run.event != 'pull_request' &&
       github.event.workflow_run.event != 'pull_request_target' &&
-      github.event.workflow_run.event != 'merge_group' &&
       (github.event.workflow_run.event == 'schedule' ||
       !contains(fromJSON('["Interop", "Nightly", "Smoke", "Smoke toolchain update", "TS", "Video"]'), github.event.workflow_run.name))
     runs-on: ubuntu-latest

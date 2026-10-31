@@ -154,23 +154,22 @@ impl Session {
 
 	/// Subscribe to a broadcast by path, waiting until a route covers it.
 	///
-	/// Rejects with the close reason if the session closes first.
-	#[wasm_bindgen(unchecked_return_type = "Promise<Broadcast | undefined>")]
+	/// Rejects with why it failed, such as an invalid path, or with the close reason if the
+	/// session closes first.
+	#[wasm_bindgen(unchecked_return_type = "Promise<Broadcast>")]
 	pub fn consume(&self, path: String) -> Promise {
 		let session = self.inner.clone();
 		let consumer = self.consumer.clone();
 		future_to_promise(async move {
-			let request = pin!(async { consumer.follow(path.as_str(), None).ok()?.available().await.ok() });
+			let request = pin!(async { consumer.follow(path.as_str(), None)?.available().await });
 			// The origin outlives the session, so its wait alone never ends on a close.
 			let closed = pin!(session.closed());
 			match select(request, closed).await {
-				Either::Left((inner, _)) => Ok(inner.map_or(JsValue::UNDEFINED, |inner| {
-					Broadcast {
-						inner,
-						freed: Freed::new(),
-					}
-					.into()
-				})),
+				Either::Left((inner, _)) => Ok(Broadcast {
+					inner: inner.map_err(js_err)?,
+					freed: Freed::new(),
+				}
+				.into()),
 				Either::Right((err, _)) => Err(js_err(err)),
 			}
 		})

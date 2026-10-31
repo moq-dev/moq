@@ -31,10 +31,12 @@ pub mod web;
 
 mod driver;
 
-pub use driver::{Connection, Lease, RecvStream, SendGroup, SendOptions, SendStream};
+pub use driver::{Connection, recv, send};
 pub use endpoint::Endpoint;
 /// The flow-control limits a live connection can change; see [`Connection::set_limits`].
 pub use moq_quic::{Limits, LimitsError};
+/// Stream identity, and the varint every QUIC code is.
+pub use moq_quic::{VarInt, stream};
 
 /// A TLS certificate chain and the private key that signs for it, as PEM.
 /// One value, so neither half can be configured alone.
@@ -155,7 +157,7 @@ pub enum Error {
 	#[error("stream stopped: {0}")]
 	Stop(u64),
 	/// The connection window was stuck and this stream was discarded to free
-	/// it. See [`RecvStream::poll_lease`]. The peer hears of it once the
+	/// it. See [`recv::Stream::poll_lease`]. The peer hears of it once the
 	/// stream is stopped, so call `stop` with your own code: dropping the
 	/// stream sends code 0.
 	#[error("stream evicted")]

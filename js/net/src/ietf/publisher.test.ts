@@ -14,6 +14,7 @@ import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
+import { unwanted } from "../util/demand.ts";
 import { wireOf } from "../wire.ts";
 import type * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
@@ -192,7 +193,7 @@ function publisher(
 	};
 }
 
-const IETF_VERSIONS = [Version.DRAFT_18, Version.DRAFT_22] as const;
+const IETF_VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
 
 /** A request stream recording what the publisher writes, with the requester's side under test control. */
 function requestStream(version: IetfVersion) {
@@ -261,7 +262,7 @@ test("TRACK_STATUS is answered on every draft without subscribing", async () => 
 
 			const { stream, wire } = requestStream(version);
 			// Only draft-22 can carry the opt-out.
-			await pub.runTrackStatusRequest(trackStatus("room", wanted || version < Version.DRAFT_22), stream);
+			await pub.runTrackStatusRequest(trackStatus("room", wanted || version < Version.DRAFT_20), stream);
 			expect(subscribed).not.toHaveBeenCalled();
 
 			const r = wire();
@@ -271,7 +272,7 @@ test("TRACK_STATUS is answered on every draft without subscribing", async () => 
 
 			expect(ok.largest).toEqual({ groupId: 4n, objectId: 1n });
 			const expected =
-				!wanted && version >= Version.DRAFT_22
+				!wanted && version >= Version.DRAFT_20
 					? {}
 					: {
 							timescale: Timescale.MILLI,
@@ -334,7 +335,7 @@ test("TRACK_STATUS outside the grant is refused on every draft", async () => {
 // Nothing answers a SUBSCRIBE while its broadcast resolves, yet the request stream is still
 // read: a second GOAWAY then closes the session at once, not once an answer goes out.
 test("a second GOAWAY on an unanswered SUBSCRIBE closes the session", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
@@ -417,12 +418,14 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		const served = new BroadcastProducer();
 		const trackRequest = wireOf(served).requested();
 		hooks.acceptRequest(request, served);
-		expect((await trackRequest)?.name).toBe("video");
-		expect(served.demand().used.peek()).toBe(true);
+		const track = await trackRequest;
+		expect(track?.name).toBe("video");
 		late.cancel();
 		await looking;
 		expect(late.written).toEqual([]);
-		await served.demand().unused();
+		// The withdrawn lookup no longer holds the track, so the answer lets it go.
+		const producer = track?.accept({ timescale: Timescale.MILLI });
+		await producer?.closed;
 
 		await requests.return?.();
 		served.close();
@@ -467,12 +470,14 @@ test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", as
 		const served = new BroadcastProducer();
 		const trackRequest = wireOf(served).requested();
 		hooks.acceptRequest(request, served);
-		expect((await trackRequest)?.name).toBe("video");
-		expect(served.demand().used.peek()).toBe(true);
+		const track = await trackRequest;
+		if (!track) throw new Error("no request for video");
+		expect(track.name).toBe("video");
+		expect(track.demand().wanted.peek()).toBeDefined();
 		late.withdraw();
 		await subscribing;
 		expect(late.written).toEqual([]);
-		await served.demand().unused();
+		await unwanted(track.demand());
 
 		await requests.return?.();
 		served.close();
@@ -556,7 +561,7 @@ test("Range Filters over MAX_FILTER_RANGES zero get INVALID_FILTER", async () =>
 });
 
 test("RENDEZVOUS_TIMEOUT has a zero cap with TIMEOUT for a requested wait", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		// A wait applies only to a missing publisher; a missing track on a live one does not exist.
 		for (const [namespace, trackName, live] of [
 			["missing", "video", false],
@@ -2267,7 +2272,7 @@ test.each([
 });
 
 test("subscription completion sends PUBLISH_DONE on every supported draft", async () => {
-	const versions = [Version.DRAFT_18, Version.DRAFT_22] as const;
+	const versions = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
 
 	for (const version of versions) {
 		// A revocation bridged from upstream keeps its meaning: UNAUTHORIZED, not INTERNAL_ERROR.
@@ -2354,6 +2359,7 @@ interface ServedFill {
 /** The subprotocol each draft negotiates, so the mock pair names the version under test. */
 const ALPNS: Record<IetfVersion, string> = {
 	[Version.DRAFT_18]: ALPN.DRAFT_18,
+	[Version.DRAFT_20]: ALPN.DRAFT_20,
 	[Version.DRAFT_22]: ALPN.DRAFT_22,
 };
 
@@ -2831,7 +2837,7 @@ test("draft-22: a backwards range within one group serves nothing and ends the s
 	}
 });
 
-test.each(["ascending", "descending"] as const)("draft-22: a sparse fill serves cached groups %s", async (order) => {
+test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refused in %s order", async (order) => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	for (const sequence of [0, 3, 9]) {
@@ -2857,12 +2863,18 @@ test.each(["ascending", "descending"] as const)("draft-22: a sparse fill serves 
 		const fill = await nextUni(fx.uni);
 		if (!fill) throw new Error("missing fill stream");
 		const served = await readFill(fill, order);
-		expect(served.reset).toBeUndefined();
-		expect(served.requestId).toBe(7n);
-		const sequences = order === "ascending" ? [0, 3, 9] : [9, 3, 0];
-		expect(served.objects).toEqual(
-			sequences.flatMap((group) => [0, 1].map((id) => ({ group, id, payload: `${group}.${id}` }))),
-		);
+		expect(served.reset).toBeDefined();
+		expect(served.objects).toEqual([]);
+		const live = track.appendGroup();
+		live.writeFrame({ payload: new TextEncoder().encode("live"), timestamp: Timestamp.now() });
+		live.finish();
+		const objects = [];
+		while (objects.length === 0) {
+			const stream = await nextUni(fx.uni);
+			if (!stream) throw new Error("subscription ended with its refused fill");
+			objects.push(...(await readGroup(stream)).objects);
+		}
+		expect(objects).toEqual([{ id: 0, payload: "live" }]);
 	} finally {
 		fx.close();
 		client.close();
@@ -3224,80 +3236,12 @@ test("draft-22: a clean close past a bounded filter's end still sends PUBLISH_DO
 	}
 });
 
-/**
- * An absolute fill ending below the live edge with no end object reads until its group
- * closes, which a group still being written may never do. The subscriber leaving has to end
- * it: watching only the fetch stream would pin the group and its cache subscription for the
- * life of the track.
- */
-test("draft-22: the subscriber leaving ends a fill still reading its group", async () => {
-	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-
-	// Group 0 stays open, so a fill over it has no end of its own to wait for. Group 1 puts
-	// the live edge above it, which is what leaves the requested end object unset.
-	const open = track.appendGroup();
-	open.writeFrame({ payload: new TextEncoder().encode("0.0"), timestamp: Timestamp.now() });
-	writeGroup(track, 1);
-
-	const { client } = await runSubscribe(
-		fx,
-		new Subscribe({
-			requestId: 7n,
-			trackNamespace: Path.from("test"),
-			trackName: "video",
-			subscriberPriority: 0,
-			filter: { kind: "nextObject" },
-			fill: {
-				filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 0n },
-				rangeFilters: false,
-			},
-		}),
-	);
-
-	try {
-		const fill = await nextUni(fx.uni);
-		if (!fill) throw new Error("no fetch stream for the requested fill");
-
-		// The fill is parked on a group that is never going to close on its own, so this only
-		// settles once the subscriber leaving cancels it.
-		const [data, observed] = fill.tee();
-		const reading = readFill(data);
-		// Opening the stream precedes fetching the group. Observe an actual object so the
-		// cancellation tests a fill reading its open group, even when header writes yield.
-		const reader = new Reader(observed, undefined, V22);
-		expect(await reader.u53()).toBe(FetchHeader.type);
-		await FetchHeader.decode(reader, V22);
-		const flags = await reader.u53();
-		if (flags & 0x08) await reader.u53();
-		if (flags & 0x04) await reader.u53();
-		if (flags & 0x10) await reader.u8();
-		if (flags & 0x20) await reader.read(await reader.u53());
-		expect(new TextDecoder().decode(await reader.read(await reader.u53()))).toBe("0.0");
-		reader.stop(new Error("observation complete"));
-		client.close();
-
-		// A reset discards what the peer has not acknowledged, so the objects already written
-		// may or may not survive it. That it ends at all, reset as CANCELLED, is the whole point.
-		const served = await reading;
-		expect(served.reset).toMatchObject({ code: StreamCode.Cancel });
-	} finally {
-		open.finish();
-		fx.close();
-		client.close();
-	}
-});
-
-// A fill's FILL_TIMEOUT bounds its wait as a FETCH's does. Zero takes only what is cached, so
-// the open group's missing tail is a Timed-Out gap rather than a wait the fill never ends.
-test("draft-22: a fill's FILL_TIMEOUT marks what it did not wait for", async () => {
+test.each([0, 1000])("draft-22: FILL_TIMEOUT=%s is ignored for a largest-group fill", async (timeout) => {
 	using _clock = manual();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const open = track.appendGroup();
 	open.writeFrame({ payload: new TextEncoder().encode("0.0"), timestamp: Timestamp.now() });
-	writeGroup(track, 1);
-
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -3306,23 +3250,13 @@ test("draft-22: a fill's FILL_TIMEOUT marks what it did not wait for", async () 
 			trackName: "video",
 			subscriberPriority: 0,
 			filter: { kind: "nextObject" },
-			fill: {
-				filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 0n },
-				fillTimeout: Milli(0),
-				rangeFilters: false,
-			},
+			fill: { filter: { kind: "relative", groups: 1n }, fillTimeout: Milli(timeout), rangeFilters: false },
 		}),
 	);
-
 	try {
 		const fill = await nextUni(fx.uni);
-		if (!fill) throw new Error("no fetch stream for the requested fill");
-		const served = await readFill(fill);
-		expect(served.reset).toBeUndefined();
-		expect(served.objects).toEqual([
-			{ group: 0, id: 0, payload: "0.0" },
-			{ group: 0, id: Number(2n ** 62n - 1n), payload: "end 20c" },
-		]);
+		if (!fill) throw new Error("missing fill");
+		expect(await readFill(fill)).toMatchObject({ objects: [{ group: 0, id: 0, payload: "0.0" }] });
 	} finally {
 		open.finish();
 		fx.close();
@@ -3967,7 +3901,7 @@ test("namespace subscription survives requester FIN and stops on STOP_SENDING", 
 });
 
 test("namespace updates move the prefix after acknowledgement", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const { pub, origin } = publisher(pair.server, {
 			session: new NativeSession(pair.server, version, false),
@@ -3996,7 +3930,7 @@ test("namespace updates move the prefix after acknowledgement", async () => {
 			await RequestOk.decode(client.reader, version);
 			expect(await client.reader.u53()).toBe(SubscribeNamespaceEntry.id);
 			expect((await SubscribeNamespaceEntry.decode(client.reader, version)).suffix).toBe(Path.from("second"));
-			if (version >= Version.DRAFT_22) {
+			if (version >= Version.DRAFT_20) {
 				await client.writer.write(Uint8Array.from([0x02, 0, 6, 4, 1, 0x34, 1, 1, 46]));
 				expect(await client.reader.u53()).toBe(RequestError.id);
 				expect((await RequestError.decode(client.reader, version)).errorCode).toBe(0x10);
@@ -4172,7 +4106,7 @@ test("draft-22: an update fills its snapshot under its own request ID", async ()
 		const parameters = new Parameters();
 		parameters.subscriptionFilter = { kind: "nextObject" };
 		parameters.fillParameters = Filter.encodeFill(
-			{ filter: { kind: "unfiltered" }, groupOrder: "ascending", rangeFilters: false },
+			{ filter: { kind: "relative", groups: 1n }, groupOrder: "ascending", rangeFilters: false },
 			fx.version,
 		);
 		await client.writer.u53(SubscribeUpdate.id);
@@ -4193,7 +4127,7 @@ test("draft-22: an update fills its snapshot under its own request ID", async ()
 		expect(served.requestId).toBe(2n);
 		expect(served.reset).toBeUndefined();
 		expect(served.objects).toEqual(
-			[0, 1, 2].flatMap((group) => [0, 1].map((id) => ({ group, id, payload: `${group}.${id}` }))),
+			[2].flatMap((group) => [0, 1].map((id) => ({ group, id, payload: `${group}.${id}` }))),
 		);
 	} finally {
 		client.close();
@@ -4439,9 +4373,9 @@ test("draft-22: widening with a fill keeps the open live group", async () => {
 		if (!live) throw new Error("missing initial open group");
 		const reading = readGroup(live);
 		const parameters = new Parameters();
-		parameters.subscriptionFilter = { kind: "absolute", startGroup: 0n, startObject: 0n };
+		parameters.subscriptionFilter = { kind: "absolute", startGroup: 1n, startObject: 0n };
 		parameters.fillParameters = Filter.encodeFill(
-			{ filter: { kind: "unfiltered" }, groupOrder: "ascending", rangeFilters: false },
+			{ filter: { kind: "relative", groups: 1n }, groupOrder: "ascending", rangeFilters: false },
 			fx.version,
 		);
 		await client.writer.u53(SubscribeUpdate.id);
@@ -4450,10 +4384,7 @@ test("draft-22: widening with a fill keeps the open live group", async () => {
 		await RequestOk.decode(client.reader, fx.version);
 		const fill = await nextUni(fx.uni);
 		if (!fill) throw new Error("missing update fill");
-		expect((await readFill(fill, "ascending")).objects).toEqual([
-			{ group: 0, id: 0, payload: "0.0" },
-			{ group: 1, id: 0, payload: "1.0" },
-		]);
+		expect((await readFill(fill, "ascending")).objects).toEqual([{ group: 1, id: 0, payload: "1.0" }]);
 		open.writeFrame({ payload: new TextEncoder().encode("1.1"), timestamp: Timestamp.now() });
 		open.finish();
 		// The live stream still owns the rest of its group, so nothing else repeats it.
@@ -4461,55 +4392,6 @@ test("draft-22: widening with a fill keeps the open live group", async () => {
 			{ id: 0, payload: "1.0" },
 			{ id: 1, payload: "1.1" },
 		]);
-		expect(await nextUni(fx.uni)).toBeUndefined();
-	} finally {
-		open.finish();
-		client.close();
-		track.finish();
-		track.close();
-		fx.close();
-	}
-});
-
-test("draft-22: widening with a fill resumes after the open live group's end", async () => {
-	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	writeGroup(track, 1);
-	const open = track.appendGroup();
-	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
-	const { client } = await runSubscribe(
-		fx,
-		new Subscribe({
-			requestId: 0n,
-			trackNamespace: Path.from("test"),
-			trackName: "video",
-			subscriberPriority: 0,
-			filter: { kind: "absolute", startGroup: 1n, startObject: 0n, endGroup: 1n, endObject: 1n },
-		}),
-	);
-	try {
-		const live = await nextUni(fx.uni);
-		if (!live) throw new Error("missing initial open group");
-		const reading = readGroup(live);
-		const parameters = new Parameters();
-		parameters.subscriptionFilter = { kind: "absolute", startGroup: 0n, startObject: 0n };
-		parameters.fillParameters = Filter.encodeFill(
-			{ filter: { kind: "unfiltered" }, groupOrder: "ascending", rangeFilters: false },
-			fx.version,
-		);
-		await client.writer.u53(SubscribeUpdate.id);
-		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
-		expect(await client.reader.u53()).toBe(RequestOk.id);
-		await RequestOk.decode(client.reader, fx.version);
-		for (const payload of ["1.1", "1.2"])
-			open.writeFrame({ payload: new TextEncoder().encode(payload), timestamp: Timestamp.now() });
-		open.finish();
-		// The live stream keeps the objects up to its old end, so the tail starts after them.
-		expect((await reading).objects).toEqual([
-			{ id: 0, payload: "1.0" },
-			{ id: 1, payload: "1.1" },
-		]);
-		expect((await readServed(fx.uni, 2)).sort()).toEqual(["0.0", "1.0", "1.2"]);
 		expect(await nextUni(fx.uni)).toBeUndefined();
 	} finally {
 		open.finish();
@@ -4549,14 +4431,14 @@ test("draft-22: a fill-only update short of the edge keeps the live join's floor
 		await RequestOk.decode(client.reader, fx.version);
 		const fill = await nextUni(fx.uni);
 		if (!fill) throw new Error("missing update fill");
-		expect((await readFill(fill, "ascending")).objects).toEqual([{ group: 0, id: 0, payload: "0.0" }]);
+		expect((await readFill(fill, "ascending")).reset).toBeDefined();
 		open.writeFrame({ payload: new TextEncoder().encode("1.1"), timestamp: Timestamp.now() });
 		open.finish();
 		expect((await reading).objects).toEqual([
 			{ id: 0, payload: "1.0" },
 			{ id: 1, payload: "1.1" },
 		]);
-		// Only the fill carries group 0; the live cursor never owned it.
+		// The refused fill never changes the live cursor.
 		expect(await nextUni(fx.uni)).toBeUndefined();
 	} finally {
 		open.finish();
@@ -4629,13 +4511,13 @@ test.each([
 		const reading = readGroup(live).then(() => undefined, error);
 		for (const [requestId, startGroup, startObject] of [
 			[2n, group, object],
-			[4n, 0n, 0n],
+			[4n, 1n, 0n],
 		] as const) {
 			const parameters = new Parameters();
 			parameters.subscriptionFilter = { kind: "absolute", startGroup, startObject };
-			if (startGroup === 0n)
+			if (requestId === 4n)
 				parameters.fillParameters = Filter.encodeFill(
-					{ filter: { kind: "unfiltered" }, groupOrder: "ascending", rangeFilters: false },
+					{ filter: { kind: "relative", groups: 1n }, groupOrder: "ascending", rangeFilters: false },
 					fx.version,
 				);
 			await client.writer.u53(SubscribeUpdate.id);
@@ -4646,7 +4528,7 @@ test.each([
 		expect(await reading).toMatchObject({ code: StreamCode.Cancel });
 		open.writeFrame({ payload: new TextEncoder().encode("1.1"), timestamp: Timestamp.now() });
 		open.finish();
-		expect((await readServed(fx.uni, 2)).sort()).toEqual(["0.0", "1.0", "1.1"]);
+		expect((await readServed(fx.uni, 2)).sort()).toEqual(["1.0", "1.1"]);
 	} finally {
 		open.finish();
 		client.close();

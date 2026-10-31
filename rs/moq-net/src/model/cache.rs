@@ -1157,6 +1157,15 @@ impl Charge {
 		self.touch(WRITE_BOOST)
 	}
 
+	/// Release `n` charged bytes the group dropped while still cached, without an access.
+	pub(super) fn sub(&mut self, n: u64) {
+		if let Some(track) = &self.track {
+			let n = n.min(self.bytes);
+			track.pool.sub(n);
+			self.bytes -= n;
+		}
+	}
+
 	/// The group's full cached footprint: payload bytes plus overhead.
 	pub(super) fn size(&self) -> u64 {
 		self.bytes

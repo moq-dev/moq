@@ -24,13 +24,12 @@ on-demand saved, without losing the past.
 - JS (`js/publish/src/audio/encoder.ts`) and Rust (`rs/moq-audio` capture)
   both switch. The always-on default from their sibling quests becomes the
   opt-out.
+- `moq import capture --audio` gains `buffered` beside `on`, `demand`, and
+  `off`, as its default (decided 2026-10-29). Update `--help` and
+  `doc/bin/cli.md`.
 
 Tests: no subscriber for a few seconds, then a subscriber with `maxDelay`
 covering the last second receives that second, timestamps matching capture
 time. Memory stays bounded by `maxAge` or the cap.
 
 Public API: default behavior change for audio. Wire: none.
-
-## Required
-
-- [@moq/publish encodes while enabled](/quest/m1/eager-encode/js.md) - the JS always-on path this switches from

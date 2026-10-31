@@ -79,7 +79,8 @@ mod tests {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
@@ -282,7 +283,9 @@ mod tests {
 		let client = Client::new(client::Config::default());
 		let url = format!("http://{address}/whip/ingested").parse().expect("WHIP URL");
 		let source = origin.consume();
-		let pushed = tokio::spawn(async move { client.publish(url, source, "source").await });
+		let broadcast = source.request("source", None).await.unwrap();
+		let source = moq_mux::Source::new(source, broadcast);
+		let pushed = tokio::spawn(async move { client.publish(url, source).await });
 		let ingested = ingest_origin.consume();
 		let ingested = ingested.follow("ingested", None).unwrap().available().await.unwrap();
 		let mut played = opus_output(&ingested).await;
@@ -395,7 +398,12 @@ mod tests {
 		// Each client call resolves once its session ends, so the test drives them aside.
 		let whip_client = tokio::spawn({
 			let client = client.clone();
-			async move { client.publish(whip, source_consumer, "source").await }
+			async move {
+				let broadcast = source_consumer.request("source", None).await?;
+				client
+					.publish(whip, moq_mux::Source::new(source_consumer, broadcast))
+					.await
+			}
 		});
 		let (whip_id, whip_task) = tokio::time::timeout(TIMEOUT, sources_rx.recv())
 			.await

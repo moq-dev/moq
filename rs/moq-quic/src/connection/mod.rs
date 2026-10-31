@@ -43,7 +43,6 @@ mod ack_frequency;
 use ack_frequency::AckFrequencyState;
 
 mod assembler;
-pub use assembler::Chunk;
 
 mod bandwidth_probe;
 use bandwidth_probe::BandwidthProbe;
@@ -53,7 +52,7 @@ use cid_state::CidState;
 
 mod datagrams;
 use datagrams::DatagramState;
-pub use datagrams::{Datagrams, SendDatagramError};
+pub use datagrams::Datagrams;
 
 mod mtud;
 #[cfg(feature = "mux")]
@@ -101,10 +100,7 @@ pub use stats::{CreditStats, FrameStats, PathStats, Stats, UdpStats};
 
 mod streams;
 pub(crate) use streams::StreamsState;
-pub use streams::{
-	Chunks, ClosedStream, FinishError, LeaseError, Leased, ReadError, ReadableError, RecvStream, SendGroup, SendGroups,
-	SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
-};
+pub use streams::{ShouldTransmit, StreamEvent, Streams, recv, send};
 
 mod timer;
 use crate::congestion::{self, Controller};
@@ -123,8 +119,8 @@ use timer::{Timer, TimerTable};
 /// - B. Handlers for incoming events from the network or system, named `handle_*`.
 /// - C. State machine mutators, for incoming commands from the application. For convenience we
 ///   refer to this as "performing I/O" below, however as per the design of this library none of the
-///   functions actually perform system-level I/O. For example, [`read`](RecvStream::read) and
-///   [`write`](SendStream::write), but also things like [`reset`](SendStream::reset).
+///   functions actually perform system-level I/O. For example, [`read`](recv::Stream::read) and
+///   [`write`](send::Stream::write), but also things like [`reset`](send::Stream::reset).
 /// - D. Polling functions for outgoing events or actions for the caller to
 ///   take, named `poll_*`.
 ///
@@ -209,6 +205,8 @@ pub struct Connection {
 	permit_idle_reset: bool,
 	/// Negotiated idle timeout
 	idle_timeout: Option<Duration>,
+	/// Keep-alive interval, derived from [`Self::idle_timeout`] unless configured
+	keep_alive: Option<Duration>,
 	/// The time we send next bundled ACK
 	///
 	/// The goal is to wait long enough for the peer to acknowledge our previous
@@ -355,6 +353,8 @@ impl Connection {
 				None | Some(VarInt(0)) => None,
 				Some(dur) => Some(Duration::from_millis(dur.0)),
 			},
+			// Armed only once established, after the peer's parameters set it.
+			keep_alive: None,
 			timers: TimerTable::default(),
 			authentication_failures: 0,
 			early_1rtt: Vec::new(),
@@ -458,17 +458,17 @@ impl Connection {
 
 	/// Provide control over the send groups that schedule outgoing streams
 	#[must_use]
-	pub fn send_groups(&mut self) -> SendGroups<'_> {
-		SendGroups {
+	pub fn send_groups(&mut self) -> send::Groups<'_> {
+		send::Groups {
 			state: &mut self.streams,
 		}
 	}
 
 	/// Provide control over streams
 	#[must_use]
-	pub fn recv_stream(&mut self, id: StreamId) -> RecvStream<'_> {
+	pub fn recv_stream(&mut self, id: StreamId) -> recv::Stream<'_> {
 		assert!(id.dir() == Dir::Bi || id.initiator() != self.side.side());
-		RecvStream {
+		recv::Stream {
 			id,
 			state: &mut self.streams,
 			pending: &mut self.spaces[SpaceId::Data].pending,
@@ -477,9 +477,9 @@ impl Connection {
 
 	/// Provide control over streams
 	#[must_use]
-	pub fn send_stream(&mut self, id: StreamId) -> SendStream<'_> {
+	pub fn send_stream(&mut self, id: StreamId) -> send::Stream<'_> {
 		assert!(id.dir() == Dir::Bi || id.initiator() == self.side.side());
-		SendStream {
+		send::Stream {
 			id,
 			state: &mut self.streams,
 			pending: &mut self.spaces[SpaceId::Data].pending,
@@ -1339,7 +1339,7 @@ impl Connection {
 	///
 	/// This does not ensure delivery of outstanding data. It is the application's responsibility to
 	/// call this only when all important communications have been completed, e.g. by calling
-	/// [`SendStream::finish`] on outstanding streams and waiting for the corresponding
+	/// [`send::Stream::finish`] on outstanding streams and waiting for the corresponding
 	/// [`StreamEvent::Finished`] event.
 	///
 	/// If [`Streams::send_streams`] returns 0, all outstanding stream data has been
@@ -1404,11 +1404,6 @@ impl Connection {
 		stats.credit = self.streams.credit_stats();
 
 		stats
-	}
-
-	/// The bytes leased from receive stream `id` with [`RecvStream::lease()`], if it has a lease
-	pub fn leased(&self, id: StreamId) -> Option<&Leased> {
-		self.streams.leased(id)
 	}
 
 	/// Assert that the receive lease books balance, for the fuzz target.
@@ -2179,11 +2174,16 @@ impl Connection {
 	}
 
 	fn reset_keep_alive(&mut self, now: Instant) {
-		let interval = match self.config.keep_alive {
+		let interval = match self.keep_alive {
 			Some(x) if self.state.is_established() => x,
 			_ => return,
 		};
-		self.timers.set(Timer::KeepAlive, now + interval);
+		// A peer may advertise an idle timeout whose derived interval is too far out to represent;
+		// that keep-alive never fires.
+		match now.checked_add(interval) {
+			Some(deadline) => self.timers.set(Timer::KeepAlive, deadline),
+			None => self.timers.stop(Timer::KeepAlive),
+		}
 	}
 
 	fn reset_cid_retirement(&mut self) {
@@ -3620,7 +3620,11 @@ impl Connection {
 	fn set_peer_params(&mut self, params: TransportParameters) {
 		self.streams.set_params(&params);
 		self.idle_timeout = negotiate_max_idle_timeout(self.config.max_idle_timeout(), Some(params.max_idle_timeout));
-		trace!("negotiated max idle timeout {:?}", self.idle_timeout);
+		self.keep_alive = transport::keep_alive_interval(self.config.keep_alive, self.idle_timeout);
+		trace!(
+			"negotiated max idle timeout {:?}, keep-alive {:?}",
+			self.idle_timeout, self.keep_alive
+		);
 		if let Some(info) = params.preferred_address {
 			self.rem_cids
 				.insert(NewConnectionId {
