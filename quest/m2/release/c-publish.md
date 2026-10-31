@@ -19,6 +19,10 @@ published package; its source stays until
 The smoke client moves here rather than with
 [C consumers](/quest/m2/c/consumers.md) because it checks a published archive,
 and the generated one publishes only after that quest (decided 2026-10-31).
+The move also takes the client off `moq_origin_announced_broadcast` onto the
+generated `request`/`follow`, so
+[Smoke clients use request and follow](/quest/m2/release/smoke-bindings-rename.md)
+leaves the C client to this quest.
 
 ## Required
 
