@@ -20,7 +20,3 @@ Filters, so the profile patch the pin also applies needs rebasing in the same
 bump. Run `just test interop --all` and the Moxygen smoke lane.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - the other upstream Moxygen fix the smoke lane waits on

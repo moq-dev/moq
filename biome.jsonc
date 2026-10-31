@@ -135,5 +135,17 @@
 		"formatter": {
 			"quoteStyle": "double"
 		}
+	},
+	// Biome 2.6 formats YAML and Markdown by default. Keep both off until a
+	// deliberate, repo-wide reformat turns them on.
+	"yaml": {
+		"formatter": {
+			"enabled": false
+		}
+	},
+	"markdown": {
+		"formatter": {
+			"enabled": false
+		}
 	}
 }
