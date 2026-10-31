@@ -1634,32 +1634,35 @@ mod tests {
 	/// Capture policy values cannot leak into rendition selection or unsupported commands.
 	#[test]
 	fn media_modes_are_command_specific() {
-		let mut commands = vec![vec!["export", "fmp4"]];
+		// Each command and the arguments that follow its flags: export's selection flags
+		// come before the sink.
+		let mut commands = vec![(vec!["export"], vec!["fmp4"])];
 		if cfg!(feature = "play") {
-			commands.push(vec!["play"]);
+			commands.push((vec!["play"], vec![]));
 		}
 		if cfg!(feature = "capture") {
-			commands.push(vec!["import", "capture"]);
+			commands.push((vec!["import", "capture"], vec![]));
 		}
-		for command in commands {
+		for (command, rest) in commands {
+			let argv = |flags: &[&'static str]| [vec!["moq"], command.clone(), flags.to_vec(), rest.clone()].concat();
 			for flag in ["--video", "--audio"] {
 				for mode in ["on", "off", "demand", "buffered", "always", "true"] {
-					let argv = [vec!["moq"], command.clone(), vec![flag, mode]].concat();
+					let argv = argv(&[flag, mode]);
 					let supported =
 						matches!(mode, "on" | "off") || (command == ["import", "capture"] && mode == "demand");
 					assert_eq!(Invocation::try_parse_from(argv.clone()).is_ok(), supported, "{argv:?}");
 				}
-				let argv = [vec!["moq"], command.clone(), vec![flag]].concat();
+				let argv = argv(&[flag]);
 				assert!(
-					Invocation::try_parse_from(argv).is_err(),
-					"{command:?} {flag} needs a value"
+					Invocation::try_parse_from(argv.clone()).is_err(),
+					"{argv:?} needs a value"
 				);
 			}
 			for flag in ["--no-video", "--no-audio", "--on-demand"] {
-				let argv = [vec!["moq"], command.clone(), vec![flag]].concat();
+				let argv = argv(&[flag]);
 				assert!(
-					Invocation::try_parse_from(argv).is_err(),
-					"{command:?} {flag} was removed"
+					Invocation::try_parse_from(argv.clone()).is_err(),
+					"{argv:?} was removed"
 				);
 			}
 		}
