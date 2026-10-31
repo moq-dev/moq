@@ -117,6 +117,8 @@ struct Splice {
 pub(crate) struct ExportSource {
 	/// The rendition's ID in the catalog.
 	name: String,
+	source: crate::Source,
+	priority_control: Option<crate::source::Priority>,
 	target: Target,
 	state: SourceState,
 	/// Wire format, consumed when the subscription resolves into a consumer.
@@ -277,6 +279,8 @@ impl ExportSource {
 	fn new(source: &crate::Source, name: &str, target: Target, media: HangContainer, max_delay: Duration) -> Self {
 		Self {
 			name: name.to_string(),
+			source: source.clone(),
+			priority_control: None,
 			state: target.request(source),
 			target,
 			media: Some(media),
@@ -524,7 +528,7 @@ impl ExportSource {
 				Err(_) if self.instance_ended(waiter) => return self.end(),
 				Err(err) => return Poll::Ready(Err(err.into())),
 			};
-			self.state = SourceState::Subscribing(track.subscribe(subscription));
+			self.state = SourceState::Subscribing(track.subscribe(self.source.subscription(subscription)));
 		}
 
 		// Resolve the subscription before reading any frames.
@@ -545,6 +549,7 @@ impl ExportSource {
 				.media
 				.take()
 				.expect("media present until the subscription resolves");
+			self.priority_control = Some(self.source.control(track.control())?);
 			let consumer = Consumer::new(track, media);
 			let consumer = match self.live {
 				true => consumer.live(),
@@ -625,6 +630,7 @@ impl ExportSource {
 						return Poll::Ready(Ok(Some(Event::Cut { observed })));
 					}
 					None => {
+						self.priority_control = None;
 						self.finish_ends();
 						return Poll::Ready(Ok(None));
 					}
@@ -676,6 +682,7 @@ impl ExportSource {
 	pub(crate) fn stop(&mut self) {
 		self.finish_ends();
 		self.state = SourceState::Ended;
+		self.priority_control = None;
 		self.instance = None;
 	}
 
@@ -683,6 +690,7 @@ impl ExportSource {
 	fn end(&mut self) -> Poll<crate::Result<Option<Event>>> {
 		self.finish_ends();
 		self.state = SourceState::Ended;
+		self.priority_control = None;
 		Poll::Ready(Ok(None))
 	}
 

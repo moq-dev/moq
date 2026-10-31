@@ -1740,14 +1740,18 @@ test("a route superseded while its properties are checked stops being asked", as
 	const sub = front.consumer.track("seq").subscribe();
 	await sub.info();
 	// b never answers what the track is, so its splice waits on it.
-	void wireOf(b).requested();
+	const pulled = wireOf(b).requested();
 	front.serve(b.consume());
 	await settle();
-	expect(b.demand().used.peek()).toBe(true);
+	const request = await pulled;
+	if (!request) throw new Error("b was never asked");
 
 	front.serve(c.consume());
 	await settle();
-	expect(b.demand().used.peek()).toBe(false);
+	// Nobody asks b any more, so its late answer is let go.
+	const late = request.accept();
+	await settle();
+	expect(late.closed.peek()).toBeDefined();
 
 	sub.close();
 	front.consumer.close();

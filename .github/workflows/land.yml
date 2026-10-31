@@ -53,9 +53,11 @@ jobs:
   check:
     needs: resolve
     runs-on: ${{ vars.MOQ_QUEUE_RUNNER }}
-    # One job tests the whole batch and each bisected prefix, and a timeout lands
-    # nothing and ejects nothing, so leave room; the runner is self-hosted.
-    timeout-minutes: 240
+    # One job tests the whole batch, each bisected prefix, and after an ejection
+    # the rest of the queue. A timeout lands and ejects nothing, so the check's
+    # --budget stops after an ejection at 150 minutes, leaving room for the
+    # bisection already under way (about five checks of up to half an hour).
+    timeout-minutes: 360
     permissions:
       contents: read
     outputs:
@@ -87,7 +89,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           mkdir -p .tmp/land
           printf '%s' "$PLAN" > .tmp/land/plan.json
-          result=$(quest land check .tmp/land/plan.json -- nix develop --command just ci "$BASE")
+          result=$(quest land check .tmp/land/plan.json --budget 150 -- nix develop --command just ci "$BASE")
           printf 'result=%s\n' "$result" >> "$GITHUB_OUTPUT"
       - name: Upload build timings
         if: ${{ !cancelled() }}

@@ -359,7 +359,7 @@ async fn subscribe(
 					Some(
 						moq_net::announce::Event::Start(update)
 						| moq_net::announce::Event::Update(update)
-						| moq_net::announce::Event::Restart(update),
+						| moq_net::announce::Event::Restart(update) | moq_net::announce::Event::Takeover { announce: update, .. },
 					) => update,
 					Some(moq_net::announce::Event::End(_)) => continue,
 					None => break,
@@ -389,7 +389,8 @@ async fn subscribe(
 			Some(
 				moq_net::announce::Event::Start(update)
 				| moq_net::announce::Event::Update(update)
-				| moq_net::announce::Event::Restart(update),
+				| moq_net::announce::Event::Restart(update)
+				| moq_net::announce::Event::Takeover { announce: update, .. },
 			) => update,
 			Some(moq_net::announce::Event::End(_)) => continue,
 			None => break,

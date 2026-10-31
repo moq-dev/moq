@@ -16,6 +16,28 @@ use std::task::{Poll, ready};
 /// The broadcast held for each path, shared by a source's clones and its requests.
 type Pins = Arc<Mutex<HashMap<moq_net::Path, moq_net::broadcast::Consumer>>>;
 
+#[derive(Default)]
+struct Priorities {
+	value: i8,
+	controls: HashMap<usize, std::sync::Weak<moq_net::track::Control>>,
+}
+
+/// A program's control registration, removed with the subscription that owns it.
+pub(crate) struct Priority {
+	control: Arc<moq_net::track::Control>,
+	shared: Arc<Mutex<Priorities>>,
+}
+
+impl Drop for Priority {
+	fn drop(&mut self) {
+		self.shared
+			.lock()
+			.expect("priorities poisoned")
+			.controls
+			.remove(&(Arc::as_ptr(&self.control) as usize));
+	}
+}
+
 /// The subscription side of an export: an origin and the catalog broadcast that drives it.
 ///
 /// Every rendition (including ones whose catalog `broadcast` field references a sibling
@@ -44,6 +66,7 @@ pub struct Source {
 	origin: moq_net::origin::Consumer,
 	path: moq_net::Path,
 	pins: Pins,
+	priority: Arc<Mutex<Priorities>>,
 	/// What each rendition an export reads through this source has received. See
 	/// [`stats`](Self::stats).
 	received: Arc<crate::stats::Registry<crate::stats::Received>>,
@@ -65,6 +88,7 @@ impl Source {
 			origin,
 			path,
 			pins: Arc::new(Mutex::new(pins)),
+			priority: Arc::default(),
 			received: Default::default(),
 		}
 	}
@@ -77,8 +101,49 @@ impl Source {
 			origin: self.origin.clone(),
 			path: self.path.clone(),
 			pins: Arc::new(Mutex::new(pins)),
+			priority: Arc::default(),
 			received: self.received.clone(),
 		}
+	}
+
+	/// Give one export its own delivery preferences while sharing bindings and counters.
+	pub(crate) fn isolate(&mut self) {
+		self.priority = Arc::default();
+	}
+
+	/// Set the subscriber priority of this program's current and future tracks.
+	pub(crate) fn priority(&self, value: i8) -> moq_net::Result<()> {
+		let mut priority = self.priority.lock().expect("priorities poisoned");
+		priority.value = value;
+		for control in priority.controls.values().filter_map(std::sync::Weak::upgrade) {
+			match control.update(control.subscription().with_priority(value)) {
+				Ok(()) | Err(moq_net::Error::Closed) => {}
+				Err(err) => return Err(err),
+			}
+		}
+		Ok(())
+	}
+
+	/// Start a new track at the program's current priority.
+	pub(crate) fn subscription(&self, subscription: moq_net::track::Subscription) -> moq_net::track::Subscription {
+		subscription.with_priority(self.priority.lock().expect("priorities poisoned").value)
+	}
+
+	/// Keep a track at its program's priority until the returned registration drops.
+	pub(crate) fn control(&self, control: moq_net::track::Control) -> moq_net::Result<Priority> {
+		let mut priority = self.priority.lock().expect("priorities poisoned");
+		match control.update(control.subscription().with_priority(priority.value)) {
+			Ok(()) | Err(moq_net::Error::Closed) => {}
+			Err(err) => return Err(err),
+		}
+		let control = Arc::new(control);
+		priority
+			.controls
+			.insert(Arc::as_ptr(&control) as usize, Arc::downgrade(&control));
+		Ok(Priority {
+			control,
+			shared: self.priority.clone(),
+		})
 	}
 
 	/// The counters an export reading rendition `name` bumps.
@@ -484,6 +549,41 @@ mod tests {
 	use super::*;
 	use hang::catalog::{H264, VideoConfig};
 	use moq_net::path::Relative;
+
+	/// Priorities belong to one export, follow late tracks, preserve delivery bounds, and
+	/// retain no subscription once its owning reader drops.
+	#[tokio::test(start_paused = true)]
+	async fn export_priorities_follow_subscription_ownership() {
+		let origin = produce_origin();
+		let source = created(&origin);
+		let mut independent = source.clone();
+		independent.isolate();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("audio", None).unwrap();
+		let preferences = moq_net::track::Subscription::default()
+			.with_max_delay(std::time::Duration::from_secs(3))
+			.with_range(5..=10);
+		let first = track.subscribe(preferences.clone());
+		let held = source.control(first.control()).unwrap();
+		let other = track.subscribe(preferences.clone());
+		let _other = independent.control(other.control()).unwrap();
+
+		source.priority(-1).unwrap();
+		assert_eq!(first.subscription(), preferences.clone().with_priority(-1));
+		assert_eq!(other.subscription(), preferences);
+		let late = track.subscribe(source.subscription(preferences.clone()));
+		let late_held = source.control(late.control()).unwrap();
+		assert_eq!(late.subscription(), first.subscription());
+		source.priority(0).unwrap();
+		assert_eq!(first.subscription(), preferences);
+		assert_eq!(late.subscription(), preferences);
+		track.finish().unwrap();
+		source.priority(-1).unwrap(); // A closed track has no priority left to change.
+		drop((held, late_held));
+		assert!(source.priority.lock().unwrap().controls.is_empty());
+		drop((first, late, other, _other));
+		assert!(track.subscription().is_none());
+	}
 
 	/// Let the origin's driver run the fronts that requests and announcements
 	/// started: they serve asynchronously, shortly after the call returns.

@@ -82,7 +82,7 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 			event = announced.next() => {
 				let announce = match event.context("announcements ended")? {
 					// Another publisher instance, or the same one announced again.
-					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => announce,
+					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) | moq_net::announce::Event::Takeover { announce, .. } => announce,
 					_ => continue,
 				};
 				if !announce.prefix.has_prefix(&prefix) {

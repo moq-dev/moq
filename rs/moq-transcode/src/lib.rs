@@ -1469,7 +1469,7 @@ mod tests {
 		rung.info().await.unwrap();
 
 		let fetching = rung.fetch_group(7, None);
-		let abandoned = moq_clock::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
+		let mut abandoned = moq_clock::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
 			.await
 			.expect("the fetch never reached the source")
 			.expect("the source track closed");
@@ -1478,9 +1478,11 @@ mod tests {
 		// Leave before a single source frame exists. Encoding can only happen
 		// if the handler keeps this fetch.
 		drop(fetching);
-		moq_clock::timeout(std::time::Duration::from_secs(5), abandoned.unused())
-			.await
-			.expect("the abandoned fetch kept its source fetch");
+		moq_clock::timeout(std::time::Duration::from_secs(5), async {
+			while abandoned.wanted_changed().await.is_some() {}
+		})
+		.await
+		.expect("the abandoned fetch kept its source fetch");
 
 		// The handler dropped the output request with the caller, so this is a
 		// fresh request rather than a join of the one still encoding.

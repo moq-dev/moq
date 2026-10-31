@@ -69,9 +69,12 @@ pub async fn handle_viewers(
 	let mut readers: std::collections::HashMap<String, tokio::task::AbortHandle> = Default::default();
 	loop {
 		let (update, active, restart) = match announced.next().await {
-			Some(moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update)) => {
-				(update, true, false)
-			}
+			// A takeover continues what was read through its predecessor.
+			Some(
+				moq_net::announce::Event::Start(update)
+				| moq_net::announce::Event::Update(update)
+				| moq_net::announce::Event::Takeover { announce: update, .. },
+			) => (update, true, false),
 			// The viewer restarted: read the new broadcast instead of the old one.
 			Some(moq_net::announce::Event::Restart(update)) => (update, true, true),
 			Some(moq_net::announce::Event::End(update)) => (update, false, false),
