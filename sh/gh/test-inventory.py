@@ -872,9 +872,9 @@ def drives_browser(path: Path, relative: str) -> bool:
 
 
 def discovered(root: Path, graph: Graph) -> set[Path]:
-    """What a reached `bun test` discovers: the paths a root workspace's scripts name, or the
-    workspace, once sh/js/workspace.py runs their tests, and every Worker sh/js/workers.sh
-    tests, one per lockfile outside the workspace."""
+    """What a reached `bun test` discovers: the paths a root workspace's `check`, `test`, or
+    `build` script names, or the workspace, once sh/js/workspace.py runs those scripts, and
+    every Worker sh/js/workers.sh tests, one per lockfile outside the workspace."""
     found = set()
     if root / "sh/js/workers.sh" in graph.files:
         found.update(lock.parent for lock in tracked(root, "*/bun.lock"))
@@ -884,7 +884,8 @@ def discovered(root: Path, graph: Graph) -> set[Path]:
     for manifest in [path / "package.json" for pattern in workspaces for path in root.glob(pattern)]:
         if not manifest.is_file():
             continue
-        for script in json.loads(manifest.read_text()).get("scripts", {}).values():
+        scripts = json.loads(manifest.read_text()).get("scripts", {})
+        for script in [scripts[verb] for verb in ("check", "test", "build") if verb in scripts]:
             for match in re.finditer(r"\bbun test\b([^&|;]*)", script):
                 paths = [word for word in match.group(1).split() if not word.startswith("-")]
                 found.update((manifest.parent / path).resolve() for path in paths or ["."])

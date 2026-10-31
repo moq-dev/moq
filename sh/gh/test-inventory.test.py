@@ -251,6 +251,10 @@ class InventoryTest(unittest.TestCase):
         self.assertNotIn("script js/net/src/codec.test.ts", orphans)
         self.assertIn("script js/loose/src/codec.test.ts", orphans)
 
+        # The runner runs only the `check`, `test`, and `build` scripts.
+        self.write("js/net/package.json", '{"scripts": {"manual-test": "bun test src"}}')
+        self.assertIn("script js/net/src/codec.test.ts", self.orphans())
+
     def test_a_selection_outside_the_ignored_set_covers_nothing(self):
         # Same filter, but without --run-ignored nextest skips the ignored tests.
         self.write("justfile", JUSTFILE.replace("--run-ignored only ", ""))
