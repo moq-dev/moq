@@ -1057,7 +1057,9 @@ async fn next_epoch(announced: &mut moq_net::announce::Consumer) -> moq_net::Epo
 	tokio::time::timeout(TIMEOUT, async {
 		loop {
 			match announced.next().await.expect("the relay stays up") {
-				moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => {
+				moq_net::announce::Event::Start(announce)
+				| moq_net::announce::Event::Restart(announce)
+				| moq_net::announce::Event::Takeover { announce, .. } => {
 					return announce.route.epoch.expect("a lite-07 importer announces its epoch");
 				}
 				_ => continue,

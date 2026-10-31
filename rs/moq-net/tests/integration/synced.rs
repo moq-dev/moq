@@ -30,7 +30,9 @@ async fn read_until_synced(announced: &mut announce::Consumer) -> BTreeSet<Strin
 			.expect("synced in time")
 			.expect("the cursor stays open");
 		match event {
-			announce::Event::Start(announce) | announce::Event::Restart(announce) => {
+			announce::Event::Start(announce)
+			| announce::Event::Restart(announce)
+			| announce::Event::Takeover { announce, .. } => {
 				seen.insert(announce.prefix.to_string());
 			}
 			announce::Event::End(announce) => {

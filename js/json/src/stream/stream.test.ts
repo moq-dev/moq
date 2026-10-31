@@ -91,8 +91,8 @@ test("a second group is reported while the first is still open", async () => {
 
 	// Both mirrors are released. The read that lost the race would otherwise stay registered on the
 	// first group, keeping this consumer's subscription reachable after the caller drops it.
-	expect(first.demand().used.peek()).toBe(false);
-	expect(second.demand().used.peek()).toBe(false);
+	expect(first.demand().wanted.peek()).toBe(false);
+	expect(second.demand().wanted.peek()).toBe(false);
 
 	// Sticky: a later read must not report the rest of the first group as a whole log.
 	first.writeFrame({ payload: encode({ n: 2 }), timestamp: Time.Timestamp.now() });
