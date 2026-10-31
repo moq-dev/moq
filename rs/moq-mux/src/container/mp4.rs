@@ -13,7 +13,7 @@
 //! A rendition that joins after the fragmented `moov` is written into `free` boxes, which a
 //! reader of the unfinished file skips, and only the final `moov` indexes it.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -150,9 +150,11 @@ impl<S: Stream> Export<S> {
 			return Ok(None);
 		};
 
+		let declarations: HashMap<u32, &mp4_atom::Trak> =
+			self.fmp4.declarations().map(|(id, trak, _)| (id, trak)).collect();
 		let mut timelines = Vec::new();
 		for (&id, track) in self.tracks.iter().filter(|(_, track)| !track.samples.is_empty()) {
-			let Some((trak, _)) = self.fmp4.declaration(id) else {
+			let Some(&trak) = declarations.get(&id) else {
 				return Err(unindexable(id, "the track has no declaration").into());
 			};
 			timelines.push((trak, track, Timeline::new(id, trak, track)?));
@@ -320,7 +322,8 @@ struct Timeline {
 	offsets: Vec<i32>,
 	/// Where presentation starts on the media timeline, past the first decode time.
 	media_time: u64,
-	/// When presentation starts, in the media ticks the fragments were written in.
+	/// The Hang time presentation starts at, in media ticks, which places the track in the
+	/// movie. An Opus track's media runs one pre-skip ahead of it.
 	start: u64,
 	/// How long the track presents, in media ticks.
 	duration: u64,
@@ -382,14 +385,15 @@ impl Timeline {
 		}
 		// An Opus track presents one pre-skip into its first packet, and nothing is presented
 		// before the first decode time.
-		let start = (presented + i128::from(fmp4::priming(trak))).max(i128::from(first));
-		let start = u64::try_from(start).map_err(|_| Error::PtsOverflow)?;
-		let duration = u64::try_from((end - i128::from(start)).max(0)).map_err(|_| Error::PtsOverflow)?;
+		let priming = fmp4::priming(trak);
+		let media = (presented + i128::from(priming)).max(i128::from(first));
+		let media = u64::try_from(media).map_err(|_| Error::PtsOverflow)?;
+		let duration = u64::try_from((end - i128::from(media)).max(0)).map_err(|_| Error::PtsOverflow)?;
 		Ok(Self {
 			deltas,
 			offsets,
-			media_time: start - first,
-			start,
+			media_time: media - first,
+			start: media.checked_sub(priming).ok_or(Error::PtsOverflow)?,
 			duration,
 		})
 	}
@@ -504,12 +508,19 @@ mod tests {
 
 	type Producer = crate::container::Producer<crate::catalog::hang::Container>;
 
-	fn add_opus(live: &mut Live) -> Producer {
+	/// A 48 kHz Opus rendition whose OpusHead declares `pre_skip`.
+	fn add_opus(live: &mut Live, pre_skip: u16) -> Producer {
 		use hang::catalog::{AudioCodec, AudioConfig, Container};
 
 		live.add_track(".opus", |catalog, name| {
 			let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 			config.container = Container::Legacy;
+			config.description = Some(
+				crate::codec::opus::Config::new(48_000, 2)
+					.with_pre_skip(pre_skip)
+					.encode()
+					.unwrap(),
+			);
 			catalog.modify().unwrap().audio.renditions.insert(name, config);
 		})
 	}
@@ -616,7 +627,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_finished_recording_is_a_regular_mp4() {
 		let mut live = Live::avc3();
-		let mut audio = add_opus(&mut live);
+		let mut audio = add_opus(&mut live, 0);
 		let video: Vec<_> = (0..9u64).map(|i| video_frame(i * 33_000, i % 3 == 0)).collect();
 		for frame in &video {
 			live.track.write(frame.clone()).unwrap();
@@ -682,7 +693,7 @@ mod tests {
 		record(&mut export, &mut file).await;
 		assert_eq!(moov(atoms(&file)).trak.len(), 1);
 
-		let mut audio = add_opus(&mut live);
+		let mut audio = add_opus(&mut live, 0);
 		for i in 0..10u64 {
 			audio.write(raw_frame(i * 20_000, OPUS, i % 5 == 0)).unwrap();
 		}
@@ -705,12 +716,51 @@ mod tests {
 		assert_eq!(samples(&file, trak(&moov, b"vide")).len(), 2);
 	}
 
+	/// A late rendition that leaves without writing anything is forgotten, so cycling names
+	/// holds nothing; one that wrote stays for the final moov.
+	#[tokio::test(start_paused = true)]
+	async fn departed_late_renditions_keep_only_what_they_wrote() {
+		let mut live = Live::avc3();
+		live.track.write(video_frame(0, true)).unwrap();
+		let mut export = export(&live).await;
+		let mut file = Vec::new();
+		record(&mut export, &mut file).await;
+
+		for _ in 0..3 {
+			let audio = add_opus(&mut live, 0);
+			record(&mut export, &mut file).await;
+			let name = audio.name().to_string();
+			live.catalog.modify().unwrap().audio.renditions.remove(&name);
+			record(&mut export, &mut file).await;
+		}
+		assert_eq!(export.fmp4.declarations().count(), 1, "only the video is held");
+
+		let mut audio = add_opus(&mut live, 0);
+		record(&mut export, &mut file).await;
+		for i in 0..5u64 {
+			audio.write(raw_frame(i * 20_000, OPUS, i == 0)).unwrap();
+		}
+		audio.finish().unwrap();
+		record(&mut export, &mut file).await;
+		let name = audio.name().to_string();
+		live.catalog.modify().unwrap().audio.renditions.remove(&name);
+		live.track.write(video_frame(200_000, true)).unwrap();
+		live.track.finish().unwrap();
+		record(&mut export, &mut file).await;
+		assert_eq!(export.fmp4.declarations().count(), 2);
+
+		finish(export, &mut file);
+		let moov = moov(atoms(&file));
+		assert_eq!(samples(&file, trak(&moov, b"soun")), vec![OPUS; 5]);
+	}
+
 	/// A track that starts later waits behind an empty edit, and a gap stretches the sample
-	/// before it rather than pulling later samples early.
+	/// before it rather than pulling later samples early. Opus starts at its Hang time, its
+	/// edit skipping the pre-skip in its media.
 	#[tokio::test(start_paused = true)]
 	async fn later_starts_and_gaps_keep_their_time() {
 		let mut live = Live::avc3();
-		let mut audio = add_opus(&mut live);
+		let mut audio = add_opus(&mut live, 312);
 		for i in 0..10u64 {
 			audio.write(raw_frame(i * 20_000, OPUS, i % 5 == 0)).unwrap();
 		}
@@ -733,6 +783,12 @@ mod tests {
 		assert_eq!(edits[0].media_time, None, "an empty edit first");
 		assert_eq!(edits[0].segment_duration, movie / 10);
 		assert_eq!(edits[1].media_time, Some(0));
+
+		let audio = trak(&moov, b"soun");
+		let skip = 312 * u64::from(audio.mdia.mdhd.timescale) / 48_000;
+		let edits = &audio.edts.as_ref().expect("edts").elst.as_ref().expect("elst").entries;
+		assert_eq!(edits.len(), 1, "audio starts the movie");
+		assert_eq!(edits[0].media_time, Some(skip));
 
 		let timescale = u64::from(video.mdia.mdhd.timescale);
 		let deltas: Vec<u64> = video
