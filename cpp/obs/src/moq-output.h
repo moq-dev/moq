@@ -140,6 +140,9 @@ private:
 		bool enabled = true;
 		// False from a disable until the keyframe that resumes it, dropping packets.
 		bool sending = true;
+		// Whether a frame was written. Until one is, the importer still holds the
+		// init's parameter sets, which a discontinuity would discard.
+		bool started = false;
 	};
 
 	void VideoInit(obs_encoder_t *encoder);

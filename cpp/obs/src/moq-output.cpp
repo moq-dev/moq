@@ -708,6 +708,7 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 		LOG_ERROR("Failed to write video frame: %s", result.error().to_string().c_str());
 		return;
 	}
+	track.started = true;
 
 	total_bytes_sent += packet->size;
 }
@@ -727,9 +728,13 @@ void MoQOutput::Retarget(obs_encoder_t *encoder, Track &track, const moq::RateTa
 		return;
 	track.sending = false;
 	// The lower renditions keep their share; viewers switch to one instead of
-	// waiting on frames that stopped coming.
-	if (auto result = track.producer->discontinuity(); !result)
-		LOG_ERROR("Failed to mark a disabled video track: %s", result.error().to_string().c_str());
+	// waiting on frames that stopped coming. Before the first frame there is no
+	// timeline to break, and the marker would drop the init's parameter sets, which
+	// an encoder that sends them only as extra data never repeats.
+	if (track.started) {
+		if (auto result = track.producer->discontinuity(); !result)
+			LOG_ERROR("Failed to mark a disabled video track: %s", result.error().to_string().c_str());
+	}
 	if (auto result = track.producer->set_enabled(false); !result)
 		LOG_ERROR("Failed to disable video track: %s", result.error().to_string().c_str());
 }

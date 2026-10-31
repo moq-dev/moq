@@ -9,6 +9,7 @@
 //
 // Run with `just obs test` (ThreadSanitizer) or `just obs ci` (plain). This is not
 // part of the plugin build.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <climits>
@@ -460,6 +461,13 @@ struct MoQOutputStatsTest {
 		}
 		return true;
 	}
+	// Open `encoder`'s track from its extra data, as its first keyframe does just
+	// before the track's rate control is first read.
+	static void Init(MoQOutput &output, obs_encoder_t *encoder)
+	{
+		std::lock_guard<std::mutex> lock(output.media_mutex);
+		output.VideoInit(encoder);
+	}
 	// Apply `target` to `encoder`'s track, as a grant the track's rate control returned.
 	static void Retarget(MoQOutput &output, obs_encoder_t *encoder, const moq::RateTarget &target)
 	{
@@ -739,6 +747,52 @@ int main()
 		o.Stop();
 	}
 	printf("a ladder rung disables, drops packets, and resumes on a keyframe: ok\n");
+
+	// A rung disabled before its first frame keeps the extra data's parameter sets,
+	// so a keyframe without them still resumes it decodable.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		g_encoder_caps = 0;
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+
+		MoQOutputStatsTest::Init(o, VIDEO_ENCODER);
+		MoQOutputStatsTest::Retarget(o, VIDEO_ENCODER, moq::RateTarget::kDisabled{});
+		MoQOutputStatsTest::Retarget(o, VIDEO_ENCODER, moq::RateTarget::kEnabled{4'000'000});
+		std::vector<uint8_t> idr = {0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00, 0x33, 0xff};
+		auto resumed = videoPacket(idr, 0);
+		o.Data(&resumed);
+		CHECK(o.GetTotalBytes() == idr.size());
+
+		auto broadcast = relayBroadcast(relay);
+		auto catalog =
+			relayCatalog(broadcast, [](const moq::Catalog &catalog) { return !catalog.video.empty(); });
+		CHECK(catalog.has_value() && catalog->video.size() == 1);
+		if (catalog && catalog->video.size() == 1) {
+			const auto &[name, rendition] = *catalog->video.begin();
+			auto media = TestOk(
+				moq::MediaTrackConsumer::subscribe(broadcast, {moq::Rendition::kVideo{name, rendition}})
+					.get(),
+				"container consumer");
+			auto next = media->next();
+			CHECK(next.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+			auto first = TestOk(next.get(), "first frame");
+			const auto *frame = first ? std::get_if<moq::MediaRead::kFrame>(&first->get_variant())
+						  : nullptr;
+			CHECK(frame != nullptr);
+			if (frame) {
+				const auto &payload = frame->frame.payload;
+				// The start of the extra data's SPS, past its start code.
+				const auto init = TestH264Init();
+				CHECK(std::search(payload.begin(), payload.end(), init.begin() + 4,
+						  init.begin() + 12) != payload.end());
+			}
+		}
+		o.Stop();
+	}
+	printf("a rung disabled before its first frame keeps its parameter sets: ok\n");
 
 	// A rung whose lower encoder has no headers yet waits for the lower's first packet
 	// rather than start the lower track without them, and so does every rung above it.
