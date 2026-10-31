@@ -125,7 +125,7 @@ pub struct MoqQuicConfig {
 	/// How long an idle connection survives before it is dropped.
 	#[uniffi(default = None)]
 	pub idle_timeout: Option<Duration>,
-	/// Keep-alive ping interval. 0 disables it; unset derives it from the idle timeout.
+	/// Keep-alive ping interval; zero or unset derives it from the idle timeout.
 	#[uniffi(default = None)]
 	pub keep_alive: Option<Duration>,
 	/// UDP generic segmentation offload: batches sends into one syscall.

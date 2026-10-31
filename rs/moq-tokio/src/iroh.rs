@@ -268,11 +268,6 @@ impl Config {
 			quic.validate().map_err(Error::Config)?;
 
 			let quic = quic.resolve();
-			if quic.keep_alive.is_some_and(|interval| interval.is_zero()) {
-				return Err(Error::Config(crate::Error::NoBackend(
-					"Iroh cannot disable keep-alive; omit quic.keep_alive or set a positive interval",
-				)));
-			}
 			if quic.keylog.is_some() {
 				return Err(Error::Config(crate::Error::NoBackend(
 					"Iroh does not support an explicit quic.keylog path",
@@ -323,9 +318,8 @@ impl Config {
 ///
 /// The keep-alive is [`crate::quic::Resolved::keep_alive_interval`]: iroh does
 /// not expose the negotiated idle timeout, so an unset interval derives from our
-/// own. iroh 1.4's setter only stores `Some`, and the builder starts at its own
-/// 5s heartbeat, so a disabled interval (`0s`) is refused at bind. A zero duration
-/// would rearm the timer for immediately and spin, so it is not passed. iroh's separate per-path
+/// own. Zero resolves to the default before reaching iroh's builder, since a zero
+/// interval would rearm its timer immediately. iroh's separate per-path
 /// heartbeat stays at the 5s it ships with: that setter ignores anything longer
 /// and cannot clear it either.
 fn transport_config(quic: &crate::quic::Resolved) -> iroh::endpoint::QuicTransportConfigBuilder {
@@ -336,9 +330,7 @@ fn transport_config(quic: &crate::quic::Resolved) -> iroh::endpoint::QuicTranspo
 		.max_concurrent_bidi_streams(max_streams)
 		.max_concurrent_uni_streams(max_streams)
 		.max_idle_timeout(Some(quic.idle_timeout.try_into().expect("idle timeout out of range")));
-	if let Some(interval) = quic.keep_alive_interval() {
-		transport = transport.keep_alive_interval(interval);
-	}
+	transport = transport.keep_alive_interval(quic.keep_alive_interval());
 	if !quic.mtu_discovery {
 		transport = transport.mtu_discovery_config(None);
 	}
@@ -512,21 +504,6 @@ mod tests {
 	use super::*;
 
 	#[tokio::test]
-	async fn zero_keep_alive_is_refused_only_when_iroh_is_enabled() {
-		let mut config = Config::default();
-		let quic = crate::quic::Config {
-			keep_alive: Some(std::time::Duration::ZERO.into()),
-			..Default::default()
-		};
-		assert!(config.clone().bind(&quic).await.unwrap().is_none());
-		config.enabled = Some(true);
-		let err = config.bind(&quic).await.unwrap_err();
-		assert!(
-			matches!(err, Error::Config(crate::Error::NoBackend(reason)) if reason.contains("cannot disable keep-alive"))
-		);
-	}
-
-	#[tokio::test]
 	async fn explicit_keylog_path_is_refused_only_when_iroh_is_enabled() {
 		let mut config = Config::default();
 		let quic = crate::quic::Config {
@@ -623,9 +600,7 @@ mod tests {
 	}
 
 	/// The connection keep-alive is the resolved interval, not iroh's 5s heartbeat,
-	/// and unset derives from the idle timeout.
-	///
-	/// The setter cannot store `None`, so a disabled interval is not asserted here.
+	/// and unset or zero derives from the idle timeout.
 	#[test]
 	fn keep_alive_interval_follows_resolved_config() {
 		use std::time::Duration;
@@ -634,7 +609,9 @@ mod tests {
 			(secs(10), Some(secs(3)), secs(3)),
 			(secs(10), Some(Duration::from_millis(500)), Duration::from_millis(500)),
 			(secs(10), None, secs(3)),
+			(secs(10), Some(Duration::ZERO), secs(3)),
 			(secs(30), None, secs(9)),
+			(Duration::ZERO, None, secs(9)),
 		] {
 			let quic = crate::quic::Resolved {
 				idle_timeout: idle,
