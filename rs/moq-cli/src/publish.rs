@@ -330,6 +330,9 @@ enum Source {
 		catalog: moq_mux::catalog::Producer,
 		video: Option<moq_video::encode::Capture>,
 		audio: Option<moq_audio::encode::Capture>,
+		/// Withholds the catalog until [`Publish::run`] starts the encoders, so the `stats` and
+		/// `echo` sections set before then ride the first catalog rather than an empty one.
+		gate: moq_mux::catalog::Reserved,
 	},
 }
 
@@ -552,6 +555,7 @@ impl Publish {
 		Ok(Self {
 			source: Source::Capture {
 				broadcast: broadcast.clone(),
+				gate: catalog.reserve(),
 				catalog,
 				video,
 				audio,
@@ -571,16 +575,20 @@ impl Publish {
 	///
 	/// Call it before the importer declares its tracks, so the section rides the first catalog.
 	pub fn with_report(mut self, connection: Option<moq_tokio::connection::Monitor>) -> anyhow::Result<Self> {
-		let (Some(broadcast), Source::Stream { catalog, .. }) = (self.broadcast.as_mut(), &self.source) else {
-			anyhow::bail!("--report reports a stdin import's one catalog");
+		let Some(broadcast) = self.broadcast.as_mut() else {
+			anyhow::bail!("`import ts --program all` builds a catalog per program");
 		};
 		if let Some(republish) = &mut self.republish {
 			republish.report = Some(connection.clone());
 		}
-		let report = match catalog {
-			PublishCatalog::Media(catalog) => crate::report::Stats::new(broadcast, catalog, connection)?,
-			PublishCatalog::Ts(catalog) => crate::report::Stats::new(broadcast, catalog, connection)?,
-			PublishCatalog::TsPrograms => anyhow::bail!("`import ts --program all` builds a catalog per program"),
+		let report = match &self.source {
+			Source::Stream { catalog, .. } => match catalog {
+				PublishCatalog::Media(catalog) => crate::report::Stats::new(broadcast, catalog, connection)?,
+				PublishCatalog::Ts(catalog) => crate::report::Stats::new(broadcast, catalog, connection)?,
+				PublishCatalog::TsPrograms => anyhow::bail!("`import ts --program all` builds a catalog per program"),
+			},
+			#[cfg(feature = "capture")]
+			Source::Capture { catalog, .. } => crate::report::Stats::new(broadcast, catalog, connection)?,
 		};
 		self.report = Some(report);
 		Ok(self)
@@ -593,7 +601,10 @@ impl Publish {
 		let catalog = match &mut self.source {
 			Source::Stream { catalog, .. } => catalog,
 			#[cfg(feature = "capture")]
-			Source::Capture { .. } => anyhow::bail!("--echo-path solicits feedback in a stdin import's one catalog"),
+			Source::Capture { catalog, .. } => {
+				catalog.mutate(|catalog| catalog.echo = Some(echo))?;
+				return Ok(self);
+			}
 		};
 		if let Some(republish) = &mut self.republish {
 			republish.echo = Some(echo.clone());
@@ -652,7 +663,10 @@ impl Publish {
 				catalog,
 				video,
 				audio,
+				gate,
 			} => {
+				drop(gate);
+				let mut report = self.report;
 				// Each enabled medium publishes its own track onto the shared
 				// broadcast + catalog. Both stamp frames on the catalog's
 				// advertised clock, so HLS/DASH wall times match the mapping on
@@ -681,8 +695,21 @@ impl Publish {
 					}
 				};
 
-				tokio::try_join!(video_fut, audio_fut)?;
-				Ok(())
+				let capture = async { tokio::try_join!(video_fut, audio_fut).map(|_| ()) };
+				// Written beside the encoders, so a capture waiting on its first viewer still reports.
+				let result = match report.as_mut() {
+					Some(report) => tokio::select! {
+						result = capture => result,
+						never = report.run() => match never {},
+					},
+					None => capture.await,
+				};
+				match (&result, report) {
+					(Ok(()), Some(mut report)) => report.finish(),
+					(Err(err), Some(report)) => report.abort(moq_net::Error::Transport(err.to_string())),
+					(_, None) => {}
+				}
+				result
 			}
 		}
 	}

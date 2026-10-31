@@ -188,8 +188,10 @@ impl Reserved {
 
 	/// Spend the reservation on a registered encoder, publishing through the track.
 	pub(crate) fn encode(self, registered: Registered) -> Producer {
+		let bitrate = registered.encoder.bitrate();
+		self.track.report_bitrate(bitrate);
 		Producer {
-			bitrate: registered.encoder.bitrate(),
+			bitrate,
 			encoder: Some(registered.encoder),
 			input: registered.input,
 			remix: registered.remix,
@@ -305,6 +307,7 @@ impl Producer {
 			return Err(err.into());
 		}
 		self.bitrate = encoder.bitrate();
+		self.track.report_bitrate(self.bitrate);
 		Ok(())
 	}
 
@@ -598,6 +601,27 @@ mod tests {
 				return Some(frame);
 			}
 		}
+	}
+
+	/// The catalog's stats follow the encoder's target from the first rendition on.
+	#[tokio::test]
+	async fn stats_follow_the_target_bitrate() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let options = Options {
+			track: Some("audio".into()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
+		let reported = || catalog.stats().remove("audio").and_then(|stats| stats.bitrate);
+		assert_eq!(reported(), Some(producer.bitrate().as_bps()));
+
+		let initial = producer.bitrate();
+		producer
+			.set_bitrate(moq_net::bandwidth::Rate::from_bps(initial.as_bps() / 2))
+			.unwrap();
+		assert_ne!(producer.bitrate(), initial);
+		assert_eq!(reported(), Some(producer.bitrate().as_bps()));
 	}
 
 	#[tokio::test]

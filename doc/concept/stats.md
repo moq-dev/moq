@@ -146,8 +146,9 @@ A viewer's loss counters describe its own uplink, so they are reported but not
 graded. Loss and headroom divide the connection's transport counters by the
 report's own media, so they hold when the broadcast is the only one its
 connection publishes. The transport limits were measured on one paced TS feed
-through a shaped link over five-second intervals; no CLI reporter emits
-`skipped`, `late`, `errors`, or `stalled`, so their limits are not measured.
+through a shaped link over five-second intervals. Only `import capture`
+emits `skipped`, and no CLI reporter emits `late`, `errors`, or `stalled`, so
+those limits are not measured.
 
 A publisher whose link falls below its media rate sends no report at all,
 since its report track sits below every media track. Its health goes stale

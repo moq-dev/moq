@@ -531,8 +531,9 @@ of `--follow`.
 
 `import --report` names a track in the catalog's `stats` section and reports
 what each rendition has written, about once a second while someone subscribes,
-with the connection's RTT, estimated send rate, and loss. It covers the stdin imports;
-capture, the gateways, `archive`, and `ts --program all` refuse it.
+with the connection's RTT, estimated send rate, and loss. It covers the stdin imports
+and `capture`, whose renditions also report the encoder's target bitrate and the
+video frames it fell behind on; the gateways, `archive`, and `ts --program all` refuse it.
 
 `import --echo-path <path>` solicits feedback from the same imports: it sets
 the catalog's `echo` path, resolved against the broadcast like a relative URL,
