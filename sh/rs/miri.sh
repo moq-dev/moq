@@ -34,12 +34,45 @@ if ! cargo miri --version >/dev/null 2>&1; then
 fi
 rustc --version
 
-run() {
-    cargo miri nextest run --locked --profile miri --no-fail-fast "$@"
+# Nextest unions repeated filtersets, so a caller's `-E` would add tests to a pass
+# rather than narrow it; intersect it with each pass's filter instead.
+args=()
+filters=()
+while (($#)); do
+    case $1 in
+    --) args+=("$@"); break ;;
+    -E | --filterset) filters+=("${2:?$1 needs a filterset}"); shift 2 ;;
+    -E*) filters+=("${1#-E}"); shift ;;
+    --filterset=*) filters+=("${1#*=}"); shift ;;
+    *) args+=("$1"); shift ;;
+    esac
+done
+caller='all()'
+if ((${#filters[@]})); then
+    caller=$(printf ' | (%s)' "${filters[@]}")
+    caller=${caller# | }
+fi
+
+# Nextest exits 4 when a pass selects no tests. Without arguments that means a filter
+# below went stale; with them, the caller may have narrowed the run to one pass.
+ran=0
+pass() {
+    local status=0
+    cargo miri nextest run --locked --profile miri --no-fail-fast -p kio -p moq-net --lib \
+        -E "($1) & ($caller)" ${args[@]+"${args[@]}"} || status=$?
+    case $status in
+    0) ran=1 ;;
+    4) ((${#args[@]} + ${#filters[@]})) || exit 4 ;;
+    *) exit "$status" ;;
+    esac
 }
 
-run -p kio -p moq-net --lib \
-    -E '(package(kio) & not test(/^log::/)) | (package(moq-net) & (test(/^model::frame::/) | test(/^path::/)))' "$@"
+pass '(package(kio) & not test(/^log::/)) | (package(moq-net) & (test(/^model::frame::/) | test(/^path::/)))'
 
-MIRIFLAGS="${MIRIFLAGS:+$MIRIFLAGS }-Zmiri-tree-borrows -Zmiri-ignore-leaks" run -p kio -p moq-net --lib \
-    -E '(package(kio) & test(/^log::/)) | (package(moq-net) & test(/^model::group::/))' "$@"
+MIRIFLAGS="${MIRIFLAGS:+$MIRIFLAGS }-Zmiri-tree-borrows -Zmiri-ignore-leaks" \
+    pass '(package(kio) & test(/^log::/)) | (package(moq-net) & test(/^model::group::/))'
+
+if ((!ran)); then
+    echo "rs: no test matched in either Miri pass" >&2
+    exit 4
+fi
