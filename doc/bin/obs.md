@@ -46,10 +46,12 @@ recording at the full rate.
 
 With several video encoders on the output, each one is a rendition, and one
 above a lower-bitrate encoder stops sending while its share of the estimate
-cannot fund it, advertised as disabled so viewers switch down. It keeps
-encoding, since OBS cannot pause one encoder of a live output, and resumes at
-that encoder's next keyframe once the estimate recovers. This needs the
-session to probe for bandwidth, which takes moq-quic with BBR3.
+cannot fund it, advertised as disabled so viewers switch down. Only an encoder
+that follows the estimate, as above, stops; one that cannot retune while live,
+or uses CQP or CRF, keeps sending. A stopped encoder keeps encoding, since OBS
+cannot pause one encoder of a live output, and resumes at that encoder's next
+keyframe once the estimate recovers. This needs the session to probe for
+bandwidth, which takes moq-quic with BBR3.
 
 ## Source quality and moq-transcode
 
