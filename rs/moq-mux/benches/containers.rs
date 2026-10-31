@@ -207,12 +207,13 @@ fn interleaved(init: &[u8], tracks: usize, runs: usize, fragments: usize, payloa
 					trun: (0..runs)
 						.map(|run| mp4_atom::Trun {
 							data_offset: Some(0),
-							entries: vec![mp4_atom::TrunEntry {
+							samples: vec![mp4_atom::TrunEntry {
 								duration: Some(trak.mdia.mdhd.timescale / 50),
 								size: Some(payload.len() as u32),
 								flags: Some(if run == 0 { 0 } else { 0x0001_0000 }),
 								cts: None,
-							}],
+							}]
+							.into(),
 						})
 						.collect(),
 					..Default::default()

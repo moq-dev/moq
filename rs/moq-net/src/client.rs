@@ -3,8 +3,8 @@ use crate::origin;
 use crate::time::{Deadlines, Instant};
 use crate::transport::poll::Session as _;
 use crate::{
-	ALPN_18, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume,
-	Error, NEGOTIATED, Session, Version, Versions,
+	ALPN_18, ALPN_20, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP,
+	Consume, Error, NEGOTIATED, Session, Version, Versions,
 	coding::{self, Encode, Stream},
 	ietf, lite, setup, stats,
 };
@@ -368,9 +368,10 @@ impl Client {
 		let (publish, subscribe) = self.origins(peer_hop);
 
 		let supported = match session.protocol() {
-			Some(alpn @ (ALPN_22 | ALPN_18)) => {
+			Some(alpn @ (ALPN_22 | ALPN_20 | ALPN_18)) => {
 				let draft = match alpn {
 					ALPN_22 => ietf::Version::Draft22,
+					ALPN_20 => ietf::Version::Draft20,
 					_ => ietf::Version::Draft18,
 				};
 

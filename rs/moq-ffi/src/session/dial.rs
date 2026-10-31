@@ -276,9 +276,14 @@ async fn forward_send(source: Option<moq_net::bandwidth::Consumer>, out: &moq_ne
 /// Forward the receive estimate only while someone holds `out`, since holding the
 /// session's consumer is what requests PROBE.
 async fn forward_recv(session: &moq_net::Session, out: &moq_net::bandwidth::Producer) {
+	let mut demand = out.demand();
 	loop {
-		if out.used().await.is_err() {
-			return;
+		loop {
+			match demand.wanted_changed().await {
+				Ok(true) => break,
+				Ok(false) => {}
+				Err(_) => return,
+			}
 		}
 		let Some(mut source) = session.recv_bandwidth() else {
 			return;
@@ -286,9 +291,11 @@ async fn forward_recv(session: &moq_net::Session, out: &moq_net::bandwidth::Prod
 		loop {
 			tokio::select! {
 				biased;
-				unused = out.unused() => {
-					if unused.is_err() {
-						return;
+				wanted = demand.wanted_changed() => {
+					match wanted {
+						Ok(true) => continue,
+						Ok(false) => {}
+						Err(_) => return,
 					}
 					let _ = out.set(None);
 					break;
