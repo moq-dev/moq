@@ -1,7 +1,6 @@
 """Lightweight stand-ins for runtime-only modules used during unit collection."""
 
 import sys
-import uuid
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -65,8 +64,6 @@ moq.AnnounceEventStart = AnnounceEventStart
 moq.AnnounceEventUpdate = AnnounceEventUpdate
 moq.AnnounceEventEnd = AnnounceEventEnd
 moq.AnnounceEventRestart = AnnounceEventRestart
-moq.AnnounceRoute = lambda **kwargs: SimpleNamespace(**kwargs)
-moq.mint_epoch = lambda: str(uuid.uuid4())
 moq.TrackInfo = lambda **kwargs: SimpleNamespace(**kwargs)
 
 moq_json = ModuleType("moq.json")

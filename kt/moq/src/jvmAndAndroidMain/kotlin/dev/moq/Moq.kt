@@ -33,26 +33,26 @@ class Moq internal constructor(
         session.consume().announced(config)
 
     /**
-     * Follow exactly [path], resolving each publisher instance that serves it.
+     * Follow exactly [path], resolving each stream that serves it.
      *
      * Unlike [request] this waits indefinitely for a future announcement, and
-     * each later `available()` waits for the next instance, such as a restarted
-     * publisher. Pass an [epoch] (UUIDv7 text) to follow only that instance.
+     * each later `available()` waits for the next stream, such as a restarted
+     * publisher. Pass an [identity] to follow only that stream.
      * Cancel the returned handle to stop waiting.
      */
-    fun follow(path: String, epoch: String? = null): Following = session.consume().follow(path, epoch)
+    fun follow(path: String, identity: String? = null): Following = session.consume().follow(path, identity)
 
     /**
-     * Resolve one publisher instance of the broadcast at [path] as soon as it
+     * Resolve one stream of the broadcast at [path] as soon as it
      * can be served: a local broadcast at the exact path, the best announced
      * route covering it, or a dynamic fallback on the origin.
      *
      * Unlike [follow] this does not wait for a future announcement; it throws
-     * when neither can serve the path. Pass an [epoch] (UUIDv7 text) to refuse
-     * any other instance.
+     * when neither can serve the path. Pass an [identity] to refuse any other
+     * stream.
      */
-    suspend fun request(path: String, epoch: String? = null): BroadcastConsumer =
-        session.consume().request(path, epoch)
+    suspend fun request(path: String, identity: String? = null): BroadcastConsumer =
+        session.consume().request(path, identity)
 
     /**
      * The session's bandwidth allocator.

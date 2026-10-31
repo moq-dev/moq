@@ -126,11 +126,11 @@ pub struct MoqVideo {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
-	/// The publisher epoch of the instance [`broadcast`](Self::broadcast) names, when the
-	/// catalog knows it. Resolving refuses a broadcast proven to serve another instance; absent
-	/// names whichever instance resolves first.
+	/// The identity of the stream [`broadcast`](Self::broadcast) names, when the catalog
+	/// knows it. Resolving refuses a broadcast proven to serve another stream; absent names
+	/// whichever resolves first.
 	#[uniffi(default = None)]
-	pub epoch: Option<String>,
+	pub identity: Option<String>,
 	/// The track's name in its broadcast, when it differs from the rendition's ID. Absent means
 	/// the ID is the track name.
 	#[uniffi(default = None)]
@@ -169,11 +169,11 @@ pub struct MoqAudio {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
-	/// The publisher epoch of the instance [`broadcast`](Self::broadcast) names, when the
-	/// catalog knows it. Resolving refuses a broadcast proven to serve another instance; absent
-	/// names whichever instance resolves first.
+	/// The identity of the stream [`broadcast`](Self::broadcast) names, when the catalog
+	/// knows it. Resolving refuses a broadcast proven to serve another stream; absent names
+	/// whichever resolves first.
 	#[uniffi(default = None)]
-	pub epoch: Option<String>,
+	pub identity: Option<String>,
 	/// The track's name in its broadcast, when it differs from the rendition's ID. Absent means
 	/// the ID is the track name.
 	#[uniffi(default = None)]
@@ -530,7 +530,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 				MoqVideo {
 					label: config.label.clone(),
 					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
-					epoch: config.epoch.as_ref().map(ToString::to_string),
+					identity: config.identity.as_ref().map(ToString::to_string),
 					track: config.track.clone(),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
@@ -562,7 +562,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 				MoqAudio {
 					label: config.label.clone(),
 					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
-					epoch: config.epoch.as_ref().map(ToString::to_string),
+					identity: config.identity.as_ref().map(ToString::to_string),
 					track: config.track.clone(),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
@@ -641,10 +641,10 @@ mod test {
 	fn catalog_exposes_rendition_broadcast_references() {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 
-		let epoch: moq_net::Epoch = crate::origin::moq_mint_epoch().parse().unwrap();
+		let identity = moq_net::Identity::random();
 		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		video.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
-		video.epoch = Some(epoch.clone());
+		video.identity = Some(identity.clone());
 		catalog.video.renditions.insert("video".to_string(), video);
 		let local = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		catalog.video.renditions.insert("local".to_string(), local);
@@ -660,9 +660,9 @@ mod test {
 		assert_eq!(converted.video["video"].broadcast.as_deref(), Some("source"));
 		assert_eq!(converted.video["local"].broadcast, None);
 		assert_eq!(converted.audio["audio"].broadcast.as_deref(), Some("../elsewhere"));
-		// The epoch crosses in the same canonical form `resolve` parses back.
-		assert_eq!(converted.video["video"].epoch, Some(epoch.to_string()));
-		assert_eq!(converted.video["local"].epoch, None);
+		// The identity crosses in the same canonical form `resolve` parses back.
+		assert_eq!(converted.video["video"].identity, Some(identity.to_string()));
+		assert_eq!(converted.video["local"].identity, None);
 	}
 
 	#[test]
@@ -1296,13 +1296,13 @@ pub enum MoqRendition {
 }
 
 impl MoqRendition {
-	/// Split into the broadcast reference and its epoch, the track name, and the container.
+	/// Split into the broadcast reference and its identity, the track name, and the container.
 	pub(crate) fn into_parts(self) -> (Option<String>, Option<String>, String, MoqContainer) {
-		let (id, broadcast, epoch, track, container) = match self {
-			Self::Video { id, config } => (id, config.broadcast, config.epoch, config.track, config.container),
-			Self::Audio { id, config } => (id, config.broadcast, config.epoch, config.track, config.container),
+		let (id, broadcast, identity, track, container) = match self {
+			Self::Video { id, config } => (id, config.broadcast, config.identity, config.track, config.container),
+			Self::Audio { id, config } => (id, config.broadcast, config.identity, config.track, config.container),
 		};
-		(broadcast, epoch, track.unwrap_or(id), container)
+		(broadcast, identity, track.unwrap_or(id), container)
 	}
 }
 
@@ -1452,7 +1452,7 @@ mod read_tests {
 					config: MoqAudio {
 						label: None,
 						broadcast: None,
-						epoch: None,
+						identity: None,
 						track: None,
 						codec: "opus".into(),
 						description: None,
@@ -1646,7 +1646,7 @@ impl MoqMediaTrackConsumer {
 	///
 	/// Follows the rendition's broadcast reference and track name, so a rendition served by a
 	/// sibling broadcast or under another track name subscribes to the right track, and fails
-	/// one whose broadcast is proven to serve another instance than its epoch.
+	/// one whose broadcast is proven to serve another stream than its identity.
 	#[uniffi::constructor]
 	pub async fn subscribe(
 		broadcast: &MoqBroadcastConsumer,
@@ -1660,11 +1660,13 @@ impl MoqMediaTrackConsumer {
 			MoqRendition::Audio { .. } => moq_mux::container::Kind::Audio,
 			MoqRendition::Video { .. } => moq_mux::container::Kind::Video,
 		};
-		let (reference, epoch, name, container) = rendition.into_parts();
+		let (reference, identity, name, container) = rendition.into_parts();
 		// Parse the container before resolving or subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
 		let media = media_container(container, kind)?;
-		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
+		let resolved = broadcast
+			.resolve_inner(reference.as_deref(), identity.as_deref())
+			.await?;
 		let subscription = subscription
 			.map(moq_net::track::Subscription::try_from)
 			.transpose()?

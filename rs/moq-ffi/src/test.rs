@@ -262,7 +262,7 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 			preference: 0,
 			label: None,
 			broadcast: None,
-			epoch: None,
+			identity: None,
 			track: None,
 			codec: "avc1.64001f".into(),
 			description: None,
@@ -276,14 +276,14 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 	}
 }
 
-/// A rendition whose catalog `broadcast` field names `reference`, served by `epoch`.
+/// A rendition whose catalog `broadcast` field names `reference`, served under `epoch`, an identity.
 fn referencing(reference: Option<&str>, epoch: Option<&str>) -> MoqRendition {
 	let mut rendition = rendition("video", MoqContainer::Legacy);
 	let MoqRendition::Video { config, .. } = &mut rendition else {
 		unreachable!()
 	};
 	config.broadcast = reference.map(Into::into);
-	config.epoch = epoch.map(Into::into);
+	config.identity = epoch.map(Into::into);
 	rendition
 }
 
@@ -295,7 +295,7 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	MoqAudio {
 		label: None,
 		broadcast: Some(reference.to_string()),
-		epoch: None,
+		identity: None,
 		track: None,
 		codec: "opus".to_string(),
 		description: None,
@@ -368,7 +368,11 @@ fn route_conversions_keep_cost_and_derive_anonymity() {
 	assert_eq!(MoqRoute::from(route).cost, 9);
 
 	// A publisher seeds its production cost with one number.
-	let seeded = moq_net::origin::Route::try_from(MoqAnnounceRoute { cost: 5, epoch: None }).unwrap();
+	let seeded = moq_net::origin::Route::try_from(MoqAnnounceRoute {
+		cost: 5,
+		..Default::default()
+	})
+	.unwrap();
 	assert_eq!(seeded.cost, moq_net::origin::Cost::new(5));
 	assert!(seeded.hops.is_empty());
 
@@ -384,7 +388,12 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let publication = origin.create_broadcast("priced-route".into()).unwrap();
-	publication.announce(MoqAnnounceRoute { cost: 9, epoch: None }).unwrap();
+	publication
+		.announce(MoqAnnounceRoute {
+			cost: 9,
+			..Default::default()
+		})
+		.unwrap();
 
 	// Reading an advertisement preserves its static production price.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
@@ -402,7 +411,8 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 	publication
 		.announce(MoqAnnounceRoute {
 			cost: route.cost,
-			epoch: route.epoch.clone(),
+			identity: Some(route.identity.clone()),
+			..Default::default()
 		})
 		.unwrap();
 	assert_eq!(publication.inner.route().map(MoqRoute::from), Some(route));
@@ -411,31 +421,25 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 }
 
 #[test]
-fn epoch_helpers_mint_parse_and_refuse() {
-	let epoch = moq_mint_epoch();
-	let parsed: moq_net::Epoch = epoch.parse().unwrap();
-	assert!(moq_mint_epoch() > epoch, "a later mint orders newer");
-
-	// The text the route carries round-trips, and anything but a UUIDv7 is refused.
+fn identity_routes_parse_and_refuse() {
+	// A stable identity round-trips with its epoch, which only orders its runs.
 	let route = MoqAnnounceRoute {
-		epoch: Some(epoch.clone()),
+		identity: Some("cam".into()),
+		epoch: 3,
 		..Default::default()
 	};
 	let back = moq_net::origin::Route::try_from(route).unwrap();
-	assert_eq!(back.epoch, Some(parsed));
-	assert_eq!(MoqRoute::from(back).epoch, Some(epoch.clone()));
+	assert_eq!(back.identity, Some("cam".parse().unwrap()));
+	assert_eq!(MoqRoute::from(back).identity, "cam");
 
-	let uuid_v4 = "6ba7b810-9dad-41d1-80b4-00c04fd430c8".to_string();
-	for bad in [uuid_v4, epoch.to_uppercase(), String::new()] {
-		let route = MoqAnnounceRoute {
-			epoch: Some(bad),
-			..Default::default()
-		};
-		assert!(matches!(
-			moq_net::origin::Route::try_from(route),
-			Err(MoqError::InvalidEpoch { .. })
-		));
-	}
+	let route = MoqAnnounceRoute {
+		identity: Some(String::new()),
+		..Default::default()
+	};
+	assert!(matches!(
+		moq_net::origin::Route::try_from(route),
+		Err(MoqError::InvalidIdentity { .. })
+	));
 }
 
 #[tokio::test]
@@ -445,28 +449,28 @@ async fn announced_epoch_restarts_on_a_new_epoch() {
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let publication = origin.create_broadcast("epoch-route".into()).unwrap();
 
-	let first = moq_mint_epoch();
+	let first = moq_net::Identity::random().to_string();
 	publication
 		.announce(MoqAnnounceRoute {
-			epoch: Some(first.clone()),
+			identity: Some(first.clone()),
 			..Default::default()
 		})
 		.unwrap();
 	let announce = next_announced(&announced).await;
-	assert_eq!(announce.route.epoch, Some(first));
+	assert_eq!(announce.route.identity, first);
 
 	// A new run of the same publisher is another instance: consumers restart onto it.
-	let second = moq_mint_epoch();
+	let second = moq_net::Identity::random().to_string();
 	publication
 		.announce(MoqAnnounceRoute {
-			epoch: Some(second.clone()),
+			identity: Some(second.clone()),
 			..Default::default()
 		})
 		.unwrap();
 	match next_event(&announced).await {
 		MoqAnnounceEvent::Restart { announce } => {
 			assert_eq!(announce.prefix, "epoch-route");
-			assert_eq!(announce.route.epoch, Some(second));
+			assert_eq!(announce.route.identity, second);
 		}
 		other => panic!("expected a restart, got {other:?}"),
 	}
@@ -3424,10 +3428,10 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 }
 
 /// A reference's epoch names the instance it expects: a broadcast proven to serve another fails
-/// the rendition, while an epochless reference, or a route that cannot prove its instance, reads
+/// the rendition, while an unnamed reference, or a route that cannot prove its instance, reads
 /// whichever instance resolves.
 #[tokio::test]
-async fn resolve_honors_the_reference_epoch() {
+async fn resolve_honors_the_reference_identity() {
 	async fn resolve(
 		broadcast: &MoqBroadcastConsumer,
 		reference: &str,
@@ -3440,10 +3444,10 @@ async fn resolve_honors_the_reference_epoch() {
 
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let served = moq_mint_epoch();
-	let other = moq_mint_epoch();
+	let served = moq_net::Identity::random().to_string();
+	let other = moq_net::Identity::random().to_string();
 	let route = MoqAnnounceRoute {
-		epoch: Some(served.clone()),
+		identity: Some(served.clone()),
 		..Default::default()
 	};
 
@@ -3463,21 +3467,25 @@ async fn resolve_honors_the_reference_epoch() {
 	let matching = resolve(&broadcast, "./source", Some(&served)).await.unwrap();
 	assert_eq!(matching.inner().info().path.as_str(), "a/source");
 	resolve(&broadcast, "./source", None).await.unwrap();
-	resolve(&broadcast, "./plain", Some(&other)).await.unwrap();
+	// A broadcast that minted its own identity is another stream than the one named.
+	assert!(matches!(
+		resolve(&broadcast, "./plain", Some(&other)).await,
+		Err(MoqError::Mux { reason }) if reason.contains("serves identity")
+	));
 
 	assert!(matches!(
 		resolve(&broadcast, "./source", Some(&other)).await,
-		Err(MoqError::Mux { reason }) if reason.contains("serves epoch")
+		Err(MoqError::Mux { reason }) if reason.contains("serves identity")
 	));
-	// Without a broadcast, the epoch names the catalog's own instance.
+	// Without a broadcast, the identity names the catalog's own stream.
 	resolve(&broadcast, "", Some(&served)).await.unwrap();
 	assert!(matches!(
 		resolve(&broadcast, "", Some(&other)).await,
-		Err(MoqError::Mux { reason }) if reason.contains("serves epoch")
+		Err(MoqError::Mux { reason }) if reason.contains("serves identity")
 	));
 	assert!(matches!(
-		resolve(&broadcast, "./source", Some("not-an-epoch")).await,
-		Err(MoqError::InvalidEpoch { .. })
+		resolve(&broadcast, "./source", Some("")).await,
+		Err(MoqError::InvalidIdentity { .. })
 	));
 
 	// The rendition-based consumers read the epoch off the rendition.
@@ -3488,7 +3496,7 @@ async fn resolve_honors_the_reference_epoch() {
 	let subscribed = moq_clock::timeout(TIMEOUT, MoqMediaTrackConsumer::subscribe(&broadcast, config))
 		.await
 		.expect("timed out subscribing to the rendition");
-	assert!(matches!(subscribed, Err(MoqError::Mux { reason }) if reason.contains("serves epoch")));
+	assert!(matches!(subscribed, Err(MoqError::Mux { reason }) if reason.contains("serves identity")));
 
 	catalog.close().unwrap();
 	source.close().unwrap();
@@ -4753,18 +4761,18 @@ async fn dynamic_broadcast_request() {
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "dynamic/broadcast");
 
-	let epoch = moq_net::Epoch::mint().to_string();
-	let prepared = request.prepare(epoch.clone()).unwrap();
+	let prepared = request.prepare().unwrap();
 	let served = prepared.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
-	// Only publish announces the answer, under its epoch and after admission, and it
+	// Only publish announces the answer, under a fresh identity and after admission, and it
 	// hands back the fill handle the answer was prepared with.
 	let publication = prepared.publish().unwrap();
 	assert!(Arc::ptr_eq(&publication.broadcast(), &served));
+	// A re-price that names no identity keeps the one the answer was published under.
 	publication
 		.announce(MoqAnnounceRoute {
-			epoch: Some(epoch),
 			cost: 7,
+			..Default::default()
 		})
 		.unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
@@ -4813,7 +4821,7 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 		.expect("timed out waiting for the prefix request")
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "live/cam");
-	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let prepared = request.prepare().unwrap();
 	let served = prepared.broadcast();
 	prepared.publish().unwrap();
 	moq_clock::timeout(TIMEOUT, requesting)
@@ -4855,7 +4863,7 @@ async fn dynamic_keeps_the_origin_alive() {
 		.await
 		.expect("the handler must still receive requests")
 		.unwrap();
-	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let prepared = request.prepare().unwrap();
 	let served = prepared.broadcast();
 	prepared.publish().unwrap();
 	moq_clock::timeout(TIMEOUT, requesting)
@@ -5888,7 +5896,7 @@ async fn roundtrip(media: &MoqMediaTrackProducer, track: &MoqMediaTrackConsumer,
 }
 
 /// A replacement session from the same publisher re-announces every route while the old one
-/// is still open, as a GOAWAY drain does. Without an epoch that is another instance: the
+/// is still open, as a GOAWAY drain does. Under another identity that is another instance: the
 /// next `available()` hands it out, and reading it carries on past the old session's close.
 #[tokio::test]
 async fn follow_follows_an_epochless_replacement() {
@@ -5984,7 +5992,7 @@ async fn follow_retries_a_dropped_wait() {
 	assert!(matches!(dropped.await, Err(err) if err.is_cancelled()));
 
 	let retry = tokio::spawn(async move { followed.available().await });
-	let served = request.prepare(moq_mint_epoch()).unwrap().publish().unwrap();
+	let served = request.prepare().unwrap().publish().unwrap();
 	moq_clock::timeout(TIMEOUT, retry)
 		.await
 		.expect("the retry waited for another instance")
@@ -6005,7 +6013,7 @@ async fn follow_hands_out_a_takeover_once(dynamic_at: &str) {
 
 	let waiting = followed.clone();
 	let first = tokio::spawn(async move { waiting.available().await });
-	// The wait is on the dynamic route's answer when the exact path takes over without an epoch.
+	// The wait is on the dynamic route's answer when the exact path takes over under another identity.
 	let _unanswered = moq_clock::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the wait never asked for the broadcast")
@@ -6035,14 +6043,14 @@ async fn follow_hands_out_a_held_takeover_once() {
 }
 
 /// An end is a gap that ended every request on the old route, even when a claim above the path
-/// answers under the same epoch. So the instance serving the path afterwards is handed out
-/// again, though its epoch is the one the caller still holds.
+/// answers under the same identity. So the stream serving the path afterwards is handed out
+/// again, though its identity is the one the caller still holds.
 #[tokio::test]
 async fn follow_hands_out_the_instance_again_after_an_end() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let followed = origin.consume().follow("live".into(), None).unwrap();
 	let route = MoqAnnounceRoute {
-		epoch: Some(moq_mint_epoch()),
+		identity: Some(moq_net::Identity::random().to_string()),
 		..Default::default()
 	};
 	let publication = origin.create_broadcast("live".into()).unwrap();
@@ -6052,7 +6060,7 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		.expect("timed out waiting for the broadcast")
 		.unwrap();
 
-	// A covering claim answering under the same epoch.
+	// A covering claim answering under the same identity.
 	let dynamic = origin.inner().inner.requests("").unwrap();
 	publication.unannounce().unwrap();
 	let again = tokio::spawn(async move { followed.available().await });
@@ -6060,8 +6068,10 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		.await
 		.expect("the instance never asked the route above the path")
 		.unwrap();
-	let epoch = route.epoch.clone().unwrap().parse().unwrap();
-	let served = request.prepare(epoch).unwrap().publish().unwrap();
+	let served = request.prepare().unwrap().publish().unwrap();
+	served
+		.announce(moq_net::origin::Route::try_from(route.clone()).unwrap())
+		.unwrap();
 
 	let again = moq_clock::timeout(TIMEOUT, again)
 		.await
@@ -6069,8 +6079,8 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		.unwrap()
 		.unwrap();
 	assert_eq!(
-		again.inner().info().epoch,
-		first.inner().info().epoch,
+		again.inner().info().identity,
+		first.inner().info().identity,
 		"the claim above did not answer the same instance"
 	);
 	drop((served, dynamic));
@@ -6080,14 +6090,14 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 /// An epoch pins both resolutions to one publisher instance: a request for another one is
 /// unroutable, and a follower never hands out another one taking over.
 #[tokio::test]
-async fn an_epoch_pins_request_and_follow() {
+async fn an_identity_pins_request_and_follow() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let epoch = moq_mint_epoch();
+	let epoch = moq_net::Identity::random().to_string();
 	let first = origin.create_broadcast("live".into()).unwrap();
 	first
 		.announce(MoqAnnounceRoute {
-			epoch: Some(epoch.clone()),
+			identity: Some(epoch.clone()),
 			..Default::default()
 		})
 		.unwrap();
@@ -6097,22 +6107,25 @@ async fn an_epoch_pins_request_and_follow() {
 		.expect("timed out requesting the pinned instance")
 		.unwrap();
 	assert_eq!(
-		pinned.inner().info().epoch.as_ref().map(ToString::to_string),
+		pinned.inner().info().identity.as_ref().map(ToString::to_string),
 		Some(epoch.clone())
 	);
-	let err = moq_clock::timeout(TIMEOUT, consumer.request("live".into(), Some(moq_mint_epoch())))
-		.await
-		.expect("timed out requesting another instance")
-		.err()
-		.expect("another instance is unroutable");
+	let err = moq_clock::timeout(
+		TIMEOUT,
+		consumer.request("live".into(), Some(moq_net::Identity::random().to_string())),
+	)
+	.await
+	.expect("timed out requesting another instance")
+	.err()
+	.expect("another instance is unroutable");
 	assert_protocol(
 		&err,
 		crate::error::MoqErrorScope::Stream,
 		crate::error::MoqProtocolKind::Unroutable,
 	);
 	assert!(matches!(
-		consumer.follow("live".into(), Some("not-an-epoch".into())),
-		Err(MoqError::InvalidEpoch { .. })
+		consumer.follow("live".into(), Some(String::new())),
+		Err(MoqError::InvalidIdentity { .. })
 	));
 
 	let followed = consumer.follow("live".into(), Some(epoch.clone())).unwrap();
@@ -6123,7 +6136,7 @@ async fn an_epoch_pins_request_and_follow() {
 	let second = origin.create_broadcast("live".into()).unwrap();
 	second
 		.announce(MoqAnnounceRoute {
-			epoch: Some(moq_mint_epoch()),
+			identity: Some(moq_net::Identity::random().to_string()),
 			..Default::default()
 		})
 		.unwrap();
@@ -6134,7 +6147,7 @@ async fn an_epoch_pins_request_and_follow() {
 		.expect("timed out requesting the takeover")
 		.unwrap();
 	assert_ne!(
-		takeover.inner().info().epoch.as_ref().map(ToString::to_string),
+		takeover.inner().info().identity.as_ref().map(ToString::to_string),
 		Some(epoch)
 	);
 	let next = std::pin::pin!(followed.available());

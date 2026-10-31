@@ -29,7 +29,7 @@ pub struct MoqAnnounceConfig {
 	pub hidden: bool,
 }
 
-/// How a broadcast advertises its exact path: a static cost and the publisher epoch.
+/// How a broadcast advertises its exact path: a static cost and the stream's identity.
 ///
 /// Pass one to `MoqPublication::announce`. The hop chain is the origin's to build,
 /// so a local publisher cannot claim relay hops it never took.
@@ -40,14 +40,20 @@ pub struct MoqAnnounceRoute {
 	/// larger for content it would have to start producing on demand.
 	#[uniffi(default = 0)]
 	pub cost: u64,
-	/// The publisher instance the route serves, as UUIDv7 text, or `None` when unknown.
+	/// A stable identity for the stream, or `None` to keep the one the broadcast minted.
 	///
-	/// A publisher that can restart sets a fresh one per run from `moq_mint_epoch`, so
-	/// viewers see a restart instead of a stalled broadcast. Routes with the same epoch
-	/// serve the same bytes, so redundant publishers share one. Among routes at a
-	/// prefix the newest epoch wins, and changing it is a `MoqAnnounceEvent::Restart`.
+	/// Every broadcast mints a fresh identity, kept across re-announcing, so a restarted
+	/// publisher is a new stream viewers restart onto. Set one only for a publisher that
+	/// continues its group sequences across restarts and raises `epoch` on each: readers
+	/// stitch every route of one identity together, so restarting the sequences under an
+	/// old identity splices unrelated groups into their tracks. Changing it is a
+	/// `MoqAnnounceEvent::Restart`.
 	#[uniffi(default = None)]
-	pub epoch: Option<String>,
+	pub identity: Option<String>,
+	/// Which run of a stable `identity` this is: only its highest epoch is eligible, cheaper
+	/// or not. Ignored without one.
+	#[uniffi(default = 0)]
+	pub epoch: u64,
 }
 
 impl TryFrom<MoqAnnounceRoute> for moq_net::origin::Route {
@@ -55,14 +61,14 @@ impl TryFrom<MoqAnnounceRoute> for moq_net::origin::Route {
 
 	fn try_from(route: MoqAnnounceRoute) -> Result<Self, MoqError> {
 		let mut out = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost::new(route.cost));
-		if let Some(epoch) = route.epoch {
-			out = out.with_epoch(epoch.parse()?);
+		if let Some(identity) = route.identity {
+			out = out.with_identity(identity.parse()?, route.epoch);
 		}
 		Ok(out)
 	}
 }
 
-/// An observed path-prefix route: hops, a static cost, and the publisher epoch.
+/// An observed path-prefix route: hops, a static cost, and the stream's identity.
 ///
 /// Carried by `MoqAnnounceConsumer` events. A route claims capability, not
 /// inventory: by convention a publisher announces each broadcast's exact path,
@@ -78,8 +84,8 @@ pub struct MoqRoute {
 	/// Whether the chain holds a 0 anywhere. An anonymous route ranks below every
 	/// fully identified one, whatever the costs say.
 	pub anonymous: bool,
-	/// The publisher instance the route serves, as UUIDv7 text, or `None` when unknown.
-	pub epoch: Option<String>,
+	/// The stream the route serves: routes with one identity are one continuous stream.
+	pub identity: String,
 }
 
 impl From<moq_net::origin::Route> for MoqRoute {
@@ -88,15 +94,9 @@ impl From<moq_net::origin::Route> for MoqRoute {
 			hops: route.hops.iter().map(|origin| origin.id()).collect(),
 			cost: route.cost.value(),
 			anonymous: route.is_anonymous(),
-			epoch: route.epoch.map(|epoch| epoch.to_string()),
+			identity: route.identity.map(|identity| identity.to_string()).unwrap_or_default(),
 		}
 	}
-}
-
-/// Mint a fresh publisher epoch from the wall clock and secure randomness, ordered newest last.
-#[uniffi::export]
-pub fn moq_mint_epoch() -> String {
-	moq_net::Epoch::mint().to_string()
 }
 
 /// An origin in which broadcasts can be published.
@@ -238,7 +238,7 @@ pub struct MoqAnnounce {
 	pub prefix: String,
 	/// What each wildcard matched. Only full matches are listed, so it is always set.
 	pub captures: Option<Vec<String>>,
-	/// The route serving the prefix: its epoch, hops, and a static cost.
+	/// The route serving the prefix: its identity, hops, and a static cost.
 	pub route: MoqRoute,
 }
 
@@ -469,20 +469,20 @@ impl MoqOriginConsumer {
 		}))
 	}
 
-	/// Follow the broadcast at `path` across the publisher instances that serve it.
+	/// Follow the broadcast at `path` across the identities that serve it.
 	///
-	/// Unlike `request`, this waits for future announcements and keeps following publisher
-	/// instances. A local broadcast resolves once announced, like a remote one. Pass an
-	/// `epoch` (UUIDv7 text) to follow only that instance: another one taking over is never
-	/// handed out, and the instance is handed out again if it returns after an end.
-	#[uniffi::method(default(epoch = None))]
-	pub fn follow(&self, path: String, epoch: Option<String>) -> Result<Arc<MoqFollowing>, MoqError> {
+	/// Unlike `request`, this waits for future announcements and keeps following the
+	/// identities serving the path. A local broadcast resolves once announced, like a remote
+	/// one. Pass an `identity` to follow only that stream: another one taking over is never
+	/// handed out, and the stream is handed out again if it returns after an end.
+	#[uniffi::method(default(identity = None))]
+	pub fn follow(&self, path: String, identity: Option<String>) -> Result<Arc<MoqFollowing>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
-		let epoch: Option<moq_net::Epoch> = epoch.as_deref().map(str::parse).transpose()?;
+		let identity: Option<moq_net::Identity> = identity.as_deref().map(str::parse).transpose()?;
 		// Following checks the permission eagerly, so an unreachable path fails here rather
 		// than surfacing later as a `Closed` the caller can't tell from the origin ending.
-		let inner = self.inner.follow(path.as_str(), epoch)?;
+		let inner = self.inner.follow(path.as_str(), identity)?;
 
 		Ok(Arc::new(MoqFollowing {
 			task: Task::new(Following {
@@ -500,14 +500,14 @@ impl MoqOriginConsumer {
 	/// dynamic handler on the origin. The most specific prefix wins, then the cheapest. An
 	/// unannounced broadcast is unroutable once discovery has synced without a covering route.
 	/// The request owns discovery of its path and retries route churn until then; no separate
-	/// announcement stream is needed. Pass an `epoch` (UUIDv7 text) to refuse any other
-	/// publisher instance. Drop the returned future to cancel.
-	#[uniffi::method(default(epoch = None))]
-	pub async fn request(&self, path: String, epoch: Option<String>) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		let epoch: Option<moq_net::Epoch> = epoch.as_deref().map(str::parse).transpose()?;
+	/// announcement stream is needed. Pass an `identity` to refuse any other stream. Drop the
+	/// returned future to cancel.
+	#[uniffi::method(default(identity = None))]
+	pub async fn request(&self, path: String, identity: Option<String>) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		let identity: Option<moq_net::Identity> = identity.as_deref().map(str::parse).transpose()?;
 		let broadcast = self
 			.driver
-			.watch(async { Ok(self.inner.request(path.as_str(), epoch).await?) })
+			.watch(async { Ok(self.inner.request(path.as_str(), identity).await?) })
 			.await?;
 		Ok(Arc::new(MoqBroadcastConsumer::routed(
 			broadcast,
@@ -568,12 +568,12 @@ impl MoqBroadcastRequest {
 		Ok(request.path().to_string())
 	}
 
-	/// Start answering as a new publisher instance, hidden until published.
-	pub fn prepare(&self, epoch: String) -> Result<Arc<MoqBroadcastPrepared>, MoqError> {
+	/// Start answering as a new stream under a fresh identity, hidden until published.
+	pub fn prepare(&self) -> Result<Arc<MoqBroadcastPrepared>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
 		let request = self.take()?;
-		let result = request.prepare(epoch.parse()?);
+		let result = request.prepare();
 		self.driver.check()?;
 		let prepared = result?;
 		let broadcast = Arc::new(MoqBroadcastProducer::from_inner(

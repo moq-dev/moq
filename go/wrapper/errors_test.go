@@ -96,7 +96,7 @@ func TestErrorSentinels(t *testing.T) {
 		{"NotFound", ffi.NewMoqErrorNotFound(), moq.ErrNotFound},
 		{"Unsupported", ffi.NewMoqErrorUnsupported(), moq.ErrUnsupported},
 		{"InvalidPattern", ffi.NewMoqErrorInvalidPattern(""), moq.ErrInvalidPattern},
-		{"InvalidEpoch", ffi.NewMoqErrorInvalidEpoch(""), moq.ErrInvalidEpoch},
+		{"InvalidIdentity", ffi.NewMoqErrorInvalidIdentity(""), moq.ErrInvalidIdentity},
 		{"UnresolvableBroadcast", ffi.NewMoqErrorUnresolvableBroadcast(""), moq.ErrUnresolvableBroadcast},
 		{"UnsupportedCatalog", ffi.NewMoqErrorUnsupportedCatalog(5), moq.ErrUnsupportedCatalog},
 		{"AlreadyCommitted", ffi.NewMoqErrorAlreadyCommitted(), moq.ErrAlreadyCommitted},

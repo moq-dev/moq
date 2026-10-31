@@ -403,28 +403,32 @@ async def test_announced_broadcast():
         break
 
 
-async def test_announced_epoch_restarts():
+async def test_announced_identity_restarts():
     origin = moq.OriginProducer()
     consumer = origin.consume()
     announced = consumer.announced()
-    publication = origin.create_broadcast("epoch")
+    publication = origin.create_broadcast("identity")
 
-    first = moq.mint_epoch()
-    publication.announce(moq.AnnounceRoute(epoch=first))
+    # The broadcast mints its own identity and keeps it across re-announcing.
+    publication.announce()
     start = await next_route(announced)
     assert isinstance(start, moq.AnnounceEventStart)
-    assert start.announce.route.epoch == first
+    minted = start.announce.route.identity
+    assert minted
 
-    second = moq.mint_epoch()
-    publication.announce(moq.AnnounceRoute(epoch=second))
+    publication.announce(moq.AnnounceRoute(cost=1))
+    update = await next_route(announced)
+    assert isinstance(update, moq.AnnounceEventUpdate)
+    assert update.announce.route.identity == minted
+
+    # Another identity is another stream: consumers restart onto it.
+    publication.announce(moq.AnnounceRoute(identity="cam", epoch=1))
     restart = await next_route(announced)
     assert isinstance(restart, moq.AnnounceEventRestart)
-    assert restart.announce.route.epoch == second
+    assert restart.announce.route.identity == "cam"
 
-    with pytest.raises(moq.Error.InvalidEpoch):
-        publication.announce(moq.AnnounceRoute(epoch=first.upper()))
-    with pytest.raises(moq.Error.InvalidEpoch):
-        publication.announce(moq.AnnounceRoute(epoch="not-an-epoch"))
+    with pytest.raises(moq.Error.InvalidIdentity):
+        publication.announce(moq.AnnounceRoute(identity=""))
     publication.broadcast.close()
 
 
@@ -776,7 +780,7 @@ async def test_dynamic_broadcast_request():
     request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
     assert request.path == "dynamic/broadcast"
 
-    prepared = request.prepare(moq.mint_epoch())
+    prepared = request.prepare()
     track = prepared.broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     served = prepared.publish()
     assert served.broadcast is prepared.broadcast
@@ -1621,19 +1625,18 @@ async def test_broadcast_is_reachable_only_while_announced():
     publication.broadcast.close()
 
 
-async def test_an_epoch_pins_request_and_follow():
+async def test_an_identity_pins_request_and_follow():
     origin = moq.OriginProducer()
     consumer = origin.consume()
-    epoch = moq.mint_epoch()
     publication = origin.create_broadcast("live")
-    publication.announce(moq.AnnounceRoute(epoch=epoch))
+    publication.announce(moq.AnnounceRoute(identity="cam"))
 
-    await asyncio.wait_for(consumer.request("live", epoch=epoch), timeout=5.0)
+    await asyncio.wait_for(consumer.request("live", identity="cam"), timeout=5.0)
     with pytest.raises(moq.Error.Protocol):
-        await asyncio.wait_for(consumer.request("live", epoch=moq.mint_epoch()), timeout=5.0)
-    with pytest.raises(moq.Error.InvalidEpoch):
-        consumer.follow("live", epoch="not-an-epoch")
-    async with consumer.follow("live", epoch=epoch) as following:
+        await asyncio.wait_for(consumer.request("live", identity="other"), timeout=5.0)
+    with pytest.raises(moq.Error.InvalidIdentity):
+        consumer.follow("live", identity="")
+    async with consumer.follow("live", identity="cam") as following:
         await asyncio.wait_for(following.available(), timeout=5.0)
     publication.broadcast.close()
 
@@ -1699,7 +1702,7 @@ async def test_dynamic_serves_a_request_under_a_prefix():
     pending = asyncio.create_task(consumer.request("live/cam"))
     request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
     assert request.path == "live/cam"
-    served = request.prepare(moq.mint_epoch()).publish()
+    served = request.prepare().publish()
     await asyncio.wait_for(pending, timeout=5.0)
     dynamic.cancel()
     served.broadcast.close()

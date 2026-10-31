@@ -199,9 +199,9 @@ class Announcements:
         self._idle.clear()
         return event
 
-    async def send(self, kind: type, path: str, epoch: str | None) -> None:
+    async def send(self, kind: type, path: str, identity: str) -> None:
         self._idle.clear()
-        self._events.put_nowait(kind(SimpleNamespace(prefix=path, route=SimpleNamespace(epoch=epoch))))
+        self._events.put_nowait(kind(SimpleNamespace(prefix=path, route=SimpleNamespace(identity=identity))))
         await self._idle.wait()
 
 
@@ -217,8 +217,8 @@ class Drivers:
         assert (prefix, filter) == ("viewer/carla/truck1", "*")
         return self.announcements
 
-    async def request(self, path: str, *, epoch: str | None = None):
-        self.requested.append((path, epoch))
+    async def request(self, path: str, *, identity: str | None = None):
+        self.requested.append((path, identity))
         sequence = len(self.requested)
 
         async def control():
@@ -255,56 +255,59 @@ def test_a_driver_run_keeps_the_lease_across_route_updates() -> None:
     """An update is the same run re-priced: no second subscription, no release."""
 
     async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc", "e1")
+        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc", "run-1")
         command = await next_command(commands, gate)
-        assert (command.kind, command.driver_id, command.epoch) == ("drive", "abc", "e1")
+        assert (command.kind, command.driver_id, command.identity) == ("drive", "abc", "run-1")
         assert gate.driver == "abc"
 
-        await relay.announcements.send(moq.AnnounceEventUpdate, "viewer/carla/truck1/abc", "e1")
+        await relay.announcements.send(moq.AnnounceEventUpdate, "viewer/carla/truck1/abc", "run-1")
         assert commands.empty()
         assert gate.driver == "abc"
-        assert relay.requested == [("viewer/carla/truck1/abc", "e1")]
+        assert relay.requested == [("viewer/carla/truck1/abc", "run-1")]
 
     asyncio.run(watching(scenario))
 
 
 def test_a_driver_whose_broadcast_ends_loses_the_lease() -> None:
     async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc", "e1")
+        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc", "run-1")
         await next_command(commands, gate)
         assert gate.driver == "abc"
 
-        await relay.announcements.send(moq.AnnounceEventEnd, "viewer/carla/truck1/abc", "e1")
+        await relay.announcements.send(moq.AnnounceEventEnd, "viewer/carla/truck1/abc", "run-1")
         left = await next_command(commands, gate)
-        assert (left.kind, left.epoch) == ("driver_left", "e1")
+        assert (left.kind, left.identity) == ("driver_left", "run-1")
         assert gate.driver is None
 
     asyncio.run(watching(scenario))
 
 
 @pytest.mark.parametrize("kind", ["restart", "update"])
-def test_a_driver_that_restarts_under_a_new_epoch_is_a_new_driver(kind: str) -> None:
+def test_a_driver_that_restarts_under_a_new_identity_is_a_new_driver(kind: str) -> None:
     """The old run's lease ends with it, even though the path and id are the same.
 
-    A new epoch is a restart whether the relay says so or reports it as an update.
+    A new identity is a restart whether the relay says so or reports it as an update.
     """
     event = moq.AnnounceEventRestart if kind == "restart" else moq.AnnounceEventUpdate
 
     async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc", "e1")
+        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc", "run-1")
         await next_command(commands, gate)
 
-        await relay.announcements.send(event, "viewer/carla/truck1/abc", "e2")
+        await relay.announcements.send(event, "viewer/carla/truck1/abc", "run-2")
         received = [await next_command(commands, gate) for _ in range(2)]
-        assert {(command.kind, command.epoch) for command in received} == {("driver_left", "e1"), ("drive", "e2")}
-        assert relay.requested == [("viewer/carla/truck1/abc", "e1"), ("viewer/carla/truck1/abc", "e2")]
+        assert {(command.kind, command.identity) for command in received} == {
+            ("driver_left", "run-1"),
+            ("drive", "run-2"),
+        }
+        assert relay.requested == [("viewer/carla/truck1/abc", "run-1"), ("viewer/carla/truck1/abc", "run-2")]
 
         # Whichever order those two arrived in, the new run holds the lease
         # by its next command, and the old run can no longer release it.
-        assert not gate.holds(Command(kind="drive", driver_id="abc", epoch="e1"))
-        gate.apply(Command(kind="drive", driver_id="abc", epoch="e2", sequence=3, state=DriveState()))
-        assert gate.holds(Command(kind="drive", driver_id="abc", epoch="e2"))
-        assert not gate.apply(Command(kind="driver_left", driver_id="abc", epoch="e1"))
+        assert not gate.holds(Command(kind="drive", driver_id="abc", identity="run-1"))
+        gate.apply(Command(kind="drive", driver_id="abc", identity="run-2", sequence=3, state=DriveState()))
+        assert gate.holds(Command(kind="drive", driver_id="abc", identity="run-2"))
+        assert not gate.apply(Command(kind="driver_left", driver_id="abc", identity="run-1"))
         assert gate.driver == "abc"
 
     asyncio.run(watching(scenario))

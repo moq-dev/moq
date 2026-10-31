@@ -170,7 +170,7 @@ fn announce_info(announced: u32) -> moq_announce_event {
 			hops: std::ptr::null(),
 			hops_len: 0,
 			cost: 0,
-			epoch: moq_string {
+			identity: moq_string {
 				data: std::ptr::null(),
 				len: 0,
 			},
@@ -182,31 +182,27 @@ fn announce_info(announced: u32) -> moq_announce_event {
 	info
 }
 
-/// Mint an epoch through the C ABI.
+/// A fresh stable identity, as an application would name one.
 fn mint_epoch() -> String {
-	let mut buf = [0u8; MOQ_EPOCH_LEN];
-	assert_eq!(
-		unsafe { moq_mint_epoch(buf.as_mut_ptr().cast(), buf.len()) },
-		MOQ_EPOCH_LEN as i32
-	);
-	String::from_utf8(buf.to_vec()).unwrap()
+	moq_net::Identity::random().to_string()
 }
 
-/// An announce route at `cost` under `epoch`, borrowing it.
-fn announce_route(cost: u64, epoch: &str) -> moq_announce_route {
+/// An announce route at `cost` under the stable `identity`, borrowing it.
+fn announce_route(cost: u64, identity: &str) -> moq_announce_route {
 	moq_announce_route {
 		cost,
-		epoch: epoch.as_ptr().cast(),
-		epoch_len: epoch.len(),
+		identity: identity.as_ptr().cast(),
+		identity_len: identity.len(),
+		epoch: 0,
 	}
 }
 
-/// The epoch a received route carries, or None when unknown.
+/// The identity a received route carries.
 fn route_epoch(route: &moq_route) -> Option<String> {
-	(route.epoch.len > 0).then(|| unsafe {
+	(route.identity.len > 0).then(|| unsafe {
 		std::str::from_utf8(std::slice::from_raw_parts(
-			route.epoch.data.cast::<u8>(),
-			route.epoch.len,
+			route.identity.data.cast::<u8>(),
+			route.identity.len,
 		))
 		.unwrap()
 		.to_string()
@@ -3103,22 +3099,10 @@ fn create_broadcast_is_unroutable_until_announced() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-#[test]
-fn mint_epoch_writes_ordered_uuidv7_text() {
-	let epoch = mint_epoch();
-	let parsed: moq_net::Epoch = epoch.parse().expect("a minted epoch parses");
-	assert_eq!(parsed.as_str(), epoch);
-	assert!(mint_epoch() > epoch, "a later mint orders newer");
-
-	let mut short = [0u8; MOQ_EPOCH_LEN - 1];
-	assert!(unsafe { moq_mint_epoch(short.as_mut_ptr().cast(), short.len()) } < 0);
-	assert!(unsafe { moq_mint_epoch(std::ptr::null_mut(), MOQ_EPOCH_LEN) } < 0);
-}
-
-/// A locally announced route carries its cost and epoch, and no hops: the hop chain is
+/// A locally announced route carries its cost and identity, and no hops: the hop chain is
 /// the origin's to build.
 #[test]
-fn announce_route_carries_cost_and_epoch_without_hops() {
+fn announce_route_carries_cost_and_identity_without_hops() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
@@ -3132,31 +3116,22 @@ fn announce_route_carries_cost_and_epoch_without_hops() {
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
 	assert_eq!(info.route.hops_len, 0, "a local route claims no hops");
 	assert_eq!(info.route.cost, 7);
-	assert_eq!(route_epoch(&info.route), Some(epoch));
+	assert_eq!(route_epoch(&info.route).as_ref(), Some(&epoch));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
-	// A zeroed route is the default: cost 0 and no epoch.
+	// A zeroed route is the default: cost 0 and the identity the publication minted.
 	let zeroed = moq_announce_route {
 		cost: 0,
-		epoch: std::ptr::null(),
-		epoch_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
+		epoch: 0,
 	};
 	let (publication2, broadcast2) = create_broadcast(origin, b"plain");
 	assert_eq!(unsafe { moq_publication_announce(publication2, &zeroed) }, 0);
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.route.cost, 0);
-	assert_eq!(route_epoch(&info.route), None);
+	assert!(route_epoch(&info.route).is_some_and(|minted| minted != epoch));
 	assert_eq!(moq_origin_announced_free(announced), 0);
-
-	// Anything but canonical UUIDv7 text is refused.
-	let upper = mint_epoch().to_uppercase();
-	for bad in ["6ba7b810-9dad-41d1-80b4-00c04fd430c8", upper.as_str(), "not-an-epoch"] {
-		let route = announce_route(0, bad);
-		assert!(
-			unsafe { moq_publication_announce(publication, &route) } < 0,
-			"{bad:?} is not an epoch"
-		);
-	}
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_announce_terminal(), 0);
@@ -3167,10 +3142,10 @@ fn announce_route_carries_cost_and_epoch_without_hops() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Announcing under a fresh epoch is a new publisher instance: subscribers see a restart
-/// rather than a stalled broadcast.
+/// Announcing under another identity is another stream: subscribers see a restart rather
+/// than a stalled broadcast.
 #[test]
-fn announce_under_a_new_epoch_restarts() {
+fn announce_under_a_new_identity_restarts() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
@@ -3241,10 +3216,8 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	let got = unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.data.cast::<u8>(), info.len)).unwrap() };
 	assert_eq!(got, "live/cam");
 
-	let epoch = moq_net::Epoch::mint().to_string();
 	let mut served = 0;
-	let prepared =
-		id(unsafe { moq_broadcast_request_prepare(request, epoch.as_ptr().cast(), epoch.len(), &mut served) });
+	let prepared = id(unsafe { moq_broadcast_request_prepare(request, &mut served) });
 	let publication = id(moq_broadcast_prepared_publish(prepared));
 	assert!(req_cb.recv() > 0);
 	req_cb.recv_terminal();
@@ -4277,13 +4250,9 @@ fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::o
 	State::lock().origin.get(origin).unwrap().publish(path, route).unwrap()
 }
 
-/// Publish `path` on `origin` under a fresh epoch, as each run of a publisher does.
+/// Publish `path` on `origin` under a fresh identity, as each run of a publisher does.
 fn publish_run(origin: u32, path: &str) -> moq_net::origin::Publication {
-	publish(
-		origin,
-		path,
-		moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
-	)
+	publish(origin, path, moq_net::origin::Route::default())
 }
 
 /// Another publisher instance taking the path delivers a fresh handle on the same wait.
@@ -4343,7 +4312,7 @@ fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 		)
 	});
 
-	// The wait is on the dynamic route's answer when the exact path takes over without an epoch.
+	// The wait is on the dynamic route's answer when the exact path takes over under another identity.
 	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
 	let takeover = publish(origin, "live", moq_net::origin::Route::default());
 	let delivered = id(cb.recv());
@@ -4398,17 +4367,16 @@ fn resolve_pinned(call: Resolve, origin: u32, epoch: &str, cb: &Callback) -> i32
 	}
 }
 
-/// An epoch pins both resolutions to one publisher instance: a request for another one fails,
-/// a follower never delivers another one taking over but delivers its own once it serves again,
-/// and malformed epoch text is refused.
+/// An identity pins both resolutions to one stream: a request for another one fails, and a
+/// follower never delivers another one taking over but delivers its own once it serves again.
 #[test]
-fn an_epoch_pins_request_and_follow() {
+fn an_identity_pins_request_and_follow() {
 	let origin = id(moq_origin_create());
-	let epoch = moq_net::Epoch::mint();
+	let epoch = moq_net::Identity::random();
 	let first = publish(
 		origin,
 		"live",
-		moq_net::origin::Route::default().with_epoch(epoch.clone()),
+		moq_net::origin::Route::default().with_identity(epoch.clone(), 0),
 	);
 	let epoch = epoch.to_string();
 
@@ -4420,28 +4388,20 @@ fn an_epoch_pins_request_and_follow() {
 	id(resolve_pinned(
 		moq_origin_request,
 		origin,
-		moq_net::Epoch::mint().as_ref(),
+		moq_net::Identity::random().as_ref(),
 		&cb,
 	));
-	assert!(cb.recv() < 0, "another instance resolved");
-	assert!(resolve_pinned(moq_origin_follow, origin, "not-an-epoch", &Callback::new()) < 0);
+	assert!(cb.recv() < 0, "another identity resolved");
 
-	// Another instance takes over before the follow starts. An unpinned request resolves it and
-	// holds the answer, so a follower resolving it joins that answer within its first pass.
+	// Another identity winning the path leaves the pinned stream to its own routes: the
+	// follower delivers it while it still serves, and nothing for the winner.
 	let second = publish_run(origin, "live");
-	let takeover = id(request_once(origin, b"live"));
 	let cb = Callback::new();
 	let task = id(resolve_pinned(moq_origin_follow, origin, &epoch, &cb));
-	// The runtime is one thread running the tasks spawned from outside it in order, so this one
-	// reports only after the follower's first pass has applied the takeover.
+	let delivered = id(cb.recv());
 	let tx = unsafe { &*(cb.ptr as *const mpsc::Sender<i32>) }.clone();
 	crate::ffi::RUNTIME.spawn(async move { tx.send(i32::MAX).unwrap() });
-	assert_eq!(cb.recv(), i32::MAX, "the follower delivered another instance");
-	// Once the takeover goes, the pinned instance serves the path again and is delivered.
-	assert_eq!(moq_consume_close(takeover), 0);
-	second.unannounce();
-	let delivered = id(cb.recv());
-
+	assert_eq!(cb.recv(), i32::MAX, "the follower delivered another identity");
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
@@ -4488,7 +4448,7 @@ extern "C" fn gated_callback(user_data: *mut c_void, code: i32) {
 }
 
 /// An end is a gap that ended every request on the old route, even when a claim above the path
-/// answers under the same epoch. So the instance serving the path afterwards is delivered again,
+/// answers under the same identity. So the instance serving the path afterwards is delivered again,
 /// though the caller still holds a handle to its epoch.
 #[test]
 fn follow_delivers_the_instance_again_after_an_end() {
@@ -4513,7 +4473,7 @@ fn follow_delivers_the_instance_again_after_an_end() {
 	});
 	let recv = || rx.recv_timeout(TIMEOUT).expect("callback timed out");
 
-	let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = moq_net::origin::Route::default();
 	let run = publish(origin, "live", route.clone());
 	let first = id(recv());
 
@@ -4528,8 +4488,9 @@ fn follow_delivers_the_instance_again_after_an_end() {
 	let request = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
 	let served = {
 		let _runtime = crate::ffi::RUNTIME.enter();
-		let epoch = route.epoch.clone().unwrap();
-		request.prepare(epoch).unwrap().publish().unwrap()
+		let served = request.prepare().unwrap().publish().unwrap();
+		served.announce(route.clone()).unwrap();
+		served
 	};
 	let again = id(recv());
 
@@ -4550,7 +4511,7 @@ fn follow_delivers_a_freed_takeover_again() {
 	let cb = Callback::new();
 	let task = follow(origin, b"live", &cb);
 
-	// Without an epoch, the origin holds the takeover's restart past its resolution.
+	// Under another identity, the origin holds the takeover's restart past its resolution.
 	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
 	let takeover = publish(origin, "live", moq_net::origin::Route::default());
 	assert_eq!(moq_consume_close(id(cb.recv())), 0);

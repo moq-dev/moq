@@ -74,7 +74,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatalf("path = %q, want %q", path, "dynamic/broadcast")
 	}
 
-	prepared, err := request.Prepare(moq.MintEpoch())
+	prepared, err := request.Prepare()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1289,7 +1289,7 @@ func TestRequestCancelKeepsTheOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := next.Prepare(moq.MintEpoch())
+	prepared, err := next.Prepare()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1656,8 +1656,9 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	}
 }
 
-// A route carries the publisher's epoch, and a new one restarts announce consumers.
-func TestAnnouncedEpochRestarts(t *testing.T) {
+// A broadcast mints its own identity and keeps it across re-announcing; another
+// identity is another stream and restarts announce consumers.
+func TestAnnouncedIdentityRestarts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
@@ -1668,30 +1669,38 @@ func TestAnnouncedEpochRestarts(t *testing.T) {
 	}
 	defer announced.Cancel()
 
-	publication, err := origin.CreateBroadcast("epoch")
+	publication, err := origin.CreateBroadcast("identity")
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := moq.MintEpoch()
-	if err := publication.Announce(moq.AnnounceRoute{Epoch: &first}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
-	if start := nextAnnounced(t, ctx, announced); start.Route.Epoch == nil || *start.Route.Epoch != first {
-		t.Fatalf("start epoch = %v, want %s", start.Route.Epoch, first)
+	minted := nextAnnounced(t, ctx, announced).Route.Identity
+	if minted == "" {
+		t.Fatal("start identity is empty, want a minted one")
 	}
 
-	second := moq.MintEpoch()
-	if err := publication.Announce(moq.AnnounceRoute{Epoch: &second}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{Cost: 1}); err != nil {
+		t.Fatal(err)
+	}
+	update, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventUpdate)
+	if !ok || update.Announce.Route.Identity != minted {
+		t.Fatalf("update = %+v, want identity %s", update, minted)
+	}
+
+	stable := "cam"
+	if err := publication.Announce(moq.AnnounceRoute{Identity: &stable, Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 	restart, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventRestart)
-	if !ok || restart.Announce.Route.Epoch == nil || *restart.Announce.Route.Epoch != second {
-		t.Fatalf("restart = %+v, want epoch %s", restart, second)
+	if !ok || restart.Announce.Route.Identity != stable {
+		t.Fatalf("restart = %+v, want identity %s", restart, stable)
 	}
 
-	bad := "not-an-epoch"
-	if err := publication.Announce(moq.AnnounceRoute{Epoch: &bad}); !errors.Is(err, moq.ErrInvalidEpoch) {
-		t.Fatalf("Announce(bad epoch) = %v, want ErrInvalidEpoch", err)
+	empty := ""
+	if err := publication.Announce(moq.AnnounceRoute{Identity: &empty}); !errors.Is(err, moq.ErrInvalidIdentity) {
+		t.Fatalf("Announce(empty identity) = %v, want ErrInvalidIdentity", err)
 	}
 }
 
@@ -1747,7 +1756,7 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	if err != nil || path != "live/cam" {
 		t.Fatalf("path = %q err=%v", path, err)
 	}
-	prepared, err := request.Prepare(moq.MintEpoch())
+	prepared, err := request.Prepare()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1783,7 +1792,7 @@ func TestClosingAPreparedAnswerRefusesTheRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := request.Prepare(moq.MintEpoch())
+	prepared, err := request.Prepare()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,6 @@
 # moq C++ package
 
-C++17 bindings for [rs/moq-ffi](../../rs/moq-ffi): the sources `uniffi-bindgen-cpp` generates, plus `include/moq/moq.hpp`, a thin layer that adds the executor, shutdown, and `co_await` glue. `uniffi.toml` strips moq-ffi's `Moq` type prefix and `moq_` function prefix, so `MoqClient` is generated as `moq::Client` and `moq_mint_epoch` as `moq::mint_epoch`. Nothing here re-implements a method; a shape problem is fixed in moq-ffi, where every binding benefits. User docs: [doc/lib/cpp](../../doc/lib/cpp/index.md).
+C++17 bindings for [rs/moq-ffi](../../rs/moq-ffi): the sources `uniffi-bindgen-cpp` generates, plus `include/moq/moq.hpp`, a thin layer that adds the executor, shutdown, and `co_await` glue. `uniffi.toml` strips moq-ffi's `Moq` type prefix and `moq_` function prefix, so `MoqClient` is generated as `moq::Client` and `moq_log_level` as `moq::log_level`. Nothing here re-implements a method; a shape problem is fixed in moq-ffi, where every binding benefits. User docs: [doc/lib/cpp](../../doc/lib/cpp/index.md).
 
 ## Layout
 

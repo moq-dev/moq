@@ -1270,7 +1270,7 @@ int main()
 		if (sibling) {
 			hidden = TestOk(relay.origin->create_broadcast("obs/hidden"), "unannounced sibling");
 			config.broadcast = "./hidden";
-			config.epoch = "01900000-0000-7000-8000-000000000001";
+			config.identity = "obs-test-pinned";
 		}
 		snapshot->video.clear();
 		snapshot->video.emplace("!unavailable", config);
@@ -1290,9 +1290,9 @@ int main()
 			// An unannounced sibling stays pending, without interrupting current playback.
 			const int frames = g_output_frames;
 			CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
-			// A different publisher instance is a real resolution failure.
+			// A different stream is a real resolution failure.
 			moq::AnnounceRoute route;
-			route.epoch = "01900000-0000-7000-8000-000000000002";
+			route.identity = "obs-test-other";
 			TestOk(hidden->announce(route), "announce mismatched sibling");
 		}
 		CHECK(WaitFor([] {

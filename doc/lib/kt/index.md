@@ -83,7 +83,7 @@ Moq.connect("https://relay.example.com").use { moq ->
         output = VideoEncoderOutput(codec = VideoCodec.H264, bitrate = null, gop = null, kind = autoEncoder), track = "camera"),
     )
     video.write(VideoFrame(timestampUs = pts, data = rgba))
-    publication.announce(AnnounceRoute(epoch = mintEpoch())) // a fresh epoch per run
+    publication.announce(AnnounceRoute()) // the broadcast mints its own identity
     audio.finish()
     video.finish()
     broadcast.end()

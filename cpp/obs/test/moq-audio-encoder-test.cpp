@@ -205,9 +205,7 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 	auto origin = moq::OriginProducer::init(moq::OriginConfig{});
 	auto publication = TestOk(origin->create_broadcast("room"), "create_broadcast");
 	auto broadcast = publication->broadcast();
-	moq::AnnounceRoute route;
-	route.epoch = moq::mint_epoch();
-	TestOk(publication->announce(route), "announce");
+	TestOk(publication->announce({}), "announce");
 
 	moq::AudioInit init{};
 	init.format = moq::AudioFormat::kOpus;

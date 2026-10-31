@@ -119,9 +119,9 @@ class BroadcastRequest:
         """The requested broadcast path."""
         return self._inner.path()
 
-    def prepare(self, epoch: str) -> BroadcastPrepared:
-        """Start an answer under a new epoch, hidden until published."""
-        return BroadcastPrepared(self._inner.prepare(epoch))
+    def prepare(self) -> BroadcastPrepared:
+        """Start answering as a new stream under a fresh identity, hidden until published."""
+        return BroadcastPrepared(self._inner.prepare())
 
     def reject(self, error_code: int) -> None:
         """Reject the request with an application error code."""
@@ -215,15 +215,17 @@ class OriginConsumer:
         """
         return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter, hidden=hidden)))
 
-    def follow(self, path: str, *, epoch: str | None = None) -> Following:
+    def follow(self, path: str, *, identity: str | None = None) -> Following:
         """Follow the broadcast at ``path``, resolving each publisher instance that serves it.
 
         A broadcast created on this origin resolves once it is announced, like a
-        remote one. Pass an ``epoch`` (UUIDv7 text) to follow only that instance.
+        remote one. Pass an ``identity`` to follow only that stream: another one
+        taking over is never handed out, and the stream is handed out again if it
+        returns after an end.
         """
-        return Following(self._inner.follow(path, epoch))
+        return Following(self._inner.follow(path, identity))
 
-    async def request(self, path: str, *, epoch: str | None = None) -> BroadcastConsumer:
+    async def request(self, path: str, *, identity: str | None = None) -> BroadcastConsumer:
         """Request the broadcast at ``path``, resolving one publisher instance as soon as it can be served.
 
         Resolves through the best announced route covering the path: an
@@ -231,9 +233,9 @@ class OriginConsumer:
         on demand by that session), or a dynamic handler on the origin. An
         unannounced broadcast is unroutable. Unlike :meth:`follow`, this
         answers for what is reachable now and raises if nothing can serve the
-        path. Pass an ``epoch`` (UUIDv7 text) to refuse any other instance.
+        path. Pass an ``identity`` to refuse any other stream.
         """
-        return BroadcastConsumer(await self._inner.request(path, epoch))
+        return BroadcastConsumer(await self._inner.request(path, identity))
 
 
 class OriginProducer:

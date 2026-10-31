@@ -78,8 +78,8 @@ struct AnnouncedRecord {
 	kind: moq_announce_kind,
 	hops: Vec<u64>,
 	cost: u64,
-	/// Empty when the route carries no epoch.
-	epoch: String,
+	/// The route's identity.
+	identity: String,
 	predecessor: String,
 }
 
@@ -124,7 +124,11 @@ impl AnnouncedRecord {
 			kind,
 			hops: update.route.hops.iter().map(|hop| hop.id()).collect(),
 			cost: update.route.cost.value(),
-			epoch: update.route.epoch.map(|epoch| epoch.to_string()).unwrap_or_default(),
+			identity: update
+				.route
+				.identity
+				.map(|identity| identity.to_string())
+				.unwrap_or_default(),
 			predecessor,
 		}
 	}
@@ -210,9 +214,9 @@ impl Origin {
 				hops: announced.hops.as_ptr(),
 				hops_len: announced.hops.len(),
 				cost: announced.cost,
-				epoch: moq_string {
-					data: announced.epoch.as_ptr().cast::<c_char>(),
-					len: announced.epoch.len(),
+				identity: moq_string {
+					data: announced.identity.as_ptr().cast::<c_char>(),
+					len: announced.identity.len(),
 				},
 			},
 			predecessor: announced.predecessor.as_ptr().cast::<c_char>(),
@@ -246,7 +250,7 @@ impl Origin {
 		&mut self,
 		origin: Id,
 		path: String,
-		epoch: Option<moq_net::Epoch>,
+		identity: Option<moq_net::Identity>,
 		on_broadcast: OnStatus,
 	) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
@@ -258,7 +262,7 @@ impl Origin {
 			|state| &mut state.origin.consume_task,
 			|close| async move {
 				driver
-					.watch(Self::run_follow(on_broadcast, consumer, path, epoch, close))
+					.watch(Self::run_follow(on_broadcast, consumer, path, identity, close))
 					.await
 			},
 		)
@@ -268,11 +272,11 @@ impl Origin {
 		callback: OnStatus,
 		consumer: Consumer,
 		path: String,
-		epoch: Option<moq_net::Epoch>,
+		identity: Option<moq_net::Identity>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// An unreachable path and a closed origin both mean no broadcast can ever arrive here.
-		let mut announced = match consumer.follow(path.as_str(), epoch) {
+		let mut announced = match consumer.follow(path.as_str(), identity) {
 			Ok(announced) => announced,
 			Err(moq_net::Error::Unauthorized) => return Err(Error::BroadcastNotFound),
 			Err(err) => return Err(err.into()),
@@ -311,7 +315,7 @@ impl Origin {
 		&mut self,
 		origin: Id,
 		path: String,
-		epoch: Option<moq_net::Epoch>,
+		identity: Option<moq_net::Identity>,
 		on_broadcast: OnStatus,
 	) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
@@ -323,7 +327,7 @@ impl Origin {
 			|state| &mut state.origin.consume_task,
 			|close| async move {
 				driver
-					.watch(Self::run_request(on_broadcast, consumer, path, epoch, close))
+					.watch(Self::run_request(on_broadcast, consumer, path, identity, close))
 					.await
 			},
 		)
@@ -333,11 +337,11 @@ impl Origin {
 		callback: OnStatus,
 		consumer: Consumer,
 		path: String,
-		epoch: Option<moq_net::Epoch>,
+		identity: Option<moq_net::Identity>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// Resolves to an error when no announced route can serve the path.
-		let pending = consumer.request(path.as_str(), epoch);
+		let pending = consumer.request(path.as_str(), identity);
 
 		// `biased` so a pending close always wins over a ready broadcast.
 		let broadcast = tokio::select! {

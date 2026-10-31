@@ -240,15 +240,12 @@ async def run(args: argparse.Namespace) -> None:
         try:
             async with moq.connect(args.url) as client:
                 try:
-                    # One epoch for the run: a restarted worker announces every
-                    # truck under a new one, which viewers see as a restart.
-                    route = moq.AnnounceRoute(epoch=moq.mint_epoch())
                     for truck in world.trucks:
                         publication = client.create_broadcast(broadcast_path(truck.name, args.camera))
                         video = await bridge.open(
                             bridge_stream(truck.name, args.camera), renditions(camera), publication.broadcast
                         )
-                        session = TruckSession(truck, publication, video, args.location, map_name, world.clock, route)
+                        session = TruckSession(truck, publication, video, args.location, map_name, world.clock)
                         sessions.append(session)
                         log.info(
                             "publishing %s, consuming %s/*",

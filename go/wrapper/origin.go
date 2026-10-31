@@ -133,9 +133,9 @@ func (r *BroadcastRequest) Path() (string, error) {
 	return r.inner.Path()
 }
 
-// Prepare starts an answer under a new epoch, hidden until published.
-func (r *BroadcastRequest) Prepare(epoch string) (*BroadcastPrepared, error) {
-	inner, err := r.inner.Prepare(epoch)
+// Prepare starts answering as a new stream under a fresh identity, hidden until published.
+func (r *BroadcastRequest) Prepare() (*BroadcastPrepared, error) {
+	inner, err := r.inner.Prepare()
 	if err != nil {
 		return nil, err
 	}
@@ -200,10 +200,11 @@ func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, 
 	return &AnnounceConsumer{inner: inner}, nil
 }
 
-// Follow follows an exact path, resolving each publisher instance that serves
-// it. A non-nil epoch (UUIDv7 text) follows only that instance.
-func (o *OriginConsumer) Follow(path string, epoch *string) (*Following, error) {
-	inner, err := o.inner.Follow(path, epoch)
+// Follow follows an exact path, resolving each stream that serves it. A non-nil
+// identity follows only that stream: another one taking over is never handed out,
+// and the stream is handed out again if it returns after an end.
+func (o *OriginConsumer) Follow(path string, identity *string) (*Following, error) {
+	inner, err := o.inner.Follow(path, identity)
 	if err != nil {
 		return nil, err
 	}
@@ -215,10 +216,10 @@ func (o *OriginConsumer) Follow(path string, epoch *string) (*Following, error) 
 // broadcast on this origin, a route a session announced (served on demand by
 // that session), or a dynamic handler on the origin; errors if nothing can
 // serve it, including a broadcast created but not announced. Unlike Follow, it
-// does not wait for a future announcement. A non-nil epoch (UUIDv7 text)
-// refuses any other instance. Blocks until resolved.
-func (o *OriginConsumer) Request(ctx context.Context, path string, epoch *string) (*BroadcastConsumer, error) {
-	inner, err := o.inner.Request(ctx, path, epoch)
+// does not wait for a future announcement. A non-nil identity refuses any
+// other stream. Blocks until resolved.
+func (o *OriginConsumer) Request(ctx context.Context, path string, identity *string) (*BroadcastConsumer, error) {
+	inner, err := o.inner.Request(ctx, path, identity)
 	if err != nil {
 		return nil, err
 	}

@@ -312,19 +312,19 @@ func (c *Client) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	return c.consumer.Announced(options)
 }
 
-// Follow follows path, resolving each publisher instance that serves it. A
-// non-nil epoch follows only that instance.
-func (c *Client) Follow(path string, epoch *string) (*Following, error) {
-	return c.consumer.Follow(path, epoch)
+// Follow follows path, resolving each stream that serves it. A non-nil
+// identity follows only that stream.
+func (c *Client) Follow(path string, identity *string) (*Following, error) {
+	return c.consumer.Follow(path, identity)
 }
 
 // Request resolves one publisher instance of the broadcast at path as soon as
 // it can be served: an existing exact-path broadcast, a covering announced
 // route, or a dynamic fallback on the origin, or an error. Unlike Follow, it
-// does not wait for a future announcement. A non-nil epoch refuses any other
-// instance.
-func (c *Client) Request(ctx context.Context, path string, epoch *string) (*BroadcastConsumer, error) {
-	return c.consumer.Request(ctx, path, epoch)
+// does not wait for a future announcement. A non-nil identity refuses any other
+// stream.
+func (c *Client) Request(ctx context.Context, path string, identity *string) (*BroadcastConsumer, error) {
+	return c.consumer.Request(ctx, path, identity)
 }
 
 // Session returns the underlying session. Hold the client (or session) to keep

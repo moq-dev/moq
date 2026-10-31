@@ -662,9 +662,11 @@ impl MoqAudioConsumer {
 		// Reject the codec before resolving: resolving reaches the origin, which can invoke a
 		// dynamic handler and open an upstream subscription we would immediately drop.
 		let reference = catalog_audio.broadcast.clone();
-		let epoch = catalog_audio.epoch.clone();
+		let identity = catalog_audio.identity.clone();
 		let cfg = audio_config(catalog_audio)?;
-		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
+		let resolved = broadcast
+			.resolve_inner(reference.as_deref(), identity.as_deref())
+			.await?;
 
 		let mut config = moq_audio::decode::Options::default();
 		config.output.format = output.format.into();
@@ -703,7 +705,7 @@ mod tests {
 		MoqAudio {
 			label: None,
 			broadcast: None,
-			epoch: None,
+			identity: None,
 			track: None,
 			codec: codec.to_string(),
 			description: None,

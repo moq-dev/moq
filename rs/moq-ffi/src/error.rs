@@ -366,9 +366,9 @@ pub enum MoqError {
 		reason: String,
 	},
 
-	/// An epoch was not a lowercase hyphenated UUIDv7.
+	/// An identity was empty.
 	#[error("{reason}")]
-	InvalidEpoch {
+	InvalidIdentity {
 		/// A diagnostic message describing the failure.
 		reason: String,
 	},
@@ -533,7 +533,7 @@ from_message! {
 	tracing::metadata::ParseLevelError => LogLevel,
 	serde_json::Error => Json,
 	moq_net::InvalidPattern => InvalidPattern,
-	moq_net::InvalidEpoch => InvalidEpoch,
+	moq_net::InvalidIdentity => InvalidIdentity,
 }
 
 from_message! {

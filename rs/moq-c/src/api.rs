@@ -856,14 +856,12 @@ pub struct moq_section {
 	pub json_len: usize,
 }
 
-/// The length in bytes of an epoch's UUIDv7 text, which [moq_mint_epoch] writes.
-pub const MOQ_EPOCH_LEN: usize = 36;
-
-/// How a publication advertises its exact path: a static cost and the publisher epoch.
+/// How a publication advertises its exact path: a static cost and, optionally, a stable
+/// identity.
 ///
 /// Pass one to [moq_publication_announce]. The hop chain is the origin's to build,
 /// so a local publisher cannot claim relay hops it never took. Zeroed (cost 0, NULL
-/// epoch) is the default route. `epoch` is borrowed for the duration of the call.
+/// identity) is the default route. `identity` is borrowed for the duration of the call.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct moq_announce_route {
@@ -871,19 +869,24 @@ pub struct moq_announce_route {
 	/// sets its production cost here: zero for content it is already producing,
 	/// larger for content it would have to start producing on demand.
 	pub cost: u64,
-	/// The publisher instance the route serves, as UUIDv7 text, NOT NULL terminated,
-	/// or NULL (or empty) when unknown.
+	/// A stable identity for the stream, NOT NULL terminated, or NULL (or empty) to keep the
+	/// one the publication minted.
 	///
-	/// A publisher that can restart sets a fresh one per run from [moq_mint_epoch], so
-	/// viewers see a restart instead of a stalled broadcast. Routes with the same epoch
-	/// serve the same bytes, so redundant publishers share one. Among routes at a
-	/// prefix the newest epoch wins, and changing it is a `MOQ_ANNOUNCE_KIND_RESTART`.
-	pub epoch: *const c_char,
-	/// The length in bytes of `epoch`.
-	pub epoch_len: usize,
+	/// Every publication mints a fresh identity, kept across re-announcing, so a restarted
+	/// publisher is a new stream viewers restart onto. Set one only for a publisher that
+	/// continues its group sequences across restarts and raises `epoch` on each: readers
+	/// stitch every route of one identity together, so restarting the sequences under an
+	/// old identity splices unrelated groups into their tracks. Changing it is a
+	/// `MOQ_ANNOUNCE_KIND_RESTART`.
+	pub identity: *const c_char,
+	/// The length in bytes of `identity`.
+	pub identity_len: usize,
+	/// Which run of a stable `identity` this is: only its highest epoch is eligible, cheaper
+	/// or not. Ignored without one.
+	pub epoch: u64,
 }
 
-/// An observed route: hops, a static cost, and the publisher epoch.
+/// An observed route: hops, a static cost, and the stream's identity.
 ///
 /// Carried by [moq_announce_event]. Its pointers borrow the announcement's storage.
 #[repr(C)]
@@ -897,25 +900,25 @@ pub struct moq_route {
 	pub hops_len: usize,
 	/// Preference among routes covering the same prefix: lower wins.
 	pub cost: u64,
-	/// The publisher instance the route serves, as UUIDv7 text; empty when unknown.
-	pub epoch: moq_string,
+	/// The stream the route serves: routes with one identity are one continuous stream.
+	pub identity: moq_string,
 }
 
 /// Parse a [moq_announce_route], treating NULL as the default.
 ///
 /// # Safety
-/// `route` may be NULL, or must point at a readable [moq_announce_route] whose `epoch`
-/// pointer is valid for `epoch_len` bytes.
+/// `route` may be NULL, or must point at a readable [moq_announce_route] whose `identity`
+/// pointer is valid for `identity_len` bytes.
 unsafe fn parse_announce_route(route: *const moq_announce_route) -> Result<moq_net::origin::Route, Error> {
 	let Some(route) = (unsafe { route.as_ref() }) else {
 		return Ok(moq_net::origin::Route::default());
 	};
 	let mut out = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost::new(route.cost));
-	if let Some(epoch) = unsafe { ffi::parse_str_optional(route.epoch, route.epoch_len)? } {
-		let epoch = epoch
+	if let Some(identity) = unsafe { ffi::parse_str_optional(route.identity, route.identity_len)? } {
+		let identity = identity
 			.parse()
-			.map_err(|_| Error::InvalidConfig(format!("epoch {epoch:?} is not canonical UUIDv7 text")))?;
-		out = out.with_epoch(epoch);
+			.map_err(|_| Error::InvalidConfig("an identity is never empty".into()))?;
+		out = out.with_identity(identity, route.epoch);
 	}
 	Ok(out)
 }
@@ -1222,34 +1225,6 @@ pub unsafe extern "C" fn moq_versions(dst: *mut moq_string, count: usize) -> i32
 		}
 
 		Ok(VERSION_NAMES.len())
-	})
-}
-
-/// Mint a fresh publisher epoch from the wall clock and secure randomness, ordered newest last.
-///
-/// Writes its [MOQ_EPOCH_LEN] bytes of UUIDv7 text, NOT NULL terminated, to `dst`. Pass
-/// it as [moq_announce_route]'s `epoch` or to [moq_broadcast_request_prepare]; a
-/// publisher that can restart mints one per run.
-///
-/// Returns [MOQ_EPOCH_LEN] on success, or a negative code when `dst` is NULL or
-/// `dst_len` is shorter.
-///
-/// # Safety
-/// - `dst` must be NULL or point at `dst_len` writable bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_mint_epoch(dst: *mut c_char, dst_len: usize) -> i32 {
-	ffi::enter(move || {
-		if dst.is_null() {
-			return Err(Error::InvalidPointer);
-		}
-		if dst_len < MOQ_EPOCH_LEN {
-			return Err(Error::InvalidConfig(format!(
-				"an epoch needs {MOQ_EPOCH_LEN} bytes, got {dst_len}"
-			)));
-		}
-		let dst = unsafe { std::slice::from_raw_parts_mut(dst.cast::<u8>(), MOQ_EPOCH_LEN) };
-		dst.copy_from_slice(moq_net::Epoch::mint().as_str().as_bytes());
-		Ok(MOQ_EPOCH_LEN)
 	})
 }
 
@@ -2074,31 +2049,23 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 	})
 }
 
-/// Start a broadcast request answer under `epoch`, hidden until published.
+/// Start a broadcast request answer as a new stream under a fresh identity, hidden until
+/// published.
 ///
 /// Consumes the request handle, writes the new broadcast handle to `broadcast`
 /// (which cannot announce itself; only [moq_broadcast_prepared_publish] does),
 /// and returns a positive prepared-answer handle or a negative error.
 ///
 /// # Safety
-/// - `epoch` must point at `epoch_len` readable bytes containing a UUIDv7 epoch.
 /// - `broadcast` must point at writable storage for one handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_broadcast_request_prepare(
-	request: u32,
-	epoch: *const c_char,
-	epoch_len: usize,
-	broadcast: *mut u32,
-) -> i32 {
+pub unsafe extern "C" fn moq_broadcast_request_prepare(request: u32, broadcast: *mut u32) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let epoch = unsafe { ffi::parse_str(epoch, epoch_len)? }
-			.parse()
-			.map_err(|_| Error::InvalidCode)?;
 		let broadcast_out = unsafe { broadcast.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let mut state = State::lock();
 		let (pending, driver) = state.origin.broadcast_request_take(request)?;
-		let prepared = pending.prepare(epoch)?;
+		let prepared = pending.prepare()?;
 		let broadcast = state.publish.create((prepared.broadcast().clone(), driver.clone()))?;
 		let id = state.origin.prepared_insert(prepared, driver, broadcast)?;
 		*broadcast_out = broadcast.into();
@@ -2268,9 +2235,9 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 /// instead, use [moq_origin_request]. A broadcast created on this origin resolves once it is
 /// announced, like a remote one.
 ///
-/// `epoch` is the UUIDv7 text of the only publisher instance to follow, or NULL (or empty) to
-/// follow every instance. A pinned follow never delivers another instance taking over, and
-/// delivers its own instance again if it returns after an end.
+/// `identity` is the only stream to follow, or NULL (or empty) to follow every identity serving
+/// the path. A pinned follow never delivers another identity taking over, and delivers its own
+/// again if it returns after an end.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once announced, and again with a
 /// new handle each time another publisher instance takes over (a restarted publisher, or a
@@ -2286,24 +2253,24 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
-/// - `epoch` may be NULL, or must point at `epoch_len` readable bytes.
+/// - `identity` may be NULL, or must point at `identity_len` readable bytes.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_broadcast` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_follow(
 	origin: u32,
 	path: *const c_char,
 	path_len: usize,
-	epoch: *const c_char,
-	epoch_len: usize,
+	identity: *const c_char,
+	identity_len: usize,
 	on_broadcast: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
-		let epoch = unsafe { parse_epoch(epoch, epoch_len)? };
+		let identity = unsafe { parse_identity(identity, identity_len)? };
 		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast)? };
-		State::lock().origin.follow(origin, path, epoch, on_broadcast)
+		State::lock().origin.follow(origin, path, identity, on_broadcast)
 	})
 }
 
@@ -2330,8 +2297,8 @@ pub extern "C" fn moq_origin_follow_cancel(task: u32) -> i32 {
 /// broadcast created but not announced. No separate announcement stream is needed.
 /// Serve on-demand paths with [moq_origin_requests].
 ///
-/// `epoch` is the UUIDv7 text of the only publisher instance to accept, or NULL (or empty) for
-/// any instance. A request pinned to an instance that does not serve the path is unroutable.
+/// `identity` is the only stream to accept, or NULL (or empty) for any. A request pinned to an
+/// identity that does not serve the path is unroutable.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
 /// with a terminal code: `0` (finished, including after [moq_origin_request_cancel]) or a negative
@@ -2343,24 +2310,24 @@ pub extern "C" fn moq_origin_follow_cancel(task: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
-/// - `epoch` may be NULL, or must point at `epoch_len` readable bytes.
+/// - `identity` may be NULL, or must point at `identity_len` readable bytes.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_broadcast` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_request(
 	origin: u32,
 	path: *const c_char,
 	path_len: usize,
-	epoch: *const c_char,
-	epoch_len: usize,
+	identity: *const c_char,
+	identity_len: usize,
 	on_broadcast: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
-		let epoch = unsafe { parse_epoch(epoch, epoch_len)? };
+		let identity = unsafe { parse_identity(identity, identity_len)? };
 		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast)? };
-		State::lock().origin.request(origin, path, epoch, on_broadcast)
+		State::lock().origin.request(origin, path, identity, on_broadcast)
 	})
 }
 
@@ -2378,13 +2345,13 @@ pub extern "C" fn moq_origin_request_cancel(task: u32) -> i32 {
 	})
 }
 
-/// Parse an optional publisher epoch, where NULL or empty means unpinned.
+/// Parse an optional publisher identity, where NULL or empty means unpinned.
 ///
 /// # Safety
 /// - `epoch` may be NULL, or must point at `epoch_len` readable bytes.
-unsafe fn parse_epoch(epoch: *const c_char, epoch_len: usize) -> Result<Option<moq_net::Epoch>, Error> {
-	unsafe { ffi::parse_str_optional(epoch, epoch_len)? }
-		.map(|epoch| epoch.parse().map_err(|_| Error::InvalidCode))
+unsafe fn parse_identity(identity: *const c_char, identity_len: usize) -> Result<Option<moq_net::Identity>, Error> {
+	unsafe { ffi::parse_str_optional(identity, identity_len)? }
+		.map(|identity| identity.parse().map_err(|_| Error::InvalidCode))
 		.transpose()
 }
 

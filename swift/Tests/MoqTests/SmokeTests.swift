@@ -260,26 +260,28 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(update.captures, ["alice"])
     }
 
-    func testAnnouncedEpochRestarts() async throws {
+    func testAnnouncedIdentityRestarts() async throws {
         let origin = OriginProducer()
         let announced = try origin.consume().announced(prefix: "")
-        let publication = try origin.createBroadcast(path: "epoch")
+        let publication = try origin.createBroadcast(path: "identity")
 
-        let first = mintEpoch()
-        try publication.announce(route: AnnounceRoute(epoch: first))
+        try publication.announce(route: AnnounceRoute())
         guard case .start(let start) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
-        XCTAssertEqual(start.route.epoch, first)
+        XCTAssertFalse(start.route.identity.isEmpty)
 
-        let second = mintEpoch()
-        try publication.announce(route: AnnounceRoute(epoch: second))
+        try publication.announce(route: AnnounceRoute(identity: "camera", epoch: 1))
         guard case .restart(let restart) = try await nextRoute(announced) else {
             return XCTFail("expected a restart")
         }
-        XCTAssertEqual(restart.route.epoch, second)
+        XCTAssertEqual(restart.route.identity, "camera")
 
-        XCTAssertThrowsError(try publication.announce(route: AnnounceRoute(epoch: "not-an-epoch")))
+        XCTAssertThrowsError(try publication.announce(route: AnnounceRoute(identity: ""))) { error in
+            guard case MoqError.InvalidIdentity = error else {
+                return XCTFail("expected InvalidIdentity, got \(error)")
+            }
+        }
     }
 
     func testDynamicServesARequestUnderAPrefix() async throws {
@@ -290,7 +292,7 @@ final class SmokeTests: XCTestCase {
         }
         let request = try await dynamic.requestedBroadcast()
         XCTAssertEqual(try request.path, "live/cam")
-        let prepared = try request.prepare(epoch: mintEpoch())
+        let prepared = try request.prepare()
         let served = try prepared.publish()
         XCTAssertTrue(served.broadcast === prepared.broadcast)
         _ = try await pending.value

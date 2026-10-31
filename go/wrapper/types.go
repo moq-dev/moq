@@ -33,9 +33,13 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// AnnounceRoute is how a broadcast advertises its exact path: its static production Cost (lower wins) and the publisher Epoch it serves (nil when unknown).
+	// AnnounceRoute is how a broadcast advertises its exact path: its static production Cost (lower wins) and, optionally, a stable Identity.
+	// A nil Identity keeps the one the broadcast minted, which it keeps across re-announcing, so a restarted
+	// publisher is a new stream viewers restart onto. Set one only for a publisher that continues its group
+	// sequences across restarts and raises Epoch on each: readers stitch every route of one identity together,
+	// so restarting the sequences under an old identity splices unrelated groups into their tracks.
 	AnnounceRoute = ffi.MoqAnnounceRoute
-	// Route is an observed route: the publisher Epoch it serves (nil when unknown), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
+	// Route is an observed route: the Identity of the stream it serves (routes with one identity are one continuous stream), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
 	Route = ffi.MoqRoute
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (Captures), and the Route serving it. It carries no broadcast;
@@ -199,13 +203,6 @@ func QlogSupported() bool {
 // LogLevel configures the native tracing log level (e.g. "info", "debug").
 func LogLevel(level string) error {
 	return ffi.MoqLogLevel(level)
-}
-
-// MintEpoch mints a fresh publisher epoch from the wall clock and secure randomness,
-// ordered newest last. Mint one per publisher run and announce it in AnnounceRoute.Epoch, so
-// viewers see a restart as a new broadcast instead of a stalled one.
-func MintEpoch() string {
-	return ffi.MoqMintEpoch()
 }
 
 // Protocol registries and recognized kinds carried by ProtocolError.
