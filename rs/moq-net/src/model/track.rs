@@ -689,16 +689,23 @@ impl Slot {
 
 	/// Where the group starts in presentation time, from a live copy holding frame 0. A
 	/// copy joined mid-group stamps a later frame, which proves nothing about the start.
-	fn start(&self) -> Option<Timestamp> {
+	///
+	/// Only for time anchors. `unverified` counts a start accepted below the eviction
+	/// watermark too, which a track whose history a local handler serves trusts (see
+	/// [`Holdings::looks_up`]): no remote publisher wrote it.
+	fn start(&self, unverified: bool) -> Option<Timestamp> {
 		self.copies()
 			.filter(|group| group.live_first_frame() == Some(0))
-			.find_map(group::Handle::timestamp)
+			.find_map(|group| match unverified {
+				true => group.first_timestamp(),
+				false => group.timestamp(),
+			})
 	}
 
-	/// Whether the group has no start yet but may still get one: a copy holding frame 0
-	/// has not presented it.
-	fn may_start(&self) -> bool {
-		self.start().is_none() && self.copies().any(group::Handle::may_start)
+	/// Whether the group has no [`Self::start`] yet but may still get one: a copy holding
+	/// frame 0 has not presented it.
+	fn may_start(&self, unverified: bool) -> bool {
+		self.start(unverified).is_none() && self.copies().any(group::Handle::may_start)
 	}
 
 	/// The checked start of whichever copy began at frame 0.
@@ -775,9 +782,9 @@ impl Holdings for TrackState {
 
 	fn next_held(&self, from: u64) -> Option<(u64, Held)> {
 		let (&sequence, slot) = self.lookup.range(from..).next()?;
-		let held = match slot.start() {
+		let held = match slot.start(self.looks_up()) {
 			Some(at) => Held::Started(at),
-			None if slot.may_start() => Held::Pending,
+			None if slot.may_start(self.looks_up()) => Held::Pending,
 			None => Held::Never,
 		};
 		Some((sequence, held))
@@ -950,9 +957,11 @@ impl TrackState {
 	}
 
 	/// Index where cached group `sequence` starts, read back through its slot so only the
-	/// cached copy holding frame 0 counts, and wake the reads a time end parks on it.
+	/// cached copy holding frame 0 counts, and wake the reads a time end parks on it. On a
+	/// track whose history a handler serves, a start accepted unverified counts: the fills
+	/// below the eviction watermark that a time range walks are all unverified.
 	fn index_start(&self, sequence: u64) {
-		let Some(start) = self.lookup.get(&sequence).and_then(Slot::start) else {
+		let Some(start) = self.lookup.get(&sequence).and_then(|slot| slot.start(self.looks_up())) else {
 			return;
 		};
 		self.starts
@@ -6628,8 +6637,7 @@ impl Cursor {
 			// The answer's first frame says whether it starts at or before the time.
 			if let Some(group) = answer
 				&& let Some(slot) = state.lookup.get(&group)
-				&& slot.start().is_none()
-				&& slot.may_start()
+				&& slot.may_start(state.looks_up())
 			{
 				let _ = slot.serving().poll_started(waiter);
 				continue;
@@ -18701,9 +18709,9 @@ mod test {
 		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
 	}
 
-	/// A time start before every group held starts at the group its lookup answers, and a
-	/// time end walks the history below the feed's start through fills, stopping just past
-	/// the group containing it.
+	/// A time start before every group held starts at the group its lookup answers, once that
+	/// group's first frame says where it starts, asking nothing below it; a time end walks the
+	/// history below the feed's start through fills, stopping just past the group containing it.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_looked_up_time_range_reads_the_history() {
@@ -18726,13 +18734,20 @@ mod test {
 			panic!("the time start is looked up");
 		};
 		assert_eq!(lookup.time(), Some(at(5)));
-		write_filled(lookup.accept(5, None), 5);
+		let found = lookup.accept(5, None);
 		drop(lookup);
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"nothing reads until the group found starts"
+		);
+		write_filled(found, 5);
 		let mut read = drain_groups(&mut subscriber);
 		// One group at a time past the start, until one starts after the end.
 		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 			assert_eq!(fill.time(), None);
 			while let Some(sequence) = fill.next() {
+				assert!(sequence >= 5, "group {sequence} is below the looked-up start");
 				write_filled(fill.accept(sequence, None), sequence);
 			}
 			drop(fill);
@@ -18747,7 +18762,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_time_end_walks_evicted_arrivals_through_the_history() {
-		let mut producer = track_producer("test", Info::timed());
+		let producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
 		let at = |millis| Timestamp::from_millis(millis).unwrap();
 		for sequence in 0..10 {
