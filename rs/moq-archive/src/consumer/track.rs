@@ -217,16 +217,25 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill:
 		}
 	}
 
-	// Every group starts after it: the oldest group is where its range reaches back to.
+	// Every group starts after it: the oldest group is where its range reaches back to, skipping
+	// one whose head was pruned, which can't be served from its first frame.
 	let mut next = index.lock().unwrap().after(None);
 	while let Some((start, path)) = next {
 		let Some(object) = load(shared, index, fill, start, &path, timed).await else {
 			return;
 		};
-		let found = object.entries.iter().find_map(|entry| match entry {
-			Entry::Group { sequence, frames } if !frames.is_empty() => Some(*sequence),
-			_ => None,
-		});
+		let found = object
+			.entries
+			.iter()
+			.enumerate()
+			.find_map(|(position, entry)| match entry {
+				Entry::Group { sequence, frames }
+					if !frames.is_empty() && (position > 0 || object.frame_start == 0) =>
+				{
+					Some(*sequence)
+				}
+				_ => None,
+			});
 		if let Some(sequence) = found {
 			return serve_group(shared, index, fill, sequence).await;
 		}

@@ -606,9 +606,11 @@ impl Window {
 					holdings.next_start(0).map_or(span.reach, |(oldest, _)| oldest),
 				),
 			};
-			// A time end walked from group 0 meanwhile starts its walk again at the start.
+			// A time end walked from group 0 meanwhile walks again from where the span reaches:
+			// a start the history couldn't place asks nothing below the oldest group held, so
+			// none of those may hold the end open.
 			if let Some(Anchor::Time(end)) = self.ranges[span.index].end {
-				let mut time = TimeEnd::new(end, span.start);
+				let mut time = TimeEnd::new(end, span.reach);
 				span.end = time.advance(span.start, holdings).map_or(End::Time(time), End::Before);
 			}
 		}
@@ -1234,6 +1236,19 @@ mod tests {
 		assert!(window.found(at(500), None, &groups));
 		assert_eq!(window.resolved(), [Some(Resolved { start: 0, end: None })]);
 		assert!(window.contains(4) && !window.missable(0).any(|run| *run.start() < 4));
+	}
+
+	/// A time end on a start the history couldn't place walks from the oldest group held,
+	/// since nothing asks for those below it: none holds the end open.
+	#[test]
+	fn an_unanswered_lookup_settles_a_time_end() {
+		let mut groups = Groups::new([Groups::started(4, 4000), Groups::started(9, 9000)]);
+		groups.looks_up = true;
+		let mut window = Window::new(&[range(time(500), Some(time(3000)))], Some(9), &groups).unwrap();
+		assert_eq!(window.lookups().collect::<Vec<_>>(), [(at(500), 4)]);
+		assert!(window.found(at(500), None, &groups));
+		assert!(window.is_settled());
+		assert_eq!(window.resolved(), [Some(Resolved { start: 0, end: Some(4) })]);
 	}
 
 	/// Without a handler serving the history, the groups held decide alone.

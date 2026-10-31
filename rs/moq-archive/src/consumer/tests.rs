@@ -842,6 +842,26 @@ async fn a_time_before_the_archive_starts_at_its_oldest_group() {
 	assert_eq!(read_range(&broadcast, "video", range).await, [3, 4]);
 }
 
+/// A time older than an archive whose oldest object continues a pruned group reaches back to
+/// the oldest group stored whole.
+#[tokio::test(start_paused = true)]
+async fn a_time_before_a_pruned_head_starts_at_the_oldest_whole_group() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	archive
+		.object("video", 2, vec![frames(true, 5, 2..4), frames(true, 6, 0..2)])
+		.await;
+	archive.object("video", 0, vec![frames(true, 7, 0..2)]).await;
+	archive.object("video", 0, vec![frames(true, 8, 0..1)]).await;
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let range = track::Range {
+		start: at(500),
+		end: Some(at(7_500)),
+	};
+	assert_eq!(read_range(&broadcast, "video", range).await, [6, 7]);
+}
+
 /// A time in a gap the archive never stored starts at the group before the gap, the newest
 /// starting before it, and the gap reads as missing.
 #[tokio::test(start_paused = true)]
