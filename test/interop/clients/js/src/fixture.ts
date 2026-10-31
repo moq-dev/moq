@@ -17,7 +17,14 @@ import * as Moq from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
 import type { AudioCodec, Fault, FixtureState } from "./contract";
-import { ALT_AUDIO, CHANGED_SAMPLE_RATE, KEYFRAME_INTERVAL_MS, OFFSET_STEPS, SAMPLE_RATE } from "./contract";
+import {
+	ALT_AUDIO,
+	CHANGED_SAMPLE_RATE,
+	FIXTURE_EVENT,
+	KEYFRAME_INTERVAL_MS,
+	OFFSET_STEPS,
+	SAMPLE_RATE,
+} from "./contract";
 import * as Pattern from "./pattern";
 
 /** Cap the encoder rather than letting it track a bandwidth estimate, so runs are comparable. */
@@ -31,11 +38,6 @@ const SCHEDULE_AHEAD = 2; // seconds
 
 /** Peak amplitude of the tone. Low enough to leave Opus headroom, high enough to dominate noise. */
 const AMPLITUDE = 0.5;
-
-// A canvas capture track is a MediaStreamTrack with requestFrame(); the publish types describe a
-// getUserMedia track, whose settings a canvas track does not carry. Only the MediaStreamTrack half
-// is ever touched at runtime.
-type CanvasSource = Publish.Video.StreamTrack & Pick<CanvasCaptureMediaStreamTrack, "requestFrame">;
 
 /**
  * A running fixture publisher.
@@ -93,8 +95,16 @@ export class Fixture {
 		// captureStream(0) never samples on its own: every frame comes from an explicit
 		// requestFrame(), which is what ties the emitted frames to the pattern clock.
 		const stream = canvas.captureStream(0);
-		const videoTrack = stream.getVideoTracks()[0] as unknown as CanvasSource;
+		// The publish types describe a getUserMedia track, whose settings a canvas track does not carry.
+		// Only the MediaStreamTrack half is ever touched at runtime.
+		const videoTrack = stream.getVideoTracks()[0] as unknown as Publish.Video.StreamTrack;
 		this.#signals.cleanup(() => videoTrack.stop());
+		// The spec puts requestFrame() on the track, which Chromium follows; Firefox has it on the
+		// stream instead.
+		const capturing = stream.getVideoTracks()[0] as Partial<CanvasCaptureMediaStreamTrack>;
+		const requestFrame = capturing.requestFrame
+			? () => capturing.requestFrame?.()
+			: () => (stream as unknown as { requestFrame(): void }).requestFrame();
 
 		this.#audio = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: "interactive" });
 		this.#signals.cleanup(() => void this.#audio.close());
@@ -180,7 +190,7 @@ export class Fixture {
 			const start = this.#audio.currentTime + 0.2;
 			oscillator.start(start);
 			this.#runTone(oscillator, start, fault);
-			this.#runPicture(ctx, videoTrack, start, fault);
+			this.#runPicture(ctx, requestFrame, start, fault);
 		};
 		const unlock = () => void this.#audio.resume().catch(() => {});
 
@@ -228,7 +238,7 @@ export class Fixture {
 					}),
 				),
 			};
-			host.dataset.interopFixture = JSON.stringify(state);
+			console.debug(FIXTURE_EVENT + JSON.stringify(state));
 		});
 	}
 
@@ -252,7 +262,7 @@ export class Fixture {
 
 	// Paint and request capture per pattern tick. Capture and encoding can finish later. The counter
 	// comes from the audio clock, so a coalesced tick skips a frame instead of drifting the two apart.
-	#runPicture(ctx: CanvasRenderingContext2D, track: CanvasSource, start: number, fault: Fault): void {
+	#runPicture(ctx: CanvasRenderingContext2D, requestFrame: () => void, start: number, fault: Fault): void {
 		let painted = -1;
 
 		const tick = () => {
@@ -264,7 +274,7 @@ export class Fixture {
 			painted = frameId;
 
 			Pattern.paint(ctx, fault === "frozen-video" ? 0 : frameId, this.#generation);
-			track.requestFrame();
+			requestFrame();
 			this.#frameId.set(frameId);
 		};
 
@@ -335,6 +345,6 @@ export class Fixture {
 	close(): void {
 		this.#signals.close();
 		this.host.replaceChildren();
-		delete this.host.dataset.interopFixture;
+		console.debug(`${FIXTURE_EVENT}null`);
 	}
 }

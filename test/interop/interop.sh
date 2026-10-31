@@ -74,13 +74,14 @@ NEGATIVE=0
 MEDIA=0
 MEDIA_CASES=""
 MEDIA_ENGINES="chromium"
+MEDIA_PUBLISHER="chromium"
 TAIL_ONLY=0
 FINISH_ONLY=0
 # The versions the matrix runs on, one pass each. `auto` leaves every client its defaults,
 # except the clients the harness reads a grant from, which offer $AUTH_VERSION alone. Any other
 # entry pins every client in its pass to that version, and `ietf` expands to IETF_VERSIONS.
 VERSIONS="auto"
-IETF_VERSIONS="moq-transport-18,moq-transport-22"
+IETF_VERSIONS="moq-transport-18,moq-transport-20,moq-transport-22"
 
 # Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
@@ -146,6 +147,12 @@ while [[ $# -gt 0 ]]; do
         --media-engines)
             require_value "$@"
             MEDIA_ENGINES="$2"
+            MEDIA=1
+            shift 2
+            ;;
+        --media-publisher)
+            require_value "$@"
+            MEDIA_PUBLISHER="$2"
             MEDIA=1
             shift 2
             ;;
@@ -216,6 +223,11 @@ if [[ ! "$MEDIA_ENGINES" =~ ^(chromium|firefox|webkit)(,(chromium|firefox|webkit
     exit 2
 fi
 IFS=',' read -r -a MEDIA_ENGINE_LIST <<<"$MEDIA_ENGINES"
+# WebKit's publishing stays with the Safari work; Playwright's WebKit is not Safari.
+if [[ ! "$MEDIA_PUBLISHER" =~ ^(chromium|firefox)$ ]]; then
+    echo "error: the media publisher must be chromium or firefox" >&2
+    exit 2
+fi
 
 IFS=',' read -r -a PUB_LIST <<<"$PUBLISHERS"
 IFS=',' read -r -a SUB_LIST <<<"$SUBSCRIBERS"
@@ -391,19 +403,24 @@ record() {
 # Call <action> <name> <media.ts args...> for each media run on <engine>. The planning
 # pass and the real one share it, so they cannot disagree on which runs exist.
 media_runs() {
-    local action="$1" engine="$2"
+    local action="$1" engine="$2" who="$2"
+    local roles=(--publisher-engine "$MEDIA_PUBLISHER" --player-engine "$engine")
+    # Chromium publishing keeps the names earlier reports used.
+    [[ "$MEDIA_PUBLISHER" == chromium ]] || who="$MEDIA_PUBLISHER to $engine"
     if [[ -n "$MEDIA_CASES" ]]; then
-        "$action" "$engine: media cases: $MEDIA_CASES" --player-engine "$engine" --cases "$MEDIA_CASES" --focused
+        "$action" "$who: media cases: $MEDIA_CASES" "${roles[@]}" --cases "$MEDIA_CASES" --focused
         return
     fi
-    "$action" "$engine: media output + lifecycle" --player-engine "$engine"
-    "$action" "$engine: control: frozen video" --player-engine "$engine" --fault frozen-video --cases none --expect-fail "video progress"
-    "$action" "$engine: control: silent audio" --player-engine "$engine" --fault silent-audio --cases none --expect-fail "audio tone"
-    "$action" "$engine: control: offset audio" --player-engine "$engine" --fault audio-offset --cases none --expect-fail "audio/video sync"
-    "$action" "$engine: control: leaked session" --player-engine "$engine" --leak --cases detach --expect-fail "resource baseline"
-    "$action" "$engine: control: lagging latecomer" --player-engine "$engine" --lag --cases late-join --expect-fail "late join reaches live"
-    # Skipped where the Chromium publisher has no AAC encoder, which is every Linux build.
-    "$action" "$engine: AAC publish and codec change" --player-engine "$engine" --cases aac,audio-codec --focused
+    "$action" "$who: media output + lifecycle" "${roles[@]}"
+    "$action" "$who: control: frozen video" "${roles[@]}" --fault frozen-video --cases none --expect-fail "video progress"
+    "$action" "$who: control: silent audio" "${roles[@]}" --fault silent-audio --cases none --expect-fail "audio tone"
+    "$action" "$who: control: offset audio" "${roles[@]}" --fault audio-offset --cases none --expect-fail "audio/video sync"
+    "$action" "$who: control: leaked session" "${roles[@]}" --leak --cases detach --expect-fail "resource baseline"
+    "$action" "$who: control: lagging latecomer" "${roles[@]}" --lag --cases late-join --expect-fail "late join reaches live"
+    # Skipped where the publisher has no AAC encoder, which for Chromium is every Linux build.
+    "$action" "$who: AAC publish and codec change" "${roles[@]}" --cases aac,audio-codec --focused
+    # The native runs have no browser publisher, so only the default Chromium-publisher pass runs them.
+    [[ "$MEDIA_PUBLISHER" == chromium ]] || return 0
     # The Rust CLI publishing the same pattern from ffmpeg (src/native.ts), so the player grades a
     # native importer's timestamps: one rendition per codec, switched between, then AAC alone.
     "$action" "$engine: native publisher: opus + AAC" --native opus,mp4a --player-engine "$engine" --cases audio-switch
