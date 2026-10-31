@@ -24,6 +24,8 @@ export class Producer {
 	#inner: NetBroadcast.Producer;
 	#key: SecretKey;
 	#path: Path.Valid;
+	// Each track's lowest unsigned sequence, kept across the track's replacements.
+	#sequences = new Map<string, Track.Sequences>();
 
 	/** Sign `inner` with `key`, as the broadcast at application path `path`, taking ownership of it: {@link close} ends it. */
 	constructor(inner: NetBroadcast.Producer, key: SecretKey, path: Path.Valid) {
@@ -41,7 +43,12 @@ export class Producer {
 	createTrack(name: string, info: Partial<NetTrack.Info> = {}): Track.Producer {
 		const inner = this.#inner.createTrack(name, info);
 		const timescale = info.timescale ?? undefined;
-		return Track.Producer.make(inner, this.#key, new Scope(this.#path, this.epoch, name), timescale);
+		let sequences = this.#sequences.get(name);
+		if (!sequences) {
+			sequences = { next: 0 };
+			this.#sequences.set(name, sequences);
+		}
+		return Track.Producer.make(inner, this.#key, new Scope(this.#path, this.epoch, name), sequences, timescale);
 	}
 
 	/** End the wrapped broadcast, as `@moq/net`'s `close` does. Idempotent. */

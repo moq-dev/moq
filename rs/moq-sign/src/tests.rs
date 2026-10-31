@@ -202,7 +202,10 @@ impl Published {
 	fn track(&self, key: &SecretKey, name: &str) -> (track::Producer, moq_net::track::Producer) {
 		let net = self._publication.broadcast().create_track(name, None).unwrap();
 		let scope = Scope::new(&self.path, self.signed.epoch(), name);
-		(track::Producer::new(net.clone(), key.clone(), scope), net)
+		(
+			track::Producer::new(net.clone(), key.clone(), scope, Arc::default()),
+			net,
+		)
 	}
 }
 
@@ -274,7 +277,7 @@ async fn forged_frame_delivers_nothing_and_ends_only_its_group() {
 	// The group stays ended, even though a later frame is buffered.
 	assert!(matches!(read(&mut group).await, Err(Error::Signature)));
 
-	let mut next = signed.append_group().unwrap();
+	let mut next = signed.create_group(1).unwrap();
 	next.write_frame(None, b"after").unwrap();
 	next.finish().unwrap();
 	let mut group = recv_group(&mut track).await;
@@ -379,6 +382,43 @@ async fn frame_from_an_earlier_instance_is_refused() {
 		read(&mut recv_group(&mut subscribed).await).await,
 		Err(Error::Signature)
 	));
+}
+
+#[test]
+fn group_sequence_is_never_signed_twice() {
+	let key = SecretKey::generate();
+	let net = moq_net::broadcast::Info::new().produce();
+	let signed = broadcast::Producer::new(net, key, moq_net::Path::new("mesh/node/ssh").unwrap());
+	let track = signed.create_track("stream", None).unwrap();
+	let mut group = track.append_group().unwrap();
+	group.write_frame(None, b"first").unwrap();
+	group.abort(moq_net::Error::Cancel).unwrap();
+
+	// Net would serve the aborted sequence again, but frames of both incarnations would verify,
+	// so a relay holding both could splice them into one group.
+	assert!(matches!(
+		track.create_group(0),
+		Err(Error::Net(moq_net::Error::Duplicate))
+	));
+	assert_eq!(track.append_group().unwrap().sequence(), 1);
+	assert!(matches!(
+		track.create_group(1),
+		Err(Error::Net(moq_net::Error::Duplicate))
+	));
+	assert_eq!(track.create_group(5).unwrap().sequence(), 5);
+	assert!(matches!(
+		track.create_group(3),
+		Err(Error::Net(moq_net::Error::Duplicate))
+	));
+
+	// A replacement track continues past its predecessor's sequences under the same epoch.
+	track.abort(moq_net::Error::Cancel).unwrap();
+	let replacement = signed.create_track("stream", None).unwrap();
+	assert!(matches!(
+		replacement.create_group(0),
+		Err(Error::Net(moq_net::Error::Duplicate))
+	));
+	assert_eq!(replacement.append_group().unwrap().sequence(), 6);
 }
 
 #[tokio::test(start_paused = true)]

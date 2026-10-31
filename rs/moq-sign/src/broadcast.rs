@@ -3,6 +3,9 @@
 //! A relay may mount a broadcast under another prefix, so the path a signature binds is the one
 //! the application names, never the path the transport reports.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use crate::error::{Error, Result};
 use crate::key::{PublicKey, SecretKey};
 use crate::scope::Scope;
@@ -18,6 +21,8 @@ pub struct Producer {
 	key: SecretKey,
 	path: moq_net::Path,
 	epoch: moq_net::Epoch,
+	// Each track's lowest unsigned sequence, kept across the track's replacements.
+	next: Arc<Mutex<HashMap<String, Arc<Mutex<u64>>>>>,
 }
 
 impl Producer {
@@ -28,6 +33,7 @@ impl Producer {
 			key,
 			path,
 			epoch: moq_net::Epoch::mint(),
+			next: Arc::default(),
 		}
 	}
 
@@ -44,7 +50,14 @@ impl Producer {
 	pub fn create_track(&self, name: &str, info: impl Into<Option<moq_net::track::Info>>) -> Result<track::Producer> {
 		let inner = self.inner.create_track(name, info)?;
 		let scope = Scope::new(&self.path, &self.epoch, name);
-		Ok(track::Producer::new(inner, self.key.clone(), scope))
+		let next = Arc::clone(
+			self.next
+				.lock()
+				.expect("signed sequences")
+				.entry(name.to_owned())
+				.or_default(),
+		);
+		Ok(track::Producer::new(inner, self.key.clone(), scope, next))
 	}
 }
 

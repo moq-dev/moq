@@ -1,7 +1,7 @@
 //! Signing producer and verifying subscriber for one track.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
 
 use crate::error::Result;
@@ -10,15 +10,31 @@ use crate::key::{PublicKey, SecretKey};
 use crate::scope::Scope;
 
 /// Producer for one signed track.
+///
+/// Group sequences only rise under an epoch, even across a replacement of the track, so no two
+/// groups are signed at the same coordinates. A relay holding an aborted group and a new group at
+/// its sequence could otherwise splice their frames into a group that was never published.
 pub struct Producer {
 	inner: moq_net::track::Producer,
 	key: SecretKey,
 	scope: Arc<Scope>,
+	// The lowest sequence this instance has not signed on the track, shared with its replacements.
+	next: Arc<Mutex<u64>>,
 }
 
 impl Producer {
-	pub(crate) fn new(inner: moq_net::track::Producer, key: SecretKey, scope: Arc<Scope>) -> Self {
-		Self { inner, key, scope }
+	pub(crate) fn new(
+		inner: moq_net::track::Producer,
+		key: SecretKey,
+		scope: Arc<Scope>,
+		next: Arc<Mutex<u64>>,
+	) -> Self {
+		Self {
+			inner,
+			key,
+			scope,
+			next,
+		}
 	}
 
 	/// The track name.
@@ -26,23 +42,36 @@ impl Producer {
 		self.inner.name()
 	}
 
-	/// Start a group at the next sequence.
+	/// Start a group one past the highest sequence this instance signed on the track.
 	///
 	/// # Errors
 	///
 	/// A net error if the track is closed.
 	pub fn append_group(&self) -> Result<group::Producer> {
-		let inner = self.inner.append_group()?;
-		Ok(self.group(inner))
+		self.claim(None)
 	}
 
-	/// Start a group at an explicit sequence.
+	/// Start a group at an explicit sequence, above any this instance signed on the track.
 	///
 	/// # Errors
 	///
-	/// A net error if the track is closed or already holds the sequence.
+	/// [`moq_net::Error::Duplicate`] if this instance already signed the sequence or a later one,
+	/// even in a group since aborted or evicted, or a net error if the track is closed.
 	pub fn create_group(&self, sequence: u64) -> Result<group::Producer> {
+		self.claim(Some(sequence))
+	}
+
+	fn claim(&self, sequence: Option<u64>) -> Result<group::Producer> {
+		let mut next = self.next.lock().expect("signed sequences");
+		let sequence = sequence.unwrap_or(*next);
+		if sequence < *next {
+			return Err(moq_net::Error::Duplicate.into());
+		}
+		let after = sequence
+			.checked_add(1)
+			.ok_or(moq_net::Error::from(moq_net::BoundsExceeded))?;
 		let inner = self.inner.create_group(moq_net::group::Info { sequence })?;
+		*next = after;
 		Ok(self.group(inner))
 	}
 

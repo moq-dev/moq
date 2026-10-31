@@ -115,6 +115,7 @@ A subscriber uses the name it subscribed to, never one a relay reports.
 
 **group**:
 The group sequence.
+A publisher instance MUST NOT sign two groups at the same sequence of a track, even after the first is aborted or evicted, or after the track is replaced.
 
 **frame**:
 The frame's index within its group.
@@ -171,6 +172,7 @@ The publisher's secret key is trusted; anyone holding it can sign as that endpoi
 
 The signature binds every field a relay could otherwise change to move or retime an authentic frame: the path, the epoch, the track, the group, the frame index, and the timestamp.
 Binding the epoch keeps a frame from an earlier instance of the same broadcast, which restarted its sequences, from verifying in a later one.
+Within an instance, a signed position names one frame only because the publisher never signs a group sequence twice; a relay holding two groups signed at one sequence could splice their frames into a group that was never published.
 Binding the timestamp keeps a relay from changing when a frame presents.
 
 Any subscriber can verify but none can sign, so subscribers that share a broadcast cannot forge frames to each other, as they could with a shared symmetric key.

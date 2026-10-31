@@ -55,7 +55,7 @@ async function publish(key: SecretKey, path: Path.Valid) {
 		/** A signed track over a net track the test can also write forged frames to. */
 		track(name: string) {
 			const raw = publication.broadcast.createTrack(name);
-			return { signed: Track.Producer.make(raw, key, new Scope(path, signed.epoch, name)), raw };
+			return { signed: Track.Producer.make(raw, key, new Scope(path, signed.epoch, name), { next: 0 }), raw };
 		},
 		async consume(expected: PublicKey): Promise<Signed.Consumer> {
 			return new Signed.Consumer(await active(net.subscriber, path), expected, path);
@@ -119,7 +119,7 @@ test("a forged frame delivers nothing and ends only its group", async () => {
 	await expect(group?.readFrame()).rejects.toEqual(new Failure("signature"));
 	await expect(group?.readFrame()).rejects.toEqual(new Failure("signature"));
 
-	const next = signed.appendGroup();
+	const next = signed.createGroup(1);
 	await next.writeFrame(undefined, encoder.encode("after"));
 	next.finish();
 	expect(await payload(await track.recvGroup())).toBe("after");
@@ -161,6 +161,33 @@ test("a frame replayed into another group or track is refused", async () => {
 	readA.close();
 	readB.close();
 	tap.close();
+	published.close();
+});
+
+test("a group sequence is never signed twice", async () => {
+	const key = await SecretKey.generate();
+	const published = await publish(key, Path.from("mesh/node/ssh"));
+	const track = published.signed.createTrack("stream");
+	const group = track.appendGroup();
+	await group.writeFrame(undefined, encoder.encode("first"));
+	group.abort(new Error("retry"));
+
+	// Net would serve the aborted sequence again, but frames of both incarnations would verify,
+	// so a relay holding both could splice them into one group.
+	expect(() => track.createGroup(0)).toThrow("duplicate group");
+	expect(track.appendGroup().sequence).toBe(1);
+	expect(() => track.createGroup(1)).toThrow("duplicate group");
+	expect(track.createGroup(5).sequence).toBe(5);
+	expect(() => track.createGroup(3)).toThrow("duplicate group");
+
+	// A replacement track continues past its predecessor's sequences under the same epoch.
+	track.abort(new Error("replaced"));
+	const replacement = published.signed.createTrack("stream");
+	expect(() => replacement.createGroup(0)).toThrow("duplicate group");
+	expect(replacement.appendGroup().sequence).toBe(6);
+
+	replacement.close();
+	published.signed.close();
 	published.close();
 });
 
