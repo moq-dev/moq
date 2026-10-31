@@ -441,8 +441,11 @@ impl Publisher {
 			let announce = match event {
 				Event::Closed => return Ok(()),
 				Event::Cancelled(res) => break res,
+				// moq-transport has no takeover: listing it is listing another instance.
 				Event::Announce(
-					crate::announce::Event::Start(announce) | crate::announce::Event::Restart(announce),
+					crate::announce::Event::Start(announce)
+					| crate::announce::Event::Restart(announce)
+					| crate::announce::Event::Takeover { announce, .. },
 				) => announce,
 				Event::Announce(crate::announce::Event::End(announce)) => {
 					withdraw(&mut routes, &announce.prefix);
@@ -910,7 +913,7 @@ impl Publisher {
 		let request_id = self.control.next_request_id();
 
 		// A joining FETCH needs the subscription forwarding.
-		let join = (!Filter::is_draft22(self.version)).then(|| self.register_join(request_id));
+		let join = (!Filter::is_draft20(self.version)).then(|| self.register_join(request_id));
 		self.pause_join(join.as_ref());
 
 		tracing::debug!(id = %request_id, broadcast = %absolute, track = %name, "publish started");
@@ -1002,7 +1005,7 @@ impl Publisher {
 						refused = Some(Served::UpdateFailed(Error::Unsupported));
 					}
 					new_group = ok.new_group.or(params.new_group.filter(|_| dynamic));
-					(ok.forward && !Filter::is_draft22(self.version)).then(|| Resume {
+					(ok.forward && !Filter::is_draft20(self.version)).then(|| Resume {
 						fill: None,
 						new_group: new_group.take(),
 						answer: false,
@@ -1308,7 +1311,7 @@ impl Publisher {
 		}
 		let fill = how
 			.fill
-			.filter(|_| Filter::is_draft22(self.version))
+			.filter(|_| Filter::is_draft20(self.version))
 			.map(|fill| fill_range(fill, params.filter, edge.largest));
 
 		if how.answer && self.write_request_ok(&mut stream.writer, edge.largest).await.is_err() {
@@ -1388,7 +1391,7 @@ mod tests {
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
 
-	const DRAFTS: [Version; 2] = [Version::Draft18, Version::Draft22];
+	const DRAFTS: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 	/// A publisher whose origin holds broadcast `room/cam` listing `video` and `audio`, and
 	/// the peer's end of its session.
@@ -1921,7 +1924,7 @@ mod tests {
 	/// are listed.
 	#[moq_clock::test]
 	async fn a_forwarding_listing_reads_only_as_skips_go_out() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for catalog in CATALOGS {
 				let h = harness(version);
 				let _extra: Vec<_> = (h.tracks.len()..catalog)
@@ -2141,7 +2144,7 @@ mod tests {
 			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
 			let refused = ietf::SubscribeUpdate {
 				filter: None,
-				forward: Filter::is_draft22(version).then_some(false),
+				forward: Filter::is_draft20(version).then_some(false),
 				..update(2, false)
 			};
 			send(&mut request, &refused).await;
@@ -2294,7 +2297,7 @@ mod tests {
 	/// while forwarding as while paused.
 	#[moq_clock::test]
 	async fn a_pausing_new_group_is_refused() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let _live = h
 				.broadcast
@@ -2325,7 +2328,7 @@ mod tests {
 	/// An update taken while forwarding outlives a pause: the next resume keeps it.
 	#[moq_clock::test]
 	async fn a_forwarding_update_outlives_a_pause() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let video = h.tracks.remove("video").unwrap();
 			let mut request = h.request(&listing(false)).await;
@@ -2398,7 +2401,7 @@ mod tests {
 		}
 	}
 
-	/// From draft-22 each PUBLISH states the listing's subscription parameters, which the
+	/// From draft-20 each PUBLISH states the listing's subscription parameters, which the
 	/// subscriber otherwise takes as the defaults; earlier drafts carry them on PUBLISH_OK.
 	/// Draft-22 sends none of them on SUBSCRIBE_TRACKS.
 	#[moq_clock::test]
@@ -2422,7 +2425,7 @@ mod tests {
 			assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
 			let body: ietf::Body = stream.reader.decode().await.unwrap();
 			let publish: ietf::Publish = body.message(version).unwrap();
-			let stated = Filter::is_draft22(version);
+			let stated = Filter::is_draft20(version);
 			assert_eq!(publish.subscriber_priority, stated.then_some(7), "{version}");
 			assert_eq!(
 				publish.group_order,
@@ -2437,7 +2440,7 @@ mod tests {
 	/// than this stack's unset 127.
 	#[moq_clock::test]
 	async fn a_listing_without_a_priority_states_the_default() {
-		for version in DRAFTS.into_iter().filter(|version| Filter::is_draft22(*version)) {
+		for version in DRAFTS.into_iter().filter(|version| Filter::is_draft20(*version)) {
 			let mut h = harness(version);
 			let mut request = h.request(&listing(false)).await;
 			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
@@ -2454,7 +2457,7 @@ mod tests {
 	/// has not ended, so neither does the PUBLISH cleanly.
 	#[moq_clock::test]
 	async fn an_unlisted_forwarding_publish_ends() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let video = h.tracks.remove("video").unwrap();
 			let mut request = h.request(&listing(false)).await;
@@ -2503,7 +2506,7 @@ mod tests {
 	/// withholds the credit its REQUEST_ERROR needs.
 	#[moq_clock::test]
 	async fn a_closing_listing_still_unlists() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let config = memory::Config {
 				stream_buffer: 32,
 				..Default::default()
@@ -2537,7 +2540,7 @@ mod tests {
 	/// its prefix.
 	#[moq_clock::test]
 	async fn a_listing_waits_for_the_setup_answer() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let auth = crate::auth::Link::new(true);
 			let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
@@ -2695,7 +2698,7 @@ mod tests {
 			subscribe: crate::Patterns::new(),
 			expires: None,
 		};
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let auth = crate::auth::Link::new(false);
 			auth.handle().authorize(&nothing());
