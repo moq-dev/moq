@@ -70,7 +70,7 @@ rustls-pki-types = { version = "1.7", features = ["web"] }
 [dev-dependencies]
 arbitrary = { version = "1.5", features = ["derive"] }
 assert_matches = "1.1"
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 hex-literal = "1"
 # The tests and benches read time through the runtime, as the drivers do.
 moq-clock = { path = "../moq-clock", features = ["sim"] }

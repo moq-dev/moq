@@ -1,0 +1,12 @@
+error[E0308]: mismatched types
+  --> tests/ui/segment_type.rs:17:23
+   |
+17 |         let label: String = a;
+   |                    ------   ^ expected `String`, found `u64`
+   |                    |
+   |                    expected due to this
+   |
+help: try using a conversion method
+   |
+17 |         let label: String = a.to_string();
+   |                              ++++++++++++

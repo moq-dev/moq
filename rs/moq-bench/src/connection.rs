@@ -517,8 +517,13 @@ async fn read_group(group: &mut group::Consumer, learned_shape: &mut bool, stats
 /// settled once a higher group has confirmed it. A truly skipped group is counted
 /// once the frontier moves past it.
 ///
-/// A group that explicitly fails is known lost immediately, even when it is the
-/// first or live-frontier group. Each observation feeds the shared [`Stats`]
+/// The span's floor is pinned at the first group the subscription receives. A
+/// completed group older than that, such as cached history a relay fills in after
+/// the subscribe, is counted in `groups_history` and never widens the span, so a
+/// join that over-fetches history does not read as loss.
+///
+/// A group that explicitly fails is known lost immediately wherever it falls,
+/// even below the floor or at the live frontier. Each observation feeds the shared [`Stats`]
 /// incrementally so the reporter sees losses live and many subscriptions sum
 /// correctly: `groups_expected - groups_present` is the gaps still outstanding.
 ///
@@ -527,7 +532,8 @@ async fn read_group(group: &mut group::Consumer, learned_shape: &mut bool, stats
 /// failed group once, and a late arrival cannot cancel a later loss.
 struct GapTracker<'a> {
 	stats: &'a Stats,
-	min: u64,
+	/// First sequence received: the span's floor. `None` until a group arrives.
+	floor: Option<u64>,
 	max: u64,
 	/// Second-highest sequence seen: the settled frontier we count up to. `None`
 	/// until a second group arrives.
@@ -536,25 +542,26 @@ struct GapTracker<'a> {
 	complete: u64,
 	/// Whether the live frontier completed rather than failed.
 	frontier_complete: bool,
+	/// Failed groups below the floor: outside the span, but still lost.
+	failed_history: u64,
 	/// This subscription's current contributions, remembered so each update pushes
 	/// only the delta into the shared counters.
 	expected: u64,
 	present: u64,
-	started: bool,
 }
 
 impl<'a> GapTracker<'a> {
 	fn new(stats: &'a Stats) -> Self {
 		Self {
 			stats,
-			min: 0,
+			floor: None,
 			max: 0,
 			cap: None,
 			complete: 0,
 			frontier_complete: false,
+			failed_history: 0,
 			expected: 0,
 			present: 0,
-			started: false,
 		}
 	}
 
@@ -568,27 +575,39 @@ impl<'a> GapTracker<'a> {
 	}
 
 	fn record(&mut self, sequence: u64, complete: bool) {
-		self.complete += u64::from(complete);
-		if !self.started {
-			self.started = true;
-			self.min = sequence;
-			self.max = sequence;
-			self.frontier_complete = complete;
-		} else {
-			self.min = self.min.min(sequence);
-			if sequence > self.max {
-				// New frontier: the old `max` is now settled and becomes the cap.
-				self.cap = Some(self.max);
+		let floor = match self.floor {
+			None => {
+				self.floor = Some(sequence);
 				self.max = sequence;
 				self.frontier_complete = complete;
-			} else if self.cap.is_none_or(|cap| sequence > cap) {
-				self.cap = Some(sequence);
+				sequence
 			}
-		}
+			Some(floor) => {
+				if sequence < floor {
+					// History from before the subscription's start: outside the span.
+					if complete {
+						self.stats.groups_history.fetch_add(1, Ordering::Relaxed);
+						return;
+					}
+					self.failed_history += 1;
+				} else if sequence > self.max {
+					// New frontier: the old `max` is now settled and becomes the cap.
+					self.cap = Some(self.max);
+					self.max = sequence;
+					self.frontier_complete = complete;
+				} else if self.cap.is_none_or(|cap| sequence > cap) {
+					self.cap = Some(sequence);
+				}
+				floor
+			}
+		};
+		self.complete += u64::from(complete);
 
 		// The frontier stays out of inferred spans, but a failed frontier is already
-		// known lost. Completed groups below the frontier are present.
-		let expected = self.cap.map_or(0, |cap| cap - self.min + 1) + u64::from(!self.frontier_complete);
+		// known lost, as is a failed history group. Completed groups below the
+		// frontier are present.
+		let expected =
+			self.cap.map_or(0, |cap| cap - floor + 1) + u64::from(!self.frontier_complete) + self.failed_history;
 		let present = self.complete - u64::from(self.frontier_complete);
 		let grown = (expected - present).saturating_sub(self.expected - self.present);
 		// Grow the denominator first and release the counters bounded by it, so a
@@ -1222,11 +1241,50 @@ mod tests {
 	fn gap_tracker_handles_out_of_order() {
 		let stats = Stats::default();
 		let mut gaps = GapTracker::new(&stats);
-		for seq in [2, 0, 1, 3] {
+		for seq in [0, 3, 1, 2, 4] {
 			gaps.complete(seq);
 		}
-		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 4);
-		assert_eq!(lost(&stats), 0);
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 5);
+		assert_eq!((lost(&stats), outstanding(&stats)), (0, 0));
+	}
+
+	/// Groups older than the first one received are history a relay filled in after
+	/// the subscribe: counted apart, never as loss. Gaps at or after the start still count.
+	#[test]
+	fn gap_tracker_counts_history_apart() {
+		let stats = Stats::default();
+		let mut gaps = GapTracker::new(&stats);
+		let history = |stats: &Stats| stats.groups_history.load(Ordering::Relaxed);
+
+		// Joins live at 10; 11 and 12 settle the span from 10.
+		for seq in [10, 11, 12] {
+			gaps.complete(seq);
+		}
+		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 2);
+
+		// Cached history arrives behind the live frontier, leaving 0..=4 and 6 unsent.
+		for seq in [5, 7, 8, 9] {
+			gaps.complete(seq);
+		}
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 7);
+		assert_eq!(history(&stats), 4);
+		assert_eq!(
+			(lost(&stats), outstanding(&stats)),
+			(0, 0),
+			"history never widens the span"
+		);
+		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 2);
+
+		// A skip after the start is still loss: 13 never arrives, 15 settles 14.
+		for seq in [14, 15] {
+			gaps.complete(seq);
+		}
+		assert_eq!((lost(&stats), outstanding(&stats)), (1, 1));
+
+		// A failed history group is lost wherever it falls.
+		gaps.fail(3);
+		assert_eq!(history(&stats), 4, "a failed group is not history");
+		assert_eq!((lost(&stats), outstanding(&stats)), (2, 2));
 	}
 
 	/// The newest group is the live frontier: a hole directly behind it isn't blamed

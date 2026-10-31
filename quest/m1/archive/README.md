@@ -1,4 +1,4 @@
-# Broadcast archives
+# [S] Broadcast archives
 
 ## Goal
 
@@ -83,10 +83,6 @@ This README owns a new doc page, "Archives", under `doc/concept/`, written
 once the children land: what ANNOUNCE and TRACKS discover, the store layout (linking
 the moq-archive rustdoc that specifies it), and serving a stored broadcast
 from a host. Each child fixes the stale docs it touches.
-
-## Required
-
-- [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - one `EXT-X-TARGETDURATION` for the run, from the declared `hls` duration; an overrun is listed with a warning
 
 ## Related
 
