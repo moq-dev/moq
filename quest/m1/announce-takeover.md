@@ -56,6 +56,28 @@ What remains:
   relays, a claim ending before or after its child, and held catalog pins
   through a real player rather than route-table checks.
 
+### Once identity replaces ANNOUNCE_TAKEOVER
+
+Decided 2026-10-31 (maintainer, the /quest-complete requeue session). Kept
+separate from the rest of this Plan so it survives the identity rewrite
+planned in [moq-dev/moq#7420](https://github.com/moq-dev/moq/pull/7420).
+"We're replacing EPOCH with IDENTITY soon" (maintainer, 2026-10-31).
+
+- Reword "takeover" as an event or operation, in terms of identity
+  continuity, in [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md)
+  (Goal and Plan), [the HLS server follows each path once](/quest/m2/hls-follow-once.md)
+  (Goal and Tests), and [routes and announces](/quest/m1/cluster-routing/routes.md)
+  (around line 37, "the separately proven Takeover operation").
+- Rewrite the EPOCH references in `drafts/draft-lcurley-moq-cluster.md` and
+  `drafts/draft-lcurley-moq-epoch.md` in terms of IDENTITY.
+- Add a regression test where a publisher restart's new announcement
+  arrives before the old one's reset, on `solicit = false` moq-transport
+  sessions. [moq-dev/moq#7239](https://github.com/moq-dev/moq/pull/7239)
+  found that the subscriber (`rs/moq-net/src/ietf/subscriber.rs`, `attach`)
+  folds such a PUBLISH_NAMESPACE into the same epochless route as an update
+  instead of End then Start; per-announcement identities resolve it, and
+  the test proves they do.
+
 ## Related
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route layer whose ANNOUNCE_START layout overlaps this one's

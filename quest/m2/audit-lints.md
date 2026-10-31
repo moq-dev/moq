@@ -74,6 +74,18 @@ Python wrapper. This run only reviews what those gates can't see.
   enable `reportUnnecessaryTypeIgnoreComment` without falsely flagging its
   three needed ignores. Audit it with the bindings installed.
 
+- `set_var`/`remove_var` (decided 2026-10-31, maintainer, the
+  /quest-complete requeue session): replace `rs lint`'s `git grep` text
+  check (`rs/justfile`, the `lint` recipe) with a `disallowed-methods` entry
+  for `std::env::set_var` and `std::env::remove_var` in the root
+  `clippy.toml`, which arrives with
+  [moq-dev/moq#7329](https://github.com/moq-dev/moq/pull/7329) (queued). The
+  recipe's comment says why it is text today: the clock lint's test
+  allowances (`expect(clippy::disallowed_methods)`) would also silence an
+  environment write. Narrow those allowances, or keep each test's
+  expectation reason specific, so the clippy entry still catches a write in
+  a test.
+
 ### Results (m1, 2026-10-24)
 
 - Rust: removed the Apple-only `msghdr_x` `non_camel_case_types` (Rust

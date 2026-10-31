@@ -33,10 +33,16 @@ Decided 2026-10-30 (maintainer): fix first. The two bugs the test found
 are their own quests, required below, and the test lands once it passes
 with both checks intact.
 
+Added 2026-10-31 (maintainer, the /quest-complete requeue session): once
+the fixture is repaired, the test's TS import hits a third bug, a
+reconfigure failing `JitterDecreased` after a mid-run jitter rise, also its
+own quest below.
+
 ## Required
 
 - [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - the conformance test's same-codec switch fails until it lands
 - [The last AAC segment advertises its full duration](/quest/m1/hls-final-aac-segment.md) - the conformance test's audio check fails until it lands
+- [A reconfigure keeps the published jitter and delay floor](/quest/m1/catalog-jitter-floor.md) - the conformance test's TS import aborts with `JitterDecreased` at its reconfigure until it lands
 
 ## Related
 

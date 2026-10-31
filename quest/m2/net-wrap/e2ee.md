@@ -58,6 +58,15 @@ the reverse (decided 2026-10-20, maintainer):
   without changing moq-net's `track(name)`; propose the encoding in the PR.
   Record it in `draft-lcurley-moq-e2ee.md`, replacing the Catalogs section's
   `.z` sibling rule.
+- Datagram header allowance (decided 2026-10-31, maintainer, a follow-up
+  of [moq-dev/moq#7435](https://github.com/moq-dev/moq/pull/7435)):
+  `MAX_DATAGRAM_HEADER` (`rs/moq-e2ee/src/limits.rs`,
+  `js/e2ee/src/limits.ts`; 28 after #7435, lite-07's Type plus three 9-byte
+  varints) also counts the optional lite datagram fields: the relayed fields
+  the lite `ietf` extension adds, and the Inflated Size a compressed track's
+  datagram carries. Without them a maximum-size protected datagram can
+  encode past the 1200-byte body and be dropped. Update the e2ee draft's
+  plaintext bound and the `moq-e2ee-00` vectors with it.
 - Ranges: every moq-net range starts at a group's first frame
   ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)), so the wrapper reads each physical group whole
   and inflates from frame 0.

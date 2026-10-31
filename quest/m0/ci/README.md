@@ -140,4 +140,5 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Release credentials off main](/quest/m0/ci/publish-release-only.md) - `publish` admits only `release` and release tags once its `workflow_run` publishers run on their tag
 - [Biome checks every file it can parse](/quest/m0/ci/biome-whole-repo.md) - Biome runs over the whole repository and main is clean under it
 - [workspace.test.py ignores the caller's gate filter](/quest/m0/ci/workspace-test-env.md) - the dispatcher test passes under any `just gate` module filter
+- [Dispatcher tool changes run the dispatcher tests](/quest/m0/ci/dispatch-selection-gaps.md) - a tool-list change runs `sh/dispatch-query.test.py` in CI, and `sh/rs/uring.test.py` stops printing jq errors
 - [PRs build the feature shapes they can break](/quest/m0/ci/pr-feature-builds.md) - a PR touching a crate's source runs that crate's isolated feature builds

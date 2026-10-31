@@ -55,3 +55,4 @@ Public API: none. Wire: none.
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Tests own their temp directories](/quest/m0/test-flakes-2/temp-paths.md) - concurrent test processes stop overwriting each other's fixed temp files
 - [moq-rtc's session-end test survives load](/quest/m0/test-flakes-2/rtc-dtls.md) - its DTLS handshake stops timing out on a busy host
+- [A Kotlin cancel test and a JS late-publisher test hold up](/quest/m0/test-flakes-2/kotlin-js-flakes.md) - the Kotlin flow-cancel test stops failing `unroutable` and the IETF blind-handle test passes under load
