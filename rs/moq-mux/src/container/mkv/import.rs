@@ -374,11 +374,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				TRACK_NUMBER | TRACK_TYPE | CODEC_ID | CODEC_PRIVATE | LANGUAGE | LANGUAGE_IETF | NAME
 				| DEFAULT_DURATION,
 			) => Action::Read,
-			(Some(VIDEO), COLOUR) => Action::Collect,
+			(Some(VIDEO), COLOUR | PROJECTION) => Action::Collect,
 			(
 				Some(VIDEO),
 				PIXEL_WIDTH | PIXEL_HEIGHT | DISPLAY_WIDTH | DISPLAY_HEIGHT | DISPLAY_UNIT | PIXEL_CROP_BOTTOM
-				| PIXEL_CROP_TOP | PIXEL_CROP_LEFT | PIXEL_CROP_RIGHT,
+				| PIXEL_CROP_TOP | PIXEL_CROP_LEFT | PIXEL_CROP_RIGHT | STEREO_MODE,
+			) => Action::Read,
+			(
+				Some(PROJECTION),
+				PROJECTION_TYPE
+				| PROJECTION_PRIVATE
+				| PROJECTION_POSE_YAW
+				| PROJECTION_POSE_PITCH
+				| PROJECTION_POSE_ROLL,
 			) => Action::Read,
 			(Some(COLOUR), MASTERING_METADATA) => Action::Collect,
 			(Some(COLOUR), MATRIX_COEFFICIENTS | RANGE | TRANSFER_CHARACTERISTICS | PRIMARIES | MAX_CLL | MAX_FALL) => {
@@ -467,7 +475,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				let reserved = self.initial_reservation.clone().ok_or(Error::TracksAfterFinish)?;
 				self.add_track(&reserved, children)?;
 			}
-			id::VIDEO | id::AUDIO | id::COLOUR | id::MASTERING_METADATA => {
+			id::VIDEO | id::AUDIO | id::COLOUR | id::MASTERING_METADATA | id::PROJECTION => {
 				let children = self.fields.pop().unwrap_or_default();
 				let master =
 					MatroskaSpec::get_master_tag(id.into(), Master::Full(children)).ok_or(Error::MatroskaParse)?;
@@ -1009,6 +1017,7 @@ fn build_video_config(
 		.transpose()?
 		.flatten();
 	crate::codec::color::fill(&mut config.color, colour.as_ref(), "Colour");
+	(config.projection, config.stereo) = matroska_spatial(video_children.unwrap_or_default())?;
 	if let Some(children) = video_children
 		&& let Some(aspect) = matroska_aspect(children, (width, height))?
 	{
@@ -1085,6 +1094,74 @@ fn matroska_aspect(children: &[MatroskaSpec], pixels: (Option<u64>, Option<u64>)
 	let aspect = crate::codec::video::reduce_aspect(shown_width, shown_height)
 		.ok_or(Error::InvalidAspect("invalid or unrepresentable display dimensions"))?;
 	Ok(Some(aspect))
+}
+
+/// The projection and stereo packing a Matroska `Projection` and `StereoMode` signal, each `None`
+/// for flat or mono video.
+///
+/// The catalog has no cubemap, mesh, pose, or eye order beyond left-first side by side and top-bottom,
+/// and an absent field claims flat, mono video, so those are refused rather than dropped.
+fn matroska_spatial(
+	children: &[MatroskaSpec],
+) -> Result<(Option<hang::catalog::Projection>, Option<hang::catalog::Stereo>)> {
+	let mut stereo = None;
+	let mut projection = None;
+	for child in children {
+		match child {
+			// 0 is mono, 1 side by side left eye first, 3 top-bottom left eye first. The rest put the
+			// right eye first, interleave, checkerboard, or anaglyph, or lace the eyes in one block.
+			MatroskaSpec::StereoMode(mode) => {
+				stereo = match mode {
+					0 => None,
+					1 => Some(hang::catalog::Stereo::LeftRight),
+					3 => Some(hang::catalog::Stereo::TopBottom),
+					_ => return Err(Error::UnsupportedSpatial("StereoMode").into()),
+				}
+			}
+			MatroskaSpec::Projection(Master::Full(fields)) => projection = matroska_projection(fields)?,
+			_ => {}
+		}
+	}
+	Ok((projection, stereo))
+}
+
+/// The projection a Matroska `Projection` element signals, `None` for a rectangular one.
+fn matroska_projection(fields: &[MatroskaSpec]) -> Result<Option<hang::catalog::Projection>> {
+	let unsupported = Error::UnsupportedSpatial;
+	let (mut kind, mut private) = (0, None);
+	for field in fields {
+		match field {
+			MatroskaSpec::ProjectionType(v) => kind = *v,
+			MatroskaSpec::ProjectionPrivate(v) => private = Some(v.as_slice()),
+			MatroskaSpec::ProjectionPoseYaw(v)
+			| MatroskaSpec::ProjectionPosePitch(v)
+			| MatroskaSpec::ProjectionPoseRoll(v)
+				if *v != 0.0 =>
+			{
+				return Err(unsupported("nonzero ProjectionPose").into());
+			}
+			_ => {}
+		}
+	}
+	match kind {
+		0 => Ok(None),
+		// The private data is an `equi` box's body: version and flags, then the top, bottom, left,
+		// and right bounds. Without it the picture covers the whole sphere, as FFmpeg reads it.
+		1 => {
+			let [top, bottom, left, right] = match private {
+				None => [0; 4],
+				Some(&[0, _, _, _, ref bounds @ ..]) if bounds.len() == 16 => {
+					std::array::from_fn(|i| u32::from_be_bytes(bounds[i * 4..][..4].try_into().unwrap()))
+				}
+				Some(_) => return Err(unsupported("equirectangular ProjectionPrivate").into()),
+			};
+			let projection = crate::codec::spatial::equirectangular(top, bottom, left, right).map_err(unsupported)?;
+			Ok(Some(projection))
+		}
+		2 => Err(unsupported("cubemap projection").into()),
+		3 => Err(unsupported("mesh projection").into()),
+		_ => Err(unsupported("ProjectionType").into()),
+	}
 }
 
 /// The colour a Matroska `Colour` element signals. Its code points are H.273's, `Range` counts 0

@@ -45,6 +45,14 @@ pub(super) mod id {
 	pub const PIXEL_CROP_LEFT: u32 = 0x54CC;
 	pub const PIXEL_CROP_RIGHT: u32 = 0x54DD;
 
+	pub const STEREO_MODE: u32 = 0x53B8;
+	pub const PROJECTION: u32 = 0x7670;
+	pub const PROJECTION_TYPE: u32 = 0x7671;
+	pub const PROJECTION_PRIVATE: u32 = 0x7672;
+	pub const PROJECTION_POSE_YAW: u32 = 0x7673;
+	pub const PROJECTION_POSE_PITCH: u32 = 0x7674;
+	pub const PROJECTION_POSE_ROLL: u32 = 0x7675;
+
 	pub const COLOUR: u32 = 0x55B0;
 	pub const MATRIX_COEFFICIENTS: u32 = 0x55B1;
 	pub const RANGE: u32 = 0x55B9;
@@ -463,6 +471,13 @@ mod tests {
 			(id::PIXEL_CROP_TOP, MatroskaSpec::PixelCropTop(0)),
 			(id::PIXEL_CROP_LEFT, MatroskaSpec::PixelCropLeft(0)),
 			(id::PIXEL_CROP_RIGHT, MatroskaSpec::PixelCropRight(0)),
+			(id::STEREO_MODE, MatroskaSpec::StereoMode(0)),
+			(id::PROJECTION, MatroskaSpec::Projection(Master::Start)),
+			(id::PROJECTION_TYPE, MatroskaSpec::ProjectionType(0)),
+			(id::PROJECTION_PRIVATE, MatroskaSpec::ProjectionPrivate(Vec::new())),
+			(id::PROJECTION_POSE_YAW, MatroskaSpec::ProjectionPoseYaw(0.0)),
+			(id::PROJECTION_POSE_PITCH, MatroskaSpec::ProjectionPosePitch(0.0)),
+			(id::PROJECTION_POSE_ROLL, MatroskaSpec::ProjectionPoseRoll(0.0)),
 			(id::COLOUR, MatroskaSpec::Colour(Master::Start)),
 			(id::MATRIX_COEFFICIENTS, MatroskaSpec::MatrixCoefficients(0)),
 			(id::RANGE, MatroskaSpec::Range(0)),
