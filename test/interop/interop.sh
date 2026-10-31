@@ -1155,7 +1155,8 @@ observe_group() {
 # gst-launch stop the pipeline and close its session. Not with -e: moqsrc does not end its pads on
 # an EOS sent into the pipeline. Each pad's log, trimmed to the buffers its file holds, becomes
 # <out>.<codec>.txt beside <out>.<codec>.pcm, the layout tone.py reads, the codec named by the
-# pad's caps.
+# pad's caps. A 5 s max-delay, as the other gap-checked readers ask for, keeps a starved pipeline
+# from skipping a group and failing the gap check.
 # shellcheck disable=SC2329  # reached from run_subscriber, which 'harness_spawn' invokes
 run_gst_audio() {
     local url="$1" broadcast="$2" out="$3" tone="$4" codecs="$5" tones renditions pid want deadline version i short
@@ -1174,7 +1175,7 @@ run_gst_audio() {
     done
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
         GST_TRACERS=log GST_DEBUG=GST_BUFFER:7,GST_EVENT:7 GST_DEBUG_NO_COLOR=1 GST_DEBUG_FILE="$out.trace" \
-        gst-launch-1.0 moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} \
+        gst-launch-1.0 moqsrc name=s url="$url" broadcast="$broadcast" max-delay=5000 ${version:+connect-version="$version"} \
         s.video_0 ! filesink location="$out.video" buffer-mode=2 "${pads[@]}" >"$out.gst" 2>&1 &
     pid=$!
     while :; do

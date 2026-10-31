@@ -169,9 +169,14 @@ on its own. Losing the relay connection also holds the pads: `moqsrc` redials
 without a retry deadline and resumes when the broadcast returns. A refused
 connection, refused path or catalog, or malformed protocol input or catalog posts
 an error. Properties: `url`,
-`broadcast`, `connect-version` (comma-separated protocol versions to offer, most
+`broadcast`, `max-delay`, `connect-version` (comma-separated protocol versions to offer, most
 preferred first; every stable version by default), `tls-disable-verify`,
 `quic-idle-timeout`, `quic-keep-alive`, and `quic-keylog`.
+
+`max-delay` is how many milliseconds (default 1000) a group may trail the live
+edge before every pad skips it. Raise it to ride out a stalled pipeline or a
+congested link without gaps, at the cost of falling further behind live first. The
+publisher's max-age caps it.
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.
 To decrypt a capture, set `quic-keylog=true` on either element along with
