@@ -660,7 +660,7 @@ export class Producer {
 			mirror.closed.set(evicted());
 			this.#mirrors?.delete(mirror);
 		}
-		this.#used.set((this.#mirrors?.size ?? 0) > 0);
+		this.#wanted.set((this.#mirrors?.size ?? 0) > 0);
 	}
 
 	/** True once the group has been closed. */
