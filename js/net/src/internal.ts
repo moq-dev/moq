@@ -313,6 +313,8 @@ export interface ResumeSource {
 	start(): number | "pending" | undefined;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Position | undefined;
+	/** The error the logical track's end carries, if it does not end cleanly. */
+	endError(): Error | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
 	finished(): Promise<Position>;
 	/** The serving copy's newest buffered frame, which a wire answer names as its edge. */
@@ -372,7 +374,7 @@ export const hooks: {
 	 * past the grace, or the track closes, since QUIC may deliver a lower group's stream after
 	 * a higher one. Mirrors the Rust `finish_at` on a `received()` copy; assigned by `track.ts`.
 	 */
-	endTrack: (producer: Producer, end: Position) => void;
+	endTrack: (producer: Producer, end: Position, error?: Error) => void;
 	/**
 	 * End a wire subscription's copy cleanly without declaring an end, for a session closed
 	 * locally: a dead route, not finished content, so a resumed reader's replacement route
@@ -407,6 +409,8 @@ export const hooks: {
 	 * forwarding it. Readers await `finished()` instead. Assigned by `track.ts`.
 	 */
 	subscriberEnd: (subscriber: Subscriber) => Position | undefined;
+	/** The error that end carries, if the track does not end cleanly. Assigned by `track.ts`. */
+	subscriberEndError: (subscriber: Subscriber) => Error | undefined;
 	joinSubscriber: (subscriber: Subscriber) => void;
 	/** Re-evaluate a live-edge join at a producer. */
 	joinProducer: (producer: Producer) => void;
@@ -624,6 +628,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	subscriberEnd: () => {
+		throw new Error("track.ts not loaded");
+	},
+	subscriberEndError: () => {
 		throw new Error("track.ts not loaded");
 	},
 	joinSubscriber: () => {

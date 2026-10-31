@@ -48,11 +48,12 @@ export type { Datagram } from "./datagram.ts";
 
 // The group a non-blocking read takes, skipping drops and throwing the track's error;
 // `undefined` when nothing is deliverable now.
-function taken(read: () => Recv): GroupConsumer | undefined {
+function taken(read: () => Recv, ended: () => undefined): GroupConsumer | undefined {
 	for (;;) {
 		const recv = read();
 		if (recv.kind === "group") return recv.group;
 		if (recv.kind === "error") throw recv.error;
+		if (recv.kind === "done") return ended();
 		if (recv.kind !== "drop") return undefined;
 	}
 }
@@ -541,6 +542,9 @@ class TrackState {
 	 * the Rust `end`.
 	 */
 	end = new Signal<Position | undefined>(undefined);
+	// The error the track ended with at `end`, if it did not end cleanly: a reader reaching the
+	// end gets it instead of the end of stream. Set before `end`, so its wake sees it.
+	endError?: Error;
 	// A wire subscription's pending tail still owes a group below the end, so reaching the
 	// end does not end readers yet. Mirrors the Rust `awaits_tail`.
 	owed = new Signal(false);
@@ -639,6 +643,7 @@ let makeOrdered: (subscriber: Subscriber) => Ordered;
 let ordered_: {
 	nextGroup(subscriber: Subscriber): Promise<GroupConsumer | undefined>;
 	tryNextGroup(subscriber: Subscriber): Recv;
+	ended(subscriber: Subscriber): undefined;
 	readFrame(subscriber: Subscriber): Promise<({ group: number; frame: number } & Frame) | undefined>;
 	readString(subscriber: Subscriber): Promise<string | undefined>;
 	readJson(subscriber: Subscriber): Promise<unknown | undefined>;
@@ -695,7 +700,8 @@ export class Demand {
 
 	/**
 	 * Settles once the track's outcome is final: `null` once its declared end is reached and
-	 * settled, or on a clean release, else the abort {@link Error}. Never because readers left.
+	 * settled (its error, if declared with one), or on a clean release, else the abort
+	 * {@link Error}. Never because readers left.
 	 */
 	get closed(): GetPromise<Error | null> {
 		return this.#state.outcome;
@@ -797,7 +803,7 @@ export class Producer {
 		sourceStart = (producer) => producer.#served && producer.#feedStart();
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
-		hooks.endTrack = (producer, end) => producer.#endPending(end);
+		hooks.endTrack = (producer, end, error) => producer.#endPending(end, error);
 		hooks.releaseTrack = (producer) => producer.#close(undefined);
 		hooks.trackReleased = (producer) => producer.#state.closed;
 		hooks.trackFinished = (producer) => producer.#state.end.peek() !== undefined;
@@ -919,8 +925,8 @@ export class Producer {
 
 	/**
 	 * Settles once the track's outcome is final: `null` once its declared end is reached and
-	 * settled (every group below it finished) or on a clean release, else the abort
-	 * {@link Error}. The producer stays open after a settled end, serving its cache.
+	 * settled (every group below it finished; its error, if declared with one) or on a clean
+	 * release, else the abort {@link Error}. The producer stays open after a settled end, serving its cache.
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 */
 	get closed(): GetPromise<Error | null> {
@@ -1078,6 +1084,7 @@ export class Producer {
 		sink.drops.set(this.#state.drops.peek());
 
 		sink.received.set(this.#received);
+		sink.endError = this.#state.endError;
 		sink.end.set(this.#state.end.peek());
 		sink.owed.set(this.#state.owed.peek());
 		if (closed !== undefined) {
@@ -1555,27 +1562,35 @@ export class Producer {
 	 * the remaining groups are written. Readers end once the live edge reaches the end's
 	 * group, independently of closure. Throws if the track is closed, already has an end, or
 	 * `end` would orphan a group or frame already produced.
+	 *
+	 * With an `error`, the track ended that way rather than cleanly, yet keeps its history, unlike
+	 * {@link abort}: readers still get every group below the end, and a reader reaching the end
+	 * gets the error instead of the end of stream.
 	 */
-	finishAt(end: Position): void {
+	finishAt(end: Position, error?: Error): void {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
 		const declared = this.#state.end.peek();
 		if (declared !== undefined) throw new Error(`track already ends at ${declared.group}/${declared.frame}`);
-		this.#declareEnd(end);
+		this.#declareEnd(end, error);
 	}
 
 	// The wire's end: repeating it is a no-op, and a mid-group end may refine the group
-	// boundary it falls just before. Mirrors the Rust `finish_at` on a `received()` copy.
-	#endPending(end: Position): void {
+	// boundary it falls just before. Either must carry the same error code. Mirrors the Rust
+	// `finish_at` on a `received()` copy.
+	#endPending(end: Position, error?: Error): void {
 		// Before the end lands, so settling it already counts what the tail still owes.
 		this.#tailPending = true;
 		const declared = this.#state.end.peek();
+		const code = (err?: Error) => (err === undefined ? undefined : toStreamCode(err));
 		if (declared === undefined) {
-			this.finishAt(end);
+			this.finishAt(end, error);
+		} else if (code(this.#state.endError) !== code(error)) {
+			throw new ProtocolViolation(`conflicting track end error: ${error}`);
 		} else if (declared.group !== end.group || declared.frame !== end.frame) {
 			if (declared.frame !== 0 || end.frame === 0 || finalSequence(end) !== declared.group) {
 				throw new ProtocolViolation(`conflicting track end: ${end.group}/${end.frame}`);
 			}
-			this.#declareEnd(end);
+			this.#declareEnd(end, error);
 		}
 		this.#owe();
 	}
@@ -1607,7 +1622,8 @@ export class Producer {
 	// write that could reopen it (a late group below the end, a fresh grace for the tail): that
 	// write is still served, but the clean outcome stays final. Mirrors the Rust `latch_settled`.
 	#settle(): void {
-		if (this.#state.outcome.peek() === undefined && this.#settled()) this.#state.outcome.set(null);
+		if (this.#state.outcome.peek() === undefined && this.#settled())
+			this.#state.outcome.set(this.#state.endError ?? null);
 	}
 
 	// Whether the pending tail misses a sequence from where the feed starts up to `final`: one
@@ -1637,7 +1653,7 @@ export class Producer {
 		return !this.#arrivals.covers(Math.min(floor, final), final);
 	}
 
-	#declareEnd(end: Position): void {
+	#declareEnd(end: Position, error: Error | undefined): void {
 		const { group, frame } = end;
 		if (!Number.isSafeInteger(group) || group < 0 || !Number.isSafeInteger(frame) || frame < 0) {
 			throw new RangeError(`invalid track end: ${group}/${frame}`);
@@ -1649,8 +1665,10 @@ export class Producer {
 		const cut = frame === 0 ? undefined : this.#cached.get(group)?.group;
 		if (cut) hooks.limitGroup(cut, frame);
 		end = { group, frame };
-		this.#state.end.set(end);
-		for (const sink of this.#sinks) sink.end.set(end);
+		for (const state of [this.#state, ...this.#sinks]) {
+			state.endError = error;
+			state.end.set(end);
+		}
 		this.#endLargest();
 	}
 
@@ -1721,7 +1739,7 @@ export class Producer {
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
 		const open = this.#cache.filter((entry) => entry.group.closed.peek() === undefined);
 		closeTrackState(this.#state, abort);
-		if (this.#state.outcome.peek() === undefined) this.#state.outcome.set(abort ?? null);
+		if (this.#state.outcome.peek() === undefined) this.#state.outcome.set(abort ?? this.#state.endError ?? null);
 		// Closing a copy never supplies the missing tail of a group. Already finished groups
 		// ignore the abort and stay readable; unfinished ones retain their truncation cause.
 		const groupError =
@@ -2142,6 +2160,8 @@ export class Subscriber {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.subscriberEnd = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.end() : subscriber.#state.end.peek();
+		hooks.subscriberEndError = (subscriber) =>
+			subscriber.#resume ? subscriber.#resume.endError() : subscriber.#state.endError;
 		hooks.joinSubscriber = (subscriber) => {
 			if (subscriber.#resume) subscriber.#resume.join();
 			else if (subscriber.#state.producer) hooks.joinProducer(subscriber.#state.producer);
@@ -2290,6 +2310,7 @@ export class Subscriber {
 		ordered_ = {
 			nextGroup: (subscriber) => subscriber.#nextGroup(),
 			tryNextGroup: (subscriber) => subscriber.#tryNextGroup(),
+			ended: (subscriber) => subscriber.#ended(),
 			readFrame: (subscriber) => subscriber.#readFrame(),
 			readString: (subscriber) => subscriber.#readString(),
 			readJson: (subscriber) => subscriber.#readJson(),
@@ -2505,7 +2526,7 @@ export class Subscriber {
 				case "drop":
 					continue;
 				case "done":
-					return undefined;
+					return this.#ended();
 				case "error":
 					throw recv.error;
 			}
@@ -2513,6 +2534,17 @@ export class Subscriber {
 			// Idle, or parked at the boundary waiting for the cap to rise.
 			await this.#wait();
 		}
+	}
+
+	// A drained read: the end of stream, or the error the track ended with once this reader's
+	// range reaches that end. A range short of the end never reaches the error.
+	#ended(): undefined {
+		const error = hooks.subscriberEndError(this);
+		if (error === undefined) return undefined;
+		const end = hooks.subscriberEnd(this);
+		const cap = this.#cursor.peek().end;
+		if (end !== undefined && cap !== undefined && cap < finalSequence(end)) return undefined;
+		throw error;
 	}
 
 	// Park until a group read may go differently.
@@ -2679,7 +2711,10 @@ export class Subscriber {
 	tryRecvGroup(): GroupConsumer | undefined {
 		this.#live();
 		this.#mode = "arrival";
-		return taken(() => this.#tryRecvGroup());
+		return taken(
+			() => this.#tryRecvGroup(),
+			() => this.#ended(),
+		);
 	}
 
 	/**
@@ -2706,7 +2741,7 @@ export class Subscriber {
 				case "datagram":
 					return recv.datagram;
 				case "done":
-					return undefined;
+					return this.#ended();
 				case "error":
 					throw recv.error;
 			}
@@ -2754,7 +2789,7 @@ export class Subscriber {
 				case "group":
 					return recv.group;
 				case "done":
-					return undefined;
+					return this.#ended();
 				case "error":
 					throw recv.error;
 			}
@@ -3020,7 +3055,10 @@ export class Ordered {
 	 * {@link Subscriber.tryRecvGroup}. Mirrors the Rust `poll_next_group`.
 	 */
 	tryNextGroup(): GroupConsumer | undefined {
-		return taken(() => ordered_.tryNextGroup(this.#subscriber));
+		return taken(
+			() => ordered_.tryNextGroup(this.#subscriber),
+			() => ordered_.ended(this.#subscriber),
+		);
 	}
 
 	/**
