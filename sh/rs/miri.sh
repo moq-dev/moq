@@ -40,11 +40,26 @@ args=()
 filters=()
 while (($#)); do
     case $1 in
-    --) args+=("$@"); break ;;
-    -E | --filterset) filters+=("${2:?$1 needs a filterset}"); shift 2 ;;
-    -E*) filters+=("${1#-E}"); shift ;;
-    --filterset=*) filters+=("${1#*=}"); shift ;;
-    *) args+=("$1"); shift ;;
+        --)
+            args+=("$@")
+            break
+            ;;
+        -E | --filterset)
+            filters+=("${2:?$1 needs a filterset}")
+            shift 2
+            ;;
+        -E*)
+            filters+=("${1#-E}")
+            shift
+            ;;
+        --filterset=*)
+            filters+=("${1#*=}")
+            shift
+            ;;
+        *)
+            args+=("$1")
+            shift
+            ;;
     esac
 done
 caller='all()'
@@ -61,9 +76,9 @@ pass() {
     cargo miri nextest run --locked --profile miri --no-fail-fast -p kio -p moq-net --lib \
         -E "($1) & ($caller)" ${args[@]+"${args[@]}"} || status=$?
     case $status in
-    0) ran=1 ;;
-    4) ((${#args[@]} + ${#filters[@]})) || exit 4 ;;
-    *) exit "$status" ;;
+        0) ran=1 ;;
+        4) ((${#args[@]} + ${#filters[@]})) || exit 4 ;;
+        *) exit "$status" ;;
     esac
 }
 
@@ -72,7 +87,7 @@ pass '(package(kio) & not test(/^log::/)) | (package(moq-net) & (test(/^model::f
 MIRIFLAGS="${MIRIFLAGS:+$MIRIFLAGS }-Zmiri-tree-borrows -Zmiri-ignore-leaks" \
     pass '(package(kio) & test(/^log::/)) | (package(moq-net) & test(/^model::group::/))'
 
-if ((!ran)); then
+if ((! ran)); then
     echo "rs: no test matched in either Miri pass" >&2
     exit 4
 fi
