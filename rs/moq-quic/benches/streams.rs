@@ -6,8 +6,9 @@
 //! connection setup and dropping the remaining state outside the CPU measurement. The
 //! reprioritize case moves streams that stay queued, never sending them.
 
+use bytes::Bytes;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_quic::Dir;
+use moq_quic::stream::Dir;
 
 #[allow(
 	dead_code,
@@ -82,7 +83,7 @@ fn send(pair: &mut Pair, streams: usize, priorities: usize, writes: usize, size:
 		// `as _` follows the priority type, which a scheduler rewrite widens.
 		stream.set_priority((index % priorities) as _).unwrap();
 		for _ in 0..writes {
-			assert_eq!(stream.write(&data).unwrap(), size, "write was cut short");
+			assert_eq!(stream.write(&mut data.clone()).unwrap(), size, "write was cut short");
 		}
 		stream.finish().unwrap();
 	}
@@ -122,7 +123,7 @@ fn bench_reprioritize(c: &mut Criterion<ThreadCpu>) {
 		let ids: Vec<_> = (0..queued)
 			.map(|_| {
 				let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
-				assert_eq!(conn.send_stream(id).write(b"x").unwrap(), 1);
+				assert_eq!(conn.send_stream(id).write(&mut &b"x"[..]).unwrap(), 1);
 				id
 			})
 			.collect();
@@ -154,12 +155,15 @@ fn send_windowed(pair: &mut Pair, total: usize, size: usize) {
 		.expect("stream limit");
 	let mut written = 0;
 	while written < total {
-		if pair.client().send_stream(id).write_limit() == 0 {
-			pair.drive_until(|pair| pair.client().send_stream(id).write_limit() > 0);
-		}
 		// A write the window cuts short resumes mid-chunk, so every chunk boundary stays put.
 		let start = written % size;
-		written += pair.client().send_stream(id).write(&data[start..]).unwrap();
+		match pair.client().send_stream(id).write(&mut data.slice(start..)) {
+			Ok(n) => written += n,
+			Err(moq_quic::send::Error::Blocked) => {
+				pair.drive_until(|pair| pair.client().send_stream(id).write(&mut Bytes::new()).is_ok())
+			}
+			Err(err) => panic!("{err}"),
+		}
 	}
 	pair.client().send_stream(id).finish().unwrap();
 	pair.drive_until(|pair| pair.server.received.finished >= target);
@@ -214,7 +218,7 @@ fn bench_write_size(c: &mut Criterion<ThreadCpu>) {
 	group.finish();
 }
 
-/// Keep `live` writers blocked while `churn` others block and reset, with MAX_DATA held at zero.
+/// Keep `live` writers blocked while `churn` others block and reset, with MAX_DATA spent and never raised.
 /// A fresh connection per sample bounds even the unfixed implementation's retained history.
 fn bench_connection_blocked(c: &mut Criterion<ThreadCpu>) {
 	let mut group = c.benchmark_group("connection_blocked");
@@ -227,14 +231,17 @@ fn bench_connection_blocked(c: &mut Criterion<ThreadCpu>) {
 					b.iter_batched(
 						|| {
 							let mut pair = Pair::new(Setup {
-								server_receive_window: 0u32.into(),
+								server_receive_window: 1u32.into(),
 								..Setup::default()
 							});
+							// A window can't be zero, so one stream spends its only byte.
+							let id = pair.client().streams().open(Dir::Uni, Default::default()).unwrap();
+							assert_eq!(pair.client().send_stream(id).write(&mut &b"x"[..]), Ok(1));
 							for _ in 0..live {
 								let id = pair.client().streams().open(Dir::Uni, Default::default()).unwrap();
 								assert_eq!(
-									pair.client().send_stream(id).write(b"x"),
-									Err(moq_quic::WriteError::Blocked)
+									pair.client().send_stream(id).write(&mut &b"x"[..]),
+									Err(moq_quic::send::Error::Blocked)
 								);
 							}
 							pair
@@ -243,7 +250,7 @@ fn bench_connection_blocked(c: &mut Criterion<ThreadCpu>) {
 							for _ in 0..churn {
 								let id = pair.client().streams().open(Dir::Uni, Default::default()).unwrap();
 								let mut stream = pair.client().send_stream(id);
-								assert_eq!(stream.write(b"x"), Err(moq_quic::WriteError::Blocked));
+								assert_eq!(stream.write(&mut &b"x"[..]), Err(moq_quic::send::Error::Blocked));
 								stream.reset(0u32.into()).unwrap();
 							}
 							// The peer never grants credit. Packet exchange and dropping the live

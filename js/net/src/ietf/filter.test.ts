@@ -9,11 +9,14 @@ import { Version } from "./version.ts";
 const OLD = Version.DRAFT_18;
 const NEW = Version.DRAFT_22;
 
-test("legacy live joins do not exclude the prefix without a joining FETCH", () => {
-	for (const version of [Version.DRAFT_18]) {
-		expect([...Filter.encode(joinFilter(version), version)]).toEqual([3, 0, 0]);
-	}
-	expect([...Filter.encode(joinFilter(NEW), NEW)]).toEqual([0x01, 0x01]);
+test("a live join is Next Object, its head left to a joining FETCH or a StartGroup=1 fill", () => {
+	const old = joinFilter(OLD);
+	expect([...Filter.encode(old.filter, OLD)]).toEqual([0x02]);
+	expect(old.fill).toBeUndefined();
+
+	const draft22 = joinFilter(NEW);
+	expect([...Filter.encode(draft22.filter, NEW)]).toEqual([0x05]);
+	expect(draft22.fill).toEqual({ filter: { kind: "relative", groups: 1n }, rangeFilters: false });
 });
 
 function roundTrip(filter: Filter.Filter, version: typeof OLD | typeof NEW): Filter.Filter {

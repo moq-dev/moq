@@ -611,9 +611,6 @@ impl MoqAudioConsumer {
 }
 
 fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::AudioConfig, MoqError> {
-	if !catalog_audio.enabled {
-		return Err(MoqError::NotFound);
-	}
 	let codec = catalog_audio.codec.parse().map_err(|_| MoqError::Unsupported)?;
 	// What moq-audio's decoder opens. It rejects the rest itself, so this is only
 	// here to report an unusable rendition as a plain Unsupported rather than a
@@ -641,6 +638,11 @@ impl MoqAudioConsumer {
 	/// the catalog (see
 	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next));
 	/// the codec is inferred from it. Only Opus, AAC-LC, and PCM are supported.
+	///
+	/// A [disabled](crate::media::MoqAudio::enabled) rendition subscribes too, and decodes once its
+	/// publisher re-enables it: a muted speaker's listener stays subscribed, so the unmute plays
+	/// from its first frame. Don't pick one, but keep one already playing while no enabled
+	/// rendition is on offer.
 	///
 	/// `id` is the rendition's catalog key. Its [`track`](crate::media::MoqAudio::track), or `id`
 	/// when unset, is subscribed in the broadcast its
@@ -705,12 +707,11 @@ mod tests {
 		}
 	}
 
+	/// A consumer holds a disabled rendition it already plays, so one converts like any other.
 	#[test]
-	fn audio_config_refuses_disabled_renditions() {
+	fn audio_config_accepts_disabled_renditions() {
 		let mut config = catalog_audio("opus");
 		config.enabled = false;
-		assert!(matches!(audio_config(config.clone()), Err(MoqError::NotFound)));
-		config.enabled = true;
 		assert!(audio_config(config).is_ok());
 	}
 

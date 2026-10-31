@@ -384,27 +384,37 @@ impl Misses {
 			state.start_sequence,
 			state.drops_revision,
 		);
-		let now = state.cache.pool().now_wall();
-		let grace = state.arrival_grace();
 		let ended = state.abort.is_some() || state.is_complete();
+		let ledger = state.arrivals.changes();
+		let drops = &state.drops_changes;
+		// Every reader probes on every poll, mostly with nothing changed since the last, so
+		// that answer costs neither the subscriptions' lock nor a clock read.
+		let unchanged = self.at == Some(at)
+			&& self.budget == Some(drift.budget)
+			&& self.ended == ended
+			&& self.ledger_revision == ledger.revision()
+			&& self.drops_revision == drops.revision();
+		// The grace only times deferred gaps, so with none a new one has nothing to move.
+		// It is judged once something else changes.
+		if unchanged && self.deferred.runs.is_empty() {
+			return asks;
+		}
+		let grace = state.arrival_grace();
+		let unchanged = unchanged && self.grace == Some(grace);
+		let deadline = self.deferred.deadline();
+		if unchanged && deadline.is_none() {
+			return asks;
+		}
+		let now = state.cache.pool().now_wall();
+		if unchanged && let Some(at) = deadline.filter(|at| *at > now) {
+			state.cache.watch_wall(at, waiter);
+			return asks;
+		}
 		let terms = self.at.is_none_or(|previous| {
 			previous.1 != at.1 || previous.2 != at.2 || previous.4 != at.4 || previous.5 != at.5 || at.0 < previous.0
 		}) || self.budget != Some(drift.budget)
 			|| self.grace != Some(grace)
 			|| self.ended != ended;
-		let ledger = state.arrivals.changes();
-		let drops = &state.drops_changes;
-		if !terms
-			&& self.at == Some(at)
-			&& self.ledger_revision == ledger.revision()
-			&& self.drops_revision == drops.revision()
-			&& self.deferred.deadline().is_none_or(|at| at > now)
-		{
-			if let Some(at) = self.deferred.deadline() {
-				state.cache.watch_wall(at, waiter);
-			}
-			return asks;
-		}
 		let low = state.live_floor.unwrap_or(0).max(key.0);
 		let top = newest.min(u64::MAX - 1);
 		let mut candidates = RangeSet::new();
@@ -1078,6 +1088,78 @@ mod tests {
 		assert!(asks.is_empty(), "the successor has aged past this reader's budget too");
 		assert_eq!(given_up, vec![3..4]);
 		assert!(misses.deferred.runs.is_empty());
+	}
+
+	/// A grace change with nothing deferred has no deadline to move, so an unchanged probe
+	/// skips it; the next gap is still timed by the new grace.
+	#[moq_clock::test]
+	async fn a_grace_change_with_nothing_deferred_times_the_next_gap() {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let track = broadcast.create_track("grace", crate::track::Info::default()).unwrap();
+		let budget = Duration::from_secs(5);
+		let _reader = track.subscribe(Subscription::default().with_max_delay(budget));
+		for sequence in 0..3 {
+			track
+				.create_group(crate::group::Info { sequence })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		let mut misses = Misses::default();
+		let mut given_up = Vec::new();
+		let waiter = kio::Waiter::noop();
+		let state = track.state.read();
+		let drift = Drift {
+			budget,
+			bounded: false,
+			edge: state.drift_edge(&Servable::ALL),
+		};
+		let full = |span| [span].into_iter().collect();
+		assert!(
+			misses
+				.judge(&state, (0, 0, None), None, full, &drift, &mut given_up, &waiter)
+				.is_empty()
+		);
+		assert!(misses.deferred.runs.is_empty(), "a contiguous feed defers nothing");
+		drop(state);
+
+		let wider = Duration::from_secs(20);
+		let _wide = track.subscribe(Subscription::default().with_max_delay(wider));
+		let state = track.state.read();
+		assert_eq!(state.arrival_grace(), wider);
+		assert!(
+			misses
+				.judge(
+					&state,
+					(0, 0, None),
+					None,
+					|_| panic!("nothing deferred: the new grace waits for a change"),
+					&drift,
+					&mut given_up,
+					&waiter
+				)
+				.is_empty()
+		);
+		drop(state);
+
+		track
+			.create_group(crate::group::Info { sequence: 4 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let state = track.state.read();
+		let opened = state.cache.pool().now_wall();
+		assert!(
+			misses
+				.judge(&state, (0, 0, None), None, full, &drift, &mut given_up, &waiter)
+				.is_empty()
+		);
+		assert_eq!(misses.deferred.overlapping(0..5).collect::<Vec<_>>(), vec![3..4]);
+		assert_eq!(
+			misses.deferred.deadline(),
+			Some(opened + wider),
+			"timed by the new grace"
+		);
 	}
 
 	#[test]
