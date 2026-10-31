@@ -481,7 +481,7 @@ impl Model {
 			.with_epoch(self::epoch(epoch))
 			.with_hops(hops)
 			.with_cost((SLOTS - slot) as u64);
-		let requests = self.origin.requests_route(PATH, route).unwrap();
+		let requests = self.origin.requests_route(PATH, route, None).unwrap();
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
 		let upstream = broadcast.consume();
