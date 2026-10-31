@@ -37,10 +37,10 @@
 //!   meter, into one program feed that the caller reads on its own clock: a
 //!   studio's program audio. Behind the default-on `bus` feature.
 //! - `aec` keeps the speaker out of the microphone, which is what a conference
-//!   on a laptop needs to not send itself back. `playback::Engine::canceller`
-//!   builds cloneable `aec::Control` handles from the mix it is playing and
-//!   `capture::Config::aec` attaches their adaptive state to one microphone at
-//!   a time. Requires the `aec` feature, which implies both of the above.
+//!   on a laptop needs to not send itself back. [`aec::Processor`] processes PCM
+//!   supplied by any audio stack without enabling device features. The `aec`
+//!   feature wires `playback::Engine::canceller` to
+//!   `capture::Config::aec` and implies both device features.
 //!
 //! [`Format`] mirrors WebCodecs `AudioData.format`; the helpers convert between
 //! any supported layout and the interleaved `f32` representation libopus
@@ -68,7 +68,6 @@ mod resample;
 #[cfg(any(feature = "bus", feature = "playback"))]
 mod ring;
 
-#[cfg(feature = "aec")]
 pub mod aec;
 #[cfg(feature = "bus")]
 pub mod bus;
