@@ -206,6 +206,52 @@ fn subscriber_wakes_parked_demand() {
 	});
 }
 
+/// A publisher waiting on `broadcast::Demand` while one reader hands over to the next:
+/// the last reader leaves and a new one arrives straight from the track producer, which
+/// never touches the broadcast's own state. Whatever the publisher's poll saw, it must be
+/// woken for the newcomer.
+#[test]
+fn broadcast_demand_sees_a_reader_return() {
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let video = broadcast.create_track("video", None).expect("create track");
+		let mut demand = broadcast.demand();
+		let first = block_on(consumer.track("video").expect("track").subscribe(None)).expect("subscribe");
+
+		let reader = thread::spawn(move || {
+			drop(first);
+			let next = video.subscribe(None);
+			// Returned, so neither the reader nor the track goes before the join.
+			(video, next)
+		});
+
+		// The first call reports whatever the swap left; a reader gone must not stay unseen.
+		while !block_on(demand.wanted_changed()).expect("the returning reader was missed") {}
+		drop(reader.join().unwrap());
+	});
+}
+
+/// A publisher waiting on `broadcast::Demand` while a reader comes and goes straight
+/// through the track producer: its leaving must wake the publisher.
+#[test]
+fn broadcast_demand_sees_a_reader_leave() {
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let video = broadcast.create_track("video", None).expect("create track");
+		let mut demand = broadcast.demand();
+		let reader = video.subscribe(None);
+
+		let leaver = thread::spawn(move || {
+			drop(reader);
+			video
+		});
+
+		while block_on(demand.wanted_changed()).expect("the reader leaving was missed") {}
+		drop(leaver.join().unwrap());
+	});
+}
+
 /// A reader taking and dropping a track around the front's demand poll. The front must
 /// see it go: one that missed the edge keeps its source subscribed for nobody, which
 /// shows up here as a deadlock waiting for the source to go unread.
@@ -224,7 +270,7 @@ fn a_front_sees_a_reader_come_and_go() {
 		let noop = kio::Waiter::noop();
 		let now = moq_net::time::Instant::now();
 
-		let pending = consumer.request_broadcast("room", None);
+		let pending = consumer.request("room", None);
 		driver.poll(now, &noop).unwrap();
 		let room = block_on(pending).expect("resolves");
 
@@ -265,7 +311,7 @@ fn a_front_sees_a_reader_return() {
 		let noop = kio::Waiter::noop();
 		let now = moq_net::time::Instant::now();
 
-		let pending = consumer.request_broadcast("room", None);
+		let pending = consumer.request("room", None);
 		driver.poll(now, &noop).unwrap();
 		let room = block_on(pending).expect("resolves");
 
@@ -457,11 +503,11 @@ fn a_request_never_joins_a_retiring_front() {
 		let waiter = kio::Waiter::noop();
 		let now = moq_net::time::Instant::now();
 
-		let pending = consumer.request_broadcast("room", None);
+		let pending = consumer.request("room", None);
 		driver.poll(now, &waiter).unwrap();
 		let first = block_on(pending).expect("resolves");
 
-		let requester = thread::spawn(move || consumer.request_broadcast("room", None));
+		let requester = thread::spawn(move || consumer.request("room", None));
 		drop(first);
 		driver.poll(now, &waiter).unwrap();
 		let pending = requester.join().unwrap();
@@ -480,7 +526,7 @@ fn a_refused_answer_is_never_announced() {
 	model(|| {
 		let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
 		let claim = producer.requests("room").unwrap();
-		let pending = producer.consume().request_broadcast("room/alice", None);
+		let pending = producer.consume().request("room/alice", None);
 		driver
 			.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())
 			.unwrap();
@@ -490,11 +536,11 @@ fn a_refused_answer_is_never_announced() {
 			.expect("prepare");
 		// Keep a refused answer alive so dropping it cannot hide a stray announcement.
 		let _answer = prepared.broadcast().clone();
+		// Only the claim and its answer can cover the path, so any start is a covering route.
 		let announced = |consumer: &origin::Consumer| {
-			let mut route = std::pin::pin!(consumer.routed("room/alice"));
 			matches!(
-				kio::Waiter::noop().poll_future(route.as_mut()),
-				std::task::Poll::Ready(Some(_))
+				consumer.announced().poll_next(&kio::Waiter::noop()),
+				std::task::Poll::Ready(Some(moq_net::announce::Event::Start(_)))
 			)
 		};
 
@@ -529,7 +575,7 @@ fn refused_track_race(read: fn(&mut moq_net::track::Subscriber) -> bool) {
 		let noop = kio::Waiter::noop();
 		let now = moq_net::time::Instant::now();
 
-		let pending = consumer.request_broadcast("room", None);
+		let pending = consumer.request("room", None);
 		driver.poll(now, &noop).unwrap();
 		let room = block_on(pending).expect("resolves");
 

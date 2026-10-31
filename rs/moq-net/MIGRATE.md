@@ -4,16 +4,32 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `broadcast::Demand` reads like `track::Demand`
+
+Replace `is_used()` with `wanted()`, and `used()`, `unused()`, `poll_used`, and `poll_unused` with a loop over `wanted_changed()` (or `poll_wanted_changed`), which returns the new value each time it changes and errors once the broadcast closes.
+`broadcast::Consumer::demand()` is gone: call `demand()` on the broadcast's `Producer`.
+
+```rust
+// Before
+demand.used().await?;
+demand.unused().await?;
+// After
+while !demand.wanted_changed().await? {}
+while demand.wanted_changed().await? {}
+```
+
+A group a subscription or fetch handed out now keeps its track wanted until the group finishes and a reader reads its end (a range cap is not the end): until then `track::Demand::wanted` stays `Some` and `track::Producer::abort_unused` declines. Drop the group, or read it to its end, to let the demand go.
+
 ### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 
-`Path::MAX_BYTES` is 4096, moq-transport's namespace limit, so every path fits every wire and building a longer one fails with `path::Invalid::TooLong`. Keep broadcast paths within 4096 bytes.
+`Path::MAX_BYTES` is 4096, moq-transport's namespace limit, so every path fits every wire and building a longer one fails with `path::Error::TooLong`. Keep broadcast paths within 4096 bytes.
 A moq-transport namespace whose escaped path would exceed it is refused when decoded, and a SUBSCRIBE, TRACK\_STATUS, FETCH, or PUBLISH whose namespace and track name exceed 4096 bytes together fails that request with `Error::Encode` instead of being sent.
 
 ### Building a `Path` refuses empty segments ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
-`Path::new` and `TryFrom` fail with `path::Invalid::EmptySegment` on a leading, trailing, or doubled `/` instead of collapsing it, so a path has one spelling; the empty path is still the root. Origin entry points report it as `Error::EmptySegment`, and `Path::from_static` panics on it.
+`Path::new` and `TryFrom` fail with `path::Error::EmptySegment` on a leading, trailing, or doubled `/` instead of collapsing it, so a path has one spelling; the empty path is still the root. Origin entry points report it as `Error::EmptySegment`, and `Path::from_static` panics on it.
 Pass a prefix without a trailing `/`: `Path::from_static("room")` covers `room/cam`. Build a path from pieces with `Path::join` rather than `format!`, since an empty piece is the root and adds no segment.
-`Path::from_escaped` is gone, and `path::TooLong` is `path::Invalid::TooLong`. `Path::head(n)` returns the path's first `n` segments.
+`Path::from_escaped` is gone, and `path::TooLong` is `path::Error::TooLong`. `Path::head(n)` returns the path's first `n` segments.
 moq-lite decoding refuses a path with an empty segment as a protocol violation, and moq-transport decoding refuses a namespace field ending in `/`, which escapes to one.
 
 ### moq-transport drafts 14 through 17 are removed ([#6753](https://github.com/moq-dev/moq/pull/6753))
@@ -29,8 +45,8 @@ There is one owned `Path` type: a short path is stored inline and a long one sha
 
 - `PathOwned`, `Path<'a>`, and `Path<'static>` are all `Path`; `RelativeOwned` and `Relative<'a>` are `Relative`.
 - `Path::{to_owned, into_owned, borrow}` and the `Relative` equivalents are gone: drop the call, or `clone()` a `&Path` you need to keep.
-- `Path::new`, `Relative::new`, `Path::join`, and `Path::resolve` return `Result<_, path::Invalid>`, failing on a path longer than `Path::MAX_BYTES`. `Path::new` copies its argument; use `Path::from_static("room")` for a literal, which borrows it and panics if it is too long.
-- `From<&str>`, `From<&String>`, and `From<String>` for `Path` and `Relative` are `TryFrom`, with `path::Invalid` as the error.
+- `Path::new`, `Relative::new`, `Path::join`, and `Path::resolve` return `Result<_, path::Error>`, failing on a path longer than `Path::MAX_BYTES`. `Path::new` copies its argument; use `Path::from_static("room")` for a literal, which borrows it and panics if it is too long.
+- `From<&str>`, `From<&String>`, and `From<String>` for `Path` and `Relative` are `TryFrom`, with `path::Error` as the error.
 - `AsPath` is gone. Origin entry points such as `publish`, `create_broadcast`, `scope`, `mount`, and `routed` take `impl TryInto<Path, Error: Into<Error>>`, so `&str`, `String`, `Path`, and `&Path` still work and a too-long string fails with `Error::BoundsExceeded`. Other functions that took `impl AsPath`, such as `stats::Tier::new`, take `impl Into<Path>`: pass a `Path` or `&Path`.
 - `origin::{Producer, Consumer}::absolute` and `announce::Consumer::absolute` return `Result<Path, Error>`.
 - `Path::{has_prefix, strip_prefix, join, relative}` take `&Path`: write `path.has_prefix(&Path::from_static("room"))`.
@@ -78,7 +94,6 @@ A sender that relied on `None` to hold its rate while unwatched should check its
 
 These had no caller outside tests; replace them as follows.
 
-- `broadcast::Demand` and both `broadcast::{Producer, Consumer}::demand()`: watch each track's `track::Demand` instead.
 - `goaway::Consumer::{peek, recv}`: poll it, `goaway.poll(&kio::Waiter::noop())` to peek or `kio::wait(|waiter| goaway.poll(waiter)).await` to wait.
 - `bandwidth::Producer::{abort, closed}`: drop the last producer to close it.
 - `Version::{names, from_alpn, is_ietf}`: use `Versions::all().iter()` or `Version::from_code`, match `alpn()` yourself, and `!is_lite()`.

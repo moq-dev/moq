@@ -65,11 +65,7 @@ async fn relay(
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -171,11 +167,7 @@ async fn fetch_only(version: &str) -> Vec<Result<u64, moq_net::Error>> {
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");

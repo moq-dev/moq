@@ -39,10 +39,10 @@ import { readFinish } from "./finish";
 // has to run before run() below.
 install();
 
-// How stale a group may get before it is skipped, matching the Go and Python
-// subscribers. A relay drops a superseded group (RESET_STREAM Old) rather than
-// finish sending it, e.g. a cached group a fresh one lands right behind, so a
-// subscriber has to move on to the next group instead of failing.
+// How stale a video group may get before it is skipped. A relay drops a
+// superseded group (RESET_STREAM Old) rather than finish sending it, e.g. a
+// cached group a fresh one lands right behind, so a subscriber has to move on
+// to the next group instead of failing.
 const MAX_DELAY = Milli(1000);
 
 // Audio is checked for gaps, which a reader skipping behind live would cause itself: the matrix
@@ -256,7 +256,7 @@ async function run(): Promise<void> {
 			return;
 		}
 		const path = Moq.Path.from(broadcast as string);
-		requested = origin.request(path, { announced: true });
+		requested = origin.follow(path);
 		let bc = requested.active.peek();
 		while (!bc) {
 			await requested.active.changed();

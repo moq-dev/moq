@@ -37,6 +37,8 @@ typealias Transport = uniffi.moq.MoqTransport
 // Origin (broadcast discovery / announcement).
 /** The publish side of an origin: create broadcasts so subscribers can discover them. */
 typealias OriginProducer = uniffi.moq.MoqOriginProducer
+/** An origin's handle on one broadcast: `broadcast()` to fill it, `announce` and `unannounce` to advertise it. */
+typealias Publication = uniffi.moq.MoqPublication
 /** Config for creating an origin, such as its total cache budget. */
 typealias OriginConfig = uniffi.moq.MoqOriginConfig
 /** The subscribe side of an origin: discover and request published broadcasts. */
@@ -51,8 +53,8 @@ typealias BroadcastPrepared = uniffi.moq.MoqBroadcastPrepared
 typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
 /** A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery. */
 typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
-/** A pending wait for a route to cover a specific path. */
-typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
+/** Follows a specific broadcast path across the publisher instances that serve it. */
+typealias Following = uniffi.moq.MoqFollowing
 /** A route over a prefix: its origin-relative path, wildcard captures, and route metadata. */
 typealias Announce = uniffi.moq.MoqAnnounce
 /**
@@ -105,6 +107,14 @@ typealias AnnounceRoute = uniffi.moq.MoqAnnounceRoute
 typealias Route = uniffi.moq.MoqRoute
 /** Tunes how a track subscription is delivered: priority, latency budget, ranges, and group ordering. */
 typealias Subscription = uniffi.moq.MoqSubscription
+
+/**
+ * moq-net's defaults, whose `maxDelay` of zero skips a superseded group at once. A null
+ * subscription means the same; `copy` this one to change a field. A `Subscription()` leaves
+ * `maxDelay` null, which sets no subscriber limit.
+ */
+fun uniffi.moq.MoqSubscription.Companion.default(): Subscription = uniffi.moq.moqSubscriptionDefaults()
+
 /** A span of a track to deliver: from `start` up to `end`, or onward when `end` is null. */
 typealias Range = uniffi.moq.MoqRange
 /** Where one end of a [Range] falls: [AnchorAbsolute], [AnchorRelative], or [AnchorTime]. */

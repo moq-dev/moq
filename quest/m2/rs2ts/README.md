@@ -81,5 +81,5 @@ any necessary breaks. Wire: no changes intended.
 
 - [WASM-to-JS evaluation](/quest/m2/rs2ts-wasm2js.md) - the first JS-only candidate, with source translators as alternatives
 - [JS-only @moq/net](/quest/m2/rs2ts-js.md) - the eventual distribution uses no WASM runtime
-- [rust2's TS translator](https://github.com/kixelated/rust2/blob/main/quest/m2/ts.md) - a parallel research track translating moq-net's codec through an own rustc driver
+- [rust2's TS translator](https://github.com/moq-dev/rust2/blob/main/quest/m2/ts.md) - a parallel research track translating moq-net's codec through an own rustc driver
 - [Browser media report](/quest/m2/rs2ts-browser-report.md) - broader media measurements after adoption

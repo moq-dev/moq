@@ -1,9 +1,20 @@
 import { expect, test } from "bun:test";
 import type MoqPublish from "@moq/publish/element";
-import type { Page } from "playwright";
+import type { JSHandle, Page } from "playwright";
 import { createServer } from "vite";
 import { worklet } from "../../../../js/common/vite-plugin-worklet";
 import { launch } from "./harness";
+
+/** The microphone and camera tracks a `<moq-publish>` holds open, in that order. */
+function captured(handle: JSHandle<{ publish: MoqPublish }>) {
+	return handle.evaluateHandle(({ publish }) => {
+		const audio = publish.sources.audio.peek()?.out.source.peek()?.audio;
+		const video = publish.sources.video.peek()?.out.source.peek()?.video;
+		const track = (source: unknown) =>
+			source instanceof MediaStreamTrack ? source : (source as { track?: MediaStreamTrack } | undefined)?.track;
+		return [track(audio), track(video)];
+	});
+}
 
 /** What `<moq-publish>` was told to capture. */
 function state(page: Page) {
@@ -85,6 +96,7 @@ test("a selected camera stays announced while real capture is reopening", async 
 			const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
 			const gate = {
 				hold: false,
+				calls: 0,
 				pending: [] as (() => void)[],
 				release() {
 					this.hold = false;
@@ -92,6 +104,7 @@ test("a selected camera stays announced while real capture is reopening", async 
 				},
 			};
 			navigator.mediaDevices.getUserMedia = async (constraints) => {
+				gate.calls++;
 				if (gate.hold) await new Promise<void>((resolve) => gate.pending.push(resolve));
 				return original(constraints);
 			};
@@ -114,30 +127,46 @@ test("a selected camera stays announced while real capture is reopening", async 
 			return { publish };
 		});
 
-		for (const kind of ["audio", "video"] as const) {
-			await publication.evaluate(({ publish }, kind) => {
-				if (kind === "audio") publish.muted = true;
-				else publish.invisible = true;
-			}, kind);
-			await page.waitForFunction(({ publish, kind }) => !publish.sources[kind].peek()?.out.source.peek(), {
-				publish: await publication.evaluateHandle(({ publish }) => publish),
-				kind,
-			});
-			await gate.evaluate((gate) => {
-				gate.hold = true;
-			});
-			await publication.evaluate(({ publish }, kind) => {
-				if (kind === "audio") publish.muted = false;
-				else publish.invisible = false;
-			}, kind);
-			await page.waitForFunction((gate) => gate.pending.length > 0, gate);
-			expect(await publication.evaluate(({ publish }) => publish.broadcast.in.announce.peek())).toBe(true);
-			await gate.evaluate((gate) => gate.release());
-			await page.waitForFunction(({ publish, kind }) => !!publish.sources[kind].peek()?.out.source.peek(), {
-				publish: await publication.evaluateHandle(({ publish }) => publish),
-				kind,
-			});
-		}
+		// Muting and hiding only flip each rendition to `enabled: false`: the same tracks stay live and
+		// unmuting reopens nothing.
+		const opened = await captured(publication);
+		await gate.evaluate((gate) => {
+			gate.hold = true;
+		});
+		const calls = await gate.evaluate((gate) => gate.calls);
+		await publication.evaluate(({ publish }) => {
+			publish.muted = true;
+			publish.invisible = true;
+		});
+		await page.waitForFunction(
+			({ publish }) =>
+				publish.audio.out.catalog.peek()?.enabled === false &&
+				publish.video.out.catalog.peek()?.enabled === false,
+			publication,
+		);
+		expect(await opened.evaluate((tracks) => tracks.map((track) => track?.readyState))).toEqual(["live", "live"]);
+		await publication.evaluate(({ publish }) => {
+			publish.muted = false;
+			publish.invisible = false;
+		});
+		await page.waitForFunction(
+			({ publish }) =>
+				publish.audio.out.catalog.peek()?.enabled === undefined &&
+				publish.video.out.catalog.peek()?.enabled === undefined &&
+				!!publish.audio.out.catalog.peek() &&
+				!!publish.video.out.catalog.peek(),
+			publication,
+		);
+		const resumed = await captured(publication);
+		expect(
+			await page.evaluate(([opened, resumed]) => opened.every((track, i) => track && track === resumed[i]), [
+				opened,
+				resumed,
+			] as const),
+		).toBe(true);
+		expect(await publication.evaluate(({ publish }) => publish.broadcast.in.announce.peek())).toBe(true);
+		expect(await gate.evaluate((gate) => gate.calls)).toBe(calls);
+		await gate.evaluate((gate) => gate.release());
 
 		// A camera settings/device change also tears down capture before opening its replacement.
 		await gate.evaluate((gate) => {
@@ -172,6 +201,68 @@ test("a selected camera stays announced while real capture is reopening", async 
 	}
 }, 30_000);
 
+test("a camera holds both devices until its source clears or the element detaches", async () => {
+	const server = await createServer({
+		configFile: false,
+		root: `${import.meta.dir}/publish-ui`,
+		plugins: [worklet()],
+		server: { host: "127.0.0.1", port: 0 },
+	});
+	await server.listen();
+	const browser = await launch(["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"]);
+	try {
+		const page = await browser.newPage();
+		await page.goto(server.resolvedUrls?.local[0] ?? "");
+		await page.getByRole("button", { name: /mute microphone/i }).waitFor();
+		const publication = await page.evaluateHandle(() => {
+			const publish = document.querySelector<MoqPublish>("moq-publish");
+			if (!publish) throw new Error("missing publish element");
+			return { publish };
+		});
+		const open = () =>
+			page.waitForFunction(
+				({ publish }) =>
+					!!publish.sources.audio.peek()?.out.source.peek() &&
+					!!publish.sources.video.peek()?.out.source.peek(),
+				publication,
+			);
+		const states = (tracks: JSHandle<(MediaStreamTrack | undefined)[]>) =>
+			tracks.evaluate((tracks) => tracks.map((track) => track?.readyState));
+
+		// Muted and hidden from the start still opens both, since only `source` gates the devices.
+		await publication.evaluate(({ publish }) => {
+			publish.muted = true;
+			publish.invisible = true;
+			publish.source = "camera";
+		});
+		await open();
+		const first = await captured(publication);
+		expect(await states(first)).toEqual(["live", "live"]);
+
+		await publication.evaluate(({ publish }) => {
+			publish.source = undefined;
+		});
+		await page.waitForFunction((tracks) => tracks.every((track) => track?.readyState === "ended"), first);
+
+		await publication.evaluate(({ publish }) => {
+			publish.source = "camera";
+		});
+		await open();
+		const second = await captured(publication);
+		expect(await states(second)).toEqual(["live", "live"]);
+
+		await publication.evaluate(({ publish }) => publish.remove());
+		await page.waitForFunction((tracks) => tracks.every((track) => track?.readyState === "ended"), second);
+
+		await publication.evaluate(({ publish }) => document.body.append(publish));
+		await open();
+		expect(await states(await captured(publication))).toEqual(["live", "live"]);
+	} finally {
+		await browser.close();
+		await server.close();
+	}
+}, 30_000);
+
 test("watch property and UI state reflects without resetting a selected publish File", async () => {
 	const server = await createServer({
 		configFile: false,
@@ -191,7 +282,7 @@ test("watch property and UI state reflects without resetting a selected publish 
 			watch.connection.enabled.set(false);
 			watch.captions = "english";
 			watch.controls.text.target.set("french");
-			watch.announced = false;
+			watch.follow = false;
 			watch.catalogFormat = "manual";
 			const publish = document.querySelector("moq-publish");
 			if (!publish) throw new Error("missing publish element");
@@ -213,13 +304,13 @@ test("watch property and UI state reflects without resetting a selected publish 
 				if (!publish) throw new Error("missing publish element");
 				return {
 					enabled: watch.connection.enabled.peek(),
-					announced: watch.getAttribute("announced"),
+					follow: watch.getAttribute("follow"),
 					catalog: watch.getAttribute("catalog-format"),
 					source: publish.getAttribute("source"),
 					sameFile: publish.source === (window as unknown as { selectedFile: File }).selectedFile,
 				};
 			}),
-		).toEqual({ enabled: false, announced: "false", catalog: "manual", source: "file", sameFile: true });
+		).toEqual({ enabled: false, follow: "false", catalog: "manual", source: "file", sameFile: true });
 	} finally {
 		await browser.close();
 		await server.close();
@@ -253,6 +344,25 @@ test("invalid markup reports its error and suspends the element until corrected"
 		expect(result.errors.some((error) => error.includes("catalog-format"))).toBe(true);
 		expect(result.enabled).toBe(false);
 		expect(result.raw).toBe("guess");
+
+		const renamed = await page.evaluate(() => {
+			const errors: string[] = [];
+			window.addEventListener("error", (event) => {
+				errors.push(event.message);
+				event.preventDefault();
+			});
+			const watch = document.createElement("moq-watch");
+			watch.setAttribute("announced", "false");
+			document.body.append(watch);
+			const refused =
+				!watch.connection.enabled.peek() && errors.some((error) => error.includes("renamed to `follow`"));
+			watch.removeAttribute("announced");
+			const recovered = watch.connection.enabled.peek();
+			watch.remove();
+			watch.signals.close();
+			return { refused, recovered };
+		});
+		expect(renamed).toEqual({ refused: true, recovered: true });
 	} finally {
 		await browser.close();
 		await server.close();
@@ -382,14 +492,14 @@ test("version lists keep their defaults and explicit false booleans round-trip",
 				else watch.setAttribute("versions", value);
 				versions.push(watch.versions);
 			}
-			watch.setAttribute("announced", "false");
-			const announced = watch.announced;
+			watch.setAttribute("follow", "false");
+			const follow = watch.follow;
 			watch.signals.close();
-			return { versions, announced };
+			return { versions, follow };
 		});
 		expect(result).toEqual({
 			versions: [["moq-transport-14"], ["moq-lite-06", "moq-transport-22"], undefined, undefined, undefined],
-			announced: false,
+			follow: false,
 		});
 	} finally {
 		await browser.close();

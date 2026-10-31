@@ -5,11 +5,8 @@
 // catalog track without explicit configuration; publishers should include the
 // suffix in the name they publish so consumers can detect it.
 
-/** Track name for the uncompressed hang catalog (the `.json` track). */
+/** Track name for the hang catalog, a compressed track. */
 export const TRACK = "catalog.json";
-
-/** Track name for the DEFLATE-compressed hang catalog: the `.z` sibling of {@link TRACK}. */
-export const TRACK_COMPRESSED = "catalog.json.z";
 
 /** Recognized catalog format suffixes used in broadcast names. */
 export const FORMATS = ["hang", "msf"] as const;
