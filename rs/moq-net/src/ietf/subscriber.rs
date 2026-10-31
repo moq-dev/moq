@@ -1,7 +1,7 @@
 use crate::driver::Transport;
 use crate::transport::poll::Session as _;
 use std::{
-	collections::{BTreeMap, HashMap, hash_map::Entry},
+	collections::{BTreeMap, BTreeSet, HashMap, hash_map::Entry},
 	sync::atomic::{AtomicU64, Ordering},
 	task::{Poll, ready},
 	time::Duration,
@@ -789,9 +789,10 @@ struct TrackState {
 
 	// The joining FETCH or latest fill update's own request id, when one was sent.
 	fetch_id: Option<RequestId>,
-	// The group a replaced fill failed to head. Its mid-group tail can still arrive after
-	// the update's fill settles, and has the same hole at the front.
-	headless: Option<u64>,
+	// The groups replaced fills failed to head. Their mid-group tails can still arrive
+	// after a later fill settles, and have the same hole at the front. A group leaves once
+	// its stream opens, since only one subgroup stream carries it.
+	headless: BTreeSet<u64>,
 
 	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
 	tail: kio::Producer<Tail>,
@@ -834,7 +835,7 @@ impl TrackState {
 			fill_start: None,
 			fill,
 			fetch_id: None,
-			headless: None,
+			headless: BTreeSet::new(),
 			tail: Default::default(),
 		}
 	}
@@ -3775,7 +3776,7 @@ impl Subscriber {
 						// A handler may already have the old header and be waiting on its
 						// answer. It must keep the old state, never claim the new request.
 						if let Fill::Failed { sequence } = *filling {
-							held.headless = Some(sequence);
+							held.headless.insert(sequence);
 						}
 						filling.cancel();
 						drop(filling);
@@ -4564,13 +4565,13 @@ impl Subscriber {
 		};
 
 		let (mut track, timescale, fill, headless, mut reading) = {
-			let state = self.state.lock();
-			let track = state.subscribes.get(&request_id).ok_or(Error::NotFound)?;
+			let mut state = self.state.lock();
+			let track = state.subscribes.get_mut(&request_id).ok_or(Error::NotFound)?;
 			(
 				track.producer.clone().ok_or(Error::NotFound)?,
 				track.timescale,
 				track.fill.clone(),
-				track.headless == Some(group.group_id),
+				track.headless.remove(&group.group_id),
 				// Every data stream counts toward PUBLISH_DONE's Stream Count, even one
 				// dropped below, and the subscription's end waits until it is read.
 				Reading::open(&track.tail, Some(group.group_id), self.runtime.now()),
@@ -14226,7 +14227,14 @@ mod stitch_tests {
 				tail_stream(SEQUENCE + 1, 0, &[b"next-0"]),
 			],
 		);
-		h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().headless = Some(SEQUENCE);
+		h.subscriber
+			.state
+			.lock()
+			.subscribes
+			.get_mut(&REQUEST)
+			.unwrap()
+			.headless
+			.insert(SEQUENCE);
 		let mut consumer = h.track.subscribe(None);
 
 		h.dispatch_refused().await;
@@ -16814,39 +16822,53 @@ mod new_group_tests {
 		let _ = read(&mut stream).await;
 		answer(&mut stream).await;
 
-		// The widening's fill answers with no objects, so it owes group 5's head for good.
-		first.update(track::Subscription::default().with_range(4..)).unwrap();
-		let (id, body) = read(&mut stream).await;
-		assert_eq!(id, ietf::SubscribeUpdate::ID);
-		let widening = ietf::SubscribeUpdate::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
-		assert!(widening.fill.is_some());
-		stream
-			.writer
-			.encode_message(&ietf::RequestOk {
-				largest: Some(ietf::Location { group: 5, object: 0 }),
-				active: None,
-			})
-			.await
-			.unwrap();
-		settle().await;
-		let mut empty = header(widening.request_id).await;
-		relay.probe.clone().recv_fill(&mut empty).await.unwrap();
-		let failed = relay.probe.state.lock().subscribes[&subscription].fill.clone();
-		assert!(matches!(*failed.read(), Fill::Failed { sequence: 5 }));
+		// Each widening's fill answers with no objects, so it owes its Largest Group's head
+		// for good, and the next widening replaces it.
+		let mut failed = Vec::new();
+		for (range, largest) in [(Some(4), 5), (Some(2), 6), (None, 6)] {
+			let wanted = track::Subscription::default();
+			first
+				.update(match range {
+					Some(start) => wanted.with_range(start..),
+					None => wanted,
+				})
+				.unwrap();
+			let (id, body) = read(&mut stream).await;
+			assert_eq!(id, ietf::SubscribeUpdate::ID);
+			let widening = ietf::SubscribeUpdate::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
+			assert!(widening.fill.is_some());
+			if range.is_none() {
+				break;
+			}
+			stream
+				.writer
+				.encode_message(&ietf::RequestOk {
+					largest: Some(ietf::Location {
+						group: largest,
+						object: 0,
+					}),
+					active: None,
+				})
+				.await
+				.unwrap();
+			settle().await;
+			let mut empty = header(widening.request_id).await;
+			relay.probe.clone().recv_fill(&mut empty).await.unwrap();
+			let fill = relay.probe.state.lock().subscribes[&subscription].fill.clone();
+			assert!(matches!(*fill.read(), Fill::Failed { sequence } if sequence == largest));
+			failed.push((largest, fill));
+		}
 
-		first.update(track::Subscription::default()).unwrap();
-		let (id, body) = read(&mut stream).await;
-		assert_eq!(id, ietf::SubscribeUpdate::ID);
-		let newest = ietf::SubscribeUpdate::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
-		assert!(newest.fill.is_some(), "the next widening replaced the failed fill");
-		assert!(
-			matches!(*failed.read(), Fill::Failed { sequence: 5 }),
-			"a stream already opening on the old fill still finds group 5 headless"
-		);
+		for (sequence, fill) in &failed {
+			assert!(
+				fill.read().headless(*sequence),
+				"a stream already opening on the old fill still finds group {sequence} headless"
+			);
+		}
 		assert_eq!(
 			relay.probe.state.lock().subscribes[&subscription].headless,
-			Some(5),
-			"a stream opening after the replacement does too"
+			BTreeSet::from([5, 6]),
+			"a stream opening after either replacement does too"
 		);
 		relay.serving.abort();
 	}
