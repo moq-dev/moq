@@ -25,13 +25,13 @@ captions on.
 ## Failover and restarts
 
 A broadcast can be announced over several connections. Seamless failover
-between them needs a [publisher epoch](/concept/moq-lite#publisher-epochs)
-(moq-lite 07, opt-in), which names the instance behind a broadcast: replicas
-sharing one fail over mid-group, and a restart is a newer epoch that viewers
-switch to instead of stalling on the old group numbers, given hosts whose
-clocks roughly agree. The RTMP, SRT, and
-WHIP ingests mint one per connection. Without an epoch, a subscription stays on
-the route it first resolved through until that route goes.
+between them needs a [stream identity](/concept/moq-lite#stream-identities)
+carried on every hop (moq-lite 07, opt-in), which names the stream behind a
+broadcast: replicas sharing one fail over mid-group, and a restart is a new
+identity that viewers switch to instead of stalling on the old group numbers.
+The RTMP, SRT, and WHIP ingests mint one per connection. Over an older wire the
+receiving relay mints an identity per announcement, so failover onto such a
+route is a restart.
 
 ## One protocol both ways
 

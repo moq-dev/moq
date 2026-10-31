@@ -35,7 +35,7 @@ see [Applications](/bin/). [Examples](/setup/examples) links runnable consumers;
 | [moq-auth](/lib/rs/moq-auth) | Relay authorization: JWT signing and verification, and the auth server contract. |
 | [moq-room](/lib/rs/moq-room) | Workspace-only native rooms; use the published JS room API for applications. |
 | [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
-| [moq-e2ee](https://github.com/moq-dev/moq/tree/main/rs/moq-e2ee) | Workspace-only end-to-end encryption of groups, datagrams, and track names, scoped to a publisher epoch. |
+| [moq-e2ee](https://github.com/moq-dev/moq/tree/main/rs/moq-e2ee) | Workspace-only end-to-end encryption of groups, datagrams, and track names, scoped to a publisher run's epoch. |
 | [moq-sign](https://github.com/moq-dev/moq/tree/main/rs/moq-sign) | Workspace-only per-frame Ed25519 signatures, so relays forward content they cannot forge, retime, or relocate. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
@@ -65,7 +65,7 @@ let mut announced = consumer.announced();
 while let Some(event) = announced.next().await {
     // Skip updates and retractions.
     let moq_net::announce::Event::Start(update) = event else { continue };
-    let broadcast = consumer.request(&update.prefix, update.route.epoch).await?;
+    let broadcast = consumer.request(&update.prefix, update.route.identity).await?;
     let catalog = broadcast
         .track(hang::Catalog::DEFAULT_NAME)?
         .subscribe(hang::Catalog::default_subscription())
@@ -80,7 +80,7 @@ let mut broadcast = origin.publish("my-stream.hang", Default::default())?;
 // moq-mux (from a container) or moq-video / moq-audio (from a device) fill it.
 // The route retracts on `unannounce()` or when the broadcast ends. To serve a whole
 // subtree on demand instead, `origin.requests("room")?` yields each requested path:
-// `prepare(Epoch::mint())`, fill its broadcast, then `publish()`, or reject it.
+// `prepare()`, fill its broadcast, then `publish()`, or reject it.
 ```
 
 The connection and origin helpers spawn their drivers. Watch

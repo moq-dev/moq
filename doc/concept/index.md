@@ -35,7 +35,7 @@ watched at 100 ms by one viewer and 10 s by another.
 
 - [Transport](/concept/transport): why QUIC, and the WebTransport, WebSocket, raw QUIC, and iroh paths onto it.
 - [moq-lite](/concept/moq-lite): the pub/sub protocol, discovery, path patterns, subscriptions, and congestion behavior.
-- [Identity and recovery](/concept/identity): choosing publisher epochs, following restarts, and answering work on demand without mixing instances.
+- [Identity and recovery](/concept/identity): choosing stream identities, following restarts, and answering work on demand without mixing streams.
 - [hang](/concept/hang): the media catalog, containers, encryption, and how to extend both.
 - [Audio jitter](/concept/audio-jitter): how a receiver sizes its audio playout target from arrival timing.
 - [Compressed tracks](/concept/compression): when to compress a track, what each protocol version receives, and the relay's cost.

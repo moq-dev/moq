@@ -15,7 +15,7 @@ implement in an afternoon. The wire spec is
 Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts 18
 through 22. Clients offer `moq-lite-06` first. moq-lite 07 is still in progress
 (`moq-lite-07-wip`, and only when both sides enable it). It is the version that
-carries [publisher epochs](#publisher-epochs).
+carries [stream identities](#stream-identities).
 
 ## Terminology
 
@@ -73,8 +73,8 @@ tracks follow.
 
 Each route carries the chain of relay identities it passed through, which is
 how forwarding loops are caught, and a cost, which is how a subscriber picks
-among several routes to the same broadcast. It may also carry a
-[publisher epoch](#publisher-epochs), which says which routes serve the same
+among several routes to the same broadcast. On moq-lite 07 it also carries a
+[stream identity](#stream-identities), which says which routes serve the same
 bytes. A hop of 0 is the anonymous mark and travels the chain unchanged. A
 route that passed through an anonymous hop at any depth ranks below
 every fully identified route, whatever the costs say.
@@ -100,75 +100,76 @@ whose upstream session has since gone. How long a finished broadcast stays
 announced for late readers is the application's retention policy, such as the
 `--linger` of [`moq import`](/bin/cli), not a protocol state.
 
-### Publisher epochs
+### Stream identities
 
-A route may carry an epoch: a UUIDv7 naming the publisher instance behind it.
-A path and an epoch name one broadcast. The path never changes, so
-authorization and hidden names work exactly as without one.
+Every route carries an identity: any non-empty text naming one continuous
+stream at its path, plus an epoch, a counter within that identity. A path and
+an identity name one stream. The path never changes, so authorization and
+hidden names work exactly as before.
 
-- **One instance, one epoch.** A publisher mints an epoch per run. Replicas of
-  the same content announce that same epoch. A prefix claim names no instance:
-  its worker answers each requested path by announcing that exact path under
-  the output's own epoch. Restarting one output is then a new epoch every hop
-  sees, so a viewer returning within a relay's cache window never gets the old
-  output's groups. On moq-lite 07 that announcement is a takeover of the claim:
-  what a viewer already resolved through the claim keeps playing from the
-  output rather than being reset to the new route. A different worker, or a
-  replacement output, never inherits those viewers.
-- **Newest wins.** Among routes at the same prefix, the newest epoch ranks
-  first, ahead of cost, and a route without an epoch ranks last. Newest means
-  the latest UUIDv7 timestamp, so hosts with skewed clocks can lose a restart
-  until the old instance retracts.
-- **Same epoch resumes.** A subscription moves between routes with the same
-  epoch without a seam, continuing from the first frame it lacks. That is a
+- **One stream, one identity.** Every broadcast mints a random identity and
+  keeps it across reconnects. Replicas of the same content announce that same
+  identity. A prefix claim is its own stream: its worker answers each requested
+  path by announcing that exact path under the output's own identity.
+  Restarting one output is then a new identity every hop sees, so a viewer
+  returning within a relay's cache window never gets the old output's groups.
+  On moq-lite 07 that announcement is a takeover of the claim: what a viewer
+  already resolved through the claim keeps playing from the output rather than
+  being reset to the new route. A different worker, or a replacement output,
+  never inherits those viewers.
+- **Most specific, then highest epoch, then rank.** The most specific prefix
+  wins. Within one identity only its highest epoch is eligible, ahead of cost.
+  Among identities the order is link preference, cost, a broadcast published
+  locally, hop length, then a hash of the identity and the path, so relays
+  agree and a pool's paths spread over its hosts. See
+  [choosing a route](/concept/identity#choosing-a-route).
+- **Same identity resumes.** A subscription moves between routes with the same
+  identity without a seam, continuing from the first frame it lacks. That is a
   floor, not a promise: groups the outage held back still arrive only while
   the subscriber's max age covers them, so a route that dies silently, noticed
-  only at the idle timeout, costs whatever aged out meanwhile. A route
-  without an epoch keeps its subscriptions until that route goes, and a track
-  that fails ends instead of resuming, so request the path again.
-- **Another instance restarts.** A newer epoch, or, without one, another route
-  winning the path, is announced as a restart. Subscriptions already answered
-  stay on the old instance until dropped or none of its routes remain, which
-  ends them with an error, while new requests get the new one, so a player
-  follows the restart by requesting the path again. Without an epoch, a request
-  still unanswered when another instance takes the path, even after a
-  withdrawal, ends the same way, since that instance may be the one answering
-  it. A withdrawal alone leaves it to its answer.
-  Held handles can still read their old cached content while a subscription
-  on the old instance stays open, but cannot open new epochless requests once
-  the restart is delivered. Request the path again for
-  new content.
-  That is how a restarted encoder, whose group numbers start over, takes the
-  name instead of stalling viewers on the old sequence. A relay drops its copy
-  of the old instance, so a new subscriber never sees its cached groups.
+  only at the idle timeout, costs whatever aged out meanwhile.
+- **Another identity restarts.** Another identity winning the path is
+  announced as a restart. Subscriptions already answered stay on the old
+  stream until dropped or none of its routes remain, which ends them with an
+  error, while new requests get the new one, so a player follows the restart
+  by requesting the path again. That is how a restarted encoder, whose group
+  numbers start over, takes the name instead of stalling viewers on the old
+  sequence. A relay drops its copy of the old stream, so a new subscriber never
+  sees its cached groups.
 
-The epoch and the restart and takeover messages travel on moq-lite 07, which is
-opt-in. Older versions carry a takeover as an ordinary announcement, so the
-first subscription through a claim is reset once the output's route arrives.
-moq-transport and older moq-lite versions carry no epoch. Without an epoch,
-any other route winning is a restart, even a reconnect over the same path, since nothing says it serves the same bytes. A peer that
-ignores the end and start may keep cached objects of the old run under the same
-names, so an end and a start is not a cache flush.
+The identity, the epoch, and the restart and takeover messages travel on
+moq-lite 07, which is opt-in. `ANNOUNCE_START`, `ANNOUNCE_RESTART` and
+`ANNOUNCE_TAKEOVER` carry the identity and epoch, and `TRACK`, `TRACKS`,
+`SUBSCRIBE` and `FETCH` name the identity they pin. A restart onto another
+identity, or a higher epoch of the same one, is advertised before the old one
+is withdrawn, so the path is never absent. Older versions carry a takeover as
+an ordinary announcement, so the first subscription through a claim is reset
+once the output's route arrives. Older moq-lite versions and moq-transport
+carry no identity, so the receiving session mints one for each announcement,
+marked with a leading `~`: a reconnect or a re-announcement through such a hop
+is another stream. A peer that ignores the end and start may keep cached
+objects of the old run under the same names, so an end and a start is not a
+cache flush.
 
-`moq` and `moqsink` mint a fresh epoch per run, kept across reconnects, and the
-RTMP, SRT, and WHIP ingests mint one per connection. Independent importers use
-distinct epochs, even when fed one stream. Only replicas of one publisher's
-bytes share its epoch, such as one publisher announced through multiple relays. See [Clustering](/bin/relay/cluster) for
+Independent importers use distinct identities, even when fed one stream. Only
+replicas of one publisher's bytes share its identity, such as one publisher
+announced through multiple relays. See [Clustering](/bin/relay/cluster) for
 how a relay uses this, and [identity and recovery](/concept/identity) for
-choosing epochs, following restarts, and answering work on demand.
+choosing identities, following restarts, and answering work on demand.
 
 ### Multiple CDNs
 
 An endpoint can hold sessions to several CDNs at once, each feeding one shared
 origin, and rank them: moq.pro as primary, another CDN as secondary. The rank is
-a per-link preference the endpoint sets (higher wins, 0 is neutral, negative demotes), never sent on the wire. It decides after
-the newest epoch and before cost, so metrics from different operators are never
+a per-link preference the endpoint sets (higher wins, 0 is neutral, negative demotes), never sent on the wire. It decides
+among identities before cost, so metrics from different operators are never
 compared. A subscription uses the preferred link that has a route and moves to the
 next when that route goes; a publisher pushes the same broadcast to every CDN.
 
-The move resumes without a seam only between routes with the same epoch, which
-needs moq-lite 07 on both links. A CDN link that carries no epoch makes moving onto it, or back
-off it, a restart, and the player requests the path again. Both links must
+The move resumes without a seam only between routes with the same identity,
+which needs moq-lite 07 on both links. A CDN link that carries no identity
+makes moving onto it, or back off it, a restart, and the player requests the
+path again. Both links must
 also speak the same protocol and draft: a copy's track info records the
 moq-transport draft it crossed, and a copy whose track info differs is refused,
 ending the track.

@@ -29,25 +29,25 @@ requests follow the new best route immediately. For 2 s after a relay retracts
 a broadcast, it holds back a worse path to the same publisher that a peer still
 hunting offers, instead of announcing the broadcast again.
 
-Routes carrying the same [publisher epoch](/concept/moq-lite#publisher-epochs)
-serve one broadcast. When the route serving it dies, withdraws, or is beaten by
-a cheaper one with that epoch, each subscription continues on the new route
-from the first frame its readers lack, so they see every frame once. A
-publisher whose groups restart, such as an encoder restarting from group 0,
-publishes under a new epoch, which replaces the old broadcast instead of
-resuming it; the RTMP, SRT, and WHIP ingests mint one per connection. Epochs
-order by creation time, so a reconnect to a different gateway assumes the two
-gateways' clocks roughly agree. Seamless failover needs a publisher that
-announces an epoch and, on every link the route crosses, moq-lite 07. A route
-without an epoch, including every route on moq-lite 06 and older or
-moq-transport, keeps its subscriptions until it goes or a track fails
-upstream, and any other route winning it is announced as a restart. Viewers
-re-request on a restart, and a relay drops its copy of the old instance,
-including every path beneath a prefix claim when one of them moves to another
-worker.
+Routes carrying the same [identity](/concept/moq-lite#stream-identities)
+serve one stream. When the route serving it dies, withdraws, or is beaten by
+a cheaper one of that identity, or a higher epoch of it, each subscription
+continues on the new route from the first frame its readers lack, so they see
+every frame once. A publisher whose groups restart, such as an encoder
+restarting from group 0, publishes under a new identity, which replaces the
+old broadcast instead of resuming it; the RTMP, SRT, and WHIP ingests mint one
+per connection. Among identities every relay ranks routes in [one
+order](/concept/identity#choosing-a-route), ending in a hash of the identity
+and the path, so the relays of a mesh agree on each path's stream and a pool's
+paths spread over its hosts. Seamless failover needs moq-lite 07 on every link
+the route crosses. Over moq-lite 06 and older, or moq-transport, the receiving
+relay mints an identity per announcement, so failover onto such a route is
+announced as a restart. Viewers re-request on a restart, and a relay drops its
+copy of the old stream, including every path beneath a prefix claim when one
+of them moves to another worker.
 
 Failover routes must carry copies of one publisher's broadcast. Independent
-importers use distinct epochs and switch as a restart, even when fed one stream.
+importers use distinct identities and switch as a restart, even when fed one stream.
 See [Redundant ingest](/setup/redundancy) to choose between publisher switching,
 subscriber selection, and several routes to one publisher.
 A source whose track differs in any property, such as timescale, retention,
@@ -56,10 +56,10 @@ moq-transport link records its draft in the track's properties and carries
 refresh only as on or off, so a route crossing one does not fail over to or from
 a route that does not.
 
-A route whose original publisher (its first hop) changes under the same epoch is
-updated in place on both wire protocols, so the broadcast never briefly vanishes
-downstream, and subscriptions in flight carry on through it. Without an epoch
-that is another source, so it restarts.
+A route whose original publisher (its first hop) changes under the same identity
+is updated in place, so the broadcast never briefly vanishes downstream, and
+subscriptions in flight carry on through it. Under another identity that is
+another stream, so it restarts.
 
 ## Topology
 

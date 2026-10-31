@@ -25,7 +25,7 @@ moq --connect https://relay.example.com/anon --broadcast event.hang import srt -
 ```
 
 Each connection publishes under a fresh
-[epoch](/concept/moq-lite#publisher-epochs), so an encoder that reconnects
+[identity](/concept/moq-lite#stream-identities), so an encoder that reconnects
 while its stale connection is still open replaces it at once: viewers see the
 broadcast restart, and their next subscribe reaches the new feed. An
 `export srt` stream ends with its broadcast; `--follow` and `--stitch` follow a

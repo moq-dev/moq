@@ -35,14 +35,6 @@ normative:
     date: false
 
 informative:
-  moqepoch:
-    title: "MoQ Epoch Extension"
-    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-epoch/
-    author:
-      -
-        ins: L. Curley
-        name: Luke Curley
-    date: false
   h273:
     title: "Coding-independent code points for video signal type identification"
     target: https://www.itu.int/rec/T-REC-H.273
@@ -221,7 +213,7 @@ A publisher MUST NOT change them for a track once a catalog lists it.
 
 Every other rendition field is live state that MAY change in any update within its own rules (`jitter` and `delay` never fall), as MAY the video section's `display`, `rotation`, and `flip`.
 The picture size MAY change at any keyframe, which a `description` carrying parameter sets rules out, and `codec` names a profile and level that covers every picture the track carries.
-A publisher that changes an identity field MUST publish the media under a new track name, or as a new broadcast under a new Epoch {{moql}}.
+A publisher that changes an identity field MUST publish the media under a new track name, or as a new broadcast under a new Identity {{moql}}.
 A rendition MAY keep its ID and name the new track with `track` ({{field-track}}), so a consumer follows the new name rather than reusing a decoder configured for the ID.
 A track name removed from the catalog MUST NOT return with a different identity.
 A consumer MAY configure a decoder once per track from the catalog.
@@ -631,7 +623,7 @@ That is the intended behaviour, since a partial log presented as a whole one is 
 A publisher SHOULD therefore keep a `stream` track's log within what its groups retain, and split anything unbounded across successive tracks; a consumer that needs the whole log SHOULD subscribe before the publisher exceeds that.
 
 ### broadcast and track {#data-shared}
-The `broadcast`, `epoch`, and `track` fields carry the same meaning here as they do for a media rendition ({{field-broadcast}}, {{field-epoch}}, {{field-track}}).
+The `broadcast`, `identity`, and `track` fields carry the same meaning here as they do for a media rendition ({{field-broadcast}}, {{field-identity}}, {{field-track}}).
 
 ### bitrate, jitter, and delay {#data-estimates}
 The optional `bitrate` field is the track's maximum bitrate in bits per second.
@@ -655,7 +647,7 @@ Audio, video, and text renditions share the following fields, extending the WebC
 ~~~
 type CommonExtensions = {
   "broadcast": string | undefined,
-  "epoch": string | undefined,
+  "identity": string | undefined,
   "track": string | undefined,
   "label": string | undefined,
   "container": Container,
@@ -688,26 +680,26 @@ An absent MSF `namespace` inherits the catalog's broadcast.
 Since each endpoint sees paths under its own connection root, a `namespace` equal to the catalog broadcast's path, or matching it on whole trailing segments, also names the catalog's broadcast; a gateway MUST NOT emit a different broadcast's `namespace` that matches so.
 A gateway MUST preserve the namespace and track-name pair or refuse the rendition; it MUST NOT substitute the catalog's broadcast for an unrepresentable reference.
 
-### epoch {#field-epoch}
-The optional `epoch` field names the publisher instance of the broadcast a rendition references ({{field-broadcast}}), as the canonical text of its Epoch {{moql}}: a lowercase hyphenated UUIDv7.
-Without `broadcast`, it names the instance of the catalog's own broadcast.
-A consumer MUST reject a catalog containing any other `epoch` value.
+### identity {#field-identity}
+The optional `identity` field names the stream of the broadcast a rendition references ({{field-broadcast}}), as the text of its Identity {{moql}}.
+Without `broadcast`, it names the stream of the catalog's own broadcast.
+A consumer MUST reject a catalog containing an empty `identity`.
 
 A consumer reads each path a catalog instance references from the first broadcast it resolves there, so the catalog and its renditions never resolve one path independently across a replacement.
-An absent `epoch` accepts that first broadcast, whichever instance it is.
-A consumer that follows a referenced broadcast's announcements MAY move a rendition without `epoch` onto a restarted instance.
+An absent `identity` accepts that first broadcast, whichever stream it is.
+A consumer that follows a referenced broadcast's announcements MAY move a rendition without `identity` onto a restarted stream.
 
-When `epoch` is present and the route that resolved the referenced broadcast carries an Epoch, the consumer MUST read the rendition only from that instance.
-It MUST fail the rendition rather than fall back to another instance, including one that replaced it before or after resolution, and MUST NOT follow a restart onto another instance for it.
-A later catalog update naming another Epoch for an already-resolved path MUST NOT replace the resolved broadcast; the renditions naming the other Epoch fail instead.
+When `identity` is present, the consumer MUST read the rendition only from a broadcast of that Identity.
+It MUST fail the rendition rather than fall back to another stream, including one that replaced it before or after resolution, and MUST NOT follow a restart onto another stream for it.
+A later catalog update naming another Identity for an already-resolved path MUST NOT replace the resolved broadcast; the renditions naming the other Identity fail instead.
 A new catalog instance resolves its references afresh.
 
-A route without an Epoch, such as one over an older moq-lite version or MoQ Transport without the epoch extension {{moqepoch}}, cannot prove which instance it serves, so there `epoch` is best effort: the consumer reads the broadcast it resolved.
-A consumer MUST NOT treat a catalog's `epoch` as evidence that a subscription may resume across routes.
+A route that crossed an older moq-lite version or MoQ Transport carries an Identity its receiver minted, starting with `~` {{moql}}, which names the announcement rather than the publisher's stream, so there `identity` is best effort: the consumer reads the broadcast it resolved.
+A consumer MUST NOT treat a catalog's `identity` as evidence that a subscription may resume across routes.
 A consumer that predates the field ignores it and does not gain its guarantee.
 
-A publisher SHOULD set `epoch` only when it knows the instance it references, and MUST omit it for a broadcast produced on demand, which has no instance until a worker accepts the request.
-MSF {{moqmsf}} has no field for an instance, so a gateway converting to MSF drops `epoch` and SHOULD report that it did; its readers accept the first instance they resolve.
+A publisher SHOULD set `identity` only when it knows the stream it references, and MUST omit it for a broadcast produced on demand, which has no stream until a worker accepts the request.
+MSF {{moqmsf}} has no field for a stream identity, so a gateway converting to MSF drops `identity` and SHOULD report that it did; its readers accept the first stream they resolve.
 
 ### track {#field-track}
 A rendition's key in its map is its ID, and by default also the name of its track.
@@ -1136,11 +1128,11 @@ This document has no IANA actions.
 - Removed the Recording section: the store layout is a moq-archive format, documented with that crate, not part of this draft.
 - Added the optional video `preference` field: a consumer selects automatically among the highest preference it can decode.
 - Added the optional video `reorder` field: the most frames that can precede one in decode order and follow it in presentation, fixed for the track once declared. A consumer that authors decode times derives them from it and the current group alone, refusing deeper reordering; without it, a consumer infers them from timestamps.
-- Added an optional `epoch` beside every rendition and data track `broadcast` reference ({{field-epoch}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `epoch` fails a rendition proven to resolve another instance, and is best effort over a route without an Epoch.
+- Added an optional `identity` beside every rendition and data track `broadcast` reference ({{field-identity}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `identity` fails a rendition that resolves another stream, and is best effort against an Identity a receiver minted.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
 - An Opus frame timestamp counts the OpusHead pre-skip: a consumer presents each decoded sample the pre-skip earlier than its frame timestamp places it.
 
-- Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new Epoch.
+- Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new stream Identity.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 - Specified conversion between relative broadcast references and MSF track namespaces without changing track identity, reading a namespace aligned with the catalog path's trailing segments as the catalog itself.
 

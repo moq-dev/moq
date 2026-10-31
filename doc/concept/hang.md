@@ -12,8 +12,8 @@ browser can decode it directly. The spec is
 [draft-lcurley-moq-hang](/draft/moq-hang). Plaintext broadcast names end in
 `.hang` so a player knows which catalog to expect. End-to-end encrypted
 broadcasts live at `<opaque>`, derived from the credential and a semantic name
-such as `foo.hang`, and the [epoch](/concept/moq-lite#publisher-epochs) on
-their route identifies each publisher run. The path exposes no format or protection marker; the
+such as `foo.hang`, and the [identity](/concept/moq-lite#stream-identities)
+on their route, the run's moq-e2ee epoch, identifies each publisher run. The path exposes no format or protection marker; the
 payloads follow [moq-e2ee](/draft/moq-e2ee). See [Encryption](#encryption).
 
 ## Catalog
@@ -56,13 +56,13 @@ rate, and channel count. Everything else, such as the coded size, `bitrate`,
 `framerate`, and `enabled`, updates in place; the picture resizes in band at a
 keyframe unless a `description` pins it. A publisher that needs a new identity
 publishes a new track name, or restarts the broadcast under a new
-[epoch](/concept/moq-lite#publisher-epochs); the Rust and `@moq/publish`
+[identity](/concept/moq-lite#stream-identities); the Rust and `@moq/publish`
 publishers take a new name. A player can configure its decoder once per track.
 
 A few things the catalog can express beyond decoder config:
 
 - **Labels.** Any rendition may carry a human-readable `label` for a track picker. The map key stays the rendition's ID, so labels need not be unique and renaming one doesn't rename the track.
-- **Renditions in another broadcast.** A rendition may point at a relative broadcast path, so a transcoder can publish a ladder that adds low rungs and references the source's original rendition without re-publishing its bytes. The path resolves against where the consumer found the catalog, so a reference that escapes above the root names nothing and the catalog is rejected. `@moq/watch` and `moqsrc` follow a referenced path's announcements like their own, restarting the rendition on each instance that serves it; every other reader, such as `moq play`, the exporters, and the bindings, waits for the first one announced and keeps it, and an exporter ends the rendition with it. An optional `epoch` beside the path names the [publisher instance](/concept/moq-lite#publisher-epochs) it expects: a route proving another instance ends the rendition instead of falling back to it, while a route without an epoch (an older version) cannot prove one, so there it is best effort. Omit `epoch` for a broadcast produced on demand, which has no instance until a worker answers; see [identity and recovery](/concept/identity).
+- **Renditions in another broadcast.** A rendition may point at a relative broadcast path, so a transcoder can publish a ladder that adds low rungs and references the source's original rendition without re-publishing its bytes. The path resolves against where the consumer found the catalog, so a reference that escapes above the root names nothing and the catalog is rejected. `@moq/watch` and `moqsrc` follow a referenced path's announcements like their own, restarting the rendition on each instance that serves it; every other reader, such as `moq play`, the exporters, and the bindings, waits for the first one announced and keeps it, and an exporter ends the rendition with it. An optional `identity` beside the path names the [stream](/concept/moq-lite#stream-identities) it expects: a route of another identity ends the rendition instead of falling back to it, while a route whose identity a session minted (one that crossed an older version) cannot prove one, so there it is best effort. Omit `identity` for a broadcast produced on demand, which has none until a worker answers; see [identity and recovery](/concept/identity).
 - **Track names.** The map key is a rendition's ID and, by default, its track name. A rendition sets `track` only when the two must differ, such as two renditions of same-named tracks in different broadcasts, or a rendition whose media changed and so needs a new name; readers subscribe to `track` when present. An ID can't name both a video and an audio rendition.
 - **Jitter.** A rendition can say how much media it writes behind a frame's timestamp, in whole milliseconds rounded up: the reorder delay of B-frames and the span of a fragment or batch written together. It is measured from media timestamps alone, never the time a frame was written, so neither a constant encoder delay nor a capture clock counts. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
 - **Delay.** A rendition can also say how far its frames' timestamps trail those another rendition already wrote, so a video encoder running 200 ms behind audio advertises `delay: 200` on video. A rendition alone measures none. It follows the same rules as jitter. A player holds the largest `delay + jitter` among the renditions it subscribes to, and never subtracts one rendition's `delay` from another's.
@@ -228,8 +228,9 @@ size, even when the parameter sets ride in the samples.
 [moq-e2ee](/draft/moq-e2ee) encrypts groups, datagrams, and track names so a
 relay forwards ciphertext and never sees a content key. The application
 distributes the credential on its own channel. Each publisher run binds that
-credential to its [epoch](/concept/moq-lite#publisher-epochs), which derives
-the track names and keys for that run alone. A restart under a fresh epoch
+credential to a fresh moq-e2ee epoch, announced as its route's
+[identity](/concept/moq-lite#stream-identities), which derives the track names
+and keys for that run alone. A restart under a fresh epoch
 shares no names or keys with the previous run. Never share or reuse an epoch
 under one credential, whether for a replica or a later run: two instances on
 one epoch derive the same keys from the same group sequences and repeat
