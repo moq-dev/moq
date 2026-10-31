@@ -34,8 +34,9 @@ impl Client {
 	/// A client for the server at `url`.
 	///
 	/// `http://` is accepted for a loopback host only; `https://` presents `tls`, the
-	/// caller's client identity and roots; `unix://` speaks HTTP over the socket at
-	/// the URL's path. Anything else is refused here rather than at the first session.
+	/// caller's client identity and roots, or without it rind's TLS and the platform's
+	/// roots; `unix://` speaks HTTP over the socket at the URL's path. Anything else is
+	/// refused here rather than at the first session.
 	pub fn new(url: Url, tls: Option<rustls::ClientConfig>) -> crate::Result<Self> {
 		// No client-wide timeout: `connect` runs under its caller's deadline, and the
 		// requests that run after the handshake are bounded one by one. Every request carries
@@ -56,10 +57,7 @@ impl Client {
 				}
 				(builder, url)
 			}
-			"https" => match tls {
-				Some(tls) => (builder.use_preconfigured_tls(tls), url),
-				None => (builder, url),
-			},
+			"https" => (builder, url),
 			#[cfg(unix)]
 			"unix" => {
 				let path = url.to_file_path().map_err(|()| Error::InvalidUrl(redact(&url)))?;
@@ -70,9 +68,25 @@ impl Client {
 			_ => return Err(Error::InvalidUrl(redact(&url))),
 		};
 
+		// reqwest has no crypto provider of its own and builds a TLS config for every
+		// scheme, so it is always handed one.
+		let tls = match tls {
+			Some(tls) => tls,
+			None => {
+				use rustls_platform_verifier::BuilderVerifierExt;
+				let provider = rind_rustls::default_provider().map_err(Error::crypto)?;
+				rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+					.with_safe_default_protocol_versions()
+					.map_err(Error::crypto)?
+					.with_platform_verifier()
+					.map_err(Error::crypto)?
+					.with_no_client_auth()
+			}
+		};
+
 		Ok(Self {
 			identity: Arc::new(()),
-			http: builder.build()?,
+			http: builder.use_preconfigured_tls(tls).build()?,
 			url,
 		})
 	}
