@@ -118,7 +118,7 @@ int main(void) {
     CHECK(moq_encode_audio_frame((uint32_t)producer, &frame) == 0);
     CHECK(moq_encode_audio_finish((uint32_t)producer) == 0);
 
-    CHECK(moq_origin_request((uint32_t)origin, path, strlen(path), on_broadcast, &c) > 0);
+    CHECK(moq_origin_request((uint32_t)origin, path, strlen(path), NULL, 0, on_broadcast, &c) > 0);
     pthread_mutex_lock(&c.mutex);
     wait_until(&c, &c.broadcast);
     pthread_mutex_unlock(&c.mutex);

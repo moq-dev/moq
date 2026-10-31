@@ -427,6 +427,11 @@ fn a_log_append_wakes_a_reader_parked_on_its_channel() {
 /// read it isn't ordered after fails the model. The reader keeps a hint into the first
 /// segment from an earlier read, which the eviction may free before its next one.
 ///
+/// Only an ARM run checks the release at the end of each read: off x86, crossbeam-epoch
+/// pins with a Relaxed store, so a collector that sees the reader's second pin is
+/// ordered after its first pin's reads only through that release. On x86 its SeqCst CAS
+/// orders them anyway.
+///
 /// The collector's own atomics run under loom too (`crossbeam_loom`), which makes the
 /// full search intractable, so this one bounds preemptions like moq-net's models.
 #[test]
@@ -454,6 +459,49 @@ fn a_log_reader_racing_eviction_never_touches_freed_memory() {
 		writer.evict(1);
 		writer.evict(2);
 		// Advance the collector so it may free the segments while the reader runs.
+		for _ in 0..2 {
+			crossbeam_epoch::pin().flush();
+		}
+		racer.join().unwrap();
+	});
+}
+
+/// An entry whose drop writes its cell, so loom flags a read racing it.
+struct Tracked(loom::cell::UnsafeCell<u64>);
+
+// SAFETY: loom checks every access to the cell.
+unsafe impl Send for Tracked {}
+unsafe impl Sync for Tracked {}
+
+impl Drop for Tracked {
+	fn drop(&mut self) {
+		self.0.with_mut(|value| unsafe { *value = u64::MAX });
+	}
+}
+
+/// A read racing an eviction inside a segment that stays live: the evicted entry is
+/// dropped only once the read is done with it, never while it borrows it.
+#[test]
+fn a_log_reader_racing_a_partial_eviction_never_touches_a_dropped_entry() {
+	let mut builder = loom::model::Builder::new();
+	builder.preemption_bound.get_or_insert(3);
+	builder.check(|| {
+		let mut writer = crate::log::Writer::new(0);
+		// Segments of 1 and 2 slots: entry 1 shares the second with entry 2.
+		for i in 0..3u64 {
+			writer.push(Tracked(loom::cell::UnsafeCell::new(i)));
+		}
+		let mut reader = writer.reader();
+
+		let racer = thread::spawn(move || {
+			if let Ok(Some(entry)) = reader.read().get(1) {
+				assert_eq!(entry.0.with(|value| unsafe { *value }), 1, "misread entry 1");
+			}
+		});
+
+		writer.evict(2);
+		// Retire the segment too, so its free races the pending drop of entry 1.
+		writer.evict(3);
 		for _ in 0..2 {
 			crossbeam_epoch::pin().flush();
 		}

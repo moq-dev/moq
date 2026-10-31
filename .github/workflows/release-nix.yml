@@ -4,7 +4,7 @@ name: Release Nix
 # substitutes it instead of building from source.
 #
 # The signing key and the bucket write key live in the `cache-write`
-# Environment, which only `main`, the merge queue, and these tag patterns can
+# Environment, which only `main` and these tag patterns can
 # deploy from. A tag ruleset limits who can create them; see infra/README.md.
 
 on:

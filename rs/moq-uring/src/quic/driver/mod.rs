@@ -11,15 +11,13 @@
 
 mod connection;
 mod endpoint;
-mod group;
-mod stream;
+pub mod recv;
+pub mod send;
 
 pub use connection::Connection;
 pub use endpoint::Endpoint;
-pub use group::{SendGroup, SendOptions};
-pub use stream::{Lease, RecvStream, SendStream};
 
-pub(crate) use connection::{End, Shared};
+pub(crate) use connection::Shared;
 
 use std::{num::NonZeroU64, sync::Arc};
 

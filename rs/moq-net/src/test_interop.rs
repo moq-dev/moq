@@ -25,7 +25,7 @@ pub(crate) fn fin(version: &str, started: bool, clean: bool, responses: Vec<u8>)
 }
 
 /// Rust updates keep the JS subscription alive, cover both unseen groups after narrowing,
-/// and fill cached history with the update's ID and the actual group deltas on draft-22.
+/// and fill the largest group's head under the update's ID on draft-22.
 #[test]
 #[ignore = "requires Bun; run by just test interop"]
 fn ietf_range_updates_interop() {
@@ -89,10 +89,10 @@ fn ietf_range_updates_interop() {
 		if draft22 {
 			updates.push(update(
 				2,
-				range(0, None),
+				range(3, None),
 				Some(ietf::Fill {
 					group_order: Some(ietf::GroupOrder::Ascending),
-					filter: Some(range(0, None)),
+					filter: Some(range(3, None)),
 					range_filters: false,
 				}),
 			));
@@ -192,7 +192,7 @@ fn ietf_range_updates_interop() {
 		assert_eq!(
 			filled,
 			if draft22 {
-				(0..4).flat_map(|group| [(group, 0), (group, 1)]).collect::<Vec<_>>()
+				(3..4).flat_map(|group| [(group, 0), (group, 1)]).collect::<Vec<_>>()
 			} else {
 				vec![]
 			},

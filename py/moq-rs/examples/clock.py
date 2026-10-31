@@ -41,7 +41,7 @@ async def publish(url: str, broadcast_name: str, track_name: str, insecure: bool
 async def subscribe(url: str, broadcast_name: str, track_name: str, insecure: bool) -> None:
     async with moq.Client(url, tls=moq.ClientTls(insecure=insecure)) as client:
         print(f"waiting for {broadcast_name!r} at {url}")
-        broadcast = await client.announced_broadcast(broadcast_name)
+        broadcast = await client.follow(broadcast_name)
 
         print(f"subscribed to {broadcast_name!r} track={track_name!r}")
         track = await broadcast.subscribe_track(track_name)
