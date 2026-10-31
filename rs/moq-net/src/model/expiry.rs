@@ -4,13 +4,13 @@
 //! frame write advances, and the wall clock, which the cache pool's driver advances.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 #[cfg(loom)]
-use ::loom::sync::atomic::AtomicBool;
+use ::loom::sync::atomic::{AtomicBool, AtomicU64, fence};
 #[cfg(not(loom))]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, fence};
 
 use super::Timestamp;
 
@@ -43,11 +43,18 @@ pub(super) struct Wakes {
 	/// frame below every one skips the lock. Ordered by the starts index's lock, which a
 	/// read takes after registering and a first frame before checking this.
 	starts_from: AtomicU64,
-	/// Whether either landing index has entries. Relaxed: insertion checks this
-	/// with exclusive track ownership, while readers register under the track read
-	/// lock. That lock orders registration and insertion; first-frame reveal holds
-	/// only a track read lock and must always take the parked lock instead.
+	/// Whether either landing index has entries. Insertion checks this after raising
+	/// `newest`, and a landing read sets it before reading `newest`, each across a SeqCst
+	/// fence: whichever goes second sees the other, so a read registering without the
+	/// track lock is either woken or sees the group. Held reads register under the track
+	/// read lock, which orders them against insertion too. First-frame reveal holds only
+	/// a track read lock and must always take the parked lock instead.
 	landing_waiters: AtomicBool,
+	/// The highest sequence a servable group ever landed at, or 0, so a read with nothing
+	/// above it skips the track lock. Nothing landing and group 0 landing put no group
+	/// above any read, so 0 serves both. Never lowered: a group that later fails or leaves
+	/// only sends the read the slow way.
+	newest: AtomicU64,
 	parked: kio::Lock<Parked>,
 }
 
@@ -103,6 +110,7 @@ impl Default for Wakes {
 			earliest: AtomicU64::new(u64::MAX),
 			starts_from: AtomicU64::new(u64::MAX),
 			landing_waiters: AtomicBool::new(false),
+			newest: AtomicU64::new(0),
 			parked: kio::Lock::default(),
 		}
 	}
@@ -193,16 +201,29 @@ impl Wakes {
 		next
 	}
 
-	/// Whether insertion, with exclusive track ownership, may wake a landing read.
-	pub(super) fn has_landing_waiters(&self) -> bool {
+	/// A servable group was inserted at `sequence`: returns whether a landing read may be
+	/// parked for it to wake.
+	pub(super) fn land(&self, sequence: u64) -> bool {
+		self.newest.fetch_max(sequence, Ordering::Relaxed);
+		// Pairs with the fence in `watch_landing`.
+		fence(Ordering::SeqCst);
 		self.landing_waiters.load(Ordering::Relaxed)
 	}
 
-	/// Park `waiter` until a group lands above `sequence`.
-	pub(super) fn watch_landing(&self, sequence: u64, waiter: &kio::Waiter) {
-		let mut parked = self.parked.lock();
-		parked.landings.entry(sequence).or_default().register(waiter);
-		self.landing_waiters.store(true, Ordering::Relaxed);
+	/// Park `waiter` until a group lands above `sequence`, returning whether one already
+	/// has. Needs no track lock: a group landing after it either wakes `waiter` or is seen.
+	///
+	/// `false` means no servable group ever landed above `sequence`, so it has no successor
+	/// and neither of the budget's clocks can convict it yet.
+	pub(super) fn watch_landing(&self, sequence: u64, waiter: &kio::Waiter) -> bool {
+		{
+			let mut parked = self.parked.lock();
+			parked.landings.entry(sequence).or_default().register(waiter);
+			self.landing_waiters.store(true, Ordering::Relaxed);
+		}
+		// Pairs with the fence in `land`.
+		fence(Ordering::SeqCst);
+		self.newest.load(Ordering::Relaxed) > sequence
 	}
 
 	/// Park `waiter`, holding group `sequence` from another copy, until it or a group
@@ -360,8 +381,14 @@ mod test {
 		wakes.landed(Some(1), 10, 1);
 		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));
 		wakes.watch_held(11, &waiter);
-		assert!(wakes.has_landing_waiters());
-		wakes.watch_landing(12, &waiter);
+		assert!(wakes.land(13));
+		assert!(wakes.watch_landing(12, &waiter), "a group landed above it");
+		assert!(!wakes.watch_landing(13, &waiter), "nothing landed above it");
+		assert!(wakes.land(u64::MAX));
+		assert!(
+			wakes.watch_landing(u64::MAX - 1, &waiter),
+			"the last sequence is above it"
+		);
 		wakes.wake_all();
 		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));
 	}
