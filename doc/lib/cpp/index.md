@@ -87,7 +87,7 @@ void ok(moq::expected<void> result) {
 // Subscribe.
 auto client = ok(moq::Client::init({}));   // a moq::ClientConfig; {} takes every default
 auto session = ok(client->connect("https://relay.example.com").get());
-auto announced = ok(session->consume()->announced_broadcast("my-stream.hang"));
+auto announced = ok(session->consume()->follow("my-stream.hang", std::nullopt));
 auto broadcast = ok(announced->available().get());
 auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
@@ -207,6 +207,10 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 
 `moq::TrackInfo::compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 
+## Subscription defaults
+
+`moq::subscription_defaults()` returns moq-net's defaults, whose zero `max_delay` skips a superseded group at once; passing `std::nullopt` for a subscription means the same. Change its fields rather than starting from `moq::Subscription{}`, whose unset `max_delay` sets no subscriber limit.
+
 ## Track demand
 
 `demand()->wanted()` is the group subscribers want, or `std::nullopt` while nobody subscribes, and `wanted_changed()` waits for it to move: start a new group once it passes your largest. Set `TrackInfo::refresh` to have a joining subscriber ask for a new group once the newest has grown past `refresh` times its first frame.
@@ -261,7 +265,7 @@ kind `ProtocolKind::kTooManyRequests`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
-A session closed because its credential expired reports `ProtocolKind::kExpired`, and a request refused for an expired token is `moq::Error::kExpired`; refresh the token before retrying.
+A session closed because its credential expired reports `ProtocolKind::kExpired`, and a request refused for an expired token is `moq::Error::kExpired`; refresh the token before retrying. Malformed credentials report `ProtocolKind::kMalformedAuthToken`; correct the token before reconnecting with it.
 A catalog that needs a newer moq-hang draft than this build reads is `moq::Error::kUnsupportedCatalog`; upgrade the library to read it.
 
 Check a result before reading it. `moq::expected` is a bundled `tl::expected`

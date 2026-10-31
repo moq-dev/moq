@@ -35,14 +35,7 @@ const _: () = assert!(size_of::<Repr>() == INLINE + 2);
 const _: () = assert!(Path::MAX_BYTES <= u16::MAX as usize);
 
 impl Repr {
-	fn copy(s: &str) -> Result<Self, Invalid> {
-		if s.len() > Path::MAX_BYTES {
-			return Err(Invalid::TooLong);
-		}
-		Ok(Self::copy_bounded(s))
-	}
-
-	// `copy` for a string already known to fit `MAX_BYTES`.
+	// A copy of a string already known to fit `MAX_BYTES`.
 	fn copy_bounded(s: &str) -> Self {
 		debug_assert!(s.len() <= Path::MAX_BYTES);
 		if s.len() <= INLINE {
@@ -63,7 +56,8 @@ impl Repr {
 
 /// Why a string is not a valid [`Path`] or [`Relative`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
-pub enum Invalid {
+#[non_exhaustive]
+pub enum Error {
 	/// Longer than [`Path::MAX_BYTES`].
 	#[error("path is longer than {} bytes", Path::MAX_BYTES)]
 	TooLong,
@@ -71,17 +65,39 @@ pub enum Invalid {
 	/// A leading, trailing, or doubled `/`, which would give one path several spellings.
 	#[error("path contains an empty segment")]
 	EmptySegment,
+
+	/// A `\` before anything but `\` or `/`, which would give one namespace field several spellings.
+	#[error(r"path contains a `\` that escapes neither `\` nor `/`")]
+	InvalidEscape,
 }
 
 // A path is refused rather than normalized, so each one has exactly one spelling.
-fn validate(s: &str) -> Result<(), Invalid> {
+fn validate(s: &str) -> Result<(), Error> {
 	if s.len() > Path::MAX_BYTES {
-		return Err(Invalid::TooLong);
+		return Err(Error::TooLong);
 	}
 	if !s.is_empty() && (s.starts_with('/') || s.ends_with('/') || s.contains("//")) {
-		return Err(Invalid::EmptySegment);
+		return Err(Error::EmptySegment);
+	}
+	validate_escapes(s)
+}
+
+// A `\` escapes the byte after it, which must be `\` or `/`: the IETF namespace mapping writes
+// a field's `\` and `/` that way and nothing else, so any other spelling could not round-trip.
+fn validate_escapes(s: &str) -> Result<(), Error> {
+	let mut rest = s.as_bytes();
+	while let Some(i) = rest.iter().position(|&b| b == b'\\') {
+		match rest.get(i + 1) {
+			Some(b'\\' | b'/') => rest = &rest[i + 2..],
+			_ => return Err(Error::InvalidEscape),
+		}
 	}
 	Ok(())
+}
+
+// Whether the byte at `end` is escaped, so a valid path cut there splits an escape in two.
+fn is_escaped(s: &str, end: usize) -> bool {
+	s.as_bytes()[..end].iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 1
 }
 
 /// A broadcast path that provides safe prefix matching operations.
@@ -91,6 +107,8 @@ fn validate(s: &str) -> Result<(), Invalid> {
 ///
 /// A path is a sequence of non-empty segments joined by `/`, so it has one spelling:
 /// [`Path::new`] refuses a leading, trailing, or doubled `/` rather than collapsing it.
+/// A `\` escapes the `\` or `/` after it, which is how a moq-transport namespace field holding
+/// either one is spelled, and any other `\` is refused. Segments still split at every `/`.
 /// A path is at most [`Path::MAX_BYTES`] long. The empty path has no segments; it is the
 /// origin's root and prefixes every other path. The same type names an exact broadcast
 /// and the prefix a route or announcement covers, so a broadcast's own path is the prefix
@@ -114,7 +132,7 @@ fn validate(s: &str) -> Result<(), Invalid> {
 ///
 /// let joined = base.join(&Path::from_static("users"))?;
 /// assert_eq!(joined.as_str(), "api/v1/users");
-/// # Ok::<(), moq_net::path::Invalid>(())
+/// # Ok::<(), moq_net::path::Error>(())
 /// ```
 #[derive(Clone)]
 pub struct Path(Repr);
@@ -136,9 +154,10 @@ impl Path {
 	/// Create a new Path by copying a string slice.
 	///
 	/// The empty string is the root path. Anything else must be non-empty segments joined
-	/// by `/`: a leading, trailing, or doubled `/` fails with [`Invalid::EmptySegment`], and
-	/// a string longer than [`Path::MAX_BYTES`] with [`Invalid::TooLong`].
-	pub fn new(s: &str) -> Result<Self, Invalid> {
+	/// by `/`: a leading, trailing, or doubled `/` fails with [`Error::EmptySegment`], a `\`
+	/// before anything but `\` or `/` with [`Error::InvalidEscape`], and a string longer
+	/// than [`Path::MAX_BYTES`] with [`Error::TooLong`].
+	pub fn new(s: &str) -> Result<Self, Error> {
 		validate(s)?;
 		Ok(Self(Repr::copy_bounded(s)))
 	}
@@ -222,7 +241,8 @@ impl Path {
 		Some(self.slice_from(n))
 	}
 
-	/// The first `n` segments, or `None` if the path has fewer.
+	/// The first `n` segments, or `None` if the path has fewer or the `/` after them is
+	/// escaped, since no path ends in half an escape.
 	///
 	/// # Examples
 	/// ```
@@ -232,6 +252,9 @@ impl Path {
 	/// assert_eq!(path.head(2), Some(Path::from_static("foo/bar")));
 	/// assert_eq!(path.head(0), Some(Path::empty()));
 	/// assert_eq!(path.head(4), None);
+	///
+	/// // `foo\` would end in a lone `\`.
+	/// assert_eq!(Path::from_static(r"foo\/bar").head(1), None);
 	/// ```
 	pub fn head(&self, n: usize) -> Option<Path> {
 		if n == 0 {
@@ -243,7 +266,10 @@ impl Path {
 			.map(|(i, _)| i)
 			.chain((!s.is_empty()).then_some(s.len()))
 			.nth(n - 1)?;
-		// A run of whole segments of a valid path is itself valid.
+		if is_escaped(s, end) {
+			return None;
+		}
+		// Otherwise a run of whole segments of a valid path is itself valid.
 		Some(match &self.0 {
 			Repr::Static(s) => Path(Repr::Static(&s[..end])),
 			_ => Path(Repr::copy_bounded(&s[..end])),
@@ -314,9 +340,9 @@ impl Path {
 	///
 	/// // The empty path is the identity.
 	/// assert_eq!(base.join(&Path::empty())?.as_str(), "foo");
-	/// # Ok::<(), moq_net::path::Invalid>(())
+	/// # Ok::<(), moq_net::path::Error>(())
 	/// ```
-	pub fn join(&self, other: &Path) -> Result<Path, Invalid> {
+	pub fn join(&self, other: &Path) -> Result<Path, Error> {
 		if self.is_empty() {
 			Ok(other.clone())
 		} else if other.is_empty() {
@@ -333,10 +359,10 @@ impl Path {
 	}
 
 	// `a/b` for two non-empty valid paths, built in place.
-	pub(crate) fn concat(a: &str, b: &str) -> Result<Path, Invalid> {
+	pub(crate) fn concat(a: &str, b: &str) -> Result<Path, Error> {
 		let len = a.len() + 1 + b.len();
 		if len > Self::MAX_BYTES {
-			return Err(Invalid::TooLong);
+			return Err(Error::TooLong);
 		}
 		if len <= INLINE {
 			let mut buf = [0; INLINE];
@@ -364,10 +390,11 @@ impl Path {
 	/// Excess `..` is a no-op once the base is empty (subsequent named segments still append).
 	/// An empty `rel` returns this path unchanged.
 	///
-	/// [`Relative::new`] strips empty and redundant `.` segments, but preserves a lone `.`
-	/// so it can reference the base's parent.
+	/// [`Relative::new`] strips redundant `.` segments, but preserves a lone `.` so it can
+	/// reference the base's parent.
 	///
-	/// Fails if the result is longer than [`Path::MAX_BYTES`].
+	/// Fails if the result is longer than [`Path::MAX_BYTES`], or ends a segment in a lone `\`
+	/// because resolution dropped the escaped `/` after it.
 	///
 	/// # Examples
 	/// ```
@@ -377,9 +404,9 @@ impl Path {
 	/// assert_eq!(base.resolve(&Relative::new("./d")?)?.as_str(), "a/b/d");
 	/// assert_eq!(base.resolve(&Relative::new(".")?)?.as_str(), "a/b");
 	/// assert_eq!(base.resolve(&Relative::new("../d")?)?.as_str(), "a/d");
-	/// # Ok::<(), moq_net::path::Invalid>(())
+	/// # Ok::<(), moq_net::path::Error>(())
 	/// ```
-	pub fn resolve(&self, rel: &Relative) -> Result<Path, Invalid> {
+	pub fn resolve(&self, rel: &Relative) -> Result<Path, Error> {
 		if rel.is_empty() {
 			return Ok(self.clone());
 		}
@@ -397,11 +424,12 @@ impl Path {
 			}
 		}
 
-		Ok(Path(Repr::copy(&segments.join("/"))?))
+		// Splitting at an escaped `/` and dropping a segment can strand its `\`.
+		Path::new(&segments.join("/"))
 	}
 
-	/// Resolve a [`Relative`], returning `None` if it escapes above the root or the
-	/// result is longer than [`Path::MAX_BYTES`].
+	/// Resolve a [`Relative`], returning `None` if it escapes above the root or
+	/// [`Path::resolve`] would fail.
 	///
 	/// Unlike [`Path::resolve`], this distinguishes a valid reference to the empty root
 	/// path from excess `..` segments. Use it when an untrusted relative reference must
@@ -424,7 +452,7 @@ impl Path {
 			}
 		}
 
-		Repr::copy(&segments.join("/")).ok().map(Path)
+		Path::new(&segments.join("/")).ok()
 	}
 
 	/// Express this path relative to `base`: the inverse of [`Path::resolve`].
@@ -561,17 +589,17 @@ impl serde::Serialize for Path {
 }
 
 impl TryFrom<&str> for Path {
-	type Error = Invalid;
+	type Error = Error;
 
-	fn try_from(s: &str) -> Result<Self, Invalid> {
+	fn try_from(s: &str) -> Result<Self, Error> {
 		Self::new(s)
 	}
 }
 
 impl TryFrom<&String> for Path {
-	type Error = Invalid;
+	type Error = Error;
 
-	fn try_from(s: &String) -> Result<Self, Invalid> {
+	fn try_from(s: &String) -> Result<Self, Error> {
 		Self::new(s)
 	}
 }
@@ -589,9 +617,9 @@ impl Default for Path {
 }
 
 impl TryFrom<String> for Path {
-	type Error = Invalid;
+	type Error = Error;
 
-	fn try_from(s: String) -> Result<Self, Invalid> {
+	fn try_from(s: String) -> Result<Self, Error> {
 		// `Arc<str>` can't adopt a `String`'s buffer, so this copies like `new`.
 		Self::new(&s)
 	}
@@ -609,20 +637,21 @@ impl Display for Path {
 	}
 }
 
-impl From<Invalid> for DecodeError {
-	fn from(err: Invalid) -> Self {
+impl From<Error> for DecodeError {
+	fn from(err: Error) -> Self {
 		match err {
-			Invalid::TooLong => DecodeError::BoundsExceeded,
-			Invalid::EmptySegment => DecodeError::InvalidValue,
+			Error::TooLong => DecodeError::BoundsExceeded,
+			Error::EmptySegment | Error::InvalidEscape => DecodeError::InvalidValue,
 		}
 	}
 }
 
-impl From<Invalid> for crate::Error {
-	fn from(err: Invalid) -> Self {
+impl From<Error> for crate::Error {
+	fn from(err: Error) -> Self {
 		match err {
-			Invalid::TooLong => crate::Error::BoundsExceeded(crate::BoundsExceeded),
-			Invalid::EmptySegment => crate::Error::EmptySegment,
+			Error::TooLong => crate::Error::BoundsExceeded(crate::BoundsExceeded),
+			Error::EmptySegment => crate::Error::EmptySegment,
+			Error::InvalidEscape => crate::Error::InvalidEscape,
 		}
 	}
 }
@@ -690,10 +719,10 @@ impl<'a, V> Decode<'a, V> for Patterns {
 /// frames. It does serialize via serde for off-wire use (e.g. as a field inside a catalog
 /// JSON payload, which itself travels as a track).
 ///
-/// Normalization on creation: leading/trailing slashes are trimmed, consecutive internal
-/// slashes collapse to one, and redundant `.` segments are stripped. A reference made only
-/// of `.` segments normalizes to `.` rather than empty because `.` resolves to the base's
-/// parent while empty resolves to the base itself. `..` is preserved for resolve time.
+/// It is spelled like a [`Path`], so a leading, trailing, or doubled `/` or a lone `\` is
+/// refused rather than collapsed. Redundant `.` segments are stripped on creation. A reference
+/// made only of `.` segments normalizes to `.` rather than empty because `.` resolves to the
+/// base's parent while empty resolves to the base itself. `..` is preserved for resolve time.
 ///
 /// # Examples
 /// ```
@@ -705,7 +734,10 @@ impl<'a, V> Decode<'a, V> for Patterns {
 /// // Redundant `.` segments are stripped on creation.
 /// assert_eq!(Relative::new("./a/./b")?.as_str(), "a/b");
 /// assert_eq!(Relative::new(".")?.as_str(), ".");
-/// # Ok::<(), moq_net::path::Invalid>(())
+///
+/// // An empty segment is refused, not collapsed.
+/// assert!(Relative::new("./a/").is_err());
+/// # Ok::<(), moq_net::path::Error>(())
 /// ```
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Default)]
 pub struct Relative(Path);
@@ -719,17 +751,15 @@ impl serde::Serialize for Relative {
 impl Relative {
 	/// Create a new `Relative` from a string slice.
 	///
-	/// Leading and trailing slashes are trimmed, consecutive internal slashes collapse to one,
-	/// and redundant `.` segments are stripped. See the type-level doc for the full rules.
-	/// Fails with [`Invalid::TooLong`] if the normalized reference is longer than [`Path::MAX_BYTES`].
-	pub fn new(s: &str) -> Result<Self, Invalid> {
-		let trimmed = s.trim_start_matches('/').trim_end_matches('/');
-
-		if needs_normalize_relative(trimmed) {
-			Ok(Self(Path(Repr::copy(&normalize_relative_segments(trimmed))?)))
-		} else {
-			Ok(Self(Path(Repr::copy(trimmed)?)))
+	/// Fails like [`Path::new`] on a string that is not a valid path, and strips redundant
+	/// `.` segments from one that is. See the type-level doc for the full rules.
+	pub fn new(s: &str) -> Result<Self, Error> {
+		let path = Path::new(s)?;
+		if !path.parts().any(|seg| seg == ".") {
+			return Ok(Self(path));
 		}
+		// Dropping a `.` after an escaped `/` strands its `\`, so the result is checked again.
+		Ok(Self(Path::new(&normalize_relative_segments(s))?))
 	}
 
 	/// The normalized path as a string slice.
@@ -754,45 +784,33 @@ impl Relative {
 }
 
 impl TryFrom<&str> for Relative {
-	type Error = Invalid;
+	type Error = Error;
 
-	fn try_from(s: &str) -> Result<Self, Invalid> {
+	fn try_from(s: &str) -> Result<Self, Error> {
 		Self::new(s)
 	}
 }
 
 impl TryFrom<&String> for Relative {
-	type Error = Invalid;
+	type Error = Error;
 
-	fn try_from(s: &String) -> Result<Self, Invalid> {
+	fn try_from(s: &String) -> Result<Self, Error> {
 		Self::new(s)
 	}
 }
 
 impl TryFrom<String> for Relative {
-	type Error = Invalid;
+	type Error = Error;
 
-	fn try_from(s: String) -> Result<Self, Invalid> {
+	fn try_from(s: String) -> Result<Self, Error> {
 		Self::new(&s)
 	}
 }
 
-fn needs_normalize_relative(trimmed: &str) -> bool {
-	trimmed.split('/').any(|seg| seg.is_empty() || seg == ".")
-}
-
-fn normalize_relative_segments(trimmed: &str) -> String {
-	let segments = trimmed
-		.split('/')
-		.filter(|seg| !seg.is_empty() && *seg != ".")
-		.collect::<Vec<_>>()
-		.join("/");
-
-	if segments.is_empty() && trimmed.split('/').any(|seg| seg == ".") {
-		".".to_string()
-	} else {
-		segments
-	}
+// A valid path with at least one `.` segment, without its redundant ones.
+fn normalize_relative_segments(s: &str) -> String {
+	let segments = s.split('/').filter(|seg| *seg != ".").collect::<Vec<_>>().join("/");
+	if segments.is_empty() { ".".to_string() } else { segments }
 }
 
 impl AsRef<str> for Relative {
@@ -828,10 +846,10 @@ mod tests {
 	#[test]
 	fn test_refuses_empty_segments() {
 		for s in ["/", "//", "/foo", "foo/", "/foo/", "foo//bar", "foo/bar/", "a///b"] {
-			assert_eq!(Path::new(s), Err(Invalid::EmptySegment), "accepted {s:?}");
+			assert_eq!(Path::new(s), Err(Error::EmptySegment), "accepted {s:?}");
 			assert_eq!(
 				Path::try_from(s.to_string()),
-				Err(Invalid::EmptySegment),
+				Err(Error::EmptySegment),
 				"accepted owned {s:?}"
 			);
 		}
@@ -844,6 +862,19 @@ mod tests {
 		for s in ["foo", "foo/bar", ".hidden/x", "a/../b"] {
 			assert_eq!(p(s).as_str(), s);
 			assert_eq!(p(s), Path::try_from(s.to_string()).unwrap());
+		}
+	}
+
+	#[test]
+	fn test_refuses_invalid_escapes() {
+		for s in [r"\", r"a\", r"\a", r"a\b", r"a\\\b", r"a\\\", r"a\.b/c"] {
+			assert_eq!(Path::new(s), Err(Error::InvalidEscape), "accepted {s:?}");
+			assert_eq!(Relative::new(s), Err(Error::InvalidEscape), "accepted relative {s:?}");
+		}
+
+		// An escape takes exactly the byte after it, so runs of backslashes pair up.
+		for s in [r"\\", r"a\/b", r"\/a", r"a\\/b", r"a\\\/b", r"\\\\"] {
+			assert_eq!(p(s).as_str(), s);
 		}
 	}
 
@@ -920,6 +951,12 @@ mod tests {
 		// A long path's head is a valid path of its own.
 		let long = p(&format!("{}/tail", "a".repeat(INLINE + 1)));
 		assert_eq!(long.head(1).unwrap().as_str(), "a".repeat(INLINE + 1));
+
+		// No head ends in half an escape, but an escaped `\` before a separator is whole.
+		let escaped = p(r"a\/b/c\\/d");
+		assert_eq!(escaped.head(1), None);
+		assert_eq!(escaped.head(2), Some(p(r"a\/b")));
+		assert_eq!(escaped.head(3), Some(p(r"a\/b/c\\")));
 	}
 
 	#[test]
@@ -1000,22 +1037,19 @@ mod tests {
 
 		// Every constructor accepts the limit and refuses one byte more.
 		assert_eq!(Path::new(&longest).unwrap().len(), Path::MAX_BYTES);
-		assert_eq!(Path::new(&longer), Err(Invalid::TooLong));
-		assert_eq!(Path::try_from(longer.clone()), Err(Invalid::TooLong));
-		assert_eq!(Relative::new(&longer), Err(Invalid::TooLong));
+		assert_eq!(Path::new(&longer), Err(Error::TooLong));
+		assert_eq!(Path::try_from(longer.clone()), Err(Error::TooLong));
+		assert_eq!(Relative::new(&longer), Err(Error::TooLong));
 
 		// So do joins and resolution, which can outgrow both sides.
 		let half = Path::new(&"a".repeat(Path::MAX_BYTES / 2)).unwrap();
 		let rest = Path::new(&"b".repeat(Path::MAX_BYTES / 2 - 1)).unwrap();
 		assert_eq!(half.join(&rest).unwrap().len(), Path::MAX_BYTES);
-		assert_eq!(
-			half.join(&Path::new(&format!("{rest}b")).unwrap()),
-			Err(Invalid::TooLong)
-		);
+		assert_eq!(half.join(&Path::new(&format!("{rest}b")).unwrap()), Err(Error::TooLong));
 		let rel = Relative::new(&format!("x/{rest}b")).unwrap();
 		assert_eq!(
 			Path::new(&format!("{half}/y")).unwrap().resolve(&rel),
-			Err(Invalid::TooLong)
+			Err(Error::TooLong)
 		);
 		assert_eq!(Path::new(&format!("{half}/y")).unwrap().try_resolve(&rel), None);
 
@@ -1136,20 +1170,25 @@ mod tests {
 	}
 
 	#[test]
-	fn test_path_relative_normalize() {
+	fn test_path_relative_refuses_empty_segments() {
 		assert_eq!(Relative::new("foo").unwrap().as_str(), "foo");
-		assert_eq!(Relative::new("/foo/").unwrap().as_str(), "foo");
-		assert_eq!(Relative::new("foo//bar").unwrap().as_str(), "foo/bar");
 		assert_eq!(Relative::new("../foo").unwrap().as_str(), "../foo");
 		assert_eq!(Relative::new("../../a/b").unwrap().as_str(), "../../a/b");
 		assert!(Relative::new("").unwrap().is_empty());
+
+		for s in ["/", "/foo", "foo/", "./", "foo//bar", "./foo/", "../"] {
+			assert_eq!(Relative::new(s), Err(Error::EmptySegment), "accepted {s:?}");
+		}
 	}
 
 	#[test]
 	fn test_path_relative_normalizes_dot_segments() {
 		assert_eq!(Relative::new(".").unwrap().as_str(), ".");
-		assert_eq!(Relative::new("././").unwrap().as_str(), ".");
+		assert_eq!(Relative::new("./.").unwrap().as_str(), ".");
 		assert_eq!(Relative::new("./foo").unwrap().as_str(), "foo");
+		// Dropping a `.` cannot strand the `\` of an escaped `/` before it.
+		assert_eq!(Relative::new(r"a\/."), Err(Error::InvalidEscape));
+		assert_eq!(Relative::new(r"a\\/.").unwrap().as_str(), r"a\\");
 		assert_eq!(Relative::new("foo/./bar").unwrap().as_str(), "foo/bar");
 		assert_eq!(Relative::new("./../foo").unwrap().as_str(), "../foo");
 		// TryFrom<String> takes the same normalization.
@@ -1226,6 +1265,16 @@ mod tests {
 		// caller compare resolved == base to detect a self-reference.
 		let base = Path::from_static("a/b");
 		assert_eq!(base.resolve(&Relative::new("./b").unwrap()).unwrap().as_str(), "a/b");
+	}
+
+	#[test]
+	fn test_resolve_refuses_a_stranded_escape() {
+		// Segments split at an escaped `/` too, so popping past one strands its `\`.
+		let base = p(r"a\/b/c");
+		let up = Relative::new("..").unwrap();
+		assert_eq!(base.resolve(&up), Err(Error::InvalidEscape));
+		assert_eq!(base.try_resolve(&up), None);
+		assert_eq!(base.resolve(&Relative::new("d").unwrap()).unwrap().as_str(), r"a\/b/d");
 	}
 
 	#[test]

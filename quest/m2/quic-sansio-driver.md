@@ -9,14 +9,14 @@ on each wake and at the deadline the poll returns. Its connections implement moq
 `transport::poll::Session`, so moq-net's `Client::connect` and `Server::accept` take them.
 No tokio or io_uring is in its dependency tree.
 
-The first consumer is [kixelated/rust2](https://github.com/kixelated/rust2)'s exporter,
+The first consumer is [moq-dev/rust2](https://github.com/moq-dev/rust2)'s exporter,
 whose C, C++, and Kotlin bindings drive it from their own loops
-([sessions on sans-IO QUIC](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-export/session-quic.md)).
+([sessions on sans-IO QUIC](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-export/session-quic.md)).
 
 ## Plan
 
 Decided with the maintainer on 2026-10-28, from
-[kixelated/rust2#215](https://github.com/kixelated/rust2/pull/215):
+[moq-dev/rust2#215](https://github.com/moq-dev/rust2/pull/215):
 
 - **After [waits](/quest/m1/quic-api/waits.md) and [poll](/quest/m1/quic-api/poll.md).**
   Once moq-quic owns its waits, a driver is I/O, timers, and a lock. This one is the

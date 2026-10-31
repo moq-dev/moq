@@ -28,8 +28,8 @@ jobs:
   interop:
     name: Interop
     runs-on: ubuntu-latest
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     # The matrix runs in real time (ffmpeg -re pacing + per-subscriber timeouts);
     # this is a safety net against a hung relay/client plus a cold first build.
     timeout-minutes: 60
