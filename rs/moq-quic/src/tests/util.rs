@@ -866,7 +866,7 @@ pub(super) fn client_config_with_deterministic_pns() -> client::Config {
 /// leave at once, while BBR3 paces from its own rate and releases a burst nanoseconds later.
 pub(super) fn cubic_transport() -> transport::Config {
 	transport::Config {
-		congestion: Arc::new(congestion::CubicConfig::default()),
+		congestion: Arc::new(congestion::cubic::Config::default()),
 		..transport::Config::default()
 	}
 }

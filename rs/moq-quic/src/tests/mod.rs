@@ -1,6 +1,5 @@
 use crate::cid_generator::HashedConnectionIdGenerator;
 use std::{
-	any::Any,
 	collections::{BTreeMap, BTreeSet},
 	convert::TryInto,
 	iter, mem,
@@ -31,7 +30,7 @@ use super::*;
 use crate::{
 	Duration, Instant,
 	cid_generator::{ConnectionIdGenerator, RandomConnectionIdGenerator},
-	congestion::{self, Controller, ControllerFactory, ControllerMetrics},
+	congestion::{self, Controller, Factory, Metrics},
 	connection::{Connection, Error as ConnectionError},
 	crypto::rustls::QuicServerConfig,
 	endpoint::{Accepting, ConnectionHandle, DatagramEvent, Dial, Endpoint, Incoming, Received},
@@ -483,8 +482,8 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
 			None
 		}
 
-		fn metrics(&self) -> ControllerMetrics {
-			ControllerMetrics {
+		fn metrics(&self) -> Metrics {
+			Metrics {
 				congestion_window: WINDOW,
 				bandwidth_estimate: Some(BANDWIDTH_ESTIMATE),
 				..Default::default()
@@ -494,22 +493,18 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
 		fn clone_box(&self) -> Box<dyn Controller> {
 			Box::new(self.clone())
 		}
-
-		fn into_any(self: Box<Self>) -> Box<dyn Any> {
-			self
-		}
 	}
 
-	struct TestControllerFactory;
+	struct TestFactory;
 
-	impl ControllerFactory for TestControllerFactory {
+	impl Factory for TestFactory {
 		fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
 			Box::new(TestController)
 		}
 	}
 
 	let transport = transport::Config {
-		congestion: Arc::new(TestControllerFactory),
+		congestion: Arc::new(TestFactory),
 		..transport::Config::default()
 	};
 	let mut config = client_config();
@@ -5834,8 +5829,8 @@ impl Controller for PacingOnlyController {
 		self.pacer.pace(now)
 	}
 
-	fn metrics(&self) -> ControllerMetrics {
-		ControllerMetrics {
+	fn metrics(&self) -> Metrics {
+		Metrics {
 			congestion_window: self.window(),
 			pacing_rate: Some(Self::RATE),
 			..Default::default()
@@ -5848,17 +5843,13 @@ impl Controller for PacingOnlyController {
 			pacer: self.pacer.clone(),
 		})
 	}
-
-	fn into_any(self: Box<Self>) -> Box<dyn Any> {
-		self
-	}
 }
 
 struct PacingOnlyConfig {
 	cwnd_limited_reports: Arc<AtomicU64>,
 }
 
-impl ControllerFactory for PacingOnlyConfig {
+impl Factory for PacingOnlyConfig {
 	fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
 		Box::new(PacingOnlyController {
 			cwnd_limited_reports: self.cwnd_limited_reports.clone(),
@@ -5932,13 +5923,9 @@ impl Controller for FixedQuantumController {
 	fn clone_box(&self) -> Box<dyn Controller> {
 		Box::new(self.clone())
 	}
-
-	fn into_any(self: Box<Self>) -> Box<dyn Any> {
-		self
-	}
 }
 
-impl ControllerFactory for FixedQuantumController {
+impl Factory for FixedQuantumController {
 	fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
 		Box::new((*self).clone())
 	}
@@ -6061,8 +6048,8 @@ impl Controller for PacketRecorder {
 		self.pacer.pace(now)
 	}
 
-	fn metrics(&self) -> ControllerMetrics {
-		ControllerMetrics {
+	fn metrics(&self) -> Metrics {
+		Metrics {
 			congestion_window: self.window,
 			pacing_rate: self.pacing_rate,
 			..Default::default()
@@ -6071,10 +6058,6 @@ impl Controller for PacketRecorder {
 
 	fn clone_box(&self) -> Box<dyn Controller> {
 		Box::new(self.clone())
-	}
-
-	fn into_any(self: Box<Self>) -> Box<dyn Any> {
-		self
 	}
 }
 
@@ -6088,7 +6071,7 @@ struct PacketRecorderFactory {
 	pacing_rate: Option<u64>,
 }
 
-impl ControllerFactory for PacketRecorderFactory {
+impl Factory for PacketRecorderFactory {
 	fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
 		let log = PacketLog::default();
 		self.logs.lock().unwrap().push(log.clone());
@@ -6797,7 +6780,7 @@ fn upload(
 }
 
 #[test]
-fn default_controller_is_bbr3() {
+fn default_controller_supports_bandwidth_probing() {
 	let factory = transport::Config::default().congestion;
 	let controller = factory.build(congestion::Init {
 		now: Instant::now(),
@@ -6805,5 +6788,6 @@ fn default_controller_is_bbr3() {
 		rtt: Duration::from_millis(333),
 		max_pacing_rate: None,
 	});
-	assert!(controller.into_any().downcast::<congestion::Bbr3>().is_ok());
+	assert!(controller.probes());
+	assert!(controller.metrics().pacing_rate.is_some());
 }

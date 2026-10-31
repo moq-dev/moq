@@ -77,7 +77,6 @@ Rejected in planning:
 - [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
 - [QMux datagrams obey or refuse their policy](/quest/m1/api-audit/qmux-datagrams.md) - `Session.datagrams` is the DOM interface, its high-water mark is live, and the inert settings throw
 - [No constructible internal handles](/quest/m1/api-audit/internal-constructors.md) - `Rendition`, `Lister`, `Arrivals`, and e2ee's generations get private constructors, and a lint rule stops new ones
-- [moq-congestion's first-publish names](/quest/m1/api-audit/congestion-names.md) - `bbr3::Config`, `cubic::Config`, `Metrics`, `Factory`, and no `into_any`
 
 ## Related
 
