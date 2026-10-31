@@ -29,9 +29,6 @@ pub(super) mod id {
 	pub const TRACK_TYPE: u32 = 0x83;
 	pub const CODEC_ID: u32 = 0x86;
 	pub const CODEC_PRIVATE: u32 = 0x63A2;
-	pub const LANGUAGE: u32 = 0x22_B59C;
-	pub const LANGUAGE_IETF: u32 = 0x22_B59D;
-	pub const NAME: u32 = 0x536E;
 	pub const DEFAULT_DURATION: u32 = 0x23_E383;
 
 	pub const VIDEO: u32 = 0xE0;
@@ -348,10 +345,11 @@ impl Reader {
 			parsed
 		};
 		let Some((id, size, len)) = parsed else {
-			// The bytes held are a header prefix, which cannot cross the parent's end.
+			// The bytes held are a header prefix that needs more bytes, so it cannot reach the
+			// parent's end.
 			self.position = start + self.header.len() as u64;
 			if let Some(bound) = self.bound()
-				&& self.position > bound
+				&& self.position >= bound
 			{
 				return Err(Error::MatroskaParse);
 			}
@@ -457,9 +455,6 @@ mod tests {
 			(id::TRACK_TYPE, MatroskaSpec::TrackType(0)),
 			(id::CODEC_ID, MatroskaSpec::CodecID(String::new())),
 			(id::CODEC_PRIVATE, MatroskaSpec::CodecPrivate(Vec::new())),
-			(id::LANGUAGE, MatroskaSpec::Language(String::new())),
-			(id::LANGUAGE_IETF, MatroskaSpec::LanguageIETF(String::new())),
-			(id::NAME, MatroskaSpec::Name(String::new())),
 			(id::DEFAULT_DURATION, MatroskaSpec::DefaultDuration(0)),
 			(id::VIDEO, MatroskaSpec::Video(Master::Start)),
 			(id::PIXEL_WIDTH, MatroskaSpec::PixelWidth(0)),
@@ -612,15 +607,29 @@ mod tests {
 
 	#[test]
 	fn a_header_cannot_straddle_its_parents_end() {
-		// Tracks of 1 byte, followed by a 2-byte ID.
-		let data = [0x16, 0x54, 0xae, 0x6b, 0x81, 0x63, 0xa2];
-		let mut reader = Reader::new();
-		let mut input = &data[..];
-		let Some(Event::Start(_)) = reader.next(&mut input).unwrap() else {
-			panic!("expected Tracks");
-		};
-		reader.descend().unwrap();
-		assert!(matches!(reader.next(&mut input), Err(Error::MatroskaParse)));
+		// Tracks of 1 byte, followed by a 2-byte ID and an empty size: an empty CodecPrivate if the
+		// header escaped its parent.
+		let data = [0x16, 0x54, 0xae, 0x6b, 0x81, 0x63, 0xa2, 0x80];
+		// Every split is refused, including one exactly at the parent's end.
+		for split in 0..=data.len() {
+			let mut reader = Reader::new();
+			let mut refused = false;
+			'chunks: for mut input in [&data[..split], &data[split..]] {
+				loop {
+					match reader.next(&mut input) {
+						Ok(Some(Event::Start(header))) if header.id == id::TRACKS => reader.descend().unwrap(),
+						Ok(Some(event)) => panic!("split {split}: unexpected {event:?}"),
+						Ok(None) => break,
+						Err(err) => {
+							assert!(matches!(err, Error::MatroskaParse), "split {split}: {err:?}");
+							refused = true;
+							break 'chunks;
+						}
+					}
+				}
+			}
+			assert!(refused, "split {split}");
+		}
 	}
 
 	#[test]

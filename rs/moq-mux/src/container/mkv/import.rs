@@ -369,11 +369,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			(Some(INFO), TIMESTAMP_SCALE) => Action::Read,
 			(Some(TRACKS), TRACK_ENTRY) => Action::Collect,
 			(Some(TRACK_ENTRY), VIDEO | AUDIO) => Action::Collect,
-			(
-				Some(TRACK_ENTRY),
-				TRACK_NUMBER | TRACK_TYPE | CODEC_ID | CODEC_PRIVATE | LANGUAGE | LANGUAGE_IETF | NAME
-				| DEFAULT_DURATION,
-			) => Action::Read,
+			(Some(TRACK_ENTRY), TRACK_NUMBER | TRACK_TYPE | CODEC_ID | CODEC_PRIVATE | DEFAULT_DURATION) => {
+				Action::Read
+			}
 			(Some(VIDEO), COLOUR | PROJECTION) => Action::Collect,
 			(
 				Some(VIDEO),
@@ -382,12 +380,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			) => Action::Read,
 			(
 				Some(PROJECTION),
-				PROJECTION_TYPE
-				| PROJECTION_PRIVATE
-				| PROJECTION_POSE_YAW
-				| PROJECTION_POSE_PITCH
-				| PROJECTION_POSE_ROLL,
+				PROJECTION_TYPE | PROJECTION_POSE_YAW | PROJECTION_POSE_PITCH | PROJECTION_POSE_ROLL,
 			) => Action::Read,
+			// Only the equirectangular `equi` body is understood, so other sizes are skipped and
+			// recorded as unsupported in `start`.
+			(Some(PROJECTION), PROJECTION_PRIVATE) if header.size == Some(EQUI_PRIVATE_LEN) => Action::Read,
 			(Some(COLOUR), MASTERING_METADATA) => Action::Collect,
 			(Some(COLOUR), MATRIX_COEFFICIENTS | RANGE | TRANSFER_CHARACTERISTICS | PRIMARIES | MAX_CLL | MAX_FALL) => {
 				Action::Read
@@ -437,6 +434,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				self.reader.skip()?;
 				if parent == Some(id::BLOCK_GROUP) && header.id == id::REFERENCE_BLOCK {
 					self.referenced = true;
+				}
+				// An empty body is never a supported one, so a projection that needs it is refused
+				// when its master ends, without holding the bytes.
+				if parent == Some(id::PROJECTION) && header.id == id::PROJECTION_PRIVATE {
+					set(
+						self.fields.last_mut().expect("Projection is collected"),
+						MatroskaSpec::ProjectionPrivate(Vec::new()),
+					)?;
 				}
 			}
 		}
@@ -1125,6 +1130,9 @@ fn matroska_spatial(
 	Ok((projection, stereo))
 }
 
+/// The size of an `equi` box's body: version and flags, then four 32-bit bounds.
+const EQUI_PRIVATE_LEN: u64 = 20;
+
 /// The projection a Matroska `Projection` element signals, `None` for a rectangular one.
 fn matroska_projection(fields: &[MatroskaSpec]) -> Result<Option<hang::catalog::Projection>> {
 	let unsupported = Error::UnsupportedSpatial;
@@ -1669,6 +1677,92 @@ mod tests {
 			assert!(import.reader.retained() <= 12, "{}", import.reader.retained());
 		}
 		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+	}
+
+	/// A WebM prefix with an unknown-size Segment, then a Tracks holding one VP9 TrackEntry whose
+	/// last child is `field`'s header, so `size` body bytes of it remain.
+	fn entry_ending_in(field: &[u8], size: u64) -> Vec<u8> {
+		let mut data = Vec::new();
+		{
+			let mut writer = WebmWriter::new(&mut data);
+			writer
+				.write(&MatroskaSpec::Ebml(Master::Full(vec![MatroskaSpec::DocType(
+					"webm".into(),
+				)])))
+				.unwrap();
+			writer
+				.write_advanced(
+					&MatroskaSpec::Segment(Master::Start),
+					WriteOptions::is_unknown_sized_element(),
+				)
+				.unwrap();
+			writer.flush().unwrap();
+		}
+		// TrackNumber 1, TrackType 1 (video), CodecID V_VP9.
+		let mut entry = vec![0xd7, 0x81, 0x01, 0x83, 0x81, 0x01, 0x86, 0x85];
+		entry.extend_from_slice(b"V_VP9");
+		entry.extend_from_slice(field);
+		let entry_size = entry.len() as u64 + size;
+		let mut tracks = header(&[0xae], entry_size);
+		tracks.extend(entry);
+		data.extend(header(&[0x16, 0x54, 0xae, 0x6b], tracks.len() as u64 + size));
+		data.extend(tracks);
+		data
+	}
+
+	/// Feed `size` body bytes in 1 KiB chunks, checking none are held, and return the last
+	/// chunk's result.
+	fn feed_unretained(import: &mut Import, size: u64) -> crate::Result<()> {
+		for _ in 1..size / 1024 {
+			import.decode(&[b'a'; 1024]).unwrap();
+			assert!(import.reader.retained() <= 12, "{}", import.reader.retained());
+		}
+		import.decode(&[b'a'; 1024])
+	}
+
+	#[test]
+	fn unused_track_fields_are_discarded_as_they_arrive() {
+		const SIZE: u64 = 1024 * 1024;
+		// Name, Language, and LanguageIETF have no effect on output.
+		for id in [&[0x53, 0x6e][..], &[0x22, 0xb5, 0x9c], &[0x22, 0xb5, 0x9d]] {
+			let (mut import, _catalog, _consumer) = import();
+			import.decode(&entry_ending_in(&header(id, SIZE), SIZE)).unwrap();
+			feed_unretained(&mut import, SIZE).unwrap();
+			assert_eq!(import.tracks.len(), 1, "{id:x?}");
+			import.finish().unwrap();
+		}
+	}
+
+	#[test]
+	fn unsupported_projection_private_data_is_not_held() {
+		const SIZE: u64 = 1024 * 1024;
+		for projection_type in [0, 1] {
+			// Video: PixelWidth 320, PixelHeight 240, then Projection: ProjectionType, then the
+			// ProjectionPrivate header.
+			let mut projection = vec![0x76, 0x71, 0x81, projection_type];
+			projection.extend(header(&[0x76, 0x72], SIZE));
+			let mut video = vec![0xb0, 0x82, 0x01, 0x40, 0xba, 0x81, 0xf0];
+			video.extend(header(&[0x76, 0x70], projection.len() as u64 + SIZE));
+			video.extend(projection);
+			let mut field = header(&[0xe0], video.len() as u64 + SIZE);
+			field.extend(video);
+
+			let (mut import, _catalog, _consumer) = import();
+			import.decode(&entry_ending_in(&field, SIZE)).unwrap();
+			let result = feed_unretained(&mut import, SIZE);
+			match projection_type {
+				// A rectangular projection ignores its private data.
+				0 => {
+					result.unwrap();
+					assert_eq!(import.tracks.len(), 1);
+				}
+				// An equirectangular one is refused, as any size but an `equi` body is.
+				_ => assert!(
+					matches!(result, Err(crate::Error::Mkv(Error::UnsupportedSpatial(_)))),
+					"{result:?}"
+				),
+			}
+		}
 	}
 
 	#[tokio::test]
