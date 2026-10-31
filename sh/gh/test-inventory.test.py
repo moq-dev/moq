@@ -246,6 +246,11 @@ class InventoryTest(unittest.TestCase):
         self.assertIn("script js/loose/src/codec.test.ts", orphans)
 
         self.write("sh/js/workspace.py", "")
+        # A reached script that only names the runner, as the checker does, does not run it.
+        self.write("sh/check.py", 'RUNNER = "sh/js/workspace.py"\n')
+        self.write("justfile", JUSTFILE + "        python3 sh/check.py\n")
+        self.assertIn("script js/net/src/codec.test.ts", self.orphans())
+
         self.write("justfile", JUSTFILE + "        python3 sh/js/workspace.py test --all\n")
         orphans = self.orphans()
         self.assertNotIn("script js/net/src/codec.test.ts", orphans)

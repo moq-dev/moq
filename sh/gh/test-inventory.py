@@ -304,6 +304,8 @@ class Graph:
         self.reached: dict[str, Recipe] = {}
         self.bindings: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
         self.files: set[Path] = set()
+        # Files a reached shell command runs, not merely names, as the checker names its own.
+        self.executed: set[Path] = set()
         self.branches: set[tuple[Path, int, int]] = set()
         self.runs: list[Run] = []
         self.queue: list[tuple[str, str, Path, Path | None]] = []
@@ -356,13 +358,6 @@ class Graph:
         if path not in self.files:
             self.files.add(path)
             self.queue.append((rest, where, cwd, path))
-            # The module dispatch passes its own names: `just <module> check` and the like.
-            if path == self.root / "sh/dispatch.sh":
-                for line in re.findall(r"modules=\(([^)]*)\)", text):
-                    for name in line.split():
-                        for verb in ("check", "fix"):
-                            for recipe in self.resolve([name, verb], self.root):
-                                self.visit_recipe(recipe)
         for first in [call[0] if call else "" for call in arguments] if arguments is not None else [None]:
             for block, branches in enumerate(blocks):
                 if first is None or not literal(first):
@@ -375,6 +370,19 @@ class Graph:
                     if (path, block, index) not in self.branches:
                         self.branches.add((path, block, index))
                         self.queue.append((branches[index][1], where, cwd, path))
+
+    def execute(self, path: Path):
+        """Record that a reached command runs path, following what only a run implies."""
+        if path in self.executed:
+            return
+        self.executed.add(path)
+        # The module dispatch passes its own names: `just <module> check` and the like.
+        if path == self.root / "sh/dispatch.sh":
+            for line in re.findall(r"modules=\(([^)]*)\)", path.read_text(errors="replace")):
+                for name in line.split():
+                    for verb in ("check", "fix"):
+                        for recipe in self.resolve([name, verb], self.root):
+                            self.visit_recipe(recipe)
 
     def bases(self, text: str, cwd: Path, file: Path | None) -> list[Path]:
         """The directories a script path in text may be relative to."""
@@ -419,6 +427,7 @@ class Graph:
                             self.visit_recipe(recipe, rest)
                     elif SCRIPT.fullmatch(word) and (path := self.script(word, bases)):
                         arguments[path].append(words[index + 1:])
+                        self.execute(path)
             mentions = Counter(self.scripts(text, cwd, file))
             for path, count in mentions.items():
                 # Other languages only name a script, like a test running it under stubs, so they
@@ -876,9 +885,9 @@ def discovered(root: Path, graph: Graph) -> set[Path]:
     `build` script names, or the workspace, once sh/js/workspace.py runs those scripts, and
     every Worker sh/js/workers.sh tests, one per lockfile outside the workspace."""
     found = set()
-    if root / "sh/js/workers.sh" in graph.files:
+    if root / "sh/js/workers.sh" in graph.executed:
         found.update(lock.parent for lock in tracked(root, "*/bun.lock"))
-    if root / "sh/js/workspace.py" not in graph.files or not (root / "package.json").is_file():
+    if root / "sh/js/workspace.py" not in graph.executed or not (root / "package.json").is_file():
         return found
     workspaces = json.loads((root / "package.json").read_text()).get("workspaces", [])
     for manifest in [path / "package.json" for pattern in workspaces for path in root.glob(pattern)]:
