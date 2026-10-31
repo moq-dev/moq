@@ -300,6 +300,7 @@ impl Consumer {
 				drops: RangeMap::new(),
 				peeked: None,
 				declared: None,
+				declared_error: None,
 				refused: false,
 			})
 		});
@@ -787,6 +788,34 @@ impl Subscriber {
 		route.poll_largest(seen, bounds, waiter)
 	}
 
+	/// The final sequence and the error the logical track ended with, once the serving copy
+	/// completed and drained the channel read, its datagrams for `datagrams`, to that end.
+	pub(super) fn end_error(&self, datagrams: bool) -> Option<(u64, Error)> {
+		let reader = self.reader();
+		let serving = reader
+			.copies
+			.last()
+			.filter(|copy| Some(copy.generation) == reader.generation)?;
+		let done = match datagrams {
+			true => &serving.datagrams_done,
+			false => &serving.done,
+		};
+		if !matches!(done, Some(Ok(())))
+			|| !matches!(serving.track.poll_complete(&kio::Waiter::noop()), Poll::Ready(Ok(())))
+		{
+			return None;
+		}
+		Some((reader.declared?.final_sequence()?, reader.declared_error.clone()?))
+	}
+
+	/// The error the logical track's declared end carries, reached or not.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn declared_error(&self) -> Option<Error> {
+		let mut reader = self.reader();
+		reader.learn_end(None);
+		reader.declared_error.clone()
+	}
+
 	/// The local group filter, as [`track::Subscriber::poll_largest`] reports within it.
 	pub(super) fn bounds(&self) -> track::Bounds {
 		let mut reader = self.reader();
@@ -877,6 +906,8 @@ struct Reader {
 	peeked: Option<Candidate>,
 	/// The first exclusive end any copy declared, refined by a matching mid-group end.
 	declared: Option<Position>,
+	/// The first error a copy's end carried, kept with the end so a route switch keeps it.
+	declared_error: Option<Error>,
 	/// Copies of one logical track contradicted its end.
 	refused: bool,
 	this: Weak<Mutex<Reader>>,
@@ -1120,6 +1151,10 @@ impl Reader {
 					}
 				}
 				Some(_) => self.refused = true,
+			}
+			// A copy over a version with no end error declares the same end cleanly.
+			if self.declared_error.is_none() {
+				self.declared_error = copy.track.declared_error();
 			}
 		}
 		// A group, frame, or datagram at or past it, handed out or on any copy, claims
@@ -2365,7 +2400,7 @@ mod test {
 		let mut sub = subscribe(&logical, Duration::ZERO);
 		assert!(sub.poll_finished(&kio::Waiter::noop()).is_pending());
 		let end = Position { group: 5, frame: 5 };
-		source.finish_at(end).unwrap();
+		source.finish_at(end, None).unwrap();
 		assert_eq!(
 			sub.poll_finished(&kio::Waiter::noop()).map(|result| result.unwrap()),
 			Poll::Ready(end)
@@ -2380,7 +2415,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, HOUR);
 		let end = Position { group: 4, frame: 3 };
-		a.finish_at(end).unwrap();
+		a.finish_at(end, None).unwrap();
 		let b = copy();
 		routes.serve(b.consume());
 		assert_eq!(
@@ -2396,6 +2431,54 @@ mod test {
 		);
 	}
 
+	/// A route switch keeps the error the logical end was declared with, even when the copy
+	/// serving at the end declares that end cleanly.
+	#[moq_clock::test]
+	async fn an_errored_end_survives_a_route_switch() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let mut a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		a.finish_at(Position::group(1), Some(Error::App(7))).unwrap();
+		let mut b = copy();
+		routes.serve(b.consume());
+		write(&b, 0);
+		b.finish_at(Position::group(1), None).unwrap();
+		assert_eq!(
+			sub.poll_finished(&kio::Waiter::noop()).map(Result::unwrap),
+			Poll::Ready(Position::group(1))
+		);
+		assert!(matches!(sub.end_error(), Some(Error::App(7))));
+		assert_eq!(recv(&mut sub).sequence, 0);
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::App(7)))
+		));
+	}
+
+	/// A routed reader that reads only datagrams ends with the end's error, as a direct one does.
+	#[moq_clock::test]
+	async fn a_routed_datagram_reader_ends_with_the_end_error() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let mut a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		a.insert_datagram(0, ts(0), b"d".as_ref()).unwrap();
+		a.finish_at(Position::group(1), Some(Error::App(7))).unwrap();
+		assert!(matches!(
+			sub.poll_recv_datagram(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Some(_)))
+		));
+		assert!(matches!(
+			sub.poll_recv_datagram(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::App(7)))
+		));
+	}
+
 	#[moq_clock::test]
 	async fn copies_must_agree_on_the_declared_end() {
 		for next in [Position::group(5), Position { group: 4, frame: 3 }, Position::group(6)] {
@@ -2404,9 +2487,9 @@ mod test {
 			let mut a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, HOUR);
-			a.finish_at(Position::group(5)).unwrap();
+			a.finish_at(Position::group(5), None).unwrap();
 			let mut b = copy();
-			b.finish_at(next).unwrap();
+			b.finish_at(next, None).unwrap();
 			routes.serve(b.consume());
 			let result = sub.poll_finished(&kio::Waiter::noop());
 			if next == Position::group(6) {
@@ -2434,7 +2517,7 @@ mod test {
 			let mut a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, HOUR);
-			a.finish_at(Position::group(5)).unwrap();
+			a.finish_at(Position::group(5), None).unwrap();
 			let mut b = copy();
 			routes.serve(b.consume());
 			write(&b, 4);
@@ -2469,7 +2552,7 @@ mod test {
 		let mut a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, HOUR);
-		a.finish_at(Position { group: 4, frame: 2 }).unwrap();
+		a.finish_at(Position { group: 4, frame: 2 }, None).unwrap();
 		let b = copy();
 		routes.serve(b.consume());
 		let mut group = b.create_group(group::Info { sequence: 4 }).unwrap();
@@ -2505,7 +2588,7 @@ mod test {
 			}
 			let mut b = copy();
 			routes.serve(b.consume());
-			b.finish_at(Position::group(3)).unwrap();
+			b.finish_at(Position::group(3), None).unwrap();
 			assert!(matches!(
 				sub.poll_finished(&kio::Waiter::noop()),
 				Poll::Ready(Err(Error::ProtocolViolation))
@@ -2557,7 +2640,7 @@ mod test {
 			};
 			let mut b = copy();
 			routes.serve(b.consume());
-			b.finish_at(Position { group: 4, frame: 2 }).unwrap();
+			b.finish_at(Position { group: 4, frame: 2 }, None).unwrap();
 			let res = sub.poll_finished(&kio::Waiter::noop());
 			assert!(
 				matches!(res, Poll::Ready(Err(Error::ProtocolViolation))),
@@ -2583,7 +2666,7 @@ mod test {
 		moq_clock::sleep(Duration::from_secs(2)).await;
 		assert!(sub.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
 		assert_eq!(copies(&routes), 1);
-		b.finish_at(Position::group(5)).unwrap();
+		b.finish_at(Position::group(5), None).unwrap();
 		assert!(matches!(
 			sub.poll_finished(&kio::Waiter::noop()),
 			Poll::Ready(Err(Error::ProtocolViolation))
