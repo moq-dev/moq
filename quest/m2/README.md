@@ -32,6 +32,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Weekly mutation testing on critical modules](/quest/m2/mutants.md) - cargo-mutants runs weekly on moq-auth and moq-net's permission, resume, and expiry code
 - [Video quality](/quest/m2/video-quality/README.md) - a nightly VMAF harness grades every encoder backend and on-demand GoP pops against floors, and moq-boy's encode is fixed under it
 - [noq adopts moq-congestion](/quest/m2/noq-congestion.md) - noq's BBR3 and Cubic delegate to the published crate behind noq's unchanged API
+- [moq-relay forwards QUIC packets by QUIC-LB server ID](/quest/m2/relay-quic-lb-forward.md) - an established connection that lands on the wrong instance behind an anycast IP or VIP is forwarded to its owner, which replies from the shared address
 - [Byte streams](/quest/m2/stream/README.md) - TCP connections ride MoQ losslessly through relays, proxied per hop rather than as IP packets
 - [Mesh](/quest/m2/mesh/README.md) - `moq mesh` enrolls a host or robot and reaches any node by endpoint ID or name for SSH, forwards, and agents
 - [P2P](/quest/m2/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
