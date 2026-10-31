@@ -4493,11 +4493,6 @@ impl Consumer {
 		self.with_state(|state| state?.read().end)
 	}
 
-	/// The final sequence and the error the track ended with, once a reader can reach it.
-	pub(super) fn end_error(&self) -> Option<(u64, Error)> {
-		self.with_state(|state| state?.read().end_error())
-	}
-
 	/// The error the declared end carries, reached or not.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn declared_error(&self) -> Option<Error> {
@@ -7210,7 +7205,7 @@ impl Subscriber {
 		}
 		self.count_stale(&meter);
 		let res = match res {
-			Poll::Ready(Ok(None)) => Poll::Ready(self.ended()),
+			Poll::Ready(Ok(None)) => Poll::Ready(self.ended(false)),
 			res => res,
 		};
 		res.map(|res| res.map(|group| group.map(|group| group.with_meter(meter))))
@@ -7228,15 +7223,15 @@ impl Subscriber {
 	/// Whether this reader ran out at an end declared with an error, rather than an abort.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn ended_with_error(&self) -> bool {
-		self.ended::<()>().is_err()
+		self.ended::<()>(false).is_err()
 	}
 
-	/// What a reader that ran out gets: the end of stream, or the error the track ended with
-	/// once this reader's range reaches that end.
-	fn ended<T>(&self) -> Result<Option<T>> {
+	/// What a reader that ran out of groups, or of datagrams for `datagrams`, gets: the end
+	/// of stream, or the error the track ended with once this reader's range reaches that end.
+	fn ended<T>(&self, datagrams: bool) -> Result<Option<T>> {
 		let end = match &self.inner {
 			Inner::Plain(cursor) => cursor.state.read().end_error(),
-			Inner::Resume(resume, _) => resume.end_error(),
+			Inner::Resume(resume, _) => resume.end_error(datagrams),
 		};
 		let Some((fin, err)) = end else {
 			return Ok(None);
@@ -7398,7 +7393,7 @@ impl Subscriber {
 	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
 		loop {
 			let Some(datagram) = ready!(self.poll_recv_stored_datagram(waiter))? else {
-				return Poll::Ready(self.ended());
+				return Poll::Ready(self.ended(true));
 			};
 			// A plain payload cannot identify another object in the same group or a status.
 			if let Some(wire) = &datagram.wire
