@@ -1,7 +1,7 @@
 //! Regression tests for the value/closed/consumer waiter split.
 //!
 //! Each non-close event must wake only the waiters that care about it: a value
-//! modification wakes neither `closed()` nor `used`/`unused`, and consumer
+//! modification wakes neither `closed()` nor `wanted_changed`, and consumer
 //! create/drop wakes neither value nor `closed()` waiters. We drive the public
 //! async futures by hand with a counting waker so we can assert that a waiter
 //! was *not* notified.
@@ -55,20 +55,23 @@ fn value_modification_does_not_wake_consumer() {
 	let (waker, w) = counting();
 	let mut cx = Context::from_waker(&w);
 
-	let mut fut = Box::pin(producer.unused());
+	let mut fut = Box::pin(producer.wanted_changed(true));
 	assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
 
-	// `unused()` only cares about the consumer count, so value churn shouldn't wake it.
+	// `wanted_changed()` only cares about the consumer count, so value churn shouldn't wake it.
 	for i in 1..=100 {
 		*producer.write().ok().expect("open") = i;
 	}
-	assert_eq!(waker.count(), 0, "value modification spuriously woke unused()");
+	assert_eq!(waker.count(), 0, "value modification spuriously woke wanted_changed()");
 	assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
 
 	// Dropping the last consumer is what should wake it.
 	drop(consumer);
-	assert!(waker.count() >= 1, "dropping the last consumer did not wake unused()");
-	assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+	assert!(
+		waker.count() >= 1,
+		"dropping the last consumer did not wake wanted_changed()"
+	);
+	assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(Ok(false))));
 }
 
 #[test]
@@ -146,12 +149,12 @@ fn close_wakes_value_closed_and_consumer() {
 
 	let mut value_fut = Box::pin(producer.wait(|m| if **m == 99 { Poll::Ready(()) } else { Poll::Pending }));
 	let mut closed_fut = Box::pin(producer.closed());
-	let mut unused_fut = Box::pin(producer.unused());
+	let mut unused_fut = Box::pin(producer.wanted_changed(true));
 	assert!(matches!(value_fut.as_mut().poll(&mut value_cx), Poll::Pending));
 	assert!(matches!(closed_fut.as_mut().poll(&mut closed_cx), Poll::Pending));
 	assert!(matches!(unused_fut.as_mut().poll(&mut unused_cx), Poll::Pending));
 
-	// Closing resolves all three: value/unused with `Err`, closed with `()`.
+	// Closing resolves all three: value/wanted_changed with `Err`, closed with `()`.
 	producer.close().ok().expect("open");
 	assert!(value_waker.count() >= 1, "close did not wake the value waiter");
 	assert!(closed_waker.count() >= 1, "close did not wake the closed waiter");
@@ -164,27 +167,27 @@ fn close_wakes_value_closed_and_consumer() {
 	assert!(matches!(unused_fut.as_mut().poll(&mut unused_cx), Poll::Ready(Err(_))));
 }
 
-/// The three states `write_unused` distinguishes, since a teardown branches on all
+/// The three states `write_unwanted` distinguishes, since a teardown branches on all
 /// of them: commit, keep going, already gone.
 #[test]
-fn write_unused_reports_used_closed_and_idle() {
+fn write_unwanted_reports_wanted_closed_and_idle() {
 	let producer = Producer::new(0u32);
 
 	let consumer = producer.consume();
 	assert!(
-		matches!(producer.write_unused(), crate::Unused::Used),
+		matches!(producer.write_unwanted(), crate::Unwanted::Wanted),
 		"a live consumer must decline the write"
 	);
 
 	drop(consumer);
-	let crate::Unused::Idle(mut guard) = producer.write_unused() else {
+	let crate::Unwanted::Idle(mut guard) = producer.write_unwanted() else {
 		panic!("the last consumer left, so the write is owed");
 	};
 	*guard = 1;
 	guard.close();
 
 	assert!(
-		matches!(producer.write_unused(), crate::Unused::Closed),
+		matches!(producer.write_unwanted(), crate::Unwanted::Closed),
 		"a closed channel has nothing left to write"
 	);
 }
@@ -199,16 +202,16 @@ fn a_consumer_minted_before_the_guard_declines_it() {
 	let weak = producer.weak();
 
 	// The wake a teardown acts on.
-	assert!(matches!(producer.write_unused(), crate::Unused::Idle(_)));
+	assert!(matches!(producer.write_unwanted(), crate::Unwanted::Idle(_)));
 
 	// Demand returns in the gap between that wake and the commit.
 	let consumer = weak.try_consume().expect("the channel is open");
-	assert!(matches!(producer.write_unused(), crate::Unused::Used));
+	assert!(matches!(producer.write_unwanted(), crate::Unwanted::Wanted));
 
 	// Once the teardown does commit, the weak handle mints nothing more.
 	drop(consumer);
-	let crate::Unused::Idle(guard) = producer.write_unused() else {
-		panic!("unused again");
+	let crate::Unwanted::Idle(guard) = producer.write_unwanted() else {
+		panic!("unwanted again");
 	};
 	guard.close();
 	assert!(weak.try_consume().is_none(), "a closed channel minted a consumer");
