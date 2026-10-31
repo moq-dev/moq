@@ -36,7 +36,7 @@ The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 
 `server_name` is the SNI that selected the relay's certificate. It is absent
-over plaintext, on the `tls://` TCP listener, and for an IP-literal dial, and
+over plaintext, on the `listen.tcp` `tls://` listener, and for an IP-literal dial, and
 never filled from a `Host` header or a WebTransport authority. The client still picks it among the names
 the relay serves, so a hostname-scoped server binds the tenant to the
 credential, not to `server_name` alone.
@@ -440,3 +440,7 @@ parent directory or an allowlist.
 `listen.tcp.tls = true` serves the TCP listener over TLS instead, for `tls://`
 dials such as [cluster links](/bin/relay/cluster#tls-links). It asks for no
 client certificate, so a peer on it presents a token, not mTLS.
+The HTTPS listener (`web.https`) accepts `tls://` too, with no setting: a
+ClientHello that offers a moq ALPN is served the listen certificate, the same
+way and with no client certificate either, while every other connection keeps
+`web.https.cert`.

@@ -152,14 +152,32 @@ impl Server {
 		let tls_stream = acceptor.accept(stream).await?;
 
 		let negotiated = tls_stream.get_ref().1.alpn_protocol();
-		let negotiated_str = negotiated.and_then(|a| std::str::from_utf8(a).ok());
+		let negotiated_str = negotiated.and_then(|a| std::str::from_utf8(a).ok()).map(str::to_owned);
 		tracing::debug!(?negotiated_str, "TLS accepted, negotiated ALPN");
+		self.accept_established(tls_stream, negotiated_str.as_deref(), socket_stats)
+			.await
+	}
 
-		let (version, protocol) = alpn::parse(negotiated_str)?;
+	/// Accept a session over a TLS stream whose handshake the caller already ran,
+	/// such as a listener that reads the ClientHello to pick a config for its port.
+	///
+	/// `alpn` is the ALPN that handshake negotiated, which names the wire-format
+	/// version. `socket_stats` reports on the TCP connection underneath; take it
+	/// before TLS wraps the socket, as [`accept`](Self::accept) does.
+	pub async fn accept_established<T>(
+		&self,
+		stream: T,
+		alpn: Option<&str>,
+		socket_stats: Option<crate::SharedSocketStats>,
+	) -> Result<Session, Error>
+	where
+		T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+	{
+		let (version, protocol) = alpn::parse(alpn)?;
 		tracing::debug!(?version, ?protocol, "parsed ALPN");
 
 		let session_config = self.session.clone().with_negotiated(version, protocol);
-		let mut transport = Stream::new(tls_stream);
+		let mut transport = Stream::new(stream);
 		if let Some(stats) = socket_stats {
 			transport = transport.with_socket_stats(stats);
 		}
