@@ -20,7 +20,3 @@ was declined.
 - Prove equivalence with the existing `sh/dispatch-query.test.py` and
   `sh/changed.test.py`, plus a before/after diff of `just ci-select` output for
   a few representative diffs.
-
-## Related
-
-- [The relay's NixOS module is tested](/quest/m2/nix-relay-module.md) - also edits the dispatcher's module map

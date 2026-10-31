@@ -74,6 +74,7 @@ NEGATIVE=0
 MEDIA=0
 MEDIA_CASES=""
 MEDIA_ENGINES="chromium"
+MEDIA_PUBLISHER="chromium"
 TAIL_ONLY=0
 FINISH_ONLY=0
 # The versions the matrix runs on, one pass each. `auto` leaves every client its defaults,
@@ -149,6 +150,12 @@ while [[ $# -gt 0 ]]; do
             MEDIA=1
             shift 2
             ;;
+        --media-publisher)
+            require_value "$@"
+            MEDIA_PUBLISHER="$2"
+            MEDIA=1
+            shift 2
+            ;;
         # The full matrix. --timeout 30 gives headless Chromium cold-start
         # headroom; flags after it still override.
         --all)
@@ -216,6 +223,11 @@ if [[ ! "$MEDIA_ENGINES" =~ ^(chromium|firefox|webkit)(,(chromium|firefox|webkit
     exit 2
 fi
 IFS=',' read -r -a MEDIA_ENGINE_LIST <<<"$MEDIA_ENGINES"
+# WebKit's publishing stays with the Safari work; Playwright's WebKit is not Safari.
+if [[ ! "$MEDIA_PUBLISHER" =~ ^(chromium|firefox)$ ]]; then
+    echo "error: the media publisher must be chromium or firefox" >&2
+    exit 2
+fi
 
 IFS=',' read -r -a PUB_LIST <<<"$PUBLISHERS"
 IFS=',' read -r -a SUB_LIST <<<"$SUBSCRIBERS"
@@ -391,17 +403,20 @@ record() {
 # Call <action> <name> <media.ts args...> for each media run on <engine>. The planning
 # pass and the real one share it, so they cannot disagree on which runs exist.
 media_runs() {
-    local action="$1" engine="$2"
+    local action="$1" engine="$2" who="$2"
+    local roles=(--publisher-engine "$MEDIA_PUBLISHER" --player-engine "$engine")
+    # Chromium publishing keeps the names earlier reports used.
+    [[ "$MEDIA_PUBLISHER" == chromium ]] || who="$MEDIA_PUBLISHER to $engine"
     if [[ -n "$MEDIA_CASES" ]]; then
-        "$action" "$engine: media cases: $MEDIA_CASES" --player-engine "$engine" --cases "$MEDIA_CASES" --focused
+        "$action" "$who: media cases: $MEDIA_CASES" "${roles[@]}" --cases "$MEDIA_CASES" --focused
         return
     fi
-    "$action" "$engine: media output + lifecycle" --player-engine "$engine"
-    "$action" "$engine: control: frozen video" --player-engine "$engine" --fault frozen-video --cases none --expect-fail "video progress"
-    "$action" "$engine: control: silent audio" --player-engine "$engine" --fault silent-audio --cases none --expect-fail "audio tone"
-    "$action" "$engine: control: offset audio" --player-engine "$engine" --fault audio-offset --cases none --expect-fail "audio/video sync"
-    "$action" "$engine: control: leaked session" --player-engine "$engine" --leak --cases detach --expect-fail "resource baseline"
-    "$action" "$engine: control: lagging latecomer" --player-engine "$engine" --lag --cases late-join --expect-fail "late join reaches live"
+    "$action" "$who: media output + lifecycle" "${roles[@]}"
+    "$action" "$who: control: frozen video" "${roles[@]}" --fault frozen-video --cases none --expect-fail "video progress"
+    "$action" "$who: control: silent audio" "${roles[@]}" --fault silent-audio --cases none --expect-fail "audio tone"
+    "$action" "$who: control: offset audio" "${roles[@]}" --fault audio-offset --cases none --expect-fail "audio/video sync"
+    "$action" "$who: control: leaked session" "${roles[@]}" --leak --cases detach --expect-fail "resource baseline"
+    "$action" "$who: control: lagging latecomer" "${roles[@]}" --lag --cases late-join --expect-fail "late join reaches live"
 }
 
 # shellcheck disable=SC2329  # invoked indirectly via media_runs
