@@ -1,8 +1,8 @@
 // Every vector in drafts/moq-e2ee-00.json, run against the internal primitives.
 import { expect, test } from "bun:test";
-import { Epoch } from "@moq/net";
 import { Credential } from "./credential.ts";
 import { type Domain, decode, encode, nameKeyInfo, nameMacInfo, nonce, pad, pathInfo } from "./derive.ts";
+import * as Epoch from "./epoch.ts";
 import { Failure } from "./failure.ts";
 import { keyBytes, TrackKey, trackKey } from "./key.ts";
 import * as Limits from "./limits.ts";

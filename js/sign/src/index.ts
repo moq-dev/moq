@@ -4,11 +4,11 @@
  * Implements profile `moq-sign-00` from
  * [draft-lcurley-moq-sign](https://datatracker.ietf.org/doc/draft-lcurley-moq-sign/). A publisher
  * signs every grouped frame with its endpoint's {@link SecretKey}, binding the broadcast path, its
- * publisher epoch, the track, the group, the frame index, and the timestamp. A subscriber hands a
+ * publisher's identity, the track, the group, the frame index, and the timestamp. A subscriber hands a
  * frame to the application only after it verifies against the {@link PublicKey} it expects, so a
  * relay can proxy and cache without forging, retiming, relocating, or splicing content. Signatures
  * authenticate content, not liveness: a relay that recorded an instance can replay it whole under
- * its epoch. Mirrors the Rust `moq-sign` crate.
+ * its identity. Mirrors the Rust `moq-sign` crate.
  *
  * ```ts
  * const key = await SecretKey.generate();
@@ -16,7 +16,7 @@
  * const publication = origin.createBroadcast(path);
  * const signed = new Broadcast.Producer(publication.broadcast, key, path);
  * const messages = signed.createTrack("messages");
- * publication.announce({ epoch: signed.epoch });
+ * publication.announce({ identity: signed.identity });
  *
  * const group = messages.appendGroup();
  * await group.writeFrame(undefined, payload);

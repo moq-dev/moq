@@ -8,7 +8,6 @@ import type { Drain } from "../connection/goaway.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import * as DatagramStream from "../datagram_stream.ts";
-import type * as Epoch from "../epoch.ts";
 import {
 	error,
 	ProtocolViolation,
@@ -22,6 +21,7 @@ import {
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import * as Identity from "../identity.ts";
 import { groupBounds, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import { grace } from "../ledger.ts";
 import type { Lister } from "../listing.ts";
@@ -109,15 +109,15 @@ interface SubscribeSetup {
 }
 
 /**
- * What a consumed broadcast captured when it was opened: the epoch it asks for, and its own id.
- * Fetches are shared only within one consume, so a fresh consume for a replaced instance never
+ * What a consumed broadcast captured when it was opened: the identity it pins, and its own id.
+ * Fetches are shared only within one consume, so a fresh consume for a replaced stream never
  * reads a FETCH the old one opened.
  */
 interface Consumed {
-	readonly epoch?: Epoch.Valid;
+	readonly identity?: Identity.Valid;
 	readonly id?: number;
 	readonly valid?: AbortSignal;
-	// Aborted once another instance takes the path, which may answer a request without an epoch
+	// Aborted once another stream takes the path, which may answer a request without an identity
 	// still unanswered. A withdrawal alone leaves the peer to answer it.
 	readonly answering?: AbortSignal;
 }
@@ -154,8 +154,42 @@ interface SubscribeEntry {
 	// the two.
 	held?: Stream;
 	// Called at the SUBSCRIBE's first response (lite-05+). Until then a SUBSCRIBE without an
-	// epoch may be answered by whichever instance won the path, so a replacement refuses it.
+	// identity may be answered by whichever stream won the path, so a replacement refuses it.
 	answered?: () => void;
+}
+
+/**
+ * The identity a session minted for each path a peer advertises without one (every version
+ * before lite-07), shared by its announce streams: a peer serves one broadcast at a path at a
+ * time, so the path advertised on two streams at once is one stream. Once every advertisement
+ * of it is gone, the next one is a new stream with a fresh identity.
+ */
+class Minted {
+	#paths = new Map<Path.Valid, { identity: Identity.Valid; holders: number }>();
+
+	acquire(path: Path.Valid): Identity.Valid {
+		let entry = this.#paths.get(path);
+		if (!entry) {
+			entry = { identity: Identity.minted(), holders: 0 };
+			this.#paths.set(path, entry);
+		}
+		entry.holders += 1;
+		return entry.identity;
+	}
+
+	/** The identity a holder already acquired. */
+	get(path: Path.Valid): Identity.Valid {
+		const entry = this.#paths.get(path);
+		if (!entry) throw new Error(`no identity minted for ${path}`);
+		return entry.identity;
+	}
+
+	release(path: Path.Valid) {
+		const entry = this.#paths.get(path);
+		if (!entry) return;
+		entry.holders -= 1;
+		if (entry.holders === 0) this.#paths.delete(path);
+	}
 }
 
 /** Subscribe to the peer and own its receive-side protocol tasks.
@@ -165,6 +199,9 @@ export class Subscriber {
 	#quic: WebTransport;
 	// Advertisements the peer holds live across every announce stream on this session.
 	#announces: Slots;
+	// The identities minted for the paths the peer advertises without one, shared by every
+	// announce stream on this session.
+	#minted = new Minted();
 
 	// The version of the connection.
 	readonly version: Version;
@@ -181,7 +218,7 @@ export class Subscriber {
 	#consumes = new BroadcastCache();
 	#consumeNext = 0;
 
-	// Dedup in-flight one-shot fetches, keyed by [consume, broadcast, epoch, track, sequence].
+	// Dedup in-flight one-shot fetches, keyed by [consume, broadcast, identity, track, sequence].
 	// Concurrent (or repeat, while still open) fetchGroup() calls for the same group of one consume
 	// share one FETCH stream and each get an independent mirror; the entry is evicted once the
 	// group closes.
@@ -338,6 +375,17 @@ export class Subscriber {
 		};
 		// Each holds one of the session's announce slots, reflected and hidden ones included.
 		const advertised = new SlotMap<Path.Valid, Advertisement>(this.#announces);
+		// The paths this stream holds a session-minted identity for: a version before lite-07
+		// names none, so each advertisement stands for one stream until it ends.
+		const minted = new Set<Path.Valid>();
+		const mint = (path: Path.Valid): Identity.Valid => {
+			if (minted.has(path)) return this.#minted.get(path);
+			minted.add(path);
+			return this.#minted.acquire(path);
+		};
+		const unmint = (path: Path.Valid) => {
+			if (minted.delete(path)) this.#minted.release(path);
+		};
 
 		let stopDrain: Dispose | undefined;
 		try {
@@ -389,7 +437,7 @@ export class Subscriber {
 						if (advertised.has(path)) {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
-						const route = { hops: [UNKNOWN_HOP], cost: this.#cost() };
+						const route = { identity: mint(path), epoch: 0n, hops: [UNKNOWN_HOP], cost: this.#cost() };
 						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
 						advertised.set(path, { live, route, captures });
@@ -462,9 +510,10 @@ export class Subscriber {
 				// Present on active/update/restart; ended messages never carry hops worth checking.
 				let hops: Hop[] | undefined;
 				let cost: Cost | undefined;
-				// Present on active and restart; an update never changes it.
-				let epoch: Epoch.Valid | undefined;
-				// Another publisher instance replaces the advertisement (lite-07).
+				// Present on active and restart from lite-07; an update never changes them.
+				let identity: Identity.Valid | undefined;
+				let epoch: bigint | undefined;
+				// The advertisement now serves another identity or epoch (lite-07).
 				let restart = false;
 
 				switch (announce.status) {
@@ -476,6 +525,7 @@ export class Subscriber {
 						active = true;
 						hops = resolved.hops;
 						cost = announce.cost;
+						identity = announce.identity;
 						epoch = announce.epoch;
 						break;
 					}
@@ -504,6 +554,7 @@ export class Subscriber {
 						active = true;
 						hops = resolved.hops;
 						cost = announce.cost;
+						identity = announce.identity;
 						epoch = announce.epoch;
 						restart = true;
 						break;
@@ -520,6 +571,7 @@ export class Subscriber {
 						active = true;
 						hops = resolved.hops;
 						cost = announce.cost;
+						identity = announce.identity;
 						epoch = announce.epoch;
 						restart = resolved.suffix === resolved.previous;
 						break;
@@ -568,9 +620,24 @@ export class Subscriber {
 					});
 				};
 
-				// An update keeps the epoch its announcement named, even through a placeholder
-				// below: a later update that is not reflected still names that instance.
-				if (!restart) epoch ??= advertised.get(path)?.route.epoch;
+				if (!active) {
+					retract();
+					unmint(path);
+					continue;
+				}
+
+				// An update keeps the identity its announcement named, even through a placeholder
+				// below: a later update that is not reflected still names that stream. A version
+				// before lite-07 names none, so the session mints one per advertisement.
+				if (!restart) {
+					const previous = advertised.get(path)?.route;
+					identity ??= previous?.identity;
+					epoch ??= previous?.epoch;
+				}
+				if (identity === undefined) {
+					identity = mint(path);
+					epoch = 0n;
+				}
 
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
 				// list, so fold it back in before checking.
@@ -584,16 +651,11 @@ export class Subscriber {
 						retract();
 						advertised.set(path, {
 							live: false,
-							route: { epoch, hops: full, cost: Cost.zero },
+							route: { identity, epoch, hops: full, cost: Cost.zero },
 							captures: undefined,
 						});
 						continue;
 					}
-				}
-
-				if (!active) {
-					retract();
-					continue;
 				}
 
 				const fullHops =
@@ -608,25 +670,25 @@ export class Subscriber {
 					console.debug(`announced: broadcast=${path} dropped (hop chain at MAX_HOPS)`);
 					advertised.set(path, {
 						live: false,
-						route: { epoch, hops: [], cost: Cost.zero },
+						route: { identity, epoch, hops: [], cost: Cost.zero },
 						captures: undefined,
 					});
 					continue;
 				}
-				const route: Route = { epoch, hops: fullHops, cost: this.#cost(cost) };
+				const route: Route = { identity, epoch, hops: fullHops, cost: this.#cost(cost) };
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
 					advertised.set(path, { live: false, route, captures });
 					continue;
 				}
 
-				// Another publisher instance: whatever was consumed at the path is the old one, so
-				// the next consume subscribes fresh, while the handles already out keep theirs.
+				// Another identity or epoch: whatever was consumed at the path may be stale, so the
+				// next consume subscribes fresh, while the handles already out keep theirs.
 				const previous = advertised.get(path);
 				if (restart && previous?.live) {
 					advertised.set(path, { live: true, route, captures });
 					this.#consumes.announce(path, announced, route, true);
-					console.debug(`announced: broadcast=${path} restart=true epoch=${epoch}`);
+					console.debug(`announced: broadcast=${path} restart=true identity=${identity} epoch=${epoch}`);
 					announced.append({ prefix: path, captures, kind: "restart", route });
 					continue;
 				}
@@ -635,7 +697,7 @@ export class Subscriber {
 				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE. It updates the
 				// route in place, so a forwarder re-prices without retracting.
 				if (previous?.live) {
-					// An update preserves the advertisement identity, including on epochless drafts.
+					// An update preserves the advertisement's identity.
 					advertised.set(path, { live: true, route, captures });
 					this.#consumes.announce(path, announced, route);
 					console.debug(`announced: broadcast=${path} rerouted`);
@@ -648,7 +710,7 @@ export class Subscriber {
 				advertised.set(path, { live: true, route, captures });
 				this.#consumes.announce(path, announced, route);
 
-				console.debug(`announced: broadcast=${path} active=true epoch=${epoch}`);
+				console.debug(`announced: broadcast=${path} active=true identity=${identity}`);
 				announced.append({ prefix: path, captures, kind: "start", route });
 			}
 
@@ -672,6 +734,8 @@ export class Subscriber {
 			// Release only this interest's routes. Existing consumers remain pinned.
 			for (const path of advertised.keys()) this.#consumes.withdraw(path, announced);
 			advertised.clear();
+			for (const path of minted) this.#minted.release(path);
+			minted.clear();
 			stopDrain?.();
 		}
 	}
@@ -693,7 +757,7 @@ export class Subscriber {
 
 	#createConsume(path: Path.Valid, instance: ReturnType<BroadcastCache["instance"]>): broadcast.Consumer {
 		const consumed = {
-			epoch: instance.route.epoch,
+			identity: instance.route.identity,
 			id: this.#consumeNext++,
 			get valid() {
 				return instance.validity?.signal;
@@ -746,7 +810,7 @@ export class Subscriber {
 	// Returns without answering when setup was cut short, for the caller to look again.
 	async #listTracks(broadcast: Path.Valid, consumed: Consumed, lister: Lister): Promise<void> {
 		// The consumed instance must still be the selected one until the request is out, then
-		// not replaced until the peer answers: a TRACKS request without an epoch lists whichever
+		// not replaced until the peer answers: a TRACKS request without an identity lists whichever
 		// instance won the path when it arrived.
 		const valid = consumed.valid;
 		if (valid?.aborted) {
@@ -803,7 +867,7 @@ export class Subscriber {
 			);
 			stream = await untilAborted(opening, cut);
 			await stream.writer.u53(StreamId.Tracks);
-			await new TracksMessage(broadcast, consumed.epoch).encode(stream.writer, this.version);
+			await new TracksMessage(broadcast, consumed.identity).encode(stream.writer, this.version);
 			let synced = false;
 			const answering = consumed.answering;
 			let unanswered = answering ? AbortSignal.any([stop, answering]) : stop;
@@ -918,7 +982,7 @@ export class Subscriber {
 		request: track.Request,
 		state: SubscribeSetup,
 	) {
-		const { epoch, valid, answering } = consumed;
+		const { identity, valid, answering } = consumed;
 		const subscription = request.subscription;
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
@@ -927,7 +991,7 @@ export class Subscriber {
 		const msg = new Subscribe({
 			id,
 			broadcast,
-			epoch,
+			identity,
 			track: request.name,
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
@@ -1093,7 +1157,7 @@ export class Subscriber {
 			// Fetch the immutable properties once via the TRACK stream.
 			const { info, stream } = await this.#trackInfo(
 				msg.broadcast,
-				msg.epoch,
+				msg.identity,
 				msg.track,
 				state.cancel.signal,
 				deadline,
@@ -1155,7 +1219,7 @@ export class Subscriber {
 	// stays open, as interest in the track, until the caller closes it.
 	async #trackInfo(
 		broadcast: Path.Valid,
-		epoch: Epoch.Valid | undefined,
+		identity: Identity.Valid | undefined,
 		track: string,
 		signal: AbortSignal | undefined,
 		deadline: Deadline,
@@ -1164,7 +1228,7 @@ export class Subscriber {
 			{ version: this.version },
 			async (stream) => {
 				await stream.writer.u53(StreamId.Track);
-				await new TrackMessage(broadcast, track, epoch).encode(stream.writer, this.version);
+				await new TrackMessage(broadcast, track, identity).encode(stream.writer, this.version);
 				const info = await TrackInfo.decode(stream.reader, this.version);
 				return { info, stream };
 			},
@@ -1231,14 +1295,14 @@ export class Subscriber {
 	async resolveTrackInfo(
 		broadcast: Path.Valid,
 		track: string,
-		epoch?: Epoch.Valid,
+		identity?: Identity.Valid,
 		hold?: AbortSignal,
 	): Promise<track.Info> {
 		if (!hasTrackStream(this.version)) {
 			throw new Error("track info requires moq-lite-05 or newer");
 		}
 		const deadline = new Deadline();
-		const { info, stream } = await deadline.wait(this.#trackInfo(broadcast, epoch, track, hold, deadline));
+		const { info, stream } = await deadline.wait(this.#trackInfo(broadcast, identity, track, hold, deadline));
 		if (hold && !hold.aborted) hold.addEventListener("abort", () => stream.close(), { once: true });
 		else stream.close();
 		return this.#toModelInfo(info);
@@ -1253,7 +1317,7 @@ export class Subscriber {
 		options: track.FetchGroupOptions = {},
 		consumed: Consumed = {},
 	): Promise<netGroup.Consumer> {
-		const { epoch } = consumed;
+		const { identity } = consumed;
 		options.signal?.throwIfAborted();
 
 		// Coalesce onto a still-open fetch of the same group so we don't open a second FETCH
@@ -1266,7 +1330,7 @@ export class Subscriber {
 		// Different freshness budgets use independent streams: once a FETCH is on the
 		// wire its limit cannot be widened for a later, more tolerant caller. Equal
 		// budgets still coalesce and each caller keeps an independent mirror.
-		const key = JSON.stringify([consumed.id, broadcast, epoch, track, sequence, options.maxDelay]);
+		const key = JSON.stringify([consumed.id, broadcast, identity, track, sequence, options.maxDelay]);
 		let entry = this.#fetches.get(key);
 		let consumer: netGroup.Consumer;
 		if (entry && !entry.group.isClosed) {
@@ -1373,11 +1437,11 @@ export class Subscriber {
 		deadline: Deadline,
 		maxDelay?: Milli,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
-		const { epoch, valid } = consumed;
+		const { identity, valid } = consumed;
 		const cancel = new AbortController();
 		void group.closed.then((err) => cancel.abort(err ?? new StreamError(StreamCode.Cancel)));
 		const signal = valid ? AbortSignal.any([valid, cancel.signal]) : cancel.signal;
-		const answered = this.#trackInfo(broadcast, epoch, track, signal, deadline);
+		const answered = this.#trackInfo(broadcast, identity, track, signal, deadline);
 		// Only the properties are needed, so the TRACK stream closes however the wait ends.
 		answered.then(
 			({ stream }) => stream.close(),
@@ -1390,7 +1454,7 @@ export class Subscriber {
 				await stream.writer.u53(StreamId.Fetch);
 				await new FetchMessage({
 					broadcast,
-					epoch,
+					identity,
 					track,
 					priority,
 					maxDelay: hasFetchMaxDelay(this.version) ? maxDelay : undefined,
@@ -1970,13 +2034,13 @@ class ConsumeBroadcast extends broadcast.Consumer {
 		super(state);
 		overrideBroadcastWire(this, {
 			resolveTrackInfo: async (name, hold) => {
-				if (!consumed.valid) return subscriber.resolveTrackInfo(path, name, consumed.epoch, hold);
+				if (!consumed.valid) return subscriber.resolveTrackInfo(path, name, consumed.identity, hold);
 				// Retirement cancels setup, but a one-shot query still releases its TRACK
 				// as soon as it answers instead of holding it for the broadcast's lifetime.
 				const query = new AbortController();
 				const signal = AbortSignal.any([consumed.valid, hold ?? query.signal]);
 				try {
-					return await subscriber.resolveTrackInfo(path, name, consumed.epoch, signal);
+					return await subscriber.resolveTrackInfo(path, name, consumed.identity, signal);
 				} finally {
 					if (!hold) query.abort();
 				}

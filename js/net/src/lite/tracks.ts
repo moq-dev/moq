@@ -1,9 +1,9 @@
-import type * as Epoch from "../epoch.ts";
 import { ProtocolViolation } from "../error.ts";
+import type * as Identity from "../identity.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { decodeError } from "../util/decode_error.ts";
-import { decodeEpoch, encodeEpoch } from "./epoch.ts";
+import { decodePin, encodePin } from "./identity.ts";
 import * as Message from "./message.ts";
 import { TrackInfo } from "./track.ts";
 import { hasTracks, type Version } from "./version.ts";
@@ -25,18 +25,18 @@ function guardTracks(version: Version) {
 export class Tracks {
 	broadcast: Path.Valid;
 	/** The publisher instance the subscriber expects. */
-	epoch?: Epoch.Valid;
+	identity?: Identity.Valid;
 
-	constructor(broadcast: Path.Valid, epoch?: Epoch.Valid) {
+	constructor(broadcast: Path.Valid, identity?: Identity.Valid) {
 		this.broadcast = broadcast;
-		this.epoch = epoch;
+		this.identity = identity;
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		guardTracks(version);
 		return Message.encode(w, async (w) => {
 			await w.string(Path.encode(this.broadcast));
-			await encodeEpoch(w, version, this.epoch);
+			await encodePin(w, version, this.identity);
 		});
 	}
 
@@ -44,8 +44,8 @@ export class Tracks {
 		guardTracks(version);
 		return Message.decode(r, async (r) => {
 			const broadcast = Path.decode(await r.string());
-			const epoch = await decodeEpoch(r, version);
-			return new Tracks(broadcast, epoch);
+			const identity = await decodePin(r, version);
+			return new Tracks(broadcast, identity);
 		});
 	}
 }

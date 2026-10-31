@@ -1,7 +1,7 @@
 import * as z from "zod/mini";
 import { ContainerSchema } from "./container";
 import { u53Schema } from "./integers";
-import { EpochSchema, RelativeBroadcastSchema } from "./path";
+import { IdentitySchema, RelativeBroadcastSchema } from "./path";
 
 /**
  * The cue serialization format of a text track, mirroring the Rust `TextFormat`.
@@ -35,11 +35,11 @@ export const TextConfigSchema = z.object({
 	// broadcast that served this catalog (e.g. "../source"). If unset, the track lives in the same
 	// broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
-	// The publisher instance the reference names, when known. Absent accepts whichever instance
-	// resolves first. An epoch-aware route proving another instance fails the entry; an epochless
-	// route cannot prove one, so there it is best effort. Without `broadcast`, it names the
-	// catalog's own instance.
-	epoch: z.optional(EpochSchema),
+	// The identity of the stream the reference names, when known. Absent accepts whichever stream
+	// resolves first. A route of another identity fails the entry; a route over a wire that
+	// carries no identity has one its session minted, which proves nothing, so there it is best
+	// effort. Without `broadcast`, it names the catalog's own stream.
+	identity: z.optional(IdentitySchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
 	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),

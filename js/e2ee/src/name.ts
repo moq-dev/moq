@@ -1,6 +1,6 @@
-import type { Epoch } from "@moq/net";
 import type { Credential } from "./credential.ts";
 import { decode, encode, type Name, nameKeyInfo, nameMacInfo, pad, unpad } from "./derive.ts";
+import type * as Epoch from "./epoch.ts";
 import { Failure } from "./failure.ts";
 import { KEY_LEN, NAME_MAC_LEN, NAME_NONCE_LEN, TAG_LEN } from "./limits.ts";
 import { expand } from "./secret.ts";

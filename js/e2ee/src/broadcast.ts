@@ -8,6 +8,7 @@
  * @module
  */
 import type { Broadcast as NetBroadcast, Track as NetTrack } from "@moq/net";
+import type * as Epoch from "./epoch.ts";
 import type * as Generation from "./generation.ts";
 import type * as Track from "./track.ts";
 
@@ -15,7 +16,8 @@ import type * as Track from "./track.ts";
  * The publishing side of a protected broadcast.
  *
  * Wraps the `@moq/net` broadcast at `Credential.path`. Announce that broadcast with
- * `generation.epoch` on its route once the tracks a subscriber needs first exist.
+ * `generation.epoch` as its route's identity ({@link Epoch.identity}) once the tracks a
+ * subscriber needs first exist.
  */
 export class Producer {
 	/** The generation this broadcast's tracks are protected under. */

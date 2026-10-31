@@ -496,7 +496,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
 	const announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
-	const epoch = announced?.active.peek()?.epoch;
+	const epoch = announced?.active.peek()?.identity;
 	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({
 		track: net.track(Broadcast.CATALOG_TRACK).subscribe(),
 	});
@@ -532,7 +532,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		// The replacement is handed over at once, with or without a subscriber.
 		expect(video.track.peek()?.name).toBe("video/1");
 		expect(broadcast.net.peek()).toBe(net);
-		expect(announced?.active.peek()?.epoch).toBe(epoch);
+		expect(announced?.active.peek()?.identity).toBe(epoch);
 
 		const second = net.track("video/1").subscribe();
 		await settle();

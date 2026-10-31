@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Error as NetError, Path, StreamCode, Track } from "@moq/net";
+import { Identity, Error as NetError, Path, StreamCode, Track } from "@moq/net";
 import {
 	Effect,
 	type Getter,
@@ -18,11 +18,11 @@ import { toHang } from "./msf";
 
 type ReferencedRendition = {
 	broadcast?: Path.Relative;
-	epoch?: Catalog.ReferenceEpoch;
+	identity?: Catalog.ReferenceIdentity;
 };
 
 // Whether a rendition's reference names something this consumer can play.
-type Usable = (rel: Path.Relative | undefined, epoch: Moq.Epoch.Valid | undefined) => boolean;
+type Usable = (rel: Path.Relative | undefined, identity: Moq.Identity.Valid | undefined) => boolean;
 
 // Either the catalog's own broadcast, or a sibling to consume by path.
 type RelativeTarget = { local: true } | { local: false; path: Moq.Path.Valid };
@@ -32,14 +32,16 @@ function filterRenditions<T extends ReferencedRendition>(
 	usable: Usable,
 ): Record<string, T> {
 	return Object.fromEntries(
-		Object.entries(renditions).filter(([, config]) => usable(config.broadcast, config.epoch)),
+		Object.entries(renditions).filter(([, config]) => usable(config.broadcast, config.identity)),
 	);
 }
 
-// Whether `active` is proven to be another instance than `epoch` names. An epochless route cannot
-// prove its instance, so only a known mismatch counts.
-function provesOther(active: Moq.Broadcast.Consumer | undefined, epoch: Moq.Epoch.Valid | undefined): boolean {
-	return epoch !== undefined && active?.epoch !== undefined && active.epoch !== epoch;
+// Whether `active` is proven to be another stream than `identity` names. A route over a wire
+// that carries no identity has one its session minted, which proves nothing, so only a known
+// mismatch counts.
+function provesOther(active: Moq.Broadcast.Consumer | undefined, identity: Moq.Identity.Valid | undefined): boolean {
+	if (identity === undefined || active?.identity === undefined) return false;
+	return !Identity.isMinted(active.identity) && active.identity !== identity;
 }
 
 // Whether an announced route covers `path`, until closed. Hidden routes count: a service claim
@@ -202,16 +204,16 @@ export class Broadcast {
 	}
 
 	// Publish the catalog minus every rendition this consumer cannot use: one naming a
-	// broadcast that isn't announced to us, or one whose broadcast proves another epoch than it
+	// broadcast that isn't announced to us, or one whose broadcast proves another identity than it
 	// names. Selecting one of those would render nothing, since `relativeBroadcast` resolves it to
 	// no broadcast at all. Reruns as announcements arrive, so a rendition appears once its
-	// broadcast does. Only a rendition naming an epoch resolves its broadcast here, sharing the
+	// broadcast does. Only a rendition naming an identity resolves its broadcast here, sharing the
 	// request playback uses.
 	#runFiltered(effect: Effect): void {
 		const raw = effect.get(this.#raw);
-		const usable: Usable = (rel, epoch) =>
+		const usable: Usable = (rel, identity) =>
 			this.#relativeTarget(effect, rel) !== undefined &&
-			(epoch === undefined || !provesOther(this.#relativeActive(effect, rel), epoch));
+			(identity === undefined || !provesOther(this.#relativeActive(effect, rel), identity));
 		effect.set(this.#out.catalog, raw ? filterCatalog(raw, usable) : undefined);
 	}
 
@@ -461,20 +463,26 @@ export class Broadcast {
 	 * reference resolves lazily and reacts to `enabled` / connection / announcement
 	 * changes exactly like the catalog broadcast.
 	 *
-	 * `epoch` is the rendition's `epoch` field, the publisher instance the reference names.
-	 * Returns `undefined` while the followed broadcast is proven to be another instance, rather
-	 * than reading it. A route without an epoch cannot prove one, so there it is best effort.
+	 * `identity` is the rendition's `identity` field, the stream the reference names. Returns
+	 * `undefined` while the followed broadcast is proven to be another stream, rather than
+	 * reading it. A route over a wire that carries no identity cannot prove one, so there it is
+	 * best effort.
 	 *
 	 * @internal
 	 */
 	relativeBroadcast(
 		effect: Effect,
 		rel: Path.Relative | undefined,
-		epoch?: Moq.Epoch.Valid,
+		identity?: Moq.Identity.Valid,
 	): Moq.Broadcast.Consumer | undefined {
 		const active = this.#relativeActive(effect, rel);
-		if (!active || !provesOther(active, epoch)) return active;
-		console.warn("ignoring rendition: its broadcast serves another epoch", active.path, active.epoch, epoch);
+		if (!active || !provesOther(active, identity)) return active;
+		console.warn(
+			"ignoring rendition: its broadcast serves another identity",
+			active.path,
+			active.identity,
+			identity,
+		);
 		return undefined;
 	}
 

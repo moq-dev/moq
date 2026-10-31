@@ -4,8 +4,9 @@
  * Random sequences of route flips, route failures, give-ups, ranges, cache expiry, and reader
  * joins and leaves drive an origin's fronts on the manual clock. Every reader's groups, frames,
  * drops, and end are checked against what one plain cursor on the logical track would see:
- * every group its range and budget allow, each once, in its order. A newer publisher epoch wins
- * the path while older readers stay on theirs until it has no route left, then end with an error.
+ * every group its range and budget allow, each once, in its order. A second identity, priced
+ * below the first, wins the path while older readers stay on theirs until it has no route left,
+ * then end with an error.
  *
  * `MOQ_RESUME_SEED` and `MOQ_RESUME_CASES` pick the cases; nightly sweeps a fresh seed.
  */
@@ -14,10 +15,10 @@ import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import fc from "fast-check";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import * as Epoch from "./epoch.ts";
 import { NotFound, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { HopSchema, Route } from "./hop.ts";
+import * as Identity from "./identity.ts";
 import { hooks } from "./internal.ts";
 import { type Consumer as OriginConsumer, Producer as OriginProducer, type Requesting } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -28,9 +29,9 @@ import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
 /** Groups in the logical track; group `g` has `1 + g % 3` frames. */
 const GROUPS = 12;
-/** Routes per epoch, cheaper the higher the slot. */
+/** Routes per identity, cheaper the higher the slot. */
 const SLOTS = 3;
-/** The older publisher instance, then a newer one. */
+/** The first identity, then one whose routes all undercut it. */
 const EPOCHS = 2;
 const READERS = 4;
 const PATH = Path.from("room/alice");
@@ -51,11 +52,7 @@ function payload(epoch: number, group: number, frame: number): string {
 	return `e${epoch}:${group}.${frame}`;
 }
 
-// UUIDv7s minted in order, so the second is the newer instance.
-const EPOCH_IDS = [
-	Epoch.parse("01900000-0000-7000-8000-000000000001"),
-	Epoch.parse("01900000-0001-7000-8000-000000000001"),
-];
+const EPOCH_IDS = [Identity.parse("first"), Identity.parse("second")];
 
 /** How a route fails: its session closes on the far side. */
 function routeFailure(): Error {
@@ -436,9 +433,10 @@ class Model {
 		const instance = this.instances[epoch];
 		if (instance.routes[slot]) return;
 		const route = Route.normalize({
-			epoch: EPOCH_IDS[epoch],
+			identity: EPOCH_IDS[epoch],
 			hops: [HopSchema.parse(BigInt(10 * (epoch + 1) + slot))],
-			cost: BigInt(SLOTS - slot),
+			// The second identity's routes all undercut the first's.
+			cost: BigInt((EPOCHS - epoch) * SLOTS - slot),
 		});
 		const serving = wireOf(this.origin).receive(PATH, route);
 		const broadcast = new BroadcastProducer();
@@ -546,7 +544,7 @@ class Model {
 			await this.clock.advance(Nano.zero);
 		}
 		const broadcast = request.active.peek();
-		const instance = broadcast?.epoch === undefined ? -1 : EPOCH_IDS.indexOf(broadcast.epoch);
+		const instance = broadcast?.identity === undefined ? -1 : EPOCH_IDS.indexOf(broadcast.identity);
 		if (!broadcast || instance === -1) {
 			request.close();
 			throw fail(index, "resolved no known instance");

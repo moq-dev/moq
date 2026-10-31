@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import * as Epoch from "../epoch.ts";
 import { ProtocolViolation } from "../error.ts";
 import { Cost, HopSchema, UNKNOWN_HOP } from "../hop.ts";
+import * as Identity from "../identity.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
@@ -76,10 +76,10 @@ test("AnnounceBroadcast round-trips on draft-06", async () => {
 
 test("AnnounceBroadcast carries a restart only on draft-07", async () => {
 	const hops = [HopSchema.parse(7n)];
-	const epoch = Epoch.mint();
+	const identity = Identity.random();
 	for (const msg of [
-		{ status: "restart" as const, id: 3n, epoch, hops, cost: 12n },
-		{ status: "restart" as const, id: 3n, epoch: undefined, hops, cost: 12n },
+		{ status: "restart" as const, id: 3n, identity, epoch: 0n, hops, cost: 12n },
+		{ status: "restart" as const, id: 3n, identity, epoch: 7n, hops, cost: 12n },
 	]) {
 		expect(await roundTrip(msg, Version.DRAFT_07)).toEqual(msg);
 	}
@@ -107,7 +107,8 @@ test("AnnounceBroadcast carries a takeover only on draft-07", async () => {
 		predecessor: 2n,
 		suffix: Path.from("p"),
 		pathBase: { distance: 1n, keep: 1 },
-		epoch: Epoch.mint(),
+		identity: Identity.random(),
+		epoch: 3n,
 		hops,
 		hopBase: undefined,
 		cost: 12n,
@@ -258,7 +259,8 @@ test("a 64-bit hop is unknown on draft-06 and whole on draft-07", async () => {
 		[Version.DRAFT_06, UNKNOWN_HOP],
 		[Version.DRAFT_07, wide],
 	] as const) {
-		const got = await roundTrip({ status: "active", suffix: Path.from("room"), hops: [wide] }, version);
+		const identity = Identity.parse("a");
+		const got = await roundTrip({ status: "active", suffix: Path.from("room"), identity, hops: [wide] }, version);
 		expect(got).toMatchObject({ hops: [want] });
 
 		const msg = new AnnounceOk(wide, 0);
@@ -346,6 +348,8 @@ async function resolveStream(data: Uint8Array) {
 
 const hop = (id: bigint) => HopSchema.parse(id);
 const relay = hop(0x2222n);
+const a = Identity.parse("a");
+const b = Identity.parse("b");
 const GOLDEN_RESOLVED = [
 	{ start: { suffix: Path.from("room/a/cam"), hops: [hop(0x1111n), relay] } },
 	{ start: { suffix: Path.from("room/a/mic"), hops: [hop(0x3333n), relay] } },
@@ -357,7 +361,7 @@ const GOLDEN_RESOLVED = [
 // Pinned from the Rust encoder (`lite::compress::tests::golden_stream_is_pinned`), so the
 // JS decoder is checked against real compressed output.
 const GOLDEN =
-	"001600000a726f6f6d2f612f63616d0000029111a2220000000d0102036d6963000101b33301000208000101c044440100010101000c02010162000201c055550100";
+	"001800000a726f6f6d2f612f63616d01610000029111a2220000000f0102036d69630161000101b33301000208000101c044440100010101000e020101620161000201c055550100";
 
 test("AnnounceHistory resolves the Rust encoder's compressed stream", async () => {
 	expect(await resolveStream(unhex(GOLDEN))).toEqual(GOLDEN_RESOLVED);
@@ -365,7 +369,7 @@ test("AnnounceHistory resolves the Rust encoder's compressed stream", async () =
 
 // JS always encodes literally; Rust decodes these bytes too (`js_literal_stream_decodes`).
 const JS_LITERAL =
-	"001600000a726f6f6d2f612f63616d0000029111a2220000001600000a726f6f6d2f612f6d6963000002b333a2220000020a000002c04444a22200000101010013000006726f6f6d2f62000002c05555a2220000";
+	"001800000a726f6f6d2f612f63616d01610000029111a2220000001800000a726f6f6d2f612f6d69630161000002b333a2220000020a000002c04444a22200000101010015000006726f6f6d2f620161000002c05555a2220000";
 
 test("the literal draft-07 stream matches what Rust decodes", async () => {
 	const wire = await bytes(async (w) => {
@@ -373,19 +377,19 @@ test("the literal draft-07 stream matches what Rust decodes", async () => {
 		const cost = 0n;
 		await encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room/a/cam"), hops: [hop(0x1111n), relay], cost },
+			{ status: "active", suffix: Path.from("room/a/cam"), identity: a, hops: [hop(0x1111n), relay], cost },
 			v,
 		);
 		await encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room/a/mic"), hops: [hop(0x3333n), relay], cost },
+			{ status: "active", suffix: Path.from("room/a/mic"), identity: a, hops: [hop(0x3333n), relay], cost },
 			v,
 		);
 		await encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [hop(0x4444n), relay], cost }, v);
 		await encodeAnnounceBroadcast(w, { status: "endedId", id: 1n }, v);
 		await encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room/b"), hops: [hop(0x5555n), relay], cost },
+			{ status: "active", suffix: Path.from("room/b"), identity: a, hops: [hop(0x5555n), relay], cost },
 			v,
 		);
 	}, Version.DRAFT_07);
@@ -476,16 +480,20 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 	const ceiling = 2n ** 62n - 1n;
 	const huge = 2n ** 64n - 1n;
 	for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
-		const got = await roundTrip({ status: "active", suffix: Path.from("x"), hops: [], cost: huge }, version);
+		const identity = Identity.parse("a");
+		const got = await roundTrip(
+			{ status: "active", suffix: Path.from("x"), identity, hops: [], cost: huge },
+			version,
+		);
 		expect(got).toMatchObject({ cost: ceiling });
 	}
 
-	// ANNOUNCE_START: path base, path keep, empty suffix, no epoch, hop base, no hops, hop
-	// keep, then a cost of 2^64-1, which only lite-07's varints can carry.
+	// ANNOUNCE_START: path base, path keep, empty suffix, identity "a", epoch 0, hop base, no
+	// hops, hop keep, then a cost of 2^64-1, which only lite-07's varints can carry.
 	const wire = await bytes(async (w) => {
 		await w.u53(0);
-		await w.u53(16);
-		for (const b of [0, 0, 0, 0, 0, 0, 0]) await w.u8(b);
+		await w.u53(18);
+		for (const byte of [0, 0, 0, 1, 0x61, 0, 0, 0, 0]) await w.u8(byte);
 		await w.u62(huge);
 	}, Version.DRAFT_07);
 	const got = await decodeAnnounceBroadcast(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07);
@@ -495,11 +503,16 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 test("wip start and update carry one static cost", async () => {
 	const v = Version.DRAFT_07;
 	const start = await bytes(
-		(w) => encodeAnnounceBroadcast(w, { status: "active", suffix: Path.empty(), hops: [], cost: Cost.zero }, v),
+		(w) =>
+			encodeAnnounceBroadcast(
+				w,
+				{ status: "active", suffix: Path.empty(), identity: b, hops: [], cost: Cost.zero },
+				v,
+			),
 		v,
 	);
-	// Path base, path keep, empty suffix, no epoch, hop base, no hops, hop keep, cost.
-	expect([...start]).toEqual([0, 8, 0, 0, 0, 0, 0, 0, 0, 0]);
+	// Path base, path keep, empty suffix, identity "b", epoch 0, hop base, no hops, hop keep, cost.
+	expect([...start]).toEqual([0, 10, 0, 0, 0, 1, 0x62, 0, 0, 0, 0, 0]);
 	const update = await bytes(
 		(w) => encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [], cost: Cost.zero }, v),
 		v,

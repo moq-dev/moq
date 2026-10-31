@@ -57,6 +57,7 @@ import {
 	hasCompression,
 	hasDatagrams,
 	hasEndError,
+	hasIdentity,
 	hasLargest,
 	hasProbeRtt,
 	hasRouteCost,
@@ -558,12 +559,25 @@ export class Publisher {
 			auth: undefined,
 		});
 
+		// Another identity is another stream, and a newer epoch of the same one is no new
+		// stream but must still be ranked by the peer, so lite-07 restarts in place for either.
+		const restarted = (prev: Advertised, next: Advertised): boolean =>
+			!sameInstance(prev, next) ||
+			(hasIdentity(this.version) && (prev.route.epoch ?? 0n) !== (next.route.epoch ?? 0n));
+
 		const announce = async (suffix: Path.Valid, route: Route) => {
-			console.debug(`announce: broadcast=${suffix} active=true epoch=${route.epoch}`);
+			console.debug(`announce: broadcast=${suffix} active=true identity=${route.identity}`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{ status: "active", suffix, epoch: route.epoch, hops: wireHops(route), cost: route.cost },
+				{
+					status: "active",
+					suffix,
+					identity: route.identity,
+					epoch: route.epoch,
+					hops: wireHops(route),
+					cost: route.cost,
+				},
 				this.version,
 			);
 		};
@@ -587,7 +601,7 @@ export class Publisher {
 			);
 		};
 
-		// Another publisher instance: ANNOUNCE_RESTART on lite-07, an end and a start before it.
+		// Another identity or epoch: ANNOUNCE_RESTART on lite-07, an end and a start before it.
 		const restart = async (suffix: Path.Valid, route: Route) => {
 			const id = announceIds.get(suffix);
 			if (id === undefined || !hasAnnounceRestart(this.version)) {
@@ -595,10 +609,17 @@ export class Publisher {
 				await announce(suffix, route);
 				return;
 			}
-			console.debug(`announce: broadcast=${suffix} restart=true epoch=${route.epoch}`);
+			console.debug(`announce: broadcast=${suffix} restart=true identity=${route.identity} epoch=${route.epoch}`);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{ status: "restart", id, epoch: route.epoch, hops: wireHops(route), cost: route.cost },
+				{
+					status: "restart",
+					id,
+					identity: route.identity,
+					epoch: route.epoch,
+					hops: wireHops(route),
+					cost: route.cost,
+				},
 				this.version,
 			);
 		};
@@ -680,7 +701,7 @@ export class Publisher {
 						if (
 							queued?.end ||
 							!prev ||
-							!sameInstance(prev, snap) ||
+							restarted(prev, snap) ||
 							!routesEqual(onWire(prev.route), onWire(snap.route))
 						) {
 							pending.set(suffix, { end: queued?.end ?? false, next: snap });
@@ -727,7 +748,7 @@ export class Publisher {
 						const prev = active.get(suffix);
 						active.set(suffix, entry.next);
 						if (!prev) await announce(suffix, entry.next.route);
-						else if (!sameInstance(prev, entry.next)) await restart(suffix, entry.next.route);
+						else if (restarted(prev, entry.next)) await restart(suffix, entry.next.route);
 						else await update(suffix, entry.next.route);
 					}
 					if (remaining !== undefined) remaining -= 1;
@@ -796,7 +817,7 @@ export class Publisher {
 					const prev = active.get(suffix);
 					if (!prev) {
 						await announce(suffix, snap.route);
-					} else if (!sameInstance(prev, snap)) {
+					} else if (restarted(prev, snap)) {
 						await restart(suffix, snap.route);
 					} else if (!routesEqual(onWire(prev.route), onWire(snap.route))) {
 						await update(suffix, snap.route);
@@ -872,8 +893,8 @@ export class Publisher {
 		try {
 			front =
 				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, left.signal)));
+				(wireOf(this.#publish).local(msg.broadcast, msg.identity) ??
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.identity, left.signal)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -1078,8 +1099,8 @@ export class Publisher {
 			try {
 				front =
 					this.#publish &&
-					(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-						(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, holding)));
+					(wireOf(this.#publish).local(msg.broadcast, msg.identity) ??
+						(await wireOf(this.#publish).demand(msg.broadcast, msg.identity, holding)));
 			} catch (err: unknown) {
 				stream.writer.reset(error(err));
 				return;
@@ -1535,8 +1556,8 @@ export class Publisher {
 		try {
 			const front =
 				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, hold.signal)));
+				(wireOf(this.#publish).local(msg.broadcast, msg.identity) ??
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.identity, hold.signal)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track, hold.signal);
@@ -1590,8 +1611,8 @@ export class Publisher {
 			const origin = this.#publish && wireOf(this.#publish);
 			const front =
 				origin &&
-				(origin.local(msg.broadcast, msg.epoch) ??
-					(await origin.demand(msg.broadcast, msg.epoch, cancel.signal)));
+				(origin.local(msg.broadcast, msg.identity) ??
+					(await origin.demand(msg.broadcast, msg.identity, cancel.signal)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			tracks = wireOf(front).tracks(this);

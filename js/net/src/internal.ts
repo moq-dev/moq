@@ -10,10 +10,10 @@ import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Datagram } from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
-import type * as Epoch from "./epoch.ts";
 import { toStreamCode } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
+import type * as Identity from "./identity.ts";
 import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
@@ -603,10 +603,12 @@ export const hooks: {
 	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
-	/** Name the epoch of the route an origin resolved a broadcast handle through. */
-	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
+	/** Name the identity of the route an origin resolved a broadcast handle through. */
+	stampIdentity: (target: BroadcastConsumer, identity: Identity.Valid | undefined) => void;
 	/** Mark a broadcast handle served through a route claiming a shorter prefix: it lists nothing. */
 	stampUnlisted: (target: BroadcastConsumer) => void;
+	/** Whether a broadcast handle was {@link stampUnlisted marked unlisted}. */
+	unlisted: (target: BroadcastConsumer) => boolean;
 	/**
 	 * Resolve a session-forwarded request with its peer's routed broadcast. An application
 	 * claim answers through `prepare` and `publish` instead. Assigned by `origin.ts`.
@@ -836,10 +838,13 @@ export const hooks: {
 	stampPath: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
-	stampEpoch: () => {
+	stampIdentity: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 	stampUnlisted: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	unlisted: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 	acceptRequest: () => {
@@ -847,24 +852,39 @@ export const hooks: {
 	},
 };
 
-/**
- * Spreads equal routes across paths: FNV-1a 64 of `path` then each hop, oldest first, as 8
- * little-endian bytes. Keyed on the requested path so an equal-cost pool advertising one
- * prefix shares its paths, and every node holding the same routes picks the same member.
- * Mirrors `fnv_key` in `rs/moq-net`; the seed is the draft's Spread Hash offset basis.
- */
-export function spreadHash(path: string, hops: readonly bigint[]): bigint {
+/** FNV-1a 64 of `path`, then `bytes`. The seed is the draft's Spread Hash offset basis. */
+function fnv(path: string, bytes: Iterable<number>): bigint {
 	const prime = 0x100000001b3n;
 	let hash = 0x420c0decb00bn;
 	for (const byte of new TextEncoder().encode(path)) {
 		hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * prime);
 	}
-	for (const hop of hops) {
-		for (let shift = 0n; shift < 64n; shift += 8n) {
-			hash = BigInt.asUintN(64, (hash ^ ((hop >> shift) & 0xffn)) * prime);
-		}
+	for (const byte of bytes) {
+		hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * prime);
 	}
 	return hash;
+}
+
+/**
+ * Spreads a pool's identities across paths: FNV-1a 64 of `path` then the identity's UTF-8.
+ * Keyed on the requested path so a pool advertising one prefix shares its paths, and every
+ * node agrees, since the identity reads the same everywhere. Mirrors `identity_key` in
+ * `rs/moq-net`.
+ */
+export function spreadHash(path: string, identity: string): bigint {
+	return fnv(path, new TextEncoder().encode(identity));
+}
+
+/**
+ * Settles among one identity's routes: FNV-1a 64 of `path` then each hop, oldest first, as 8
+ * little-endian bytes. Mirrors `chain_key` in `rs/moq-net`.
+ */
+export function chainHash(path: string, hops: readonly bigint[]): bigint {
+	const bytes: number[] = [];
+	for (const hop of hops) {
+		for (let shift = 0n; shift < 64n; shift += 8n) bytes.push(Number((hop >> shift) & 0xffn));
+	}
+	return fnv(path, bytes);
 }
 
 /** Covering prefixes, most specific first, including the empty root. */
@@ -877,34 +897,38 @@ export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
 	}
 }
 
-/** Prefer the newer epoch, with none last. */
-export function compareEpochs(a: Route, b: Route): number {
-	if (a.epoch === b.epoch) return 0;
-	if (a.epoch === undefined) return 1;
-	if (b.epoch === undefined) return -1;
-	return a.epoch > b.epoch ? -1 : 1;
+/**
+ * Whether `route` at `prefix` is superseded among `others`: one of them carries its identity at
+ * a higher epoch at the same prefix. An older incarnation of an identity is never eligible,
+ * however cheap, since its publisher was replaced.
+ */
+export function superseded(route: Route, others: Iterable<Route>): boolean {
+	for (const other of others) {
+		if (other.identity === route.identity && (other.epoch ?? 0n) > (route.epoch ?? 0n)) return true;
+	}
+	return false;
 }
 
-/** Prefer newer epochs, identified publishers, then lower static cost. */
+/** Prefer identified publishers, then lower static cost. */
 export function compareRoutes(a: Route, b: Route): number {
-	return (
-		compareEpochs(a, b) ||
-		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
-		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
-	);
+	return Number(isAnonymous(a)) - Number(isAnonymous(b)) || (a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0);
 }
 
 /**
- * Order routes at `prefix` resolving `path` by preference, hop count, and the stable spread
- * hash. The hash only spreads a prefix's paths: at the prefix itself a tie is left for the
- * newest to win, so a publisher that reconnects under a new hop takes over from its lingering
- * session at once, matching `route_order` in rs/moq-net for routes a node did not get from a
- * cluster peer, which is every route here.
+ * Order eligible routes at `prefix` resolving `path` by preference, hop count, then the spread
+ * hash of each identity, then, within one identity, the hash of its chain. The hashes only
+ * spread a prefix's paths: at the prefix itself a tie is left for the newest to win, so a
+ * publisher that restarts under a new identity takes over from its lingering session at once,
+ * matching `route_order` in rs/moq-net for routes a node did not get from a cluster peer, which
+ * is every route here.
  */
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: Route, b: Route): number {
 	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
 	if (order !== 0 || path === prefix) return order;
-	const ha = spreadHash(path, a.hops);
-	const hb = spreadHash(path, b.hops);
-	return ha < hb ? -1 : ha > hb ? 1 : 0;
+	const ha = spreadHash(path, a.identity ?? "");
+	const hb = spreadHash(path, b.identity ?? "");
+	if (ha !== hb) return ha < hb ? -1 : 1;
+	const ca = chainHash(path, a.hops);
+	const cb = chainHash(path, b.hops);
+	return ca < cb ? -1 : ca > cb ? 1 : 0;
 }

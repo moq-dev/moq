@@ -1,8 +1,8 @@
 import type * as broadcast from "./broadcast.ts";
-import type * as Epoch from "./epoch.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import type { Route } from "./hop.ts";
-import { compareRouteCandidates, coveringPrefixes } from "./internal.ts";
+import * as Identity from "./identity.ts";
+import { compareRouteCandidates, coveringPrefixes, superseded } from "./internal.ts";
 import type * as Path from "./path.ts";
 import { type Instance, sameInstance } from "./wire.ts";
 
@@ -48,7 +48,10 @@ class Blind implements Selection {
 
 /** Consumed broadcasts shared only within the selected serving instance. @internal */
 export class BroadcastCache {
-	#cache = new Map<Path.Valid, Map<Epoch.Valid | object, { consumer: broadcast.Consumer; selection: Selection }>>();
+	#cache = new Map<
+		Path.Valid,
+		Map<Identity.Valid | object, { consumer: broadcast.Consumer; selection: Selection }>
+	>();
 	#announced = new Map<Path.Valid, Map<object, { identity: object; route: Route }>>();
 	#blind = new Map<Path.Valid, Blind>();
 	#blindPrefixes = new Map<Path.Valid, Set<Path.Valid>>();
@@ -82,19 +85,22 @@ export class BroadcastCache {
 			const entries = this.#announced.get(prefix);
 			if (!entries) continue;
 			let best: { identity: object; route: Route } | undefined;
+			const routes = [...entries.values()].map((entry) => entry.route);
 			for (const entry of entries.values()) {
+				if (superseded(entry.route, routes)) continue;
 				if (!best || compareRouteCandidates(path, prefix, entry.route, best.route) < 0) best = entry;
 			}
 			if (best) {
-				const cached = this.#cache.get(path)?.get(best.route.epoch ?? best.identity);
+				const cached = this.#cache.get(path)?.get(best.route.identity ?? best.identity);
+				// A minted identity names the announcement, not the publisher's stream, so a
+				// request for it can only name the path: it holds while this route is selected.
+				const named = best.route.identity !== undefined && !Identity.isMinted(best.route.identity);
 				return {
 					...best,
-					validity:
-						best.route.epoch === undefined
-							? ((cached?.consumer.closed.peek() === undefined
-									? cached?.selection.validity
-									: undefined) ?? new Validity())
-							: undefined,
+					validity: !named
+						? ((cached?.consumer.closed.peek() === undefined ? cached?.selection.validity : undefined) ??
+							new Validity())
+						: undefined,
 				};
 			}
 		}
@@ -103,7 +109,7 @@ export class BroadcastCache {
 
 	/** Clone the live cached consumer only when it serves the selected instance. */
 	get(path: Path.Valid, instance: Instance): broadcast.Consumer | undefined {
-		const cached = this.#cache.get(path)?.get(instance.route.epoch ?? instance.identity);
+		const cached = this.#cache.get(path)?.get(instance.route.identity ?? instance.identity);
 		return cached?.consumer.closed.peek() === undefined ? cached?.consumer.clone() : undefined;
 	}
 
@@ -114,7 +120,7 @@ export class BroadcastCache {
 			entries = new Map();
 			this.#cache.set(path, entries);
 		}
-		const key = instance.route.epoch ?? instance.identity;
+		const key = instance.route.identity ?? instance.identity;
 		const entry = { consumer, selection: instance };
 		entries.set(key, entry);
 		for (const prefix of coveringPrefixes(path)) {

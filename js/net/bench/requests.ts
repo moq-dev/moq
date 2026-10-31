@@ -1,6 +1,6 @@
 /** Sweep request restart, cancellation, and discovery settlement over independent origin and waiter dimensions. */
 import { Producer as Broadcast } from "../src/broadcast";
-import * as Epoch from "../src/epoch";
+import * as Identity from "../src/identity.ts";
 import { Publisher as IetfPublisher } from "../src/ietf/publisher";
 import { RequestOk } from "../src/ietf/request";
 import { NativeSession } from "../src/ietf/session";
@@ -128,7 +128,7 @@ for (const pending of [128, 1024, 8192])
 		console.log(`${pending},${landed},${samples[2].toFixed(2)}`);
 	}
 
-// Keep old instances on distinct same-epoch failovers, then cancel new demand.
+// Keep old instances on distinct same-identity failovers, then cancel new demand.
 // This exercises ownership checks inside one cleanup, independently of wire sharing.
 console.log("failovers,extra_routes,cancel_us");
 for (const failovers of [0, 1, 16, 128])
@@ -141,10 +141,10 @@ for (const failovers of [0, 1, 16, 128])
 			const entries = [];
 			const sources: Broadcast[] = [];
 			for (let i = 0; i < failovers; i++) {
-				const epoch = Epoch.mint();
-				const primary = origin.requestsRoute(prefix, { epoch, cost: 0n });
+				const epoch = Identity.random();
+				const primary = origin.requestsRoute(prefix, { identity: epoch, cost: 0n });
 				const ar = primary.requested();
-				const br = origin.requestsRoute(prefix, { epoch, cost: 1n }).requested();
+				const br = origin.requestsRoute(prefix, { identity: epoch, cost: 1n }).requested();
 				const held = origin.request(path);
 				const source = new Broadcast();
 				sources.push(source);
@@ -153,9 +153,10 @@ for (const failovers of [0, 1, 16, 128])
 				await settle();
 				entries.push({ primary, ar, br, held });
 			}
-			const epoch = Epoch.mint();
-			origin.requestsRoute(prefix, { epoch });
-			for (let i = 0; i < extraRoutes; i++) origin.requestsRoute(prefix, { epoch, cost: BigInt(i + 1) });
+			const epoch = Identity.random();
+			origin.requestsRoute(prefix, { identity: epoch });
+			for (let i = 0; i < extraRoutes; i++)
+				origin.requestsRoute(prefix, { identity: epoch, cost: BigInt(i + 1) });
 			const pending = [];
 			for (const entry of entries) {
 				entry.primary.close();

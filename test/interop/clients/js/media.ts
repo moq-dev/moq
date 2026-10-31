@@ -1306,12 +1306,10 @@ try {
 					description: "the incumbent's marked pixels",
 					predicate: (s) => s.generation === 0 && !s.audioStalled,
 				});
-				check(
-					version === "moq-lite-07-wip"
-						? first.broadcastEpoch !== undefined
-						: first.broadcastEpoch === undefined,
-					"negotiated epoch identity",
-					() => JSON.stringify(first),
+				// Every route carries an identity: lite-07 names the publisher's, and an older wire's
+				// session mints one for the announcement.
+				check(first.broadcastIdentity !== undefined, "the route carries an identity", () =>
+					JSON.stringify(first),
 				);
 				const before = await readFixtureState(old);
 				const [replacement, replacementErrors] = await open(
@@ -1341,10 +1339,9 @@ try {
 					predicate: (s) => s.generation === 1 && !s.audioStalled && playsInSync(s),
 				});
 				const replacementMs = Date.now() - ready;
-				if (version === "moq-lite-07-wip")
-					check(switched.broadcastEpoch !== first.broadcastEpoch, "replacement has a fresh epoch", () =>
-						JSON.stringify(switched),
-					);
+				check(switched.broadcastIdentity !== first.broadcastIdentity, "replacement has a fresh identity", () =>
+					JSON.stringify(switched),
+				);
 				const during = await collect(watch, watchErrors, WINDOW_MS);
 				check(
 					during.every((s) => s.frameId === undefined || s.generation === 1),
@@ -1363,9 +1360,18 @@ try {
 					predicate: (s) => s.generation === 0 && !s.audioStalled && playsInSync(s),
 				});
 				const fallbackMs = Date.now() - withdrawn;
-				check(back.broadcastEpoch === first.broadcastEpoch, "fallback keeps incumbent identity", () =>
-					JSON.stringify(back),
-				);
+				// Only lite-07 carries the incumbent's identity back; an older wire's session mints a
+				// fresh one for the incumbent's new announcement.
+				if (version === "moq-lite-07-wip")
+					check(back.broadcastIdentity === first.broadcastIdentity, "fallback keeps incumbent identity", () =>
+						JSON.stringify(back),
+					);
+				else
+					check(
+						back.broadcastIdentity !== switched.broadcastIdentity,
+						"fallback leaves the replacement",
+						() => JSON.stringify(back),
+					);
 				await measurePlayback(watch, watchErrors, `fallback ${version}`);
 				console.error(
 					`  ${version}: replacement ${replacementMs}ms, fallback ${fallbackMs}ms, bound ${SWITCH_MS}ms`,

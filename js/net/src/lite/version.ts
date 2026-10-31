@@ -411,9 +411,10 @@ export function hasAnnounceTakeover(version: Version): boolean {
 	return hasAnnounceRestart(version);
 }
 
-/** Whether ANNOUNCE_START, TRACK, SUBSCRIBE, and FETCH carry the publisher epoch. Added in lite-07.
- * Older versions carry nothing, so a received route has no epoch and is never resumed elsewhere. */
-export function hasEpoch(version: Version): boolean {
+/** Whether announcements carry their identity and epoch, and TRACK, TRACKS, SUBSCRIBE, and FETCH
+ * the identity they pin. Added in lite-07. Older versions carry nothing, so the receiving session
+ * mints an identity for each announcement. */
+export function hasIdentity(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:

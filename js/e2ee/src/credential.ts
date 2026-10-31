@@ -1,5 +1,6 @@
-import { type Epoch, Path } from "@moq/net";
+import { Path } from "@moq/net";
 import { checkBytes, checkU53, encode, pathInfo } from "./derive.ts";
+import type * as Epoch from "./epoch.ts";
 import { Failure } from "./failure.ts";
 import * as Generation from "./generation.ts";
 import { PATH_LEN } from "./limits.ts";

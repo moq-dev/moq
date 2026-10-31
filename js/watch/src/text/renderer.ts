@@ -254,7 +254,7 @@ export class Renderer {
 		const [_enabled, container, track, config, broadcast] = values;
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source broadcast.
-		const active = broadcast.relativeBroadcast(effect, config.broadcast, config.epoch);
+		const active = broadcast.relativeBroadcast(effect, config.broadcast, config.identity);
 		if (!active) return;
 
 		// A new track gets its own chance to complain about its clock.

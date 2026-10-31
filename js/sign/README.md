@@ -16,9 +16,9 @@ authenticate content, not liveness: a relay that recorded an instance can replay
 An endpoint's `SecretKey` signs; its `PublicKey` is the endpoint ID, displayed as 52 z-base-32
 characters (a DNS label). `SecretKey.generate()` keeps the private half a nonextractable `CryptoKey`.
 
-`Broadcast.Producer` wraps the `@moq/net` broadcast, mints a fresh epoch, and signs each frame
-over the application path, epoch, track, group, frame index, and timestamp (rounded to the
-track's timescale, as the wire carries it). Announce the broadcast with that epoch on its route:
+`Broadcast.Producer` wraps the `@moq/net` broadcast, mints a fresh identity, and signs each frame
+over the application path, identity, track, group, frame index, and timestamp (rounded to the
+track's timescale, as the wire carries it). Announce the broadcast with that identity on its route:
 
 ```ts
 import { Broadcast, SecretKey } from "@moq/sign";
@@ -29,7 +29,7 @@ const path = Path.from(`mesh/${key.public}/agent`);
 const publication = origin.createBroadcast(path);
 const signed = new Broadcast.Producer(publication.broadcast, key, path);
 const messages = signed.createTrack("messages");
-publication.announce({ epoch: signed.epoch });
+publication.announce({ identity: signed.identity });
 
 const group = messages.appendGroup();
 await group.writeFrame(undefined, payload);
@@ -37,9 +37,9 @@ group.finish();
 ```
 
 A subscriber wraps the broadcast an origin resolved in a `Broadcast.Consumer` with the key it
-expects and the same application path; it takes the epoch from the route. A frame reaches the
+expects and the same application path; it takes the identity from the route. A frame reaches the
 application only after it verifies. A forged or relocated frame ends its group with `Failure`
-code `signature`, and the track keeps delivering other groups. Every hop must carry the epoch and
+code `signature`, and the track keeps delivering other groups. Every hop must carry the identity and
 timestamps unchanged, which means moq-lite-07. A group's end is not signed: a relay may drop a
 group's tail, as MoQ already allows.
 

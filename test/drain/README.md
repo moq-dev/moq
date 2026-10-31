@@ -33,11 +33,11 @@ deletes its own.
   its own sequence number. A pulls the track through the cluster, so both relays
   serve the same groups.
 - **The viewer** is `@moq/net` over WebSocket. It requests the path once and
-  reads one subscription for the whole run. The publisher mints an epoch, so
-  B's route serves the same broadcast as A's, and the origin resumes the track
-  there from the first group the viewer lacks. Epochs travel on the
-  work-in-progress moq-lite-07 only, so the relays, A's cluster dial, and both
-  JS sessions offer it.
+  reads one subscription for the whole run. The publisher's route carries one
+  identity through both relays, so B's route serves the same stream as A's, and
+  the origin resumes the track there from the first group the viewer lacks.
+  Identities travel on the work-in-progress moq-lite-07 only, so the relays,
+  A's cluster dial, and both JS sessions offer it.
 
 Once the viewer has read groups through A, the driver withdraws A from the name
 and sends it SIGTERM, which fires the same trigger an embedder's drain hook

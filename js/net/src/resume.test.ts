@@ -1,10 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import * as Epoch from "./epoch.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Route } from "./hop.ts";
+import * as Identity from "./identity.ts";
 import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { hooks, MAX_DATAGRAMS } from "./internal.ts";
@@ -16,7 +16,7 @@ import type * as track from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
-const EPOCH = Epoch.parse("01900000-0000-7000-8000-000000000001");
+const IDENTITY = Identity.parse("01900000-0000-7000-8000-000000000001");
 const path = Path.from("live");
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -38,7 +38,7 @@ async function isPending(promise: Promise<unknown>): Promise<boolean> {
 
 /** A stand-in session announcing `path` under the epoch at `cost`, serving `source`. */
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
-	const handle = wireOf(origin).receive(path, Route.normalize({ epoch: EPOCH, cost }));
+	const handle = wireOf(origin).receive(path, Route.normalize({ identity: IDENTITY, cost }));
 	void (async () => {
 		for await (const request of handle.requested()) hooks.acceptRequest(request, source.consume());
 	})();
@@ -406,12 +406,12 @@ test("a resumed fork shares an on-demand track request", async () => {
 	expect(await extra).toBeUndefined();
 });
 
-test("a lagging same-epoch replica resumes from one publisher's bytes exactly once", async () => {
+test("a lagging same-identity replica resumes from one publisher's bytes exactly once", async () => {
 	const { clock, installed } = manual();
 	const publisher = new Producer();
 	const originalPublication = publisher.createBroadcast(path);
 	const original = originalPublication.broadcast;
-	originalPublication.announce({ epoch: EPOCH });
+	originalPublication.announce({ identity: IDENTITY });
 	const source = original.createTrack("seq");
 	const origin = new Producer();
 
@@ -549,7 +549,7 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 	}
 });
 
-test("a subscription reads on across a same-epoch route swap, each group once", async () => {
+test("a subscription reads on across a same-identity route swap, each group once", async () => {
 	const { a, b, active, request, swap, close } = await setup();
 	const ta = copy(a);
 	const tb = copy(b);
@@ -891,7 +891,7 @@ test("between routes a reader keeps reading the copy it has", async () => {
 	expect(drain(sub)).toEqual([0]);
 
 	// The next route has not answered when the old one is retracted.
-	const next = wireOf(origin).receive(path, Route.normalize({ epoch: EPOCH, cost: 1n }));
+	const next = wireOf(origin).receive(path, Route.normalize({ identity: IDENTITY, cost: 1n }));
 	const asked = next.requested();
 	disposeA();
 	await settle();

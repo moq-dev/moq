@@ -9,7 +9,7 @@
  */
 import * as z from "zod/mini";
 import type { Credential } from "./auth.ts";
-import type * as Epoch from "./epoch.ts";
+import type * as Identity from "./identity.ts";
 import { isLeadingOnes, type StreamVersion } from "./stream.ts";
 
 /**
@@ -97,12 +97,23 @@ export const Cost = {
  */
 export interface Route {
 	/**
-	 * The publisher instance the route serves, if known: routes with the same epoch serve
-	 * the same bytes. Among routes at one prefix the newest epoch wins, and a route without
-	 * one ranks last. Fixed for the advertisement's lifetime: changing it retracts and
-	 * announces afresh. Mirrors `Route::epoch` in rs/moq-net.
+	 * The stream the route serves: routes with one identity serve one continuous sequence
+	 * space, so a subscription resumes from one to another. Changing it on a standing
+	 * advertisement is a restart. Always set on a route the origin delivers; given to an
+	 * announcing handle, unset keeps the identity its route already has, a fresh random one
+	 * minted when the handle was made. Mirrors `Route::identity` in rs/moq-net.
+	 *
+	 * Set one only for a publisher that continues its group sequences across restarts and
+	 * raises {@link epoch} on each: readers stitch every route of one identity together, so
+	 * restarting the sequences under an old identity splices unrelated groups into their tracks.
 	 */
-	epoch?: Epoch.Valid;
+	identity?: Identity.Valid;
+	/**
+	 * Which incarnation of {@link identity} this is: among its routes at one prefix only the
+	 * highest epoch is eligible, cheaper or not. Never compared across identities. Ignored
+	 * without an identity.
+	 */
+	epoch?: bigint;
 	/** The chain of hops the route has traversed, oldest first. */
 	hops: Hop[];
 	/** What pulling content via this route costs; lower wins. */
@@ -124,13 +135,16 @@ export const Route = {
 
 	/** Fill route defaults and saturate the static price at the wire ceiling. */
 	normalize(
-		route: Route | { epoch?: Epoch.Valid; hops?: readonly Hop[]; cost?: Cost; auth?: Credential } = {},
+		route:
+			| Route
+			| { identity?: Identity.Valid; epoch?: bigint; hops?: readonly Hop[]; cost?: Cost; auth?: Credential } = {},
 	): Route {
 		const cost = route.cost ?? Cost.zero;
 		if (typeof cost !== "bigint" || cost < 0n) throw new RangeError("route cost must be a non-negative bigint");
 		const max = 2n ** 62n - 1n;
 		return {
-			epoch: route.epoch,
+			identity: route.identity,
+			epoch: route.identity === undefined ? undefined : (route.epoch ?? 0n),
 			hops: route.hops ? [...route.hops] : [],
 			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 			cost: cost > max ? max : cost,
@@ -149,11 +163,12 @@ export function isAnonymous(route: Route): boolean {
 	return route.hops.includes(UNKNOWN_HOP);
 }
 
-/** Whether two routes name the same epoch, hop chain, cost, and auth. */
+/** Whether two routes name the same identity, epoch, hop chain, cost, and auth. */
 export function routesEqual(a: Route | undefined, b: Route | undefined): boolean {
 	if (a === b) return true;
 	if (!a || !b) return false;
 	return (
+		a.identity === b.identity &&
 		a.epoch === b.epoch &&
 		a.cost === b.cost &&
 		a.auth === b.auth &&

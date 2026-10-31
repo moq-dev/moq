@@ -10,9 +10,9 @@
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type * as broadcast from "./broadcast.ts";
 import type { Drain } from "./connection/goaway.ts";
-import type * as Epoch from "./epoch.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
+import type * as Identity from "./identity.ts";
 import type { Lister, Tracks } from "./listing.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
@@ -56,7 +56,15 @@ export interface OriginProducer {
 	accepts(prefix: Path.Valid): boolean;
 	receive(
 		prefix: Path.Valid,
-		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
+		route?:
+			| Route
+			| {
+					identity?: Route["identity"];
+					epoch?: Route["epoch"];
+					hops?: Route["hops"];
+					cost?: Route["cost"];
+					auth?: Route["auth"];
+			  },
 	): origin.Requests;
 	attach(discovery: boolean): Dispose;
 	/**
@@ -77,10 +85,10 @@ export interface OriginConsumer {
 	routes(path: Path.Valid): boolean;
 	readonly advertised: Getter<Advertisements | undefined>;
 	/** The announced local broadcast at `path`, when it is the route peers are offered there.
-	 * A request naming an `epoch` only matches a route serving it. */
-	local(path: Path.Valid, epoch?: Epoch.Valid): broadcast.Consumer | undefined;
-	/** Resolve `path` for serving; throws `Unroutable` when the route serves another `epoch`. */
-	demand(path: Path.Valid, epoch?: Epoch.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
+	 * A request naming an `identity` only matches a route serving it. */
+	local(path: Path.Valid, identity?: Identity.Valid): broadcast.Consumer | undefined;
+	/** Resolve `path` for serving; throws `Unroutable` when the route serves another `identity`. */
+	demand(path: Path.Valid, identity?: Identity.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
 }
 
 /** One originated advertisement exposed to the publishing wire. */
@@ -91,18 +99,18 @@ export interface Advertised {
 	readonly claim?: Path.Patterns;
 }
 
-/** What names a publisher instance: an advertisement's identity and epoch. */
+/** What names a stream: an advertisement, and the identity its route serves. */
 export interface Instance {
 	readonly identity: object;
-	readonly route: Pick<Route, "epoch">;
+	readonly route: Pick<Route, "identity">;
 }
 
 /**
- * Whether two advertisements serve one publisher instance: the same epoch, or, without one,
- * the same advertisement, since nothing says another serves the same bytes.
+ * Whether two advertisements serve one stream: the same route identity, or, for a route not
+ * yet named one, the same advertisement.
  */
 export function sameInstance(a: Instance, b: Instance): boolean {
-	if (a.route.epoch !== undefined || b.route.epoch !== undefined) return a.route.epoch === b.route.epoch;
+	if (a.route.identity !== undefined || b.route.identity !== undefined) return a.route.identity === b.route.identity;
 	return a.identity === b.identity;
 }
 

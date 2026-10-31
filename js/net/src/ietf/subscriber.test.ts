@@ -1482,7 +1482,7 @@ test("an object datagram is a datagram group", async () => {
 	track.close();
 });
 
-test("a more specific epochless announcement replaces the consumed source", async () => {
+test("a more specific unnamed announcement replaces the consumed source", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
 	const announced = subscriber.announced();

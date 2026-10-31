@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as z from "@zod/mini";
 import { u53 } from "./integers.ts";
-import type { ReferenceEpoch, RelativeBroadcast } from "./path.ts";
+import type { ReferenceIdentity, RelativeBroadcast } from "./path.ts";
 import { checkRenditions, DuplicateRendition, encode, RootSchema, UnsupportedVersion, VERSION } from "./root.ts";
 import { track } from "./track.ts";
 
@@ -50,20 +50,20 @@ test("rendition broadcast reference is parsed and normalized", () => {
 	}
 });
 
-// Mirrors Rust's `reference_epochs_roundtrip_in_every_section`.
-test("every reference-bearing section carries an optional epoch", () => {
-	const EPOCH = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceEpoch;
-	const catalog = (epoch: string) => ({
+// Mirrors Rust's `reference_identities_roundtrip_in_every_section`.
+test("every reference-bearing section carries an optional identity", () => {
+	const IDENTITY = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceIdentity;
+	const catalog = (identity: string) => ({
 		video: {
 			renditions: {
-				v: { broadcast: "./a", epoch, codec: "avc1.64001f", container: { kind: "legacy" } },
+				v: { broadcast: "./a", identity, codec: "avc1.64001f", container: { kind: "legacy" } },
 			},
 		},
 		audio: {
 			renditions: {
 				a: {
 					broadcast: "./a",
-					epoch,
+					identity,
 					codec: "opus",
 					sampleRate: 48000,
 					numberOfChannels: 2,
@@ -71,24 +71,22 @@ test("every reference-bearing section carries an optional epoch", () => {
 				},
 			},
 		},
-		text: { renditions: { t: { broadcast: "./a", epoch, format: "vtt" } } },
-		json: { tracks: { j: { broadcast: "./a", epoch, mode: "snapshot" } } },
-		binary: { tracks: { b: { broadcast: "./a", epoch, mode: "snapshot" } } },
+		text: { renditions: { t: { broadcast: "./a", identity, format: "vtt" } } },
+		json: { tracks: { j: { broadcast: "./a", identity, mode: "snapshot" } } },
+		binary: { tracks: { b: { broadcast: "./a", identity, mode: "snapshot" } } },
 	});
 
-	const parsed = RootSchema.parse(catalog(EPOCH));
+	const parsed = RootSchema.parse(catalog(IDENTITY));
 	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
 	if (!parsed.audio || !("renditions" in parsed.audio)) throw new Error("missing audio section");
-	expect(parsed.video.renditions.v?.epoch).toBe(EPOCH);
-	expect(parsed.audio.renditions.a?.epoch).toBe(EPOCH);
-	expect(parsed.text?.renditions.t?.epoch).toBe(EPOCH);
-	expect(parsed.json?.tracks.j?.epoch).toBe(EPOCH);
-	expect(parsed.binary?.tracks.b?.epoch).toBe(EPOCH);
+	expect(parsed.video.renditions.v?.identity).toBe(IDENTITY);
+	expect(parsed.audio.renditions.a?.identity).toBe(IDENTITY);
+	expect(parsed.text?.renditions.t?.identity).toBe(IDENTITY);
+	expect(parsed.json?.tracks.j?.identity).toBe(IDENTITY);
+	expect(parsed.binary?.tracks.b?.identity).toBe(IDENTITY);
 
-	// A malformed or noncanonical epoch refuses the catalog, as in Rust.
-	for (const bad of ["not-a-uuid", EPOCH.toUpperCase(), "01890a5d-ac96-474b-bcce-b302099a8057"]) {
-		expect(RootSchema.safeParse(catalog(bad)).success).toBe(false);
-	}
+	// An empty identity refuses the catalog, as in Rust.
+	expect(RootSchema.safeParse(catalog("")).success).toBe(false);
 });
 
 test("rendition parent broadcast reference stays distinct from empty", () => {

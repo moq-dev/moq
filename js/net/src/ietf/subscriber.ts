@@ -20,6 +20,7 @@ import {
 } from "../error.ts";
 import type * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import * as Identity from "../identity.ts";
 import {
 	finalSequence,
 	groupBounds,
@@ -389,7 +390,9 @@ export class Subscriber {
 			this.#settleAnnounce(path, existing);
 			return id;
 		}
-		route = this.#priced(route);
+		// moq-transport carries no identity, so each namespace the peer advertises anew is a
+		// stream of its own, even one it advertised before on this session.
+		route = this.#priced({ ...route, identity: Identity.minted(), epoch: 0n });
 		const entry: Announced = { adverts: [{ id, route }], route };
 		this.#announced.set(path, entry);
 		this.#consumes.announce(path, entry, route);
@@ -421,7 +424,9 @@ export class Subscriber {
 	#settleAnnounce(path: Path.Valid, existing: Announced) {
 		const newest = existing.adverts.at(-1);
 		if (newest === undefined) return;
-		const route = this.#priced(newest.route);
+		// Every advertisement of a path the peer holds is the stream its first one named.
+		const { identity, epoch } = existing.route;
+		const route = this.#priced({ ...newest.route, identity, epoch });
 		if (routesEqual(existing.route, route)) return;
 		existing.route = route;
 		this.#consumes.announce(path, existing, route, false);

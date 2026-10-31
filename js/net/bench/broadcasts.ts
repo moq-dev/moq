@@ -4,8 +4,8 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../src/auth.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { BroadcastCache } from "../src/consume.ts";
-import * as Epoch from "../src/epoch.ts";
 import { HopSchema, Route } from "../src/hop.ts";
+import * as Identity from "../src/identity.ts";
 import { hooks } from "../src/internal.ts";
 import { AnnounceRequest } from "../src/lite/announce.ts";
 import { Publisher } from "../src/lite/publisher.ts";
@@ -126,26 +126,26 @@ for (const trackCount of [8, 128, 1024]) {
 
 // Resolve one touched path while both the table and that path's readers grow.
 console.log("request,routes,readers,update_and_read_us");
-const epoch = Epoch.parse("01900000-0000-7000-8000-000000000001");
+const epoch = Identity.parse("01900000-0000-7000-8000-000000000001");
 for (const pinned of [false, true]) {
 	for (const routeCount of routeCounts) {
 		for (const readerCount of observerCounts) {
 			const origin = new Producer();
 			const reader = origin.consume();
-			const options = pinned ? { epoch } : {};
+			const options = pinned ? { identity: epoch } : {};
 			const publishers = Array.from({ length: routeCount }, (_, index) => {
 				const sourcePublication = origin.createBroadcast(Path.from(`room/${index}`));
-				sourcePublication.announce({ epoch });
+				sourcePublication.announce({ identity: epoch });
 				return sourcePublication;
 			});
 			const background = publishers.map((_, index) => reader.request(Path.from(`room/${index}`), options));
 			const requests = Array.from({ length: readerCount }, () => reader.request(Path.from("room/0"), options));
 			const start = performance.now();
 			for (let index = 0; index < updates; index++) {
-				publishers[0].announce({ epoch, cost: BigInt(index + 1) });
+				publishers[0].announce({ identity: epoch, cost: BigInt(index + 1) });
 				await Promise.resolve();
 				for (const request of requests) {
-					if (!request.active.peek()) throw new Error("same-epoch request lost its front");
+					if (!request.active.peek()) throw new Error("same-identity request lost its front");
 					checksum++;
 				}
 			}
@@ -231,11 +231,11 @@ for (const patternCount of [8, 32, 128]) {
 
 // Restart a served prefix while both its path count and readers per path grow.
 console.log("restart,paths,readers,update_us");
-const nextEpoch = Epoch.parse("01900000-0000-7000-8000-000000000002");
+const nextIdentity = Identity.parse("01900000-0000-7000-8000-000000000002");
 for (const pathCount of routeCounts) {
 	for (const readerCount of observerCounts) {
 		const origin = new Producer();
-		const dynamic = origin.requestsRoute(Path.from("room"), { epoch });
+		const dynamic = origin.requestsRoute(Path.from("room"), { identity: epoch });
 		const pending = dynamic.requested();
 		const requests = Array.from({ length: pathCount }, (_, index) =>
 			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),
@@ -248,7 +248,7 @@ for (const pathCount of routeCounts) {
 		await Promise.resolve();
 		const before = requests.map((request) => request.active.peek());
 		const start = performance.now();
-		dynamic.updateRoute({ epoch: nextEpoch });
+		dynamic.updateRoute({ identity: nextIdentity });
 		await Promise.resolve();
 		const elapsed = performance.now() - start;
 		for (const [index, request] of requests.entries()) {
@@ -302,11 +302,11 @@ for (const routeCount of routeCounts) {
 		const held = sources.map((source, i) => cache.insert(paths[i], cache.instance(paths[i]), source.consume()));
 		const specific = {};
 		const prefix = Path.from("pool/0/job");
-		const epoch = Epoch.mint();
+		const epoch = Identity.random();
 		let duplicates = 0;
 		const start = performance.now();
 		for (let round = 0; round < 256; round++) {
-			if (round % 2 === 0) cache.announce(prefix, specific, { ...Route.default, epoch });
+			if (round % 2 === 0) cache.announce(prefix, specific, { ...Route.default, identity: epoch });
 			else cache.withdraw(prefix, specific);
 			for (let i = 0; i < consumerCount; i++) {
 				const instance = cache.instance(paths[i]);
