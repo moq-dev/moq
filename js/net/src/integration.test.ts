@@ -29,6 +29,7 @@ import * as Path from "./path.ts";
 import { Stream } from "./stream.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Position, Producer as TrackProducer } from "./track.ts";
+import { unwanted } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
@@ -457,16 +458,25 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		]);
 
 		const broadcast = publish(origin, Path.from("test"));
-		const demand = broadcast.demand();
+		// Whether anyone subscribes to the served track, recorded on each change.
 		const edges: boolean[] = [];
-		const dispose = demand.used.subscribe((used) => edges.push(used));
+		let producer: TrackProducer | undefined;
+		let dispose = () => {};
 		let requests = 0;
 		const serving = (async () => {
 			for (;;) {
 				const request = await wireOf(broadcast).requested();
 				if (!request) return;
 				requests++;
-				request.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
+				producer = request.accept({ timescale: Timescale.MILLI });
+				const wanted = producer.demand().wanted;
+				const edge = () => {
+					const now = wanted.peek() !== undefined;
+					if (edges.at(-1) !== now) edges.push(now);
+				};
+				edge();
+				dispose = wanted.subscribe(edge);
+				producer.writeFrame(textFrame("hello"));
 			}
 		})();
 
@@ -474,12 +484,17 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		const track = remote.track("video").subscribe().ordered();
 		expect(await track.readString()).toBe("hello");
 		await sleep(50);
-		expect(edges).toEqual([true]);
+		// One request, wanted from its subscription on and never let go in between.
+		if (!producer) throw new Error("the track was never answered");
+		const served = producer;
 		expect(requests).toBe(1);
+		expect(edges.filter((edge) => edge)).toEqual([true]);
+		expect(edges.at(-1)).toBe(true);
 
 		track.close();
-		await withTimeout(demand.unused(), Nano.fromMilli(Milli(1000)), "demand outlived the reader");
-		expect(edges).toEqual([true, false]);
+		await withTimeout(unwanted(served.demand()), Nano.fromMilli(Milli(1000)), "demand outlived the reader");
+		expect(edges.at(-1)).toBe(false);
+		expect(edges.filter((edge) => edge)).toEqual([true]);
 
 		dispose();
 		remote.close();
@@ -1449,12 +1464,12 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 	expect(await fetched.readString()).toBe("hello");
 
 	// The publisher is now serving the still-open group.
-	await waitUntil(() => group.demand().used.peek());
+	await waitUntil(() => group.demand().wanted.peek());
 
 	// Abandoning the fetch cancels the FETCH stream, so the publisher stops serving instead of
 	// pumping an open group to a reader that left.
 	fetched.close();
-	await waitUntil(() => !group.demand().used.peek());
+	await waitUntil(() => !group.demand().wanted.peek());
 
 	group.finish();
 	broadcast.close();
@@ -1557,17 +1572,17 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 	const f2 = await remote.track("video").fetchGroup(group.sequence);
 	expect(await f1.readString()).toBe("hello");
 	expect(await f2.readString()).toBe("hello");
-	await waitUntil(() => group.demand().used.peek());
+	await waitUntil(() => group.demand().wanted.peek());
 
 	// Closing one coalesced reader keeps the shared FETCH flowing for the other.
 	f1.close();
 	group.writeFrame(textFrame("more"));
 	expect(await f2.readString()).toBe("more");
-	expect(group.demand().used.peek()).toBe(true);
+	expect(group.demand().wanted.peek()).toBe(true);
 
 	// The last abandon cancels the FETCH.
 	f2.close();
-	await waitUntil(() => !group.demand().used.peek());
+	await waitUntil(() => !group.demand().wanted.peek());
 
 	group.finish();
 	broadcast.close();
@@ -2642,7 +2657,7 @@ const DEATH = SessionCode(71);
 async function runSessionDeath(
 	protocol: string,
 	version?: number,
-	local = false,
+	kill: "death" | "remote" | "local" = "death",
 ): Promise<[Error | null, Error | null, Position | undefined]> {
 	const pair = createMockTransportPair(protocol);
 	const origin = new OriginProducer();
@@ -2667,7 +2682,9 @@ async function runSessionDeath(
 	if (!group) throw new Error("missing group");
 	expect(await group.readString()).toBe("head");
 
-	if (local) client.close();
+	if (kill === "local") client.close();
+	// The track is live, so the drain runs to its deadline and closes anyway.
+	else if (kill === "remote") void server.close().catch(() => {});
 	else pair.server.close({ closeCode: DEATH, reason: "killed" });
 	const groupEnd = Promise.resolve(group.closed);
 	const closed = await withTimeout(
@@ -2701,13 +2718,19 @@ for (const [name, protocol, version] of [
 		expect(groupEnd).toBeInstanceOf(SessionError);
 		expect((groupEnd as SessionError).code).toBe(DEATH);
 	});
-	// A local close is a dead route, not finished content: it declares no end, so a resumed
-	// reader's replacement route continues past it.
-	test(`integration: ${name} ends a locally closed track cleanly without declaring an end`, async () => {
-		const [closed, , end] = await runSessionDeath(protocol, version, true);
-		expect(closed).toBeNull();
-		expect(end).toBeUndefined();
-	});
+	// A clean close cuts off the track and its open group, and a local close reads exactly as
+	// the remote one does. It declares no end, so a resumed reader's replacement route
+	// continues past it.
+	for (const kill of ["remote", "local"] as const) {
+		test(`integration: ${name} cancels the track on a ${kill} session close`, async () => {
+			const [closed, groupEnd, end] = await runSessionDeath(protocol, version, kill);
+			expect(closed).toBeInstanceOf(SessionError);
+			expect((closed as SessionError).code).toBe(SessionCode.Cancel);
+			expect(groupEnd).toBeInstanceOf(SessionError);
+			expect((groupEnd as SessionError).code).toBe(SessionCode.Cancel);
+			expect(end).toBeUndefined();
+		});
+	}
 }
 
 // On lite-05+ the subscribe stream carries responses until its FIN, so a reset of it is how the

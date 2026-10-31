@@ -267,7 +267,10 @@ async fn probe(
         .await
         .context("probe SETUP failed")?;
     let namespace = TrackNamespace::from_utf8_path(&args.namespace);
-    let (track_writer, _) = Track::new(namespace, args.track).produce();
+    // Hold the reader until the probe ends. Without one, moq-rs cannot close
+    // the track on REQUEST_ERROR, so a not-found rejection surfaces as `done`
+    // and the readiness race fails instead of retrying.
+    let (track_writer, _track_reader) = Track::new(namespace, args.track).produce();
     let accept_namespaces = accept_namespaces(subscriber.clone());
 
     tokio::select! {

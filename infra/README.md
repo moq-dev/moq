@@ -10,6 +10,7 @@ infrastructure.
 | `infra/moq-sh` | `moq.sh`     |                 | The `moq` installer script              |
 | `infra/mbx` |                 | `mbx-moq-dev`   | Private Rust build cache for CI         |
 | `infra/nix` | `nix.moq.dev`   | `nix-moq-dev`, `nix-ci-moq-dev` | Nix binary cache        |
+| `infra/token` | `token.moq.dev` |               | Scoped moq-bot tokens for CI, by OIDC   |
 
 Each worker is a standalone bun package with a `wrangler.jsonc` and a
 small TypeScript handler. The apt and rpm workers proxy GETs out of the R2
@@ -29,6 +30,7 @@ just infra apt deploy
 just infra rpm deploy
 just infra moq-sh deploy
 just infra nix deploy
+just infra token deploy
 ```
 
 Each recipe runs `bun install` and `bun wrangler deploy`. The
@@ -43,6 +45,35 @@ So the first deploy, and any change to the custom domain, runs by hand under a
 maintainer's `wrangler login`. Whether Editor alone passes wrangler's
 custom-domain check on every deploy is unproven until the first `release`
 run; [the deploy quest](../quest/m2/release/moq-sh-deploy.md) tracks it.
+
+## The token broker
+
+`token.moq.dev` holds the moq-bot key so that no repository has to. A workflow
+job with `id-token: write` asks GitHub for an ID token with audience
+`token.moq.dev` and POSTs it to a policy's path. The worker verifies GitHub's
+signature and issues a one-hour installation token, scoped to the calling
+repository, only when the job runs that repository's policy workflow on
+`main` in the moq-dev organization. A pushed branch, a pull request, a tag,
+every other workflow, and a reusable workflow the policy workflow calls are
+refused.
+
+| Path | Workflow | Permissions |
+| --- | --- | --- |
+| `/land` | `.github/workflows/land.yml` | `contents`, `workflows`: write |
+
+A repository opts in by adding the workflow; moq-bot is installed on every
+moq-dev repository. Only main's copy of the workflow counts, and only the
+gate or a ruleset bypass changes `main`, so the job that requests the ID
+token must never run pull request code. The first deploy, and any key
+rotation, run by hand:
+
+```bash
+just infra token deploy
+just infra token secret ~/Downloads/moq-bot.<date>.private-key.pem
+```
+
+`secret` converts GitHub's PKCS#1 key to the PKCS#8 that WebCrypto imports
+and pipes it straight to `wrangler secret put`.
 
 ## Write credentials
 
