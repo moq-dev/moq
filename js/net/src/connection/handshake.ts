@@ -4,7 +4,7 @@ import { type Hop, randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
 import * as Lite from "../lite/index.ts";
-import { Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
+import { acceptBudget, Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
 import * as Extensions from "./extensions.ts";
 
 /** Default bound on a connection attempt, including its SETUP exchange. @internal */
@@ -125,6 +125,10 @@ async function receiveSetup(
 	let reader: Reader;
 	try {
 		for (;;) {
+			// Each stream racing ahead of SETUP is held, so a peer opening them at once must
+			// not hold the host for its whole stream credit.
+			const pause = acceptBudget.poll();
+			if (pause !== undefined) await pause;
 			const next = await uniReader.read();
 			if (next.done) throw new Error("no incoming uni stream for SETUP");
 
