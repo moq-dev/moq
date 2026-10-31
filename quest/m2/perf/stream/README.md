@@ -112,6 +112,19 @@ Decisions (2026-10-22), each with its reason:
 - **Ranked second in m2/perf**, after kio channel contention, which is the
   largest cost measured so far.
 
+Decided 2026-10-31 (maintainer), in
+[moq-dev/moq#7086](https://github.com/moq-dev/moq/pull/7086):
+
+- **`just bench` keeps all five transports by default, `tls` included.** A base
+  without `listen.tcp.tls`, such as `origin/release` today, fails at its first
+  `tls` case, so pass `"quic ws wss tcp"` until a release includes it
+  (`bench/README.md`). Probing the base relay first would mean building it
+  before Criterion, and a QUIC-only default would hide the transports this line
+  measures.
+- **The longer bench is accepted.** The relay phase grew from 2 cases to 11,
+  about 15 minutes against a base at 3 rounds; the transport argument narrows a
+  run when that matters.
+
 ## Required
 
 - [Driver](/quest/m2/perf/stream/driver.md) - a qmux session is one caller-spawned task polling the socket it owns, with no split, pump, channel, or per-record allocation

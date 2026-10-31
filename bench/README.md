@@ -87,7 +87,14 @@ nix develop --command just bench origin/main ws
 Every relay serves QUIC and plain WebSocket on its port; `wss://`, `tcp://`, and
 `tls://` get their own listener on the port two above it. A base revision must
 accept the listener a case needs, so pass the transports it has: a relay without
-`listen.tcp.tls` refuses the `tls` cases. Beside relay CPU in cores, each case
+`listen.tcp.tls` refuses the `tls` cases. Until a release includes
+`listen.tcp.tls`, compare against it without them:
+
+```bash
+nix develop --command just bench origin/release "quic ws wss tcp"
+```
+
+Beside relay CPU in cores, each case
 reports CPU microseconds per delivered frame and cores per delivered Gbps; base
 comparisons pair those too.
 
