@@ -39,4 +39,17 @@ identity preserved. Neither reported failure recurred. These runs provide a
 current baseline, not evidence that either intermittent failure is fixed;
 keep waiting for a recurrence with its relay and browser logs.
 
+Rechecked 2026-10-28 at
+[487759f62a](https://github.com/moq-dev/moq/commit/487759f62a9ef39d916fe5b92df06dcff83478ce)
+with the same Chromium 156.0.8078.4 and relay debug filter: two focused
+replacement runs passed all three protocol versions. IETF22 replaced in
+191 and 94 ms and fell back in 326 and 228 ms, with synchronized audio and the incumbent
+identity preserved. Relay debug evidence showed one IETF22 viewer connection
+throughout, resubscribing to the incumbent epoch after the fallback NAMESPACE;
+its session closed only at teardown after playback grading. Neither failure
+recurred, so no production or test change is justified. The remaining condition
+is still a fallback session drop or audio stall captured with relay debug and
+browser logs, sufficient to isolate a deterministic cause. These runs did not
+recreate the original host load of 30 to 70.
+
 Public API: none expected. Wire: none expected.
