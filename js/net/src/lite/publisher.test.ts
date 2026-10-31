@@ -190,9 +190,13 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 	},
 );
 
-// Delivers `sequences` in the given order, finishes the track, and returns the
-// SUBSCRIBE_END the publisher put on the wire.
-async function subscribeEnd(sequences: number[], version: Version = Version.DRAFT_05): Promise<SubscribeEnd> {
+// Delivers `sequences` in the given order, finishes the track (with `error`, if given), and
+// returns the SUBSCRIBE_END the publisher put on the wire.
+async function subscribeEnd(
+	sequences: number[],
+	version: Version = Version.DRAFT_05,
+	error?: Error,
+): Promise<SubscribeEnd> {
 	const pair = createMockTransportPair(version === Version.DRAFT_07 ? ALPN_07_WIP : ALPN_05);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
@@ -219,7 +223,8 @@ async function subscribeEnd(sequences: number[], version: Version = Version.DRAF
 		// arrives late opens no stream at all, so there is nothing firmer to wait on.
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
-	track.finish();
+	if (error) track.finishAt({ group: Math.max(-1, ...sequences) + 1, frame: 0 }, error);
+	else track.finish();
 	track.close();
 
 	try {
@@ -1729,6 +1734,13 @@ test("lite draft-05: subscribe end is 0 when no groups were produced", async () 
 	expect((await subscribeEnd([])).group).toBe(0);
 });
 
+// Lite-07 forwards an errored end's error with its boundary, so the subscriber keeps the history.
+test("lite draft-07: subscribe end carries the track's error", async () => {
+	const end = await subscribeEnd([0, 1], Version.DRAFT_07, new StreamError(StreamCode(71)));
+	expect([end.group, end.error]).toEqual([2, 71]);
+	expect((await subscribeEnd([0, 1], Version.DRAFT_07)).error).toBeUndefined();
+});
+
 // The boundary clears every produced group even when a sequence was skipped.
 test("lite draft-07: subscribe end names the final boundary", async () => {
 	const end = await subscribeEnd([0, 2], Version.DRAFT_07);
@@ -1780,6 +1792,68 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 	} finally {
 		publisher.close();
 		client.close();
+	}
+});
+
+// Before lite-07 an errored end goes out only as the reset at that end: a clean SUBSCRIBE_END
+// sent early could let the subscriber settle before the reset arrives.
+test("lite draft-06: an errored end is not declared early", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_06);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+	void publisher.runSubscribe(
+		new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
+		server,
+	);
+
+	try {
+		const first = track.createGroup(0);
+		first.writeFrame(textFrame("hello"));
+		first.finish();
+		track.finishAt({ group: 2, frame: 0 }, new StreamError(StreamCode(71)));
+
+		const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_06);
+		expect("start" in start).toBe(true);
+		const pending = decodeSubscribeResponse(client.reader, Version.DRAFT_06);
+		const early = await Promise.race([
+			pending.then(
+				() => "response",
+				() => "reset",
+			),
+			new Promise((resolve) => setTimeout(() => resolve("none"), 20)),
+		]);
+		expect(early).toBe("none");
+
+		const second = track.createGroup(1);
+		second.writeFrame(textFrame("hello"));
+		second.finish();
+		await expect(pending).rejects.toBeDefined();
+	} finally {
+		publisher.close();
+		client.close();
+	}
+});
+
+// A subscription capped short of an errored end is owed no error, so its boundary still goes out.
+test("lite draft-06: a subscription capped short of an errored end gets its boundary", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, endGroup: 1 });
+	try {
+		for (const sequence of [0, 1, 2, 3]) sub.serve(sequence);
+		sub.track.finishAt({ group: 4, frame: 0 }, new StreamError(StreamCode(71)));
+		for (;;) {
+			const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+			if (!("end" in resp)) continue;
+			expect(resp.end.group).toBe(4);
+			break;
+		}
+	} finally {
+		await sub.close();
 	}
 });
 

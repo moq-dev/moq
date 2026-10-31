@@ -8,6 +8,7 @@ import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
 import {
 	hasDropCode,
+	hasEndError,
 	hasFrameBounds,
 	hasGroupOrder,
 	hasOrder,
@@ -707,19 +708,38 @@ export class SubscribeStart {
 export class SubscribeEnd {
 	/** The exclusive final group sequence: the first sequence that will never be produced. */
 	group: number;
+	/** The stream error code the track ended with, if it did not end cleanly. Draft-07+ only. */
+	error?: number;
 
-	constructor(group: number) {
+	constructor(group: number, error?: number) {
 		this.group = group;
+		this.error = error;
 	}
 
-	async encode(w: Writer, _version: Version): Promise<void> {
+	/** The error the track ended with, or `undefined` for a clean end. */
+	cause(): Error | undefined {
+		if (this.error === undefined) return undefined;
+		if (this.error > 0xffff_ffff)
+			return new StreamError(StreamCode.Internal, { message: `invalid end code: ${this.error}` });
+		return fromTransport({ source: "stream", streamErrorCode: this.error });
+	}
+
+	async encode(w: Writer, version: Version): Promise<void> {
 		return Message.encode(w, async (w) => {
 			await w.u53(this.group);
+			// The code + 1, so 0 is a clean end.
+			if (hasEndError(version)) await w.u53(this.error === undefined ? 0 : this.error + 1);
+			else if (this.error !== undefined) throw new Error("an errored end needs draft-07");
 		});
 	}
 
-	static async decode(r: Reader, _version: Version): Promise<SubscribeEnd> {
-		return Message.decode(r, async (r) => new SubscribeEnd(await r.u53()));
+	static async decode(r: Reader, version: Version): Promise<SubscribeEnd> {
+		return Message.decode(r, async (r) => {
+			const group = await r.u53();
+			if (!hasEndError(version)) return new SubscribeEnd(group);
+			const code = await r.u53();
+			return new SubscribeEnd(group, code === 0 ? undefined : code - 1);
+		});
 	}
 }
 
