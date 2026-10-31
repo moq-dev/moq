@@ -86,7 +86,12 @@ out, the HLS records restart, or a segment can't be fetched, the export exits wi
 an error and leaves the playlists unended. A rendition whose decoder is
 reconfigured keeps one playlist, switching to a new init at an
 `EXT-X-DISCONTINUITY` in that playlist, so the whole recording stays playable
-from its master playlist.
+from its master playlist. Each playlist's `EXT-X-TARGETDURATION` is the one the
+export serves for that rendition when the recording first sees it (see the
+target duration rule above), and never changes, even if the rendition is
+removed and re-added with another target, which logs a warning. A GOP longer
+than the target is still recorded, with a warning, so keep keyframe intervals
+within the declared duration.
 
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
 and `--cors-origin` opens it to browsers. HLS TLS reads `MOQ_HLS_TLS_*`;

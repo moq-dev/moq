@@ -131,6 +131,13 @@ class SelectTest(unittest.TestCase):
                                         for call in calls), calls)
         self.assertEqual(self.selected("test/interop/compat/container.rs"), [])
 
+    def test_relay_nixos_module_selects_the_relay(self):
+        # moq-relay's tests read the module.
+        calls = self.selected("nix/modules/moq-relay.nix", action="test")
+        self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
+        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        self.assertRegex("nix/modules/moq-relay.nix", scope)
+
     def test_dispatch_scope_covers_out_of_crate_targets(self):
         scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
         metadata = json.loads(subprocess.check_output(

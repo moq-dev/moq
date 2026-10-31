@@ -195,5 +195,21 @@ relay_owns_port "$OWNER_PID" "$PORT"
                                     OWNER_PID=str(os.getpid()), PORT=str(tcp.getsockname()[1]))
             self.assertEqual(result.returncode, 1, result.stderr)
 
+    def test_a_stream_transport_needs_its_own_listener(self):
+        with tempfile.TemporaryDirectory() as directory, socket.socket() as tcp, \
+                socket.socket(type=socket.SOCK_DGRAM) as udp:
+            tcp.bind(('127.0.0.1', 0))
+            tcp.listen()
+            port = tcp.getsockname()[1]
+            udp.bind(('127.0.0.1', port))
+            script = '''set -euo pipefail
+ROOT=$1 RUN=$2
+source "$ROOT/bench/relay.sh"
+TRANSPORT=ws relay_owns_port "$OWNER_PID" "$PORT"
+! TRANSPORT=tls relay_owns_port "$OWNER_PID" "$PORT"
+'''
+            result = self.run_shell(script, Path(directory), 'unused', OWNER_PID=str(os.getpid()), PORT=str(port))
+            self.assertEqual(result.returncode, 0, result.stderr)
+
 
 unittest.main()
