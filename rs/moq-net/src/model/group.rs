@@ -4819,6 +4819,7 @@ mod test {
 	/// A head's slots count against the live tail, so a head of empty frames that would
 	/// take the group's slots past it is not adopted.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	fn an_adopted_head_counts_its_slots() {
 		let pool = cache::Pool::unbounded();
 		let cache = cache::Track::new(pool, Default::default(), kio::Weak::new());
@@ -5033,6 +5034,7 @@ mod test {
 	/// A group grows past its live tail by shedding whole frames from its front: a reader
 	/// that keeps up reads every frame, a late one gets `Evicted`, and nothing aborts.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	#[cfg(feature = "async")]
 	fn a_long_group_sheds_its_front() {
 		let pool = cache::Pool::unbounded();
@@ -5068,6 +5070,7 @@ mod test {
 
 	/// Empty frames still cost their slot, so a group of them sheds its front too.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	fn empty_frames_shed_by_their_slots() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let slot = size_of::<Entry>();
@@ -5084,6 +5087,7 @@ mod test {
 	/// Batches of empty frames count their new slots too, so they shed the front as
 	/// single writes do.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	fn empty_frame_batches_shed_by_their_slots() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let count = 2 * MAX_CACHE_BYTES as usize / size_of::<Entry>();
@@ -5325,6 +5329,7 @@ mod test {
 	/// Frames a cursor already prefetched are its own, so shedding them from the group
 	/// does not make `finished` report the cursor evicted.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	#[cfg(feature = "async")]
 	fn finished_counts_prefetched_frames_as_read() {
 		let mut producer = Info { sequence: 0 }.produce();
@@ -6001,6 +6006,7 @@ mod test {
 	/// front, and sheds its own front past the tail; a plain or raw reader that starts after
 	/// frame 0 was shed gets `Evicted`.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	#[cfg(feature = "async")]
 	fn a_long_compressed_group_sheds_its_front() {
 		let pool = cache::Pool::unbounded();
@@ -6047,6 +6053,7 @@ mod test {
 	/// A batch of large frames that deflate to almost nothing stays within one tail of
 	/// inflated bytes, and the copy sheds what the reader took past its tail.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	#[cfg(feature = "async")]
 	fn a_batch_of_large_compressible_frames_stays_in_the_tail() {
 		let pool = cache::Pool::unbounded();
