@@ -55,8 +55,9 @@ mod video;
 /// caller-supplied timestamp mode.
 ///
 /// Partial header contents hold at most 264 bytes per PID. PES payloads, retained video
-/// AUs, and sections awaiting a timestamp share half a MoQ group's byte budget;
-/// buffered units also share half its frame budget. Exceeding either limit refuses the input instead of retaining more bytes.
+/// AUs, and sections awaiting a timestamp share a 16 MiB budget, and at most 4096 units are
+/// buffered, the raw TS accumulator's group roll triggers. Exceeding either limit refuses the input
+/// instead of retaining more bytes.
 ///
 /// Elementary streams we don't decode are carried verbatim, one MoQ track per
 /// PID, when the catalog `E` carries the [`mpegts`](super::Mpegts) section: section-framed
@@ -2022,9 +2023,9 @@ fn section_framed(stream_type: u8, cuei: bool) -> bool {
 	matches!(stream_type, 0x05 | 0x0a..=0x0d) || (cuei && stream_type == StreamType::Dts8ChannelLosslessAudio as u8)
 }
 
-// Match the raw TS accumulator: half a MoQ group bounds one program's staged input.
-pub(super) const STAGING_BYTES_MAX: usize = (moq_net::group::MAX_CACHE_BYTES / 2) as usize;
-const STAGING_UNITS_MAX: usize = moq_net::group::MAX_GROUP_FRAMES / 2;
+// Match the raw TS accumulator's group roll triggers: they bound one program's staged input.
+pub(super) const STAGING_BYTES_MAX: usize = super::passthrough::GROUP_BYTES_MAX as usize;
+const STAGING_UNITS_MAX: usize = super::passthrough::GROUP_OBJECTS_MAX;
 
 #[derive(Default)]
 struct Staging {

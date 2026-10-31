@@ -62,7 +62,7 @@ pub use bridge::Bridge;
 pub use consumer::Consumer;
 pub use lock::{Lock, LockGuard};
 pub use pending::Pending;
-pub use producer::{Mut, Producer, Ref, Unused};
+pub use producer::{Mut, Producer, Ref, Unwanted};
 pub use queue::{PushError, Queue};
 pub use send::MaybeSend;
 pub use shared::Shared;
@@ -144,8 +144,7 @@ pub(crate) struct State<T> {
 	pub waiters_value: waiter::WaiterList,
 	/// Closure (`closed`). Woken only when the channel closes.
 	pub waiters_closed: waiter::WaiterList,
-	/// Consumer-count changes (`used`/`unused`). `used`/`unused` are used
-	/// sequentially in practice, so they share one list.
+	/// Consumer-count changes (`wanted_changed`), in either direction.
 	pub waiters_consumer: waiter::WaiterList,
 	pub closed: bool,
 }

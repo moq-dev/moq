@@ -89,7 +89,7 @@ for (const protocol of ["lite", "ietf"] as const) {
 			} finally {
 				track.close();
 				broadcast.close();
-				subscriber.close();
+				if (subscriber instanceof LiteSubscriber) subscriber.close();
 				installed.close();
 			}
 		});
@@ -162,7 +162,7 @@ for (const protocol of ["lite", "ietf"] as const) {
 				expect(transport.options).toEqual([{ sendOrder: undefined, waitUntilAvailable: false }]);
 			} finally {
 				announced.close();
-				subscriber.close();
+				if (subscriber instanceof LiteSubscriber) subscriber.close();
 				installed.close();
 			}
 		});
@@ -191,7 +191,7 @@ for (const protocol of ["lite", "ietf"] as const) {
 		} finally {
 			track.close();
 			broadcast.close();
-			subscriber.close();
+			if (subscriber instanceof LiteSubscriber) subscriber.close();
 			installed.close();
 		}
 	});
@@ -219,7 +219,7 @@ for (const protocol of ["lite", "ietf"] as const) {
 		} finally {
 			track.close();
 			broadcast.close();
-			subscriber.close();
+			if (subscriber instanceof LiteSubscriber) subscriber.close();
 		}
 	});
 }

@@ -6,7 +6,7 @@ use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqGroupConsumer;
 use crate::consumer::MoqTrackConsumer;
-use crate::consumer::{MoqAnchor, MoqOrder, MoqRange, MoqSubscription};
+use crate::consumer::{MoqAnchor, MoqOrder, MoqRange, MoqSubscription, moq_subscription_defaults};
 use crate::error::{MoqError, MoqProtocolError, MoqProtocolKind};
 use crate::json::{
 	MoqJsonSnapshotConfig, MoqJsonSnapshotConsumer, MoqJsonSnapshotProducer, MoqJsonStreamConsumer,
@@ -2573,7 +2573,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 		(5, 0, 6)
 	);
 	assert_eq!(request.priority(), 11);
-	assert_eq!(request.next(), Some(5));
+	assert_eq!(request.wanted(), Some(5));
 
 	let group = request.accept(5).unwrap();
 	group
@@ -2596,7 +2596,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 }
 
 #[tokio::test]
-async fn fill_goes_unused_when_the_fetcher_leaves() {
+async fn fill_goes_unwanted_when_the_fetcher_leaves() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), None).unwrap();
 	let dynamic = track.requests().unwrap();
@@ -2607,21 +2607,57 @@ async fn fill_goes_unused_when_the_fetcher_leaves() {
 		.await
 		.expect("timed out waiting for fill")
 		.unwrap();
-	assert!(fill.is_used());
+	assert_eq!(fill.wanted_changed().await.unwrap(), Some(5));
 	assert!(fill.is_wanted(5));
 	assert!(!fill.is_wanted(6), "outside the fill");
 
 	fetch.abort();
-	tokio::time::timeout(TIMEOUT, fill.unused())
+	let wanted = tokio::time::timeout(TIMEOUT, fill.wanted_changed())
 		.await
-		.expect("timed out waiting for the abandoned fetch to become unused")
+		.expect("timed out waiting for the abandoned fetch to become unwanted")
 		.unwrap();
-	assert!(!fill.is_used());
+	assert_eq!(wanted, None);
+	assert_eq!(fill.wanted(), None);
 	tokio::time::timeout(TIMEOUT, fill.unwanted(5))
 		.await
-		.expect("an unused fill wants none of its groups")
+		.expect("an unwanted fill wants none of its groups")
 		.unwrap();
 	assert!(!fill.is_wanted(5));
+}
+
+/// A foreign cancel only stops polling `wanted_changed`; uniffi drops it later, at
+/// `rust_future_free`. Until then the cancelled call must not consume the change the next
+/// call is waiting for.
+#[tokio::test]
+async fn fill_wanted_changed_cancelled_before_free_leaves_the_change() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let dynamic = track.requests().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
+	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
+		.await
+		.expect("timed out waiting for fill")
+		.unwrap();
+	assert_eq!(fill.wanted_changed().await.unwrap(), Some(5));
+
+	// Poll once, then stop without dropping, which is all `rust_future_cancel` does.
+	let mut cancelled = Box::pin(fill.wanted_changed());
+	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(cancelled.as_mut().poll(cx))).await;
+	assert!(first.is_pending());
+
+	fetch.abort();
+	// Give anything still driving the cancelled call the chance to take the change.
+	ffi_caught_up().await;
+
+	let next = fill.wanted_changed();
+	drop(cancelled);
+	let wanted = tokio::time::timeout(TIMEOUT, next)
+		.await
+		.expect("the cancelled call took the change")
+		.unwrap();
+	assert_eq!(wanted, None);
 }
 
 #[tokio::test]
@@ -2637,7 +2673,7 @@ async fn dynamic_track_rejects_fetch_miss() {
 		.expect("timed out waiting for fill")
 		.unwrap();
 	fill.drop_groups(5, 6);
-	assert_eq!(fill.next(), None, "the dropped group is answered");
+	assert_eq!(fill.wanted(), None, "the dropped group is answered");
 
 	let result = tokio::time::timeout(TIMEOUT, fetch)
 		.await
@@ -3289,10 +3325,8 @@ async fn announced_filters_patterns_and_reports_captures() {
 		})
 		.unwrap();
 
+	// A claim at `room` could serve a match, but its own name is none, so it is not listed.
 	let _broad = origin.requests("room".into()).unwrap();
-	let overlap = next_announced(&announced).await;
-	assert_eq!(overlap.prefix, "room");
-	assert_eq!(overlap.captures, None, "an overlap does not pin the wildcard");
 
 	let chat = create_announced(&origin, "room/alice/chat");
 	let _audio = create_announced(&origin, "room/alice/audio");
@@ -5048,6 +5082,61 @@ where
 	assert_eq!(datagram.payload, b"beep".to_vec());
 }
 
+/// `insert_datagram` sends at the caller's sequence, and later appends continue past it.
+#[tokio::test]
+async fn raw_track_insert_datagram_keeps_its_sequence() {
+	let (_broadcast, track, consumer) = raw_track();
+
+	track.insert_datagram(7, datagram_frame(b"seven")).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for the inserted datagram")
+		.unwrap()
+		.expect("expected a datagram");
+	assert_eq!(datagram.sequence, 7);
+	assert_eq!(datagram.payload, b"seven".to_vec());
+	assert_eq!(datagram.timestamp_us, Some(1));
+
+	assert_eq!(track.append_datagram(datagram_frame(b"next")).unwrap(), 8);
+}
+
+/// `largest` follows the newest group and its newest frame.
+#[test]
+fn raw_track_largest_follows_writes() {
+	let (_broadcast, track, _consumer) = raw_track();
+	assert_eq!(track.largest().unwrap(), None);
+
+	let group = track.create_group(3).unwrap();
+	assert_eq!(track.largest().unwrap(), Some(MoqPosition { group: 3, frame: 0 }));
+	group.write_frame(group_frame(b"one")).unwrap();
+	group.write_frame(group_frame(b"two")).unwrap();
+	assert_eq!(track.largest().unwrap(), Some(MoqPosition { group: 3, frame: 1 }));
+
+	// An older group never moves it back.
+	track.create_group(1).unwrap();
+	assert_eq!(track.largest().unwrap(), Some(MoqPosition { group: 3, frame: 1 }));
+}
+
+/// A broadcast consumer's `closed` resolves once its producer closes.
+#[tokio::test]
+async fn broadcast_consumer_closed_resolves_on_close() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let closed = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.closed().await }).await
+	};
+	assert!(!closed.is_finished(), "closed resolved while the broadcast is live");
+
+	broadcast.close().unwrap();
+	tokio::time::timeout(TIMEOUT, closed)
+		.await
+		.expect("timed out waiting for closed")
+		.expect("closed panicked")
+		.unwrap();
+}
+
 #[tokio::test]
 async fn raw_track_pending_next_group_does_not_block_datagram() {
 	pending_group_does_not_block_datagram(|consumer| async move { consumer.next_group().await }).await;
@@ -6236,6 +6325,14 @@ async fn server_new_validates_the_config() {
 	} else {
 		assert!(matches!(qlog, Err(MoqError::Config { .. })));
 	}
+}
+
+/// The defaults convert back to moq-net's own, so they mean the same as no subscription.
+#[test]
+fn subscription_defaults_are_moq_net_defaults() {
+	let defaults = moq_net::track::Subscription::try_from(moq_subscription_defaults()).unwrap();
+	assert_eq!(defaults, moq_net::track::Subscription::default());
+	assert_eq!(defaults.max_delay, Some(Duration::ZERO));
 }
 
 /// A settings UI shows these, so each must be what an unset knob actually dials with.
