@@ -73,7 +73,11 @@ Contended channels at 16 workers, by share of mutex wait (`moq_net::model`):
 | `subscription::Subscription` | 0% | 0.6% | `GroupExpiry::is_expired` |
 
 Origin and broadcast state never appear. The `GroupExpiry::is_expired` read
-is its own fix, [Group expiry](/quest/m2/perf/kio-channel-contention/group-expiry.md).
+no longer locks the track (or the subscription) while nothing landed above the
+group it judges, the common verdict at the live edge
+([moq-dev/moq#7327](https://github.com/moq-dev/moq/pull/7327)). Its
+`just bench-profile lock` before and after was refused twice on a loaded host
+(perf dropped events), so this README's end-to-end rerun is its measurement.
 Every hot site is a read or re-poll
 of a per-track channel that all of a track's subscribers share, which is the
 [version counter](/quest/m2/perf/kio-channel-contention/version.md)'s target.
@@ -226,7 +230,6 @@ epic's targets but carries no lock-wait split.
 
 ## Required
 
-- [Group expiry](/quest/m2/perf/kio-channel-contention/group-expiry.md) - a group poll decides expiry without locking the track state, the largest single wait site
 - [Version counter](/quest/m2/perf/kio-channel-contention/version.md) - an opted-in re-poll skips the mutex when nothing changed, and parking no longer contends with readers
 - [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - measures per-worker data-plane replicas linked over the in-memory transport, announcements shared
 - [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - measures a relay per thread clustered over the in-memory transport, nothing shared

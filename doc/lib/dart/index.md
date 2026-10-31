@@ -57,10 +57,12 @@ moq
     )
     .updates()
     .listen((event) {
-  // A restart is a new publisher run at the same path: request it again.
+  // A restart is a new publisher run at the same path: request it again. A takeover
+  // continues what an earlier route served, like a start.
   switch (event) {
     case AnnounceEventStart(:final announce) ||
-        AnnounceEventRestart(:final announce):
+        AnnounceEventRestart(:final announce) ||
+        AnnounceEventTakeover(:final announce):
       print(announce.prefix);
       print(announce.captures);
     default:

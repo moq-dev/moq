@@ -4932,6 +4932,61 @@ where
 	assert_eq!(datagram.payload, b"beep".to_vec());
 }
 
+/// `insert_datagram` sends at the caller's sequence, and later appends continue past it.
+#[tokio::test]
+async fn raw_track_insert_datagram_keeps_its_sequence() {
+	let (_broadcast, track, consumer) = raw_track();
+
+	track.insert_datagram(7, datagram_frame(b"seven")).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for the inserted datagram")
+		.unwrap()
+		.expect("expected a datagram");
+	assert_eq!(datagram.sequence, 7);
+	assert_eq!(datagram.payload, b"seven".to_vec());
+	assert_eq!(datagram.timestamp_us, Some(1));
+
+	assert_eq!(track.append_datagram(datagram_frame(b"next")).unwrap(), 8);
+}
+
+/// `largest` follows the newest group and its newest frame.
+#[test]
+fn raw_track_largest_follows_writes() {
+	let (_broadcast, track, _consumer) = raw_track();
+	assert_eq!(track.largest().unwrap(), None);
+
+	let group = track.create_group(3).unwrap();
+	assert_eq!(track.largest().unwrap(), Some(MoqPosition { group: 3, frame: 0 }));
+	group.write_frame(group_frame(b"one")).unwrap();
+	group.write_frame(group_frame(b"two")).unwrap();
+	assert_eq!(track.largest().unwrap(), Some(MoqPosition { group: 3, frame: 1 }));
+
+	// An older group never moves it back.
+	track.create_group(1).unwrap();
+	assert_eq!(track.largest().unwrap(), Some(MoqPosition { group: 3, frame: 1 }));
+}
+
+/// A broadcast consumer's `closed` resolves once its producer closes.
+#[tokio::test]
+async fn broadcast_consumer_closed_resolves_on_close() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let closed = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.closed().await }).await
+	};
+	assert!(!closed.is_finished(), "closed resolved while the broadcast is live");
+
+	broadcast.close().unwrap();
+	tokio::time::timeout(TIMEOUT, closed)
+		.await
+		.expect("timed out waiting for closed")
+		.expect("closed panicked")
+		.unwrap();
+}
+
 #[tokio::test]
 async fn raw_track_pending_next_group_does_not_block_datagram() {
 	pending_group_does_not_block_datagram(|consumer| async move { consumer.next_group().await }).await;

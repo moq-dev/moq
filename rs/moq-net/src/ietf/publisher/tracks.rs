@@ -410,8 +410,11 @@ impl Publisher {
 			let announce = match event {
 				Event::Closed => return Ok(()),
 				Event::Cancelled(res) => break res,
+				// moq-transport has no takeover: listing it is listing another instance.
 				Event::Announce(
-					crate::announce::Event::Start(announce) | crate::announce::Event::Restart(announce),
+					crate::announce::Event::Start(announce)
+					| crate::announce::Event::Restart(announce)
+					| crate::announce::Event::Takeover { announce, .. },
 				) => announce,
 				Event::Announce(crate::announce::Event::End(announce)) => {
 					withdraw(&mut routes, &announce.prefix);
