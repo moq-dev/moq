@@ -213,8 +213,6 @@ struct Attached {
 	/// Whether a request can carry a token itself (moq-transport), so an auth needs no
 	/// AUTH stream to be named.
 	requests: bool,
-	/// Request tokens remain indexed only while at least one naming request holds them.
-	request_tokens: BTreeMap<Bytes, std::sync::Weak<RequestLifetime>>,
 	/// Set once the session ends.
 	closed: Option<Error>,
 	/// The session's GOAWAY: once either side sends one, the session is draining.
@@ -299,7 +297,6 @@ impl Attached {
 		let mut attached = Self {
 			supported,
 			requests,
-			request_tokens: BTreeMap::new(),
 			closed: None,
 			goaway: None,
 			slots: BTreeMap::new(),
@@ -725,6 +722,9 @@ pub(crate) struct Link {
 struct Detach {
 	state: kio::Shared<State>,
 	id: u64,
+	/// Request tokens, indexed only while at least one naming request holds them. Kept out of
+	/// the handle's state, whose every lock wakes everything waiting on the session's permits.
+	request_tokens: crate::sync::Mutex<BTreeMap<Bytes, std::sync::Weak<RequestLifetime>>>,
 }
 
 impl Drop for Detach {
@@ -801,6 +801,7 @@ impl Link {
 			attached: std::sync::Arc::new(Detach {
 				state: handle.state.clone(),
 				id,
+				request_tokens: Default::default(),
 			}),
 		})
 	}
@@ -918,26 +919,31 @@ impl Link {
 			return unsupported();
 		};
 		let token = Bytes::from(token.value);
-		let (lifetime, fresh) = self.with_state(|state, id| {
-			let link = attached(&mut state.links, id);
-			// A verdict the acceptor already finished with is not shared: the token verifies again.
-			if let Some(lifetime) = link.request_tokens.get(&token).and_then(std::sync::Weak::upgrade)
-				&& !lifetime.issue.read().done
-			{
-				return (lifetime, false);
+		// A lifetime this upgrades is dropped only once the index is unlocked, since the last
+		// one out removes its entry.
+		let mut stale = None;
+		let (lifetime, fresh) = {
+			let mut tokens = self.attached.request_tokens.lock().unwrap();
+			match tokens.get(&token).and_then(std::sync::Weak::upgrade) {
+				// A verdict the acceptor already finished with is not shared: the token verifies
+				// again.
+				Some(lifetime) if !lifetime.issue.read().done => (lifetime, false),
+				existing => {
+					stale = existing;
+					let lifetime = std::sync::Arc::new(RequestLifetime {
+						issue: kio::Shared::new(Issue {
+							hold,
+							..Default::default()
+						}),
+						handle: self.clone(),
+						token: token.clone(),
+					});
+					tokens.insert(token.clone(), std::sync::Arc::downgrade(&lifetime));
+					(lifetime, true)
+				}
 			}
-			let lifetime = std::sync::Arc::new(RequestLifetime {
-				issue: kio::Shared::new(Issue {
-					hold,
-					..Default::default()
-				}),
-				handle: self.clone(),
-				token: token.clone(),
-			});
-			link.request_tokens
-				.insert(token.clone(), std::sync::Arc::downgrade(&lifetime));
-			(lifetime, true)
-		});
+		};
+		drop(stale);
 		if fresh {
 			queue.push(Request::new(token, lifetime.issue.clone()));
 		}
@@ -1324,8 +1330,7 @@ impl Link {
 	/// End the session: fail every pending token here, leaving the handle's tokens for the
 	/// next session. A handle the session created for itself ends with it.
 	pub(crate) fn close(&self, err: Error) {
-		let mut lifetimes = Vec::new();
-		let queue = self.with_state(|state, link| {
+		let closing = self.with_state(|state, link| {
 			if state.links[&link].closed.is_some() {
 				return None;
 			}
@@ -1334,21 +1339,28 @@ impl Link {
 			let link = attached(&mut state.links, link);
 			link.closed = Some(err.clone());
 			link.opening.clear();
-			lifetimes.extend(link.request_tokens.values().filter_map(std::sync::Weak::upgrade));
 			for slot in link.slots.values_mut() {
 				slot.grant = None;
 				slot.answered.get_or_insert(Err(err.clone()));
 				slot.ended.get_or_insert(err.clone());
 			}
 			link.recompute();
-			match state.bound {
+			Some(match state.bound {
 				true => state.abort(err.clone()),
 				false => None,
-			}
+			})
 		});
-		for lifetime in lifetimes {
+		let Some(queue) = closing else {
+			return;
+		};
+		// Collected first: a lifetime dropped here removes its own entry.
+		let lifetimes: Vec<_> = (self.attached.request_tokens.lock().unwrap().values())
+			.filter_map(std::sync::Weak::upgrade)
+			.collect();
+		for lifetime in &lifetimes {
 			lifetime.issue.lock().peer.get_or_insert(err.clone());
 		}
+		drop(lifetimes);
 		// Refusing the queued tokens takes the lock again, to drop them from the scope.
 		if let Some(queue) = queue {
 			queue.close();
@@ -1886,16 +1898,11 @@ struct RequestLifetime {
 
 impl Drop for RequestLifetime {
 	fn drop(&mut self) {
-		self.handle.with_state(|state, id| {
-			let link = attached(&mut state.links, id);
-			if link
-				.request_tokens
-				.get(&self.token)
-				.is_some_and(|token| token.strong_count() == 0)
-			{
-				link.request_tokens.remove(&self.token);
-			}
-		});
+		let mut tokens = self.handle.attached.request_tokens.lock().unwrap();
+		if tokens.get(&self.token).is_some_and(|token| token.strong_count() == 0) {
+			tokens.remove(&self.token);
+		}
+		drop(tokens);
 		let mut issue = self.issue.lock();
 		issue.peer.get_or_insert(Error::Cancel);
 		if !issue.taken {
@@ -3639,6 +3646,36 @@ mod request_token_tests {
 				.poll_ended(&waiter)
 				.is_ready(),
 			"an observer made after narrowing starts ended"
+		);
+	}
+
+	/// Naming and releasing a request token touches nothing the session's permits watch, so
+	/// it wakes none of the requests waiting on them: a session with many announces would
+	/// otherwise poll every one for each token.
+	#[moq_clock::test]
+	async fn request_tokens_do_not_wake_permit_waiters() {
+		struct Woken(std::sync::atomic::AtomicBool);
+		impl std::task::Wake for Woken {
+			fn wake(self: std::sync::Arc<Self>) {
+				self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+			}
+		}
+		let handle = Link::new(true);
+		let mut requests = handle.handle().requests();
+		let first = handle.verify_request(token(b"warm", 0), None);
+		let _first = requests.next().await.unwrap().accept(Grant::all());
+		first.grant().await.unwrap();
+
+		let woken = std::sync::Arc::new(Woken(Default::default()));
+		let waiter = kio::Waiter::new(std::task::Waker::from(woken.clone()));
+		let mut epoch = 0;
+		while handle.poll_permit(Direction::Publish, &mut epoch, &waiter).is_ready() {}
+		let second = handle.verify_request(token(b"shared", 0), None);
+		let third = handle.verify_request(token(b"shared", 0), None);
+		drop((second, third));
+		assert!(
+			!woken.0.load(std::sync::atomic::Ordering::SeqCst),
+			"a request token woke the permit waiters"
 		);
 	}
 
