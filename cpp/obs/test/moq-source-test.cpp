@@ -712,13 +712,20 @@ moq::Catalog CatalogPreferring(Publisher &publisher, const std::string &id)
 // would otherwise re-rank renditions partway through a scenario.
 void FreezeCatalog(moq_source *ctx, Publisher &publisher)
 {
-	{
-		std::lock_guard<std::mutex> lock(ctx->mutex);
-		ctx->connection->catalog_call.reset();
+	for (;;) {
+		{
+			// Cancelling stops a catalog not yet completed, but one already completed is
+			// queued on the worker, and running it reads the next. Stop that one in turn.
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			auto &call = ctx->connection->catalog_call;
+			if (!call)
+				return;
+			call.reset();
+		}
+		// The worker runs in order, so once more media is out, a catalog it had queued has run.
+		const int outputs = g_output_frames + g_output_audio;
+		CHECK(publisher.WriteUntil([&] { return g_output_frames + g_output_audio >= outputs + 3; }));
 	}
-	// The worker runs in order, so once more media is out, a catalog it had queued has run.
-	const int outputs = g_output_frames + g_output_audio;
-	CHECK(publisher.WriteUntil([&] { return g_output_frames + g_output_audio >= outputs + 3; }));
 }
 
 // Delivers a catalog as the source's catalog reader would.
