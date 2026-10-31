@@ -3941,15 +3941,14 @@ impl<E: CatalogExt> AacStream<E> {
 			// Count only completed frames; input gaps and unfinished tails are not a media burst.
 			burst += std::time::Duration::from_nanos((1024_u64 * 1_000_000_000).div_ceil(header.sample_rate as u64));
 			// The importer accumulates; cut each ADTS frame into its own group (one QUIC stream)
-			// so the relay forwards it without waiting for the next.
-			import.cut(None)?;
+			// so the relay forwards it without waiting for the next. Its known endpoint also
+			// bounds the final HLS segment, since a one-frame group has no measured cadence.
+			pts = advance_pts(pts, 1024, header.sample_rate)?;
+			import.cut(pts)?;
 			self.resync.published(unvouched);
 			published += 1;
 			// Offsets behind the published frame are spent; carrying one would republish it.
 			fallback = None;
-
-			// Every ADTS frame is 1024 samples.
-			pts = advance_pts(pts, 1024, header.sample_rate)?;
 			offset = end;
 		}
 
@@ -6390,7 +6389,7 @@ pub(super) mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
@@ -6415,6 +6414,20 @@ pub(super) mod test {
 			[0xAA, 0xBB].map(|fill| adts_frame(40, fill)[7..].to_vec()).to_vec(),
 			"the last frame was held for a confirmation that could never arrive"
 		);
+		catalog.finish().unwrap();
+		let snapshot = catalog.snapshot();
+		let hls = snapshot.audio.renditions.values().next().unwrap().hls.as_ref().unwrap();
+		let mut records = crate::hls::Consumer::subscribe(&consumer, hls).await.unwrap();
+		let mut end = None;
+		while let Some(event) = records.next().await.unwrap() {
+			if let crate::hls::Event::Push { entry, .. } = event
+				&& entry.is_stop()
+			{
+				end = Some(entry.pts);
+			}
+		}
+		// Both 1024-sample frames at 48 kHz, including the one completed by the EOF drain.
+		assert_eq!(end, Some(Timestamp::from_millis(1_042).unwrap()));
 	}
 
 	/// One whole MPEG-2 Layer II frame (8 kbps, 16 kHz, mono = 72 bytes), filled with
