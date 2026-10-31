@@ -34,7 +34,8 @@ pass only options: visibility at creation, `cost`, `auth`, and a stable
 `identity` for a publisher that keeps its sequence space across restarts
 (see [Identity and epoch](/quest/m1/api-audit/route/identity.md)). Setting
 an identity grants no more than a minted one does: publishing still
-requires the path's grant. Hops, via, source and the anonymous mark become
+requires the path's grant. A route exposes its own identity (`route.identity()`), so the OBS dock can
+show it again. Hops, via, source and the anonymous mark become
 read-only facts on a received announcement, and `Hop`, `Hops` and
 `HopLimit` leave the public API.
 

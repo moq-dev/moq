@@ -45,6 +45,8 @@ Decided 2026-10-30 (maintainer); every prompt is in the
   `follow(path, identity)`, catalog references and archive keys pin an
   identity. Rename the internal `Instance`/`Resolution` types if they
   confuse. Mirror this in `js/net`, moq-ffi, moq-c and the wrappers.
+  Rename tests and variables that still say `epoch` where they mean the
+  identity.
 - **Default identity.** Random, minted for each new stream, so a publisher
   that restarts its sequences can never be stitched to its old run. A
   [Route](/quest/m1/api-audit/route/handle.md) mints it when created and

@@ -33,6 +33,8 @@ moves to `follow`.
   its one-shot fixed mode only if a caller needs it.
 - `routes()` lives on the origin consumer for relays and stats, and is
   hidden from the app-level docs.
+- Format the go and python interop clients while touching them (two lines
+  were already unformatted on 2026-10-30).
 - Bindings: replace `MoqAnnounceEvent`'s variants, and the go and python
   interop clients' and carla `publish.py:303-340`'s Restart handling, with
   the listing plus `follow`.
