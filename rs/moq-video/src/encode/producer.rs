@@ -406,7 +406,17 @@ async fn publish_capture_from<E: CatalogExt, S: CaptureSource>(
 		}
 	};
 
-	let mut producer = Producer::with_track(track, catalog.reserve().with_hls_hint(gop), rendition)?;
+	// The importer consumes the track, so keep a handle to abort it if setup fails,
+	// then drop it so it never outlives the importer's.
+	let fallback = track.clone();
+	let mut producer = match Producer::with_track(track, catalog.reserve().with_hls_hint(gop), rendition) {
+		Ok(producer) => producer,
+		Err(err) => {
+			let _ = fallback.abort(moq_net::Error::Transport(err.to_string()));
+			return Err(err);
+		}
+	};
+	drop(fallback);
 	// Capturing from the start, the loop keeps the probe's camera rather than reopening it,
 	// which could mean a second permission prompt or picker. On demand it closes until a viewer.
 	let mut source = Opened {
