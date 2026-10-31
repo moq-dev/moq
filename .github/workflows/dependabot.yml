@@ -9,7 +9,7 @@ name: Dependabot
 # because this job never checks out or executes the pull request's code; it
 # reads the pull request files and runs Quest from main, never from its head.
 #
-# The moq-bot token triggers the Land workflow when it enables auto-merge.
+# The host land daemon picks up the head-pinned auto-merge moq-bot enables.
 
 permissions: {}
 
@@ -20,13 +20,9 @@ on:
 jobs:
   request-landing:
     name: Request landing
-    # github.token reads the queue, including check results, which moq-bot's
-    # installation has no permission for.
     permissions:
       contents: read
       pull-requests: read
-      checks: read
-      statuses: read
     # head.repo guards the `pull_request_target` trigger: Dependabot pushes its
     # branches to this repository, so a pull request from a fork claiming to be
     # Dependabot is not one.
@@ -77,13 +73,9 @@ jobs:
         env:
           # Token is minted fresh per run, expires in 1 hour, never at rest.
           BOT_TOKEN: ${{ steps.token.outputs.token }}
-          READ_TOKEN: ${{ github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          # Refuse until the maintainer has installed the gate's ruleset.
-          GH_TOKEN="$READ_TOKEN" quest land resolve --base main > .tmp/land-plan.json
-          # moq-bot enables auto-merge, so the Land workflow hears about it.
           export GH_TOKEN="$BOT_TOKEN"
           hold=$(quest merge "$PR_URL")
           quest merge "$PR_URL" "$hold" --land "$PR_HEAD"
