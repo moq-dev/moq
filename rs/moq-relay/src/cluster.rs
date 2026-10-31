@@ -585,8 +585,8 @@ pub struct Config {
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub connect: Vec<Peer>,
 
-	/// Fetch the list of peers to dial from an HTTP(S) URL or a local file,
-	/// reloading at runtime without a restart. The source returns a JSON array
+	/// Fetch the list of peers to dial from HTTPS, loopback HTTP, or a local
+	/// file, refusing redirects, reloading at runtime without a restart. The source returns a JSON array
 	/// of peers: bare URL strings and/or objects with `url`, `cost`, `egress`,
 	/// and `token`, exactly as [`Self::connect`] accepts, e.g.
 	/// `["https://a.pop.example/?cost=1", {"url": "https://b.pop.example/", "cost": 2}]`.
@@ -605,6 +605,20 @@ pub struct Config {
 		setting = "cluster.connect_api"
 	)]
 	pub connect_api: Option<String>,
+
+	/// PEM roots to use instead of system roots, verifying the
+	/// [`Self::connect_api`] URL's hostname. Mesh roots, fingerprints, insecure
+	/// mode, and hostname overrides never apply to the API.
+	#[usage(
+		name = "cluster-connect-api-tls-root",
+		long = "cluster-connect-api-tls-root",
+		env = "MOQ_CLUSTER_CONNECT_API_TLS_ROOT",
+		setting = "cluster.connect_api_tls_root"
+	)]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub connect_api_tls_root: Vec<PathBuf>,
 
 	/// This relay's own externally-reachable URL (identity). Sent to
 	/// [`Self::connect_api`] as a `?node=` query param so the endpoint can return
@@ -904,6 +918,8 @@ impl std::fmt::Debug for Started {
 struct Work {
 	node: Option<String>,
 	token: String,
+	/// The `connect_api` HTTP client, built by [`Cluster::start`] for an http(s) source.
+	http: Option<ClientWithMiddleware>,
 	/// The live mDNS advertisement, bound by [`Cluster::start`].
 	#[cfg(feature = "cluster-lan")]
 	discovery: Option<moq_tokio::mdns::Discovery>,
@@ -1061,7 +1077,8 @@ impl Cluster {
 	/// Attach the client TLS config used for `--cluster-connect-api` peer-list
 	/// fetches. Required when `config.connect_api` is set; pass the same config
 	/// used to build the QUIC [`with_client`](Self::with_client) so the endpoint
-	/// sees this relay's cluster certificate.
+	/// sees this relay's cluster certificate. Only its client identity is used:
+	/// the API server is verified with `connect_api_tls_root` or system roots.
 	pub fn with_client_tls(mut self, tls: rustls::ClientConfig) -> Self {
 		self.client_tls = Some(Arc::new(tls));
 		self
@@ -1257,18 +1274,28 @@ impl Cluster {
 			});
 		}
 
+		// Only http(s) sources need the TLS client; a local file doesn't. Build
+		// here so malformed API roots fail startup, before background work.
+		let http = match self
+			.config
+			.connect_api
+			.as_deref()
+			.map(connect_api_is_http)
+			.transpose()?
+		{
+			Some(true) => {
+				let tls = self.client_tls.as_ref().context(
+					"cluster.connect_api with an http(s) URL needs client TLS (call Cluster::with_client_tls)",
+				)?;
+				Some(crate::http_client::build(tls, &self.config.connect_api_tls_root)?)
+			}
+			_ => None,
+		};
+
 		anyhow::ensure!(
 			self.client.is_some(),
 			"cluster peers configured but no QUIC client attached (call Cluster::with_client)"
 		);
-
-		// Only http(s) sources need the TLS client; a local file doesn't.
-		if let Some(source) = &self.config.connect_api {
-			anyhow::ensure!(
-				!connect_api_is_http(source) || self.client_tls.is_some(),
-				"cluster.connect_api with an http(s) URL needs client TLS (call Cluster::with_client_tls)"
-			);
-		}
 
 		// Token presented on outbound dials whose URL doesn't already carry a
 		// `?jwt=`. This remains the shared credential for any peer without a
@@ -1306,6 +1333,7 @@ impl Cluster {
 			work: Some(Work {
 				node,
 				token,
+				http,
 				#[cfg(feature = "cluster-lan")]
 				discovery,
 			}),
@@ -1320,6 +1348,7 @@ impl Cluster {
 		let Work {
 			node,
 			token,
+			http,
 			#[cfg(feature = "cluster-lan")]
 			discovery,
 		} = work;
@@ -1351,7 +1380,7 @@ impl Cluster {
 			let dialed = dialed.clone();
 			let node = node.clone();
 			tasks.spawn(async move {
-				this.run_connect_api(source, node, token, dialed).await;
+				this.run_connect_api(source, node, token, dialed, http).await;
 			});
 		}
 
@@ -1425,21 +1454,17 @@ impl Cluster {
 	/// Drive `--cluster-connect-api`: an http(s) URL is polled, a local path (or
 	/// `file://` URL) is watched for changes. Either way the source yields a JSON
 	/// array of peers that's reconciled into the shared dial map.
-	async fn run_connect_api(self, source: String, node: Option<String>, token: String, dialed: DialMap) {
+	async fn run_connect_api(
+		self,
+		source: String,
+		node: Option<String>,
+		token: String,
+		dialed: DialMap,
+		http: Option<ClientWithMiddleware>,
+	) {
 		match Url::parse(&source) {
 			Ok(url) if matches!(url.scheme(), "http" | "https") => {
-				// Validated in `run`: an http(s) source has client TLS attached.
-				let tls = self
-					.client_tls
-					.as_ref()
-					.expect("http(s) connect_api source requires client TLS");
-				let http = match crate::http_client::build(tls) {
-					Ok(http) => http,
-					Err(err) => {
-						tracing::error!(%err, "cluster.connect_api: failed to build HTTP client");
-						return;
-					}
-				};
+				let http = http.expect("http(s) connect_api client built at startup");
 				self.run_connect_api_http(url, node, token, dialed, http).await;
 			}
 			Ok(url) if url.scheme() == "file" => match url.to_file_path() {
@@ -1529,13 +1554,17 @@ impl Cluster {
 	/// stale-if-error are handled by the HTTP cache middleware on `http`, so this
 	/// just issues the request and parses the (possibly cache-served) body.
 	async fn fetch_peer_list(http: &ClientWithMiddleware, url: Url) -> anyhow::Result<Vec<Peer>> {
-		let body = http
+		let response = http
 			.get(url)
 			.send()
 			.await
-			.context("cluster.connect_api request failed")?
-			.error_for_status()
-			.context("cluster.connect_api returned an error status")?
+			.context("cluster.connect_api request failed")?;
+		anyhow::ensure!(
+			response.status().is_success(),
+			"cluster.connect_api returned {}",
+			response.status()
+		);
+		let body = response
 			.text()
 			.await
 			.context("failed to read cluster.connect_api body")?;
@@ -1844,8 +1873,18 @@ fn strip_jwt(url: &mut Url) {
 
 /// Whether a `--cluster-connect-api` source is an http(s) URL (otherwise it's
 /// treated as a local file path, which needs no TLS client).
-fn connect_api_is_http(source: &str) -> bool {
-	Url::parse(source).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+fn connect_api_is_http(source: &str) -> anyhow::Result<bool> {
+	let Ok(url) = Url::parse(source) else { return Ok(false) };
+	if url.scheme() == "http" {
+		let loopback = match url.host() {
+			Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+			Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+			Some(url::Host::Domain(host)) => host == "localhost",
+			None => false,
+		};
+		anyhow::ensure!(loopback, "--cluster-connect-api requires HTTPS except on loopback");
+	}
+	Ok(matches!(url.scheme(), "http" | "https"))
 }
 
 /// Resolve a cluster peer to the URL we dial.
@@ -3057,6 +3096,96 @@ mod tests {
 			config.cluster.connect_api.as_deref(),
 			Some("https://api.example.com/cluster/connect")
 		);
+	}
+
+	#[test]
+	fn cluster_connect_api_tls_root_survives_toml_merge() {
+		let _env = crate::test_env::EnvGuard::clear(&["MOQ_CLUSTER_CONNECT_API_TLS_ROOT"]);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("relay.toml");
+		std::fs::write(
+			&path,
+			"[cluster]\nconnect_api = 'https://api.example/'\nconnect_api_tls_root = 'api.pem'\n[connect.tls]\nroot = ['mesh.pem']\n",
+		)
+		.unwrap();
+		let config = RelayConfig::parse_and_merge(["moq-relay", path.to_str().unwrap()]).unwrap();
+		assert_eq!(config.cluster.connect_api_tls_root, vec![PathBuf::from("api.pem")]);
+		assert_eq!(config.connect.tls.root, vec![PathBuf::from("mesh.pem")]);
+		let config = RelayConfig::parse_and_merge([
+			"moq-relay",
+			path.to_str().unwrap(),
+			"--cluster-connect-api-tls-root",
+			"cli.pem",
+		])
+		.unwrap();
+		assert_eq!(config.cluster.connect_api_tls_root, vec![PathBuf::from("cli.pem")]);
+	}
+
+	#[tokio::test]
+	async fn remote_plaintext_api_refuses_startup() {
+		let _ = moq_tokio::crypto::install_default();
+		for url in ["http://api.example.com/", "http://192.0.2.1/", "http://[2001:db8::1]/"] {
+			let config = Config {
+				connect_api: Some(url.into()),
+				..Default::default()
+			};
+			let tls = moq_tokio::tls::Connect::default().build().unwrap();
+			let result = new_cluster(config).unwrap().with_client_tls(tls).start().await;
+			let Err(err) = result else { panic!("accepted {url}") };
+			assert!(err.to_string().contains("loopback"), "{err}");
+		}
+	}
+
+	#[tokio::test]
+	async fn malformed_api_roots_refuse_startup() {
+		let _ = moq_tokio::crypto::install_default();
+		let dir = tempfile::tempdir().unwrap();
+		let config = Config {
+			connect_api: Some("https://api.example.com/".into()),
+			connect_api_tls_root: vec![dir.path().join("missing.pem")],
+			..Default::default()
+		};
+		let tls = moq_tokio::tls::Connect::default().build().unwrap();
+		let result = new_cluster(config).unwrap().with_client_tls(tls).start().await;
+		assert!(result.is_err(), "malformed API roots must fail before polling");
+	}
+
+	#[test]
+	fn cluster_api_supports_loopback_http_and_local_files() {
+		for source in [
+			"http://localhost/",
+			"http://127.0.0.2/",
+			"http://[::1]/",
+			"https://api.example.com/",
+		] {
+			assert!(connect_api_is_http(source).unwrap(), "{source}");
+		}
+		for source in ["peers.json", "/etc/moq/peers.json", "file:///etc/moq/peers.json"] {
+			assert!(!connect_api_is_http(source).unwrap(), "{source}");
+		}
+		assert!(connect_api_is_http("http://localhost.example.com/").is_err());
+	}
+
+	#[tokio::test]
+	async fn cluster_api_rejects_redirect_bodies() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let _ = moq_tokio::crypto::install_default();
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+		let server = async move {
+			let (mut stream, _) = listener.accept().await.unwrap();
+			let mut data = [0; 4096];
+			assert!(stream.read(&mut data).await.unwrap() > 0);
+			// No Location header: refusing to follow alone does not reject this body.
+			stream
+				.write_all(b"HTTP/1.1 302 Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]")
+				.await
+				.unwrap();
+		};
+		let tls = moq_tokio::tls::Connect::default().build().unwrap();
+		let client = crate::http_client::build(&tls, &[]).unwrap();
+		let (peers, ()) = tokio::join!(Cluster::fetch_peer_list(&client, url), server);
+		assert!(peers.unwrap_err().to_string().contains("302"));
 	}
 
 	/// Two in-process origins share broadcasts both ways over one

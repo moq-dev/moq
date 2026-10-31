@@ -140,6 +140,7 @@ See [HTTP endpoints](/bin/relay/http).
 # Exactly one of these:
 url = "http://127.0.0.1:4440/"       # An auth server asked once per session event (`moq auth serve`,
                                      # or your own). https:// presents connect.tls; unix:// is a socket.
+# root = ["auth-ca.pem"]             # Verify an https:// url with these roots instead of system roots.
 # public = "anon/**"                 # Or a static anonymous grant rooted at /, publish and subscribe alike.
 # public_subscribe = ["anon/**", "demo/**"]   # Or split them; patterns, `foo/**` for a subtree.
 # public_publish = ["anon/**"]
@@ -154,6 +155,7 @@ See [Authentication](/bin/relay/auth).
 connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, egress, token} objects.
 node = "https://us-west.example.com/"                 # This relay's own URL.
 connect_api = "https://api.example.com/peers"        # Or fetch the peer list (JSON array of URLs and/or objects) live.
+# connect_api_tls_root = ["api-ca.pem"]               # Verify connect_api with these roots instead of system roots.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
 id = 12345                                            # Stable Hop ID across restarts.
 max_hops = 32                                         # Longest accepted/forwarded hop path (1 to 32).

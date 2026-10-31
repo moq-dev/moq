@@ -91,6 +91,8 @@ moq-uring = { workspace = true, optional = true }
 sd-notify = { workspace = true }
 
 [dev-dependencies]
+aws-lc-rs = { workspace = true }
+hex = { workspace = true }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 moq-shaper = { path = "../moq-shaper" }
 qmux = { workspace = true, features = ["tcp"] }
