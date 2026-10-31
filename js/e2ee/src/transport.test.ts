@@ -52,7 +52,7 @@ async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadc
 const transports = [
 	["moq-lite-07", "moq-lite-07-wip", true, true],
 	["moq-lite-05", "moq-lite-05", false, false],
-	["moq-transport-18", "moqt-18", true, true],
+	["moq-transport-18", "moqt-18", false, true],
 ] as const;
 
 for (const [name, protocol, routed, timed] of transports) {

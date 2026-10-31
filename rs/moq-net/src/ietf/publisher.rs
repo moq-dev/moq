@@ -11460,7 +11460,6 @@ mod serve_tests {
 				range_filters: false,
 				fill_timeout: false,
 				properties_wanted: true,
-				epoch: None,
 			},
 		));
 		for _ in 0..100 {

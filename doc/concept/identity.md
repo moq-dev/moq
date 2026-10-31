@@ -10,8 +10,7 @@ path, track name, and group sequence, and a subscriber that loses its route
 resumes by asking for the first frame it lacks. Both are only safe while every
 source of a name serves the same bytes. This page is the contract publishers,
 players, and relays share to keep that true across restarts, failover, and work
-started on demand. Wire details live in the [moq-lite](/draft/moq-lite) and
-[epoch](/draft/moq-epoch) drafts.
+started on demand. Wire details live in the [moq-lite](/draft/moq-lite) draft.
 
 ## Identity is a path and an epoch
 
@@ -52,11 +51,10 @@ the ingest gateways do it for you; see [publisher runs](/bin/cli#publisher-runs)
 ## Routes with and without an epoch
 
 An epoch reaches readers only over hops that carry it: moq-lite 07
-(`moq-lite-07-wip`, opt-in) and moq-transport with the
-[epoch extension](/draft/moq-epoch), which is on by default. Older moq-lite
-versions and moq-transport without the extension drop it. The
-[moq-lite](/draft/moq-lite) and [epoch](/draft/moq-epoch) drafts say how each
-version signals another instance taking the path.
+(`moq-lite-07-wip`, opt-in). Older moq-lite versions and moq-transport drop
+it, so use moq-lite 07 on every hop where continuity matters. The
+[moq-lite draft](/draft/moq-lite) says how each version signals another
+instance taking the path.
 
 A relay forwards an epoch unchanged and never invents one. Without one, no
 route can prove it serves the same bytes as another, so any other route
