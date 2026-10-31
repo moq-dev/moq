@@ -88,6 +88,73 @@ impl MoqReservation {
 	}
 }
 
+/// Divides one connection's receive estimate among the broadcasts watched over it,
+/// mirroring [`moq_net::bandwidth::Viewers`].
+///
+/// Minted by [`MoqSession::viewers`](crate::session::MoqSession::viewers). Handles from
+/// one session share a registry, and the session sends what its viewers' ceilings add
+/// up to as its PROBE target, so a peer that probes raises the estimate toward it.
+#[derive(uniffi::Object)]
+pub struct MoqViewers {
+	inner: moq_net::bandwidth::Viewers,
+}
+
+impl MoqViewers {
+	pub(crate) fn new(inner: moq_net::bandwidth::Viewers) -> Self {
+		Self { inner }
+	}
+}
+
+#[uniffi::export]
+impl MoqViewers {
+	/// Watch a broadcast receiving at most `max_bps`, returning its viewer.
+	///
+	/// `max_bps` is a ceiling: what the largest rendition the player would switch to
+	/// needs, not what it is receiving. The claim lasts as long as the returned handle;
+	/// drop it once the broadcast stops being watched. Holding one requests the receive
+	/// estimate, like [`MoqSession::recv_bandwidth`](crate::session::MoqSession::recv_bandwidth).
+	pub fn watch(&self, max_bps: u64) -> Arc<MoqViewer> {
+		let _guard = crate::ffi::enter();
+		Arc::new(MoqViewer {
+			inner: self.inner.watch(moq_net::bandwidth::Rate::from_bps(max_bps)),
+		})
+	}
+
+	/// Send `target_bps` as the PROBE target instead of the viewers' sum, or `None` to
+	/// follow them again. `Some(0)` sends no target.
+	pub fn set_target(&self, target_bps: Option<u64>) {
+		let _guard = crate::ffi::enter();
+		self.inner
+			.set_target(target_bps.map(moq_net::bandwidth::Rate::from_bps));
+	}
+}
+
+/// One watched broadcast's standing claim on a [`MoqViewers`].
+///
+/// [`rate`](Self::rate) is [`moq_net::bandwidth::Viewer::rate`]: `None` means no
+/// receive estimate, so hold the current selection.
+#[derive(uniffi::Object)]
+pub struct MoqViewer {
+	inner: moq_net::bandwidth::Viewer,
+}
+
+#[uniffi::export]
+impl MoqViewer {
+	/// This viewer's slice of the receive estimate right now, in bits per second.
+	///
+	/// `None` means no estimate: hold the current selection. `Some(0)` is a real zero rate.
+	pub fn rate(&self) -> Option<u64> {
+		let _guard = crate::ffi::enter();
+		self.inner.rate().map(moq_net::bandwidth::Rate::as_bps)
+	}
+
+	/// Change the ceiling, keeping the same claim.
+	pub fn update(&self, max_bps: u64) {
+		let _guard = crate::ffi::enter();
+		self.inner.update(moq_net::bandwidth::Rate::from_bps(max_bps));
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -201,6 +268,29 @@ mod tests {
 			.set(Some(moq_net::bandwidth::Rate::from_bps(1_000_000)))
 			.unwrap();
 		assert_eq!(reserved.rate(), Some(1_000_000));
+	}
+
+	/// Two viewers split a 3 Mbps receive estimate max-min fair by ceiling.
+	#[test]
+	fn viewers_split_the_receive_estimate() {
+		let estimate = moq_net::bandwidth::Producer::new();
+		let viewers = MoqViewers::new(moq_net::bandwidth::Viewers::new(estimate.weak()));
+
+		let first = viewers.watch(4_000_000);
+		let second = viewers.watch(1_000_000);
+		assert_eq!(first.rate(), None);
+
+		estimate
+			.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
+			.unwrap();
+		assert_eq!(first.rate(), Some(2_000_000));
+		assert_eq!(second.rate(), Some(1_000_000));
+
+		second.update(4_000_000);
+		assert_eq!(first.rate(), Some(1_500_000));
+
+		drop(second);
+		assert_eq!(first.rate(), Some(3_000_000));
 	}
 
 	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
