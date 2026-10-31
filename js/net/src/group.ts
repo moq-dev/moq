@@ -143,7 +143,7 @@ function appendFrame(state: GroupState, frame: Frame) {
 	for (const fn of state.progress) fn(state.total.peek());
 }
 
-let makeDemand: (sequence: number, used: Getter<boolean>, state: GroupState) => Demand;
+let makeDemand: (sequence: number, wanted: Getter<boolean>, state: GroupState) => Demand;
 
 /**
  * A watch-only view of a group's mirror readers, including coalesced fetches.
@@ -153,32 +153,22 @@ let makeDemand: (sequence: number, used: Getter<boolean>, state: GroupState) => 
 export class Demand {
 	/** The group sequence this handle watches. */
 	readonly sequence: number;
-	#used: Getter<boolean>;
+	#wanted: Getter<boolean>;
 	#state: GroupState;
 
-	private constructor(sequence: number, used: Getter<boolean>, state: GroupState) {
+	private constructor(sequence: number, wanted: Getter<boolean>, state: GroupState) {
 		this.sequence = sequence;
-		this.#used = used;
+		this.#wanted = wanted;
 		this.#state = state;
 	}
 
 	static {
-		makeDemand = (sequence, used, state) => new Demand(sequence, used, state);
+		makeDemand = (sequence, wanted, state) => new Demand(sequence, wanted, state);
 	}
 
 	/** Whether any mirror reader is attached. */
-	get used(): Getter<boolean> {
-		return this.#used;
-	}
-
-	/** Wait until all mirror readers leave. Throws once the group closes: its abort error, or a clean-close error. */
-	async unused(): Promise<void> {
-		for (;;) {
-			const closed = this.#state.closed.peek();
-			if (closed !== undefined) throw closed ?? new Error("group is closed");
-			if (!this.#used.peek()) return;
-			await Signal.race(this.#used, this.#state.closed);
-		}
+	get wanted(): Getter<boolean> {
+		return this.#wanted;
 	}
 
 	/** The group's clean close or abort error. */
@@ -199,10 +189,10 @@ export class Producer {
 	#state: GroupState;
 	#mirrors?: Set<GroupState>;
 
-	// Whether any mirror reader is attached (see {@link Demand.used}). Fetch coalescing watches it to
+	// Whether any mirror reader is attached (see {@link Demand.wanted}). Fetch coalescing watches it to
 	// cancel an abandoned download; a group can stay open indefinitely (a catalog or JSON stream),
 	// so this is what stops a reader-less fetch instead of the stream ending on its own.
-	#used = new Signal<boolean>(false);
+	#wanted = new Signal<boolean>(false);
 	#demand: Demand;
 
 	// Exclusive cap on the frame count, set when the track ends inside this group: a write
@@ -220,7 +210,7 @@ export class Producer {
 	constructor(sequence: number) {
 		this.#state = new GroupState(sequence);
 		this.sequence = sequence;
-		this.#demand = makeDemand(sequence, this.#used, this.#state);
+		this.#demand = makeDemand(sequence, this.#wanted, this.#state);
 	}
 
 	static {
@@ -348,14 +338,14 @@ export class Producer {
 
 		this.#mirrors ??= new Set();
 		this.#mirrors.add(dst);
-		this.#used.set(true);
+		this.#wanted.set(true);
 
 		// Track this mirror's close eagerly (not just lazily on the next write) so demand drops the
 		// moment the last reader leaves, letting an abandoned fetch cancel even with no more frames.
 		const dispose = dst.closed.subscribe((c) => {
 			if (c === undefined) return;
 			this.#mirrors?.delete(dst);
-			this.#used.set((this.#mirrors?.size ?? 0) > 0);
+			this.#wanted.set((this.#mirrors?.size ?? 0) > 0);
 			dispose();
 		});
 
