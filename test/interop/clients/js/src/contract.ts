@@ -241,10 +241,10 @@ export type CloseState =
  * owns them rather than the driver reaching in.
  */
 export type InteropControl = {
-	/** Stop the fixture publisher, releasing its session. */
-	stop(): void;
+	/** Stop the fixture publisher, releasing its session. Resolves once its capture is released. */
+	stop(): Promise<void>;
 	/** Start (or restart) the fixture publisher on the same broadcast path. */
-	start(): void;
+	start(): Promise<void>;
 	/** Remove the player from the DOM. */
 	detach(): void;
 	/** Blank the canvas the old session left behind, put the player back, and resume sampling. */

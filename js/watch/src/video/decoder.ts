@@ -514,7 +514,8 @@ class DecoderTrack {
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
 				try {
-					// A cancelled codec must not recreate the poster its track already released.
+					// A cancelled codec must not recreate the poster its track already released. Firefox can
+					// still deliver output after close().
 					if (signal.aborted) return;
 					const timestamp = Milli.fromMicro(frame.timestamp as Micro);
 					if (timestamp < (this.timestamp.peek() ?? 0)) {

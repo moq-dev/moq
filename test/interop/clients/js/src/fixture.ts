@@ -32,6 +32,9 @@ const SCHEDULE_AHEAD = 2; // seconds
 /** Peak amplitude of the tone. Low enough to leave Opus headroom, high enough to dominate noise. */
 const AMPLITUDE = 0.5;
 
+/** How long the capture keeps reading after the last requested picture before it is released. See {@link Fixture.close}. */
+const CAPTURE_DRAIN_MS = 250;
+
 // A canvas capture track is a MediaStreamTrack with requestFrame(); the publish types describe a
 // getUserMedia track, whose settings a canvas track does not carry. Only the MediaStreamTrack half
 // is ever touched at runtime.
@@ -47,6 +50,8 @@ export class Fixture {
 	readonly host: HTMLElement;
 
 	readonly #signals = new Effect();
+	// The canvas capture, released after everything else. See close().
+	readonly #capture = new Effect();
 	readonly #audio: AudioContext;
 	readonly #frameId = new Signal(-1);
 	readonly #audioState = new Signal<AudioContextState>("suspended");
@@ -88,7 +93,7 @@ export class Fixture {
 		// requestFrame(), which is what ties the emitted frames to the pattern clock.
 		const stream = canvas.captureStream(0);
 		const videoTrack = stream.getVideoTracks()[0] as unknown as CanvasSource;
-		this.#signals.cleanup(() => videoTrack.stop());
+		this.#capture.cleanup(() => videoTrack.stop());
 
 		this.#audio = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: "interactive" });
 		this.#signals.cleanup(() => void this.#audio.close());
@@ -106,7 +111,7 @@ export class Fixture {
 		this.#signals.cleanup(() => connection.close());
 
 		const capture = new Publish.Video.Capture({ source: videoTrack });
-		this.#signals.cleanup(() => capture.close());
+		this.#capture.cleanup(() => capture.close());
 
 		const broadcast = new Publish.Broadcast({
 			origin: connection.origin,
@@ -266,10 +271,17 @@ export class Fixture {
 		this.#canvas.height = Pattern.HEIGHT * 2;
 	}
 
-	/** Stop publishing and release the capture, audio graph, and session. */
-	close(): void {
+	/** Stop publishing at once, then release the capture, audio graph, and session. */
+	async close(): Promise<void> {
+		// Withdraws the broadcast and stops painting.
 		this.#signals.close();
-		this.host.replaceChildren();
+		this.#canvas.remove();
 		delete this.host.dataset.interopFixture;
+
+		// Chromium's MediaStreamTrackProcessor discards a frame still in flight inside it when torn down
+		// without closing it, and the page logs the collected frame as unclosed. No picture is requested
+		// once painting stops, so let the capture read what the processor still holds before releasing it.
+		await new Promise((resolve) => self.setTimeout(resolve, CAPTURE_DRAIN_MS));
+		this.#capture.close();
 	}
 }
