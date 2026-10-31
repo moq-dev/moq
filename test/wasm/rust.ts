@@ -28,6 +28,7 @@ try {
 	page.on("pageerror", (error) => console.error(error));
 	await page.goto(url);
 	await page.waitForFunction(() => document.getElementById("output")?.textContent?.includes("test result: "));
+	// biome-ignore lint/performance/useDomNodeTextContent: Playwright's Locator.innerText(), not the DOM property.
 	const result = await page.locator("#output").innerText();
 	console.log(result);
 	if (!/test result: ok\. [1-9]\d* passed; 0 failed;/.test(result)) {

@@ -826,7 +826,7 @@ test("zero latency takes the latest group when ages are equal", async () => {
 	}
 });
 
-test("the default subscription skips superseded groups and a bare options object sets no limit", async () => {
+test("an omitted maxDelay is the default zero, and null sets no limit", async () => {
 	expect(Subscription.default()).toEqual({ priority: 0, maxDelay: Milli.zero, order: "descending" });
 
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
@@ -837,11 +837,15 @@ test("the default subscription skips superseded groups and a bare options object
 		producer.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
 	}
 
-	// No options means the default subscription, whose zero budget keeps only the newest group.
+	// Each spelling of the default keeps only the newest group.
 	expect((await explicit.recvGroup())?.sequence).toBe(2);
 	expect((await implicit.recvGroup())?.sequence).toBe(2);
-	// An omitted maxDelay leaves the publisher's retention as the only bound.
-	for (const sequence of [0, 1, 2]) expect((await bare.recvGroup())?.sequence).toBe(sequence);
+	expect((await bare.recvGroup())?.sequence).toBe(2);
+	expect(producer.subscription.peek()?.maxDelay).toBe(Milli.zero);
+
+	// An explicit null leaves the publisher's retention as the only bound.
+	const unlimited = producer.subscribe({ maxDelay: null });
+	for (const sequence of [0, 1, 2]) expect((await unlimited.recvGroup())?.sequence).toBe(sequence);
 	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(5000));
 	producer.finish();
 	producer.close();
@@ -3955,4 +3959,40 @@ test("a partial maxDelay widening keeps the older skip owed", () => {
 	subscriber.update({ maxDelay: Milli(10_000) });
 	expect(drainGroups(subscriber)).toEqual([1]);
 	producer.close();
+});
+
+// An end declared with an error keeps the history below it: a reader gets every group, then the
+// error, even one arriving after the producer closed.
+test("an errored end keeps its history", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	for (const sequence of [0, 1]) {
+		const group = producer.createGroup(sequence);
+		group.writeFrame(textFrame("a", Timestamp.fromMillis(sequence)));
+		group.finish();
+	}
+	const failed = new StreamError(StreamCode(71));
+	producer.finishAt({ group: 2, frame: 0 }, failed);
+	producer.close();
+	expect(producer.closed.peek()).toBe(failed);
+
+	const replay = { groups: { start: { included: 0 } }, maxDelay: Milli(30_000) };
+	const arrival = producer.subscribe(replay);
+	expect((await arrival.recvGroup())?.sequence).toBe(0);
+	expect((await arrival.recvGroup())?.sequence).toBe(1);
+	await expect(arrival.recvGroup()).rejects.toBe(failed);
+
+	const ordered = producer.subscribe(replay).ordered();
+	expect((await ordered.nextGroup())?.sequence).toBe(0);
+	expect((await ordered.nextGroup())?.sequence).toBe(1);
+	await expect(ordered.nextGroup()).rejects.toBe(failed);
+
+	// The nonblocking reads end the same way.
+	const polled = producer.subscribe(replay);
+	expect(polled.tryRecvGroup()?.sequence).toBe(0);
+	expect(polled.tryRecvGroup()?.sequence).toBe(1);
+	expect(() => polled.tryRecvGroup()).toThrow(failed);
+	const polledOrdered = producer.subscribe(replay).ordered();
+	expect(polledOrdered.tryNextGroup()?.sequence).toBe(0);
+	expect(polledOrdered.tryNextGroup()?.sequence).toBe(1);
+	expect(() => polledOrdered.tryNextGroup()).toThrow(failed);
 });
