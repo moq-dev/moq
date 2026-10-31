@@ -514,8 +514,7 @@ async def test_fetch_group_and_serve_dynamic_miss():
     fill = await asyncio.wait_for(dynamic.requested_fill(), timeout=5.0)
     assert (fill.start_group, fill.start_frame, fill.end_group) == (7, 0, 8)
     assert fill.priority == 11
-    assert fill.next() == 7
-    assert fill.is_used()
+    assert fill.wanted() == 7
     assert fill.is_wanted(7)
     assert not fill.is_wanted(8)
 

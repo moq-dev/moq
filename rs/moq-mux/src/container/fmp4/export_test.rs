@@ -1183,7 +1183,7 @@ fn traf_samples(fragment: &Bytes) -> Vec<(u32, usize)> {
 			continue;
 		};
 		for traf in moof.traf {
-			let samples = traf.trun.iter().map(|trun| trun.entries.len()).sum();
+			let samples = traf.trun.iter().map(|trun| trun.samples.len()).sum();
 			trafs.push((traf.tfhd.track_id, samples));
 		}
 	}

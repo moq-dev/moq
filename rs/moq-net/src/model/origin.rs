@@ -3369,7 +3369,7 @@ struct TrackIo {
 	copy: Option<(u64, track::Consumer, track::Resolving)>,
 	held: Option<kio::Pending<track::Subscribing>>,
 	/// Whether the track had a reader as of the last demand edge.
-	used: bool,
+	wanted: bool,
 }
 
 impl TrackIo {
@@ -3488,7 +3488,7 @@ async fn run_front(task: FrontTask, origin: TasksWeak) {
 		}
 		for mut io in std::mem::take(&mut in_flight) {
 			follow_demand(&mut io.held, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
-			match io.weak.poll_unused(waiter) {
+			match io.weak.poll_unwanted(waiter) {
 				Poll::Pending => in_flight.push(io),
 				Poll::Ready(_) => io.release(),
 			}
@@ -3966,15 +3966,15 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 					}
 					Action::Forget { track: name } => {
 						// A reader that looked the track up since the machine decided keeps
-						// it. Feed its `Used` edge here: the demand poll only sees the
+						// it. Feed its `Wanted` edge here: the demand poll only sees the
 						// current level, so a reader gone before the next poll would
 						// otherwise leave the track unread with no linger armed.
 						if let Some(io) = tracks.get_mut(&name)
-							&& !io.weak.abort_unused(Error::Cancel)
+							&& !io.weak.abort_unwanted(Error::Cancel)
 						{
-							if !io.used {
-								io.used = true;
-								events.push_back(Event::Used { track: name });
+							if !io.wanted {
+								io.wanted = true;
+								events.push_back(Event::Wanted { track: name });
 							}
 							continue;
 						}
@@ -4030,21 +4030,21 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						broadcast.close();
 						let mut in_flight = Vec::new();
 						for (_, mut io) in tracks.drain() {
-							let used = io.weak.is_used();
+							let wanted = io.weak.is_wanted();
 							// A reader still waiting on its source's answer is in flight
 							// too: serve it the copy it asked, so it ends as that copy does.
 							let waiting = io.staged.take().or_else(|| io.query.take());
 							if io.copy.is_none()
-								&& used && let Some(asked) = waiting
+								&& wanted && let Some(asked) = waiting
 							{
 								io.splice(asked);
 							}
 							// Nothing in flight: unread, or nothing serving it.
-							if !used || io.copy.is_none() {
+							if !wanted || io.copy.is_none() {
 								io.end(Err(err.clone()));
 								// An unread track the front has not parked yet still holds
 								// its copy, which would keep its source subscribed.
-								if !used {
+								if !wanted {
 									io.routes.release();
 								}
 								continue;
@@ -4100,12 +4100,12 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			// the tracks it finished last before its close detaches it.
 			match &mut listing {
 				None => {
-					if front.serving().is_some() && matches!(lister.poll_used(waiter), Poll::Ready(Ok(()))) {
+					if front.serving().is_some() && matches!(lister.poll_wanted(waiter), Poll::Ready(Ok(()))) {
 						return Poll::Ready(Step::Listing);
 					}
 				}
 				Some(state) => {
-					if lister.poll_unused(waiter).is_ready() {
+					if lister.poll_unwanted(waiter).is_ready() {
 						return Poll::Ready(Step::Unlisted);
 					}
 					if state.source != front.serving() {
@@ -4154,11 +4154,11 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 					}
 					// Watch the demand edge in whichever direction is unmet. Only `Pending`
 					// parks, so an answer steps and the handler looks again, polling anew when
-					// nothing changed. A closed track is unread: it owes one `Unused` if
+					// nothing changed. A closed track is unread: it owes one `Unwanted` if
 					// recorded read, and is no edge after.
-					let edge = match io.used {
-						true => io.weak.poll_unused(waiter).is_ready(),
-						false => matches!(io.weak.poll_used(waiter), Poll::Ready(Ok(()))),
+					let edge = match io.wanted {
+						true => io.weak.poll_unwanted(waiter).is_ready(),
+						false => matches!(io.weak.poll_wanted(waiter), Poll::Ready(Ok(()))),
 					};
 					if edge {
 						return Some(Step::Demand(name.clone()));
@@ -4208,7 +4208,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						staged: None,
 						copy: None,
 						held: None,
-						used: false,
+						wanted: false,
 					},
 				);
 				Event::TrackAssigned {
@@ -4284,7 +4284,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 				// Staged only while the track has a reader: without one the machine
 				// will not splice, and a held copy would keep the source subscribed.
 				if let Ok(info) = &result
-					&& io.used
+					&& io.wanted
 				{
 					io.staged = Some(Asked {
 						info: Some(info.clone()),
@@ -4315,19 +4315,19 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 				let Some(io) = tracks.get_mut(&name) else { continue };
 				// Read again: the edge may have flipped back since it fired, and the next
 				// wait parks on it.
-				if io.weak.is_used() == io.used {
+				if io.weak.is_wanted() == io.wanted {
 					continue;
 				}
-				io.used = !io.used;
-				if !io.used {
+				io.wanted = !io.wanted;
+				if !io.wanted {
 					// Nothing will be spliced now: let go of the copies a query
 					// holds, or the source stays subscribed with nobody reading.
 					io.query = None;
 					io.staged = None;
 				}
-				match io.used {
-					true => Event::Used { track: name },
-					false => Event::Unused {
+				match io.wanted {
+					true => Event::Wanted { track: name },
+					false => Event::Unwanted {
 						track: name,
 						now: timers.now(),
 					},
@@ -7898,7 +7898,7 @@ mod tests {
 				staged: None,
 				copy: None,
 				held: None,
-				used: true,
+				wanted: true,
 			};
 			let mut subscriber = consumer.subscribe(None).now_or_never().unwrap().unwrap();
 			io.end(Ok(()));
@@ -10140,7 +10140,7 @@ mod tests {
 		queued(&server).await.accept(&upstream);
 		let resolved = pending.await.expect("resolves");
 		let reader = resolved.track("video").unwrap().subscribe(None);
-		settle(|| source.demand().is_used()).await;
+		settle(|| source.demand().is_wanted()).await;
 
 		// The source refuses the track before delivering, which ends it for the reader.
 		source.abort(Error::NotFound).unwrap();
@@ -13648,7 +13648,10 @@ mod tests {
 		for _ in 0..10 {
 			moq_clock::sim::yield_now().await;
 		}
-		assert!(!incompatible.demand().is_used(), "the refused copy is still subscribed");
+		assert!(
+			!incompatible.demand().is_wanted(),
+			"the refused copy is still subscribed"
+		);
 
 		// The refusal happened: the incumbent leaving surfaces it.
 		drop(track);

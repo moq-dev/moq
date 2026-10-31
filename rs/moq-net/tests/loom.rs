@@ -389,7 +389,7 @@ fn concurrent_tracks_drain_a_shared_pool() {
 /// The teardown every wire subscriber runs when its copy of a track goes idle,
 /// racing a viewer coming back for the same name.
 ///
-/// `poll_unused` is a level snapshot, so the teardown it wakes can only be trusted
+/// `poll_wanted_changed` is a level snapshot, so the teardown it wakes can only be trusted
 /// at the instant it commits. The invariant is that the two can't both win: either
 /// the subscribe joins the live track and the teardown declines, or the teardown
 /// commits and the subscribe never sees the dead track at all. A subscription joined
@@ -407,7 +407,7 @@ fn an_idle_teardown_never_cancels_a_returning_viewer() {
 		let viewer = thread::spawn(move || consumer.track("video").map(|track| track.subscribe(None).into_inner()));
 
 		// Held to the end: a declined teardown hands back the producer still serving.
-		let teardown = track.abort_unused(Error::Cancel);
+		let teardown = track.abort_unwanted(Error::Cancel);
 		let subscribed = viewer.join().unwrap().and_then(|subscribing| {
 			match subscribing.poll_ok(&kio::Waiter::noop()) {
 				// A live track parks (nothing has been published); only an error matters.
@@ -472,7 +472,7 @@ fn a_fetch_never_joins_a_withdrawn_attempt() {
 
 		let leaver = thread::spawn(move || {
 			drop(first);
-			request.is_used().then_some(request)
+			request.wanted().is_some().then_some(request)
 		});
 		let mut retry = consumer.fetch_group(5, None);
 		let request = match leaver.join().unwrap() {
