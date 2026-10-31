@@ -696,18 +696,22 @@ test("a time start waits on groups below a reached end that have yet to start", 
 		producer.accept({ timescale: Timescale.MILLI });
 		const groups = [0, 1, 2].map((sequence) => producer.createGroup(sequence));
 		producer.finishAt({ group: 3, frame: 0 });
-		const reader = producer.subscribe({
-			maxDelay: null,
-			order,
-			ranges: [{ start: { time: Timestamp.fromMillis(1500) } }],
-		});
-		expect(reader.tryRecvGroup()).toBeUndefined();
+		const subscription = { maxDelay: null, order, ranges: [{ start: { time: Timestamp.fromMillis(1500) } }] };
+		const reader = producer.subscribe(subscription);
+		const sequenced = producer.subscribe(subscription);
+		const ordered = sequenced.ordered();
+		// Idle rather than done: the groups may still start inside the window.
+		expect(hooks.tryRecvGroup(reader, false)).toEqual({ kind: "idle" });
+		expect(hooks.tryNextGroup(sequenced)).toEqual({ kind: "idle" });
 		for (const [sequence, group] of groups.entries()) {
 			group.writeFrame(textFrame(`${sequence}`, Timestamp.fromMillis(sequence * 1000)));
 		}
 		const got: number[] = [];
 		for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup()) got.push(group.sequence);
 		expect(got.sort()).toEqual([1, 2]);
+		const inOrder: number[] = [];
+		for (let group = ordered.tryNextGroup(); group; group = ordered.tryNextGroup()) inOrder.push(group.sequence);
+		expect(inOrder).toEqual([1, 2]);
 	}
 });
 

@@ -2309,6 +2309,14 @@ export class Subscriber {
 		return cap !== undefined && (groups.at(-1)?.sequence ?? -1) >= cap;
 	}
 
+	// Whether a held group from `from` on may still start, and so settle a time anchor the window
+	// waits on, which a reached end does not decide: until it starts or the track closes, as
+	// {@link Holdings.complete} says, the window may still take it in.
+	#starting(groups: readonly GroupConsumer[], from = 0): boolean {
+		if (this.#window.settled || this.#state.closed.peek() !== undefined) return false;
+		return groups.some((group) => group.sequence >= from && !hooks.groupStarted(group));
+	}
+
 	static {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.subscriberEnd = (subscriber) =>
@@ -2780,7 +2788,7 @@ export class Subscriber {
 
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
-		if (closed === undefined && !this.#complete()) return { kind: "idle" };
+		if (closed === undefined && (!this.#complete() || this.#starting(groups))) return { kind: "idle" };
 		// A group beyond the cap outlives a clean close: it becomes deliverable if
 		// the cap rises, so the track isn't over while any are held.
 		return this.#parked(groups) ? { kind: "boundary" } : { kind: "done" };
@@ -3042,6 +3050,7 @@ export class Subscriber {
 		const end = this.#state.end.peek();
 		if (
 			!this.#parked(groups) &&
+			!this.#starting(groups, start) &&
 			(closed !== undefined || this.#complete() || (end !== undefined && start >= finalSequence(end)))
 		) {
 			return { kind: "done" };
