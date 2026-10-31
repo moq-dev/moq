@@ -11,9 +11,9 @@
 //! GET /{broadcast}/@{instance}/{kind}/{rendition}/seg/{tag}.t{pts}.m4s
 //! ```
 //!
-//! The master playlist and manifest list the publisher instance serving the broadcast now,
-//! and every URL they list is under that `@{instance}`: its epoch, or an id the server mints
-//! for an epochless instance. A publisher that restarts gets its own URLs, so a playlist URL
+//! The master playlist and manifest list the stream serving the broadcast now, and every
+//! URL they list is under that `@{instance}`: its identity, which a session mints for a route
+//! whose wire carries none. A publisher that restarts gets its own URLs, so a playlist URL
 //! never resets its media sequence. A replaced instance keeps serving its URLs while its
 //! broadcast stays open, so a player already on it keeps playing until its publisher goes,
 //! then reloads the master to reach the replacement.
@@ -125,8 +125,8 @@ impl Followed {
 		self.instances.lock().unwrap().by_id.get(id).cloned()
 	}
 
-	/// List `broadcaster` from now on. An instance returning after a gap keeps its epoch, and so
-	/// its id, which then names the new broadcaster.
+	/// List `broadcaster` from now on. An instance returning after a gap keeps its identity, and
+	/// so its id, which then names the new broadcaster.
 	fn start(&self, broadcaster: Arc<Broadcaster>) {
 		let mut instances = self.instances.lock().unwrap();
 		instances
@@ -232,8 +232,8 @@ impl Server {
 				if !existing.current().is_closed() {
 					return Some(existing.clone());
 				}
-				// A player may still be on a replaced instance, and an epochless one would not get
-				// its id back.
+				// A player may still be on a replaced instance of another identity, which the
+				// fresh resolution does not list.
 				followed.adopt(existing);
 			}
 			broadcasts.insert(name.to_string(), followed.clone());
@@ -507,8 +507,8 @@ mod tests {
 	async fn a_replaced_instance_serves_until_it_closes() {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
-		let (old_epoch, new_epoch) = (moq_net::Epoch::mint(), moq_net::Epoch::mint());
-		let route = |epoch: &moq_net::Epoch| moq_net::origin::Route::default().with_epoch(epoch.clone());
+		let (old_epoch, new_epoch) = (moq_net::Identity::random(), moq_net::Identity::random());
+		let route = |epoch: &moq_net::Identity| moq_net::origin::Route::default().with_identity(epoch.clone(), 0);
 
 		let old = origin.publish("live", route(&old_epoch)).expect("publish allowed");
 		settle().await;
@@ -554,8 +554,8 @@ mod tests {
 	}
 
 	/// A request that finds the listed instance closed before the follower does resolves the path
-	/// afresh, yet a replaced instance still open keeps its URLs. An epochless one gets a new id
-	/// when resolved again, so its old URLs would never serve otherwise.
+	/// afresh, yet a replaced instance still open keeps its URLs: its identity names them, so the
+	/// fresh resolution of that same stream serves them on.
 	#[tokio::test]
 	async fn a_closed_current_instance_keeps_the_open_ones() {
 		let origin = produce_origin();
@@ -580,7 +580,7 @@ mod tests {
 		assert!(!current.is_closed());
 		let kept = server.instance("live", open.instance()).await;
 		assert!(
-			kept.is_some_and(|kept| Arc::ptr_eq(&kept, &open)),
+			kept.is_some_and(|kept| kept.instance() == open.instance() && !kept.is_closed()),
 			"the open instance lost its URLs"
 		);
 	}

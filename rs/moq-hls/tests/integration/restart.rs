@@ -14,9 +14,10 @@ const NEW: u8 = 2;
 /// What the replaced run's recording holds when the new instance takes over.
 #[derive(Clone, Copy, Debug)]
 enum Case {
-	/// A cached segment returned while the cursor's live SUBSCRIBE was still unanswered.
-	/// Without an epoch nothing says which instance answers it, so it is refused and the
-	/// recording loses the old run's last uncached GOP.
+	/// A cached segment returned while the cursor's live SUBSCRIBE was still unanswered. On
+	/// lite-07 it names the old run's identity, so the old run answers it and the recording
+	/// completes. An older wire names none, so the takeover refuses it and the recording loses
+	/// the old run's last uncached GOP.
 	Unanswered,
 	/// As [`Self::Unanswered`], while the replacement's own group of the same number is
 	/// still open, which the old cursor once waited on forever.
@@ -66,7 +67,7 @@ async fn takeover(version: &str, case: Case) {
 	}
 
 	// The new instance numbers its groups and segments from zero again.
-	let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = moq_net::origin::Route::default();
 	let mut new = Publisher::new(&pair.publisher, "live", route);
 	let deadline = moq_clock::now() + TIMEOUT;
 	let current = loop {
@@ -113,14 +114,15 @@ async fn takeover(version: &str, case: Case) {
 	// The old recording reads only its own segments, and either completes or fails at the GOP
 	// it lost.
 	let (read, end) = drain_old(&mut cursor).await;
+	let pinned = version == "moq-lite-07-wip";
 	match case {
-		Case::Answered => {
+		_ if pinned || matches!(case, Case::Answered) => {
 			end.unwrap_or_else(|err| panic!("{case:?}: {err}"));
 			assert_eq!(read, [1, 2, 3], "{case:?}");
 			let playlist = rendition.media_playlist(None).expect("finished").expect("listed");
 			assert!(playlist.ends_with("#EXT-X-ENDLIST\n"), "{case:?}: {playlist}");
 		}
-		Case::Unanswered | Case::UnansweredUnfinished | Case::FinishedFirst => {
+		Case::Answered | Case::Unanswered | Case::UnansweredUnfinished | Case::FinishedFirst => {
 			assert!(
 				matches!(end, Err(moq_hls::Error::SegmentUnavailable { segment: 3 })),
 				"{case:?}: {end:?}"

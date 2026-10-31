@@ -1020,7 +1020,7 @@ mod tests {
 
 	impl Instance {
 		fn publish(origin: &moq_net::origin::Producer, track: &str) -> Self {
-			let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+			let route = moq_net::origin::Route::default();
 			let broadcast = origin.publish("live", route).unwrap();
 			let mut catalog = moq_mux::catalog::Producer::new(
 				&mut broadcast.broadcast().clone(),

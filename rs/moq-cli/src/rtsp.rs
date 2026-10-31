@@ -86,9 +86,9 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 		if updates.next().await?.is_none() {
 			return std::future::pending().await;
 		}
-		let epoch = moq_net::Epoch::mint();
+		let epoch = moq_net::Identity::random();
 		broadcast
-			.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+			.announce(moq_net::origin::Route::default().with_identity(epoch.clone(), 0))
 			.context("failed to announce broadcast")?;
 		tracing::info!(name = %target.name, %epoch, "publishing RTSP broadcast");
 		*published = true;

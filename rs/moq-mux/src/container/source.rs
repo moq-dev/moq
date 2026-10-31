@@ -69,12 +69,12 @@ enum SourceState {
 	Ended,
 }
 
-/// The track a source reads: its broadcast's path, the publisher instance that broadcast must
-/// be, and the track's name there.
+/// The track a source reads: its broadcast's path, the identity that broadcast must have, and
+/// the track's name there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Target {
 	path: moq_net::Path,
-	epoch: Option<moq_net::Epoch>,
+	identity: Option<moq_net::Identity>,
 	track: String,
 }
 
@@ -83,13 +83,13 @@ impl Target {
 	fn of(source: &crate::Source, name: &str, config: &impl Reference) -> Option<Self> {
 		Some(Self {
 			path: source.resolve_reference(config.broadcast())?,
-			epoch: config.epoch().cloned(),
+			identity: config.identity().cloned(),
 			track: config.track(name).to_string(),
 		})
 	}
 
 	fn request(&self, source: &crate::Source) -> SourceState {
-		let binding = source.request_path(&self.path, self.epoch.as_ref());
+		let binding = source.request_path(&self.path, self.identity.as_ref());
 		SourceState::Requesting(binding, self.track.clone())
 	}
 }
@@ -268,7 +268,7 @@ impl ExportSource {
 	) -> Result<Self, crate::Error> {
 		let target = Target {
 			path: source.path().clone(),
-			epoch: None,
+			identity: None,
 			track: name.to_string(),
 		};
 		let media = HangContainer::Legacy(crate::container::Kind::Data);

@@ -89,9 +89,9 @@ impl Instance {
 		path: &str,
 		config: moq_mux::catalog::Config,
 		program: Option<u16>,
-	) -> Result<(Self, moq_net::Epoch)> {
-		let epoch = moq_net::Epoch::mint();
-		let broadcast = origin.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
+	) -> Result<(Self, moq_net::Identity)> {
+		let epoch = moq_net::Identity::random();
+		let broadcast = origin.publish(path, moq_net::origin::Route::default().with_identity(epoch.clone(), 0))?;
 		let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
@@ -128,7 +128,7 @@ impl Publisher {
 		program: Option<Program>,
 	) -> Result<Self> {
 		let importer = match program {
-			// `ts::Programs` mints an epoch per program.
+			// `ts::Programs` mints an identity per program.
 			Some(Program::All) => {
 				tracing::info!(%path, ?program, "publishing ingest broadcasts");
 				Importer::All(Box::new(ts::Programs::new(

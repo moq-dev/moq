@@ -39,7 +39,7 @@ informative:
 --- abstract
 
 This document specifies moq-sign-00, a versioned profile that authenticates MoQ application payloads with a per-frame Ed25519 signature.
-A publisher signs each grouped frame with its endpoint key, binding the broadcast path, the publisher epoch, the track, the group, the frame index, and the frame's timestamp.
+A publisher signs each grouped frame with its endpoint key, binding the broadcast path, the publisher's identity, the track, the group, the frame index, and the frame's timestamp.
 A subscriber that expects that key delivers a frame only after its signature verifies, so a relay can forward and cache content without forging it, retiming it, or moving it to another position.
 
 --- note_Note_to_Readers
@@ -91,7 +91,7 @@ Integers are unsigned big-endian of the stated width, and `bytes(x)` is `u64(len
 ~~~
 message = "moq-sign-00"
           || bytes(path)
-          || bytes(epoch)
+          || bytes(identity)
           || bytes(track)
           || u64(group)
           || u64(frame)
@@ -104,10 +104,10 @@ message = "moq-sign-00"
 The UTF-8 broadcast path both ends name the broadcast by.
 A relay may mount a broadcast under another prefix, so this is the application's path, not the one a transport hop reports.
 
-**epoch**:
-The UUID text of the publisher instance's epoch, carried on the broadcast's route ({{moql}}).
-A publisher instance MUST sign under an epoch it minted and no other instance has used.
-The epoch names one sequence space: a publisher that restarts its group sequences signs under a new one.
+**identity**:
+The UTF-8 identity carried on the broadcast's route ({{moql}}), naming one continuous stream.
+A publisher MUST sign under an identity no other publisher uses.
+The identity names one sequence space: a publisher that restarts its group sequences signs under a new one.
 
 **track**:
 The UTF-8 track name.
@@ -152,9 +152,9 @@ A subscriber MUST NOT deliver any byte of a frame before its signature verifies.
 A `signature` failure ends that group for the subscriber: it MUST deliver no later frame of the group.
 Other groups of the track continue, since each verifies on its own.
 
-A subscriber that cannot learn the broadcast's epoch from its route MUST refuse to read it (`epoch`).
+A subscriber that cannot learn the publisher's identity from the broadcast's route MUST refuse to read it (`identity`), including when a relay minted the identity for a hop that carries none.
 
-Every hop between the publisher and the subscriber must carry the route's epoch and each frame's timestamp and timescale unchanged; in {{moql}} that is moq-lite-07.
+Every hop between the publisher and the subscriber must carry the route's identity and each frame's timestamp and timescale unchanged; in {{moql}} that is moq-lite-07.
 A hop that cannot, such as a moq-lite-05 or -06 hop that stamps an untimed frame with its send time, causes `signature` failures rather than a frame delivered with the wrong time.
 
 Datagrams are not covered by this profile; a subscriber MUST NOT deliver datagrams from a track it reads under it.
@@ -170,22 +170,22 @@ The file covers key derivation from a seed, including {{RFC8032}} Section 7.1 TE
 Relays, caches, and recorders are untrusted for content.
 The publisher's secret key is trusted; anyone holding it can sign as that endpoint.
 
-The signature binds every field a relay could otherwise change to move or retime an authentic frame: the path, the epoch, the track, the group, the frame index, and the timestamp.
-Binding the epoch keeps a frame from an earlier instance of the same broadcast, which restarted its sequences, from verifying in a later one.
+The signature binds every field a relay could otherwise change to move or retime an authentic frame: the path, the identity, the track, the group, the frame index, and the timestamp.
+Binding the identity keeps a frame from an earlier instance of the same broadcast, which restarted its sequences, from verifying in a later one.
 Within an instance, a signed position names one frame only because the publisher never signs a group sequence twice; a relay holding two groups signed at one sequence could splice their frames into a group that was never published.
 Binding the timestamp keeps a relay from changing when a frame presents.
 
 Any subscriber can verify but none can sign, so subscribers that share a broadcast cannot forge frames to each other, as they could with a shared symmetric key.
 
 A relay can still delay, drop, or reorder groups.
-A relay that presents a wrong epoch only causes `signature` failures.
+A relay that presents a wrong identity only causes `signature` failures.
 
 ## Freshness {#freshness}
 The profile authenticates content, not liveness.
-The subscriber learns the epoch from the route, which a relay presents, so a relay that recorded an instance can later announce that epoch again and replay the instance's frames, whole or in part, after the publisher has gone or restarted.
+The subscriber learns the identity from the route, which a relay presents, so a relay that recorded an instance can later announce that identity again and replay the instance's frames, whole or in part, after the publisher has gone or restarted.
 Every replayed frame verifies, because the publisher did sign it at that position.
-Binding the epoch only keeps frames of different instances from being spliced into one.
-An application that needs freshness learns the expected epoch from a channel it trusts, or checks the signed timestamps against a clock it shares with the publisher.
+Binding the identity only keeps frames of different streams from being spliced into one.
+An application that needs freshness learns the expected identity from a channel it trusts, or checks the signed timestamps against a clock it shares with the publisher.
 
 ## Group End {#group-end}
 Nothing authenticates where a group ends: a relay can end a group after any frame, and the subscriber sees an ordinary end of group.
@@ -193,7 +193,7 @@ MoQ already lets a relay drop the tail of a group, for example when it falls beh
 An application MUST NOT treat a group's end as proof that it received every frame the publisher wrote.
 One that needs a complete group, such as a byte stream reading the end as a clean close, signs its own end marker as the group's last frame.
 
-A relay can observe everything a signature does not hide: paths, epochs, track names, payloads, sizes, and timing.
+A relay can observe everything a signature does not hide: paths, identities, track names, payloads, sizes, and timing.
 
 Ed25519 signing is deterministic, so no per-signature randomness can leak the key.
 
@@ -210,4 +210,4 @@ This document requests no registrations.
 ## draft-lcurley-moq-sign-00
 {:numbered="false"}
 
-- Initial `moq-sign-00` profile: Ed25519 endpoint keys with a z-base-32 ID, a message binding path, epoch, track, group, frame index, and timestamp, a payload-then-signature frame body, group-ending failures, an unauthenticated group end, no freshness guarantee, and shared vectors.
+- Initial `moq-sign-00` profile: Ed25519 endpoint keys with a z-base-32 ID, a message binding path, identity, track, group, frame index, and timestamp, a payload-then-signature frame body, group-ending failures, an unauthenticated group end, no freshness guarantee, and shared vectors.

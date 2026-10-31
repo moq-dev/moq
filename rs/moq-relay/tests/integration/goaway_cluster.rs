@@ -213,7 +213,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	within("routed via B", async {
 		loop {
 			let event = announced.next().await.expect("announce update");
-			// Without an epoch, B's route is another source: a restart.
+			// Under another identity, B's route is another source: a restart.
 			if let moq_net::announce::Event::Start(update)
 			| moq_net::announce::Event::Update(update)
 			| moq_net::announce::Event::Restart(update)
@@ -485,7 +485,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let top_origin = moq_tokio::origin::spawn();
 	let broadcast = top_origin.create_broadcast("diamond").expect("create broadcast");
 	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(moq_net::origin::Route::default())
 		.expect("create broadcast");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 

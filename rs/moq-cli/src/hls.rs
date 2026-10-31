@@ -162,7 +162,7 @@ impl Tls {
 
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`,
 /// announced under `epoch`. Once the playlist ends, serve the finished broadcast for the linger.
-pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoch) -> anyhow::Result<()> {
+pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Identity) -> anyhow::Result<()> {
 	let ImportTarget {
 		origin,
 		name,
@@ -217,7 +217,7 @@ async fn run_announced(
 	importer: &mut moq_hls::import::Import,
 	listed: &mut moq_mux::catalog::hang::Consumer,
 	publication: &moq_net::origin::Publication,
-	epoch: moq_net::Epoch,
+	epoch: moq_net::Identity,
 ) -> anyhow::Result<()> {
 	let run = importer.run();
 	tokio::pin!(run);
@@ -234,7 +234,7 @@ async fn run_announced(
 	};
 	anyhow::ensure!(catalog.is_some(), "the playlist ended before it declared a track");
 	publication
-		.announce(moq_net::origin::Route::default().with_epoch(epoch))
+		.announce(moq_net::origin::Route::default().with_identity(epoch, 0))
 		.context("failed to announce broadcast")?;
 	if !ended {
 		run.await?;
@@ -415,7 +415,7 @@ mod test {
 	async fn an_ended_playlist_announces_its_catalog() {
 		for _ in 0..32 {
 			let (_dir, mut importer, mut listed, producer) = joined_then_ended(1).await.unwrap();
-			run_announced(&mut importer, &mut listed, &producer, moq_net::Epoch::mint())
+			run_announced(&mut importer, &mut listed, &producer, moq_net::Identity::random())
 				.await
 				.unwrap();
 			assert!(producer.route().is_some(), "the finished playlist was not announced");
@@ -436,7 +436,7 @@ mod test {
 	#[tokio::test]
 	async fn an_empty_playlist_fails_unannounced() {
 		let (_dir, mut importer, mut listed, producer) = joined_then_ended(0).await.unwrap();
-		let result = run_announced(&mut importer, &mut listed, &producer, moq_net::Epoch::mint()).await;
+		let result = run_announced(&mut importer, &mut listed, &producer, moq_net::Identity::random()).await;
 		assert!(producer.route().is_none(), "an empty playlist was announced");
 		let err = result.expect_err("an empty playlist imports nothing");
 		assert!(format!("{err:#}").contains("before it declared a track"), "{err:#}");
@@ -521,7 +521,7 @@ mod test {
 			playlist: playlist.to_str().unwrap().to_string(),
 			passthrough: false,
 		};
-		let importing = tokio::spawn(import(target, args, moq_net::Epoch::mint()));
+		let importing = tokio::spawn(import(target, args, moq_net::Identity::random()));
 
 		announced.next().await.expect("announced");
 		let broadcast = consumer.request("hls", None).await.unwrap();

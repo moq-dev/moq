@@ -229,7 +229,7 @@ mod tests {
 	const RUN: &str = "01920000-0000-7000-8000-000000000000";
 
 	fn run() -> moq_net::origin::Route {
-		moq_net::origin::Route::default().with_epoch(RUN.parse().unwrap())
+		moq_net::origin::Route::default().with_identity(RUN.parse().unwrap(), 0)
 	}
 
 	fn vp8_frame(micros: u64, keyframe: bool) -> moq_mux::container::Frame {
@@ -439,9 +439,9 @@ mod tests {
 		wait_listed(&app, "/live/master.m3u8", &format!("@{RUN}/video/video0/media.m3u8")).await;
 		wait_listed(&app, &old_playlist, "seg/53e0aafd.0.m4s").await;
 
-		let next = moq_net::Epoch::mint();
+		let next = moq_net::Identity::random();
 		let new = origin.create_broadcast("live").expect("publish");
-		new.announce(moq_net::origin::Route::default().with_epoch(next.clone()))
+		new.announce(moq_net::origin::Route::default().with_identity(next.clone(), 0))
 			.expect("announce");
 		let (_new_catalog, _, _new_track, mut new_media) =
 			publish_video(&mut new.broadcast().clone(), video_config(), timed());

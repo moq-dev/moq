@@ -5,13 +5,13 @@ use std::collections::hash_map::Entry;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+use crate::Epoch;
 use crate::credential::{Credential, append_bytes};
 use crate::error::{Error, Result};
 use crate::key::TrackKey;
 use crate::limits::{KEY_LABEL, NAME_KEY_LABEL, NAME_MAC_LABEL};
 use crate::name::{self, Name};
 use crate::track;
-use moq_net::Epoch;
 use rind::{aead, hmac};
 
 /// Grouped-frame versus datagram key domain.

@@ -96,8 +96,8 @@ pub struct Broadcaster {
 		)
 	)]
 	broadcast: moq_net::broadcast::Consumer,
-	/// The publisher instance served, which every URL the master playlist and manifest list
-	/// starts with: its epoch, or an id minted for an epochless instance.
+	/// The stream served, which every URL the master playlist and manifest list starts with:
+	/// its identity, or an id minted for a broadcast that came through no route.
 	instance: Arc<str>,
 	/// The current rendition set, reconciled from the catalog by the watcher task.
 	renditions: renditions::Producer,
@@ -111,8 +111,12 @@ impl Broadcaster {
 	/// Start tracking the renditions of `source`'s catalog broadcast.
 	pub fn new(source: moq_mux::Source, config: Config) -> Arc<Self> {
 		let broadcast = source.broadcast();
-		// An epoch names the instance on every edge, so each serves it under the same URLs.
-		let instance = broadcast.info().epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
+		// An identity names the stream on every edge, so each serves it under the same URLs.
+		let instance = broadcast
+			.info()
+			.identity
+			.clone()
+			.unwrap_or_else(moq_net::Identity::random);
 		let renditions = renditions::Producer::new(config.window);
 		let broadcaster = Arc::new(Self {
 			broadcast,

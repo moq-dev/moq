@@ -155,8 +155,8 @@ pub async fn accept(
 	// subscriber doesn't see a 404 in the gap before the first RTP packet. Each
 	// offer is its own publisher instance, so a reconnect replaces a stale
 	// session's broadcast instead of resuming into it.
-	let epoch = moq_net::Epoch::mint();
-	handle.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
+	let epoch = moq_net::Identity::random();
+	handle.announce(moq_net::origin::Route::default().with_identity(epoch.clone(), 0))?;
 
 	let resource_id = sdp::new_resource_id();
 	let socket = moq_ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;

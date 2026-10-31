@@ -297,7 +297,7 @@ impl Rendition {
 		};
 		Target {
 			path: source.resolve_reference(config.broadcast()),
-			epoch: config.epoch().cloned(),
+			epoch: config.identity().cloned(),
 			track: config.track(name).to_string(),
 		}
 	}
@@ -310,13 +310,13 @@ impl Rendition {
 		match &self {
 			Self::Audio(name, config) => {
 				let track = source
-					.subscribe_track(config.broadcast(), config.epoch(), config.track(name))
+					.subscribe_track(config.broadcast(), config.identity(), config.track(name))
 					.await?;
 				codec::Track::opus(track, config)
 			}
 			Self::Video(name, config) => {
 				let track = source
-					.subscribe_track(config.broadcast(), config.epoch(), config.track(name))
+					.subscribe_track(config.broadcast(), config.identity(), config.track(name))
 					.await?;
 				codec::Track::video(track, config)
 			}
@@ -339,7 +339,7 @@ fn pick_audio<'a>(
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Target {
 	path: Option<moq_net::Path>,
-	epoch: Option<moq_net::Epoch>,
+	epoch: Option<moq_net::Identity>,
 	track: String,
 }
 

@@ -575,7 +575,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 		let mut stdout = None;
 
 		// Each run publishes its own content and therefore mints its own instance.
-		let epoch = moq_net::Epoch::mint();
+		let epoch = moq_net::Identity::random();
 		tracing::info!(%epoch, "publisher instance");
 
 		for stage in stages {
@@ -714,7 +714,7 @@ fn spawn_import(
 	origin: &moq_net::origin::Producer,
 	import: Import,
 	name: String,
-	epoch: moq_net::Epoch,
+	epoch: moq_net::Identity,
 	bandwidth: moq_net::bandwidth::Allocator,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Option<Publish>> {

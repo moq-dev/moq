@@ -29,12 +29,12 @@ let generation = credential.produce();
 let broadcast = origin.create_broadcast(&credential.path("meeting.hang")?)?;
 let protected = broadcast::Producer::new(broadcast.clone(), generation.clone());
 let video = protected.create_track("video", None)?;
-broadcast.announce(Route::default().with_epoch(generation.epoch().clone()))?;
+broadcast.announce(Route::default().with_identity(generation.epoch().identity(), 0))?;
 ```
 
 A subscriber follows `credential.path(semantic)` with `origin.follow(path, None)`. It takes
-each instance's epoch from the broadcast it resolved, `broadcast.info().epoch` (or from the
-application's channel on a wire older than lite-07), so the key always matches the instance
+each instance's epoch from the broadcast it resolved, `Epoch::of(&broadcast)` (or from the
+application's channel on a wire that carries no identity, older than lite-07), so the key always matches the instance
 it reads. It binds the epoch with `credential.consume(epoch)` and wraps the broadcast in a
 `broadcast::Consumer`. Its `subscribe(semantic, subscription)` opens the track a decrypted
 catalog names. A consuming generation cannot produce. Nothing survives a publisher instance: a restart mints a new epoch.

@@ -617,8 +617,8 @@ impl Publish {
 	///
 	/// A capture announces now. A stdin import announces from [`run`](Self::run), once the input
 	/// has declared its tracks: see [`Pending`].
-	pub fn announce(&mut self, epoch: moq_net::Epoch) -> anyhow::Result<()> {
-		let route = moq_net::origin::Route::default().with_epoch(epoch);
+	pub fn announce(&mut self, epoch: moq_net::Identity) -> anyhow::Result<()> {
+		let route = moq_net::origin::Route::default().with_identity(epoch, 0);
 		match (&self.source, &self.publication) {
 			(_, None) => {}
 			(Source::Stream { .. }, Some(_)) => self.route = Some(route),
@@ -739,9 +739,12 @@ impl Republish {
 		if let Some(echo) = &self.echo {
 			catalog.mutate(|catalog| catalog.echo = Some(echo.clone()))?;
 		}
-		let epoch = moq_net::Epoch::mint();
+		let epoch = moq_net::Identity::random();
 		tracing::info!(%epoch, "publisher instance");
-		let pending = Pending::new(control.clone(), moq_net::origin::Route::default().with_epoch(epoch))?;
+		let pending = Pending::new(
+			control.clone(),
+			moq_net::origin::Route::default().with_identity(epoch, 0),
+		)?;
 		Ok(Instance {
 			decoder: PublishDecoder::Ts(Box::new(import)),
 			catalog: PublishCatalog::Ts(catalog),
@@ -2095,7 +2098,7 @@ pub(crate) mod tests {
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
-			let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+			let route = moq_net::origin::Route::default();
 			let pending = Pending::new(broadcast, route).unwrap();
 			let (mut stdin, input_end) = tokio::io::duplex(input.len());
 			let publication = Publication {
@@ -2207,7 +2210,7 @@ pub(crate) mod tests {
 			moq_net::path::Relative::new("viewer").unwrap(),
 		))
 		.unwrap();
-		let first = moq_net::Epoch::mint();
+		let first = moq_net::Identity::random();
 		publish.announce(first.clone()).unwrap();
 		#[cfg_attr(
 			not(feature = "capture"),
@@ -2239,7 +2242,7 @@ pub(crate) mod tests {
 					loop {
 						use moq_net::announce::Event;
 						if let Event::Start(announce) | Event::Restart(announce) = announced.next().await.unwrap() {
-							break announce.route.epoch.unwrap();
+							break announce.route.identity.unwrap();
 						}
 					}
 				} => epoch,

@@ -9,10 +9,10 @@ use bytes::Bytes;
 use rind::hkdf;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::Epoch;
 use crate::error::{Error, Result};
 use crate::generation;
 use crate::limits::{PATH_LABEL, PATH_LEN, PROFILE, SECRET_LEN, check_bytes, check_u53};
-use moq_net::Epoch;
 
 /// What the application distributes over its own authenticated channel.
 pub struct Config {

@@ -436,7 +436,7 @@ async fn publish(
 	let audio = moq_audio::encode::Producer::new(&mut broadcast, catalog, input, &options)?;
 
 	publication
-		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(moq_net::origin::Route::default())
 		.context("cannot announce the broadcast")?;
 	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), broadcast = %path, "connecting");
 	let connection = client.with_publisher(&origin).with_subscriber(subscribe).connect(url);

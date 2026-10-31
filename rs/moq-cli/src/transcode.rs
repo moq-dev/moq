@@ -180,7 +180,7 @@ impl Following {
 						drop(running.take());
 						let output = self.publish.create_broadcast(&self.output_path)?;
 						let transcoder = moq_transcode::Transcoder::new(source, output.broadcast().clone(), self.config.clone())?;
-						output.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))?;
+						output.announce(moq_net::origin::Route::default())?;
 						tracing::info!(source = %self.source_path, output = %self.output_path, "transcoding");
 						running = Some(Box::pin(transcoder.run()));
 					}
@@ -224,7 +224,7 @@ mod tests {
 		let route = || {
 			let route = moq_net::origin::Route::default();
 			if with_epoch {
-				route.with_epoch(moq_net::Epoch::mint())
+				route.with_identity(moq_net::Identity::random(), 0)
 			} else {
 				route
 			}
@@ -251,7 +251,7 @@ mod tests {
 		let _new_dynamic = new.requests();
 		let second = next(&mut derivatives).await;
 		assert!(!first.is_clone(&second));
-		assert_ne!(first.info().epoch, second.info().epoch);
+		assert_ne!(first.info().identity, second.info().identity);
 		assert!(first.is_closed(), "the superseded ladder is retired");
 		loop {
 			match old_catalog.recv_group().await {
@@ -275,7 +275,7 @@ mod tests {
 	async fn a_source_ending_before_its_video_waits_for_the_next_instance() {
 		let origin = moq_tokio::origin::spawn();
 		let publish = moq_tokio::origin::spawn();
-		let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+		let route = || moq_net::origin::Route::default();
 		let old = origin.publish("source", route()).unwrap();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut old.broadcast().clone(), Default::default()).unwrap();
 		let mut derivatives = moq_mux::follow::Instances::new(&publish.consume(), "derived", None).unwrap();

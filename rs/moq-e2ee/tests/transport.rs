@@ -46,7 +46,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	let protected = moq_e2ee::broadcast::Producer::new(broadcast.broadcast().clone(), generation.clone());
 	let producer = protected.create_track(track, timed()).unwrap();
 	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(generation.epoch().clone()))
+		.announce(moq_net::origin::Route::default().with_identity(generation.epoch().identity(), 0))
 		.unwrap();
 
 	let mut options = MockConnectOptions::new(version);
@@ -54,22 +54,18 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	options.client_subscribe = Some(consumer_origin.clone());
 	let pair = connect_mock(options).await;
 
-	// The subscriber knows the opaque path and takes the epoch from the announced route.
-	// A wire without epochs leaves it to the application's own channel.
+	// The subscriber knows the opaque path and takes the epoch from the announced route's
+	// identity. A wire without identities leaves it to the application's own channel.
 	let consumer = consumer_origin.consume();
 	let remote = consumer.follow(&path, None).unwrap().available().await.unwrap();
 	if version.to_string().starts_with("moq-lite-07") {
 		assert_eq!(
-			remote.info().epoch.as_ref(),
+			moq_e2ee::Epoch::of(&remote).as_ref(),
 			Some(generation.epoch()),
 			"lite-07 announces the epoch"
 		);
 	}
-	let epoch = remote
-		.info()
-		.epoch
-		.clone()
-		.unwrap_or_else(|| generation.epoch().clone());
+	let epoch = moq_e2ee::Epoch::of(&remote).unwrap_or_else(|| generation.epoch().clone());
 	let consumer = moq_e2ee::broadcast::Consumer::new(remote, cred.consume(epoch))
 		.subscribe(
 			track,

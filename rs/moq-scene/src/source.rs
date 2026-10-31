@@ -618,9 +618,7 @@ mod tests {
 					.unwrap()
 			};
 			let first = audio("first", None);
-			publication
-				.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
-				.unwrap();
+			publication.announce(moq_net::origin::Route::default()).unwrap();
 
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());
@@ -661,9 +659,7 @@ mod tests {
 					.unwrap();
 			};
 			point(&mut catalog, "first");
-			publication
-				.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
-				.unwrap();
+			publication.announce(moq_net::origin::Route::default()).unwrap();
 
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());
@@ -698,9 +694,7 @@ mod tests {
 					catalog.audio.renditions.insert("audio".into(), config);
 				})
 				.unwrap();
-			publication
-				.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
-				.unwrap();
+			publication.announce(moq_net::origin::Route::default()).unwrap();
 
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection());

@@ -512,13 +512,13 @@ async fn a_restarted_publisher_is_a_program_switch_with_stitch() {
 	assert_eq!(unflagged(after), Vec::<u16>::new(), "every PID flags the break");
 }
 
-/// One publisher reconnects within the follow, continuing its capture under the same epoch
+/// One publisher reconnects within the follow, continuing its capture under the same identity
 /// and program before delivering a clean final finish.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
 async fn the_same_instance_within_the_follow_continues() {
 	let relay = relay().await;
-	let epoch = moq_net::Epoch::mint();
+	let epoch = moq_net::Identity::random();
 	let lite07 = ["--connect-version", LITE_07];
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.create_broadcast("demo").unwrap();
@@ -528,7 +528,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
 	let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
 	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+		.announce(moq_net::origin::Route::default().with_identity(epoch.clone(), 0))
 		.unwrap();
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
@@ -563,7 +563,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	export.output_past(0).await;
 	assert!(split < LONG.len(), "the capture has a tail after the export joined");
 	let old = relay.origin.request("demo", None).await.unwrap();
-	assert_eq!(old.info().epoch.as_ref(), Some(&epoch));
+	assert_eq!(old.info().identity.as_ref(), Some(&epoch));
 	let clock = catalog.snapshot().clock;
 	connection.abort(moq_net::Error::Cancel);
 	connection.closed().await.unwrap();
@@ -576,7 +576,7 @@ async fn the_same_instance_within_the_follow_continues() {
 		.await
 		.expect("the relay observes the returning publication")
 		.unwrap();
-	assert_eq!(back.info().epoch.as_ref(), Some(&epoch));
+	assert_eq!(back.info().identity.as_ref(), Some(&epoch));
 	assert!(!back.is_clone(&old), "the old relay copy was replaced");
 	for chunk in chunks {
 		pace.tick().await;
@@ -1055,14 +1055,14 @@ async fn redundant_failover(bufferbloat: bool) {
 }
 
 /// The epoch of the next route announced for the path.
-async fn next_epoch(announced: &mut moq_net::announce::Consumer) -> moq_net::Epoch {
+async fn next_epoch(announced: &mut moq_net::announce::Consumer) -> moq_net::Identity {
 	moq_clock::timeout(TIMEOUT, async {
 		loop {
 			match announced.next().await.expect("the relay stays up") {
 				moq_net::announce::Event::Start(announce)
 				| moq_net::announce::Event::Restart(announce)
 				| moq_net::announce::Event::Takeover { announce, .. } => {
-					return announce.route.epoch.expect("a lite-07 importer announces its epoch");
+					return announce.route.identity.expect("a lite-07 importer announces its epoch");
 				}
 				_ => continue,
 			}

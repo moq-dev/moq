@@ -144,8 +144,9 @@ where
 	catalog_ended: bool,
 	/// A snapshot arrived on `catalog` since it was subscribed.
 	cataloged: bool,
-	/// The publisher epoch of the broadcast being exported, `None` for an epochless route.
-	instance: Option<moq_net::Epoch>,
+	/// The identity of the broadcast being exported, `None` for one not resolved through an
+	/// origin.
+	instance: Option<moq_net::Identity>,
 	/// Tracks [`Export::follow`] left on the ended broadcast, resubscribed as the returned
 	/// catalog lists them.
 	stale: HashSet<String>,
@@ -1402,7 +1403,7 @@ where
 {
 	fn new(mut source: crate::Source, catalog: S) -> Self {
 		source.isolate();
-		let instance = source.broadcast().info().epoch.clone();
+		let instance = source.broadcast().info().identity.clone();
 		Self {
 			id: 0,
 			retired: false,
@@ -2646,19 +2647,20 @@ where
 		&self.selected().source
 	}
 
-	/// The publisher epoch of the broadcast being exported, `None` for an epochless route.
-	pub(super) fn instance(&self) -> Option<&moq_net::Epoch> {
+	/// The identity of the broadcast being exported, `None` for one not resolved through an
+	/// origin.
+	pub(super) fn instance(&self) -> Option<&moq_net::Identity> {
 		self.selected().instance.as_ref()
 	}
 
 	/// Carry on into `broadcast`, using the caller's replacement `catalog` stream.
 	///
-	/// The same publisher instance (an equal epoch) continues the stream: the program and
+	/// The same stream (an equal identity) continues: the program and
 	/// its PSI carry on, and its catalog resubscribes each track as it lists it, so a gap is a
 	/// skip like any other. A track it adds or drops revises the PMT, as any catalog update
 	/// does.
 	///
-	/// Another instance (another epoch, or an epochless route) opens a fresh jitter generation.
+	/// Another identity, or a broadcast without one, opens a fresh jitter generation.
 	/// [`Follower`](super::Follower) keeps feeding the old program until the new clock and
 	/// first media are usable, bounded by its follow window. Then what the old program
 	/// already released goes out before the new PMT, and what it still buffers is dropped,
@@ -2682,15 +2684,17 @@ where
 		catalog: S,
 		follow: Duration,
 	) -> Result<(), crate::Error> {
-		tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "follow", now = ?moq_clock::now(), program = self.program.id, pending = ?self.pending.as_ref().map(|pending| pending.id), old_epoch = ?self.program.instance, new_epoch = ?broadcast.info().epoch, ?follow);
-		if self.pending.is_some() && self.program.instance.is_some() && broadcast.info().epoch == self.program.instance
+		tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "follow", now = ?moq_clock::now(), program = self.program.id, pending = ?self.pending.as_ref().map(|pending| pending.id), old_identity = ?self.program.instance, new_identity = ?broadcast.info().identity, ?follow);
+		if self.pending.is_some()
+			&& self.program.instance.is_some()
+			&& broadcast.info().identity == self.program.instance
 		{
 			self.cancel_pending();
 			self.program.source.priority(0)?;
 			self.follow_until = None;
 			self.follow_timer = None;
 		}
-		let same = self.selected().instance.is_some() && broadcast.info().epoch == self.selected().instance;
+		let same = self.selected().instance.is_some() && broadcast.info().identity == self.selected().instance;
 		if !same {
 			self.cancel_pending();
 			let next = self.replacement(self.program.source.switched(broadcast), catalog);

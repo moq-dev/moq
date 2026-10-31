@@ -26,7 +26,7 @@ use crate::catalog;
 /// The PAT is followed as it changes. A program a later PAT adds waits for its PMT as the first
 /// PAT's do, and each program follows its PMT to the PID the latest PAT names. One a later PAT
 /// drops is retired: its tracks finish and its broadcast is unannounced, while the other
-/// programs carry on. A program that returns publishes a new instance, under a new epoch.
+/// programs carry on. A program that returns publishes a new stream, under a new identity.
 ///
 /// The multiplex is parsed once: framing, continuity, the PAT and the SI sections are shared,
 /// and each program reads only the packets on the PIDs its PAT entry and PMT claim. A packet on a
@@ -606,7 +606,7 @@ impl Programs {
 		import.handle_pat(pat)?;
 		// Each program is its own publisher instance for this run, so a restart
 		// replaces it rather than resuming into it.
-		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+		let route = moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
 		let listed = broadcast.consume().track(hang::Catalog::DEFAULT_NAME)?;
 		self.programs.push(Program {
 			number,
@@ -729,8 +729,8 @@ mod test {
 		two_section_pat, video_pes,
 	};
 
-	/// The epoch each running program publishes under, announced yet or not.
-	fn epochs(programs: &Programs) -> Vec<(u16, moq_net::Epoch)> {
+	/// The identity each running program publishes under, announced yet or not.
+	fn epochs(programs: &Programs) -> Vec<(u16, moq_net::Identity)> {
 		programs
 			.programs
 			.iter()
@@ -739,7 +739,7 @@ mod test {
 				let route = route.as_ref().or(program.pending.as_ref().map(|(route, _)| route));
 				(
 					program.number,
-					route.and_then(|route| route.epoch.clone()).expect("an epoch"),
+					route.and_then(|route| route.identity.clone()).expect("an identity"),
 				)
 			})
 			.collect()
@@ -1542,7 +1542,7 @@ mod test {
 		let epochs: Vec<_> = programs
 			.programs
 			.iter()
-			.map(|program| program.broadcast.route().and_then(|route| route.epoch))
+			.map(|program| program.broadcast.route().and_then(|route| route.identity))
 			.collect();
 		assert_eq!(epochs.len(), 2);
 		assert!(epochs.iter().all(Option::is_some), "every program names its instance");

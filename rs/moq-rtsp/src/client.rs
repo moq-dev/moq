@@ -857,8 +857,8 @@ mod tests {
 			async move {
 				let mut ends = Vec::new();
 				for _ in 0..2 {
-					let epoch = moq_net::Epoch::mint();
-					let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
+					let epoch = moq_net::Identity::random();
+					let route = moq_net::origin::Route::default().with_identity(epoch.clone(), 0);
 					let broadcast = origin.publish("camera", route).unwrap();
 					let mut catalog =
 						moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default())
@@ -908,7 +908,7 @@ mod tests {
 		let ends = within("the caller", caller).await.unwrap();
 		assert_eq!(ends[0], End::Jumped);
 		assert_eq!(ends[1], End::Closed);
-		assert!(epochs[1] > epochs[0], "the restart mints a fresh epoch");
+		assert_ne!(epochs[1], epochs[0], "the restart mints a fresh identity");
 	}
 
 	/// Credentials come out of the URL, never reach a log, and still authenticate.

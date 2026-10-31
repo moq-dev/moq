@@ -456,23 +456,23 @@ mod test {
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 	}
 
-	/// Every reference-bearing section carries an optional epoch beside its `broadcast`.
+	/// Every reference-bearing section carries an optional identity beside its `broadcast`.
 	#[test]
-	fn reference_epochs_roundtrip_in_every_section() {
+	fn reference_identities_roundtrip_in_every_section() {
 		use crate::catalog::Reference;
 
 		const EPOCH: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
 		let encoded = format!(
 			r#"{{
-				"video": {{"renditions": {{"v": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "avc1.64001f", "container": {{"kind": "legacy"}}}}}}}},
-				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
-				"text": {{"renditions": {{"t": {{"broadcast": "./a", "epoch": "{EPOCH}", "format": "vtt"}}}}}},
-				"json": {{"tracks": {{"j": {{"broadcast": "./a", "epoch": "{EPOCH}", "mode": "snapshot"}}}}}},
-				"binary": {{"tracks": {{"b": {{"broadcast": "./a", "epoch": "{EPOCH}", "mode": "snapshot"}}}}}}
+				"video": {{"renditions": {{"v": {{"broadcast": "./a", "identity": "{EPOCH}", "codec": "avc1.64001f", "container": {{"kind": "legacy"}}}}}}}},
+				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "identity": "{EPOCH}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
+				"text": {{"renditions": {{"t": {{"broadcast": "./a", "identity": "{EPOCH}", "format": "vtt"}}}}}},
+				"json": {{"tracks": {{"j": {{"broadcast": "./a", "identity": "{EPOCH}", "mode": "snapshot"}}}}}},
+				"binary": {{"tracks": {{"b": {{"broadcast": "./a", "identity": "{EPOCH}", "mode": "snapshot"}}}}}}
 			}}"#
 		);
 		let catalog = Catalog::<()>::from_str(&encoded).unwrap();
-		let epoch: moq_net::Epoch = EPOCH.parse().unwrap();
+		let epoch: moq_net::Identity = EPOCH.parse().unwrap();
 		let references: [&dyn Reference; 5] = [
 			&catalog.video.renditions["v"],
 			&catalog.audio.renditions["a"],
@@ -481,20 +481,17 @@ mod test {
 			&catalog.binary.tracks["b"],
 		];
 		for reference in references {
-			assert_eq!(reference.epoch(), Some(&epoch));
+			assert_eq!(reference.identity(), Some(&epoch));
 		}
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 
-		// Omitted stays omitted, and a malformed or noncanonical epoch refuses the catalog.
-		assert!(!Catalog::<()>::default().to_json().unwrap().contains("poch"));
-		for bad in [
-			"not-a-uuid",
-			"01890A5D-AC96-774B-BCCE-B302099A8057",
-			"01890a5d-ac96-474b-bcce-b302099a8057",
-		] {
-			let encoded = encoded.replace(EPOCH, bad);
-			assert!(Catalog::<()>::from_str(&encoded).is_err(), "{bad} must be refused");
-		}
+		// Omitted stays omitted, and an empty identity refuses the catalog.
+		assert!(!Catalog::<()>::default().to_json().unwrap().contains("identity"));
+		let encoded = encoded.replace(EPOCH, "");
+		assert!(
+			Catalog::<()>::from_str(&encoded).is_err(),
+			"an empty identity must be refused"
+		);
 	}
 
 	#[test]
@@ -639,7 +636,7 @@ mod test {
 			VideoConfig {
 				broadcast: None,
 				track: None,
-				epoch: None,
+				identity: None,
 				label: None,
 				codec: H264 {
 					profile: 0x64,
@@ -677,7 +674,7 @@ mod test {
 			AudioConfig {
 				broadcast: None,
 				track: None,
-				epoch: None,
+				identity: None,
 				label: None,
 				codec: Opus,
 				sample_rate: 48_000,

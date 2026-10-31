@@ -260,9 +260,9 @@ async fn run(config: &Config) -> Result<()> {
 	let broadcast = publish_origin
 		.create_broadcast(&broadcast_path)
 		.context("failed to create broadcast")?;
-	let epoch = moq_net::Epoch::mint();
+	let epoch = moq_net::Identity::random();
 	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+		.announce(moq_net::origin::Route::default().with_identity(epoch.clone(), 0))
 		.context("failed to announce broadcast")?;
 	tracing::info!(broadcast = %broadcast_path, %epoch, "announced");
 

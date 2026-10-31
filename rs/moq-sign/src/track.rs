@@ -11,7 +11,7 @@ use crate::scope::Scope;
 
 /// Producer for one signed track.
 ///
-/// Group sequences only rise under an epoch, even across a replacement of the track, so no two
+/// Group sequences only rise under an identity, even across a replacement of the track, so no two
 /// groups are signed at the same coordinates. A relay holding an aborted group and a new group at
 /// its sequence could otherwise splice their frames into a group that was never published.
 pub struct Producer {

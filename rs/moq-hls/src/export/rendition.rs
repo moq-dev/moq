@@ -142,7 +142,7 @@ impl Media {
 	fn bind(source: &moq_mux::Source, reference: &impl hang::catalog::Reference, track: &str) -> moq_mux::Result<Self> {
 		let rel = reference.broadcast();
 		let mut handle = Handle {
-			binding: Arc::new(source.bind(rel, reference.epoch())?),
+			binding: Arc::new(source.bind(rel, reference.identity())?),
 			track: None,
 			ended: false,
 		};

@@ -16,15 +16,15 @@ const LABEL: &[u8] = b"moq-sign-00";
 /// One track of one publisher instance: the identity every frame on it is signed under.
 #[derive(Debug)]
 pub(crate) struct Scope {
-	// The canonical prefix: label, path, epoch, and track, each length-prefixed.
+	// The canonical prefix: label, path, identity, and track, each length-prefixed.
 	prefix: Vec<u8>,
 }
 
 impl Scope {
-	pub(crate) fn new(path: &moq_net::Path, epoch: &moq_net::Epoch, track: &str) -> Arc<Self> {
+	pub(crate) fn new(path: &moq_net::Path, identity: &moq_net::Identity, track: &str) -> Arc<Self> {
 		let mut prefix = Vec::with_capacity(LABEL.len() + 24 + path.as_str().len() + 36 + track.len());
 		prefix.extend_from_slice(LABEL);
-		for field in [path.as_str(), epoch.as_str(), track] {
+		for field in [path.as_str(), identity.as_str(), track] {
 			prefix.extend_from_slice(&(field.len() as u64).to_be_bytes());
 			prefix.extend_from_slice(field.as_bytes());
 		}
