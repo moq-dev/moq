@@ -8,12 +8,12 @@ umask 077
 
 if [ ! -f demo-web.jwt ]; then
     cargo run --quiet --bin moq -- auth sign --key root.jwk \
-        --root demo --subscribe '**' --publish 'me/**' \
+        --root demo --subject demo-web --subscribe '**' --publish 'me/**' \
         >demo-web.jwt
 fi
 
 if [ ! -f demo-cli.jwt ]; then
     cargo run --quiet --bin moq -- auth sign --key root.jwk \
-        --root demo --publish '**' \
+        --root demo --subject demo-cli --publish '**' \
         >demo-cli.jwt
 fi

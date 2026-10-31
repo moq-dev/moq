@@ -144,8 +144,8 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   scoped, and bare when it is unscoped (publish `**` at the root). Its own
   identity is no exception (2026-10-26): the bare exemption relied on the
   dropped proof, so an unproven own identity could otherwise claim a
-  victim's. Extend the fixture below to a forger declaring the victim's id as
-  its own, and drop the reference model's `proved` exemption. The hash
+  victim's. The fixture below covers a forger declaring the victim's id as
+  its own, and the reference model files it like any other. The hash
   has its own domain, so it cannot collide with a key-derived identity, and is
   collision-resistant at the identity width, since the forwarder picks `id`
   and could otherwise grind another subject's key. The relay that files it
@@ -168,12 +168,11 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   refresh and is shared by one operator's uplinks; each claim is still checked
   against the current pattern union. Rejected: the connection root, too
   coarse since two scoped peers under one root would share keys. Add
-  multi-pattern, overlapping-pattern, and refresh fixtures. Today
-  `moq_auth::Claims` drops `sub` and `moq_net::auth::Grant` holds only
-  patterns and expiry, so the grant gains the verified subject, qualified by
-  its issuer, in Rust and JS. Fail loud: a scoped token without a subject is
-  refused, and so is a token added to a session (refresh or `auth().add`)
-  whose issuer-qualified subject differs from that of the session's current
+  multi-pattern, overlapping-pattern, and refresh fixtures. The grant
+  carries the verified subject, qualified by its issuer
+  (`moq_net::auth::Grant::subject`, mirrored in JS): a scoped token without
+  a subject is refused, and so is a token added to a session (refresh or
+  `auth().add`) whose subject differs from that of the session's current
   grants. The receiver derives the key from the token it verified, so no wire
   change.
 - ✅ Decided 2026-10-15 (maintainer): retract and re-file when a session's
@@ -648,11 +647,6 @@ continues to rank feasible transit routes; report it. This may
 split at start (Rust and draft, then JS), as long as both land in one
 release.
 
-Decided 2026-10-27 (maintainer): [Grant subject](/quest/m1/cluster-routing/grant-subject.md)
-split out of this quest, and this quest builds on it. It carries the
-issuer-qualified subject the scoped keys above are named by, and fixes the
-reference model's `proved` exemption.
-
 Decided 2026-10-27 (maintainer): this quest deletes the epochless instance
 machinery in `rs/moq-net/src/model/origin.rs`: `Instance::Route(generation)`
 and its renewals, `restarted_since`, the held-restart Release for epochless
@@ -678,10 +672,6 @@ presented a token. Also from
 [moq-dev/moq#6947](https://github.com/moq-dev/moq/pull/6947): in `js/net`'s
 `origin.ts` a detached request stays on its own route instead of following
 the cheapest one; fix it with the route-selection rework here.
-
-## Required
-
-- [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - the issuer-qualified subject scoped identities are filed under
 
 ## Related
 

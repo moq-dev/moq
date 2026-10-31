@@ -89,6 +89,17 @@ impl Permissions {
 	pub fn is_empty(&self) -> bool {
 		self.publish.is_empty() && self.subscribe.is_empty()
 	}
+
+	/// The access these rules, rooted at `/`, grant at `path`, as [`Claims::authorize`]
+	/// would for a token with an empty root. Rules are not a token, so they need no subject.
+	pub fn authorize(&self, path: &str) -> crate::Result<Permissions> {
+		Claims {
+			publish: self.publish.clone(),
+			subscribe: self.subscribe.clone(),
+			..Default::default()
+		}
+		.permissions(path)
+	}
 }
 
 /// The payload of a token: a root, plus the publish/subscribe patterns granted beneath it.
@@ -108,9 +119,10 @@ impl Permissions {
 /// Legacy `moq-token` claims are read too: each `put`/`get` prefix `p` is the subtree
 /// `p/**`. Claims that only grant subtrees are written that way, so every published
 /// verifier accepts them; anything else is written as `publish`/`subscribe`, which an
-/// older verifier refuses rather than misreads. The registered `iss`, `sub`, and `jti`
-/// claims are read and ignored; any other field fails verification, since it might
-/// narrow the grant, and a misspelled `root` would otherwise widen it.
+/// older verifier refuses rather than misreads. The registered `iss` and `sub` claims
+/// name who the token was issued to, and `jti` is read and ignored; any other field
+/// fails verification, since it might narrow the grant, and a misspelled `root` would
+/// otherwise widen it.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 #[serde(try_from = "crate::wire::Claims", into = "crate::wire::Claims")]
 #[non_exhaustive]
@@ -134,6 +146,13 @@ pub struct Claims {
 	/// The time before which the token is refused, as a unix timestamp (`nbf`).
 	/// Enforced by [`Key::verify`](crate::Key::verify).
 	pub not_before: Option<moq_clock::Wall>,
+
+	/// Who issued the token (`iss`), qualifying its [`subject`](Self::subject).
+	pub issuer: Option<String>,
+
+	/// Who the token was issued to (`sub`), unique within its issuer. Required to
+	/// publish anything but `**` at the root; see [`authorize`](Self::authorize).
+	pub subject: Option<String>,
 }
 
 impl Claims {
@@ -171,6 +190,26 @@ impl Claims {
 		self
 	}
 
+	/// Name who issued the token.
+	pub fn with_issuer(mut self, issuer: impl Into<String>) -> Self {
+		self.issuer = Some(issuer.into());
+		self
+	}
+
+	/// Name who the token is issued to, unique within its issuer.
+	pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
+		self.subject = Some(subject.into());
+		self
+	}
+
+	/// The issuer-qualified subject, or `None` when the token names no subject.
+	pub fn qualified(&self) -> Option<crate::Subject> {
+		Some(crate::Subject {
+			issuer: self.issuer.clone(),
+			name: self.subject.clone()?,
+		})
+	}
+
 	/// Returns an error when the token grants nothing at all, making it useless.
 	pub fn validate(&self) -> crate::Result<()> {
 		if self.publish.is_empty() && self.subscribe.is_empty() {
@@ -194,12 +233,23 @@ impl Claims {
 	/// Slashes at the boundaries are implicit: `/demo/` and `demo` are the same path.
 	///
 	/// Returns [`Error::RootMismatch`](crate::Error::RootMismatch) when the two don't
-	/// overlap, and [`Error::NoAccess`](crate::Error::NoAccess) when they do but every
-	/// pattern falls outside `path`.
+	/// overlap, [`Error::NoAccess`](crate::Error::NoAccess) when they do but every
+	/// pattern falls outside `path`, and [`Error::MissingSubject`](crate::Error::MissingSubject)
+	/// when the token names no subject yet may publish only part of the tree: anything but
+	/// `**` with `path` at the root. Such a connection's routes are filed under its subject.
 	///
 	/// This is authorization only. Verify the signature first with
 	/// [`Key::verify`](crate::Key::verify), which is where expiry is enforced.
 	pub fn authorize(&self, path: &str) -> crate::Result<Permissions> {
+		let permissions = self.permissions(path)?;
+		if self.subject.is_none() && crate::subject::scoped(path, &permissions.publish) {
+			return Err(crate::Error::MissingSubject);
+		}
+		Ok(permissions)
+	}
+
+	/// [`authorize`](Self::authorize) without requiring a subject.
+	fn permissions(&self, path: &str) -> crate::Result<Permissions> {
 		let path = path::normalize(path);
 		let root = path::normalize(&self.root);
 
@@ -254,6 +304,8 @@ mod tests {
 			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
 			issued: Some(moq_clock::wall()),
 			not_before: None,
+			issuer: None,
+			subject: Some("alice".to_string()),
 		}
 	}
 
@@ -581,7 +633,60 @@ mod tests {
 			root: root.to_string(),
 			subscribe: patterns(subscribe),
 			publish: patterns(publish),
+			subject: Some("alice".to_string()),
 			..Default::default()
+		}
+	}
+
+	#[test]
+	fn test_authorize_a_scoped_publisher_needs_a_subject() {
+		let anonymous = |root: &str, publish: &[&str]| Claims {
+			subject: None,
+			..authorize_claims(root, &["**"], publish)
+		};
+
+		// Publishing nothing, or everything from the root, forwards no scoped routes.
+		anonymous("", &[]).authorize("room").unwrap();
+		anonymous("", &["**"]).authorize("/").unwrap();
+
+		for (root, publish, path) in [
+			("", &["alice/**"][..], ""),
+			("room", &["**"], "room"),
+			("", &["**"], "room"),
+		] {
+			assert!(
+				matches!(
+					anonymous(root, publish).authorize(path),
+					Err(crate::Error::MissingSubject)
+				),
+				"{root:?} {publish:?} at {path:?}"
+			);
+			authorize_claims(root, &["**"], publish).authorize(path).unwrap();
+		}
+	}
+
+	#[test]
+	fn test_claims_carry_the_issuer_and_subject() {
+		let claims: Claims =
+			serde_json::from_str(r#"{"publish":["**"],"iss":"https://auth.example","sub":"alice"}"#).unwrap();
+		assert_eq!(
+			claims.qualified(),
+			Some(crate::Subject {
+				issuer: Some("https://auth.example".into()),
+				name: "alice".into(),
+			})
+		);
+		assert_eq!(
+			serde_json::to_string(&claims).unwrap(),
+			r#"{"put":[""],"iss":"https://auth.example","sub":"alice"}"#
+		);
+
+		// An issuer alone qualifies nobody.
+		let claims: Claims = serde_json::from_str(r#"{"publish":["**"],"iss":"https://auth.example"}"#).unwrap();
+		assert_eq!(claims.qualified(), None);
+
+		for json in [r#"{"publish":["**"],"sub":7}"#, r#"{"publish":["**"],"sub":null}"#] {
+			assert!(serde_json::from_str::<Claims>(json).is_err(), "{json}");
 		}
 	}
 

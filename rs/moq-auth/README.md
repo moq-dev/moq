@@ -20,7 +20,7 @@ a subtree, `**` is everything.
 # generate secret key
 moq auth generate --out key.jwk
 # sign a new JWT
-moq auth sign --key key.jwk --root demo --publish 'bbb/**' > token.jwt
+moq auth sign --key key.jwk --root demo --subject bbb-owner --publish 'bbb/**' > token.jwt
 # verify the JWT
 moq auth verify --key key.jwk < token.jwt
 ```
@@ -31,7 +31,7 @@ moq auth verify --key key.jwk < token.jwt
 # generate private and public keys
 moq auth generate --algorithm RS256 --out private.jwk --public public.jwk
 # sign a new JWT (using private key)
-moq auth sign --key private.jwk --root demo --publish 'bbb/**' > token.jwt
+moq auth sign --key private.jwk --root demo --subject bbb-owner --publish 'bbb/**' > token.jwt
 # verify the JWT (using public key)
 moq auth verify --key public.jwk < token.jwt
 ```

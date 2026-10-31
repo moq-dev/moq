@@ -8238,7 +8238,11 @@ mod serve_tests {
 			));
 			assert!(futures::poll!(running.as_mut()).is_pending());
 			let mark = session.log.writes.lock().unwrap().len();
-			h.publisher.auth.handle().authorize(&crate::auth::Grant::default());
+			h.publisher
+				.auth
+				.handle()
+				.authorize(&crate::auth::Grant::default())
+				.unwrap();
 			// An otherwise valid no-op update is ready at the same time as revocation.
 			session.push(&[0x02, 0, 2, 2, 0]);
 			assert!(futures::poll!(running.as_mut()).is_pending());
@@ -8731,6 +8735,7 @@ mod serve_tests {
 			publish: Default::default(),
 			subscribe: Default::default(),
 			expires: None,
+			subject: None,
 		};
 		let unauthorized = |version| request::to_code(&Error::Unauthorized, request::Kind::TrackStatus, version);
 
@@ -8741,7 +8746,7 @@ mod serve_tests {
 				.requests_route("live", crate::origin::Route::default(), None)
 				.unwrap();
 			let auth = crate::auth::Link::new(false);
-			auth.handle().authorize(&nothing());
+			auth.handle().authorize(&nothing()).unwrap();
 			h.publisher = h.publisher.clone().with_auth(auth);
 			let code = moq_clock::timeout(
 				std::time::Duration::from_secs(1),
@@ -8786,7 +8791,7 @@ mod serve_tests {
 
 			// Parked resolving the broadcast when the grant narrows.
 			let request = claim.requested_broadcast().await.unwrap();
-			auth.handle().authorize(&nothing());
+			auth.handle().authorize(&nothing()).unwrap();
 			let output = crate::broadcast::Info::new().produce();
 			let _track = output.create_track("video", None).unwrap();
 			request.accept(&output);
@@ -8805,11 +8810,12 @@ mod serve_tests {
 			publish: Default::default(),
 			subscribe: Default::default(),
 			expires: None,
+			subject: None,
 		};
 		for version in [Version::Draft22] {
 			let mut h = serve(version);
 			let auth = crate::auth::Link::new(false);
-			auth.handle().authorize(&nothing);
+			auth.handle().authorize(&nothing).unwrap();
 			h.publisher = h.publisher.clone().with_auth(auth);
 
 			let mut body = track_status("room", true, version);
@@ -8873,11 +8879,14 @@ mod serve_tests {
 				moq_clock::sim::yield_now().await;
 			}
 
-			auth.handle().authorize(&crate::auth::Grant {
-				publish: Default::default(),
-				subscribe: Default::default(),
-				expires: None,
-			});
+			auth.handle()
+				.authorize(&crate::auth::Grant {
+					publish: Default::default(),
+					subscribe: Default::default(),
+					expires: None,
+					subject: None,
+				})
+				.unwrap();
 			let Ok(mut writable) = bi.write() else {
 				panic!("request stream gate closed");
 			};
@@ -11260,6 +11269,7 @@ mod serve_tests {
 			publish: Default::default(),
 			subscribe: Default::default(),
 			expires: None,
+			subject: None,
 		};
 		let location = Location { group: 0, object: 0 };
 
@@ -11268,7 +11278,7 @@ mod serve_tests {
 			publish_pairs(&mut h, 1, None);
 			settle().await;
 			let auth = crate::auth::Link::new(false);
-			auth.handle().authorize(&nothing);
+			auth.handle().authorize(&nothing).unwrap();
 			h.publisher = h.publisher.clone().with_auth(auth);
 
 			let buf = standalone_fetch(&h, location, location, GroupOrder::Ascending).await;
@@ -11298,7 +11308,7 @@ mod serve_tests {
 				futures::poll!(fetch.as_mut()).is_pending(),
 				"{version}: served an unwritten group"
 			);
-			auth.handle().authorize(&nothing);
+			auth.handle().authorize(&nothing).unwrap();
 			let buf = moq_clock::timeout(std::time::Duration::from_secs(1), fetch)
 				.await
 				.unwrap_or_else(|_| panic!("{version}: still loading after the grant narrowed"));
@@ -11380,11 +11390,14 @@ mod serve_tests {
 				"{version}: FETCH_OK never went out"
 			);
 
-			auth.handle().authorize(&crate::auth::Grant {
-				publish: Default::default(),
-				subscribe: Default::default(),
-				expires: None,
-			});
+			auth.handle()
+				.authorize(&crate::auth::Grant {
+					publish: Default::default(),
+					subscribe: Default::default(),
+					expires: None,
+					subject: None,
+				})
+				.unwrap();
 			let res = moq_clock::timeout(std::time::Duration::from_secs(1), fetch)
 				.await
 				.unwrap_or_else(|_| panic!("{version}: still responding after the grant narrowed"));
@@ -11486,11 +11499,14 @@ mod serve_tests {
 					"{version}: FETCH_OK never went out"
 				);
 
-				auth.handle().authorize(&crate::auth::Grant {
-					publish: Default::default(),
-					subscribe: Default::default(),
-					expires: None,
-				});
+				auth.handle()
+					.authorize(&crate::auth::Grant {
+						publish: Default::default(),
+						subscribe: Default::default(),
+						expires: None,
+						subject: None,
+					})
+					.unwrap();
 				let res = moq_clock::timeout(std::time::Duration::from_secs(1), fetch)
 					.await
 					.unwrap_or_else(|_| panic!("{version}: still responding after the grant narrowed"));
@@ -11557,10 +11573,12 @@ mod serve_tests {
 			let auth = crate::auth::Link::new(false);
 			let mut requests = auth.handle().requests();
 			// A limit of nothing, so only the token admits the subscription.
-			auth.handle().authorize(&match token {
-				true => crate::auth::Grant::default(),
-				false => crate::auth::Grant::all(),
-			});
+			auth.handle()
+				.authorize(&match token {
+					true => crate::auth::Grant::default(),
+					false => crate::auth::Grant::all(),
+				})
+				.unwrap();
 			let publisher = Publisher::new(
 				crate::time::sim(),
 				crate::driver::Transport::new(session.clone()),
@@ -11896,7 +11914,7 @@ mod serve_tests {
 		let auth = crate::auth::Link::new(false);
 		let mut requests = auth.handle().requests();
 		// A limit of nothing, so only the token admits the subscription.
-		auth.handle().authorize(&crate::auth::Grant::default());
+		auth.handle().authorize(&crate::auth::Grant::default()).unwrap();
 		let publisher = Publisher::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
@@ -12607,6 +12625,7 @@ mod serve_tests {
 			publish: crate::Patterns::new(),
 			subscribe: crate::Pattern::all().into(),
 			expires: secs.map(|s| runtime.now().checked_add(Duration::from_secs(s)).unwrap()),
+			subject: None,
 		}
 	}
 
@@ -12619,11 +12638,14 @@ mod serve_tests {
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		// The peer lets us publish everything, and we let it read only "other".
 		auth.granted(0, crate::auth::Grant::all());
-		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::subtree("other").unwrap().into(),
-			expires: None,
-		});
+		auth.handle()
+			.authorize(&crate::auth::Grant {
+				publish: crate::Patterns::new(),
+				subscribe: crate::Pattern::subtree("other").unwrap().into(),
+				expires: None,
+				subject: None,
+			})
+			.unwrap();
 		assert!(
 			!auth.allows(crate::auth::Direction::Publish, "room"),
 			"the limit must not cover the request path"
@@ -13559,7 +13581,7 @@ mod serve_tests {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Link::new(false);
 		let mut requests = auth.handle().requests();
-		auth.handle().authorize(&crate::auth::Grant::default());
+		auth.handle().authorize(&crate::auth::Grant::default()).unwrap();
 
 		let h = serve_with_auth(VERSION, auth, Vec::new());
 		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
@@ -13613,7 +13635,7 @@ mod serve_tests {
 		let auth = crate::auth::Link::new(false);
 		let mut requests = auth.handle().requests();
 		if let Some(limit) = &limit {
-			auth.handle().authorize(limit);
+			auth.handle().authorize(limit).unwrap();
 		}
 		let h = serve_with_auth(VERSION, auth.clone(), Vec::new());
 		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
@@ -13662,11 +13684,13 @@ mod serve_tests {
 			publish: crate::Patterns::new(),
 			subscribe: crate::Pattern::all().into(),
 			expires: None,
+			subject: None,
 		};
 		let write_only = crate::auth::Grant {
 			publish: crate::Pattern::all().into(),
 			subscribe: crate::Patterns::new(),
 			expires: None,
+			subject: None,
 		};
 		let nothing = Some(crate::auth::Grant::default());
 		let (_auth, _h, mut serving) = serve_token_subscribe(read_only, nothing.clone()).await;
@@ -13685,11 +13709,14 @@ mod serve_tests {
 			still_serving(&mut serving).await,
 			"a limit of nothing defers to the token"
 		);
-		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::subtree("other").unwrap().into(),
-			expires: None,
-		});
+		auth.handle()
+			.authorize(&crate::auth::Grant {
+				publish: crate::Patterns::new(),
+				subscribe: crate::Pattern::subtree("other").unwrap().into(),
+				expires: None,
+				subject: None,
+			})
+			.unwrap();
 		assert!(
 			still_serving(&mut serving).await,
 			"narrowing the limit leaves a token-authorized subscription"
@@ -13745,6 +13772,7 @@ mod serve_tests {
 			publish: crate::Patterns::new(),
 			subscribe: crate::Pattern::subtree(subtree).unwrap().into(),
 			expires: None,
+			subject: None,
 		};
 		let (_auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::default(), Some(limit("room"))).await;
 		assert!(
@@ -13754,7 +13782,7 @@ mod serve_tests {
 
 		let (auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::all(), Some(limit("room"))).await;
 		assert!(still_serving(&mut serving).await, "the verified token admits it");
-		auth.handle().authorize(&limit("other"));
+		auth.handle().authorize(&limit("other")).unwrap();
 		assert!(
 			still_serving(&mut serving).await,
 			"narrowing the limit leaves the token-verified subscription"
@@ -13767,7 +13795,7 @@ mod serve_tests {
 	async fn a_token_on_a_subscription_admitted_without_one_is_refused() {
 		for version in [Version::Draft22] {
 			let auth = crate::auth::Link::new(false);
-			auth.handle().authorize(&crate::auth::Grant::all());
+			auth.handle().authorize(&crate::auth::Grant::all()).unwrap();
 			let h = serve_with_auth(version, auth, Vec::new());
 			let session = ScriptedSession::per_stream(vec![update_with_tokens(&[TOKEN])]);
 			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
@@ -13847,7 +13875,7 @@ mod serve_tests {
 	/// is refused NOT_SUPPORTED.
 	async fn a_token_without_a_verifier_is_refused(version: Version, limit: crate::auth::Grant) {
 		let auth = crate::auth::Link::new(false);
-		auth.handle().authorize(&limit);
+		auth.handle().authorize(&limit).unwrap();
 		let h = serve_with_auth(version, auth, Vec::new());
 		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
 			.await
@@ -14012,9 +14040,10 @@ mod serve_tests {
 				publish: crate::Pattern::subtree("other").unwrap().into(),
 				subscribe: crate::Patterns::new(),
 				expires: None,
+				subject: None,
 			},
 		);
-		auth.handle().authorize(&crate::auth::Grant::default());
+		auth.handle().authorize(&crate::auth::Grant::default()).unwrap();
 		let h = serve_with_auth(VERSION, auth, Vec::new());
 		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), VERSION)
 			.await

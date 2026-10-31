@@ -6,8 +6,8 @@
 /// Token claims for a participant in `room`.
 ///
 /// `root` is the room prefix, `subscribe` is `**` (everything under the room),
-/// and `publish` is `<identity>/**` so a participant cannot publish at anyone
-/// else's paths. An identity that is empty or contains `*` is
+/// `publish` is `<identity>/**` so a participant cannot publish at anyone
+/// else's paths, and the identity is the token's subject. An identity that is empty or contains `*` is
 /// refused, since a wildcard would let the participant publish as someone else, and
 /// so is a room or identity longer than [`moq_net::Path::MAX_BYTES`].
 pub fn claims(
@@ -23,7 +23,8 @@ pub fn claims(
 	Ok(moq_auth::Claims::default()
 		.with_root(room.as_str())
 		.with_subscribe([moq_auth::Pattern::all()])
-		.with_publish([publish]))
+		.with_publish([publish])
+		.with_subject(identity.as_str()))
 }
 
 #[cfg(test)]
@@ -55,6 +56,7 @@ mod tests {
 		assert_eq!(c.root, "meet/demo");
 		assert_eq!(c.subscribe, patterns(&["**"]));
 		assert_eq!(c.publish, patterns(&["alice/**"]));
+		assert_eq!(c.subject.as_deref(), Some("alice"));
 	}
 
 	#[test]

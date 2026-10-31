@@ -334,11 +334,7 @@ impl Config {
 				let tls = crate::http_client::server_tls(&tls, &self.root)?;
 				Decider::Server(moq_auth::Client::new(url.clone(), Some(tls))?)
 			}
-			(None, Some(grant)) => Decider::Public(
-				moq_auth::Claims::default()
-					.with_publish(grant.publish)
-					.with_subscribe(grant.subscribe),
-			),
+			(None, Some(grant)) => Decider::Public(moq_auth::Permissions::new(grant.publish, grant.subscribe)),
 			(None, None) => unreachable!("validated above"),
 		};
 		let (mut auth, admissions) = Auth::embedded(node);
@@ -451,6 +447,8 @@ pub struct Token {
 	pub peer: bool,
 	/// Whether the peer is upstream, so it is never offered another upstream's routes.
 	pub upstream: bool,
+	/// Who the session's token was issued to, qualified by its issuer.
+	pub subject: Option<moq_net::auth::Subject>,
 }
 
 impl Token {
@@ -486,6 +484,7 @@ impl Token {
 			label: Path::new(grant.label.as_deref().unwrap_or_default()).map_err(invalid)?,
 			peer: grant.peer,
 			upstream: grant.upstream,
+			subject: subject(grant),
 		})
 	}
 
@@ -503,6 +502,15 @@ impl Token {
 			&& other.subscribe.covers(&self.subscribe)
 			&& other.publish.covers(&self.publish)
 	}
+}
+
+/// The grant's subject, as the session enforces it.
+pub(crate) fn subject(grant: &Grant) -> Option<moq_net::auth::Subject> {
+	let subject = grant.subject.as_ref()?;
+	Some(moq_net::auth::Subject {
+		issuer: subject.issuer.clone(),
+		name: subject.name.clone(),
+	})
 }
 
 /// What admitted a session and keeps it admitted: the grant's lease and the
@@ -614,7 +622,8 @@ impl Lease {
 	/// session a narrower grant ends the lease and a wider one changes nothing.
 	/// A changed root or mounts ends it, and so does a flipped `peer` or `upstream`,
 	/// since the routes it already announced would be misreported as entering here or
-	/// from a peer, or offered to the wrong links. A changed tier keeps the session and
+	/// from a peer, or offered to the wrong links, and a changed subject, which the
+	/// routes it forwarded are filed under. A changed tier keeps the session and
 	/// moves its [stats](Self::with_stats) to the new tier.
 	///
 	/// Once the relay answers the session's AUTH requests itself, each of
@@ -654,6 +663,10 @@ impl Lease {
 						if fresh.upstream != self.token.upstream {
 							return "upstream changed".into();
 						}
+						// The routes the session forwarded are filed under its subject.
+						if fresh.subject != self.token.subject {
+							return "subject changed".into();
+						}
 						if fresh.publish != self.token.publish || fresh.subscribe != self.token.subscribe {
 							match &self.session {
 								Some(session) => {
@@ -662,11 +675,17 @@ impl Lease {
 										subscribe = %join(&fresh.subscribe),
 										"grant changed; re-authorizing the session",
 									);
-									session.authorize(&moq_net::auth::Grant {
-										publish: fresh.publish.clone(),
-										subscribe: fresh.subscribe.clone(),
-										expires: None,
-									});
+									if session
+										.authorize(&moq_net::auth::Grant {
+											publish: fresh.publish.clone(),
+											subscribe: fresh.subscribe.clone(),
+											expires: None,
+											subject: fresh.subject.clone(),
+										})
+										.is_err()
+									{
+										return "subject changed".into();
+									}
 									self.token.publish = fresh.publish;
 									self.token.subscribe = fresh.subscribe;
 								}
@@ -770,8 +789,8 @@ pub(crate) async fn hold<T>(mut lease: Lease, work: impl std::future::Future<Out
 
 enum Decider {
 	Server(moq_auth::Client),
-	/// The public rules, as a token with an empty root.
-	Public(moq_auth::Claims),
+	/// The public rules, rooted at `/`.
+	Public(moq_auth::Permissions),
 	Refuse,
 }
 
@@ -1529,6 +1548,17 @@ mod tests {
 		upstream.upstream = true;
 		producer.update(upstream);
 		assert_eq!(lease.ended().await.to_string(), "upstream changed");
+
+		// The routes the session forwarded were filed under its subject.
+		let (producer, consumer) = lease::Producer::new(Grant::new(patterns(&["**"]), patterns(&["**"])));
+		let mut lease = Lease::new("/", consumer).unwrap();
+		let mut named = Grant::new(patterns(&["**"]), patterns(&["**"]));
+		named.subject = Some(moq_auth::Subject {
+			issuer: None,
+			name: "alice".into(),
+		});
+		producer.update(named);
+		assert_eq!(lease.ended().await.to_string(), "subject changed");
 	}
 
 	#[test]

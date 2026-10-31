@@ -233,7 +233,7 @@ impl Policy {
 		if jwt.is_some() && request.tls.is_some() {
 			return Err(Denial::TokenAndCertificate);
 		}
-		let (permissions, expires, certificate, root) = if let Some(jwt) = jwt {
+		let (permissions, expires, certificate, root, subject) = if let Some(jwt) = jwt {
 			let claims = self.verify(&jwt).await?;
 			let permissions = claims.authorize(&request.path).map_err(|err| match err {
 				crate::Error::RootMismatch(path) => Denial::RootMismatch {
@@ -246,17 +246,18 @@ impl Policy {
 				},
 				other => Denial::InvalidToken(other.to_string()),
 			})?;
-			(permissions, claims.expires, false, Some(claims.root))
+			let subject = claims.qualified();
+			(permissions, claims.expires, false, Some(claims.root), subject)
 		} else if let Some(peer) = &request.tls {
 			if self.mtls.is_empty() {
 				return Err(Denial::NoMtlsGrant);
 			}
-			(authorize(&self.mtls, &request.path)?, peer.expires, true, None)
+			(authorize(&self.mtls, &request.path)?, peer.expires, true, None, None)
 		} else {
 			if self.public.is_empty() {
 				return Err(Denial::NoPublicGrant);
 			}
-			(authorize(&self.public, &request.path)?, None, false, None)
+			(authorize(&self.public, &request.path)?, None, false, None, None)
 		};
 
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
@@ -269,6 +270,7 @@ impl Policy {
 		grant.tier = self.tier.clone();
 		grant.peer = certificate && self.mtls_link.is_some();
 		grant.upstream = certificate && self.mtls_link == Some(Link::Upstream);
+		grant.subject = subject;
 		Ok((grant, root))
 	}
 
@@ -316,13 +318,8 @@ impl Policy {
 /// Authorize rules rooted at `/` at the dialed `path`, exactly as a token with an
 /// empty root would be.
 fn authorize(rules: &Permissions, path: &str) -> Result<Permissions, Denial> {
-	let claims = crate::Claims {
-		publish: rules.publish.clone(),
-		subscribe: rules.subscribe.clone(),
-		..Default::default()
-	};
 	// An empty root overlaps every path, so the only refusal is reaching nothing.
-	claims.authorize(path).map_err(|_| Denial::NoAccess {
+	rules.authorize(path).map_err(|_| Denial::NoAccess {
 		path: crate::path::normalize(path),
 		root: None,
 	})
@@ -663,7 +660,9 @@ mod tests {
 			.with_root(root)
 			.with_publish(patterns(publish))
 			.with_subscribe(patterns(subscribe))
-			.with_expires(expires);
+			.with_expires(expires)
+			.with_issuer("https://auth.example")
+			.with_subject("alice");
 		key.sign(&claims).unwrap()
 	}
 
@@ -717,6 +716,46 @@ mod tests {
 		assert_eq!(grant.revalidate, None);
 		assert_eq!(grant.tier.as_deref(), Some("gold"));
 		assert_eq!(grant.root, None);
+		assert_eq!(
+			grant.subject,
+			Some(crate::Subject {
+				issuer: Some("https://auth.example".into()),
+				name: "alice".into(),
+			})
+		);
+	}
+
+	/// The subject is what a scoped publisher's routes are filed under, so a token that
+	/// may publish part of the tree is refused without one, while a certificate or the
+	/// public rules, which are not tokens, carry none.
+	#[tokio::test]
+	async fn a_scoped_publisher_token_needs_a_subject() {
+		let (dir, key) = key_dir();
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			public: rules(&["anon/**"], &[]),
+			..Default::default()
+		};
+		let anonymous = |publish: &[&str]| {
+			let claims = Claims::default().with_publish(patterns(publish));
+			key.sign(&claims).unwrap()
+		};
+
+		let err = policy
+			.decide(&with_token(request("/"), &anonymous(&["alice/**"])))
+			.await
+			.unwrap_err();
+		assert!(matches!(err, Denial::InvalidToken(_)), "{err}");
+
+		let grant = policy
+			.decide(&with_token(request("/"), &anonymous(&["**"])))
+			.await
+			.unwrap();
+		assert_eq!(grant.subject, None);
+
+		let grant = policy.decide(&request("/")).await.unwrap();
+		assert_eq!(grant.publish, patterns(&["anon/**"]));
+		assert_eq!(grant.subject, None);
 	}
 
 	#[tokio::test]

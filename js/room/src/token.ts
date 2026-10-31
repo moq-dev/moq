@@ -17,14 +17,17 @@ export type Claims = {
 	subscribe: string[];
 	/** Publish only under this participant's identity. */
 	publish: string[];
+	/** The participant identity, as the token's subject. */
+	sub: string;
 };
 
 /**
  * Token claims for a participant in `room`.
  *
- * `root` is the room prefix, `subscribe` is `**` (everything under the room), and
+ * `root` is the room prefix, `subscribe` is `**` (everything under the room),
  * `publish` is `<identity>/**` so a participant cannot publish at anyone else's
- * paths. Throws on an identity that is empty, has an empty segment, or contains `*`,
+ * paths, and `sub` is the identity, since a scoped publisher needs a subject.
+ * Throws on an identity that is empty, has an empty segment, or contains `*`,
  * since a wildcard would let the participant publish as someone else.
  */
 export function claims(room: string, identity: string): Claims {
@@ -33,5 +36,6 @@ export function claims(room: string, identity: string): Claims {
 		root: room,
 		subscribe: [Path.Pattern.all().text],
 		publish: [Path.Pattern.subtree(identity).text],
+		sub: identity,
 	};
 }

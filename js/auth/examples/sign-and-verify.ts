@@ -20,6 +20,7 @@ async function main() {
 	// Create claims
 	const claims = ClaimsSchema.parse({
 		root: "demo",
+		sub: "bbb-owner", // Who the token is for: a publisher scoped below the root must be named
 		publish: ["bbb/**"], // `demo/bbb` and everything beneath it
 		subscribe: ["**"], // Any broadcast under `demo/`
 		exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour from now (in seconds)

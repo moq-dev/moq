@@ -1104,60 +1104,73 @@ fn transit_priority_depends_on_arrival_order() {
 
 // Subject-qualified identities: a forwarded identity cannot reach beyond its admission.
 
-/// A scoped peer forwards a victim's identity with a newer seqno. Routes are
-/// shared by every claim of an identity, so unscoped, the forgery captures
-/// claims outside the forger's namespace, and its seqno outlives it: after it
-/// leaves, the victim's real routes are refused until the victim counts past
-/// the forged seqno. Filed under `hash(subject, id)`, the forgery serves only
-/// claims inside the forger's scope. The forger's own proven identity stays
-/// bare either way.
+/// A scoped peer forwards a victim's identity with a newer seqno, or declares
+/// it as its own. Routes are shared by every claim of an identity, so unscoped,
+/// the forgery captures claims outside the forger's namespace, and its seqno
+/// outlives it: after it leaves, the victim's real routes are refused until the
+/// victim counts past the forged seqno. Filed under `hash(subject, id)`, the
+/// forgery serves only claims inside the forger's scope. Nothing proves a
+/// connection's own identity, so it is filed the same way as any it forwards.
 #[test]
 fn forged_identity_hijacks_claims_outside_the_forgers_scope() {
 	for scoped_admission in [false, true] {
-		let (victim, core, edge, forger) = (0, 1, 2, 3);
-		let mut net = Net::new(Config::default(), 4);
-		net.leaf(victim);
-		net.leaf(forger);
-		net.join(victim, core, 5);
-		net.join(core, edge, 1);
-		let admission = if scoped_admission {
-			Link::cost(1).grant(Grant {
-				subject: "forger",
-				scope: "forger/",
-			})
-		} else {
-			Link::cost(1)
-		};
-		net.link(edge, forger, admission, Link::cost(1));
-		net.originate(victim, 7, 0);
-		net.originate(forger, 3, 0);
-		net.claim(7, "other/", 0, None);
-		net.claim(7, "forger/", 0, None);
-		assert!(net.run());
+		for as_own in [false, true] {
+			let case = format!("scoped {scoped_admission}, as own {as_own}");
+			let (victim, core, edge, forger) = (0, 1, 2, 3);
+			let mut net = Net::new(Config::default(), 4);
+			net.leaf(victim);
+			net.leaf(forger);
+			net.join(victim, core, 5);
+			net.join(core, edge, 1);
+			let admission = if scoped_admission {
+				Link::cost(1).grant(Grant {
+					subject: "forger",
+					scope: "forger/",
+				})
+			} else {
+				Link::cost(1)
+			};
+			net.link(edge, forger, admission, Link::cost(1));
+			net.originate(victim, 7, 0);
+			if !as_own {
+				net.originate(forger, 3, 0);
+			}
+			net.claim(7, "other/", 0, None);
+			net.claim(7, "forger/", 0, None);
+			assert!(net.run());
 
-		net.forge(forger, 7, 1000);
-		assert!(net.run());
-		assert!(net.route(core, 3).is_some(), "a connection's own identity is bare");
-		let served = served_by(&net.request(core, "other/x", Forward::Pinned));
-		if scoped_admission {
-			assert_eq!(served, Some((7, victim)));
-			assert_eq!(net.resolve(core, "forger/x"), Some(qualified("forger", 7)));
+			if as_own {
+				net.originate(forger, 7, 1000);
+			} else {
+				net.forge(forger, 7, 1000);
+				let own = if scoped_admission { qualified("forger", 3) } else { 3 };
+				assert!(
+					net.route(core, own).is_some(),
+					"{case}: the forger's own identity is filed like any other"
+				);
+			}
+			assert!(net.run());
+			let served = served_by(&net.request(core, "other/x", Forward::Pinned));
+			if scoped_admission {
+				assert_eq!(served, Some((7, victim)), "{case}");
+				assert_eq!(net.resolve(core, "forger/x"), Some(qualified("forger", 7)), "{case}");
+				assert_eq!(
+					served_by(&net.request(core, "forger/x", Forward::Pinned)),
+					Some((7, forger)),
+					"{case}: the forgery is contained in its own scope"
+				);
+			} else {
+				assert_eq!(served, Some((7, forger)), "{case}: the forger serves another namespace");
+			}
+
+			net.kill(forger);
+			assert!(net.run());
 			assert_eq!(
-				served_by(&net.request(core, "forger/x", Forward::Pinned)),
-				Some((7, forger)),
-				"the forgery is contained in its own scope"
+				net.starved(core, 7),
+				!scoped_admission,
+				"{case}: the forged seqno outlives the forger"
 			);
-		} else {
-			assert_eq!(served, Some((7, forger)), "the forger serves another namespace");
 		}
-
-		net.kill(forger);
-		assert!(net.run());
-		assert_eq!(
-			net.starved(core, 7),
-			!scoped_admission,
-			"the forged seqno outlives the forger"
-		);
 	}
 }
 
@@ -1165,8 +1178,8 @@ fn forged_identity_hijacks_claims_outside_the_forgers_scope() {
 /// subject. Both CDN relays file the local origin under one key, so it survives
 /// losing an uplink: the first hop keeps its identity and the request follows
 /// the other uplink, named as the local relay knows it. Claims outside the
-/// scope are refused under that key, and the local relay's own identity stays
-/// bare.
+/// scope are refused under that key, and the local relay's own identity is
+/// qualified like any other it sends.
 #[test]
 fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	let (c1, c2, l1, l2, origin) = (0, 1, 2, 3, 4);
@@ -1188,7 +1201,11 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	assert!(net.route(c1, 9).is_none());
 	assert_eq!(net.route(c1, key).and_then(|route| route.next), Some(l1));
 	assert_eq!(net.route(c2, key).and_then(|route| route.next), Some(l2));
-	assert_eq!(net.route(c1, 20).and_then(|route| route.next), Some(l1));
+	assert!(net.route(c1, 20).is_none());
+	assert_eq!(
+		net.route(c1, qualified(LOCAL.subject, 20)).and_then(|route| route.next),
+		Some(l1)
+	);
 	assert_eq!(net.resolve(c2, "local/x"), Some(key));
 	assert_eq!(
 		net.request(c2, "local/x", Forward::Pinned),
@@ -1211,11 +1228,11 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 		}
 	);
 
-	// A retracted identity leaves no alias behind.
-	assert_eq!(net.aliases(c1), 1);
+	// A retracted identity leaves no alias behind; the local relay's own stays.
+	assert_eq!(net.aliases(c1), 2);
 	net.kill(origin);
 	assert!(net.run());
-	assert_eq!(net.aliases(c1), 0);
+	assert_eq!(net.aliases(c1), 1);
 }
 
 /// A local relay missing its `upstream` mark leaks CDN routes back to the CDN,

@@ -205,6 +205,7 @@ pub(super) fn peer_grant(
 		publish: subscribe.map(|origin| origin.allowed()).unwrap_or_default(),
 		subscribe: publish.map(|origin| origin.allowed()).unwrap_or_default(),
 		expires: None,
+		subject: None,
 	}
 }
 
@@ -388,6 +389,7 @@ impl Present {
 							publish: ok.publish,
 							subscribe: ok.subscribe,
 							expires,
+							subject: None,
 						},
 					);
 					// Each grant recomputes the session's permits, so a peer streaming them

@@ -155,6 +155,8 @@ mod tests {
 			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
 			issued: Some(moq_clock::wall()),
 			not_before: None,
+			issuer: None,
+			subject: None,
 		}
 	}
 

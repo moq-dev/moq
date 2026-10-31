@@ -868,7 +868,7 @@ async fn quic_client_close_drains_finished_track() {
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let mut announcements = consumer.announced();
-	request.auth().authorize(&moq_net::auth::Grant::default());
+	request.auth().authorize(&moq_net::auth::Grant::default()).unwrap();
 	let mut requests = request.requests();
 	let _session = request
 		.with_subscriber(origin)

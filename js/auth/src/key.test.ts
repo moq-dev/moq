@@ -859,7 +859,9 @@ test("verify - only registered claims", async () => {
 	const token = await signRaw({ root: "room", publish: ["**"], iss: "api", sub: "alice", jti: "1", iat: now });
 	const claims = await Key.verify(key, token);
 	expect(claims.root).toBe("room");
-	expect(claims).not.toHaveProperty("iss");
+	expect(claims.iss).toBe("api");
+	expect(claims.sub).toBe("alice");
+	expect(claims).not.toHaveProperty("jti");
 
 	for (const [claim, payload] of [
 		["rooot", { rooot: "room/123", publish: ["**"] }],

@@ -91,15 +91,19 @@ impl Args {
 				subscribe,
 				expires,
 				issued,
+				issuer,
+				subject,
 			} => {
 				let key = read_key(&key)?;
 
-				let payload = moq_auth::Claims::default()
+				let mut payload = moq_auth::Claims::default()
 					.with_root(root)
 					.with_publish(publish)
 					.with_subscribe(subscribe)
 					.with_expires(expires.map(Into::into))
 					.with_issued(issued.map(Into::into));
+				payload.issuer = issuer;
+				payload.subject = subject;
 
 				let token = key.sign(&payload)?;
 				println!("{token}");
@@ -193,6 +197,14 @@ enum Command {
 		/// Issued-at time as a unix timestamp.
 		#[usage(long)]
 		issued: Option<UnixTimestamp>,
+
+		/// Who issued the token, qualifying its subject.
+		#[usage(long)]
+		issuer: Option<String>,
+
+		/// Who the token is issued to. Required to publish anything but `**` at the root.
+		#[usage(long)]
+		subject: Option<String>,
 	},
 
 	/// Answer a relay's auth requests with keys, public rules, an mTLS grant, tiers, and session limits.
@@ -851,6 +863,8 @@ mod tests {
 			"demo",
 			"--publish",
 			"alice/**",
+			"--subject",
+			"alice",
 			"--issued",
 			"1700000000",
 			"--expires",

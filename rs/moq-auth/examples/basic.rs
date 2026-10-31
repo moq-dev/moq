@@ -13,6 +13,8 @@ fn main() -> anyhow::Result<()> {
 	// Create claims for the token.
 	let claims = moq_auth::Claims::default()
 		.with_root("demo")
+		// Who the token is for: a publisher scoped below the root must be named.
+		.with_subject("my-stream-owner")
 		.with_publish(["my-stream/**".parse()?]) // Can publish to demo/my-stream and below
 		.with_subscribe(["**".parse()?]) // Can subscribe to anything under demo/
 		.with_expires(moq_clock::wall() + Duration::from_secs(3600))

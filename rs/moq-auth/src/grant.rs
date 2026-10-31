@@ -61,6 +61,11 @@ pub struct Grant {
 	/// Requires `peer`.
 	#[serde(skip_serializing_if = "std::ops::Not::not")]
 	pub upstream: bool,
+
+	/// Who the session's token was issued to, qualified by its issuer. A session that may
+	/// publish only part of the tree files the routes it forwards under it, so it must not
+	/// change on revalidation. Absent when the credential names nobody.
+	pub subject: Option<crate::Subject>,
 }
 
 impl Grant {
@@ -135,6 +140,10 @@ mod tests {
 			label: Some("project/key/123".into()),
 			peer: true,
 			upstream: true,
+			subject: Some(crate::Subject {
+				issuer: Some("https://auth.example".into()),
+				name: "alice".into(),
+			}),
 		};
 		let json = serde_json::to_value(&grant).unwrap();
 		assert_eq!(json["expires"], 4_102_444_800_i64);
@@ -160,10 +169,14 @@ mod tests {
 			label: Some("project/key/123".into()),
 			peer: true,
 			upstream: true,
+			subject: Some(crate::Subject {
+				issuer: Some("https://auth.example".into()),
+				name: "alice".into(),
+			}),
 		};
 		assert_eq!(
 			serde_json::to_string(&grant).unwrap(),
-			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","peer":true,"upstream":true}"#
+			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","peer":true,"upstream":true,"subject":{"issuer":"https://auth.example","name":"alice"}}"#
 		);
 	}
 

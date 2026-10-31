@@ -23,7 +23,7 @@ Object roles, including bitrate caps, are refused during parsing.
 ```bash
 bun add @moq/auth
 bunx @moq/auth generate --out root.jwk
-bunx @moq/auth sign --key root.jwk --root "rooms/123" --publish 'alice/**'
+bunx @moq/auth sign --key root.jwk --root "rooms/123" --subject alice --publish 'alice/**'
 ```
 
 Mint tokens on a server, never in the browser, and prefer asymmetric keys so

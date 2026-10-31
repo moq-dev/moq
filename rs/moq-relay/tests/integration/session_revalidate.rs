@@ -22,7 +22,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 enum Answer {
-	Grant(Grant),
+	Grant(Box<Grant>),
 	Status(u16),
 }
 
@@ -36,8 +36,8 @@ struct Script {
 impl Script {
 	fn new(grant: Grant) -> Self {
 		Self {
-			connect: Arc::new(Mutex::new(Answer::Grant(grant.clone()))),
-			revalidate: Arc::new(Mutex::new(Answer::Grant(grant))),
+			connect: Arc::new(Mutex::new(Answer::Grant(Box::new(grant.clone())))),
+			revalidate: Arc::new(Mutex::new(Answer::Grant(Box::new(grant)))),
 			seen: Arc::new(Mutex::new(Vec::new())),
 		}
 	}
@@ -78,7 +78,7 @@ impl Script {
 			Event::End { .. } => return StatusCode::NO_CONTENT.into_response(),
 		};
 		match answer {
-			Answer::Grant(grant) => Json(grant).into_response(),
+			Answer::Grant(grant) => Json(*grant).into_response(),
 			Answer::Status(code) => StatusCode::from_u16(code).unwrap().into_response(),
 		}
 	}
@@ -421,7 +421,7 @@ async fn a_pushed_retier_arrives_on_the_next_reply() {
 
 	let mut moved = grant();
 	moved.tier = Some("gold".into());
-	script.on_revalidate(Answer::Grant(moved));
+	script.on_revalidate(Answer::Grant(Box::new(moved)));
 	let (status, _) = fixture.revalidate("").await;
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
 

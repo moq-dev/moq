@@ -73,8 +73,11 @@ describe("Rust-generated fixtures", () => {
 		expect(claims.publish).toEqual(["alice/**"]);
 		expect(claims.subscribe).toEqual(["bob/**"]);
 
+		// A publisher scoped below the root must be named.
+		expect(() => authorize(claims, "alice")).toThrow(/subject/);
+
 		// An empty root grants its patterns wherever the connection lands.
-		const permissions = authorize(claims, "alice");
+		const permissions = authorize({ ...claims, sub: "alice" }, "alice");
 		expect(permissions.subscribe.toJSON()).toEqual([]);
 		expect(permissions.publish.toJSON()).toEqual(["**"]);
 	});
@@ -261,7 +264,7 @@ describe("Rust-serialized contract", () => {
 	const RUST_INVALID_END =
 		'{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}';
 	const RUST_GRANT =
-		'{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","peer":true,"upstream":true}';
+		'{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","peer":true,"upstream":true,"subject":{"issuer":"https://auth.example","name":"alice"}}';
 
 	test("parse a request a Rust relay sent", () => {
 		const request = RequestSchema.parse(JSON.parse(RUST_REQUEST));
@@ -301,6 +304,7 @@ describe("Rust-serialized contract", () => {
 			label: "project/key/123",
 			peer: true,
 			upstream: true,
+			subject: { issuer: "https://auth.example", name: "alice" },
 		});
 		expect(JSON.stringify(grant)).toBe(RUST_GRANT);
 	});

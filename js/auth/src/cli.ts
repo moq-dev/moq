@@ -75,6 +75,8 @@ program
 	.option("--subscribe <pattern...>", "Patterns the holder may subscribe to (foo/** for a subtree)")
 	.option("--expires <timestamp>", "Expiration time as unix timestamp", parseUnixTimestamp)
 	.option("--issued <timestamp>", "Issued time as unix timestamp", parseUnixTimestamp)
+	.option("--issuer <issuer>", "Who issued the token, qualifying its subject")
+	.option("--subject <subject>", "Who the token is issued to; required to publish anything but ** at the root")
 	.action(async (options) => {
 		try {
 			const keyEncoded = readFileSync(options.key, "utf-8");
@@ -86,6 +88,8 @@ program
 				...(options.subscribe && { subscribe: options.subscribe }),
 				...(options.expires && { exp: options.expires }),
 				...(options.issued && { iat: options.issued }),
+				...(options.issuer !== undefined && { iss: options.issuer }),
+				...(options.subject !== undefined && { sub: options.subject }),
 			});
 
 			const token = await Key.sign(key, claims);

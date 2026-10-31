@@ -858,14 +858,13 @@ fn holds_retire_once_nothing_can_recover() {
 /// Seqnos and revisions are varints. An origin never advertises the last
 /// value: a bump, a claim change, or a request that would reach it rotates the
 /// identity instead, so every node lets the old one go and sees the claims
-/// again under the new one. Nothing wraps. A session proves one key once, so
-/// rotating closes and reopens every session the origin had up; proving a
-/// second key on a live session fails.
+/// again under the new one. Nothing wraps. Rotating closes and reopens every
+/// session the origin had up.
 #[test]
 fn exhausted_counters_rotate_the_identity() {
 	let (origin, a, b, c, client) = (0, 1, 2, 3, 4);
 	let rotated = |net: &Net| {
-		let fresh = net.proven(origin);
+		let fresh = net.own(origin);
 		assert_ne!(fresh, 7, "a fresh identity");
 		assert_eq!(net.shows(client, 7, "live/x"), None);
 		assert_eq!(net.shows(client, fresh, "live/x"), Some(true));
@@ -891,7 +890,7 @@ fn exhausted_counters_rotate_the_identity() {
 	let mut net = build(VARINT_MAX - 2);
 	net.bump(origin);
 	assert!(net.run());
-	assert_eq!(net.proven(origin), 7);
+	assert_eq!(net.own(origin), 7);
 	net.bump(origin);
 	assert!(net.run());
 	rotated(&net);
@@ -900,7 +899,7 @@ fn exhausted_counters_rotate_the_identity() {
 	net.age(origin, VARINT_MAX - 2);
 	net.announce(origin, "live/y", 0, None);
 	assert!(net.run());
-	assert_eq!(net.proven(origin), 7);
+	assert_eq!(net.own(origin), 7);
 	net.unannounce(origin, "live/y");
 	assert!(net.run());
 	rotated(&net);
@@ -912,7 +911,7 @@ fn exhausted_counters_rotate_the_identity() {
 	net.connect(origin, c);
 	assert!(net.run());
 	rotated(&net);
-	assert!(net.route(a, net.proven(origin)).is_some());
+	assert!(net.route(a, net.own(origin)).is_some());
 }
 
 /// The seqno request sketch: a starved node resends its request a few times
@@ -1456,7 +1455,7 @@ fn loop_free(net: &Net) {
 /// for an identity whose process is gone.
 fn settled(net: &mut Net, label: &str) {
 	net.check().unwrap();
-	let live: Vec<Id> = (RELAYS..RELAYS + 2).map(|origin| net.proven(origin)).collect();
+	let live: Vec<Id> = (RELAYS..RELAYS + 2).map(|origin| net.own(origin)).collect();
 	for node in 0..RELAYS + 3 {
 		let mut expected = BTreeSet::new();
 		for &id in &live {

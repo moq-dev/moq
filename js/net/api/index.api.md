@@ -41,6 +41,7 @@ export namespace Auth {
 	export interface Grant {
 		expires?: number;
 		publish: Path.Patterns;
+		subject?: Auth.Subject;
 		subscribe: Path.Patterns;
 	}
 	export class Handle {
@@ -48,6 +49,10 @@ export namespace Auth {
 		abort(err?: Error): void;
 		add(token: string | Uint8Array): Promise<Auth.Credential>;
 		get grant(): Signals.Getter<Auth.Grant | undefined>;
+	}
+	export interface Subject {
+		issuer?: string;
+		name: string;
 	}
 	export class Unsupported extends Error {
 		constructor(message?: string);

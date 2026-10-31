@@ -7,6 +7,7 @@
 import { Pattern, Patterns } from "@moq/pattern";
 import * as z from "@zod/mini";
 import * as Path from "./path.ts";
+import type { Subject } from "./subject.ts";
 import { decodeGrants } from "./wire.ts";
 
 /** A list of pattern texts, each validated by `Pattern.parse`. */
@@ -73,14 +74,16 @@ const ClaimsFields = {
 	iat: z.optional(z.int()),
 	/** Not-before time, as a whole unix timestamp in seconds. Enforced by verification. */
 	nbf: z.optional(z.int()),
+	/** Who issued the token, qualifying its `sub`. */
+	iss: z.optional(z.string()),
+	/** Who the token was issued to, unique within its issuer. Required to publish anything but `**` at the root. */
+	sub: z.optional(z.string()),
 };
 
-// Registered claims that narrow nothing: an issuer's bookkeeping, read and dropped.
+// A registered claim that narrows nothing: an issuer's bookkeeping, read and dropped.
 // Every other claim is refused, since an unknown one may narrow the grant, and a
 // misspelled `root` would otherwise widen it to everything.
 const IgnoredFields = {
-	iss: z.optional(z.unknown()),
-	sub: z.optional(z.unknown()),
 	jti: z.optional(z.unknown()),
 };
 
@@ -94,8 +97,8 @@ const PrefixListSchema = z.union([z.string(), z.array(z.string())]);
  * exactly what it says: `alice` is one broadcast, `alice/**` is a subtree, and `**` is
  * everything under the root. Legacy `moq-token` claims read too, each `put`/`get`
  * prefix `p` as the subtree `p/**`, and signing writes that form whenever it says the
- * same thing. The registered `iss`, `sub`, and `jti` claims are read and dropped; any
- * other field fails verification.
+ * same thing. The registered `iss` and `sub` claims name who the token was issued to,
+ * and `jti` is read and dropped; any other field fails verification.
  */
 export const ClaimsSchema = z
 	.pipe(
@@ -105,7 +108,7 @@ export const ClaimsSchema = z
 			put: z.optional(PrefixListSchema),
 			get: z.optional(PrefixListSchema),
 		}),
-		z.transform(({ iss: _iss, sub: _sub, jti: _jti, ...claims }, ctx) => decodeGrants(claims, ctx)),
+		z.transform(({ jti: _jti, ...claims }, ctx) => decodeGrants(claims, ctx)),
 	)
 	.check(
 		// Emptiness, not just presence: `publish: []` grants nothing, and the Rust crate
@@ -120,6 +123,12 @@ export const ClaimsSchema = z
  * JWT claims structure for moq-auth
  */
 export type Claims = z.output<typeof ClaimsSchema>;
+
+/** The issuer-qualified subject `claims` names, or undefined when it names no subject. */
+export function qualified(claims: Claims): Subject | undefined {
+	if (claims.sub === undefined) return undefined;
+	return { ...(claims.iss !== undefined && { issuer: claims.iss }), name: claims.sub };
+}
 
 /**
  * The access a {@link Claims} grants at a specific path, with every pattern rebased so
@@ -149,8 +158,10 @@ export interface Permissions {
  * Matching is segment-aware, so a root of `foo` does not cover `foobar`. Slashes at
  * the boundaries are implicit: `/demo/` and `demo` are the same path.
  *
- * Throws when the two don't overlap, and when they do but every pattern falls outside
- * `path`.
+ * Throws when the two don't overlap, when they do but every pattern falls outside
+ * `path`, and when the token names no `sub` yet may publish only part of the tree:
+ * anything but `**` with `path` at the root. Such a connection's routes are filed
+ * under its subject.
  *
  * This is authorization only. Verify the signature first with {@link Key.verify} or
  * {@link KeySet.verify}, which is where expiry is enforced.
@@ -183,6 +194,10 @@ export function authorize(claims: Claims, path: string): Permissions {
 	};
 	if (permissions.subscribe.size === 0 && permissions.publish.size === 0) {
 		throw new Error(`token grants no access to path "${target}"`);
+	}
+	const scoped = permissions.publish.size > 0 && !(target === "" && permissions.publish.contains(Pattern.all()));
+	if (claims.sub === undefined && scoped) {
+		throw new Error("token publishes a scoped grant without a subject");
 	}
 
 	return permissions;

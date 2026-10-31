@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { authorize, type Claims, ClaimsSchema, type Permissions, ScopeSchema } from "./claims.ts";
+import { authorize, type Claims, ClaimsSchema, type Permissions, qualified, ScopeSchema } from "./claims.ts";
 import { GrantSchema } from "./contract.ts";
 import { encodeGrants } from "./wire.ts";
 
@@ -7,7 +7,7 @@ import { encodeGrants } from "./wire.ts";
 // sides stay pinned to the same authorization semantics.
 
 function claims(root: string, subscribe: string[], publish: string[]): Claims {
-	return ClaimsSchema.parse({ root, subscribe, publish });
+	return ClaimsSchema.parse({ root, subscribe, publish, sub: "alice" });
 }
 
 function texts(permissions: Permissions) {
@@ -87,6 +87,31 @@ test("authorize - path is parent of root", () => {
 	// Connecting above the root prepends it, keeping the grants anchored.
 	const permissions = authorize(claims("demo", ["**"], ["alice/**"]), "/");
 	expect(texts(permissions)).toEqual({ subscribe: ["demo/**"], publish: ["demo/alice/**"] });
+});
+
+test("authorize - a scoped publisher needs a subject, matching Rust", () => {
+	const anonymous = (root: string, publish: string[]) => ({ ...claims(root, ["**"], publish), sub: undefined });
+
+	// Publishing nothing, or everything from the root, forwards no scoped routes.
+	authorize(anonymous("", []), "room");
+	authorize(anonymous("", ["**"]), "/");
+
+	for (const [root, publish, path] of [
+		["", ["alice/**"], ""],
+		["room", ["**"], "room"],
+		["", ["**"], "room"],
+	] as const) {
+		expect(() => authorize(anonymous(root, [...publish]), path)).toThrow(/subject/);
+		authorize(claims(root, ["**"], [...publish]), path);
+	}
+});
+
+test("claims carry the issuer-qualified subject", () => {
+	const parsed = ClaimsSchema.parse({ publish: ["**"], iss: "https://auth.example", sub: "alice" });
+	expect(qualified(parsed)).toEqual({ issuer: "https://auth.example", name: "alice" });
+	// An issuer alone qualifies nobody.
+	expect(qualified(ClaimsSchema.parse({ publish: ["**"], iss: "https://auth.example" }))).toBeUndefined();
+	expect(() => ClaimsSchema.parse({ publish: ["**"], sub: 7 })).toThrow();
 });
 
 test("authorize - empty root", () => {

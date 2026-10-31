@@ -10,6 +10,7 @@
 import { Pattern } from "@moq/pattern";
 import * as z from "@zod/mini";
 import { PatternListSchema } from "./claims.ts";
+import { SubjectSchema } from "./subject.ts";
 
 const PathSchema = z.string().check(
 	z.refine(
@@ -193,6 +194,11 @@ export const GrantSchema = z
 		peer: z.optional(z.boolean()),
 		/** The peer is upstream: the relay never offers it a route learned from another upstream. Requires `peer`. */
 		upstream: z.optional(z.boolean()),
+		/**
+		 * Who the session's token was issued to, qualified by its issuer. A session that may publish only part of
+		 * the tree files the routes it forwards under it, so it must not change on revalidation.
+		 */
+		subject: z.optional(SubjectSchema),
 	})
 	.check(
 		z.refine((grant) => (grant.publish?.length ?? 0) > 0 || (grant.subscribe?.length ?? 0) > 0, {

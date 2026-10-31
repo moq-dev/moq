@@ -36,6 +36,23 @@ export interface Grant {
 	subscribe: Path.Patterns;
 	/** When the grant lapses, as `@moq/clock` wall time in Unix milliseconds, or undefined for never. */
 	expires?: number;
+	/**
+	 * Who the peer's credential was issued to, as the acceptor verified it, or undefined when it names
+	 * nobody. Every grant a session issues names the same subject, if any: a token whose subject differs
+	 * is refused. Never sent, so a grant the peer gave this side has none.
+	 */
+	subject?: Subject;
+}
+
+/**
+ * Who a credential was issued to: its subject, qualified by the issuer that named it, so two
+ * issuers' subjects never collide.
+ */
+export interface Subject {
+	/** Who issued the credential, or undefined when it names no issuer. */
+	issuer?: string;
+	/** Who the credential was issued to, unique within its issuer. */
+	name: string;
 }
 
 /**

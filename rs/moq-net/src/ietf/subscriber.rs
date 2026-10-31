@@ -7787,7 +7787,7 @@ mod tests {
 				Error::Unauthorized
 			}
 			Invalidated::Narrowed => {
-				auth.handle().authorize(&crate::auth::Grant::default());
+				auth.handle().authorize(&crate::auth::Grant::default()).unwrap();
 				Error::Unauthorized
 			}
 			// The session's AUTH handler reports expiry by ending the peer's grant.
@@ -10309,14 +10309,18 @@ mod tests {
 				publish: crate::Patterns::new(),
 				subscribe: crate::Pattern::subtree("other").unwrap().into(),
 				expires: None,
+				subject: None,
 			},
 		);
 		// We let the peer announce only "other".
-		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Pattern::subtree("other").unwrap().into(),
-			subscribe: crate::Patterns::new(),
-			expires: None,
-		});
+		auth.handle()
+			.authorize(&crate::auth::Grant {
+				publish: crate::Pattern::subtree("other").unwrap().into(),
+				subscribe: crate::Patterns::new(),
+				expires: None,
+				subject: None,
+			})
+			.unwrap();
 		assert!(
 			!auth.within_limit(crate::auth::Direction::Subscribe, "room/alice"),
 			"the limit must not cover the announced path"
@@ -10348,6 +10352,7 @@ mod tests {
 			publish: crate::Pattern::all().into(),
 			subscribe: crate::Patterns::new(),
 			expires: secs.map(|s| runtime.now().checked_add(std::time::Duration::from_secs(s)).unwrap()),
+			subject: None,
 		}
 	}
 	/// An out-of-band request token, the only kind a session verifies.
@@ -10624,9 +10629,10 @@ mod tests {
 			publish: crate::Pattern::subtree(subtree).unwrap().into(),
 			subscribe: crate::Patterns::new(),
 			expires: None,
+			subject: None,
 		};
 		let auth = crate::auth::Link::new(false);
-		auth.handle().authorize(&limit("room"));
+		auth.handle().authorize(&limit("room")).unwrap();
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 			.await
@@ -10665,7 +10671,7 @@ mod tests {
 			"the verifier ran though the limit covers the announce"
 		);
 
-		auth.handle().authorize(&limit("other"));
+		auth.handle().authorize(&limit("other")).unwrap();
 		for _ in 0..50 {
 			let _ = futures::poll!(acceptor.as_mut());
 			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended");
@@ -10683,7 +10689,7 @@ mod tests {
 	async fn a_token_authorized_announce_is_exempt_from_the_limit() {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Link::new(false);
-		auth.handle().authorize(&crate::auth::Grant::default());
+		auth.handle().authorize(&crate::auth::Grant::default()).unwrap();
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 			.await
@@ -10712,11 +10718,14 @@ mod tests {
 		}
 		assert!(routed, "the token admits the announce outside the limit");
 
-		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Pattern::subtree("other").unwrap().into(),
-			subscribe: crate::Patterns::new(),
-			expires: None,
-		});
+		auth.handle()
+			.authorize(&crate::auth::Grant {
+				publish: crate::Pattern::subtree("other").unwrap().into(),
+				subscribe: crate::Patterns::new(),
+				expires: None,
+				subject: None,
+			})
+			.unwrap();
 		for _ in 0..50 {
 			let _ = futures::poll!(acceptor.as_mut());
 			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended");
@@ -10734,7 +10743,7 @@ mod tests {
 	async fn a_token_authorized_announce_admits_its_subscriptions() {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Link::new(false);
-		auth.handle().authorize(&crate::auth::Grant::default());
+		auth.handle().authorize(&crate::auth::Grant::default()).unwrap();
 		// The announce's peer says nothing; the subscription's accepts it.
 		let subscribe_ok = {
 			let log = crate::lite::test_transport::Log::default();
@@ -11545,7 +11554,7 @@ mod tests {
 	) {
 		let auth = crate::auth::Link::new(false);
 		if let Some(limit) = &limit {
-			auth.handle().authorize(limit);
+			auth.handle().authorize(limit).unwrap();
 		}
 		announce_harness_with(version, auth)
 	}
@@ -11902,11 +11911,13 @@ mod tests {
 			publish: crate::Patterns::new(),
 			subscribe: crate::Pattern::all().into(),
 			expires: None,
+			subject: None,
 		};
 		let write_only = crate::auth::Grant {
 			publish: crate::Pattern::all().into(),
 			subscribe: crate::Patterns::new(),
 			expires: None,
+			subject: None,
 		};
 		for (grant, admitted) in [(read_only, false), (write_only, true)] {
 			let (mut subscriber, mut requests, consumer, session) =
@@ -15222,7 +15233,7 @@ mod joining_fetch_tests {
 			// A group is accepted only once its first object arrives, so FETCH_OK alone
 			// leaves the fetch waiting on the stream.
 			assert!(futures::poll!(fetch.as_mut()).is_pending());
-			auth.handle().authorize(&crate::auth::Grant::default());
+			auth.handle().authorize(&crate::auth::Grant::default()).unwrap();
 			assert!(
 				futures::poll!(serving.as_mut()).is_pending(),
 				"FIN stays unacknowledged"

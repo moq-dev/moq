@@ -59,7 +59,7 @@ struct Credential {
 }
 
 enum Change {
-	Grant(Grant),
+	Grant(Box<Grant>),
 	Ended(lease::Reason),
 	Withdrawn,
 }
@@ -89,6 +89,7 @@ impl Credential {
 				self.grant.subscribe.clone()
 			},
 			expires: self.expires,
+			subject: super::subject(&self.grant),
 		}
 	}
 }
@@ -154,10 +155,17 @@ impl Refresh {
 			let grant = credential.wire(self.role);
 			union.publish.extend(grant.publish.iter().cloned());
 			union.subscribe.extend(grant.subscribe.iter().cloned());
+			// Every initial credential is the connection's own lease, which keeps its subject.
+			union.subject = grant.subject;
 		}
 		// Credential timers remove one grant at a time; no single deadline may
 		// expire a union that another credential still covers.
-		self.handle.authorize(&union);
+		if let Err(err) = self.handle.authorize(&union) {
+			// Unreachable: every initial credential keeps the admitted subject, and moq-net
+			// issued the other tokens only under it.
+			tracing::error!(%err, "the connection credential changed subject");
+			self.handle.abort(err);
+		}
 	}
 
 	fn request(&mut self, request: auth::Request) {
@@ -184,7 +192,7 @@ impl Refresh {
 			// use while another credential keeps the session alive. Validate the
 			// exact snapshot that would be issued.
 			let mut credential = Credential::new(self.owner.clone());
-			if !self.valid(&credential.grant) {
+			if !self.valid(&credential.grant) || super::subject(&credential.grant) != self.admitted.subject {
 				request.reject(SessionError::Unauthorized, "connection credential no longer valid");
 				return;
 			}
@@ -372,14 +380,17 @@ impl Refresh {
 						Err(err) => refuse(request, err),
 					}
 				}
-				Event::Changed(id, Change::Grant(grant)) if self.valid(&grant) => {
+				// A credential keeps its subject: the session's routes are filed under it.
+				Event::Changed(id, Change::Grant(grant))
+					if self.valid(&grant) && self.credentials[&id].grant.subject == grant.subject =>
+				{
 					let fresh = self.admitted.recheck(&grant).expect("checked by valid");
 					let credential = self.credentials.get_mut(&id).expect("observed credential");
 					credential.expires = grant.deadline();
 					if credential.initial {
 						self.stats.retag(fresh.tier, &fresh.label);
 					}
-					credential.grant = grant;
+					credential.grant = *grant;
 					if let Some(issued) = &credential.issued {
 						issued.update(credential.wire(self.role));
 					}
@@ -425,7 +436,7 @@ async fn changed(consumer: &mut lease::Consumer, expires: Option<moq_clock::Inst
 		biased;
 		() = expire => Change::Ended(lease::Reason::Expired),
 		changed = consumer.changed() => match changed {
-			Ok(grant) => Change::Grant(grant),
+			Ok(grant) => Change::Grant(Box::new(grant)),
 			Err(reason) => Change::Ended(reason),
 		},
 	}
@@ -1081,6 +1092,60 @@ mod tests {
 		let narrowed = union.changed().await.unwrap().unwrap();
 		assert!(narrowed.publish.matches("a/cam"));
 		assert!(!narrowed.publish.matches("c/cam"));
+		assert!(!supervising.is_finished());
+		client.abort(moq_net::Error::Cancel);
+		supervising.abort();
+		let _ = supervising.await;
+	}
+
+	fn subject(name: &str) -> moq_auth::Subject {
+		moq_auth::Subject {
+			issuer: Some("https://auth.example".into()),
+			name: name.into(),
+		}
+	}
+
+	fn granted_to(name: &str, prefix: &str) -> Grant {
+		let mut grant = grant(prefix, 30);
+		grant.subject = Some(subject(name));
+		grant
+	}
+
+	/// Every token a session holds names one subject, which the routes it forwards are
+	/// filed under: an in-band token naming another is refused, and the connection's own
+	/// credential ends rather than change its subject.
+	#[tokio::test(start_paused = true)]
+	async fn a_session_keeps_one_subject() {
+		let (auth, mut admissions) = super::super::Auth::embedded("test");
+		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let (owner, consumer) = lease::Producer::new(granted_to("alice", "a/**"));
+		let (lease, ()) = tokio::join!(auth.admit(request), async {
+			admissions.next().await.unwrap().grant(consumer);
+		});
+		let (client, supervising) = sessions(lease.unwrap()).await;
+		let auth = client.auth();
+
+		let (result, ()) = tokio::join!(auth.add("bob"), async {
+			let admission = admissions.next().await.unwrap();
+			admission.grant(lease::Consumer::fixed(granted_to("bob", "b/**")));
+		});
+		assert!(
+			matches!(result, Err(moq_net::Error::Session(SessionError::Unauthorized))),
+			"{:?}",
+			result.map(|(token, _)| token.grant().peek())
+		);
+		let (result, ()) = tokio::join!(auth.add("alice"), async {
+			let admission = admissions.next().await.unwrap();
+			admission.grant(lease::Consumer::fixed(granted_to("alice", "c/**")));
+		});
+		let (_alice, _) = result.unwrap();
+		let mut union = auth.grant();
+		assert!(union.peek().unwrap().publish.matches("a/cam"));
+
+		owner.update(granted_to("bob", "a/**"));
+		let narrowed = union.changed().await.unwrap().unwrap();
+		assert!(!narrowed.publish.matches("a/cam"));
+		assert!(narrowed.publish.matches("c/cam"));
 		assert!(!supervising.is_finished());
 		client.abort(moq_net::Error::Cancel);
 		supervising.abort();

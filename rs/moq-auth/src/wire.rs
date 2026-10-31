@@ -33,13 +33,13 @@ pub(crate) struct Claims {
 	iat: Option<moq_clock::Wall>,
 	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
 	nbf: Option<moq_clock::Wall>,
-	// Registered claims that narrow nothing: an issuer's bookkeeping, read and dropped.
+	#[serde(deserialize_with = "present")]
+	iss: Option<String>,
+	#[serde(deserialize_with = "present")]
+	sub: Option<String>,
+	// A registered claim that narrows nothing: an issuer's bookkeeping, read and dropped.
 	// Every other claim is refused, since an unknown one may narrow the grant, and a
 	// misspelled `root` would otherwise widen it to everything.
-	#[serde(skip_serializing)]
-	iss: Option<serde::de::IgnoredAny>,
-	#[serde(skip_serializing)]
-	sub: Option<serde::de::IgnoredAny>,
 	#[serde(skip_serializing)]
 	jti: Option<serde::de::IgnoredAny>,
 }
@@ -56,8 +56,8 @@ impl From<crate::Claims> for Claims {
 			exp: claims.expires,
 			iat: claims.issued,
 			nbf: claims.not_before,
-			iss: None,
-			sub: None,
+			iss: claims.issuer,
+			sub: claims.subject,
 			jti: None,
 		}
 	}
@@ -81,6 +81,8 @@ impl TryFrom<Claims> for crate::Claims {
 			expires: wire.exp,
 			issued: wire.iat,
 			not_before: wire.nbf,
+			issuer: wire.iss,
+			subject: wire.sub,
 		})
 	}
 }
