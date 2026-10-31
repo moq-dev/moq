@@ -192,10 +192,11 @@ declare -A compiles=(
 )
 
 # Lanes start in this order, so the slowest come first. dart runs alone (see
-# below), so it waits for the rest.
+# below), so it waits for the rest. fix runs biome before js, since Biome can
+# fix sources that the package build rejects, such as a type-only export.
 case "$action" in
     check | ci) modules=(py rs rs_shapes c cpp obs_compile js kt flake bench carla swift go drafts biome markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
-    fix) modules=(js rs py carla dart obs biome markdown shell toml nix justfile) ;;
+    fix) modules=(biome js rs py carla dart obs markdown shell toml nix justfile) ;;
 esac
 
 # Modules that share mutable state run in one lane, in module order; every
