@@ -238,17 +238,27 @@ impl Meter {
 		}
 	}
 
-	/// Take back up to `limit` bytes of credit discarded after `at`, newest first.
+	/// Take back up to `limit` bytes of credit discarded after `at`, oldest first: a frame
+	/// charged later that arrived later can use only newer credit.
 	fn refund(&mut self, at: Instant, limit: f64) -> f64 {
 		let mut refund = 0.0;
-		for full in self.full.iter_mut().rev() {
-			if full.until <= at || refund >= limit {
-				break;
+		let mut i = 0;
+		while refund < limit && i < self.full.len() {
+			let Full { since, until, rate } = self.full[i];
+			if until <= at {
+				i += 1;
+				continue;
 			}
-			let discarded = full.rate * full.until.saturating_duration_since(full.since.max(at)).as_secs_f64();
-			let take = discarded.min(limit - refund);
-			full.until -= Duration::from_secs_f64(take / full.rate);
+			let start = since.max(at);
+			let take = (rate * until.saturating_duration_since(start).as_secs_f64()).min(limit - refund);
 			refund += take;
+			self.full[i].since = (start + Duration::from_secs_f64(take / rate)).min(until);
+			if since < at {
+				// The credit discarded before `at` stays for frames that arrived earlier.
+				self.full.insert(i, Full { since, until: at, rate });
+				i += 1;
+			}
+			i += 1;
 		}
 		refund
 	}
@@ -366,6 +376,20 @@ mod tests {
 			assert!(meter.charge_at(20, t0 + Duration::from_millis(20 * i)).is_ok(), "{i}");
 		}
 		assert!(meter.charge(100, t0, t0 + Duration::from_millis(180)).is_ok());
+	}
+
+	#[test]
+	fn a_refund_leaves_newer_credit_to_frames_that_arrived_later() {
+		let t0 = Instant::now();
+		let ms = |ms| t0 + Duration::from_millis(ms);
+		// Frame A takes 499 bytes at 0 ms and 1 at 1000 ms. Frame B takes 1000 bytes at
+		// 500 ms and 499 at 1001 ms. In packet order the bucket ends at 1 byte.
+		let mut meter = Meter::new(Some(cap()), t0);
+		assert!(meter.charge(500, ms(0), ms(1000)).is_ok());
+		// A was refunded the credit discarded over 0..500 ms, which B could not use. B, charged
+		// at its first packet, gets the byte its last one paid for back too.
+		assert!(meter.charge(1499, ms(500), ms(1001)).is_ok());
+		assert!((meter.tokens - 2.0).abs() < 1e-6, "{}", meter.tokens);
 	}
 
 	#[test]
