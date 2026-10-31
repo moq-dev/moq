@@ -3956,3 +3956,39 @@ test("a partial maxDelay widening keeps the older skip owed", () => {
 	expect(drainGroups(subscriber)).toEqual([1]);
 	producer.close();
 });
+
+// An end declared with an error keeps the history below it: a reader gets every group, then the
+// error, even one arriving after the producer closed.
+test("an errored end keeps its history", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	for (const sequence of [0, 1]) {
+		const group = producer.createGroup(sequence);
+		group.writeFrame(textFrame("a", Timestamp.fromMillis(sequence)));
+		group.finish();
+	}
+	const failed = new StreamError(StreamCode(71));
+	producer.finishAt({ group: 2, frame: 0 }, failed);
+	producer.close();
+	expect(producer.closed.peek()).toBe(failed);
+
+	const replay = { groups: { start: { included: 0 } }, maxDelay: Milli(30_000) };
+	const arrival = producer.subscribe(replay);
+	expect((await arrival.recvGroup())?.sequence).toBe(0);
+	expect((await arrival.recvGroup())?.sequence).toBe(1);
+	await expect(arrival.recvGroup()).rejects.toBe(failed);
+
+	const ordered = producer.subscribe(replay).ordered();
+	expect((await ordered.nextGroup())?.sequence).toBe(0);
+	expect((await ordered.nextGroup())?.sequence).toBe(1);
+	await expect(ordered.nextGroup()).rejects.toBe(failed);
+
+	// The nonblocking reads end the same way.
+	const polled = producer.subscribe(replay);
+	expect(polled.tryRecvGroup()?.sequence).toBe(0);
+	expect(polled.tryRecvGroup()?.sequence).toBe(1);
+	expect(() => polled.tryRecvGroup()).toThrow(failed);
+	const polledOrdered = producer.subscribe(replay).ordered();
+	expect(polledOrdered.tryNextGroup()?.sequence).toBe(0);
+	expect(polledOrdered.tryNextGroup()?.sequence).toBe(1);
+	expect(() => polledOrdered.tryNextGroup()).toThrow(failed);
+});
