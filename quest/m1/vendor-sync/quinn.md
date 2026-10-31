@@ -43,13 +43,16 @@ Remaining before completing this run:
 
 - Pass the full local `just ci`. Broad Cargo launches currently fail in `mbx`
   with `Argument list too long`, including CI's own Clippy fixture; the
-  focused package commands work. Do not treat partial gate results as success.
+  focused package commands work. The captured Bash environment reload overrides
+  PATH-only fixes. A gate attempt using `BASH_ENV=/dev/null` and the Nix Cargo
+  path is testing the full selection. Do not treat partial results as success.
 - Run the Apple source-override regression on macOS at default features and
   with `fast-apple-datapath`. This Linux host cannot reproduce or run that
   platform-specific behavior.
 - Obtain the required local other-vendor review and fix or refute every
-  finding. The prior batch exhausted Claude review quota; check the actual
-  result of the next attempt rather than assuming it is still unavailable.
+  finding. `quest review` on `9d15d25a720ec0d0f1b761fdc896b0740c8c275e`
+  failed before review: Claude reported its weekly limit, resetting
+  2026-11-02 at 02:00 America/Los_Angeles. No completed review is claimed.
 
 Public API: none expected; a ported fix that changes one says so. Wire:
 QUIC behavior follows upstream's fixes.
