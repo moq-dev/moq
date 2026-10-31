@@ -272,8 +272,15 @@ test("SubscribeEnd round-trips on draft-05", async () => {
 	expect(got.end.group).toBe(7);
 });
 
-test("SubscribeEnd has no stream count on draft-07", async () => {
-	expect(await encode(Version.DRAFT_07, { end: new SubscribeEnd(7) })).toEqual(new Uint8Array([1, 1, 7]));
+test("SubscribeEnd carries its error on draft-07", async () => {
+	// Type, length, exclusive final group, then the error code + 1, 0 for a clean end.
+	expect(await encode(Version.DRAFT_07, { end: new SubscribeEnd(7) })).toEqual(new Uint8Array([1, 2, 7, 0]));
+	expect(await encode(Version.DRAFT_07, { end: new SubscribeEnd(7, 71) })).toEqual(new Uint8Array([1, 2, 7, 72]));
+	const got = await responseRoundtrip(Version.DRAFT_07, { end: new SubscribeEnd(7, 71) });
+	if (!("end" in got)) throw new Error("expected end");
+	expect([got.end.group, got.end.error]).toEqual([7, 71]);
+	// An older version has nowhere to carry it.
+	await expect(encode(Version.DRAFT_06, { end: new SubscribeEnd(7, 71) })).rejects.toThrow();
 });
 
 test("SubscribeDrop is restored on draft-07", async () => {

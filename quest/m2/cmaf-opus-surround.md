@@ -16,11 +16,14 @@ family 0), the shape drafted in kixelated/mp4-atom#246. That is a breaking
 Decided 2026-10-17: the `mp4-atom` change is not worth landing on its own.
 Alone it only swaps `mp4-atom`'s generic decode error for
 `UnsupportedMappingFamily`; the payoff is surround Opus. So the former
-`mp4-atom-dops-mapping` quest (draft moq-dev/moq#5819) folded in here, and
-the breaking `mp4-atom` release lands only when this quest does.
+`mp4-atom-dops-mapping` quest (draft moq-dev/moq#5819) folded in here.
 
-Order: land kixelated/mp4-atom#246, release `mp4-atom` 0.17, then one moq PR
-that bumps `rs/moq-mux` to `mp4-atom = "0.17"` and does the import and export.
+Decided 2026-10-28 (maintainer): kixelated/mp4-atom#246 ships in 0.17.0
+beside kixelated/mp4-atom#254, so downstream takes one breaking bump.
+0.17.0 is released (2026-10-30), and moq-mux takes it for the counted
+trun (moq-dev/moq#7043, carried by moq-dev/moq#7308), still refusing a
+nonzero family explicitly, since `mp4-atom` no longer does.
+This quest then only does the import and export.
 A git patch to the branch cannot stand in for the release, since `cargo deny`
 refuses unknown git sources.
 

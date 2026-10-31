@@ -129,7 +129,10 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timest
 /// Whether the route passes through the preferred CDN.
 fn via_a(announce: &announce::Event) -> bool {
 	let route = match announce {
-		announce::Event::Start(a) | announce::Event::Update(a) | announce::Event::Restart(a) => &a.route,
+		announce::Event::Start(a)
+		| announce::Event::Update(a)
+		| announce::Event::Restart(a)
+		| announce::Event::Takeover { announce: a, .. } => &a.route,
 		announce::Event::End(_) => return false,
 	};
 	route.hops.iter().any(|hop| *hop == Hop::new(A).unwrap())
