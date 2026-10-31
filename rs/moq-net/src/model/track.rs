@@ -9948,6 +9948,7 @@ mod test {
 			ietf: None,
 			compressed: false,
 		})
+		.unwrap()
 		.unwrap();
 		let mut downstream = track_producer("test", Info::timed());
 		let mut downstream_dg = downstream.subscribe(None);
