@@ -8187,9 +8187,8 @@ pub struct Request {
 	// unless this request was reserved on a tagged broadcast.
 	stats: stats::Scope,
 
-	// The floor the accepted track's start is pending at, until the source resolves it
-	// (see [`Self::request_start`]).
-	requested_start: Option<Option<u64>>,
+	// Where the accepted track's start is pending; see [`Self::request_start`].
+	requested_start: RequestedStart,
 
 	// Whether the accepted track starts idle; see [`Self::idle`].
 	idle: bool,
@@ -8199,6 +8198,14 @@ pub struct Request {
 
 	// A track the producer reserved, listed by its broadcast once accepted.
 	list: Option<broadcast::ListOnAccept>,
+}
+
+/// Whether a [`Request`] asked for its accepted track's start to be pending.
+enum RequestedStart {
+	/// The track starts as [`Request::accept`] leaves it.
+	Unset,
+	/// Pending at this floor, `None` for the live edge, until the source resolves it.
+	Pending(Option<u64>),
 }
 
 impl Request {
@@ -8215,7 +8222,7 @@ impl Request {
 			alive,
 			_dynamic: dynamic,
 			stats: stats::Scope::default(),
-			requested_start: None,
+			requested_start: RequestedStart::Unset,
 			idle: false,
 			routes: None,
 			list: None,
@@ -8246,7 +8253,7 @@ impl Request {
 	/// see the track.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn request_start(mut self, floor: impl Into<Option<u64>>) -> Self {
-		self.requested_start = Some(floor.into());
+		self.requested_start = RequestedStart::Pending(floor.into());
 		self
 	}
 
@@ -8345,7 +8352,7 @@ impl Request {
 			Ok(mut state) => {
 				state.accept(info.clone());
 				state.staged = true;
-				if let Some(floor) = self.requested_start {
+				if let RequestedStart::Pending(floor) = self.requested_start {
 					state.set_start(floor, true);
 				}
 				if self.idle {

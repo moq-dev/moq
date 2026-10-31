@@ -5951,7 +5951,8 @@ fn resolve_fetch_group(prior: Option<u64>, wire: Option<u64>) -> Result<Option<u
 		return Ok(Some(wire));
 	};
 	let step = wire.checked_add(1).ok_or(Error::Unsupported)?;
-	prior.checked_add(step).map(Some).ok_or(Error::Unsupported)
+	let group = prior.checked_add(step).ok_or(Error::Unsupported)?;
+	Ok(Some(group))
 }
 
 fn open_fill_group(
