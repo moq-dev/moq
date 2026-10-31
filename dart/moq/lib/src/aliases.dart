@@ -144,6 +144,9 @@ typedef Anchor = MoqAnchor;
 /// Which pending group the publisher sends first.
 typedef Order = MoqOrder;
 
+/// A location within a track: a group sequence and a frame index in it.
+typedef Position = MoqPosition;
+
 /// Options for fetching one past group by sequence.
 typedef FetchGroupOptions = MoqFetchGroupOptions;
 
