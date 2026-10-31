@@ -936,6 +936,8 @@ pub struct ScriptedSession {
 	/// Set by [`Self::gated_open`]: parks `poll_open_bi` until the gate opens, standing in
 	/// for a transport header blocked on send capacity.
 	open_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::with_open_uni_gate`].
+	uni_open_gate: Option<kio::Consumer<bool>>,
 	credit: kio::Producer<bool>,
 	/// Scripts the peer pushes at us on unidirectional streams, popped by `accept_uni`
 	/// in order. See [`Self::with_incoming_unis`].
@@ -948,6 +950,8 @@ pub struct ScriptedSession {
 	datagram_size: usize,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
+	/// Set by [`Self::with_send_window`].
+	send_window: Option<usize>,
 }
 
 impl ScriptedSession {
@@ -978,6 +982,7 @@ impl ScriptedSession {
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
+			uni_open_gate: None,
 			credit: kio::Producer::new(true),
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
@@ -985,12 +990,26 @@ impl ScriptedSession {
 			unacked_unis: Default::default(),
 			datagram_size: 0,
 			groups: false,
+			send_window: None,
 		}
+	}
+
+	/// Let each opened bidi stream send only its first `bytes`, then park its writes for good,
+	/// like a peer that never grants more send credit.
+	pub fn with_send_window(mut self, bytes: usize) -> Self {
+		self.send_window = Some(bytes);
+		self
 	}
 
 	/// Open send groups, as native QUIC does, recording them in the log.
 	pub fn with_groups(mut self) -> Self {
 		self.groups = true;
+		self
+	}
+
+	/// Hold unidirectional stream opens until `gate` grants stream credit.
+	pub fn with_open_uni_gate(mut self, gate: kio::Consumer<bool>) -> Self {
+		self.uni_open_gate = Some(gate);
 		self
 	}
 
@@ -1141,7 +1160,15 @@ impl poll::Session for ScriptedSession {
 			Some(queue) => Arc::new(Mutex::new(queue.lock().unwrap().pop_front().unwrap_or_default())),
 			None => self.script.clone(),
 		};
-		let mut send = SinkSend::new(self.log.clone()).opened(options);
+		let mut send = match self.send_window {
+			// The gate's producer is gone, so the writes past the prefix park forever.
+			Some(window) => SinkSend {
+				prefix: window,
+				..SinkSend::gated(self.log.clone(), kio::Producer::new(false).consume())
+			},
+			None => SinkSend::new(self.log.clone()),
+		}
+		.opened(options);
 		send.unacked_fin = self.unacked_fin;
 		Poll::Ready(Ok((
 			send,
@@ -1170,9 +1197,15 @@ impl poll::Session for ScriptedSession {
 
 	fn poll_open_uni(
 		&self,
-		_waiter: &kio::Waiter,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<Self::SendStream, Self::Error>> {
+		if let Some(gate) = &self.uni_open_gate {
+			match gate.poll(waiter, |open| (**open).then_some(()).map_or(Poll::Pending, Poll::Ready)) {
+				Poll::Ready(Ok(())) => {}
+				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
+			}
+		}
 		let mut send = SinkSend::new(self.log.clone());
 		send.unacked_fin = self
 			.unacked_unis

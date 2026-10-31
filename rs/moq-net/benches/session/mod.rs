@@ -16,13 +16,11 @@
 //! groups have a `_cpu` suffix. Cache-clock advancement remains outside both clocks.
 //! `session_delivery_group_cost` sweeps publishers and viewers independently for SUBSCRIBE
 //! and FETCH; its constrained cases release held streams only after a real blocked write.
-//! A one-relay FETCH fixture asserts one upstream FETCH per run during setup: one group on
-//! moq-lite, a whole burst on moq-transport.
-//! `session_delivery_fetch_range` FETCHes a burst of missing groups at once, swept over its
-//! length, so a relay fills each run with one moq-transport FETCH.
+//! A one-relay FETCH fixture asserts one upstream FETCH per group during setup.
+//! `session_delivery_fetch_range` FETCHes missing groups independently, swept over burst length.
 //! `session_range_updates` widens established draft-22 subscriptions over a fresh cached
-//! burst, swept over burst length and concurrent requests. Narrowing and writing the
-//! next burst happen outside timing; the update and every filled group count.
+//! burst's largest group, swept over burst length and concurrent requests. Narrowing and
+//! writing the next burst happen outside timing; the update and largest-group fill count.
 //! `session_delivery_credit` grants a viewer one uni stream at a time, swept over its
 //! subscriptions and the backlog each holds, so every group waits for a stream grant. A
 //! publisher that parks state per backlogged group pays for it on each grant, which shows
@@ -138,8 +136,7 @@ struct Shape {
 	credit: Option<usize>,
 	/// Publish compressed groups and exercise negotiated versus plain fallback egress.
 	compress: bool,
-	/// Read each group via a fresh FETCH rather than a live subscription, a burst's groups
-	/// at once so the relays can fill them as one run.
+	/// Read each group via a fresh FETCH rather than a live subscription.
 	fetch: bool,
 }
 
@@ -677,12 +674,8 @@ impl<B: Backend> Room<B> {
 			);
 		}
 		if shape.fetch && shape.relays == 1 {
-			// A lite FETCH (stream type 3) names one group; a moq-transport FETCH (type 0x16)
-			// a whole run. Both types encode in one byte.
-			let (kind, run) = match room.cluster.version.is_lite() {
-				true => (3, 1),
-				false => (0x16, shape.burst),
-			};
+			// Both FETCH types encode in one byte and every request names one group.
+			let kind = if room.cluster.version.is_lite() { 3 } else { 0x16 };
 			let upstream_fetches = room
 				.cluster
 				._pairs
@@ -695,7 +688,7 @@ impl<B: Backend> Room<B> {
 						.count()
 				})
 				.sum::<usize>();
-			assert_eq!(upstream_fetches, room.groups / run, "one upstream FETCH per run");
+			assert_eq!(upstream_fetches, room.groups, "one upstream FETCH per group");
 		}
 		room
 	}
@@ -737,7 +730,7 @@ impl<B: Backend> Room<B> {
 			}
 		}
 		let mut bytes = 0;
-		// A fetching viewer asks for a burst's groups at once; a subscription reads them
+		// A fetching viewer asks for each group independently; a subscription reads them
 		// round-robin, so no subscription's backlog waits on another's being read.
 		let passes = if self.shape.fetch { 1 } else { self.shape.burst };
 		let burst = self.shape.burst as u64;
@@ -748,15 +741,6 @@ impl<B: Backend> Room<B> {
 					let mut bytes = 0;
 					for (broadcast, track) in &viewer.fetches {
 						let newest = newest[*broadcast];
-						// A burst is one span, as a downstream range FETCH asks for it.
-						let _filled = match burst {
-							1 => None,
-							_ => Some(
-								moq_net::fuzz::fill_groups(track, newest + 1 - burst..newest + 1)
-									.await
-									.unwrap(),
-							),
-						};
 						for sequence in newest + 1 - burst..=newest {
 							let mut group = track.fetch_group(sequence, None).await.unwrap();
 							while let Some(frame) = group.read_frame().await.unwrap() {
@@ -908,7 +892,7 @@ pub(crate) fn fetch_frames<B: Backend>(c: &mut Criterion) {
 	delivery::<B>(c, "fetch_frames", shapes);
 }
 
-/// Missing runs FETCHed at once across independent publishers, viewers, and run lengths.
+/// Independent one-group FETCHes across publishers, viewers, and burst lengths.
 pub(crate) fn fetch_range<B: Backend>(c: &mut Criterion) {
 	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
 		return;
@@ -927,7 +911,7 @@ pub(crate) fn fetch_range<B: Backend>(c: &mut Criterion) {
 	delivery::<B>(c, "fetch_range", shapes);
 }
 
-/// Range updates and their fill streams, over groups per fill and concurrent requests.
+/// Largest-group fills, over cached backlog and concurrent requests.
 pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
 		return;
@@ -937,7 +921,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 	group.sample_size(10);
 	for span in [2u64, 16] {
 		for requests in [1usize, 16] {
-			group.throughput(Throughput::Elements(span * requests as u64));
+			group.throughput(Throughput::Elements(requests as u64));
 			group.bench_function(BenchmarkId::new(format!("groups_{span}"), requests), |b| {
 				let (mut cluster, mut viewers) = rt.block_on(async {
 					let mut cluster = Cluster::<B>::new(
@@ -996,10 +980,14 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							let started = Instant::now();
 							for viewer in &mut viewers {
 								viewer.subscribers[0]
-									.update(track::Subscription::default().with_range(next..).with_max_delay(None))
+									.update(
+										track::Subscription::default()
+											.with_range(future - 1..)
+											.with_max_delay(None),
+									)
 									.unwrap();
 							}
-							for _ in 0..span {
+							for _ in 0..1 {
 								for viewer in &mut viewers {
 									assert_eq!(read_group(&mut viewer.subscribers[0]).await, payload.len());
 								}
