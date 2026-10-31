@@ -91,16 +91,34 @@ export function presented(
 		if (Path.hasPrefix(covered, prefix)) {
 			if (covered.length < rootLen) continue;
 			// A scoped route covers only what it claims, so the best one that can serve the prefix wins.
-			const snap = candidates.find((candidate) => !candidate.claim || candidate.claim.overlaps(requested));
+			const snap = firstEligible(
+				candidates,
+				(candidate) => !candidate.claim || candidate.claim.overlaps(requested),
+			);
 			if (!snap) continue;
 			rootLen = covered.length;
 			out.set(Path.empty(), snap);
 			continue;
 		}
 		const suffix = Path.stripPrefix(prefix, covered);
-		if (suffix !== null && candidates.length > 0) out.set(suffix, candidates[0]);
+		const best = suffix !== null ? firstEligible(candidates) : undefined;
+		if (suffix !== null && best) out.set(suffix, best);
 	}
 	return out;
+}
+
+/**
+ * The first of `candidates`, most preferred first, that `admits` and that no other admitted
+ * candidate supersedes. Supersession is decided among what the reader may see, so a higher epoch
+ * it cannot see never hides a route it can.
+ */
+export function firstEligible<T extends { readonly route: Route }>(
+	candidates: readonly T[],
+	admits: (candidate: T) => boolean = () => true,
+): T | undefined {
+	const admitted = candidates.filter(admits);
+	const routes = admitted.map((candidate) => candidate.route);
+	return admitted.find((candidate) => !superseded(candidate.route, routes));
 }
 
 /** Whether the announced prefix's subtree overlaps `scope`. */

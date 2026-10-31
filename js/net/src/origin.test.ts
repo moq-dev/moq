@@ -2320,6 +2320,49 @@ test("broadcast handles carry the path they were created or requested at", async
 	origin.close();
 });
 
+test("a higher epoch of a dynamic route supersedes a cheaper local broadcast of its identity", async () => {
+	const origin = new Producer();
+	const path = Path.from("camera");
+	const identity = Identity.random();
+	const localPublication = origin.createBroadcast(path);
+	localPublication.announce({ identity, epoch: 1n, cost: 0n });
+	const dynamic = origin.requestsRoute(path, { identity, epoch: 2n, cost: 10n });
+	const served = new BroadcastProducer();
+	const requests = dynamic.requested();
+	const request = origin.consume().request(path);
+	const asked = await requests.next();
+	expect(asked.value?.path).toBe(path);
+	hooks.acceptRequest(asked.value, served);
+	await settle();
+	expect(readsFrom(request.active.peek(), served)).toBe(true);
+	request.close();
+	await requests.return?.();
+	dynamic.close();
+	localPublication.broadcast.close();
+	served.close();
+	origin.close();
+});
+
+test("supersession only counts routes the reader can see", async () => {
+	const origin = new Producer();
+	const identity = Identity.random();
+	const video = origin
+		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/video")]))
+		.requestsRoute(Path.empty(), { identity, epoch: 1n });
+	const live = await announcedView(origin, Path.Pattern.parse("room/video"), { covering: true });
+	await settle();
+	expect(live.peek().size).toBe(1);
+	// A higher epoch the reader cannot see never hides the route it can.
+	const chat = origin
+		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/chat")]))
+		.requestsRoute(Path.empty(), { identity, epoch: 2n });
+	await settle();
+	expect([...live.peek().values()].map((route) => route.epoch)).toEqual([1n]);
+	chat.close();
+	video.close();
+	origin.close();
+});
+
 test("the newest epoch of an identity is announced in place over a cheaper one", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

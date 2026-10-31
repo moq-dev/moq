@@ -21,6 +21,7 @@ import {
 	compareRouteCandidates,
 	compareRoutes,
 	coveringPrefixes,
+	firstEligible,
 	hiddenBelow,
 	hooks,
 	scopeCaptures,
@@ -312,9 +313,11 @@ function preferredEntry(
 	prefix: Path.Valid,
 	entries: readonly RouteEntry[],
 	skip?: (entry: RouteEntry) => boolean,
+	others: readonly Route[] = [],
 ): RouteEntry | undefined {
 	const eligible = entries.filter((entry) => !skip?.(entry));
-	const routes = eligible.map((entry) => entry.route.peek());
+	// `others` compete at the prefix too, such as a broadcast announced here at the path.
+	const routes = [...eligible.map((entry) => entry.route.peek()), ...others];
 	let best: RouteEntry | undefined;
 	for (const entry of eligible) {
 		// Only the highest epoch of an identity is eligible, however cheap an older one is.
@@ -534,9 +537,10 @@ class OriginState {
 	}
 
 	/**
-	 * Every advertisement per prefix, most preferred first, without the `skip`ped entries or
-	 * those a higher epoch of their identity supersedes. Readers select after filtering by
-	 * their scope, so a cheaper route they cannot see never hides one they can.
+	 * Every advertisement per prefix, most preferred first, without the `skip`ped entries.
+	 * Readers select after filtering by their scope, then drop what a higher epoch of the
+	 * same identity supersedes (see {@link firstEligible}), so a route they cannot see never
+	 * hides one they can.
 	 */
 	candidates(skip?: (entry: RouteEntry) => boolean): Map<Path.Valid, Candidate[]> {
 		const out = new Map<Path.Valid, Candidate[]>();
@@ -564,13 +568,9 @@ class OriginState {
 			if (list) list.push(local);
 			else out.set(path, [local]);
 		}
-		for (const [path, list] of out) {
-			if (list.length < 2) continue;
-			const routes = list.map((candidate) => candidate.route);
-			const eligible = list.filter((candidate) => !superseded(candidate.route, routes));
+		for (const list of out.values()) {
 			// Stable, so equal routes keep the table's newest-first order.
-			eligible.sort(compareCandidates);
-			out.set(path, eligible);
+			if (list.length > 1) list.sort(compareCandidates);
 		}
 		return out;
 	}
@@ -1037,6 +1037,7 @@ class OriginState {
 	bestEntry(path: Path.Valid, skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
 		const routes = this.routes.peek();
 		if (!routes) return undefined;
+		const local = this.local.peek()?.has(path) ? this.advertisedLocal.peek()?.get(path) : undefined;
 		for (const prefix of coveringPrefixes(path)) {
 			const entries = routes.get(prefix);
 			if (!entries) continue;
@@ -1045,6 +1046,7 @@ class OriginState {
 				prefix,
 				entries,
 				(candidate) => !candidate.scope.matches(path) || (skip?.(candidate) ?? false),
+				prefix === path && local ? [local] : [],
 			);
 			if (entry) return entry;
 		}
@@ -1063,6 +1065,9 @@ class OriginState {
 		if (!local || !this.local.peek()?.has(path)) return false;
 		if (!entry || !this.routes.peek()?.get(path)?.includes(entry)) return true;
 		const remote = entry.route.peek();
+		// Within one identity only the higher epoch is eligible, however cheap the other is.
+		if (superseded(local, [remote])) return false;
+		if (superseded(remote, [local])) return true;
 		return compareRoutes(local, remote) <= 0;
 	}
 
@@ -2100,21 +2105,17 @@ export class Consumer {
 			.sort((a, b) => Path.compareSpecificity(b.specificity(), a.specificity()))
 			.map((pattern) => ({ pattern, head: scopeHead(pattern) }));
 		for (const [path, candidates] of this.#state.snapshot()) {
-			// The first candidate this reader can see wins, since the preferred one overall may not be.
-			let entry: Candidate | undefined;
-			let scope: (typeof scopes)[number] | undefined;
-			for (const candidate of candidates) {
-				scope = scopes.find(
+			// The first candidate this reader can see wins, since the preferred one overall may not be,
+			// unless a higher epoch of its identity that the reader also sees supersedes it.
+			const scopeOf = (candidate: Candidate) =>
+				scopes.find(
 					({ pattern, head }) =>
 						(covering || pattern.matches(path)) &&
 						(candidate.exact ? pattern.matches(path) : advertOverlaps(candidate, path, pattern)) &&
 						(hidden || !hiddenBelow(head, path)),
 				);
-				if (scope) {
-					entry = candidate;
-					break;
-				}
-			}
+			const entry = firstEligible(candidates, (candidate) => scopeOf(candidate) !== undefined);
+			const scope = entry && scopeOf(entry);
 			if (!entry || !scope) continue;
 			const relative = rooted.relative(path);
 			if (relative === undefined) continue;

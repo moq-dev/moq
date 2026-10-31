@@ -23,7 +23,7 @@ import {
 import type * as group from "../group.ts";
 import type { Hop, Route } from "../hop.ts";
 import type * as Identity from "../identity.ts";
-import { hiddenBelow, hooks, presented } from "../internal.ts";
+import { firstEligible, hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Priority, sendOrder } from "../priority.ts";
@@ -1676,13 +1676,9 @@ export class Publisher {
 				for (const [covered, candidates] of advertised) {
 					// Only peers that declared MoQ Hidden filter unsolicited discovery, and
 					// nothing our grant does not cover reaches the peer at all (MoQ Auth).
-					if (
-						(this.#hidden && hiddenBelow(Path.empty(), covered)) ||
-						!this.#gate.allows(covered) ||
-						candidates.length === 0
-					)
-						continue;
-					updated.set(covered, candidates[0]);
+					if ((this.#hidden && hiddenBelow(Path.empty(), covered)) || !this.#gate.allows(covered)) continue;
+					const best = firstEligible(candidates);
+					if (best) updated.set(covered, best);
 				}
 				// Another broadcast at the path starts its backoff fresh, as a refusal does.
 				for (const [key, lapse] of lapses) {
