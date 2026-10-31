@@ -1786,6 +1786,42 @@ test.each([
 	}
 });
 
+// A TRACK answered while its SUBSCRIBE still waits for a stream belongs to the subscription, so
+// a withdrawal then closes it rather than leaving it to a create that may never open.
+test("a withdrawal while the subscribe opens closes the answered track", async () => {
+	const version = Version.DRAFT_07;
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const { quic, streams, opened } = fakeSession([2]);
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const announced = subscriber.announced();
+	try {
+		await opened(0);
+		const pool = await epochlessPool(version, streams, announced);
+		const held = subscriber.consume(Path.from("pool/job"));
+		const track = held.track("video").subscribe();
+		const info = await opened(1);
+		await opened(2);
+		await info.reading;
+		await answerTrackInfo(info, version);
+		await drainReactions();
+
+		let finished = false;
+		void info.finished.then(() => {
+			finished = true;
+		});
+		await pool.withdraw();
+		expect(await track.closed).toBeInstanceOf(Error);
+		await drainReactions();
+		expect(finished).toBe(true);
+		track.close();
+		held.close();
+	} finally {
+		announced.close();
+		subscriber.close();
+		warn.mockRestore();
+	}
+});
+
 // A TRACKS request without an epoch lists whichever instance won the path when it arrived, so
 // another instance taking the path refuses one still unanswered.
 test("a listing of an epochless handle replaced before its answer is refused", async () => {

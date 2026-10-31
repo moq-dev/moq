@@ -1054,8 +1054,8 @@ export class Subscriber {
 
 	// Open the subscribe stream and accept the request (so the application's track.Subscriber
 	// resolves and incoming groups have a producer to write into) with the track's immutable
-	// properties. `state.stream` and `state.track` are populated as soon as each stream opens
-	// so the caller can clean them up on timeout even before this promise settles.
+	// properties. `state.stream` is populated as soon as it opens, and `state.track` once
+	// answered, so the caller can clean them up on timeout even before this promise settles.
 	//
 	// On lite-05+ the properties come from a TRACK stream, held open until the SUBSCRIBE is
 	// answered, and the SUBSCRIBE goes out alongside it rather than a round trip after: it is
@@ -1084,7 +1084,16 @@ export class Subscriber {
 		}
 
 		// The TRACK opens first, then the SUBSCRIBE, which is waiting on before it is written.
-		const info = this.#trackInfo(msg.broadcast, msg.epoch, msg.track, state.cancel.signal, deadline);
+		// The answered TRACK is held at once, so a cancellation while the SUBSCRIBE still opens
+		// closes it rather than waiting on an open that may never finish.
+		const info = this.#trackInfo(msg.broadcast, msg.epoch, msg.track, state.cancel.signal, deadline).then(
+			(answered) => {
+				state.track = answered.stream;
+				// Cancelled as it was answered: the caller may already have left.
+				if (state.cancel.signal.aborted) answered.stream.close();
+				return answered;
+			},
+		);
 		let settle: (entry: SubscribeEntry | undefined) => void = () => {};
 		this.#pending.set(
 			id,
@@ -1097,7 +1106,6 @@ export class Subscriber {
 			// Either failing fails the subscription: a reset TRACK rejects the request, so the
 			// origin can try another route, and the caller resets the SUBSCRIBE.
 			const [answered, stream] = await Promise.all([info, sending]);
-			state.track = answered.stream;
 			// The deadline passed as TRACK_INFO landed: the request is already rejected, so don't
 			// accept it again.
 			state.cancel.signal.throwIfAborted();

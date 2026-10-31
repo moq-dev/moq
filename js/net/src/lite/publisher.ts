@@ -887,7 +887,8 @@ export class Publisher {
 			},
 		});
 		serving(track);
-		const floor = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
+		const latest = hooks.latestSequence(track);
+		let floor = cursorFloor(this.version, msg.startGroup, latest);
 		track.withRange({
 			start: { included: floor },
 			end: endGroup === undefined ? undefined : { excluded: endGroup },
@@ -921,6 +922,16 @@ export class Publisher {
 			// priority.
 			const info = await untilAborted(track.info(), left.signal);
 			const publisher = info.priority;
+			// On lite-05, a SUBSCRIBE sent alongside its TRACK can arrive before the track
+			// resolves, when no group is known yet: the newest once it resolves stands in, as it
+			// would for one sent after.
+			if (latest === undefined && hasTrackStream(this.version)) {
+				floor = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
+				track.withRange({
+					start: { included: floor },
+					end: endGroup === undefined ? undefined : { excluded: endGroup },
+				});
+			}
 			// Older drafts carry no timestamps.
 			let stamp: Stamp | undefined;
 			let compress = false;
