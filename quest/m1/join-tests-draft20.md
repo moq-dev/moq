@@ -10,7 +10,9 @@ and 22.
 
 [moq-dev/moq#7190](https://github.com/moq-dev/moq/pull/7190) restored draft 20
 and added it to `fetch.test.ts`, but `join.test.ts` still names drafts 18 and
-22. Iterate its cases over the supported versions, as `fetch.test.ts` does.
+22. Iterate its cases over the supported versions, as `fetch.test.ts` does,
+with each draft's own expectation: draft 18 joins with a relative joining
+FETCH and draft 22 with a fill, so confirm which path draft 20 takes first.
 
 Decided 2026-10-30 (maintainer, /quest-plan of the 2026-10-30 /quest-complete follow-ups): ✅ new m1 XS quest / drop.
 

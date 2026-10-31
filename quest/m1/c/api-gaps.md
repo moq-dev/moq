@@ -40,6 +40,7 @@ at this cut (0.6 to 0.7), so the error-code change rides that break.
 
 Update `moq.h`, `rs/moq-c/README.md` and `doc/lib/c` as needed.
 
-Public API: moq-c gains an audio enabled query and changes one error code.
-Wire: none.
+Public API: moq-c gains an audio enabled query, an optional caller timestamp
+on JSON window push and pop, and a call to disable a rung of pre-encoded
+media, and changes one error code. Wire: none.
 

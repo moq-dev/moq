@@ -16,8 +16,9 @@ Left by #6987 (halve the slowest tests' CPU):
   it proves.
 
 Measure each before and after, as #6987 did. The export idle poll and mesh
-session cost already have quests in `quest/m2/perf/`; moq-quic padding frames
-have their own.
+session cost already have quests in `quest/m2/perf/`, and
+[moq-dev/moq#7075](https://github.com/moq-dev/moq/pull/7075) already decodes a
+moq-quic padding run as one frame.
 
 Decided 2026-10-30 (maintainer, /quest-plan of the 2026-10-30 /quest-complete follow-ups): ✅ new m0 CI quest / drop.
 
