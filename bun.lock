@@ -582,6 +582,9 @@
       },
     },
   },
+  "patchedDependencies": {
+    "typedoc@0.28.20": "patches/typedoc@0.28.20.patch",
+  },
   "overrides": {
     "chokidar@3": {
       ".": "^4.0.3",

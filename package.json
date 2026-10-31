@@ -69,5 +69,8 @@
 		"test/p2p",
 		"test/qmux",
 		"test/wasm"
-	]
+	],
+	"patchedDependencies": {
+		"typedoc@0.28.20": "patches/typedoc@0.28.20.patch"
+	}
 }
