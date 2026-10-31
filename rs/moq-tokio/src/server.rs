@@ -193,6 +193,11 @@ pub struct Config {
 
 	/// Per-connection statistics context.
 	pub stats: moq_net::stats::Session,
+
+	/// What the QUIC socket diverts from the shared port and drops; keep a clone to
+	/// take its [`webrtc`](crate::quic::demux::Demux::webrtc) feed or read its counters.
+	#[cfg(feature = "quic")]
+	pub demux: crate::quic::demux::Demux,
 }
 
 impl Config {
@@ -222,6 +227,7 @@ impl Config {
 			subscriber: self.subscriber.clone(),
 			stats: self.stats.clone(),
 			activity: self.activity.clone(),
+			demux: self.demux.clone(),
 		}
 	}
 }
@@ -279,6 +285,8 @@ impl Server {
 			publisher,
 			subscriber,
 			stats,
+			#[cfg(feature = "quic")]
+			demux,
 		} = config;
 
 		// Refuse here rather than in `init`, so a caller that skipped its own check
@@ -376,6 +384,7 @@ impl Server {
 					quic: quic.clone(),
 					member,
 					tls: tls.clone().expect("QUIC needs TLS"),
+					demux: demux.clone(),
 				})
 			})
 			.transpose()?;

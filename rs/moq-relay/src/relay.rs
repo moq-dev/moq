@@ -108,6 +108,10 @@ pub struct Relay {
 	/// they own the QUIC listen address instead of `workers`.
 	#[cfg(all(target_os = "linux", feature = "_uring"))]
 	uring: Option<crate::uring::Workers>,
+	/// The tokio QUIC listener's demux, which every worker shares. `None` when
+	/// nothing on tokio serves QUIC: a stream-only relay, or the io_uring workers.
+	#[cfg(feature = "_quic")]
+	demux: Option<moq_tokio::quic::demux::Demux>,
 }
 
 impl Relay {
@@ -215,6 +219,11 @@ impl Relay {
 			listen.tls = Default::default();
 		}
 
+		// Shared by whichever tokio listener serves QUIC, so one feed and one set of
+		// counters covers every worker.
+		#[cfg(feature = "_quic")]
+		let demux = moq_tokio::quic::demux::Demux::default();
+
 		#[cfg(feature = "_quic")]
 		let workers = match config.runtime.workers() {
 			Some(worker) if !io_uring => {
@@ -223,6 +232,7 @@ impl Relay {
 				server.tls = served.clone();
 				server.quic = config.quic.clone();
 				server.activity = shutdown.activity.clone();
+				server.demux = demux.clone();
 				Some(moq_tokio::worker::Workers::bind(server, worker).context("failed to start the QUIC workers")?)
 			}
 			_ => None,
@@ -264,6 +274,10 @@ impl Relay {
 		server_config.tls = served;
 		server_config.quic = config.quic.clone();
 		server_config.activity = shutdown.activity.clone();
+		#[cfg(feature = "_quic")]
+		{
+			server_config.demux = demux.clone();
+		}
 		#[cfg(feature = "iroh")]
 		{
 			server_config.iroh = iroh.clone();
@@ -287,6 +301,13 @@ impl Relay {
 				Err(err) => return Err(err).context("failed to resolve the QUIC bind address"),
 			},
 		};
+
+		// The io_uring workers serve QUIC without the demux, and a stream-only relay
+		// has no UDP port at all.
+		#[cfg(all(feature = "_quic", target_os = "linux", feature = "_uring"))]
+		let demux = (addr.is_some() && uring.is_none()).then_some(demux);
+		#[cfg(all(feature = "_quic", not(all(target_os = "linux", feature = "_uring"))))]
+		let demux = addr.is_some().then_some(demux);
 
 		let cache = config.cache.init()?;
 		// Whichever worker group owns QUIC holds the certificates; the shared
@@ -356,6 +377,8 @@ impl Relay {
 			.bind()?;
 		#[cfg(feature = "stun")]
 		let internal = internal.with_stun(stun.as_ref().map(|stun| stun.counters.clone()));
+		#[cfg(feature = "_quic")]
+		let internal = internal.with_demux(demux.as_ref().map(|demux| demux.counters().clone()));
 		// Bound but not yet serving: registering here (rather than after the
 		// threads start) is what gives every worker a series from the first
 		// scrape, including one that is about to fail setup.
@@ -397,6 +420,8 @@ impl Relay {
 			workers,
 			#[cfg(all(target_os = "linux", feature = "_uring"))]
 			uring,
+			#[cfg(feature = "_quic")]
+			demux,
 		})
 	}
 
@@ -444,6 +469,21 @@ impl Relay {
 	/// the config named a source, or once taken.
 	pub fn admissions(&mut self) -> Option<Admissions> {
 		self.admissions.take()
+	}
+
+	/// The WebRTC media path (ICE, DTLS, and RTP) arriving on the QUIC port,
+	/// for an embedder's WebRTC stack to serve and answer through the same port.
+	///
+	/// Until a feed is taken, and once every feed is dropped, that traffic is
+	/// dropped and counted. Fails when no tokio listener serves QUIC: a stream-only
+	/// relay, or one on the io_uring workers, which do not split the port yet.
+	#[cfg(feature = "_quic")]
+	pub fn webrtc(&self) -> anyhow::Result<moq_tokio::quic::demux::WebRtc> {
+		let demux = self
+			.demux
+			.as_ref()
+			.context("the WebRTC media path needs QUIC served by the tokio runtime")?;
+		Ok(demux.webrtc())
 	}
 
 	/// The shared cluster: the origin every session and peer publishes into.

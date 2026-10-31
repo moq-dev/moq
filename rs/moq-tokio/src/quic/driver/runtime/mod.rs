@@ -135,6 +135,12 @@ impl Slot {
 		self.blocked.wake_all();
 	}
 
+	/// Whether [`Self::release`] closed the socket
+	#[cfg(feature = "quic")]
+	pub(crate) fn is_released(&self) -> bool {
+		self.socket.read().unwrap().is_none()
+	}
+
 	/// See [`AsyncUdpSocket::max_transmit_segments`]
 	pub(crate) fn max_transmit_segments(&self) -> usize {
 		self.socket

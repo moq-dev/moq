@@ -5894,6 +5894,8 @@ dependencies = [
 name = "moq-sock"
 version = "0.2.0"
 dependencies = [
+ "arc-swap",
+ "bench-harness",
  "cfg_aliases",
  "core_affinity",
  "libc",

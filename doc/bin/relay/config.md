@@ -55,6 +55,13 @@ alike. A client that advertises its own name (moq-lite-05+ or any moq-transport 
 reaches the [auth server](/bin/relay/auth#the-contract) with it as `implementation`,
 which is where to count client versions; older clients arrive without one.
 
+`bind` is the relay's one UDP port. Beside QUIC it carries WebRTC media for an
+[embedder](/bin/relay/#embed) that takes it; otherwise that traffic is dropped,
+as are STUN Binding queries ([`[stun]`](#stun) has its own port) and anything
+else. `/metrics` counts the drops in `moq_relay_demux_dropped_total` by `reason`:
+`unclaimed` (WebRTC with no embedder), `overflow`, `stun`, and `unknown`. Not
+with `runtime.io_uring`, which serves QUIC alone.
+
 `reset.secret` lets a relay restarted on the same address reset its
 predecessor's QUIC connections, so clients reconnect at once instead of
 waiting out the idle timeout. Keep it secret, and give it to one relay

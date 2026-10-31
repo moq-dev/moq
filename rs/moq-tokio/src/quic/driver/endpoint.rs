@@ -885,7 +885,9 @@ impl RecvState {
 		loop {
 			match recv(cx, &mut iovs, &mut metas) {
 				Poll::Ready(Ok(msgs)) => {
-					self.recv_limiter.record_work(msgs);
+					// A demuxing socket can hand back an empty batch after diverting every
+					// datagram it read; that read is still work, or a flood of it never yields.
+					self.recv_limiter.record_work(msgs.max(1));
 					// Copy the received batch into `datagrams` and split each datagram off as
 					// an owned slice. We can't read directly into `datagrams` and drop
 					// `recv_buf`: once a slice has been handed to a connection the allocation

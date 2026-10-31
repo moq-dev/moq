@@ -93,6 +93,8 @@ pub struct Internal {
 	uring: Vec<UringWorker>,
 	#[cfg(any(feature = "stun", test))]
 	stun: Option<crate::stun::Counters>,
+	#[cfg(feature = "_quic")]
+	demux: Option<moq_tokio::quic::demux::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 	listener: Option<net::TcpListener>,
 	addr: Option<net::SocketAddr>,
@@ -108,6 +110,8 @@ struct InternalState {
 	uring: Vec<UringWorker>,
 	#[cfg(any(feature = "stun", test))]
 	stun: Option<crate::stun::Counters>,
+	#[cfg(feature = "_quic")]
+	demux: Option<moq_tokio::quic::demux::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 }
 
@@ -137,6 +141,8 @@ impl Internal {
 			uring: Vec::new(),
 			#[cfg(any(feature = "stun", test))]
 			stun: None,
+			#[cfg(feature = "_quic")]
+			demux: None,
 			shutdown: None,
 			listener: None,
 			addr: None,
@@ -146,6 +152,12 @@ impl Internal {
 	#[cfg(feature = "stun")]
 	pub(crate) fn with_stun(mut self, counters: Option<crate::stun::Counters>) -> Self {
 		self.stun = counters;
+		self
+	}
+
+	#[cfg(feature = "_quic")]
+	pub(crate) fn with_demux(mut self, counters: Option<moq_tokio::quic::demux::Counters>) -> Self {
+		self.demux = counters;
 		self
 	}
 
@@ -265,6 +277,8 @@ impl Internal {
 				uring: self.uring.clone(),
 				#[cfg(any(feature = "stun", test))]
 				stun: self.stun.clone(),
+				#[cfg(feature = "_quic")]
+				demux: self.demux.clone(),
 				shutdown: self.shutdown.clone(),
 			})
 	}
@@ -342,6 +356,10 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	#[cfg(any(feature = "stun", test))]
 	if let Some(stun) = &state.stun {
 		stun.render(&mut body);
+	}
+	#[cfg(feature = "_quic")]
+	if let Some(demux) = &state.demux {
+		render_demux(&mut body, demux);
 	}
 	if let Some(shutdown) = &state.shutdown {
 		render_drain(&mut body, shutdown.tally());
@@ -653,6 +671,28 @@ fn render_drain(out: &mut String, tally: crate::shutdown::Tally) {
 	let _ = writeln!(out, "moq_relay_draining_sessions {}", tally.draining);
 }
 
+/// Datagrams the QUIC port dropped instead of handing to QUIC or the WebRTC feed,
+/// one row per reason from zero. `unclaimed` is WebRTC traffic while no embedder
+/// takes the feed, which is every WebRTC datagram on a bare relay.
+#[cfg(feature = "_quic")]
+fn render_demux(out: &mut String, counters: &moq_tokio::quic::demux::Counters) {
+	use std::fmt::Write as _;
+
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_demux_dropped_total Datagrams the QUIC port dropped, by reason."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_demux_dropped_total counter");
+	for reason in moq_tokio::quic::demux::Discard::ALL {
+		let _ = writeln!(
+			out,
+			"moq_relay_demux_dropped_total{{reason=\"{}\"}} {}",
+			Label(reason.as_str()),
+			counters.get(reason)
+		);
+	}
+}
+
 /// Sessions admission turned away, one row per reason, every reason present from
 /// zero so a rate over it is defined from the first scrape. A refused session
 /// never reaches the traffic counters above.
@@ -911,6 +951,8 @@ mod tests {
 				listeners: Vec::new(),
 				uring: Vec::new(),
 				stun,
+				#[cfg(feature = "_quic")]
+				demux: None,
 				shutdown: None,
 			};
 			let response = serve_metrics(State(state)).await;
@@ -918,6 +960,45 @@ mod tests {
 			let body = std::str::from_utf8(&body).unwrap();
 			assert_eq!(body.contains("moq_relay_stun_replies_total"), configured);
 			assert_eq!(body.contains("moq_relay_stun_dropped_total"), configured);
+		}
+	}
+
+	/// Every drop reason renders from zero, and only for a relay whose QUIC port
+	/// runs the demux.
+	#[cfg(feature = "_quic")]
+	#[tokio::test]
+	async fn demux_metrics_list_every_reason_from_zero() {
+		use moq_tokio::quic::demux::{Counters, Discard};
+
+		for demux in [None, Some(Counters::default())] {
+			let configured = demux.clone();
+			if let Some(counters) = &demux {
+				counters.discard(Discard::Stun);
+			}
+			let state = InternalState {
+				stats: moq_net::stats::Registry::disabled(),
+				nodes: None,
+				refusals: None,
+				sessions: crate::session::Registry::new(),
+				listeners: Vec::new(),
+				uring: Vec::new(),
+				stun: None,
+				demux,
+				shutdown: None,
+			};
+			let response = serve_metrics(State(state)).await;
+			let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+			let body = std::str::from_utf8(&body).unwrap();
+			match configured {
+				None => assert!(!body.contains("moq_relay_demux_dropped_total")),
+				Some(_) => {
+					assert!(body.contains("moq_relay_demux_dropped_total{reason=\"stun\"} 1"));
+					for reason in Discard::ALL {
+						let row = format!("moq_relay_demux_dropped_total{{reason=\"{}\"}}", reason.as_str());
+						assert!(body.contains(&row), "{row} missing");
+					}
+				}
+			}
 		}
 	}
 
@@ -1180,6 +1261,8 @@ mod tests {
 			uring: Vec::new(),
 			#[cfg(any(feature = "stun", test))]
 			stun: None,
+			#[cfg(feature = "_quic")]
+			demux: None,
 			shutdown: None,
 		};
 
@@ -1200,6 +1283,8 @@ mod tests {
 			uring: Vec::new(),
 			#[cfg(any(feature = "stun", test))]
 			stun: None,
+			#[cfg(feature = "_quic")]
+			demux: None,
 			shutdown: None,
 		};
 

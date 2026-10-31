@@ -561,6 +561,7 @@ pub(crate) struct Options {
 	pub quic: crate::quic::Config,
 	pub member: Option<listen::Socket>,
 	pub tls: crate::tls::Serve,
+	pub demux: super::demux::Demux,
 }
 
 impl Server {
@@ -570,6 +571,7 @@ impl Server {
 			quic,
 			member,
 			tls: served,
+			demux,
 		} = options;
 		let quic = quic.resolve();
 		let transport = transport(&quic, "server")?;
@@ -612,6 +614,9 @@ impl Server {
 		let load_balancer = config.load_balancer();
 
 		let mut endpoint_config = driver::endpoint::Config::default().with_server(server);
+		// The demux, and the shard steering filter, tell QUIC from the WebRTC media
+		// path by the fixed bit, so peers must never be invited to clear it.
+		endpoint_config.grease_quic_bit = false;
 		// It also keys the default connection ID generator. The ones below validate a
 		// predecessor's IDs without it.
 		if let Some(secret) = &config.reset.secret {
@@ -624,8 +629,6 @@ impl Server {
 			if load_balancer.is_some() {
 				return Err(Error::ShardWithQuicLb);
 			}
-			// The steering filter recognizes short headers by their fixed bit.
-			endpoint_config.grease_quic_bit = false;
 			tracing::debug!(
 				index = shard.index(),
 				count = shard.count(),
@@ -665,7 +668,10 @@ impl Server {
 			None => crate::bind::udp(crate::bind::Udp::new(listen)).map_err(Error::BindSocket)?,
 		};
 
-		let quic = driver::endpoint::Endpoint::new(endpoint_config, socket).map_err(Error::CreateEndpoint)?;
+		let socket = driver::wrap_udp_socket(socket).map_err(|err| Error::CreateEndpoint(err.into()))?;
+		let quic =
+			driver::endpoint::Endpoint::new(endpoint_config, demux.wrap(socket)).map_err(Error::CreateEndpoint)?;
+		demux.attach(&quic);
 
 		Ok(Self { quic, tls: served })
 	}
@@ -900,6 +906,104 @@ mod tests {
 		);
 	}
 
+	/// QUIC and the WebRTC media path share the listening port: a QUIC session
+	/// connects while a WebRTC peer's ICE check, DTLS, and RTP reach the feed and
+	/// its reply leaves from the same port, and a public STUN query is dropped.
+	/// The feed lives as long as the listener, without a clone of its demux kept.
+	#[tokio::test]
+	async fn one_port_serves_quic_and_webrtc() {
+		let demux = crate::quic::demux::Demux::default();
+		let feed = demux.webrtc();
+		let counters = demux.counters().clone();
+		let quic = crate::quic::Config::default();
+		let config = listen::Config {
+			bind: Some("[::]:0".parse().unwrap()),
+			tls: crate::tls::Listen {
+				generate: vec!["localhost".into()],
+				..Default::default()
+			},
+			..Default::default()
+		};
+		let tls = config.tls.load().unwrap();
+		let server = Server::new(Options {
+			config,
+			quic: quic.clone(),
+			member: None,
+			tls,
+			demux,
+		})
+		.expect("server init");
+		let port = server.local_addr().port();
+		let addr = net::SocketAddr::from((net::Ipv4Addr::LOCALHOST, port));
+
+		let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let check: &[u8] = &[
+			0x00, 0x01, 0x00, 0x08, 0x21, 0x12, 0xa4, 0x42, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0x00, 0x06, 0x00,
+			0x03, b'a', b':', b'b', 0,
+		];
+		let query = &check[..20];
+		let query = [&[0x00, 0x01, 0x00, 0x00][..], &query[4..]].concat();
+		let sent: [&[u8]; 3] = [check, &[0x16, 0xfe, 0xfd, 1], &[0x80, 0x00, 0, 1]];
+		peer.send_to(&query, addr).await.unwrap();
+		for datagram in sent {
+			peer.send_to(datagram, addr).await.unwrap();
+		}
+
+		let mut tls_config = crate::tls::Connect::default();
+		tls_config.fingerprint = server.certificates().fingerprints();
+		let config = connect::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			tls: tls_config,
+			..Default::default()
+		};
+		let tls = config.tls.build().expect("tls config");
+		let client = Client::new(&config, &quic).expect("client init");
+		let url: Url = format!("moqt://localhost:{port}/test").parse().unwrap();
+		let versions = moq_net::Versions::default();
+		let dial = client.connect(&tls, url.into(), &versions);
+		let accept = async {
+			let incoming = server.accept().await.expect("incoming connection");
+			super::accept(incoming, versions.alpns()).await
+		};
+		let webrtc = async {
+			let mut received = Vec::new();
+			for _ in sent {
+				let datagram = feed.recv().await.expect("feed open");
+				assert_eq!(datagram.remote, peer.local_addr().unwrap());
+				received.push(datagram.data.to_vec());
+			}
+			feed.send(&moq_sock::udp::Transmit {
+				destination: peer.local_addr().unwrap(),
+				ecn: None,
+				contents: b"reply",
+				segment_size: None,
+				src_ip: None,
+			})
+			.await
+			.unwrap();
+			let mut buf = [0; 16];
+			let (len, from) = peer.recv_from(&mut buf).await.unwrap();
+			(received, buf[..len].to_vec(), from.port())
+		};
+		let (session, received) = tokio::time::timeout(Duration::from_secs(5), async {
+			let (session, received) = tokio::join!(async { tokio::try_join!(dial, accept) }, webrtc);
+			(session, received)
+		})
+		.await
+		.expect("timed out");
+		session.expect("QUIC beside WebRTC");
+
+		let (received, reply, from) = received;
+		assert_eq!(received, sent.map(<[u8]>::to_vec));
+		assert_eq!(reply, b"reply");
+		assert_eq!(from, port);
+		assert_eq!(counters.get(crate::quic::demux::Discard::Stun), 1);
+
+		server.shutdown().await;
+		let end = tokio::time::timeout(Duration::from_secs(5), feed.recv()).await;
+		assert!(end.expect("the feed outlived the listener").is_none());
+	}
+
 	async fn pinned_connection(bind: &str, host_name: Option<&str>) {
 		let quic = crate::quic::Config::default();
 		let config = listen::Config {
@@ -916,6 +1020,7 @@ mod tests {
 			quic: quic.clone(),
 			member: None,
 			tls,
+			demux: Default::default(),
 		})
 		.expect("server init");
 		let addr = server.local_addr();
@@ -1015,6 +1120,7 @@ mod tests {
 			quic: quic.clone(),
 			member: None,
 			tls,
+			demux: Default::default(),
 		})
 		.expect("server init");
 		let addr = server.local_addr();

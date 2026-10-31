@@ -99,6 +99,9 @@ relay.with_web(web).run().await?;
   send its path in the SETUP.
 - To decide admissions yourself, leave `[auth]` empty and answer
   `relay.admissions()`; see [Authentication](/bin/relay/auth#in-process).
+- To serve WebRTC media (WHIP, WHEP) on the QUIC port, take `relay.webrtc()`:
+  ICE, DTLS, and RTP arrive on it, and its `send` answers from the same
+  port. It fails with `runtime.io_uring`, whose workers do not split the port yet.
 
 See [docs.rs/moq-relay](https://docs.rs/moq-relay) and
 [`rs/moq-relay/examples/embed.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/examples/embed.rs).
