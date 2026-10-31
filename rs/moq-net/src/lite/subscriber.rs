@@ -3994,7 +3994,7 @@ mod tests {
 		})
 		.encode(&mut encoder, version)
 		.unwrap();
-		lite::SubscribeResponse::End(lite::SubscribeEnd { group: 1 })
+		lite::SubscribeResponse::End(lite::SubscribeEnd { group: 1, error: None })
 			.encode(&mut encoder, version)
 			.unwrap();
 		responses
@@ -4811,7 +4811,7 @@ mod tests {
 					group.finish().unwrap();
 				}
 				if version.has_track_stream() {
-					serving.serving.finish_at(Position::group(1)).unwrap();
+					serving.serving.finish_at(Position::group(1), None).unwrap();
 				}
 				// The tail machine has not seen group 0 accounted for, so it never settles.
 				serving.mode = ServeMode::Tail {
