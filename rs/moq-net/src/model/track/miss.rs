@@ -232,7 +232,7 @@ impl Misses {
 	/// Take `sequence` as handed out, if a fill answered it. A refill handed out is never
 	/// judged again, so it is forgotten too.
 	pub fn take_filled(&mut self, sequence: u64) {
-		// Refills lie below the newest group, so never at the last sequence.
+		// The last sequence is never judged, so never refilled.
 		if let Some(end) = sequence.checked_add(1) {
 			self.refilled.remove(sequence..end);
 		}
