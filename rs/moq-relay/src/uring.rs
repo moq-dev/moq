@@ -136,18 +136,31 @@ impl Workers {
 	pub fn bind(server: moq_tokio::server::Config, config: moq_tokio::worker::Config) -> anyhow::Result<Self> {
 		// Before any TLS loads or socket binds, so a bad `[quic]` has no side effects.
 		server.quic.validate()?;
-		let listen = &server.listen;
+		// Every setting by name, so one added to `listen` fails to compile here until
+		// these workers honor or refuse it.
+		let moq_tokio::listen::Resolved {
+			bind,
+			versions,
+			extensions,
+			implementation,
+			timeout,
+			tls: listen_tls,
+			preferred_v4,
+			preferred_v6,
+			lb: moq_tokio::listen::LoadBalancer { id: lb_id, nonce: _ },
+			reset_secret,
+		} = server.listen.resolve()?;
 		let quic = &server.quic;
 		for (configured, setting) in [
-			(listen.preferred_v4.is_some(), "listen.preferred_v4"),
-			(listen.preferred_v6.is_some(), "listen.preferred_v6"),
+			(preferred_v4.is_some(), "listen.preferred_v4"),
+			(preferred_v6.is_some(), "listen.preferred_v6"),
 		] {
 			anyhow::ensure!(
 				!configured,
 				"io_uring workers cannot advertise a QUIC preferred address ({setting}); use the tokio runtime"
 			);
 		}
-		if listen.lb.id.is_some() {
+		if lb_id.is_some() {
 			anyhow::bail!(
 				"io_uring workers issue shard-steered connection ids and cannot also carry a \
 				 QUIC-LB server id (listen.lb.id)"
@@ -157,17 +170,17 @@ impl Workers {
 			Some(tls) => {
 				// A second configured source must not be silently ignored.
 				anyhow::ensure!(
-					listen.tls.cert.is_empty()
-						&& listen.tls.key.is_empty()
-						&& listen.tls.generate.is_empty()
-						&& listen.tls.root.is_empty()
-						&& listen.tls.identity.is_none()
-						&& listen.tls.peers.is_none(),
+					listen_tls.cert.is_empty()
+						&& listen_tls.key.is_empty()
+						&& listen_tls.generate.is_empty()
+						&& listen_tls.root.is_empty()
+						&& listen_tls.identity.is_none()
+						&& listen_tls.peers.is_none(),
 					"a shared TLS policy cannot be combined with listen.tls settings"
 				);
 				tls
 			}
-			None => listen.tls.load()?,
+			None => listen_tls.load()?,
 		};
 		let certificates = tls.certificates();
 
@@ -179,10 +192,7 @@ impl Workers {
 		// address here would open a QUIC listener nobody asked for.
 		let requested: SocketAddr = {
 			use std::net::ToSocketAddrs;
-			let bind = listen
-				.bind
-				.as_ref()
-				.context("io_uring workers need an explicit listen.bind")?;
+			let bind = bind.as_ref().context("io_uring workers need an explicit listen.bind")?;
 			let bind = bind.to_string();
 			bind.to_socket_addrs()
 				.with_context(|| format!("failed to resolve {bind}"))?
@@ -207,7 +217,6 @@ impl Workers {
 		// Every configured version's ALPN, as the tokio listener advertises.
 		// `h3` rides along for browsers, which negotiate the moq version as a
 		// WebTransport subprotocol instead.
-		let versions = listen.versions();
 		let alpns: Vec<String> = versions.alpns().into_iter().map(str::to_owned).collect();
 
 		let alpn = alpns
@@ -229,9 +238,7 @@ impl Workers {
 		let mut udp = moq_uring::udp::Config::default();
 		udp.gso = quic.gso.unwrap_or(true);
 
-		let reset_secret = listen
-			.reset
-			.secret
+		let reset_secret = reset_secret
 			.as_deref()
 			.map(moq_tokio::secret::Secret::read)
 			.transpose()
@@ -253,13 +260,13 @@ impl Workers {
 			moq: {
 				let mut moq = moq_net::Server::new()
 					.with_versions(versions)
-					.with_extensions(listen.extensions);
-				if let Some(implementation) = &listen.implementation {
+					.with_extensions(extensions);
+				if let Some(implementation) = &implementation {
 					moq = moq.with_implementation(implementation);
 				}
 				moq
 			},
-			timeout: listen.resolved_timeout(),
+			timeout,
 			reset_secret,
 			threads: Vec::new(),
 			stops: Vec::new(),
@@ -952,6 +959,19 @@ mod tests {
 				assert!(err.to_string().contains(setting), "{err:#}");
 			}
 		}
+	}
+
+	/// The workers refuse what the tokio listener refuses, before binding a socket.
+	#[test]
+	fn bind_refuses_an_invalid_listen() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let mut server = moq_tokio::server::Config::default();
+		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		server.listen.tls.generate = vec!["localhost".into()];
+		server.listen.lb.nonce = Some(8);
+		let err = Workers::bind(server, moq_tokio::worker::Config::new(1))
+			.expect_err("a QUIC-LB nonce without an id is refused");
+		assert!(err.to_string().contains("--listen-quic-lb-nonce"), "{err:#}");
 	}
 
 	/// A window the operator set has to reach the worker. Refusing it, or

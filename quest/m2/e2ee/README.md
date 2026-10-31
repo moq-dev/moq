@@ -82,7 +82,6 @@ Extractor declaration checks, which analyze only published packages since
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind
-- [Cloned publisher processes](/quest/m2/e2ee/cloned-process.md) - the draft and docs say a cloned process mints its own generation, and a CryptoKey caller owns the 32-byte rule
 
 ## Closes
 

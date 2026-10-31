@@ -42,7 +42,8 @@ impl Live {
 			return Ok(None);
 		}
 		let id = self.next.checked_sub(distance).ok_or(Error::ProtocolViolation)?;
-		self.entries.get(&id).map(Some).ok_or(Error::ProtocolViolation)
+		let entry = self.entries.get(&id).ok_or(Error::ProtocolViolation)?;
+		Ok(Some(entry))
 	}
 
 	fn resolve_path(&self, path: PathRef) -> Result<Path, Error> {
@@ -113,6 +114,24 @@ impl AnnounceDecoder {
 			},
 		);
 		Ok((suffix, hops))
+	}
+
+	/// An ANNOUNCE_TAKEOVER: resolve it like a start against the live `predecessor`,
+	/// returning the predecessor's suffix too. One at the predecessor's own suffix
+	/// retires the predecessor, since a suffix holds one advertisement.
+	pub fn takeover(&mut self, predecessor: u64, suffix: PathRef, hops: HopsRef) -> Result<(Path, Path, Hops), Error> {
+		let previous = self
+			.live
+			.entries
+			.get(&predecessor)
+			.ok_or(Error::ProtocolViolation)?
+			.suffix
+			.clone();
+		let (suffix, hops) = self.start(suffix, hops)?;
+		if suffix == previous {
+			self.live.entries.remove(&predecessor);
+		}
+		Ok((previous, suffix, hops))
 	}
 
 	/// An ANNOUNCE_UPDATE: resolve its chain before replacing the old one, which it
@@ -269,6 +288,22 @@ impl AnnounceEncoder {
 		self.tails.insert(reversed(&hops), id);
 		self.live.entries.insert(id, Entry { suffix, hops });
 		(Some(id), path, chain)
+	}
+
+	/// An ANNOUNCE_TAKEOVER of the live `predecessor`: like [`Self::start`], retiring
+	/// the predecessor when it holds the same suffix.
+	pub fn takeover(&mut self, predecessor: u64, suffix: Path, hops: Hops) -> (u64, PathRef, HopsRef) {
+		let replaces = self
+			.live
+			.entries
+			.get(&predecessor)
+			.is_some_and(|entry| entry.suffix == suffix);
+		let (id, path, chain) = self.start(suffix, hops);
+		let id = id.expect("a takeover is only sent on a version with announce ids");
+		if replaces {
+			self.end(predecessor);
+		}
+		(id, path, chain)
 	}
 
 	/// An ANNOUNCE_UPDATE for a live `id`: its wire hop chain.
@@ -458,6 +493,38 @@ mod tests {
 		assert_eq!(suffix.as_str(), "b/x");
 	}
 
+	// A takeover assigns the next id like a start. Beneath its predecessor the predecessor
+	// stays live; at the predecessor's own suffix it retires, after bases resolve against it.
+	#[test]
+	fn takeover_assigns_an_id_and_retires_one_in_place() {
+		let mut decoder = AnnounceDecoder::default();
+		let (p, h) = literal("pool", &[1]);
+		decoder.start(p, h).unwrap();
+
+		let (previous, suffix, chain) = decoder.takeover(0, path(1, 1, "p"), chain_ref(1, 1)).unwrap();
+		assert_eq!((previous.as_str(), suffix.as_str()), ("pool", "pool/p"));
+		assert_eq!(chain, hops(&[1]));
+		decoder.update(0, chain_ref(0, 0)).unwrap();
+
+		// Id 2 at id 1's own suffix, copied from id 1 itself, which then retires.
+		let (previous, suffix, _) = decoder.takeover(1, path(1, 2, ""), chain_ref(1, 1)).unwrap();
+		assert_eq!((previous.as_str(), suffix.as_str()), ("pool/p", "pool/p"));
+		assert!(matches!(
+			decoder.update(1, chain_ref(0, 0)),
+			Err(Error::ProtocolViolation)
+		));
+		assert!(matches!(
+			decoder.takeover(1, path(0, 0, "pool/p/q"), chain_ref(0, 0)),
+			Err(Error::ProtocolViolation)
+		));
+		assert!(matches!(
+			decoder.takeover(9, path(0, 0, "pool/p/q"), chain_ref(0, 0)),
+			Err(Error::ProtocolViolation)
+		));
+		assert_eq!(decoder.end(2).unwrap().as_str(), "pool/p");
+		assert_eq!(decoder.end(0).unwrap().as_str(), "pool");
+	}
+
 	#[test]
 	fn rejects_a_keep_longer_than_the_base() {
 		let mut decoder = AnnounceDecoder::default();
@@ -538,6 +605,34 @@ mod tests {
 		assert_eq!(got_path.as_str(), suffix);
 		assert_eq!(got_hops, hops(ids));
 		(id.unwrap(), size)
+	}
+
+	// The encoder's takeover ids and bases agree with the decoder's, in place and beneath.
+	#[test]
+	fn encoder_takeover_decodes_to_its_input() {
+		let mut encoder = AnnounceEncoder::new(VERSION);
+		let mut decoder = AnnounceDecoder::default();
+		let (claim, _) = start(&mut encoder, &mut decoder, "pool", &[1, 2]);
+		let mut predecessor = claim;
+		for (suffix, ids) in [
+			("pool/p", &[3, 1, 2][..]),
+			("pool/p", &[4, 1, 2]),
+			("pool/p/q", &[4, 1, 2]),
+		] {
+			let (id, wire_path, wire_hops) = encoder.takeover(predecessor, Path::new(suffix).unwrap(), hops(ids));
+			let (_, got_path, got_hops) = decoder.takeover(predecessor, wire_path, wire_hops).unwrap();
+			assert_eq!(got_path.as_str(), suffix);
+			assert_eq!(got_hops, hops(ids));
+			predecessor = id;
+		}
+		// Both sides retired the id replaced in place and kept the rest.
+		let (id, wire_path, wire_hops) = encoder.start(Path::new("other").unwrap(), hops(&[1, 2]));
+		decoder.start(wire_path, wire_hops).unwrap();
+		assert_eq!(id, Some(4));
+		assert!(matches!(decoder.end(1), Err(Error::ProtocolViolation)));
+		decoder.end(claim).unwrap();
+		decoder.end(2).unwrap();
+		decoder.end(3).unwrap();
 	}
 
 	#[test]
