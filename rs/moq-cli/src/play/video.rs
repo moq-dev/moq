@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_mux::container::{Frame, Read};
 
 use super::buffer::Buffer;
@@ -302,7 +302,7 @@ impl<O: Output> Video<O> {
 				let frames = match step {
 					Step::Wait(Some(at)) => {
 						tokio::select! {
-							_ = moq_clock::sleep_until(at) => {},
+							_ = kio::clock::sleep_until(at) => {},
 							_ = self.changed.notified() => {},
 						}
 						continue;

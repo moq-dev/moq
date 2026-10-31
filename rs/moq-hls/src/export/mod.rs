@@ -334,7 +334,7 @@ impl Broadcaster {
 			&mpd::Manifest {
 				instance: self.instance.clone(),
 				availability_start,
-				publish: moq_clock::wall(),
+				publish: kio::clock::wall(),
 				window: self.renditions.window(),
 				finished,
 				video,
@@ -405,7 +405,7 @@ async fn watch_catalog(source: moq_mux::Source, renditions: renditions::Producer
 				let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
 				delay = (delay * 2).min(CATALOG_RETRY_MAX);
 				tokio::select! {
-					_ = moq_clock::sleep(wait) => {}
+					_ = kio::clock::sleep(wait) => {}
 					_ = kio::wait(|waiter| broadcast.poll_closed(waiter)) => {
 						renditions.close();
 						return;
@@ -1542,11 +1542,11 @@ mod tests {
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		while broadcaster.rendition(Kind::Video, "video0").is_none() {
-			moq_clock::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 		}
 		let mut waiting = std::pin::pin!(broadcaster.video_init());
 		assert!(
-			moq_clock::timeout(Duration::from_secs(1), waiting.as_mut())
+			kio::clock::timeout(Duration::from_secs(1), waiting.as_mut())
 				.await
 				.is_err(),
 			"resolved without a listable video"
@@ -1558,7 +1558,7 @@ mod tests {
 			group.finish().unwrap();
 			records[0].push(&gop(sequence)).unwrap();
 		}
-		moq_clock::timeout(Duration::from_secs(1), waiting)
+		kio::clock::timeout(Duration::from_secs(1), waiting)
 			.await
 			.expect("the wait builds video0's init once its records arrive");
 	}
@@ -1964,7 +1964,7 @@ mod tests {
 		settle().await;
 
 		// PTS zero at exactly the moq epoch, so every timestamp maps to a fixed string.
-		let wall = moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
+		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
 		let config = catalog_config()
 			.with_clock(moq_mux::Clock::at(moq_net::time::Instant::now(), wall).expect("a representable wall"));
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();

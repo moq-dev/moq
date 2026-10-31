@@ -5715,7 +5715,7 @@ where
 		// Run the paused clock only as far as the next frame due, so a test that writes
 		// more afterwards is still on time for it.
 		if let Some(deadline) = export.next_due() {
-			moq_clock::sleep_until(deadline).await;
+			kio::clock::sleep_until(deadline).await;
 			continue;
 		}
 		match tokio::time::timeout(Duration::from_millis(10), export.next()).await {
@@ -8820,7 +8820,7 @@ async fn the_same_instance_continues_after_a_drop() {
 /// A returning route serves the same publisher's catalog and monotonically numbered groups.
 #[tokio::test(start_paused = true)]
 async fn a_return_keeps_catalog_and_group_history() {
-	let wall = moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 86_400_000);
+	let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 86_400_000);
 	crate::clock::fake_host_wall(wall);
 	let start = tokio::time::Instant::now();
 	let origin = crate::source::produce_origin();

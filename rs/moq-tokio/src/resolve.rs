@@ -329,7 +329,7 @@ impl Candidates {
 				// stagger between attempts dwarfs this.
 				if self.count == 0 && !self.delayed && self.full.pending() {
 					self.delayed = true;
-					let _ = moq_clock::timeout(self.delay, self.answer_full()).await;
+					let _ = kio::clock::timeout(self.delay, self.answer_full()).await;
 					continue;
 				}
 
@@ -588,7 +588,7 @@ impl Query {
 
 		Self {
 			call: Some(tokio::spawn(async move {
-				moq_clock::sleep(delay).await;
+				kio::clock::sleep(delay).await;
 				Ok(addrs)
 			})),
 			..Default::default()

@@ -14,7 +14,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use tokio::sync::watch;
 
 /// Fires the relay-wide shutdown broadcast. Held by `Relay::run` for the OS
@@ -198,7 +198,7 @@ impl Observer {
 			Err(_) => None,
 		};
 		match deadline {
-			Some(deadline) => moq_clock::sleep_until(deadline).await,
+			Some(deadline) => kio::clock::sleep_until(deadline).await,
 			None => std::future::pending().await,
 		}
 	}
@@ -324,7 +324,7 @@ impl Observer {
 		tokio::select! {
 			biased;
 			_ = session.closed() => return,
-			() = moq_clock::sleep_until(deadline) => {}
+			() = kio::clock::sleep_until(deadline) => {}
 		}
 		tracing::debug!("peer did not leave before the drain deadline; closing");
 		session.abort(moq_net::Error::GoawayTimeout);

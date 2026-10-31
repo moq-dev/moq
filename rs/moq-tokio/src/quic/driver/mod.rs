@@ -54,7 +54,7 @@ mod runtime;
 pub mod send;
 mod work_limiter;
 
-pub(crate) use moq_clock::Instant;
+pub(crate) use kio::clock::Instant;
 pub(crate) use std::time::Duration;
 
 pub use moq_quic::{

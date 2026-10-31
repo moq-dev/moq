@@ -2038,7 +2038,7 @@ mod timebase_tests {
 				reserve();
 			}
 			for touched in [1, 16, 256] {
-				let start = moq_clock::Instant::now();
+				let start = kio::clock::Instant::now();
 				for _ in 0..1000 {
 					for _ in 0..touched {
 						reserve();

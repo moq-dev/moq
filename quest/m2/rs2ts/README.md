@@ -43,7 +43,7 @@ Rust async, kio, integer representations, and storage unless evidence calls
 for a source change. A batched boundary is an optimization candidate, not a
 reason to require a full sans-IO rewrite.
 
-The Rust and JS clocks (`moq-clock` and `@moq/clock`) must agree on origin and
+The Rust and JS clocks (`kio::clock` and `@moq/clock`) must agree on origin and
 units under either backend. WASM keeps Rust's time types; a source translator
 chooses its `Instant` mapping with its backend. A JS `number` of nanoseconds is
 exact for 104 days of uptime and only loses sub-microsecond precision after.

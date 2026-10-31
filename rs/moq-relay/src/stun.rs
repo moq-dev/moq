@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use serde::{Deserialize, Serialize};
 use stun_types::attribute::XorMappedAddress;
 use stun_types::message::{BINDING, Message, MessageClass, MessageHeader, MessageWriteMutSlice};

@@ -772,7 +772,7 @@ struct Reader<R> {
 	// diagnosed by the rate at which these climb, and stdin may never end, so
 	// they have to surface as they accumulate rather than at exit.
 	log: ts::stats::Log,
-	sampled: moq_clock::Instant,
+	sampled: kio::clock::Instant,
 }
 
 /// Decode `input` into the broadcast until EOF.
@@ -815,7 +815,7 @@ async fn decode(
 		// whatever is available without waiting to fill it.
 		buffer: bytes::BytesMut::with_capacity(64 * 1024),
 		log: ts::stats::Log::default(),
-		sampled: moq_clock::now(),
+		sampled: kio::clock::now(),
 	};
 
 	let result = loop {
@@ -862,7 +862,7 @@ impl Instance {
 				}
 
 				if reader.sampled.elapsed() >= ts::stats::Log::INTERVAL {
-					reader.sampled = moq_clock::now();
+					reader.sampled = kio::clock::now();
 					if let Some(stats) = decoder.stats() {
 						if let Some(sections) = &sections {
 							sections.set(|report| report.mpegts = Some(stats.clone()));
@@ -1816,9 +1816,9 @@ pub(crate) mod tests {
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
-		let before = moq_clock::wall();
+		let before = kio::clock::wall();
 		decoder.decode_chunk(BBB).unwrap();
-		let after = moq_clock::wall();
+		let after = kio::clock::wall();
 		decoder.finish().unwrap();
 
 		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)

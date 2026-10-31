@@ -736,7 +736,7 @@ fn bad_auth() -> rustls_acme::EventError<io::Error, io::Error> {
 
 /// Failed renewal validations stop ordering at the startup budget, which a start
 /// inside the window honors too, and renewal resumes once the oldest leaves it.
-#[moq_clock::test]
+#[kio::test]
 async fn renewal_pauses_once_failed_validations_spend_the_budget() {
 	let dir = tempfile::tempdir().unwrap();
 	let mut acme = uncontacted(dir.path());
@@ -755,15 +755,15 @@ async fn renewal_pauses_once_failed_validations_spend_the_budget() {
 	.chain(futures::stream::pending())
 	.inspect({
 		let polled = polled.clone();
-		move |_| polled.borrow_mut().push(moq_clock::wall())
+		move |_| polled.borrow_mut().push(kio::clock::wall())
 	});
-	let start = moq_clock::wall();
+	let start = kio::clock::wall();
 	let failures = Failures {
 		path: acme.failures.path.clone(),
 	};
-	let renewal = moq_clock::sim::spawn(renew(events, failures, DOMAIN.into()));
+	let renewal = kio::clock::sim::spawn(renew(events, failures, DOMAIN.into()));
 
-	moq_clock::sleep(FAILURE_WINDOW - Duration::from_secs(1)).await;
+	kio::clock::sleep(FAILURE_WINDOW - Duration::from_secs(1)).await;
 	assert_eq!(
 		*polled.borrow(),
 		[start; FAILURE_LIMIT],
@@ -780,8 +780,8 @@ async fn renewal_pauses_once_failed_validations_spend_the_budget() {
 		"{message}"
 	);
 
-	moq_clock::sleep(Duration::from_secs(1)).await;
-	moq_clock::sim::idle().await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	kio::clock::sim::idle().await;
 	let resumed = start + FAILURE_WINDOW;
 	assert_eq!(*polled.borrow(), [start, start, start, resumed, resumed]);
 	assert!(

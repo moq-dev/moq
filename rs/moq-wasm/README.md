@@ -53,8 +53,8 @@ What works today:
 
 ### Timestamp fallback
 
-`moq_net::time::Instant` is the logical `moq_clock::Instant` on every
-target. In the browser, moq-clock reads it from `performance.now()` through
+`moq_net::time::Instant` is the logical `kio::clock::Instant` on every
+target. In the browser, kio's clock reads it from `performance.now()` through
 `web_async::time`, since `std::time::Instant` panics there. `model/time.rs`
 anchors its timestamps on it.
 

@@ -1,7 +1,7 @@
 //! Media time: the playout clock, and the audio track's own timeline.
 
 use anyhow::Context;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::time::Duration;
 
 use super::playback::Kind;
@@ -304,7 +304,7 @@ impl Role {
 	/// Stop while a tail still plays until `drained`, holding a declared end until
 	/// then. Dropping instead discards the tail with the end.
 	pub(super) fn retire(self, drained: Option<Instant>) {
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let mut presentation = self.presentation.lock().unwrap();
 		presentation.tails.retain(|tail| *tail > now);
 		if presentation.ends[self.role as usize].take().is_some()
@@ -325,7 +325,7 @@ impl Role {
 	/// long as its replacement has not started playing; otherwise this one opens
 	/// a transition of its own.
 	pub(super) fn declare(&self) -> Transition {
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let own = self.role as usize;
 		let mut presentation = self.presentation.lock().unwrap();
 		presentation.prune(now);
@@ -402,7 +402,7 @@ impl Role {
 			pending.members[own] = false;
 			pending.plans[own] = None;
 		}
-		presentation.prune(moq_clock::now());
+		presentation.prune(kio::clock::now());
 		drop(presentation);
 		self.timeline.notify_waiters();
 	}
@@ -413,7 +413,7 @@ impl Role {
 		if let Some(pending) = presentation.transition(transition) {
 			pending.resumed[self.role as usize] = true;
 		}
-		presentation.prune(moq_clock::now());
+		presentation.prune(kio::clock::now());
 		drop(presentation);
 		self.timeline.notify_waiters();
 	}
@@ -432,7 +432,7 @@ impl Role {
 			let changed = self.timeline.notified();
 			let mut changed = std::pin::pin!(changed);
 			changed.as_mut().enable();
-			let now = moq_clock::now();
+			let now = kio::clock::now();
 			let end = {
 				let mut presentation = self.presentation.lock().unwrap();
 				// The peer already resumed this transition after draining every end
@@ -451,7 +451,7 @@ impl Role {
 			};
 			if let Some(end) = end.filter(|end| *end > now) {
 				tokio::select! {
-					_ = moq_clock::sleep_until(end) => {},
+					_ = kio::clock::sleep_until(end) => {},
 					_ = changed => {},
 				}
 				continue;
@@ -505,7 +505,7 @@ impl Drop for Role {
 				pending.plans[own] = None;
 			}
 			presentation.declared[own] = Transition::default();
-			presentation.prune(moq_clock::now());
+			presentation.prune(kio::clock::now());
 		}
 		self.timeline.notify_waiters();
 	}
@@ -682,7 +682,7 @@ mod tests {
 	#[tokio::test]
 	async fn one_ended_role_maps_to_the_continuous_peers_clock() {
 		tokio::time::pause();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
@@ -700,7 +700,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_late_paired_replacement_keeps_its_media_offset() {
 		tokio::time::pause();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
 		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
@@ -725,7 +725,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_late_replacement_pairs_with_its_own_transition() {
 		tokio::time::pause();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
 		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
@@ -753,7 +753,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_peer_two_restarts_ahead_pairs_with_the_first() {
 		tokio::time::pause();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
 		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
@@ -782,7 +782,7 @@ mod tests {
 	#[tokio::test]
 	async fn an_abandoned_replacement_leaves_the_next_transition_alone() {
 		tokio::time::pause();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
 		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
@@ -801,7 +801,7 @@ mod tests {
 		audio.apply(transition, audio.resume(transition, ms(0), Some(DELAY)).await.unwrap());
 		video.apply(next, video.resume(next, ms(5_000), None).await.unwrap());
 		// The later replacement maps onto the running clock, not the audio restart's.
-		let resumed = moq_clock::now() + DELAY;
+		let resumed = kio::clock::now() + DELAY;
 		assert_eq!(
 			presentation.lock().unwrap().due(video.map(ms(5_000)).unwrap()),
 			Some(resumed)
@@ -811,7 +811,7 @@ mod tests {
 	#[tokio::test]
 	async fn an_abandoned_peer_plan_is_not_paired() {
 		tokio::time::pause();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
 		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
@@ -825,7 +825,7 @@ mod tests {
 		video.plan(transition, ms(40), None);
 		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
 		video.apply(transition, video.resume(transition, ms(40), None).await.unwrap());
-		let resumed = moq_clock::now() + DELAY;
+		let resumed = kio::clock::now() + DELAY;
 		assert_eq!(
 			presentation.lock().unwrap().due(video.map(ms(40)).unwrap()),
 			Some(resumed)
@@ -835,7 +835,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_resumed_transition_ignores_the_peers_later_end() {
 		tokio::time::pause();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
 		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
@@ -861,7 +861,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_cancelled_role_releases_its_declared_end() {
 		tokio::time::pause();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
 		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
@@ -884,7 +884,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_closed_role_still_holds_its_declared_end() {
 		tokio::time::pause();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
 		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
@@ -907,7 +907,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_retired_end_ignores_a_later_re_pin() {
 		tokio::time::pause();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
 		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
@@ -930,7 +930,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_cancelled_successor_keeps_a_retired_tail() {
 		tokio::time::pause();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
 		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
@@ -951,7 +951,7 @@ mod tests {
 	#[tokio::test]
 	async fn paired_plans_keep_media_offsets_and_follow_the_speakers_delay() {
 		tokio::time::pause();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
 		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);

@@ -1068,7 +1068,7 @@ mod test {
 		);
 
 		// Record PTS 2000 (ms) lands 2s after the wall epoch, whatever the track timescale.
-		let expected = moq_clock::Wall::UNIX_EPOCH
+		let expected = kio::clock::Wall::UNIX_EPOCH
 			+ std::time::Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);
 		assert_eq!(
 			clock

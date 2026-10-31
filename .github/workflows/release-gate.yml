@@ -240,7 +240,6 @@ jobs:
               - "rs/moq-archive/**"
               - "rs/moq-auth/**"
               - "rs/moq-cli/**"
-              - "rs/moq-clock/**"
               - "rs/moq-congestion/**"
               - "rs/moq-hls/**"
               - "rs/moq-ice/**"
@@ -301,7 +300,6 @@ jobs:
               - ".github/workflows/video.yml"
             wasm:
               - "rs/moq-wasm/**"
-              - "rs/moq-clock/**"
               - "rs/moq-net/**"
               - "rs/kio/**"
               - "js/wasm/**"

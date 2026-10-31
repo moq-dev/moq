@@ -45,7 +45,7 @@ which is expensive on a shared machine.
   binding facades below in minutes. Per-file uncovered line counts mostly
   point at GPU code and generated bindings instead.
 - When sampling `fix` commits for regression tests, count
-  `#[moq_clock::test]` as well as `#[test]` and `#[tokio::test]`.
+  `#[kio::test]` as well as `#[test]` and `#[tokio::test]`.
 
 ### m1 baselines
 

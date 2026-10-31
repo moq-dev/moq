@@ -1,8 +1,8 @@
-# [XS] The WebRTC stack takes moq-clock time
+# [XS] The WebRTC stack takes kio clock time
 
 ## Goal
 
-The vendored str0m and dimpl take `moq_clock::Instant` instead of `std::time::Instant`, so moq-webrtc drops its `into_std()` conversions and sim tests drive the stack's timers directly.
+The vendored str0m and dimpl take `kio::clock::Instant` instead of `std::time::Instant`, so moq-webrtc drops its `into_std()` conversions and sim tests drive the stack's timers directly.
 
 ## Plan
 

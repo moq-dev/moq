@@ -61,13 +61,13 @@ async fn setup(version: Version) -> Setup {
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
 	let (tx, frames) = futures::channel::mpsc::unbounded();
-	moq_clock::sim::spawn(async move {
+	kio::clock::sim::spawn(async move {
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.expect("subscribe");
 		while let Ok(Some(mut group)) = sub.recv_group().await {
 			while let Ok(Some(frame)) = group.read_frame().await {
@@ -76,7 +76,7 @@ async fn setup(version: Version) -> Setup {
 		}
 	});
 
-	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
+	kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -93,7 +93,7 @@ async fn deliver(setup: &mut Setup, payload: &'static [u8]) {
 	let mut group = setup.track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, payload).unwrap();
 	group.finish().unwrap();
-	let got = moq_clock::timeout(TIMEOUT, setup.frames.next())
+	let got = kio::clock::timeout(TIMEOUT, setup.frames.next())
 		.await
 		.expect("frame timed out")
 		.expect("the subscription ended");
@@ -113,7 +113,7 @@ async fn subscribe_tracks(pair: &MockPair, len: usize) -> Vec<u8> {
 
 	let mut reply = Vec::new();
 	while reply.len() < len
-		&& let Some(chunk) = moq_clock::timeout(TIMEOUT, recv.read_chunk(len - reply.len()))
+		&& let Some(chunk) = kio::clock::timeout(TIMEOUT, recv.read_chunk(len - reply.len()))
 			.await
 			.expect("reply timed out")
 			.expect("read")
@@ -126,7 +126,7 @@ async fn subscribe_tracks(pair: &MockPair, len: usize) -> Vec<u8> {
 /// An omitted FORWARD asks for every track's objects, which we never push unasked: on
 /// draft-22 each track is answered with PUBLISH_SKIPPED, and the subscription already on
 /// the session keeps going.
-#[moq_clock::test]
+#[kio::test]
 async fn subscribe_tracks_skips_every_track() {
 	let version = "moq-transport-22";
 	let mut setup = setup(version.parse().unwrap()).await;
@@ -147,7 +147,7 @@ async fn subscribe_tracks_skips_every_track() {
 
 /// Draft-18 has no PUBLISH_SKIPPED, so a listing that must forward is refused on its own
 /// stream with NOT_SUPPORTED, and the session keeps delivering.
-#[moq_clock::test]
+#[kio::test]
 async fn subscribe_tracks_needs_forward_0_on_draft_18() {
 	let mut setup = setup("moq-transport-18".parse().unwrap()).await;
 	deliver(&mut setup, b"before").await;

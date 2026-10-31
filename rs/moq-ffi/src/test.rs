@@ -7334,13 +7334,13 @@ async fn video_encoder_follows_a_shrinking_grant() {
 		.unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
 
-	let deadline = moq_clock::Instant::now() + TIMEOUT;
+	let deadline = kio::clock::Instant::now() + TIMEOUT;
 	loop {
 		if video.applied_bitrate() == 1_000_000 {
 			break;
 		}
 		assert!(
-			moq_clock::Instant::now() < deadline,
+			kio::clock::Instant::now() < deadline,
 			"encoder did not follow the shrinking grant, last applied {}",
 			video.applied_bitrate()
 		);
@@ -7980,7 +7980,7 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 		let (session, driver) = moq_net::Client::new()
 			.with_origin(a.inner.clone())
 			.with_versions(version.into())
-			.connect(moq_clock::Instant::now(), client)
+			.connect(kio::clock::Instant::now(), client)
 			.await
 			.unwrap();
 		tokio::spawn(moq_net::time::run(driver));
@@ -7991,7 +7991,7 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 			.with_publisher(&b.inner)
 			.with_subscriber(b.inner.clone())
 			.with_versions(version.into())
-			.accept(moq_clock::Instant::now(), server)
+			.accept(kio::clock::Instant::now(), server)
 			.await
 			.unwrap();
 		tokio::spawn(moq_net::time::run(driver));
@@ -8180,7 +8180,7 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 			.unwrap();
 		shutdown_ready(&track, &reader).await;
 		let receiving = tokio::spawn(async move { reader.read_frame().await });
-		let start = moq_clock::Instant::now();
+		let start = kio::clock::Instant::now();
 		let mut closed = Box::pin(publisher.closed());
 		assert!(
 			closed

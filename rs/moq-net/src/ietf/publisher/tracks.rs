@@ -1419,7 +1419,7 @@ mod tests {
 			let id = accepted.reader.varint().await.unwrap();
 			let body: ietf::Body = accepted.reader.decode().await.unwrap();
 			let task = self.publisher.handle_stream(id, body, accepted, false).unwrap();
-			moq_clock::sim::spawn(task);
+			kio::clock::sim::spawn(task);
 			stream
 		}
 
@@ -1441,7 +1441,7 @@ mod tests {
 	}
 
 	async fn timeout<F: std::future::Future>(future: F) -> F::Output {
-		moq_clock::timeout(TIMEOUT, future).await.expect("timed out")
+		kio::clock::timeout(TIMEOUT, future).await.expect("timed out")
 	}
 
 	/// The next message on a request stream: its type and body.
@@ -1493,7 +1493,7 @@ mod tests {
 
 	/// A paused listing PUBLISHes every track under the prefix, later ones included, each
 	/// paused, and ends a track's PUBLISH with PUBLISH_DONE once it is no longer listed.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_paused_listing_publishes_every_track() {
 		for version in DRAFTS {
 			let mut h = harness(version);
@@ -1536,7 +1536,7 @@ mod tests {
 
 	/// A track that finishes while its PUBLISH awaits the answer still ends with TRACK_ENDED
 	/// once answered, since the peer listed it on the PUBLISH; a reset would fail its listing.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_track_finished_before_the_answer_ends_cleanly() {
 		for version in DRAFTS {
 			let mut h = harness(version);
@@ -1552,7 +1552,7 @@ mod tests {
 			let track = h.tracks.remove("video").unwrap();
 			track.finish().unwrap();
 			drop(track);
-			moq_clock::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 			publish_ok(&mut video).await;
 			let (id, body) = next(&mut video).await;
 			assert_eq!(id, ietf::PublishDone::ID, "{version}");
@@ -1568,7 +1568,7 @@ mod tests {
 	/// A broadcast closing right after a track finished ends that track's PUBLISH with
 	/// TRACK_ENDED, whether its producer is still held or not, while a track left unfinished
 	/// still ends in error.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_clean_end_keeps_its_finishes() {
 		for version in DRAFTS {
 			for held in [false, true] {
@@ -1582,7 +1582,7 @@ mod tests {
 					publish_ok(&mut stream).await;
 					published.insert(name, stream);
 				}
-				moq_clock::sleep(Duration::from_millis(10)).await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 
 				let video = h.tracks.remove("video").unwrap();
 				video.finish().unwrap();
@@ -1604,7 +1604,7 @@ mod tests {
 
 	/// A REQUEST_UPDATE with FORWARD=1 resumes a paused PUBLISH: its answer names where the
 	/// subscription joins, and new groups flow. FORWARD=0 pauses it again.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_update_resumes_and_pauses_a_publish() {
 		for version in DRAFTS {
 			let mut h = harness(version);
@@ -1657,7 +1657,7 @@ mod tests {
 			let mut group = video.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"paused".as_slice()).unwrap();
 			group.finish().unwrap();
-			moq_clock::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 			let more = futures::poll!(kio::wait(|waiter| h.peer.poll_accept_uni(waiter)));
 			assert!(more.is_pending(), "{version}: a paused PUBLISH forwarded");
 
@@ -1672,7 +1672,7 @@ mod tests {
 
 	/// A listed compressed track is declared and served compressed only to a peer that
 	/// negotiated FLATE; any other peer gets the plain copy with no declaration.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_publish_compresses_only_when_negotiated() {
 		for version in DRAFTS {
 			for flate in [false, true] {
@@ -1730,7 +1730,7 @@ mod tests {
 
 	/// FORWARD=1 asks for every track's objects, which we never push unasked: from
 	/// draft-22 each track is skipped, and draft-18, with no way to skip, refuses it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_forwarding_listing_skips_every_track() {
 		for version in DRAFTS {
 			let mut h = harness(version);
@@ -1761,7 +1761,7 @@ mod tests {
 	}
 
 	/// A prefix overlapping an established listing is refused, and freed by its cancel.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_overlapping_prefix_is_refused() {
 		for version in DRAFTS {
 			let mut h = harness(version);
@@ -1777,7 +1777,7 @@ mod tests {
 			assert_eq!(request_error(&body, version), request::PREFIX_OVERLAP, "{version}");
 
 			first.writer.abort(&Error::Cancel);
-			moq_clock::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 			nested.request_id = RequestId(4);
 			let mut third = h.request(&nested).await;
 			assert_eq!(next(&mut third).await.0, ietf::RequestOk::ID, "{version}");
@@ -1786,7 +1786,7 @@ mod tests {
 
 	/// Draft-18 allows one subscription per track: a SUBSCRIBE to a PUBLISHed track is a
 	/// duplicate. Later drafts serve it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_subscribe_to_a_published_track() {
 		for version in DRAFTS {
 			let mut h = harness(version);
@@ -1829,7 +1829,7 @@ mod tests {
 	/// Each PUBLISH opens only as the peer's stream credit admits it: a peer that withholds
 	/// credit and reads nothing holds as many PUBLISHes as it grants, however many tracks are
 	/// listed, and each track is PUBLISHed once credit returns.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_listing_publishes_only_as_credit_admits() {
 		const CREDIT: usize = 2;
 		for version in DRAFTS {
@@ -1850,7 +1850,7 @@ mod tests {
 
 				let mut request = h.request(&listing(false)).await;
 				assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-				moq_clock::sleep(Duration::from_millis(10)).await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 				assert_eq!(held(&h), CREDIT, "{version} catalog={catalog}");
 
 				// Refusing each PUBLISH returns its credit, which opens the next.
@@ -1868,7 +1868,7 @@ mod tests {
 	/// A FORWARD=1 listing reads its next track only once the request stream has taken the
 	/// last skip, so a peer that stops reading leaves one skip queued, however many tracks
 	/// are listed.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_forwarding_listing_reads_only_as_skips_go_out() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for catalog in CATALOGS {
@@ -1898,7 +1898,7 @@ mod tests {
 					skips: skips.clone(),
 					live: live.consume(),
 				};
-				moq_clock::sim::spawn(h.publisher.clone().run_listed_broadcast(
+				kio::clock::sim::spawn(h.publisher.clone().run_listed_broadcast(
 					request,
 					crate::Path::from_static("room/cam"),
 					None,
@@ -1907,13 +1907,13 @@ mod tests {
 
 				let mut skipped = HashSet::new();
 				while skipped.len() < catalog {
-					moq_clock::sleep(Duration::from_millis(10)).await;
+					kio::clock::sleep(Duration::from_millis(10)).await;
 					let mut queued = skips.lock();
 					assert_eq!(queued.len(), 1, "{version} catalog={catalog}");
 					let ((_, name), ()) = queued.pop_front().unwrap();
 					assert!(skipped.insert(name), "{version}: skipped a track twice");
 				}
-				moq_clock::sleep(Duration::from_millis(10)).await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 				assert!(skips.read().is_empty(), "{version}: skipped past the listing");
 			}
 		}
@@ -1921,7 +1921,7 @@ mod tests {
 
 	/// Cancelling the listing stops new PUBLISHes, while those already sent live on until
 	/// their broadcast ends, which ends each with PUBLISH_DONE.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_cancelled_listing_keeps_its_publishes() {
 		for version in DRAFTS {
 			let mut h = harness(version);
@@ -1933,12 +1933,12 @@ mod tests {
 			publish_ok(&mut second).await;
 
 			request.writer.abort(&Error::Cancel);
-			moq_clock::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 			let _late = h
 				.broadcast
 				.create_track("captions", crate::track::Info::timed())
 				.unwrap();
-			moq_clock::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 			let opened = futures::poll!(std::pin::pin!(Stream::accept(
 				&mut crate::driver::Transport::new(h.peer.clone()),
 				version
@@ -1955,7 +1955,7 @@ mod tests {
 	/// On draft-18 a replacement listing skips the tracks whose PUBLISHes outlive the one it
 	/// replaced, since each is still the peer's one subscription; later drafts PUBLISH them
 	/// again.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_relisting_skips_tracks_still_published_on_draft_18() {
 		let version = Version::Draft18;
 		let mut h = harness(version);
@@ -1966,7 +1966,7 @@ mod tests {
 		publish_ok(&mut first).await;
 		publish_ok(&mut second).await;
 		request.writer.abort(&Error::Cancel);
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 
 		let relisting = ietf::SubscribeTracks {
 			request_id: RequestId(2),
@@ -1990,7 +1990,7 @@ mod tests {
 
 	/// On draft 18 a PUBLISH_OK may ask for a new group only if the PUBLISH sent
 	/// DYNAMIC_GROUPS; one that asks anyway ends the PUBLISH in error.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_publish_ok_new_group_needs_dynamic_groups() {
 		let version = Version::Draft18;
 		let mut h = harness(version);
@@ -2016,7 +2016,7 @@ mod tests {
 	}
 
 	/// Draft-18 lets PUBLISH_OK forward at once, with no update to answer.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_forwarding_publish_ok_resumes() {
 		for version in [Version::Draft18] {
 			let mut h = harness(version);
@@ -2058,7 +2058,7 @@ mod tests {
 
 	/// A REQUEST_UPDATE on the listing admits its Request ID like any other: one of the
 	/// wrong parity closes the session rather than only refusing the update.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_listing_update_admits_its_request_id() {
 		for version in DRAFTS {
 			let mut h = harness(version);
@@ -2081,7 +2081,7 @@ mod tests {
 
 	/// A REQUEST_UPDATE on the listing is answered with REQUEST_ERROR. From draft-22 it may
 	/// carry FORWARD, which is refused the same way rather than closing the session.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_listing_update_is_refused() {
 		for version in DRAFTS {
 			let mut h = harness(version);
@@ -2100,7 +2100,7 @@ mod tests {
 	}
 
 	/// A listing update past our GOAWAY is refused as GOING_AWAY, not as unsupported.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_listing_update_after_goaway_is_going_away() {
 		for version in DRAFTS {
 			let mut h = harness(version);
@@ -2122,7 +2122,7 @@ mod tests {
 
 	/// NEW_GROUP_REQUEST resuming a paused PUBLISH is a join under the track's refresh
 	/// ratio, as on a SUBSCRIBE, even when the filter's fixed start is not.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_resume_asks_for_a_new_group() {
 		let version = Version::Draft22;
 		let mut h = harness(version);
@@ -2161,7 +2161,7 @@ mod tests {
 
 	/// On draft-22 an update may ask for a new group only if its PUBLISH sent
 	/// DYNAMIC_GROUPS, which INCLUDE_PROPERTIES=0 leaves out even for a dynamic track.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_new_group_needs_the_advertised_dynamic_groups() {
 		for version in [Version::Draft22] {
 			let mut h = harness(version);
@@ -2203,7 +2203,7 @@ mod tests {
 
 	/// While forwarding, an update's NEW_GROUP_REQUEST also needs the advertised
 	/// DYNAMIC_GROUPS, which INCLUDE_PROPERTIES=0 leaves out.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_forwarding_new_group_needs_the_advertised_dynamic_groups() {
 		let version = Version::Draft22;
 		let mut h = harness(version);
@@ -2240,7 +2240,7 @@ mod tests {
 
 	/// A paused subscription opens no groups, so an update that pauses may not ask for one,
 	/// while forwarding as while paused.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_pausing_new_group_is_refused() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
@@ -2271,7 +2271,7 @@ mod tests {
 	}
 
 	/// An update taken while forwarding outlives a pause: the next resume keeps it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_forwarding_update_outlives_a_pause() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
@@ -2303,7 +2303,7 @@ mod tests {
 
 	/// On draft-18 a track the peer already SUBSCRIBEd to is skipped rather than PUBLISHed
 	/// a second time; later drafts PUBLISH it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_subscribed_track_is_skipped_on_draft_18() {
 		let version = Version::Draft18;
 		let mut h = harness(version);
@@ -2349,7 +2349,7 @@ mod tests {
 	/// From draft-20 each PUBLISH states the listing's subscription parameters, which the
 	/// subscriber otherwise takes as the defaults; earlier drafts carry them on PUBLISH_OK.
 	/// Draft-22 sends none of them on SUBSCRIBE_TRACKS.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_listing_states_its_parameters_on_each_publish() {
 		for version in DRAFTS.into_iter().filter(|version| *version != Version::Draft22) {
 			let mut h = harness(version);
@@ -2383,7 +2383,7 @@ mod tests {
 
 	/// An omitted SUBSCRIBER_PRIORITY is the drafts' 128, so each PUBLISH restates 128 rather
 	/// than this stack's unset 127.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_listing_without_a_priority_states_the_default() {
 		for version in DRAFTS.into_iter().filter(|version| Filter::is_draft20(*version)) {
 			let mut h = harness(version);
@@ -2400,7 +2400,7 @@ mod tests {
 	/// A forwarding PUBLISH ends with PUBLISH_DONE once its track is no longer listed, here
 	/// because its broadcast's route went, even while the track itself goes on. The track
 	/// has not ended, so neither does the PUBLISH cleanly.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unlisted_forwarding_publish_ends() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
@@ -2430,7 +2430,7 @@ mod tests {
 
 	/// A paused PUBLISH ends in error once its track is unlisted, here because its
 	/// broadcast's route went, never with the clean end that says the track is over.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unlisted_paused_publish_ends_in_error() {
 		for version in DRAFTS {
 			let mut h = harness(version);
@@ -2449,7 +2449,7 @@ mod tests {
 
 	/// A listing ending through a refused update still unlists its tracks while the peer
 	/// withholds the credit its REQUEST_ERROR needs.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_closing_listing_still_unlists() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let config = memory::Config {
@@ -2467,7 +2467,7 @@ mod tests {
 				..update(2, false)
 			};
 			send(&mut request, &refused).await;
-			moq_clock::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 
 			// A new instance takes the path while the old one goes on: only its route ends.
 			let _restarted = h._origin.publish("room/cam", crate::origin::Route::default()).unwrap();
@@ -2483,7 +2483,7 @@ mod tests {
 	/// With MoQ Auth, no track is listed until the peer answers our setup credential, whose
 	/// grant may narrow what the listing shows, and a listing cancelled while waiting frees
 	/// its prefix.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_listing_waits_for_the_setup_answer() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
@@ -2506,7 +2506,7 @@ mod tests {
 			.with_auth(auth.clone());
 
 			let first = h.request(&listing(false)).await;
-			moq_clock::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 			let opened = futures::poll!(std::pin::pin!(Stream::accept(
 				&mut crate::driver::Transport::new(h.peer.clone()),
 				version
@@ -2514,7 +2514,7 @@ mod tests {
 			assert!(opened.is_pending(), "{version}: listed a track before the setup answer");
 
 			first.writer.abort(&Error::Cancel);
-			moq_clock::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 			let mut again = listing(false);
 			again.request_id = RequestId(2);
 			let mut request = h.request(&again).await;
@@ -2528,7 +2528,7 @@ mod tests {
 
 	/// Tracks under a namespace our grant does not cover are not listed until it does, and
 	/// a grant that stops covering them ends their PUBLISHes.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_listing_follows_the_publish_grant() {
 		let nothing = || crate::auth::Grant {
 			publish: crate::Patterns::new(),
@@ -2543,7 +2543,7 @@ mod tests {
 
 			let mut request = h.request(&listing(false)).await;
 			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-			moq_clock::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 			let opened = futures::poll!(std::pin::pin!(Stream::accept(
 				&mut crate::driver::Transport::new(h.peer.clone()),
 				version

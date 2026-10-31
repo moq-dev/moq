@@ -6,7 +6,7 @@ use std::{
 
 /// A wall-clock time, in nanoseconds since the Unix epoch.
 ///
-/// Read from the same clock as [`Instant`](crate::Instant) but kept apart from it:
+/// Read from the same clock as [`Instant`](crate::clock::Instant) but kept apart from it:
 /// wall time can be stepped, forward or back, without any monotonic time passing,
 /// so it never measures elapsed time. Times before 1970 are unrepresentable.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -23,7 +23,7 @@ impl Wall {
 
 	/// The current wall time on the ambient clock.
 	pub fn now() -> Self {
-		crate::wall()
+		crate::clock::wall()
 	}
 
 	/// The time from `earlier` to this one, or `None` if `earlier` is later.

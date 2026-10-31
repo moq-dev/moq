@@ -24,7 +24,7 @@ pub(crate) struct Runtime {
 	handle: tokio::runtime::Handle,
 	/// The clock a test drives, when the runtime started with one.
 	#[cfg(feature = "testing")]
-	clock: Option<moq_clock::Installed>,
+	clock: Option<kio::clock::Installed>,
 	/// Taken by [`shutdown`], so the thread is stopped and joined once.
 	thread: std::sync::Mutex<Option<Thread>>,
 	/// Set by [`shutdown`] to wake the [`Task::run`] calls parked in place, so they observe
@@ -67,7 +67,7 @@ pub(crate) fn runtime() -> &'static Runtime {
 	RUNTIME.get_or_init(|| Runtime::new(false))
 }
 
-/// Start the runtime on a [`moq_clock::Manual`] clock that only a test moves.
+/// Start the runtime on a [`kio::clock::Manual`] clock that only a test moves.
 ///
 /// False when the runtime already started, since its timers are armed on the host clock.
 #[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
@@ -82,7 +82,7 @@ pub(crate) fn start_test_clock() -> bool {
 
 /// The clock [`start_test_clock`] installed, if it did.
 #[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
-pub(crate) fn test_clock() -> Option<&'static moq_clock::Installed> {
+pub(crate) fn test_clock() -> Option<&'static kio::clock::Installed> {
 	RUNTIME.get()?.clock.as_ref()
 }
 
@@ -103,7 +103,7 @@ impl Runtime {
 		let handle = runtime.handle().clone();
 		// Before any task runs, so every read and timer lands on it.
 		#[cfg(feature = "testing")]
-		let clock = test_clock.then(|| moq_clock::Manual::new().install(&handle));
+		let clock = test_clock.then(|| kio::clock::Manual::new().install(&handle));
 		let (stop, stopped) = tokio::sync::oneshot::channel();
 
 		let join = std::thread::Builder::new()

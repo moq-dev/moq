@@ -977,7 +977,7 @@ mod tests {
 	#[test]
 	fn congestion_factory_maps_each_family() {
 		let init = moq_congestion::Init {
-			now: moq_clock::Instant::now(),
+			now: kio::clock::Instant::now(),
 			mtu: 1200,
 			rtt: std::time::Duration::from_millis(333),
 			max_pacing_rate: None,

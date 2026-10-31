@@ -382,7 +382,7 @@ impl<T: Task<Output = ()>> Tasks<T> {
 	/// such an arm with [`is_empty`](Self::is_empty).
 	/// `waiter` is registered for the next task wake or push; the tasks
 	/// themselves park on their own wakers.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
 		self.poll_each(waiter, |_, ()| {})
 	}
@@ -454,7 +454,7 @@ impl<T: Task> Tasks<T> {
 					let child_waiter = occupant.park.hold(&cx);
 					// Each child is its own task, so a large sweep of finite children is not
 					// one spinning poll.
-					#[cfg(feature = "_sim")]
+					#[cfg(feature = "sim")]
 					let _scope = crate::coop::child();
 					if let Poll::Ready(output) = occupant.task.poll(child_waiter) {
 						let occupant = self.children[index].take().expect("polled slot is occupied");

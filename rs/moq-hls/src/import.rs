@@ -742,7 +742,7 @@ impl Import {
 	/// amount of waiting changes either.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut delay = STEP_RETRY_MIN;
-		let mut deadline = moq_clock::now() + STEP_RETRY_BUDGET;
+		let mut deadline = kio::clock::now() + STEP_RETRY_BUDGET;
 
 		loop {
 			// A step where *nothing* ingested while a rendition was failing is a failed pass wearing
@@ -766,7 +766,7 @@ impl Import {
 				Ok(outcome) => {
 					// The source is alive, so the earlier failures no longer describe it.
 					delay = STEP_RETRY_MIN;
-					deadline = moq_clock::now() + STEP_RETRY_BUDGET;
+					deadline = kio::clock::now() + STEP_RETRY_BUDGET;
 					outcome
 				}
 				Err(err @ Error::ResourceRefused) => return Err(err),
@@ -778,7 +778,7 @@ impl Import {
 				// The source rewound its timestamps, which no later pass can import.
 				Err(err @ Error::Rewind { .. }) => return Err(err),
 				Err(err) => {
-					let now = moq_clock::now();
+					let now = kio::clock::now();
 					if now >= deadline {
 						return Err(err);
 					}
@@ -790,7 +790,7 @@ impl Import {
 						.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)
 						.min(deadline - now);
 					delay = (delay * 2).min(STEP_RETRY_MAX);
-					moq_clock::sleep(wait).await;
+					kio::clock::sleep(wait).await;
 					continue;
 				}
 			};
@@ -807,7 +807,7 @@ impl Import {
 				"HLS import step complete"
 			);
 
-			moq_clock::sleep(delay).await;
+			kio::clock::sleep(delay).await;
 		}
 	}
 

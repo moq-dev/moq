@@ -99,7 +99,7 @@ fn all() -> Patterns {
 /// A grant that lasts an hour and would not re-check on its own during a test.
 fn grant() -> Grant {
 	let mut grant = Grant::new(all(), all());
-	grant.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
+	grant.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 	grant.revalidate = Some(Duration::from_secs(3600));
 	grant
 }

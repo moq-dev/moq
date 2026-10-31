@@ -1,7 +1,7 @@
-//! The `#[kio::machine]` attribute: a `poll_*` state machine from straight-line code.
+//! The `#[kio::machine]` attribute, a `poll_*` state machine from straight-line code,
+//! and the `#[kio::test]` attribute, an `async fn` test run on the simulator.
 //!
-//! Use it through `kio`'s `macros` feature, which re-exports it and documents the
-//! dialect.
+//! Use them through `kio`'s `macros` and `sim` features, which re-export them.
 
 use std::collections::HashSet;
 
@@ -86,6 +86,14 @@ pub fn machine(args: proc_macro::TokenStream, item: proc_macro::TokenStream) -> 
 	let args = parse_macro_input!(args as Args);
 	let item = parse_macro_input!(item as ItemImpl);
 	expand(args, item).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+mod sim_test;
+
+/// Run an `async fn` test to completion on `kio::clock::sim::run`.
+#[proc_macro_attribute]
+pub fn test(args: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+	sim_test::expand(args, item)
 }
 
 /// `self.<field>: <State>`.

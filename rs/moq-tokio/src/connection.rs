@@ -606,7 +606,7 @@ struct State {
 	session: Option<moq_net::Session>,
 	/// The loop's [`Draining`] predecessor and its handover deadline, so
 	/// [`Connection::close`] drains it too without overstaying that window.
-	predecessor: Option<(moq_net::Session, moq_clock::Instant)>,
+	predecessor: Option<(moq_net::Session, kio::clock::Instant)>,
 }
 
 /// The producer side of everything a [`Connection`] handle can observe.
@@ -1093,7 +1093,7 @@ impl Connection {
 			let mut close = std::pin::pin!(session.close());
 			tokio::select! {
 				res = &mut close => res,
-				_ = moq_clock::sleep_until(deadline) => {
+				_ = kio::clock::sleep_until(deadline) => {
 					abort.abort(moq_net::Error::GoawayTimeout);
 					close.await
 				}
@@ -1139,7 +1139,7 @@ impl Connection {
 					shared.tokens.connected(&dialed.session);
 					let session = dialed.session;
 
-					let connected = moq_clock::now();
+					let connected = kio::clock::now();
 					// Wait for the session to end, forwarding its bandwidth estimates into the
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration.
@@ -1269,7 +1269,7 @@ impl Connection {
 						if restarting {
 							// After the sleep, so the window counts only the time after the
 							// peer stops answering.
-							retry.start = moq_clock::now();
+							retry.start = kio::clock::now();
 						}
 						continue;
 					}
@@ -1400,7 +1400,7 @@ impl Connection {
 
 			let dialed = match attempt_timeout(index, candidates.len()) {
 				None => dialed.await,
-				Some(limit) => match moq_clock::timeout(limit, dialed).await {
+				Some(limit) => match kio::clock::timeout(limit, dialed).await {
 					Ok(dialed) => dialed,
 					Err(_) => Err(Error::Reconnect(format!("timed out connecting to {}", Endpoint(url)))),
 				},
@@ -1614,7 +1614,7 @@ struct Retry {
 	/// The wait before the next attempt, before jitter.
 	delay: Duration,
 	/// When this run of failures began; the give-up timeout counts from here.
-	start: moq_clock::Instant,
+	start: kio::clock::Instant,
 	/// The latest failure, so giving up reports a real cause.
 	last_error: Option<Error>,
 }
@@ -1623,7 +1623,7 @@ impl Retry {
 	fn new(initial: Duration) -> Self {
 		Self {
 			delay: initial,
-			start: moq_clock::now(),
+			start: kio::clock::now(),
 			last_error: None,
 		}
 	}
@@ -1648,7 +1648,7 @@ fn timeout_error(timeout: Duration, last_error: Option<&Error>) -> Error {
 }
 
 /// Jitter the next delay and cap it at the retry window. `None` means the window is exhausted.
-fn retry_wait(delay: Duration, retry_start: moq_clock::Instant, timeout: Duration) -> Option<Duration> {
+fn retry_wait(delay: Duration, retry_start: kio::clock::Instant, timeout: Duration) -> Option<Duration> {
 	let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
 	if timeout.is_zero() {
 		return Some(wait);
@@ -1728,14 +1728,14 @@ enum Ended {
 struct Draining {
 	session: moq_net::Session,
 	closed: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
-	deadline: std::pin::Pin<Box<moq_clock::Sleep>>,
+	deadline: std::pin::Pin<Box<kio::clock::Sleep>>,
 	/// Mirrors the session into [`State::predecessor`] for as long as this lives.
 	state: kio::Producer<State>,
 }
 
 impl Draining {
 	fn new(session: moq_net::Session, handover: Duration, state: &kio::Producer<State>) -> Self {
-		let deadline = Box::pin(moq_clock::sleep(handover));
+		let deadline = Box::pin(kio::clock::sleep(handover));
 		if let Ok(mut state) = state.write() {
 			state.predecessor = Some((session.clone(), deadline.deadline()));
 		}
@@ -1805,7 +1805,7 @@ fn poll_draining(draining: &mut Option<Draining>, waiter: &kio::Waiter) -> bool 
 /// to reach would leave the old session holding its connection well past the
 /// handover window.
 async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared: &Shared) {
-	let mut sleep = std::pin::pin!(moq_clock::sleep(delay));
+	let mut sleep = std::pin::pin!(kio::clock::sleep(delay));
 	kio::wait(|waiter| {
 		// Nothing is serving once it retires: the predecessor closed or overstayed
 		// its handover, and the replacement is still a dial away. Leaving the state
@@ -3674,7 +3674,7 @@ mod tests {
 			.expect("the dial failed");
 
 		let mut announced = server_origin.consume().announced();
-		let arrived = moq_clock::timeout(Duration::from_secs(5), announced.next())
+		let arrived = kio::clock::timeout(Duration::from_secs(5), announced.next())
 			.await
 			.expect("the broadcast never reached the server")
 			.expect("the server's origin closed");

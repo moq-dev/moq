@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
 use hang::catalog::VideoConfig;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_mux::container::Read as Encoded;
 
 use super::decoder::Config;
@@ -218,7 +218,7 @@ impl Consumer {
 	fn poll_read(
 		&mut self,
 		cx: &mut Context<'_>,
-		sleep: &mut Option<Pin<Box<moq_clock::Sleep>>>,
+		sleep: &mut Option<Pin<Box<kio::clock::Sleep>>>,
 	) -> Poll<Result<Option<Read>, Error>> {
 		loop {
 			let deadline = match self.selector.next(Instant::now()) {
@@ -265,7 +265,7 @@ impl Consumer {
 			let Some(deadline) = deadline else {
 				return Poll::Pending;
 			};
-			let sleep = sleep.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(deadline)));
+			let sleep = sleep.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(deadline)));
 			sleep.as_mut().reset(deadline);
 			ready!(sleep.as_mut().poll(cx));
 		}

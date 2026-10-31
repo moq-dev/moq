@@ -247,7 +247,7 @@ targets, over one dual-annotated crate.
 - **moq-ffi panicked creating any broadcast in the browser.** `moq_mux`'s catalog clock
   called `std::time::SystemTime::now`, which wasm32-unknown-unknown does not implement.
   The measurements above used a workaround in the pin patch. Since
-  [#5681](https://github.com/moq-dev/moq/pull/5681), moq-mux reads moq-clock's browser
+  [#5681](https://github.com/moq-dev/moq/pull/5681), moq-mux reads kio's browser
   wall clock instead, and the cases pass without the workaround.
 - **On moq-lite-06, group sequence 2^62-1 never arrived.** The cases also stamped it as
   the frame timestamp, which lite-05/06 cannot zigzag as a group's first frame, so the

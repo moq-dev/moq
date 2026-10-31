@@ -78,7 +78,7 @@ impl Dial {
 		let handshake = async move {
 			let transport = transport.await.map_err(|err| Failure::Transport(err.to_string()))?;
 			client
-				.connect(moq_clock::now(), transport)
+				.connect(kio::clock::now(), transport)
 				.await
 				.map_err(Failure::Handshake)
 		};

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Poll, ready};
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::Timestamp;
 
 use super::{Container, Frame, Read, TimestampRewind};
@@ -150,7 +150,7 @@ pub struct Consumer<F: Container> {
 	max_delay: std::time::Duration,
 
 	// Wakes the reader once the hole at the cursor expires.
-	hole_timer: Option<std::pin::Pin<Box<moq_clock::Sleep>>>,
+	hole_timer: Option<std::pin::Pin<Box<kio::clock::Sleep>>>,
 
 	// The furthest presentation point delivered so far: max(timestamp + duration), endpoints
 	// included. `None` until the first item, so a loss before it is no gap.
@@ -528,7 +528,7 @@ impl<F: Container> Consumer<F> {
 						// Said now rather than with the gap, which waits for the next group: what
 						// the caller holds of this one need not wait for a successor.
 						return Poll::Ready(Ok(Some(Event::Cut {
-							observed: moq_clock::now(),
+							observed: kio::clock::now(),
 						})));
 					}
 					// Cleanly finished group: advance to the next sequence.
@@ -653,7 +653,7 @@ impl<F: Container> Consumer<F> {
 				if let Some(wake) = since.checked_add(self.max_delay) {
 					let timer = self
 						.hole_timer
-						.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(wake)));
+						.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(wake)));
 					timer.as_mut().reset(wake);
 					let _ = waiter.poll_future(timer.as_mut());
 				}
@@ -919,7 +919,7 @@ struct GroupBuffer<F: Container> {
 
 	// From then on, any sequence missing below this group is late: the earliest arrival among it
 	// and the groups past it, kept on insert so a hole reads it without scanning the backlog.
-	late: moq_clock::Instant,
+	late: kio::clock::Instant,
 
 	// The current frame index within the group.
 	index: usize,
@@ -1504,8 +1504,8 @@ mod tests {
 				assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
 				tokio::time::advance(budget - Duration::from_millis(1)).await;
 				assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
-				let before = moq_clock::now();
-				let read = moq_clock::timeout(Duration::from_millis(2), reader.read())
+				let before = kio::clock::now();
+				let read = kio::clock::timeout(Duration::from_millis(2), reader.read())
 					.await
 					.unwrap()
 					.unwrap();
@@ -4552,7 +4552,7 @@ mod tests {
 	}
 
 	/// A paused payload reader must not retain metadata for cache entries that were evicted.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn receiving_under_backpressure_releases_aborted_group_handles() {
 		let track = track_producer("backpressured", timed());
 		let mut consumer = Consumer::new(
@@ -4584,7 +4584,7 @@ mod tests {
 	}
 
 	/// A finished track may still have bytes in flight on a group already received.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn received_input_waits_for_group_fin_without_consuming_payload() {
 		let mut track = track_producer("finite", timed());
 		let mut consumer = Consumer::new(

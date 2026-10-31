@@ -11,7 +11,7 @@ use moq_mux::catalog::{self, Stream};
 use moq_mux::follow::{Event as FollowEvent, Instances};
 // The ambient clock, which follows tokio's paused clock when a test drives the
 // playout clock itself.
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use super::args::Args;
 use super::output::{Output, Sink, Speaker};
@@ -672,7 +672,7 @@ async fn play_audio<O: Output>(
 								.due(role.map(frame.timestamp)?)
 								.and_then(|at| at.checked_sub(first));
 							if let Some(at) = at {
-								moq_clock::sleep_until(at).await;
+								kio::clock::sleep_until(at).await;
 							}
 							ended = false;
 							// An end this frame did not cross ends the timeline it resumes.
@@ -745,7 +745,7 @@ async fn play_audio<O: Output>(
 					.due(mapped)
 					.and_then(|at| at.checked_sub(lead(delay, &frame)));
 				if let Some(at) = at {
-					moq_clock::sleep_until(at).await;
+					kio::clock::sleep_until(at).await;
 				}
 			}
 
@@ -809,7 +809,7 @@ async fn play_audio<O: Output>(
 async fn drain(sink: impl Sink) {
 	// The estimated target moves, so the depth the sink was opened with says
 	// nothing about what it holds now: read it at retirement instead.
-	let _ = moq_clock::timeout(sink.buffered() + AUDIO_DRAIN_GRACE, sink.finish()).await;
+	let _ = kio::clock::timeout(sink.buffered() + AUDIO_DRAIN_GRACE, sink.finish()).await;
 }
 
 #[cfg(test)]
@@ -1536,7 +1536,7 @@ mod tests {
 		while index < 50 {
 			old.write(packet(index, OLD)).unwrap();
 			index += 1;
-			moq_clock::sleep_until(start + PACKET_DURATION * index as u32).await;
+			kio::clock::sleep_until(start + PACKET_DURATION * index as u32).await;
 		}
 
 		// The replacement joins the catalog, then the old track finishes.
@@ -1547,7 +1547,7 @@ mod tests {
 		drop(old);
 
 		while index < 100 {
-			moq_clock::sleep_until(start + PACKET_DURATION * index as u32).await;
+			kio::clock::sleep_until(start + PACKET_DURATION * index as u32).await;
 			new.write(packet(index, NEW)).unwrap();
 			index += 1;
 		}
@@ -1632,7 +1632,7 @@ mod tests {
 				_ => a.write(packet(index, BACK)).unwrap(),
 			}
 			index += 1;
-			moq_clock::sleep_until(start + PACKET_DURATION * index as u32).await;
+			kio::clock::sleep_until(start + PACKET_DURATION * index as u32).await;
 		}
 
 		settle(player, &recorder).await;
@@ -2054,7 +2054,7 @@ mod tests {
 		let start = Instant::now();
 		for index in 0..COUNT {
 			let ready = ((index + 1) * PACKET).div_ceil(BLOCK) * BLOCK;
-			moq_clock::sleep_until(start + Duration::from_secs_f64(ready as f64 / SAMPLE_RATE as f64)).await;
+			kio::clock::sleep_until(start + Duration::from_secs_f64(ready as f64 / SAMPLE_RATE as f64)).await;
 			audio.write(packet(index, 0.25)).unwrap();
 		}
 		settle(player, &recorder).await;

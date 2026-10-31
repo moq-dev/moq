@@ -154,7 +154,7 @@ impl<T> ProducerWeak<T> {
 	}
 
 	/// Poll for channel closure, registering the waiter if still open.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
 		if state.closed {
@@ -175,7 +175,7 @@ impl<T> ProducerWeak<T> {
 
 	/// Poll for [`Self::wanted`] to differ from `last`: `Ready(Ok)` with the new value once
 	/// it does, [`Closed`] if the channel closed first, else `Pending`.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_wanted_changed(&self, waiter: &Waiter, last: bool) -> Poll<Result<bool, Closed>> {
 		// Closure is checked first, so a closed channel reports `Closed` from every handle
 		// rather than a consumer count that only dropped because it's dead.
@@ -242,7 +242,7 @@ impl<T> ConsumerWeak<T> {
 	/// Available here so a watcher can register for changes without joining the
 	/// consumer count, which is what [`Producer::wanted_changed`](crate::Producer::wanted_changed)
 	/// keys off.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
@@ -275,7 +275,7 @@ impl<T> ConsumerWeak<T> {
 	}
 
 	/// Poll for channel closure, registering the waiter if still open.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
 		if state.closed {

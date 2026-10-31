@@ -1,4 +1,4 @@
-//! One clock for Media over QUIC.
+//! One clock: logical instants, wall time, deadlines, timers, and a deterministic simulator.
 //!
 //! - [`Instant`] is a logical point on the monotonic clock, in nanoseconds from
 //!   the clock's origin, with [`std::time::Instant`]'s methods. [`Wall`] is
@@ -15,18 +15,20 @@
 //!   it, which is how a runtime that reads the host clock itself (an io_uring
 //!   worker) becomes a backend.
 //!
+//! The `runtime` feature arms timers on tokio's clock natively and `setTimeout` in
+//! the browser. Without it, reads fall back to std (the browser still reads
+//! `performance.now()`), and waiting on the host clock panics.
+//!
 //! The `manual` feature adds `Manual::install`, which makes a [`Manual`] clock
 //! the ambient clock of one tokio runtime. It moves only when told to, never on
 //! idle, so a test harness outside the runtime decides when native time passes.
 //!
 //! The `sim` feature adds the `sim` module, a deterministic executor whose clock
-//! starts at [`Instant::ZERO`], and the `#[moq_clock::test]` attribute that runs an
+//! starts at [`Instant::ZERO`], and the `#[kio::test]` attribute that runs an
 //! `async fn` test on it. Enable it for dev-dependencies only.
 //!
 //! The `serde` feature adds `serde::UnixSeconds`, matching existing integer
 //! Unix-second JSON encodings for wall times.
-
-#![warn(missing_docs)]
 
 mod deadline;
 #[cfg(feature = "manual")]
@@ -53,14 +55,6 @@ pub use timer::{
 	timeout_at,
 };
 pub use wall::{OutOfRange, Wall};
-
-/// Run an `async fn` test to completion on [`sim::run`].
-#[cfg(feature = "sim")]
-pub use moq_clock_macros::test;
-
-// So `#[moq_clock::test]` resolves inside this crate's own tests.
-#[cfg(test)]
-extern crate self as moq_clock;
 
 /// The current instant on the ambient clock.
 pub fn now() -> Instant {

@@ -7,15 +7,15 @@ workspace lint prevents new direct reads outside backends and measurements.
 
 ## Plan
 
-Production code and exported APIs already read time through `moq-clock` and
+Production code and exported APIs already read time through `kio::clock` and
 `@moq/clock`. This follow-up owns the legacy test conversions, the
 workspace-wide lint ratchet, and the final audit of harness exceptions.
 
 Decided with the m1 migrations, so this sweep doesn't reopen them:
 
-- **Sim first.** A test with no real I/O runs on the `moq-clock` sim
-  (`#[moq_clock::test]`). One that cannot run there yet uses paused tokio,
-  whose clock `moq-clock` reads.
+- **Sim first.** A test with no real I/O runs on the `kio::clock` sim
+  (`#[kio::test]`). One that cannot run there yet uses paused tokio,
+  whose clock `kio::clock` reads.
 - **Real I/O syncs on events.** A test with sockets, browsers, codecs, or
   hardware never uses paused tokio, which auto-advances to the next timer while
   the OS event is still in flight. Wall time is allowed only for its watchdog

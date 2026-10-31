@@ -142,7 +142,7 @@ pub async fn accept(
 	let (creds, inbound, registration) = mux.register();
 	let mut rtc = RtcConfig::new()
 		.set_local_ice_credentials(creds)
-		.build(moq_clock::now().into_std());
+		.build(kio::clock::now().into_std());
 	for addr in mux.candidates() {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);

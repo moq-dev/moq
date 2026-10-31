@@ -1,4 +1,4 @@
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -106,7 +106,7 @@ impl Stats {
 	/// Record one group keyframe's wall-clock delivery latency.
 	pub fn latency(&self, sent_ms: u128) {
 		// Read the clock before locking so contention is not measured as latency.
-		let now_ms = moq_clock::wall()
+		let now_ms = kio::clock::wall()
 			.saturating_duration_since(Wall::UNIX_EPOCH)
 			.as_millis();
 		self.latency.observe(sent_ms, now_ms);
@@ -130,7 +130,7 @@ impl Stats {
 	/// recorded stats are partial is invalid, so the caller must fail the run
 	/// rather than exit green.
 	pub async fn report(&self, interval: Duration, mut output: Option<std::fs::File>) -> anyhow::Result<()> {
-		let mut ticker = moq_clock::interval(interval);
+		let mut ticker = kio::clock::interval(interval);
 		// Skip the immediate first tick so the first report covers a full interval.
 		ticker.tick().await;
 
@@ -435,7 +435,7 @@ impl Latency {
 		// include only part of an observation. One that reads the clock before the
 		// boundary but locks after it counts in the next interval, unaltered.
 		let state = self.state.lock().expect("latency lock poisoned");
-		let captured_at = moq_clock::wall();
+		let captured_at = kio::clock::wall();
 		let LatencyState {
 			buckets,
 			max_ms,

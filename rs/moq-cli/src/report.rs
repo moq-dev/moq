@@ -198,7 +198,7 @@ impl Stats {
 
 	/// Write a snapshot every interval, for as long as the import runs beside it.
 	pub async fn run(&mut self) -> Infallible {
-		let mut interval = moq_clock::interval(INTERVAL);
+		let mut interval = kio::clock::interval(INTERVAL);
 		loop {
 			interval.tick().await;
 			self.write();
@@ -298,7 +298,7 @@ impl Echo {
 				None
 			}
 		};
-		let mut interval = moq_clock::interval(INTERVAL);
+		let mut interval = kio::clock::interval(INTERVAL);
 		loop {
 			tokio::select! {
 				update = next(&mut catalog) => match update {
@@ -539,7 +539,7 @@ impl Readers {
 		};
 		let id = reader.id();
 		self.drains.spawn(async move {
-			moq_clock::sleep(DRAIN).await;
+			kio::clock::sleep(DRAIN).await;
 			(path, id)
 		});
 	}

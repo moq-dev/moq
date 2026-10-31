@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use url::Url;
 
 use crate::lease::{self, Due, Reason};
@@ -369,7 +369,7 @@ async fn ask<S: Post>(server: &S, request: &Request) -> crate::Result<Grant> {
 /// Finish a request that nothing else bounds within [`TIMEOUT`], or report the
 /// server as unavailable, so a stalled server cannot pile up requests.
 async fn bounded<T>(request: impl Future<Output = crate::Result<T>>) -> crate::Result<T> {
-	moq_clock::timeout(TIMEOUT, request).await.unwrap_or_else(|_| {
+	kio::clock::timeout(TIMEOUT, request).await.unwrap_or_else(|_| {
 		Err(Error::Unavailable(format!(
 			"the auth server did not answer within {TIMEOUT:?}"
 		)))
@@ -619,7 +619,7 @@ mod tests {
 	/// as zero and be refused; these tests run on a one-second cadence.
 	fn grant(expires_in: Option<Duration>, revalidate: Option<Duration>) -> Grant {
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
-		grant.expires = expires_in.map(|d| moq_clock::wall() + d);
+		grant.expires = expires_in.map(|d| kio::clock::wall() + d);
 		grant.revalidate = revalidate;
 		grant
 	}
@@ -1249,7 +1249,7 @@ mod tests {
 	async fn an_expired_grant_is_refused() {
 		tokio::time::pause();
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
-		grant.expires = Some(moq_clock::wall() - Duration::from_secs(1));
+		grant.expires = Some(kio::clock::wall() - Duration::from_secs(1));
 		let script = Script::new(Log::default(), move |_| Some(Ok(grant.clone())));
 		assert!(matches!(script.connect().await, Err(Error::GrantExpired)));
 	}
@@ -1282,7 +1282,7 @@ mod tests {
 	#[tokio::test]
 	async fn an_outage_keeps_the_grant_until_expires() {
 		tokio::time::pause();
-		let expires = moq_clock::wall() + Duration::from_secs(3);
+		let expires = kio::clock::wall() + Duration::from_secs(3);
 		let log = Log::default();
 		let script = Script::new(log.clone(), move |request| {
 			Some(match request.event {
@@ -1297,9 +1297,9 @@ mod tests {
 
 		// `expires` is wall-clock time, which the client maps onto Tokio's clock
 		// somewhere inside `connect`, so bracket it: the bounds hold however long it takes.
-		let (wall, tick) = (moq_clock::wall(), tokio::time::Instant::now());
+		let (wall, tick) = (kio::clock::wall(), tokio::time::Instant::now());
 		let consumer = script.connect().await.unwrap();
-		let earliest = tick + expires.checked_duration_since(moq_clock::wall()).unwrap();
+		let earliest = tick + expires.checked_duration_since(kio::clock::wall()).unwrap();
 		let latest = tokio::time::Instant::now() + expires.checked_duration_since(wall).unwrap();
 
 		// A millisecond either side for Tokio's timer resolution.

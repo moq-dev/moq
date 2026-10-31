@@ -186,9 +186,9 @@ case "$action" in
         if shapes_want moq-tokio; then just rs tokio-features; fi
         if shapes_want '(moq-video|moq-audio|moq-transcode)'; then just rs media-features; fi
         # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a
-        # wasm32 pass checks it. moq-mux, moq-ffi, and moq-clock ride along in that pass, and
+        # wasm32 pass checks it. moq-mux, moq-ffi, and kio ride along in that pass, and
         # nothing depends on moq-ffi, so each has to reach it on its own.
-        if wants '(moq-wasm|moq-mux|moq-ffi|moq-clock)'; then just rs wasm; fi
+        if wants '(moq-wasm|moq-mux|moq-ffi|kio)'; then just rs wasm; fi
         # Device code behind the off-by-default `capture` feature. check-test
         # lints it through the test build, as for the default features.
         if [[ "$action" != lint ]] && wants '(moq-video|moq-audio|moq-scene|moq-studio)'; then
@@ -204,7 +204,7 @@ case "$action" in
         ;;
     fix)
         just rs fix "${flags[@]}"
-        if wants '(moq-wasm|moq-mux|moq-ffi|moq-clock)'; then just rs wasm-fix; fi
+        if wants '(moq-wasm|moq-mux|moq-ffi|kio)'; then just rs wasm-fix; fi
         ;;
     test)
         # A selection can hold nothing testable, and

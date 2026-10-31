@@ -207,25 +207,25 @@ android *args:
 # build sees the code. Not to be confused with `just js wasm`, which builds the
 # shippable `@moq/wasm` package. `moq-mux` and `moq-ffi` share the invocation
 # because moq-mux needs the getrandom backend only its siblings declare, and
-# features unify only within one cargo invocation. `moq-clock` rides along to
-# compile its browser clock backend.
+# features unify only within one cargo invocation. `kio` rides along to
+# lint its browser clock backend.
 
 # Compile and lint the browser/WASM bindings, which the host-target check skips.
 [positional-arguments]
 wasm *args:
-    bash sh/local.sh cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi -p kio --target wasm32-unknown-unknown --lib "$@" -- -D warnings
 
 # Run the browser clock backend on the root devShell's Playwright Chromium,
 # with the runtime and with reads alone.
 wasm-test:
-    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" bash sh/local.sh cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown
-    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" bash sh/local.sh cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown --no-default-features
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" bash sh/local.sh cargo test --locked -p kio --lib --target wasm32-unknown-unknown --features runtime -- clock::
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" bash sh/local.sh cargo test --locked -p kio --lib --target wasm32-unknown-unknown -- clock::
 
 # Auto-fix the browser/WASM bindings.
 [positional-arguments]
 wasm-fix *args:
-    bash sh/local.sh cargo clippy --locked --fix --allow-staged --allow-dirty -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@"
-    cargo fmt -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock
+    bash sh/local.sh cargo clippy --locked --fix --allow-staged --allow-dirty -p moq-wasm -p moq-mux -p moq-ffi -p kio --target wasm32-unknown-unknown --lib "$@"
+    cargo fmt -p moq-wasm -p moq-mux -p moq-ffi -p kio
 
 # Audit dependencies against deny.toml. Nightly: advisories land without a diff.
 audit:
@@ -275,7 +275,7 @@ features:
 net-features *args:
     bash sh/rs/net-features.sh "$@"
 
-# Prove moq-quic leaves moq-clock's dev-only runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
+# Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
 [positional-arguments]
 quic-features *args:
     #!/usr/bin/env bash

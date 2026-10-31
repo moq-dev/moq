@@ -5,8 +5,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use kio::clock::Instant;
 use moq_audio::playback::Input;
-use moq_clock::Instant;
 
 use super::output::{Output, Sink, Speaker};
 use super::window::Event;
@@ -49,7 +49,7 @@ impl Recorder {
 	pub fn present(&self, media: &super::media::Media<Self>) -> Option<hang::moq_net::Timestamp> {
 		let mut video = media.video.lock().unwrap();
 		let presentation = media.presentation.lock().unwrap();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let mut shown = None;
 		while video
 			.front()
@@ -127,7 +127,7 @@ pub(super) struct FakeSink {
 
 impl Sink for FakeSink {
 	async fn finish(self) {
-		moq_clock::sleep_until(self.end).await;
+		kio::clock::sleep_until(self.end).await;
 	}
 
 	fn write(&mut self, samples: &[u8]) -> anyhow::Result<moq_audio::playback::Write> {

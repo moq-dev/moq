@@ -1,7 +1,7 @@
 name: WASM
 
 # Runs the @moq/wasm bindings in a real browser, which nothing in `just check`
-# can do, and moq-clock's browser timers and wall clock through
+# can do, and kio's browser timers and wall clock through
 # wasm-bindgen-test on the same Chromium. rs/moq-wasm is
 # `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace`
 # compiles it to nothing, and `just rs wasm` is a compile gate: it catches a
@@ -13,7 +13,7 @@ name: WASM
 # review (they are a thin wrapper over it, and every other gate compiles them to
 # nothing), and kio underneath it, because a lost wakeup or a timer regression
 # reaches the browser through moq-net without touching a file named here
-# otherwise. moq-clock supplies the browser clock below those layers.
+# otherwise. kio also supplies the browser clock below those layers.
 #
 # The rest of the filter is the machinery that turns the crate into the package
 # under test, which is just as able to break it: the root `justfile` owns the

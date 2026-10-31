@@ -33,7 +33,7 @@ failing page, and CI uploads it; a passing run deletes its own. See
 
 ## Rust clock
 
-`moq-clock`'s browser backend also runs here, using `wasm-bindgen-test` and the
+kio's browser clock backend also runs here, using `wasm-bindgen-test` and the
 same Chromium supplied by the root devShell:
 
 ```bash

@@ -149,7 +149,7 @@ fn all() -> Patterns {
 /// Everything under the dialed path, re-checked every second, good for `expires_in`.
 fn grant(expires_in: Duration) -> Grant {
 	let mut grant = Grant::new(all(), all());
-	grant.expires = Some(moq_clock::wall() + expires_in);
+	grant.expires = Some(kio::clock::wall() + expires_in);
 	grant.revalidate = Some(Duration::from_secs(1));
 	grant
 }
@@ -1501,20 +1501,20 @@ const EXPIRES: Duration = Duration::from_secs(3);
 
 /// Make the test runtime's clock one that only the test moves, wall time included,
 /// so a grant's life is measured exactly. Call it before anything reads the clock.
-fn manual() -> moq_clock::Installed {
-	moq_clock::Manual::new().install(&tokio::runtime::Handle::current())
+fn manual() -> kio::clock::Installed {
+	kio::clock::Manual::new().install(&tokio::runtime::Handle::current())
 }
 
 /// Everything under the dialed path, until [`EXPIRES`] from now on the ambient clock.
 fn expiring() -> Grant {
 	let mut grant = Grant::new(all(), all());
-	grant.expires = Some(moq_clock::wall() + EXPIRES);
+	grant.expires = Some(kio::clock::wall() + EXPIRES);
 	grant
 }
 
 /// Supervise an in-memory session admitted on `consumer`, whose grant nobody renews,
 /// and assert it closes at exactly [`EXPIRES`] on `clock`.
-async fn closes_at_expires(clock: &moq_clock::Installed, consumer: moq_auth::lease::Consumer) {
+async fn closes_at_expires(clock: &kio::clock::Installed, consumer: moq_auth::lease::Consumer) {
 	let (auth, mut admissions) = moq_relay::auth::Auth::embedded("test-relay");
 	let (lease, ()) = tokio::join!(auth.admit(auth.request(moq_auth::Transport::Tcp, "/room")), async {
 		admissions.next().await.expect("an admission").grant(consumer);
@@ -1725,7 +1725,7 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 	for scheme in ["tcp", "ws"] {
 		let mut initial = Grant::new(all(), "a/**".parse::<moq_auth::Pattern>().unwrap());
-		initial.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
+		initial.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		let script = Script::new(initial);
 		let auth = build_auth(script.spawn().await);
 		let (port, relay) = if scheme == "tcp" {
@@ -1777,7 +1777,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap();
 		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
-		replacement.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
+		replacement.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		script.on_connect(Answer::Grant(replacement));
 		let token = tokio::time::timeout(TIMEOUT, subscriber.auth().add("replacement"))
 			.await

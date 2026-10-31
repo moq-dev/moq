@@ -72,7 +72,7 @@ async fn master(server: &Server, broadcast: &str, query: Option<&str>) -> Respon
 	};
 	// A master listing no variant is unplayable: wait for one that can start, else answer
 	// unavailable.
-	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.advertised()).await;
+	let _ = kio::clock::timeout(READY_TIMEOUT, broadcaster.advertised()).await;
 	let (video, audio) = broadcaster.variants(query);
 	if video.is_empty() && audio.is_empty() {
 		return not_found();
@@ -84,17 +84,17 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 	let Some(broadcaster) = server.broadcaster(broadcast).await else {
 		return not_found();
 	};
-	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.ready()).await;
+	let _ = kio::clock::timeout(READY_TIMEOUT, broadcaster.ready()).await;
 	if broadcaster.is_empty() {
 		return not_found();
 	}
 	// A manifest whose renditions are all empty confuses players; give the broadcast a moment
 	// to index its first complete segment before answering.
-	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.playable()).await;
+	let _ = kio::clock::timeout(READY_TIMEOUT, broadcaster.playable()).await;
 	// Each representation names its init by hash, which an inline codec only learns from media.
 	// A player keeps the adaptation sets of the first manifest it loads, so wait for one video
 	// init rather than every init: a stuck rendition never holds a sibling that can play.
-	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.video_init()).await;
+	let _ = kio::clock::timeout(READY_TIMEOUT, broadcaster.video_init()).await;
 	match broadcaster.manifest(query) {
 		Ok(Some(manifest)) => mpd(manifest),
 		Ok(None) => not_found(),
@@ -106,7 +106,7 @@ async fn media(server: &Server, at: At<'_>, query: Option<&str>) -> Response {
 	let Some(rendition) = rendition_for(server, at).await else {
 		return not_found();
 	};
-	match moq_clock::timeout(READY_TIMEOUT, rendition.playlist(query)).await {
+	match kio::clock::timeout(READY_TIMEOUT, rendition.playlist(query)).await {
 		Ok(Ok(Some(playlist))) => m3u8(playlist),
 		Ok(Ok(None)) | Err(_) => not_found(),
 		Ok(Err(err)) => server_error(err),
@@ -150,7 +150,7 @@ impl<'a> At<'a> {
 /// Resolve a rendition, waiting for the catalog to populate.
 async fn rendition_for(server: &Server, at: At<'_>) -> Option<Arc<Rendition>> {
 	let broadcaster = server.instance(at.broadcast, at.instance).await?;
-	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.ready()).await;
+	let _ = kio::clock::timeout(READY_TIMEOUT, broadcaster.ready()).await;
 	broadcaster.rendition(at.kind, at.rendition)
 }
 

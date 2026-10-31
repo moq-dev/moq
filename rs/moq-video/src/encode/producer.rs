@@ -1235,10 +1235,10 @@ mod tests {
 	/// published timestamp may land up to `SAMPLING` early, never late.
 	#[cfg(all(feature = "capture", feature = "openh264"))]
 	mod clock {
-		use moq_clock::Wall;
+		use kio::clock::Wall;
 		use std::time::Duration;
 
-		use moq_clock::Instant;
+		use kio::clock::Instant;
 
 		use super::*;
 		use crate::capture::Synthetic;
@@ -1276,7 +1276,7 @@ mod tests {
 		impl Fixture {
 			/// Start the capture loop on a broadcast whose clock began `behind` ago, at `wall`.
 			async fn start(behind: Duration, wall: Wall) -> Self {
-				let epoch = moq_clock::now()
+				let epoch = kio::clock::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
 				let clock = moq_mux::Clock::at(epoch, wall).unwrap();
@@ -1437,7 +1437,7 @@ mod tests {
 		async fn a_late_first_frame_publishes_its_acquisition() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(5), moq_clock::wall()).await;
+					let fixture = Fixture::start(Duration::from_secs(5), kio::clock::wall()).await;
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
 
@@ -1460,7 +1460,7 @@ mod tests {
 		async fn a_device_clock_restart_continues_forward() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
 
@@ -1503,7 +1503,7 @@ mod tests {
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let idle = Duration::from_millis(300);
-					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
 
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
@@ -1539,7 +1539,7 @@ mod tests {
 		async fn a_reopen_onto_a_new_level_follows_the_new_track() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
 					let probed = fixture
 						.catalog
 						.snapshot()
@@ -1594,7 +1594,7 @@ mod tests {
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					// Whole seconds, so the advertised mapping holds it exactly.
-					let now = moq_clock::wall().checked_duration_since(Wall::UNIX_EPOCH).unwrap();
+					let now = kio::clock::wall().checked_duration_since(Wall::UNIX_EPOCH).unwrap();
 					let wall = Wall::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
 					let fixture = Fixture::start(Duration::from_secs(1), wall).await;
 					let advertised = fixture.catalog.snapshot().clock;
@@ -1622,7 +1622,7 @@ mod tests {
 		async fn hls_records_keep_the_live_timestamps() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
 					// The encoder's GOP hint declares the duration up front.
 					let hls = fixture.catalog.snapshot().video.renditions["video"]
 						.hls
@@ -2322,7 +2322,7 @@ mod tests {
 			probe::refuse_once(ceiling.as_bps());
 
 			// A minute without a wake is far past anything the ramp still needs.
-			while let Ok(next) = moq_clock::timeout(Duration::from_secs(60), next_target(&mut rate)).await {
+			while let Ok(next) = kio::clock::timeout(Duration::from_secs(60), next_target(&mut rate)).await {
 				apply_target(&mut sink, &mut rate, next).await;
 			}
 			let bitrates = probe::bitrates();

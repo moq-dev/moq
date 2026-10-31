@@ -816,7 +816,7 @@ async fn next_write(writes: Option<&mut mpsc::Receiver<Bytes>>) -> Option<Bytes>
 
 /// A str0m connection with this socket's host candidates.
 fn rtc(locals: &[SocketAddr]) -> Result<Rtc, Error> {
-	let mut rtc = Rtc::builder().build(moq_clock::now().into_std());
+	let mut rtc = Rtc::builder().build(kio::clock::now().into_std());
 	for &addr in locals {
 		let candidate = str0m::Candidate::host(addr, "udp").map_err(|err| Error::Candidate(err.to_string()))?;
 		rtc.add_local_candidate(candidate);

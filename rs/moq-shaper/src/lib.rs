@@ -42,9 +42,9 @@ mod preset;
 pub use preset::Preset;
 
 use anyhow::Context;
+use kio::clock::Instant;
 #[cfg(test)]
 use mem::UdpSocket;
-use moq_clock::Instant;
 use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
 use serde::{Deserialize, Serialize};
 #[cfg(not(test))]
@@ -898,7 +898,7 @@ async fn deliver(
 					None => ready.push(parcel),
 				}
 			}
-			_ = moq_clock::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
+			_ = kio::clock::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
 				// The window closes a batch that never filled.
 				if let Some(closes) = held.closes.filter(|&closes| closes <= Instant::now()) {
 					held.release(closes, &mut ready, &tally[direction]);

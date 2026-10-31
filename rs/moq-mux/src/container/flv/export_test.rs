@@ -137,7 +137,7 @@ async fn drain_export<S: crate::catalog::Stream>(mut exporter: Export<S>, import
 			Ok(Err(e)) => panic!("exporter error: {e}"),
 			Err(_) => {
 				if let Some(deadline) = exporter.next_deadline() {
-					tokio::time::advance(deadline.saturating_duration_since(moq_clock::now())).await;
+					tokio::time::advance(deadline.saturating_duration_since(kio::clock::now())).await;
 				} else {
 					importer = None; // No scheduled frames remain; close the broadcast.
 				}
@@ -1558,7 +1558,7 @@ async fn drain_until_idle<S: crate::catalog::Stream>(
 			Ok(Err(e)) => return Some(Err(e)),
 			Err(_) => {
 				let deadline = exporter.next_deadline()?;
-				tokio::time::advance(deadline.saturating_duration_since(moq_clock::now())).await;
+				tokio::time::advance(deadline.saturating_duration_since(kio::clock::now())).await;
 			}
 		}
 	}
@@ -1743,7 +1743,7 @@ async fn delay_drops_late_frames_and_drains_the_final_frame() {
 	let delay = std::time::Duration::from_millis(100);
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await).with_delay(delay);
 	export.next().await.unwrap().unwrap();
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	live.track.write(raw_frame(0, b"first", true)).unwrap();
 	let first = export.next().await.unwrap().unwrap();
 	assert!(first.windows(5).any(|part| part == b"first"));

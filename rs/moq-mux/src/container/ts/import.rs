@@ -439,7 +439,7 @@ impl<E: catalog::Catalog> Import<E> {
 	/// coalesces a junction's burst of sub-table commits into few groups instead of one per
 	/// commit.
 	pub(super) fn flush_batch(&mut self) -> anyhow::Result<()> {
-		self.damage_log.flush(moq_clock::now());
+		self.damage_log.flush(kio::clock::now());
 		self.si.flush(self.last_pts.unwrap_or(Timestamp::ZERO), false)
 	}
 
@@ -5631,7 +5631,7 @@ pub(super) mod test {
 		if anchored {
 			// The shift then depends on the wall clock, so only its consistency is checked.
 			let first = Timestamp::from_scale(picture(0), 90_000).unwrap();
-			timebase.place(first, moq_clock::wall()).unwrap();
+			timebase.place(first, kio::clock::wall()).unwrap();
 		}
 		let mut import = super::Import::new(broadcast, timebase.reserve());
 
@@ -10499,7 +10499,7 @@ pub(super) mod test {
 				std::task::Poll::Ready(Err(err)) => panic!("exporter error: {err}"),
 				std::task::Poll::Pending => {
 					let Some(deadline) = exporter.next_due() else { break };
-					moq_clock::sleep_until(deadline).await;
+					kio::clock::sleep_until(deadline).await;
 				}
 			}
 		}

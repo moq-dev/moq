@@ -1063,7 +1063,7 @@ fn uring_workers_bound_stalled_handshakes() {
 		.enable_all()
 		.build()
 		.expect("runtime");
-	let clock = moq_clock::Manual::new().install(runtime.handle());
+	let clock = kio::clock::Manual::new().install(runtime.handle());
 	runtime.block_on(async move {
 		let dir = tempfile::tempdir().expect("tempdir");
 		let (cert, key) = certificate(dir.path());
