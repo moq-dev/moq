@@ -141,6 +141,10 @@ supersede the epoch-minting, pairing and run-uniqueness answers above:
 - Takeover: ✅ re-plan it around identity, where a job's exact route
   inherits its claim's identity and ANNOUNCE_TAKEOVER is dropped; keep the
   predecessor-ID plan.
+  The predecessor design then landed on main in
+  [moq-dev/moq#6994](https://github.com/moq-dev/moq/pull/6994). On
+  2026-10-31 the maintainer kept identity: [announce takeover](/quest/m1/announce-takeover.md)
+  now also removes that work, so only one continuity rule remains.
 
 The epic owns no work of its own: each child updates the docs it makes
 stale, including `doc/concept/identity.md`.

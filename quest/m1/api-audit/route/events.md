@@ -5,8 +5,8 @@
 Applications read announcements as a listing: each path is present or
 absent. Instance changes, whether a restart or a takeover, are handled
 inside `follow` and `request`, not seen as announce events. The `Start`,
-`Update`, `End` and `Restart` variants leave the app API in Rust, JS,
-moq-ffi, moq-c and the wrappers. Route metadata changes (cost, hops,
+`Update`, `End`, `Restart` and `Takeover` variants leave the app API in
+Rust, JS, moq-ffi, moq-c and the wrappers. Route metadata changes (cost, hops,
 preference) move to a relay-level `routes()` stream that moq-relay and
 stats use.
 
@@ -19,7 +19,7 @@ Decided 2026-10-30 (maintainer); see the [epic](/quest/m1/api-audit/route/README
 The audit found that almost every production caller merges the variants,
 for example `rs/moq-relay/src/internal.rs:933`, `rs/moq-rtc/src/lib.rs:81`
 and `rs/moq-cli/src/archive.rs:85`. Every JS consumer branches only on
-`end`. Only `rs/moq-boy/src/input.rs:76` handles `Restart` alone, and it
+`end`. Only `rs/moq-boy/src/input.rs:79` handles `Restart` alone, and it
 moves to `follow`.
 
 - The listing yields present and absent per path, with the announcement's
@@ -35,6 +35,10 @@ moves to `follow`.
   hidden from the app-level docs.
 - Format the go and python interop clients while touching them (two lines
   were already unformatted on 2026-10-30).
+- `Takeover` (landed in [moq-dev/moq#6994](https://github.com/moq-dev/moq/pull/6994))
+  goes with the rest, along with its predecessor fields in
+  `MoqAnnounceEvent` and `moq_announce_event`, unless
+  [announce takeover](/quest/m1/announce-takeover.md) has already removed it.
 - Bindings: replace `MoqAnnounceEvent`'s variants, and the go and python
   interop clients' and carla `publish.py:303-340`'s Restart handling, with
   the listing plus `follow`.

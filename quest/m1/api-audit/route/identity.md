@@ -98,9 +98,10 @@ Decided 2026-10-30 (maintainer); every prompt is in the
   two identities), `doc/bin/cli.md` ("Publisher runs", and `--epoch`, which
   becomes `--identity`) and `doc/bin/relay/config.md`.
 - **moq.pro.** Recording resume compares `routeEpoch`
-  (`api/src/recording.ts`), and recordings are keyed `<path>/@<epoch>/...`.
-  The Impact section says to key on identity and record the start time on
-  moq.pro's side, for moq.pro's bump.
+  (`api/src/recording.ts`). Recordings are currently keyed
+  `<path>/@<epoch>/...`; the target key is `(path, identity)`, since an
+  epoch only orders one identity's runs. The Impact section says to key on
+  identity and record the start time on moq.pro's side, for moq.pro's bump.
 - **Tests.** Cover a higher epoch superseding a cheaper stale route of the
   same identity; a reader continuing across an epoch change; two identities
   hashing per path; a failover to another identity ending the broadcast and

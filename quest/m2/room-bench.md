@@ -10,11 +10,13 @@ benchmark shows the change.
 
 ## Plan
 
-Planned 2026-10-31 (`/quest-plan`, maintainer), a follow-up reported by the
-[Listing and follow](/quest/m1/api-audit/route/events.md) implementation:
-`Room` now holds a follower per listed path and polls every follower on each
-wake, which is fine at room sizes seen today. Benchmark first, as
-[Keyed prefix polling](/quest/m2/keyed-prefix-polling.md) does, and fix
+Planned 2026-10-31 (`/quest-plan`, maintainer), a follow-up to the
+required [Listing and follow](/quest/m1/api-audit/route/events.md)
+implementation, after which `Room` will hold a follower per listed path and
+poll every follower on each wake. That should be fine at room sizes seen
+today. Benchmark first, as
+[moq-dev/moq#7340](https://github.com/moq-dev/moq/pull/7340) did for the
+lite subscriber's prefixes, and fix
 only if it shows a slope. Wire the benchmark into the existing bench lanes
 ([Benchmark sources](/quest/m2/bench-sources.md)).
 
