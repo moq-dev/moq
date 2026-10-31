@@ -62,7 +62,6 @@ behavior follows quinn's fixes.
 - [moq-v4l has every libv4l-rs fix it needs](/quest/m1/vendor-sync/v4l.md) - libv4l-rs fixes since v4l 0.14 are ported or the API they fix is gone
 - [UniFFI generator forks are current](/quest/m1/vendor-sync/uniffi.md) - the generator forks carry upstream's fixes until rust2 replaces them
 - [moq-vaapi has every cros-codecs fix it needs](/quest/m1/vendor-sync/vaapi.md) - cros-libva and cros-codecs fixes reach moq-dev/vaapi
-- [moq-nvenc has every upstream fix it needs](/quest/m1/vendor-sync/nvenc.md) - nvidia-video-codec-sdk fixes since the vendored commit are ported
 - [moq-rtmp's rml has every upstream fix it needs](/quest/m1/vendor-sync/rml.md) - rust-media-libs fixes since rml_rtmp 0.8.0 are ported
 
 ## Related
