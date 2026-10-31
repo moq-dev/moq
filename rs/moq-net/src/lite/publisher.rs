@@ -90,11 +90,21 @@ struct Shared {
 	estimate: kio::ProducerWeak<crate::session::Estimate>,
 	/// The peer's latest PROBE target, which the session's sender probes up to.
 	peer_target: kio::Producer<crate::bandwidth::Rate>,
-	/// The newest PROBE stream to set `peer_target`, so a superseded stream whose
-	/// buffered targets or end arrive after its replacement's target can't touch it.
-	peer_target_owner: Mutex<u64>,
-	/// Numbers each PROBE stream for `peer_target_owner` in accept order, from 1.
+	/// Each open PROBE stream's latest target, which `peer_target` follows.
+	peer_targets: Mutex<PeerTargets>,
+	/// Numbers each PROBE stream for `peer_targets`.
 	probe_streams: AtomicU64,
+}
+
+/// The latest target each open PROBE stream sent, so the peer's target is the newest
+/// one written by a stream still open. A superseded stream's late targets and end then
+/// settle on its replacement's target whatever order they arrive in, with no need to
+/// know which stream the peer opened first.
+#[derive(Default)]
+struct PeerTargets {
+	/// By stream: when its target was written, counted by `writes`, and the target.
+	streams: HashMap<u64, (u64, crate::bandwidth::Rate)>,
+	writes: u64,
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
@@ -133,23 +143,29 @@ fn cursor_floor(version: Version, start_group: Option<u64>, latest: Option<u64>)
 }
 
 impl Shared {
-	/// Record the peer's PROBE target from stream `owner`, which only a session with a
-	/// sender acts on. The newest stream to send one wins; an older one is ignored.
-	fn set_peer_target(&self, owner: u64, target: crate::bandwidth::Rate) {
-		let mut current = self.peer_target_owner.lock().unwrap();
-		if owner < *current {
-			return;
-		}
-		*current = owner;
+	/// Record the PROBE target stream `stream` sent, which only a session with a sender
+	/// acts on. The latest write wins while several streams are open.
+	fn set_peer_target(&self, stream: u64, target: crate::bandwidth::Rate) {
+		let mut targets = self.peer_targets.lock().unwrap();
+		targets.writes += 1;
+		let order = targets.writes;
+		targets.streams.insert(stream, (order, target));
 		self.write_peer_target(target);
 	}
 
-	/// Lapse the peer's PROBE target with stream `owner`, unless a later stream set it.
-	fn clear_peer_target(&self, owner: u64) {
-		let current = self.peer_target_owner.lock().unwrap();
-		if *current == owner {
-			self.write_peer_target(crate::bandwidth::Rate::ZERO);
+	/// Lapse the target stream `stream` sent as it ends, falling back to the newest one
+	/// another open stream sent, or zero.
+	fn clear_peer_target(&self, stream: u64) {
+		let mut targets = self.peer_targets.lock().unwrap();
+		if targets.streams.remove(&stream).is_none() {
+			return;
 		}
+		let newest = targets
+			.streams
+			.values()
+			.max_by_key(|(order, _)| *order)
+			.map_or(crate::bandwidth::Rate::ZERO, |(_, target)| *target);
+		self.write_peer_target(newest);
 	}
 
 	fn write_peer_target(&self, target: crate::bandwidth::Rate) {
@@ -246,7 +262,7 @@ impl Publisher {
 				runtime: config.runtime.clone(),
 				estimate: config.estimate,
 				peer_target: kio::Producer::new(crate::bandwidth::Rate::ZERO),
-				peer_target_owner: Mutex::new(0),
+				peer_targets: Default::default(),
 				probe_streams: AtomicU64::new(0),
 			}),
 			runtime: config.runtime,
@@ -696,7 +712,7 @@ struct ProbeServe {
 	due: crate::time::Deadline,
 	/// A peer streaming targets still lets the session's other tasks run.
 	budget: kio::coop::Budget,
-	/// This stream's number, owning the peer's target while it sent the latest one.
+	/// This stream's key in the session's `peer_targets`.
 	id: u64,
 }
 
@@ -763,8 +779,8 @@ impl ProbeServe {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let res = ready!(self.poll_probe(waiter));
-		// The stream carried the target, so it lapses with it, unless a newer stream's
-		// target arrived before this one's end.
+		// The stream carried the target, so it lapses with it, back to another open
+		// stream's target if a replacement already sent one.
 		self.shared.clear_peer_target(self.id);
 		match res {
 			Ok(()) => tracing::debug!("probe stream closed"),
@@ -7665,8 +7681,8 @@ mod tests {
 	}
 
 	/// A subscriber that drops its PROBE stream and opens another can see the new
-	/// stream's target land before the old stream's buffered targets and end: neither
-	/// may replace or clear it.
+	/// stream's target land before the old stream's buffered targets and end, in any
+	/// order: once the old stream ends, the new stream's target stands.
 	#[moq_clock::test]
 	async fn a_superseded_probe_stream_keeps_its_successors_target() {
 		use crate::bandwidth::Rate;
@@ -7683,9 +7699,13 @@ mod tests {
 
 		shared.set_peer_target(old.id, Rate::from_bps(1_000_000));
 		shared.set_peer_target(new.id, Rate::from_bps(2_000_000));
+		// The old stream's buffered target lands late, winning while it is open.
 		shared.set_peer_target(old.id, Rate::from_bps(3_000_000));
-		assert_eq!(*target.read(), Rate::from_bps(2_000_000));
+		assert_eq!(*target.read(), Rate::from_bps(3_000_000));
 		shared.clear_peer_target(old.id);
+		assert_eq!(*target.read(), Rate::from_bps(2_000_000));
+		// A stream that never sent a target ends without touching the others'.
+		shared.clear_peer_target(old.id + new.id + 1);
 		assert_eq!(*target.read(), Rate::from_bps(2_000_000));
 
 		shared.clear_peer_target(new.id);
