@@ -925,8 +925,9 @@ export class Publisher {
 			// On lite-05, a SUBSCRIBE sent alongside its TRACK can arrive before the track
 			// resolves, when no group is known yet: the newest once it resolves stands in, as it
 			// would for one sent after.
-			if (latest === undefined && hasTrackStream(this.version)) {
-				floor = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
+			const resolved = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
+			if (latest === undefined && hasTrackStream(this.version) && resolved !== floor) {
+				floor = resolved;
 				track.withRange({
 					start: { included: floor },
 					end: endGroup === undefined ? undefined : { excluded: endGroup },
