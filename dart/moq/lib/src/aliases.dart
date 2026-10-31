@@ -71,7 +71,8 @@ typedef AnnounceRoute = MoqAnnounceRoute;
 typedef Announce = MoqAnnounce;
 
 /// What an [AnnounceConsumer] yields: [AnnounceEventStart],
-/// [AnnounceEventUpdate], [AnnounceEventEnd], or [AnnounceEventRestart].
+/// [AnnounceEventUpdate], [AnnounceEventEnd], [AnnounceEventRestart], or
+/// [AnnounceEventTakeover].
 typedef AnnounceEvent = MoqAnnounceEvent;
 
 /// A route now covers the prefix; the stream had none there.
@@ -86,6 +87,10 @@ typedef AnnounceEventEnd = EndMoqAnnounceEvent;
 /// Another publisher instance now serves the prefix: drop what was resolved
 /// under it and request afresh.
 typedef AnnounceEventRestart = RestartMoqAnnounceEvent;
+
+/// A route now covers the prefix and continues what the route at `predecessor`
+/// served beneath it: keep what was resolved through that one.
+typedef AnnounceEventTakeover = TakeoverMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;
@@ -143,6 +148,9 @@ typedef Anchor = MoqAnchor;
 
 /// Which pending group the publisher sends first.
 typedef Order = MoqOrder;
+
+/// A location within a track: a group sequence and a frame index in it.
+typedef Position = MoqPosition;
 
 /// Options for fetching one past group by sequence.
 typedef FetchGroupOptions = MoqFetchGroupOptions;

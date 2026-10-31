@@ -6,8 +6,8 @@ use crate::origin;
 use crate::time::{Deadlines, Instant};
 use crate::transport::poll::Session as _;
 use crate::{
-	ALPN_18, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume,
-	Error, NEGOTIATED, Session, SessionError, Version, Versions,
+	ALPN_18, ALPN_20, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP,
+	Consume, Error, NEGOTIATED, Session, SessionError, Version, Versions,
 	coding::{Encode, Stream},
 	ietf, lite,
 	setup::{self, Role},
@@ -42,14 +42,14 @@ impl Activity {
 	/// Wait until every admitted connection has left, then refuse new ones.
 	pub async fn close(&self) {
 		loop {
-			if self.state.unused().await.is_err() {
+			if self.state.wanted_changed(true).await.is_err() {
 				return;
 			}
-			match self.state.write_unused() {
-				kio::Unused::Idle(state) => return state.close(),
+			match self.state.write_unwanted() {
+				kio::Unwanted::Idle(state) => return state.close(),
 				// Admitted between the wake and the commit: wait for it too.
-				kio::Unused::Used => continue,
-				kio::Unused::Closed => return,
+				kio::Unwanted::Wanted => continue,
+				kio::Unwanted::Closed => return,
 			}
 		}
 	}
@@ -324,9 +324,10 @@ impl Server {
 
 	async fn handshake(&self, runtime: Deadlines, mut session: Transport) -> Result<Handshake, Error> {
 		let supported = match session.protocol() {
-			Some(alpn @ (ALPN_22 | ALPN_18)) => {
+			Some(alpn @ (ALPN_22 | ALPN_20 | ALPN_18)) => {
 				let draft = match alpn {
 					ALPN_22 => ietf::Version::Draft22,
+					ALPN_20 => ietf::Version::Draft20,
 					_ => ietf::Version::Draft18,
 				};
 

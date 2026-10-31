@@ -299,7 +299,7 @@ export class Connection implements Established {
 		}
 
 		const probes = new Effect((effect) => {
-			if (!effect.get(this.#probe.used)) return;
+			if (!effect.get(this.#probe.wanted)) return;
 			effect.spawn(() => this.#subscriber.runProbe(effect.abort, this.#probeTarget));
 		});
 

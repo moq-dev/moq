@@ -374,15 +374,15 @@ test("the viewers' target sums their ceilings until overridden", () => {
 test("an idle viewers registry does not observe the estimate", async () => {
 	const estimate = new Observed<number | undefined>(1_000_000);
 	const viewers = new Viewers(estimate);
-	expect(estimate.used.peek()).toBe(false);
+	expect(estimate.wanted.peek()).toBe(false);
 
 	const viewer = viewers.watch(1_000_000);
 	await settled();
-	expect(estimate.used.peek()).toBe(true);
+	expect(estimate.wanted.peek()).toBe(true);
 
 	viewer.close();
 	await settled();
-	expect(estimate.used.peek()).toBe(false);
+	expect(estimate.wanted.peek()).toBe(false);
 
 	viewers.close();
 });

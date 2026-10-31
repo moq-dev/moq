@@ -36,8 +36,8 @@ fn ietf_range_updates_interop() {
 		responses: Vec<Vec<u8>>,
 		streams: Vec<Vec<u8>>,
 	}
-	for version in [ietf::Version::Draft18, ietf::Version::Draft22] {
-		let draft22 = Filter::is_draft22(version);
+	for version in [ietf::Version::Draft18, ietf::Version::Draft20, ietf::Version::Draft22] {
+		let draft20 = Filter::is_draft20(version);
 		let range = |start, end: Option<u64>| Filter::Absolute {
 			start: Location {
 				group: start,
@@ -54,7 +54,7 @@ fn ietf_range_updates_interop() {
 			track_name: "video".into(),
 			subscriber_priority: 127,
 			group_order: ietf::GroupOrder::Ascending,
-			filter: if draft22 { range(4, None) } else { Filter::Unfiltered },
+			filter: if draft20 { range(4, None) } else { Filter::Unfiltered },
 			fill: None,
 			properties_wanted: false,
 			forward: true,
@@ -86,7 +86,7 @@ fn ietf_range_updates_interop() {
 			bytes
 		};
 		let mut updates = Vec::new();
-		if draft22 {
+		if draft20 {
 			updates.push(update(
 				2,
 				range(3, None),
@@ -113,13 +113,13 @@ fn ietf_range_updates_interop() {
 				assert_eq!(r.varint().unwrap(), ietf::SubscribeOk::ID);
 				let ok = ietf::SubscribeOk::decode(&mut r, version).unwrap();
 				assert_eq!(ok.track_alias, 0);
-				assert_eq!(ok.largest, draft22.then_some(Location { group: 3, object: 1 }));
+				assert_eq!(ok.largest, draft20.then_some(Location { group: 3, object: 1 }));
 			} else {
 				assert_eq!(r.varint().unwrap(), ietf::RequestOk::ID);
 				let ok = ietf::RequestOk::decode(&mut r, version).unwrap();
 				assert_eq!(
 					ok.largest,
-					if draft22 {
+					if draft20 {
 						Some(Location {
 							group: index as u64 + 2,
 							object: 1,
@@ -136,7 +136,7 @@ fn ietf_range_updates_interop() {
 		for bytes in &served.streams {
 			let mut r = Decoder::new(bytes, version.into());
 			if r.varint().unwrap() == ietf::FetchHeader::TYPE {
-				assert!(draft22);
+				assert!(draft20);
 				assert_eq!(
 					ietf::FetchHeader::decode(&mut r, version).unwrap().request_id,
 					RequestId(2)
@@ -182,7 +182,7 @@ fn ietf_range_updates_interop() {
 		groups.sort_unstable();
 		assert_eq!(
 			groups,
-			if draft22 {
+			if draft20 {
 				vec![(3, vec![]), (4, vec![0, 1]), (6, vec![0, 1]), (7, vec![0, 1])]
 			} else {
 				vec![(6, vec![0, 1]), (7, vec![0, 1])]
@@ -191,7 +191,7 @@ fn ietf_range_updates_interop() {
 		);
 		assert_eq!(
 			filled,
-			if draft22 {
+			if draft20 {
 				(3..4).flat_map(|group| [(group, 0), (group, 1)]).collect::<Vec<_>>()
 			} else {
 				vec![]
@@ -429,8 +429,11 @@ fn ietf_datagram_interop() {
 	use crate::coding::Decode;
 	use crate::{Timescale, Timestamp};
 
-	let all = [ietf::Version::Draft18, ietf::Version::Draft22];
-	for (draft, version) in [18, 22].into_iter().zip(all) {
+	for (draft, version) in [
+		(18, ietf::Version::Draft18),
+		(20, ietf::Version::Draft20),
+		(22, ietf::Version::Draft22),
+	] {
 		let mut properties = Vec::new();
 		let mut w = Encoder::new(&mut properties, version.into());
 		ietf::encode_object_time(&mut w, Timestamp::from_millis(1234).unwrap(), Timescale::MILLI).unwrap();
@@ -594,8 +597,11 @@ fn ietf_track_status_interop() {
 	use crate::coding::Decode;
 	use crate::ietf::error::request;
 
-	let all = [ietf::Version::Draft18, ietf::Version::Draft22];
-	for (draft, version) in [18, 22].into_iter().zip(all) {
+	for (draft, version) in [
+		(18, ietf::Version::Draft18),
+		(20, ietf::Version::Draft20),
+		(22, ietf::Version::Draft22),
+	] {
 		let request = |id: u64, namespace: &str, wanted: bool| {
 			let mut buf = Vec::new();
 			let mut w = Encoder::new(&mut buf, version.into());
@@ -630,8 +636,8 @@ fn ietf_track_status_interop() {
 			assert!(r.is_empty(), "{version}: trailing bytes");
 
 			let expected = match version {
-				// Only draft-22 can carry the opt-out.
-				_ if !wanted && ietf::Filter::is_draft22(version) => ietf::Properties::default(),
+				// Draft 20 and later can carry the opt-out.
+				_ if !wanted && ietf::Filter::is_draft20(version) => ietf::Properties::default(),
 				_ => ietf::Properties {
 					unknown: Default::default(),
 					dynamic_groups: false,

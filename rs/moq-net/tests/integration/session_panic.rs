@@ -83,7 +83,8 @@ async fn until(announced: &mut announce::Consumer, path: &str, active: bool) {
 			let (announce, now_active) = match announced.next().await.expect("origin closed") {
 				announce::Event::Start(announce)
 				| announce::Event::Update(announce)
-				| announce::Event::Restart(announce) => (announce, true),
+				| announce::Event::Restart(announce)
+				| announce::Event::Takeover { announce, .. } => (announce, true),
 				announce::Event::End(announce) => (announce, false),
 			};
 			if announce.prefix.as_str() == path && now_active == active {

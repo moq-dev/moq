@@ -110,6 +110,9 @@ when its session does.
 
 `MediaTrackConsumer` reads `MediaRead` records in decode order: `kFrame`, `kGap`, or
 `kEnd`, like the audio and video decoders. Match the variant before taking its frame.
+A decoder reads everything the track still holds unless a live player sets `start` to
+`moq::DecodeStart::kLatest` in its decoder output, which joins at the newest group and skips
+the cached backlog.
 A gap breaks continuity. An encoder end is not stream EOF: following frames before its
 endpoint are the old encoder's drain; the first at or past it starts fresh. For arrival-order reads, decode each group
 from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
