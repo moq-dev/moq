@@ -169,6 +169,12 @@ impl Reader {
 		self.open.last().and_then(|open| open.end)
 	}
 
+	/// Where the innermost open master ends: its declared end, or an unknown-size master's nearest
+	/// sized ancestor's.
+	fn bound(&self) -> Option<u64> {
+		self.open.iter().rev().find_map(|open| open.end)
+	}
+
 	/// Enter the started master; its children follow.
 	pub fn descend(&mut self) -> Result<(), Error> {
 		let header = self.take_pending();
@@ -225,9 +231,10 @@ impl Reader {
 		loop {
 			match &mut self.body {
 				Body::Between => {
-					// A known-size master ends exactly at its declared end.
+					// A master ends at its declared end, and an unknown-size one at its nearest
+					// sized ancestor's.
 					if let Some(open) = self.open.last()
-						&& open.end == Some(self.position)
+						&& self.bound() == Some(self.position)
 					{
 						let id = open.id;
 						self.open.pop();
@@ -249,16 +256,16 @@ impl Reader {
 						self.open.pop();
 						return Ok(Some(Event::End(id)));
 					}
-					// The header's own bytes were checked against the parent as they were parsed.
-					if let Some(parent) = self.parent_end()
-						&& header.end.is_none_or(|end| end > parent)
+					if let Some(bound) = self.bound()
+						&& header.end.unwrap_or(self.position) > bound
 					{
 						return Err(Error::MatroskaParse);
 					}
 					self.body = Body::Pending(header);
 					return Ok(Some(Event::Start(header)));
 				}
-				Body::Pending(_) => panic!("a started element awaits a choice"),
+				// A refused choice leaves the element unread, so nothing after it can be framed.
+				Body::Pending(_) => return Err(Error::MatroskaParse),
 				Body::Read { id, end, data } => {
 					let taken = take(input, *end - self.position);
 					data.extend_from_slice(taken);
@@ -335,8 +342,8 @@ impl Reader {
 		let Some((id, size, len)) = parsed else {
 			// The bytes held are a header prefix, which cannot cross the parent's end.
 			self.position = start + self.header.len() as u64;
-			if let Some(parent) = self.parent_end()
-				&& self.position > parent
+			if let Some(bound) = self.bound()
+				&& self.position > bound
 			{
 				return Err(Error::MatroskaParse);
 			}
@@ -548,6 +555,29 @@ mod tests {
 			]
 		);
 		for chunk in 1..data.len() {
+			assert_eq!(walk(&data, chunk), expected, "chunk {chunk}");
+		}
+	}
+
+	#[test]
+	fn an_unknown_size_cluster_ends_with_its_sized_segment() {
+		let data = [
+			0x18, 0x53, 0x80, 0x67, 0x88, // Segment of 8 bytes
+			0x1f, 0x43, 0xb6, 0x75, 0xff, // Cluster, unknown size
+			0xe7, 0x81, 0x05, // Timestamp 5
+			0xe7, 0x81, 0x06, // a top-level Timestamp after the Segment
+		];
+		let expected = [
+			"start 18538067",
+			"start 1f43b675",
+			"start e7",
+			"value e7 [5]",
+			"end 1f43b675",
+			"end 18538067",
+			"start e7",
+			"value e7 [6]",
+		];
+		for chunk in 1..=data.len() {
 			assert_eq!(walk(&data, chunk), expected, "chunk {chunk}");
 		}
 	}

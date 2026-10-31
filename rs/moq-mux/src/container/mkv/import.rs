@@ -334,6 +334,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		result
 	}
 
+	fn drain_eof(&mut self) -> Result<()> {
+		while let Some(event) = self.reader.finish()? {
+			self.handle(event)?;
+		}
+		Ok(())
+	}
+
 	fn drain(&mut self, mut input: &[u8]) -> Result<()> {
 		while let Some(event) = self.reader.next(&mut input)? {
 			self.handle(event)?;
@@ -817,10 +824,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// truncated.
 	pub fn finish(&mut self) -> Result<()> {
 		self.finished = true;
-		while self.failed.is_none()
-			&& let Some(event) = self.reader.finish()?
+		if self.failed.is_none()
+			&& let Err(err) = self.drain_eof()
 		{
-			self.handle(event)?;
+			// A frame cut short fails its group with the reason, rather than waiting for the rest.
+			self.abort_block(err.reason());
+			return Err(err);
 		}
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
@@ -1619,6 +1628,20 @@ mod tests {
 			import.decode(&payload).unwrap();
 		}
 		import.finish().unwrap();
+	}
+
+	#[tokio::test]
+	async fn truncation_fails_the_frame_cut_short() {
+		let (mut import, catalog, consumer) = import();
+		import.decode(&live(vec![entry(1, 1, "V_VP9")])).unwrap();
+		import.decode(&simple_block(1, 1024)).unwrap();
+		import.decode(&[4; 512]).unwrap();
+		let mut frame = first_frame(&catalog, &consumer).await;
+		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+		// The importer is still owned, and the frame fails rather than waiting on it.
+		let read = tokio::time::timeout(WAIT, frame.read_all()).await.unwrap();
+		assert!(read.is_err(), "a truncated frame must not read as complete: {read:?}");
+		drop(import);
 	}
 
 	#[tokio::test]
