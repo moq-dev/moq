@@ -2943,8 +2943,16 @@ impl Subscriber {
 				None => Ok(subscription),
 			})
 			.transpose();
+		// A relative anchor the copy cannot settle yet counts back from the Largest Object, so
+		// the live join that names it goes first and the answer resolves the anchor. No Group ID
+		// arithmetic spells it upstream. A time anchor names no group the answer settles.
+		let deferred = matches!(subscription, Err(Error::Unsupported))
+			&& target
+				.subscription()
+				.is_some_and(|subscription| !has_time(&subscription));
 		let subscription = match subscription {
 			Ok(subscription) => subscription,
+			Err(_) if deferred => None,
 			Err(err) => {
 				target.fail(err);
 				return None;
@@ -3420,6 +3428,11 @@ impl Subscriber {
 		// the group carries over: its first frame is the edge a reader can count on.
 		if let Some(largest) = largest {
 			track.report_object(largest.group, largest.object);
+			// A live join's Largest is where its feed is, which a relative anchor counts back
+			// from even when a newer group lands before the joined one.
+			if live {
+				track.report_edge(largest.group);
+			}
 		}
 		// A live join starts at the publisher's edge; an absolute one where it asked. With
 		// no Largest the join skips nothing, so every group is owed: a lower one's stream
@@ -3431,6 +3444,14 @@ impl Subscriber {
 		if let Some(staged) = staged {
 			staged.commit();
 		}
+		// Resolved while the answer's Largest is still the live edge: no data stream reaches
+		// the copy before its alias is bound below.
+		let settled = match deferred {
+			true => track
+				.subscription()
+				.map(|subscription| (settle_bounds(&mut resolved, &track, &subscription), subscription)),
+			false => None,
+		};
 		let mut fetching: Option<JoiningTask> = None;
 		{
 			let mut state = self.state.lock();
@@ -3490,6 +3511,17 @@ impl Subscriber {
 		let mut priority = priority;
 		let mut sent_bounds = (start, subscription.as_ref().and_then(|subscription| subscription.end()));
 		let mut wanted_bounds = Ok(sent_bounds);
+		// A deferred relative anchor, until the copy learns the live edge it counts back from:
+		// an answer with no Largest leaves it to the first group. The bounds it then resolves
+		// to go upstream as an update, absolute like any other.
+		let mut unsettled = None;
+		match settled {
+			Some((Ok(Some(bounds)), _)) => wanted_bounds = Ok(bounds),
+			Some((Ok(None), subscription)) => unsettled = Some(subscription),
+			Some((Err(err), _)) => wanted_bounds = Err(err),
+			None => {}
+		}
+		let mut edge = track.consume();
 		// REQUEST_UPDATEs sent and not yet answered.
 		let unanswered = AtomicU64::new(0);
 
@@ -3561,14 +3593,28 @@ impl Subscriber {
 						subscribed = subscription
 							.as_ref()
 							.is_some_and(|subscription| !subscription.ranges.is_empty());
+						unsettled = None;
 						if let Some(subscription) = subscription {
 							priority = subscription.priority;
-							wanted_bounds = resolved
-								.resolve(&track, &subscription)
-								.map(|subscription| wire_bounds(&subscription));
+							match settle_bounds(&mut resolved, &track, &subscription) {
+								Ok(Some(bounds)) => wanted_bounds = Ok(bounds),
+								Ok(None) => unsettled = Some(subscription.clone()),
+								Err(err) => wanted_bounds = Err(err),
+							}
 							if max_age_supported {
 								wanted_max_age = Some(super::max_age::millis(subscription.budget()));
 							}
+						}
+					}
+					if let Some(subscription) = &unsettled {
+						while let Poll::Ready(Some(_)) = edge.poll_largest(waiter) {}
+						match settle_bounds(&mut resolved, &track, subscription) {
+							Ok(Some(bounds)) => {
+								wanted_bounds = Ok(bounds);
+								unsettled = None;
+							}
+							Ok(None) => {}
+							Err(err) => return Poll::Ready(End::Invalid(err)),
 						}
 					}
 					loop {
@@ -5453,8 +5499,9 @@ impl Subscriber {
 				range_filters: false,
 				fill_timeout: false,
 				// The copy learned the track before any fetch, from SUBSCRIBE_OK or
-				// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste.
-				properties_wanted: false,
+				// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste, except that only its
+				// TIMESCALE opts the answer into the timestamps a timed copy needs.
+				properties_wanted: timescale.is_some(),
 				epoch: self.epoch.clone(),
 			},
 		);
@@ -12003,6 +12050,27 @@ impl ResolvedRanges {
 	}
 }
 
+/// The wire bounds `subscription` resolves to, `None` while a relative anchor still waits
+/// for the live edge it counts back from.
+fn settle_bounds(
+	resolved: &mut ResolvedRanges,
+	track: &track::Producer,
+	subscription: &track::Subscription,
+) -> Result<Option<WireBounds>, Error> {
+	match resolved.resolve(track, subscription) {
+		Ok(subscription) => Ok(Some(wire_bounds(&subscription))),
+		Err(Error::Unsupported) if !has_time(subscription) => Ok(None),
+		Err(err) => Err(err),
+	}
+}
+
+fn has_time(subscription: &track::Subscription) -> bool {
+	subscription
+		.ranges
+		.iter()
+		.any(|range| matches!(range.start, track::Anchor::Time(_)) || matches!(range.end, Some(track::Anchor::Time(_))))
+}
+
 fn needs_resolution(subscription: &track::Subscription) -> bool {
 	subscription.ranges.iter().any(|range| {
 		let start = match range.start {
@@ -12014,8 +12082,11 @@ fn needs_resolution(subscription: &track::Subscription) -> bool {
 	})
 }
 
+/// A subscription's single wire span: its start and exclusive end group, each open when `None`.
+type WireBounds = (Option<u64>, Option<u64>);
+
 /// The single wire span covers mixed absolute/live starts from group zero.
-fn wire_bounds(subscription: &track::Subscription) -> (Option<u64>, Option<u64>) {
+fn wire_bounds(subscription: &track::Subscription) -> WireBounds {
 	let start = subscription.start().or_else(|| {
 		subscription
 			.ranges
