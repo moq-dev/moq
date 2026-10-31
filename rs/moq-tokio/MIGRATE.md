@@ -4,11 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### The `iroh` feature is removed
-
-The `iroh` feature, the `iroh` module, `settings::Iroh`, `Client::with_iroh`, `Client::with_iroh_addrs`, `server::Config::iroh`, `Server::iroh_endpoint`, `Listener::iroh_endpoint`, `Transport::Iroh`, `Error::Iroh`, and `Error::IrohDisabled` are gone, and `iroh://` URLs no longer dial.
-Connect over QUIC or WebTransport instead.
-
 ### `Connection::allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
 
 `Connection::bandwidth()` is `Connection::allocator()`, mirroring `moq_net::Session::allocator()`.

@@ -5,11 +5,6 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
-### iroh is removed
-
-The `iroh` feature, the `[iroh]` table, the `--iroh-*` flags and `MOQ_IROH_*` variables, `Cluster::with_iroh`, and `iroh://` cluster peers are gone.
-Startup now refuses an `[iroh]` table, an `--iroh-*` flag, or a `MOQ_IROH_*` variable; remove them and connect over QUIC or WebTransport.
-
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 A session dialed at a URL path with a trailing or doubled `/`, such as `/room/` or `/room//cam`, is refused as a bad request instead of collapsed; dial `/room`. An auth grant whose `root`, `mounts`, `tier`, or `label` has one is refused as forbidden, and `stats.prefix`, `stats.node`, and `--cluster-tier` with one refuse to start.
