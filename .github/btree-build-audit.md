@@ -137,12 +137,16 @@ is larger than that, and the means move in opposite directions across targets,
 so CPU time does not drop beyond noise.
 
 Rows naming BTree internals are 332,566 of the library's 1,379,943 lines at this
-base (24.1%). Each removed instantiation saves about 6.5 k of them and about
-0.2% of instructions. Removing a handful of the 38 spellings would save well
-under a second of CPU per moq-net build, while each conversion adds a key
-translation that callers and reviewers must keep lossless.
+base (24.1%). The measured candidate removed about 6.5 k of them, 0.19% of
+library instructions and 0.06% of unit-test instructions, with no CPU-time
+change distinguishable from noise. Other instantiations generate different
+methods and amounts of code, so this one result does not bound them, but it gives
+no reason to expect a large win from any single conversion, while each conversion
+adds a key translation that callers and reviewers must keep lossless.
 
 Decision: the conversion is not retained. The quest's own acceptance rule, a CPU
 drop beyond noise, is not met by the cheapest candidate, and larger candidates
-(sorted vectors, slab-indexed values) trade runtime complexity for at most a few
-tenths of a percent each.
+(sorted vectors, slab-indexed values) would trade runtime complexity for unmeasured
+gains that this result gives no reason to expect beyond a few tenths of a percent
+each. The maintainer
+deleted the BTree keys quest on 2026-10-31 on this result.
