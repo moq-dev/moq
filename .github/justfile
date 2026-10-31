@@ -21,9 +21,10 @@ runner-vm-ci:
 runner-vm:
     bash sh/local.sh nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
 
-# Lint GitHub Actions workflows, their alert coverage, that every step runs a recipe, and that every opt-in test has a caller.
+# Lint GitHub Actions workflows, their security, their alert coverage, that every step runs a recipe, and that every opt-in test has a caller.
 check:
     actionlint
+    zizmor --offline --quiet .github
     sh/gh/alert.sh check-coverage
     bun test sh/gh/alert.test.ts
     bun sh/gh/check-runs.ts
@@ -56,6 +57,7 @@ test:
     python3 sh/rs/package-rename.test.py
     python3 sh/dart/build.test.py
     python3 sh/rs/select.test.py
+    python3 sh/rs/config.test.py
     python3 sh/js/workspace.test.py
     python3 sh/js/audit.test.py
     python3 sh/rs/test-lints.test.py

@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/01d051cf5dca8cd29c664bf8bcbcab63cdc76445";
+      url = "github:moq-dev/quest/1ef2ca70053ed8bc4785ddaaafb2a6c445e87614";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -311,6 +311,7 @@
           shellcheck
           shfmt
           actionlint
+          zizmor
           taplo
           nixfmt
         ];
@@ -374,6 +375,8 @@
         goDeps = [
           pkgs.go
           uniffi-bindgen-go
+          # `just go audit`, nightly.
+          pkgs.govulncheck
         ];
 
         # uniffi-bindgen-dart renders rs/moq-ffi into dart/moq_ffi. The fork
