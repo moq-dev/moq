@@ -138,9 +138,10 @@ impl<O: Output> Video<O> {
 		let closed = std::sync::atomic::AtomicBool::new(false);
 		let advancing = std::sync::atomic::AtomicBool::new(false);
 		let revision = std::sync::atomic::AtomicU64::new(0);
-		// The group of the end whose replacement the clock maps, once one resumed.
-		// A gap keeps the mapping, so this outlives the buffers it replaces.
-		let resumed: Mutex<Option<u64>> = Mutex::new(None);
+		// The first group the clock's mapping covers: the first the min-delay decoder
+		// read, then the one after each end it resumed past. A gap keeps the mapping,
+		// so this outlives the buffers it replaces.
+		let origin: Mutex<Option<u64>> = Mutex::new(None);
 		let buffers = Mutex::new(VecDeque::from([Segment::default()]));
 		// Signalled when a segment held behind a resume becomes the front.
 		let advanced = tokio::sync::Notify::new();
@@ -202,6 +203,11 @@ impl<O: Output> Video<O> {
 							self.output.send(Event::Wake);
 						}
 						let back = buffers.back_mut().unwrap();
+						// The first segment's mapping starts where this decoder joined, so an
+						// end before the join needs no resume.
+						if back.resumes.is_none() && back.after.is_none() {
+							origin.lock().unwrap().get_or_insert(group);
+						}
 						back.push(frame, self.max_delay);
 						back.arrived.get_or_insert_with(Instant::now);
 						false
@@ -472,7 +478,7 @@ impl<O: Output> Video<O> {
 							continue;
 						}
 						role.apply(transition, mapping);
-						*resumed.lock().unwrap() = buffers.front().unwrap().after;
+						*origin.lock().unwrap() = buffers.front().unwrap().after.map(|after| after + 1);
 						if let Some(end) = buffers.front().unwrap().end {
 							role.end(end)?;
 						}
@@ -577,7 +583,7 @@ impl<O: Output> Video<O> {
 						// A segment the clock has not mapped yet.
 						let ahead = front.until.is_some_and(|until| group > until)
 							|| fence.is_some_and(|fence| {
-								group > fence && resumed.lock().unwrap().is_none_or(|resumed| resumed < fence)
+								group > fence && origin.lock().unwrap().is_none_or(|origin| origin <= fence)
 							}) || advancing.load(std::sync::atomic::Ordering::Relaxed);
 						if ahead {
 							// Nor ever will: the track closed without resuming it.
@@ -1550,6 +1556,72 @@ mod tests {
 		);
 		let sizes: Vec<_> = after.iter().map(|(_, size)| *size).collect();
 		assert!(hands_over(&sizes), "no clean handover after the skip: {shown:?}");
+	}
+
+	/// A join right after an encoder restart starts the max-delay decoder on the end,
+	/// a group before the min-delay one. The clock already maps the replacement, so
+	/// that end holds nothing back.
+	#[tokio::test]
+	async fn a_join_right_after_a_restart_still_hands_over() {
+		tokio::time::pause();
+		let delay = Duration::from_millis(200);
+		let warmup = Duration::from_secs(1);
+		let media = media(delay);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(
+			track.clone(),
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		for ms in [0, 33, 66] {
+			producer.write(frame(ms, ms == 0)).unwrap();
+		}
+		producer.discontinuity().unwrap();
+		// The replacement is published live, one picture every 33 ms.
+		let picture = |index: u64| frame(1_000 + index * 33, index == 0);
+		producer.write(picture(0)).unwrap();
+		let min = join(&track, delay, 0).await;
+		let max = join(&track, delay + warmup, 1).await;
+		let refresh = Refresh {
+			track: max,
+			decoder: refresh_decoder(Duration::from_millis(10)),
+			interval: Some(Duration::from_millis(33)),
+		};
+		let task = tokio::spawn(playback(&media, delay).run(min, Buffered::new(0), Some(refresh)));
+		let start = Instant::now();
+		let mut next = 1;
+		let mut shown = Vec::new();
+		while !task.is_finished() {
+			let elapsed = Instant::now() - start;
+			if next < 60 && Duration::from_millis(next * 33) <= elapsed {
+				producer.write(picture(next)).unwrap();
+				next += 1;
+				if next == 60 {
+					producer.finish().unwrap();
+				}
+			}
+			tokio::task::yield_now().await;
+			if let Some(picture) = media.output.present_frame(&media) {
+				shown.push((picture.timestamp.as_millis(), picture.size().width));
+			}
+			tokio::time::advance(Duration::from_millis(1)).await;
+			assert!(elapsed < Duration::from_secs(30), "playback never finished: {shown:?}");
+		}
+		task.await.unwrap().unwrap();
+		// The window still holds the last pictures the decoder queued.
+		for _ in 0..1_000 {
+			if let Some(picture) = media.output.present_frame(&media) {
+				shown.push((picture.timestamp.as_millis(), picture.size().width));
+			}
+			tokio::time::advance(Duration::from_millis(1)).await;
+		}
+		assert_eq!(shown.first().map(|(at, _)| *at), Some(1_000), "{shown:?}");
+		assert_eq!(shown.last().map(|(at, _)| *at), Some(1_000 + 59 * 33), "{shown:?}");
+		let sizes: Vec<_> = shown.iter().map(|(_, size)| *size).collect();
+		assert!(hands_over(&sizes), "no clean handover: {shown:?}");
+		assert!(shown.windows(2).all(|pair| pair[0].0 < pair[1].0), "{shown:?}");
 	}
 
 	/// The max-delay decoder reads its own subscription, so it can see an encoder
