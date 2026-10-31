@@ -121,9 +121,9 @@ fn a_steered_group_serves_a_shared_port() {
 				handle.spawn(async move {
 					// Each accepted connection is counted, then closed: that
 					// close is how the client learns this side accepted it.
-					while let Ok(mut conn) = endpoint.accept().await {
+					while let Ok(conn) = endpoint.accept().await {
 						accepted[usize::from(shard.index())].fetch_add(1, Ordering::AcqRel);
-						web_transport_trait::poll::Session::close(&mut conn, 0, "done");
+						conn.close(moq_uring::quic::VarInt::from_u32(0), b"done");
 					}
 				});
 				ready.send(()).expect("test alive");
@@ -150,19 +150,15 @@ fn a_steered_group_serves_a_shared_port() {
 				let socket = handle
 					.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 					.expect("client socket");
-				let mut conn = quic::client::connect(socket, &dial, addr, "localhost")
+				let conn = quic::client::connect(socket, &dial, addr, "localhost")
 					.await
 					.expect("connect");
-				assert_eq!(
-					web_transport_trait::poll::Session::protocol(&conn),
-					Some(ALPN),
-					"negotiated ALPN"
-				);
+				assert_eq!(conn.protocol(), Some(ALPN), "negotiated ALPN");
 				// The client's handshake completes a flight before the
 				// server's, so closing here could discard the client's Finished
 				// (still behind the pacer, say) and the server would never
 				// accept. The server's close is the proof it did.
-				match std::future::poll_fn(|cx| web_transport_trait::poll::Session::poll_closed(&mut conn, cx)).await {
+				match conn.closed().await {
 					quic::Error::App { code: 0, .. } => {}
 					other => panic!("the client saw {other:?} instead of the server's close"),
 				}
