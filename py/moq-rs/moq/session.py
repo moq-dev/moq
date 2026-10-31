@@ -14,13 +14,12 @@ from moq_ffi import (
     MoqSession,
     MoqTokens,
 )
-from moq_ffi import MoqRateTarget as RateTarget
 
 from ._records import _strs
 from .errors import is_shutdown
 from .origin import OriginConsumer, OriginProducer
 from .publish import TrackDemand
-from .types import ConnectionState, ConnectionStats, Grant
+from .types import ConnectionState, ConnectionStats, Grant, RateTarget
 
 
 class Session:

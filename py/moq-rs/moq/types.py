@@ -43,6 +43,9 @@ from moq_ffi import (
     MoqRange as Range,
 )
 from moq_ffi import (
+    MoqRateTarget as RateTarget,
+)
+from moq_ffi import (
     MoqRoute as Route,
 )
 from moq_ffi import (
@@ -101,6 +104,7 @@ __all__ = [
     "ProtocolKind",
     "QuicConfig",
     "Range",
+    "RateTarget",
     "Route",
     "Subscription",
     "TrackInfo",
