@@ -259,6 +259,14 @@ impl PublishCatalog {
 		}
 		Ok(())
 	}
+
+	/// The multiplex rate a TS catalog records.
+	fn mux_rate(&self) -> Option<u64> {
+		match self {
+			Self::Ts(catalog) => catalog.snapshot().ext.mpegts.mux_rate,
+			Self::Media(_) | Self::TsPrograms => None,
+		}
+	}
 }
 
 /// Build the importer and `mpegts` catalog for one TS broadcast.
@@ -270,8 +278,12 @@ fn ts_import(
 	broadcast: &mut moq_net::broadcast::Producer,
 	config: moq_mux::catalog::Config,
 	program: Option<u16>,
+	mux_rate: Option<u64>,
 ) -> anyhow::Result<(ts::Import<ts::Ext>, moq_mux::catalog::Producer<ts::Ext>)> {
-	let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
+	let mut initial = moq_mux::catalog::hang::Catalog::<ts::Ext>::default();
+	// A rate already measured on this multiplex releases the catalog with the first media.
+	initial.ext.mpegts.mux_rate = mux_rate;
+	let config = config.with_catalog(initial);
 	let catalog = moq_mux::catalog::Producer::new(broadcast, config)?;
 	let mut import = ts::Import::new(broadcast.clone(), catalog.timebase().reserve());
 	if let Some(program) = program {
@@ -374,7 +386,7 @@ impl Publish {
 	) -> anyhow::Result<Self> {
 		// TS builds its `Ext` catalog instead of the shared `()` below.
 		if let PublishFormat::Ts { program } = *format {
-			let (ts, catalog) = ts_import(&mut broadcast, config, program)?;
+			let (ts, catalog) = ts_import(&mut broadcast, config, program, None)?;
 			return Ok(Self {
 				source: Source::Stream {
 					decoder: PublishDecoder::Ts(Box::new(ts)),
@@ -694,13 +706,16 @@ struct Republish {
 
 impl Republish {
 	/// A new instance of the broadcast under a new epoch, announced once its catalog goes out.
-	fn instance(&self) -> anyhow::Result<Instance> {
+	///
+	/// `mux_rate` is the previous instance's measurement of the same multiplex, which the new
+	/// catalog carries from its first media rather than waiting on a fresh window.
+	fn instance(&self, mux_rate: Option<u64>) -> anyhow::Result<Instance> {
 		let control = self
 			.origin
 			.create_broadcast(&self.name)
 			.context("failed to create broadcast")?;
 		let mut broadcast = control.broadcast().clone();
-		let (import, mut catalog) = ts_import(&mut broadcast, self.config.clone(), self.program)?;
+		let (import, mut catalog) = ts_import(&mut broadcast, self.config.clone(), self.program, mux_rate)?;
 		// Before the import declares a track, so the sections ride the first catalog.
 		let report = match &self.report {
 			Some(connection) => Some(crate::report::Stats::new(&mut broadcast, &catalog, connection.clone())?),
@@ -867,7 +882,7 @@ impl Instance {
 			}
 			self.catalog.finish()?;
 			// The finished broadcast ends as its handles drop, withdrawing its announcement.
-			*self = republish.instance()?;
+			*self = republish.instance(self.catalog.mux_rate())?;
 			*log = ts::stats::Log::default();
 			match feed(&mut self.decoder, &mut self.pending, &restart.remainder)? {
 				Some(next) => restart = next,
@@ -2092,11 +2107,15 @@ pub(crate) mod tests {
 	}
 
 	/// A source whose clock steps back republishes the path under a new epoch, announced once
-	/// its catalog goes out, with the sections the first instance's catalog carried.
+	/// its catalog goes out, with the sections the first instance's catalog carried. The new
+	/// catalog reuses the first instance's mux rate, so it goes out with the first media rather
+	/// than after a fresh two-second measurement window.
 	#[tokio::test(start_paused = true)]
 	async fn a_clock_step_republishes_under_a_new_epoch() {
-		// 5 s of H.264 and AAC, its clock on PID 0x100.
-		const CLIP: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
+		// 5 s of H.264 and AAC at a constant 400 kb/s, its clock on PID 0x100.
+		const CLIP: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
+		// Its first 1.5 s: short of a measurement window, so only a reused rate releases a catalog.
+		const HEAD: &[u8] = CLIP.split_at(400 * 188).0;
 		let mut flag = vec![0x47, 0x01, 0x00, 0x20, 183, 0x80];
 		flag.resize(188, 0xff);
 
@@ -2153,15 +2172,35 @@ pub(crate) mod tests {
 		};
 		tokio::io::AsyncWriteExt::write_all(&mut stdin, CLIP).await.unwrap();
 		assert_eq!(next(&mut import).await, first);
+		let broadcast = origin.consume().request("demo", None).await.unwrap();
+		let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast).await.unwrap();
+		let catalog = catalogs.next().await.unwrap().expect("a catalog");
+		let rate = catalog
+			.ext
+			.mpegts
+			.mux_rate
+			.expect("the first instance measured its rate");
+		drop(catalogs);
+
 		// The encoder restarts its clock and plays the clip again: a rewind, flagged.
-		tokio::io::AsyncWriteExt::write_all(&mut stdin, &[&flag[..], CLIP].concat())
+		tokio::io::AsyncWriteExt::write_all(&mut stdin, &[&flag[..], HEAD].concat())
 			.await
 			.unwrap();
 		assert_ne!(next(&mut import).await, first, "the new instance has its own epoch");
 		let broadcast = origin.consume().request("demo", None).await.unwrap();
-		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
+		let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast).await.unwrap();
 		let catalog = catalogs.next().await.unwrap().expect("a catalog");
 		assert!(catalog.echo.is_some(), "the new instance solicits feedback too");
+		assert_eq!(
+			catalog.ext.mpegts.mux_rate,
+			Some(rate),
+			"the new instance reuses the rate"
+		);
+		// Its first group is already out with the catalog.
+		let (name, _) = catalog.video.renditions.iter().next().expect("a video rendition");
+		let mut track = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
+		let group = track.recv_group().await.unwrap().expect("the first group");
+		assert_eq!(group.sequence, 0, "the new instance's first group");
 		drop(stdin);
 		import.await.unwrap();
 	}

@@ -278,6 +278,14 @@ pub enum MoqAnnounceEvent {
 		/// The broadcast announcement affected by this event.
 		announce: MoqAnnounce,
 	},
+	/// A route now covers the prefix and continues what the route at `predecessor`
+	/// served beneath it: keep what was resolved through that one.
+	Takeover {
+		/// The broadcast announcement affected by this event.
+		announce: MoqAnnounce,
+		/// The prefix of the route it continues, at or above `announce`'s.
+		predecessor: String,
+	},
 }
 
 impl From<moq_net::announce::Event> for MoqAnnounceEvent {
@@ -295,6 +303,10 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 			},
 			Event::Restart(announce) => Self::Restart {
 				announce: announce.into(),
+			},
+			Event::Takeover { announce, predecessor } => Self::Takeover {
+				announce: announce.into(),
+				predecessor: predecessor.to_string(),
 			},
 		}
 	}

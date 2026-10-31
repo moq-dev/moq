@@ -3,7 +3,7 @@
 	"version": "0.0.0",
 	"devDependencies": {
 		"@babel/parser": "^8.0.7",
-		"@biomejs/biome": "^2.5.15",
+		"@biomejs/biome": "^2.6.4",
 		"concurrently": "^10.0.6",
 		"markdown-extensions": "^2.0.0",
 		"publint": "^0.3.25",

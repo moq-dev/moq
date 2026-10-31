@@ -80,7 +80,7 @@ FINISH_ONLY=0
 # except the clients the harness reads a grant from, which offer $AUTH_VERSION alone. Any other
 # entry pins every client in its pass to that version, and `ietf` expands to IETF_VERSIONS.
 VERSIONS="auto"
-IETF_VERSIONS="moq-transport-18,moq-transport-22"
+IETF_VERSIONS="moq-transport-18,moq-transport-20,moq-transport-22"
 
 # Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
