@@ -55,13 +55,21 @@ type DecoderOutput struct {
 	MaxDelay *time.Duration
 	// Delay fixes the jitter buffer to hold ahead of the playhead; nil estimates it from arrival timing.
 	Delay *time.Duration
+	// Start is where to begin on a track that already holds groups; zero is media.DecodeStartOldest.
+	// A live player sets media.DecodeStartLatest so a reopened decoder skips the cached backlog.
+	Start media.DecodeStart
 }
 
 func (o DecoderOutput) ffi() (ffi.MoqAudioDecoderOutput, error) {
 	if err := bridge.NonNegative(o.MaxDelay, "audio max delay"); err != nil {
 		return ffi.MoqAudioDecoderOutput{}, err
 	}
-	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, MaxDelay: o.MaxDelay, Delay: o.Delay}, bridge.NonNegative(o.Delay, "audio delay")
+	// Go's zero value is the native null: the oldest group.
+	var start *media.DecodeStart
+	if o.Start != 0 {
+		start = &o.Start
+	}
+	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, MaxDelay: o.MaxDelay, Delay: o.Delay, Start: start}, bridge.NonNegative(o.Delay, "audio delay")
 }
 
 // Frame is interleaved PCM with its presentation timestamp.

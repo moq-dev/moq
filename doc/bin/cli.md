@@ -91,7 +91,9 @@ stream stepping back, flagged or not, or more than 10 s forward without a
 `discontinuity_indicator`. The broadcast finishes there, and the rest of the
 input publishes as a new instance under a new
 [epoch](/concept/moq-lite#publisher-epochs), on the same SRT connection, which
-`export ts --stitch --follow` carries on into. An unflagged step usually means
+`export ts --stitch --follow` carries on into. The new instance keeps the mux
+rate the old one measured, so its catalog goes out with its first media rather
+than after a fresh two-second measurement. An unflagged step usually means
 redundant encoders behind a changeover switch: time-lock their clocks, or have
 the switch set `discontinuity_indicator`. `--program all` and `--passthrough`
 still end at a rewind. A flagged MPEG-TS discontinuity that
@@ -510,10 +512,11 @@ arrives or the replacement goes, keeping the old publisher playing meanwhile,
 so even the default `--follow 0s` switches to a replacement that is still
 starting. After the catalog arrives, the old instance keeps feeding for up to
 `--follow` while the replacement acquires its clock and first usable media.
-The marked switch then drops the old instance's buffered tail, so the
-replacement plays at `--delay` rather than behind it. A replacement usable
-within that window adds no gap to the output; one still acquiring when it runs
-out, such as on a link too slow to carry both instances, starts after a gap.
+Its subscriptions take lower priority so the replacement can acquire on a
+congested link. The marked switch drops the old instance's buffered tail, so
+the replacement plays at `--delay` rather than behind it. An unimpaired switch
+usable within that window adds no gap. Congestion can starve the old instance
+sooner or leave the replacement acquiring past the window, causing a gap.
 Timestamps across epochs are not aligned. Without `--stitch` the export stays
 on the old publisher while it is up. Only lite-07 and moq-transport sessions
 carry epochs, so on the

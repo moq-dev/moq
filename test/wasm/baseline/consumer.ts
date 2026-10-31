@@ -160,7 +160,10 @@ async function run(config: Sample) {
 				disposers.push(() => session.cancel(0));
 				await Promise.all(
 					Array.from({ length: config.publishers }, async (_, publisher) => {
-						const broadcast = await session.consume().follow(`${config.id}/${publisher}`).available();
+						const broadcast = await session
+							.consume()
+							.follow(`${config.id}/${publisher}`, undefined)
+							.available();
 						const track = await broadcast.subscribeTrack("data", undefined);
 						disposers.push(() => track.cancel());
 						const group = await track.recvGroup();

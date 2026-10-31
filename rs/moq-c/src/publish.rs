@@ -849,8 +849,8 @@ impl Publish {
 				}
 			};
 			let state = match next {
-				Ok(Some(_)) => moq_demand::MOQ_DEMAND_USED,
-				Ok(None) => moq_demand::MOQ_DEMAND_UNUSED,
+				Ok(Some(_)) => moq_demand::MOQ_DEMAND_WANTED,
+				Ok(None) => moq_demand::MOQ_DEMAND_UNWANTED,
 				Err(moq_net::Error::Dropped) => return Ok(()),
 				Err(err) => return Err(err.into()),
 			};
@@ -971,8 +971,7 @@ impl Publish {
 	/// reads it any more, until every group is answered or nobody waits on the fill.
 	async fn serve_fill(callback: OnStatus, fill: Arc<moq_net::track::Fill>) {
 		let mut last = None;
-		while fill.is_used()
-			&& let Some(sequence) = fill.next()
+		while let Some(sequence) = fill.wanted()
 			&& last != Some(sequence)
 		{
 			last = Some(sequence);

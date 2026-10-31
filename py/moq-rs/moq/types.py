@@ -32,6 +32,9 @@ from moq_ffi import (
     MoqOrder as Order,
 )
 from moq_ffi import (
+    MoqPosition as Position,
+)
+from moq_ffi import (
     MoqProtocolError as ProtocolError,
 )
 from moq_ffi import (
@@ -93,6 +96,7 @@ __all__ = [
     "FetchGroupOptions",
     "Grant",
     "Order",
+    "Position",
     "ProtocolError",
     "ProtocolKind",
     "QuicConfig",

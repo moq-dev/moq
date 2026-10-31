@@ -42,7 +42,7 @@ type (
 	// resolve a path with [OriginConsumer.Request].
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
-	// AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventRestart.
+	// AnnounceEventUpdate, AnnounceEventEnd, AnnounceEventRestart, or AnnounceEventTakeover.
 	AnnounceEvent = ffi.MoqAnnounceEvent
 	// AnnounceEventStart reports a route now covering a prefix that had none.
 	AnnounceEventStart = ffi.MoqAnnounceEventStart
@@ -53,6 +53,9 @@ type (
 	// AnnounceEventRestart reports another publisher instance now serving a prefix:
 	// drop what was resolved under it and request afresh.
 	AnnounceEventRestart = ffi.MoqAnnounceEventRestart
+	// AnnounceEventTakeover reports a route now covering a prefix that continues what the
+	// route at Predecessor served beneath it: keep what was resolved through that one.
+	AnnounceEventTakeover = ffi.MoqAnnounceEventTakeover
 	// Range is a span of a track to deliver: from Start up to End, or onward when End is nil.
 	// A relative start is the first frame of its group, a relative end includes its whole
 	// group, and an absolute end is exclusive.
@@ -67,6 +70,8 @@ type (
 	AnchorTime = ffi.MoqAnchorTime
 	// Order is which of a subscription's pending groups the publisher sends first.
 	Order = ffi.MoqOrder
+	// Position is a location within a track: a group sequence and a frame index in it.
+	Position = ffi.MoqPosition
 	// VideoDecoderOutput configures what a video.Consumer delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
