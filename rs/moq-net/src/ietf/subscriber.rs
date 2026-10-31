@@ -4758,7 +4758,7 @@ fn end_track(track: &mut track::Producer, end: track::Position, properties: bool
 	}
 	// Lower groups may still be on the wire, behind the one that carried the end: the
 	// received copy holds readers at a hole for the grace.
-	if let Err(err) = track.finish_at(end) {
+	if let Err(err) = track.finish_at(end, None) {
 		tracing::warn!(%err, ?end, "invalid END_OF_TRACK");
 		let _ = track.clone().abort(Error::ProtocolViolation);
 		return Err(Error::ProtocolViolation);
@@ -5951,7 +5951,8 @@ fn resolve_fetch_group(prior: Option<u64>, wire: Option<u64>) -> Result<Option<u
 		return Ok(Some(wire));
 	};
 	let step = wire.checked_add(1).ok_or(Error::Unsupported)?;
-	prior.checked_add(step).map(Some).ok_or(Error::Unsupported)
+	let group = prior.checked_add(step).ok_or(Error::Unsupported)?;
+	Ok(Some(group))
 }
 
 fn open_fill_group(
@@ -13935,7 +13936,7 @@ mod stitch_tests {
 		use futures::FutureExt;
 
 		let mut h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 0, &[b"late"])]);
-		h.track.finish_at(track::Position::group(SEQUENCE)).unwrap();
+		h.track.finish_at(track::Position::group(SEQUENCE), None).unwrap();
 		let mut stream = h.stream().await;
 
 		let res = h.subscriber.clone().recv_group(&mut stream).await;

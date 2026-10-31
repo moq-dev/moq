@@ -35,9 +35,11 @@ required-features = ["uring"]
 doc = false
 
 [features]
-default = ["quic", "websocket"]
+default = ["quic", "websocket", "tcp"]
 iroh = ["moq-tokio/iroh"]
 quic = ["moq-tokio/quic"]
+# Qmux over TCP: `tcp://`, and `tls://`.
+tcp = ["moq-tokio/tcp"]
 uring = ["dep:moq-uring"]
 websocket = ["moq-tokio/websocket"]
 

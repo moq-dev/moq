@@ -41,7 +41,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 		group.write_frame(Timestamp::ZERO, b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 	}
-	track.finish_at(moq_net::track::Position::group(GROUPS)).unwrap();
+	track.finish_at(moq_net::track::Position::group(GROUPS), None).unwrap();
 	// Every group below the end is finished: the end has settled and the track is
 	// complete. Nothing has been read yet.
 	if abort {

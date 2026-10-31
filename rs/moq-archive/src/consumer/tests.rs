@@ -529,7 +529,7 @@ async fn a_store_failure_aborts_the_served_tracks() {
 }
 
 /// A completed archive ends each track at its recorded end, mid-group included, and an
-/// errored track replays its stored groups.
+/// errored track replays its stored groups, then its error.
 #[tokio::test(start_paused = true)]
 async fn a_completed_archive_ends_as_recorded() {
 	let archive = Archive::new();
@@ -566,10 +566,19 @@ async fn a_completed_archive_ends_as_recorded() {
 		assert_eq!(reader.finished().await.unwrap(), end, "{track}");
 	}
 
+	// Every stored group, then the error the source ended with, and still fetchable after.
 	let mut reader = subscribe(&broadcast, "errored").await;
-	assert_eq!(next(&mut reader).await.unwrap().0, 0);
-	assert_eq!(next(&mut reader).await.unwrap().0, 1);
-	assert!(next(&mut reader).await.is_none());
+	assert_eq!(next(&mut reader).await.unwrap(), (0, expected(true, 0, 0..1)));
+	assert_eq!(next(&mut reader).await.unwrap(), (1, expected(true, 1, 0..1)));
+	let end = timeout(Duration::from_secs(10), reader.next_group())
+		.await
+		.expect("the track ends");
+	let end = end.map(|group| group.map(|group| group.sequence));
+	assert!(
+		matches!(end, Err(moq_net::Error::Stream(moq_net::StreamError::App(7)))),
+		"{end:?}"
+	);
+	assert_eq!(fetch(&broadcast, "errored", 0).await.unwrap(), expected(true, 0, 0..1));
 
 	// The sequence below the end replays as an empty group, and those before it as dropped.
 	let mut reader = subscribe(&broadcast, "tail").await;
