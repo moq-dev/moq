@@ -1030,6 +1030,7 @@ impl TrackState {
 
 	/// Resolve waiting subscribers with what the minted Producer wrote.
 	fn commit(&mut self) {
+		debug_assert_eq!(self.publication, Publication::Staged, "only a staged track commits");
 		self.publication = Publication::Published;
 	}
 
