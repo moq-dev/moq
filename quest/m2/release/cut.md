@@ -45,20 +45,18 @@ From the 2026-10-25 pre-cut run:
   `MOQ_FFI_RANGE`) to the release that ships the `implementation` field from
   [moq-dev/moq#6775](https://github.com/moq-dev/moq/pull/6775).
 
-The [2026-10-28 audit checkpoint](https://github.com/moq-dev/moq/pull/7176)
-records source candidate
-[main 487759f62a](https://github.com/moq-dev/moq/commit/487759f62a9ef39d916fe5b92df06dcff83478ce)
-and shipping branch
-[release 7fad611aae](https://github.com/moq-dev/moq/commit/7fad611aae4ef4e7fa856ed077a0bb467f2de9be).
-The focused native suites (7,697 passes), JS checks, draft checks, OBS sanitizer
-suite, and all 176 configured all-language interop cells passed. Dart's 45 tests
-passed, but its checkout-local publish dry-run hit the staging ignore bug owned
-by [moq-dev/moq#7117](https://github.com/moq-dev/moq/pull/7117).
-The checkpoint does not select or approve the final cut tree. The published-wire comparison
-is blocked by stale exception pins and the stable released CLI control failures
-owned by [moq-dev/moq#7061](https://github.com/moq-dev/moq/pull/7061). Resolve
-that existing prerequisite and repeat the candidate compatibility checks after
-the documented release-to-main merge; source-only passes do not replace them.
+The [2026-10-22 release audit](https://github.com/moq-dev/moq/pull/7176)
+closed with its fixes rechecked together. At source candidate
+[main 487759f62a](https://github.com/moq-dev/moq/commit/487759f62a9ef39d916fe5b92df06dcff83478ce),
+the focused native suites (7,697 passes), JS checks, draft checks, OBS sanitizer
+suite, and all 176 configured all-language interop cells passed. At
+[main 1ea4b1a2c3](https://github.com/moq-dev/moq/commit/1ea4b1a2c333527e25c8c29ee827290ed6e7d410),
+`just test wire-compat` against moq-cli 0.14.10, moq-relay 0.17.10, and
+`@moq/net` 0.4.7 passed every stable lite-01 through lite-06 session cell,
+token, and catalog/container lane, with lite-07-wip skipped as its accepted
+planned break. Dart's tests and both staged publish dry-runs passed with no
+warnings. Neither main is the cut tree, and the full Linux gate was not run:
+repeat these checks after the documented release-to-main merge.
 
 ## Required
 
