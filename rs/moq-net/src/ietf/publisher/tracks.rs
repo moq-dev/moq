@@ -1102,14 +1102,23 @@ impl Publisher {
 				Wait::Cancelled => return Ok(()),
 				Wait::Failed(err) => break Served::Track(Err(err)),
 			};
-			// Refused like an update to any subscription: it fails, ending this one.
+			// Refused like an update to any subscription (draft-18 section 10.9.1): REQUEST_ERROR,
+			// then PUBLISH_DONE UPDATE_FAILED. The old grant does not survive, so a FETCH joined
+			// under it stops too.
 			match self
 				.admit_request(&mut stream, &mut gate, update.authorization_token.clone())
 				.await
 			{
 				Ok(true) => {}
 				Ok(false) => return Ok(()),
-				Err(refusal) => break Served::Track(Err(refusal.error)),
+				Err(refusal) => {
+					self.write_subscribe_error(&mut stream.writer, &refusal.error, &refusal.reason)
+						.await?;
+					if let Some(grant) = gate.token_guard() {
+						grant.end(refusal.clone());
+					}
+					break Served::UpdateFailed(refusal.error);
+				}
 			}
 			let refusal = match update.refused {
 				Some(Error::Decode(err)) => Some((super::super::token::reason(&err), Error::Decode(err))),

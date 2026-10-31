@@ -4344,20 +4344,9 @@ impl Publisher {
 			};
 
 			match event {
-				NamespaceEvent::Denied(refusal) => {
-					if let Target::Inline(mut stream) = ns.target {
-						super::request_stream::write_error(
-							&mut stream.writer,
-							request::Kind::SubscribeNamespace,
-							&refusal.error,
-							&refusal.reason,
-							self.version,
-						)
-						.await?;
-						let _ = stream.writer.close().await;
-					}
-					return Ok(());
-				}
+				// Ended as the request's guard would have, had it seen the token end first: the
+				// stream is established, so no REQUEST_ERROR may follow its REQUEST_OK.
+				NamespaceEvent::Denied(refusal) => return Err(refusal.error),
 
 				// Only a solicited loop has a stream to close, and its request task closes the
 				// session over a protocol violation.

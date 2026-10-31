@@ -804,9 +804,11 @@ impl Subscriber {
 			) {
 				Ok(grant) => Some(grant),
 				Err(refusal) => {
-					return self
-						.write_publish_error(&mut stream, &refusal.error, &refusal.reason)
-						.await;
+					self.write_publish_error(&mut stream, &refusal.error, &refusal.reason)
+						.await?;
+					// Dropping an unfinished writer resets it, which could discard the refusal.
+					let _ = stream.writer.close().await;
+					return Ok(());
 				}
 			}
 		} else {
