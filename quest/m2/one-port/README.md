@@ -38,6 +38,15 @@ hands an embedder. [Native pairs](/quest/m2/p2p/native-quic.md) reuse the
 classifier. QUIC shard steering landed in #5638; reuse its filter rather than
 recreating that completed work.
 
+Decided 2026-10-31 by the maintainer, in
+[moq-dev/moq#7095](https://github.com/moq-dev/moq/pull/7095): the split runs
+inline in the QUIC socket's `poll_recv`, not in a task owning the socket and
+fanning out to per-stack virtual sockets, so a QUIC datagram keeps its
+zero-copy, same-task path and its GRO batch. The API stays as shipped:
+`moq_tokio::quic::demux::Demux` in `server::Config::demux`, `Demux::webrtc()`
+returning the `WebRtc` feed, and `moq_relay::Relay::webrtc()`. SRT adds its
+class to the same inline split.
+
 ### Classifying a datagram
 
 RFC 7983 already partitions the first byte: STUN is 0 to 3, DTLS 20 to 63,

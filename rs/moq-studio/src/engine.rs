@@ -632,7 +632,7 @@ mod tests {
 			.await
 			.expect("the studio starts");
 
-		let broadcast = tokio::time::timeout(TIMEOUT, relay.routed_broadcast("studio"))
+		let broadcast = tokio::time::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
 			.await
 			.expect("the relay routes the program")
 			.expect("broadcast");

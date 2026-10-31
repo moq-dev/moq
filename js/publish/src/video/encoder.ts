@@ -14,7 +14,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { errors } from "../internal";
+import { errors, watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
@@ -88,8 +88,8 @@ export type EncoderInput = {
 	// The capture pipeline supplying frames and the source track.
 	capture: Getter<Capture | undefined>;
 
-	// The connection's bandwidth allocator. The encoder reserves its ceiling and
-	// follows the grant instead of the whole-session estimate.
+	// The connection's bandwidth allocator. While a subscriber is attached, the encoder
+	// reserves its ceiling and follows the grant instead of the whole-session estimate.
 	bandwidth: Getter<Moq.Bandwidth.Handle | undefined>;
 };
 
@@ -109,7 +109,8 @@ export type EncoderOutput = {
 	// The resolved WebCodecs config (codec, bitrate, dimensions), available even with no subscriber.
 	// Exposed so a local preview can re-encode with identical settings to mirror the wire output.
 	resolved: Signal<VideoEncoderConfig | undefined>;
-	// True when a subscriber is attached and we're encoding.
+	// True while encoding: enabled and the rendition has a track, which with the broadcast's
+	// `onDemand` also takes a subscriber.
 	active: Signal<boolean>;
 	// Cumulative output totals (frames, bytes, keyframes) measured while serving.
 	stats: Signal<Stats>;
@@ -119,8 +120,10 @@ export type EncoderOutput = {
  * A single video rendition encoder.
  *
  * Registers itself on the {@link Broadcast} under {@link name} (via `broadcast.video(name)`), resolves
- * the best codec/bitrate/dimensions for the capture, and encodes frames only while a subscriber is
- * attached (the demand gate). Rename by constructing a new encoder; the name is not a signal.
+ * the best codec/bitrate/dimensions for the capture, and encodes frames while enabled, so a late
+ * subscriber or fetch finds the recent groups in the track's cache. The broadcast's `onDemand` encodes
+ * only while a subscriber is attached instead. A joining subscriber that wants a newer group gets a
+ * fresh keyframe either way. Rename by constructing a new encoder; the name is not a signal.
  *
  * The catalog advertises the largest size encoded so far as the coded-size ceiling, so a capture that
  * shrinks resizes in band at a keyframe. Outgrowing the ceiling re-probes and advertises a larger one,
@@ -338,7 +341,7 @@ export class Encoder {
 		// Publish the resolved catalog config; undefined (until one resolves) leaves it out of the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
 
-		// Encode only while enabled and a subscriber is attached (the demand gate).
+		// Encode while enabled and the broadcast hands over the track (with `onDemand`, a subscriber is attached).
 		effect.run((effect) => {
 			const enabled = effect.get(this.in.enabled);
 			const track = effect.get(rendition.track);
@@ -349,29 +352,34 @@ export class Encoder {
 			this.#encode(track, broadcast.order, effect);
 		});
 
-		// Reserve against the connection for as long as this track is live. Wait
-		// for a ceiling so we never claim 0 and starve siblings for a tick. The
-		// allocator ignores an idle track, and closing the reservation hands the
-		// room to siblings.
+		// Reserve against the connection while a subscriber is attached. Wait for a ceiling so we
+		// never claim 0 and starve siblings for a tick. Closing the reservation hands the room to
+		// siblings, and an unwatched rendition encodes at its configured bitrate: its backlog is
+		// served from the cache rather than paced live.
 		effect.run((effect) => {
 			const enabled = effect.get(this.in.enabled);
 			const track = effect.get(rendition.track);
 			const allocator = effect.get(this.in.bandwidth);
 			if (!enabled || !track || !allocator || effect.get(this.#out.error)) return;
 
-			let reservation: Moq.Bandwidth.Reservation | undefined;
-			effect.subscribe(this.#ceiling, (ceiling) => {
-				if (ceiling === undefined) return;
-				if (!reservation) {
-					reservation = allocator.reserve(track.demand(), ceiling);
-					this.#reservation.set(reservation);
-				} else {
-					reservation.update(ceiling);
-				}
-			});
-			effect.cleanup(() => {
-				reservation?.close();
-				if (this.#reservation.peek() === reservation) this.#reservation.set(undefined);
+			const demanded = watched(track, effect);
+			effect.run((effect) => {
+				if (!effect.get(demanded)) return;
+
+				let reservation: Moq.Bandwidth.Reservation | undefined;
+				effect.subscribe(this.#ceiling, (ceiling) => {
+					if (ceiling === undefined) return;
+					if (!reservation) {
+						reservation = allocator.reserve(track.demand(), ceiling);
+						this.#reservation.set(reservation);
+					} else {
+						reservation.update(ceiling);
+					}
+				});
+				effect.cleanup(() => {
+					reservation?.close();
+					if (this.#reservation.peek() === reservation) this.#reservation.set(undefined);
+				});
 			});
 		});
 	}
@@ -388,13 +396,15 @@ export class Encoder {
 		let lastEncoded: Micro | undefined;
 		// The catalog declares no reordering, so each chunk must present after the one before it.
 		let lastOutput: number | undefined;
-		// The largest group demand asked for that a keyframe already answers. A join over the refresh
-		// ratio asks for one past the largest, which the next frame opens.
+		// The largest group demand asked for that a keyframe already answers, including one still in
+		// the encoder. A join over the refresh ratio asks for one past the largest, which the next frame
+		// opens; any other join is served by a group already written, encoded with or without demand.
 		let answered: number | undefined;
 		const answer = () => {
 			const wanted = demand.wanted.peek();
 			if (wanted !== undefined) answered = Math.max(answered ?? 0, wanted);
 		};
+		const covered = () => Math.max(answered ?? -1, track.largest()?.group ?? -1);
 		let tearingDown = false;
 
 		effect.spawn(async () => {
@@ -509,7 +519,7 @@ export class Encoder {
 								since === undefined ||
 								since >= Micro.fromMilli(interval) ||
 								this.#cut ||
-								(wanted !== undefined && (answered === undefined || wanted > answered));
+								(wanted !== undefined && wanted > covered());
 							if (keyFrame) {
 								lastKeyframe = frame.timestamp as Micro;
 								resized = false;
@@ -559,9 +569,9 @@ export class Encoder {
 				// A stopped rendition stops holding the others' delay back. Not a cleanup: the black
 				// keyframe above is written after one would run, and would seat this rendition again.
 				order.leave(this.#estimator);
-				// The broadcast owns this static track across demand gaps. Close the current group, marking
-				// the break so a later subscriber resumes on the same track without the pre-gap group reading
-				// as live. A fatal encoder error aborts the track instead.
+				// The broadcast owns this static track across gaps (a disable, or with `onDemand` a demand
+				// gap). Close the current group, marking the break so a later subscriber resumes on the same
+				// track without the pre-gap group reading as live. A fatal encoder error aborts the track instead.
 				if (track.closed.peek() === undefined) producer.discontinuity();
 			}
 		});

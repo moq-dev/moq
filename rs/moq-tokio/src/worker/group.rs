@@ -68,8 +68,8 @@ impl Workers {
 	/// [`init_streams`](crate::listen::Config::init_streams) server on the
 	/// caller's own runtime.
 	///
-	/// The group's shared certificate reloads run on the caller's Tokio runtime,
-	/// which must outlive the group; see [`Listen::load`](crate::tls::Listen::load).
+	/// The group's shared certificate reloads run on the caller's Tokio runtime, else
+	/// the fallback, which must outlive the group; see [`Listen::load`](crate::tls::Listen::load).
 	pub fn bind(mut server: crate::server::Config, config: Config) -> Result<Self> {
 		if server.tls.is_some() && server.listen.tls.configured() {
 			return Err(crate::tls::Error::ConflictingServe.into());
@@ -196,7 +196,7 @@ impl Workers {
 
 		// Joining blocks, so it goes to the pool that exists for that rather than
 		// stalling whichever executor thread happened to run this.
-		let _ = tokio::task::spawn_blocking(move || join(threads)).await;
+		let _ = crate::runtime::scope(async move { tokio::task::spawn_blocking(move || join(threads)).await }).await;
 	}
 }
 
@@ -338,7 +338,7 @@ impl Group {
 
 		// Joining blocks, so it goes to the pool that exists for that rather than
 		// stalling whichever executor thread happened to run this.
-		let _ = tokio::task::spawn_blocking(move || join(threads)).await;
+		let _ = crate::runtime::scope(async move { tokio::task::spawn_blocking(move || join(threads)).await }).await;
 	}
 
 	/// Tell every worker to stop and take its thread, leaving nothing for a later

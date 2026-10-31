@@ -71,7 +71,7 @@ async def read(case: Case, consumer: moq.TrackConsumer, payload: bytes, n: int) 
 
 async def throughput(case: Case, results: list[dict]) -> None:
     origin = moq.OriginProducer(cache_capacity_bytes=CACHE_BYTES)
-    broadcast = origin.create_broadcast("bench")
+    broadcast = origin.create_broadcast("bench").broadcast
     tracks = [broadcast.publish_track(str(p), moq.TrackInfo(timescale=1_000_000)) for p in range(case.publishers)]
     consumers = [track.consume() for track in tracks for _ in range(case.subscribers)]
     # A non-uniform payload, so a zero-filled or truncated copy fails the check.

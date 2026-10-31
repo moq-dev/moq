@@ -10,7 +10,7 @@ use std::{
 	io::{self, IoSliceMut},
 	net::{IpAddr, SocketAddr},
 	sync::{Arc, Mutex},
-	task::Poll,
+	task::{Context, Poll},
 };
 
 use bytes::Bytes;
@@ -24,7 +24,10 @@ pub use moq_sock::{
 	udp::Transmit,
 };
 
-use super::backend::Socket;
+use super::driver::{
+	Slot,
+	endpoint::{AsyncUdpSocket, Endpoint},
+};
 
 /// The bytes a [`WebRtc`] feed may hold before it drops, shared by every source.
 const CAPACITY: usize = 4 << 20;
@@ -40,7 +43,7 @@ pub struct Demux {
 	live: kio::Producer<()>,
 	shared: Arc<Shared>,
 	/// The listening sockets a [`WebRtc`] answers through.
-	sockets: Arc<Mutex<Vec<Socket>>>,
+	sockets: Arc<Mutex<Vec<Answer>>>,
 }
 
 #[derive(Debug)]
@@ -90,10 +93,31 @@ impl Demux {
 		}
 	}
 
-	/// Answer through `socket`, one of the sockets this demux reads.
-	pub(crate) fn attach(&self, socket: Socket) {
-		self.sockets.lock().unwrap().push(socket);
+	/// Run the split on `socket`, leaving only QUIC for the endpoint that reads it.
+	pub(crate) fn wrap(&self, socket: Box<dyn AsyncUdpSocket>) -> Box<dyn AsyncUdpSocket> {
+		Box::new(Split {
+			inner: socket,
+			divert: self.divert(),
+		})
 	}
+
+	/// Answer through `endpoint`'s socket, one this demux [`wrap`](Self::wrap)ped.
+	///
+	/// Only its slot is kept, which the endpoint empties when it releases the port.
+	pub(crate) fn attach(&self, endpoint: &Endpoint) {
+		self.sockets.lock().unwrap().push(Answer {
+			slot: endpoint.inner.slot.clone(),
+			ipv6: endpoint.local_addr().is_ipv6(),
+		});
+	}
+}
+
+/// A listening socket a [`WebRtc`] answers through.
+#[derive(Debug)]
+struct Answer {
+	slot: Arc<Slot>,
+	/// Whether the socket is AF_INET6, so an IPv4 destination needs its mapped form.
+	ipv6: bool,
 }
 
 /// A datagram diverted to the WebRTC media path.
@@ -116,7 +140,7 @@ pub struct Datagram {
 pub struct WebRtc {
 	live: kio::Consumer<()>,
 	shared: Arc<Shared>,
-	sockets: Arc<Mutex<Vec<Socket>>>,
+	sockets: Arc<Mutex<Vec<Answer>>>,
 }
 
 impl WebRtc {
@@ -143,15 +167,15 @@ impl WebRtc {
 	/// Poll to send `transmit` from the shared port, with GSO and ECN as it asks.
 	///
 	/// A datagram sent once the listener has released its socket is lost, as UDP
-	/// allows. Errors are those of [`AsyncUdpSocket`](crate::quic::driver::AsyncUdpSocket)'s
-	/// sender: an unreachable destination comes back, anything else is logged.
+	/// allows. Errors are those of the endpoint's own sends: an unreachable destination
+	/// comes back, as [`AsyncUdpSocket::try_send`] describes, and anything else is logged.
 	pub fn poll_send(&self, waiter: &kio::Waiter, transmit: &Transmit<'_>) -> Poll<io::Result<()>> {
 		// Any member of a reuseport group answers from the same port.
 		let sockets = self.sockets.lock().unwrap();
-		let Some(socket) = sockets.iter().find(|socket| !socket.is_released()) else {
+		let Some(socket) = sockets.iter().find(|socket| !socket.slot.is_released()) else {
 			return Poll::Ready(Ok(()));
 		};
-		let destination = match (transmit.destination, socket.is_ipv6()) {
+		let destination = match (transmit.destination, socket.ipv6) {
 			(SocketAddr::V4(v4), true) => SocketAddr::new(v4.ip().to_ipv6_mapped().into(), v4.port()),
 			(destination, _) => destination,
 		};
@@ -159,7 +183,7 @@ impl WebRtc {
 			destination,
 			..*transmit
 		};
-		socket.poll_transmit(&transmit, &mut waiter.context())
+		socket.slot.poll_send(&transmit, &mut waiter.context())
 	}
 
 	/// Send `transmit` from the shared port; see [`Self::poll_send`].
@@ -171,6 +195,50 @@ impl WebRtc {
 	/// until the returned [`Pin`] drops.
 	pub fn pin(&self, remote: SocketAddr) -> Pin {
 		self.shared.flows.pin(remote)
+	}
+}
+
+/// A listening socket that runs its [`Divert`] on every receive.
+#[derive(Debug)]
+struct Split {
+	inner: Box<dyn AsyncUdpSocket>,
+	divert: Divert,
+}
+
+impl AsyncUdpSocket for Split {
+	fn poll_recv(
+		&self,
+		cx: &mut Context<'_>,
+		bufs: &mut [IoSliceMut<'_>],
+		meta: &mut [RecvMeta],
+	) -> Poll<io::Result<usize>> {
+		self.inner
+			.poll_recv(cx, bufs, meta)
+			.map_ok(|received| self.divert.split(bufs, meta, received))
+	}
+
+	fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
+		self.inner.try_send(transmit)
+	}
+
+	fn poll_writable(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		self.inner.poll_writable(cx)
+	}
+
+	fn local_addr(&self) -> io::Result<SocketAddr> {
+		self.inner.local_addr()
+	}
+
+	fn max_receive_segments(&self) -> usize {
+		self.inner.max_receive_segments()
+	}
+
+	fn max_transmit_segments(&self) -> usize {
+		self.inner.max_transmit_segments()
+	}
+
+	fn may_fragment(&self) -> bool {
+		self.inner.may_fragment()
 	}
 }
 

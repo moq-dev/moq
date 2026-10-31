@@ -50,7 +50,6 @@ fn early_packets_leave_handshake_and_application_data_usable() {
 		let (decoded, _) = PartialDecode::new(
 			initial.clone(),
 			&FixedLengthConnectionIdParser::new(RandomConnectionIdGenerator::default().cid_len()),
-			&[1],
 			true,
 		)
 		.unwrap();
@@ -67,7 +66,7 @@ fn early_packets_leave_handshake_and_application_data_usable() {
 		let keys = config
 			.crypto
 			.clone()
-			.start_session(1, "localhost", &TransportParameters::default())
+			.start_session(Version::V1, "localhost", &TransportParameters::default())
 			.unwrap()
 			.initial_keys(initial_header.dst_cid, Side::Client);
 		// The ciphertext is deliberately opaque: early-data rejection precedes decryption,

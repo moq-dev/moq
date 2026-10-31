@@ -57,10 +57,9 @@ test("snapshot codec property reconstructs each JSON value", () => {
 	const seed = setting("MOQ_JSON_SEED", 0x6d6f71, 0);
 	const numRuns = setting("MOQ_JSON_CASES", 256, 1);
 	fc.assert(
-		fc.property(fc.boolean(), fc.boolean(), fc.oneof(roots, edits), (deltas, deflate, steps) => {
-			const config = { deltas, compression: deflate ? ("deflate" as const) : ("none" as const) };
-			const encoder = new Encoder<Json>(config);
-			const decoder = new Decoder<Json>(config);
+		fc.property(fc.boolean(), fc.oneof(roots, edits), (deltas, steps) => {
+			const encoder = new Encoder<Json>({ deltas });
+			const decoder = new Decoder<Json>({});
 			for (const { value, reset, restate } of steps) {
 				if (reset) encoder.reset();
 				if (restate) {

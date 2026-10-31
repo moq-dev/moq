@@ -35,7 +35,7 @@ Most important, in this order:
 2. Authorization: a session publishing, subscribing, or seeing announcements outside its grant, or reaching another root (tenant) through path tricks, revalidation, mounts, or cluster links.
 3. `rs/moq-mux` and `rs/hang`: container, codec, and catalog parsing of publisher-controlled bytes.
 4. The ingest gateways: `rs/moq-rtmp`, `rs/moq-rtsp`, `rs/moq-srt`, `rs/moq-rtc`, `rs/moq-ice`, `rs/moq-hls`.
-5. `rs/moq-e2ee`, `rs/moq-cli`, `rs/moq-flate`, `rs/moq-json`, `rs/moq-stats`, `rs/kio`, `rs/moq-clock`.
+5. `rs/moq-e2ee`, `rs/moq-cli`, `rs/moq-json`, `rs/moq-stats`, `rs/kio`, `rs/moq-clock`.
 
 `unsafe` is rare and worth reading closely where it appears: `rs/moq-quic`, `rs/moq-net/src/model`, `rs/moq-net/src/util/cell.rs`, `rs/moq-net/src/transport.rs`, and `rs/moq-relay/src/uring.rs`.
 

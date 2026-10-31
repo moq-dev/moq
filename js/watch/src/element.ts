@@ -58,6 +58,8 @@ const OBSERVED = [
 	"muted",
 	"visible",
 	"backend",
+	"follow",
+	// Renamed to `follow`, observed only to refuse it.
 	"announced",
 	"delay",
 	"buffer",
@@ -112,7 +114,7 @@ export function parseCatalogFormat(value: string | null): CatalogFormat | undefi
 /**
  * Parse a boolean attribute: absent uses `defaultValue`, bare presence is true, and an explicit
  * `"false"`/`"0"` is false. Presence alone can't express false, and attributes that default to
- * true (`announced`) need to, so every boolean attribute accepts the explicit form.
+ * true (`follow`) need to, so every boolean attribute accepts the explicit form.
  */
 function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 	if (value === null) return defaultValue;
@@ -190,7 +192,7 @@ export default class MoqWatch extends HTMLElement {
 
 	// Broadcast configuration owned here and wired into `broadcast` as inputs.
 	#name = new Signal<Moq.Path.Valid>(Moq.Path.empty());
-	#announced = new Signal(true);
+	#follow = new Signal(true);
 	#catalogFormat = new Signal<CatalogFormat | undefined>(undefined);
 	#catalog = new Signal<Catalog.Root | undefined>(undefined);
 
@@ -232,7 +234,7 @@ export default class MoqWatch extends HTMLElement {
 			probe: this.connection.probe,
 			enabled: this.#enabled,
 			name: this.#name,
-			announced: this.#announced,
+			follow: this.#follow,
 			catalogFormat: this.#catalogFormat,
 			catalog: this.#catalog,
 			...this.controls,
@@ -306,7 +308,7 @@ export default class MoqWatch extends HTMLElement {
 		);
 		this.signals.run((effect) => this.#reflect(effect, "visible", effect.get(this.controls.video.visible)));
 		this.signals.run((effect) => this.#reflect(effect, "backend", effect.get(this.controls.video.backend)));
-		this.signals.run((effect) => this.#reflect(effect, "announced", effect.get(this.#announced) ? "" : "false"));
+		this.signals.run((effect) => this.#reflect(effect, "follow", effect.get(this.#follow) ? "" : "false"));
 		this.signals.run((effect) => this.#reflect(effect, "catalog-format", effect.get(this.#catalogFormat)));
 		this.signals.run((effect) => this.#reflect(effect, "captions", effect.get(this.controls.text.target)));
 		this.signals.run((effect) => {
@@ -384,7 +386,10 @@ export default class MoqWatch extends HTMLElement {
 			else if (name === "muted") this.muted = parseBoolean(newValue, false);
 			else if (name === "visible") this.visible = parseVisible(newValue);
 			else if (name === "backend") this.backend = parseBackend(newValue);
-			else if (name === "announced") this.announced = parseBoolean(newValue, true);
+			else if (name === "follow") this.follow = parseBoolean(newValue, true);
+			else if (name === "announced" && newValue !== null)
+				throw new Error("moq-watch: `announced` was renamed to `follow`");
+			else if (name === "announced") this.#accept("announced");
 			else if (name === "delay") this.delay = parseDelay(newValue);
 			else if (name === "buffer") this.buffer = parseBuffer(newValue);
 			else if (name === "catalog-format") this.catalogFormat = parseCatalogFormat(newValue);
@@ -509,14 +514,14 @@ export default class MoqWatch extends HTMLElement {
 		this.#accept("backend");
 	}
 
-	/** Whether to wait for the broadcast's announcement before subscribing, mirrored by the `announced` attribute. */
-	get announced(): boolean {
-		return this.#announced.peek();
+	/** Whether to follow the broadcast's announcements, waiting for one before subscribing, mirrored by the `follow` attribute. */
+	get follow(): boolean {
+		return this.#follow.peek();
 	}
 
-	set announced(value: boolean) {
-		this.#announced.set(value);
-		this.#accept("announced");
+	set follow(value: boolean) {
+		this.#follow.set(value);
+		this.#accept("follow");
 	}
 
 	/**

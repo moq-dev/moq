@@ -11,9 +11,10 @@ case $(uname -s) in Linux) dylib=so ;; Darwin) dylib=dylib ;; *)
     ;;
 esac
 # Release jobs ship default features only; this shows what the feature gates save.
-cargo build --locked --release -p moq-ffi --no-default-features
-cp "$target/release/libmoq_ffi.$dylib" "$out/native/libmoq_ffi-minimal.$dylib"
-cp "$target/release/libmoq_ffi.a" "$out/native/libmoq_ffi-minimal.a"
+# Its own target directory, since the cdylib would replace the default build's.
+cargo build --locked --release -p moq-ffi --no-default-features --target-dir "$target/minimal"
+cp "$target/minimal/release/libmoq_ffi.$dylib" "$out/native/libmoq_ffi-minimal.$dylib"
+cp "$target/minimal/release/libmoq_ffi.a" "$out/native/libmoq_ffi-minimal.a"
 bun install --frozen-lockfile
 just js build
 bun sh/size/bundles.ts "$out/js"

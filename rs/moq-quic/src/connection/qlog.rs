@@ -54,17 +54,6 @@ pub(crate) struct QlogSink {
 }
 
 impl QlogSink {
-	pub(crate) fn is_enabled(&self) -> bool {
-		#[cfg(feature = "qlog")]
-		{
-			self.stream.is_some()
-		}
-		#[cfg(not(feature = "qlog"))]
-		{
-			false
-		}
-	}
-
 	pub(super) fn emit_recovery_metrics(
 		&self,
 		pto_count: u32,

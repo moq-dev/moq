@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Compression moves to the track
+
+`moq.flate` is removed: publish opaque bytes on a `TrackProducer`.
+The `moq.json` producers and consumers drop their `compression` keyword. Publish the track with `TrackInfo(compress=True)` instead; a consumer reads a compressed track with no option of its own.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 Publishing, serving, or requesting a broadcast at a path with a leading, trailing, or doubled `/` raises instead of collapsing it. Pass the canonical path, such as `room/cam`.
@@ -272,6 +277,7 @@ Pass `timestamp=` on every write to a timed track.
 ### Subscriber staleness is `max_delay`
 
 `Subscription.max_age_us` is `max_delay`, a `timedelta`, and the decoder outputs take `max_delay`, also a `timedelta`.
+`Subscription.max_delay` defaults to `None`, which sets no subscriber limit: start from `Subscription.default()` for the old default of zero.
 `TrackInfo` keeps its `max_age`: it is the publisher's retention.
 
 ### Error payloads are named `reason`
