@@ -1691,7 +1691,7 @@ mod tests {
 	// Background work ends with its owners, not with the publisher: once a reconfigure replaced
 	// the rendition, dropping the broadcaster and both renditions finishes the driver while the
 	// records stay open.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_driver_finishes_with_its_owners() {
 		let origin = produce_origin();
 		let broadcast = origin.create_broadcast("live").expect("publish allowed");
@@ -2488,7 +2488,7 @@ mod tests {
 	// Dropping the broadcaster must not truncate a recording in progress. A cursor holds its
 	// rendition alive, so the rendition's own watcher still lists the final segment once the
 	// publisher finishes.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn dropping_the_broadcaster_keeps_a_cursor_drainable() {
 		let origin = produce_origin();
 		let broadcast = origin.create_broadcast("live").expect("publish allowed");
