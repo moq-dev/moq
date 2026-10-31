@@ -64,6 +64,17 @@ class Moq internal constructor(
     fun allocator(): Allocator = session.allocator()
 
     /**
+     * The session's viewers, dividing the connection's receive estimate among the broadcasts
+     * watched over it.
+     *
+     * Every call returns a handle to the same registry, and the session sends what its viewers'
+     * ceilings add up to as its PROBE target. [Viewers.watch] a broadcast with the ceiling of
+     * the largest rendition the player would switch to, read its slice with [Viewer.rate], and
+     * [Viewer.close] it once the broadcast stops being watched.
+     */
+    fun viewers(): Viewers = session.viewers()
+
+    /**
      * Follow the grant the peer gave this session.
      *
      * Collect `grants().updates()` for the current grant and each change. Every call returns

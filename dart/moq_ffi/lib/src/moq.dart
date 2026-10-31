@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -9378,6 +9380,173 @@ class FfiConverterMoqReservation {
   }
 }
 
+abstract class MoqViewerInterface {
+  int? rate();
+  void update({required int maxBps});
+}
+
+final _MoqViewerFinalizer = Finalizer<Pointer<Void>>((ptr) {
+  rustCall((status) => uniffi_moq_ffi_fn_free_moqviewer(ptr, status));
+});
+
+class MoqViewer implements MoqViewerInterface {
+  late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
+  MoqViewer._(this._ptr) {
+    _MoqViewerFinalizer.attach(this, _ptr, detach: this);
+  }
+  factory MoqViewer.lift(Pointer<Void> ptr) {
+    return MoqViewer._(ptr);
+  }
+  Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
+    return rustCall(
+      (status) => uniffi_moq_ffi_fn_clone_moqviewer(_ptr, status),
+    );
+  }
+
+  void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
+    _MoqViewerFinalizer.detach(this);
+    rustCall((status) => uniffi_moq_ffi_fn_free_moqviewer(_ptr, status));
+  }
+
+  int? rate() {
+    return rustCallWithLifter(
+      (status) =>
+          uniffi_moq_ffi_fn_method_moqviewer_rate(uniffiClonePointer(), status),
+      FfiConverterOptionalUInt64.lift,
+      null,
+    );
+  }
+
+  void update({required int maxBps}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqviewer_update(
+        uniffiClonePointer(),
+        FfiConverterUInt64.lower(maxBps),
+        status,
+      );
+    }, null);
+  }
+}
+
+class FfiConverterMoqViewer {
+  static MoqViewer lift(Pointer<Void> ptr) {
+    return MoqViewer.lift(ptr);
+  }
+
+  static Pointer<Void> lower(MoqViewer value) {
+    return value.uniffiClonePointer();
+  }
+
+  static int allocationSize(MoqViewer value) {
+    return 8;
+  }
+
+  static LiftRetVal<MoqViewer> read(Uint8List buf) {
+    final handle = buf.buffer.asByteData(buf.offsetInBytes).getInt64(0);
+    final pointer = Pointer<Void>.fromAddress(handle);
+    return LiftRetVal(MoqViewer.lift(pointer), 8);
+  }
+
+  static int write(MoqViewer value, Uint8List buf) {
+    final handle = lower(value);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt64(0, handle.address);
+    return 8;
+  }
+}
+
+abstract class MoqViewersInterface {
+  void setTarget({required int? targetBps});
+  MoqViewer watch({required int maxBps});
+}
+
+final _MoqViewersFinalizer = Finalizer<Pointer<Void>>((ptr) {
+  rustCall((status) => uniffi_moq_ffi_fn_free_moqviewers(ptr, status));
+});
+
+class MoqViewers implements MoqViewersInterface {
+  late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
+  MoqViewers._(this._ptr) {
+    _MoqViewersFinalizer.attach(this, _ptr, detach: this);
+  }
+  factory MoqViewers.lift(Pointer<Void> ptr) {
+    return MoqViewers._(ptr);
+  }
+  Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
+    return rustCall(
+      (status) => uniffi_moq_ffi_fn_clone_moqviewers(_ptr, status),
+    );
+  }
+
+  void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
+    _MoqViewersFinalizer.detach(this);
+    rustCall((status) => uniffi_moq_ffi_fn_free_moqviewers(_ptr, status));
+  }
+
+  void setTarget({required int? targetBps}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqviewers_set_target(
+        uniffiClonePointer(),
+        FfiConverterOptionalUInt64.lower(targetBps),
+        status,
+      );
+    }, null);
+  }
+
+  MoqViewer watch({required int maxBps}) {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqviewers_watch(
+        uniffiClonePointer(),
+        FfiConverterUInt64.lower(maxBps),
+        status,
+      ),
+      FfiConverterMoqViewer.lift,
+      null,
+    );
+  }
+}
+
+class FfiConverterMoqViewers {
+  static MoqViewers lift(Pointer<Void> ptr) {
+    return MoqViewers.lift(ptr);
+  }
+
+  static Pointer<Void> lower(MoqViewers value) {
+    return value.uniffiClonePointer();
+  }
+
+  static int allocationSize(MoqViewers value) {
+    return 8;
+  }
+
+  static LiftRetVal<MoqViewers> read(Uint8List buf) {
+    final handle = buf.buffer.asByteData(buf.offsetInBytes).getInt64(0);
+    final pointer = Pointer<Void>.fromAddress(handle);
+    return LiftRetVal(MoqViewers.lift(pointer), 8);
+  }
+
+  static int write(MoqViewers value, Uint8List buf) {
+    final handle = lower(value);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt64(0, handle.address);
+    return 8;
+  }
+}
+
 abstract class MoqBroadcastConsumerInterface {
   UniffiRustFuture<MoqGroupConsumer> fetchGroup({
     required String name,
@@ -13588,6 +13757,7 @@ abstract class MoqSessionInterface {
   UniffiRustFuture<MoqConnectionState> stateChanged({required int after});
   MoqConnectionStats stats();
   MoqTokens? tokens();
+  MoqViewers viewers();
 }
 
 final _MoqSessionFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -13751,6 +13921,17 @@ class MoqSession implements MoqSessionInterface {
         status,
       ),
       FfiConverterOptionalMoqTokens.lift,
+      null,
+    );
+  }
+
+  MoqViewers viewers() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqsession_viewers(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterMoqViewers.lift,
       null,
     );
   }
@@ -17308,6 +17489,73 @@ external void uniffi_moq_ffi_fn_method_moqreservation_update(
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
+external Pointer<Void> uniffi_moq_ffi_fn_clone_moqviewer(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_free_moqviewer(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external RustBuffer uniffi_moq_ffi_fn_method_moqviewer_rate(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Uint64, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqviewer_update(
+  Pointer<Void> ptr,
+  int max_bps,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external Pointer<Void> uniffi_moq_ffi_fn_clone_moqviewers(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_free_moqviewers(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqviewers_set_target(
+  Pointer<Void> ptr,
+  RustBuffer target_bps,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Uint64, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqviewers_watch(
+  Pointer<Void> ptr,
+  int max_bps,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
 external Pointer<Void> uniffi_moq_ffi_fn_clone_moqbroadcastconsumer(
   Pointer<Void> handle,
   Pointer<RustCallStatus> uniffiStatus,
@@ -19260,6 +19508,14 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqsession_tokens(
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_viewers(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
 external Pointer<Void> uniffi_moq_ffi_fn_clone_moqtokens(
   Pointer<Void> handle,
   Pointer<RustCallStatus> uniffiStatus,
@@ -19975,6 +20231,18 @@ external int uniffi_moq_ffi_checksum_method_moqreservation_rate();
 external int uniffi_moq_ffi_checksum_method_moqreservation_update();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqviewer_rate();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqviewer_update();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqviewers_set_target();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqviewers_watch();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_fetch_group();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -20424,6 +20692,9 @@ external int uniffi_moq_ffi_checksum_method_moqsession_stats();
 external int uniffi_moq_ffi_checksum_method_moqsession_tokens();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqsession_viewers();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqtokens_answered();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -20668,6 +20939,18 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqreservation_update() != 9626) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqviewer_rate() != 64505) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqviewer_update() != 13024) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqviewers_set_target() != 23388) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqviewers_watch() != 62773) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_fetch_group() !=
@@ -21135,6 +21418,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_tokens() != 2396) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqsession_viewers() != 51586) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtokens_answered() != 11571) {

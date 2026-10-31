@@ -58,3 +58,51 @@ public final class Reservation: Sendable {
         ffi.update(maxBps: maxBps)
     }
 }
+
+/// Divides one connection's receive estimate among the broadcasts watched over it.
+///
+/// Minted by `Session.viewers`. Handles from the same session share one registry.
+public final class Viewers: Sendable {
+    let ffi: MoqViewers
+
+    init(_ ffi: MoqViewers) {
+        self.ffi = ffi
+    }
+
+    /// Watch a broadcast receiving at most `maxBps`, returning its viewer.
+    ///
+    /// `maxBps` is a ceiling: what the largest rendition the player would switch to
+    /// needs, not what it is receiving. Drop the viewer once the broadcast stops being
+    /// watched. Holding one requests the receive estimate, like `Session.recvBandwidth()`.
+    public func watch(maxBps: UInt64) -> Viewer {
+        Viewer(ffi.watch(maxBps: maxBps))
+    }
+
+    /// Send `targetBps` as the PROBE target instead of the viewers' sum, or `nil` to
+    /// follow them again. `0` sends no target.
+    public func setTarget(targetBps: UInt64?) {
+        ffi.setTarget(targetBps: targetBps)
+    }
+}
+
+/// One watched broadcast's standing claim on `Viewers`.
+///
+/// `rate()` is a snapshot: `nil` means no receive estimate, so hold the current
+/// selection, and `0` is a real zero rate.
+public final class Viewer: Sendable {
+    let ffi: MoqViewer
+
+    init(_ ffi: MoqViewer) {
+        self.ffi = ffi
+    }
+
+    /// This viewer's slice of the receive estimate right now, in bits per second.
+    public func rate() -> UInt64? {
+        ffi.rate()
+    }
+
+    /// Change the ceiling, keeping the same claim.
+    public func update(maxBps: UInt64) {
+        ffi.update(maxBps: maxBps)
+    }
+}

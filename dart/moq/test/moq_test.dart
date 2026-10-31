@@ -211,6 +211,17 @@ void main() {
     final serverSession = await accepted;
     expect(client.allocator(), isA<MoqAllocator>());
 
+    final viewers = client.viewers();
+    expect(viewers, isA<Viewers>());
+    final viewer = viewers.watch(maxBps: 4000000);
+    expect(viewer, isA<Viewer>());
+    // A slice never exceeds its ceiling, whether or not QUIC has an estimate yet.
+    viewer.update(maxBps: 1000000);
+    expect(viewer.rate() ?? 0, lessThanOrEqualTo(1000000));
+    viewers.setTarget(targetBps: 0);
+    viewers.setTarget(targetBps: null);
+    viewer.dispose();
+
     final announcement = client.announced().updates().firstWhere(
       (event) => event is AnnounceEventStart,
     );

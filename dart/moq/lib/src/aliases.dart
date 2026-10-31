@@ -159,6 +159,13 @@ typedef BandwidthConsumer = MoqBandwidthConsumer;
 /// One track's standing claim on an [Allocator].
 typedef Reservation = MoqReservation;
 
+/// Divides one connection's receive estimate among the broadcasts watched over it.
+typedef Viewers = MoqViewers;
+
+/// One watched broadcast's standing claim on [Viewers]; holding it requests
+/// PROBE, disposing it releases the claim.
+typedef Viewer = MoqViewer;
+
 /// A snapshot of transport connection statistics.
 typedef ConnectionStats = MoqConnectionStats;
 

@@ -212,6 +212,31 @@ async def test_session_state_names_a_failing_first_dial():
             session.cancel(0)
 
 
+async def test_viewer_holds_without_an_estimate():
+    """A viewer on a session that has not connected reads no estimate."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as silent:
+        silent.bind(("127.0.0.1", 0))
+        host, port = silent.getsockname()
+        client = moq.Client(
+            f"https://{host}:{port}",
+            tls=moq.ClientTls(insecure=True),
+            bind="127.0.0.1:0",
+            websocket=moq.WebSocketConfig(enabled=False),
+        )
+        async with client:
+            session = client.session
+            assert session is not None
+            viewers = session.viewers()
+            viewer = viewers.watch(1_000_000)
+            viewer.update(2_000_000)
+            viewers.set_target(0)
+            viewers.set_target(None)
+            assert viewer.rate() is None
+            session.cancel(0)
+
+
 async def test_server_close_releases_port():
     """Exiting the context manager releases the listening socket before it
     returns, so the same address binds again with no retry."""

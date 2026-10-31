@@ -203,6 +203,21 @@ A rendition with `enabled: false` has no frames coming until its publisher re-en
 
 Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rate_changed()` waits for a new one. Releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 
+## Viewers
+
+`session->viewers()` divides the receive estimate among the broadcasts you watch, max-min fair by each one's ceiling. `watch(max_bps)` returns a `Viewer` claiming up to a ceiling, the bitrate of the largest rendition you would switch to; its `rate()` reads that viewer's share in bits per second, `std::nullopt` while there is no estimate (keep the current rendition), and `update(max_bps)` changes the ceiling. Holding a viewer requests the estimate like `recv_bandwidth()`, and releasing it releases the claim. The session sends the summed ceilings as its PROBE target; `set_target(bps)` overrides that, `0` sends none, and `std::nullopt` follows the viewers again. Client viewers survive reconnects and read `std::nullopt` while disconnected.
+
+```cpp
+auto viewers = session->viewers();
+auto camera = viewers->watch(4'000'000);   // what its largest rendition needs
+auto screen = viewers->watch(1'000'000);
+if (auto bps = camera->rate()) {
+    // Switch to the largest rendition that fits in *bps.
+}
+camera->update(2'500'000);   // the catalog disabled the top rendition
+screen.reset();              // stopped watching: its share returns to camera
+```
+
 ## Compressed tracks
 
 `moq::TrackInfo::compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
