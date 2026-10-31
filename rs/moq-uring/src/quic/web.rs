@@ -1078,6 +1078,20 @@ impl RecvStream {
 			inner.set_priority(priority);
 		}
 	}
+
+	/// Poll until the peer resets the stream or the connection closes, without reading it;
+	/// pending for good once every byte arrived. See [`recv::Stream::received_reset`].
+	pub fn poll_reset(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
+		let web = self.web;
+		let Some(inner) = &mut self.inner else {
+			return Poll::Ready(Error::Closed);
+		};
+		match ready!(inner.poll_received_reset(cx)) {
+			Ok(None) => Poll::Pending,
+			Ok(Some(code)) => Poll::Ready(map(web, Error::Reset(code.into_inner()))),
+			Err(err) => Poll::Ready(map(web, err.into())),
+		}
+	}
 }
 
 /// Unmap a stream error's code from the session's code space.

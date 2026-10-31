@@ -262,6 +262,9 @@ impl poll::RecvStream for crate::quic::web::RecvStream {
 		// A stream already closed has nobody left to tell.
 		crate::quic::web::RecvStream::stop(self, code);
 	}
+	fn poll_reset(&mut self, waiter: &moq_net::kio::Waiter) -> Poll<Self::Error> {
+		crate::quic::web::RecvStream::poll_reset(self, &mut waiter.context()).map(Error)
+	}
 }
 
 #[cfg(feature = "quic")]

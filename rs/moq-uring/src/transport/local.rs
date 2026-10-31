@@ -177,6 +177,10 @@ impl<T: poll::RecvStream> poll::RecvStream for Local<T> {
 		self.0.stop(code)
 	}
 
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+		self.0.poll_reset(waiter)
+	}
+
 	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 		self.0.poll_read_chunk(waiter, max)
 	}

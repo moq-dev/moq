@@ -108,6 +108,35 @@ async fn an_idle_reader_paces_the_relay_and_loses_nothing() {
 	}
 }
 
+/// A paused stream is not read, so the relay watches it for a reset instead: a publisher
+/// aborting the group ends the relay's copy while its reader still takes nothing.
+#[moq_clock::test]
+async fn a_reset_reaches_a_paused_relay() {
+	let payload = Bytes::from(vec![7u8; MB]);
+	for version in VERSIONS {
+		let mut relay = relay(version).await;
+
+		let mut group = relay.track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		let mut reader = moq_clock::timeout(TIMEOUT, relay.subscriber.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap()
+			.expect("group 0");
+		for _ in 1..30 {
+			group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		}
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert!(reader.frame_count() < 30, "{version}: the relay never paused");
+
+		group.abort(moq_net::Error::Cancel).unwrap();
+		let end = moq_clock::timeout(TIMEOUT, reader.finished())
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the reset never reached the paused relay"));
+		assert!(end.is_err(), "{version}: {end:?}");
+	}
+}
+
 /// A frame larger than the room left waits to be admitted, since admitting it trims the
 /// tail to fit: an idle reader loses nothing to a large frame either.
 #[moq_clock::test]

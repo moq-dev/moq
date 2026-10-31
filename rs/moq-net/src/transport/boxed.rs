@@ -302,6 +302,7 @@ trait ErasedRecv: MaybeSend + MaybeSync {
 	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Error>>;
 	fn set_priority(&mut self, priority: i64);
 	fn stop(&mut self, code: u32);
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error>;
 	fn pause(&mut self) -> bool;
 	fn resume(&mut self);
 }
@@ -488,6 +489,10 @@ impl<T: poll::RecvStream + MaybeSend + MaybeSync> ErasedRecv for Budgeted<T> {
 		poll::RecvStream::stop(&mut self.stream, code)
 	}
 
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		poll::RecvStream::poll_reset(&mut self.stream, waiter).map(Error::new)
+	}
+
 	fn pause(&mut self) -> bool {
 		if self.held > 0 {
 			return true;
@@ -652,6 +657,10 @@ impl poll::RecvStream for RecvStream {
 
 	fn stop(&mut self, code: u32) {
 		self.0.stop(code)
+	}
+
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		self.0.poll_reset(waiter)
 	}
 }
 

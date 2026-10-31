@@ -888,6 +888,18 @@ pub mod poll {
 		/// Call this method manually if you want to specify a code yourself.
 		fn stop(&mut self, code: u32);
 
+		/// Poll until the stream fails without reading it: the peer resets it, or the
+		/// connection closes. Pending for good once the peer finished it.
+		///
+		/// A session that stops reading a stream to pace it (see
+		/// [`Session::receive_window`]) watches this instead, so a reset still ends the group
+		/// it carries. It takes no bytes and grants no credit. The default never completes,
+		/// which suits a transport reporting no receive window, since none of its streams pause.
+		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+			let _ = waiter;
+			Poll::Pending
+		}
+
 		/// Poll for the next chunk, up to `max` bytes, or `None` once the peer finished the
 		/// stream. Its credit returns as it is read.
 		///
@@ -965,6 +977,12 @@ pub mod poll {
 		/// An implementation MUST also do this on Drop: [`Buffered`] forwards an explicit stop
 		/// but leaves the drop to the wrapped stream.
 		fn stop(&mut self, code: u32);
+
+		/// Poll until the stream fails without reading it. See [`RecvStream::poll_reset`].
+		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+			let _ = waiter;
+			Poll::Pending
+		}
 	}
 
 	/// Leases over a transport that cannot keep bytes unconsumed, buffering what it reads.
@@ -1034,6 +1052,14 @@ pub mod poll {
 			self.chunks.clear();
 			self.len = 0;
 			self.inner.stop(code);
+		}
+
+		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<S::Error> {
+			// Every byte arrived, so nothing is left to reset.
+			match self.fin {
+				true => Poll::Pending,
+				false => self.inner.poll_reset(waiter),
+			}
 		}
 	}
 

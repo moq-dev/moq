@@ -96,6 +96,9 @@ impl moq_net::transport::poll::RecvStream for quic::web::RecvStream {
 	fn stop(&mut self, code: u32) {
 		web_transport_trait::poll::RecvStream::stop(self, code)
 	}
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> std::task::Poll<Self::Error> {
+		quic::web::RecvStream::poll_reset(self, &mut waiter.context()).map(adapter::Error)
+	}
 }
 
 #[cfg(feature = "quic")]

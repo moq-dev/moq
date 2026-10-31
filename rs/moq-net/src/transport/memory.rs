@@ -643,6 +643,23 @@ impl poll::Chunks for Chunks {
 		drop(channel);
 		self.release();
 	}
+
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		if self.stopped {
+			return Poll::Ready(Error::Closed);
+		}
+		if let Poll::Ready(err) = poll_close(&self.close, waiter) {
+			return Poll::Ready(err);
+		}
+		let channel = ready!(self.channel.poll(waiter, |channel| match channel.end {
+			Some(End::Reset(_)) => Poll::Ready(()),
+			_ => Poll::Pending,
+		}));
+		let Some(End::Reset(code)) = channel.end else {
+			unreachable!("checked above")
+		};
+		Poll::Ready(Error::Reset(code))
+	}
 }
 
 impl Drop for Chunks {

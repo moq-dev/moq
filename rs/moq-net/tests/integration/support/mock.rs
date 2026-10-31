@@ -413,6 +413,14 @@ impl poll::Chunks for MockChunks {
 	fn stop(&mut self, code: u32) {
 		self.stop_after_latency(code);
 	}
+
+	// Unlike data, a reset skips the link's latency: no test times one.
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+		match &mut self.inner {
+			Some(inner) => poll::RecvStream::poll_reset(inner, waiter),
+			None => Poll::Ready(memory::Error::Closed),
+		}
+	}
 }
 
 impl Drop for MockChunks {
