@@ -11,6 +11,7 @@ import {
 	ProtocolViolation,
 	reason,
 	SessionCode,
+	SessionError,
 	StreamCode,
 	StreamError,
 	TimestampMismatch,
@@ -1019,7 +1020,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 			await answerTrackInfo(await opened(0), version, 1000);
 			const request = await opened(1);
 			await request.reading;
-			await respond(request, version, [{ start: new SubscribeStart(0) }]);
+			await respond(request, version, [{ start: new SubscribeStart([0]) }]);
 			const received = track.recvDatagram();
 			await writer.write(new DatagramMessage(0n, 0, 0, new Uint8Array(1198)).encode(version));
 			await writer.write(new DatagramMessage(0n, 1, 1, new Uint8Array(1197)).encode(version));
@@ -1038,8 +1039,9 @@ function expectCut(err: unknown, cause: Error | undefined) {
 	if (cause) {
 		expect(err).toBe(cause);
 	} else {
-		expect(err).toBeInstanceOf(StreamError);
-		expect((err as StreamError).code).toBe(StreamCode.SessionClosed);
+		// A deliberate close cuts it off as the peer's clean close would.
+		expect(err).toBeInstanceOf(SessionError);
+		expect((err as SessionError).code).toBe(SessionCode.Cancel);
 	}
 }
 
@@ -1657,7 +1659,7 @@ test.each([
 		await subscribe.reading;
 
 		if (outcome === "answered") {
-			await respond(subscribe, version, [{ start: new SubscribeStart(0) }]);
+			await respond(subscribe, version, [{ start: new SubscribeStart([0]) }]);
 			await drainReactions();
 			await pool.replace();
 			await drainReactions();
@@ -1666,7 +1668,7 @@ test.each([
 			await pool.withdraw();
 			await drainReactions();
 			expect(track.closed.peek()).toBeUndefined();
-			await respond(subscribe, version, [{ start: new SubscribeStart(0) }, { end: new SubscribeEnd(0) }], true);
+			await respond(subscribe, version, [{ start: new SubscribeStart([0]) }, { end: new SubscribeEnd(0) }], true);
 			expect(await track.closed).toBeNull();
 		} else {
 			await pool.replace();
@@ -2221,6 +2223,52 @@ test("a publisher FIN without SUBSCRIBE_END still violates an open subscription"
 	}
 });
 
+// Our SUBSCRIBE carries one range, so a lite-07 SUBSCRIBE_START with any other count is malformed.
+test.each([[[]], [[0, 5]]])("a lite-07 SUBSCRIBE_START resolving %j violates the protocol", async (starts) => {
+	const { quic, streams, opened, closes } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], Version.DRAFT_07);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, Version.DRAFT_07, [{ start: new SubscribeStart(starts) }]);
+		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
+		await drainReactions();
+		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+test("an empty START remains resolved when its range widens", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ groups: { start: { included: 0 }, end: { excluded: 1 } } });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		await request.reading;
+		expect(hooks.sourceStart(track)).toBe("pending");
+		await respond(request, version, [{ start: new SubscribeStart([undefined]) }]);
+		await drainReactions();
+		track.update({ groups: { start: { included: 0 }, end: { excluded: 2 } } });
+		await drainReactions();
+		expect(hooks.sourceStart(track)).not.toBe("pending");
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A lite-07 publisher FINs a bounded subscription without SUBSCRIBE_END once it covered the range,
 // which ends the subscription cleanly rather than violating the protocol. Covering a range is
 // not ending the track, so no end is declared.
@@ -2240,7 +2288,7 @@ test("a lite-07 publisher FIN ends a covered bounded subscription", async () => 
 			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 			version,
 		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart(0) }, version);
+		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0]) }, version);
 		await encodeSubscribeResponse(
 			writer,
 			{ drop: new SubscribeDrop({ start: 0, end: 1, error: StreamCode.NotFound }) },
@@ -2308,7 +2356,10 @@ test.each([
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ groups: { start: { included: 0 }, end: { excluded: 1 } } });
+	const track = broadcast.track("video").subscribe({
+		maxDelay: Milli.zero,
+		groups: { start: { included: 0 }, end: { excluded: 1 } },
+	});
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -2322,7 +2373,7 @@ test.each([
 					}),
 				)
 			: undefined;
-		track.update({ groups });
+		track.update({ maxDelay: Milli.zero, groups });
 		await refused;
 		await drainReactions();
 
@@ -2332,7 +2383,7 @@ test.each([
 			version,
 		);
 		if (start) {
-			await encodeSubscribeResponse(writer, { start: new SubscribeStart(0) }, version);
+			await encodeSubscribeResponse(writer, { start: new SubscribeStart([0]) }, version);
 			await encodeSubscribeResponse(
 				writer,
 				{ drop: new SubscribeDrop({ start: 0, end: 0, error: StreamCode.NotFound }) },
