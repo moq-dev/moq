@@ -11,7 +11,7 @@ name: Alert
 # pull_request_target. The author already sees them as a check on the PR, and
 # that noise is what drives people to mute Actions notifications wholesale.
 #
-# Needs a DISCORD_WEBHOOK repo secret (Discord: Channel > Integrations >
+# Needs a DISCORD_WEBHOOK secret in `publish` (Discord: Channel > Integrations >
 # Webhooks). Nothing else reads it.
 
 on:
@@ -77,6 +77,9 @@ jobs:
       github.event.workflow_run.event != 'pull_request' &&
       github.event.workflow_run.event != 'pull_request_target'
     runs-on: ubuntu-latest
+    # The webhook lives in the `publish` Environment, which only protected refs
+    # can deploy to; workflow_run runs on `main`.
+    environment: publish
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
