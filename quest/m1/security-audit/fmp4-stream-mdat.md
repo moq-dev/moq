@@ -38,57 +38,46 @@ supported. A sequential MoQ group writer cannot stream decode-ordered
 samples whose physical bytes arrive backwards without retaining earlier
 payload. This settles the draft's remaining input-contract decision.
 
-Implementation checkpoint, 2026-10-29:
+Implemented on the PR branch (checkpoints of 2026-10-29 and 2026-10-31):
 
 - Top-level headers are read incrementally. Ignored bodies are discarded as
   input arrives, including across `cut()` calls; a zero-sized ignored box
   extends to EOF. Discarded bytes count toward moof-relative offsets.
 - `begin_mdat` resolves selected media and text samples before opening media
-  writers. The importer's streaming resolver preserves `Claimed` checks and
-  rejects backwards ranges per track; the complete-frame CMAF decoder keeps
-  its existing random-access behavior.
+  writers, and releases the catalog reservation only once a fragment
+  anchors. The streaming resolver keeps `Claimed` checks and rejects
+  backwards ranges per track; complete-frame CMAF decoding keeps its
+  random-access behavior.
 - Media samples stream into MoQ frame writers. Passthrough writes rewritten
-  per-track moof+mdat headers first, then each track's sample bytes directly
-  into its own writer. Gaps and unused trailing mdat bytes are discarded.
-- Text resolution is separated from reconstruction, but each text sample
-  still accumulates in a `BytesMut` before rewriting. `Body::Metadata` still
-  buffers whole `moov` and `moof` bodies. These remain unbounded input-owned
-  paths: this checkpoint does not resolve MUX-2 and must stay a draft.
-- Added tests cover backwards-range refusal before output, huge/EOF-sized
-  mdat with a partially output-owned sample and discarded trailing bytes,
-  cache accounting, and repeated cuts. The existing ignored-box hostile
-  test remains. The interleaved-run benchmark now sweeps input chunk size
-  as well as track, run, and sample counts. These assertions and benchmarks
-  have not yet run successfully.
+  per-track moof+mdat headers, sized from the real mdat header encoding
+  (largesize past 4 GiB) with checked `data_offset` values, then each
+  track's sample bytes into its own writer. Gaps and unused trailing mdat
+  bytes are discarded.
+- While a fragment publishes, its open frames own their groups, so `seek()`
+  and `discontinuity()` wait for its last sample. A refused fragment aborts
+  its open frames and discards the rest of its mdat. EOF inside a sample
+  aborts that frame, failing its group, finishes every track, and returns
+  `UnexpectedEof`.
+- Tests cover backwards-range refusal before output, huge/EOF-sized mdat with
+  output-owned samples and cache accounting, repeated cuts, ignored boxes,
+  deferred controls, truncation at EOF, and refused-fragment recovery.
+
+Open question, 2026-10-31: whole-box metadata and staged text samples. A
+`moov` or `moof` body still buffers whole, and each text sample stages in a
+`BytesMut` before rewriting. Both are held before anything can publish, so
+incremental parsing alone cannot bound them: a structurally valid `trun`
+(sample count up to 2^32, 16 bytes per entry) or a text sample (size up to
+4 GiB) retains every later segment as parsed state. Bounding them needs a
+limit somewhere: on the held body, or on the counts and open-ended fields an
+incremental parser would keep. The PR's `## Decisions needed` asks which.
 
 Remaining work:
 
-- Parse metadata containers and children incrementally, retaining only
-  fields used for track setup and sample resolution. Variable-sized leaves
-  need structural parsing too; moving the whole-box wait down one level is
-  insufficient. mp4-atom 0.16.2 exposes incremental header decoding but its
-  body readers buffer whole bodies. No blanket byte cap.
-- Remove input-owned accumulation of subtitle samples while preserving VTT
-  and TTML reconstruction. Output ownership must bound staging and any
-  rewriting expansion. Do not substitute the transport's current frame cap
-  for source-level memory bounds; the unbounded-groups quest owns that cap.
-- Verify abort, truncated headers/metadata/samples, explicit EOF, and
-  seek/discontinuity while a frame holds its group's writer. In particular,
-  ensure controls cannot open a replacement group underneath an unfinished
-  sample. Validate passthrough header sizing and offset arithmetic too.
-- Reproduce the hostile ignored-box failure against the pre-fix source, then
-  run the focused fMP4 tests, source memory/cache assertions, shared producer
-  tests, streamed-import benchmarks, and `just ci`. Add huge `moov`/`moof`
-  and structural-leaf tests with the metadata implementation. Every case
-  must run in CI. Keep the MKV implementation independently reviewable.
-
-Validation at this checkpoint: the first focused compile was admitted and
-reported missing `Clone + Send` bounds on the private streaming producer
-implementation; those bounds are now corrected. Its rerun, the baseline
-reproduction, and `just ci` remained at the host build gate and were stopped
-for handoff. `quest check`, `quest check --base origin/main` (664 documents),
-`cargo fmt --all --check` in the Nix environment, and `git diff --check`
-passed. No passing build, test, benchmark, or memory measurement is claimed.
+- Bound metadata and text staging as decided, with huge `moov`/`moof`,
+  `trun`, and text-sample tests that run in CI.
+- Run the streamed-import chunk-size benchmarks against `main`, `just ci`,
+  and the cross-vendor review. Keep the MKV implementation independently
+  reviewable.
 
 Public API: no signature change. Adds `Error::BackwardsDataOffset` to the
 non-exhaustive error enum; streaming import now refuses backwards per-track
