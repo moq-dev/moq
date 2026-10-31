@@ -4049,23 +4049,16 @@ impl OpusStream {
 		// 48 kHz samples elapsed since this PES's PTS, advancing each packet after the first.
 		let mut elapsed: u64 = 0;
 		for packet in packets {
-			let pts = match base {
-				Some(base) if elapsed > 0 => {
-					let advance = Timestamp::from_scale(elapsed, 48_000)?;
-					// `base` is a 90 kHz PTS; rescale the sample advance to match before
-					// adding (the scale-aware Timestamp rejects mixed scales).
-					Some(base.checked_add(advance.convert(base.scale())?)?)
-				}
-				other => other,
-			};
-			self.import.decode(packet, pts)?;
-			// The importer accumulates; cut each Opus packet into its own group (one QUIC stream)
-			// so the relay forwards it without waiting for the next.
-			self.import.cut(None)?;
-
+			let pts = advance_pts(base, elapsed, 48_000)?;
 			// Default to 20 ms (960 samples) if the TOC can't be read, so a malformed packet
 			// doesn't stall the timeline for the rest of the PES.
 			elapsed += opus::packet_samples(packet).unwrap_or(960) as u64;
+			let end = advance_pts(base, elapsed, 48_000)?;
+			self.import.decode(packet, pts)?;
+			// The importer accumulates; cut each Opus packet into its own group (one QUIC stream)
+			// so the relay forwards it without waiting for the next. Its known endpoint also
+			// bounds the final HLS segment, since a one-packet group has no measured cadence.
+			self.import.cut(end)?;
 			published += 1;
 		}
 		Ok(published)
@@ -4551,14 +4544,14 @@ impl<E: CatalogExt> LegacyStream<E> {
 
 			import.decode(&data[offset..end], pts)?;
 			// The importer accumulates; cut each frame into its own group (one QUIC stream)
-			// so the relay forwards it without waiting for the next.
-			import.cut(None)?;
+			// so the relay forwards it without waiting for the next. Its known endpoint also
+			// bounds the final HLS segment, since a one-frame group has no measured cadence.
+			pts = advance_pts(pts, header.samples, header.sample_rate)?;
+			import.cut(pts)?;
 			self.resync.published(unvouched);
 			published += 1;
 			// Offsets behind the published frame are spent; carrying one would republish it.
 			fallback = None;
-
-			pts = advance_pts(pts, header.samples, header.sample_rate)?;
 			offset = end;
 		}
 
@@ -6036,6 +6029,26 @@ pub(super) mod test {
 	}
 
 	/// Read every retained frame of the single audio rendition in `catalog`.
+	/// Where the only audio rendition's HLS records end, once the catalog finishes.
+	async fn hls_audio_end<E: crate::catalog::hang::CatalogExt>(
+		consumer: &moq_net::broadcast::Consumer,
+		catalog: &mut crate::catalog::Producer<E>,
+	) -> Option<Timestamp> {
+		catalog.finish().unwrap();
+		let snapshot = catalog.snapshot();
+		let hls = snapshot.audio.renditions.values().next().unwrap().hls.as_ref().unwrap();
+		let mut records = crate::hls::Consumer::subscribe(consumer, hls).await.unwrap();
+		let mut end = None;
+		while let Some(event) = records.next().await.unwrap() {
+			if let crate::hls::Event::Push { entry, .. } = event
+				&& entry.is_stop()
+			{
+				end = Some(entry.pts);
+			}
+		}
+		end
+	}
+
 	async fn read_audio_frames<E: crate::catalog::hang::CatalogExt>(
 		consumer: &moq_net::broadcast::Consumer,
 		catalog: &crate::catalog::Producer<E>,
@@ -6414,20 +6427,11 @@ pub(super) mod test {
 			[0xAA, 0xBB].map(|fill| adts_frame(40, fill)[7..].to_vec()).to_vec(),
 			"the last frame was held for a confirmation that could never arrive"
 		);
-		catalog.finish().unwrap();
-		let snapshot = catalog.snapshot();
-		let hls = snapshot.audio.renditions.values().next().unwrap().hls.as_ref().unwrap();
-		let mut records = crate::hls::Consumer::subscribe(&consumer, hls).await.unwrap();
-		let mut end = None;
-		while let Some(event) = records.next().await.unwrap() {
-			if let crate::hls::Event::Push { entry, .. } = event
-				&& entry.is_stop()
-			{
-				end = Some(entry.pts);
-			}
-		}
 		// Both 1024-sample frames at 48 kHz, including the one completed by the EOF drain.
-		assert_eq!(end, Some(Timestamp::from_millis(1_042).unwrap()));
+		assert_eq!(
+			hls_audio_end(&consumer, &mut catalog).await,
+			Some(Timestamp::from_millis(1_042).unwrap())
+		);
 	}
 
 	/// One whole MPEG-2 Layer II frame (8 kbps, 16 kHz, mono = 72 bytes), filled with
@@ -6791,7 +6795,7 @@ pub(super) mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -6834,6 +6838,11 @@ pub(super) mod test {
 				}
 			)]),
 			"the drained frame was published without a trace"
+		);
+		// Both 1152-sample frames at 16 kHz, including the one completed by the EOF drain.
+		assert_eq!(
+			hls_audio_end(&consumer, &mut catalog).await,
+			Some(Timestamp::from_millis(1_144).unwrap())
 		);
 	}
 
@@ -9701,7 +9710,7 @@ pub(super) mod test {
 	async fn damaged_opus_pes_is_not_half_published() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
 			.ensure_stream(
@@ -9727,6 +9736,11 @@ pub(super) mod test {
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
 		let frames = read_track(&consumer, &name, crate::container::Kind::Audio).await;
 		assert_eq!(frames.len(), 2, "no packet from the damaged PES is published");
+		// The last PES starts at 1.0667 s and holds one 20 ms packet, recorded in milliseconds.
+		assert_eq!(
+			hls_audio_end(&consumer, &mut catalog).await,
+			Some(Timestamp::from_millis(1_086).unwrap())
+		);
 	}
 
 	/// An aborted track is a feed-wide publishing failure, never a damaged media unit.
