@@ -3901,7 +3901,7 @@ mod tests {
 			// The broadcast keeps only a weak handle, so the map below owns the only strong
 			// `track::Producer`: dropping it is what ends the track.
 			// Earlier versions drop their wire timestamps.
-			let producer = broadcast
+			let mut producer = broadcast
 				.create_track(
 					"datagrams",
 					match version.has_media_time() {
@@ -3910,6 +3910,7 @@ mod tests {
 					},
 				)
 				.unwrap();
+			producer.set_idle();
 			let mut received = producer.subscribe(None);
 			subscriber.subscribes.lock().insert(
 				1,
