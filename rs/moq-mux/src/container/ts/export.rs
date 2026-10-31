@@ -355,6 +355,10 @@ struct Track {
 	/// The `temporal_reference` of the I-picture the last MPEG-1/2 video group opened on, when
 	/// its GOP is open: the B-pictures presented before it reference the group before.
 	open_gop: Option<u16>,
+	/// The last MPEG-1/2 video PES read holds only pictures of the group before's: B-pictures
+	/// presented before the open GOP's I-picture, or the tail of one. The next PES's tail of
+	/// its last picture is one too.
+	orphan: bool,
 	/// What the catalog and the SPS declare about the video's reordering.
 	timing: Timing,
 	/// The receiver's buffers for an audio or verbatim track; video's come from [`Timing`].
@@ -402,6 +406,7 @@ impl Track {
 			settle: false,
 			keyframe: None,
 			open_gop: None,
+			orphan: false,
 			timing: Timing::default(),
 			buffer: None,
 			pack: None,
@@ -449,7 +454,8 @@ impl Track {
 					&& !radl(stream_type, self.source.description(), &pending.frame)
 			}
 			None => {
-				let pictures = Mpeg2Picture::read(&pending.frame.payload);
+				let (payload, after) = (&pending.frame.payload, self.orphan);
+				let pictures = Mpeg2Picture::read(payload);
 				if pending.frame.keyframe {
 					self.open_gop = (pictures.first())
 						.filter(|picture| picture.gop == Some(false))
@@ -458,7 +464,11 @@ impl Track {
 					// A GOP inside the group: its leading pictures reference only the group's own.
 					self.open_gop = None;
 				}
-				self.leads_gop(&pending.frame)
+				// A PES that also holds a picture others reference goes out whole, its orphans
+				// with it.
+				self.orphan = !pending.frame.keyframe
+					&& (self.open_gop).is_some_and(|opened| Mpeg2Picture::orphaned(payload, opened, after));
+				self.orphan
 			}
 		};
 		if let Some((_, ahead)) = self.leading_floor
@@ -497,13 +507,6 @@ impl Track {
 			None => self.clock.push(item, pts, arrived, bytes),
 		}
 		self.release(name, jitter, false)
-	}
-
-	/// Whether an MPEG-1/2 video PES holds only B-pictures presented before the I-picture of the
-	/// open GOP its group opened on, so they reference the group before. A PES that also holds
-	/// a picture others reference goes out whole, its orphans with it.
-	fn leads_gop(&self, frame: &Frame) -> bool {
-		!frame.keyframe && (self.open_gop).is_some_and(|opened| Mpeg2Picture::orphaned(&frame.payload, opened))
 	}
 
 	/// Read within the jitter window, or hold the first frame until the program tables are built.
@@ -794,7 +797,8 @@ impl Track {
 					&& self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe)
 					&& !radl(stream_type, description.as_ref(), &frame)
 			}
-			_ => self.leads_gop(&frame),
+			// Read by [`Self::queue`] just before, for MPEG-1/2 video carried whole.
+			_ => self.orphan,
 		};
 		if video && frame.keyframe {
 			self.keyframe = Some(frame.timestamp);
@@ -4564,10 +4568,11 @@ impl Mpeg2Picture {
 	/// Read every picture header of the whole PES `pes`, in order. `broken_link` is the
 	/// encoder's own mark of an edit, so an open GOP is judged by `closed_gop` alone.
 	fn read(pes: &[u8]) -> Vec<Self> {
-		let Ok(start) = psi::PesStart::parse(pes) else {
-			return Vec::new();
-		};
-		let es = start.data;
+		psi::PesStart::parse(pes).map_or_else(|_| Vec::new(), |start| Self::scan(start.data))
+	}
+
+	/// Read every picture header of the elementary stream `es`, in order.
+	fn scan(es: &[u8]) -> Vec<Self> {
 		let (mut pictures, mut gop) = (Vec::new(), None);
 		for at in memchr::memmem::find_iter(es, &[0, 0, 1]) {
 			match &es[at + 3..] {
@@ -4584,12 +4589,35 @@ impl Mpeg2Picture {
 		pictures
 	}
 
-	/// Whether the PES `pes` holds pictures and only B-pictures presented before the I-picture
-	/// at temporal reference `opened`.
-	fn orphaned(pes: &[u8], opened: u16) -> bool {
-		let pictures = Self::read(pes);
-		!pictures.is_empty()
-			&& (pictures.iter()).all(|picture| picture.bidirectional && picture.temporal_reference < opened)
+	/// Whether the PES `pes` holds only B-pictures presented before the I-picture at temporal
+	/// reference `opened`, or the tail of one.
+	///
+	/// A PES need not start a picture. One opening on bytes outside any start code, or on a
+	/// slice before its first picture header, carries the tail of the last picture of the PES
+	/// before, an orphan only when that PES was one (`after`). A PES that ends inside the header
+	/// after a start code is kept, since the next PES holds the rest of a picture it cannot read.
+	/// Trailing zero bytes are stuffing far more often than half a start code, so they do not.
+	fn orphaned(pes: &[u8], opened: u16, after: bool) -> bool {
+		let Ok(start) = psi::PesStart::parse(pes) else {
+			return false;
+		};
+		let es = start.data;
+		let mut codes = memchr::memmem::find_iter(es, &[0, 0, 1]).peekable();
+		let first = codes.peek().copied().unwrap_or(es.len());
+		let opens = es[..first].iter().all(|&byte| byte == 0);
+		let continues = !opens
+			|| codes
+				.map(|at| es.get(at + 3).copied())
+				.take_while(|&code| code != Some(0x00))
+				.any(|code| matches!(code, Some(0x01..=0xaf)));
+		// A GOP header, the longest read, ends 8 bytes after its start code begins.
+		let cut = memchr::memmem::rfind(es, &[0, 0, 1]).is_some_and(|at| es.len() - at < 8);
+		let pictures = Self::scan(es);
+		let tail = match continues {
+			true => after,
+			false => !pictures.is_empty(),
+		};
+		tail && !cut && (pictures.iter()).all(|picture| picture.bidirectional && picture.temporal_reference < opened)
 	}
 }
 
@@ -5497,16 +5525,40 @@ mod tests {
 				0,
 			]
 		};
-		let video = |pictures: &[[u8; 8]]| pes(0xe0, 0x00, &[], &pictures.concat());
-		assert!(Mpeg2Picture::orphaned(&video(&[picture(0, 3), picture(1, 3)]), 2));
-		// A B-picture presented after the I-picture references only its own GOP.
-		assert!(!Mpeg2Picture::orphaned(&video(&[picture(3, 3)]), 2));
-		// The P-picture later pictures reference keeps its PES, orphans and all.
-		assert!(!Mpeg2Picture::orphaned(
-			&video(&[picture(0, 3), picture(1, 3), picture(5, 2)]),
-			2
-		));
-		assert!(!Mpeg2Picture::orphaned(&video(&[]), 2));
+		let slice = [0, 0, 1, 1, 0x12, 0x34, 0x56, 0x78];
+		let video = |pictures: &[&[u8]]| pes(0xe0, 0x00, &[], &pictures.concat());
+		for after in [false, true] {
+			assert!(Mpeg2Picture::orphaned(
+				&video(&[&picture(0, 3), &picture(1, 3)]),
+				2,
+				after
+			));
+			// A B-picture presented after the I-picture references only its own GOP.
+			assert!(!Mpeg2Picture::orphaned(&video(&[&picture(3, 3)]), 2, after));
+			// The P-picture later pictures reference keeps its PES, orphans and all.
+			assert!(!Mpeg2Picture::orphaned(
+				&video(&[&picture(0, 3), &picture(1, 3), &picture(5, 2)]),
+				2,
+				after
+			));
+			assert!(!Mpeg2Picture::orphaned(&video(&[]), 2, after));
+			// Zero stuffing before the first start code opens no tail.
+			assert!(Mpeg2Picture::orphaned(&video(&[&[0], &picture(0, 3)]), 2, after));
+			// Half a picture header: the next PES holds a picture this one cannot read.
+			assert!(!Mpeg2Picture::orphaned(
+				&video(&[&picture(0, 3), &[0, 0, 1, 0, 0]]),
+				2,
+				after
+			));
+		}
+		// The tail of a picture the PES before began, as slices or mid-slice bytes, is an orphan
+		// only when that PES was: it may finish the I-picture its group opened on.
+		for tail in [&slice[..], &slice[4..]] {
+			assert!(!Mpeg2Picture::orphaned(&video(&[tail, &picture(0, 3)]), 2, false));
+			assert!(Mpeg2Picture::orphaned(&video(&[tail, &picture(0, 3)]), 2, true));
+			assert!(!Mpeg2Picture::orphaned(&video(&[tail]), 2, false));
+			assert!(Mpeg2Picture::orphaned(&video(&[tail]), 2, true));
+		}
 	}
 
 	#[test]
