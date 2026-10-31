@@ -294,6 +294,17 @@ impl Session {
 		}
 	}
 
+	/// The session's viewers, whose summed ceilings it sends as its PROBE target. A dialed
+	/// session's survive reconnects, reading no estimate while offline.
+	///
+	/// Errors with [`Error::Offline`] for an accepted session still in SETUP.
+	pub fn viewers(&self, id: Id) -> Result<moq_net::bandwidth::Viewers, Error> {
+		match self.link(id)? {
+			Link::Dialed { connection, .. } => Ok(connection.viewers()),
+			Link::Accepted(accepted) => Ok(accepted.as_ref().ok_or(Error::Offline)?.session.viewers()),
+		}
+	}
+
 	/// Mint receive-estimate demand only when the caller asks for a consumer.
 	pub fn recv_bandwidth(&self, id: Id) -> Result<Option<moq_net::bandwidth::Consumer>, Error> {
 		match self.link(id)? {
