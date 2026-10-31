@@ -1,6 +1,8 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { Padding } from "../padding.ts";
 import { Producer as TrackProducer } from "../track.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
@@ -31,9 +33,9 @@ afterEach(() => {
 	globalThis.WebTransport = original;
 });
 
-function stubTransport(stats: { estimatedSendRate?: number }): void {
+function stubTransport(stats: { estimatedSendRate?: number }, protocol: string = Lite.ALPN_06): void {
 	const stub = function StubWebTransport() {
-		const pair = createMockTransportPair(Lite.ALPN_06, { stats });
+		const pair = createMockTransportPair(protocol, { stats });
 		void accept(pair.server, url);
 		return pair.client;
 	};
@@ -135,5 +137,34 @@ test("a private connection still exposes an allocator", async () => {
 		await waitUntil(() => reserved.peek() === 2_000_000);
 	} finally {
 		connection.close();
+	}
+});
+
+test("a connection probes for its reservations, and opting out pads nothing", async () => {
+	stubTransport({ estimatedSendRate: 2_000_000 }, Ietf.ALPN.DRAFT_18);
+	const targets: number[] = [];
+	const setTarget = spyOn(Padding.prototype, "setTarget").mockImplementation((rate) => void targets.push(rate));
+
+	const connection = new Connection({ url, share: false, websocket: { enabled: false } });
+	try {
+		await waitUntil(() => connection.status.peek() === "connected");
+		const allocator = connection.allocator.peek();
+		if (!allocator) throw new Error("missing allocator");
+
+		const watched = new TrackProducer("watched").accept({ priority: 60 });
+		watched.subscribe();
+		const watchedShare = allocator.reserve(watched.demand(), 4_000_000);
+		// An idle rendition is still probed for, so it can resume.
+		const idle = new TrackProducer("idle").accept({ priority: 60 });
+		const idleShare = allocator.reserve(idle.demand(), 1_000_000);
+		await waitUntil(() => targets.at(-1) === 5_000_000);
+		expect(idleShare.probed.peek()).toBe(true);
+
+		allocator.setTarget(0);
+		await waitUntil(() => targets.at(-1) === 0);
+		expect(watchedShare.probed.peek()).toBe(false);
+	} finally {
+		connection.close();
+		setTarget.mockRestore();
 	}
 });
