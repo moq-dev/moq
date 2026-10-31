@@ -639,6 +639,31 @@ test("a small frame written in pieces reads whole once it completes", async () =
 	producer.finish();
 });
 
+test("a whole read grows with the bytes that arrive, never with the declared size", async () => {
+	const producer = new Producer(0);
+	const reader = producer.consume();
+	const open = producer.createFrame({ size: 2 ** 50 });
+	open.write(new Uint8Array(1));
+	const whole = reader.readFrame();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	producer.abort(new Error("gone"));
+	await expect(whole).rejects.toThrow("gone");
+});
+
+test("a whole read of a frame stalled partway fails with Old when its budget gives up", async () => {
+	const producer = new Producer(0);
+	const reader = producer.consume();
+	const expired = new Signal(false);
+	hooks.expireGroup(reader, { expired: () => expired.peek(), changed: [expired] });
+	const open = producer.createFrame({ size: 10 });
+	open.write(new Uint8Array(4));
+	const whole = reader.readFrame();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	expired.set(true);
+	await expect(whole).rejects.toMatchObject({ code: StreamCode.Old });
+	producer.abort(new Error("done"));
+});
+
 test("a frame written whole in one piece stays the writer's buffer", async () => {
 	const producer = new Producer(0);
 	const reader = producer.consume();

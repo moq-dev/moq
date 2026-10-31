@@ -55,6 +55,18 @@ test("received slices are forwarded byte-for-byte and exact declarations fail al
 	await expect(group.mirror().readFrame()).rejects.toThrow(/declared size/);
 });
 
+test("a slice that fails to decode fails its open group, which takes no more frames", async () => {
+	const group = new Group(0);
+	hooks.bindGroupCompression(group, true);
+	const raw = group.consume();
+	const slice = new Encoder().frame(payload);
+	hooks.writeGroupFrame(group, { payload: slice }, payload.length + 1);
+	await expect(group.consume().readFrame()).rejects.toThrow(/declared size/);
+	expect(group.closed.peek()).toBeInstanceOf(Error);
+	expect(() => hooks.writeGroupFrame(group, { payload: slice }, payload.length)).toThrow();
+	await expect(raw.readFrame()).rejects.toThrow(/declared size/);
+});
+
 for (const readPlain of [false, true]) {
 	test(`compressed tails shed dictionary prefixes without retaining inflated history (plain=${readPlain})`, async () => {
 		const group = new Group(0);

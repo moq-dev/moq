@@ -1,7 +1,7 @@
 import { Error as NetError } from "@moq/net";
 import type * as z from "@zod/mini";
 import { deepEqual, diff } from "../diff.ts";
-import { MAX_FRAME_BYTES } from "../limits.ts";
+import { MAX_FRAME_BYTES, TAIL_BYTES, tailCharge } from "../limits.ts";
 
 // Bound the number of patches a joiner must apply before reaching the current value.
 const MAX_DELTA_FRAMES = 256;
@@ -106,8 +106,10 @@ export class Encoder<T> {
 	// baseline every delta is diffed against, and `undefined` until the first snapshot commits.
 	#last?: unknown;
 
-	// Bytes charged to the current group, snapshot included.
+	// Payload bytes in the current group, snapshot included.
 	#groupBytes = 0;
+	// What moq-net's group tail charges for them, which must keep the snapshot retained.
+	#groupCharge = 0;
 	// Frames emitted into the current group, snapshot included.
 	#groupFrames = 0;
 
@@ -151,6 +153,7 @@ export class Encoder<T> {
 	 */
 	reset(): void {
 		this.#groupBytes = 0;
+		this.#groupCharge = 0;
 		this.#groupFrames = 0;
 		this.#resync = true;
 		this.#pending = false;
@@ -191,9 +194,11 @@ export class Encoder<T> {
 		// The baseline advances on commit, so it never runs ahead of the wire.
 		if (delta) {
 			// A delta is only readable while the group still holds the snapshot it applies to.
-			// Roll before this budget so joiners do not depend on a shed snapshot.
-			if (this.#groupBytes + delta.length <= this.#maxGroupBytes) {
+			// Roll before the group's tail sheds the snapshot, so a joiner always finds it.
+			const charge = tailCharge(delta.length);
+			if (this.#groupBytes + delta.length <= this.#maxGroupBytes && this.#groupCharge + charge <= TAIL_BYTES) {
 				this.#groupBytes += delta.length;
+				this.#groupCharge += charge;
 				this.#groupFrames += 1;
 				return this.#pend({ payload: delta, keyframe: false }, json);
 			}
@@ -259,6 +264,7 @@ export class Encoder<T> {
 	#snapshot(frame: Uint8Array): Uint8Array {
 		if (frame.length > this.#maxGroupBytes) throw new NetError.FrameTooLarge();
 		this.#groupBytes = frame.length;
+		this.#groupCharge = tailCharge(frame.length);
 		this.#groupFrames = 1;
 		this.#resync = false;
 		return frame;

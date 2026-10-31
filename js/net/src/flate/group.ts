@@ -78,9 +78,13 @@ export class Compression {
 	stored = 0;
 	/** Retained slice and shared plain bytes. */
 	bytes = 0;
+	/** Called once a slice fails to decode, so the owning group fails with it. */
+	failed?: (error: Error) => void;
 
 	/** Store a local plain frame or a received slice. */
 	push(frame: Frame, inflated?: number): Frame {
+		// A failed dictionary cannot decode anything after it, so the group takes no more.
+		if (this.#failed) throw this.#failed;
 		let slice: Stored;
 		if (inflated === undefined) {
 			this.#encoder ??= new Encoder();
@@ -150,6 +154,7 @@ export class Compression {
 		this.#pending = new Queue();
 		this.bytes = 0;
 		this.stored = 0;
+		this.failed?.(error);
 	}
 
 	/** Release codec scratch once no more frames can arrive. */

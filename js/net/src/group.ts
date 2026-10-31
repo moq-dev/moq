@@ -366,6 +366,7 @@ export class Producer {
 			state.compressed = compressed;
 			if (!compressed) return;
 			const flate = new Compression();
+			flate.failed = (error) => group.abort(error);
 			state.flate = flate;
 			const frames = Array.from(state.frames.peek(), (frame) => flate.push(frame));
 			state.frames.set(new Queue(frames));
@@ -779,6 +780,23 @@ export class FrameProducer {
 }
 
 let makeFrameConsumer: (sequence: number, frame: Frame) => FrameConsumer;
+// The next chunk without waiting: `undefined` at the end, or `WAIT` until the next write.
+let pollChunk: (consumer: FrameConsumer) => Uint8Array | undefined | typeof WAIT;
+// What a waiting chunk read waits on.
+let chunkChanged: (consumer: FrameConsumer) => Getter<unknown>[];
+const WAIT: unique symbol = Symbol("wait");
+
+// Parts read in order, joined into one buffer, copied only when there is more than one.
+function joined(parts: Uint8Array[], size: number): Uint8Array {
+	if (parts.length === 1) return parts[0];
+	const out = new Uint8Array(size);
+	let at = 0;
+	for (const part of parts) {
+		out.set(part, at);
+		at += part.byteLength;
+	}
+	return out;
+}
 
 /**
  * Reads one frame's payload as it arrives, as Rust's `frame::Consumer`. Obtain one from
@@ -809,6 +827,11 @@ export class FrameConsumer {
 
 	static {
 		makeFrameConsumer = (sequence, frame) => new FrameConsumer(sequence, frame);
+		pollChunk = (consumer) => consumer.#poll();
+		chunkChanged = (consumer) => {
+			const frame = consumer.#frame;
+			return frame instanceof Chunked ? [frame.written, frame.done] : [];
+		};
 	}
 
 	/** When the frame's last byte landed in this node's group; `undefined` until then. */
@@ -817,41 +840,45 @@ export class FrameConsumer {
 		return frame instanceof Chunked ? frame.arrived : frame.arrived;
 	}
 
-	/** The next chunk of the payload, waiting for it to be written; `undefined` once every byte is read. */
-	async readChunk(): Promise<Uint8Array | undefined> {
+	#poll(): Uint8Array | undefined | typeof WAIT {
 		const frame = this.#frame;
 		if (!(frame instanceof Chunked)) {
 			if (this.#offset >= this.size) return undefined;
 			this.#offset = this.size;
 			return frame.payload;
 		}
+		const done = frame.done.peek();
+		if (done instanceof Error) throw done;
+		if (this.#offset < frame.base) throw evicted();
+		if (this.#offset < frame.written.peek()) {
+			const chunk = frame.chunk(this.#offset);
+			this.#offset += chunk.byteLength;
+			return chunk;
+		}
+		return done === null ? undefined : WAIT;
+	}
+
+	/** The next chunk of the payload, waiting for it to be written; `undefined` once every byte is read. */
+	async readChunk(): Promise<Uint8Array | undefined> {
 		for (;;) {
-			const done = frame.done.peek();
-			if (done instanceof Error) throw done;
-			if (this.#offset < frame.base) throw evicted();
-			if (this.#offset < frame.written.peek()) {
-				const chunk = frame.chunk(this.#offset);
-				this.#offset += chunk.byteLength;
-				return chunk;
-			}
-			if (done === null) return undefined;
-			await Signal.race(frame.written, frame.done);
+			const chunk = this.#poll();
+			if (chunk !== WAIT) return chunk;
+			await Signal.race(...chunkChanged(this));
 		}
 	}
 
-	/** The rest of the payload in one buffer, copied only when it spans chunks. */
+	/**
+	 * The rest of the payload in one buffer, copied only when it spans chunks. It grows as
+	 * bytes arrive, so a declared size is never allocated ahead of them.
+	 */
 	async readAll(): Promise<Uint8Array> {
-		const first = await this.readChunk();
-		if (!first) return EMPTY;
-		if (this.#offset === this.size) return first;
-		const out = new Uint8Array(this.size - this.#offset + first.byteLength);
-		out.set(first);
-		let at = first.byteLength;
+		const parts: Uint8Array[] = [];
+		let size = 0;
 		for (let chunk = await this.readChunk(); chunk; chunk = await this.readChunk()) {
-			out.set(chunk, at);
-			at += chunk.byteLength;
+			parts.push(chunk);
+			size += chunk.byteLength;
 		}
-		return out;
+		return parts.length === 0 ? EMPTY : joined(parts, size);
 	}
 }
 
@@ -1518,8 +1545,23 @@ export class Consumer {
 
 	// Read a streamed frame whole. Losing any of it ends this reader, since the frame is gone.
 	async #join(sequence: number, chunks: FrameConsumer): Promise<ReadGroupFrame> {
+		const parts: Uint8Array[] = [];
+		let size = 0;
 		try {
-			const payload = await chunks.readAll();
+			for (;;) {
+				if (this.#terminal) throw this.#terminal;
+				const chunk = pollChunk(chunks);
+				if (chunk === undefined) break;
+				if (chunk !== WAIT) {
+					parts.push(chunk);
+					size += chunk.byteLength;
+					continue;
+				}
+				// A frame stalled partway is the stall the drift budget bounds, as an empty group is.
+				if (this.#expire()) continue;
+				await Signal.race(...chunkChanged(chunks), ...(this.#expiry?.changed ?? []));
+			}
+			const payload = parts.length === 0 ? EMPTY : joined(parts, size);
 			return { sequence, frame: { payload, timestamp: chunks.timestamp, arrived: chunks.arrived } };
 		} catch (error) {
 			this.#terminal ??= error instanceof Error ? error : new Error(String(error));

@@ -1,4 +1,4 @@
-import { MAX_FRAME_BYTES } from "../limits.ts";
+import { MAX_FRAME_BYTES, TAIL_BYTES, tailCharge } from "../limits.ts";
 
 /** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. Bounds how many operations a joiner must replay after its checkpoint. */
 const MAX_GROUP_FRAMES = 1024;
@@ -73,8 +73,8 @@ export class Encoder<T> {
 	// Absolute index of #window[0], which may follow #offset in checkpoint mode.
 	#start = 0;
 
-	// Bytes charged to this group, header included.
-	#groupBytes = 0;
+	// What moq-net's group tail charges for this group's frames, header included.
+	#groupCharge = 0;
 	#groupFrames = 0;
 	// Whether the next frame must be a header after a lost frame.
 	#resync = true;
@@ -121,7 +121,7 @@ export class Encoder<T> {
 
 	/** Discard group-local state after an encoded frame did not reach the wire. */
 	#resyncGroup(): void {
-		this.#groupBytes = 0;
+		this.#groupCharge = 0;
 		this.#groupFrames = 0;
 		this.#resync = true;
 		this.#pending = false;
@@ -197,8 +197,9 @@ export class Encoder<T> {
 		const payload = new TextEncoder().encode(text);
 
 		this.#groupFrames += 1;
-		this.#groupBytes += payload.length;
-		if (this.#groupBytes > MAX_FRAME_BYTES) {
+		// Roll before the group's tail sheds the checkpoint, so a joiner always finds it.
+		this.#groupCharge += tailCharge(payload.length);
+		if (this.#groupCharge > TAIL_BYTES) {
 			this.#resyncGroup();
 			return undefined;
 		}
@@ -228,7 +229,7 @@ export class Encoder<T> {
 			throw new Error("window header exceeds the group cache limit");
 		}
 
-		this.#groupBytes = payload.length;
+		this.#groupCharge = tailCharge(payload.length);
 		this.#groupFrames = 1;
 		this.#resync = false;
 

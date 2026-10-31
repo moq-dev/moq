@@ -498,8 +498,9 @@ test("pop counts are nonnegative safe integers", () => {
 
 test("an op that would evict the header rolls first", () => {
 	const encoder = new Encoder<string>({ ops: true });
-	const first = "a".repeat(16 * 1024 * 1024);
-	const next = "b".repeat(15 * 1024 * 1024);
+	// Charged about twice their size, for the compressed slice a track may keep beside each.
+	const first = "a".repeat(8 * 1024 * 1024);
+	const next = "b".repeat(7 * 1024 * 1024);
 
 	let frame = encoder.push(first);
 	expect(frame.keyframe).toBeTrue();

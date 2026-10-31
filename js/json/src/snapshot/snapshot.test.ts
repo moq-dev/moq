@@ -552,6 +552,18 @@ test("a delta that would overflow the snapshot rolls a new one instead", async (
 	expect(values[values.length - 1]).toEqual({ v: "y".repeat(size) });
 });
 
+test("a delta that would push the snapshot out of the group's tail rolls a new group", () => {
+	const encoder = new Encoder<Value>();
+	// Charged about twice its size, for the compressed slice a track may keep beside it.
+	const big = "x".repeat(16 * 1024 * 1024);
+	let frame = encoder.update({ v: big, n: 0 });
+	expect(frame?.keyframe).toBeTrue();
+	frame?.commit();
+	frame = encoder.update({ v: big, n: 1 });
+	expect(frame?.keyframe).toBeTrue();
+	frame?.commit();
+});
+
 test("a snapshot past the budget is refused", () => {
 	for (const deltas of [false, true]) {
 		const encoder = new Encoder<Value>({ deltas, maxGroupBytes: 100 });
