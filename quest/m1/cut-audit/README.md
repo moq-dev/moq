@@ -43,7 +43,7 @@ internal and can ship after the cut:
 [group heads filled in place](/quest/m2/ietf-fill-refill.md),
 [one relay serve path](/quest/m2/relay-serve-path.md),
 [moqsrc pad actors](/quest/m2/moqsrc-pad-actor.md), and
-[publish rendition identity](/quest/m2/publish-publication.md). Other
+publish rendition identity (since landed). Other
 redesign evidence went into the quests that already own the mechanism:
 [subscribe ranges](/quest/m1/subscribe-ranges/README.md),
 [drop set](/quest/m1/drop-set.md),
