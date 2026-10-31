@@ -574,13 +574,17 @@ impl Rendition {
 			(claim.next, claim.pending)
 		};
 		self.retiring.send_replace(true);
-		// One that never lists a segment has nothing to keep listed.
-		let lists = pending || !self.live.window().segments.is_empty() || self.previous().is_some();
+		// Once retired, one that neither lists nor waits to list a segment never will, so the
+		// replacement keeps only what this one was keeping: churn can't stack empty instances.
+		let lists = pending || !self.live.window().segments.is_empty();
 		Handoff {
 			track: self.hls.track.clone(),
 			next,
 			target_duration: self.target_duration,
-			previous: lists.then(|| self.clone()),
+			previous: match lists {
+				true => Some(self.clone()),
+				false => self.previous(),
+			},
 		}
 	}
 
@@ -603,7 +607,8 @@ impl Rendition {
 	/// The predecessors' rows listed ahead of `own`, oldest first, each with its instance.
 	///
 	/// They are trimmed as one window with `own`, as if one instance had listed them all, and a
-	/// predecessor none of whose rows is left is released, along with every older one.
+	/// predecessor none of whose rows is left is released, along with every older one, once none
+	/// of them can list another.
 	fn inherited(&self, own: &[segments::Row]) -> Vec<(Arc<Rendition>, segments::Row)> {
 		let lineage = self.lineage();
 		if lineage.is_empty() {
@@ -640,10 +645,14 @@ impl Rendition {
 			.take(inherited - trimmed)
 			.map(|(rendition, row)| (rendition.expect("an inherited row"), row))
 			.collect();
-		// Nothing lists anything older than the oldest instance left.
+		// Nothing lists anything older than the oldest instance left, whose rows followed every
+		// older one's last.
 		match rows.first() {
 			Some((oldest, _)) => *oldest.previous.lock().expect("previous lock poisoned") = None,
-			None => *self.previous.lock().expect("previous lock poisoned") = None,
+			None if lineage.iter().all(|rendition| rendition.live.is_closed()) => {
+				*self.previous.lock().expect("previous lock poisoned") = None
+			}
+			None => {}
 		}
 		rows
 	}
@@ -1267,9 +1276,12 @@ impl Rendition {
 	/// [generation](super::Broadcaster::set_generation), since a restart reuses segment numbers
 	/// and another run's URL would name different bytes.
 	pub async fn segment(&self, id: &segments::Id) -> Result<Option<Bytes>> {
-		// A predecessor's segments still listed are muxed under its config, which their tag names.
-		if *id.tag != *self.tag
-			&& let Some(rendition) = self.lineage().into_iter().find(|rendition| *rendition.tag == *id.tag)
+		// A predecessor's segments still listed are muxed under its config. A config that returns
+		// gets its tag back, but the instances' segment numbers never overlap.
+		if let Some(rendition) = self
+			.lineage()
+			.into_iter()
+			.find(|rendition| *rendition.tag == *id.tag && rendition.live.holds(&id.tag, id.at))
 		{
 			return rendition.own_segment(id).await;
 		}

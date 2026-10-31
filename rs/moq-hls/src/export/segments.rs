@@ -383,6 +383,19 @@ impl Producer {
 		self.state.closed().await;
 	}
 
+	/// Whether the window is closed (see [`closed`](Self::closed)).
+	pub fn is_closed(&self) -> bool {
+		self.state.read().is_closed()
+	}
+
+	/// Whether the window lists segment `at` of the record track tagged `tag`.
+	pub fn holds(&self, tag: &str, at: At) -> bool {
+		match at {
+			At::Sequence(segment) => self.row(tag, segment).is_some(),
+			At::Pts(time) => self.segment_number_at(tag, time).is_some(),
+		}
+	}
+
 	/// Poll until the window fails.
 	#[cfg_attr(
 		not(feature = "server"),

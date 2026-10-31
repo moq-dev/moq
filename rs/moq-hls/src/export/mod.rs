@@ -3879,6 +3879,79 @@ mod tests {
 		assert!(new.segment(&id(old.tag(), 2)).await.unwrap().is_none());
 	}
 
+	/// Reconfigure `video0` to `width`.
+	fn resize(test: &mut Records, width: u32) {
+		test.catalog.video.renditions.get_mut("video0").unwrap().coded_width = Some(width);
+		test.sync();
+	}
+
+	// A predecessor still waiting on its first segment keeps it, whenever the playlist renders.
+	#[tokio::test(start_paused = true)]
+	async fn a_predecessors_pending_first_segment_is_kept() {
+		let mut test = Records::with(&["video0"], &[]);
+		let (_, mut records) = test.publish("video0");
+		let _media = test.media("video0", 4);
+		records.push(&gop(0)).unwrap();
+		tokio::time::sleep(Duration::from_millis(100)).await;
+		resize(&mut test, 1280);
+		assert!(test.rendition("video0").snapshot().segments.is_empty());
+		records.push(&gop(1)).unwrap();
+		records.push(&gop(2)).unwrap();
+		assert_eq!(numbers(&test.listed("video0", 1).await), [0, 1]);
+	}
+
+	// Reconfigures that list nothing keep only the instance that does, however many there are.
+	#[tokio::test(start_paused = true)]
+	async fn reconfigures_listing_nothing_hold_nothing() {
+		let mut test = Records::with(&["video0"], &[]);
+		let (_, mut records) = test.publish("video0");
+		let _media = test.media("video0", 2);
+		records.push(&gop(0)).unwrap();
+		records.push(&gop(1)).unwrap();
+		test.listed("video0", 0).await;
+		for width in 1..=8 {
+			resize(&mut test, width);
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		assert_eq!(numbers(&test.rendition("video0").snapshot()), [0]);
+		assert!(test.renditions.targets() <= 3, "{} targets", test.renditions.targets());
+	}
+
+	// A config that returns while its earlier instance's segments are still listed gets its tag
+	// back, and each segment URL still reaches the instance that lists it.
+	#[tokio::test(start_paused = true)]
+	async fn a_returning_config_serves_both_instances_segments() {
+		let mut test = Records::with(&["video0"], &[]);
+		let (_, mut records) = test.publish("video0");
+		let _media = test.media("video0", 8);
+		for sequence in 0..3 {
+			records.push(&gop(sequence)).unwrap();
+		}
+		test.listed("video0", 1).await;
+		let first = test.rendition("video0");
+		resize(&mut test, 1280);
+		records.push(&gop(3)).unwrap();
+		records.push(&gop(4)).unwrap();
+		test.listed("video0", 3).await;
+		resize(&mut test, 320);
+		let returned = test.rendition("video0");
+		assert_eq!(returned.tag(), first.tag(), "the same config muxes the same way");
+		records.push(&gop(5)).unwrap();
+		records.push(&gop(6)).unwrap();
+		assert_eq!(numbers(&test.listed("video0", 5).await), [0, 1, 2, 3, 4, 5]);
+		let id = |segment| segments::Id {
+			generation: None,
+			tag: first.tag().to_string(),
+			at: segments::At::Sequence(segment),
+		};
+		for segment in [0, 2, 5] {
+			assert!(
+				returned.segment(&id(segment)).await.unwrap().is_some(),
+				"segment {segment}"
+			);
+		}
+	}
+
 	// A replacement reading another record track shares no numbering with its predecessor, so it
 	// lists that track's records from the first.
 	#[tokio::test(start_paused = true)]
