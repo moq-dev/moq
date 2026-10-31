@@ -313,6 +313,16 @@ impl Version {
 		)
 	}
 
+	/// Whether the announce stream has ANNOUNCE_TAKEOVER: a new advertisement that
+	/// continues what a live one served beneath its prefix. Added in lite-07. Older
+	/// versions send an ANNOUNCE_START, which the receiver treats as another instance.
+	pub(crate) fn has_announce_takeover(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE a wanted group,
 	/// so a join at any hop reaches the publisher. Added in lite-07; older peers see a
 	/// track that never refreshes.

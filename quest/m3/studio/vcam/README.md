@@ -23,7 +23,3 @@ Decided 2026-10-22:
 - [Linux virtual camera](/quest/m3/studio/vcam/linux.md) - a PipeWire video node carrying the program
 - [Windows virtual camera](/quest/m3/studio/vcam/windows.md) - a Media Foundation virtual camera on Windows 11
 - [macOS virtual camera](/quest/m3/studio/vcam/macos.md) - a CoreMediaIO Camera Extension inside the app bundle
-
-## Related
-
-- [V4L2 virtual camera tests](/quest/m2/v4l2-virtual-camera.md) - capture tested against a virtual camera, the inverse direction

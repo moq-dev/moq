@@ -1501,7 +1501,7 @@ export class Front {
 					next?: Promise<{ event?: TracksEvent; err?: Error }>;
 			  }
 			| undefined;
-		const wait = () => race([Signal.race(lister.used, this.#changed), closed]);
+		const wait = () => race([Signal.race(lister.wanted, this.#changed), closed]);
 		const stop = () => {
 			listing?.reader?.close();
 			listing = undefined;
@@ -1525,7 +1525,7 @@ export class Front {
 		try {
 			for (;;) {
 				if (closed.peek() !== undefined) return;
-				if (!lister.used.peek()) {
+				if (!lister.wanted.peek()) {
 					if (listing) {
 						stop();
 						lister.clear();
