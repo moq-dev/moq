@@ -1112,11 +1112,13 @@ impl Publisher {
 				Ok(true) => {}
 				Ok(false) => return Ok(()),
 				Err(refusal) => {
-					self.write_subscribe_error(&mut stream.writer, &refusal.error, &refusal.reason)
-						.await?;
+					// Ended first, so neither withheld stream credit nor a failed write keeps the
+					// joined FETCH running meanwhile.
 					if let Some(grant) = gate.token_guard() {
 						grant.end(refusal.clone());
 					}
+					self.write_subscribe_error(&mut stream.writer, &refusal.error, &refusal.reason)
+						.await?;
 					break Served::UpdateFailed(refusal.error);
 				}
 			}
@@ -2696,6 +2698,23 @@ mod tests {
 			ietf::FetchOk::ID,
 			"the joining FETCH was held to the session scope"
 		);
+
+		// A refused renewal, which a paused PUBLISH takes, fails the update as on any
+		// subscription: REQUEST_ERROR answers it, then PUBLISH_DONE ends the PUBLISH.
+		send(&mut stream, &update(6, false)).await;
+		assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID);
+		let mut renewal = update(8, false);
+		renewal.authorization_token = Some(crate::ietf::token::RequestToken(crate::setup::Token {
+			kind: 0,
+			value: b"renewal".to_vec(),
+		}));
+		send(&mut stream, &renewal).await;
+		timeout(requests.next())
+			.await
+			.unwrap()
+			.reject(crate::SessionError::Unauthorized, "refused");
+		assert_eq!(next(&mut stream).await.0, ietf::RequestError::ID);
+		assert_eq!(next(&mut stream).await.0, ietf::PublishDone::ID);
 	}
 
 	/// Tracks under a namespace our grant does not cover are not listed until it does, and
