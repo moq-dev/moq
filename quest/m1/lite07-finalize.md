@@ -72,6 +72,11 @@ replaced SUBSCRIBE_ALL) landed in [#6158](https://github.com/moq-dev/moq/pull/61
 and [#6167](https://github.com/moq-dev/moq/pull/6167), and the padding stream
 type for the m2 browser [padding probes](/quest/m2/probe/padding.md) landed in
 [#6233](https://github.com/moq-dev/moq/pull/6233).
+Decided 2026-10-30 (maintainer, on
+[moq-dev/moq#7390](https://github.com/moq-dev/moq/pull/7390)): those probes
+pad with datagrams rather than streams, and padding datagrams are supported
+only on lite-07. So [Lite-07 padding datagram](/quest/m1/lite07-padding-datagram.md),
+a datagram type receivers discard, joins Required.
 The `Time(pts)` range end rides in the subscribe-ranges children already Required.
 
 Decided 2026-10-27 (maintainer): of [Subscribe ranges](/quest/m1/subscribe-ranges/README.md),
@@ -109,6 +114,7 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 - [Lite-07 by start](/quest/m1/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m1/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
+- [Lite-07 padding datagram](/quest/m1/lite07-padding-datagram.md) - lite-07 defines a padding datagram that receivers discard, for the browser padding probes
 
 ## Related
 
