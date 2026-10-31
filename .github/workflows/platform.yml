@@ -76,8 +76,8 @@ jobs:
     if: needs.scope.outputs.rs == 'true' || needs.scope.outputs.c == 'true' || needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
     # OBS uses the Visual Studio 17 2022 CMake generator.
     runs-on: windows-2022
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     # The suites run serially; the full macOS suite measured 43 min without a Rust cache.
     timeout-minutes: 90
     steps:
@@ -134,8 +134,8 @@ jobs:
     needs: scope
     if: needs.scope.outputs.rs == 'true' || needs.scope.outputs.swift == 'true' || needs.scope.outputs.obs == 'true' || needs.scope.outputs.moq_sh == 'true'
     runs-on: macos-latest
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -45,7 +45,7 @@ use std::task::{Poll, ready};
 use std::time::Duration;
 
 use crate::time::Instant;
-use crate::{Error, Result, SessionError, StreamError, group, stats, track};
+use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
 use super::subscription::{Anchor, Position, Resolved, Subscription, Unheld, Window};
@@ -242,22 +242,6 @@ impl Consumer {
 		self.state.read().copy.clone()
 	}
 
-	/// Poll for the serving route's copy, as a fetch waits for one: `None` once the logical
-	/// track ends without one.
-	#[cfg(feature = "async")]
-	pub(super) fn poll_serving(&self, waiter: &kio::Waiter) -> Poll<Option<track::Consumer>> {
-		loop {
-			let (generation, copy) = {
-				let route = self.state.read();
-				(route.generation, route.copy.clone())
-			};
-			if copy.is_some() || self.end().is_some() {
-				return Poll::Ready(copy);
-			}
-			ready!(self.poll_changed(generation, waiter));
-		}
-	}
-
 	/// The copy the front parked, while it serves none and may still serve one again.
 	pub(super) fn parked(&self) -> Option<track::Consumer> {
 		let route = self.state.read();
@@ -435,6 +419,9 @@ struct Copy {
 	/// Held by every group handed out from this copy, so a replaced copy stays subscribed
 	/// while one is still read from it.
 	lease: Arc<()>,
+	/// Whether it may still deliver a group the reader lacks, as [`Reader::let_go`] last
+	/// judged: a drop under its bound waits for it.
+	feeds: bool,
 }
 
 // Boxed: a subscriber is twice a pending answer, and a copy holds one for its whole life.
@@ -1096,6 +1083,7 @@ impl Reader {
 			datagrams_done: None,
 			since: None,
 			lease: Arc::new(()),
+			feeds: true,
 		});
 		self.learn_end(None);
 	}
@@ -1192,15 +1180,18 @@ impl Reader {
 		};
 		let mut waits = false;
 		// The serving copy, or one between routes with nothing replacing it yet, stays.
-		self.copies
-			.retain_mut(|copy| match copy.replaced.then(|| copy.retains(&reader)) {
+		self.copies.retain_mut(|copy| {
+			let retains = copy.replaced.then(|| copy.retains(&reader));
+			copy.feeds = matches!(retains, None | Some(Retains::Wait));
+			match retains {
 				None | Some(Retains::Keep) => true,
 				Some(Retains::Wait) => {
 					waits = true;
 					true
 				}
 				Some(Retains::No) => false,
-			});
+			}
+		});
 		waits
 	}
 
@@ -1485,13 +1476,10 @@ impl Reader {
 				Some(None) => {}
 			},
 			// No front is left to replace the copy: the track ends as it does, or unroutable
-			// when no route served it. A locally closed copy ends it cleanly; a connection
-			// ending retains its session error.
+			// when no route served it. A connection ending retains its session error.
 			Some(None) => match serving.map(&done) {
 				None => return Some(Poll::Ready(Err(Error::Unroutable))),
-				Some(Some(Ok(()) | Err(Error::Stream(StreamError::Session(SessionError::Cancel))))) => {
-					return Some(Poll::Ready(Ok(None)));
-				}
+				Some(Some(Ok(()))) => return Some(Poll::Ready(Ok(None))),
 				Some(Some(Err(err))) => return Some(Poll::Ready(Err(err))),
 				Some(None) => {}
 			},
@@ -1656,12 +1644,14 @@ impl Reader {
 		for run in covered {
 			self.drops.remove(run);
 		}
+		// Judged as the group path judges it, so a copy kept only for a group still read
+		// holds nothing back, and letting one go wakes this too.
+		self.let_go(delivered, waiter);
 		let serving = self.generation;
-		let budget = self.mirrored.budget();
 		let (start, end) = self.groups;
 		let mut feeding = RangeSet::new();
 		for copy in &self.copies {
-			if Some(copy.generation) == serving || copy.done.is_some() || copy.expired(budget, waiter) {
+			if Some(copy.generation) == serving || !copy.feeds {
 				continue;
 			}
 			let from = copy.start(start);
@@ -1768,6 +1758,7 @@ impl Reader {
 			done: None,
 			datagrams_done: None,
 			lease: Arc::new(()),
+			feeds: true,
 		};
 		// The last copy stays the newest route's own.
 		self.copies.insert(self.copies.len() - 1, copy);
@@ -3221,6 +3212,54 @@ mod test {
 			dynamic.requested_fill_group().now_or_never().is_some(),
 			"the head was not kept"
 		);
+	}
+
+	/// A fetched reader whose copy shed the frame it reads next gets `Evicted`, rather than
+	/// recovering onto the same copy again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fetched_reader_past_a_shed_front_gets_evicted() {
+		let routes = Producer::new();
+		let a = copy();
+		routes.serve(a.consume());
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut fetched = logical(&routes)
+			.consume()
+			.fetch_group(0, None)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(read(&mut fetched), Some(b"a".to_vec()));
+		for _ in 0..40 {
+			open.write_frame(ts(0), vec![0u8; 1 << 20]).unwrap();
+		}
+		let res = fetched.read_frame().now_or_never().expect("not parked");
+		assert!(matches!(res, Err(Error::Evicted)), "{res:?}");
+	}
+
+	/// The same holds for a plain reader of a compressed group whose inflated copy shed the
+	/// frame while the stored slice stays.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fetched_plain_reader_past_a_shed_inflated_front_gets_evicted() {
+		let info = crate::track::Info::timed().with_compress(true);
+		let routes = Producer::new();
+		let a = track::Producer::new(Arc::new(broadcast::Info::default()), "video", info.clone());
+		routes.serve(a.consume());
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut drain = open.consume();
+		// Two frames that compress to almost nothing, but inflate past the tail together.
+		for _ in 0..2 {
+			open.write_frame(ts(0), vec![0u8; 31 << 20]).unwrap();
+			assert!(read(&mut drain).is_some());
+		}
+		let logical = track::Request::new(Arc::new(broadcast::Info::default()), "video")
+			.routes(routes.consume())
+			.accept(info);
+		let mut fetched = logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap();
+		let res = fetched.read_frame().now_or_never().expect("not parked");
+		assert!(matches!(res, Err(Error::Evicted)), "{res:?}");
 	}
 
 	/// A group first read while only one copy existed is still backed by a later copy that
@@ -5241,27 +5280,6 @@ mod test {
 		assert_eq!(group.index(), 2);
 		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(&frame.payload[..], &[2]);
-	}
-
-	/// A span fill made before the front serves a copy waits for one and asks it for the
-	/// whole span, rather than resolving with nothing filled.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_span_fill_waits_for_the_serving_copy() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let consumer = logical.consume();
-		let mut filling = Box::pin(consumer.fill_groups(0..4, 0));
-		assert!(filling.as_mut().now_or_never().is_none(), "no copy serves yet");
-		let a = copy();
-		let dynamic = a.requests();
-		routes.serve(a.consume());
-		assert!(
-			filling.as_mut().now_or_never().is_none(),
-			"the copy's fill is unanswered"
-		);
-		let fill = dynamic.requested_fill().now_or_never().unwrap().unwrap();
-		assert_eq!((fill.start().group, fill.end()), (0, 4));
 	}
 
 	#[test]

@@ -35,10 +35,13 @@ _Static_assert(offsetof(moq_video_decoder_output, max_delay_us) == 0, "max_delay
 _Static_assert(offsetof(moq_video_decoder_output, format) == 8, "format moved");
 _Static_assert(offsetof(moq_video_decoder_output, width) == 12, "width moved");
 _Static_assert(offsetof(moq_video_decoder_output, height) == 16, "height moved");
+_Static_assert(offsetof(moq_video_decoder_output, start) == 20, "start moved");
 _Static_assert(sizeof(moq_video_decoder_output) == 24, "decoder output size changed");
 _Static_assert(MOQ_DECODE_READ_FRAME == 0, "frame read discriminant moved");
 _Static_assert(MOQ_DECODE_READ_GAP == 1, "gap read discriminant moved");
 _Static_assert(MOQ_DECODE_READ_END == 2, "end read discriminant moved");
+_Static_assert(MOQ_DECODE_START_OLDEST == 0, "oldest start discriminant moved");
+_Static_assert(MOQ_DECODE_START_LATEST == 1, "latest start discriminant moved");
 
 // Numeric codes from rs/moq-c/src/error.rs. They are the contract a C caller
 // matches on; if they drift, this fixture fails and the header is stale.
