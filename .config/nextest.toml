@@ -31,6 +31,12 @@ default-filter = "not kind(bench)"
 filter = "package(moq-uring) | (binary_id(moq-relay::integration) & (test(/^runtime_uring::/) | test(/^embed::.*uring/)))"
 test-group = "io-uring"
 
+# The vivid tests share one capture node, and a second process configuring its
+# queue while another streams gets EBUSY.
+[[profile.default.overrides]]
+filter = "package(moq-video) & test(/^capture::v4l2::tests::vivid::/)"
+test-group = "v4l2"
+
 # The binding benchmark runs many `MOQ_BENCH_SECONDS` budgets back to back, so its
 # length scales with the budget. It guards each round against a wedge itself.
 [[profile.default.overrides]]
@@ -45,6 +51,7 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 
 [test-groups]
 io-uring = { max-threads = 4 }
+v4l2 = { max-threads = 1 }
 
 # CI has noisier neighbours and cold caches, so give a test longer before
 # calling it wedged.
