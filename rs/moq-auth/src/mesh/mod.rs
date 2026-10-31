@@ -160,7 +160,6 @@ fn audience(base: &url::Url) -> &str {
 /// A fresh, single-use challenge from `POST {base}/challenge`.
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct Challenge {
 	/// [`CHALLENGE_LEN`] bytes, opaque to the device, base64url without padding.
 	#[serde_as(as = "serde_with::base64::Base64<serde_with::base64::UrlSafe, serde_with::formats::Unpadded>")]
@@ -174,7 +173,6 @@ pub struct Challenge {
 /// [`proof_message`] for a challenge the coordinator issued and has not yet seen used.
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct Proof {
 	/// The endpoint ID, which is the key that signed.
 	pub endpoint: EndpointId,
@@ -239,7 +237,6 @@ impl Signer for aws_lc_rs::signature::Ed25519KeyPair {
 
 /// `POST {base}/enroll`: join with a pre-authorized enrollment key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct EnrollRequest {
 	/// Proof of the endpoint key.
 	#[serde(flatten)]
@@ -255,7 +252,6 @@ pub struct EnrollRequest {
 /// What a device needs to join: the relays to dial and the token to present.
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct Enrollment {
 	/// A JWT granting publish on `mesh/<id>/**` and subscribe on `mesh/**`, rooted at `/`.
 	pub token: String,
@@ -272,7 +268,6 @@ pub struct Enrollment {
 
 /// One enrolled device, as listed in an [`Enrollment`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct Member {
 	/// Its endpoint ID.
 	pub endpoint: EndpointId,

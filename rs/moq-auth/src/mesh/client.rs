@@ -44,7 +44,7 @@ impl Client {
 			"http" => return Err(Error::InsecureUrl(base.to_string())),
 			_ => return Err(Error::InvalidUrl(base.to_string())),
 		}
-		// A redirect would resend a proof or device code to wherever it points.
+		// A redirect would resend a proof or enrollment key to wherever it points.
 		let http = reqwest::Client::builder()
 			.redirect(reqwest::redirect::Policy::none())
 			.timeout(TIMEOUT)
@@ -53,6 +53,10 @@ impl Client {
 	}
 
 	/// Join with a pre-authorized enrollment key, asking for `name`.
+	///
+	/// When the coordinator refuses the key but this endpoint is already enrolled, such as
+	/// a retry after a single-use key's reply was lost, this refreshes instead, keeping the
+	/// name the device already has.
 	pub async fn enroll(&self, key: &str, name: Option<&str>) -> crate::Result<Enrollment> {
 		let proof = self.proof().await?;
 		let request = EnrollRequest {
@@ -60,7 +64,14 @@ impl Client {
 			key: key.into(),
 			name: name.map(Into::into),
 		};
-		self.post("enroll", &request).await
+		match self.post("enroll", &request).await {
+			Err(Error::Mesh(refused)) if refused.error == ErrorCode::InvalidGrant => match self.refresh().await {
+				// Not enrolled after all, so the key's refusal is the answer.
+				Err(Error::Mesh(reply)) if reply.error == ErrorCode::AccessDenied => Err(Error::Mesh(refused)),
+				res => res,
+			},
+			res => res,
+		}
 	}
 
 	/// Prove the key again for a fresh token. Fails with [`ErrorCode::AccessDenied`] once

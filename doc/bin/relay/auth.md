@@ -391,7 +391,9 @@ The device-facing API on `--mesh-listen` is meant to be public behind a TLS
 proxy, since devices refuse plain `http://` beyond loopback. A challenge holds
 no state until a proof uses it, so unauthenticated requests cannot crowd out a
 device's; the proxy should still rate-limit each client. The owner's
-commands go to `--listen`, which stays private. A hosted coordinator implements
+commands go to `--listen` (`moq auth mesh --url`, `unix:///path` for a
+socket), which has no authentication, so `--mesh-url` refuses
+`--listen-public`. A hosted coordinator implements
 the same JSON contract, documented in
 [`moq_auth::mesh`](https://docs.rs/moq-auth/latest/moq_auth/mesh/); it adds
 no token claims.

@@ -546,6 +546,11 @@ impl Serve {
 		let Some(url) = &self.mesh_url else {
 			return Ok(None);
 		};
+		if self.listen_public {
+			anyhow::bail!(
+				"--mesh-url serves the mesh owner's API on --listen, which has no authentication, so it cannot be combined with --listen-public"
+			);
+		}
 		let path = self
 			.mesh_key
 			.as_ref()
@@ -615,7 +620,8 @@ impl Serve {
 #[derive(usage_rs::Args, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Mesh {
-	/// The auth server's listener, which serves the owner's API alongside `POST /`.
+	/// The auth server's listener, which serves the owner's API alongside `POST /`:
+	/// `http://` for a TCP `--listen`, or `unix:///path` for a unix socket.
 	#[usage(long, default = "http://127.0.0.1:4440")]
 	url: url::Url,
 
@@ -661,20 +667,28 @@ enum MeshCommand {
 
 impl Mesh {
 	async fn run(self) -> anyhow::Result<()> {
-		let client = reqwest::Client::new();
+		let (client, base) = self.client()?;
+		let url = |path: &str, segments: &[&str]| {
+			let mut url = base.clone();
+			let prefix = url.path().trim_end_matches('/').to_string();
+			url.set_path(&format!("{prefix}{path}"));
+			if let Ok(mut parts) = url.path_segments_mut() {
+				parts.extend(segments);
+			}
+			url
+		};
 		let request = match &self.command {
 			MeshCommand::CreateKey { tag, expires, reusable } => {
-				let body = serde_json::json!({
-					"tags": tag,
-					"expires_in": expires.map(|expires| std::time::Duration::from(expires).as_secs()),
-					"reusable": reusable,
-				});
-				client.post(self.url("/mesh/keys", &[])).json(&body)
+				let mut new = moq_auth::mesh::NewKey::default();
+				new.tags = tag.clone();
+				new.expires_in = expires.map(std::time::Duration::from);
+				new.reusable = *reusable;
+				client.post(url("/mesh/keys", &[])).json(&new)
 			}
-			MeshCommand::Keys => client.get(self.url("/mesh/keys", &[])),
-			MeshCommand::RevokeKey { id } => client.delete(self.url("/mesh/keys", &[id])),
-			MeshCommand::Devices => client.get(self.url("/mesh/devices", &[])),
-			MeshCommand::Revoke { endpoint } => client.delete(self.url("/mesh/devices", &[endpoint])),
+			MeshCommand::Keys => client.get(url("/mesh/keys", &[])),
+			MeshCommand::RevokeKey { id } => client.delete(url("/mesh/keys", &[id])),
+			MeshCommand::Devices => client.get(url("/mesh/devices", &[])),
+			MeshCommand::Revoke { endpoint } => client.delete(url("/mesh/devices", &[endpoint])),
 		};
 		let response = request
 			.send()
@@ -701,15 +715,23 @@ impl Mesh {
 		Ok(())
 	}
 
-	/// `path` under the server's URL, with `segments` appended percent-encoded.
-	fn url(&self, path: &str, segments: &[&str]) -> url::Url {
-		let mut url = self.url.clone();
-		let base = url.path().trim_end_matches('/').to_string();
-		url.set_path(&format!("{base}{path}"));
-		if let Ok(mut parts) = url.path_segments_mut() {
-			parts.extend(segments);
+	/// The HTTP client for `--url` and the URL its requests target: a `unix://` URL names
+	/// the socket, and the requests go to the server's root over it.
+	fn client(&self) -> anyhow::Result<(reqwest::Client, url::Url)> {
+		let builder = reqwest::Client::builder();
+		match self.url.scheme() {
+			"http" | "https" => Ok((builder.build()?, self.url.clone())),
+			#[cfg(unix)]
+			"unix" => {
+				let path = self
+					.url
+					.to_file_path()
+					.map_err(|()| anyhow::anyhow!("--url {} names no socket path", self.url))?;
+				let target = url::Url::parse("http://localhost/").expect("a constant URL parses");
+				Ok((builder.unix_socket(path).build()?, target))
+			}
+			_ => anyhow::bail!("--url expects http://, https://, or unix://, got {}", self.url),
 		}
-		url
 	}
 }
 
@@ -864,6 +886,45 @@ mod tests {
 		assert!(flags.mesh_listen.ip().is_loopback());
 		assert!(flags.coordinator().unwrap().is_some());
 		assert!(serve(&["moq", "auth", "serve"]).coordinator().unwrap().is_none());
+
+		// The owner's API rides --listen, so a public one would hand out enrollment keys.
+		let flags = serve(&[
+			"moq",
+			"auth",
+			"serve",
+			"--listen",
+			"0.0.0.0:4440",
+			"--listen-public",
+			"--mesh-url",
+			"https://mesh.example",
+			"--mesh-key",
+			key.to_str().unwrap(),
+		]);
+		let err = flags.coordinator().err().expect("a public owner API");
+		assert!(err.to_string().contains("--listen-public"), "{err}");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn mesh_commands_reach_a_unix_listener() {
+		let dir = tempfile::tempdir().unwrap();
+		let key = moq_auth::Key::generate(Algorithm::HS256, None).unwrap();
+		let config = moq_auth::mesh::Config::new("https://mesh.example".parse().unwrap(), key);
+		let coordinator = moq_auth::mesh::Coordinator::new(config).unwrap();
+		let server = moq_auth::serve::Server::new(Policy::default())
+			.unwrap()
+			.with_mesh(coordinator.clone());
+		let path = dir.path().join("auth.sock");
+		let listener = tokio::net::UnixListener::bind(&path).unwrap();
+		tokio::spawn(async move { server.serve_unix(listener).await });
+
+		let url = format!("unix://{}", path.display());
+		run(&["moq", "auth", "mesh", "--url", &url, "create-key", "--expires", "1d"])
+			.await
+			.unwrap();
+		let keys = coordinator.keys();
+		assert_eq!(keys.len(), 1);
+		assert!(keys[0].expires.is_some());
 	}
 
 	#[test]

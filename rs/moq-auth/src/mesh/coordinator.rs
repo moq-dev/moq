@@ -5,9 +5,14 @@
 //! authentication and stays on loopback. Enrollment keys and devices persist to a JSON
 //! state file. Challenges are sealed with a secret held in memory, so a restart only makes
 //! a device fetch a new challenge.
+//!
+//! A challenge is single-use per endpoint: each carries a sequence number, and an endpoint's
+//! proof is accepted only over a challenge newer than the last one it was granted with. The
+//! replay state is one number per enrolled device, so no caller can spend another's room.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,13 +30,9 @@ use crate::{Claims, Key, Pattern};
 /// How long a challenge stays valid.
 const CHALLENGE_TTL: Duration = Duration::from_secs(60);
 
-/// The most challenges remembered as used by a granted request. Past it, proofs are
-/// refused with `slow_down` until some expire; an outstanding challenge is never dropped.
-const MAX_SPENT: usize = 65536;
-
-/// A challenge is its expiry (unix seconds), a nonce, then a truncated HMAC over both.
-const NONCE_LEN: usize = 8;
-const TAG_LEN: usize = CHALLENGE_LEN - 8 - NONCE_LEN;
+/// A challenge is its expiry (unix seconds), its sequence number, then a truncated HMAC
+/// over both. The HMAC makes it unpredictable; the sequence makes it single-use.
+const TAG_LEN: usize = CHALLENGE_LEN - 16;
 
 /// The longest a device name may be: one DNS label.
 const MAX_NAME: usize = 63;
@@ -156,14 +157,16 @@ impl From<&StoredKey> for KeyInfo {
 }
 
 /// `POST /mesh/keys` on the admin API: what the new enrollment key allows.
+#[serde_as]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[non_exhaustive]
 pub struct NewKey {
 	/// Tags every device it enrolls carries.
 	pub tags: Vec<String>,
-	/// Seconds until it stops enrolling; `None` never expires.
-	pub expires_in: Option<u64>,
+	/// How long until it stops enrolling; `None` never expires. Whole seconds on the wire.
+	#[serde_as(as = "Option<serde_with::DurationSeconds<u64>>")]
+	pub expires_in: Option<Duration>,
 	/// Whether it enrolls more than one device.
 	pub reusable: bool,
 }
@@ -171,8 +174,9 @@ pub struct NewKey {
 #[derive(Default)]
 struct Inner {
 	store: Store,
-	/// Challenges a granted request already used, until each expires.
-	spent: HashMap<Vec<u8>, moq_clock::Wall>,
+	/// The sequence of the last challenge each endpoint was granted with. Only an
+	/// enrolled device gets an entry, so it grows with the devices and nothing else.
+	used: HashMap<EndpointId, u64>,
 }
 
 /// The mesh coordinator: issues challenges, enrolls devices, and refreshes their tokens.
@@ -181,6 +185,9 @@ pub struct Coordinator {
 	config: Arc<Config>,
 	/// Seals challenges, so an outstanding one needs no state.
 	secret: Arc<aws_lc_rs::hmac::Key>,
+	/// The next challenge's sequence number. It restarts with the secret, which voids
+	/// every earlier challenge.
+	sequence: Arc<AtomicU64>,
 	inner: Arc<Mutex<Inner>>,
 }
 
@@ -205,6 +212,7 @@ impl Coordinator {
 		Ok(Self {
 			config: Arc::new(config),
 			secret: Arc::new(aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &random(32))),
+			sequence: Default::default(),
 			inner: Arc::new(Mutex::new(Inner {
 				store,
 				..Default::default()
@@ -221,7 +229,7 @@ impl Coordinator {
 				.unwrap_or_default()
 				.as_secs() + CHALLENGE_TTL.as_secs();
 		let mut challenge = expires.to_be_bytes().to_vec();
-		challenge.extend_from_slice(&random(NONCE_LEN));
+		challenge.extend_from_slice(&self.sequence.fetch_add(1, Ordering::Relaxed).to_be_bytes());
 		let tag = self.tag(&challenge);
 		challenge.extend_from_slice(&tag);
 		Challenge {
@@ -233,7 +241,7 @@ impl Coordinator {
 	/// Enroll with an enrollment key.
 	pub fn enroll(&self, request: &EnrollRequest) -> Reply<Enrollment> {
 		let mut inner = self.inner.lock().unwrap();
-		let spent = self.check(&mut inner, &request.proof)?;
+		let sequence = self.check(&inner, &request.proof)?;
 
 		let (id, secret) = request
 			.key
@@ -277,14 +285,14 @@ impl Coordinator {
 			}
 			self.issue(store, endpoint)
 		})?;
-		inner.spent.insert(request.proof.challenge.clone(), spent);
+		inner.used.insert(endpoint, sequence);
 		Ok(enrollment)
 	}
 
 	/// Refresh an enrolled device's token, refusing a revoked or unknown one.
 	pub fn refresh(&self, proof: &Proof) -> Reply<Enrollment> {
 		let mut inner = self.inner.lock().unwrap();
-		let spent = self.check(&mut inner, proof)?;
+		let sequence = self.check(&inner, proof)?;
 		let enrollment = match inner
 			.store
 			.devices
@@ -295,7 +303,7 @@ impl Coordinator {
 			Some(_) => return Err(ErrorReply::new(ErrorCode::AccessDenied, "the device is revoked")),
 			None => return Err(ErrorReply::new(ErrorCode::AccessDenied, "the device is not enrolled")),
 		};
-		inner.spent.insert(proof.challenge.clone(), spent);
+		inner.used.insert(proof.endpoint, sequence);
 		Ok(enrollment)
 	}
 
@@ -308,9 +316,7 @@ impl Coordinator {
 			id: id.clone(),
 			hash: hex(&sha256(secret.as_bytes())),
 			tags: new.tags.clone(),
-			expires: new
-				.expires_in
-				.map(|secs| moq_clock::wall().saturating_add(Duration::from_secs(secs))),
+			expires: new.expires_in.map(|ttl| moq_clock::wall().saturating_add(ttl)),
 			reusable: new.reusable,
 			used: false,
 			revoked: false,
@@ -392,11 +398,11 @@ impl Coordinator {
 		axum::serve(listener, self.router()).await
 	}
 
-	/// Verify the proof's challenge and signature, returning when the challenge expires.
+	/// Verify the proof's challenge and signature, returning the challenge's sequence.
 	///
-	/// The caller records the challenge in `spent` only once the request succeeds, so
-	/// only an authorized device or enrollment key takes room there.
-	fn check(&self, inner: &mut Inner, proof: &Proof) -> Reply<moq_clock::Wall> {
+	/// The caller records the sequence as the endpoint's last only once the request is
+	/// granted, so a refused proof changes nothing.
+	fn check(&self, inner: &Inner, proof: &Proof) -> Reply<u64> {
 		let invalid = |reason: &str| ErrorReply::new(ErrorCode::InvalidChallenge, reason);
 		let challenge = &proof.challenge;
 		if challenge.len() != CHALLENGE_LEN
@@ -408,8 +414,7 @@ impl Coordinator {
 		}
 		let expires = u64::from_be_bytes(challenge[..8].try_into().expect("8 bytes"));
 		let expires = moq_clock::Wall::UNIX_EPOCH.saturating_add(Duration::from_secs(expires));
-		let now = moq_clock::wall();
-		if expires <= now {
+		if expires <= moq_clock::wall() {
 			return Err(invalid("the challenge expired"));
 		}
 		if !proof.verify(&self.config.url) {
@@ -418,19 +423,11 @@ impl Coordinator {
 				"the signature does not verify against the endpoint ID",
 			));
 		}
-		if inner.spent.contains_key(challenge) {
-			return Err(invalid("the challenge was already used"));
+		let sequence = u64::from_be_bytes(challenge[8..16].try_into().expect("8 bytes"));
+		if inner.used.get(&proof.endpoint).is_some_and(|last| sequence <= *last) {
+			return Err(invalid("the endpoint already used this challenge or a newer one"));
 		}
-		if inner.spent.len() >= MAX_SPENT {
-			inner.spent.retain(|_, until| *until > now);
-		}
-		if inner.spent.len() >= MAX_SPENT {
-			return Err(ErrorReply::new(
-				ErrorCode::SlowDown,
-				"too many proofs at once; retry shortly",
-			));
-		}
-		Ok(expires)
+		Ok(sequence)
 	}
 
 	/// The truncated HMAC sealing a challenge's expiry and nonce.
@@ -724,30 +721,46 @@ mod tests {
 	}
 
 	#[test]
-	fn only_a_granted_proof_takes_room_in_the_spent_table() {
+	fn a_challenge_is_single_use_per_endpoint() {
 		let key = Key::generate(Algorithm::HS256, None).unwrap();
 		let base: url::Url = "https://mesh.example".parse().unwrap();
 		let coordinator = Coordinator::new(Config::new(base.clone(), key)).unwrap();
-		let signer = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
-		let proof = Proof::sign(&signer, &base, coordinator.challenge().challenge);
+		let secret = coordinator
+			.create_key(&NewKey {
+				reusable: true,
+				..Default::default()
+			})
+			.unwrap()
+			.key
+			.unwrap();
+		let a = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
+		let b = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
+		let enroll = |signer: &aws_lc_rs::signature::Ed25519KeyPair, challenge: &Challenge| EnrollRequest {
+			proof: Proof::sign(signer, &base, challenge.challenge.clone()),
+			key: secret.clone(),
+			name: None,
+		};
+		let older = coordinator.challenge();
+		let newer = coordinator.challenge();
 
-		// A refused request records nothing, so unknown callers cannot fill the table.
-		let err = coordinator.refresh(&proof).unwrap_err();
-		assert_eq!(err.error, ErrorCode::AccessDenied);
-		assert!(coordinator.inner.lock().unwrap().spent.is_empty());
+		// A refused proof records nothing, so an unknown caller holds no state.
+		assert_eq!(
+			coordinator.refresh(&enroll(&a, &older).proof).unwrap_err().error,
+			ErrorCode::AccessDenied
+		);
+		assert!(coordinator.inner.lock().unwrap().used.is_empty());
 
-		let later = moq_clock::wall() + CHALLENGE_TTL;
-		let mut inner = coordinator.inner.lock().unwrap();
-		inner.spent = (0..MAX_SPENT as u64)
-			.map(|n| (n.to_be_bytes().to_vec(), later))
-			.collect();
-		let err = coordinator.check(&mut inner, &proof).unwrap_err();
-		assert_eq!(err.error, ErrorCode::SlowDown);
+		// Once `a` uses the newer challenge, its own older one is spent too.
+		coordinator.enroll(&enroll(&a, &newer)).unwrap();
+		for challenge in [&newer, &older] {
+			let err = coordinator.enroll(&enroll(&a, challenge)).unwrap_err();
+			assert_eq!(err.error, ErrorCode::InvalidChallenge);
+		}
 
-		// Its challenge stays good once room frees up.
-		inner.spent.clear();
-		coordinator.check(&mut inner, &proof).unwrap();
-		assert!(inner.spent.is_empty(), "checking alone spends nothing");
+		// Another endpoint's state is its own: `a` spending challenges costs `b` nothing.
+		coordinator.enroll(&enroll(&b, &older)).unwrap();
+		coordinator.enroll(&enroll(&b, &newer)).unwrap();
+		assert_eq!(coordinator.inner.lock().unwrap().used.len(), 2);
 	}
 
 	#[test]

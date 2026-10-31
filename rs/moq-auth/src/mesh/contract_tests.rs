@@ -86,9 +86,15 @@ async fn an_enrollment_key_grants_the_endpoints_subtree() {
 async fn a_single_use_key_enrolls_once() {
 	let mesh = Mesh::new().await;
 	let key = mesh.key(false);
-	mesh.device().enroll(&key, None).await.unwrap();
+	let device = mesh.device();
+	let first = device.enroll(&key, Some("pi")).await.unwrap();
 	let err = mesh.device().enroll(&key, None).await.unwrap_err();
 	assert_eq!(Mesh::refused(err), ErrorCode::InvalidGrant);
+
+	// The device it enrolled can retry, as after a lost reply, and keeps its name.
+	let retried = device.enroll(&key, Some("other")).await.unwrap();
+	assert_eq!(retried.name, first.name);
+	assert!(mesh.key.verify(&retried.token).is_ok());
 
 	let reusable = mesh.key(true);
 	let first = mesh.device().enroll(&reusable, Some("bot")).await.unwrap();
