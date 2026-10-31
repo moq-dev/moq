@@ -104,9 +104,11 @@ jobs:
 
       - name: Export digest
         if: github.ref_type == 'tag'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
+          digest="$DIGEST"
           touch "/tmp/digests/${digest#sha256:}"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -140,12 +142,16 @@ jobs:
 
       - name: Create manifest
         working-directory: /tmp/digests
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ needs.parse.outputs.package }}
+          VERSION: ${{ needs.parse.outputs.version }}
         run: |
-          # shellcheck disable=SC2046  # intentional word-splitting: one arg per digest
+          sources=()
+          for digest in *; do sources+=("$IMAGE@sha256:$digest"); done
           docker buildx imagetools create \
-            -t ${{ env.REGISTRY }}/${{ needs.parse.outputs.package }}:${{ needs.parse.outputs.version }} \
-            -t ${{ env.REGISTRY }}/${{ needs.parse.outputs.package }}:latest \
-            $(printf "${{ env.REGISTRY }}/${{ needs.parse.outputs.package }}@sha256:%s " *)
+            -t "$IMAGE:$VERSION" \
+            -t "$IMAGE:latest" \
+            "${sources[@]}"
 
       # The image was moqdev/moq-cli through 0.12.2. Point `latest` there at a
       # refusal naming the new image, so a user tracking it breaks instead of

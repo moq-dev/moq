@@ -55,11 +55,12 @@ pub struct Peer {
 }
 
 impl std::fmt::Debug for Peer {
-	/// Redact `token`: [`crate::Config::load`] traces the whole resolved config,
+	/// Redact credentials: [`crate::Config::load`] traces the whole resolved config,
 	/// so a derived `Debug` would print cluster credentials into logs.
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let url = peer_url(&self.url).ok();
 		f.debug_struct("Peer")
-			.field("url", &self.url)
+			.field("url", &url.as_ref().map(moq_tokio::RedactedUrl::new))
 			.field("cost", &self.cost)
 			.field("egress", &self.egress)
 			.field("token", &self.token.as_ref().map(|_| "..."))
@@ -1357,7 +1358,7 @@ impl Cluster {
 		}
 
 		let stats = self.stats.tier(token.tier.clone()).session(&token.label);
-		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = %token.root,
+		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = ?token.root,
 			publish = ?publisher.as_ref().map(origin::Producer::allowed),
 			subscribe = ?subscriber.as_ref().map(origin::Producer::allowed),
 			"session accepted");
@@ -1473,7 +1474,7 @@ impl Cluster {
 			origin = match mounted.and_then(|at| origin.mount(at, target)) {
 				Ok(origin) => origin,
 				Err(err) => {
-					tracing::warn!(root = %token.root, %at, %target, %err, "grant mount refused");
+					tracing::warn!(root = ?token.root, ?at, ?target, ?err, "grant mount refused");
 					return None;
 				}
 			};
@@ -2981,13 +2982,20 @@ mod tests {
 	/// credential from `Debug` instead of printing it into logs.
 	#[test]
 	fn peer_debug_redacts_token() {
-		let peer = Peer::new("https://peer.example/").with_cost(2).with_token("secret");
-		let debug = format!("{peer:?}");
-		assert!(!debug.contains("secret"), "Debug must not leak the credential: {debug}");
-		assert!(
-			debug.contains("https://peer.example/"),
-			"Debug keeps the address: {debug}"
-		);
+		for peer in [
+			Peer::new("https://peer.example/").with_cost(2).with_token("secret"),
+			Peer::new("https://user:secret@peer.example/?jwt=secret#secret"),
+			Peer::new("https://peer.example:bad/?jwt=secret"),
+		] {
+			let debug = format!("{peer:?}");
+			assert!(!debug.contains("secret"), "Debug must not leak the credential: {debug}");
+			if peer_url(peer.url()).is_ok() {
+				assert!(
+					debug.contains("https://peer.example/"),
+					"Debug keeps the address: {debug}"
+				);
+			}
+		}
 	}
 
 	/// Static `--cluster-connect` entries get the same all-or-nothing
