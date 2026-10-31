@@ -22,7 +22,7 @@ lite-07; bitrate enforcement is not part of this release.
 
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
 - [Untrusted media parsers have fuzz targets](/quest/m2/media-fuzz.md) - fMP4, MKV, FLV, TS, Annex-B, catalog, and AMF0 parsing fuzzed with a bounded-work invariant
-- [Wire fuzz coverage](/quest/m2/wire-fuzz-coverage.md) - the audited moq-net decoders have targets that assert an invariant, and the unsafe peer input reaches runs under Miri
+- [Wire fuzz coverage](/quest/m2/wire-fuzz-coverage.md) - the cmsg walks in moq-sock and moq-uring have invariant fuzz targets, and the unsafe peer input reaches runs under Miri
 - [In-memory unsafe runs under Miri](/quest/m2/miri-memory.md) - kio's and moq-net's memory-only unsafe runs under a nightly Miri job
 - [VA-API renderer tests](/quest/m2/vaapi-render-tests.md) - the VA-API renderer, decode, and transcode tests run in `just rs gpu` on AMD and Intel and fail instead of skipping, and hosted CI reports them ignored
 - [Every opt-in test target has a CI caller](/quest/m2/test-inventory.md) - the merge gate flags ignored tests, fuzz and bench targets, recipes, and scripts no workflow runs
@@ -77,7 +77,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [moqsrc surround Opus](/quest/m2/moqsrc-opus-surround.md) - moqsrc sets the Opus mapping caps, so opusdec plays 3 to 8 channels
 - [GPU CI](/quest/m2/gpu-ci.md) - NVIDIA tests gate the merge queue on a self-hosted GPU runner VM, and `just rs nvidia` runs them locally instead of skipping
 - [Vendor-free CARLA bridge](/quest/m2/carla-bridge.md) - the CARLA demo's GPU bridge lets moq-video pick the encoder, and its stand-in test runs on AMD as well as NVIDIA
-- [V4L2 virtual camera](/quest/m2/v4l2-virtual-camera.md) - V4L2 capture runs nightly against the `vivid` virtual driver instead of only on a developer's camera
 - [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; the browser pads where native sessions retransmit
 - [Failed groups reach the publisher](/quest/m2/group-failed.md) - Rust and both JS publishers surface a group whose delivery a subscriber's stream gave up on, with one shape
 - [Headless moq-transport groups](/quest/m2/ietf-headless-group.md) - a mid-group stream whose head no fill or joining FETCH supplies is dropped in either arrival order, never kept as a whole group
@@ -180,7 +179,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
 - [io_uring thread check](/quest/m2/uring-transport-machines.md) - the relay fanout bench measures `moq_uring::transport::Local`'s per-call thread check after the transport is boxed, removing it only if it shows
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare Opus codec quality, CPU, build cost, and the loss recovery each backend offers
-- [Latency ledger](/quest/m2/latency-ledger.md) - a viewer reports its share of playback delay stage by stage: jitter buffer, decode, render, and device
+- [Latency ledger](/quest/m2/latency-ledger.md) - a viewer reports its share of playback delay stage by stage: jitter buffer and device
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
 - [Media Foundation encode](/quest/m2/audio-encode-mediafoundation.md) - Windows encodes AAC-LC
 - [MediaCodec on an emulator](/quest/m2/android-mediacodec-ci.md) - moq-video's MediaCodec tests run nightly on an Android emulator, in a lane the audio MediaCodec quests reuse
@@ -273,3 +272,14 @@ lite-07; bitrate enforcement is not part of this release.
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
 - [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
 - [Bindings see a broadcast end](/quest/m2/binding-broadcast-end.md) - `MoqBroadcastConsumer` exposes the close, and a moq-transport run end is a protocol error
+- [We own our WebRTC stack](/quest/m2/webrtc/README.md) - moq-rtc becomes moq-webrtc with moq-ice, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
+- [Certificate reload and qmux's tasks are supervised](/quest/m2/tls-reload-supervision.md) - a panic in either fails loudly instead of silently stopping
+- [PUBLISH_DONE says why](/quest/m2/publish-done-codes.md) - GOING_AWAY, TOO_FAR_BEHIND, and EXPIRED round-trip as stream codes
+- [An interrupted mp4 recording keeps its last fragment](/quest/m2/mp4-sigint-flush.md) - SIGINT flushes the buffering fragment before finishing
+- [Repair a crashed mp4 recording](/quest/m2/mp4-repair.md) - a crashed recording's fragmented file becomes a regular MP4
+- [Windows receives notice truncated control data](/quest/m2/cmsg-windows-truncation.md) - Windows handles `MSG_CTRUNC` like the Unix paths
+- [moq-quic's internal dev-dependencies are path-only](/quest/m2/quic-dev-dep-path.md) - moq-congestion is a path dev-dependency
+- [moq-mux's AAC config reports SBR](/quest/m2/aac-sbr-config.md) - moq-audio reads backward-compatible SBR from the config
+- [An ended HLS playlist has no trailing gap](/quest/m2/hls-trailing-gap.md) - no zero-duration `EXT-X-GAP` before `EXT-X-ENDLIST`
+- [moq-video's Apple Sink encodes on its own thread](/quest/m2/apple-sink-thread.md) - macOS and iOS ladders never encode on a tokio worker
+- [The test inventory sees JS bench scripts](/quest/m2/js-bench-inventory.md) - JS bench entry points are resolved by the inventory gate
