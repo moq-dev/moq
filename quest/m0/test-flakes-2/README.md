@@ -55,3 +55,5 @@ Public API: none. Wire: none.
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Tests own their temp directories](/quest/m0/test-flakes-2/temp-paths.md) - concurrent test processes stop overwriting each other's fixed temp files
 - [moq-rtc's session-end test survives load](/quest/m0/test-flakes-2/rtc-dtls.md) - its DTLS handshake stops timing out on a busy host
+- [Browser buffering and Firefox audio-tone tests pass under load](/quest/m0/test-flakes-2/browser-media-flakes.md) - the two `harness.browser.ts` buffering tests and the Firefox player's audio-tone checks pass reliably in Interop and Nightly, each fixed at its cause under the epic's
+- [Timing-bound tests pass beside a busy build](/quest/m0/test-flakes-2/load-timing-bounds.md) - four tests that pass alone but have failed under a loaded `just check` pass reliably there, each fixed at its cause under the epic's rules

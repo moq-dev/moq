@@ -31,3 +31,4 @@ Public API: moq-c gains each m1 binding feature. Wire: none.
 
 - [API gaps](/quest/m1/c/api-gaps.md) - one malformed-epoch error code, an audio enabled query, and a relay hops test
 - [Every consumer cancels while pending](/quest/m1/c/consumer-cancel.md) - catalog, raw, datagram, and media consumers end cleanly on cancel before their subscription is accepted
+- [moq-c's media consume applies the catalog warmup, and can disable rungs](/quest/m1/c/raw-consume-warmup.md) - `moq_consume_audio` and `moq_consume_video` start where the moq-ffi and Rust media consumers do

@@ -62,6 +62,20 @@ priority, and progress after eviction, with a JS sender over WebSocket.
 Measure retained bytes per session and throughput across many sessions for
 the chosen window.
 
+Noted 2026-10-31 from [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388),
+which pauses a relay's ingest stream by the group's fastest reader only on
+transports that report a receive window (`poll::Session::receive_window`):
+
+- When qmux starts reporting its window, it must also answer
+  `poll::RecvStream::poll_reset` (and `poll::Chunks::poll_reset`). The
+  provided default pends forever, so a reset on a paused stream would go
+  unseen.
+- moq-net reserves each paused stream's window from a per-session budget of
+  about half the connection window (`rs/moq-net/src/transport/boxed.rs`) and
+  never re-balances it. No caller shrinks a live window today, but if this
+  quest's window can shrink (for example a grow-on-demand window that later
+  contracts), re-balance the paused reservations when it does.
+
 Public API: qmux's `RecvStream` leases natively instead of through
 `Buffered`, and its window defaults or validation change (with a migration note). Wire:
 QMux MAX_DATA and STOP_SENDING only, no MoQ format change.

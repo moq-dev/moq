@@ -57,6 +57,17 @@ Rejected:
 
 The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876) with `reserve_track`, which still serves declared names; [rust-publish](/quest/m2/e2ee/rust-publish.md) needs nothing more (maintainer, 2026-10-19).
 
+Noted 2026-10-31 from [moq-dev/moq#7307](https://github.com/moq-dev/moq/pull/7307):
+
+- The draft's epoch rule (`drafts/draft-lcurley-moq-e2ee.md:136`, clones of a
+  producing generation share permanent track claims so reopening a physical
+  track cannot reset its nonce counters) leaves its resume rule implicit.
+  State explicitly in that section how a reopened or resumed track continues
+  from those claims.
+- moq-net's `Lister` has no async `used`/`unused` forms yet, so neither the
+  e2ee wrapper nor the trait mirror has them. Add them to the wrapper once
+  moq-net does.
+
 Before `@moq/e2ee` is first published, add its entrypoints to the API
 Extractor declaration checks, which analyze only published packages since
 [moq-dev/moq#6794](https://github.com/moq-dev/moq/pull/6794).

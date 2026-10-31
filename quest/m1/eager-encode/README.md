@@ -55,6 +55,7 @@ The epic's own work, once the children land:
 
 - [The CLI picks each medium's mode](/quest/m1/eager-encode/cli-modes.md) - `--video`/`--audio` take `on|demand|off` in capture and `on|off` in export and play, replacing `--no-*` and `--on-demand`
 - [Raw audio on demand](/quest/m1/eager-encode/raw-audio.md) - audio encodes on demand again, from raw frames kept up to `maxAge`
+- [Buffered audio survives a capture stop and a disable](/quest/m1/eager-encode/audio-across-stop.md) - audio retained by default
 
 ## Related
 

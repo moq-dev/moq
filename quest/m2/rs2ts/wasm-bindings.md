@@ -41,6 +41,10 @@ them. Benchmark any hot-path changes, including publisher/subscriber sweeps.
 Rust and JS must agree on clock origin, units, deadlines, and controlled-time
 behavior across the boundary. Integrate with moq-clock/@moq/clock if available;
 otherwise preserve current semantics without blocking on the whole time line.
+The parity table's frame `arrived` row (`MoqFrame` carries no arrival time)
+closes only after that agreement, so
+[moq-dev/moq#7304](https://github.com/moq-dev/moq/pull/7304) left it open
+(added 2026-10-31).
 
 Extend the [backend baseline](/test/wasm/README.md#backend-baseline) for full API parity.
 

@@ -65,6 +65,11 @@ the fed socket may belong in the server's constructor rather than the
 config. The fed mux has nothing to bind lazily, and a dropped feed should
 fail the server loudly rather than idle.
 
+Noted 2026-10-31 from [moq-dev/moq#7095](https://github.com/moq-dev/moq/pull/7095):
+its demux `Datagram` carries no ECN marks or kernel receive timestamp. If
+the fed mux's RTP congestion control needs either, add them to the demux
+here rather than reading them around it.
+
 Tests: a fed mux completes ICE and DTLS with a client through an in-memory
 `Transmit`, reports the selected tuple on `pinned`, and releases it when the
 session closes. A fed dual-stack socket serves an IPv4 peer. The existing
