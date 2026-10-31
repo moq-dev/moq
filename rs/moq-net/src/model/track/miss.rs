@@ -346,6 +346,10 @@ impl Misses {
 								taken.remove(sequence..sequence + 1);
 							}
 						}
+						// Seen cached, though judging may not run again before it is evicted.
+						if let Some(inbox) = &self.inbox {
+							inbox.saw(state.cached);
+						}
 					}
 					Err((Error::Old, asked)) if looser(max_delay, asked) => retry.insert(groups),
 					// A drop the track recorded is named by the drop cursor already.
@@ -530,6 +534,7 @@ impl Misses {
 		let evicted = inbox.judge(state.cached, low, top);
 		self.evictions = state.evictions;
 		let mut refills = RangeSet::new();
+		let mut again = RangeSet::new();
 		for run in evicted.iter() {
 			let run = run.start.max(low)..run.end.min(top.saturating_add(1));
 			if run.is_empty() {
@@ -542,18 +547,32 @@ impl Misses {
 						for fresh in self.refilled.gaps(&judged) {
 							refills.insert(fresh);
 						}
+						for refilled in self.refilled.overlapping(&judged) {
+							again.insert(refilled.start.max(judged.start)..refilled.end.min(judged.end));
+						}
 					}
 				}
 			}
 		}
-		for run in refills.iter() {
-			self.refilled.insert(run.clone());
-			candidates.insert(run.clone());
-			// A fill's answer evicted before it was taken is asked again, not given up.
+		// Settled here rather than when read, since an ordered reader never looks at what a
+		// fill answered: it reads past a group gone from the cache. Still asked, its fill
+		// settles it; given up already, it was named.
+		for run in self.wanted.iter().chain(self.given_up.iter()) {
+			again.remove(run.clone());
+		}
+		for (run, refill) in refills.iter().map(|run| (run, true)).chain(again.iter().map(|run| (run, false))) {
+			// A fill's answer evicted before it was taken is no longer held for this reader.
 			let filled: Vec<u64> = self.filled.range(run.clone()).copied().collect();
 			for sequence in filled {
 				self.filled.remove(&sequence);
 				self.release(sequence);
+			}
+			match refill {
+				true => {
+					self.refilled.insert(run.clone());
+					candidates.insert(run.clone());
+				}
+				false => self.give_up(run.clone(), given_up),
 			}
 		}
 		self.ledger_revision = ledger.revision();
@@ -805,6 +824,12 @@ impl Inbox {
 		judging.cached = cached;
 		judging.span = Some(low..=top);
 		std::mem::take(&mut judging.evicted)
+	}
+
+	/// Count every slot cached by `cached` as judged cached, within the span judged last.
+	fn saw(&self, cached: u64) {
+		let mut judging = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		judging.cached = judging.cached.max(cached);
 	}
 }
 

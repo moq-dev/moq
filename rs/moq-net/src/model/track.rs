@@ -18866,6 +18866,40 @@ mod test {
 		assert_eq!(next(&mut subscriber), Some(3));
 	}
 
+	/// An ordered reader gives up a refill evicted again while it waits on a lower one,
+	/// naming it dropped and releasing its fill, rather than reading past it unnamed.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_reader_gives_up_a_refill_evicted_while_it_waits_below() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
+		for sequence in 0..4 {
+			write_group(&producer, sequence);
+		}
+		let waiter = kio::Waiter::noop();
+		let next = |subscriber: &mut Subscriber| match subscriber.poll_next_group(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(group))) => Some(group.sequence),
+			_ => None,
+		};
+		assert_eq!(next(&mut subscriber), Some(0));
+		evict(&producer, 1);
+		evict(&producer, 2);
+		assert_eq!(next(&mut subscriber), None, "group 1 comes before 3");
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("groups 1 and 2 are misses now");
+		};
+		write_filled(fill.accept(2, None), 2);
+		assert_eq!(next(&mut subscriber), None, "still waiting on group 1");
+		evict(&producer, 2);
+		assert_eq!(next(&mut subscriber), None, "still waiting on group 1");
+		assert_eq!(drained_drops(&mut subscriber), [(2, 3)]);
+		write_filled(fill.accept(1, None), 1);
+		drop(fill);
+		assert_eq!([next(&mut subscriber), next(&mut subscriber)], [Some(1), Some(3)]);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "refilled once");
+	}
+
 	/// A refill evicted again before its reader took it is given up rather than asked a
 	/// second time, so refills that evict each other cannot loop.
 	#[test]
