@@ -911,10 +911,7 @@ unsafe fn parse_announce_route(route: *const moq_announce_route) -> Result<moq_n
 		return Ok(moq_net::origin::Route::default());
 	};
 	let mut out = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost::new(route.cost));
-	if let Some(epoch) = unsafe { ffi::parse_str_optional(route.epoch, route.epoch_len)? } {
-		let epoch = epoch
-			.parse()
-			.map_err(|_| Error::InvalidConfig(format!("epoch {epoch:?} is not canonical UUIDv7 text")))?;
+	if let Some(epoch) = unsafe { parse_epoch(route.epoch, route.epoch_len)? } {
 		out = out.with_epoch(epoch);
 	}
 	Ok(out)
@@ -2093,10 +2090,7 @@ pub unsafe extern "C" fn moq_broadcast_request_prepare(
 ) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let epoch = unsafe { ffi::parse_str(epoch, epoch_len)? };
-		let epoch = epoch
-			.parse()
-			.map_err(|_| Error::InvalidConfig(format!("epoch {epoch:?} is not canonical UUIDv7 text")))?;
+		let epoch = epoch_from_str(unsafe { ffi::parse_str(epoch, epoch_len)? })?;
 		let broadcast_out = unsafe { broadcast.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let mut state = State::lock();
 		let (pending, driver) = state.origin.broadcast_request_take(request)?;
@@ -2271,7 +2265,7 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 /// announced, like a remote one.
 ///
 /// `epoch` is the UUIDv7 text of the only publisher instance to follow, or NULL (or empty) to
-/// follow every instance. A pinned follow never delivers another instance taking over, and
+/// follow every instance. Malformed epoch text returns `MOQ_ERROR_INVALID_CONFIG`. A pinned follow never delivers another instance taking over, and
 /// delivers its own instance again if it returns after an end.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once announced, and again with a
@@ -2334,6 +2328,7 @@ pub extern "C" fn moq_origin_follow_cancel(task: u32) -> i32 {
 ///
 /// `epoch` is the UUIDv7 text of the only publisher instance to accept, or NULL (or empty) for
 /// any instance. A request pinned to an instance that does not serve the path is unroutable.
+/// Malformed epoch text returns `MOQ_ERROR_INVALID_CONFIG`.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
 /// with a terminal code: `0` (finished, including after [moq_origin_request_cancel]) or a negative
@@ -2386,8 +2381,16 @@ pub extern "C" fn moq_origin_request_cancel(task: u32) -> i32 {
 /// - `epoch` may be NULL, or must point at `epoch_len` readable bytes.
 unsafe fn parse_epoch(epoch: *const c_char, epoch_len: usize) -> Result<Option<moq_net::Epoch>, Error> {
 	unsafe { ffi::parse_str_optional(epoch, epoch_len)? }
-		.map(|epoch| epoch.parse().map_err(|_| Error::InvalidCode))
+		.map(epoch_from_str)
 		.transpose()
+}
+
+/// Parse canonical UUIDv7 epoch text, refusing anything else as `MOQ_ERROR_INVALID_CONFIG`
+/// at every API that takes an epoch.
+fn epoch_from_str(epoch: &str) -> Result<moq_net::Epoch, Error> {
+	epoch
+		.parse()
+		.map_err(|_| Error::InvalidConfig(format!("epoch {epoch:?} is not canonical UUIDv7 text")))
 }
 
 /// Close an origin and clean up its resources.
@@ -2409,7 +2412,7 @@ pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 /// Announcing again re-prices the route in place, or restarts it under a new epoch. A
 /// NULL `route` uses the default (cost 0, no epoch). Until announced, the broadcast is
 /// invisible and unroutable for local consumers and peers alike. Fails once the
-/// broadcast closed, or when `epoch` is not UUIDv7 text.
+/// broadcast closed, or with `MOQ_ERROR_INVALID_CONFIG` when `epoch` is not UUIDv7 text.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

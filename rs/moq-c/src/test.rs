@@ -4553,7 +4553,12 @@ fn an_epoch_pins_request_and_follow() {
 		&cb,
 	));
 	assert!(cb.recv() < 0, "another instance resolved");
-	assert!(resolve_pinned(moq_origin_follow, origin, "not-an-epoch", &Callback::new()) < 0);
+	for resolve in [moq_origin_request, moq_origin_follow] {
+		assert_eq!(
+			resolve_pinned(resolve, origin, "not-an-epoch", &Callback::new()),
+			MOQ_ERROR_INVALID_CONFIG
+		);
+	}
 
 	// Another instance takes over before the follow starts. An unpinned request resolves it and
 	// holds the answer, so a follower resolving it joins that answer within its first pass.
