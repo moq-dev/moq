@@ -135,10 +135,11 @@ serialization duplication lead. The [bindings size profile
 quest](/quest/m2/ffi-size-profile.md) requires codec/crypto and FFI throughput
 measurements before adopting opt-level s; no compiler profile was changed.
 
-The Swift source tarball's only changed member is `Generated.swift`, from
-684,643 to 704,105 bytes. Its new request/publication, token, media-read and
-decoder-start bindings match the changed public API; licenses, package
-manifest and README are identical. No packaging duplication was found.
+The Swift source tarball grows in `Generated.swift`, from 684,643 to 704,105
+bytes. Its new request/publication, token, media-read and decoder-start
+bindings match the changed public API. `Package.swift` only changes the
+xcframework checksum, at the same length; licenses and README are identical.
+No packaging duplication was found.
 
 ### Local WASM baseline
 
