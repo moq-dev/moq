@@ -26,6 +26,7 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
 - [Backport audio groupDuration](/quest/m0/backport-audio-group-duration.md) - `@moq/publish` 0.5.4 on `release` can pack several Opus frames per group, making Cloudflare's relay drop audio less often
 - [Backport the SETUP-path and iroh-key fixes](/quest/m0/backport-security-fixes.md) - `release` refuses a conflicting SETUP Path and keeps persisted iroh keys private, in one patch release
+- [Backport the joined-head FETCH race fix](/quest/m0/backport-fill-head-race.md) - a `release` relay stops FETCHing a group head its own SUBSCRIBE is bringing, which left live readers hanging
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in a batched merge gate as one `just ci` pass per batch, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one fails a whole batch
 - [Backport the dot-segment and auth-redirect refusals](/quest/m0/backport-release-hardening.md) - `release`'s relay refuses dot-segment paths and its auth client refuses redirects

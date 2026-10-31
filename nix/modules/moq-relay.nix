@@ -151,10 +151,13 @@ in
       };
 
       rootUrl = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
+        type = lib.types.nullOr (lib.types.nonEmptyListOf lib.types.str);
         default = null;
-        example = "https://root.example.com:4443";
-        description = "Root node URL to connect to (for leaf mode); a full URL, since a bare `host:port` is refused";
+        example = [
+          "https://root-a.example.com:4443"
+          "https://root-b.example.com:4443"
+        ];
+        description = "Cluster peer URLs to connect to (for leaf mode); full URLs, since a bare `host:port` is refused";
       };
 
       nodeUrl = lib.mkOption {
@@ -374,7 +377,7 @@ in
       }
       // lib.optionalAttrs (cfg.cluster.rootUrl != null) {
         # Cluster configuration
-        MOQ_CLUSTER_CONNECT = cfg.cluster.rootUrl;
+        MOQ_CLUSTER_CONNECT = lib.concatStringsSep "," cfg.cluster.rootUrl;
       }
       # Public rules refuse a token, so a peer only presents one an auth server will read.
       //
