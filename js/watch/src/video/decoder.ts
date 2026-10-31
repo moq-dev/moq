@@ -158,7 +158,9 @@ export class Decoder {
 		const startup = this.#signals.computed((effect) => {
 			if (!effect.get(this.in.enabled)) return undefined;
 			if (effect.get(this.source.pending)) return null;
-			if (!effect.get(this.source.out.config)) return undefined;
+			// A held disabled rendition has no frames coming, so startup does not wait on it.
+			const config = effect.get(this.source.out.config);
+			if (!config || config.enabled === false) return undefined;
 			const active = effect.get(this.#active);
 			if (!active) return null;
 			const timestamp = effect.get(active.first);

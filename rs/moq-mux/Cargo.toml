@@ -50,7 +50,7 @@ futures = { workspace = true }
 moq-clock = { workspace = true, features = ["sim"] }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
-tracing-test = { workspace = true, features = ["no-env-filter"] }
+tracing-test = { workspace = true }
 
 # The ts_schedule bench pins glibc's heap.
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dev-dependencies]

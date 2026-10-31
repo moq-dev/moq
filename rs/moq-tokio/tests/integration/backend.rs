@@ -337,6 +337,7 @@ async fn cert_sources_test() {
 /// set follows, without the listener being rebuilt.
 #[cfg(feature = "quic")]
 async fn reload_test() {
+	let logs = crate::Logs::capture();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = write_self_signed(dir.path(), "server", "localhost");
 
@@ -372,10 +373,7 @@ async fn reload_test() {
 	.await
 	.expect("certificate reload timed out");
 
-	assert!(
-		tracing_test::internal::logs_with_scope_contain("moq_tokio", "reloading server certificates"),
-		"no reload log"
-	);
+	assert!(logs.text().contains("reloading server certificates"), "no reload log");
 	assert_eq!(reloaded.len(), 1);
 	drop(server);
 }
@@ -523,7 +521,6 @@ async fn mtls_test(scheme: &str, reject: bool) {
 // ── Iroh backend ────────────────────────────────────────────────────
 
 #[cfg(feature = "iroh")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn iroh_connect() {
 	iroh_connect_test(None).await;
@@ -532,7 +529,6 @@ async fn iroh_connect() {
 /// `moq-lite-07-wip` is opt-in, so it is on the wire only when both ends configure it.
 /// iroh once built its ALPNs from the default constant and ignored that opt-in.
 #[cfg(feature = "iroh")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn iroh_connect_lite_07_wip() {
 	iroh_connect_test(Some("moq-lite-07-wip")).await;
@@ -541,7 +537,6 @@ async fn iroh_connect_lite_07_wip() {
 /// A dialer and a listener that share no version never connect, instead of the
 /// listener falling back to the default set.
 #[cfg(feature = "iroh")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn iroh_versions_disjoint() {
 	use moq_tokio::iroh::Config as IrohConfig;
@@ -741,7 +736,6 @@ async fn iroh_connect_test(version: Option<&str>) {
 /// A client that closes before its runtime stops tells the server at once, instead of
 /// leaving it to the idle timeout, which is what a process exiting on a signal does.
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_client_close_reaches_server() {
 	// An idle timeout inside TIMEOUT would hide a lost close.
@@ -803,7 +797,6 @@ async fn quic_client_close_reaches_server() {
 /// A client that finishes its track and closes before its runtime stops still delivers
 /// the queued group and the track's finish, retaining its token-only grant through the drain.
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_client_close_drains_finished_track() {
 	// Several congestion windows, so the token must cover data still in flight
@@ -941,7 +934,6 @@ async fn quic_client_close_drains_finished_track() {
 /// A GOAWAY leaves the old session serving its subscriptions after the replacement
 /// connects, and a close then drains that predecessor too rather than dropping it.
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_client_close_drains_migrated_predecessor() {
 	// Several congestion windows, so it is still in flight when the close starts.
@@ -1089,7 +1081,6 @@ async fn quic_client_close_drains_migrated_predecessor() {
 /// A close cuts a predecessor that cannot drain off at its handover deadline,
 /// rather than holding it for the full one second close window.
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_client_close_keeps_predecessor_handover() {
 	let quic = moq_tokio::quic::Config::default();
@@ -1198,70 +1189,60 @@ async fn quic_client_close_keeps_predecessor_handover() {
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_raw_quic() {
 	backend_test("moqt").await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_raw_quic_no_sni() {
 	no_sni_test("moqt").await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_raw_quic_path() {
 	path_test("moqt").await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_raw_quic_moql_path() {
 	path_test("moql").await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_webtransport_path() {
 	path_test("https").await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_webtransport() {
 	backend_test("https").await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_mtls() {
 	mtls_test("https", false).await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_sni_certificate() {
 	sni_test().await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_cert_sources() {
 	cert_sources_test().await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_cert_reload() {
 	reload_test().await;

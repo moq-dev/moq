@@ -359,10 +359,10 @@ async def _pump_driver(
     """
     log.info("driver %s connected (epoch %s)", driver_id, epoch)
     try:
-        broadcast = await client.request_broadcast(path)
+        broadcast = await client.request(path)
         control = moq.json.SnapshotConsumer(await broadcast.subscribe_track("control"))
         async for message in control:
-            command = parse_command(driver_id, message, epoch)
+            command = parse_command(driver_id, message.value, epoch)
             if command is not None:
                 await commands.put(command)
     # uniffi's stubs declare the error a plain class; at runtime it is an Exception.

@@ -841,94 +841,81 @@ struct AnnounceServe {
 	state: AnnounceState,
 }
 
-#[expect(
-	clippy::large_enum_variant,
-	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk"
-)]
-enum AnnounceState {
-	/// Reading the ANNOUNCE_REQUEST.
-	Decode,
-	/// Waiting on the peer's SETUP for the session-wide excluded origin
-	/// (lite-05, whose wire carries no per-stream exclude_hop).
-	ExcludeHop { prefix: crate::Path, hidden: bool },
-	/// Streaming announce updates.
-	Run {
-		origin: origin::Consumer,
-		announced: announce::Consumer,
-		run: AnnounceRun,
-	},
-}
-
+#[kio::machine(self.state: AnnounceState)]
 impl AnnounceServe {
 	fn new(shared: Arc<Shared>, stream: Stream<Transport, Version>) -> Self {
 		Self {
 			_withdrawing: shared.withdrawal.register(),
 			shared,
 			stream: Some(stream),
-			state: AnnounceState::Decode,
+			state: AnnounceState::Start,
 		}
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		loop {
-			match &mut self.state {
-				AnnounceState::Decode => {
-					let stream = self.stream.as_mut().expect("stream present");
-					let interest = ready!(stream.reader.poll_decode::<lite::AnnounceRequest>(waiter))?;
-					let prefix = interest.prefix.clone();
-					let hidden = interest.hidden;
+		// Reading the ANNOUNCE_REQUEST.
+		let interest = wait!(Decode => {
+			let stream = self.stream.as_mut().expect("stream present");
+			stream.reader.poll_decode::<lite::AnnounceRequest>(waiter)
+		})?;
+		let prefix: crate::Path = interest.prefix.clone();
+		let hidden: bool = interest.hidden;
 
-					// The identity whose routes we filter out. Lite-04/05 carry it per
-					// announce stream; lite-06+ reads the session-wide SETUP Hop
-					// parameter, the same identity the subscribe path excludes. A peer that
-					// declares nothing falls back to the identity the session assigned it.
-					let assigned = self.shared.peer_hop.unwrap_or(Hop::UNKNOWN);
-					if self.shared.version.has_exclude_hop() {
-						let exclude_hop = match interest.exclude_hop {
-							Hop::UNKNOWN => assigned,
-							hop => hop,
-						};
-						self.start(prefix, exclude_hop, hidden);
-					} else if self.shared.version.has_setup_stream() {
-						self.state = AnnounceState::ExcludeHop { prefix, hidden };
-					} else {
-						self.start(prefix, assigned, hidden);
-					}
-				}
-				AnnounceState::ExcludeHop { prefix, hidden } => {
-					let assigned = self.shared.peer_hop.unwrap_or(Hop::UNKNOWN);
-					let exclude_hop = ready!(self.shared.peer_setup.poll_hop(waiter)).unwrap_or(assigned);
-					let (prefix, hidden) = (prefix.clone(), *hidden);
-					self.start(prefix, exclude_hop, hidden);
-				}
-				AnnounceState::Run { origin, announced, run } => {
-					let stream = self.stream.as_mut().expect("stream present");
-					if self.shared.withdrawal.poll(waiter).is_ready() {
-						run.withdraw(stream, origin, announced)?;
-					}
-					let res = ready!(run.poll(stream, origin, announced, waiter));
-					if let Err(err) = res {
-						match &err {
-							Error::Cancel
-							| Error::Stream(crate::StreamError::Cancel)
-							| Error::Session(crate::SessionError::Cancel)
-							| Error::Transport(_)
-							| Error::IdleTimeout => {
-								tracing::debug!(prefix = %origin.root(), "announcing cancelled");
-							}
-							err => {
-								tracing::warn!(%err, prefix = %origin.root(), "announcing error");
-							}
-						}
-						self.stream.take().expect("stream present").writer.abort(&err);
-					}
-					return Poll::Ready(Ok(()));
-				}
+		// The identity whose routes we filter out. Lite-04/05 carry it per
+		// announce stream; lite-06+ reads the session-wide SETUP Hop
+		// parameter, the same identity the subscribe path excludes. A peer that
+		// declares nothing falls back to the identity the session assigned it.
+		let assigned: Hop = self.shared.peer_hop.unwrap_or(Hop::UNKNOWN);
+		let exclude_hop: Option<Hop> = match self.shared.version.has_exclude_hop() {
+			true => Some(match interest.exclude_hop {
+				Hop::UNKNOWN => assigned,
+				hop => hop,
+			}),
+			// Waits on the peer's SETUP below (lite-05, whose wire carries no
+			// per-stream exclude_hop).
+			false if self.shared.version.has_setup_stream() => None,
+			false => Some(assigned),
+		};
+		let exclude_hop = wait!(ExcludeHop => match exclude_hop {
+			Some(hop) => Poll::Ready(*hop),
+			None => self.shared.peer_setup.poll_hop(waiter).map(|hop| hop.unwrap_or(*assigned)),
+		});
+		let (origin, announced, run): (origin::Consumer, announce::Consumer, AnnounceRun) =
+			self.start(prefix, exclude_hop, hidden);
+
+		// Streaming announce updates.
+		wait!(Run => {
+			let stream = self.stream.as_mut().expect("stream present");
+			if self.shared.withdrawal.poll(waiter).is_ready() {
+				run.withdraw(stream, origin, announced)?;
 			}
-		}
+			let res = ready!(run.poll(stream, origin, announced, waiter));
+			if let Err(err) = res {
+				match &err {
+					Error::Cancel
+					| Error::Stream(crate::StreamError::Cancel)
+					| Error::Session(crate::SessionError::Cancel)
+					| Error::Transport(_)
+					| Error::IdleTimeout => {
+						tracing::debug!(prefix = %origin.root(), "announcing cancelled");
+					}
+					err => {
+						tracing::warn!(%err, prefix = %origin.root(), "announcing error");
+					}
+				}
+				self.stream.take().expect("stream present").writer.abort(&err);
+			}
+			Poll::Ready(())
+		});
+		Poll::Ready(Ok(()))
 	}
 
-	fn start(&mut self, prefix: crate::Path, exclude_hop: Hop, hidden: bool) {
+	fn start(
+		&self,
+		prefix: crate::Path,
+		exclude_hop: Hop,
+		hidden: bool,
+	) -> (origin::Consumer, announce::Consumer, AnnounceRun) {
 		// If the requested prefix is outside our scope (an empty origin, or a token
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
 		// empty set and keep the stream open (the subscriber treats a FIN here as a
@@ -969,7 +956,7 @@ impl AnnounceServe {
 			run.prefix.clone(),
 			crate::auth::Direction::Publish,
 		));
-		self.state = AnnounceState::Run { origin, announced, run };
+		(origin, announced, run)
 	}
 }
 
@@ -1641,9 +1628,14 @@ impl<R: Request> RequestServe<R> {
 			ready!(self.budget.poll_yield(waiter));
 			// Once answered, the requester's FIN is the normal end, not a cancel.
 			if matches!(self.state, RequestState::Resolve { .. } | RequestState::Serve(_))
-				&& let Poll::Ready(res) = self.poll_requester(waiter)
+				&& let Poll::Ready(next) = self.poll_requester(waiter)
 			{
-				res?;
+				// One update per pass, so the budget above charges each; reading again before
+				// serving keeps the reader's waker registered.
+				if let Some(update) = next? {
+					self.apply(update);
+					continue;
+				}
 				if !R::GRACEFUL {
 					return Poll::Ready(Err(Error::Cancel));
 				}
@@ -1718,7 +1710,7 @@ impl<R: Request> RequestServe<R> {
 						// A reply blocked on flow control may never unblock, so a requester
 						// leaving before it is out cancels it and lets go of the request.
 						if stream.writer.poll_flush(waiter)?.is_pending() {
-							let closed = ready!(self.poll_requester(waiter));
+							let closed = ready!(self.poll_closed(waiter));
 							self.state = RequestState::Finish { finished: false };
 							closed?;
 							return Poll::Ready(Err(Error::Cancel));
@@ -1732,7 +1724,7 @@ impl<R: Request> RequestServe<R> {
 					if delivered {
 						self.settle();
 					}
-					let closed = ready!(self.poll_requester(waiter));
+					let closed = ready!(self.poll_closed(waiter));
 					// Let go of the request now, not when the serve is dropped.
 					self.state = RequestState::Finish { finished: true };
 					// A FIN or a reset both end the requester's interest; only a stray byte
@@ -1755,7 +1747,7 @@ impl<R: Request> RequestServe<R> {
 					// A transport ACK does not say the application read the tail: a lite-07
 					// subscriber FINs once its tail accounting settles, so wait for that.
 					if R::GRACEFUL && self.shared.version.waits_for_subscriber_fin() {
-						ready!(self.poll_requester(waiter))?;
+						ready!(self.poll_closed(waiter))?;
 					}
 					let stream = self.stream.as_mut().expect("stream present");
 					return stream.writer.poll_close(waiter);
@@ -1764,23 +1756,32 @@ impl<R: Request> RequestServe<R> {
 		}
 	}
 
-	/// Read what the requester sends while we answer: ready once it closes its send
-	/// direction, `Ok` for a FIN. Each update reaches the reply, or waits for it to start.
-	fn poll_requester(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	/// Read the requester's next message while we answer: an update, or `None` once it FINs
+	/// its send direction.
+	fn poll_requester(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<R::Update>, Error>> {
 		let stream = self.stream.as_mut().expect("stream present");
-		loop {
-			let update = match ready!(stream.reader.poll_decode_maybe::<R::Update>(waiter)) {
-				Ok(Some(update)) => update,
-				Ok(None) => return Poll::Ready(Ok(())),
-				Err(err) => {
-					self.malformed = matches!(err, Error::Decode(_));
-					return Poll::Ready(Err(err));
-				}
-			};
-			match &mut self.state {
-				RequestState::Serve(request) => request.update(update),
-				_ => self.update = Some(update),
-			}
+		let res = ready!(stream.reader.poll_decode_maybe::<R::Update>(waiter));
+		if let Err(err) = &res {
+			self.malformed = matches!(err, Error::Decode(_));
+		}
+		Poll::Ready(res)
+	}
+
+	/// Ready once the requester closes its send direction, `Ok` for a FIN. Updates until then
+	/// still reach the reply, each charged to the budget.
+	fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		while let Some(update) = ready!(self.poll_requester(waiter))? {
+			self.apply(update);
+			ready!(self.budget.poll_yield(waiter));
+		}
+		Poll::Ready(Ok(()))
+	}
+
+	/// Each update reaches the reply, or waits for it to start.
+	fn apply(&mut self, update: R::Update) {
+		match &mut self.state {
+			RequestState::Serve(request) => request.update(update),
+			_ => self.update = Some(update),
 		}
 	}
 }
@@ -3558,6 +3559,14 @@ impl Bounds {
 			frames: Frames::default(),
 		};
 		for range in ranges {
+			// Empty partway through a group, which whole groups can't say: keep its place,
+			// covering no group and narrowing no frame of one.
+			if let (Some(lite::Anchor::Absolute(start)), Some(lite::Anchor::Absolute(end))) = (range.start, range.end)
+				&& end <= start
+			{
+				bounds.ranges.push(Range::groups(start.group..start.group));
+				continue;
+			}
 			let start = match range.start {
 				None => Range::oldest().start,
 				Some(start) => anchor(start)?,
@@ -3917,15 +3926,19 @@ impl TrackRun {
 		{
 			self.track.join();
 		}
-		if let Ok(mut value) = self.steer_tx.write() {
-			*value = Steer {
-				priority: upd.priority,
-				order: upd.order,
-			};
-		}
-		// One move for the whole subscription; its streams keep their order within it.
-		if let Some(group) = &mut self.ctx.group {
-			group.set_priority(crate::priority::group(upd.priority, self.ctx.publisher));
+		// The steer wakes every in-flight group, so an update that keeps it wakes none.
+		let steer = Steer {
+			priority: upd.priority,
+			order: upd.order,
+		};
+		if *self.steer_tx.read() != steer {
+			if let Ok(mut value) = self.steer_tx.write() {
+				*value = steer;
+			}
+			// One move for the whole subscription; its streams keep their order within it.
+			if let Some(group) = &mut self.ctx.group {
+				group.set_priority(crate::priority::group(upd.priority, self.ctx.publisher));
+			}
 		}
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
@@ -3969,6 +3982,7 @@ impl TrackRun {
 			}
 			floor => floor,
 		};
+		let range = (self.floor, self.cap);
 		if let Some(start) = floor {
 			self.floor = start;
 			// Before SUBSCRIBE_START nothing is owed yet; the start accounts for it.
@@ -3980,7 +3994,10 @@ impl TrackRun {
 			}
 		}
 		self.cap = end.map_or(Bound::Unbounded, Bound::Excluded);
-		self.move_cursor();
+		// Moving the cursor wakes its readers, so an update that keeps the range moves nothing.
+		if (self.floor, self.cap) != range {
+			self.move_cursor();
+		}
 		self.bounded = bounds.ends(self.ctx.version);
 		self.frames = bounds.frames;
 	}
@@ -4089,8 +4106,8 @@ impl TrackRun {
 		{
 			self.start = Some(start);
 			writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
-				group: start,
 				largest: Some(largest),
+				starts: self.starts(start),
 			}))?;
 			self.raise_floor(start);
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -4310,6 +4327,15 @@ impl TrackRun {
 }
 
 impl TrackRun {
+	/// Where each requested range starts once delivery starts at `start`. Before lite-07
+	/// there is one range, which starts there.
+	fn starts(&mut self, start: u64) -> Vec<Option<u64>> {
+		match self.ctx.version.has_ranges() {
+			true => self.track.starts(start),
+			false => vec![Some(start)],
+		}
+	}
+
 	/// Send SUBSCRIBE_START for the first servable group, then serve it.
 	///
 	/// A relay caches groups in upstream arrival order, and a newer group's stream can
@@ -4334,7 +4360,7 @@ impl TrackRun {
 		}
 		let skipped = std::mem::take(&mut self.skipped);
 		self.start = Some(start);
-		// Only the group: the subscriber derives the start frame from its own request
+		// Only groups: the subscriber derives the start frame from its own request
 		// (see `lite::SubscribeStart`). The track is live by now, since its first group
 		// was readable. A relay can hold just the first group of a backlog its source
 		// already answered past, so the source's largest says where the live feed is.
@@ -4344,8 +4370,8 @@ impl TrackRun {
 		};
 		let largest = live.max(self.track.peek_largest());
 		writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
-			group: start,
 			largest,
+			starts: self.starts(start),
 		}))?;
 		// The subscriber now owes itself everything from the start, so a range given up
 		// above it is named as it would have been after the start.
@@ -4885,6 +4911,11 @@ mod serve_group_test {
 		let started = bounds(group(5, 3), None);
 		assert_eq!((started.groups().start(), started.groups().end()), (Some(5), None));
 		assert_eq!(started.frames.start(5), 3);
+
+		// Empty partway through group 5 covers no group, rather than all of it.
+		let empty = bounds(group(5, 3), group(5, 3));
+		assert_eq!(empty.ranges, [crate::track::Range::groups(5..5)]);
+		assert_eq!(empty.frames, Frames::default());
 
 		// A time anchor names no group on a track the peer was told is untimed.
 		let time = [lite::Range {
@@ -6122,6 +6153,56 @@ mod serve_group_test {
 		.await;
 	}
 
+	/// SUBSCRIBE_START tells the subscriber where each range's start landed, which a relative
+	/// or time start leaves it no way to work out from the groups it receives.
+	#[moq_clock::test]
+	async fn lite07_start_names_each_resolved_range_start() {
+		use crate::track::{Anchor, Range};
+
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		for sequence in 0..5 {
+			write_group(&mut track, sequence, sequence * 1000);
+		}
+		let at = |millis| Anchor::Time(Timestamp::from_millis(millis).unwrap());
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_max_delay(Duration::from_secs(3600))
+				.with_ranges([
+					Range {
+						start: Anchor::Relative(1),
+						end: None,
+					},
+					Range {
+						start: at(1500),
+						end: Some(Anchor::Absolute(2)),
+					},
+					// Empty, so it starts nowhere.
+					Range::groups(3..3),
+					// Empty only once its start resolves to group 4.
+					Range {
+						start: Anchor::Relative(0),
+						end: Some(Anchor::Absolute(2)),
+					},
+				]),
+		);
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		let mut run = std::pin::pin!(kio::wait(move |waiter| run.poll(&mut writer, waiter)));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		let writes = log.writes.lock().unwrap().clone();
+		match lite::SubscribeResponse::decode_slice(&writes, Version::Lite07)
+			.unwrap()
+			.0
+		{
+			lite::SubscribeResponse::Start(start) => assert_eq!(start.starts, [Some(3), Some(1), None, None]),
+			other => panic!("expected SUBSCRIBE_START, got {other:?}"),
+		}
+	}
+
 	/// A skipped sequence is accounted for by DROP rather than a stream count.
 	#[moq_clock::test]
 	async fn lite07_end_drops_skipped_sequences() {
@@ -6140,9 +6221,12 @@ mod serve_group_test {
 		track.finish().unwrap();
 		run.await.unwrap();
 
-		// SUBSCRIBE_START at 0, a DROP for the skipped group 1 with NOT_FOUND (0x33), which
-		// the end gives up on at once, and SUBSCRIBE_END at 3.
-		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 2, 3, 1, 1, 0x33, 1, 1, 3]);
+		// SUBSCRIBE_START with the range starting at 0, a DROP for the skipped group 1
+		// with NOT_FOUND (0x33), which the end gives up on at once, and SUBSCRIBE_END at 3.
+		assert_eq!(
+			*log.writes.lock().unwrap(),
+			[0, 4, 1, 0, 1, 1, 2, 3, 1, 1, 0x33, 1, 1, 3]
+		);
 	}
 
 	/// A relay that holds only the first group of a backlog answers with the largest its
@@ -6170,7 +6254,10 @@ mod serve_group_test {
 		let lite::SubscribeResponse::Start(start) = msg else {
 			panic!("expected SUBSCRIBE_START, got {msg:?}");
 		};
-		assert_eq!((start.group, start.largest), (0, Some(track::Position::group(4))));
+		assert_eq!(
+			(start.starts, start.largest),
+			(vec![Some(0)], Some(track::Position::group(4)))
+		);
 	}
 
 	/// The SUBSCRIBE_DROP ranges a run loop's subscribe stream carried, once flushed.
@@ -6661,9 +6748,9 @@ mod serve_group_test {
 				let lite::SubscribeResponse::Start(start) = msg else {
 					panic!("expected SUBSCRIBE_START, got {msg:?}");
 				};
-				starts.push(start.group);
+				starts.push(start.starts[0]);
 			}
-			assert_eq!(starts, [2, 2], "{version}: cold and warm relay starts differ");
+			assert_eq!(starts, [Some(2); 2], "{version}: cold and warm relay starts differ");
 		}
 	}
 
@@ -6692,7 +6779,7 @@ mod serve_group_test {
 			let lite::SubscribeResponse::Start(start) = msg else {
 				panic!("expected SUBSCRIBE_START, got {msg:?}");
 			};
-			assert_eq!(start.group, 1_000_000, "{version}: named a dropped group");
+			assert_eq!(start.starts, [Some(1_000_000)], "{version}: named a dropped group");
 		}
 	}
 
@@ -7063,7 +7150,7 @@ mod serve_group_test {
 			let writes = self.session.log.writes.lock().unwrap();
 			matches!(
 				lite::SubscribeResponse::decode_slice(&writes, Version::Lite07),
-				Ok((lite::SubscribeResponse::Start(start), _)) if start.group == group
+				Ok((lite::SubscribeResponse::Start(start), _)) if start.starts == [Some(group)]
 			)
 		}
 	}
@@ -7276,7 +7363,7 @@ mod serve_group_test {
 		assert_eq!(
 			*log.writes.lock().unwrap(),
 			// The DROP carries OLD (0x34).
-			[0, 3, 0, 1, 0, 2, 3, 0, 0, 0x34, 1, 1, 2],
+			[0, 4, 1, 0, 1, 1, 2, 3, 0, 0, 0x34, 1, 1, 2],
 			"the expired group is dropped and the end precedes stream credit"
 		);
 
@@ -7286,7 +7373,10 @@ mod serve_group_test {
 		*open = true;
 		drop(open);
 		run.await.unwrap();
-		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 2, 3, 0, 0, 0x34, 1, 1, 2]);
+		assert_eq!(
+			*log.writes.lock().unwrap(),
+			[0, 4, 1, 0, 1, 1, 2, 3, 0, 0, 0x34, 1, 1, 2]
+		);
 	}
 }
 
@@ -8179,19 +8269,27 @@ mod tests {
 		assert_eq!(track.demand().wanted(), Some(2), "a stale wanted group joined");
 	}
 
-	/// A subscription that always has another group ready yields within its budget, so a
-	/// sibling (the transport's driver, say) runs between its polls. Without it, one poll
-	/// served every group the producer kept appending and starved the rest of the runtime
-	/// (a go publisher's 2.5 ms audio groups timed its session out).
-	#[moq_clock::test]
-	async fn a_busy_subscription_yields_to_its_siblings() {
-		/// `RequestServe`'s passes per poll; each serves at most one group.
-		const BUDGET: u64 = 32;
-		const GROUPS: u64 = 10_000;
-		const BATCH: u64 = 1_000;
+	/// A lite-07 SUBSCRIBE to `room/video`, served until it runs.
+	struct Running {
+		serve: RequestServe<SubscribeServe>,
+		session: ScriptedSession,
+		track: track::Producer,
+		_broadcast: crate::origin::Publication,
+		_origin: crate::origin::Producer,
+	}
 
-		type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
+	/// The SUBSCRIBE [`running`] sends, which an update restates to change nothing.
+	fn running_update() -> lite::SubscribeUpdate {
+		lite::SubscribeUpdate {
+			wanted_group: None,
+			order: crate::track::Order::Descending,
+			priority: 0,
+			max_delay: Duration::from_secs(3600),
+			ranges: vec![lite::Range::span(None, 0, None, None)],
+		}
+	}
 
+	async fn running() -> Running {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let broadcast = origin.create_broadcast("room").unwrap();
 		let mut dynamic = broadcast.requests();
@@ -8248,8 +8346,49 @@ mod tests {
 			.unwrap()
 			.accept(crate::track::Info::timed());
 		assert!(!drive(&mut serve).await, "the subscription ended");
+		assert!(
+			matches!(serve.state, RequestState::Serve(SubscribeServe::Run(_))),
+			"the subscription is not running"
+		);
+		Running {
+			serve,
+			session,
+			track,
+			_broadcast: broadcast,
+			_origin: origin,
+		}
+	}
+
+	/// The steer of a running subscription.
+	fn steer(serve: &RequestServe<SubscribeServe>) -> &kio::Producer<Steer> {
 		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
 			panic!("the subscription is not running");
+		};
+		&run.steer_tx
+	}
+
+	/// A subscription that always has another group ready yields within its budget, so a
+	/// sibling (the transport's driver, say) runs between its polls. Without it, one poll
+	/// served every group the producer kept appending and starved the rest of the runtime
+	/// (a go publisher's 2.5 ms audio groups timed its session out).
+	#[moq_clock::test]
+	async fn a_busy_subscription_yields_to_its_siblings() {
+		/// `RequestServe`'s passes per poll; each serves at most one group.
+		const BUDGET: u64 = 32;
+		const GROUPS: u64 = 10_000;
+		const BATCH: u64 = 1_000;
+
+		type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
+
+		let Running {
+			mut serve,
+			session,
+			track,
+			_broadcast,
+			_origin,
+		} = running().await;
+		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
+			unreachable!()
 		};
 		let outcomes = run.ctx.outcomes.clone();
 
@@ -8307,6 +8446,95 @@ mod tests {
 			session.log.resets().is_empty(),
 			"a group was reset: {:?}",
 			session.log.resets()
+		);
+	}
+
+	/// A requester streaming SUBSCRIBE_UPDATEs gets at most a budget of them applied per
+	/// poll, so its siblings run between them, yet every update still applies in order.
+	#[moq_clock::test]
+	async fn a_flood_of_updates_yields_to_its_siblings() {
+		/// `RequestServe`'s passes per poll; each applies at most one update.
+		const BUDGET: usize = 32;
+		const UPDATES: usize = 10_000;
+
+		let Running {
+			mut serve,
+			session,
+			_broadcast,
+			_origin,
+			track: _track,
+		} = running().await;
+		// Each differs from the one before, so none is skipped as a repeat, and only the
+		// last carries `i8::MAX`, so seeing it means every update has applied.
+		let priority = |i: usize| if i == UPDATES - 1 { i8::MAX } else { (i % 100) as i8 + 1 };
+		let mut bytes = Vec::new();
+		for i in 0..UPDATES {
+			let update = lite::SubscribeUpdate {
+				priority: priority(i),
+				..running_update()
+			};
+			update
+				.encode(
+					&mut crate::coding::Encoder::new(&mut bytes, Version::Lite07.into()),
+					Version::Lite07,
+				)
+				.unwrap();
+		}
+		session.push(&bytes);
+
+		let mut polls = 0;
+		kio::wait(|waiter| {
+			assert!(serve.poll(waiter).is_pending(), "the subscription ended");
+			polls += 1;
+			if steer(&serve).read().priority == priority(UPDATES - 1) {
+				return Poll::Ready(());
+			}
+			assert!(polls <= UPDATES, "the updates stalled");
+			Poll::Pending
+		})
+		.await;
+		assert!(polls * BUDGET >= UPDATES, "{UPDATES} updates applied in {polls} polls");
+	}
+
+	/// An update that restates the subscription wakes none of its groups.
+	#[moq_clock::test]
+	async fn a_repeated_update_wakes_no_group() {
+		#[derive(Default)]
+		struct Count(std::sync::atomic::AtomicUsize);
+		impl std::task::Wake for Count {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+
+		let Running {
+			mut serve,
+			session,
+			_broadcast,
+			_origin,
+			track: _track,
+		} = running().await;
+		let steered = steer(&serve).consume();
+		let wakes = Arc::new(Count::default());
+		let waiter = kio::Waiter::new(std::task::Waker::from(wakes.clone()));
+		assert!(steered.poll(&waiter, |_| Poll::<()>::Pending).is_pending());
+
+		for _ in 0..100 {
+			session.push(&running_update().encode_bytes(Version::Lite07).unwrap());
+		}
+		assert!(!drive(&mut serve).await, "the subscription ended");
+		assert_eq!(wakes.0.load(Ordering::Relaxed), 0, "a repeated update woke the groups");
+
+		let update = lite::SubscribeUpdate {
+			priority: 1,
+			..running_update()
+		};
+		session.push(&update.encode_bytes(Version::Lite07).unwrap());
+		assert!(!drive(&mut serve).await, "the subscription ended");
+		assert_eq!(
+			wakes.0.load(Ordering::Relaxed),
+			1,
+			"a new priority did not reach the groups"
 		);
 	}
 

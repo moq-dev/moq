@@ -649,7 +649,9 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		expect(track.closed.peek()).toBeUndefined();
 
 		client.abort();
-		expect(await track.closed).toBeNull();
+		const closed = await track.closed;
+		expect(closed).toBeInstanceOf(SessionError);
+		expect((closed as SessionError).code).toBe(SessionCode.Cancel);
 		server.abort();
 	});
 
