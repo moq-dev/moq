@@ -90,7 +90,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Shared group serving and ingest in JS](/quest/m2/shared-serve-js.md) - the same split in js/net, following the Rust seam
 - [Paired bench BASE](/quest/m2/bench-base-paired.md) - `just bench <base>` uses the nightly's paired comparison and the old one is deleted
 - [Read-only lookup](/quest/m2/read-only-lookup.md) - a live track lookup stops waking the front and every demand watcher
-- [Ordered owed wait](/quest/m2/ordered-owed-wait.md) - an ordered reader waits within max_delay for a missing group only while the track still owes it
 - [lite-05/06 gap judgement](/quest/m2/lite-legacy-gap.md) - a resumed copy on lite-05/06 never reads a descending track's newest group as its start
 - [Refill evicted groups](/quest/m2/evicted-refill.md) - a group evicted after a reader judged it but before it took it is refilled, never delivered twice, and guarded against thrash
 - [Receive pool](/quest/m2/receive-pool.md) - one byte budget per worker covers every connection's receive credit and the cache, billing each frame once
@@ -208,7 +207,6 @@ lite-07; bitrate enforcement is not part of this release.
 
 - [Archive time ranges](/quest/m2/archive-time-ranges.md) - a `Time(pts)` range on an archive consumer broadcast resolves from the archive's keys, however old
 - [DVR rewind](/quest/m2/archive-dvr.md) - follow-on capability after the release contract is stable
-- [An errored track end keeps its history](/quest/m2/errored-end.md) - a replayed archive ends with its source's error after serving every stored group, instead of a clean finish
 
 - [JS HLS field](/quest/m2/js-hls.md) - follow-on capability after the release contract is stable
 
@@ -258,7 +256,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [No MOQ_* knobs outside the binaries](/quest/m2/env-knobs.md) - test, bench, and library knobs leave the `MOQ_*` prefix
 - [Clean ALSA playback onset](/quest/m2/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
 - [Interop audit](/quest/m2/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
-- [Open-GOP MPEG-2 export](/quest/m2/mpeg2-open-gop-export.md) - a TS export resuming in an open GOP trims the B-pictures that reference the previous one
 - [Resume delivers late groups below its resume point](/quest/m2/resume-late-groups.md) - a bonus: groups that arrive late after a route change are delivered instead of written off
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
 - [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast

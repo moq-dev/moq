@@ -62,7 +62,6 @@ relay path to the third, surviving a relay restart.
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - a local relay dials its relays and prefers LAN peers
 - [Byte streams](/quest/m2/stream/README.md) - lossless TCP-level streams over MoQ
 - [Enrollment](/quest/m2/mesh/enroll.md) - a device proves its key and gets a relay URL and a scoped token, by device grant or a pre-authorized key
-- [Signed broadcasts](/quest/m2/mesh/sign.md) - endpoint keys, per-frame signatures, and per-broadcast protection levels
 - [Endpoint API](/quest/m2/mesh/endpoint.md) - an iroh-shaped `Endpoint` that connects to an endpoint ID and service and accepts byte streams
 - [Daemon](/quest/m2/mesh/daemon.md) - `moq mesh up`, `serve`, `pipe`, and `install`, with SSH by ID on two hosts
 - [Robots](/quest/m2/mesh/robot.md) - aarch64 builds and a robot-shaped node surviving a flapping uplink

@@ -115,8 +115,8 @@ typealias Subscription = uniffi.moq.MoqSubscription
 
 /**
  * moq-net's defaults, whose `maxDelay` of zero skips a superseded group at once. A null
- * subscription means the same; `copy` this one to change a field. A `Subscription()` leaves
- * `maxDelay` null, which sets no subscriber limit.
+ * subscription means the same; `copy` this one to change a field. A `Subscription(...)`
+ * must name `maxDelay`, where null sets no subscriber limit.
  */
 fun uniffi.moq.MoqSubscription.Companion.default(): Subscription = uniffi.moq.moqSubscriptionDefaults()
 

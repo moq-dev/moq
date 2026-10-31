@@ -1169,7 +1169,7 @@ impl Publish {
 	/// Declare a raw track's exclusive final group sequence.
 	pub fn track_finish_at(&mut self, track: Id, final_sequence: u64) -> Result<(), Error> {
 		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		track.finish_at(moq_net::track::Position::group(final_sequence))?;
+		track.finish_at(moq_net::track::Position::group(final_sequence), None)?;
 		Ok(())
 	}
 

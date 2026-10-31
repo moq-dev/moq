@@ -2466,7 +2466,7 @@ mod tests {
 		assert_eq!(fetches.polled - polled, 1);
 		assert!(!fetches.held.contains_key(&1));
 		let polled = fetches.polled;
-		track.finish_at(Position::group(5)).unwrap();
+		track.finish_at(Position::group(5), None).unwrap();
 		fetches.poll(&sub, start, &waiter);
 		assert_eq!(fetches.polled - polled, 2);
 		assert_eq!(fetches.held.len(), 1);
@@ -2762,7 +2762,7 @@ mod tests {
 			tail: Default::default(),
 			served: None,
 			starts: Vec::new(),
-			end: Some(lite::SubscribeEnd { group: 10 }),
+			end: Some(lite::SubscribeEnd { group: 10, error: None }),
 			wanted: None,
 			unanswered: None,
 			bounded: false,
@@ -3051,7 +3051,7 @@ mod tests {
 				"video",
 				crate::track::Info::timed(),
 			);
-			track.finish_at(Position::group(3)).unwrap();
+			track.finish_at(Position::group(3), None).unwrap();
 			subscriber.subscribes.lock().insert(
 				7,
 				TrackEntry {
@@ -3491,7 +3491,7 @@ mod tests {
 				version,
 			)
 			.unwrap();
-			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 2 })
+			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 2, error: None })
 				.encode(
 					&mut crate::coding::Encoder::new(&mut responses, version.into()),
 					version,
@@ -3606,7 +3606,7 @@ mod tests {
 		})
 		.encode(&mut encoder, version)
 		.unwrap();
-		lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0 })
+		lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, error: None })
 			.encode(&mut encoder, version)
 			.unwrap();
 		session.push(&answer);
@@ -3867,7 +3867,7 @@ mod tests {
 			.unwrap();
 		}
 		if clean {
-			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0 })
+			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, error: None })
 				.encode(
 					&mut crate::coding::Encoder::new(&mut responses, version.into()),
 					version,
@@ -4688,7 +4688,7 @@ mod tests {
 				send.reset(crate::StreamError::NotFound.to_code());
 			} else {
 				let mut end = Vec::new();
-				lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0 })
+				lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, error: None })
 					.encode(&mut crate::coding::Encoder::new(&mut end, version.into()), version)
 					.unwrap();
 				kio::wait(|waiter| send.poll_write(waiter, &end)).await.unwrap();
@@ -8081,7 +8081,8 @@ impl ServeLoop {
 										// only costs the early boundary: warn, and let the FIN
 										// finish the track. Later drafts made it exclusive, so
 										// the publisher contradicted its own end.
-										if let Err(err) = self.serving.finish_at(Position::group(end.group)) {
+										let error = end.error.clone().map(Error::from);
+										if let Err(err) = self.serving.finish_at(Position::group(end.group), error) {
 											match serve.subscriber.version {
 												Version::Lite05 => {
 													tracing::warn!(track = %serve.name, group = end.group, %err, "invalid subscribe end")

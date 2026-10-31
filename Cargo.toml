@@ -39,6 +39,7 @@ default-members = [
     "rs/moq-rtsp",
     "rs/moq-scene",
     "rs/moq-shaper",
+    "rs/moq-sign",
     "rs/moq-sock",
     "rs/moq-srt",
     "rs/moq-stats",
@@ -106,6 +107,7 @@ clap = { version = "4", features = ["derive"] }
 # CUDA driver bindings for the NVENC/NVDEC path. dlopen'd at runtime
 # (`fallback-dynamic-loading`), so nothing links against libcuda at build time.
 cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
+data-encoding = "2.11"
 dispatch2 = "0.3.1"
 ebml-iterable = "0.7.1"
 flate2 = { version = "1.1", default-features = false }
