@@ -8,8 +8,6 @@
 //! lanes add [`SECOND_V6`] to `lo`; without it the case skips loudly, and
 //! CI_STRICT makes CI refuse it.
 
-#![cfg(target_os = "linux")]
-
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::os::fd::AsRawFd;
 use std::time::Duration;
