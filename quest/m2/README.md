@@ -179,7 +179,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
 - [io_uring thread check](/quest/m2/uring-transport-machines.md) - the relay fanout bench measures `moq_uring::transport::Local`'s per-call thread check after the transport is boxed, removing it only if it shows
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare Opus codec quality, CPU, build cost, and the loss recovery each backend offers
-- [Latency ledger](/quest/m2/latency-ledger.md) - a viewer reports its share of playback delay stage by stage: jitter buffer, decode, render, and device
+- [Latency ledger](/quest/m2/latency-ledger.md) - a viewer reports its share of playback delay stage by stage: jitter buffer and device
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
 - [Media Foundation encode](/quest/m2/audio-encode-mediafoundation.md) - Windows encodes AAC-LC
 - [MediaCodec on an emulator](/quest/m2/android-mediacodec-ci.md) - moq-video's MediaCodec tests run nightly on an Android emulator, in a lane the audio MediaCodec quests reuse
@@ -271,3 +271,14 @@ lite-07; bitrate enforcement is not part of this release.
 - [Resume delivers late groups below its resume point](/quest/m2/resume-late-groups.md) - a bonus: groups that arrive late after a route change are delivered instead of written off
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
 - [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
+- [We own our WebRTC stack](/quest/m2/webrtc/README.md) - moq-rtc becomes moq-webrtc with moq-ice, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
+- [Certificate reload and qmux's tasks are supervised](/quest/m2/tls-reload-supervision.md) - a panic in either fails loudly instead of silently stopping
+- [PUBLISH_DONE says why](/quest/m2/publish-done-codes.md) - GOING_AWAY, TOO_FAR_BEHIND, and EXPIRED round-trip as stream codes
+- [An interrupted mp4 recording keeps its last fragment](/quest/m2/mp4-sigint-flush.md) - SIGINT flushes the buffering fragment before finishing
+- [Repair a crashed mp4 recording](/quest/m2/mp4-repair.md) - a crashed recording's fragmented file becomes a regular MP4
+- [Windows receives notice truncated control data](/quest/m2/cmsg-windows-truncation.md) - Windows handles `MSG_CTRUNC` like the Unix paths
+- [moq-quic's internal dev-dependencies are path-only](/quest/m2/quic-dev-dep-path.md) - moq-congestion is a path dev-dependency
+- [moq-mux's AAC config reports SBR](/quest/m2/aac-sbr-config.md) - moq-audio reads backward-compatible SBR from the config
+- [An ended HLS playlist has no trailing gap](/quest/m2/hls-trailing-gap.md) - no zero-duration `EXT-X-GAP` before `EXT-X-ENDLIST`
+- [moq-video's Apple Sink encodes on its own thread](/quest/m2/apple-sink-thread.md) - macOS and iOS ladders never encode on a tokio worker
+- [The test inventory sees JS bench scripts](/quest/m2/js-bench-inventory.md) - JS bench entry points are resolved by the inventory gate
