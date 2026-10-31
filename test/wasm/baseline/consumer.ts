@@ -1,6 +1,7 @@
 import { Milli } from "@moq/clock";
 import type * as Moq from "@moq/net";
 import type * as Wasm from "@moq/wasm";
+import { diagnose } from "./diagnostics.ts";
 import { type Sample, verify } from "./fixture.ts";
 import type { Uniffi } from "./uniffi.ts";
 
@@ -221,4 +222,4 @@ declare global {
 		baselineConsume: typeof run;
 	}
 }
-window.baselineConsume = run;
+window.baselineConsume = (config) => diagnose(run(config));
