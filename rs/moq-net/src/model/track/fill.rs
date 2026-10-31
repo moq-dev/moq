@@ -845,14 +845,6 @@ impl Fill {
 		Poll::Ready(wanted)
 	}
 
-	/// Refuse every group still owed with `err`, which says nothing about whether the source
-	/// has them, so nothing is recorded dropped.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn refuse(&self, err: Error) {
-		let unresolved = self.inner.unresolved(self.inner.start.group..self.inner.end);
-		self.inner.refuse(&unresolved, err, self.max_delay());
-	}
-
 	/// The next run of groups still owed, in the fill's order: [`Self::wanted`]'s group,
 	/// extended over the owed groups beside it up to the nearest one the cache holds, so a
 	/// session asks its source for the whole run at once.
