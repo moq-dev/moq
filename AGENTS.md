@@ -15,7 +15,7 @@ Use this checkout's source and docs for repository work; published API reference
 
 - Pull the latest origin changes before working.
 - Dig into the root cause and fix it at the source. Never work around a fixable bug with a retry, sleep, or timeout, nor pass a flaky test by loosening its assertion or disabling production behavior.
-- Fail loud and early. Error on unsupported or malformed input rather than warn and continue: supported or refused.
+- Fail loud and early. Error on unsupported or malformed input rather than warn and continue: supported or refused. Never paper over a partial failure: when any part of an input or operation fails, fail the whole instead of skipping that part, and never report partly failed work as done.
 - Treat anything received over the network as untrusted. Ask how a hostile peer could abuse it, such as memory, CPU, or state it makes the other side hold, and bound that cost by design (backpressure, flow control, ownership), never with a constant whose only effect is a runtime refusal. A peer must never crash the process, reach another tenant's data, or receive a credential it was not issued.
 - Don't detect a peer reusing or duplicating an ID, name, or sequence unless our own correctness or the hostile-peer bounds above depend on it. A duplicate that only confuses the sender's own requests is its problem; track a high-water mark or nothing.
 - Reproduce bugs before fixing them. Tests must be worth their weight long-term: cover edge cases, not old bugs or trivial values.
