@@ -402,8 +402,9 @@ impl<'a> Stream<'a> {
 
 	/// [`Self::write`], or wait for room when nothing fits
 	///
-	/// Pending registers `waiter` until flow control or the send buffer has room, or the peer
-	/// stops the stream. Fails with [`Error::ConnectionLost`] once the connection is lost.
+	/// Pending registers `waiter` until flow control or the send buffer has room, the peer stops
+	/// the stream, or it is finished, reset, or released. Fails with [`Error::ConnectionLost`] once
+	/// the connection is lost.
 	pub fn poll_write(&mut self, waiter: &kio::Waiter, data: &mut impl Buf) -> Poll<Result<usize, Error>> {
 		match self.write(data) {
 			Err(Error::Blocked) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
@@ -431,7 +432,8 @@ impl<'a> Stream<'a> {
 	/// Wait for the stream to end, as [`Self::end`] reports it
 	///
 	/// Pending registers `waiter` until the peer acknowledges a finish, stops the stream, or the
-	/// stream is reset. Fails with [`Error::ConnectionLost`] once the connection is lost first.
+	/// stream is reset or released. Fails with [`Error::ConnectionLost`] once the connection is
+	/// lost first.
 	pub fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Result<End, Error>> {
 		match self.end() {
 			Ok(Some(end)) => Poll::Ready(Ok(end)),
@@ -456,6 +458,10 @@ impl<'a> Stream<'a> {
 		let max_data = self.state.max_send_data(self.id);
 		if let Ok(stream) = StreamsState::send_mut(&mut self.state.send, self.id, max_data) {
 			stream.released = true;
+			// Every wait on the ID now fails with Closed.
+			for wait in [Wait::Write, Wait::End, Wait::Acked] {
+				self.state.waits.wake(self.id, wait);
+			}
 		}
 	}
 
@@ -471,6 +477,8 @@ impl<'a> Stream<'a> {
 		if !was_pending {
 			self.state.pending.push(self.id, &mut stream.slot, stream.priority);
 		}
+		// A writer waiting on it learns it is closed.
+		self.state.waits.wake(self.id, Wait::Write);
 
 		Ok(())
 	}

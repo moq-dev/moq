@@ -272,6 +272,63 @@ fn end_hears_a_local_reset() {
 	);
 }
 
+/// Releasing the ID wakes every send wait on it, which then finds it closed.
+#[test]
+fn release_wakes_send_waiters() {
+	let _guard = subscribe();
+	let mut pair = pair_with(Limits {
+		stream_receive_window: NonZeroU64::new(10),
+		..Limits::default()
+	});
+	let (client_ch, server_ch) = pair.connect();
+	let s = open_uni(&mut pair, client_ch, server_ch, &[0; 5]);
+
+	let (write, end, acked) = (Counter::new(), Counter::new(), Counter::new());
+	let mut send = pair.client_send(client_ch, s);
+	// Fill the window with bytes not yet sent, let alone acknowledged.
+	send.write(&mut &[0; 5][..]).unwrap();
+	let tail = send.offset();
+	assert!(send.poll_write(&write, &mut &[1; 10][..]).is_pending());
+	assert!(send.poll_end(&end).is_pending());
+	assert!(send.poll_acked(&acked, tail).is_pending());
+	send.release();
+	assert_eq!((write.wakes(), end.wakes(), acked.wakes()), (1, 1, 1));
+
+	let mut send = pair.client_send(client_ch, s);
+	assert_eq!(
+		send.poll_write(&write, &mut &[1; 10][..]),
+		Poll::Ready(Err(send::Error::Closed))
+	);
+	assert_eq!(send.poll_end(&end), Poll::Ready(Err(send::Error::Closed)));
+	assert_eq!(send.poll_acked(&acked, tail), Poll::Ready(Err(send::Error::Closed)));
+	assert_eq!(pair.client_conn_mut(client_ch).waiting_streams(), 0);
+}
+
+/// A local finish wakes a writer parked on a full window, which then finds the stream closed.
+#[test]
+fn finish_wakes_a_blocked_writer() {
+	let _guard = subscribe();
+	let mut pair = pair_with(Limits {
+		stream_receive_window: NonZeroU64::new(10),
+		..Limits::default()
+	});
+	let (client_ch, server_ch) = pair.connect();
+	let s = open_uni(&mut pair, client_ch, server_ch, &[0; 10]);
+
+	let waiter = Counter::new();
+	assert!(
+		pair.client_send(client_ch, s)
+			.poll_write(&waiter, &mut &[1; 10][..])
+			.is_pending()
+	);
+	pair.client_send(client_ch, s).finish().unwrap();
+	assert_eq!(waiter.wakes(), 1);
+	assert_eq!(
+		pair.client_send(client_ch, s).poll_write(&waiter, &mut &[1; 10][..]),
+		Poll::Ready(Err(send::Error::Closed))
+	);
+}
+
 #[test]
 fn datagram_waits_for_arrival() {
 	let _guard = subscribe();
