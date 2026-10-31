@@ -1035,9 +1035,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// independently decodable, so it has no boundary of its own) follow the same segmentation as
 	/// video instead of opening a group per fragment.
 	///
-	/// `mdat_len` bounds the scan across the whole moof: each sample takes at least one byte of the
-	/// mdat, and the resolver refuses any past it, so forged field-less runs of billions of samples,
-	/// however many trafs repeat them, aren't walked here.
+	/// The scan is bounded across the whole moof: `end_metadata` refuses a moof declaring more than
+	/// [`MAX_FRAGMENT_SAMPLES`](super::MAX_FRAGMENT_SAMPLES) samples before it becomes `self.moof`,
+	/// so forged field-less runs of billions of samples, however many trafs repeat them, aren't
+	/// walked here. `mdat_len` tightens that to one sample per mdat byte when the mdat declares its
+	/// size; a size-0 (to end of file) mdat passes `usize::MAX`.
 	fn starts_segment(&self, moof: &Moof, has_video: bool, mdat_len: usize) -> bool {
 		if self.pending_cut {
 			return true;
