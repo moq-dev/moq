@@ -310,6 +310,19 @@ impl MoqBroadcastConsumer {
 		}))
 	}
 
+	/// Wait until the broadcast ends: its publisher closed it, or every producer of it left.
+	///
+	/// Resolves rather than erroring when it ends, since an ended broadcast is not a failure.
+	/// Errors only when the session driving it fails first. Cancel the call to stop waiting.
+	pub async fn closed(&self) -> Result<(), MoqError> {
+		self.driver
+			.watch(async {
+				self.inner.closed().await;
+				Ok(())
+			})
+			.await
+	}
+
 	/// Subscribe to a track by name, the same pattern as moq-boy's command/status tracks.
 	///
 	/// Frames are returned as plain byte payloads with no codec or container parsing.
