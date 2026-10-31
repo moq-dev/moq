@@ -659,6 +659,13 @@ async fn serve_connection(
 		.await
 		.context("moq handshake failed")?;
 
+	// WebTransport carries the path in its URL, so a SETUP path too is a protocol
+	// violation rather than a second path to authorize.
+	if url.is_some() && !request.path().is_empty() {
+		request.close(moq_net::Error::ProtocolViolation);
+		anyhow::bail!("WebTransport SETUP carried a path");
+	}
+
 	// The path + `?jwt=` ride the URL for WebTransport and the SETUP for raw
 	// QUIC; either way the grant comes from the shared runtime, which owns the
 	// auth client.

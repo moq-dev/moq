@@ -218,6 +218,7 @@ class Encoder_2 {
     get capture(): Capture_2 | undefined;
     close(): void;
     codec: Signal<Codec>;
+    groupDuration: Signal<Time.Milli>;
     readonly in: Readonlys<EncoderInput_2>;
     readonly name: string;
     readonly out: Readonlys<EncoderOutput_2>;
@@ -259,6 +260,7 @@ type EncoderProps = Inputs<EncoderInput> & {
 type EncoderProps_2 = Inputs<EncoderInput_2> & {
     volume?: number | Signal<number>;
     codec?: Codec | Signal<Codec>;
+    groupDuration?: Time.Milli | Signal<Time.Milli>;
 };
 
 class Fanout<T> {

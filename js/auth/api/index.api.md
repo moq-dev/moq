@@ -580,14 +580,19 @@ export { Request_2 as Request }
 export const RequestSchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
     id: z.ZodMiniString<string>;
     node: z.ZodMiniString<string>;
-    transport: z.ZodMiniEnum<{
+    transport: z.ZodMiniPipe<z.ZodMiniString<string>, z.ZodMiniCatch<z.ZodMiniEnum<{
         http: "http";
         iroh: "iroh";
         quic: "quic";
+        rtmp: "rtmp";
+        srt: "srt";
         tcp: "tcp";
         unix: "unix";
+        unknown: "unknown";
+        webrtc: "webrtc";
         websocket: "websocket";
-    }>;
+        webtransport: "webtransport";
+    }>>>;
     remote: z.ZodMiniOptional<z.ZodMiniString<string>>;
     local: z.ZodMiniOptional<z.ZodMiniString<string>>;
     server_name: z.ZodMiniOptional<z.ZodMiniString<string>>;
@@ -612,14 +617,19 @@ export const RequestSchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
 }, z.core.$strip>, z.ZodMiniObject<{
     id: z.ZodMiniString<string>;
     node: z.ZodMiniString<string>;
-    transport: z.ZodMiniEnum<{
+    transport: z.ZodMiniPipe<z.ZodMiniString<string>, z.ZodMiniCatch<z.ZodMiniEnum<{
         http: "http";
         iroh: "iroh";
         quic: "quic";
+        rtmp: "rtmp";
+        srt: "srt";
         tcp: "tcp";
         unix: "unix";
+        unknown: "unknown";
+        webrtc: "webrtc";
         websocket: "websocket";
-    }>;
+        webtransport: "webtransport";
+    }>>>;
     remote: z.ZodMiniOptional<z.ZodMiniString<string>>;
     local: z.ZodMiniOptional<z.ZodMiniString<string>>;
     server_name: z.ZodMiniOptional<z.ZodMiniString<string>>;
@@ -644,14 +654,19 @@ export const RequestSchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
 }, z.core.$strip>, z.ZodMiniObject<{
     id: z.ZodMiniString<string>;
     node: z.ZodMiniString<string>;
-    transport: z.ZodMiniEnum<{
+    transport: z.ZodMiniPipe<z.ZodMiniString<string>, z.ZodMiniCatch<z.ZodMiniEnum<{
         http: "http";
         iroh: "iroh";
         quic: "quic";
+        rtmp: "rtmp";
+        srt: "srt";
         tcp: "tcp";
         unix: "unix";
+        unknown: "unknown";
+        webrtc: "webrtc";
         websocket: "websocket";
-    }>;
+        webtransport: "webtransport";
+    }>>>;
     remote: z.ZodMiniOptional<z.ZodMiniString<string>>;
     local: z.ZodMiniOptional<z.ZodMiniString<string>>;
     server_name: z.ZodMiniOptional<z.ZodMiniString<string>>;
@@ -740,14 +755,19 @@ function toPublic_2(set: KeySet): PublicKeySet;
 
 export type Transport = z.infer<typeof TransportSchema>;
 
-export const TransportSchema: z.ZodMiniEnum<{
+export const TransportSchema: z.ZodMiniPipe<z.ZodMiniString<string>, z.ZodMiniCatch<z.ZodMiniEnum<{
     http: "http";
     iroh: "iroh";
     quic: "quic";
+    rtmp: "rtmp";
+    srt: "srt";
     tcp: "tcp";
     unix: "unix";
+    unknown: "unknown";
+    webrtc: "webrtc";
     websocket: "websocket";
-}>;
+    webtransport: "webtransport";
+}>>>;
 
 function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims>;
 

@@ -672,6 +672,8 @@ pub(crate) fn extract_init(
 					// composition offsets, so an edit list is redundant here, and a
 					// browser applying an empty-edit media_time would shift the track
 					// off the others (a black screen in Media Source Extensions).
+					// encode_init restores only Opus priming's presentation shift
+					// after the output track timescales have been settled.
 					trak.edts = None;
 					// tkhd.duration is in the *movie* timescale, and the merged moov
 					// picks its own (the first trak's media scale), so whatever the
@@ -1198,6 +1200,7 @@ mod tests {
 	// A source init whose trak carries an edit list must come out of extract_init with
 	// the edit list dropped: CMAF carries timing via tfdt + composition offsets, and a
 	// browser applying an edit list shifts the track off the others (a black screen).
+	// encode_init rebuilds any codec-specific presentation shift afterwards.
 	#[test]
 	fn extract_init_strips_edit_lists() {
 		use mp4_atom::Encode;
@@ -1223,7 +1226,7 @@ mod tests {
 		extract_init(&Bytes::from(init), 1, &mut ftyp, &mut traks, &mut trexs).unwrap();
 
 		assert_eq!(traks.len(), 1);
-		assert!(traks[0].edts.is_none(), "CMAF init must not carry an edit list");
+		assert!(traks[0].edts.is_none(), "the source edit must not survive extraction");
 	}
 
 	// tkhd.duration is in the movie timescale, which the merged moov replaces with its own. A

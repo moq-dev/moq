@@ -4,7 +4,7 @@
 //! falling back to an iroh relay. Both WebTransport-over-H3 and raw QUIC are
 //! negotiated via ALPN.
 
-use std::{net, path::PathBuf, str::FromStr, sync::Arc};
+use std::{net, path::Path, str::FromStr, sync::Arc};
 
 use crate::quic::CongestionControl;
 use url::Url;
@@ -150,6 +150,8 @@ pub struct Config {
 
 	/// Secret key for the iroh endpoint, either a hex-encoded string or a path to a file.
 	/// If the file does not exist, a random key will be generated and written to the path.
+	/// Files must be regular, with no symlinks; on Unix, new files use mode 0600 and
+	/// existing files readable by group or others are refused without changing permissions.
 	#[usage(
 		name = "iroh-secret",
 		long = "iroh-secret",
@@ -227,17 +229,9 @@ impl Config {
 		let secret_key = if let Some(secret) = self.secret.as_ref().and_then(|s| SecretKey::from_str(s).ok()) {
 			secret
 		} else if let Some(path) = self.secret {
-			let path = PathBuf::from(path);
-			if !path.exists() {
-				// Generate a new random secret and write it to the file.
-				let secret = SecretKey::generate();
-				tokio::fs::write(path, hex::encode(secret.to_bytes())).await?;
-				secret
-			} else {
-				// Otherwise, read the secret from a file.
-				let key_str = tokio::fs::read_to_string(&path).await?;
-				SecretKey::from_str(&key_str).map_err(|err| Error::Secret(crate::error::message(err)))?
-			}
+			let generated = hex::encode(SecretKey::generate().to_bytes());
+			let key_str = load_or_create(Path::new(&path), &generated).await?;
+			SecretKey::from_str(&key_str).map_err(|err| Error::Secret(crate::error::message(err)))?
 		} else {
 			// Otherwise, generate a new random secret.
 			SecretKey::generate()
@@ -445,9 +439,138 @@ fn url_set_scheme(url: Url, scheme: &str) -> Result<Url> {
 	Ok(url)
 }
 
+/// Load a persisted secret, or exclusively create its private file.
+async fn load_or_create(path: &Path, generated: &str) -> std::io::Result<String> {
+	use std::io;
+	use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+	let mut options = std::fs::OpenOptions::new();
+	options.write(true).create_new(true);
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::OpenOptionsExt;
+		options.mode(0o600);
+	}
+	match tokio::fs::OpenOptions::from(options).open(path).await {
+		Ok(mut file) => {
+			file.write_all(generated.as_bytes()).await?;
+			file.flush().await?;
+			return Ok(generated.to_owned());
+		}
+		Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+		Err(err) => return Err(err),
+	}
+
+	let mut options = std::fs::OpenOptions::new();
+	options.read(true);
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::OpenOptionsExt;
+		// Validate the opened inode, without following a symlink or blocking on a FIFO.
+		options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+	}
+	#[cfg(windows)]
+	{
+		use std::os::windows::fs::OpenOptionsExt;
+		// FILE_FLAG_OPEN_REPARSE_POINT opens the link itself for validation.
+		options.custom_flags(0x00200000);
+	}
+	let mut file = tokio::fs::OpenOptions::from(options).open(path).await?;
+	let metadata = file.metadata().await?;
+	if !metadata.is_file() {
+		return Err(io::Error::new(
+			io::ErrorKind::InvalidInput,
+			"secret must be a regular file",
+		));
+	}
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+		if metadata.permissions().mode() & 0o044 != 0 {
+			return Err(io::Error::new(
+				io::ErrorKind::PermissionDenied,
+				"secret must not be readable by group or others; use chmod 600",
+			));
+		}
+	}
+	let mut contents = String::new();
+	file.read_to_string(&mut contents).await?;
+	Ok(contents)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	const KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+	#[tokio::test]
+	async fn persisted_secret_is_private_and_reused() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("secret.key");
+		assert_eq!(load_or_create(&path, KEY).await.unwrap(), KEY);
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt;
+			let metadata = std::fs::metadata(&path).unwrap();
+			assert_eq!(metadata.permissions().mode() & 0o177, 0);
+			std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+		}
+		assert_eq!(load_or_create(&path, "replacement").await.unwrap(), KEY);
+		assert_eq!(std::fs::read_to_string(&path).unwrap(), KEY);
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn persisted_secret_refuses_shared_read_permissions() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("secret.key");
+		std::fs::write(&path, KEY).unwrap();
+		for mode in [0o640, 0o604, 0o644] {
+			std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+			let err = load_or_create(&path, "replacement").await.unwrap_err();
+			assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+			assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, mode);
+			assert_eq!(std::fs::read_to_string(&path).unwrap(), KEY);
+		}
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn persisted_secret_refuses_symlinks_without_touching_the_target() {
+		use std::os::unix::fs::symlink;
+
+		let dir = tempfile::tempdir().unwrap();
+		let target = dir.path().join("target.key");
+		let link = dir.path().join("secret.key");
+		symlink(&target, &link).unwrap();
+		assert!(load_or_create(&link, KEY).await.is_err());
+		assert!(!target.exists());
+		std::fs::write(&target, KEY).unwrap();
+		assert!(load_or_create(&link, "replacement").await.is_err());
+		assert_eq!(std::fs::read_to_string(&target).unwrap(), KEY);
+	}
+
+	#[tokio::test]
+	async fn persisted_secret_refuses_nonregular_files() {
+		let dir = tempfile::tempdir().unwrap();
+		assert!(load_or_create(dir.path(), KEY).await.is_err());
+		#[cfg(unix)]
+		{
+			let path = dir.path().join("socket");
+			let _socket = std::os::unix::net::UnixListener::bind(&path).unwrap();
+			assert!(load_or_create(&path, KEY).await.is_err());
+
+			use std::os::unix::ffi::OsStrExt;
+			let path = dir.path().join("fifo");
+			let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+			// SAFETY: name is a valid, NUL-terminated path and mkfifo retains no pointer.
+			assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+			assert!(load_or_create(&path, KEY).await.is_err());
+		}
+	}
 
 	/// A public builder taking a config this crate did not check, so it refuses
 	/// before it touches the key file or a socket.

@@ -45,9 +45,9 @@ jobs:
        startsWith(github.event.workflow_run.head_branch, 'moq-cli-v') ||
        startsWith(github.event.workflow_run.head_branch, 'moq-gst-v'))
     runs-on: ubuntu-latest
-    # Write credentials live in the `publish` Environment, which only protected
-    # refs can deploy to; workflow_run runs on `main`.
-    environment: publish
+    # The moq-bot key lives in the `bot` Environment, which only protected
+    # refs can deploy to, not in an organization secret any branch can read.
+    environment: bot
 
     steps:
       # head_branch names a branch as readily as a tag, and anyone who can push

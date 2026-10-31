@@ -81,11 +81,24 @@ test("a SETUP token parses as the Rust vector", () => {
 	}
 });
 
-test("a connect must not carry end facts, and an unknown transport is refused", () => {
+test("a connect must not carry end facts", () => {
 	expect(() => RequestSchema.parse({ id: "1", event: "end", node: "n", transport: "quic", path: "/" })).toThrow();
-	expect(() =>
-		RequestSchema.parse({ id: "1", event: "connect", node: "n", transport: "carrier-pigeon", path: "/" }),
-	).toThrow();
+});
+
+test("WebTransport and future transport names follow the Rust contract", () => {
+	for (const [incoming, expected] of [
+		["webtransport", "webtransport"],
+		["carrier-pigeon", "unknown"],
+	] as const) {
+		const request = RequestSchema.parse({ id: "1", event: "connect", node: "n", transport: incoming, path: "/" });
+		expect(request.transport).toBe(expected);
+	}
+});
+
+test("malformed transport values are refused", () => {
+	for (const transport of [undefined, null, 1, {}, []]) {
+		expect(() => RequestSchema.parse({ id: "1", event: "connect", node: "n", transport, path: "/" })).toThrow();
+	}
 });
 
 test("a grant round trips and is validated", () => {

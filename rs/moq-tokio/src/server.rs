@@ -645,7 +645,7 @@ impl Server {
 							// (like the stream bindings).
 							let Accepted { session, url, identity, authority, mut link } = within(deadline, super::noq::accept(_conn, alpns)).await?;
 							link.local = local;
-							let (request, deadline) = setup.accept(session, deadline).await?;
+							let (request, deadline) = setup.accept(session, deadline, url.is_some()).await?;
 							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)), deadline })
 						}.boxed());
 					}
@@ -657,7 +657,7 @@ impl Server {
 						let deadline = setup.deadline();
 						self.accept.push(async move {
 							let Accepted { session, url, identity, authority, link } = within(deadline, super::iroh::accept(_conn, alpns)).await?;
-							let (request, deadline) = setup.accept(session, deadline).await?;
+							let (request, deadline) = setup.accept(session, deadline, url.is_some()).await?;
 							Ok(Request { transport: Transport::Iroh, url, identity, authority, link, kind: RequestKind::Iroh(Box::new(request)), deadline })
 						}.boxed());
 					}
@@ -673,7 +673,7 @@ impl Server {
 						let deadline = setup.deadline();
 						self.accept.push(async move {
 							let (session, url, accepted) = within(deadline, _pending).await?;
-							let (request, deadline) = setup.accept(session, deadline).await?;
+							let (request, deadline) = setup.accept(session, deadline, true).await?;
 							let authority = url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 							let link = Link { remote: Some(accepted.remote), local, alpn: accepted.protocol, ..Default::default() };
 							Ok(Request { transport: Transport::WebSocket, url: Some(url), authority, identity: None, link, kind: RequestKind::Qmux(Box::new(request)), deadline })
@@ -868,10 +868,15 @@ impl Setup {
 	/// Read the peer's MoQ SETUP by `deadline`, closing the session with a timeout
 	/// code if it hasn't arrived. The deadline comes back too, since answering the
 	/// SETUP is part of the handshake it bounds.
+	///
+	/// `uri` marks a binding whose request URI carries the path (WebTransport and
+	/// WebSocket). Its SETUP must not carry one too, so a SETUP path is refused
+	/// with a protocol violation rather than authorized in place of the URI.
 	async fn accept<S>(
 		&self,
 		session: S,
 		deadline: Option<tokio::time::Instant>,
+		uri: bool,
 	) -> crate::Result<(PendingRequest<crate::transport::Session<S>>, Option<Deadline>)>
 	where
 		S: web_transport_trait::Session,
@@ -890,6 +895,12 @@ impl Setup {
 				.await?)
 		};
 		let request = Deadline::bound(deadline.as_ref(), accept).await?;
+		// The SETUP path is empty when the peer sent none, and an empty one never
+		// overrides the URI, so only a non-empty path conflicts with it.
+		if uri && !request.path().is_empty() {
+			request.close(moq_net::Error::ProtocolViolation);
+			return Err(moq_net::Error::ProtocolViolation.into());
+		}
 		Ok((request, deadline))
 	}
 }
@@ -1264,7 +1275,7 @@ async fn stream_request(
 	deadline: Option<tokio::time::Instant>,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) {
-	match setup.accept(session, deadline).await {
+	match setup.accept(session, deadline, false).await {
 		Ok((request, deadline)) => {
 			let request = Request {
 				transport,
@@ -1373,8 +1384,7 @@ impl std::fmt::Display for Transport {
 /// session, or [Self::reject] to reject it (which closes the just-established session).
 pub struct Request {
 	transport: Transport,
-	/// The request URL, for transports that carry one (QUIC/WebTransport/WebSocket). `None` for the
-	/// URL-less stream bindings, whose request path rides the SETUP instead.
+	/// The request URL for WebTransport/WebSocket. `None` for bindings whose path rides SETUP.
 	url: Option<Url>,
 	/// The authority the client dialed, when it offered one: the TLS SNI on raw QUIC, the CONNECT
 	/// authority on WebTransport. `None` on the URL-less stream bindings and on iroh.
@@ -1505,10 +1515,9 @@ impl Request {
 		self.transport
 	}
 
-	/// Returns the request URL for transports that carry one (QUIC/WebTransport/WebSocket).
+	/// Returns the request URL for WebTransport/WebSocket.
 	///
-	/// `None` for the URL-less stream bindings (`tcp`/`unix`); use [`Self::path`] for their
-	/// in-band request path.
+	/// `None` for bindings without a request URI; use [`Self::path`] for their in-band path.
 	pub fn url(&self) -> Option<&Url> {
 		self.url.as_ref()
 	}
@@ -1527,18 +1536,14 @@ impl Request {
 
 	/// The request path the client advertised, uniform across transports.
 	///
-	/// Taken from the SETUP for the URL-less stream bindings (and moq-transport, which
-	/// carries it in-band), or the request [`url`](Self::url) for
-	/// WebTransport/QUIC/WebSocket.
+	/// Taken from the request [`url`](Self::url) for WebTransport/WebSocket, or SETUP
+	/// for bindings without a request URI.
 	/// The missing or root path is returned as an empty string.
 	pub fn path(&self) -> &str {
-		// An empty SETUP path means the client advertised none, so fall back to the
-		// request URL. URL-carrying bindings are the ones that must not send a path at
-		// all, so this never discards a path the client meant us to use.
-		let setup = request_ref!(self, r => r.path());
-		let path = if setup.is_empty() {
-			self.url.as_ref().map(Url::path).unwrap_or("")
+		let path = if let Some(url) = &self.url {
+			url.path()
 		} else {
+			let setup = request_ref!(self, r => r.path());
 			setup.split_once('?').map_or(setup, |(path, _)| path)
 		};
 		if path == "/" { "" } else { path }
@@ -1548,11 +1553,12 @@ impl Request {
 	///
 	/// Query values can contain credentials. Avoid logging this value.
 	pub fn query(&self) -> Option<&str> {
-		let setup = request_ref!(self, r => r.path());
-		if setup.is_empty() {
-			self.url.as_ref().and_then(Url::query)
+		if let Some(url) = &self.url {
+			url.query()
 		} else {
-			setup.split_once('?').map(|(_, query)| query)
+			request_ref!(self, r => r.path())
+				.split_once('?')
+				.map(|(_, query)| query)
 		}
 	}
 
@@ -1768,6 +1774,85 @@ mod tests {
 		)
 	}
 
+	/// A WebSocket request carries its path in the URL, so a SETUP path is refused
+	/// rather than authorized in its place. An empty one names nothing and is accepted.
+	#[cfg(feature = "websocket")]
+	#[tokio::test(start_paused = true)]
+	async fn websocket_refuses_setup_path() {
+		use qmux::ws::tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+		use web_transport_trait::{SendStream as _, Session as _};
+
+		let url: Url = "wss://example.com/room?jwt=url-token".parse().unwrap();
+		for protocol in ["qmux-01.moq-lite-06", "qmux-01.moqt-18", "qmux-01.moqt-22"] {
+			for path in [
+				None,
+				Some(""),
+				Some("/room?jwt=url-token"),
+				Some("/other?jwt=setup-token"),
+			] {
+				let (client, server) = tokio::io::duplex(64 * 1024);
+				let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+				let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+				let client = qmux::ws::Upgraded::new(client).with_alpn(protocol).connect();
+				let server = qmux::ws::Upgraded::new(server).with_alpn(protocol).accept();
+
+				// At most a single Path parameter: lite uses a counted parameter bag;
+				// IETF uses a u16-sized SETUP option block.
+				let lite = protocol.contains("moq-lite");
+				let mut params = if lite {
+					vec![u8::from(path.is_some())]
+				} else {
+					Vec::new()
+				};
+				if let Some(path) = path {
+					params.extend_from_slice(&[if lite { 2 } else { 1 }, path.len() as u8]);
+					params.extend_from_slice(path.as_bytes());
+				}
+				let mut bytes = if lite {
+					vec![1, params.len() as u8]
+				} else {
+					vec![0xaf, 0, 0, params.len() as u8]
+				};
+				bytes.extend(params);
+				let mut setup = client.open_uni().await.unwrap();
+				setup.write_all(&bytes).await.unwrap();
+
+				let setup = Setup {
+					server: moq_net::Server::new(),
+					timeout: None,
+				};
+				let result = setup.accept(server, None, true).await;
+				if path.is_some_and(|path| !path.is_empty()) {
+					let Err(err) = result else {
+						panic!("{protocol} accepted SETUP path {path:?}");
+					};
+					assert!(
+						matches!(err, Error::MoqNet(moq_net::Error::ProtocolViolation)),
+						"{protocol}, {path:?}: {err}"
+					);
+					// qmux 0.5 reports the peer's close without its code here, so only
+					// check that the session closes.
+					tokio::time::timeout(std::time::Duration::from_secs(1), client.closed())
+						.await
+						.unwrap_or_else(|_| panic!("{protocol}, {path:?}: session stayed open"));
+				} else {
+					let (request, deadline) = result.unwrap_or_else(|err| panic!("{protocol}, {path:?}: {err}"));
+					let request = Request {
+						transport: Transport::WebSocket,
+						url: Some(url.clone()),
+						authority: None,
+						identity: None,
+						link: Link::default(),
+						kind: RequestKind::Qmux(Box::new(request)),
+						deadline,
+					};
+					assert_eq!(request.path(), "/room", "{protocol}, {path:?}");
+					assert_eq!(request.query(), Some("jwt=url-token"), "{protocol}, {path:?}");
+				}
+			}
+		}
+	}
+
 	/// A scripted peer, recording the code it was closed with.
 	///
 	/// With `setup` it is a moq-transport peer whose bidi SETUP stream delivers those
@@ -1933,7 +2018,7 @@ mod tests {
 			timeout: Some(timeout),
 		};
 		let start = tokio::time::Instant::now();
-		let Err(err) = setup.accept(peer.clone(), setup.deadline()).await else {
+		let Err(err) = setup.accept(peer.clone(), setup.deadline(), false).await else {
 			panic!("a peer that never sent SETUP was accepted");
 		};
 		assert!(matches!(err, Error::MoqNet(moq_net::Error::Timeout)), "{err}");
@@ -1974,7 +2059,7 @@ mod tests {
 			timeout: Some(timeout),
 		};
 		let start = tokio::time::Instant::now();
-		let Ok((request, deadline)) = setup.accept(peer.clone(), setup.deadline()).await else {
+		let Ok((request, deadline)) = setup.accept(peer.clone(), setup.deadline(), false).await else {
 			panic!("a readable SETUP was refused");
 		};
 		assert_eq!(start.elapsed(), std::time::Duration::ZERO);
@@ -2016,7 +2101,7 @@ mod tests {
 			session
 		});
 
-		let Ok((request, _)) = setup.accept(server, deadline).await else {
+		let Ok((request, _)) = setup.accept(server, deadline, false).await else {
 			panic!("a prompt SETUP was refused");
 		};
 		let (_session, driver) = request.ok().await.expect("server handshake");

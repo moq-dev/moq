@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.19](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.18...moq-mux-v0.10.19) - 2026-10-30
+
+### Fixed
+
+- *(mux)* preserve Opus timing in fMP4 exports (backport #7118)
+
 ## [0.10.18](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.17...moq-mux-v0.10.18) - 2026-10-28
 
 ### Fixed

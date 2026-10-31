@@ -239,6 +239,7 @@ class Encoder {
     get capture(): Capture | undefined;
     close(): void;
     codec: Signal<Codec>;
+    groupDuration: Signal<Time.Milli>;
     readonly in: Readonlys<EncoderInput>;
     readonly name: string;
     readonly out: Readonlys<EncoderOutput>;
@@ -286,6 +287,7 @@ type EncoderOutput_2 = {
 type EncoderProps = Inputs<EncoderInput> & {
     volume?: number | Signal<number>;
     codec?: Codec | Signal<Codec>;
+    groupDuration?: Time.Milli | Signal<Time.Milli>;
 };
 
 type EncoderProps_2 = Inputs<EncoderInput_2> & {
