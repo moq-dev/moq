@@ -1801,13 +1801,17 @@ impl Reader {
 	/// the lowest gap within the reader's ranges, so groups already handed out are not asked
 	/// for again below it. A gap past the reader's budget was already forgotten as handed out.
 	fn backfill_gaps(&mut self, delivered: &Delivered) {
+		if self.resumed.is_none() {
+			return;
+		}
+		// Kept until a copy places the ranges: only then can the gaps they cover be judged.
+		let Some(floor) = self.window().floor() else {
+			return;
+		};
 		let Some((replaced, resolved)) = self.resumed.take() else {
 			return;
 		};
 		let Some(resumed) = self.copies.last().and_then(|copy| copy.floor) else {
-			return;
-		};
-		let Some(floor) = self.window().floor() else {
 			return;
 		};
 		// Each range from where the copy it replaced placed it, else where the reader did: a
@@ -4569,6 +4573,51 @@ mod test {
 			rest.push(group.sequence);
 		}
 		assert_eq!(rest, vec![0, 1, 2, 3, 4, 6]);
+	}
+
+	/// Ranges widened while only an unanswered replacement can place them keep the switch's
+	/// backfill pending: once it answers, the groups below its resume point come once.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_range_widened_before_the_replacement_answers_backfills_once() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let subscription = Subscription::default().with_max_delay(HOUR).with_ranges([track::Range {
+			start: track::Anchor::Absolute(5),
+			end: None,
+		}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		write(&a, 5);
+		drop(recv(&mut sub));
+		a.abort(Error::Dropped).unwrap();
+
+		let b = track::Request::new(Arc::new(broadcast::Info::default()), "video");
+		routes.serve(b.consume());
+		// The read subscribes the replacement, which has not answered yet.
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		let back = sub.subscription().with_ranges([track::Range {
+			start: track::Anchor::Relative(3),
+			end: None,
+		}]);
+		sub.update(back).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		let b = b.accept(crate::track::Info::timed());
+		for sequence in 0..5 {
+			write(&b, sequence);
+		}
+		let mut rest = drain(&mut sub, false);
+		write(&b, 6);
+		rest.extend(drain(&mut sub, false));
+		rest.sort_unstable();
+		assert_eq!(rest, [1, 2, 3, 4, 6]);
 	}
 
 	/// A copy updated while pending, then answering, hands its own resolution of the
