@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import timedelta
 from typing import Any, cast
 
 from moq_ffi import MoqAudio as Audio
@@ -53,7 +52,7 @@ from moq_ffi import (
 
 from . import subscribe as _subscribe
 from ._read import End, Gap, _end, _gap
-from ._records import Frame, Subscription, _from_us, _subscription
+from ._records import Frame, Subscription, Timestamp, _subscription
 from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand, TrackRequest
 from .subscribe import BroadcastConsumer
@@ -110,12 +109,12 @@ class MediaFrame:
     """A container-decoded payload, presentation timestamp, and keyframe flag."""
 
     payload: bytes
-    timestamp: timedelta
+    timestamp: Timestamp
     keyframe: bool
 
     @staticmethod
     def _from_ffi(frame: MoqMediaFrame) -> MediaFrame:
-        return MediaFrame(frame.payload, _from_us(frame.timestamp_us), frame.keyframe)
+        return MediaFrame(frame.payload, Timestamp._from_ffi(frame.timestamp), frame.keyframe)
 
 
 Read = MediaFrame | Gap | End
@@ -128,9 +127,9 @@ class CatalogProducer:
     def __init__(self, broadcast: BroadcastProducer) -> None:
         self._inner = MoqMediaCatalogProducer(broadcast._inner)
 
-    def now(self) -> timedelta:
+    def now(self) -> Timestamp:
         """Read the broadcast clock, fixing it for subsequent media producers."""
-        return _from_us(self._inner.now())
+        return Timestamp._from_ffi(self._inner.now())
 
     def set_video_properties(self, properties: VideoProperties) -> None:
         """Replace the video properties shared by every rendition."""
@@ -178,7 +177,7 @@ class TrackProducer:
         """A watch-only handle to whether this media track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def write_frame(self, payload: bytes, timestamp: timedelta) -> None:
+    def write_frame(self, payload: bytes, timestamp: Timestamp) -> None:
         """Write one encoded frame with a presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
@@ -311,9 +310,9 @@ class TrackConsumer(_Stream[Read]):
         if isinstance(value, MoqMediaRead.FRAME):
             return MediaFrame._from_ffi(value.frame)
         if isinstance(value, MoqMediaRead.GAP):
-            return _gap(value.timestamp_us, value.duration)
+            return _gap(value.timestamp, value.duration)
         if isinstance(value, MoqMediaRead.END):
-            return _end(value.end_us)
+            return _end(value.end)
         raise TypeError(f"unknown media read: {value!r}")
 
     def cancel(self) -> None:

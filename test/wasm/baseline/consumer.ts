@@ -174,7 +174,9 @@ async function run(config: Sample) {
 								const got = await group.readFrame();
 								if (
 									!got ||
-									(timed ? got.timestampUs !== BigInt(frame * 1000) : got.timestampUs !== undefined)
+									(timed
+										? got.timestamp?.value !== BigInt(frame) || got.timestamp.scale !== 1000n
+										: got.timestamp !== undefined)
 								)
 									throw new Error(`incorrect UniFFI frame timestamp ${frame}`);
 								check(new Uint8Array(got.payload), frame);

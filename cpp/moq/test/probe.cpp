@@ -98,6 +98,41 @@ Coroutine read_one(std::shared_ptr<moq::TrackConsumer> consumer, std::optional<m
 }
 #endif
 
+// Whether two timestamps name the same instant at any scales; the probe's values are small
+// enough that the cross products cannot overflow.
+bool same_time(const moq::Timestamp &a, const moq::Timestamp &b) {
+    return a.value * b.scale == b.value * a.scale;
+}
+
+// Timestamps are exact records: a 90 kHz tick and a present zero read back as written, an
+// untimed frame reads back untimed, and a record past the bounds is refused.
+void timestamp_roundtrip() {
+    auto broadcast = ok(moq::BroadcastProducer::init(), "timestamp broadcast");
+    moq::TrackInfo timed;
+    timed.timescale = 90000;
+    auto track = ok(broadcast->publish_track("timed", timed), "publish timed track");
+    auto consumer = ok(track->consume(std::nullopt), "consume timed track");
+    for (uint64_t value : {0, 1}) {
+        ok(track->write_frame({bytes("tick"), moq::Timestamp{value, 90000}}), "write tick");
+        auto frame = ok(consumer->read_frame().get(), "read tick");
+        CHECK(frame && frame->timestamp);
+        CHECK(frame->timestamp->value == value && frame->timestamp->scale == 90000);
+    }
+    for (const moq::Timestamp &invalid :
+         {moq::Timestamp{0, 0}, moq::Timestamp{0, uint64_t(1) << 62}, moq::Timestamp{uint64_t(1) << 61, 90000}}) {
+        auto refused = track->write_frame({bytes("tick"), invalid});
+        CHECK(!refused);
+        CHECK(std::holds_alternative<moq::Error::kTimeOverflow>(refused.error().get_variant()));
+    }
+
+    auto untimed = ok(broadcast->publish_track("untimed", std::nullopt), "publish untimed track");
+    auto untimed_consumer = ok(untimed->consume(std::nullopt), "consume untimed track");
+    ok(untimed->write_frame({bytes("untimed"), std::nullopt}), "write untimed");
+    auto frame = ok(untimed_consumer->read_frame().get(), "read untimed");
+    CHECK(frame && !frame->timestamp);
+    ok(broadcast->close(), "close timestamp broadcast");
+}
+
 // Only the defaults carry moq-net's zero max delay; a bare record sets no subscriber limit.
 void subscription_defaults() {
     CHECK(moq::subscription_defaults().max_delay == std::chrono::nanoseconds::zero());
@@ -132,7 +167,7 @@ void audio_roundtrip() {
                 std::memcpy(data.data() + (sample * 2 + channel) * sizeof(float), &value, sizeof(value));
             }
         }
-        ok(audio->write({250000 + packet * 20000, data}), "write audio");
+        ok(audio->write({{250000 + packet * 20000, 1000000}, data}), "write audio");
     }
     ok(audio->finish(), "finish audio");
     size_t frames = 0;
@@ -143,7 +178,7 @@ void audio_roundtrip() {
         CHECK(!std::holds_alternative<moq::AudioRead::kGap>(read->get_variant()));
         // The finish ends the encoder where its eight 20 ms frames stop.
         if (const auto *end = std::get_if<moq::AudioRead::kEnd>(&read->get_variant())) {
-            CHECK(end->end_us == 250000 + 8 * 20000);
+            CHECK(same_time(end->end, {250000 + 8 * 20000, 1000000}));
             continue;
         }
         const auto *variant = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
@@ -151,7 +186,7 @@ void audio_roundtrip() {
 
         const auto *next = &variant->frame;
 
-        CHECK(next->timestamp_us == 250000 + frames * 1000000 / 48000);
+        CHECK(same_time(next->timestamp, {250 * 48000 + frames * 1000, 48000000}));
         CHECK(next->data.size() % (2 * sizeof(float)) == 0);
         for (size_t sample = 0; sample < next->data.size() / (2 * sizeof(float)); sample++) {
             for (size_t channel = 0; channel < 2; channel++) {
@@ -171,13 +206,14 @@ void audio_roundtrip() {
         auto power = [&](size_t tone) { return real[channel][tone] * real[channel][tone] + imag[channel][tone] * imag[channel][tone]; };
         CHECK(power(channel) > power(1 - channel));
     }
-    CHECK(!audio->write({0, std::vector<uint8_t>(8)}));
+    CHECK(!audio->write({{0, 1000000}, std::vector<uint8_t>(8)}));
     ok(broadcast->close(), "close audio broadcast");
 }
 
 } // namespace
 
 int main() {
+    timestamp_roundtrip();
     subscription_defaults();
     audio_roundtrip();
     auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
@@ -278,14 +314,14 @@ int main() {
 
     // The consumer survives the cancelled read and delivers the next frame.
     auto reading = consumer->read_frame();
-    ok(track->write_frame({bytes("hello"), 1000}), "write_frame");
+    ok(track->write_frame({bytes("hello"), moq::Timestamp{1000, 1000000}}), "write_frame");
     auto frame = ok(reading.get(), "read_frame");
     // get() consumed the state.
     CHECK(!reading.valid());
     CHECK(frame.has_value());
     CHECK(frame->payload == bytes("hello"));
     // Lite-07 carries both the Implementation parameter and frame timestamps.
-    CHECK(frame->timestamp_us == 1000);
+    CHECK(frame->timestamp && same_time(*frame->timestamp, {1000, 1000000}));
 
     // A continuation receives the next frame on the executor.
     {
@@ -298,7 +334,7 @@ int main() {
         });
         // then() took the future's state.
         CHECK(!reading_next.valid());
-        ok(track->write_frame({bytes("then"), 2000}), "write_frame");
+        ok(track->write_frame({bytes("then"), moq::Timestamp{2000, 1000000}}), "write_frame");
         CHECK(done.wait_for(5s));
         CHECK(received && received->payload == bytes("then"));
     }
@@ -318,7 +354,7 @@ int main() {
         Latch done;
         std::optional<moq::Frame> received;
         auto reader = read_one(consumer, received, done);
-        ok(track->write_frame({bytes("co_await"), 3000}), "write_frame");
+        ok(track->write_frame({bytes("co_await"), moq::Timestamp{3000, 1000000}}), "write_frame");
         CHECK(done.wait_for(5s));
         CHECK(received && received->payload == bytes("co_await"));
         (void)reader;

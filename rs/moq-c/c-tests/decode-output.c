@@ -183,7 +183,7 @@ static uint64_t next_ts;
 
 static void publish_frames(int32_t producer, int count) {
     for (int i = 0; i < count; i++) {
-        moq_video_encoder_frame frame = {next_ts, gray_rgba, sizeof(gray_rgba)};
+        moq_video_encoder_frame frame = {{next_ts, 1000000}, gray_rgba, sizeof(gray_rgba)};
         next_ts += 33333;
         int32_t rc = moq_encode_video_frame((uint32_t)producer, &frame);
         if (rc < 0) fail("error: moq_encode_video_frame failed: %d (%s)\n", rc, moq_error());

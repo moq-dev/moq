@@ -95,7 +95,7 @@ class FfiBench {
                         repeat(case.frames) { f ->
                             val frame = assertNotNull(group.readFrame(), "group ended")
                             assertTrue(frame.payload.contentEquals(payload), "corrupt frame $f of round $n")
-                            assertEquals((n * case.frames + f).toULong(), frame.timestampUs)
+                            assertEquals(Timestamp((n * case.frames + f).toULong(), 1_000_000uL), frame.timestamp)
                         }
                     }
                 }
@@ -103,7 +103,7 @@ class FfiBench {
             tracks.forEach { track ->
                 track.appendGroup().use { group ->
                     repeat(case.frames) { f ->
-                        group.writeFrame(Frame(payload = payload, timestampUs = (n * case.frames + f).toULong()))
+                        group.writeFrame(Frame(payload = payload, timestamp = Timestamp((n * case.frames + f).toULong(), 1_000_000uL)))
                     }
                     group.finish()
                 }

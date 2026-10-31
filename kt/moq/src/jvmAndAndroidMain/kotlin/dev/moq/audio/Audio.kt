@@ -20,7 +20,7 @@ typealias Read = uniffi.moq.MoqAudioRead
 typealias ReadFrame = uniffi.moq.MoqAudioRead.Frame
 /** Media after what was already read was lost; what follows does not continue it. */
 typealias ReadGap = uniffi.moq.MoqAudioRead.Gap
-/** The publisher stopped its encoder; frames starting before `endUs` are its remaining media. */
+/** The publisher stopped its encoder; frames starting before `end` are its remaining media. */
 typealias ReadEnd = uniffi.moq.MoqAudioRead.End
 
 /** One encoded payload from an [Encoder]. */

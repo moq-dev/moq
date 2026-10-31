@@ -131,6 +131,9 @@ typedef Datagram = MoqDatagram;
 /// A payload plus the timestamp it should be presented at.
 typedef Frame = MoqFrame;
 
+/// An exact media time: `value` units at `scale` units per second.
+typedef Timestamp = MoqTimestamp;
+
 /// Tunes how a track subscription is delivered: priority, latency budget, ranges, and group ordering.
 typedef Subscription = MoqSubscription;
 

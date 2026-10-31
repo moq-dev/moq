@@ -86,13 +86,13 @@ final class FfiBench: XCTestCase {
                             let received = try await group.readFrame()
                             let frame = try XCTUnwrap(received, "group ended")
                             XCTAssertEqual(frame.payload, payload)
-                            XCTAssertEqual(frame.timestampUs, UInt64(n * c.frames + f))
+                            XCTAssertEqual(frame.timestamp, Timestamp(value: UInt64(n * c.frames + f), scale: 1_000_000))
                         }
                     }
                 }
                 for track in tracks {
                     let group = try track.appendGroup()
-                    for f in 0..<c.frames { try group.writeFrame(payload, timestampUs: UInt64(n * c.frames + f)) }
+                    for f in 0..<c.frames { try group.writeFrame(payload, timestamp: Timestamp(value: UInt64(n * c.frames + f), scale: 1_000_000)) }
                     try group.finish()
                 }
                 try await readers.waitForAll()

@@ -4,6 +4,7 @@
 #include <util/platform.h>
 #include <util/darray.h>
 #include <util/dstr.h>
+#include <util/util_uint64.h>
 
 #include <moq/moq.hpp>
 
@@ -75,6 +76,13 @@ namespace {
 
 struct moq_source;
 
+// A track timestamp in the nanoseconds OBS stamps media with, floored when the scale does not
+// divide a second evenly into nanoseconds.
+static uint64_t moq_source_nanoseconds(const moq::Timestamp &timestamp)
+{
+	return util_mul_div64(timestamp.value, 1'000'000'000, timestamp.scale);
+}
+
 enum class Decoded { Pending, Ready, Failed };
 // Full: the decoder refused the packet until its pending pictures are taken.
 enum class Sent { Accepted, Full, Failed };
@@ -86,7 +94,7 @@ struct VideoDecoder {
 	SwsContext *sws_ctx = nullptr;
 	bool got_keyframe = false;
 	// End can precede the old encoder's final packets, whose timestamps are below it.
-	std::optional<uint64_t> end_us;
+	std::optional<uint64_t> end_ns;
 	uint32_t frames_waiting_for_keyframe = 0;
 	uint32_t consecutive_decode_errors = 0;
 	obs_source_frame frame = {};
@@ -685,18 +693,18 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 	auto &decoder = *track->video_decoder;
 	const auto &variant = (*result)->get_variant();
 	if (const auto *end = std::get_if<moq::MediaRead::kEnd>(&variant)) {
-		decoder.end_us = end->end_us;
+		decoder.end_ns = moq_source_nanoseconds(end->end);
 		moq_source_read_track(ctx, conn, track);
 		return;
 	}
 	const auto *read = std::get_if<moq::MediaRead::kFrame>(&variant);
-	if (!read || (decoder.end_us && read->frame.timestamp_us >= *decoder.end_us)) {
+	if (!read || (decoder.end_ns && moq_source_nanoseconds(read->frame.timestamp) >= *decoder.end_ns)) {
 		// A gap loses references immediately. An end does so only at the fresh encoder,
 		// after all old tail packets below its endpoint have entered the decoder.
 		moq_source_drain_video(ctx, conn, track);
 		avcodec_flush_buffers(decoder.codec_ctx);
 		decoder.got_keyframe = false;
-		decoder.end_us.reset();
+		decoder.end_ns.reset();
 	}
 	if (!read) {
 		moq_source_read_track(ctx, conn, track);
@@ -771,7 +779,7 @@ static bool moq_source_on_audio_read(struct moq_source *ctx, const std::shared_p
 	audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
 	audio.samples_per_sec = layout.sample_rate;
 	// The same broadcast timeline video stamps, in the nanoseconds OBS expects.
-	audio.timestamp = frame.timestamp_us * 1000;
+	audio.timestamp = moq_source_nanoseconds(frame.timestamp);
 
 	if (track == conn->pending_audio)
 		conn->audio = std::move(conn->pending_audio);
@@ -1062,9 +1070,9 @@ static std::unique_ptr<VideoDecoder> moq_source_prepare_decoder(const moq::Video
 		}
 	}
 
-	// Packets carry the frame's microsecond timestamp, which the decoder hands back on the
-	// picture it belongs to.
-	decoder->codec_ctx->pkt_timebase = AVRational{1, 1'000'000};
+	// Packets carry the frame's timestamp in OBS's nanoseconds, which the decoder hands back
+	// on the picture it belongs to.
+	decoder->codec_ctx->pkt_timebase = AVRational{1, 1'000'000'000};
 
 	// Open codec
 	if (avcodec_open2(decoder->codec_ctx, codec, NULL) < 0) {
@@ -1116,7 +1124,7 @@ static Sent moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame 
 	packet->size = static_cast<int>(frame_data.payload.size());
 	// The decoder hands this back on the picture it belongs to. Decode order has no
 	// timestamp of its own here, so dts stays unset.
-	packet->pts = static_cast<int64_t>(frame_data.timestamp_us);
+	packet->pts = static_cast<int64_t>(moq_source_nanoseconds(frame_data.timestamp));
 
 	// Send packet to decoder
 	int ret = avcodec_send_packet(decoder.codec_ctx, packet);
@@ -1282,8 +1290,8 @@ static Decoded moq_source_receive_frame(VideoDecoder &decoder)
 		return Decoded::Failed;
 	}
 
-	// OBS expects nanoseconds; packets carry microseconds.
-	decoder.frame.timestamp = static_cast<uint64_t>(frame->best_effort_timestamp) * 1000;
+	// Packets already carry the nanoseconds OBS expects.
+	decoder.frame.timestamp = static_cast<uint64_t>(frame->best_effort_timestamp);
 	decoder.frame.format = VIDEO_FORMAT_RGBA;
 	av_frame_free(&frame);
 	return Decoded::Ready;

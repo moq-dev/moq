@@ -27,6 +27,6 @@ interface Track {
 
 interface Group {
 	sequence(): bigint;
-	readFrame(): Promise<{ payload: ArrayBuffer; timestampUs?: bigint } | undefined>;
+	readFrame(): Promise<{ payload: ArrayBuffer; timestamp?: { value: bigint; scale: bigint } } | undefined>;
 	cancel(): void;
 }

@@ -171,7 +171,10 @@ static void on_audio(void *ud, int32_t id) {
     moq_audio_frame f = read.frame;
     if (status == 0 && read.kind == MOQ_DECODE_READ_FRAME && a->samples < a->want) {
         uint64_t samples = f.data_size / a->frame_bytes;
-        fprintf(a->log, "%llu %llu\n", (unsigned long long)f.timestamp_us, (unsigned long long)samples);
+        // tone.py reads whole microseconds; splitting off the seconds keeps the product in range.
+        moq_timestamp ts = f.timestamp;
+        unsigned long long us = ts.value / ts.scale * 1000000 + ts.value % ts.scale * 1000000 / ts.scale;
+        fprintf(a->log, "%llu %llu\n", us, (unsigned long long)samples);
         fwrite(f.data, 1, f.data_size, a->pcm);
         a->samples += samples;
         if (a->samples >= a->want) {
@@ -385,7 +388,7 @@ static void on_finish_health_frame(void *ud, int32_t frame) {
     pthread_mutex_lock(&c->mu);
     if (read < 0 || info.payload_size != sizeof(payload) - 1 ||
         memcmp(info.payload, payload, sizeof(payload) - 1) != 0 ||
-        info.timestamp_present || ++c->finish.health_frames != 1) c->finish.failed = 1;
+        info.timestamp != NULL || ++c->finish.health_frames != 1) c->finish.failed = 1;
     pthread_cond_broadcast(&c->cv);
     pthread_mutex_unlock(&c->mu);
     moq_consume_track_frame_free((uint32_t)frame);

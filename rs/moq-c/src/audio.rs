@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 
 use crate::decode::Read;
 use crate::ffi::OnStatus;
-use crate::{moq_decode_gap, moq_decode_read_kind, moq_decode_start};
+use crate::{moq_decode_gap, moq_decode_read_kind, moq_decode_start, moq_timestamp};
 
 use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
@@ -138,8 +138,8 @@ pub struct moq_audio_decoder_output {
 /// (the publisher copies before returning).
 #[repr(C)]
 pub struct moq_audio_frame {
-	/// The presentation timestamp in microseconds.
-	pub timestamp_us: u64,
+	/// The presentation timestamp.
+	pub timestamp: moq_timestamp,
 	/// The raw frame bytes in the configured layout.
 	pub data: *const u8,
 	/// The length in bytes of `data`.
@@ -157,11 +157,11 @@ pub struct moq_audio_read {
 	/// The lost span, for [moq_decode_read_kind::MOQ_DECODE_READ_GAP]. What follows does
 	/// not continue what came before.
 	pub gap: moq_decode_gap,
-	/// Where the stopped encoder's media stops in microseconds, for
+	/// Where the stopped encoder's media stops, for
 	/// [moq_decode_read_kind::MOQ_DECODE_READ_END]. Frames that follow and start before it
 	/// are the stopped encoder's remaining media; the first at or past it comes from a fresh
 	/// encoder.
-	pub end_us: u64,
+	pub end: moq_timestamp,
 }
 
 // ---- State extensions (used internally by lib.rs) ----
@@ -292,7 +292,7 @@ impl Audio {
 				read = consumer.read() => match read {
 					Ok(Some(moq_audio::decode::Read::Frame(frame))) => Read::Frame(frame),
 					Ok(Some(moq_audio::decode::Read::Gap { timestamp, duration })) => Read::gap(timestamp, duration)?,
-					Ok(Some(moq_audio::decode::Read::End { end })) => Read::end(end)?,
+					Ok(Some(moq_audio::decode::Read::End { end })) => Read::end(end),
 					Ok(None) => return Ok(()),
 					// One packet the codec rejected is that packet's problem: the
 					// decoder stays usable, so drop it and keep the subscription rather
@@ -319,29 +319,20 @@ impl Audio {
 	/// Borrow a delivered read, and a frame's samples, until its handle is freed.
 	pub fn read_info(&self, id: Id, dst: &mut moq_audio_read) -> Result<(), Error> {
 		let read = self.reads.get(id).ok_or(Error::FrameNotFound)?;
-		let (kind, gap, end_us) = read.info();
+		let (kind, gap, end) = read.info();
 		let frame = match read {
 			Read::Frame(frame) => moq_audio_frame {
-				// The C ABI carries plain microseconds, so flatten the scaled
-				// `Timestamp` here at the boundary. Saturating rather than erroring:
-				// this is a getter on a frame we already decoded, and a u64 overflow
-				// needs a timestamp ~580,000 years out.
-				timestamp_us: u64::try_from(frame.timestamp.as_micros()).unwrap_or(u64::MAX),
+				timestamp: frame.timestamp.into(),
 				data: frame.data.as_ptr(),
 				data_size: frame.data.len(),
 			},
 			_ => moq_audio_frame {
-				timestamp_us: 0,
+				timestamp: moq_timestamp::default(),
 				data: std::ptr::null(),
 				data_size: 0,
 			},
 		};
-		*dst = moq_audio_read {
-			kind,
-			frame,
-			gap,
-			end_us,
-		};
+		*dst = moq_audio_read { kind, frame, gap, end };
 		Ok(())
 	}
 
@@ -478,9 +469,7 @@ pub unsafe extern "C" fn moq_encode_audio_frame(producer: u32, frame: *const moq
 		let frame = unsafe { frame.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let data = unsafe { ffi::parse_slice(frame.data, frame.data_size)? };
 
-		// The C ABI carries plain microseconds; scale them at the boundary.
-		let timestamp = moq_net::Timestamp::from_micros(frame.timestamp_us).map_err(moq_audio::Error::from)?;
-		let owned = moq_audio::Frame::new(Bytes::copy_from_slice(data), timestamp);
+		let owned = moq_audio::Frame::new(Bytes::copy_from_slice(data), frame.timestamp.try_into()?);
 
 		let producer = State::lock().audio.producer(producer)?;
 		producer

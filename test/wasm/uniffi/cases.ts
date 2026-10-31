@@ -60,8 +60,11 @@ const MAX_TIMESTAMP = 2n ** 61n - 1n;
 /** The ladder's timestamp for `sequence`, capped where a timestamp stops. */
 const stamp = (sequence: bigint) => (sequence < MAX_TIMESTAMP ? sequence : MAX_TIMESTAMP);
 
-/** Microsecond ticks, so `timestampUs` passes through unscaled. */
+/** Microsecond ticks, so a `us` timestamp reads back at the scale it was written. */
 const TIMED = MoqTrackInfo.create({ timescale: 1_000_000n });
+
+/** `value` microseconds. */
+const us = (value: bigint) => ({ value, scale: 1_000_000n });
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -176,10 +179,10 @@ const local: Record<string, () => Promise<string | undefined>> = {
 			using fixture = localGroup(sequence);
 			const { group, consumer } = fixture;
 			if (consumer.sequence() !== sequence) throw new Error(`sequence ${consumer.sequence()} != ${sequence}`);
-			group.writeFrame({ payload: payload(1), timestampUs: stamp(sequence) });
+			group.writeFrame({ payload: payload(1), timestamp: us(stamp(sequence)) });
 			const frame = await consumer.readFrame();
-			if (frame?.timestampUs !== stamp(sequence))
-				throw new Error(`timestamp ${frame?.timestampUs} != ${stamp(sequence)}`);
+			if (frame?.timestamp?.value !== stamp(sequence))
+				throw new Error(`timestamp ${frame?.timestamp?.value} != ${stamp(sequence)}`);
 		}
 		return undefined;
 	},
@@ -188,7 +191,7 @@ const local: Record<string, () => Promise<string | undefined>> = {
 		using fixture = localGroup();
 		const { group } = fixture;
 		try {
-			group.writeFrame({ payload: payload(1), timestampUs: MAX_TIMESTAMP + 1n });
+			group.writeFrame({ payload: payload(1), timestamp: us(MAX_TIMESTAMP + 1n) });
 		} catch (err) {
 			return (err as Error).message;
 		}
@@ -210,7 +213,7 @@ const local: Record<string, () => Promise<string | undefined>> = {
 			(err: unknown) => err,
 		);
 		if (!error) throw new Error("aborted read resolved");
-		group.writeFrame({ payload: payload(3), timestampUs: 0n });
+		group.writeFrame({ payload: payload(3), timestamp: us(0n) });
 		const next = await within(consumer.readFrame(), 1000, "read after abort");
 		if (next?.payload.byteLength !== 3) throw new Error("the frame after an abort went missing");
 		return `rejects with ${(error as Error).name}: ${(error as Error).message}`;
@@ -251,7 +254,7 @@ const local: Record<string, () => Promise<string | undefined>> = {
 		const read = consumer.readFrame();
 		(consumer as MoqGroupConsumer).uniffiDestroy();
 		if (!(await pending(read))) throw new Error("free settled the pending read");
-		group.writeFrame({ payload: payload(2), timestampUs: 0n });
+		group.writeFrame({ payload: payload(2), timestamp: us(0n) });
 		const frame = await within(read, 1000, "read after free");
 		return `resolves later with ${frame?.payload.byteLength} bytes`;
 	},
@@ -290,8 +293,8 @@ const local: Record<string, () => Promise<string | undefined>> = {
 		};
 		if (position() !== undefined) throw new Error(`empty track at ${position()}`);
 		const group = track.createGroup(HIGH[0]);
-		group.writeFrame({ payload: payload(1), timestampUs: 0n });
-		group.writeFrame({ payload: payload(1), timestampUs: 0n });
+		group.writeFrame({ payload: payload(1), timestamp: us(0n) });
+		group.writeFrame({ payload: payload(1), timestamp: us(0n) });
 		track.createGroup(3n);
 		if (position() !== `${HIGH[0]}/1`) throw new Error(`largest ${position()} != ${HIGH[0]}/1`);
 		return undefined;
@@ -301,12 +304,12 @@ const local: Record<string, () => Promise<string | undefined>> = {
 		using fixture = localTrack();
 		const { track } = fixture;
 		const consumer = track.consume(undefined);
-		track.insertDatagram(HIGH[0], { payload: payload(5), timestampUs: 7n });
+		track.insertDatagram(HIGH[0], { payload: payload(5), timestamp: us(7n) });
 		const datagram = await within(consumer.recvDatagram(), 1000, "recvDatagram");
 		if (datagram?.sequence !== HIGH[0]) throw new Error(`sequence ${datagram?.sequence} != ${HIGH[0]}`);
-		if (datagram.timestampUs !== 7n) throw new Error(`timestamp ${datagram.timestampUs}`);
+		if (datagram.timestamp?.value !== 7n) throw new Error(`timestamp ${datagram.timestamp?.value}`);
 		if (datagram.payload.byteLength !== 5) throw new Error(`payload ${datagram.payload.byteLength} bytes`);
-		const next = track.appendDatagram({ payload: payload(1), timestampUs: 8n });
+		const next = track.appendDatagram({ payload: payload(1), timestamp: us(8n) });
 		if (next !== HIGH[0] + 1n) throw new Error(`appended at ${next}`);
 		return undefined;
 	},
@@ -384,7 +387,7 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 			const seen: string[] = [];
 			for (const sequence of [5n, 2n ** 32n, 2n ** 53n - 1n, ...HIGH]) {
 				const group = track.createGroup(sequence);
-				group.writeFrame({ payload: payload(160), timestampUs: stamp(sequence) });
+				group.writeFrame({ payload: payload(160), timestamp: us(stamp(sequence)) });
 				group.finish();
 				const got = (await within(sub.recvGroup(), 5000, `recvGroup ${sequence} after [${seen}]`)) as
 					| MoqGroupConsumerLike
@@ -393,7 +396,8 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 				const frame = await got.readFrame();
 				// Lite-02 carries no timestamp and a lite-05/06 subscriber drops it; the rest keep it exact.
 				const expected = /^moq-lite-0[1-6]$/.test(relay.version) ? undefined : stamp(sequence);
-				if (frame?.timestampUs !== expected) throw new Error(`timestamp ${frame?.timestampUs} != ${expected}`);
+				if (frame?.timestamp?.value !== expected)
+					throw new Error(`timestamp ${frame?.timestamp?.value} != ${expected}`);
 				seen.push(String(sequence));
 			}
 			return undefined;
@@ -460,7 +464,7 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 			const consumer = await within(subscriber.consume().follow(path, undefined).available(), 5000, "announce");
 			const sub = await consumer.subscribeTrack("data", undefined);
 			const group = track.appendGroup();
-			group.writeFrame({ payload: payload(4), timestampUs: 0n });
+			group.writeFrame({ payload: payload(4), timestamp: us(0n) });
 			const got = await within(sub.recvGroup(), 5000, "recvGroup");
 			if (!got) throw new Error("no group");
 			await got.readFrame();
@@ -510,7 +514,7 @@ async function bench(): Promise<Bench[]> {
 			using fixture = localGroup();
 			const { group, broadcast } = fixture;
 			const start = performance.now();
-			for (let i = 0; i < BATCH; i++) group.writeFrame({ payload: bytes, timestampUs: 0n });
+			for (let i = 0; i < BATCH; i++) group.writeFrame({ payload: bytes, timestamp: us(0n) });
 			const elapsed = performance.now() - start;
 			broadcast.close();
 			return elapsed;
@@ -518,7 +522,7 @@ async function bench(): Promise<Bench[]> {
 		await measure(`async read_frame, buffered ${size}B`, batches, async () => {
 			using fixture = localGroup();
 			const { group, consumer, broadcast } = fixture;
-			for (let i = 0; i < BATCH; i++) group.writeFrame({ payload: bytes, timestampUs: 0n });
+			for (let i = 0; i < BATCH; i++) group.writeFrame({ payload: bytes, timestamp: us(0n) });
 			const start = performance.now();
 			for (let i = 0; i < BATCH; i++) await consumer.readFrame();
 			const elapsed = performance.now() - start;
@@ -536,7 +540,7 @@ async function bench(): Promise<Bench[]> {
 		const start = performance.now();
 		for (let i = 0; i < BATCH; i++) {
 			const read = consumer.readFrame();
-			group.writeFrame({ payload: bytes, timestampUs: 0n });
+			group.writeFrame({ payload: bytes, timestamp: us(0n) });
 			await read;
 		}
 		const elapsed = performance.now() - start;

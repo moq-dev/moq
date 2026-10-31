@@ -73,7 +73,6 @@ func publishTone(ctx context.Context, audio *moqaudio.Producer, tones []float64)
 	defer ticker.Stop()
 
 	data := make([]byte, audioBatchSamples*len(tones)*4)
-	timestampUs := uint64(0)
 	phase := 0
 	for {
 		select {
@@ -87,12 +86,12 @@ func publishTone(ctx context.Context, audio *moqaudio.Producer, tones []float64)
 				binary.LittleEndian.PutUint32(data[(i*len(tones)+c)*4:], math.Float32bits(float32(sample)))
 			}
 		}
-		if err := audio.Write(moqaudio.Frame{Timestamp: time.Duration(timestampUs) * time.Microsecond, Data: data}); err != nil {
+		// Stamped on the sample clock, so every batch time is exact.
+		if err := audio.Write(moqaudio.Frame{Timestamp: moq.Timestamp{Value: uint64(phase), Scale: audioRate}, Data: data}); err != nil {
 			fmt.Fprintf(os.Stderr, "tone: %v\n", err)
 			return
 		}
 		phase += audioBatchSamples
-		timestampUs += audioBatchUs
 	}
 }
 
@@ -503,7 +502,7 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 		}
 		samples := len(frame.Data) / frameBytes
 
-		fmt.Fprintf(log, "%d %d\n", frame.Timestamp.Microseconds(), samples)
+		fmt.Fprintf(log, "%d %d\n", moq.TimestampToDuration(frame.Timestamp).Microseconds(), samples)
 		if _, err := pcm.Write(frame.Data); err != nil {
 			return err
 		}

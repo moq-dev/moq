@@ -11,12 +11,11 @@ package dev.moq.json
 //     val reader = SnapshotConsumer(consumer.subscribeTrack("status", null))
 
 import dev.moq.MoqJson
+import dev.moq.Timestamp
 import dev.moq.pull
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.serializer
-import kotlin.time.Duration
-import kotlin.time.Duration.Companion.microseconds
 
 /** Publishes lossy latest-value JSON snapshots on a track it takes over. */
 typealias SnapshotProducer = uniffi.moq.MoqJsonSnapshotProducer
@@ -49,22 +48,8 @@ typealias WindowEventSkip = uniffi.moq.MoqJsonWindowEvent.Skip
 /** A [WindowEvent] and the timestamp of the frame that carried it. */
 typealias WindowTimed = uniffi.moq.MoqJsonWindowTimed
 
-/**
- * The frame's timestamp on the broadcast clock, or null when untimed. Rounded down to a whole
- * microsecond, so a tick on a track like 90 kHz may not survive a read and republish exactly.
- */
-val Value.timestamp: Duration?
-    get() = timestampUs?.toLong()?.microseconds
-
-/**
- * The frame's timestamp on the broadcast clock, or null when untimed. A record first learned of
- * from a group's restatement carries that frame's time, not its original push time.
- */
-val WindowTimed.timestamp: Duration?
-    get() = timestampUs?.toLong()?.microseconds
-
 /** A decoded JSON value and its frame timestamp on the broadcast clock, or null when untimed. */
-data class Timed<T>(val value: T, val timestamp: Duration?)
+data class Timed<T>(val value: T, val timestamp: Timestamp?)
 
 /** Decode [Value.value] as [T], keeping the timestamp. */
 inline fun <reified T> Value.decode(): Timed<T> =
@@ -75,20 +60,20 @@ inline fun <reified T> Value.decode(): Timed<T> =
  *
  * The `@Serializable` type is encoded with [MoqJson]. Pass an already-encoded
  * `String` to serialize with another library: the member overload takes it
- * unchanged. [timestampUs] is on the broadcast clock; null is untimed.
+ * unchanged. [timestamp] is on the broadcast clock; null is untimed.
  */
-inline fun <reified T> SnapshotProducer.update(value: T, timestampUs: ULong? = null) {
-    update(MoqJson.encodeToString(serializer<T>(), value), timestampUs)
+inline fun <reified T> SnapshotProducer.update(value: T, timestamp: Timestamp? = null) {
+    update(MoqJson.encodeToString(serializer<T>(), value), timestamp)
 }
 
-/** Append [value] at [timestampUs] on the broadcast clock; null is untimed. */
-inline fun <reified T> StreamProducer.append(value: T, timestampUs: ULong? = null) {
-    append(MoqJson.encodeToString(serializer<T>(), value), timestampUs)
+/** Append [value] at [timestamp] on the broadcast clock; null is untimed. */
+inline fun <reified T> StreamProducer.append(value: T, timestamp: Timestamp? = null) {
+    append(MoqJson.encodeToString(serializer<T>(), value), timestamp)
 }
 
-/** Push [value] onto the window at [timestampUs] on the broadcast clock; null is untimed. */
-inline fun <reified T> WindowProducer.push(value: T, timestampUs: ULong? = null) {
-    push(MoqJson.encodeToString(serializer<T>(), value), timestampUs)
+/** Push [value] onto the window at [timestamp] on the broadcast clock; null is untimed. */
+inline fun <reified T> WindowProducer.push(value: T, timestamp: Timestamp? = null) {
+    push(MoqJson.encodeToString(serializer<T>(), value), timestamp)
 }
 
 /** Decode the pushed record as [T]. */

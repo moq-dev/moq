@@ -84,7 +84,8 @@ Reader read(Case c, std::shared_ptr<moq::TrackConsumer> consumer,
     require(group != nullptr);
     for (int f = 0; f < c.frames(); ++f) {
         auto frame = ok(co_await group->read_frame());
-        require(frame && frame->payload == payload && frame->timestamp_us == n * c.frames() + f);
+        require(frame && frame->payload == payload && frame->timestamp &&
+                frame->timestamp->value == n * c.frames() + f);
     }
 }
 
@@ -112,7 +113,7 @@ void throughput(Case c, double budget, std::vector<Result> &results) {
         for (auto &track : tracks) {
             auto group = ok(track->append_group());
             for (int f = 0; f < c.frames(); ++f)
-                ok(group->write_frame({payload, n * c.frames() + f}));
+                ok(group->write_frame({payload, moq::Timestamp{n * c.frames() + f, 1000000}}));
             ok(group->finish());
         }
         for (auto &reader : readers) {
