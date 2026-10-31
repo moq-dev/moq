@@ -97,7 +97,9 @@ impl Clone for Config {
 /// cannot finish. It runs no tasks, though, so work a task has merely been
 /// asked for is not performed: a QUIC close is queued on its connection and
 /// framed by the driver task, so keep driving until the close is published
-/// rather than stopping the worker on the call that asked for it.
+/// rather than stopping the worker on the call that asked for it. Its tasks are
+/// dropped instead, so a socket, endpoint, connection, or stream handle that
+/// outlives it fails rather than pending.
 pub struct Worker {
 	shared: Rc<Shared>,
 	tasks: kio::Tasks<Task>,
@@ -570,6 +572,13 @@ impl Drop for Worker {
 			tracing::error!("failed to queue one or more io_uring teardown cancellations");
 		}
 		self.drain_teardown(deadline);
+		// Drop every task here, including those spawned since the last turn,
+		// which a surviving handle would otherwise keep alive. A QUIC driver
+		// fails its connection as it drops, waking whatever its handles have
+		// parked.
+		let spawns = std::mem::take(&mut *self.shared.spawns.borrow_mut());
+		drop(spawns);
+		self.tasks = kio::Tasks::new();
 	}
 }
 

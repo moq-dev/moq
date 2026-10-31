@@ -27,8 +27,8 @@ both are reachable by an embedder that opens a socket per dial.
   failure, so every handle on the worker fails. Test by injecting the push
   failure.
 
-Decided 2026-10-22 from the io_uring audit, split from
-[handle lifecycle](/quest/m2/uring-lifecycle.md) in review since neither is
-a QUIC handle and neither gates packaging.
+Decided 2026-10-22 from the io_uring audit, split from the QUIC handle
+lifecycle work in review since neither is a QUIC handle and neither gates
+packaging.
 
 Public API: none. Wire: none.
