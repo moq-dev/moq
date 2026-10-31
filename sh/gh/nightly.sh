@@ -122,9 +122,9 @@ case "$1" in
     rust-extra)
         # The allocation/window/play-buffer tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
-        criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
+        criterion extra --no-fail-fast -p moq-e2ee -p moq-sign -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
             -p moq-quic --features moq-quic/fuzz \
-            --bench protect --bench codec --bench table --bench allocations --bench window \
+            --bench protect --bench sign --bench codec --bench table --bench allocations --bench window \
             --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs --bench ts_video \
             --bench bus --bench parameter_sets --bench sent_packets
         ;;

@@ -71,7 +71,7 @@ pub(super) enum Event {
 	/// A source closed: it will never serve again.
 	SourceClosed { source: u64 },
 	/// The front's broadcast handed out a new logical track to serve. It has no
-	/// reader until [`Event::Used`] says so.
+	/// reader until [`Event::Wanted`] says so.
 	TrackAssigned { track: Arc<str>, now: Instant },
 	/// A source answered a track query: its copy's metadata, or a refusal.
 	/// `closing` is whether the source has begun closing, in which case a
@@ -93,13 +93,13 @@ pub(super) enum Event {
 		delivered: bool,
 	},
 	/// A reader arrived on the track.
-	Used { track: Arc<str> },
+	Wanted { track: Arc<str> },
 	/// The last reader left the track.
-	Unused { track: Arc<str>, now: Instant },
+	Unwanted { track: Arc<str>, now: Instant },
 	/// The armed deadline passed.
 	Deadline { now: Instant },
 	/// The driver let go of a track the machine asked it to [`Action::Forget`].
-	/// Not fed when a reader arrived first: [`Event::Used`] follows instead.
+	/// Not fed when a reader arrived first: [`Event::Wanted`] follows instead.
 	Forgotten { track: Arc<str> },
 	/// A consumer took hold of the front's broadcast: a request joined it, or the
 	/// driver declined an [`Action::Retire`] because one did.
@@ -177,7 +177,7 @@ struct Track {
 	/// The most recent refusal, reported when every source has refused.
 	refusal: Option<Error>,
 	/// Whether anyone reads the track: a copy is only spliced in for a reader.
-	used: bool,
+	wanted: bool,
 	/// A detached source whose copy still feeds the track until the serving source's
 	/// replaces it: a route being beaten keeps serving until then, and keeps serving if
 	/// the newcomer refuses the track.
@@ -277,8 +277,8 @@ impl Front {
 			Event::TrackAssigned { track, .. }
 			| Event::TrackInfo { track, .. }
 			| Event::TrackEnded { track, .. }
-			| Event::Used { track }
-			| Event::Unused { track, .. }
+			| Event::Wanted { track }
+			| Event::Unwanted { track, .. }
 			| Event::Forgotten { track } => Some(track.clone()),
 			_ => None,
 		};
@@ -298,7 +298,7 @@ impl Front {
 						state: TrackState::Parked { since: now },
 						refused: HashSet::new(),
 						refusal: None,
-						used: false,
+						wanted: false,
 						ended: false,
 						draining: None,
 					},
@@ -317,8 +317,8 @@ impl Front {
 				result,
 				delivered,
 			} => self.track_ended(track, source, closing, result, delivered, &mut actions),
-			Event::Used { track } => self.used(track, &mut actions),
-			Event::Unused { track, now } => self.unused(track, now, &mut actions),
+			Event::Wanted { track } => self.wanted(track, &mut actions),
+			Event::Unwanted { track, now } => self.unwanted(track, now, &mut actions),
 			Event::Deadline { now } => self.deadline(now, &mut actions),
 			Event::Forgotten { track } => {
 				self.tracks.remove(&track);
@@ -435,7 +435,7 @@ impl Front {
 		}
 		// A read track is never parked, so idle is the only state to re-query.
 		for (name, track) in &mut self.tracks {
-			if track.used && !track.ended && track.state == TrackState::Idle {
+			if track.wanted && !track.ended && track.state == TrackState::Idle {
 				track.state = TrackState::Querying { source };
 				actions.push(Action::Query {
 					track: name.clone(),
@@ -609,7 +609,7 @@ impl Front {
 			return;
 		};
 		let track = self.tracks.get_mut(&name).expect("dispatching a known track");
-		if !track.used || track.ended || track.state != TrackState::Idle {
+		if !track.wanted || track.ended || track.state != TrackState::Idle {
 			return;
 		}
 		if track.refused.contains(&source) {
@@ -625,22 +625,22 @@ impl Front {
 		actions.push(Action::Query { track: name, source });
 	}
 
-	fn used(&mut self, name: Arc<str>, actions: &mut Vec<Action>) {
+	fn wanted(&mut self, name: Arc<str>, actions: &mut Vec<Action>) {
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
-		track.used = true;
+		track.wanted = true;
 		if let TrackState::Parked { .. } = track.state {
 			track.state = TrackState::Idle;
 		}
 		self.redispatch(name, actions);
 	}
 
-	fn unused(&mut self, name: Arc<str>, now: Instant, actions: &mut Vec<Action>) {
+	fn unwanted(&mut self, name: Arc<str>, now: Instant, actions: &mut Vec<Action>) {
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
-		track.used = false;
+		track.wanted = false;
 		// Nothing reads it, so a copy it still drains goes with the park.
 		track.draining = None;
 		match track.state {
@@ -784,7 +784,7 @@ mod tests {
 			&[Action::Arm { at: Some(t0 + LINGER) }],
 		);
 		assert_actions(
-			front.step(Event::Used { track: name("video") }),
+			front.step(Event::Wanted { track: name("video") }),
 			&[
 				Action::Query {
 					track: name("video"),
@@ -1020,7 +1020,7 @@ mod tests {
 			track: name("audio"),
 			now: Instant::now(),
 		});
-		front.step(Event::Used { track: name("audio") });
+		front.step(Event::Wanted { track: name("audio") });
 		assert_actions(
 			front.step(Event::TrackInfo {
 				track: name("audio"),
@@ -1043,7 +1043,7 @@ mod tests {
 			track: name("audio"),
 			now: Instant::now(),
 		});
-		front.step(Event::Used { track: name("audio") });
+		front.step(Event::Wanted { track: name("audio") });
 		assert_actions(
 			front.step(Event::TrackInfo {
 				track: name("audio"),
@@ -1113,7 +1113,7 @@ mod tests {
 						err,
 					}],
 				);
-				assert_actions(front.step(Event::Used { track: name("video") }), &[]);
+				assert_actions(front.step(Event::Wanted { track: name("video") }), &[]);
 			}
 		}
 	}
@@ -1145,7 +1145,7 @@ mod tests {
 				}],
 			);
 			// A returning reader is not re-spliced either.
-			assert_actions(front.step(Event::Used { track: name("video") }), &[]);
+			assert_actions(front.step(Event::Wanted { track: name("video") }), &[]);
 		}
 	}
 
@@ -1241,7 +1241,7 @@ mod tests {
 		let mut front = serving(remote(1), 100);
 		let t0 = Instant::now();
 		assert_actions(
-			front.step(Event::Unused {
+			front.step(Event::Unwanted {
 				track: name("video"),
 				now: t0,
 			}),
@@ -1267,12 +1267,12 @@ mod tests {
 	}
 
 	/// A reader that looked the track up before the driver could forget it keeps
-	/// it: the driver feeds `Used` instead of `Forgotten`, and the track re-splices.
+	/// it: the driver feeds `Wanted` instead of `Forgotten`, and the track re-splices.
 	#[test]
 	fn a_reader_racing_the_forget_keeps_the_track() {
 		let mut front = serving(remote(1), 100);
 		let t0 = Instant::now();
-		front.step(Event::Unused {
+		front.step(Event::Unwanted {
 			track: name("video"),
 			now: t0,
 		});
@@ -1281,7 +1281,7 @@ mod tests {
 			&[Action::Forget { track: name("video") }],
 		);
 		assert_actions(
-			front.step(Event::Used { track: name("video") }),
+			front.step(Event::Wanted { track: name("video") }),
 			&[Action::Query {
 				track: name("video"),
 				source: 100,
@@ -1295,7 +1295,7 @@ mod tests {
 	fn an_unread_front_retires_after_the_linger() {
 		let mut front = serving(remote(1), 100);
 		let t0 = Instant::now();
-		front.step(Event::Unused {
+		front.step(Event::Unwanted {
 			track: name("video"),
 			now: t0,
 		});
@@ -1315,7 +1315,7 @@ mod tests {
 	#[test]
 	fn a_held_front_stays_without_tracks() {
 		let mut front = serving(local(1), 100);
-		front.step(Event::Unused {
+		front.step(Event::Unwanted {
 			track: name("video"),
 			now: Instant::now(),
 		});
@@ -1342,7 +1342,7 @@ mod tests {
 		);
 
 		let mut front = serving(local(1), 100);
-		front.step(Event::Unused {
+		front.step(Event::Unwanted {
 			track: name("video"),
 			now: Instant::now(),
 		});
@@ -1374,7 +1374,7 @@ mod tests {
 	#[test]
 	fn a_request_racing_the_retire_keeps_the_front() {
 		let mut front = serving(local(1), 100);
-		front.step(Event::Unused {
+		front.step(Event::Unwanted {
 			track: name("video"),
 			now: Instant::now(),
 		});
@@ -1403,7 +1403,7 @@ mod tests {
 		);
 		let t0 = Instant::now();
 		assert_actions(
-			front.step(Event::Unused {
+			front.step(Event::Unwanted {
 				track: name("video"),
 				now: t0,
 			}),
@@ -1411,7 +1411,7 @@ mod tests {
 		);
 		// A returning reader reads what it holds: no query, and the linger waits.
 		assert_actions(
-			front.step(Event::Used { track: name("video") }),
+			front.step(Event::Wanted { track: name("video") }),
 			&[Action::Arm { at: None }],
 		);
 		// A replacement source does not re-splice it either.
@@ -1427,7 +1427,7 @@ mod tests {
 			&[Action::Detach { source: 100 }],
 		);
 		let t1 = t0 + LINGER;
-		front.step(Event::Unused {
+		front.step(Event::Unwanted {
 			track: name("video"),
 			now: t1,
 		});
@@ -1453,7 +1453,7 @@ mod tests {
 		});
 		let t0 = Instant::now();
 		assert_actions(
-			front.step(Event::Unused {
+			front.step(Event::Unwanted {
 				track: name("video"),
 				now: t0,
 			}),
@@ -1472,7 +1472,7 @@ mod tests {
 	fn an_unread_local_track_is_forgotten_at_once() {
 		let mut front = serving(local(1), 100);
 		assert_actions(
-			front.step(Event::Unused {
+			front.step(Event::Unwanted {
 				track: name("video"),
 				now: Instant::now(),
 			}),
@@ -1484,12 +1484,12 @@ mod tests {
 	fn a_returning_reader_cancels_the_linger() {
 		let mut front = serving(remote(1), 100);
 		let t0 = Instant::now();
-		front.step(Event::Unused {
+		front.step(Event::Unwanted {
 			track: name("video"),
 			now: t0,
 		});
 		assert_actions(
-			front.step(Event::Used { track: name("video") }),
+			front.step(Event::Wanted { track: name("video") }),
 			&[
 				Action::Query {
 					track: name("video"),
@@ -1504,7 +1504,7 @@ mod tests {
 	fn returning_reader_preserves_other_tracks_deadlines() {
 		let mut front = serving(remote(1), 100);
 		let now = Instant::now();
-		front.step(Event::Unused {
+		front.step(Event::Unwanted {
 			track: name("video"),
 			now,
 		});
@@ -1513,7 +1513,7 @@ mod tests {
 			now: now + LINGER / 2,
 		});
 		assert_actions(
-			front.step(Event::Used { track: name("video") }),
+			front.step(Event::Wanted { track: name("video") }),
 			&[
 				Action::Query {
 					track: name("video"),
@@ -1603,8 +1603,8 @@ mod tests {
 				Event::TrackAssigned { track, now }
 			} else {
 				match rng.random_range(0..4) {
-					0 => Event::Used { track },
-					1 => Event::Unused { track, now },
+					0 => Event::Wanted { track },
+					1 => Event::Unwanted { track, now },
 					2 => {
 						now += LINGER / 4;
 						Event::Deadline { now }
@@ -1664,8 +1664,8 @@ mod tests {
 				track: name("v"),
 				now: t0,
 			},
-			Event::Used { track: name("v") },
-			Event::Unused {
+			Event::Wanted { track: name("v") },
+			Event::Unwanted {
 				track: name("v"),
 				now: t0,
 			},
@@ -1816,7 +1816,7 @@ mod tests {
 		});
 		let t0 = Instant::now();
 		assert_actions(
-			front.step(Event::Unused {
+			front.step(Event::Unwanted {
 				track: name("video"),
 				now: t0,
 			}),
@@ -1833,7 +1833,7 @@ mod tests {
 			route: 3,
 			result: Ok(300),
 		});
-		front.step(Event::Used { track: name("video") });
+		front.step(Event::Wanted { track: name("video") });
 		let actions = front.step(Event::TrackInfo {
 			track: name("video"),
 			source: 300,
@@ -1862,7 +1862,7 @@ mod tests {
 		});
 		let t0 = Instant::now();
 		assert_actions(
-			front.step(Event::Unused {
+			front.step(Event::Unwanted {
 				track: name("video"),
 				now: t0,
 			}),
