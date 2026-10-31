@@ -1,7 +1,8 @@
 name: Alert
 
 # Posts cron, release, and deployment failures to the Discord #alerts channel.
-# PRs, the landing gate, branch validation, and cache warming stay on GitHub.
+# PRs, branch validation, and cache warming stay on GitHub; the landing gate
+# runs on the maintainer's host.
 #
 # Needs a DISCORD_WEBHOOK repo secret (Discord: Channel > Integrations >
 # Webhooks). Nothing else reads it.
