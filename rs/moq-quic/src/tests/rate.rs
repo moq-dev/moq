@@ -516,3 +516,19 @@ fn loss_probes_are_held_to_the_send_cap() {
 		"sent {sent} past the cap"
 	);
 }
+
+/// A cap too low to batch its grants sends no `MAX_DATA` without new credit, so a packet
+/// arriving on an idle connection cannot start a `MAX_DATA` and ACK ping-pong.
+#[test]
+fn a_tiny_cap_sends_no_empty_grants() {
+	let mut pair = pair();
+	let (client_ch, server_ch) = pair.connect();
+	open(&mut pair, client_ch, server_ch);
+	pair.server_conn_mut(server_ch).set_limits(cap_receive(1)).unwrap();
+	assert!(!pair.drive_bounded(), "the connection never went idle");
+
+	let grants = pair.server_conn_mut(server_ch).stats().frame_tx.max_data;
+	pair.client_conn_mut(client_ch).ping();
+	assert!(!pair.drive_bounded(), "the connection never went idle");
+	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_tx.max_data, grants);
+}

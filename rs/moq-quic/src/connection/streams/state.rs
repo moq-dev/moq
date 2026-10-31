@@ -1261,7 +1261,8 @@ impl StreamsState {
 		};
 		let threshold = window / 8;
 		let diff = self.local_max_data - sent;
-		diff >= threshold || (diff > 0 && sent.saturating_sub(self.data_recvd) < threshold)
+		// A cap under eight bytes a second batches to nothing, so require new credit first.
+		diff > 0 && (diff >= threshold || sent.saturating_sub(self.data_recvd) < threshold)
 	}
 
 	pub(crate) fn credit_stats(&self) -> CreditStats {
