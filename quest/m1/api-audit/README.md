@@ -76,7 +76,6 @@ Rejected in planning:
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve/README.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
 - [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
 - [QMux datagrams obey or refuse their policy](/quest/m1/api-audit/qmux-datagrams.md) - `Session.datagrams` is the DOM interface, its high-water mark is live, and the inert settings throw
-- [Validate private JS constructors](/quest/m1/api-audit/internal-constructors.md) - finish the local consumer and runtime gate for private construction
 - [moq-congestion's first-publish names](/quest/m1/api-audit/congestion-names.md) - `bbr3::Config`, `cubic::Config`, `Metrics`, `Factory`, and no `into_any`
 
 ## Related
