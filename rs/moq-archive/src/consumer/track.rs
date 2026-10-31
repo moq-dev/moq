@@ -178,13 +178,13 @@ pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mut
 }
 
 /// Answer `fill`'s lookup of `pts` with the group containing it: the newest group starting at
-/// or before it, found back from the object its key says holds it, or the oldest stored group
-/// when every one starts after it. Left unanswered when the archive holds no group, or the
-/// store fails.
+/// or before it, found among the objects whose keys say they may hold it, or the oldest stored
+/// group when every one starts after it. Left unanswered when the archive holds no group, or
+/// the store fails.
 async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill: &Fill, pts: Timestamp) {
-	let (at, timed, timescale) = {
+	let (around, timed, timescale) = {
 		let index = index.lock().unwrap();
-		(index.at(pts), index.timed(), index.timescale)
+		(index.around(pts), index.timed(), index.timescale)
 	};
 	let Some(timescale) = timescale else {
 		// A reader's time start on an untimed track is refused before it is looked up.
@@ -192,10 +192,8 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill:
 	};
 	let limit = pts.as_scale(timescale);
 
-	// Back from the object holding it to the newest group starting at or before it: its
-	// own when the object continues one, since every frame presents after its group's first.
-	let mut next = at.clone();
-	while let Some((start, path)) = next {
+	// Newest first: only a group whose first frame an object holds says where it starts.
+	for (start, path) in around {
 		let Some(object) = load(shared, index, fill, start, &path, timed).await else {
 			return;
 		};
@@ -204,23 +202,23 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill:
 			.iter()
 			.enumerate()
 			.filter_map(|(position, entry)| match entry {
-				Entry::Group { sequence, frames } => {
+				Entry::Group { sequence, frames } if position > 0 || object.frame_start == 0 => {
 					let first = frames.first()?;
-					let started = position == 0 && object.frame_start > 0
-						|| first.timestamp.is_some_and(|at| u128::from(at) <= limit);
-					started.then_some(*sequence)
+					first
+						.timestamp
+						.is_some_and(|at| u128::from(at) <= limit)
+						.then_some(*sequence)
 				}
-				Entry::Datagram { .. } => None,
+				_ => None,
 			})
 			.last();
 		if let Some(sequence) = found {
 			return serve_group(shared, index, fill, sequence).await;
 		}
-		next = index.lock().unwrap().before(start);
 	}
 
 	// Every group starts after it: the oldest group is where its range reaches back to.
-	let mut next = index.lock().unwrap().after(at.map(|(start, _)| start));
+	let mut next = index.lock().unwrap().after(None);
 	while let Some((start, path)) = next {
 		let Some(object) = load(shared, index, fill, start, &path, timed).await else {
 			return;

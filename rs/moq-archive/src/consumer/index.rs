@@ -32,8 +32,10 @@ pub(super) struct Index {
 	pub timescale: Option<Timescale>,
 	/// Each object's first frame timestamp, on a timed track, and key.
 	objects: BTreeMap<Start, (Option<u64>, Path)>,
-	/// Each timed object's first frame timestamp with where it starts, so a time finds the
-	/// object holding it in one lookup. Timestamps never rewind, so they sort as the starts do.
+	/// Each timed object starting a group, by that group's start timestamp with where it
+	/// starts, so a time finds the newest such object at or before it in one lookup. Group
+	/// starts never rewind, so they sort as the objects do. An object continuing a group is
+	/// left out: its first frame says nothing about where the groups after it start.
 	times: BTreeSet<(u64, Start)>,
 	/// The newest key listed, which the next listing starts after.
 	cursor: Path,
@@ -64,7 +66,9 @@ impl Index {
 	pub fn extend(&mut self, objects: &[Listing]) {
 		for (start, pts, path) in objects {
 			self.objects.insert(*start, (*pts, path.clone()));
-			if let Some(pts) = pts {
+			if let Some(pts) = pts
+				&& start.1 == 0
+			{
 				self.times.insert((*pts, *start));
 			}
 			self.cursor = path.clone();
@@ -97,20 +101,37 @@ impl Index {
 		(holding, after)
 	}
 
-	/// The newest object whose first frame presents at or before `pts`: the one holding it,
-	/// if any does. `None` when every object starts after it, or on an untimed track.
-	pub fn at(&self, pts: Timestamp) -> Option<(Start, Path)> {
+	/// The objects that may hold the newest group starting at or before `pts`, newest first:
+	/// from the newest object starting a group at or before it, or the oldest object when none
+	/// does, up to the next object starting a group after it, which holds only later groups.
+	/// One continuing a group the next object still continues starts none, so it is skipped.
+	/// Empty on an untimed track.
+	pub fn around(&self, pts: Timestamp) -> Vec<(Start, Path)> {
+		let Some(timescale) = self.timescale else {
+			return Vec::new();
+		};
 		// A stored timestamp is whole, so it is at or before `pts` exactly when it is at or
 		// before `pts` rounded down to the track's timescale.
-		let limit = u64::try_from(pts.as_scale(self.timescale?)).unwrap_or(u64::MAX);
-		let (_, start) = self.times.range(..=(limit, (u64::MAX, u64::MAX))).next_back()?;
-		self.objects.get(start).map(|(_, path)| (*start, path.clone()))
-	}
+		let limit = u64::try_from(pts.as_scale(timescale)).unwrap_or(u64::MAX);
+		let from = self
+			.times
+			.range(..=(limit, (u64::MAX, u64::MAX)))
+			.next_back()
+			.map_or((0, 0), |(_, start)| *start);
 
-	/// The object just before the one starting at `start`.
-	pub fn before(&self, start: Start) -> Option<(Start, Path)> {
-		let (start, (_, path)) = self.objects.range(..start).next_back()?;
-		Some((*start, path.clone()))
+		let mut around = Vec::new();
+		let mut objects = self.objects.range(from..).peekable();
+		while let Some((start, (first, path))) = objects.next() {
+			if start.1 == 0 && first.is_some_and(|first| first > limit) {
+				break;
+			}
+			let continued = start.1 > 0 && objects.peek().is_some_and(|(next, _)| next.0 == start.0);
+			if !continued {
+				around.push((*start, path.clone()));
+			}
+		}
+		around.reverse();
+		around
 	}
 
 	/// The object just after the one starting at `start`, or the oldest for `None`.

@@ -784,15 +784,19 @@ impl Holdings for TrackState {
 	}
 
 	fn gone(&self, sequence: u64) -> Option<u64> {
+		let dropped = self.drops.get_key_value(&sequence).map(|(dropped, _)| dropped.end);
+		// The history a handler serves may still hold what the live feed never delivered, or
+		// delivered and the cache evicted, starting anywhere: only a drop, or a reader's own
+		// refused fills (see `Seen`), says it is gone.
+		if self.looks_up() {
+			return dropped;
+		}
 		// Without a declared start, the first arrival stands in for it, as the tail's does.
 		let floor = self.start_sequence.or(self.arrivals.first()).unwrap_or(0);
-		if sequence < floor && !self.looks_up() {
+		if sequence < floor {
 			return Some(floor);
 		}
-		self.drops
-			.get_key_value(&sequence)
-			.map(|(dropped, _)| dropped.end)
-			.or_else(|| self.arrivals.run_end(sequence))
+		dropped.or_else(|| self.arrivals.run_end(sequence))
 	}
 
 	fn complete(&self) -> bool {
@@ -18735,6 +18739,44 @@ mod test {
 			read.extend(drain_groups(&mut subscriber));
 		}
 		assert_eq!(read, [5, 6, 7]);
+	}
+
+	/// A time end walking the history a handler serves takes no group the live feed
+	/// delivered and the cache evicted as gone: the history still holds it, and it may start
+	/// inside the end, so the end settles on what the history answers.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_end_walks_evicted_arrivals_through_the_history() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		for sequence in 0..10 {
+			write_group(&producer, sequence);
+		}
+		for sequence in [0, 1, 2, 3, 5, 6, 7, 8] {
+			evict(&producer, sequence);
+		}
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Time(at(5)),
+			end: Some(Anchor::Time(at(6))),
+		}]));
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
+		let Poll::Ready(Ok(lookup)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start in the evicted gap is looked up");
+		};
+		assert_eq!(lookup.time(), Some(at(5)));
+		write_filled(lookup.accept(5, None), 5);
+		drop(lookup);
+		let mut read = drain_groups(&mut subscriber);
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			while let Some(sequence) = fill.next() {
+				write_filled(fill.accept(sequence, None), sequence);
+			}
+			drop(fill);
+			read.extend(drain_groups(&mut subscriber));
+		}
+		assert_eq!(read, [5, 6], "groups 7 and 8 start past the end");
 	}
 
 	/// A wide fill refused group by group, each with its own error, holds only the answers its

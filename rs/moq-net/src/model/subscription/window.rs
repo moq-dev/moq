@@ -35,8 +35,8 @@ pub(in crate::model) trait Holdings {
 
 	/// Whether a [`Requests`](crate::track::Requests) handler serving the track's history
 	/// may look up a time its groups can't resolve: a time start before every group with a
-	/// known start then waits on that lookup, and a sequence below where the feed starts may
-	/// still arrive from that history.
+	/// known start then waits on that lookup, and a sequence the live feed never delivered,
+	/// or delivered and the cache evicted, may still arrive from that history.
 	fn looks_up(&self) -> bool {
 		false
 	}

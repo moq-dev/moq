@@ -858,6 +858,53 @@ async fn a_time_in_a_gap_starts_before_it() {
 	assert_eq!(read_range(&broadcast, "video", range).await, [3, 6]);
 }
 
+/// A continuation's first frame bounds no group start: an object continuing group 0 at a
+/// later timestamp than the group 1 it then starts still holds the group containing a time
+/// between the two.
+#[tokio::test(start_paused = true)]
+async fn a_continuation_does_not_bound_a_group_start() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	let frame = |sequence: u64, index: u64, pts: u64| Frame {
+		timestamp: Some(pts),
+		payload: Bytes::from(format!("{sequence}/{index}")),
+	};
+	archive
+		.object(
+			"video",
+			0,
+			vec![Entry::Group {
+				sequence: 0,
+				frames: vec![frame(0, 0, 0)],
+			}],
+		)
+		.await;
+	archive
+		.object(
+			"video",
+			1,
+			vec![
+				Entry::Group {
+					sequence: 0,
+					frames: vec![frame(0, 1, 1_000)],
+				},
+				Entry::Group {
+					sequence: 1,
+					frames: vec![frame(1, 0, 500)],
+				},
+			],
+		)
+		.await;
+	stored(&archive, 2..4).await;
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let range = track::Range {
+		start: at(600),
+		end: Some(at(700)),
+	};
+	assert_eq!(read_range(&broadcast, "video", range).await, [1]);
+}
+
 /// An untimed track refuses a time range rather than looking it up.
 #[tokio::test(start_paused = true)]
 async fn an_untimed_track_refuses_a_time_range() {
