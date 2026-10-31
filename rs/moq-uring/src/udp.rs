@@ -44,6 +44,9 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::task::Poll;
+use std::time::Duration;
+
+use moq_clock::Wall;
 
 use io_uring::{cqueue, opcode, types};
 
@@ -59,19 +62,20 @@ const fn cmsg_space(len: usize) -> usize {
 }
 
 /// Space for the control messages of one receive or send: the segment size
-/// (`UDP_GRO`, or a send's u16 `UDP_SEGMENT`), then the family's packet info
-/// and ECN mark. A v4-mapped datagram on a v6 socket carries `IPV6_PKTINFO`
-/// with `IP_TOS`, which the IPv6 set already covers.
+/// (`UDP_GRO`, or a send's u16 `UDP_SEGMENT`), the kernel's receive
+/// timestamp, then the family's packet info and ECN mark. A v4-mapped datagram
+/// on a v6 socket carries `IPV6_PKTINFO` with `IP_TOS`, which the IPv6 set
+/// already covers.
 const CONTROL_LEN: usize = {
 	let int = std::mem::size_of::<libc::c_int>();
 	let v4 = cmsg_space(std::mem::size_of::<libc::in_pktinfo>()) + cmsg_space(int);
 	let v6 = cmsg_space(std::mem::size_of::<libc::in6_pktinfo>()) + cmsg_space(int);
-	cmsg_space(int) + if v4 > v6 { v4 } else { v6 }
+	cmsg_space(int) + cmsg_space(std::mem::size_of::<libc::timespec>()) + if v4 > v6 { v4 } else { v6 }
 };
-// Linux on 64-bit: the IPv6 set needs 88 bytes and the IPv4 one 80, and an
+// Linux on 64-bit: the IPv6 set needs 120 bytes and the IPv4 one 112, and an
 // undersized buffer would truncate every receive into a drop.
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(CONTROL_LEN == 88);
+const _: () = assert!(CONTROL_LEN == 120);
 /// Space reserved for the source address of each received datagram.
 const NAME_LEN: usize = std::mem::size_of::<libc::sockaddr_storage>();
 /// Fixed per-completion overhead of the multishot recvmsg layout.
@@ -168,6 +172,7 @@ struct Queued {
 	dst_ip: Option<IpAddr>,
 	stride: usize,
 	ecn: Option<Ecn>,
+	timestamp: Option<Wall>,
 }
 
 /// The ECN codepoint carried in the IP header's TOS or traffic class byte.
@@ -638,6 +643,11 @@ impl Socket {
 			set_option(&io, libc::IPPROTO_IP, libc::IP_PKTINFO)?;
 		}
 		set_option(&io, libc::IPPROTO_IP, libc::IP_RECVTOS)?;
+		// Stamp each receive on the kernel's clock, for a QUIC peer that asks when its packets
+		// arrived. Best effort, as moq-sock's: without it, receives carry no stamp.
+		if let Err(err) = set_option(&io, libc::SOL_SOCKET, libc::SO_TIMESTAMPNS) {
+			tracing::debug!(%err, "receive timestamps unavailable");
+		}
 		// Send at the interface MTU and never fragment, as moq-sock does, so a forged ICMP
 		// fragmentation-needed cannot shrink a path below a GSO train and turn its sends into
 		// EMSGSIZE or a worker-wide GSO fallback. The v4 option covers v4-mapped peers on a v6
@@ -778,6 +788,7 @@ impl Socket {
 				from: queued.from,
 				dst_ip: queued.dst_ip,
 				ecn: queued.ecn,
+				timestamp: queued.timestamp,
 			}));
 		}
 		if let Some(code) = rx.error {
@@ -892,6 +903,7 @@ pub struct Packet {
 	from: SocketAddr,
 	dst_ip: Option<IpAddr>,
 	ecn: Option<Ecn>,
+	timestamp: Option<Wall>,
 }
 
 impl Packet {
@@ -909,6 +921,12 @@ impl Packet {
 	/// datagrams that share one.
 	pub fn ecn(&self) -> Option<Ecn> {
 		self.ecn
+	}
+
+	/// When the kernel received the datagrams, on the wall clock, if it stamped them. One stamp
+	/// covers a GRO coalesce.
+	pub fn timestamp(&self) -> Option<Wall> {
+		self.timestamp
 	}
 
 	/// The datagram size GRO coalesced with; the final datagram may be short.
@@ -938,6 +956,7 @@ impl std::fmt::Debug for Packet {
 			.field("len", &self.len)
 			.field("stride", &self.stride)
 			.field("ecn", &self.ecn)
+			.field("timestamp", &self.timestamp)
 			.finish()
 	}
 }
@@ -1498,6 +1517,7 @@ fn on_recv_multi(sock: &Rc<SockShared>, cqe: Cqe) -> Result<(u16, Option<Queued>
 			dst_ip: meta.dst_ip,
 			stride: meta.stride.unwrap_or(payload.len()),
 			ecn: meta.ecn,
+			timestamp: meta.timestamp,
 		}),
 	))
 }
@@ -1538,6 +1558,7 @@ fn on_recv_oneshot(one: OneshotRecv, cqe: Cqe) -> Result<(u16, Option<Queued>), 
 			dst_ip: meta.dst_ip,
 			stride: meta.stride.unwrap_or(len),
 			ecn: meta.ecn,
+			timestamp: meta.timestamp,
 		}),
 	))
 }
@@ -1663,6 +1684,8 @@ struct RecvMeta {
 	ecn: Option<Ecn>,
 	/// The local address from `IP_PKTINFO` or `IPV6_PKTINFO`.
 	dst_ip: Option<IpAddr>,
+	/// The kernel's receive time from `SCM_TIMESTAMPNS`.
+	timestamp: Option<Wall>,
 }
 
 impl RecvMeta {
@@ -1704,6 +1727,12 @@ impl RecvMeta {
 				}
 				(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) => {
 					meta.dst_ip = read::<libc::in6_pktinfo>(data).map(|info| IpAddr::from(info.ipi6_addr.s6_addr));
+				}
+				(libc::SOL_SOCKET, libc::SCM_TIMESTAMPNS) => {
+					meta.timestamp = read::<libc::timespec>(data).and_then(|ts| {
+						let since = Duration::new(u64::try_from(ts.tv_sec).ok()?, u32::try_from(ts.tv_nsec).ok()?);
+						Wall::UNIX_EPOCH.checked_add(since)
+					});
 				}
 				_ => {}
 			}
@@ -1883,10 +1912,16 @@ mod tests {
 			ipi6_ifindex: 1,
 		};
 		let ect0 = Ecn::Ect0 as u8;
+		let stamp = libc::timespec {
+			tv_sec: 1_700_000_000,
+			tv_nsec: 123_456_789,
+		};
+		let stamped = || cmsg(libc::SOL_SOCKET, libc::SCM_TIMESTAMPNS, stamp);
 		let cases: [(Vec<Vec<u8>>, IpAddr); 3] = [
 			(
 				vec![
 					gro(1200),
+					stamped(),
 					cmsg(libc::IPPROTO_IP, libc::IP_PKTINFO, in_pktinfo),
 					cmsg(libc::IPPROTO_IP, libc::IP_TOS, ect0),
 				],
@@ -1895,6 +1930,7 @@ mod tests {
 			(
 				vec![
 					gro(1200),
+					stamped(),
 					cmsg(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO, in6_pktinfo(v6)),
 					cmsg(libc::IPPROTO_IPV6, libc::IPV6_TCLASS, libc::c_int::from(ect0)),
 				],
@@ -1903,6 +1939,7 @@ mod tests {
 			(
 				vec![
 					gro(1200),
+					stamped(),
 					cmsg(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO, in6_pktinfo(v4.to_ipv6_mapped())),
 					cmsg(libc::IPPROTO_IP, libc::IP_TOS, ect0),
 				],
@@ -1916,6 +1953,10 @@ mod tests {
 			assert_eq!(meta.stride, Some(1200));
 			assert_eq!(meta.ecn, Some(Ecn::Ect0));
 			assert_eq!(meta.dst_ip, Some(dst_ip));
+			assert_eq!(
+				meta.timestamp,
+				Some(Wall::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789))
+			);
 		}
 	}
 

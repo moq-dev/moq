@@ -2,7 +2,11 @@
 
 #[cfg(test)]
 use rand::RngExt;
-use std::{fmt, num::NonZeroU64, sync::Arc};
+use std::{
+	fmt,
+	num::{NonZeroU32, NonZeroU64},
+	sync::Arc,
+};
 
 use crate::{
 	ConfigError, Duration, INITIAL_MTU, Limits, MAX_UDP_PAYLOAD, VarInt, congestion, connection::qlog::QlogSink,
@@ -141,6 +145,14 @@ pub struct Config {
 	/// `None`, the local side still supports the extension.
 	pub ack_frequency: Option<ack_frequency::Config>,
 
+	/// The most receive timestamps to ask the peer for in each ACK, or `None` (the default) to ask
+	/// for none
+	///
+	/// Only a peer that supports draft-ietf-quic-receive-ts sends them, and then only for 1-RTT
+	/// packets, as space in its ACKs allows. Whatever this is set to, the local side sends them to
+	/// a peer that asks.
+	pub receive_timestamps: Option<NonZeroU32>,
+
 	/// How to construct each connection's congestion controller, BBRv3 by default
 	pub congestion: Arc<dyn congestion::ControllerFactory + Send + Sync>,
 
@@ -274,6 +286,7 @@ impl Default for Config {
 			pad_to_mtu: false,
 			mtu: Some(mtu::Config::default()),
 			ack_frequency: None,
+			receive_timestamps: None,
 
 			congestion: Arc::new({
 				let config = congestion::Bbr3Config::default();
@@ -321,6 +334,7 @@ impl fmt::Debug for Config {
 			pad_to_mtu,
 			mtu,
 			ack_frequency,
+			receive_timestamps,
 			congestion: _,
 			max_outgoing_bytes_per_second,
 			datagram,
@@ -348,6 +362,7 @@ impl fmt::Debug for Config {
 			.field("pad_to_mtu", pad_to_mtu)
 			.field("mtu", mtu)
 			.field("ack_frequency", ack_frequency)
+			.field("receive_timestamps", receive_timestamps)
 			// congestion not debug
 			.field("max_outgoing_bytes_per_second", max_outgoing_bytes_per_second)
 			.field("datagram", datagram)
