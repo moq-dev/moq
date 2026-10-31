@@ -49,7 +49,7 @@ pub async fn run(
 	args: Args,
 	network: tokio::task::JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
-	if args.select.no_video {
+	if args.select.video == Some(crate::subscribe::Mode::Off) {
 		headless::run(origin, broadcast, args, network).await
 	} else {
 		window::run(origin, broadcast, args, network)
