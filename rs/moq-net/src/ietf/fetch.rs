@@ -120,6 +120,8 @@ impl<'a> Decode<'a, Version> for FetchType<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fetch<'a> {
+	/// The credential authorizing this request alone.
+	pub authorization_token: Option<super::token::RequestToken>,
 	pub request_id: RequestId,
 	pub subscriber_priority: u8,
 	pub group_order: GroupOrder,
@@ -181,6 +183,7 @@ impl Fetch<'_> {
 		};
 		Fetch {
 			request_id: self.request_id,
+			authorization_token: self.authorization_token,
 			subscriber_priority: self.subscriber_priority,
 			group_order: self.group_order,
 			fetch_type,
@@ -207,6 +210,7 @@ impl<'a> Message<'a> for Fetch<'a> {
 				self.fetch_type.encode(w, version)?;
 				let epoch = self.epoch.clone();
 				encode_params!(w, version,
+					0x03 => self.authorization_token.clone(),
 					0x20 => self.subscriber_priority,
 					0x22 => group_order,
 					epoch::EPOCH_PARAM => epoch,
@@ -226,6 +230,7 @@ impl<'a> Message<'a> for Fetch<'a> {
 				// INCLUDE_PROPERTIES defaults to 1, so only the opt-out is worth bytes.
 				let include_properties = (!self.properties_wanted).then_some(false);
 				encode_params!(w, version,
+					0x03 => self.authorization_token.clone(),
 					0x20 => self.subscriber_priority,
 					0x21 => *filter,
 					0x22 => group_order,
@@ -240,75 +245,84 @@ impl<'a> Message<'a> for Fetch<'a> {
 	fn decode_msg(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(buf, version)?;
 
-		// The token decodes but grants nothing: the session's grant is what authorizes the request.
-		let (fetch_type, subscriber_priority, group_order, range_filters, fill_timeout, properties_wanted, epoch) =
-			match version {
-				Version::Draft18 => {
-					let fetch_type = FetchType::decode(buf, version)?;
-					decode_params!(buf, version,
-						0x03 => authorization_token: Vec<super::token::RequestToken>,
-						0x0A => fill_timeout: Option<u64>,
-						0x20 => subscriber_priority: Option<u8>,
-						0x22 => group_order: Option<GroupOrder>,
-						epoch::EPOCH_PARAM => epoch: Option<crate::Epoch>,
-					);
-					super::token::single(authorization_token)?;
+		let (
+			fetch_type,
+			subscriber_priority,
+			group_order,
+			range_filters,
+			fill_timeout,
+			properties_wanted,
+			epoch,
+			authorization_token,
+		) = match version {
+			Version::Draft18 => {
+				let fetch_type = FetchType::decode(buf, version)?;
+				decode_params!(buf, version,
+					0x03 => authorization_token: Vec<super::token::RequestToken>,
+					0x0A => fill_timeout: Option<u64>,
+					0x20 => subscriber_priority: Option<u8>,
+					0x22 => group_order: Option<GroupOrder>,
+					epoch::EPOCH_PARAM => epoch: Option<crate::Epoch>,
+				);
+				let authorization_token = super::token::single(authorization_token)?;
 
-					(
-						fetch_type,
-						subscriber_priority,
-						group_order,
-						false,
-						fill_timeout.is_some(),
-						true,
-						epoch,
-					)
-				}
-				// Draft-22 names the track up front and moves the range into LOCATION_FILTER.
-				_ => {
-					let (namespace, track) = decode_track(buf)?;
-					let track = Cow::Borrowed(track);
-					decode_params!(buf, version,
-						0x03 => authorization_token: Vec<super::token::RequestToken>,
-						0x0A => fill_timeout: Option<u64>,
-						0x20 => subscriber_priority: Option<u8>,
-						0x21 => filter: Option<Filter>,
-						0x22 => group_order: Option<GroupOrder>,
-						0x25 => subgroup_filter: Vec<Opaque>,
-						0x26 => object_id_filter: Vec<Opaque>,
-						0x27 => priority_filter: Vec<Opaque>,
-						0x28 => object_property_filter: Vec<Opaque>,
-						0x35 => include_properties: Option<bool>,
-						epoch::EPOCH_PARAM => epoch: Option<crate::Epoch>,
-					);
-					super::token::single(authorization_token)?;
-					let range_filters = [
-						subgroup_filter,
-						object_id_filter,
-						priority_filter,
-						object_property_filter,
-					]
-					.iter()
-					.any(|filter| !filter.is_empty());
+				(
+					fetch_type,
+					subscriber_priority,
+					group_order,
+					false,
+					fill_timeout.is_some(),
+					true,
+					epoch,
+					authorization_token,
+				)
+			}
+			// Draft-22 names the track up front and moves the range into LOCATION_FILTER.
+			_ => {
+				let (namespace, track) = decode_track(buf)?;
+				let track = Cow::Borrowed(track);
+				decode_params!(buf, version,
+					0x03 => authorization_token: Vec<super::token::RequestToken>,
+					0x0A => fill_timeout: Option<u64>,
+					0x20 => subscriber_priority: Option<u8>,
+					0x21 => filter: Option<Filter>,
+					0x22 => group_order: Option<GroupOrder>,
+					0x25 => subgroup_filter: Vec<Opaque>,
+					0x26 => object_id_filter: Vec<Opaque>,
+					0x27 => priority_filter: Vec<Opaque>,
+					0x28 => object_property_filter: Vec<Opaque>,
+					0x35 => include_properties: Option<bool>,
+					epoch::EPOCH_PARAM => epoch: Option<crate::Epoch>,
+				);
+				let authorization_token = super::token::single(authorization_token)?;
+				let range_filters = [
+					subgroup_filter,
+					object_id_filter,
+					priority_filter,
+					object_property_filter,
+				]
+				.iter()
+				.any(|filter| !filter.is_empty());
 
-					let fetch_type = FetchType::Filtered {
-						namespace,
-						track,
-						// An absent LOCATION_FILTER fetches the whole track.
-						filter: filter.unwrap_or(Filter::Unfiltered),
-					};
-					(
-						fetch_type,
-						subscriber_priority,
-						group_order,
-						range_filters,
-						fill_timeout.is_some(),
-						// Defaults to 1, so an absent parameter means the requester wants them.
-						include_properties.unwrap_or(true),
-						epoch,
-					)
-				}
-			};
+				let fetch_type = FetchType::Filtered {
+					namespace,
+					track,
+					// An absent LOCATION_FILTER fetches the whole track.
+					filter: filter.unwrap_or(Filter::Unfiltered),
+				};
+				(
+					fetch_type,
+					subscriber_priority,
+					group_order,
+					range_filters,
+					fill_timeout.is_some(),
+					// Defaults to 1, so an absent parameter means the requester wants them.
+					include_properties.unwrap_or(true),
+					epoch,
+					authorization_token,
+				)
+			}
+		};
 
 		// A joining FETCH is served by its subscription's instance; naming one is malformed.
 		if epoch.is_some()
@@ -320,6 +334,7 @@ impl<'a> Message<'a> for Fetch<'a> {
 		}
 
 		Ok(Self {
+			authorization_token,
 			request_id,
 			subscriber_priority: subscriber_priority.unwrap_or(super::priority::DEFAULT_WIRE),
 			// No preference: the publisher picks the order.
@@ -615,6 +630,7 @@ mod tests {
 	#[test]
 	fn test_fetch_v18_round_trip() {
 		let msg = Fetch {
+			authorization_token: None,
 			request_id: RequestId(1),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
@@ -724,6 +740,7 @@ mod tests {
 	#[test]
 	fn test_fetch_v22_wire() {
 		let fetch = Fetch {
+			authorization_token: None,
 			request_id: RequestId(1),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,

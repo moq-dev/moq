@@ -4,7 +4,7 @@
 //! every piece of the answer:
 //!
 //! - [`Request`], [`Grant`], and [`Refusal`]: the JSON a relay POSTs to an auth server on
-//!   [`Event::Connect`], [`Event::Revalidate`], and [`Event::End`], and what comes back.
+//!   [`Event::Connect`], [`Event::Attach`], [`Event::Revalidate`], and [`Event::End`], and what comes back.
 //! - [`lease::Producer`] / [`lease::Consumer`]: the handle a session holds for its
 //!   grant, so whoever runs the accept loop decides how, in process or over HTTP.
 //! - [`Client`]: the HTTP implementation that drives a lease against `--auth-url`.

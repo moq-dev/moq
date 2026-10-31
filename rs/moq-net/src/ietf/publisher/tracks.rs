@@ -147,6 +147,7 @@ type Skips = kio::Shared<LinkedHashMap<(crate::Path, Arc<str>), ()>>;
 /// What a request's listing shares with the tasks listing each broadcast.
 #[derive(Clone)]
 struct Request {
+	token_grant: Option<crate::auth::RequestGrant>,
 	origin: origin::Consumer,
 	/// The request's prefix, which every PUBLISH namespace starts with.
 	prefix: crate::Path,
@@ -251,6 +252,9 @@ struct Listed {
 	/// On draft-18, claims the track's one subscription for as long as the PUBLISH lives.
 	subscribed: Option<Subscribed>,
 	params: Params,
+	/// The listing request's token, if it named one: the PUBLISH is held to that grant alone,
+	/// as the listing is, and ends with it.
+	token: Option<crate::auth::RequestGrant>,
 }
 
 /// How a paused PUBLISH subscription resumes forwarding.
@@ -309,6 +313,27 @@ impl Publisher {
 			let error = refuse(request::NOT_SUPPORTED, "SUBSCRIBE_TRACKS needs FORWARD=0");
 			return super::super::request_stream::reject(stream, error).await;
 		}
+		let mut gate =
+			crate::auth::Gate::new(self.auth.clone(), msg.prefix.clone(), crate::auth::Direction::Publish).discovery();
+		match self
+			.admit_request(&mut stream, &mut gate, msg.authorization_token.clone())
+			.await
+		{
+			Ok(true) => {}
+			Ok(false) => return Ok(()),
+			Err(refusal) => {
+				super::super::request_stream::write_error(
+					&mut stream.writer,
+					request::Kind::SubscribeNamespace,
+					&refusal.error,
+					&refusal.reason,
+					self.version,
+				)
+				.await?;
+				let _ = stream.writer.close().await;
+				return Ok(());
+			}
+		}
 		let prefix = msg.prefix.clone();
 		let Some(established) = Established::new(&self.listings, &prefix) else {
 			let error = refuse(request::PREFIX_OVERLAP, "overlaps another SUBSCRIBE_TRACKS");
@@ -337,17 +362,20 @@ impl Publisher {
 			.discovery(!declared.hidden || self.origin.includes_hidden());
 		let mut announced = origin.announced();
 
-		stream
-			.writer
-			.encode_message(&ietf::RequestOk {
+		crate::auth::until(
+			stream.writer.encode_message(&ietf::RequestOk {
 				active: None,
 				largest: None,
-			})
-			.await?;
+			}),
+			|waiter| gate.poll_token_ended(waiter),
+		)
+		.await
+		.map_err(|refusal| refusal.error)??;
 
 		// Dropped when the request is cancelled, which tells every broadcast to stop.
 		let live = kio::Producer::new(());
 		let request = Request {
+			token_grant: gate.token_observer(),
 			origin,
 			prefix: prefix.clone(),
 			forward: msg.forward,
@@ -392,6 +420,9 @@ impl Publisher {
 					if let Poll::Ready(res) = self.poll_listing_cancel(&mut stream, &mut finished, &mut goaways, waiter)
 					{
 						return Poll::Ready(Event::Cancelled(res));
+					}
+					if let Poll::Ready(refusal) = gate.poll_token_ended(waiter) {
+						return Poll::Ready(Event::Cancelled(Err(refusal.error)));
 					}
 					if let Err(err) = Self::poll_write_skips(&mut stream, &request.skips, waiter) {
 						return Poll::Ready(Event::Cancelled(Err(err)));
@@ -441,6 +472,7 @@ impl Publisher {
 		// already sent still ends when its track does.
 		drop(established);
 		drop(live);
+		drop(gate);
 		request.skips.lock().clear();
 		// A refused update left its REQUEST_ERROR buffered, so a cancel flushes before the FIN.
 		let mut closing = match cancelled {
@@ -630,7 +662,11 @@ impl Publisher {
 		// The broadcast's listing, held only while our publish permit covers it: a track
 		// it does not cover is not revealed at all, and one it comes to cover is listed
 		// from scratch.
-		let (permit, mut auth_epoch) = self.permit_now(None);
+		let mut gate = crate::auth::Gate::new(self.auth.clone(), namespace.clone(), crate::auth::Direction::Publish);
+		if let Some(token) = request.token_grant.clone() {
+			gate.bind(token);
+		}
+		let (permit, mut auth_epoch) = self.permit_now(Some(&gate));
 		let mut tracks = None;
 		if permit.matches(namespace.as_str()) {
 			match broadcast.tracks() {
@@ -708,10 +744,7 @@ impl Publisher {
 						Route::Withdrawn => Event::Withdrawn,
 					}));
 				}
-				if let Poll::Ready(permit) =
-					self.auth
-						.poll_permit(crate::auth::Direction::Publish, &mut auth_epoch, waiter)
-				{
+				if let Poll::Ready(permit) = gate.poll_permit(&mut auth_epoch, waiter) {
 					return Poll::Ready(Some(Event::Regrant(permit)));
 				}
 				if entries.staged.is_some()
@@ -816,6 +849,7 @@ impl Publisher {
 						slot: self.subscriptions.hold(),
 						subscribed,
 						params: request.params,
+						token: gate.token_observer(),
 					};
 					entries.listed.insert(name, entry);
 					let this = self.clone();
@@ -858,6 +892,7 @@ impl Publisher {
 			slot,
 			subscribed,
 			mut params,
+			token,
 		} = task;
 		let _slot = slot;
 		let _subscribed = subscribed;
@@ -883,6 +918,7 @@ impl Publisher {
 
 		tracing::debug!(id = %request_id, broadcast = %absolute, track = %name, "publish started");
 		let publish = ietf::Publish {
+			authorization_token: None,
 			request_id,
 			track_namespace: namespace.clone(),
 			track_name: name.as_ref().into(),
@@ -913,6 +949,9 @@ impl Publisher {
 		written?;
 
 		let mut gate = crate::auth::Gate::new(self.auth.clone(), namespace.clone(), crate::auth::Direction::Publish);
+		if let Some(token) = token {
+			gate.bind(token);
+		}
 		let mut finished = false;
 		let mut goaways = super::super::request_stream::Messages::new(self.session.clone(), self.control.client());
 
@@ -1063,19 +1102,30 @@ impl Publisher {
 				Wait::Cancelled => return Ok(()),
 				Wait::Failed(err) => break Served::Track(Err(err)),
 			};
-			// Refused like an update to any subscription: it fails, ending this one.
+			// Refused like an update to any subscription (draft-18 section 10.9.1): REQUEST_ERROR,
+			// then PUBLISH_DONE UPDATE_FAILED. The old grant does not survive, so a FETCH joined
+			// under it stops too.
+			match self
+				.admit_request(&mut stream, &mut gate, update.authorization_token.clone())
+				.await
+			{
+				Ok(true) => {}
+				Ok(false) => return Ok(()),
+				Err(refusal) => {
+					// Ended first, so neither withheld stream credit nor a failed write keeps the
+					// joined FETCH running meanwhile.
+					if let Some(grant) = gate.token_guard() {
+						grant.end(refusal.clone());
+					}
+					self.write_subscribe_error(&mut stream.writer, &refusal.error, &refusal.reason)
+						.await?;
+					break Served::UpdateFailed(refusal.error);
+				}
+			}
 			let refusal = match update.refused {
 				Some(Error::Decode(err)) => Some((super::super::token::reason(&err), Error::Decode(err))),
 				Some(Error::GoingAway) => Some(("going away", Error::GoingAway)),
 				Some(err) => Some(("REQUEST_UPDATE parameters not supported", err)),
-				None if update.authorization_token.is_some()
-					&& self.auth.token_decides(crate::auth::Direction::Publish) =>
-				{
-					Some((
-						"AUTHORIZATION TOKEN on a request admitted without one",
-						Error::Unsupported,
-					))
-				}
 				None if update.new_group.is_some() && !dynamic => Some((
 					"NEW_GROUP_REQUEST on a track without DYNAMIC_GROUPS",
 					Error::Unsupported,
@@ -1251,7 +1301,18 @@ impl Publisher {
 					},
 					cache: track.clone(),
 					namespace: namespace.clone(),
-					grant: None,
+					// A joining FETCH is held to the PUBLISH's token too, once one authorized it,
+					// covering this track as the PUBLISH must.
+					binding: gate.token_guard().map(|grant| {
+						let kind = crate::auth::RequestKind::Subscribe;
+						crate::auth::RequestBinding::new(
+							&self.runtime,
+							namespace.clone(),
+							kind,
+							None,
+							Some(grant.observe_as(namespace.clone(), kind)),
+						)
+					}),
 					ranking: serve.ranking.clone(),
 				},
 				(Filter::NextObject, None) => Joined::Empty,
@@ -1277,7 +1338,11 @@ impl Publisher {
 						.await;
 				}
 			};
-			let serving = self.run_subscription(stream, &mut serve, finished, goaways, fill, None);
+			let mut updates = super::SubscriptionUpdates {
+				binding: None,
+				renewal: Default::default(),
+			};
+			let serving = self.run_subscription(stream, &mut serve, finished, goaways, fill, &mut updates);
 			// A track no longer listed ends its PUBLISH even while the track itself goes on,
 			// as when its broadcast's route is withdrawn.
 			crate::auth::until(serving, |waiter| {
@@ -1884,6 +1949,7 @@ mod tests {
 				let live = kio::Producer::new(());
 				let route = kio::Producer::new(Route::Replaced);
 				let request = Request {
+					token_grant: None,
 					origin: h._origin.consume(),
 					prefix: crate::Path::from_static(""),
 					forward: true,
@@ -2524,6 +2590,131 @@ mod tests {
 			let (mut stream, ..) = h.publish().await;
 			publish_ok(&mut stream).await;
 		}
+	}
+
+	/// A listing its own token admitted holds the PUBLISHes it sends to that token too: they
+	/// outlast a session scope that never covered them, and end once the token is revoked.
+	#[moq_clock::test]
+	async fn a_listing_token_holds_its_publishes() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let mut h = harness(version);
+			let auth = crate::auth::Link::new(false);
+			auth.handle().authorize(&crate::auth::Grant::default());
+			let mut requests = auth.handle().requests();
+			h.publisher = h.publisher.clone().with_auth(auth.clone());
+
+			let mut msg = listing(false);
+			msg.authorization_token = Some(crate::ietf::token::RequestToken(crate::setup::Token {
+				kind: 0,
+				value: b"listing".to_vec(),
+			}));
+			let mut request = h.request(&msg).await;
+			let issued = timeout(requests.next())
+				.await
+				.unwrap()
+				.accept(crate::auth::Grant::all());
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let (mut first, ..) = h.publish().await;
+			let (mut second, ..) = h.publish().await;
+			publish_ok(&mut first).await;
+			publish_ok(&mut second).await;
+			for stream in [&mut first, &mut second] {
+				assert!(
+					moq_clock::timeout(Duration::from_millis(50), stream.reader.varint())
+						.await
+						.is_err(),
+					"{version}: the PUBLISH was held to the session scope"
+				);
+			}
+
+			issued.revoke(crate::SessionError::Unauthorized, "revoked");
+			for stream in [&mut first, &mut second] {
+				assert_eq!(next(stream).await.0, ietf::PublishDone::ID, "{version}");
+			}
+		}
+	}
+
+	/// A joining FETCH on a PUBLISH a token listing sent is held to that token, as the PUBLISH
+	/// is, rather than to a session scope that never covered it.
+	#[moq_clock::test]
+	async fn a_joining_fetch_on_a_token_listed_publish_follows_the_token() {
+		let version = Version::Draft18;
+		let mut h = harness(version);
+		let video = h.tracks.remove("video").unwrap();
+		let mut group = video.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"head".as_slice()).unwrap();
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::default());
+		let mut requests = auth.handle().requests();
+		h.publisher = h.publisher.clone().with_auth(auth.clone());
+
+		let mut msg = listing(false);
+		msg.authorization_token = Some(crate::ietf::token::RequestToken(crate::setup::Token {
+			kind: 0,
+			value: b"listing".to_vec(),
+		}));
+		let mut request = h.request(&msg).await;
+		let _issued = timeout(requests.next())
+			.await
+			.unwrap()
+			.accept(crate::auth::Grant::all());
+		assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID);
+		let (mut stream, publish) = loop {
+			let mut stream = timeout(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version,
+			))
+			.await
+			.unwrap();
+			assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
+			let body: ietf::Body = stream.reader.decode().await.unwrap();
+			let publish: ietf::Publish = body.message(version).unwrap();
+			if publish.track_name == "video" {
+				break (stream, publish.request_id);
+			}
+		};
+		publish_ok(&mut stream).await;
+		send(&mut stream, &update(2, true)).await;
+		assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID);
+
+		let mut fetch = h
+			.request(&ietf::Fetch {
+				authorization_token: None,
+				request_id: RequestId(4),
+				subscriber_priority: 128,
+				group_order: GroupOrder::Ascending,
+				fetch_type: ietf::FetchType::RelativeJoining {
+					subscriber_request_id: publish,
+					group_offset: 0,
+				},
+				range_filters: false,
+				fill_timeout: false,
+				properties_wanted: true,
+				epoch: None,
+			})
+			.await;
+		assert_eq!(
+			next(&mut fetch).await.0,
+			ietf::FetchOk::ID,
+			"the joining FETCH was held to the session scope"
+		);
+
+		// A refused renewal, which a paused PUBLISH takes, fails the update as on any
+		// subscription: REQUEST_ERROR answers it, then PUBLISH_DONE ends the PUBLISH.
+		send(&mut stream, &update(6, false)).await;
+		assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID);
+		let mut renewal = update(8, false);
+		renewal.authorization_token = Some(crate::ietf::token::RequestToken(crate::setup::Token {
+			kind: 0,
+			value: b"renewal".to_vec(),
+		}));
+		send(&mut stream, &renewal).await;
+		timeout(requests.next())
+			.await
+			.unwrap()
+			.reject(crate::SessionError::Unauthorized, "refused");
+		assert_eq!(next(&mut stream).await.0, ietf::RequestError::ID);
+		assert_eq!(next(&mut stream).await.0, ietf::PublishDone::ID);
 	}
 
 	/// Tracks under a namespace our grant does not cover are not listed until it does, and
