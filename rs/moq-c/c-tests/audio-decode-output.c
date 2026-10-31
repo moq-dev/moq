@@ -128,6 +128,13 @@ int main(void) {
     wait_until(&c, &c.catalog);
     pthread_mutex_unlock(&c.mutex);
 
+    bool enabled = false;
+    CHECK(moq_consume_audio_enabled((uint32_t)c.catalog, 0, &enabled) == 0);
+    CHECK(enabled);
+    CHECK(moq_consume_audio_enabled((uint32_t)c.catalog, 1, &enabled) == MOQ_ERROR_NO_INDEX);
+    CHECK(enabled); // An error preserves the destination.
+    CHECK(moq_consume_audio_enabled((uint32_t)c.catalog, 0, NULL) == MOQ_ERROR_INVALID_POINTER);
+
     // Each decode reads the finished track from the start. Its budget is the track's whole
     // retention, since the budget ages groups by wall clock and a stalled host would skip them.
     const uint32_t formats[] = {MOQ_AUDIO_SAMPLE_FORMAT_F32, MOQ_AUDIO_SAMPLE_FORMAT_F32_PLANAR, MOQ_AUDIO_SAMPLE_FORMAT_S16};
