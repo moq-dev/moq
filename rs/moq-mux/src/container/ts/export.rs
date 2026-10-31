@@ -4594,9 +4594,10 @@ impl Mpeg2Picture {
 	///
 	/// A PES need not start a picture. One opening on bytes outside any start code, or on a
 	/// slice before its first picture header, carries the tail of the last picture of the PES
-	/// before, an orphan only when that PES was one (`after`). A PES that ends inside the header
-	/// after a start code is kept, since the next PES holds the rest of a picture it cannot read.
-	/// Trailing zero bytes are stuffing far more often than half a start code, so they do not.
+	/// before, an orphan only when that PES was one (`after`). A PES that may end inside a start
+	/// code or the header after it is kept, since the next PES holds the rest of a picture it
+	/// cannot read. Trailing zero bytes are kept too: usually stuffing, but trimming half a
+	/// reference picture's start code would lose it, while an orphan kept is only skipped.
 	fn orphaned(pes: &[u8], opened: u16, after: bool) -> bool {
 		let Ok(start) = psi::PesStart::parse(pes) else {
 			return false;
@@ -4611,7 +4612,7 @@ impl Mpeg2Picture {
 				.take_while(|&code| code != Some(0x00))
 				.any(|code| matches!(code, Some(0x01..=0xaf)));
 		// A GOP header, the longest read, ends 8 bytes after its start code begins.
-		let cut = memchr::memmem::rfind(es, &[0, 0, 1]).is_some_and(|at| es.len() - at < 8);
+		let cut = es.last() == Some(&0) || memchr::memmem::rfind(es, &[0, 0, 1]).is_some_and(|at| es.len() - at < 8);
 		let pictures = Self::scan(es);
 		let tail = match continues {
 			true => after,
@@ -5521,8 +5522,8 @@ mod tests {
 				0,
 				(reference >> 2) as u8,
 				((reference & 3) as u8) << 6 | coding << 3,
-				0,
-				0,
+				0xff,
+				0xf8,
 			]
 		};
 		let slice = [0, 0, 1, 1, 0x12, 0x34, 0x56, 0x78];
@@ -5544,7 +5545,9 @@ mod tests {
 			assert!(!Mpeg2Picture::orphaned(&video(&[]), 2, after));
 			// Zero stuffing before the first start code opens no tail.
 			assert!(Mpeg2Picture::orphaned(&video(&[&[0], &picture(0, 3)]), 2, after));
-			// Half a picture header: the next PES holds a picture this one cannot read.
+			// Half a start code or picture header: the next PES holds a picture this one cannot
+			// read.
+			assert!(!Mpeg2Picture::orphaned(&video(&[&picture(0, 3), &[0, 0]]), 2, after));
 			assert!(!Mpeg2Picture::orphaned(
 				&video(&[&picture(0, 3), &[0, 0, 1, 0, 0]]),
 				2,
