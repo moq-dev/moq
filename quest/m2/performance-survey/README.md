@@ -150,7 +150,7 @@ No duplicate quest or workflow edit belongs here.
   [performance audit](/quest/m2/audit-perf.md) repeats it before later cuts.
 - [Perf](/quest/m2/perf/README.md) owns measured channel contention, relay
   allocations, ingest batching, worker quiescence and runtime selection.
-- The [release audit](/quest/m1/release-audit/README.md) bounded the media
+- The 2026-10-22 release audit bounded the media
   reorder queues in [moq-dev/moq#6453](https://github.com/moq-dev/moq/pull/6453)
   and fixed QMux copying in
   [moq-dev/moq#6381](https://github.com/moq-dev/moq/pull/6381). MKV
