@@ -352,9 +352,23 @@ mod tests {
 		assert_eq!(crate::ietf::token::from_setup(&params, version).unwrap(), Some(token));
 		tracing::trace!(?setup, ?decoded, ?params, "SETUP diagnostics");
 
+		let uri = format!("https://relay.example/room?jwt={secret}");
+		let goaway = lite::Goaway { uri: uri.as_str().into() };
+		let wire = goaway.encode_bytes(lite::Version::Lite07).unwrap();
+		lite::Goaway::decode_slice(&wire, lite::Version::Lite07).unwrap();
+		let goaway = crate::ietf::GoAway {
+			new_session_uri: uri.as_str().into(),
+			timeout: 0,
+			request_id: Some(crate::ietf::RequestId(0)),
+		};
+		let wire = goaway.encode_bytes(version).unwrap();
+		crate::ietf::GoAway::decode_slice(&wire, version).unwrap();
+		tracing::trace!(goaway = ?crate::goaway::Goaway::redirect(uri), "GOAWAY diagnostics");
+
 		assert!(logs_contain("encoding"));
 		assert!(logs_contain("decoded"));
 		assert!(logs_contain("SETUP diagnostics"));
+		assert!(logs_contain("GOAWAY diagnostics"));
 		assert!(!logs_contain(secret));
 		let decimal = format!("{:?}", secret.as_bytes());
 		assert!(!logs_contain(&decimal[1..decimal.len() - 1]));

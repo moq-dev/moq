@@ -391,7 +391,7 @@ impl Control {
 							.reader
 							.poll_decode_with(waiter, |r| { Ok(lite::Goaway::decode(r, version)?.uri.into_owned()) })
 					)?;
-					tracing::info!(%uri, "received goaway");
+					tracing::info!(uri_len = uri.len(), "received goaway");
 
 					if !self.shared.client && !uri.is_empty() {
 						return Poll::Ready(Err(Error::ProtocolViolation));
