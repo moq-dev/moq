@@ -1169,6 +1169,8 @@ impl Publisher {
 		goaways: &mut super::super::request_stream::Messages,
 		opened: &mut u64,
 	) -> Result<Served, ()> {
+		// Paused, the PUBLISH is only a listing entry; forwarding, it is a subscription.
+		let _working = self.session.work().start();
 		let mut subscription = serving_subscription(params.priority);
 		if let Some(order) = params.order {
 			subscription = subscription.with_order(order.to_order());

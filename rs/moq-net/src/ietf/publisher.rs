@@ -810,11 +810,15 @@ enum FetchGate {
 	Joining { id: RequestId, auth: crate::auth::Link },
 }
 
-struct Serve(Arc<AtomicUsize>);
+/// A dispatched SUBSCRIBE or FETCH serve, counted until dropped.
+struct Serve {
+	owed: Arc<AtomicUsize>,
+	_working: crate::session::Working,
+}
 
 impl Drop for Serve {
 	fn drop(&mut self) {
-		self.0.fetch_sub(1, Ordering::Relaxed);
+		self.owed.fetch_sub(1, Ordering::Relaxed);
 	}
 }
 
@@ -1024,7 +1028,10 @@ impl Publisher {
 		// Count at dispatch so close cannot pass a request waiting for its first poll.
 		let serve = matches!(id, ietf::Subscribe::ID | ietf::Fetch::ID).then(|| {
 			self.owed.fetch_add(1, Ordering::Relaxed);
-			Serve(self.owed.clone())
+			Serve {
+				owed: self.owed.clone(),
+				_working: self.session.work().start(),
+			}
 		});
 		let task = match id {
 			ietf::Subscribe::ID => {

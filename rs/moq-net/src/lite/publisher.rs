@@ -1537,6 +1537,9 @@ trait Request: Sized {
 	/// Whether the request counts toward the session's subscriptions peak while it is open.
 	/// Its stream's credit, not a count, bounds how many the peer holds.
 	const SUBSCRIPTION: bool = false;
+	/// Whether the request carries track data (a subscription or a fetch), which keeps
+	/// the session from reading as idle while it is open.
+	const DATA: bool = false;
 	/// Whether the request stays open past its reply, keeping what serving it took, until
 	/// the requester closes its side.
 	const HOLDS: bool;
@@ -1596,6 +1599,8 @@ struct RequestServe<R: Request> {
 	owing: bool,
 	// A subscription's place in the session's subscriptions peak.
 	_subscription: Option<crate::session::Slot>,
+	// Holds the session busy while a subscription or fetch is open.
+	_working: Option<crate::session::Working>,
 	// The latest update to arrive before the reply started. Each one replaces the last.
 	update: Option<R::Update>,
 	/// Ends the request, even mid-reply, once the session stops allowing its broadcast.
@@ -1635,12 +1640,14 @@ enum RequestState<M, R> {
 impl<R: Request> RequestServe<R> {
 	fn new(shared: Arc<Shared>, stream: Stream<Transport, Version>) -> Self {
 		shared.owed.fetch_add(1, Ordering::Relaxed);
+		let _working = R::DATA.then(|| shared.session.work().start());
 		Self {
 			shared,
 			stream: Some(stream),
 			state: RequestState::Decode,
 			owing: true,
 			_subscription: None,
+			_working,
 			update: None,
 			gate: None,
 			broadcast: Default::default(),
@@ -2024,6 +2031,7 @@ impl Request for SubscribeServe {
 	// Ending a subscription early is still a valid end.
 	const GRACEFUL: bool = true;
 	const SUBSCRIPTION: bool = true;
+	const DATA: bool = true;
 	const HOLDS: bool = false;
 	type Message = lite::Subscribe<'static>;
 	type Update = lite::SubscribeUpdate;
@@ -2268,6 +2276,7 @@ impl Request for FetchServe {
 	const KIND: &'static str = "fetch";
 	// The response carries no header, so a run cut short would read as whole.
 	const GRACEFUL: bool = false;
+	const DATA: bool = true;
 	const HOLDS: bool = false;
 	type Message = lite::Fetch<'static>;
 	type Update = NoUpdate;

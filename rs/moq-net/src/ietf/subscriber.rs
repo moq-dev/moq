@@ -2933,6 +2933,7 @@ impl Subscriber {
 		group_fetches: &mut TaskSet,
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
+		let _working = self.session.work().start();
 		let validity = self.validity.start();
 		let mut resolved = ResolvedRanges::default();
 		let subscription = target
@@ -5373,6 +5374,7 @@ impl Subscriber {
 	/// hold the earlier groups until it finishes, or be cut short at the Largest Object by a
 	/// publisher following draft-22 section 9.11.
 	async fn serve_fill(self, broadcast: Path, name: String, fill: track::Fill, timescale: Option<Timescale>) {
+		let _working = self.session.work().start();
 		let fill = std::sync::Arc::new(fill);
 		let mut last = None;
 		while let Some(run) = fill.next_run() {
