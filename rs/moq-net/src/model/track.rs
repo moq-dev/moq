@@ -324,6 +324,9 @@ pub(crate) struct TrackState {
 	// Ordered so an in-range subscriber can seek to its cursor instead of scanning
 	// every cached group for each delivery.
 	lookup: BTreeMap<u64, Slot>,
+	// The sequences in `lookup` the live feed holds ([`Slot::visible`]): the searches for
+	// live content walk these, so fetched backfill between them costs nothing.
+	visible: BTreeSet<u64>,
 	contents: group::Contents,
 	// Copies that left `lookup`, or never entered it, while a fetch or reader may still
 	// hold them, so a teardown ends those still being written. Pruned once it doubles
@@ -718,14 +721,14 @@ impl Slot {
 /// Heap the track keeps per cached group, excluding the group itself
 /// ([`group::CACHE_OVERHEAD`]).
 ///
-/// One [`Slot`] under its sequence in `lookup`, its start in `starts` once frame 0
-/// arrives, plus a hint in each of `arrival` and `evict`. Doubled because the
-/// containers run half empty in the worst case: a
+/// One [`Slot`] under its sequence in `lookup`, its sequence in `visible`, its start in
+/// `starts` once frame 0 arrives, plus a hint in each of `arrival` and `evict`. Doubled
+/// because the containers run half empty in the worst case: a
 /// `BTreeMap` node sits between half and fully packed, and a `VecDeque` holds up to
 /// twice the entries in it. Half of [`cache::ENTRY_OVERHEAD`]; see it for why this is
 /// derived rather than measured.
 pub(super) const CACHE_OVERHEAD: u64 =
-	2 * (size_of::<u64>() + size_of::<Slot>() + size_of::<(u64, Timestamp)>() + 2 * size_of::<(u64, u32)>()) as u64;
+	2 * (2 * size_of::<u64>() + size_of::<Slot>() + size_of::<(u64, Timestamp)>() + 2 * size_of::<(u64, u32)>()) as u64;
 
 /// Where the groups this hop holds start, for resolving time anchors: ordered lookups in
 /// the starts index and the cache, so no query walks more than the run it answers.
@@ -1306,10 +1309,23 @@ impl TrackState {
 		}
 	}
 
-	/// The first cached group at or above `from` that `servable` covers for which `f`
+	/// The live feed's cached groups within `range`, by sequence: never fetched backfill.
+	fn live(&self, range: impl ops::RangeBounds<u64> + Clone) -> impl DoubleEndedIterator<Item = (&u64, &Slot)> {
+		// Without backfill every cached group is the feed's, so the cache is walked as is.
+		let all = self.visible.len() == self.lookup.len();
+		let cached = all.then(|| self.lookup.range(range.clone()));
+		let indexed = (!all).then(|| {
+			self.visible
+				.range(range)
+				.map(|sequence| (sequence, self.lookup.get(sequence).expect("an indexed live slot")))
+		});
+		cached.into_iter().flatten().chain(indexed.into_iter().flatten())
+	}
+
+	/// The first live-feed group at or above `from` that `servable` covers for which `f`
 	/// answers, lowest first or, with `rev`, highest first: one lookup for a single run.
-	/// Several runs leapfrog the cache, so a run holding nothing (a reader's misses) costs
-	/// one lookup rather than a walk over every run past it.
+	/// Several runs leapfrog the live groups, so a run holding none (a reader's misses, or
+	/// fetched backfill) costs one lookup rather than a walk over every run past it.
 	fn find_servable<'a, R>(
 		&'a self,
 		servable: &Servable,
@@ -1317,7 +1333,7 @@ impl TrackState {
 		rev: bool,
 		mut f: impl FnMut(&'a Slot) -> Option<R>,
 	) -> Option<R> {
-		let mut scan = |range: std::collections::btree_map::Range<'a, u64, Slot>| match rev {
+		let mut scan = |range: &mut dyn DoubleEndedIterator<Item = (&'a u64, &'a Slot)>| match rev {
 			true => range.rev().find_map(|(_, slot)| f(slot)),
 			false => range.map(|(_, slot)| slot).find_map(&mut f),
 		};
@@ -1329,7 +1345,7 @@ impl TrackState {
 					return None;
 				}
 				let end = end.map_or(Bound::Unbounded, Bound::Excluded);
-				scan(self.lookup.range((Bound::Included(from), end)))
+				scan(&mut self.live((Bound::Included(from), end)))
 			}
 			Servable::Runs(runs) => {
 				// What is left to search, shrinking from the end the search starts at.
@@ -1344,8 +1360,8 @@ impl TrackState {
 					// The cache from the run on, toward the far end: one lookup either finds
 					// the run's groups or the next cached group past a run holding none.
 					let leap = match rev {
-						true => leap(self.lookup.range(lo..=end).rev(), start..=end, &mut f),
-						false => leap(self.lookup.range(start..=hi), start..=end, &mut f),
+						true => leap(self.live(lo..=end).rev(), start..=end, &mut f),
+						false => leap(self.live(start..=hi), start..=end, &mut f),
 					};
 					match leap {
 						Leap::Found(found) => return Some(found),
@@ -1853,6 +1869,7 @@ impl TrackState {
 		self.lookup
 			.retain(|_, slot| slot.copies().any(group::Handle::is_finished));
 		let lookup = &self.lookup;
+		self.visible.retain(|sequence| lookup.contains_key(sequence));
 		self.bounds
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
@@ -1868,6 +1885,7 @@ impl TrackState {
 	/// Take `sequence` out of the cache, along with its checked start.
 	fn remove_slot(&mut self, sequence: u64) -> Option<Slot> {
 		let slot = self.lookup.remove(&sequence)?;
+		self.visible.remove(&sequence);
 		self.bounds
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
@@ -2044,6 +2062,10 @@ impl TrackState {
 				retired: AtomicBool::new(false),
 			},
 		);
+		match visible {
+			true => self.visible.insert(sequence),
+			false => self.visible.remove(&sequence),
+		};
 		if replaced.is_some() {
 			self.bounds
 				.get_mut()
@@ -2084,8 +2106,7 @@ impl TrackState {
 	/// Wake the reads a group landing at `sequence` succeeds.
 	fn wake_landed(&self, sequence: u64) {
 		let below = self
-			.lookup
-			.range(..sequence)
+			.live(..sequence)
 			.rev()
 			.find(|(_, slot)| slot.is_shown())
 			.map(|(below, _)| *below);
@@ -2622,11 +2643,7 @@ impl TrackState {
 	/// The newest live group the cache holds, and the number of frames it has so far.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn newest(&self) -> Option<(u64, u64)> {
-		let (sequence, slot) = self
-			.lookup
-			.iter()
-			.rev()
-			.find(|(_, slot)| slot.visible && slot.group.is_started())?;
+		let (sequence, slot) = self.live(..).rev().find(|(_, slot)| slot.group.is_started())?;
 		Some((*sequence, slot.group.frame_count() as u64))
 	}
 
@@ -6577,9 +6594,7 @@ impl Cursor {
 		let fills = self.state.read().fills.clone();
 		let misses = self.misses.get_or_insert_with(Box::default);
 		let mut given_up = Vec::new();
-		if misses.lowest().is_some() {
-			misses.retain(from, &below(window.missable(from), cap));
-		}
+		misses.retain((from, revision, cap), || below(window.missable(from), cap));
 		let asks = {
 			let state = self.state.read();
 			misses.judge(
@@ -12561,7 +12576,7 @@ mod test {
 		drop(state);
 
 		// The edge dies between resolving it and judging the candidate.
-		let slot = producer.modify().unwrap().lookup.remove(&edge).unwrap();
+		let slot = producer.modify().unwrap().remove_slot(edge).unwrap();
 		let _ = slot.group.abort(Error::Evicted);
 
 		let state = producer.state.read();
