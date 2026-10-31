@@ -118,6 +118,29 @@ async def test_fetch_of_a_dropped_group_is_not_found():
     await task
 
 
+async def test_insert_datagram_keeps_its_sequence_and_largest_follows():
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("events")
+    consumer = track.consume()
+    assert track.largest() is None
+
+    track.insert_datagram(7, b"seven")
+    datagram = await asyncio.wait_for(consumer.recv_datagram(), 5)
+    assert datagram is not None
+    assert (datagram.sequence, datagram.payload) == (7, b"seven")
+    assert track.largest() == moq.Position(group=7, frame=0)
+    assert track.append_datagram(b"next") == 8
+
+
+async def test_broadcast_consumer_closed_resolves_on_close():
+    broadcast = moq.BroadcastProducer()
+    closed = asyncio.create_task(broadcast.consume().closed())
+    await asyncio.sleep(0.01)
+    assert not closed.done()
+    broadcast.close()
+    await asyncio.wait_for(closed, 5)
+
+
 def test_protocol_error_helper_covers_known_app_and_unknown():
     cases = [
         (moq.ErrorScope.SESSION, 0x2, moq.ProtocolKind.UNAUTHORIZED, True),

@@ -115,6 +115,9 @@ public typealias ProtocolKind = MoqFFI.MoqProtocolKind
 /// A protocol failure: scope, verbatim wire code, kind, and a diagnostic message.
 public typealias ProtocolError = MoqFFI.MoqProtocolError
 
+/// A location within a track: a group sequence and a frame index in it.
+public typealias Position = MoqFFI.MoqPosition
+
 // Nested rather than top-level: a module-level `Range` would shadow `Swift.Range`
 // in every file that imports Moq.
 extension Subscription {

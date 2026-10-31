@@ -127,6 +127,8 @@ typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
 typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 /** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
 typealias Order = uniffi.moq.MoqOrder
+/** A location within a track: a group sequence and a frame index in it. */
+typealias Position = uniffi.moq.MoqPosition
 /** Options for fetching one past group by sequence. */
 typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 /** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */
