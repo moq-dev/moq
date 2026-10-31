@@ -34,7 +34,7 @@ struct Ended {
 /// task sent it, including one ending the session from inside a single request.
 #[derive(Default)]
 pub(crate) struct Closing {
-	/// The handles closed it by dropping or draining, so received streams are not drained.
+	/// The handles closed it by dropping or draining: a clean close, whatever the protocol reports.
 	local: std::sync::atomic::AtomicBool,
 	/// The first close this side sent: its code, and the error behind it when the closer had one.
 	sent: std::sync::Mutex<Option<(u32, Option<Error>)>>,
@@ -755,7 +755,7 @@ impl Supervisor {
 		// before the protocol, so the estimate a consumer reads is at most one
 		// interval old.
 		let Some(estimate) = &self.estimate else { return };
-		if estimate.poll_used(waiter).is_pending() {
+		if estimate.poll_wanted_changed(waiter, false).is_pending() {
 			return;
 		}
 		let now = self.runtime.now();
@@ -776,8 +776,8 @@ impl Supervisor {
 				SamplerMode::Idle => {
 					// Demand is a bandwidth consumer appearing or a stats read.
 					let mut demanded = match &self.send_bandwidth {
-						Some(producer) => match producer.poll_used(waiter) {
-							Poll::Ready(Ok(())) => true,
+						Some(producer) => match producer.poll_wanted_changed(waiter, false) {
+							Poll::Ready(Ok(_)) => true,
 							Poll::Ready(Err(_)) => {
 								self.send_bandwidth = None;
 								false
@@ -803,8 +803,11 @@ impl Supervisor {
 						return;
 					}
 					// The interval elapsed: pause unless someone still cares.
-					let used = self.send_bandwidth.as_ref().is_some_and(bandwidth::Producer::is_used);
-					if !used && !self.stats.read().demanded {
+					let wanted = self
+						.send_bandwidth
+						.as_ref()
+						.is_some_and(|producer| producer.demand().wanted());
+					if !wanted && !self.stats.read().demanded {
 						self.mode = SamplerMode::Idle;
 						continue;
 					}

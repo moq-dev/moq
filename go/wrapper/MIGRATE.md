@@ -280,7 +280,7 @@ Set `Timestamp` on every write to a timed track.
 
 ### Subscriber staleness is `MaxDelay`
 
-`Subscription.MaxAgeUs` is `MaxDelay`, a `time.Duration`, and `audio.DecoderOutput` / `video.DecoderOutput` take `MaxDelay *time.Duration`.
+`Subscription.MaxAgeUs` is `MaxDelay`, a `*time.Duration` whose nil sets no subscriber limit, so start from `moq.DefaultSubscription()` for the old zero default. `audio.DecoderOutput` / `video.DecoderOutput` take `MaxDelay *time.Duration`.
 `TrackInfo.MaxAge` keeps its name: it is the publisher's retention.
 
 ### Error payloads are named `Reason`
