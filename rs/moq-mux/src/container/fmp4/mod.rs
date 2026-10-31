@@ -316,6 +316,15 @@ pub enum Error {
 	/// A track's edit list does more than delay the track and start its media at one time.
 	#[error("unsupported edit list: {0}")]
 	UnsupportedEditList(&'static str),
+
+	/// A fragment written to a regular MP4 can't be indexed in its final `moov`.
+	#[error("track {track} can't be indexed: {reason}")]
+	Unindexable {
+		/// The fragment's track id.
+		track: u32,
+		/// What the sample tables can't express.
+		reason: &'static str,
+	},
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -1119,9 +1128,9 @@ pub(crate) fn encode_init(
 	// dOps alone describes decoder priming; ISO BMFF needs an edit to express that
 	// presentation shift. Rebuild it after the output track timescales are settled.
 	for trak in &mut traks {
-		if let [mp4_atom::Codec::Opus(opus)] = trak.mdia.minf.stbl.stsd.codecs.as_slice() {
-			let skip = u64::from(opus.dops.pre_skip) * u64::from(trak.mdia.mdhd.timescale) / 48_000;
-			trak.edts = (skip != 0).then(|| mp4_atom::Edts {
+		let skip = priming(trak);
+		if skip != 0 {
+			trak.edts = Some(mp4_atom::Edts {
 				elst: Some(mp4_atom::Elst {
 					entries: vec![mp4_atom::ElstEntry {
 						// A live edit's duration is implicit in the fragments that follow.
@@ -1160,6 +1169,14 @@ pub(crate) fn encode_init(
 	ftyp.encode(&mut buf)?;
 	moov.encode(&mut buf)?;
 	Ok(Bytes::from(buf))
+}
+
+/// An Opus track's pre-skip in its media timescale, or zero for any other track.
+pub(crate) fn priming(trak: &mp4_atom::Trak) -> u64 {
+	match trak.mdia.minf.stbl.stsd.codecs.as_slice() {
+		[mp4_atom::Codec::Opus(opus)] => u64::from(opus.dops.pre_skip) * u64::from(trak.mdia.mdhd.timescale) / 48_000,
+		_ => 0,
+	}
 }
 
 /// Narrow a media timescale to the 32-bit `mdhd` field, rejecting what would truncate.

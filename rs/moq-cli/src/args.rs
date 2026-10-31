@@ -31,6 +31,7 @@
 //!   the separator stays unconditional rather than context-sensitive.
 
 use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::publish::PublishFormat;
@@ -383,12 +384,10 @@ impl Invocation {
 				);
 			}
 			if export.echo.is_some() {
-				if export.sink.stdout().is_none()
+				if export.sink.container().is_none()
 					&& let Some(sink) = export.sink.ignores_selection()
 				{
-					anyhow::bail!(
-						"--echo reports what a stdout container export reads, and `export {sink}` is not one"
-					);
+					anyhow::bail!("--echo reports what a container export reads, and `export {sink}` is not one");
 				}
 				let msf = match export.catalog_format {
 					Some(format) => matches!(format, CatalogFormatArg::Msf),
@@ -402,7 +401,15 @@ impl Invocation {
 					"--echo follows the hang catalog's `echo` section, which the MSF catalog does not carry"
 				);
 			}
-			if let Some(stdout) = export.sink.stdout() {
+			if let Some(output) = export.sink.container().and_then(|container| container.output) {
+				// Refused before anything dials, rather than once the broadcast arrives.
+				anyhow::ensure!(
+					!output.exists(),
+					"--output {} already exists; pick a new file",
+					output.display()
+				);
+			}
+			if let Some(stdout) = export.sink.container() {
 				anyhow::ensure!(
 					stdout.follow.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
 					"--linger is gone, and following a broadcast's return needs an output that can mark the restart: only `export ts --follow` can"
@@ -1065,6 +1072,7 @@ impl Export {
 		}
 		match &self.sink {
 			ExportSink::Fmp4(args) => found.extend(args.container.deprecated()),
+			ExportSink::Mp4(args) => found.extend(args.fragmented.container.deprecated()),
 			ExportSink::Mkv(args) => found.extend(args.container.deprecated()),
 			ExportSink::Ts(args) => found.extend(args.deprecated()),
 			ExportSink::Flv(args) => found.extend(args.deprecated()),
@@ -1078,11 +1086,13 @@ impl Export {
 }
 
 /// The single sink draining the Origin on an export. The container formats write
-/// to stdout; the gateways bridge another protocol.
+/// to stdout, except `mp4`, which records to a file; the gateways bridge another protocol.
 #[derive(usage_rs::Subcommands, Clone)]
 pub enum ExportSink {
 	/// Fragmented MP4 / CMAF to stdout.
 	Fmp4(Fragmented),
+	/// Regular MP4 recorded to a file, which plays as fragmented MP4 if the recording is cut short.
+	Mp4(Recorded),
 	/// Matroska / WebM to stdout.
 	Mkv(BufferedFragmented),
 	/// MPEG-TS to stdout.
@@ -1113,7 +1123,7 @@ impl ExportSink {
 	/// The sink's name when it doesn't apply selection, so the selection flags would be ignored.
 	fn ignores_selection(&self) -> Option<&'static str> {
 		Some(match self {
-			Self::Fmp4(_) | Self::Mkv(_) | Self::Flv(_) | Self::H264(_) | Self::H265(_) => return None,
+			Self::Fmp4(_) | Self::Mp4(_) | Self::Mkv(_) | Self::Flv(_) | Self::H264(_) | Self::H265(_) => return None,
 			Self::Ts(_) => "ts",
 			Self::Hls(_) => "hls",
 			Self::Rtmp(_) => "rtmp",
@@ -1134,15 +1144,15 @@ impl ExportSink {
 		}
 	}
 
-	/// Whether this sink writes to stdout (the container formats and the report sinks).
+	/// Whether this sink writes to stdout (the container formats but `mp4`, and the report sinks).
 	pub fn is_stdout(&self) -> bool {
-		self.stdout().is_some() || self.report().is_some()
+		self.container().is_some_and(|container| container.output.is_none()) || self.report().is_some()
 	}
 
-	/// The stdout container format and its options, when this sink writes to
-	/// stdout. The fragment cap is fmp4/mkv-only and the mux rate is TS-only.
-	pub fn stdout(&self) -> Option<Stdout> {
-		let container = |format, container: &Container| Stdout {
+	/// The container format and its options, when this sink is one. The fragment cap is
+	/// fmp4/mp4/mkv-only and the mux rate is TS-only.
+	pub fn container(&self) -> Option<ContainerSink> {
+		let container = |format, container: &Container| ContainerSink {
 			format,
 			max_delay: container.max_delay.into(),
 			follow: container.linger.into(),
@@ -1150,8 +1160,9 @@ impl ExportSink {
 			fragment_duration: None,
 			mux_rate: None,
 			passthrough: false,
+			output: None,
 		};
-		let buffered = |format, args: &Buffered| Stdout {
+		let buffered = |format, args: &Buffered| ContainerSink {
 			format,
 			max_delay: args.delay.into(),
 			follow: args.linger.into(),
@@ -1159,17 +1170,23 @@ impl ExportSink {
 			fragment_duration: None,
 			mux_rate: None,
 			passthrough: false,
+			output: None,
 		};
 		Some(match self {
-			Self::Fmp4(args) => Stdout {
+			Self::Fmp4(args) => ContainerSink {
 				fragment_duration: args.fragment_duration.map(Into::into),
 				..container(SubscribeFormat::Fmp4, &args.container)
 			},
-			Self::Mkv(args) => Stdout {
+			Self::Mp4(args) => ContainerSink {
+				fragment_duration: args.fragmented.fragment_duration.map(Into::into),
+				output: Some(args.output.clone()),
+				..container(SubscribeFormat::Mp4, &args.fragmented.container)
+			},
+			Self::Mkv(args) => ContainerSink {
 				fragment_duration: args.fragment_duration.map(Into::into),
 				..buffered(SubscribeFormat::Mkv, &args.container)
 			},
-			Self::Ts(args) => Stdout {
+			Self::Ts(args) => ContainerSink {
 				format: SubscribeFormat::Ts,
 				max_delay: args.delay.into(),
 				follow: args.follow.into(),
@@ -1177,6 +1194,7 @@ impl ExportSink {
 				fragment_duration: None,
 				mux_rate: args.mux_rate,
 				passthrough: args.passthrough,
+				output: None,
 			},
 			Self::Flv(args) => buffered(SubscribeFormat::Flv, args),
 			Self::H264(args) => container(SubscribeFormat::H264, args),
@@ -1186,8 +1204,8 @@ impl ExportSink {
 	}
 }
 
-/// A stdout sink's format and the options that apply to it.
-pub struct Stdout {
+/// A container sink's format and the options that apply to it.
+pub struct ContainerSink {
 	pub format: SubscribeFormat,
 	/// The staleness budget, also the FLV/MKV release delay and how far behind the source `ts`
 	/// runs (`--delay`).
@@ -1201,6 +1219,8 @@ pub struct Stdout {
 	pub mux_rate: Option<u64>,
 	/// Write the `m2ts` passthrough track back out (`ts` only).
 	pub passthrough: bool,
+	/// The file a recording writes (`mp4` only); the rest write to stdout.
+	pub output: Option<PathBuf>,
 }
 
 /// Staleness options for stdout sinks without a fixed release delay.
@@ -1350,6 +1370,20 @@ impl Transport {
 	}
 }
 
+/// A regular MP4 recording.
+#[derive(usage_rs::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct Recorded {
+	#[usage(flatten)]
+	pub fragmented: Fragmented,
+
+	/// The file to record to, which must not exist yet. It plays as fragmented MP4 while
+	/// recording; the broadcast's end or the first SIGINT/SIGTERM finishes it as a regular
+	/// MP4, and a second signal exits at once, leaving it fragmented.
+	#[usage(long, value_name = "FILE", value_hint = usage_rs::ValueHint::FilePath)]
+	pub output: PathBuf,
+}
+
 /// The fMP4 stdout container with a fragment cap.
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
@@ -1424,7 +1458,7 @@ mod tests {
 			let Command::Export(export) = &cli.stages[0] else {
 				panic!("not an export");
 			};
-			export.sink.stdout().unwrap().max_delay
+			export.sink.container().unwrap().max_delay
 		};
 		assert_eq!(stdout(&[]), Duration::from_secs(1));
 		assert_eq!(stdout(&["--delay", "2s"]), Duration::from_secs(2));
@@ -1607,7 +1641,7 @@ mod tests {
 		let Command::Export(export) = &cli.stages[0] else {
 			panic!("not an export");
 		};
-		let stdout = export.sink.stdout().unwrap();
+		let stdout = export.sink.container().unwrap();
 		assert!(stdout.passthrough);
 		assert_eq!(stdout.max_delay, Duration::from_secs(2));
 		for flags in [&["--stitch"][..], &["--follow", "10s"], &["--mux-rate", "20000000"]] {
@@ -2448,7 +2482,7 @@ mod tests {
 			let Command::Export(export) = &cli.stages[0] else {
 				panic!("expected export")
 			};
-			export.sink.stdout().unwrap().max_delay
+			export.sink.container().unwrap().max_delay
 		};
 
 		for format in ["fmp4", "h264", "h265"] {

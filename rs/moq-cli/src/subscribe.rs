@@ -1,15 +1,19 @@
 use std::time::Duration;
 
+use anyhow::Context;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use moq_mux::select;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 
-/// Container format written to stdout on the export (sink) side.
+/// Container format written on the export (sink) side.
 #[derive(Clone, Copy)]
 pub enum SubscribeFormat {
 	/// Fragmented MP4 (CMAF).
 	Fmp4,
+	/// Regular MP4, recorded to a file.
+	Mp4,
 	/// Matroska / WebM.
 	Mkv,
 	/// H.264 Annex-B elementary stream (no container).
@@ -166,10 +170,10 @@ impl SelectArgs {
 	}
 }
 
-/// The resolved stdout export settings (built from the `export` flags + format).
+/// The resolved container export settings (built from the `export` flags + format).
 #[derive(Clone)]
 pub struct SubscribeArgs {
-	/// The format to write to stdout.
+	/// The format to write.
 	pub format: SubscribeFormat,
 
 	/// How far playback may drift from the live edge before skipping groups. TS also runs
@@ -192,6 +196,9 @@ pub struct SubscribeArgs {
 
 	/// Write the `m2ts` passthrough track back out instead of muxing the media (TS only).
 	pub passthrough: bool,
+
+	/// The file to record to (MP4 only); the other formats write to stdout.
+	pub output: Option<std::path::PathBuf>,
 
 	/// Catalog format for track discovery (default: detect from the broadcast suffix).
 	pub catalog: Option<CatalogFormatArg>,
@@ -216,7 +223,11 @@ impl SubscribeArgs {
 		match self.format {
 			SubscribeFormat::H264 => Some(VideoCodecKind::H264),
 			SubscribeFormat::H265 => Some(VideoCodecKind::H265),
-			SubscribeFormat::Fmp4 | SubscribeFormat::Mkv | SubscribeFormat::Ts | SubscribeFormat::Flv => None,
+			SubscribeFormat::Fmp4
+			| SubscribeFormat::Mp4
+			| SubscribeFormat::Mkv
+			| SubscribeFormat::Ts
+			| SubscribeFormat::Flv => None,
 		}
 	}
 
@@ -242,13 +253,15 @@ impl SubscribeArgs {
 	}
 }
 
-/// Exports one broadcast from the Origin to stdout in the requested format.
+/// Exports one broadcast from the Origin in the requested format, to stdout or a recording.
 pub struct Subscribe {
 	source: moq_mux::Source,
 	catalog: CatalogFormat,
 	args: SubscribeArgs,
 	/// Where a TS export sets its MPEG-TS sections, when it reports them.
 	sections: Option<crate::report::Sections>,
+	/// Cancelled to make a recording finish its file and return.
+	finish: CancellationToken,
 }
 
 /// Log how a TS export's release clock keeps up with the source.
@@ -274,7 +287,14 @@ impl Subscribe {
 			catalog,
 			args,
 			sections: None,
+			finish: CancellationToken::new(),
 		}
+	}
+
+	/// Finish a recording's file and return once `finish` is cancelled.
+	pub fn with_finish(mut self, finish: CancellationToken) -> Self {
+		self.finish = finish;
+		self
 	}
 
 	/// The resolved broadcast, whose [`stats`](moq_mux::Source::stats) count what the export reads.
@@ -295,10 +315,11 @@ impl Subscribe {
 		Ok(consumer.select(self.args.selection()?))
 	}
 
-	/// Write the broadcast to stdout until it ends.
+	/// Write the broadcast until it ends.
 	pub async fn run(self) -> anyhow::Result<()> {
 		match self.args.format {
 			SubscribeFormat::Fmp4 => self.run_fmp4().await,
+			SubscribeFormat::Mp4 => self.run_mp4().await,
 			SubscribeFormat::Mkv => self.run_mkv().await,
 			SubscribeFormat::H264 => self.run_h264().await,
 			SubscribeFormat::H265 => self.run_h265().await,
@@ -323,6 +344,53 @@ impl Subscribe {
 		}
 
 		Ok(())
+	}
+
+	/// Record a regular MP4 until the broadcast ends or `finish` is cancelled, then finish it.
+	async fn run_mp4(self) -> anyhow::Result<()> {
+		let path = self.args.output.clone().context("an mp4 export records to --output")?;
+		let finish = self.finish.clone();
+		let stream = tokio::select! {
+			stream = self.stream() => stream?,
+			() = finish.cancelled() => return Ok(()),
+		};
+		let mut mp4 = moq_mux::container::mp4::Export::new(self.source, stream)
+			.with_max_delay(self.args.max_delay)
+			.with_fragment_duration(self.args.fragment_duration);
+		let mut file = tokio::fs::File::create_new(&path)
+			.await
+			.with_context(|| format!("failed to create {}", path.display()))?;
+
+		// A failed export still finishes what it recorded; a failed write leaves the file as is.
+		let ended = loop {
+			let next = tokio::select! {
+				next = mp4.next() => next,
+				() = finish.cancelled() => break Ok(()),
+			};
+			match next {
+				Ok(Some(data)) => file.write_all(&data).await?,
+				Ok(None) => break Ok(()),
+				Err(err) => break Err(err),
+			}
+		};
+
+		match mp4.finish()? {
+			Some(trailer) => {
+				file.write_all(&trailer.moov).await?;
+				// The header points readers past the media at the moov, so the moov must be on disk first.
+				file.sync_data().await?;
+				file.seek(std::io::SeekFrom::Start(trailer.mdat_offset)).await?;
+				file.write_all(&trailer.mdat).await?;
+				file.sync_all().await?;
+				tracing::info!(path = %path.display(), "recording finished");
+			}
+			// Nothing reached the file, so there is no recording to keep.
+			None => {
+				drop(file);
+				tokio::fs::remove_file(&path).await?;
+			}
+		}
+		Ok(ended?)
 	}
 
 	async fn run_mkv(self) -> anyhow::Result<()> {
