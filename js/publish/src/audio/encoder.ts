@@ -14,7 +14,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { errors, watched } from "../internal";
+import { errors, hlsHint, watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
@@ -388,12 +388,9 @@ export class Encoder {
 		const rendition = broadcast.audio(this.name);
 		errors.set(rendition, failure);
 		effect.cleanup(() => rendition.close());
-		// Audio groups are far shorter than a segment, so any hint declares the grid's own duration up
-		// front; a group per frame (zero) still hints a millisecond.
-		const hint = (duration: Milli) =>
-			Micro.fromMilli(Number.isFinite(duration) && duration > 0 ? duration : Milli(1));
-		rendition.hlsHint.set(hint(this.groupDuration.peek()));
-		effect.subscribe(this.groupDuration, (duration) => rendition.hlsHint.set(hint(duration)));
+		// Audio groups are far shorter than a segment, so any hint declares the grid's own duration up front.
+		rendition.hlsHint.set(hlsHint(this.groupDuration.peek()));
+		effect.subscribe(this.groupDuration, (duration) => rendition.hlsHint.set(hlsHint(duration)));
 
 		// Publish the resolved config; undefined (no capture) drops it from the catalog.
 		effect.proxy(rendition.config, this.out.catalog);

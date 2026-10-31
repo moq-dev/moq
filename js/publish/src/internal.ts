@@ -1,3 +1,4 @@
+import { Micro, Milli } from "@moq/clock";
 import type * as Moq from "@moq/net";
 import type { Effect, Getter } from "@moq/signals";
 
@@ -10,4 +11,13 @@ export const errors = new WeakMap<object, Getter<Error | undefined>>();
  */
 export function watched(track: Moq.Track.Producer, effect: Effect): Getter<boolean | undefined> {
 	return effect.computed((demand) => demand.get(track.demand().wanted) !== undefined);
+}
+
+/**
+ * @internal A rendition's HLS duration hint for groups of `duration`. A zero or unbounded group still
+ * hints a millisecond, which declares the grid's own duration up front: without a hint, an on-demand
+ * rendition never advertises the records whose subscription would start it encoding.
+ */
+export function hlsHint(duration: Milli): Micro {
+	return Micro.fromMilli(Number.isFinite(duration) && duration > 0 ? duration : Milli(1));
 }

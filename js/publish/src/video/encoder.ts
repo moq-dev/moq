@@ -15,7 +15,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { errors, watched } from "../internal";
+import { errors, hlsHint, watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
@@ -343,8 +343,7 @@ export class Encoder {
 		effect.cleanup(() => rendition.close());
 
 		// The longest GOP fixes each new track's HLS segment duration, as moq-video's encoders hint theirs.
-		const hint = (config: Config | undefined) =>
-			Micro.fromMilli(config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL);
+		const hint = (config: Config | undefined) => hlsHint(config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL);
 		rendition.hlsHint.set(hint(this.config.peek()));
 		effect.subscribe(this.config, (config) => rendition.hlsHint.set(hint(config)));
 

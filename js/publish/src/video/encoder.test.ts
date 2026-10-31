@@ -1174,6 +1174,46 @@ test.each([false, true])(
 	},
 );
 
+// An HLS export subscribes only to the records the catalog advertises, so an on-demand rendition has
+// to advertise them before anything is encoded, even with every frame a keyframe.
+test("an on-demand all-keyframe rendition advertises its records, whose subscriber starts it", async () => {
+	using recording = await installRecording();
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("keyframes.hang"),
+		onDemand: true,
+	});
+	const encoder = new Encoder("video", {
+		enabled: true,
+		broadcast,
+		capture: recording.capture as never,
+		config: { keyframeInterval: Milli(0) },
+	});
+	const subscribers: Moq.Track.Subscriber[] = [];
+	try {
+		await settle();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		expect(encoder.out.active.peek()).toBe(false);
+
+		const catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
+		subscribers.push(catalogSubscriber);
+		const catalog = await new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber }).latest();
+		expect(catalog?.value.video?.renditions.video?.hls).toEqual({
+			track: "video.hls",
+			duration: Catalog.u53(4000),
+		});
+
+		subscribers.push(net.track("video.hls").subscribe());
+		await settle();
+		expect(encoder.out.active.peek()).toBe(true);
+	} finally {
+		for (const subscriber of subscribers) subscriber.close();
+		encoder.close();
+		broadcast.close();
+	}
+});
+
 test("an unwatched rendition reserves nothing and encodes at its configured bitrate", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("unwatched.hang") });
