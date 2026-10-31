@@ -90,7 +90,7 @@ typealias Announce = uniffi.moq.MoqAnnounce
 
 /**
  * What an [AnnounceConsumer] yields: [AnnounceEventStart], [AnnounceEventUpdate],
- * [AnnounceEventEnd], or [AnnounceEventRestart].
+ * [AnnounceEventEnd], [AnnounceEventRestart], or [AnnounceEventTakeover].
  */
 typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
 
@@ -110,7 +110,11 @@ typealias AnnounceEventEnd = uniffi.moq.MoqAnnounceEvent.End
  * afresh.
  */
 typealias AnnounceEventRestart = uniffi.moq.MoqAnnounceEvent.Restart
-
+/**
+ * A route now covers the prefix and continues what the route at `predecessor` served beneath
+ * it: keep what was resolved through that one.
+ */
+typealias AnnounceEventTakeover = uniffi.moq.MoqAnnounceEvent.Takeover
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
@@ -199,7 +203,8 @@ typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 
 /** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
 typealias Order = uniffi.moq.MoqOrder
-
+/** A location within a track: a group sequence and a frame index in it. */
+typealias Position = uniffi.moq.MoqPosition
 /** Options for fetching one past group by sequence. */
 typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 
