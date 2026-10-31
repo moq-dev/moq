@@ -9924,6 +9924,93 @@ mod serve_tests {
 		}
 	}
 
+	/// A cold copy's frame zero retains the upstream Object ID, so a Next Object floor
+	/// compares wire IDs rather than discarding that many locally received frames.
+	#[moq_clock::test]
+	async fn a_cold_reported_copy_serves_its_first_wire_object() {
+		for version in [Version::Draft18, Version::Draft22] {
+			for streamed in [false, true] {
+				let h = serve(version);
+				h.track.report_object(3, 4);
+				settle().await;
+				let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+					.await
+					.unwrap();
+				let mut serving = std::pin::pin!(
+					h.publisher
+						.clone()
+						.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+				);
+				std::future::poll_fn(|cx| {
+					assert!(std::future::Future::poll(serving.as_mut(), cx).is_pending());
+					if !h.log.trail().is_empty() && Wire::read(&h.log, version).sent(ietf::SubscribeOk::ID).is_some() {
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					}
+				})
+				.await;
+				let group = h.track.create_group(group::Info { sequence: 3 }).unwrap();
+				group
+					.set_wire(group::Wire {
+						sparse: true,
+						first_object: false,
+						first_id: 5,
+						extensions: true,
+						has_end: true,
+						fetchable: true,
+						last: None,
+					})
+					.unwrap();
+				group.mark_gap(5, None).unwrap();
+				let payload = b"first locally received";
+				let mut frame = group
+					.create_object(frame::Header {
+						info: frame::Info {
+							size: payload.len() as u64,
+							timestamp: Some(timestamp()),
+						},
+						fields: Some(std::sync::Arc::new(crate::model::object::Fields {
+							id: 5,
+							properties: Default::default(),
+						})),
+						inflated: None,
+					})
+					.unwrap();
+				frame.write(payload.as_slice()).unwrap();
+				if streamed {
+					assert!(futures::poll!(serving.as_mut()).is_pending());
+				}
+				frame.finish().unwrap().finish().unwrap();
+				h.track.finish().unwrap();
+				serving.await.unwrap();
+				assert_eq!(occurrences(&h.log, payload), 1, "{version} streamed={streamed}");
+				assert!(h.log.resets().is_empty(), "{version} streamed={streamed}");
+
+				// The first object's delta is its absolute Object ID.
+				let ids: Vec<u64> = data_streams(&h.log)
+					.into_values()
+					.filter_map(|sent| {
+						let bytes: Vec<u8> = sent
+							.into_iter()
+							.filter_map(|sent| match sent {
+								Sent::Write(bytes) => Some(bytes),
+								_ => None,
+							})
+							.flatten()
+							.collect();
+						let mut buf = bytes::Bytes::from(bytes);
+						let header =
+							crate::coding::decode_buf(&mut buf, version, |r, v| ietf::GroupHeader::decode(r, v))
+								.ok()?;
+						(header.group_id == 3).then(|| crate::coding::decode_varint(&mut &buf[..], version).unwrap())
+					})
+					.collect();
+				assert_eq!(ids, [5], "{version} streamed={streamed}");
+			}
+		}
+	}
+
 	/// FETCH returns the saved multi-object prefix, including empty objects, and excludes
 	/// later objects that belong to the subscription. Decode the wire fields independently.
 	#[moq_clock::test]
