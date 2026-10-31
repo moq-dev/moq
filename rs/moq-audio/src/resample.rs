@@ -539,35 +539,38 @@ mod tests {
 	#[test]
 	#[ignore = "run with just rs bench-playback"]
 	fn benchmark_resampler() {
-		for (input_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100)] {
+		for (input_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100), (96_000, 48_000)] {
 			for channels in [1, 2, 6] {
-				for packet in [32, 960, 4096] {
-					let frames = input_rate as usize;
-					let input = vec![0.25; frames * channels as usize];
-					let mut resampler =
-						Resampler::new(input_rate, output_rate, channels, input_rate as usize / 50).unwrap();
-					let mut elapsed = std::time::Duration::ZERO;
-					for _ in 0..10 {
-						let start = moq_clock::now();
-						let mut count = 0;
-						for (index, samples) in input.chunks(packet * channels as usize).enumerate() {
-							let at = at((index * packet) as u64, input_rate as u64);
-							let held = if resampler.pending_frames() == 0 {
-								at
-							} else {
-								resampler.held_at().unwrap()
-							};
-							std::hint::black_box(resampler.output_at(held).unwrap());
-							count += std::hint::black_box(resampler.process(samples, at).unwrap()).len();
+				let mut chunks = vec![input_rate as usize / 50, (input_rate as usize / 50).clamp(1, 960)];
+				chunks.dedup();
+				for chunk in chunks {
+					for packet in [32, 960, 4096] {
+						let frames = input_rate as usize;
+						let input = vec![0.25; frames * channels as usize];
+						let mut resampler = Resampler::new(input_rate, output_rate, channels, chunk).unwrap();
+						let mut elapsed = std::time::Duration::ZERO;
+						for _ in 0..10 {
+							let start = moq_clock::now();
+							let mut count = 0;
+							for (index, samples) in input.chunks(packet * channels as usize).enumerate() {
+								let at = at((index * packet) as u64, input_rate as u64);
+								let held = if resampler.pending_frames() == 0 {
+									at
+								} else {
+									resampler.held_at().unwrap()
+								};
+								std::hint::black_box(resampler.output_at(held).unwrap());
+								count += std::hint::black_box(resampler.process(samples, at).unwrap()).len();
+							}
+							count += std::hint::black_box(resampler.drain().unwrap()).len();
+							elapsed += start.elapsed();
+							assert_eq!(count, output_rate as usize * channels as usize);
 						}
-						count += std::hint::black_box(resampler.drain().unwrap()).len();
-						elapsed += start.elapsed();
-						assert_eq!(count, output_rate as usize * channels as usize);
+						println!(
+							"{input_rate}->{output_rate} channels={channels} chunk={chunk} packet={packet}: {:.1} ns/input-frame",
+							elapsed.as_nanos() as f64 / (10 * frames) as f64
+						);
 					}
-					println!(
-						"{input_rate}->{output_rate} channels={channels} packet={packet}: {:.1} ns/input-frame",
-						elapsed.as_nanos() as f64 / (10 * frames) as f64
-					);
 				}
 			}
 		}

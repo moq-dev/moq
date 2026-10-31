@@ -12,13 +12,13 @@ archive before the cut.
 
 Decided 2026-10-25 (maintainer): the hand-written crate ships at this cut and
 the [generated C line](/quest/m2/c/README.md) moves after it, waiting on the
-switch to rust2's UniFFI fork. The generated C is not built in CI today and
-needs a generator fix first, so it must not block the release. C users break
+switch to rust2's UniFFI fork. The generated package (`c/moq`) builds in CI,
+but it publishes only after the cut. C users break
 twice (0.6 to 0.7, then to the generated 0.8); that is the accepted cost.
 
 - moq-c is not frozen: it takes the same breaks as moq-ffi and the other
   bindings. Every m1 quest or PR that changes the binding API changes
-  `rs/moq-c` in the same PR, with its `MIGRATE.md` entry and `doc/lib/c`
+  `rs/moq-c` in the same PR, with its Impact migration note and `doc/lib/c`
   update; none waits on the generated package.
 - Before the cut, diff the moq-ffi exports against `moq.h` and add any m1
   binding feature still missing, so parity is checked rather than assumed.
@@ -29,4 +29,5 @@ Public API: moq-c gains each m1 binding feature. Wire: none.
 
 ## Required
 
-- [moq-c decode start](/quest/m1/c/decode-start.md) - a moq-c decoder can read a finished track from its start
+- [API gaps](/quest/m1/c/api-gaps.md) - one malformed-epoch error code, an audio enabled query, and a relay hops test
+- [Every consumer cancels while pending](/quest/m1/c/consumer-cancel.md) - catalog, raw, datagram, and media consumers end cleanly on cancel before their subscription is accepted

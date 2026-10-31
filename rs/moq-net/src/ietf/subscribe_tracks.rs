@@ -19,9 +19,9 @@ use super::token::RequestToken;
 ///
 /// Its subscription parameters are the defaults of each PUBLISH it produces.
 #[derive(Clone, Debug)]
-pub struct SubscribeTracks<'a> {
+pub struct SubscribeTracks {
 	pub request_id: RequestId,
-	pub prefix: Path<'a>,
+	pub prefix: Path,
 	/// FORWARD: absent means 1, which asks each PUBLISH to push its objects at once.
 	pub forward: bool,
 	/// The default subscriber priority of each PUBLISH subscription.
@@ -44,37 +44,36 @@ pub struct SubscribeTracks<'a> {
 	pub authorization_token: Option<RequestToken>,
 }
 
-impl Message for SubscribeTracks<'_> {
+impl<'a> Message<'a> for SubscribeTracks {
 	const ID: u64 = 0x51;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		if !has_subscribe_tracks(version) {
-			return Err(EncodeError::Version);
-		}
 		self.request_id.encode(w, version)?;
 		encode_namespace(w, &self.prefix)?;
 		// Absent means 1, so only a paused listing writes it.
-		let include_properties = (!self.properties_wanted && Filter::is_draft22(version)).then_some(false);
-		// Draft-18 allows only AUTHORIZATION_TOKEN and FORWARD here. Draft-22 section 9.18
-		// lists GROUP_ORDER but no longer SUBSCRIBER_PRIORITY, LOCATION_FILTER,
-		// FILL_PARAMETERS, or NEW_GROUP_REQUEST, which a resuming REQUEST_UPDATE carries.
+		let include_properties = (!self.properties_wanted && Filter::is_draft20(version)).then_some(false);
+		// Draft-18 allows only AUTHORIZATION_TOKEN and FORWARD here. Draft-20 allows any
+		// subscription parameter (section 10.20.1). Draft-22 section 9.18 lists GROUP_ORDER
+		// but no longer SUBSCRIBER_PRIORITY, LOCATION_FILTER, FILL_PARAMETERS, or
+		// NEW_GROUP_REQUEST, which a resuming REQUEST_UPDATE carries.
 		let defaults = version != Version::Draft18;
+		let subscription = version == Version::Draft20;
 		encode_params!(w, version,
 			0x03 => self.authorization_token.clone(),
 			0x10 => (!self.forward).then_some(false),
+			0x20 => self.subscriber_priority.filter(|_| subscription),
+			0x21 => self.filter.filter(|_| subscription),
 			0x22 => self.group_order.filter(|_| defaults),
+			0x32 => self.new_group.filter(|_| subscription),
 			0x35 => include_properties,
 		);
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		if !has_subscribe_tracks(version) {
-			return Err(DecodeError::Version);
-		}
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let prefix = decode_namespace(r)?;
-		// From draft-22 any parameter a SUBSCRIBE takes is legal here (section 3.6.2);
+		// From draft-20 any parameter a SUBSCRIBE takes is legal here (section 3.6.2 of draft-22);
 		// draft-18 allows only AUTHORIZATION_TOKEN and FORWARD. Those that only make sense
 		// on one subscription, such as RENDEZVOUS_TIMEOUT or a delivery timeout, are read
 		// and dropped.
@@ -90,14 +89,14 @@ impl Message for SubscribeTracks<'_> {
 			0x22 => group_order: Option<GroupOrder> where defaults,
 			// Each PUBLISH starts paused, where a fill opens nothing, even once resumed
 			// (draft-22 section 3.4.1), so FILL_PARAMETERS is read and dropped.
-			0x23 => _fill: Option<super::Fill> where Filter::is_draft22(version),
+			0x23 => _fill: Option<super::Fill> where Filter::is_draft20(version),
 			0x25 => subgroup_filter: Vec<Opaque> where has_range_filters(version),
 			0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
 			0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
 			0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
 			0x29 => track_property_filter: Vec<Opaque> where has_range_filters(version),
 			0x32 => new_group: Option<u64> where defaults,
-			0x35 => include_properties: Option<bool> where Filter::is_draft22(version),
+			0x35 => include_properties: Option<bool> where Filter::is_draft20(version),
 		);
 		let range_filters = [
 			subgroup_filter,
@@ -126,74 +125,54 @@ impl Message for SubscribeTracks<'_> {
 	}
 }
 
-/// Whether `version` defines SUBSCRIBE_TRACKS: draft-18 split it off SUBSCRIBE_NAMESPACE.
-pub(crate) fn has_subscribe_tracks(version: Version) -> bool {
-	!matches!(
-		version,
-		Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
-	)
-}
-
 /// PUBLISH_SKIPPED (0x0F): a track under a SUBSCRIBE_TRACKS prefix the publisher will
 /// not PUBLISH, sent on that request's stream. The subscriber may SUBSCRIBE to it instead.
 ///
-/// Drafts 17 and 18 name it PUBLISH_BLOCKED and send it only when the publisher has run
+/// Draft-18 names it PUBLISH_BLOCKED and send it only when the publisher has run
 /// out of streams for PUBLISH; draft-22 renamed it and allows it for any reason.
 #[derive(Clone, Debug)]
 pub struct PublishSkipped<'a> {
 	/// The track's namespace below the request's prefix.
-	pub suffix: Path<'a>,
+	pub suffix: Path,
 	pub track_name: Cow<'a, str>,
 }
 
-impl Message for PublishSkipped<'_> {
+impl<'a> Message<'a> for PublishSkipped<'a> {
 	const ID: u64 = 0x0F;
 
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		if !has_publish_skipped(version) {
-			return Err(EncodeError::Version);
-		}
+	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 		encode_namespace(w, &self.suffix)?;
 		w.string(&self.track_name)?;
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		if !has_publish_skipped(version) {
-			return Err(DecodeError::Version);
-		}
+	fn decode_msg(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let suffix = decode_namespace(r)?;
-		let track_name = Cow::Owned(r.string()?);
+		let track_name = Cow::Borrowed(r.str()?);
 		Ok(Self { suffix, track_name })
 	}
-}
-
-/// Whether `version` defines [`PublishSkipped`], under either name. Draft-16 and older
-/// had no message 0x0F.
-fn has_publish_skipped(version: Version) -> bool {
-	!matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 
-	fn encode<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+	fn encode<'m, M: Message<'m>>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		buf
 	}
 
-	fn decode<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
-		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
+	fn decode<'m, M: Message<'m>>(bytes: &'m [u8], version: Version) -> Result<M, DecodeError> {
+		let mut buf = bytes;
+		crate::coding::decode_from(&mut buf, version, |r, v| M::decode_msg(r, v))
 	}
 
-	fn paused() -> SubscribeTracks<'static> {
+	fn paused() -> SubscribeTracks {
 		SubscribeTracks {
 			request_id: RequestId(4),
-			prefix: Path::new("room"),
+			prefix: Path::from_static("room"),
 			forward: false,
 			subscriber_priority: None,
 			group_order: None,
@@ -208,7 +187,7 @@ mod tests {
 
 	#[test]
 	fn a_paused_listing_round_trips() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let decoded: SubscribeTracks = decode(&encode(&paused(), version), version).unwrap();
 			assert_eq!(decoded.request_id, RequestId(4), "{version}");
 			assert_eq!(decoded.prefix.as_str(), "room", "{version}");
@@ -254,6 +233,25 @@ mod tests {
 		assert!(decode::<SubscribeTracks>(&bytes, Version::Draft18).is_err());
 	}
 
+	/// Draft-20 allows any subscription parameter on SUBSCRIBE_TRACKS, so the listing's
+	/// defaults are sent and read back.
+	#[test]
+	fn draft_20_carries_the_subscription_parameters() {
+		let listing = SubscribeTracks {
+			subscriber_priority: Some(7),
+			group_order: Some(GroupOrder::Ascending),
+			filter: Some(Filter::NextObject),
+			new_group: Some(0),
+			..paused()
+		};
+		let version = Version::Draft20;
+		let decoded: SubscribeTracks = decode(&encode(&listing, version), version).unwrap();
+		assert_eq!(decoded.subscriber_priority, Some(7));
+		assert_eq!(decoded.group_order, Some(GroupOrder::Ascending));
+		assert_eq!(decoded.filter, Some(Filter::NextObject));
+		assert_eq!(decoded.new_group, Some(0));
+	}
+
 	/// Draft-22 section 9.18 no longer lists SUBSCRIBER_PRIORITY, LOCATION_FILTER,
 	/// FILL_PARAMETERS, or NEW_GROUP_REQUEST, so none is sent there; GROUP_ORDER still is.
 	/// Section 3.6.2 still allows any subscription parameter, so one received is read.
@@ -283,24 +281,14 @@ mod tests {
 	}
 
 	#[test]
-	fn subscribe_tracks_starts_at_draft_18() {
-		let mut buf = Vec::new();
-		let version = Version::Draft17;
-		assert!(
-			paused()
-				.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
-				.is_err()
-		);
-	}
-
-	#[test]
 	fn publish_skipped_round_trips() {
-		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let msg = PublishSkipped {
-				suffix: Path::new("cam"),
+				suffix: Path::from_static("cam"),
 				track_name: "video".into(),
 			};
-			let decoded: PublishSkipped = decode(&encode(&msg, version), version).unwrap();
+			let wire = encode(&msg, version);
+			let decoded: PublishSkipped = decode(&wire, version).unwrap();
 			assert_eq!(decoded.suffix.as_str(), "cam", "{version}");
 			assert_eq!(decoded.track_name, "video", "{version}");
 		}

@@ -3,4 +3,4 @@
  *
  * @module
  */
-export { type Announce, Consumer, type Event } from "./announced.ts";
+export { type Announce, Consumer, type Event, type Options } from "./announced.ts";

@@ -1,12 +1,12 @@
 use crate::error::KeyError;
 use crate::{Algorithm, EllipticCurve, Jwk, Key, KeyMaterial, RsaPublicKey};
-use aws_lc_rs::encoding::AsBigEndian;
+use aws_lc_rs::encoding::{AsBigEndian, AsDer, Pkcs8V1Der};
 use aws_lc_rs::signature::KeyPair;
 use p256::elliptic_curve::array::typenum::Unsigned;
 use p256::elliptic_curve::point::PointCompression;
 use p256::elliptic_curve::sec1::{FromSec1Point, ModulusSize, ToSec1Point};
 use p256::elliptic_curve::{Curve, CurveArithmetic, SecretKey};
-use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+use pkcs1::der::Decode;
 
 /// Generate a key pair for the given algorithm, returning the private and public keys.
 pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result<Key> {
@@ -19,7 +19,7 @@ pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result
 		| Algorithm::RS512
 		| Algorithm::PS256
 		| Algorithm::PS384
-		| Algorithm::PS512 => generate_rsa_key(2048),
+		| Algorithm::PS512 => generate_rsa_key(),
 		Algorithm::ES256 => generate_ec_key::<p256::NistP256>(EllipticCurve::P256),
 		Algorithm::ES384 => generate_ec_key::<p384::NistP384>(EllipticCurve::P384),
 		Algorithm::EdDSA => generate_ed25519_key(),
@@ -36,50 +36,27 @@ fn generate_hmac_key<const SIZE: usize>() -> crate::Result<KeyMaterial> {
 	Ok(KeyMaterial::OCT { secret: key.to_vec() })
 }
 
-struct AwsRng;
-
-impl rsa::rand_core::RngCore for AwsRng {
-	fn next_u32(&mut self) -> u32 {
-		let mut buf = [0u8; 4];
-		self.fill_bytes(&mut buf);
-		u32::from_le_bytes(buf)
-	}
-
-	fn next_u64(&mut self) -> u64 {
-		let mut buf = [0u8; 8];
-		self.fill_bytes(&mut buf);
-		u64::from_le_bytes(buf)
-	}
-
-	fn fill_bytes(&mut self, dest: &mut [u8]) {
-		aws_lc_rs::rand::fill(dest).unwrap();
-	}
-
-	fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rsa::rand_core::Error> {
-		aws_lc_rs::rand::fill(dest).map_err(|_| rsa::rand_core::Error::new("aws-lc-rs failed"))
-	}
-}
-
-impl rsa::rand_core::CryptoRng for AwsRng {}
-
-fn generate_rsa_key(size: usize) -> crate::Result<KeyMaterial> {
-	let mut rng = AwsRng;
-	let mut key = rsa::RsaPrivateKey::new(&mut rng, size)?;
-	key.precompute()?;
+fn generate_rsa_key() -> crate::Result<KeyMaterial> {
+	let key = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048)?;
+	let document: Pkcs8V1Der<'_> = key.as_der()?;
+	let info =
+		pkcs8::PrivateKeyInfoRef::try_from(document.as_ref()).map_err(|e| crate::Error::Crypto(e.to_string()))?;
+	let key =
+		pkcs1::RsaPrivateKey::from_der(info.private_key.as_bytes()).map_err(|e| crate::Error::Crypto(e.to_string()))?;
 
 	Ok(KeyMaterial::RSA {
 		public: RsaPublicKey {
-			e: key.e().to_bytes_be(),
-			n: key.n().to_bytes_be(),
+			e: key.public_exponent.as_bytes().to_vec(),
+			n: key.modulus.as_bytes().to_vec(),
 		},
 		private: Some(crate::RsaPrivateKey {
-			d: key.d().to_bytes_be(),
-			p: key.primes()[0].to_bytes_be(),
-			q: key.primes()[1].to_bytes_be(),
-			dp: key.dp().ok_or(KeyError::MissingPrivateKey)?.to_bytes_be(),
-			dq: key.dq().ok_or(KeyError::MissingPrivateKey)?.to_bytes_be(),
-			qi: key.qinv().ok_or(KeyError::MissingPrivateKey)?.to_bytes_be().1,
-			oth: None, // TODO https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.2.7
+			d: key.private_exponent.as_bytes().to_vec(),
+			p: key.prime1.as_bytes().to_vec(),
+			q: key.prime2.as_bytes().to_vec(),
+			dp: key.exponent1.as_bytes().to_vec(),
+			dq: key.exponent2.as_bytes().to_vec(),
+			qi: key.coefficient.as_bytes().to_vec(),
+			oth: None,
 		}),
 	})
 }

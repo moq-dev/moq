@@ -42,8 +42,7 @@ Decided with the maintainer on 2026-10-17 (see the
   (Padding Stream 0x2), matching moq-transport's
   PADDING. Pad only on lite-07 and, on moq-transport, from draft-18 on. On
   lite-05 and lite-06 the peer resets every padding stream, so the estimate
-  can never rise, and drafts 14 to 17 close the session on an unknown stream
-  type (`UniType::classify`). Those sessions have no sender: refuse to pad
+  can never rise. Those sessions have no sender: refuse to pad
   and keep `Report`. Update `drafts/draft-lcurley-moq-probe.md` if the sender changes
   what it says, and run `just drafts check`.
 - A browser sender can't see whether it is app-limited; settle how to judge

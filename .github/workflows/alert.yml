@@ -1,7 +1,7 @@
 name: Alert
 
 # Posts cron, release, and deployment failures to the Discord #alerts channel.
-# PRs, merge queues, branch validation, and cache warming stay on GitHub.
+# PRs, the landing gate, branch validation, and cache warming stay on GitHub.
 #
 # Needs a DISCORD_WEBHOOK repo secret (Discord: Channel > Integrations >
 # Webhooks). Nothing else reads it.
@@ -13,6 +13,7 @@ on:
     # `just gh check` enforces coverage and the exclusions in alert.sh.
     workflows:
       - apt-repo
+      - CodSpeed
       - Docker
       - Interop
       - moq-c
@@ -22,6 +23,7 @@ on:
       - moq.sh
       - Nightly
       - release-brew
+      - Release C
       - Release Cpp
       - Release Dart
       - Release Dart FFI
@@ -64,10 +66,12 @@ jobs:
       github.event.workflow_run.conclusion == 'timed_out') &&
       github.event.workflow_run.event != 'pull_request' &&
       github.event.workflow_run.event != 'pull_request_target' &&
-      github.event.workflow_run.event != 'merge_group' &&
       (github.event.workflow_run.event == 'schedule' ||
       !contains(fromJSON('["Interop", "Nightly", "Smoke", "Smoke toolchain update", "TS", "Video"]'), github.event.workflow_run.name))
     runs-on: ubuntu-latest
+    # The webhook lives in the `publish` Environment, which only protected refs
+    # can deploy to; workflow_run runs on `main`.
+    environment: publish
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

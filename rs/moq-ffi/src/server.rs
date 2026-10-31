@@ -597,9 +597,10 @@ mod lifecycle_tests {
 					subscribe: vec!["**".into()],
 					expires: None,
 				};
-				for auth in [peer.auth(), session.auth()] {
-					while auth.grant().as_ref() != Some(&everything) {
-						pollster::block_on(auth.grant_changed()).unwrap();
+				for grants in [peer.grants(), session.grants()] {
+					let mut grant = grants.grant();
+					while grant.as_ref() != Some(&everything) {
+						grant = pollster::block_on(grants.changed()).unwrap();
 					}
 				}
 				peer.cancel(0);

@@ -4,21 +4,44 @@
 
 Every benchmark that regressed since the previous run is explained, fixed, or
 planned, and every hot or fan-out path without a benchmark gets one or a
-follow-up.
+follow-up. `main` ships no slower than `release`: every case where the cut
+this run gates would be slower is fixed or accepted with the feature it pays
+for.
 
 ## Plan
 
 Recurs once per major release (decided 2026-10-19). The PR that finishes
 this run also adds the next one with the same file name at the end of the next
-milestone's `Required` (m0 to m1, m1 to m2). The successor keeps the Goal
-and this paragraph; the rest of its Plan is rewritten with what this run
-learned: baselines, results, and what to check first. A successor placed in m2
+milestone's `Required` (m0 to m1, m1 to m2). The successor keeps the Goal,
+this paragraph, and the release baseline section; the rest of its Plan is
+rewritten with what this run learned: baselines, results, and what to check
+first. A successor placed in m2
 also lists the [release cut](/quest/m2/release/cut.md) under `Required`, so it
 waits for the release in flight to ship. Only `/quest-delete` ends the
 recurrence. Fixes land in the run's PR, one commit each, rather than as follow-ups.
 Only a change that needs a maintainer decision (public API, scope) or is
 independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
+
+### Release baseline
+
+The run's last step, once the rest of its milestone has merged, so `main` is
+what the cut ships. Pair it with the last cut, keeping the evidence outside
+the checkout, and record `/proc/loadavg` around each run:
+
+```bash
+BENCH_ARTIFACTS=<scratch> just bench origin/release
+bun bench/browser/micro.ts --bench frames --out <scratch>/frames.json base=<release> current=. aa=.
+```
+
+`<release>` is an export of `origin/release` with its own
+`bun install --frozen-lockfile`. Re-run every slower case in alternating
+rounds and count instructions for any that holds (see Method). A ratio
+against `release` shows where to look, not what to fix: `main` carries
+features `release` lacks, so a flat per-operation cost usually pays for one,
+while a cost that grows with `main`'s own sweep is accidental. Fix accidental
+cost in this run, and record each accepted cost in its results with the
+feature and PR it pays for. A browser row inside the `aa` spread is noise.
 
 ### What the m1 run (2026-10-22) fixed
 
@@ -89,6 +112,12 @@ did not move.
   catalog on every estimate to validate it before retaining it (62% of
   `catalog_estimate_fanout/hang/tracks_4/4`). Validating only the edited entry
   would weaken that guarantee for custom configs, so it needs a decision.
+- The TS export grows with track count (1.50x release at `container-export/ts/1x1`,
+  2.24x at `16x64`): `Schedule::index` and `Schedule::admit`
+  (`moq-mux/src/container/ts/schedule.rs`) scan and sort every queued unit
+  per PCR slot.
+- e2ee expands the AES-GCM key on every frame (`aead` in
+  `moq-e2ee/src/protect.rs`), about a quarter of `protect`; release does too.
 
 ### Method: attribute with instruction counts, not wall time
 
@@ -108,6 +137,9 @@ wall-clock bisect blames the wrong commit. Count instructions instead:
   `finish` for `track_stamp_groups`) and divide by the count.
 - `callgrind_annotate --inclusive=yes` diffs between two commits point at the
   step; workspace sources show as `${workspace}`, so read them by name.
+- A wall-time hold at equal instructions may be page faults: compare
+  `/usr/bin/time -f %R`, then pin glibc with `GLIBC_TUNABLES` (see
+  [the m1 release run](/quest/m1/release-perf/README.md)) before blaming code.
 - A bench that is not CPU-bound is not attributable this way:
   `relay_auth_refresh` runs real loopback sockets and moved +27-60% on CI with
   +0.4% instructions.

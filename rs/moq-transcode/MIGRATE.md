@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `moq_net::Path` has no lifetime
+
+`Config::source` is an `Option<moq_net::path::Relative>`: build it with `Relative::new(".")?` instead of `RelativeOwned::from(..)`. See moq-net's migration for the rest.
+
 ### Ladder resolution names its short side
 
 `Rung::height` is `short_side`, and `Rung::new` takes the shorter coded dimension, not always the height.

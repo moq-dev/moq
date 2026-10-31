@@ -174,7 +174,7 @@ impl Driver {
 	pub async fn run(self) {
 		let status = self.status.clone();
 		let result = tokio::select! {
-			_ = status.unused() => return,
+			_ = status.wanted_changed(true) => return,
 			result = self.produce() => result,
 		};
 		let status = match result {
@@ -692,7 +692,7 @@ mod tests {
 			let mut broadcast = publication.broadcast().clone();
 			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-			config.broadcast = Some("../other".into());
+			config.broadcast = Some(moq_net::path::Relative::new("../other").unwrap());
 			catalog
 				.mutate(|catalog| {
 					catalog.audio.renditions.insert("audio".into(), config);

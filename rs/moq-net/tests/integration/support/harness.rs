@@ -13,7 +13,7 @@ use std::sync::{
 };
 use std::task::Poll;
 
-use moq_net::{Client, Server, Session, Version, origin};
+use moq_net::{Client, Server, Session, Version, kio, origin};
 
 use super::mock::{MockSession, MockStats, create_mock_session_pair};
 
@@ -206,7 +206,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	}
 
 	// Run both handshakes concurrently and spawn each side's driver
-	// the moment its handshake resolves: on draft-17+ the server's accept blocks
+	// the moment its handshake resolves: on moq-transport the server's accept blocks
 	// on the client's SETUP, which only reaches the wire once the client's
 	// machine is polled (and vice versa for the server's own SETUP).
 	let client_fut = async {

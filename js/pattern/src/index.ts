@@ -81,6 +81,7 @@ export class InvalidPattern extends Error {
 	}
 }
 
+/** Types for {@link InvalidPattern}. */
 export namespace InvalidPattern {
 	/** Why a string or a segment list is not a valid {@link Pattern}. */
 	export type Code =

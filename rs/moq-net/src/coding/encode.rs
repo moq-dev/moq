@@ -59,7 +59,7 @@ pub trait Encode<V> {
 pub struct Encoder<'a> {
 	buf: &'a mut Vec<u8>,
 	form: Form,
-	pub(crate) control: Option<crate::stats::Control>,
+	pub(crate) control: Option<crate::stats::Message>,
 }
 
 impl<'a> Encoder<'a> {
@@ -90,7 +90,7 @@ impl<'a> Encoder<'a> {
 	}
 
 	/// Write a big-endian `u16`.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	#[cfg(all(test, feature = "async"))]
 	pub fn u16(&mut self, v: u16) {
 		self.buf.extend_from_slice(&v.to_be_bytes());
 	}

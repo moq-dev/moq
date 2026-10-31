@@ -132,12 +132,13 @@ pub enum Error {
 	#[error("io: {0}")]
 	Io(std::sync::Arc<std::io::Error>),
 
-	/// An export timeline failed, so its listings refuse rather than read as a finished recording.
-	#[error("timeline {track} failed: {source}")]
-	TimelineFailed {
-		/// The timeline's track name.
+	/// A rendition's HLS records failed, so its listings refuse rather than read as a finished
+	/// recording.
+	#[error("hls records {track} failed: {source}")]
+	RecordsFailed {
+		/// The record track's name.
 		track: String,
-		/// Why the timeline failed.
+		/// Why the records failed.
 		source: Box<Error>,
 	},
 

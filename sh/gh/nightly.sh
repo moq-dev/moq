@@ -84,6 +84,7 @@ case "$1" in
         run just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
         run just rs test -p moq-tokio --release -E 'test(benchmark_receive_windows)' --run-ignored only --success-output immediate
         run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
+        run just rs test -p moq-c -E 'test(benchmark_handles)' --run-ignored only --success-output immediate
         run just rs test -p moq-archive -p moq-mux -p moq-hls --no-fail-fast \
             -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_reference_handoff_fanout)' \
             --run-ignored only --success-output immediate
@@ -121,10 +122,11 @@ case "$1" in
     rust-extra)
         # The allocation/window/play-buffer tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
-        criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
-            --bench protect --bench codec --bench table --bench allocations --bench window \
+        criterion extra --no-fail-fast -p moq-e2ee -p moq-sign -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
+            -p moq-quic --features moq-quic/fuzz \
+            --bench protect --bench sign --bench codec --bench table --bench allocations --bench window \
             --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs --bench ts_video \
-            --bench bus --bench parameter_sets
+            --bench bus --bench parameter_sets --bench sent_packets
         ;;
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report
@@ -134,7 +136,7 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts request-ids requests forward reader frames drift ledger varint lite-varint track resume priority subscribe-drop subscribe-tracks refresh observed compression; do
+        for benchmark in broadcasts requests fills forward reader frames drift ledger varint lite-varint track resume priority subscribe-drop subscribe-tracks refresh observed compression; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench

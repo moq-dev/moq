@@ -18,7 +18,8 @@ export interface CameraProps extends Inputs<CameraInput> {
 	constraints?: Video.Constraints | Signal<Video.Constraints | undefined>;
 }
 
-type CameraOutput = {
+/** Signals the camera derives. */
+export type CameraOutput = {
 	// The live camera track, or undefined while disabled or denied.
 	source: Signal<Media | undefined>;
 	// Clockwise turn a landscape picture needs to appear upright on this screen: 90 or 270 while the

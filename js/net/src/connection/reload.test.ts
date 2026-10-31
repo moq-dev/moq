@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Instant, Manual, Milli, Nano } from "@moq/clock";
+import { Instant, Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -12,7 +12,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import { nextTask } from "../util/yield.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
@@ -205,7 +205,7 @@ async function waitUntil(pred: () => boolean): Promise<void> {
 	throw new Error("timed out waiting for condition");
 }
 
-test("an announced request follows the reconnect on the same handle", async () => {
+test("a follower follows the reconnect on the same handle", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 
@@ -232,7 +232,7 @@ test("an announced request follows the reconnect on the same handle", async () =
 		delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
 		consume: clientOrigin,
 	});
-	const watched = clientOrigin.request(Path.from("late"), { announced: true });
+	const watched = clientOrigin.follow(Path.from("late"));
 
 	try {
 		await waitUntil(() => watched.active.peek() !== undefined);
@@ -268,7 +268,7 @@ test("an ended auth handle gives up instead of retrying", async () => {
 	// so a reconnect, if the loop tried one, would be dialed well within the bound.
 	const until = async (done: () => boolean) => {
 		for (let i = 0; i < 100 && !done(); i++) {
-			await nextTask();
+			await yieldNow();
 			await clock.advance(Nano.fromMilli(Milli(1)));
 		}
 		expect(done()).toBe(true);
@@ -762,7 +762,8 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 			fin.hold?.enable();
 			const last = producer.appendGroup();
 			last.writeFrame(textFrame("last"));
-			last.close();
+			last.finish();
+			producer.finish();
 			producer.close();
 			teardown.end(handle, win);
 			await clock.advance(Nano.fromMilli(teardown.linger));
@@ -856,6 +857,7 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 			remote.close();
 			reload.close();
 			for (const dial of dials) (await dial.server).abort();
+			producer.finish();
 			producer.close();
 			broadcast.close();
 			origin.close();
@@ -922,6 +924,7 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 		remote.close();
 		reload.close();
 		for (const dial of dials) (await dial.server).abort();
+		producer.finish();
 		producer.close();
 		broadcast.close();
 		origin.close();
@@ -982,7 +985,8 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 		fin.hold?.enable();
 		const last = producer.appendGroup();
 		last.writeFrame(textFrame("last"));
-		last.close();
+		last.finish();
+		producer.finish();
 		producer.close();
 		reload.close();
 
@@ -1008,13 +1012,12 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 test("closing an announce consumer during upstream teardown does not append retractions", async () => {
 	const { Producer } = await import("../announced.ts");
 	const upstream = new Producer();
-	const reload = new Reload({ enabled: false });
-	reload.established.set({
-		probe: new Signal(undefined),
-		announced: () => upstream.consume(),
-		stats: async () => undefined,
-	} as unknown as import("./established.ts").Established);
-	const consumer = reload.announced();
+	const producer = new Producer();
+	const pump = new Effect((effect) => pumpAnnounced(effect, upstream.consume(), producer));
+	const consumer = producer.consume();
+	// The same lifecycle as Connection.announced: the last consumer closing closes the producer and its pump.
+	closeUnwanted(producer);
+	void producer.closed.then(() => pump.close());
 	const errors = spyOn(console, "error").mockImplementation(() => {});
 	try {
 		upstream.append({
@@ -1029,21 +1032,23 @@ test("closing an announce consumer during upstream teardown does not append retr
 		await Promise.resolve();
 		consumer.close();
 		await settle();
+		expect(producer.closed.peek()).not.toBeUndefined();
 		expect(errors.mock.calls).toEqual([]);
 	} finally {
 		consumer.close();
-		reload.close();
+		pump.close();
+		producer.close();
 		errors.mockRestore();
 	}
 });
 
 test("announced accepts a non-prefix scope before any session exists", () => {
-	const reload = new Reload({ enabled: false });
+	const connection = new Connection({ enabled: false });
 	try {
-		const announced = reload.announced(Path.Pattern.parse("room/*"));
+		const announced = connection.announced(Path.Pattern.parse("room/*"));
 		announced.close();
 	} finally {
-		reload.close();
+		connection.close();
 	}
 });
 
@@ -1076,14 +1081,15 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 		globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 		const clientOrigin = new OriginProducer();
-		const reload = new Reload({
+		const props = {
 			enabled: true,
 			url,
 			websocket: { enabled: false },
 			delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
-			consume: viaOrigin ? clientOrigin : undefined,
-		});
-		const watching = viaOrigin ? clientOrigin.announced() : reload.announced();
+		};
+		const reload = viaOrigin ? new Reload({ ...props, consume: clientOrigin }) : undefined;
+		const connection = viaOrigin ? undefined : new Connection({ ...props, share: false });
+		const watching = connection ? connection.announced() : clientOrigin.announced();
 		const seen = new Set<string>();
 		void (async () => {
 			for await (const event of watching) {
@@ -1104,7 +1110,8 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 			expect([...seen].sort()).toEqual(["a", "b"]);
 		} finally {
 			watching.close();
-			reload.close();
+			reload?.close();
+			connection?.close();
 			clientOrigin.close();
 			for (const broadcast of published) broadcast.close();
 			serverOrigin.close();

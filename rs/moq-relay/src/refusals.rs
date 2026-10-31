@@ -2,7 +2,10 @@
 
 use crate::auth;
 pub(crate) use moq_net::stats::RefusalKind;
-use moq_net::stats::{Registry, Tier};
+use moq_net::{
+	Path,
+	stats::{Registry, Tier},
+};
 
 impl From<&auth::Error> for RefusalKind {
 	// Exhaustive on purpose: a new `auth::Error` variant must pick its reason here.
@@ -39,13 +42,19 @@ impl Refusals {
 		}
 	}
 	pub(crate) fn record(&self, reason: RefusalKind) {
-		self.0.tier(Tier::default()).refuse("", reason);
+		self.0.tier(Tier::default()).refuse(Path::empty(), reason);
 	}
 	pub(crate) fn record_auth(&self, err: &auth::Error) {
 		if let auth::Error::Refused(refusal) = err {
-			self.0
-				.tier(refusal.tier.clone().map(Tier::new).unwrap_or_default())
-				.refuse(refusal.root.as_deref().unwrap_or(""), err.into());
+			// A refusal only counts: one naming a tier or root too long for a path counts
+			// under the default instead.
+			let tier = crate::configured_tier(refusal.tier.clone()).unwrap_or_default();
+			let root = refusal
+				.root
+				.as_deref()
+				.and_then(|root| Path::new(root).ok())
+				.unwrap_or_default();
+			self.0.tier(tier).refuse(root, err.into());
 		} else {
 			self.record(err.into());
 		}

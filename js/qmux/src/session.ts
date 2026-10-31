@@ -16,11 +16,11 @@ import {
 	type WebSocketStreamLike,
 } from "./web-socket-stream.ts";
 
-/** The QMux wire-format versions a caller can advertise. */
+/** The QMux wire-format versions a caller can advertise. @reexport */
 export type Version = WireFormat;
 
 /** Options for a new outgoing stream. `@types/web` doesn't declare `waitUntilAvailable` yet. */
-type SendStreamOptions = WebTransportSendStreamOptions & {
+export type SendStreamOptions = WebTransportSendStreamOptions & {
 	/** Wait for the peer to grant stream credit (the default) instead of rejecting at once. */
 	waitUntilAvailable?: boolean;
 };
@@ -102,7 +102,8 @@ function configToTransportParams(config: Required<Config>): TransportParams {
 		maxDatagramFrameSize:
 			config.maxDatagramFrameSize === null
 				? 0n
-				: config.maxDatagramFrameSize < config.maxRecordSize
+				: // biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
+					config.maxDatagramFrameSize < config.maxRecordSize
 					? config.maxDatagramFrameSize
 					: config.maxRecordSize,
 		maxRecordSize: config.maxRecordSize,
@@ -119,12 +120,18 @@ function configToTransportParams(config: Required<Config>): TransportParams {
  * silently discarded, matching the W3C WebTransport semantics.
  */
 export class Datagrams implements WebTransportDatagramDuplexStream {
+	/** Inbound datagrams the readable queues before dropping more; fixed at construction. */
 	incomingHighWaterMark = 1024;
+	/** Part of the WebTransport interface; unused, since a datagram never expires here. */
 	incomingMaxAge: number | null = null;
+	/** Part of the WebTransport interface; unused, since a datagram is sent once written. */
 	outgoingHighWaterMark = 1024;
+	/** Part of the WebTransport interface; unused, since a datagram never expires here. */
 	outgoingMaxAge: number | null = null;
 
+	/** The datagrams the peer sends. */
 	readonly readable: ReadableStream<Uint8Array>;
+	/** The datagrams to send to the peer. */
 	readonly writable: WritableStream<Uint8Array>;
 
 	#incoming!: ReadableStreamDefaultController<Uint8Array>;
@@ -133,7 +140,7 @@ export class Datagrams implements WebTransportDatagramDuplexStream {
 	#maxDatagramSize = 0;
 	#send: (data: Uint8Array) => void;
 
-	/** @param send Enqueue a datagram payload onto the wire (best-effort). */
+	/** @param send - Enqueue a datagram payload onto the wire (best-effort). */
 	constructor(send: (data: Uint8Array) => void) {
 		this.#send = send;
 		// A bounded queue: `pull` is a no-op, so `desiredSize` reflects the
@@ -158,6 +165,7 @@ export class Datagrams implements WebTransportDatagramDuplexStream {
 		});
 	}
 
+	/** The largest payload a datagram can carry, or 0 before the peer allows any. */
 	get maxDatagramSize(): number {
 		return this.#maxDatagramSize;
 	}
@@ -285,10 +293,10 @@ export interface SessionOptions extends WebTransportOptions {
 	 *
 	 * Each entry is either:
 	 *  - A bare ALPN (e.g. `"moq-lite-04"`). The polyfill resolves it via
-	 *    [[SessionOptions.versions]] and emits the prefixed wire form
+	 *    {@link SessionOptions.versions} and emits the prefixed wire form
 	 *    `{version}.{alpn}` (e.g. `"qmux-01.moq-lite-04"`).
 	 *  - An explicit pair already prefixed with a QMux version
-	 *    (e.g. `"qmux-00.moq-transport-17"`). Advertised as-is.
+	 *    (e.g. `"qmux-00.moq-transport-18"`). Advertised as-is.
 	 *
 	 * Bare entries that have no matching `versions` entry throw at
 	 * construction time.
@@ -334,7 +342,7 @@ export interface SessionOptions extends WebTransportOptions {
 /** Options for accepting a QMux Session on an already-negotiated socket.
  *
  * The handshake is done by the time [[Session.accept]] is called, so the
- * subprotocol options ([[SessionOptions.protocols]], `versions`,
+ * subprotocol options ({@link SessionOptions.protocols}, `versions`,
  * `requireProtocol`) don't apply — see [[selectSubprotocol]], which consumes
  * them during the upgrade instead.
  */
@@ -466,8 +474,8 @@ export function resolveSubprotocols(
  * @example
  * ```ts
  * const protocol = selectSubprotocol(req.headers.get("sec-websocket-protocol"), {
- *   protocols: ["moq-transport-17"],
- *   versions: { "moq-transport-17": null },
+ *   protocols: ["moq-transport-18"],
+ *   versions: { "moq-transport-18": null },
  * });
  * if (!protocol) return new Response("no supported protocol", { status: 400 });
  * const { socket, response } = Deno.upgradeWebSocket(req, { protocol });
@@ -537,7 +545,7 @@ export default class Session implements WebTransport {
 	// [[AcceptOptions.protocol]]: stands in for `socket.protocol` when the host
 	// doesn't expose the negotiated subprotocol.
 	#protocolOverride?: string;
-	// [[SessionOptions.requireProtocol]] on a dial: the server must pick one of
+	// `SessionOptions.requireProtocol` on a dial: the server must pick one of
 	// our application protocols, not answer with none.
 	#requireProtocol = false;
 	#closed?: Error;
@@ -632,7 +640,7 @@ export default class Session implements WebTransport {
 	 * application-level ALPNs in `options.protocols` plus a `versions`
 	 * map saying which QMux wire-format version each bare ALPN rides on. The
 	 * wire form `{qmux-VV}.{alpn}` is built automatically; entries already in
-	 * pair form (e.g. `"qmux-00.moq-transport-17"`) pass through unchanged.
+	 * pair form (e.g. `"qmux-00.moq-transport-18"`) pass through unchanged.
 	 *
 	 * Once the handshake completes, the QMux wire-format version is derived
 	 * from the negotiated `Sec-WebSocket-Protocol`. `.protocol` exposes the
@@ -1009,6 +1017,7 @@ export default class Session implements WebTransport {
 			// A datagram must fit in one record, so the frame is capped by the
 			// smaller of the peer's datagram-frame limit and its record size.
 			const cap =
+				// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 				params.maxRecordSize < params.maxDatagramFrameSize ? params.maxRecordSize : params.maxDatagramFrameSize;
 			// We encode the length-prefixed form (0x31): one type byte plus a length
 			// varint sized for `cap`. Subtracting it keeps the frame within the limit.
@@ -1048,6 +1057,7 @@ export default class Session implements WebTransport {
 		if (a === 0n && b === 0n) return 0n;
 		if (a === 0n) return b;
 		if (b === 0n) return a;
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		return a < b ? a : b;
 	}
 
@@ -1106,6 +1116,7 @@ export default class Session implements WebTransport {
 			this.#sendResetAt = this.#lastSendAt;
 			this.#sendCredit = false;
 		}
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		return this.#recvSeen > this.#sendResetAt ? this.#recvSeen : this.#sendResetAt;
 	}
 
@@ -1290,6 +1301,7 @@ export default class Session implements WebTransport {
 		// TODO(qmux-03): Once draft-03 is implemented, reject finalSize < received
 		// (and conflicting terminal final sizes) with FINAL_SIZE_ERROR instead of
 		// applying this draft-00/-01/-02 compatibility fallback.
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		const finalSize = frame.finalSize > received ? frame.finalSize : received;
 		const gap = finalSize - received;
 
@@ -1588,6 +1600,7 @@ export default class Session implements WebTransport {
 	#maxStreamPayload(id: Stream.Id, offset: bigint): bigint {
 		const peerMax = Frame.maxStreamPayload(this.#version, this.#sendFrameBudget(), id, offset);
 		const compatibilityMax = BigInt(Frame.MAX_FRAME_PAYLOAD);
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		const max = peerMax < compatibilityMax ? peerMax : compatibilityMax;
 		// Unreachable with a conforming peer: max_record_size is validated against
 		// the draft-01 minimum on arrival. Guard anyway — a zero budget would make
@@ -1628,6 +1641,7 @@ export default class Session implements WebTransport {
 			// Size from the peer's frame budget and this frame's actual header, then
 			// apply the compatibility ceiling for released receivers.
 			const payloadMax = this.#maxStreamPayload(id, flow.sendOffset);
+			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 			const chunkMax = Number(payloadMax < remaining ? payloadMax : remaining);
 
 			// Claim flow control credit (stream + connection)

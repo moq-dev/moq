@@ -35,10 +35,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use fixed_resample::{ResamplerConfig, ResamplingChannelConfig, ResamplingCons, ResamplingProd, resampling_channel};
-
 use crate::encode::Input;
 use crate::resample::Remix;
+use crate::ring;
 use crate::{Error, Layout, Level};
 
 /// Audio held between a [`Channel::write`] and the [`Bus::read`] that mixes it.
@@ -100,7 +99,7 @@ struct Mixer {
 /// A channel as the mixer sees it.
 struct Entry {
 	id: u64,
-	cons: ResamplingCons<f32>,
+	cons: ring::Consumer,
 	strip: Strip,
 	/// Gain actually applied, ramping toward the strip's target across a block.
 	applied: f32,
@@ -155,21 +154,17 @@ impl Bus {
 			Some(Remix::new(input.layout, output)?)
 		};
 
-		let (prod, cons) = resampling_channel::<f32>(
+		let (prod, cons) = ring::channel(
 			output.channels() as usize,
 			input.sample_rate,
 			self.inner.config.sample_rate,
-			// Only ever pushed interleaved, which skips the planar staging buffer.
-			true,
-			ResamplingChannelConfig {
-				latency_seconds: LATENCY.as_secs_f64(),
-				capacity_seconds: (LATENCY + HEADROOM).as_secs_f64(),
+			ring::Config {
+				latency: LATENCY,
+				capacity: LATENCY + HEADROOM,
 				// Correct drift against the program clock by trimming or padding
 				// back to the target depth, not by letting the ring run dry or full.
-				underflow_autocorrect_percent_threshold: Some(25.0),
-				overflow_autocorrect_percent_threshold: Some(75.0),
-				resampler_config: ResamplerConfig::default(),
-				..Default::default()
+				pad: true,
+				trim: true,
 			},
 		);
 
@@ -213,7 +208,7 @@ impl Bus {
 		let frames = output.len() / channels;
 
 		for entry in entries.iter_mut() {
-			entry.cons.read_interleaved(scratch, false);
+			entry.cons.read(scratch);
 
 			// Ramp across the block rather than stepping, so a fader move or a
 			// mute never clicks.
@@ -265,7 +260,7 @@ impl Bus {
 /// Dropping it takes the source out of the mix.
 pub struct Channel {
 	id: u64,
-	prod: ResamplingProd<f32>,
+	prod: ring::Producer,
 	remix: Option<Remix>,
 	input: Input,
 	strip: Strip,
@@ -295,10 +290,10 @@ impl Channel {
 	fn push(&mut self, pcm: &[f32]) {
 		match &self.remix {
 			Some(remix) => {
-				let _ = self.prod.push_interleaved(&remix.process(pcm));
+				let _ = self.prod.push(&remix.process(pcm));
 			}
 			None => {
-				let _ = self.prod.push_interleaved(pcm);
+				let _ = self.prod.push(pcm);
 			}
 		}
 	}
@@ -445,6 +440,24 @@ mod tests {
 		std::iter::repeat_n(value, frames * channels)
 			.flat_map(f32::to_le_bytes)
 			.collect()
+	}
+
+	#[test]
+	fn ring_allocation_follows_the_bus_rate() {
+		let mut baseline = None;
+		for sample_rate in [44_100, 96_000, 4_000_000_000] {
+			let bus = Bus::new(Config::default()).unwrap();
+			let (_, stats) = crate::allocation::measure(|| {
+				bus.channel(input(sample_rate, Layout::SevenPointOne), Strip::default())
+					.unwrap()
+			});
+			let baseline = *baseline.get_or_insert(stats.bytes);
+			assert!(
+				stats.bytes <= baseline,
+				"{sample_rate} Hz allocated {} bytes, baseline {baseline}",
+				stats.bytes
+			);
+		}
 	}
 
 	fn input(sample_rate: u32, layout: Layout) -> Input {

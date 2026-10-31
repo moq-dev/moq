@@ -36,7 +36,7 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	for (let sequence = 0; sequence < 10; sequence++) {
 		const group = producer.appendGroup();
 		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(sequence * 1000) });
-		group.close();
+		group.finish();
 	}
 
 	const [client, server] = await Promise.all([
@@ -51,6 +51,7 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	reader.update({ maxDelay: Milli(6500) });
 	expect(await received(reader, 4)).toEqual([2, 3, 4, 5]);
 	// Ending the track flushes anything else the publisher would send: nothing, not even a repeat.
+	producer.finish();
 	producer.close();
 	expect(await reader.recvGroup()).toBeUndefined();
 

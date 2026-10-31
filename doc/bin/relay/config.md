@@ -40,9 +40,9 @@ allow.uid = [1001]
 
 [listen.extensions]                  # moq-transport SETUP extensions to offer, each on by default.
                                      # The relay always offers ietf, for moq-lite-07 relay links.
-auth = false                         # Decline MoQ Auth (draft 17+).
+auth = false                         # Decline MoQ Auth.
 solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
-epoch = false                        # Decline MoQ Epoch, so routes over moq-transport carry no epoch (draft 17+).
+epoch = false                        # Decline MoQ Epoch, so routes over moq-transport carry no epoch.
 ```
 
 `timeout` bounds the whole handshake, transport through MoQ SETUP and auth
@@ -68,6 +68,8 @@ A setting no configured listener reads stops startup rather than being ignored.
 A stream-only relay refuses `preferred_v4`, `preferred_v6`, `lb.id`, and
 `reset.secret`, which only QUIC reads, and a `[listen.tls]` `cert`, `key`, or `generate` unless
 `tcp.tls` serves it.
+The io\_uring runtime refuses `preferred_v4`, `preferred_v6`, and `lb.id`;
+use the tokio runtime when the listener needs these settings.
 `[listen.lb] nonce` needs an `id` in the same table; unset nonce uses 8.
 The `--listen-quic-lb-id` and `--listen-quic-lb-nonce` flags update that table.
 `unix.allow` needs `unix.bind`.
@@ -81,7 +83,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 congestion_control = "delay"         # "delay" (BBR, the default), "loss" (CUBIC), or "none".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
-keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh refuses zero and keeps a separate 5s path heartbeat. Default.
+# keep_alive = "3s"                  # Ping interval; unset derives it from the idle timeout, "0s" disables it. iroh refuses zero and keeps a separate 5s path heartbeat.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 134217728           # Whole-connection window, in bytes. Default (128 MiB).
@@ -103,7 +105,15 @@ Iroh currently refuses an explicit keylog path when enabled.
 `idle_timeout` is how long a peer that vanished without a close keeps its
 sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).
 QUIC uses the smaller of the two endpoints' values, so this also bounds the
-other end. Keep `keep_alive` under a third of it.
+other end.
+
+Leave `keep_alive` unset to derive it from the idle timeout both ends settle
+on: 3/10 of it, so 3s against the 10s default, and shorter against a peer that
+advertises a shorter `max_idle_timeout`. Changing `idle_timeout` then needs no
+matching change here. Set it only for a NAT binding that expires sooner than
+the idle timeout. A value no shorter than the negotiated idle timeout could
+never keep the connection up, so it is capped at the derived interval. iroh
+cannot see the peer's timeout, so it derives from the local `idle_timeout`.
 
 Raise the receive windows when a fat, long path idles below the link rate. The
 128 MiB `receive_window` default carries several Gbps at a 100 ms RTT and bounds
@@ -127,11 +137,9 @@ certificate, route hop, or cluster-looking URL alone does not select peer limits
 ```toml
 [limits.client]
 announces = 1000                     # Simultaneous broadcasts or namespaces.
-requests = 10000                     # Other simultaneous moq-transport requests.
 
 [limits.peer]
 announces = 100000
-requests = 20000
 
 [limits.peer.quic]
 max_streams = 100000                 # Concurrent QUIC streams per direction.
@@ -147,13 +155,10 @@ not throttled by `[quic]` limits sized for one viewer, for example
 `--limits-peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
 their transport's own limits.
 
-These are the defaults. Each subscription and FETCH holds a stream on moq-lite
-and on moq-transport draft 17 and later, as does each PUBLISH a peer's track
-listing gets, so `[quic]` or `[limits.peer.quic]` `max_streams` bounds them
-there, and a peer past it waits rather than fails.
-On drafts 14 to 16, `announces` and `requests` together size the request
-window instead, which every request counts against, so very small values can
-prevent other requests from progressing. Size peer limits
+These are the defaults. Each subscription and FETCH holds a stream, as does each
+PUBLISH a peer's track listing gets, so `[quic]` or `[limits.peer.quic]`
+`max_streams` bounds them, and a peer past it waits rather than fails. The
+removed `requests` limit is refused at startup. Size peer limits
 for the combined traffic they carry, and use session peak counters to check
 announcement and subscription headroom. Exceeding `announces` closes the session
 with `TOO_MANY_REQUESTS`; reconnecting with the same load will exceed it again.
@@ -343,7 +348,11 @@ duration = "30s"                     # Cap how long a non-latest group is kept, 
 `capacity` is a byte target, repaid as active publishers write. `duration`
 (30s by default) bounds memory by age, and sweeps on a timer, so a publisher
 that stalls but stays connected still has its idle groups reclaimed. The latest
-group of every track is always kept, even past `capacity`.
+group of every track, and any group still being read, is kept past `capacity` but
+sheds its oldest frames instead. Whatever the capacity, a group holds at most its
+newest 32 MB. A reader of a track's newest group that reaches a shed frame asks
+for a new group on tracks that opt into refresh. Any other reader of a shed
+frame sees `Evicted`.
 
 ## \[stats]
 
@@ -381,6 +390,10 @@ enabled = true
 secret = "./iroh-secret.key"         # Persist the key so the endpoint id survives restarts.
 # disable_relay = true               # Direct addresses only. Right on a LAN, wrong on the internet.
 ```
+
+The secret path must be a regular file, not a symlink. A missing file is created
+exclusively, with mode `0600` on Unix. Existing Unix files readable by group or
+others are refused; use `chmod 600` to make an existing key private before startup.
 
 See [Transport](/concept/transport#iroh-peer-to-peer-experimental).
 

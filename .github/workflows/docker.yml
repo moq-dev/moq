@@ -74,6 +74,9 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    # Docker Hub credentials live in the `publish` Environment, which only
+    # protected refs can deploy to. Only a tag pushes; other builds need none.
+    environment: ${{ github.ref_type == 'tag' && 'publish' || '' }}
     permissions:
       contents: read
     steps:
@@ -119,6 +122,7 @@ jobs:
     needs: [parse, build]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    environment: publish
     permissions: {}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

@@ -1,0 +1,34 @@
+[package]
+name = "moq-net-tests"
+description = "moq-net tests that need its hidden fuzz module or JSON consumers."
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+version = "0.0.0"
+edition = "2024"
+rust-version.workspace = true
+publish = false
+
+# Used by the shared transport harness outside this package's source tree.
+[package.metadata.cargo-shear]
+ignored = ["tokio"]
+
+[dev-dependencies]
+futures = { workspace = true }
+moq-clock = { path = "../moq-clock", default-features = false, features = ["sim"] }
+moq-json = { path = "../moq-json" }
+moq-net = { path = "../moq-net", features = ["fuzz"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+
+[lints]
+workspace = true
+
+# Declared rather than discovered: the Nix dependency-only build stubs each
+# declared target, and a package with none fails to load the workspace.
+[[test]]
+name = "announce_allocs"
+path = "tests/announce_allocs.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

@@ -20,33 +20,44 @@ export type WebSocketStreamData = Uint8Array | string;
 
 /** Resolved value of {@link WebSocketStreamLike.opened}. */
 export interface WebSocketStreamOpenEvent {
+	/** The messages the peer sends. */
 	readable: ReadableStream<WebSocketStreamData>;
+	/** The messages to send to the peer. */
 	writable: WritableStream<WebSocketStreamData>;
+	/** The extensions the server selected. */
 	extensions: string;
+	/** The subprotocol the server selected, or empty. */
 	protocol: string;
 }
 
 /** Resolved value of {@link WebSocketStreamLike.closed}. */
 export interface WebSocketStreamCloseEvent {
+	/** The close code the connection ended with. */
 	closeCode: number;
+	/** The close reason the connection ended with. */
 	reason: string;
 }
 
 /** Argument to {@link WebSocketStreamLike.close}. */
 export interface WebSocketStreamCloseInfo {
+	/** The close code to send. */
 	closeCode?: number;
+	/** The close reason to send. */
 	reason?: string;
 }
 
 /** The common shape implemented by both the native API and this ponyfill. */
 export interface WebSocketStreamLike {
+	/** The URL the socket connected to. */
 	readonly url: string;
+	/** Resolves with the streams once the handshake completes. */
 	readonly opened: Promise<WebSocketStreamOpenEvent>;
+	/** Resolves once the connection closes. */
 	readonly closed: Promise<WebSocketStreamCloseEvent>;
+	/** Close the connection, with an optional code and reason. */
 	close(closeInfo?: WebSocketStreamCloseInfo): void;
-	/** Ponyfill-only: resize the write-backpressure high-water mark at runtime
-	 *  (see {@link WebSocketStream.setHighWaterMark}). Absent on the native API,
-	 *  which sizes its own send buffer — callers should treat it as optional. */
+	/** Ponyfill-only: resize the write-backpressure high-water mark at runtime.
+	 *  Absent on the native API, which sizes its own send buffer — callers should treat it as optional. */
 	setHighWaterMark?(bytes: number): void;
 }
 
@@ -77,19 +88,30 @@ type NativeWebSocketStreamConstructor = new (
 /** The slice of the `WebSocket` API this ponyfill relies on. Both the browser
  *  `WebSocket` and Node's `ws` satisfy it. */
 export interface WebSocketLike {
+	/** How binary messages arrive; set to `arraybuffer`. */
 	binaryType: string;
 	/** Absent on some server-side implementations; only used to report
 	 *  {@link WebSocketStreamLike.url} for an adopted socket. */
 	readonly url?: string;
+	/** Bytes queued to send but not yet sent. */
 	readonly bufferedAmount: number;
+	/** The connection state, as the `WebSocket` constants number it. */
 	readonly readyState: number;
+	/** The subprotocol the server selected, or empty. */
 	readonly protocol: string;
+	/** The extensions the server selected. */
 	readonly extensions: string;
+	/** Queue a message to send. */
 	send(data: string | ArrayBufferLike | ArrayBufferView): void;
+	/** Close the connection, with an optional code and reason. */
 	close(code?: number, reason?: string): void;
+	/** Called once the handshake completes. */
 	onopen: ((ev: unknown) => void) | null;
+	/** Called with each message received. */
 	onmessage: ((ev: { data: unknown }) => void) | null;
+	/** Called when the connection fails. */
 	onerror: ((ev: unknown) => void) | null;
+	/** Called once the connection closes. */
 	onclose: ((ev: { code?: number; reason?: string }) => void) | null;
 }
 

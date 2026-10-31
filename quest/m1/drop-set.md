@@ -14,6 +14,12 @@ narrower budget is served after a widening, as a cold relay would.
 
 ## Plan
 
+Decided 2026-10-27 (maintainer): this runs after
+[Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md), since both edit
+`given_up` in `rs/moq-net/src/model/track/miss.rs`, and before
+[Rust groups by start](/quest/m1/time-addressing/model.md), which requires it
+because runs keyed by group sequence convert mechanically to starts.
+
 Decided by the maintainer on 2026-10-19, splitting this from the widened
 max age re-offer
 ([moq-dev/moq#6717](https://github.com/moq-dev/moq/pull/6717)), which keeps
@@ -242,6 +248,15 @@ Test on mock time through a relay:
   [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171), decided
   2026-10-23).
 
+- A group the publisher cut while a fetched copy still serves its end is
+  delivered and never also reported dropped. Today `DropCursor::cut`
+  (`rs/moq-net/src/model/track.rs`) reports any visible slot's
+  `cut_error()`, so the arrival walk can hand out the fetched copy and report
+  the group dropped too; `Slot::cut()` already returns nothing while a copy
+  serves the end. Found by
+  [moq-dev/moq#7053](https://github.com/moq-dev/moq/pull/7053) (added
+  2026-10-28).
+
 Mirror each case in `js/net`.
 
 Public API: none. Wire: lite-07 SUBSCRIBE_DROP (unpublished) gains `Max Age`
@@ -258,7 +273,7 @@ unchanged.
 Besides memory, run fragmentation costs CPU today, new on main: every
 SUBSCRIBE_DROP bumps `drops_revision`, and each reader's `DropCursor::next`
 rescans the overlapping runs (`rs/moq-net/src/model/track.rs` about lines
-5574-5609), so N fragmented runs and R downstream readers cost O(R*N) per
+5802-5870), so N fragmented runs and R downstream readers cost O(R*N) per
 6-byte DROP. JS `insertDrop` (`js/net/src/internal.ts:136`) copies the whole
 run array once for the track and once per sink (`track.ts:914`). The
 replacement keeps the per-cursor walk incremental in both languages, with a
@@ -272,6 +287,21 @@ widening can re-offer them as Rust does, but landed it without a test: the
 case needs an update to arrive between START and the first group. Cover it
 deterministically, through the track hooks rather than wire timing, when the
 drop runs are reworked here.
+
+### A covered cut is still reported
+
+`DropCursor::cut` reports a group as cut even when a fetched copy covers it,
+noted in [moq-dev/moq#7053](https://github.com/moq-dev/moq/pull/7053) and again
+by [moq-dev/moq#7149](https://github.com/moq-dev/moq/pull/7149), which made a
+fetched copy settle such a group. Decided 2026-10-29 (maintainer): settle it
+here, where a cut run gets a reason and a covering copy can clear it.
+
+### Cancelled fetches hold the end
+
+Found 2026-10-28 by [moq-dev/moq#7149](https://github.com/moq-dev/moq/pull/7149):
+a cancelled fetch below a track's end still holds the end open until the cache
+expiry scan removes it, so how fast a subscription ends depends on expiry
+timing. Settle it here, where cancelled and expired runs get a reason.
 
 ## Related
 

@@ -9,11 +9,12 @@ How to update your code for each breaking change, newest first.
 `Catalog.MAX_RENDITIONS` and `Catalog.TooManyRenditions` are gone: `checkRenditions`, `encode`, and `watch` accept any number of renditions.
 Delete `instanceof TooManyRenditions` checks. An application that wants a limit counts the `renditions` of each section itself.
 
-### Timeline records describe one track
+### HLS records replace the root archive
 
-`Timeline.Range` is replaced by `Position { group, frame? }`; a record has inclusive `start` and exclusive `end` positions for its own track instead of a `tracks` map of group ranges.
-`Record.segment` is `sequence`, and `pts` / `duration` are absent for untimed records.
-`Timeline.DEFAULT_NAME` is replaced by `SUFFIX`; name each media track's timeline separately and advertise it in `archive.timelines`.
+`Catalog.ArchiveSchema`, `Catalog.ARCHIVE_VERSION`, the root `archive` field, and the `Timeline` module are gone.
+A video or audio rendition carries an optional `hls: { track, duration }` field instead; read its records with `Hls.Consumer.subscribe(broadcast, rendition.hls)`.
+Each `Hls.Entry` is `{ sequence, group, pts, duration? }`, with `pts` and `duration` in microseconds; a zero `duration` marks where content stopped.
+`Catalog.MOQ_EPOCH_UNIX_MILLIS` is unchanged.
 
 ### Container reads are a tagged union
 
@@ -37,16 +38,6 @@ Handle the rejection as fatal; only a reset or evicted group still reads as a ga
 
 `version` is the oldest moq-hang draft that reads the catalog, and parsing throws `UnsupportedVersion` for one newer than this reader.
 Rename an extension field that was called `version`.
-
-### Archive timelines declare a per-track duration (#5715)
-
-`archive.track` becomes `archive.timelines`, keyed by each media track name. Each value is `{ track, duration }`, naming that media track's timeline and nominal duration, absent when untimed.
-Replace the shared `durationMax` with each track's `duration`. The archive version is 3 rather than 1; update publishers and consumers together.
-
-### Timeline records are optionally timed (#5720)
-
-`Timeline.Record.pts` and `.duration` are optional, absent on an untimed track.
-Handle a record whose `pts` is `undefined`.
 
 ### Catalog ranking names its media kind
 

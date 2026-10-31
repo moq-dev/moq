@@ -1025,6 +1025,28 @@ describe("Computed", () => {
 		timesTen.close();
 	});
 
+	test("close clears the value and notifies downstream readers once", async () => {
+		const input = new Signal(1);
+		const value = new Computed((effect) => effect.get(input) * 2);
+		await settle();
+		const seen: (number | undefined)[] = [];
+		const unsubscribe = value.subscribe((next) => seen.push(next));
+		try {
+			input.set(3); // A queued recompute must not resurrect a closed value.
+			value.close();
+			expect(value.peek()).toBeUndefined();
+			await settle();
+			expect(seen).toEqual([undefined]);
+			value.close();
+			await settle();
+			expect(value.peek()).toBeUndefined();
+			expect(seen).toEqual([undefined]);
+		} finally {
+			unsubscribe();
+			value.close();
+		}
+	});
+
 	test("close stops recomputing", async () => {
 		const a = new Signal(1);
 		let computes = 0;

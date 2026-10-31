@@ -12,7 +12,7 @@ against any moq-transport relay (including
 implement in an afternoon. The wire spec is
 [draft-lcurley-moq-lite](/draft/moq-lite).
 
-Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts 14
+Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts 18
 through 22. Clients offer `moq-lite-06` first. moq-lite 07 is still in progress
 (`moq-lite-07-wip`, and only when both sides enable it). It is the version that
 carries [publisher epochs](#publisher-epochs).
@@ -28,6 +28,12 @@ carries [publisher epochs](#publisher-epochs).
 | **Group** | A sequence of frames delivered reliably and in order, on its own QUIC stream. | Group |
 | **Frame** | A sized chunk of bytes. | Object |
 | **Datagram** | One unreliable frame sent as a QUIC datagram instead of a group. | Datagram |
+
+A broadcast is named by a path: non-empty segments joined by `/`, such as
+`room/alice`. A path never starts or ends with `/` or doubles one, and a `\`
+only escapes a `\` or `/` (how a moq-transport namespace field holding one is
+spelled), so each name has one spelling, and every API and peer refuses any
+other. The empty path is the root, which prefixes every path.
 
 ## Discovery
 
@@ -86,8 +92,10 @@ and waits up to one second for them to be delivered. An abort skips that.
 
 A broadcast has no finished state. Online means announced, and offline means
 no route is left. The end of content is a track FIN: the publisher finishes
-each track, and a hang broadcast also finishes its catalog. A finished track
-stays servable to the subscribers it already has, including through a relay
+each track, and a hang broadcast also finishes its catalog. A track can also
+finish with an error, such as a replayed recording whose source failed: readers
+get its groups, then the error. Only moq-lite-07 carries that error across a
+hop; older versions reset instead. A finished track stays servable to the subscribers it already has, including through a relay
 whose upstream session has since gone. How long a finished broadcast stays
 announced for late readers is the application's retention policy, such as the
 `--linger` of [`moq import`](/bin/cli), not a protocol state.
@@ -103,7 +111,10 @@ authorization and hidden names work exactly as without one.
   its worker answers each requested path by announcing that exact path under
   the output's own epoch. Restarting one output is then a new epoch every hop
   sees, so a viewer returning within a relay's cache window never gets the old
-  output's groups.
+  output's groups. On moq-lite 07 that announcement is a takeover of the claim:
+  what a viewer already resolved through the claim keeps playing from the
+  output rather than being reset to the new route. A different worker, or a
+  replacement output, never inherits those viewers.
 - **Newest wins.** Among routes at the same prefix, the newest epoch ranks
   first, ahead of cost, and a route without an epoch ranks last. Newest means
   the latest UUIDv7 timestamp, so hosts with skewed clocks can lose a restart
@@ -116,10 +127,13 @@ authorization and hidden names work exactly as without one.
   without an epoch keeps its subscriptions until that route goes, and a track
   that fails ends instead of resuming, so request the path again.
 - **Another instance restarts.** A newer epoch, or, without one, another route
-  winning the path, is announced as a restart. Subscriptions already open stay
-  on the old instance until dropped or none of its routes remain, which ends
-  them with an error, while new requests get the new one, so a player follows
-  the restart by requesting the path again.
+  winning the path, is announced as a restart. Subscriptions already answered
+  stay on the old instance until dropped or none of its routes remain, which
+  ends them with an error, while new requests get the new one, so a player
+  follows the restart by requesting the path again. Without an epoch, a request
+  still unanswered when another instance takes the path, even after a
+  withdrawal, ends the same way, since that instance may be the one answering
+  it. A withdrawal alone leaves it to its answer.
   Held handles can still read their old cached content while a subscription
   on the old instance stays open, but cannot open new epochless requests once
   the restart is delivered. Request the path again for
@@ -128,12 +142,14 @@ authorization and hidden names work exactly as without one.
   name instead of stalling viewers on the old sequence. A relay drops its copy
   of the old instance, so a new subscriber never sees its cached groups.
 
-The epoch and the restart message travel on moq-lite 07, which is opt-in.
-moq-transport carries the epoch from draft 17 when both sides offer the [epoch
+The epoch and the restart and takeover messages travel on moq-lite 07, which is
+opt-in. Older versions carry a takeover as an ordinary announcement, so the
+first subscription through a claim is reset once the output's route arrives.
+moq-transport carries the epoch when both sides offer the [epoch
 extension](/draft/moq-epoch), on by default. A restart onto another epoch is
 advertised before the old one is withdrawn, so the path is never absent, and one
-that gains or loses an epoch is an end then a start. Older moq-lite versions,
-older moq-transport drafts, and a side that declines the extension carry no
+that gains or loses an epoch is an end then a start. Older moq-lite versions
+and a side that declines the extension carry no
 epoch. Without an epoch, any other route winning is a restart, even a reconnect
 over the same path, since nothing says it serves the same bytes. A peer that
 ignores the end and start may keep cached objects of the old run under the same
@@ -143,7 +159,8 @@ names, so an end and a start is not a cache flush.
 RTMP, SRT, and WHIP ingests mint one per connection. Independent importers use
 distinct epochs, even when fed one stream. Only replicas of one publisher's
 bytes share its epoch, such as one publisher announced through multiple relays. See [Clustering](/bin/relay/cluster) for
-how a relay uses this.
+how a relay uses this, and [identity and recovery](/concept/identity) for
+choosing epochs, following restarts, and answering work on demand.
 
 ### Multiple CDNs
 
@@ -155,7 +172,7 @@ compared. A subscription uses the preferred link that has a route and moves to t
 next when that route goes; a publisher pushes the same broadcast to every CDN.
 
 The move resumes without a seam only between routes with the same epoch, which
-needs moq-lite 07, or moq-transport draft 17 or later with the epoch extension,
+needs moq-lite 07, or moq-transport with the epoch extension,
 on both links. A CDN link that carries no epoch makes moving onto it, or back
 off it, a restart, and the player requests the path again. Both links must
 also speak the same protocol and draft: a copy's track info records the
@@ -199,7 +216,13 @@ a literal `*`. The empty pattern matches the empty path.
 
 A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route
-its scope can use.
+its scope can use. A listing reports only routes whose literal name matches its
+patterns: under `**/*.chat`, a claim at `room` is left out even though it could
+serve `room/lobby.chat`, and so is a route above the root. Requests still
+resolve through such covering routes, and a session still forwards them to its
+peer, which routes through them. Code that routes or forwards opts in with the
+origin consumer's covering view: `covering()` in Rust, `{ covering: true }` in
+JS.
 
 ## Authorization
 
@@ -228,13 +251,12 @@ code and the session stays up. A client that publishes outside its grant closes
 the session with `UNAUTHORIZED`, naming the path. A session whose last
 credential expires closes with `EXPIRED_AUTH_TOKEN` instead: refresh the token
 and reconnect, rather than treating the credential as invalid. moq-transport carries the same
-exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), with
+exchange through the [MoQ Auth extension](/draft/moq-auth), with
 the same patterns. Older versions have no grant; the URL token keeps working
 everywhere. On moq-transport an added token is kept even without the extension,
 so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
 authorization token. Naming a fresh token renews the announcement in place with
-`REQUEST_UPDATE` from draft 16, and re-announces it on drafts 14 and 15, so it
-can outlive the token it started with. A token added to a reconnecting
+`REQUEST_UPDATE`, so it can outlive the token it started with. A token added to a reconnecting
 connection's auth handle is presented on every session it makes, so the
 announcement keeps it across a reconnect with no re-add or re-announce; one
 added to a single session's handle ends with that session. moq-lite has no
@@ -245,7 +267,9 @@ per-request token, so there an announcement rides the session's scope.
 A subscriber names a broadcast and track. Delivery starts at the oldest group
 it can still use, which at the default budget is the latest one, so every group
 must begin at a point a fresh subscriber can decode from (a keyframe, a full
-JSON snapshot). Groups can also be fetched by sequence number, which is how the
+JSON snapshot). A moq-lite 05 or moq-transport publisher starts at the latest
+group whatever the budget, so a subscription there reads older groups only from
+a starting group it names. Groups can also be fetched by sequence number, which is how the
 [HLS gateway](/bin/hls) and the relay's [HTTP fetch](/bin/relay/http) serve
 history.
 
@@ -288,9 +312,13 @@ evicted after the subscriber saw it cached, but before it read it, is skipped. A
 moq-lite-07 carries range by range and older wire versions as the single span
 covering them. A relative or time anchor resolves on the hop that publishes the
 track, and over moq-lite-07, which carries a relative or time start upstream and
-reports the live edge and media time, so a copy resolves the ends itself. Over an older lite or any moq-transport version, a subscriber gets every
-anchor but the live and default starts refused as unsupported, and an untimed
-track refuses a time anchor. At the live edge, a time end
+reports the live edge and media time, so a copy resolves the ends itself. A Rust
+moq-transport copy resolves a relative anchor from the Largest Object its live join
+reports, accepts time anchors its cache can already resolve, and sends group bounds
+upstream; it refuses any other time anchor. Older
+moq-lite versions accept absolute anchors but refuse time anchors and relative anchors other
+than the live and default starts. An untimed track refuses a time anchor. At the live
+edge, a time end
 may let one group through before its first frame shows it starts past the end:
 the first group that has yet to start is handed out without waiting for that
 frame, and the next one waits on it. A datagram is judged by its own timestamp.
@@ -314,7 +342,7 @@ across its subscribers.
 A track is timed or untimed: it declares a timescale or none, and a frame that
 doesn't match is refused. No receiver fills in an arrival time, so an untimed
 track is judged by the wall clock alone. Tracks from moq-lite before 05, or from
-moq-transport without a `TIMESCALE` (every track on drafts 14-16), arrive
+moq-transport without a `TIMESCALE`, arrive
 untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
 frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
@@ -328,15 +356,11 @@ are not checked. Rust relays preserve them across moq-lite 07 when both peers
 negotiate the [ietf extension](/draft/moq-ietf), which carries their origin and
 keeps them unchecked. A moq-lite peer without it receives that track untimed.
 
-A publisher may compress a track, which pays off for repetitive data such as
-JSON and not for media. Each group's frames become one DEFLATE stream
-([moq-flate](/draft/moq-flate)), and a datagram
-compresses alone. Only the work-in-progress moq-lite 07 carries the compressed
-bytes. A relay forwards them as received and inflates each group once for every
-other subscriber, moq-transport included, so readers always see the original
-frames. Rust and JavaScript publish compressed tracks by setting `compress: true`
-on the track's info. Application writes stay synchronous and readers receive plain
-payloads; compression is useful for repetitive data, not already compressed media.
+A publisher may [compress](/concept/compression) a track, which pays off for
+repetitive data such as JSON and not for media. Each group's frames become one
+DEFLATE stream, which only the work-in-progress moq-lite 07 carries. A relay
+forwards it as received and inflates each group once for every other
+subscriber, moq-transport included, so readers always see the original frames.
 
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning

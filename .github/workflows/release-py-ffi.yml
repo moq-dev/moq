@@ -131,6 +131,13 @@ jobs:
         shell: bash
         run: python -m pip wheel --no-deps --wheel-dir .tmp/sdist-wheels dist/*.tar.gz
 
+      - name: Install wheel from sdist
+        shell: bash
+        run: |
+          python -m pip install --no-deps .tmp/sdist-wheels/*.whl
+          cd .tmp
+          python -c 'import moq_ffi'
+
       - name: Upload sdist
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

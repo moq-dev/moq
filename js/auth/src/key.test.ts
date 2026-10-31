@@ -453,6 +453,19 @@ test("verify - private to public key", async () => {
 	expect(publicKey.key_ops.indexOf("verify") >= 0).toBeTruthy();
 });
 
+test("RSA imports refuse partial private parameters and other primes", () => {
+	const original = Key.parse(INSECURE_TEST_RSA_KEYS.RS256.private);
+	if (original.kty !== "RSA") throw new Error("expected RSA fixture");
+	for (const field of ["d", "p", "q", "dp", "dq", "qi"] as const) {
+		const partial = { ...original };
+		delete partial[field];
+		expect(() => Key.parse(encodeJwk(partial))).toThrow();
+	}
+	for (const oth of [[], [{ r: "AQ", d: "AQ", t: "AQ" }], null]) {
+		expect(() => Key.parse(encodeJwk({ ...original, oth }))).toThrow();
+	}
+});
+
 test("RSA algorithms - sign and verify", async () => {
 	for (const alg of ["RS256", "RS384", "RS512"] as const) {
 		const key = Key.parse(INSECURE_TEST_RSA_KEYS[alg].private);
@@ -822,7 +835,7 @@ test("key scope treats absolute and rooted grants alike", async () => {
 	const scoped: Key = { ...Key.parse(encodeJwk(testKey)), scope: { root: "project", publish: ["live/**"] } };
 
 	await expect(Key.sign(scoped, { root: "", publish: ["project/live/room/**"] })).resolves.toBeString();
-	await expect(Key.sign(scoped, { root: "/project/live/", publish: ["room/**"] })).resolves.toBeString();
+	await expect(Key.sign(scoped, { root: "project/live", publish: ["room/**"] })).resolves.toBeString();
 	// Segment-aware: "live" must not cover "lively".
 	await expect(Key.sign(scoped, { root: "project", publish: ["lively/**"] })).rejects.toThrow("exceed the key scope");
 	// A root above the scope does not widen it.
@@ -875,4 +888,14 @@ test("key IDs share Rust's grammar and 128-character limit", async () => {
 		expect(() => Key.parse(JSON.stringify({ ...testKey, kid }))).toThrow();
 	}
 	await expect(Key.generate("HS256", "a".repeat(129))).rejects.toThrow();
+});
+
+test("sign refuses a root no path can spell", async () => {
+	const key = Key.parse(encodeJwk(testKey));
+	for (const root of ["/room", "room/", "a//b", "a\\b", "a\\", "a".repeat(4097)]) {
+		await expect(Key.sign(key, { root, publish: ["**"] })).rejects.toThrow("invalid root");
+	}
+	for (const root of ["", "room", "a\\\\b", "a\\/b"]) {
+		await expect(Key.sign(key, { root, publish: ["**"] })).resolves.toBeString();
+	}
 });

@@ -31,7 +31,7 @@ pub struct MoqAnnounceConfig {
 
 /// How a broadcast advertises its exact path: a static cost and the publisher epoch.
 ///
-/// Pass one to `MoqBroadcastProducer::announce`. The hop chain is the origin's to build,
+/// Pass one to `MoqPublication::announce`. The hop chain is the origin's to build,
 /// so a local publisher cannot claim relay hops it never took.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqAnnounceRoute {
@@ -67,7 +67,7 @@ impl TryFrom<MoqAnnounceRoute> for moq_net::origin::Route {
 /// Carried by `MoqAnnounceConsumer` events. A route claims capability, not
 /// inventory: by convention a publisher announces each broadcast's exact path,
 /// so subscribers can enumerate broadcasts, while a service advertises a prefix
-/// with `MoqOriginProducer::dynamic` and answers whatever is requested beneath it.
+/// with `MoqOriginProducer::requests` and answers whatever is requested beneath it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MoqRoute {
 	/// Hop ids of the relay hops the route traversed, oldest first. 0 is the
@@ -137,9 +137,9 @@ pub struct MoqAnnounceConsumer {
 ///
 /// Keeps its origin running, like a published broadcast, after every
 /// `MoqOriginProducer` is gone.
-pub struct MoqOriginDynamic {
+pub struct MoqOriginRequests {
 	slot: Slot,
-	task: std::sync::Mutex<Option<Arc<Task<OriginDynamic>>>>,
+	task: std::sync::Mutex<Option<Arc<Task<OriginRequests>>>>,
 }
 
 #[derive(uniffi::Object)]
@@ -147,6 +147,15 @@ pub struct MoqOriginDynamic {
 pub struct MoqBroadcastRequest {
 	inner: std::sync::Mutex<Option<moq_net::origin::Request>>,
 	driver: Background,
+}
+
+#[derive(uniffi::Object)]
+/// A broadcast published on an origin: the broadcast to fill and its announcement.
+///
+/// Dropping it does not retract the route; closing the broadcast does.
+pub struct MoqPublication {
+	pub(crate) inner: moq_net::origin::Publication,
+	broadcast: Arc<MoqBroadcastProducer>,
 }
 
 #[derive(uniffi::Object)]
@@ -162,17 +171,17 @@ struct Announced {
 	driver: Background,
 }
 
-/// The served route behind one `MoqOriginProducer::dynamic` handle, shared
+/// The served route behind one `MoqOriginProducer::requests` handle, shared
 /// between the handle and the task draining it. Emptied by the handle's cancel,
 /// which retracts the route: the task sees the empty slot and ends.
-type Slot = Arc<std::sync::Mutex<Option<moq_net::origin::Dynamic>>>;
+type Slot = Arc<std::sync::Mutex<Option<moq_net::origin::Requests>>>;
 
-struct OriginDynamic {
+struct OriginRequests {
 	slot: Slot,
 	driver: Background,
 }
 
-impl OriginDynamic {
+impl OriginRequests {
 	async fn requested_broadcast(&mut self) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
 		let request = self
 			.driver
@@ -201,13 +210,13 @@ impl Announced {
 }
 
 /// Follows one exact path, resolving each publisher instance that serves it.
-struct AnnouncedBroadcast {
-	inner: moq_net::origin::AnnouncedBroadcast,
+struct Following {
+	inner: moq_net::origin::Following,
 	origin: moq_net::origin::Consumer,
 	driver: Background,
 }
 
-impl AnnouncedBroadcast {
+impl Following {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self.driver.watch(async { Ok(self.inner.available().await?) }).await?;
 		Ok(Arc::new(MoqBroadcastConsumer::routed(
@@ -221,13 +230,13 @@ impl AnnouncedBroadcast {
 /// A route over a prefix, carried by a [`MoqAnnounceEvent`].
 ///
 /// Carries no broadcast: resolve a specific path with
-/// `MoqOriginConsumer::request_broadcast` (after an event proves it is
+/// `MoqOriginConsumer::request` (after an event proves it is
 /// covered). The application decides which paths name broadcasts.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MoqAnnounce {
 	/// The covered prefix, relative to the origin.
 	pub prefix: String,
-	/// What each wildcard matched, or `None` when the route only overlaps the scope.
+	/// What each wildcard matched. Only full matches are listed, so it is always set.
 	pub captures: Option<Vec<String>>,
 	/// The route serving the prefix: its epoch, hops, and a static cost.
 	pub route: MoqRoute,
@@ -269,6 +278,14 @@ pub enum MoqAnnounceEvent {
 		/// The broadcast announcement affected by this event.
 		announce: MoqAnnounce,
 	},
+	/// A route now covers the prefix and continues what the route at `predecessor`
+	/// served beneath it: keep what was resolved through that one.
+	Takeover {
+		/// The broadcast announcement affected by this event.
+		announce: MoqAnnounce,
+		/// The prefix of the route it continues, at or above `announce`'s.
+		predecessor: String,
+	},
 }
 
 impl From<moq_net::announce::Event> for MoqAnnounceEvent {
@@ -287,14 +304,18 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 			Event::Restart(announce) => Self::Restart {
 				announce: announce.into(),
 			},
+			Event::Takeover { announce, predecessor } => Self::Takeover {
+				announce: announce.into(),
+				predecessor: predecessor.to_string(),
+			},
 		}
 	}
 }
 
 /// Follows a specific broadcast across the publisher instances that serve it.
 #[derive(uniffi::Object)]
-pub struct MoqAnnouncedBroadcast {
-	task: Task<AnnouncedBroadcast>,
+pub struct MoqFollowing {
+	task: Task<Following>,
 }
 
 impl MoqOriginProducer {
@@ -386,49 +407,53 @@ impl MoqOriginProducer {
 	/// the covering prefix and rejects the rest as they are requested. Hold
 	/// the returned handle while the route should stay advertised and missing
 	/// broadcasts should be served.
-	pub fn dynamic(&self, prefix: String) -> Result<Arc<MoqOriginDynamic>, MoqError> {
+	pub fn requests(&self, prefix: String) -> Result<Arc<MoqOriginRequests>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.inner.driver.check()?;
-		let result = self.inner.dynamic(prefix);
+		let result = self.inner.requests(prefix);
 		self.inner.driver.check()?;
 		let dynamic = result?;
 		let slot = Arc::new(std::sync::Mutex::new(Some(dynamic)));
-		Ok(Arc::new(MoqOriginDynamic {
+		Ok(Arc::new(MoqOriginRequests {
 			slot: slot.clone(),
-			task: std::sync::Mutex::new(Some(Arc::new(Task::new(OriginDynamic {
+			task: std::sync::Mutex::new(Some(Arc::new(Task::new(OriginRequests {
 				slot,
 				driver: self.inner.driver.clone(),
 			})))),
 		}))
 	}
 
-	/// Create a broadcast at `path` on this origin, returning the producer that feeds it.
+	/// Create a broadcast at `path` on this origin, returning its publication.
 	///
 	/// The broadcast exists for nobody, on this origin or its peers, until
-	/// [`MoqBroadcastProducer::announce`]: until then announcement streams skip it
+	/// [`MoqPublication::announce`]: until then announcement streams skip it
 	/// and requests for its path are unroutable. Announce after populating
-	/// tracks; an on-demand handler is [`Self::dynamic`]. Create, `dynamic()` if
-	/// tracks are served on demand, populate, then announce.
+	/// tracks; an on-demand handler is [`MoqBroadcastProducer::requests`]. Create,
+	/// `requests()` if tracks are served on demand, populate, then announce.
 	///
 	/// [`MoqBroadcastProducer::close`] ends it for good; dropping its last handle,
-	/// `dynamic()` included, does the same.
-	pub fn create_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
+	/// the publication and `requests()` included, does the same.
+	pub fn create_broadcast(&self, path: String) -> Result<Arc<MoqPublication>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.inner.driver.check()?;
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
 		let result = self.inner.create_broadcast(path.as_str());
 		self.inner.driver.check()?;
-		let broadcast = result?;
-		Ok(Arc::new(MoqBroadcastProducer::from_publication(
-			broadcast,
+		let publication = result?;
+		let broadcast = Arc::new(MoqBroadcastProducer::from_inner(
+			publication.broadcast().clone(),
 			self.inner.driver.clone(),
-		)?))
+		)?);
+		Ok(Arc::new(MoqPublication {
+			inner: publication,
+			broadcast,
+		}))
 	}
 }
 
 #[uniffi::export]
 impl MoqOriginConsumer {
-	/// Subscribe to routes matching a pattern scope; updates stay relative to the origin.
+	/// Subscribe to routes whose names match a pattern scope; updates stay relative to the origin.
 	pub fn announced(&self, config: MoqAnnounceConfig) -> Result<Arc<MoqAnnounceConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
@@ -449,21 +474,23 @@ impl MoqOriginConsumer {
 		}))
 	}
 
-	/// Follow the broadcast at `path`, resolving each publisher instance that serves it.
+	/// Follow the broadcast at `path` across the publisher instances that serve it.
 	///
-	/// This is how you resolve a path right after connecting: announcements arrive over the
-	/// session after it opens, so `request_broadcast` on its own races them. A
-	/// broadcast created on this origin resolves once it is announced, like a
-	/// remote one.
-	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
+	/// Unlike `request`, this waits for future announcements and keeps following publisher
+	/// instances. A local broadcast resolves once announced, like a remote one. Pass an
+	/// `epoch` (UUIDv7 text) to follow only that instance: another one taking over is never
+	/// handed out, and the instance is handed out again if it returns after an end.
+	#[uniffi::method(default(epoch = None))]
+	pub fn follow(&self, path: String, epoch: Option<String>) -> Result<Arc<MoqFollowing>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
+		let epoch: Option<moq_net::Epoch> = epoch.as_deref().map(str::parse).transpose()?;
 		// Following checks the permission eagerly, so an unreachable path fails here rather
 		// than surfacing later as a `Closed` the caller can't tell from the origin ending.
-		let inner = self.inner.announced_broadcast(path.as_str(), None)?;
+		let inner = self.inner.follow(path.as_str(), epoch)?;
 
-		Ok(Arc::new(MoqAnnouncedBroadcast {
-			task: Task::new(AnnouncedBroadcast {
+		Ok(Arc::new(MoqFollowing {
+			task: Task::new(Following {
 				inner,
 				origin: self.inner.clone(),
 				driver: self.driver.clone(),
@@ -471,23 +498,21 @@ impl MoqOriginConsumer {
 		}))
 	}
 
-	/// Request a broadcast by path, resolving as soon as it can be served.
+	/// Request the broadcast at `path`, resolving one publisher instance as soon as it can be served.
 	///
 	/// Resolves through the best announced route covering the path: an announced broadcast
 	/// on this origin, a route a session announced (served on demand by that session), or a
 	/// dynamic handler on the origin. The most specific prefix wins, then the cheapest. An
-	/// unannounced broadcast is unroutable. Unlike `announced_broadcast`, this answers for what is
-	/// reachable *now* and errors if nothing can serve the path. Drop the returned future to
-	/// cancel.
-	///
-	/// Calling this straight after connecting therefore races the session's announcements
-	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first. A
-	/// client only asks the relay about paths something watches, through `announced` or
-	/// `announced_broadcast`, so a path nothing watches stays unroutable.
-	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+	/// unannounced broadcast is unroutable once discovery has synced without a covering route.
+	/// The request owns discovery of its path and retries route churn until then; no separate
+	/// announcement stream is needed. Pass an `epoch` (UUIDv7 text) to refuse any other
+	/// publisher instance. Drop the returned future to cancel.
+	#[uniffi::method(default(epoch = None))]
+	pub async fn request(&self, path: String, epoch: Option<String>) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		let epoch: Option<moq_net::Epoch> = epoch.as_deref().map(str::parse).transpose()?;
 		let broadcast = self
 			.driver
-			.watch(async { Ok(self.inner.request_broadcast(path.as_str(), None).await?) })
+			.watch(async { Ok(self.inner.request(path.as_str(), epoch).await?) })
 			.await?;
 		Ok(Arc::new(MoqBroadcastConsumer::routed(
 			broadcast,
@@ -497,10 +522,10 @@ impl MoqOriginConsumer {
 	}
 }
 
-// ---- MoqOriginDynamic ----
+// ---- MoqOriginRequests ----
 
 #[uniffi::export]
-impl MoqOriginDynamic {
+impl MoqOriginRequests {
 	/// Wait for the next broadcast requested through this handle's prefix.
 	///
 	/// Returns a [`MoqBroadcastRequest`]: accept it with a broadcast producer or reject
@@ -584,19 +609,47 @@ impl MoqBroadcastPrepared {
 	}
 
 	/// Announce the filled broadcast and resolve every waiting requester.
-	pub fn publish(&self) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
+	pub fn publish(&self) -> Result<Arc<MoqPublication>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
 		let prepared = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
-		let mut state = self.broadcast.state.lock().unwrap();
 		let result = prepared.publish();
 		self.driver.check()?;
-		let publication = result?;
-		if let Some(state) = state.as_mut() {
-			state.publication = Some(publication);
-		}
-		// A fill releases this state only on close, which native admission refuses.
-		Ok(self.broadcast.clone())
+		Ok(Arc::new(MoqPublication {
+			inner: result?,
+			broadcast: self.broadcast.clone(),
+		}))
+	}
+}
+
+#[uniffi::export]
+impl MoqPublication {
+	/// The broadcast to fill, without announcement control.
+	pub fn broadcast(&self) -> Arc<MoqBroadcastProducer> {
+		self.broadcast.clone()
+	}
+
+	/// Advertise the broadcast's exact path as a route, or re-price it in place.
+	///
+	/// Until announced, the broadcast is invisible and unroutable for local
+	/// consumers and peers alike. Errors with `Closed` once the broadcast closed.
+	pub fn announce(&self, route: MoqAnnounceRoute) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let route: moq_net::origin::Route = route.try_into()?;
+		self.broadcast.with_state(|_| Ok(self.inner.announce(route)?))
+	}
+
+	/// Retract the advertisement, if any, keeping the filled tracks alive.
+	///
+	/// Local consumers and peers alike stop discovering and requesting it;
+	/// tracks already in flight carry on. Announcing again brings it back. Errors with
+	/// `Closed` once the broadcast closed.
+	pub fn unannounce(&self) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		self.broadcast.with_state(|_| {
+			self.inner.unannounce();
+			Ok(())
+		})
 	}
 }
 
@@ -617,10 +670,10 @@ impl MoqAnnounceConsumer {
 	}
 }
 
-// ---- MoqAnnouncedBroadcast ----
+// ---- MoqFollowing ----
 
 #[uniffi::export]
-impl MoqAnnouncedBroadcast {
+impl MoqFollowing {
 	/// Wait for the next publisher instance serving the broadcast. Returns `Closed` if cancelled
 	/// or the origin is closed.
 	///
@@ -656,9 +709,9 @@ mod supervision_tests {
 		assert!(matches!(failed.next().await, Err(MoqError::Task { .. })));
 
 		let healthy = MoqOriginProducer::new(Default::default());
-		let broadcast = healthy.create_broadcast("healthy".into()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
-		healthy.consume().request_broadcast("healthy".into()).await.unwrap();
+		let publication = healthy.create_broadcast("healthy".into()).unwrap();
+		publication.announce(Default::default()).unwrap();
+		healthy.consume().request("healthy".into(), None).await.unwrap();
 	}
 
 	#[tokio::test]
@@ -668,8 +721,8 @@ mod supervision_tests {
 			inner,
 			driver: completion.clone(),
 		});
-		let broadcast = origin.create_broadcast("retained".into()).unwrap();
-		let dynamic = broadcast.dynamic().unwrap();
+		let publication = origin.create_broadcast("retained".into()).unwrap();
+		let dynamic = publication.broadcast().requests().unwrap();
 		drop(origin);
 		*trigger
 			.write()
@@ -677,7 +730,7 @@ mod supervision_tests {
 		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
 		drop(completion);
 		assert!(matches!(
-			broadcast.announce(Default::default()),
+			publication.announce(Default::default()),
 			Err(MoqError::Task { .. })
 		));
 		assert!(matches!(dynamic.requested_track().await, Err(MoqError::Task { .. })));
@@ -696,9 +749,9 @@ mod supervision_tests {
 			inner,
 			driver: completion.clone(),
 		});
-		let broadcast = origin.create_broadcast("retained".into()).unwrap();
+		let broadcast = origin.create_broadcast("retained".into()).unwrap().broadcast();
 		// A dynamic handle outlives the consumed producer, so only an explicit close ends it.
-		let _dynamic = broadcast.dynamic().unwrap();
+		let _dynamic = broadcast.requests().unwrap();
 		let consumer = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.consume();
 		let catalog = crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 		*trigger
@@ -720,7 +773,7 @@ mod supervision_tests {
 			inner,
 			driver: completion.clone(),
 		});
-		let broadcast = origin.create_broadcast("retained".into()).unwrap();
+		let broadcast = origin.create_broadcast("retained".into()).unwrap().broadcast();
 		// One importer shares a timebase and one doesn't, so both reservation paths carry the driver.
 		let timebase = MoqMediaTimebase::new(broadcast.clone()).unwrap();
 		let container = MoqMediaContainerProducer::new(
@@ -762,11 +815,12 @@ mod supervision_tests {
 			inner,
 			driver: completion.clone(),
 		});
-		let broadcast = origin.create_broadcast("routed".into()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let publication = origin.create_broadcast("routed".into()).unwrap();
+		publication.announce(Default::default()).unwrap();
+		let broadcast = publication.broadcast();
 		let track = broadcast.publish_track("data".into(), None).unwrap();
 		let open = track.append_group().unwrap();
-		let consumer = origin.consume().request_broadcast("routed".into()).await.unwrap();
+		let consumer = origin.consume().request("routed".into(), None).await.unwrap();
 		let subscriber = consumer.subscribe_track("data".into(), None).await.unwrap();
 		let group = subscriber.recv_group().await.unwrap().unwrap();
 		let catalog = crate::media::MoqMediaCatalogConsumer::subscribe(&consumer)
@@ -783,6 +837,7 @@ mod supervision_tests {
 		drop(open);
 		drop(track);
 		drop(broadcast);
+		drop(publication);
 		let result = subscriber.recv_group().await.map(|group| group.is_some());
 		assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
 		let result = group.read_frame().await.map(|frame| frame.is_some());

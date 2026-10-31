@@ -16,7 +16,7 @@ export interface Writer {
 	key: TrackKey;
 	// The net track's committed timescale, or undefined when untimed.
 	timescale?: Time.Timescale;
-	// Set by any close: no new writes.
+	// Set by release or abort: no new writes, including on existing groups.
 	closed: boolean;
 	aborted?: Error;
 }

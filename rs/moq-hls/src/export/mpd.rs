@@ -1,8 +1,8 @@
 //! Hand-written MPEG-DASH manifest (MPD) generation.
 //!
-//! Rendered purely from timeline records, exactly like the HLS playlists: each record is one
-//! complete aligned segment carrying its own `pts` and `duration` in the timeline's timescale,
-//! which map 1:1 onto a `SegmentTimeline`'s `S@t`/`S@d`. Segments are addressed by `$Time$`
+//! Rendered purely from HLS records, exactly like the HLS playlists: each record is one complete
+//! segment carrying its own `pts` and `duration` in milliseconds, which map 1:1 onto a
+//! `SegmentTimeline`'s `S@t`/`S@d`. Segments are addressed by `$Time$`
 //! (the record's `pts`) rather than `$Number$`: with explicit `t` on every `S`, a rendition
 //! that skips a span (a gap) or a client that joins mid-window never mis-addresses a segment
 //! the way positional numbering would.
@@ -15,7 +15,7 @@
 //! HLS routes; only the time-addressed segment alias `seg/t<pts>.m4s` is DASH's own.
 
 use moq_clock::Wall;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,7 +45,7 @@ pub(crate) struct Representation {
 	pub sample_rate: Option<u32>,
 	/// Channel count for `AudioChannelConfiguration` (audio only).
 	pub channel_count: Option<u32>,
-	/// The timeline's timescale (units per second), for `SegmentTemplate@timescale`.
+	/// The records' timescale (units per second), for `SegmentTemplate@timescale`.
 	pub timescale: u32,
 	/// `(t, d)` per listed segment in `timescale` units, oldest first: the record's `pts` and
 	/// `duration` verbatim. Gap segments (no content for this rendition) and zero-duration
@@ -55,11 +55,9 @@ pub(crate) struct Representation {
 	/// Whether this rendition's window has ended (the broadcast finished). Not rendered;
 	/// [`Manifest`] callers use it to pick static vs dynamic.
 	pub ended: bool,
-	/// The reference timestamp where this period started, kept exact for its offset.
-	pub period: moq_net::Timestamp,
 	/// The init segment's content hash (`init.{init}.mp4`).
 	pub init: String,
-	/// The [`tag`](super::segments::tag) of the reference numbering the segments.
+	/// The [`tag`](super::segments::tag) of the record track numbering the segments.
 	pub tag: String,
 	/// The publisher run every segment URL carries (`seg/{generation}.{tag}.t$Time$.m4s`).
 	pub generation: Option<Arc<str>>,
@@ -181,16 +179,9 @@ fn render_representation(out: &mut String, instance: &str, rep: &Representation,
 		);
 	}
 
-	let offset = if rep.period.is_zero() {
-		String::new()
-	} else {
-		// Scaled like each `S@t`, so the first segment lands exactly on the period start.
-		let timescale = moq_net::Timescale::new(u64::from(rep.timescale.max(1))).expect("nonzero timescale");
-		format!(" presentationTimeOffset=\"{}\"", rep.period.as_scale(timescale))
-	};
 	let _ = writeln!(
 		out,
-		"        <SegmentTemplate timescale=\"{}\" initialization=\"{initialization}\" media=\"{media}\"{offset}>",
+		"        <SegmentTemplate timescale=\"{}\" initialization=\"{initialization}\" media=\"{media}\">",
 		rep.timescale.max(1)
 	);
 	let _ = writeln!(out, "          <SegmentTimeline>");
@@ -228,11 +219,11 @@ fn render_adaptation_sets<'a>(
 		Kind::Audio => ("audio", "audio/mp4"),
 	};
 	for representations in codecs.values() {
-		// Segment boundaries come from the broadcast's single timeline, so alignment across
-		// renditions is guaranteed by construction; groups open on keyframes.
+		// Groups open on keyframes. `segmentAlignment` is left out (false): each rendition lists
+		// its own records, which line up only where the publisher's keyframes do.
 		let _ = writeln!(
 			out,
-			"    <AdaptationSet contentType=\"{content}\" mimeType=\"{mime}\" segmentAlignment=\"true\" startWithSAP=\"1\">"
+			"    <AdaptationSet contentType=\"{content}\" mimeType=\"{mime}\" startWithSAP=\"1\">"
 		);
 		for rep in representations {
 			render_representation(out, instance, rep, query);
@@ -257,8 +248,7 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		"<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" profiles=\"urn:mpeg:dash:profile:isoff-live:2011\""
 	);
 	if manifest.finished {
-		// Period starts and presentationTimeOffset retain the absolute content time in
-		// both states, so a player that followed the live presentation keeps the
+		// Segment times stay absolute content time in both states, so a player that followed the live presentation keeps the
 		// same segment-to-time mapping when the manifest turns static; DASH forbids shifting
 		// representation timing across MPD updates. The duration therefore spans from pts 0,
 		// and a fresh static viewer starts at the earliest listed S@t (players seek to the
@@ -299,31 +289,11 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		xs_duration(Duration::from_secs(target)),
 	);
 
-	let periods: BTreeSet<_> = representations().map(|rep| rep.period).collect();
-	for period in periods {
-		let start = Duration::from(period);
-		let _ = writeln!(
-			out,
-			"  <Period id=\"{}\" start=\"{}\">",
-			start.as_nanos(),
-			xs_duration(start)
-		);
-		render_adaptation_sets(
-			&mut out,
-			&manifest.instance,
-			Kind::Video,
-			manifest.video.iter().filter(|rep| rep.period == period),
-			query,
-		);
-		render_adaptation_sets(
-			&mut out,
-			&manifest.instance,
-			Kind::Audio,
-			manifest.audio.iter().filter(|rep| rep.period == period),
-			query,
-		);
-		let _ = writeln!(out, "  </Period>");
-	}
+	// Every segment carries its absolute content time, so one period starting at pts 0 holds them.
+	let _ = writeln!(out, "  <Period id=\"0\" start=\"{}\">", xs_duration(Duration::ZERO));
+	render_adaptation_sets(&mut out, &manifest.instance, Kind::Video, manifest.video.iter(), query);
+	render_adaptation_sets(&mut out, &manifest.instance, Kind::Audio, manifest.audio.iter(), query);
+	let _ = writeln!(out, "  </Period>");
 	let _ = writeln!(out, "</MPD>");
 	out
 }
@@ -346,7 +316,6 @@ mod tests {
 			timescale: 1000,
 			segments,
 			ended,
-			period: moq_net::Timestamp::ZERO,
 			init: "0123abcd".into(),
 			tag: "ab12cd34".into(),
 			generation: None,
@@ -354,48 +323,9 @@ mod tests {
 	}
 
 	#[test]
-	fn handoff_periods_preserve_absolute_time_and_source_templates() {
-		let old = video(vec![(4_000, 2_000)], false);
-		let mut next = video(vec![(6_000, 2_000)], false);
-		next.period = moq_net::Timestamp::from_secs(6).unwrap();
-		next.tag = "next".into();
-		let manifest = Manifest {
-			instance: "run".into(),
-			availability_start: Some(Wall::UNIX_EPOCH),
-			publish: Wall::UNIX_EPOCH,
-			window: Duration::from_secs(4),
-			finished: false,
-			video: vec![old, next],
-			audio: Vec::new(),
-		};
-		let rendered = render_manifest(&manifest, None);
-		assert_eq!(rendered.matches("<Period ").count(), 2);
-		assert!(rendered.contains("start=\"PT6.000S\""), "{rendered}");
-		assert!(rendered.contains("presentationTimeOffset=\"6000\""), "{rendered}");
-		assert!(rendered.contains("timeShiftBufferDepth=\"PT4.000S\""), "{rendered}");
-		assert!(rendered.contains("next.t$Time$"), "{rendered}");
+	fn durations_render_exactly() {
 		assert_eq!(xs_duration(Duration::from_nanos(6_000_000_001)), "PT6.000000001S");
-	}
-
-	// A 90 kHz tick is not a whole number of nanoseconds, so the offset must come from the
-	// timestamp itself rather than a nanosecond round trip.
-	#[test]
-	fn a_period_offset_keeps_the_exact_tick() {
-		let scale = moq_net::Timescale::new(90_000).unwrap();
-		let mut next = video(vec![(1, 90_000)], false);
-		next.timescale = 90_000;
-		next.period = moq_net::Timestamp::new(1, scale).unwrap();
-		let manifest = Manifest {
-			instance: "run".into(),
-			availability_start: Some(Wall::UNIX_EPOCH),
-			publish: Wall::UNIX_EPOCH,
-			window: Duration::from_secs(16),
-			finished: false,
-			video: vec![next],
-			audio: Vec::new(),
-		};
-		let rendered = render_manifest(&manifest, None);
-		assert!(rendered.contains("presentationTimeOffset=\"1\""), "{rendered}");
+		assert_eq!(xs_duration(Duration::from_secs(6)), "PT6.000S");
 	}
 
 	fn audio(segments: Vec<(u64, u64)>, ended: bool) -> Representation {
@@ -412,7 +342,6 @@ mod tests {
 			timescale: 1000,
 			segments,
 			ended,
-			period: moq_net::Timestamp::ZERO,
 			init: "4567cdef".into(),
 			tag: "ab12cd34".into(),
 			generation: None,
@@ -440,9 +369,7 @@ mod tests {
 		assert!(out.contains(" minimumUpdatePeriod=\"PT2.000S\""));
 		assert!(out.contains(" suggestedPresentationDelay=\"PT6.000S\""));
 		assert!(out.contains(" maxSegmentDuration=\"PT2.000S\""));
-		assert!(out.contains(
-			"<AdaptationSet contentType=\"video\" mimeType=\"video/mp4\" segmentAlignment=\"true\" startWithSAP=\"1\">"
-		));
+		assert!(out.contains("<AdaptationSet contentType=\"video\" mimeType=\"video/mp4\" startWithSAP=\"1\">"));
 		assert!(out.contains(
 			"<Representation id=\"video/video0\" bandwidth=\"2500000\" codecs=\"avc1.42c01f\" width=\"1280\" height=\"720\" frameRate=\"30\">"
 		));

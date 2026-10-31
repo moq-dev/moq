@@ -2,6 +2,7 @@ import * as z from "@zod/mini";
 import { compareName, compareNumber } from "./compare";
 import { ContainerSchema } from "./container";
 import { hexSchema } from "./hex";
+import { HlsFieldSchema } from "./hls";
 import { u53Schema } from "./integers";
 import { EpochSchema, RelativeBroadcastSchema } from "./path";
 
@@ -56,7 +57,8 @@ const AudioConfigFields = z.object({
 	bitrate: z.optional(u53Schema),
 
 	// Whether this rendition may be selected. When false, no frames are coming and a consumer
-	// must not select it. Default: true, so publishers only write it when false.
+	// should not select it, though one may keep it selected while no enabled alternative exists.
+	// Default: true, so publishers only write it when false.
 	enabled: z.optional(z.boolean()),
 
 	// The maximum delay between a frame being ready and the publisher flushing it, in whole
@@ -89,6 +91,10 @@ const AudioConfigFields = z.object({
 			z.transform((value) => (value === 0 ? undefined : value)),
 		),
 	),
+
+	// This rendition's HLS segment records, when the publisher opted in. Without it the rendition
+	// is not HLS-renderable. A malformed value is absent, so it can never reject the media.
+	hls: HlsFieldSchema,
 });
 
 /**

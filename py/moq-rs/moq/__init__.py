@@ -8,40 +8,41 @@ from moq_ffi import MoqError as Error
 from . import audio as audio
 
 # Layer namespaces stay out of __all__; json would shadow the stdlib module.
-from . import flate as flate
 from . import json as json
 from . import video as video
-from .client import Client, CongestionControl, Tokens, connect, qlog_supported, versions
+from .client import Client, CongestionControl, connect, qlog_supported, versions
 from .epoch import mint_epoch
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
 from .origin import (
     Announce,
     AnnounceConsumer,
-    AnnouncedBroadcast,
     AnnounceEvent,
     AnnounceEventEnd,
     AnnounceEventRestart,
     AnnounceEventStart,
+    AnnounceEventTakeover,
     AnnounceEventUpdate,
     BroadcastPrepared,
     BroadcastRequest,
+    Following,
     OriginConsumer,
-    OriginDynamic,
     OriginProducer,
+    OriginRequests,
+    Publication,
 )
 from .publish import (
-    BroadcastDynamic,
     BroadcastProducer,
+    BroadcastRequests,
     Fill,
     GroupProducer,
     TrackDemand,
-    TrackDynamic,
     TrackProducer,
     TrackRequest,
+    TrackRequests,
 )
 from .server import Request, Server, Transport
-from .session import Auth, AuthToken, Bandwidth, Reservation, Session
+from .session import Allocator, BandwidthConsumer, GrantConsumer, Reservation, Session, Tokens
 from .subscribe import (
     BroadcastConsumer,
     GroupConsumer,
@@ -64,6 +65,7 @@ from .types import (
     Frame,
     Grant,
     Order,
+    Position,
     ProtocolError,
     ProtocolKind,
     QuicConfig,
@@ -81,25 +83,24 @@ from .types import (
 )
 
 __all__ = [
+    "Allocator",
     "Anchor",
     "Announce",
     "AnnounceConsumer",
-    "AnnouncedBroadcast",
     "AnnounceEvent",
     "AnnounceEventEnd",
     "AnnounceEventRestart",
+    "AnnounceEventTakeover",
     "AnnounceEventStart",
     "AnnounceEventUpdate",
     "AnnounceRoute",
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",
-    "Auth",
-    "AuthToken",
     "Backoff",
-    "Bandwidth",
+    "BandwidthConsumer",
     "BroadcastConsumer",
-    "BroadcastDynamic",
+    "BroadcastRequests",
     "BroadcastPrepared",
     "BroadcastProducer",
     "BroadcastRequest",
@@ -118,13 +119,17 @@ __all__ = [
     "QuicConfig",
     "FetchGroupOptions",
     "Fill",
+    "Following",
     "Grant",
+    "GrantConsumer",
     "GroupConsumer",
     "GroupProducer",
     "OriginConsumer",
-    "OriginDynamic",
+    "OriginRequests",
     "OriginProducer",
     "Order",
+    "Position",
+    "Publication",
     "Range",
     "Request",
     "Reservation",
@@ -135,7 +140,7 @@ __all__ = [
     "Tokens",
     "TrackConsumer",
     "TrackDemand",
-    "TrackDynamic",
+    "TrackRequests",
     "TrackInfo",
     "TrackProducer",
     "TrackRequest",

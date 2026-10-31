@@ -38,7 +38,7 @@ kio?":
   which a write, open, reset, stop, close, or credit change wakes. Pacing
   and loss timers stay on `poll_timeout`. This replaces the kick each
   handle sends its driver after mutating the connection.
-- **After [streams](/quest/m1/quic-api/streams.md)**, whose queryable
+- **After [moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)**, whose queryable
   send-stream end is what `poll_finished` and `poll_acked` read, and whose
   names the new methods take.
 
@@ -68,15 +68,10 @@ Public API: moq-quic gains `poll_*` methods taking `&kio::Waiter`,
 `poll_transmit` changes shape, and `StreamEvent` and the waiting `Event`
 variants go. The drivers' and qmux's public APIs are unchanged here; the
 driver poll forms come in [poll](/quest/m1/quic-api/poll.md). Update
-moq-quic's README fork list and MIGRATE.md. Wire: none.
-
-## Required
-
-- [Streams](/quest/m1/quic-api/streams.md) - the send-stream end state and the `send::`/`recv::` names these waits use
+moq-quic's README fork list and describe migration in the PR's Impact section. Wire: none.
 
 ## Related
 
 - [Poll forms](/quest/m1/quic-api/poll.md) - the drivers' public poll forms forward to these
 - [poll_acked](/quest/m2/quic-ack-hook.md) - its offset wait lives here
 - [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md) - profiles the lock these waits are registered under
-- [Sans-IO compared](/quest/m1/poll-first/sansio-compare.md) - a core that owns kio waits but no I/O is a third data point

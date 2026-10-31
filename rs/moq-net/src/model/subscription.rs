@@ -28,7 +28,8 @@ pub struct Subscription {
 	/// giving up. This never *adds* delay, since the bound is only reached once newer data
 	/// is already that far ahead. `None` is the publisher's
 	/// [`Info::max_age`](crate::track::Info::max_age) alone, what a reader reaching back
-	/// for history wants.
+	/// for history wants. Read in order, `None` waits at a missing group until it resolves;
+	/// see [`track::Ordered`](crate::track::Ordered) for where that can block.
 	///
 	/// This is the `Subscriber Max Age` on the wire, and it is stored here verbatim so
 	/// what was asked for stays readable. Encoded as milliseconds in a QUIC varint, so
@@ -120,11 +121,13 @@ pub enum Order {
 /// copy waiting on a fresh upstream answer counts from the live feed's latest group once
 /// it answers, never from the groups an ended feed left in its cache.
 ///
-/// Over a session, the copy resolves them only on moq-lite-07, which reports the live edge
-/// and media time and asks upstream for every group the budget allows. A copy received
-/// over an older lite or any moq-transport version refuses each other than [`Range::live`]
-/// and [`Range::oldest`] with [`Error::Unsupported`](crate::Error::Unsupported) on read,
-/// rather than resolve it against the part of the track it holds.
+/// Over moq-lite-07, a copy resolves them from the reported live edge and media time.
+/// A Rust moq-transport copy resolves a relative anchor from the Largest Object its live
+/// join reports, and accepts time anchors its cache can already resolve, translating both
+/// to group bounds upstream; any other time anchor is refused. Older moq-lite versions
+/// accept absolute anchors but refuse time anchors and relative anchors other
+/// than [`Range::live`] and [`Range::oldest`] with [`Error::Unsupported`](crate::Error::Unsupported)
+/// rather than guess from a partial copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Anchor {
 	/// The group with this sequence.
@@ -170,8 +173,9 @@ impl Range {
 
 	/// Everything from the oldest group still around onward, the default.
 	///
-	/// Unlike `Absolute(0)..` this names no floor, so an older wire asks for the live edge
-	/// and lets [`Subscription::max_delay`] decide how far back to reach.
+	/// Unlike `Absolute(0)..` this names no floor: a wire whose publisher resolves the start
+	/// from [`Subscription::max_delay`] reaches as far back as it allows, and an older wire
+	/// starts at the live edge, filling nothing below it.
 	pub fn oldest() -> Self {
 		Self {
 			start: Anchor::Relative(u64::MAX),

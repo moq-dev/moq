@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
-import { Group, Time, Track, Varint } from "@moq/net";
+import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Consumer } from "./consumer.ts";
 import { Format } from "./legacy.ts";
@@ -15,9 +15,8 @@ for (const count of [1, 16, 256]) {
 			maxDelay,
 		});
 		const write = (sequence: number, timestamp: number) => {
-			const group = new Group.Producer(sequence);
+			const group = track.createGroup(sequence);
 			group.writeFrame({ payload: Varint.encode(timestamp), timestamp: Time.Timestamp.now() });
-			track.writeGroup(group);
 			return group;
 		};
 		const buffered = async (timestamp: number) => {
@@ -45,6 +44,7 @@ for (const count of [1, 16, 256]) {
 			);
 		} finally {
 			consumer.close();
+			track.finish();
 			track.close();
 			warn.mockRestore();
 		}

@@ -226,17 +226,15 @@ test("a listing past the announces cap is reset, and the session stays", async (
 	const cap = 3;
 	const { subscriber, listed, closing } = handPlayed({ limits: { announces: cap } });
 	const tracks = subscriber.consume(Path.from("room")).tracks();
+	expect(await next(tracks)).toBe("synced");
 	const peer = await listed();
-	for (let i = 0; i <= cap; i++) await peer.send({ kind: "added", name: `t${i}`, info });
-	let added = 0;
-	let end: string;
-	for (;;) {
-		end = await next(tracks);
-		if (end.startsWith("+")) added++;
-		else if (end !== "synced") break;
+	// Read in step: the reset withdraws whatever adds are still unread.
+	for (let i = 0; i < cap; i++) {
+		await peer.send({ kind: "added", name: `t${i}`, info });
+		expect(await next(tracks)).toBe(`+t${i}`);
 	}
-	expect(added).toBe(cap);
-	expect(end).toMatch(/^error: /);
+	await peer.send({ kind: "added", name: `t${cap}`, info });
+	expect(await next(tracks)).toMatch(/^error: /);
 	await settle();
 	expect(closing).not.toHaveBeenCalled();
 	// The reset released every slot: another listing lists the whole cap again.
@@ -411,7 +409,7 @@ test("a newer listing of a broadcast on one session replaces the older", async (
 
 test("a path served through a covering prefix route is NOT_FOUND", async () => {
 	const origin = new OriginProducer();
-	const dynamic = origin.dynamicRoute(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	void (async () => {
 		for await (const request of dynamic.requested()) {
 			const served = new BroadcastProducer();
@@ -428,7 +426,7 @@ test("a path served through a covering prefix route is NOT_FOUND", async () => {
 test("a local read through a covering prefix route is NOT_FOUND, and through its exact route lists", async () => {
 	const origin = new OriginProducer();
 	for (const prefix of ["room", "room/bob"]) {
-		const dynamic = origin.dynamicRoute(Path.from(prefix));
+		const dynamic = origin.requestsRoute(Path.from(prefix));
 		void (async () => {
 			for await (const request of dynamic.requested()) {
 				const served = new BroadcastProducer();
@@ -528,7 +526,7 @@ test("an epoch-pinned front lists its serving route's tracks", async () => {
 
 test("an epoch-pinned front served through a covering prefix route is NOT_FOUND", async () => {
 	const origin = new OriginProducer();
-	const dynamic = origin.dynamicRoute(Path.from("room"), {
+	const dynamic = origin.requestsRoute(Path.from("room"), {
 		epoch: Epoch.parse("01900000-0000-7000-8000-000000000001"),
 	});
 	void (async () => {

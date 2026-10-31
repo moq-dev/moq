@@ -55,7 +55,7 @@ pub enum Error {
 	#[error("timestamp overflow")]
 	TimestampOverflow,
 
-	/// A Tracks element arrived after `finish()`, so the tracks it declares could never finish.
+	/// Input arrived after `finish()`, so any tracks it declares could never finish.
 	#[error("Tracks after finish")]
 	TracksAfterFinish,
 
@@ -99,6 +99,10 @@ pub enum Error {
 	/// A `Colour` element value has no catalog representation.
 	#[error("invalid Colour {0}")]
 	InvalidColour(&'static str),
+
+	/// A `StereoMode` or `Projection` element the catalog cannot describe, or a malformed one.
+	#[error("unsupported spherical video: {0}")]
+	UnsupportedSpatial(&'static str),
 
 	/// The named track joined after the MKV header was emitted.
 	#[error("MKV track layout changed after header was emitted: track '{0}' added")]

@@ -85,7 +85,18 @@ moq --connect https://relay.example.com/rooms/1 --connect-token "$TOKEN" --broad
 The `ts`, `fmp4`, and `flv` imports publish the input's own timestamps, mapped
 to the wall time the first frame arrived. A timeline that rewinds, such as a
 restarted encoder or a looping file wrapping to the top, ends the import with
-an error; run it again to publish anew. A flagged MPEG-TS discontinuity that
+an error; run it again to publish anew. `import ts` and `import srt` republish
+instead when an MPEG-TS clock steps onto another timeline: the PCR and every
+stream stepping back, flagged or not, or more than 10 s forward without a
+`discontinuity_indicator`. The broadcast finishes there, and the rest of the
+input publishes as a new instance under a new
+[epoch](/concept/moq-lite#publisher-epochs), on the same SRT connection, which
+`export ts --stitch --follow` carries on into. The new instance keeps the mux
+rate the old one measured, so its catalog goes out with its first media rather
+than after a fresh two-second measurement. An unflagged step usually means
+redundant encoders behind a changeover switch: time-lock their clocks, or have
+the switch set `discontinuity_indicator`. `--program all` and `--passthrough`
+still end at a rewind. A flagged MPEG-TS discontinuity that
 jumps forward continues the broadcast and is declared on the exported clock.
 MPEG-TS timestamps follow their source history across the 33-bit wrap
 (every 26.5 hours), including files imported faster than real time and flagged
@@ -122,8 +133,11 @@ supplies a PES boundary or clock fails rather than retaining bytes indefinitely.
 It takes one program: a multi-program
 stream is refused until `--program` picks one, or `--program all` publishes
 each as its own broadcast (`event.hang` becomes `event/1.hang`,
-`event/2.hang`). A damaged packet is dropped on its own PID, so video freezes
-until its next keyframe while the other tracks carry on. The importer also
+`event/2.hang`), following the PAT: a program it adds publishes, one it drops
+ends, and one that returns publishes as a new instance. A listed program whose
+PMT does not arrive within 0.5 s of program clock ends the import. A damaged packet is
+dropped on its own PID, so video freezes until its next keyframe while the
+other tracks carry on. The importer also
 logs feed health (stalled streams, TR 101 290 errors) without changing what it
 publishes. `--passthrough` publishes the multiplex whole instead, every packet
 in order on one [`m2ts`](/concept/hang#transport-streams) track with every
@@ -157,13 +171,13 @@ moq --connect https://relay.example.com/anon --broadcast camera.hang \
 ## Export
 
 The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports pick renditions with
-`--video-name`, `--audio-name`, `--video-codec`, `--audio-codec`, `--no-video`,
-and `--no-audio`. `ts`, `archive`, and the gateways export everything and
-refuse these flags.
+`--video-name`, `--audio-name`, `--video-codec`, `--audio-codec`, `--video <on|off>`,
+and `--audio <on|off>` (both default to `on`). `ts`, `archive`, and the gateways
+export everything and refuse these flags.
 
 ```bash
-moq ... export --no-video fmp4 > audio.mp4
-moq ... export --video-name hd --no-audio mkv > hd.mkv
+moq ... export --video off fmp4 > audio.mp4
+moq ... export --video-name hd --audio off mkv > hd.mkv
 ```
 
 Every export skips a disabled rendition (catalog `enabled: false`). `h264` and
@@ -196,8 +210,8 @@ error names the `--delay` it needs.
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
-moq ... play --no-video             # audio only, without a window
-moq ... play --no-video --metrics play.ndjson   # log what the speaker played
+moq ... play --video off            # audio only, without a window
+moq ... play --video off --metrics play.ndjson   # log what the speaker played
 ```
 
 Decodes H.264, H.265, and AV1 video with the platform hardware decoder where
@@ -212,7 +226,7 @@ default, `auto`, sizes the buffer to how unevenly audio arrives, with the same
 [algorithm](/concept/audio-jitter) as the browser player. A duration fixes the
 delay and is also how long a stalled group is waited on before it is skipped.
 Each role follows the catalog, switching rendition when the publisher retires
-the one playing. With `--no-video`, `--metrics <PATH>` writes a JSON line every
+the one playing. With `--video off`, `--metrics <PATH>` writes a JSON line every
 250 ms with the playhead, the delay, and every gap and stall the speaker hit, in
 the schema the
 [audio quality harness](https://github.com/moq-dev/moq/tree/main/test/audio-quality)
@@ -233,22 +247,33 @@ audio-device dependencies:
 cargo install moq-cli --no-default-features --features "quic,websocket,play,openh264"
 ```
 
-`moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
+`moq play` skips disabled renditions when it picks one. If no enabled rendition
+matches its name and codec filters, it waits for a later catalog. Disabling the
+current rendition switches to an enabled one of its kind that matches the
+filters; with none, it stays subscribed, so re-enabling it (an unmute) plays at
+once.
 
 ## Capture
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast cam.hang import capture
 moq ... import capture --display --system-audio          # share a screen with its sound (macOS)
-moq ... import capture --window 39193 --no-audio         # one window (macOS, Windows, X11)
-moq ... import capture --window --no-audio               # system window picker (Linux Portal)
+moq ... import capture --window 39193 --audio off        # one window (macOS, Windows, X11)
+moq ... import capture --window --audio off              # system window picker (Linux Portal)
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
+moq ... import capture --video demand --audio demand     # capture only while someone watches
 ```
 
 Video goes through the platform hardware encoder, with an H.264 software
 fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
-backends. The camera opens only while someone is watching, and `--bitrate` is a
-ceiling that backends with live bitrate control lower to fit the connection.
+backends. The camera and microphone stay open and encode while publishing,
+so a late subscriber can fetch the recent past. Choose each medium with
+`--video <on|demand|off>` and `--audio <on|demand|off>`, both defaulting to `on`.
+`off` publishes no track of that medium. `demand` captures and encodes only
+while that track has a subscriber, and leaves nothing to fetch from before
+the first viewer; video still opens its source once at startup to probe the
+mode it negotiates. `--bitrate` is a ceiling that
+backends with live bitrate control lower to fit the connection.
 `moq devices` prints every source id. On Windows, `display:N` is an
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
 saved selector picks the wrong screen.
@@ -375,7 +400,7 @@ rtsp` one per RTSP session, and `import ts --program all` one per program.
 A restarted process takes the name at once: viewers see the broadcast restart,
 and their next subscribe reaches the new run instead of waiting for its group
 numbers to catch up. Epochs cross a connection only on moq-lite 07, which is
-opt-in, and on moq-transport draft 17 and later, and order by the host's clock
+opt-in, and on moq-transport, and order by the host's clock
 there, so a host whose clock runs behind the old run's waits for it to close.
 Other versions carry no epoch, so a restart from another session is the newest
 route at an equal cost, or a better one.
@@ -462,6 +487,9 @@ FLV, MKV and RTMP refuse the released `--max-age` spelling with a migration
 message. The output follows the source's clock within what ISO/IEC 13818-1
 allows a TS PCR. A source further off fails the export, naming its rate, once
 it has used half the delay; a brief network stall only drops what it made late.
+A timeline that steps further than the delay absorbs with no restart marker, as
+a changeover between two encoders whose clocks disagree, re-acquires the clock
+as at startup rather than read the step as drift.
 
 `export ts --passthrough` reads the track an `import ts --passthrough` published
 and writes its packets back out unchanged, from its first group on, each run
@@ -472,19 +500,28 @@ continuity error, and the rest carry on. It takes neither `--follow`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
 
-A stdout export ends with the broadcast. `export ts --follow 10s` waits that
-long for the same publisher instance to come back, and carries on with the same
-stream. A return that refuses its catalog keeps it waiting for the next
-announcement; if the follow runs out first, it exits 1 with that refusal. One
-that goes before serving, such as one still routed through a dead session, is
-no return. A replacement (a restarted publisher, under a new
+A stdout export ends with the broadcast. A publisher that leaves still gets
+what the export buffered of it out on schedule first. `export ts --follow 10s`
+then waits that long for the same publisher instance to come back, and carries
+on with the same stream. A return that refuses its catalog keeps it waiting
+for the next announcement; if the follow runs out first, it exits 1 with that
+refusal. One that goes before serving, such as one still routed through a dead
+session, is no return. A replacement (a restarted publisher, under a new
 [epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
 the break. A stitch waits for the replacement's first catalog snapshot until it
 arrives or the replacement goes, keeping the old publisher playing meanwhile,
 so even the default `--follow 0s` switches to a replacement that is still
-starting. Without `--stitch` the export stays on the old publisher while it is
-up. Only lite-07 and moq-transport draft 17+ sessions carry epochs, so on the
+starting. After the catalog arrives, the old instance keeps feeding for up to
+`--follow` while the replacement acquires its clock and first usable media.
+Its subscriptions take lower priority so the replacement can acquire on a
+congested link. The marked switch drops the old instance's buffered tail, so
+the replacement plays at `--delay` rather than behind it. An unimpaired switch
+usable within that window adds no gap. Congestion can starve the old instance
+sooner or leave the replacement acquiring past the window, causing a gap.
+Timestamps across epochs are not aligned. Without `--stitch` the export stays
+on the old publisher while it is up. Only lite-07 and moq-transport sessions
+carry epochs, so on the
 default version every return is a replacement. A failure other than the
 publisher leaving, such as a codec TS cannot carry, exits 1 at once. Only `ts`
 can mark a break, so the other formats refuse `--linger`, the released spelling

@@ -1,0 +1,9 @@
+prefix=${pcfiledir}/@MOQ_PC_PREFIX@
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: moq-c
+Description: Media over QUIC for C
+Version: @PROJECT_VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -lmoq -lmoq_c_ffi@MOQ_LIBS_PC@

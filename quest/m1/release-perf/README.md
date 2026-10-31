@@ -1,4 +1,4 @@
-# [M] Main is no slower than release
+# Main is no slower than release
 
 ## Goal
 
@@ -7,12 +7,11 @@ Before the next release cut, every benchmark where `main` is slower than
 is fixed. Cost that pays for a feature `main` deliberately added is accepted,
 and the reason is written here.
 
-This epic's own work: once every child has landed, run the full main against
-release comparison again with `just bench origin/release`, plus the JS frame
-path in Chromium with `bench/browser/micro.ts`, and confirm nothing new
-regressed. Then add a release-baseline step to the recurring
-[performance audit](/quest/m2/audit-perf.md), so every later cut
-repeats this comparison.
+This epic's own work: once its child has landed, re-pair the relay `fanout`
+workload against `release` and confirm main's relay CPU is no higher in every
+round. The sparse rows are accepted (2026-10-30). The browser frame path
+needs no repeat; the [performance audit](/quest/m2/audit-perf.md) now pairs
+every later cut with `release`.
 
 ## Plan
 
@@ -74,8 +73,7 @@ noise.
   one-frame import's instructions are its zero-fill), and the encoders already
   build that state lazily on first use. It is paid once per broadcast: the
   import ratio falls from 3.97x at one frame to 1.49x at 64. TS export's
-  growth to 2.09x at `4x64` is in the export reap that
-  [moq-dev/moq#6281](https://github.com/moq-dev/moq/pull/6281) changes.
+  growth with track count is its T-STD schedule (see the final run).
 - The model's remaining per-group and per-frame cost is accepted, after
   [moq-dev/moq#6294](https://github.com/moq-dev/moq/pull/6294) cut the
   accidental part (a second track upgrade per first frame, a 128-bit division
@@ -137,7 +135,7 @@ the moq-net and kio rows include the fixes above.
 | `track_fanout_frame/1` | 1.42x | 1.86x | accepted (above) |
 | `track_empty_run/{fresh/1,stale/8}/512` | median 1.36x | 1.53x | accepted (above) |
 | `track_datagram_subscriber_join/0d/1`, `64d/64` | median 2.3x | 2.12x, 3.55x | accepted (above) |
-| `track_sparse_read/timed/4096` | 4.3x | | [moq-dev/moq#6287](https://github.com/moq-dev/moq/pull/6287) |
+| `track_sparse_read/timed/4096` | 4.3x | | fixed in [moq-dev/moq#6287](https://github.com/moq-dev/moq/pull/6287), regressed again (final run) |
 | `origin/announce_duplicate`, `1d_1s` to `240d_240s` | 4.3x | 1.06x to 1.16x | noise |
 | `session_delivery_{relays,paced,scale}` | 1.43x to 1.56x | 1.28x to 1.77x | accepted (above) |
 | moq-stats `aggregate`, live=16, departed=4096 | 2.1x | 1.05x | noise |
@@ -156,11 +154,123 @@ releasing a finished stream's reader lock, which built a `TypeError` per
 group stream. Every row then sits within the A/A spread of release.
 The group write/read microbench stays 3 to 12% above release against an
 A/A of 3 to 8% on the same host. Decided 2026-10-23 (maintainer): browser
-parity accepted on this evidence; the final re-run above checks it again.
+parity accepted on this evidence; the 2026-10-25 run confirmed it.
 
-The raw report lived in a scratch directory that has since been removed.
-`just bench <base>` now pairs full Criterion IDs; point `BENCH_ARTIFACTS`
-outside the worktree to keep the next one.
+### Final run (2026-10-25)
+
+`release` (`3db33f6715`) against `main` (`018f1c46e5`): 1,019 paired
+Criterion cases, three relay load pairings, and nine Chromium frame rounds
+with an A/A pair, at host load 20 to 60. Each slower case was re-run in
+alternating rounds and counted in callgrind instructions.
+
+Fixed in [moq-dev/moq#6784](https://github.com/moq-dev/moq/pull/6784):
+
+- The MKV and FLV exports rebuilt the jitter clock's expected track set on
+  every frame; they now set it once per catalog update.
+  `container-export/mkv/16x64` went from 27.1M to 17.6M instructions (2.27x to
+  1.47x release, flat across the sweep), `flv/16x64` 14.5M to 12.9M.
+- The TS export and its T-STD schedule hash PIDs with FxHash:
+  `container-export/ts/16x64` 30.8M to 25.5M (2.70x to 2.24x).
+- Benches that broke since release now run: the moq-mux catalog bench caps its
+  renditions, the relay auth bench reads its observed state directly, moq-stats
+  `producer_tick` skips tiers above one at 50,000 paths, and `bench/run.sh`
+  skips targets that are not Criterion.
+
+Accepted, flat per operation:
+
+- e2ee `protect` is 1.5x release on grouped frames and 1.21x on datagrams. The
+  crypto is unchanged; the rest is the per-group model cost accepted above.
+  Both branches expand the AES-GCM key on every frame, about a quarter of
+  `protect`, which the [performance audit](/quest/m2/audit-perf.md) owns.
+- gst `moqsink/eos` is +12% instructions per event, from
+  [#5512](https://github.com/moq-dev/moq/pull/5512) and the gstreamer-rs 0.25
+  bump in [#6169](https://github.com/moq-dev/moq/pull/6169).
+- `group_write_frames` (1.67x) and `track_stamp_groups/sparse` (1.48x, down
+  from 4.4x) are the per-frame and per-group costs accepted above, as are the
+  session join, burst, and delivery families (1.2x to 1.76x).
+  `session_dash_relays` is the same per-track cost: 1.50x instructions at 768
+  tracks over 2 or 3 relays, and 0.63x over 33 relays, so it falls with relay
+  count. The import fixed costs above (`annexb-import`, `cmaf-import` at one
+  frame) and the IETF `/fetch` delivery rows also reappear unchanged.
+- The TS export still grows with track count (1.50x at `1x1` to 2.24x at
+  `16x64`). The T-STD schedule scans and sorts every queued unit per PCR slot,
+  which the [performance audit](/quest/m2/audit-perf.md) owns.
+
+Noise: `frame_recv/upfront/size=262144/streams=64` is 3 to 4x in wall time at
+0.96x instructions. Its 1.6M page faults (against 192k) are glibc returning
+the freed 256 KiB buffers between iterations; with
+`GLIBC_TUNABLES=glibc.malloc.mmap_threshold=1048576:glibc.malloc.trim_threshold=1073741824`
+both sides fault 4.6k times and time the same, and the relay runs jemalloc.
+`session_idle` IETF at 1024 sessions, `origin/resume_overlap`,
+`origin/retire`, `origin/reprice_duplicate` (0.55x instructions), kio
+`contended_notify`, and moq-stats `producer/merge` are at parity in
+alternating rounds or instructions.
+
+Relay load: video used 7.8% less relay CPU with the same delivery. Fanout used
+16.4% more, but its paired deltas were -1.5%, +16.4%, and +26.1% (MAD 9.7%)
+at load 25, and the 2026-10-21 run measured 12% less, so it needs a quiet
+re-run. Browser frames: lite rows 1.09 to 1.14x and IETF 0.95x, the same as
+`main` at the 2026-10-23 decision (1.13x lite).
+
+Decided 2026-10-25 (maintainer), in
+[moq-dev/moq#6784](https://github.com/moq-dev/moq/pull/6784):
+
+- The sparse read slope from
+  [dynamic range requests](https://github.com/moq-dev/moq/pull/6171) blocks
+  the cut; [moq-dev/moq#6921](https://github.com/moq-dev/moq/pull/6921)
+  flattened it.
+- The TS schedule's growth is left to the
+  [performance audit](/quest/m2/audit-perf.md); it does not block the cut.
+- Now that the sparse fix has landed, re-run the relay fanout pairing on a
+  quiet host, recording `/proc/loadavg`, with
+  `BENCH_ARTIFACTS=<scratch> just bench origin/release` (it also re-checks
+  the sparse rows). Fix it if the relay
+  CPU still rises with consistent sign; otherwise this epic is done.
+
+### Re-run (2026-10-30)
+
+`release` (`de0a2b0534`) against `main` (`7c8e255304`). The host was shared
+with other agents: 1-minute load 11 to 29 on 24 cores. Rather than the full
+`just bench origin/release`, this run paired only the relay workloads (the
+tail of `bench/run.sh`, seven alternating rounds) and `track_sparse_read`
+(three alternating rounds). Release's `track` bench has no `async` feature, so
+`run.sh --criterion` cannot build both sides with one set of arguments.
+
+Relay fanout is bimodal on `main`. Release's relay used 0.062 to 0.082 cores
+in all seven rounds. Main's used 0.062 to 0.072 in three rounds and 0.157 to
+0.241 in four, with the same delivery (640 frames/s, p99 within 2%). The
+comparator calls the sign mixed (paired deltas -15% to +218%, median +119%),
+but the high runs share a mechanism. In them, 21 to 24 Tokio workers are busy
+and the relay makes 9,400 to 12,600 voluntary context switches/s, against 2
+to 6 busy workers and 400 to 1,300 switches/s otherwise. Release never
+exceeded 4 busy workers or 2,800 switches/s. Eight CPU-profiled runs of
+`main` reproduced it in five. In a high run, 54% of samples end in a syscall
+(3 of 227 in a low run). Most are futex waits on the track's shared
+`kio::Lock`, taken by every subscriber's `read` in
+`poll_recv_next → poll_peek_group` and
+`poll_forward_drop → poll_drop`, plus the wakes that follow. When the 64
+subscriber tasks land on many workers, every frame makes them contend that
+one lock; packed onto a few workers, they never contend. Video used 9.7% less
+CPU (MAD 7.1%), with 1.4% more frames delivered.
+
+`track_sparse_read/timed` is flat now that
+[moq-dev/moq#6921](https://github.com/moq-dev/moq/pull/6921) has landed:
+release 2.42, 2.49, 2.64 us and main 5.33, 5.98, 6.42 us at 16, 256, 4096
+gaps (medians of three rounds). From 16 to 4096 gaps, main grows 20% and
+release 9%. The 2.2 to 2.4x gap is per iteration, not per gap. Each iteration
+creates, writes, finishes, and receives two groups, so this is the per-group
+model cost accepted above.
+
+Decided 2026-10-30 (maintainer), in
+[moq-dev/moq#7299](https://github.com/moq-dev/moq/pull/7299):
+
+- The sparse rows are accepted as that per-group model cost.
+- The fanout mode is accidental and is fixed before the cut, in
+  [Fanout lock contention](/quest/m1/release-perf/fanout-lock.md).
+
+## Required
+
+- [Fanout lock contention](/quest/m1/release-perf/fanout-lock.md) - relay fanout subscribers stop contending one track lock, so main's relay CPU matches release's in every round
 
 ## Related
 

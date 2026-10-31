@@ -51,7 +51,8 @@ an explicit directory, a release pin in `cpp/moq/FFI_VERSION` selects the defaul
 input; `just cpp package` fetches it with the checked-in SHA-256 hashes and fails
 if it cannot verify it. Direct CMake builds and `just cpp check` build the
 current checkout unless given an explicit native directory. The package is
-`moq-cpp`, so it installs beside the C package, `moq-c`, without colliding.
+`moq-cpp`. It and the C package, `moq-c`, each link in their own copy of the
+Rust core, so a program links one of the two, never both.
 
 ## Example
 
@@ -86,7 +87,7 @@ void ok(moq::expected<void> result) {
 // Subscribe.
 auto client = ok(moq::Client::init({}));   // a moq::ClientConfig; {} takes every default
 auto session = ok(client->connect("https://relay.example.com").get());
-auto announced = ok(session->consume()->announced_broadcast("my-stream.hang"));
+auto announced = ok(session->consume()->follow("my-stream.hang", std::nullopt));
 auto broadcast = ok(announced->available().get());
 auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
@@ -107,7 +108,13 @@ Call `available()` again to wait for the next publisher instance at that path, s
 restarted publisher, and drop what was read from the previous one then: its tracks end
 when its session does.
 
-`MediaTrackConsumer` reads in decode order. For arrival-order reads, decode each group
+`MediaTrackConsumer` reads `MediaRead` records in decode order: `kFrame`, `kGap`, or
+`kEnd`, like the audio and video decoders. Match the variant before taking its frame.
+A decoder reads everything the track still holds unless a live player sets `start` to
+`moq::DecodeStart::kLatest` in its decoder output, which joins at the newest group and skips
+the cached backlog.
+A gap breaks continuity. An encoder end is not stream EOF: following frames before its
+endpoint are the old encoder's drain; the first at or past it starts fresh. For arrival-order reads, decode each group
 from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
 frames carry container media time as they land.
 Share `moq::MediaTimebase::init(broadcast)` through `ContainerInit` when several imports
@@ -120,7 +127,8 @@ anywhere, so a raw byte stream needs no other importer.
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // session is connected as above; opus_init, packet, and rgba come from your
 // encoder or capture source.
-auto broadcast = ok(session->publish()->create_broadcast("my-stream.hang"));
+auto publication = ok(session->publish()->create_broadcast("my-stream.hang"));
+auto broadcast = publication->broadcast(); // fill tracks here; announce on the publication
 auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
 ok(audio->write_frame({packet, 20'000}));
 
@@ -130,11 +138,11 @@ auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba
 ok(video->write({0, rgba}));
 moq::AnnounceRoute route;
 route.epoch = moq::mint_epoch(); // a fresh epoch per run
-ok(broadcast->announce(route));
+ok(publication->announce(route));
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
 
 ## Futures
 
@@ -155,8 +163,8 @@ An async call returns `moq::Future<T>`, which delivers a `moq::expected<T>`:
 
 ```cpp
 auto reading = media->next();
-auto continuation = std::move(reading).then(moq::inline_executor, [](moq::expected<std::optional<moq::MediaFrame>> frame) {
-    // Runs on the executor thread: hand the frame off, never block here.
+auto continuation = std::move(reading).then(moq::inline_executor, [](moq::expected<std::optional<moq::MediaRead>> read) {
+    // Runs on the executor thread: match the record and hand it off, never block here.
 });
 ```
 
@@ -192,7 +200,7 @@ future completed, which is the executor thread.
 
 ## Disabled renditions
 
-Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
+A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 
 ## Bandwidth estimates
 
@@ -200,7 +208,11 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 
 ## Compressed tracks
 
-`moq::TrackInfo::compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
+`moq::TrackInfo::compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+
+## Subscription defaults
+
+`moq::subscription_defaults()` returns moq-net's defaults, whose zero `max_delay` skips a superseded group at once; passing `std::nullopt` for a subscription means the same. Change its fields rather than starting from `moq::Subscription{}`, whose unset `max_delay` sets no subscriber limit.
 
 ## Track demand
 
@@ -210,9 +222,9 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 
 ## Authorization
 
-On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `session->auth()->grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects; `grant_changed()` waits for the next one. `add(token)` presents a fresh token without reconnecting and resolves to an `AuthToken` whose grant joins the union until `cancel()`; it is presented again on every reconnect. A refusal resolves to an `Error` carrying the relay's code.
+On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `session->grants()` returns a `GrantConsumer`: `grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects, and `changed()` waits for the next one until `cancel()`.
 
-Set `ClientConfig::tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `client->tokens()->set(...)` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the client redials only if they changed. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
+Set `ClientConfig::tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `session->tokens()->set(...)` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `answered()` resolves once the relay accepts them, or to an `Error` carrying its refusal code. A server-accepted session's `tokens()` is null. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 
 ## Stats
 
@@ -256,7 +268,7 @@ kind `ProtocolKind::kTooManyRequests`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
-A session closed because its credential expired reports `ProtocolKind::kExpired`, and a request refused for an expired token is `moq::Error::kExpired`; refresh the token before retrying.
+A session closed because its credential expired reports `ProtocolKind::kExpired`, and a request refused for an expired token is `moq::Error::kExpired`; refresh the token before retrying. Malformed credentials report `ProtocolKind::kMalformedAuthToken`; correct the token before reconnecting with it.
 A catalog that needs a newer moq-hang draft than this build reads is `moq::Error::kUnsupportedCatalog`; upgrade the library to read it.
 
 Check a result before reading it. `moq::expected` is a bundled `tl::expected`

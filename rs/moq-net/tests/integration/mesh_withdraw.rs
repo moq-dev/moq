@@ -38,6 +38,7 @@ enum Kind {
 	Start,
 	Update,
 	Restart,
+	Takeover,
 	End,
 }
 
@@ -62,6 +63,7 @@ fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, 
 				announce::Event::Start(announce) => (Kind::Start, announce),
 				announce::Event::Update(announce) => (Kind::Update, announce),
 				announce::Event::Restart(announce) => (Kind::Restart, announce),
+				announce::Event::Takeover { announce, .. } => (Kind::Takeover, announce),
 				announce::Event::End(announce) => (Kind::End, announce),
 			};
 			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {
@@ -631,7 +633,6 @@ async fn hop_limit_bounds_receive_and_send() {
 		"moq-lite-05",
 		"moq-lite-06",
 		"moq-lite-07-wip",
-		"moq-transport-17",
 		"moq-transport-18",
 		"moq-transport-22",
 	] {
@@ -697,13 +698,7 @@ async fn hop_limit_bounds_receive_and_send() {
 #[moq_clock::test]
 async fn hop_limit_falls_back_to_a_forwardable_route() {
 	// Only wires carrying a route cost can rank a longer route first.
-	for name in [
-		"moq-lite-06",
-		"moq-lite-07-wip",
-		"moq-transport-17",
-		"moq-transport-18",
-		"moq-transport-22",
-	] {
+	for name in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let version = name.parse().unwrap();
 		let near = produce_origin(1);
 		let far = produce_origin(4);

@@ -12,7 +12,10 @@ use std::{any::Any, str, sync::Arc};
 
 use bytes::BytesMut;
 
-use crate::{ConnectError, Side, TransportError, shared::ConnectionId, transport_parameters::TransportParameters};
+use crate::{
+	Side, TransportError, Version, endpoint::ConnectError, shared::ConnectionId,
+	transport_parameters::TransportParameters,
+};
 
 /// Cryptography interface based on *ring*
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
@@ -99,7 +102,7 @@ pub trait ClientConfig: Send + Sync {
 	/// Start a client session with this configuration
 	fn start_session(
 		self: Arc<Self>,
-		version: u32,
+		version: Version,
 		server_name: &str,
 		params: &TransportParameters,
 	) -> Result<Box<dyn Session>, ConnectError>;
@@ -108,18 +111,15 @@ pub trait ClientConfig: Send + Sync {
 /// Server-side configuration for the crypto protocol
 pub trait ServerConfig: Send + Sync {
 	/// Create the initial set of keys given the client's initial destination ConnectionId
-	fn initial_keys(&self, version: u32, dst_cid: ConnectionId) -> Result<Keys, UnsupportedVersion>;
+	fn initial_keys(&self, version: Version, dst_cid: ConnectionId) -> Keys;
 
 	/// Generate the integrity tag for a retry packet
-	///
-	/// Never called if `initial_keys` rejected `version`.
-	fn retry_tag(&self, version: u32, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16];
+	fn retry_tag(&self, version: Version, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16];
 
 	/// Start a server session with this configuration
 	///
-	/// Never called if `initial_keys` rejected `version`.
 	/// Sessions must reject early data; the transport only processes 1-RTT application packets.
-	fn start_session(self: Arc<Self>, version: u32, params: &TransportParameters) -> Box<dyn Session>;
+	fn start_session(self: Arc<Self>, version: Version, params: &TransportParameters) -> Box<dyn Session>;
 }
 
 /// Keys used to protect packet payloads
@@ -180,13 +180,3 @@ pub trait AeadKey {
 /// Generic crypto errors
 #[derive(Debug)]
 pub struct CryptoError;
-
-/// Error indicating that the specified QUIC version is not supported
-#[derive(Debug)]
-pub struct UnsupportedVersion;
-
-impl From<UnsupportedVersion> for ConnectError {
-	fn from(_: UnsupportedVersion) -> Self {
-		Self::UnsupportedVersion
-	}
-}

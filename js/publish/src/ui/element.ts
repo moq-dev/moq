@@ -38,6 +38,7 @@ export default class MoqPublishUi extends HTMLElement {
 		this.#observer = new MutationObserver(() => this.#updatePublish());
 	}
 
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#updatePublish();
 		this.#observer.observe(this, { childList: true });
@@ -47,6 +48,7 @@ export default class MoqPublishUi extends HTMLElement {
 		signals.run(this.#render.bind(this));
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		this.#observer.disconnect();
 		this.#signals?.close();
@@ -102,7 +104,8 @@ export default class MoqPublishUi extends HTMLElement {
 		// last live preview's aspect ratio (defaults to 16:9) instead of snapping.
 		let lastAspect = 16 / 9;
 		effect.run((e) => {
-			const capture = e.get(publish.video.in.capture);
+			// A hidden camera stays open but shows no preview, so it sizes the box like no video at all.
+			const capture = e.get(publish.controls.invisible) ? undefined : e.get(publish.video.in.capture);
 			const src = capture ? e.get(capture.in.source) : undefined;
 			if (src) {
 				player.classList.remove("player--empty");

@@ -5,12 +5,12 @@
 //! setup, and learns the [`Grant`] it earned. `Session::auth`
 //! returns the [`Handle`]: [`grant`](Handle::grant) is the union of every token
 //! this side presented, and `add` presents another without
-//! reconnecting. The returned [`Auth`] is cloneable; dropping its last clone withdraws it.
+//! reconnecting. The returned [`Credential`] is cloneable; dropping its last clone withdraws it.
 //! A [`Route`](crate::origin::Route) can name it, so the request advertising the route
 //! carries it too, and swapping it renews that request in place.
 //!
 //! A handle passed to `Client::with_auth` outlives its sessions: each session built on it
-//! presents every token it holds, so a route naming one of its [`Auth`]s keeps it across a
+//! presents every token it holds, so a route naming one of its [`Credential`]s keeps it across a
 //! reconnect. Only the peer's verdict ends such a token; a session ending leaves it for the
 //! next. It backs one active session at a time, plus the ones draining after a GOAWAY.
 //!
@@ -27,8 +27,8 @@
 //! that carried a token is held to that token's grant alone and ends with it; any other
 //! request is held to the session's scope, which a token carried by a request never joins.
 //!
-//! moq-transport draft-17+ carries the same exchange when both sides negotiate the
-//! MoQ Auth extension. Older versions, and peers that do not negotiate it, carry no
+//! moq-transport carries the same exchange when both sides negotiate the MoQ Auth
+//! extension. Older moq-lite versions, and peers that do not negotiate it, carry no
 //! AUTH exchange: there the grant stays `None`. On moq-transport `add` still succeeds,
 //! with a grant that stays unknown, since a request that names the auth carries its
 //! token; on moq-lite without AUTH it fails with [`Error::Unsupported`]. Both wires carry
@@ -44,6 +44,10 @@ use std::{
 use bytes::Bytes;
 
 use crate::{Error, Patterns, Result, SessionError, time::Instant};
+
+mod tokens;
+
+pub use tokens::{Dial, EmptyToken, Token, Tokens};
 
 /// Classify malformed AUTH messages separately from transport and local failures.
 pub(crate) fn protocol_error(err: Error) -> Error {
@@ -178,7 +182,7 @@ pub(crate) struct State {
 	closed: Option<Error>,
 	next_id: u64,
 	/// Every token the application added that it has not withdrawn.
-	tokens: BTreeMap<u64, Token>,
+	tokens: BTreeMap<u64, Entry>,
 	next_link: u64,
 	/// Every session built on this handle that has not dropped, oldest first.
 	links: BTreeMap<u64, Attached>,
@@ -188,10 +192,12 @@ pub(crate) struct State {
 	limit: Option<Grant>,
 	next_issue: u64,
 	acceptor: Acceptor,
+	/// The tokens a [`Tokens`] presents on this handle's sessions, when it was built by one.
+	configured: Option<tokens::Configured>,
 }
 
 /// A token the application added, presented on every session of its handle.
-struct Token {
+struct Entry {
 	value: Bytes,
 	/// The first verdict any session's peer gave: how it accepted the token, or why it ended.
 	answered: Option<Result<Answer>>,
@@ -227,6 +233,9 @@ struct Attached {
 	/// Bumped whenever the union or the scope changes, so the session's per-stream
 	/// gates can skip re-matching paths on every wakeup.
 	epoch: u64,
+	/// Whether the peer has accepted the connection, credential included: at once, unless
+	/// the session [awaits the peer's SETUP](Link::await_setup).
+	accepted: bool,
 }
 
 /// One token as one session presents it.
@@ -246,7 +255,7 @@ struct Slot {
 	retry: Option<Duration>,
 	/// Why the token ended on this session, once it has.
 	ended: Option<Error>,
-	/// The last [`Auth`] clone dropped: the driver closes the stream.
+	/// The last [`Credential`] clone dropped: the driver closes the stream.
 	withdrawn: bool,
 }
 
@@ -296,6 +305,7 @@ impl Attached {
 			issued: BTreeMap::new(),
 			scope: None,
 			epoch: 0,
+			accepted: true,
 		};
 		attached.rescope(limit);
 		attached
@@ -343,7 +353,7 @@ impl Attached {
 		self.recompute();
 	}
 
-	/// The last [`Auth`] clone for token `id` dropped.
+	/// The last [`Credential`] clone for token `id` dropped.
 	fn withdraw(&mut self, id: u64) {
 		let Some(slot) = self.slots.get_mut(&id) else {
 			return;
@@ -425,6 +435,10 @@ impl State {
 				if let Some(token) = self.tokens.get_mut(&id) {
 					token.answered.get_or_insert(Ok(answer));
 				}
+				if answer == Answer::Requests {
+					self.unsupported(id);
+				}
+				self.settle();
 			}
 			Err(err) => self.end_token(id, err),
 		}
@@ -443,6 +457,44 @@ impl State {
 		for link in self.links.values_mut() {
 			link.end(id, &err);
 		}
+		if self.closed.is_none() && self.configured(id) {
+			match err {
+				Error::Unsupported => self.unsupported(id),
+				err => tracing::warn!(%err, "a configured token was refused"),
+			}
+		}
+		self.settle();
+	}
+
+	/// Register a token and offer it to every open session.
+	fn present(&mut self, token: Bytes) -> u64 {
+		let id = self.next_id;
+		self.next_id += 1;
+		self.tokens.insert(
+			id,
+			Entry {
+				value: token.clone(),
+				answered: None,
+				ended: None,
+			},
+		);
+		let answers: Vec<_> = self
+			.links
+			.values_mut()
+			.filter_map(|link| link.offer(id, &token))
+			.collect();
+		for answer in answers {
+			self.answer(id, answer.map(|()| Answer::Requests));
+		}
+		id
+	}
+
+	/// Stop presenting token `id` on every session.
+	fn withdraw(&mut self, id: u64) {
+		self.tokens.remove(&id);
+		for link in self.links.values_mut() {
+			link.withdraw(id);
+		}
 	}
 
 	/// End the handle, returning the application's queue for the caller to close once the
@@ -451,6 +503,7 @@ impl State {
 		if self.closed.is_some() {
 			return None;
 		}
+		self.record();
 		self.closed = Some(err.clone());
 		let ids: Vec<u64> = self.tokens.keys().copied().collect();
 		for id in ids {
@@ -505,7 +558,7 @@ impl Permit {
 ///
 /// A session made without one creates its own, returned by `Session::auth`, which ends
 /// with that session. Pass one to `Client::with_auth` instead and it outlives its
-/// sessions: each presents every token the handle holds, so an [`Auth`] it issued keeps
+/// sessions: each presents every token the handle holds, so a [`Credential`] it issued keeps
 /// riding a route's announcements across a reconnect. It backs one active session at a
 /// time, plus the ones draining after a GOAWAY.
 ///
@@ -531,7 +584,7 @@ impl Handle {
 	/// Present another token on every session of this handle, resolving once a peer accepts it
 	/// with how it did.
 	///
-	/// The grant joins the union while any clone of the returned [`Auth`] lives. With no
+	/// The grant joins the union while any clone of the returned [`Credential`] lives. With no
 	/// session live it waits for the next one. A refusal that may pass, such as an
 	/// unreachable auth server, is presented again after a backoff, and so is a token whose
 	/// stream the peer drops without a verdict. On moq-transport
@@ -545,14 +598,14 @@ impl Handle {
 	/// (moq-lite without AUTH, or a peer that takes no tokens in band), the peer's refusal
 	/// as [`Error::Session`], or the handle's end.
 	#[cfg(feature = "async")]
-	pub async fn add(&self, token: impl Into<Bytes>) -> Result<(Auth, Answer)> {
+	pub async fn add(&self, token: impl Into<Bytes>) -> Result<(Credential, Answer)> {
 		let auth = self.present(token.into())?;
 		let answer = kio::wait(|waiter| auth.poll_answered(waiter)).await?;
 		Ok((auth, answer))
 	}
 
 	/// Register a token and queue it on every open session.
-	pub(crate) fn present(&self, token: Bytes) -> Result<Auth> {
+	pub(crate) fn present(&self, token: Bytes) -> Result<Credential> {
 		let mut guard = self.state.lock();
 		let state = &mut *guard;
 		if let Some(err) = &state.closed {
@@ -562,25 +615,8 @@ impl Handle {
 		if state.bound && !state.links.values().any(Attached::active) {
 			return Err(Error::GoingAway);
 		}
-		let id = state.next_id;
-		state.next_id += 1;
-		state.tokens.insert(
-			id,
-			Token {
-				value: token.clone(),
-				answered: None,
-				ended: None,
-			},
-		);
-		let answers: Vec<_> = state
-			.links
-			.values_mut()
-			.filter_map(|link| link.offer(id, &token))
-			.collect();
-		for answer in answers {
-			state.answer(id, answer.map(|()| Answer::Requests));
-		}
-		Ok(Auth {
+		let id = state.present(token);
+		Ok(Credential {
 			presented: std::sync::Arc::new(Presented {
 				state: self.state.clone(),
 				id,
@@ -717,6 +753,8 @@ impl Drop for Detach {
 	fn drop(&mut self) {
 		let queue = {
 			let mut state = self.state.lock();
+			// The link's credential may hold the answer a token set still waits on.
+			state.record();
 			state.links.remove(&self.id);
 			// Dropped without closing, such as a driver dropped mid-session.
 			match state.bound {
@@ -841,7 +879,7 @@ impl Link {
 
 	/// Present a token: the session's own credential at setup, presented on this session
 	/// alone, or else one of the handle's, presented on every session.
-	pub(crate) fn present(&self, token: Bytes, setup: bool) -> Result<Auth> {
+	pub(crate) fn present(&self, token: Bytes, setup: bool) -> Result<Credential> {
 		if !setup {
 			return self.handle.present(token);
 		}
@@ -863,7 +901,7 @@ impl Link {
 			state.next_id += 1;
 			Ok(id)
 		})?;
-		Ok(Auth {
+		Ok(Credential {
 			presented: std::sync::Arc::new(Presented {
 				state: self.state().clone(),
 				id,
@@ -875,7 +913,7 @@ impl Link {
 	/// The token a request carries for `auth`, or `None` when the request goes out unnamed
 	/// under the session's scope: `auth` came from another handle, it ended here, or
 	/// requests carry no token on this version.
-	pub(crate) fn token(&self, auth: &Auth) -> Option<Bytes> {
+	pub(crate) fn token(&self, auth: &Credential) -> Option<Bytes> {
 		if !auth.presented.state.same_channel(self.state()) {
 			return None;
 		}
@@ -965,6 +1003,8 @@ impl Link {
 			link.replied = true;
 			link.recompute();
 			state.answer(id, Ok(Answer::Granted));
+			// Latch a set this grant completed, before a later revocation can replace its answer.
+			state.record();
 		});
 	}
 
@@ -1046,6 +1086,8 @@ impl Link {
 	/// leaves it for the next session to present, except on a handle of the session's own.
 	pub(crate) fn ended(&self, id: u64, err: Error) {
 		self.with_state(|state, link_id| {
+			// Latch a set already complete, so this end never replaces its answer.
+			state.record();
 			// A draining session's verdict is stale while an active session still presents the
 			// token: that session's own answer decides, even mid-retry with no grant right now.
 			let superseded = !attached(&mut state.links, link_id).active()
@@ -1248,14 +1290,31 @@ impl Link {
 		self.read(|link, _| link.closed.clone())
 	}
 
+	/// The peer accepts the connection credential only with its SETUP, which this client
+	/// reads after the session is live, while the server can still refuse it.
+	pub(crate) fn await_setup(&self) {
+		self.with(|link| link.accepted = false);
+	}
+
+	/// The peer's SETUP arrived, so it accepted the connection credential.
+	pub(crate) fn accepted(&self) {
+		self.with_state(|state, link| {
+			attached(&mut state.links, link).accepted = true;
+			// Latch a set this acceptance completed, before a later end can replace its answer.
+			state.record();
+		});
+	}
+
 	/// End the session: fail every pending token here, leaving the handle's tokens for the
 	/// next session. A handle the session created for itself ends with it.
 	pub(crate) fn close(&self, err: Error) {
 		let queue = self.with_state(|state, link| {
-			let link = attached(&mut state.links, link);
-			if link.closed.is_some() {
+			if state.links[&link].closed.is_some() {
 				return None;
 			}
+			// The session's credential may hold the answer a token set still waits on.
+			state.record();
+			let link = attached(&mut state.links, link);
 			link.closed = Some(err.clone());
 			link.opening.clear();
 			for slot in link.slots.values_mut() {
@@ -1288,19 +1347,19 @@ fn attached(links: &mut BTreeMap<u64, Attached>, id: u64) -> &mut Attached {
 /// removes its grant from the union. A [`Route`](crate::origin::Route) holding one keeps
 /// it presented while the route stands, across the handle's sessions.
 #[derive(Clone)]
-pub struct Auth {
+pub struct Credential {
 	presented: std::sync::Arc<Presented>,
 }
 
 #[cfg(test)]
-impl Auth {
+impl Credential {
 	/// The id the session presents this credential under.
 	pub(crate) fn id(&self) -> u64 {
 		self.presented.id
 	}
 }
 
-/// The token every clone of one [`Auth`] shares, withdrawn when the last drops.
+/// The token every clone of one [`Credential`] shares, withdrawn when the last drops.
 struct Presented {
 	state: kio::Shared<State>,
 	id: u64,
@@ -1318,7 +1377,7 @@ impl Presented {
 	}
 }
 
-impl Auth {
+impl Credential {
 	/// This credential's own grant on the live session: `None` until its peer answers,
 	/// while no session is live, forever on moq-transport without AUTH, and again once
 	/// the credential ends.
@@ -1360,18 +1419,18 @@ impl Auth {
 	}
 }
 
-impl PartialEq for Auth {
+impl PartialEq for Credential {
 	fn eq(&self, other: &Self) -> bool {
 		std::sync::Arc::ptr_eq(&self.presented, &other.presented)
 	}
 }
 
-impl Eq for Auth {}
+impl Eq for Credential {}
 
-impl std::fmt::Debug for Auth {
+impl std::fmt::Debug for Credential {
 	// Never the token: routes are logged, and a credential must not be.
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_tuple("Auth").field(&self.presented.id).finish()
+		f.debug_tuple("Credential").field(&self.presented.id).finish()
 	}
 }
 
@@ -1385,12 +1444,7 @@ impl Drop for Presented {
 					link.withdraw(self.id);
 				}
 			}
-			None => {
-				state.tokens.remove(&self.id);
-				for link in state.links.values_mut() {
-					link.withdraw(self.id);
-				}
-			}
+			None => state.withdraw(self.id),
 		}
 	}
 }
@@ -1436,7 +1490,7 @@ impl Selector {
 
 /// Watches a grant: the live session's union, or one credential's.
 ///
-/// Created by [`Handle::grant`] and [`Auth::grant`].
+/// Created by [`Handle::grant`] and [`Credential::grant`].
 pub struct Watch {
 	state: kio::Shared<State>,
 	selector: Selector,
@@ -1787,7 +1841,7 @@ pub(crate) struct RequestVerdict {
 
 /// Why a request token did not authorize its request: the error whose code the peer is
 /// sent, and the reason phrase with it, which the acceptor chose when it refused.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Refusal {
 	pub error: Error,
 	pub reason: String,
@@ -1900,13 +1954,65 @@ struct Held {
 	grant: Grant,
 	deadline: crate::time::Deadline,
 	/// The request this grant must keep covering: a replacement that no longer does ends it.
-	path: crate::PathOwned,
+	path: crate::Path,
 	kind: RequestKind,
 	/// The request's slot, shared with a renewal's verification.
 	hold: Option<Hold>,
 	/// The token of the renewal being verified, until the serve loop applies its verdict.
 	renewing: Option<kio::Shared<Issue>>,
 	clock: crate::time::Deadlines,
+	/// Why the request ended, once it has. A channel, so every clone waiting on the grant
+	/// wakes when [`RequestGrant::end`] latches it.
+	ended: kio::Producer<Option<Refusal>>,
+}
+
+impl Held {
+	/// See [`RequestGrant::poll_ended`].
+	fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Refusal> {
+		loop {
+			// The acceptor granted a renewal the serve loop has yet to apply: it takes over rather
+			// than the request ending between the two, whether the old grant lapsed or dropped.
+			// Watched, so a request that abandons the renewal, such as one cancelled while a
+			// joined FETCH outlives it, falls back to the old grant's end.
+			let handover = self.renewing.as_ref().is_some_and(|issue| {
+				issue
+					.poll(waiter, |issue| match granted(issue) {
+						true => Poll::Pending,
+						false => Poll::Ready(()),
+					})
+					.is_pending()
+			});
+			if self.deadline.poll(waiter).is_ready() {
+				if handover {
+					return Poll::Pending;
+				}
+				return Poll::Ready(Refusal::new(Error::Expired, "request token expired"));
+			}
+			match self.verdict.poll_reply(waiter) {
+				Poll::Ready(None) if handover => return Poll::Pending,
+				Poll::Ready(None) => {
+					return Poll::Ready(Refusal::new(
+						Error::Session(SessionError::Unauthorized),
+						"grant dropped",
+					));
+				}
+				Poll::Ready(Some(Reply::Grant(grant))) => {
+					if !self.kind.covers(&grant, self.path.as_str()) {
+						return Poll::Ready(Refusal::new(Error::Unauthorized, "request token no longer granted"));
+					}
+					self.deadline.set(grant.expires);
+					self.grant = grant;
+					// Re-poll: the new deadline may already have lapsed, or another reply may
+					// be waiting.
+					continue;
+				}
+				Poll::Ready(Some(Reply::Refuse { code, reason })) => {
+					return Poll::Ready(Refusal::new(Error::Session(code), &reason));
+				}
+				Poll::Pending => return Poll::Pending,
+			}
+		}
+	}
 }
 
 impl RequestGrant {
@@ -1917,7 +2023,7 @@ impl RequestGrant {
 		clock: &crate::time::Deadlines,
 		verdict: RequestVerdict,
 		res: std::result::Result<Grant, Refusal>,
-		path: crate::PathOwned,
+		path: crate::Path,
 		kind: RequestKind,
 		hold: Option<Hold>,
 	) -> std::result::Result<Self, Refusal> {
@@ -1936,6 +2042,7 @@ impl RequestGrant {
 			hold,
 			renewing: None,
 			clock: clock.clone(),
+			ended: kio::Producer::new(None),
 		}))))
 	}
 
@@ -1985,47 +2092,37 @@ impl RequestGrant {
 		Ok(())
 	}
 
+	/// End the grant with `refusal`, waking every clone still watching it, unless it already
+	/// ended. A refused renewal ends the request without the grant ending itself, so the serve
+	/// loop calls this to end anything else serving under the grant, such as a joining FETCH
+	/// that outlives its subscription.
+	pub(crate) fn end(&self, refusal: Refusal) {
+		latch(&self.held().ended, refusal);
+	}
+
 	/// Resolve with the refusal that ends the request: the deadline lapsing
 	/// ([`Error::Expired`]), the acceptor revoking or dropping the grant (its code and
 	/// reason), or an acceptor-side update that no longer covers the request
 	/// ([`Error::Unauthorized`]). A covering update, such as a lowered expiry, is folded in and
 	/// polling continues. Never resolves while the grant still stands.
 	pub(crate) fn poll_ended(&self, waiter: &kio::Waiter) -> Poll<Refusal> {
-		let mut held = self.held();
-		loop {
-			// The acceptor granted a renewal the serve loop has yet to apply: it takes over rather
-			// than the request ending between the two, whether the old grant lapsed or dropped.
-			let handover = held.renewing.as_ref().is_some_and(granted);
-			if held.deadline.poll(waiter).is_ready() {
-				if handover {
-					return Poll::Pending;
-				}
-				return Poll::Ready(Refusal::new(Error::Expired, "request token expired"));
-			}
-			match held.verdict.poll_reply(waiter) {
-				Poll::Ready(None) if handover => return Poll::Pending,
-				Poll::Ready(None) => {
-					return Poll::Ready(Refusal::new(
-						Error::Session(SessionError::Unauthorized),
-						"grant dropped",
-					));
-				}
-				Poll::Ready(Some(Reply::Grant(grant))) => {
-					if !held.kind.covers(&grant, held.path.as_str()) {
-						return Poll::Ready(Refusal::new(Error::Unauthorized, "request token no longer granted"));
-					}
-					held.deadline.set(grant.expires);
-					held.grant = grant;
-					// Re-poll: the new deadline may already have lapsed, or another reply may
-					// be waiting.
-					continue;
-				}
-				Poll::Ready(Some(Reply::Refuse { code, reason })) => {
-					return Poll::Ready(Refusal::new(Error::Session(code), &reason));
-				}
-				Poll::Pending => return Poll::Pending,
-			}
+		let held = &mut *self.held();
+		// Latched, as each acceptor reply is read once: every clone watching the grant sees
+		// the same end, whichever polled first.
+		let latched = match held.ended.poll_ref(waiter, |ended| match &**ended {
+			Some(ended) => Poll::Ready(ended.clone()),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(ended)) => Some(ended),
+			// Never closed: the grant owns its only producer.
+			Poll::Ready(Err(_)) | Poll::Pending => None,
+		};
+		if let Some(ended) = latched {
+			return Poll::Ready(ended);
 		}
+		let ended = std::task::ready!(held.poll_end(waiter));
+		latch(&held.ended, ended.clone());
+		Poll::Ready(ended)
 	}
 
 	/// Run `body`, everything a request does once admitted, until it finishes or `grant`
@@ -2038,6 +2135,15 @@ impl RequestGrant {
 			Some(grant) => grant.poll_ended(waiter),
 			None => Poll::Pending,
 		}))
+	}
+}
+
+/// Record `refusal` as why a request grant ended, unless an earlier end already is.
+fn latch(ended: &kio::Producer<Option<Refusal>>, refusal: Refusal) {
+	if let Ok(mut ended) = ended.write()
+		&& ended.is_none()
+	{
+		*ended = Some(refusal);
 	}
 }
 
@@ -2070,10 +2176,10 @@ fn live(clock: &crate::time::Deadlines, kind: RequestKind, path: &str, grant: &G
 	kind.covers(grant, path) && grant.expires.is_none_or(|expires| expires > clock.now())
 }
 
-/// Whether the acceptor granted the token behind `issue` and still holds the grant.
-fn granted(issue: &kio::Shared<Issue>) -> bool {
-	let issue = issue.read();
-	!issue.done && issue.outbox.iter().any(|reply| matches!(reply, Reply::Grant(_)))
+/// Whether the acceptor granted the token behind `issue` and still holds the grant, for a
+/// request still waiting to apply it.
+fn granted(issue: &Issue) -> bool {
+	issue.peer.is_none() && !issue.done && issue.outbox.iter().any(|reply| matches!(reply, Reply::Grant(_)))
 }
 
 /// A grant issued to one of the peer's tokens, which the session enforces. Dropping it
@@ -2143,7 +2249,7 @@ pub(crate) enum Direction {
 /// only re-matched when the union or the limit changes.
 pub(crate) struct Gate {
 	handle: Link,
-	path: crate::PathOwned,
+	path: crate::Path,
 	direction: Direction,
 	epoch: u64,
 	part: Part,
@@ -2155,7 +2261,7 @@ pub(crate) struct Gate {
 
 /// Log the whole wait once, including when its request is cancelled.
 struct Waiting {
-	path: crate::PathOwned,
+	path: crate::Path,
 	started: Instant,
 }
 
@@ -2176,7 +2282,7 @@ enum Part {
 }
 
 impl Gate {
-	pub(crate) fn new(handle: Link, path: crate::PathOwned, direction: Direction) -> Self {
+	pub(crate) fn new(handle: Link, path: crate::Path, direction: Direction) -> Self {
 		let within_limit = handle.within_limit(direction, path.as_str());
 		Self {
 			handle,
@@ -2198,12 +2304,7 @@ impl Gate {
 
 	/// A gate for a request under a namespace the peer announced, while `live` stays open:
 	/// the announce stands in for the scope, as its own token may have authorized it.
-	pub(crate) fn announced(
-		handle: Link,
-		path: crate::PathOwned,
-		direction: Direction,
-		live: kio::Consumer<()>,
-	) -> Self {
+	pub(crate) fn announced(handle: Link, path: crate::Path, direction: Direction, live: kio::Consumer<()>) -> Self {
 		Self {
 			part: Part::Announced(live),
 			..Self::new(handle, path, direction)
@@ -2362,7 +2463,7 @@ pub(crate) struct Enforce {
 	epoch: u64,
 	permit: Option<Patterns>,
 	/// Every broadcast admitted so far, still announced.
-	live: std::collections::HashSet<crate::PathOwned>,
+	live: std::collections::HashSet<crate::Path>,
 	setup: bool,
 	/// Broadcasts outside the union, still announced, waiting on tokens that might cover
 	/// them, in announcement order.
@@ -2377,7 +2478,7 @@ impl Enforce {
 		handle: &Link,
 		announced: &mut crate::announce::Consumer,
 		waiter: &kio::Waiter,
-	) -> Poll<Option<crate::PathOwned>> {
+	) -> Poll<Option<crate::Path>> {
 		if !self.setup {
 			ready_or!(handle.poll_setup_answered(waiter));
 			self.setup = true;
@@ -2446,11 +2547,7 @@ mod tests {
 		let setup = handle.present(Bytes::new(), true).unwrap();
 		handle.granted(setup.presented.id, Grant::default());
 		let token = handle.present(Bytes::from_static(b"new"), false).unwrap();
-		let mut gate = Gate::new(
-			handle.clone(),
-			crate::Path::new("room").to_owned(),
-			Direction::Subscribe,
-		);
+		let mut gate = Gate::new(handle.clone(), crate::Path::from_static("room"), Direction::Subscribe);
 		let waiter = kio::Waiter::noop();
 		assert!(
 			gate.poll_ready(&waiter).is_pending(),
@@ -2472,7 +2569,7 @@ mod tests {
 		let busy = Error::Session(SessionError::TooManyRequests);
 		assert_eq!(handle.retry(id, &busy), Some(RETRY_INITIAL));
 
-		let mut gate = Gate::new(handle.clone(), crate::Path::new("room").to_owned(), Direction::Publish);
+		let mut gate = Gate::new(handle.clone(), crate::Path::from_static("room"), Direction::Publish);
 		let waiter = kio::Waiter::noop();
 		assert!(
 			gate.poll_ready(&waiter).is_pending(),
@@ -2495,7 +2592,7 @@ mod tests {
 		let route = kio::Producer::<()>::default();
 		let mut gate = Gate::announced(
 			handle,
-			crate::Path::new("room").to_owned(),
+			crate::Path::from_static("room"),
 			Direction::Subscribe,
 			route.consume(),
 		);
@@ -2510,7 +2607,7 @@ mod tests {
 	fn an_empty_token_never_holds_a_request() {
 		let handle = Link::new(true);
 		let _setup = handle.present(Bytes::new(), true).unwrap();
-		let mut gate = Gate::new(handle, crate::Path::new("room").to_owned(), Direction::Subscribe);
+		let mut gate = Gate::new(handle, crate::Path::from_static("room"), Direction::Subscribe);
 		assert!(gate.poll_ready(&kio::Waiter::noop()).is_ready());
 	}
 
@@ -2520,7 +2617,7 @@ mod tests {
 		let first = handle.present(Bytes::from_static(b"first"), false).unwrap();
 		handle.granted(first.presented.id, Grant::all());
 		let _unanswered = handle.present(Bytes::from_static(b"renewal"), false).unwrap();
-		let mut gate = Gate::new(handle, crate::Path::new("room").to_owned(), Direction::Subscribe);
+		let mut gate = Gate::new(handle, crate::Path::from_static("room"), Direction::Subscribe);
 		assert!(gate.poll_ready(&kio::Waiter::noop()).is_ready());
 	}
 
@@ -2942,7 +3039,7 @@ mod tests {
 		assert_eq!(link.retry(id, &lost), Some(RETRY_INITIAL));
 		assert_eq!(auth.grant().peek(), None, "the lost stream's grant is gone");
 		assert_eq!(link.token(&auth).as_deref(), Some(&b"jwt"[..]));
-		let mut gate = Gate::new(link.clone(), crate::Path::new("room").to_owned(), Direction::Publish);
+		let mut gate = Gate::new(link.clone(), crate::Path::from_static("room"), Direction::Publish);
 		assert!(gate.poll_ready(&kio::Waiter::noop()).is_pending());
 
 		assert_eq!(link.reopen(id).unwrap().as_ref(), b"jwt");
@@ -3022,8 +3119,8 @@ mod request_token_tests {
 		}
 	}
 
-	fn subscribe_path() -> crate::PathOwned {
-		crate::Path::new("room/alice").to_owned()
+	fn subscribe_path() -> crate::Path {
+		crate::Path::from_static("room/alice")
 	}
 
 	/// A request token reaches the app's acceptor like any other token, and the grant the

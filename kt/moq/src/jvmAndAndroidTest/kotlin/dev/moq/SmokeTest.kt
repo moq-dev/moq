@@ -2,9 +2,11 @@ package dev.moq
 
 import dev.moq.media.*
 import dev.moq.audio.Consumer as AudioConsumer
+import dev.moq.audio.ReadFrame as AudioReadFrame
 import dev.moq.audio.Producer as AudioProducer
 import dev.moq.audio.ProducerOptions as AudioProducerOptions
 import dev.moq.video.Consumer as VideoConsumer
+import dev.moq.video.ReadFrame as VideoReadFrame
 import dev.moq.video.Producer as VideoProducer
 import dev.moq.video.ProducerOptions as VideoProducerOptions
 import dev.moq.video.FrameRate as VideoFrameRate
@@ -17,7 +19,6 @@ import kotlinx.coroutines.test.runTest
 import dev.moq.json.SnapshotConfig
 import dev.moq.json.SnapshotConsumer
 import dev.moq.json.SnapshotProducer
-import dev.moq.json.StreamConfig
 import dev.moq.json.Timed
 import dev.moq.json.WindowConfig
 import dev.moq.json.WindowConsumer
@@ -174,7 +175,7 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
-            origin.dynamic("").use { /* dynamic origin smoke */ }
+            origin.requests("").use { /* dynamic origin smoke */ }
         }
     }
 
@@ -186,8 +187,7 @@ class SmokeTest {
             framerate = 60.0,
             optimizeForLatency = true,
         )
-        val snapshot: SnapshotConfig = SnapshotConfig(deltas = true, compression = false)
-        val stream: StreamConfig = StreamConfig(compression = false)
+        val snapshot: SnapshotConfig = SnapshotConfig(deltas = true)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
         val backoff: Backoff = Backoff(
             initial = java.time.Duration.ofMillis(500),
@@ -207,7 +207,6 @@ class SmokeTest {
         val status: ConnectionPhase = ConnectionPhase.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(true, snapshot.deltas)
-        assertEquals(false, stream.compression)
         assertNull(properties.display)
         assertNull(properties.flip)
         assertEquals(java.time.Duration.ofMillis(500), backoff.initial)
@@ -227,7 +226,7 @@ class SmokeTest {
     @Test
     fun `ending a broadcast ends it while a dynamic handle remains`() = runTest {
         BroadcastProducer().use { broadcast ->
-            broadcast.dynamic().use {
+            broadcast.requests().use {
                 val consumer = broadcast.consume()
                 // Releasing the producer alone would leave the dynamic handle holding it open.
                 broadcast.end()
@@ -278,6 +277,12 @@ class SmokeTest {
     }
 
     @Test
+    fun `a default subscription skips superseded groups at once`() {
+        assertEquals(java.time.Duration.ZERO, Subscription.default().maxDelay)
+        assertNull(Subscription(maxDelay = null).maxDelay)
+    }
+
+    @Test
     fun `an ascending subscription reads a cached backlog oldest first`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("backlog", TrackInfo(timescale = 1_000_000uL))
@@ -309,32 +314,6 @@ class SmokeTest {
             val frame = consumer.readFrame()
             assertEquals("populated", frame?.payload?.decodeToString())
             assertEquals(2_000uL, frame?.timestampUs)
-        }
-    }
-
-    @Test
-    fun `flate preserves optional timestamps`() = runTest {
-        for (timestamp in listOf(null, 123_456uL)) {
-            for (mode in listOf("snapshot", "stream")) {
-                BroadcastProducer().use { broadcast ->
-                    val info = if (timestamp == null) null else TrackInfo(timescale = 1_000_000uL)
-                    val track = broadcast.publishTrack("data", info)
-                    val consumer = track.consume(null)
-                    val payload = "payload".encodeToByteArray()
-                    if (mode == "snapshot") {
-                        val producer = dev.moq.flate.SnapshotProducer(broadcast, track, dev.moq.flate.Config())
-                        producer.update(payload, timestamp)
-                        producer.finish()
-                    } else {
-                        val producer = dev.moq.flate.StreamProducer(broadcast, track, dev.moq.flate.Config())
-                        producer.append(payload, timestamp)
-                        producer.finish()
-                    }
-                    val frame = consumer.readFrame()
-                    assertEquals("payload", frame?.payload?.decodeToString())
-                    assertEquals(timestamp, frame?.timestampUs)
-                }
-            }
         }
     }
 
@@ -399,9 +378,10 @@ class SmokeTest {
      * by the interop test (`just test interop`).
      */
     @Test
-    fun `video consumer exposes a frames flow like audio does`() {
-        val video: (dev.moq.video.Consumer) -> Flow<VideoDecodedFrame> = dev.moq.video.Consumer::frames
-        val audio: (dev.moq.audio.Consumer) -> Flow<dev.moq.audio.Frame> = dev.moq.audio.Consumer::frames
+    fun `video consumer exposes a reads flow like audio does`() {
+        val video: (dev.moq.video.Consumer) -> Flow<dev.moq.video.Read> = dev.moq.video.Consumer::reads
+        val audio: (dev.moq.audio.Consumer) -> Flow<dev.moq.audio.Read> = dev.moq.audio.Consumer::reads
+
         assertNotNull(video)
         assertNotNull(audio)
     }
@@ -416,10 +396,10 @@ class SmokeTest {
     @Test
     fun `typed json snapshot round-trips a serializable value`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltas = true, compression = false)
+            val config = SnapshotConfig(deltas = true)
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
             val producer = SnapshotProducer(broadcast, track, config)
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
             for (n in 1..4) producer.update(Status(state = "live$n"), timestampUs = n.toULong() * 1_000uL)
 
             // `next` yields every state in order; `latest` skips the buffered third.
@@ -432,10 +412,10 @@ class SmokeTest {
     @Test
     fun `json window yields pushes and pops in order`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = WindowConfig(compression = true)
-            val track = broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL))
+            val config = WindowConfig()
+            val track = broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL, compress = true))
             val producer = WindowProducer(track, config)
-            val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null), config)
+            val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null))
             for (n in 1..3) producer.push(Status(state = "live$n"), timestampUs = n.toULong() * 1_000uL)
             producer.pop(2uL, 4_000uL)
 
@@ -465,13 +445,13 @@ class SmokeTest {
     @Test
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltas = false, compression = false)
+            val config = SnapshotConfig(deltas = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             assertEquals("status", demand.name())
             assertEquals(null, demand.wanted())
 
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
             while (demand.wantedChanged() == null) {}
             consumer.cancel()
             while (demand.wantedChanged() != null) {}
@@ -481,12 +461,12 @@ class SmokeTest {
     @Test
     fun `cancelling a flow collection cancels its native handle`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltas = false, compression = false)
+            val config = SnapshotConfig(deltas = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             producer.update(Status(state = "live"))
 
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
             while (demand.wantedChanged() == null) {}
             // `first` cancels the collection, which must release the subscription without an explicit cancel.
             assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first().value)
@@ -502,11 +482,11 @@ class SmokeTest {
     @Test
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltas = false, compression = false)
+            val config = SnapshotConfig(deltas = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             producer.update("""{"state":"raw"}""")
 
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
             assertEquals(Timed(Status(state = "raw"), null), consumer.valuesAs<Status>().first())
         }
     }
@@ -520,17 +500,17 @@ class SmokeTest {
             assertEquals(1, fingerprints.size)
             assertEquals(64, fingerprints[0].length)
 
-            server.createBroadcast("live").use { broadcast ->
-                broadcast.announce(AnnounceRoute())
-                broadcast.unannounce()
+            server.createBroadcast("live").use { publication ->
+                publication.announce(AnnounceRoute())
+                publication.unannounce()
             }
         }
     }
 
     @Test
     fun `sessions advertise the wrapper ahead of moq-ffi`() = runTest {
-        Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
-            Moq.connect("https://${server.localAddr}", ClientConfig(tls = ClientTls(insecure = true))).use {
+        Server.listen(ServerConfig(bind = "127.0.0.1:0", versions = listOf("moq-lite-07-wip"), tls = ServerTls(generate = listOf("localhost")))).use { server ->
+            Moq.connect("https://${server.localAddr}", ClientConfig(versions = listOf("moq-lite-07-wip"), tls = ClientTls(insecure = true))).use {
                 server.requests().first().use { request ->
                     val advertised = request.peerImplementation()
                     assertTrue(advertised?.startsWith("moq-kt/") == true, "advertised: $advertised")
@@ -554,24 +534,60 @@ class SmokeTest {
     @Test
     fun `a broadcast is reachable only while announced`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.createBroadcast("live").use { broadcast ->
-                broadcast.publishTrack("events", null)
+            origin.createBroadcast("live").use { publication ->
+                publication.broadcast().use { it.publishTrack("events", null) }
                 val consumer = origin.consume()
-                assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
+                assertFailsWith<MoqException> { consumer.request("live") }
 
-                broadcast.announce(AnnounceRoute())
+                publication.announce(AnnounceRoute())
                 val announced = consumer.announced(AnnounceConfig())
                 val first = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals("live", first.announce.prefix)
 
-                broadcast.unannounce()
+                publication.unannounce()
                 val retracted = assertIs<AnnounceEventEnd>(announced.nextRoute())
                 assertEquals("live", retracted.announce.prefix)
-                assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
+                assertFailsWith<MoqException> { consumer.request("live") }
 
-                broadcast.announce(AnnounceRoute())
+                publication.announce(AnnounceRoute())
                 assertIs<AnnounceEventStart>(announced.nextRoute())
-                consumer.requestBroadcast("live")
+                consumer.request("live")
+            }
+        }
+    }
+
+    @Test
+    fun `closing a publication keeps its route until the broadcast ends`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            val consumer = origin.consume()
+            val announced = consumer.announced(AnnounceConfig())
+            val publication = origin.createBroadcast("live")
+            publication.broadcast().use { broadcast ->
+                publication.use { it.announce(AnnounceRoute()) }
+                assertIs<AnnounceEventStart>(announced.nextRoute())
+                consumer.request("live")
+
+                broadcast.end()
+                assertIs<AnnounceEventEnd>(announced.nextRoute())
+                assertFailsWith<MoqException> { consumer.request("live") }
+            }
+        }
+    }
+
+    @Test
+    fun `a stale publication leaves its replacement alone`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            origin.createBroadcast("live").use { stale ->
+                stale.announce(AnnounceRoute())
+                stale.broadcast().use { it.end() }
+
+                origin.createBroadcast("live").use { replacement ->
+                    replacement.announce(AnnounceRoute())
+                    assertFailsWith<MoqException.Closed> { stale.announce(AnnounceRoute()) }
+                    assertFailsWith<MoqException.Closed> { stale.unannounce() }
+                    origin.consume().request("live")
+                    replacement.broadcast().use { it.end() }
+                }
             }
         }
     }
@@ -580,18 +596,18 @@ class SmokeTest {
     fun `a new epoch restarts announce consumers`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             val announced = origin.consume().announced(AnnounceConfig())
-            origin.createBroadcast("epoch").use { broadcast ->
+            origin.createBroadcast("epoch").use { publication ->
                 val first = mintEpoch()
-                broadcast.announce(AnnounceRoute(epoch = first))
+                publication.announce(AnnounceRoute(epoch = first))
                 val start = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals(first, start.announce.route.epoch)
 
                 val second = mintEpoch()
-                broadcast.announce(AnnounceRoute(epoch = second))
+                publication.announce(AnnounceRoute(epoch = second))
                 val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
                 assertEquals(second, restart.announce.route.epoch)
 
-                assertFailsWith<MoqException> { broadcast.announce(AnnounceRoute(epoch = "not-an-epoch")) }
+                assertFailsWith<MoqException> { publication.announce(AnnounceRoute(epoch = "not-an-epoch")) }
             }
         }
     }
@@ -600,8 +616,8 @@ class SmokeTest {
     fun `announced pattern reports captures`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             val announced = origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
-            origin.createBroadcast("room/alice/chat").use { broadcast ->
-                broadcast.announce(AnnounceRoute())
+            origin.createBroadcast("room/alice/chat").use { publication ->
+                publication.announce(AnnounceRoute())
                 val update = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals("room/alice/chat", update.announce.prefix)
                 assertEquals(listOf("alice"), update.announce.captures)
@@ -612,14 +628,21 @@ class SmokeTest {
     @Test
     fun `dynamic serves a request under a prefix`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.dynamic("live").use { dynamic ->
+            origin.requests("live").use { dynamic ->
                 val pending = async {
-                    origin.consume().requestBroadcast("live/cam")
+                    origin.consume().request("live/cam")
                 }
                 val request = dynamic.requestedBroadcast()
                 assertEquals("live/cam", request.path())
                 request.prepare(mintEpoch()).use { prepared ->
-                    prepared.publish().use { pending.await() }
+                    prepared.broadcast().use { fill ->
+                        prepared.publish().use { publication ->
+                            pending.await()
+                            // The publication fills the broadcast it prepared: ending one ends the other.
+                            publication.broadcast().use { it.end() }
+                            assertFailsWith<MoqException.Closed> { fill.publishTrack("late", null) }
+                        }
+                    }
                 }
             }
         }
@@ -690,13 +713,15 @@ class SmokeTest {
             )
             moq.use {
                 val everything = Grant(publish = listOf("**"), subscribe = listOf("**"), expires = null)
-                assertEquals(everything, moq.auth().grants().first { it != null })
+                assertEquals(everything, moq.grants().updates().first { it != null })
                 val session = accepted.await()
-                assertEquals(everything, session.auth().grants().first { it != null })
+                assertEquals(everything, session.grants().updates().first { it != null })
                 assertNull(everything.expires)
+                assertNull(session.tokens(), "an accepted session presents no tokens")
 
-                assertFailsWith<MoqException.Unsupported> { moq.auth().add("extra") }
-                assertEquals(everything, moq.auth().grant())
+                moq.tokens().set(listOf("extra"))
+                assertFailsWith<MoqException.Unsupported> { moq.tokens().answered() }
+                assertEquals(everything, moq.grants().grant())
                 session.cancel(0u)
             }
         }
@@ -720,40 +745,42 @@ class SmokeTest {
     @Test
     fun `audio consumer reports its playout delay`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.createBroadcast("audio-delay").use { broadcast ->
-                val audio = AudioProducer(
-                    CatalogProducer(broadcast),
-                    AudioProducerOptions(
-                        input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
-                        output = AudioEncoderOutput(codec = AudioCodec.opus(), ),
-                        track = "mic",
-                    ),
-                )
-                broadcast.announce(AnnounceRoute())
+            origin.createBroadcast("audio-delay").use { publication ->
+                publication.broadcast().use { broadcast ->
+                    val audio = AudioProducer(
+                        CatalogProducer(broadcast),
+                        AudioProducerOptions(
+                            input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
+                            output = AudioEncoderOutput(codec = AudioCodec.opus(), ),
+                            track = "mic",
+                        ),
+                    )
+                    publication.announce(AnnounceRoute())
 
-                val consumer = origin.consume().requestBroadcast("audio-delay")
-                val catalog = CatalogConsumer.subscribe(consumer).next()!!
-                val rendition = catalog.audio["mic"]!!
+                    val consumer = origin.consume().request("audio-delay")
+                    val catalog = CatalogConsumer.subscribe(consumer).next()!!
+                    val rendition = catalog.audio["mic"]!!
 
-                val fixedOutput = AudioDecoderOutput(format = AudioSampleFormat.F32, delay = java.time.Duration.ofMillis(80))
-                val fixed = AudioConsumer.subscribe(consumer, "mic", rendition, fixedOutput)
-                val estimated = AudioConsumer.subscribe(consumer, "mic", rendition, AudioDecoderOutput(format = AudioSampleFormat.F32))
-                assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
-                val initial = estimated.delay()
+                    val fixedOutput = AudioDecoderOutput(format = AudioSampleFormat.F32, delay = java.time.Duration.ofMillis(80))
+                    val fixed = AudioConsumer.subscribe(consumer, "mic", rendition, fixedOutput)
+                    val estimated = AudioConsumer.subscribe(consumer, "mic", rendition, AudioDecoderOutput(format = AudioSampleFormat.F32))
+                    assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
+                    val initial = estimated.delay()
 
-                // Two 20 ms Opus frames of silence at 48 kHz mono.
-                for (i in 0 until 2) {
-                    audio.write(AudioFrame(timestampUs = i.toULong() * 20_000uL, data = ByteArray(960 * 4)))
+                    // Two 20 ms Opus frames of silence at 48 kHz mono.
+                    for (i in 0 until 2) {
+                        audio.write(AudioFrame(timestampUs = i.toULong() * 20_000uL, data = ByteArray(960 * 4)))
+                    }
+                    assertIs<AudioReadFrame>(fixed.next())
+                    assertIs<AudioReadFrame>(estimated.next())
+
+                    assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
+                    assertTrue(estimated.delay() != initial, "the estimate should move as frames are read")
+
+                    fixed.cancel()
+                    estimated.cancel()
+                    audio.finish()
                 }
-                assertNotNull(fixed.next())
-                assertNotNull(estimated.next())
-
-                assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
-                assertTrue(estimated.delay() != initial, "the estimate should move as frames are read")
-
-                fixed.cancel()
-                estimated.cancel()
-                audio.finish()
             }
         }
     }
@@ -761,49 +788,52 @@ class SmokeTest {
     @Test
     fun `decoded video frame owns its picture`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.createBroadcast("video-decode-frame").use { broadcast ->
-                val video = VideoProducer(
-                    CatalogProducer(broadcast),
-                    VideoProducerOptions(
-                        input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = VideoFrameRate(30000u, 1001u)),
-                        output = VideoEncoderOutput(codec = VideoCodec.H264,  kind = softwareEncoder),
-                        track = "camera",
-                        bandwidth = null,
-                    ),
-                )
-                broadcast.announce(AnnounceRoute())
+            origin.createBroadcast("video-decode-frame").use { publication ->
+                publication.broadcast().use { broadcast ->
+                    val video = VideoProducer(
+                        CatalogProducer(broadcast),
+                        VideoProducerOptions(
+                            input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = VideoFrameRate(30000u, 1001u)),
+                            output = VideoEncoderOutput(codec = VideoCodec.H264,  kind = softwareEncoder),
+                            track = "camera",
+                            bandwidth = null,
+                        ),
+                    )
+                    publication.announce(AnnounceRoute())
 
-                // Seed the track so a subscriber joining below lands on encoded media.
-                val rgba = ByteArray(320 * 240 * 4) { 0x80.toByte() }
-                video.cut()
-                for (i in 0 until 10) {
-                    video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
+                    // Seed the track so a subscriber joining below lands on encoded media.
+                    val rgba = ByteArray(320 * 240 * 4) { 0x80.toByte() }
+                    video.cut()
+                    for (i in 0 until 10) {
+                        video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
+                    }
+
+                    val consumer = origin.consume().request("video-decode-frame")
+                    val catalog = CatalogConsumer.subscribe(consumer).next()!!
+                    val rendition = catalog.video["camera"]!!
+
+                    val decoder = VideoConsumer.subscribe(consumer, "camera", rendition, VideoDecoderOutput())
+
+                    // Keep the encoder fed so the decoder sees frames after it joined.
+                    for (i in 10 until 40) {
+                        video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
+                    }
+
+                    assertIs<VideoReadFrame>(decoder.next()).frame.use { frame ->
+
+                        // The frame outlives its consumer's cancellation.
+                        decoder.cancel()
+
+                        val planar = frame.pixels(VideoPixelFormat.I420)
+                        assertEquals(frame.width().toInt() * frame.height().toInt() * 3 / 2, planar.size)
+
+                        val packed = frame.pixels(VideoPixelFormat.RGBA)
+                        assertEquals(frame.width().toInt() * frame.height().toInt() * 4, packed.size)
+                        assertTrue(packed.indices.filter { it % 4 == 3 }.all { packed[it] == 0xFF.toByte() })
+                    }
+
+                    video.finish()
                 }
-
-                val consumer = origin.consume().requestBroadcast("video-decode-frame")
-                val catalog = CatalogConsumer.subscribe(consumer).next()!!
-                val rendition = catalog.video["camera"]!!
-
-                val decoder = VideoConsumer.subscribe(consumer, "camera", rendition, VideoDecoderOutput())
-
-                // Keep the encoder fed so the decoder sees frames after it joined.
-                for (i in 10 until 40) {
-                    video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
-                }
-
-                decoder.next()!!.use { frame ->
-                    // The frame outlives its consumer's cancellation.
-                    decoder.cancel()
-
-                    val planar = frame.pixels(VideoPixelFormat.I420)
-                    assertEquals(frame.width().toInt() * frame.height().toInt() * 3 / 2, planar.size)
-
-                    val packed = frame.pixels(VideoPixelFormat.RGBA)
-                    assertEquals(frame.width().toInt() * frame.height().toInt() * 4, packed.size)
-                    assertTrue(packed.indices.filter { it % 4 == 3 }.all { packed[it] == 0xFF.toByte() })
-                }
-
-                video.finish()
             }
         }
     }

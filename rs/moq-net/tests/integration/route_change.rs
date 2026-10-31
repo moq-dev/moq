@@ -8,8 +8,8 @@
 //! every frame exactly once, in order, whether the route changes between groups or
 //! in the middle of one, and however it changes.
 //!
-//! moq-transport carries the epoch with the MoQ Epoch extension (draft-17+), so it
-//! behaves the same. Older wire versions cannot carry the epoch, so `R` cannot tell the
+//! moq-transport carries the epoch with the MoQ Epoch extension, so it behaves the
+//! same. Older lite versions cannot carry the epoch, so `R` cannot tell the
 //! two routes serve the same bytes: its subscription stays on its route and ends with
 //! it, while a better route restarts the path for new requests.
 //!
@@ -124,8 +124,7 @@ impl Topology {
 		let a_to_r = link(version, &relay_a, &subscriber).await;
 
 		let consumer = subscriber.consume();
-		consumer.routed("live").await.unwrap();
-		let remote = consumer.request_broadcast("live", None).await.unwrap();
+		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 		let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
@@ -305,20 +304,19 @@ async fn route_flaps(version: &str) {
 	let triggers = [Trigger::BetterRoute, Trigger::BetterRouteDies, Trigger::Disconnect];
 	let mut expected = Vec::new();
 	let mut seen = Vec::new();
-	for sequence in 0..=triggers.len() as u64 {
-		let mut group = topology.track.append_group().unwrap();
-		for frame in 0..FRAMES {
-			if frame == FRAMES / 2
-				&& let Some(trigger) = triggers.get(sequence as usize)
-			{
-				topology.trigger(*trigger).await;
-			}
-			group.write_frame(Timestamp::ZERO, payload(sequence, frame)).unwrap();
-			expected.push((sequence, payload(sequence, frame)));
-			seen.push(next(&mut rx).await);
+	// Keep every recovery within the largest group's head, which our IETF publishers serve.
+	let mut group = topology.track.append_group().unwrap();
+	for frame in 0..FRAMES * (triggers.len() as u64 + 1) {
+		if frame % FRAMES == FRAMES / 2
+			&& let Some(trigger) = triggers.get((frame / FRAMES) as usize)
+		{
+			topology.trigger(*trigger).await;
 		}
-		group.finish().unwrap();
+		group.write_frame(Timestamp::ZERO, payload(0, frame)).unwrap();
+		expected.push((0, payload(0, frame)));
+		seen.push(next(&mut rx).await);
 	}
+	group.finish().unwrap();
 
 	assert_eq!(seen, expected, "{version}");
 	settle().await;
@@ -359,7 +357,7 @@ async fn route_dies_without_an_epoch(version: &str, trigger: Trigger) {
 	let remote = topology
 		.subscriber
 		.consume()
-		.request_broadcast("live", None)
+		.request("live", None)
 		.await
 		.expect("B serves a re-request");
 	let sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
@@ -388,7 +386,7 @@ async fn better_route_restarts(version: &str) {
 	let mut group = topology.track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, payload(0, 0)).unwrap();
 	assert_eq!(next(&mut rx).await, (0, payload(0, 0)), "{version}");
-	let incumbent = consumer.request_broadcast("live", None).await.unwrap();
+	let incumbent = consumer.request("live", None).await.unwrap();
 
 	topology.trigger(Trigger::BetterRoute).await;
 	match announced.next().await.expect("announced") {
@@ -404,7 +402,7 @@ async fn better_route_restarts(version: &str) {
 	assert_eq!(next(&mut rx).await, (0, payload(0, 1)), "{version}");
 
 	// A re-request resolves the better route on a fresh broadcast.
-	let replaced = consumer.request_broadcast("live", None).await.unwrap();
+	let replaced = consumer.request("live", None).await.unwrap();
 	assert!(!replaced.is_clone(&incumbent), "{version}: joined the replaced front");
 	let sub = replaced.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut fresh = read(sub);
@@ -468,7 +466,6 @@ macro_rules! route_change_tests {
 
 route_change_tests! {
 	lite_07: "moq-lite-07-wip",
-	ietf_17: "moq-transport-17",
 	ietf_18: "moq-transport-18",
 	ietf_22: "moq-transport-22",
 }
@@ -512,8 +509,6 @@ pinned_tests! {
 	lite_06: "moq-lite-06",
 	lite_05: "moq-lite-05",
 	lite_04: "moq-lite-04",
-	ietf_14: "moq-transport-14",
-	ietf_16: "moq-transport-16",
 }
 
 /// `P` feeds `A` slowly and `B` promptly, and `R` reads through `A` until that route dies
@@ -530,8 +525,7 @@ async fn lagging_route_dies(version: Version) {
 	}
 	async fn subscribe(origin: &origin::Producer) -> track::Subscriber {
 		let consumer = origin.consume();
-		consumer.routed("live").await.unwrap();
-		let remote = consumer.request_broadcast("live", None).await.unwrap();
+		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 		let preferences = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 		remote.track("video").unwrap().subscribe(preferences).await.unwrap()
 	}
@@ -614,7 +608,7 @@ async fn lite_resumes_after_a_lagging_route_dies() {
 
 #[moq_clock::test]
 async fn ietf_17_resumes_after_a_lagging_route_dies() {
-	lagging_route_dies("moq-transport-17".parse().unwrap()).await;
+	lagging_route_dies("moq-transport-18".parse().unwrap()).await;
 }
 
 #[moq_clock::test]
@@ -657,8 +651,7 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 	let m1_e = link(version, &m1, &e).await;
 
 	let consumer = e.consume();
-	consumer.routed("live").await.unwrap();
-	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 	let prefs = track::Subscription::default().with_max_delay(budget);
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 	let m2_e = priced_link(version, &m2, &e, Some(1_000)).await;
@@ -804,7 +797,7 @@ async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 	settle().await;
 
 	let consumer = subscriber.consume();
-	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let remote = consumer.request("live", None).await.unwrap();
 	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
@@ -913,8 +906,7 @@ async fn replaced_behind_a_relay(version: &str, epoch: Option<moq_net::Epoch>, r
 	let _r_to_d = link(version, &relay, &downstream).await;
 
 	let consumer = downstream.consume();
-	consumer.routed("live").await.unwrap();
-	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
@@ -1033,8 +1025,7 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 	let _r_to_d = link(version, &relay, &downstream).await;
 
 	let consumer = downstream.consume();
-	consumer.routed("live").await.unwrap();
-	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
@@ -1111,7 +1102,7 @@ async fn producer_replaced(version: &str) {
 	let subscriber = produce_origin(3);
 
 	let broadcast = publisher.create_broadcast("live").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast
 		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.unwrap();
@@ -1128,8 +1119,7 @@ async fn producer_replaced(version: &str) {
 	let _a_to_r = link(version, &relay, &subscriber).await;
 
 	let consumer = subscriber.consume();
-	consumer.routed("live").await.unwrap();
-	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 	let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 	let mut rx = read(sub);

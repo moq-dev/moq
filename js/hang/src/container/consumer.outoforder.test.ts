@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Micro, Milli } from "@moq/clock";
-import { Group, Time, Track, Varint } from "@moq/net";
+import { type Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
 
@@ -32,10 +32,9 @@ function publishFrame(group: Group.Producer, millis: number, tag: number) {
 
 /** Publish one closed group carrying a single frame at `millis`. */
 function publish(track: Track.Producer, sequence: number, millis: number) {
-	const group = new Group.Producer(sequence);
-	track.writeGroup(group);
+	const group = track.createGroup(sequence);
 	publishFrame(group, millis, sequence);
-	group.close();
+	group.finish();
 }
 
 /** Every frame the consumer will hand over right now, as [group, payload] pairs. */
@@ -94,14 +93,12 @@ test("a below-cursor group still downloading is not truncated", async () => {
 	});
 
 	// The live edge group arrives first and starts delivery (still open).
-	const live = new Group.Producer(3);
-	track.writeGroup(live);
+	const live = track.createGroup(3);
 	publishFrame(live, 3000, 30);
 	expect((await nextFrame(consumer))?.frame.payload[0]).toBe(30);
 
 	// A backlog group lands below the cursor, one frame at a time (mid-download).
-	const backlog = new Group.Producer(1);
-	track.writeGroup(backlog);
+	const backlog = track.createGroup(1);
 	publishFrame(backlog, 1000, 10);
 	const first = await nextFrame(consumer);
 	expect(first?.group).toBe(1);
@@ -111,13 +108,14 @@ test("a below-cursor group still downloading is not truncated", async () => {
 	// rather than shift the group out, so the second frame still arrives.
 	const pending = nextFrame(consumer);
 	publishFrame(backlog, 1500, 11);
-	backlog.close();
+	backlog.finish();
 
 	const second = await pending;
 	expect(second?.group).toBe(1);
 	expect(second?.frame.payload[0]).toBe(11);
 
-	live.close();
+	live.finish();
+	track.finish();
 	track.close();
 	consumer.close();
 });
@@ -134,8 +132,7 @@ test("delayed older groups survive a floor established by two newer groups", asy
 		publish(track, 3, 30);
 		expect((await nextFrame(consumer))?.group).toBe(3);
 
-		const latest = new Group.Producer(4);
-		track.writeGroup(latest);
+		const latest = track.createGroup(4);
 		publishFrame(latest, 40, 4);
 		expect((await nextFrame(consumer))?.group).toBe(4);
 
@@ -150,6 +147,7 @@ test("delayed older groups survive a floor established by two newer groups", asy
 		await expect(nextFrame(consumer)).rejects.toThrow("below the previous group start");
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 		clock.mockRestore();
 	}

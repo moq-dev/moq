@@ -6,6 +6,7 @@ description: Draw video frames into a canvas through WebGPU or Canvas2D
 # @moq/video
 
 [![npm](https://img.shields.io/npm/v/@moq/video)](https://www.npmjs.com/package/@moq/video)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/video)
 
 The renderer behind [`<moq-watch>`](/lib/js/watch) and the
 [`<moq-publish>`](/lib/js/publish) canvas preview. It draws `VideoFrame`s into

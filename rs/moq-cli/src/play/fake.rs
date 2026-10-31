@@ -130,7 +130,7 @@ impl Sink for FakeSink {
 		moq_clock::sleep_until(self.end).await;
 	}
 
-	fn write(&mut self, samples: &[u8]) -> anyhow::Result<()> {
+	fn write(&mut self, samples: &[u8]) -> anyhow::Result<moq_audio::playback::Write> {
 		anyhow::ensure!(samples.len().is_multiple_of(self.stride), "misaligned write");
 		let now = Instant::now();
 		// The real ring pads an underflow back up to its latency in silence once it
@@ -153,7 +153,9 @@ impl Sink for FakeSink {
 			to: self.end + duration,
 		});
 		self.end += duration;
-		Ok(())
+		let mut written = moq_audio::playback::Write::default();
+		written.accepted_sample_frames = frames as usize;
+		Ok(written)
 	}
 
 	fn buffered(&self) -> Duration {

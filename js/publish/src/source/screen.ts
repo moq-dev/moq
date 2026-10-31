@@ -18,7 +18,8 @@ export interface ScreenProps extends Inputs<ScreenInput> {
 	audio?: Audio.Constraints | boolean | Signal<Audio.Constraints | boolean | undefined>;
 }
 
-type ScreenOutput = {
+/** Signals the screen capture derives. */
+export type ScreenOutput = {
 	// The captured surface, or undefined while disabled or dismissed.
 	source: Signal<Media | undefined>;
 };

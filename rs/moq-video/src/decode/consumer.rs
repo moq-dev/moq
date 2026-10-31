@@ -473,7 +473,7 @@ mod tests {
 		let rendition = config.probe().await.unwrap();
 		let reserved = source_catalog
 			.reserve()
-			.with_timeline_hint(config.gop.duration(config.framerate));
+			.with_hls_hint(config.gop.duration(config.framerate));
 		let mut producer = EncodeProducer::new(source_broadcast, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];

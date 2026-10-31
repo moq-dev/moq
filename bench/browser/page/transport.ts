@@ -45,6 +45,7 @@ async function publish(config: Transport): Promise<void> {
 	});
 	if (connection.transport !== "webtransport") throw new Error(`publisher negotiated ${connection.transport}`);
 	cleanup.push(() => {
+		track.finish();
 		track.close();
 		producer.close();
 		connection.abort();
@@ -58,7 +59,7 @@ async function publish(config: Transport): Promise<void> {
 			const group = track.appendGroup();
 			for (let frame = start; frame < Math.min(start + config.group, config.frames); frame++)
 				group.writeFrame({ payload: fixtures[frame], timestamp: Moq.Time.Timestamp.fromMillis(frame) });
-			group.close();
+			group.finish();
 		}
 	})();
 }
@@ -72,7 +73,7 @@ async function prepare(config: Transport): Promise<string> {
 		websocket: { enabled: false },
 	});
 	if (connection.transport !== "webtransport") throw new Error(`consumer negotiated ${connection.transport}`);
-	const request = origin.request(Moq.Path.from(config.path), { announced: true });
+	const request = origin.follow(Moq.Path.from(config.path));
 	cleanup.push(() => {
 		request.close();
 		connection.abort();

@@ -82,7 +82,7 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	let reader: &MockSession = &links.last().unwrap().client_transport;
 
 	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast.announce(Default::default()).unwrap();
 	// Serve every request for the track, keeping what it started.
 	let requests = Rc::new(RefCell::new(Vec::new()));
@@ -103,11 +103,7 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	});
 
 	let consumer = nodes.last().unwrap().consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("room"))
-		.await
-		.unwrap_or_else(|_| panic!("{label}: never announced"))
-		.unwrap();
-	let remote = consumer.request_broadcast("room", None).await.unwrap();
+	let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
 
 	let subscribing = remote.track("video").unwrap().subscribe(None);
 	if reorder {
@@ -180,7 +176,7 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 	}
 
 	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast.announce(Default::default()).unwrap();
 	let requests = Rc::new(RefCell::new(Vec::new()));
 	let served = requests.clone();
@@ -194,11 +190,7 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 	});
 
 	let consumer = nodes.last().unwrap().consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("room"))
-		.await
-		.unwrap_or_else(|_| panic!("{label}: never announced"))
-		.unwrap();
-	let remote = consumer.request_broadcast("room", None).await.unwrap();
+	let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
 
 	let handle = remote.track("video").unwrap();
 	moq_clock::sleep(Duration::from_secs(1)).await;
@@ -208,7 +200,7 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 	);
 
 	// A held query reaches the publisher, and holds the track there until dropped.
-	let mut query = handle.query();
+	let mut query = handle.info();
 	moq_clock::timeout(TIMEOUT, &mut query)
 		.await
 		.unwrap_or_else(|_| panic!("{label}: query stalled"))

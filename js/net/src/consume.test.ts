@@ -31,7 +31,7 @@ test("cache identity follows the serving announcement, preserving held tracks", 
 	const shared = cache.get(job, cache.instance(job));
 	expect(shared?.closed).toBe(fresh.closed);
 	// Cache replacement never transfers or closes the track an old handle is reading.
-	track.appendGroup().close();
+	track.appendGroup().finish();
 	expect((await ordered.nextGroup())?.sequence).toBe(0);
 	cache.withdraw(job, specific);
 	expect(cache.get(job, cache.instance(job))).toBeUndefined();

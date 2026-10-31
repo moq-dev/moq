@@ -18,7 +18,8 @@ export interface MicrophoneProps extends Inputs<MicrophoneInput> {
 	constraints?: Audio.Constraints | Signal<Audio.Constraints | undefined>;
 }
 
-type MicrophoneOutput = {
+/** Signals the microphone derives. */
+export type MicrophoneOutput = {
 	// The live microphone track, or undefined while disabled or denied.
 	source: Signal<Media | undefined>;
 	/** A terminal capture failure, cleared when a new capture attempt begins. */

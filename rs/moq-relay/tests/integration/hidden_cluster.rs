@@ -41,7 +41,7 @@ async fn listen_tcp(version: moq_net::Version) -> (u16, moq_tokio::Listener) {
 
 #[test]
 fn old_peers_keep_hidden_paths() {
-	for version in ["moq-lite-05", "moq-lite-06", "moq-transport-17"] {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-transport-18"] {
 		run_cluster_test(old_peer_keeps_hidden_paths(version.parse().unwrap()));
 	}
 }

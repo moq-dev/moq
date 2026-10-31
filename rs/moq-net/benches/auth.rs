@@ -188,7 +188,7 @@ fn renewal(c: &mut Criterion) {
 						let broadcasts: Vec<_> = (0..routes)
 							.map(|route| origin.create_broadcast(format!("room/{route}").as_str()).unwrap())
 							.collect();
-						let mut swap = |auth: &auth::Auth, touched: usize| {
+						let mut swap = |auth: &auth::Credential, touched: usize| {
 							for broadcast in broadcasts.iter().take(touched) {
 								broadcast
 									.announce(origin::Route::default().with_auth(auth.clone()))
@@ -290,6 +290,7 @@ fn waiting(c: &mut Criterion) {
 										moq_net::announce::Event::Start(update)
 										| moq_net::announce::Event::Update(update)
 										| moq_net::announce::Event::Restart(update)
+										| moq_net::announce::Event::Takeover { announce: update, .. }
 											if update.prefix.as_str().starts_with(&prefix) =>
 										{
 											seen.insert(update.prefix);

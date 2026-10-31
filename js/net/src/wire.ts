@@ -57,7 +57,7 @@ export interface OriginProducer {
 	receive(
 		prefix: Path.Valid,
 		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
-	): origin.Dynamic;
+	): origin.Requests;
 	attach(discovery: boolean): Dispose;
 	/**
 	 * Hold the origin's announcement streams overlapping `prefix` unsynced until

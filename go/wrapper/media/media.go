@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"iter"
 	"time"
 
@@ -24,6 +25,8 @@ type (
 	Catalog = ffi.MoqCatalog
 	// Dimensions is a width and height in pixels.
 	Dimensions = ffi.MoqDimensions
+	// DecodeStart is where an audio or video decoder starts on a track that already holds groups.
+	DecodeStart = ffi.MoqDecodeStart
 	// Video describes one catalog rendition, including whether the publisher recommends temporarily avoiding it.
 	Video = ffi.MoqVideo
 	// VideoHint supplies catalog fields a video stream can't reveal itself, such as bitrate, filling only the gaps.
@@ -356,6 +359,14 @@ const (
 	ContainerFormatFlv = ffi.MoqContainerFormatFlv
 )
 
+// DecodeStart values. A decoder's zero value starts at the oldest group.
+const (
+	// DecodeStartOldest decodes everything the track still holds: what a recorder, an export, or anything reading a finished track wants.
+	DecodeStartOldest = ffi.MoqDecodeStartOldest
+	// DecodeStartLatest joins at the newest group and skips the cached backlog: what a live player wants, so reopening a decoder does not replay what it already played.
+	DecodeStartLatest = ffi.MoqDecodeStartLatest
+)
+
 // TrackProducer writes timestamped frames into a media track.
 type TrackProducer struct {
 	inner *ffi.MoqMediaTrackProducer
@@ -470,18 +481,58 @@ func mediaFrame(frame *ffi.MoqMediaFrame, err error) (*MediaFrame, error) {
 	return &MediaFrame{Payload: frame.Payload, Timestamp: time.Duration(frame.TimestampUs) * time.Microsecond, Keyframe: frame.Keyframe}, nil
 }
 
-// TrackConsumer is a stream of decoded media frames.
+// Read is one encoded frame, a ReadGap, or a ReadEnd, in delivery order.
+type Read interface{ read() }
+
+// ReadFrame is an encoded frame and its container metadata.
+type ReadFrame struct{ Frame MediaFrame }
+
+// ReadGap is lost media; what follows does not continue it.
+type ReadGap struct {
+	Timestamp time.Duration
+	Duration  time.Duration
+}
+
+// ReadEnd is where a stopped encoder's media stops. Following frames before End
+// are its remaining media; the first at or past End comes from a fresh encoder.
+type ReadEnd struct{ End time.Duration }
+
+func (ReadFrame) read() {}
+func (ReadGap) read()   {}
+func (ReadEnd) read()   {}
+
+func mediaRead(raw ffi.MoqMediaRead) (Read, error) {
+	switch read := raw.(type) {
+	case ffi.MoqMediaReadFrame:
+		frame, err := mediaFrame(&read.Frame, nil)
+		if err != nil {
+			return nil, err
+		}
+		return ReadFrame{Frame: *frame}, nil
+	case ffi.MoqMediaReadGap:
+		return ReadGap{Timestamp: time.Duration(read.TimestampUs) * time.Microsecond, Duration: read.Duration}, nil
+	case ffi.MoqMediaReadEnd:
+		return ReadEnd{End: time.Duration(read.EndUs) * time.Microsecond}, nil
+	}
+	return nil, fmt.Errorf("unknown media read: %T", raw)
+}
+
+// TrackConsumer is a stream of encoded frames, gaps, and encoder ends.
 type TrackConsumer struct {
 	inner *ffi.MoqMediaTrackConsumer
 }
 
-// Next returns the next frame, or (nil, nil) when the track ends.
-func (m *TrackConsumer) Next(ctx context.Context) (*MediaFrame, error) {
-	return mediaFrame(bridge.Call(ctx, m.inner.Cancel, m.inner.Next))
+// Next returns the next read, or (nil, nil) once the track ends.
+func (m *TrackConsumer) Next(ctx context.Context) (Read, error) {
+	raw, err := bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
+	if err != nil || raw == nil {
+		return nil, err
+	}
+	return mediaRead(*raw)
 }
 
-// All ranges over frames until the track ends or the loop breaks.
-func (m *TrackConsumer) All(ctx context.Context) iter.Seq2[*MediaFrame, error] {
+// All ranges over reads until the track ends or the loop breaks.
+func (m *TrackConsumer) All(ctx context.Context) iter.Seq2[Read, error] {
 	return bridge.Seq(ctx, m.Next)
 }
 

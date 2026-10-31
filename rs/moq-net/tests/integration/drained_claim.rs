@@ -2,7 +2,7 @@
 
 //! A relay's front for a path ends once unread, end to end over real sessions.
 //!
-//! Two workers each claim the `pool` prefix with `origin::Producer::dynamic` and
+//! Two workers each claim the `pool` prefix with `origin::Producer::requests` and
 //! announce it to relay `R` on their own sessions, the way a transcode pool does. A
 //! viewer on `R` reads `pool/p` from worker `A`, over the cheaper link, which then
 //! closes that output and drains its session. Nothing tells `R` the output closed, so
@@ -46,7 +46,7 @@ async fn settle() {
 /// A worker claiming `pool`, answering each request with an output whose `video`
 /// track carries the worker's name.
 struct Worker {
-	_claim: Rc<origin::Dynamic>,
+	_claim: Rc<origin::Requests>,
 	/// Each output with its track, which would end once its publication drops.
 	outputs: Rc<RefCell<Vec<(origin::Publication, track::Producer)>>>,
 	origin: origin::Producer,
@@ -55,7 +55,7 @@ struct Worker {
 impl Worker {
 	fn new(hop: u64, name: &'static str) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(origin.dynamic("pool").unwrap());
+		let claim = Rc::new(origin.requests("pool").unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {
@@ -81,14 +81,17 @@ impl Worker {
 	}
 }
 
-/// Read the first frame of `video` at `pool/p` through `relay`. The first subscription
-/// through a claim is reset once the answer's exact route arrives, the cold-start reset
-/// accepted until announce takeover lands, so the read retries once.
-async fn watch(relay: &origin::Producer) -> String {
-	let cold = relay.consume().request_broadcast("pool/p", None).await.unwrap();
-	drop(cold.track("video").unwrap().subscribe(None).await);
-	settle().await;
-	let broadcast = relay.consume().request_broadcast("pool/p", None).await.unwrap();
+/// Read the first frame of `video` at `pool/p` through `relay`. moq-lite-07 announces the
+/// answer as a takeover of the claim, so the first subscription reads. Older wires carry it
+/// as an ordinary announcement, which resets the first subscription through the claim, so
+/// they wake the worker first.
+async fn watch(version: Version, relay: &origin::Producer) -> String {
+	if version != "moq-lite-07-wip".parse().unwrap() {
+		let cold = relay.consume().request("pool/p", None).await.unwrap();
+		drop(cold.track("video").unwrap().subscribe(None).await);
+		settle().await;
+	}
+	let broadcast = relay.consume().request("pool/p", None).await.unwrap();
 	let mut subscription = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut group = subscription.recv_group().await.unwrap().expect("a group");
 	let frame = group.read_frame().await.unwrap().expect("a frame");
@@ -104,7 +107,7 @@ async fn drained_claim(version: &str) {
 	let _b = link(version, &b.origin, &relay, 10).await;
 	settle().await;
 
-	assert_eq!(watch(&relay).await, "a", "{version}");
+	assert_eq!(watch(version, &relay).await, "a", "{version}");
 
 	// A closes its output and drains its session, so B wins the path from here on.
 	a.outputs.borrow().iter().for_each(|(output, _)| output.close());
@@ -114,7 +117,7 @@ async fn drained_claim(version: &str) {
 	moq_clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2).await;
 
 	assert_eq!(
-		watch(&relay).await,
+		watch(version, &relay).await,
 		"b",
 		"{version}: the relay kept the drained worker's front"
 	);

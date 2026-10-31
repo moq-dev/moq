@@ -8,6 +8,7 @@ export {
 	type Codec,
 	Encoder,
 	type EncoderInput,
+	type EncoderOutput,
 	type EncoderProps,
 	type Opus,
 	type OpusConfig,

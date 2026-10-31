@@ -67,12 +67,10 @@ impl<T: Serialize> Producer<T> {
 
 	/// Append one record to the log.
 	///
-	/// A record that might not fit in what is left of the group's budget is refused with
-	/// [`moq_net::Error::GroupTooLarge`] before anything is written, leaving the log intact. The
-	/// budget covers the whole log, so once it is spent every append is refused; a publisher with
-	/// more to say opens a new track. A timestamp whose presence doesn't match the track's timescale
-	/// is refused with [`moq_net::Error::TimestampMismatch`] the same way, so a corrected append
-	/// carries on.
+	/// The log accepts appends for its track's life. A record larger than a frame may be is refused
+	/// with [`moq_net::Error::FrameTooLarge`] before anything is written, leaving the log intact. A
+	/// timestamp whose presence doesn't match the track's timescale is refused with
+	/// [`moq_net::Error::TimestampMismatch`] the same way, so a corrected append carries on.
 	///
 	/// Any other failure ends the track. A log missing a record is not the lossless log a stream
 	/// promises, and that holds whether the group rejected the record or it never encoded at all, so
@@ -130,7 +128,7 @@ impl<T: Serialize> Inner<T> {
 		let record = match encoder.encode(payload.value) {
 			Ok(record) => record,
 			// Refused before encoding, so nothing is missing from the log and nothing desynced.
-			Err(err @ crate::Error::Net(moq_net::Error::GroupTooLarge)) => return Err(err),
+			Err(err @ crate::Error::Net(moq_net::Error::FrameTooLarge)) => return Err(err),
 			Err(err) => {
 				// A record that can't be encoded is as lost as one the group rejects: the log is
 				// missing it either way, and carrying on would present that gap as a complete log.
@@ -148,11 +146,8 @@ impl<T: Serialize> Inner<T> {
 		};
 
 		if let Err(err) = result {
-			// The record never reached the wire either way, so the window is ahead of every consumer
-			// and has to be reset. Without this the desync latch answers the next append before the
-			// track does, masking the real reason the log stopped.
+			// The record never reached the wire either way.
 			drop(record);
-			encoder.reset();
 
 			// What differs is whether a consumer could have seen the group. A write failure means the
 			// group is already live, so the record is a hole in the log, and a second group would hand
@@ -160,7 +155,7 @@ impl<T: Serialize> Inner<T> {
 			// stream is one group" a real invariant rather than the usual case.
 			//
 			// An `open` failure published nothing (it only runs when there is no group), so a later
-			// append opens a fresh group whose decoder starts cold. That path also catches an append
+			// append opens a fresh group. That path also catches an append
 			// onto a track already ended this way, which keeps reporting the error it was aborted with.
 			if published {
 				track.abort(err.clone());
@@ -228,8 +223,7 @@ impl Track {
 	fn finish(&mut self) -> std::result::Result<(), moq_net::Error> {
 		// Finalize both independently rather than short-circuiting on the group. Returning early
 		// would leave the track open with `group` already taken, so a later append would open a
-		// second group, and (with compression) write into it from a window the consumer never
-		// received. That is exactly the split log ending the track exists to prevent.
+		// second group. That is exactly the split log ending the track exists to prevent.
 		let group = match self.group.take() {
 			Some(mut group) => group.finish(),
 			None => Ok(()),

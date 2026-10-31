@@ -39,8 +39,8 @@ export class Consumer<T> {
 	 * Yields one state per frame and finishes a group before starting the next, buffering every
 	 * state the reader has not reached yet. A group the subscription's `maxDelay` proves too old
 	 * is skipped, counting media time and wall time, or wall time alone for an untimed track. The
-	 * default of zero keeps only the newest group, so a playhead reader sets `maxDelay` to how far
-	 * it trails the live edge. Use {@link latest} to skip straight to the head. A group lost to a
+	 * default subscription's zero keeps only the newest group, so a playhead reader sets `maxDelay`
+	 * to how far it trails the live edge. Use {@link latest} to skip straight to the head. A group lost to a
 	 * gap resyncs from the next one.
 	 */
 	next(): Promise<Timed<T> | undefined> {
@@ -53,7 +53,7 @@ export class Consumer<T> {
 	 * Skips to the newest group and applies every frame already buffered in it, yielding only the
 	 * last: a late joiner (or any consumer that has fallen behind) catches up to the head in one
 	 * step instead of replaying every superseded state. Frames are still decoded in order (the
-	 * DEFLATE window and merge patches are sequential); only the per-frame yield is skipped. Blocks
+	 * merge patches are sequential); only the per-frame yield is skipped. Blocks
 	 * when nothing newer than the last yield has arrived.
 	 */
 	latest(): Promise<Timed<T> | undefined> {
@@ -134,9 +134,10 @@ export class Consumer<T> {
 	}
 }
 
+/** Types for {@link Consumer}. */
 export namespace Consumer {
 	/** Snapshot consumer options, including the source track. */
-	export type Config<T> = Pick<CodecConfig<T>, "schema" | "compression"> & {
+	export type Config<T> = Pick<CodecConfig<T>, "schema"> & {
 		track: Moq.Track.Subscriber;
 	};
 }

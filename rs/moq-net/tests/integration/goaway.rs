@@ -31,17 +31,8 @@ fn produce_origin(hop: Hop) -> moq_net::origin::Producer {
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Every version with GOAWAY support, across both wires and their distinct
-/// channels: the lite Goaway control stream, the IETF draft-14-16 shared
-/// control stream, and the IETF draft-17+ SETUP uni streams.
-const GOAWAY_VERSIONS: &[&str] = &[
-	"moq-lite-04",
-	"moq-lite-05",
-	"moq-transport-14",
-	"moq-transport-16",
-	"moq-transport-17",
-	"moq-transport-18",
-	"moq-transport-22",
-];
+/// channels: the lite Goaway control stream and the IETF SETUP uni streams.
+const GOAWAY_VERSIONS: &[&str] = &["moq-lite-04", "moq-lite-05", "moq-transport-18", "moq-transport-22"];
 
 /// A full receive window or missing FIN ACK cannot hold a drain beyond its local deadline.
 async fn closes_stalled_goaway(version: Version, writes: bool) {
@@ -137,12 +128,12 @@ async fn goaway_send_receive_all_versions() {
 	}
 }
 
-/// The IETF draft-17+ GOAWAY carries a timeout on the wire; the receiver
-/// observes the sender's advertised deadline.
+/// The IETF GOAWAY carries a timeout on the wire; the receiver observes the
+/// sender's advertised deadline.
 #[moq_clock::test]
-async fn goaway_wire_timeout_moq_transport_17() {
+async fn goaway_wire_timeout_moq_transport() {
 	moq_clock::timeout(TEST_TIMEOUT, async {
-		let version: Version = "moq-transport-17".parse().unwrap();
+		let version: Version = "moq-transport-18".parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
 		pair.server
@@ -257,7 +248,7 @@ async fn goaway_client_redirect_refused_moq_transport_18() {
 #[moq_clock::test]
 async fn goaway_timeout_force_close_moq_transport_17() {
 	moq_clock::timeout(TEST_TIMEOUT, async {
-		let version: Version = "moq-transport-17".parse().unwrap();
+		let version: Version = "moq-transport-18".parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
 		pair.server
@@ -399,8 +390,12 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 
 		// Subscribe BEFORE the GOAWAY and receive a first group.
 		let sub = sub_origin.consume();
-		sub.routed("test").await.expect("route announced");
-		let bc = sub.request_broadcast("test", None).await.expect("broadcast resolves");
+		let bc = sub
+			.follow("test", None)
+			.unwrap()
+			.available()
+			.await
+			.expect("broadcast resolves");
 		let mut existing = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 		let mut group = track.append_group().expect("append group");
@@ -499,7 +494,7 @@ async fn goaway_drains_routes(version: Version) {
 		let MockPair { client, server, .. } = connect_mock(opts).await;
 
 		let sub = sub_origin.consume();
-		let route = sub.routed("test").await.expect("route announced");
+		let route = crate::support::announced(&sub, "test").await;
 		assert_ne!(
 			route.cost,
 			moq_net::origin::Cost::DRAIN,

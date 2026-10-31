@@ -1,4 +1,4 @@
-/** Sweep observers against routes for one route update, and against tracks for one demand edge. */
+/** Sweep observers against routes for one route update, and against tracks for one listing change. */
 
 import { Signal } from "@moq/signals";
 import type { Grant } from "../src/auth.ts";
@@ -26,22 +26,43 @@ const updates = 32;
 let checksum = 0;
 
 console.log("scope,routes,observers,update_us");
-for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-producers"] as const) {
+for (const scope of [
+	"unscoped",
+	"distinct-scopes",
+	"producer-scopes",
+	"rooted-producers",
+	"full-name",
+	"overlap-only",
+] as const) {
 	for (const routeCount of routeCounts) {
 		for (const observerCount of observerCounts) {
 			const origin = new Producer();
 			const handles = Array.from({ length: routeCount }, (_, index) =>
-				origin.dynamic(Path.from(`room/${index}`)),
+				origin.requests(Path.from(`room/${index}${scope === "full-name" ? ".chat" : ""}`)),
 			);
-			const touched = Path.from(scope === "rooted-producers" ? "0" : "room/0");
+			const touched = Path.from(
+				scope === "rooted-producers" ? "0" : scope === "full-name" ? "room/0.chat" : "room/0",
+			);
 			let notifications = 0;
 			const streams = Array.from({ length: observerCount }, (_, index) =>
-				(scope === "producer-scopes"
-					? origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse(`room/**/tag-${index}`)]))
-					: scope === "rooted-producers"
-						? origin.scope(Path.from("room"), new Path.Patterns([Path.Pattern.parse(`**/tag-${index}`)]))
-						: origin
-				).announced(scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined),
+				scope === "full-name" || scope === "overlap-only"
+					? origin.consume().announced(Path.Pattern.parse("**/*.chat"))
+					: (scope === "producer-scopes"
+							? origin.scope(
+									Path.empty(),
+									new Path.Patterns([Path.Pattern.parse(`room/**/tag-${index}`)]),
+								)
+							: scope === "rooted-producers"
+								? origin.scope(
+										Path.from("room"),
+										new Path.Patterns([Path.Pattern.parse(`**/tag-${index}`)]),
+									)
+								: origin
+						).announced(
+							scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined,
+							// These scopes only overlap `room/<index>`, so they measure the covering view.
+							{ covering: scope !== "unscoped" },
+						),
 			);
 			const readers = streams.map(async (stream) => {
 				for await (const event of stream) {
@@ -59,8 +80,9 @@ for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-p
 				await new Promise<void>((resolve) => setImmediate(resolve));
 			}
 			const elapsed = performance.now() - start;
-			if (notifications !== updates * observerCount) {
-				throw new Error(`expected ${updates * observerCount} notifications, got ${notifications}`);
+			const expected = scope === "overlap-only" ? 0 : updates * observerCount;
+			if (notifications !== expected) {
+				throw new Error(`expected ${expected} notifications, got ${notifications}`);
 			}
 			console.log(`${scope},${routeCount},${observerCount},${((elapsed * 1000) / updates).toFixed(1)}`);
 			for (const stream of streams) stream.close();
@@ -71,40 +93,6 @@ for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-p
 	}
 }
 if (checksum === 0) throw new Error("benchmark did no work");
-
-// Sweep both axes while only one track's demand changes.
-const demandUpdates = 1024;
-console.log("tracks,observers,demand_update_us");
-for (const trackCount of [8, 32, 128]) {
-	for (const observerCount of [1, 8, 32]) {
-		const broadcast = new BroadcastProducer();
-		const tracks = Array.from({ length: trackCount }, (_, index) => broadcast.createTrack(`track-${index}`));
-		const demand = broadcast.demand();
-		let notifications = 0;
-		const disposes = Array.from({ length: observerCount }, () =>
-			demand.used.subscribe(() => {
-				notifications++;
-			}),
-		);
-		const start = performance.now();
-		for (let index = 0; index < demandUpdates; index++) {
-			const subscriber = tracks[0].subscribe();
-			await Promise.resolve();
-			await Promise.resolve();
-			if (!demand.used.peek()) throw new Error("missing demand");
-			subscriber.close();
-			await demand.unused();
-			await Promise.resolve();
-		}
-		if (notifications !== demandUpdates * 2 * observerCount) throw new Error(`lost demand edge: ${notifications}`);
-		console.log(
-			`${trackCount},${observerCount},${(((performance.now() - start) * 1000) / demandUpdates).toFixed(1)}`,
-		);
-		for (const dispose of disposes) dispose();
-		for (const track of tracks) track.close();
-		broadcast.close();
-	}
-}
 
 // One created and removed track reaches every listing, however many tracks the broadcast holds.
 const listed = 256;
@@ -247,7 +235,7 @@ const nextEpoch = Epoch.parse("01900000-0000-7000-8000-000000000002");
 for (const pathCount of routeCounts) {
 	for (const readerCount of observerCounts) {
 		const origin = new Producer();
-		const dynamic = origin.dynamicRoute(Path.from("room"), { epoch });
+		const dynamic = origin.requestsRoute(Path.from("room"), { epoch });
 		const pending = dynamic.requested();
 		const requests = Array.from({ length: pathCount }, (_, index) =>
 			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),

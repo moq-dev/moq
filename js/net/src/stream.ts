@@ -3,7 +3,6 @@ import { race } from "@moq/signals";
 import { fromTransport, StreamCode, toStreamCode, toTransport } from "./error.ts";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
-import { Version } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
 import { decodeError } from "./util/decode_error.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
@@ -39,9 +38,8 @@ function withCode(reason: unknown, stream: StreamVersion): unknown {
 // withCode, which reads a number as a non-stream error and sends Internal.
 function stopReason(reason: unknown, stream: StreamVersion): unknown {
 	if (typeof reason !== "number") return withCode(reason, stream);
-	const version = asIetf(stream);
 	const code =
-		version === undefined || sharedStreamCode(reason, version) ? (reason as StreamCode) : StreamCode.Internal;
+		asIetf(stream) === undefined || sharedStreamCode(reason) ? (reason as StreamCode) : StreamCode.Internal;
 	return toTransport(code, "cancel");
 }
 
@@ -107,9 +105,6 @@ export function asIetf(version: StreamVersion): IetfVersion | undefined {
  */
 export function isLeadingOnes(version: StreamVersion): boolean {
 	switch (version) {
-		case Version.DRAFT_14:
-		case Version.DRAFT_15:
-		case Version.DRAFT_16:
 		case Lite.DRAFT_01:
 		case Lite.DRAFT_02:
 		case Lite.DRAFT_03:
@@ -685,10 +680,7 @@ export class Cursor {
 		let size: number;
 		if (this.#leadingOnes) {
 			size = peekLeadingOnes(b[o]);
-			// 1111110x is a 7-byte form. Draft-17 rejects it; draft-18+ allows it per #1595.
-			if (size === 7 && this.version === Version.DRAFT_17) {
-				throw new Error("invalid leading-ones varint: 1111110x prefix is reserved on draft-17");
-			}
+			// 1111110x is a 7-byte form, which draft-18+ allows per #1595.
 			this.#ensure(size);
 			this.#offset += size;
 			return readLeadingOnes(b, o, size);

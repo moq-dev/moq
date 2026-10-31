@@ -15,10 +15,9 @@ Decided with the maintainer on 2026-10-24:
 
 - One quest, both halves. Today the JS broadcast's request pull
   (`requested()` in `js/net/src/broadcast.ts`) is reachable only by wire
-  layers, and only the origin has a public `dynamic()`. Expose the
-  broadcast's handler under the name and shape that
-  [named requests](/quest/m1/api-audit/requests.md) gives Rust's
-  (`requests()` returning `Requests`), and keep the internal wire path on it.
+  layers, and only the origin has a public `requests()`. Expose the
+  broadcast's handler under Rust's name and shape (`requests()` returning
+  `Requests`), and keep the internal wire path on it.
 - `@moq/e2ee` mirrors the Rust handler exactly: it opens each request's
   physical name, claims it, and yields a request whose `name` is semantic.
   A name that does not open is answered as missing and keeps no state. A
@@ -38,6 +37,5 @@ handler on `@moq/e2ee`'s broadcast producer. Wire: none.
 
 ## Required
 
-- [Named requests](/quest/m1/api-audit/requests.md) - the handler name and shape this exposes
 - [Undeclared track names](/quest/m2/e2ee/undeclared-names.md) - the Rust handler this mirrors
 - [JS mirror](/quest/m2/net-wrap/js.md) - the `@moq/net` interfaces the `@moq/e2ee` wrappers implement

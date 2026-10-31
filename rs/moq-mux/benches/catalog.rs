@@ -3,11 +3,12 @@
 //! Every track's jitter rises 1 ms per frame for [`RISES`] frames inside one rate window, then one
 //! more frame lands after the window. Each catalog a subscriber receives makes a player update its
 //! subscription on every track, so the work fans out as `publishes x tracks x subscribers`. The
-//! routine asserts the rate limit holds that to two publishes (the leading and trailing edge)
+//! hang case asserts the rate limit holds that to two publishes (the leading and trailing edge)
 //! whatever the shape; without it the count would be `RISES x tracks x subscribers`.
 //!
-//! The MSF reference case publishes renditions in distinct sibling namespaces and converts them
-//! back for every subscriber, exercising namespace resolution over both fanout axes.
+//! The MSF reference case declares renditions in distinct sibling namespaces and converts the
+//! initial catalog back for every subscriber. MSF keeps the estimates it first declared, so this
+//! case asserts that measured rises cause no further catalogs or subscription updates.
 //! The rate window runs on tokio's paused clock, so the counts are deterministic.
 //!
 //! The teardown case drops a reserved importer whose declared tracks never got a config, as at the
@@ -49,7 +50,7 @@ struct Fanout {
 impl Fanout {
 	async fn new(tracks: usize, subscribers: usize, references: bool) -> Self {
 		let mut info = moq_net::broadcast::Info::new();
-		info.path = "room/catalog".into();
+		info.path = moq_net::Path::from_static("room/catalog");
 		let mut broadcast = info.produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let tracks = (0..tracks)
@@ -58,7 +59,7 @@ impl Fanout {
 				let track = broadcast.create_track(format!("v{index}"), info).unwrap();
 				let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 				if references {
-					config.broadcast = Some(format!("./source-{index}").into());
+					config.broadcast = Some(moq_net::path::Relative::new(&format!("./source-{index}")).unwrap());
 				}
 				catalog.video(track, Container::Legacy(Kind::Video), config).unwrap()
 			})
@@ -82,7 +83,7 @@ impl Fanout {
 			waiter: kio::Waiter::noop(),
 		};
 		// The initial track set is configuration, not estimate traffic.
-		fanout.receive();
+		assert_eq!(fanout.receive(), (1, fanout.tracks.len() * subscribers));
 		fanout
 	}
 
@@ -111,7 +112,7 @@ impl Fanout {
 					black_box(rendition.jitter);
 					if let Some(reference) = &rendition.broadcast {
 						assert!(
-							moq_net::Path::new("room/catalog")
+							moq_net::Path::from_static("room/catalog")
 								.try_resolve(reference)
 								.unwrap()
 								.as_str()
@@ -125,7 +126,7 @@ impl Fanout {
 		(publishes, updates)
 	}
 
-	async fn run(mut self) {
+	async fn run(mut self, expected: usize) {
 		let (mut publishes, mut updates) = (0, 0);
 		let mut tally = |(p, u): (usize, usize)| {
 			publishes += p;
@@ -142,7 +143,7 @@ impl Fanout {
 		let shape = self.tracks.len() * self.subscribers.len();
 		assert_eq!(
 			(publishes, updates),
-			(2, 2 * shape),
+			(expected, expected * shape),
 			"estimate churn regression with {} tracks x {} subscribers",
 			self.tracks.len(),
 			self.subscribers.len()
@@ -158,6 +159,7 @@ fn bench_estimate_fanout(c: &mut Criterion) {
 		.unwrap();
 	let mut group = c.benchmark_group("catalog_estimate_fanout");
 	for (mode, references) in [("hang", false), ("msf_references", true)] {
+		let expected = if references { 0 } else { 2 };
 		for tracks in TRACKS {
 			for subscribers in SUBSCRIBERS {
 				group.throughput(Throughput::Elements(RISES * tracks as u64));
@@ -167,7 +169,7 @@ fn bench_estimate_fanout(c: &mut Criterion) {
 					|b, &(tracks, subscribers)| {
 						b.iter_batched(
 							|| runtime.block_on(Fanout::new(tracks, subscribers, references)),
-							|fanout| runtime.block_on(fanout.run()),
+							|fanout| runtime.block_on(fanout.run(expected)),
 							BatchSize::SmallInput,
 						);
 					},
@@ -223,7 +225,7 @@ fn bench_unresolved_teardown(c: &mut Criterion) {
 }
 
 /// Tracks interleaving frames on one catalog.
-const ORDERED: [usize; 3] = [1, 16, 256];
+const ORDERED: [usize; 3] = [1, 16, 64];
 
 /// Frames each track writes per iteration.
 const FRAMES: u64 = 100;

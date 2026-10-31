@@ -10,8 +10,8 @@ import (
 )
 
 // BroadcastProducer publishes a collection of tracks. Create one at a path with
-// [OriginProducer.CreateBroadcast] (or [Client.CreateBroadcast]), then publish
-// tracks onto it.
+// [OriginProducer.CreateBroadcast] (or [Client.CreateBroadcast]) and take it
+// from the [Publication], then publish tracks onto it.
 type BroadcastProducer struct {
 	inner *ffi.MoqBroadcastProducer
 }
@@ -27,27 +27,13 @@ func NewBroadcastProducer() (*BroadcastProducer, error) {
 	return &BroadcastProducer{inner: inner}, nil
 }
 
-// Dynamic accepts requests for tracks that are not published yet.
-func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
-	inner, err := b.inner.Dynamic()
+// Requests accepts requests for tracks that are not published yet.
+func (b *BroadcastProducer) Requests() (*BroadcastRequests, error) {
+	inner, err := b.inner.Requests()
 	if err != nil {
 		return nil, err
 	}
-	return &BroadcastDynamic{inner: inner}, nil
-}
-
-// Announce advertises this broadcast's exact path as a route.
-//
-// Announcing again re-prices the route in place. Until announced, the
-// broadcast is invisible and unroutable for local consumers and peers alike.
-func (b *BroadcastProducer) Announce(route AnnounceRoute) error {
-	return b.inner.Announce(route)
-}
-
-// Unannounce retracts this broadcast's exact-path advertisement, if any, from
-// local consumers and peers alike. Tracks already in flight carry on.
-func (b *BroadcastProducer) Unannounce() error {
-	return b.inner.Unannounce()
+	return &BroadcastRequests{inner: inner}, nil
 }
 
 // PublishTrack creates a track that carries arbitrary byte payloads with no
@@ -82,13 +68,13 @@ func (b *BroadcastProducer) Close() error {
 	return b.inner.Close()
 }
 
-// BroadcastDynamic is a stream of subscriber-requested tracks.
-type BroadcastDynamic struct {
-	inner *ffi.MoqBroadcastDynamic
+// BroadcastRequests is a stream of subscriber-requested tracks.
+type BroadcastRequests struct {
+	inner *ffi.MoqBroadcastRequests
 }
 
 // RequestedTrack waits for the next subscriber-requested track.
-func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
+func (d *BroadcastRequests) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
 	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedTrack)
 	if err != nil {
 		return nil, err
@@ -97,12 +83,12 @@ func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, e
 }
 
 // All ranges over subscriber-requested tracks until the dynamic source ends.
-func (d *BroadcastDynamic) All(ctx context.Context) iter.Seq2[*TrackRequest, error] {
+func (d *BroadcastRequests) All(ctx context.Context) iter.Seq2[*TrackRequest, error] {
 	return bridge.Seq(ctx, d.RequestedTrack)
 }
 
 // Cancel stops the dynamic request stream.
-func (d *BroadcastDynamic) Cancel() {
+func (d *BroadcastRequests) Cancel() {
 	d.inner.Cancel()
 }
 
@@ -125,13 +111,13 @@ func (r *TrackRequest) Demand() (*TrackDemand, error) {
 	return &TrackDemand{inner: inner}, nil
 }
 
-// Dynamic creates a fetch handler before accepting this requested track.
-func (r *TrackRequest) Dynamic() (*TrackDynamic, error) {
-	inner, err := r.inner.Dynamic()
+// Requests creates a fetch handler before accepting this requested track.
+func (r *TrackRequest) Requests() (*TrackRequests, error) {
+	inner, err := r.inner.Requests()
 	if err != nil {
 		return nil, err
 	}
-	return &TrackDynamic{inner: inner}, nil
+	return &TrackRequests{inner: inner}, nil
 }
 
 // Accept accepts the request as a raw track. For media, pass the request as media.Requested to an importer constructor.
@@ -191,13 +177,13 @@ func (t *TrackProducer) Demand() (*TrackDemand, error) {
 	return &TrackDemand{inner: inner}, nil
 }
 
-// Dynamic serves fetches for groups that are not currently cached.
-func (t *TrackProducer) Dynamic() (*TrackDynamic, error) {
-	inner, err := t.inner.Dynamic()
+// Requests serves fetches for groups that are not currently cached.
+func (t *TrackProducer) Requests() (*TrackRequests, error) {
+	inner, err := t.inner.Requests()
 	if err != nil {
 		return nil, err
 	}
-	return &TrackDynamic{inner: inner}, nil
+	return &TrackRequests{inner: inner}, nil
 }
 
 // AppendGroup starts a new group; write frames into it, then Finish.
@@ -235,6 +221,22 @@ func (t *TrackProducer) AppendDatagram(frame Frame) (uint64, error) {
 		return 0, err
 	}
 	return t.inner.AppendDatagram(f)
+}
+
+// InsertDatagram sends frame as a best-effort datagram at an explicit sequence, for a
+// caller that allocates its own. AppendDatagram continues after the largest one.
+func (t *TrackProducer) InsertDatagram(sequence uint64, frame Frame) error {
+	f, err := frame.ffi()
+	if err != nil {
+		return err
+	}
+	return t.inner.InsertDatagram(sequence, f)
+}
+
+// Largest reports the newest group or datagram written, at its newest frame, or nil
+// before any.
+func (t *TrackProducer) Largest() (*Position, error) {
+	return t.inner.Largest()
 }
 
 // Abort closes the track with an application error code.
@@ -305,13 +307,13 @@ func (g *GroupProducer) Abort(errorCode uint16) error {
 	return g.inner.Abort(errorCode)
 }
 
-// TrackDynamic yields the fills readers of one track need: runs of groups the cache lacks.
-type TrackDynamic struct {
-	inner *ffi.MoqTrackDynamic
+// TrackRequests yields the fills readers of one track need: runs of groups the cache lacks.
+type TrackRequests struct {
+	inner *ffi.MoqTrackRequests
 }
 
 // RequestedFill waits for the next fill.
-func (d *TrackDynamic) RequestedFill(ctx context.Context) (*Fill, error) {
+func (d *TrackRequests) RequestedFill(ctx context.Context) (*Fill, error) {
 	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedFill)
 	if err != nil {
 		return nil, err
@@ -320,22 +322,22 @@ func (d *TrackDynamic) RequestedFill(ctx context.Context) (*Fill, error) {
 }
 
 // All ranges over fills until the dynamic source ends.
-func (d *TrackDynamic) All(ctx context.Context) iter.Seq2[*Fill, error] {
+func (d *TrackRequests) All(ctx context.Context) iter.Seq2[*Fill, error] {
 	return bridge.Seq(ctx, d.RequestedFill)
 }
 
 // Cancel stops current and future requested-fill waits.
-func (d *TrackDynamic) Cancel() {
+func (d *TrackRequests) Cancel() {
 	d.inner.Cancel()
 }
 
-// Fill is a run of groups readers miss, for a TrackDynamic to serve.
+// Fill is a run of groups readers miss, for a TrackRequests to serve.
 //
-// Accept each group you have and DropGroups the rest; Next names what is still
+// Accept each group you have and DropGroups the rest; Wanted names what is still
 // owed, in the fill's order. Releasing the fill names whatever is left as dropped
 // while a reader still wants it; once nobody does, it is withdrawn, so stop
-// serving it when Unused returns. Stop serving a single group when Unwanted
-// returns for it, and move on to Next.
+// serving it once Wanted is nil. Stop serving a single group when Unwanted
+// returns for it, and move on to Wanted.
 type Fill struct {
 	inner *ffi.MoqFill
 }
@@ -371,9 +373,15 @@ func (f *Fill) Order() Order {
 	return f.inner.Order()
 }
 
-// Next is the next group still owed in the fill's order, or nil once every group is answered.
-func (f *Fill) Next() *uint64 {
-	return f.inner.Next()
+// Wanted is the next group still owed in the fill's order, or nil once every
+// group is answered or no reader waits on the fill.
+func (f *Fill) Wanted() *uint64 {
+	return f.inner.Wanted()
+}
+
+// WantedChanged blocks until Wanted changes and returns it. The first call returns at once.
+func (f *Fill) WantedChanged(ctx context.Context) (*uint64, error) {
+	return f.inner.WantedChanged(ctx)
 }
 
 // Accept inserts group sequence and returns a producer for it. The first group
@@ -389,16 +397,6 @@ func (f *Fill) Accept(sequence uint64) (*GroupProducer, error) {
 // DropGroups names groups start up to the exclusive end as never to be delivered.
 func (f *Fill) DropGroups(start, end uint64) {
 	f.inner.DropGroups(start, end)
-}
-
-// IsUsed reports whether a reader still waits on this fill.
-func (f *Fill) IsUsed() bool {
-	return f.inner.IsUsed()
-}
-
-// Unused blocks until no reader waits on this fill.
-func (f *Fill) Unused(ctx context.Context) error {
-	return f.inner.Unused(ctx)
 }
 
 // IsWanted reports whether a reader still waits for group sequence from this fill:

@@ -66,9 +66,7 @@ mod tests {
 	async fn importer_creation_failure_preserves_abort_error() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let _collision = broadcast
-			.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None)
-			.unwrap();
+		let _collision = broadcast.create_track(hang::hls::default_name("0.vp8"), None).unwrap();
 		let consumer = broadcast.consume();
 		let mut bridge = super::Bridge::new(broadcast, catalog).unwrap();
 		let mut track = consumer.track("0.vp8").unwrap().subscribe(None).await.unwrap();
@@ -77,7 +75,10 @@ mod tests {
 			timestamp_us: 0,
 			payload: Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00]),
 		});
-		assert!(result.is_err(), "timeline collision must fail importer creation");
+		assert!(
+			result.is_err(),
+			"an HLS record track collision must fail importer creation"
+		);
 
 		Box::new(bridge).abort(moq_net::Error::Transport("session failed".into()));
 		let Err(error) = track.recv_group().await else {

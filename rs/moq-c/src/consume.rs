@@ -7,11 +7,12 @@ use std::{
 };
 use tokio::sync::oneshot;
 
+use crate::decode::Read;
 use crate::ffi::OnStatus;
 use crate::task::Task;
 use crate::{
-	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_json_value, moq_section, moq_string,
-	moq_video_config, moq_video_properties,
+	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_json_value, moq_json_window_event,
+	moq_json_window_kind, moq_section, moq_string, moq_video_config, moq_video_properties,
 };
 
 struct ConsumeCatalog {
@@ -57,9 +58,6 @@ pub(crate) trait Media: hang::catalog::Reference + Clone {
 
 	/// Its renditions, keyed by ID.
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self>;
-
-	/// Whether the publisher is serving this rendition.
-	fn enabled(&self) -> bool;
 }
 
 impl Media for hang::catalog::VideoConfig {
@@ -68,10 +66,6 @@ impl Media for hang::catalog::VideoConfig {
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
 		&catalog.video.renditions
 	}
-
-	fn enabled(&self) -> bool {
-		self.enabled
-	}
 }
 
 impl Media for hang::catalog::AudioConfig {
@@ -79,10 +73,6 @@ impl Media for hang::catalog::AudioConfig {
 
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
 		&catalog.audio.renditions
-	}
-
-	fn enabled(&self) -> bool {
-		self.enabled
 	}
 }
 
@@ -116,7 +106,7 @@ struct ConsumeBroadcast {
 async fn resolve(
 	broadcast: moq_net::broadcast::Consumer,
 	origin: Option<crate::origin::Consumer>,
-	reference: Option<moq_net::path::RelativeOwned>,
+	reference: Option<moq_net::path::Relative>,
 ) -> Result<moq_net::broadcast::Consumer, Error> {
 	let Some(reference) = reference.filter(|reference| !reference.is_empty()) else {
 		return Ok(broadcast);
@@ -128,7 +118,7 @@ async fn resolve(
 	// first instance resolved, without the epoch's guarantee.
 	origin
 		.driver
-		.watch(async { Ok(source.resolve(Some(&reference.borrow()), None).await?) })
+		.watch(async { Ok(source.resolve(Some(&reference), None).await?) })
 		.await
 }
 
@@ -179,6 +169,39 @@ impl JsonValue {
 	}
 }
 
+/// A JSON window event, its record pre-serialized to a string, with its frame timestamp.
+struct JsonWindowEvent {
+	kind: moq_json_window_kind,
+	range: std::ops::Range<u64>,
+	/// The pushed record, `None` for a pop or skip.
+	json: Option<String>,
+	timestamp_us: Option<u64>,
+}
+
+impl JsonWindowEvent {
+	fn new(event: moq_net::Timed<moq_json::window::Event<serde_json::Value>>) -> Result<Self, Error> {
+		use moq_json::window::Event;
+
+		let timestamp_us = timestamp_us(event.at)?;
+		let (kind, range, json) = match event.value {
+			Event::Push { index, value } => (
+				moq_json_window_kind::MOQ_JSON_WINDOW_KIND_PUSH,
+				index..index + 1,
+				Some(serde_json::to_string(&value)?),
+			),
+			Event::Pop(range) => (moq_json_window_kind::MOQ_JSON_WINDOW_KIND_POP, range, None),
+			Event::Skip(range) => (moq_json_window_kind::MOQ_JSON_WINDOW_KIND_SKIP, range, None),
+			event => return Err(Error::Json(format!("unsupported window event: {event:?}"))),
+		};
+		Ok(Self {
+			kind,
+			range,
+			json,
+			timestamp_us,
+		})
+	}
+}
+
 #[derive(Default)]
 pub struct Consume {
 	/// Active broadcast consumers.
@@ -194,7 +217,7 @@ pub struct Consume {
 	track_task: NonZeroSlab<Task>,
 
 	/// Buffered frames ready for consumption.
-	frame: NonZeroSlab<moq_mux::container::Frame>,
+	reads: NonZeroSlab<Read<moq_mux::container::Frame>>,
 
 	/// Raw track consumer tasks (no media/container framing).
 	raw_task: NonZeroSlab<RawTaskEntry>,
@@ -208,11 +231,14 @@ pub struct Consume {
 	/// Buffered datagrams ready for consumption.
 	datagram: NonZeroSlab<moq_net::Datagram>,
 
-	/// JSON consumer tasks (snapshot and stream share this slab).
+	/// JSON consumer tasks (snapshot, stream, and window share this slab).
 	json_task: NonZeroSlab<Task>,
 
 	/// Buffered JSON values ready for consumption.
 	json_value: NonZeroSlab<JsonValue>,
+
+	/// Buffered JSON window events ready for consumption.
+	json_window_event: NonZeroSlab<JsonWindowEvent>,
 }
 
 impl Consume {
@@ -465,21 +491,18 @@ impl Consume {
 		Ok(())
 	}
 
-	/// Subscribe to the video or audio rendition at catalog `index`, delivering its frames.
+	/// Subscribe to the video or audio rendition at catalog `index`, delivering its frames, gaps, and encoder ends.
 	pub fn media<C: Media>(
 		&mut self,
 		catalog: Id,
 		index: usize,
 		max_delay: std::time::Duration,
-		on_frame: OnStatus,
+		on_read: OnStatus,
 	) -> Result<Id, Error>
 	where
 		for<'a> moq_mux::catalog::hang::Container: TryFrom<&'a C, Error = moq_mux::Error>,
 	{
 		let (consume, name, config) = self.select::<C>(catalog, index)?;
-		if !config.enabled() {
-			return Err(moq_net::Error::NotFound.into());
-		}
 		let name = hang::catalog::Reference::track(config, name).to_string();
 		// Consume with the container the catalog actually advertises (Legacy / Cmaf / Loc)
 		// instead of assuming Legacy, otherwise CMAF/fMP4 sources (e.g. ffmpeg moqenc,
@@ -494,7 +517,7 @@ impl Consume {
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		self.track_task.spawn(
-			on_frame,
+			on_read,
 			|state| &mut state.consume.track_task,
 			|close| async move {
 				driver
@@ -509,7 +532,7 @@ impl Consume {
 							)
 							.await?;
 						let track = moq_mux::container::Consumer::new(track, container);
-						Self::run_track(on_frame, track, close).await
+						Self::run_track(on_read, track, close).await
 					})
 					.await
 			},
@@ -523,19 +546,19 @@ impl Consume {
 	) -> Result<(), Error> {
 		loop {
 			// `biased` so a pending close always wins over a ready frame.
-			let frame = tokio::select! {
+			let read = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
 				read = track.read() => match read? {
-					Some(moq_mux::container::Read::Frame { frame, .. }) => frame,
-					// The C ABI carries frames only.
-					Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. }) => continue,
+					Some(moq_mux::container::Read::Frame { frame, .. }) => Read::Frame(frame),
+					Some(moq_mux::container::Read::Gap { timestamp, duration }) => Read::gap(timestamp, duration)?,
+					Some(moq_mux::container::Read::End { end, .. }) => Read::end(end)?,
 					None => return Ok(()),
 				},
 			};
 
-			// Hold the lock only to buffer the frame; release it before the callback.
-			let frame_id = State::lock().consume.frame.insert(frame)?;
+			// Hold the lock only to buffer the read; release it before the callback.
+			let frame_id = State::lock().consume.reads.insert(read)?;
 			callback.call(Ok(frame_id));
 		}
 	}
@@ -544,28 +567,38 @@ impl Consume {
 		self.track_task.close(track, Error::TrackNotFound)
 	}
 
-	/// Read the payload of a frame as a single contiguous slice.
-	///
-	/// Frames are not chunked. The payload pointer is valid until the frame is closed
-	/// via [`Self::frame_close`].
-	pub fn frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
-		let f = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
-
-		let timestamp_us = f.timestamp.as_micros().try_into().map_err(|_| moq_net::TimeOverflow)?;
-
-		*dst = moq_frame {
-			payload: f.payload.as_ptr(),
-			payload_size: f.payload.len(),
-			timestamp_us,
-			timestamp_present: true,
-			keyframe: f.keyframe,
+	/// Read the tagged media item; payload pointers borrow it until [`Self::read_free`].
+	pub fn read(&self, id: Id, dst: &mut crate::moq_media_read) -> Result<(), Error> {
+		let read = self.reads.get(id).ok_or(Error::FrameNotFound)?;
+		let (kind, gap, end_us) = read.info();
+		let frame = match read {
+			Read::Frame(f) => moq_frame {
+				payload: f.payload.as_ptr(),
+				payload_size: f.payload.len(),
+				timestamp_us: f.timestamp.as_micros().try_into().map_err(|_| moq_net::TimeOverflow)?,
+				timestamp_present: true,
+				keyframe: f.keyframe,
+			},
+			_ => moq_frame {
+				payload: std::ptr::null(),
+				payload_size: 0,
+				timestamp_us: 0,
+				timestamp_present: false,
+				keyframe: false,
+			},
+		};
+		*dst = crate::moq_media_read {
+			kind,
+			frame,
+			gap,
+			end_us,
 		};
 
 		Ok(())
 	}
 
-	pub fn frame_close(&mut self, frame: Id) -> Result<(), Error> {
-		self.frame.remove(frame).ok_or(Error::FrameNotFound)?;
+	pub fn read_free(&mut self, frame: Id) -> Result<(), Error> {
+		self.reads.remove(frame).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
 
@@ -696,7 +729,7 @@ impl Consume {
 					RawStep::Stop => return Ok(()),
 				};
 
-				// Hold the lock only to buffer the frame; release it before the callback.
+				// Hold the lock only to buffer the read; release it before the callback.
 				let frame_id = State::lock().consume.raw_frame.insert(frame)?;
 				callback.call(Ok(frame_id));
 			}
@@ -826,18 +859,28 @@ impl Consume {
 		Ok(())
 	}
 
+	/// Subscribe a JSON consumer to `name`, or return `None` once `close` fires first.
+	///
+	/// A publisher can leave SUBSCRIBE_OK pending forever, so a cancel must not wait on it.
+	async fn json_subscribe(
+		broadcast: &moq_net::broadcast::Consumer,
+		name: &str,
+		close: &mut oneshot::Receiver<()>,
+	) -> Result<Option<moq_net::track::Subscriber>, Error> {
+		let subscribe = broadcast.track(name)?.subscribe(None);
+		tokio::select! {
+			biased;
+			_ = close => Ok(None),
+			track = subscribe => Ok(Some(track?)),
+		}
+	}
+
 	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
 	///
 	/// `on_value` is called with a value ID for each state, in order; a group superseded by a
 	/// newer one before it is read is skipped. Values must be released with
-	/// [`Self::json_value_close`]. Pass the same compression the producer used.
-	pub fn json_snapshot(
-		&mut self,
-		broadcast: Id,
-		name: &str,
-		config: moq_json::snapshot::consumer::Config,
-		on_value: OnStatus,
-	) -> Result<Id, Error> {
+	/// [`Self::json_value_close`].
+	pub fn json_snapshot(&mut self, broadcast: Id, name: &str, on_value: OnStatus) -> Result<Id, Error> {
 		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 		let driver = context
 			.origin
@@ -851,11 +894,14 @@ impl Consume {
 		self.json_task.spawn(
 			on_value,
 			|state| &mut state.consume.json_task,
-			|close| async move {
+			|mut close| async move {
 				driver
 					.watch(async move {
-						let track = broadcast.track(&name)?.subscribe(None).await?;
-						let consumer = moq_json::snapshot::Consumer::<serde_json::Value>::new(track, config);
+						let Some(track) = Self::json_subscribe(&broadcast, &name, &mut close).await? else {
+							return Ok(());
+						};
+						let consumer =
+							moq_json::snapshot::Consumer::<serde_json::Value>::new(track, Default::default());
 						Self::run_json_snapshot(on_value, consumer, close).await
 					})
 					.await
@@ -891,13 +937,7 @@ impl Consume {
 	///
 	/// `on_value` is called with a value ID for each record, in order. Values must be released
 	/// with [`Self::json_value_close`].
-	pub fn json_stream(
-		&mut self,
-		broadcast: Id,
-		name: &str,
-		config: moq_json::stream::Config,
-		on_value: OnStatus,
-	) -> Result<Id, Error> {
+	pub fn json_stream(&mut self, broadcast: Id, name: &str, on_value: OnStatus) -> Result<Id, Error> {
 		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 		let driver = context
 			.origin
@@ -911,11 +951,13 @@ impl Consume {
 		self.json_task.spawn(
 			on_value,
 			|state| &mut state.consume.json_task,
-			|close| async move {
+			|mut close| async move {
 				driver
 					.watch(async move {
-						let track = broadcast.track(&name)?.subscribe(None).await?;
-						let consumer = moq_json::stream::Consumer::<serde_json::Value>::new(track, config);
+						let Some(track) = Self::json_subscribe(&broadcast, &name, &mut close).await? else {
+							return Ok(());
+						};
+						let consumer = moq_json::stream::Consumer::<serde_json::Value>::new(track, Default::default());
 						Self::run_json_stream(on_value, consumer, close).await
 					})
 					.await
@@ -945,7 +987,61 @@ impl Consume {
 		}
 	}
 
-	/// Signal a JSON consumer task (snapshot or stream) to stop. The task still delivers one
+	/// Subscribe to a JSON window track by name.
+	///
+	/// `on_event` is called with an event ID for each push, pop, and skip, in order. Events must be
+	/// released with [`Self::json_window_event_close`].
+	pub fn json_window(&mut self, broadcast: Id, name: &str, on_event: OnStatus) -> Result<Id, Error> {
+		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let driver = context
+			.origin
+			.as_ref()
+			.map(|origin| origin.driver.clone())
+			.unwrap_or_default();
+		let broadcast = context.broadcast.clone();
+		let name = name.to_string();
+
+		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
+		self.json_task.spawn(
+			on_event,
+			|state| &mut state.consume.json_task,
+			|mut close| async move {
+				driver
+					.watch(async move {
+						let Some(track) = Self::json_subscribe(&broadcast, &name, &mut close).await? else {
+							return Ok(());
+						};
+						let consumer = moq_json::window::Consumer::<serde_json::Value>::new(track, Default::default());
+						Self::run_json_window(on_event, consumer, close).await
+					})
+					.await
+			},
+		)
+	}
+
+	async fn run_json_window(
+		callback: OnStatus,
+		mut consumer: moq_json::window::Consumer<serde_json::Value>,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		loop {
+			// `biased` so a pending close always wins over a ready event.
+			let event = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				next = consumer.next() => match next? {
+					Some(event) => event,
+					None => return Ok(()),
+				},
+			};
+
+			let event = JsonWindowEvent::new(event)?;
+			let event_id = State::lock().consume.json_window_event.insert(event)?;
+			callback.call(Ok(event_id));
+		}
+	}
+
+	/// Signal a JSON consumer task (snapshot, stream, or window) to stop. The task still delivers one
 	/// final terminal callback and then removes itself, so `user_data` stays valid until then.
 	pub fn json_close(&mut self, task: Id) -> Result<(), Error> {
 		self.json_task.close(task, Error::TrackNotFound)
@@ -969,6 +1065,34 @@ impl Consume {
 	/// Release a JSON value and clean up its resources.
 	pub fn json_value_close(&mut self, value: Id) -> Result<(), Error> {
 		self.json_value.remove(value).ok_or(Error::FrameNotFound)?;
+		Ok(())
+	}
+
+	/// Fill `dst` with a JSON window event delivered via a consumer callback. The pointer is valid
+	/// until the event is released with [`Self::json_window_event_close`].
+	pub fn json_window_event(&self, event: Id, dst: &mut moq_json_window_event) -> Result<(), Error> {
+		let event = self.json_window_event.get(event).ok_or(Error::FrameNotFound)?;
+		let (json, json_len) = match &event.json {
+			Some(json) => (json.as_ptr() as *const c_char, json.len()),
+			None => (std::ptr::null(), 0),
+		};
+
+		*dst = moq_json_window_event {
+			kind: event.kind,
+			start: event.range.start,
+			end: event.range.end,
+			json,
+			json_len,
+			timestamp_us: event.timestamp_us.unwrap_or_default(),
+			timestamp_present: event.timestamp_us.is_some(),
+		};
+
+		Ok(())
+	}
+
+	/// Release a JSON window event and clean up its resources.
+	pub fn json_window_event_close(&mut self, event: Id) -> Result<(), Error> {
+		self.json_window_event.remove(event).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
 
@@ -1024,5 +1148,94 @@ mod supervision_tests {
 		assert!(matches!(driver.finished().await, Err(Error::Panic)));
 		let result = rendition.driver.check();
 		assert!(matches!(result, Err(Error::Panic)), "{result:?}");
+	}
+}
+
+#[cfg(test)]
+mod read_tests {
+	use super::*;
+	use moq_mux::container::Container as _;
+
+	extern "C" fn received(data: *mut std::ffi::c_void, code: i32) {
+		// The vector is held until run_track completes on this thread.
+		unsafe { &mut *data.cast::<Vec<i32>>() }.push(code);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn encoded_media_c_reads_preserve_breaks_and_ownership() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("encoded", hang::container::track_info(0))
+			.unwrap();
+		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+		let consumer = moq_mux::container::Consumer::new(
+			track.subscribe(moq_net::track::Subscription::default().with_max_delay(std::time::Duration::ZERO)),
+			format(),
+		);
+		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();
+		let write = |sequence, us, payload: bytes::Bytes| {
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			format()
+				.write(
+					&mut group,
+					&[moq_mux::container::Frame {
+						timestamp: timestamp(us),
+						payload,
+						keyframe: true,
+						duration: None,
+					}],
+				)
+				.unwrap();
+			group.finish().unwrap();
+		};
+		let mut ids = Vec::<i32>::new();
+		let callback = unsafe { OnStatus::new((&mut ids as *mut Vec<i32>).cast(), Some(received)) }.unwrap();
+		let (_close, closed) = oneshot::channel();
+		let mut run = std::pin::pin!(Consume::run_track(callback, consumer, closed));
+		write(0, 10_000, bytes::Bytes::from_static(b"encoded"));
+		std::future::poll_fn(|cx| {
+			assert!(run.as_mut().poll(cx).is_pending());
+			Poll::Ready(())
+		})
+		.await;
+		assert_eq!(ids.len(), 1);
+		write(2, 20_000, bytes::Bytes::new());
+		track.finish().unwrap();
+		run.await.unwrap();
+		assert_eq!(ids.len(), 3);
+		let mut read = std::mem::MaybeUninit::<crate::moq_media_read>::uninit();
+		for (index, id) in ids.into_iter().enumerate() {
+			assert!(id > 0);
+			assert_eq!(unsafe { crate::moq_consume_read(id as u32, read.as_mut_ptr()) }, 0);
+			let read = unsafe { read.assume_init_read() };
+			match index {
+				0 => {
+					assert_eq!(read.kind, crate::moq_decode_read_kind::MOQ_DECODE_READ_FRAME);
+					assert_eq!(
+						unsafe { std::slice::from_raw_parts(read.frame.payload, read.frame.payload_size) },
+						b"encoded"
+					);
+					assert_eq!(read.frame.timestamp_us, 10_000);
+					assert!(read.frame.timestamp_present && read.frame.keyframe);
+					assert_eq!(read.gap.duration_us, 0);
+					assert_eq!(read.end_us, 0);
+				}
+				1 => {
+					assert_eq!(read.kind, crate::moq_decode_read_kind::MOQ_DECODE_READ_GAP);
+					assert_eq!((read.gap.timestamp_us, read.gap.duration_us), (10_000, 10_000));
+					assert!(read.frame.payload.is_null());
+					assert_eq!(read.end_us, 0);
+				}
+				2 => {
+					assert_eq!(read.kind, crate::moq_decode_read_kind::MOQ_DECODE_READ_END);
+					assert_eq!(read.end_us, 20_000);
+					assert!(read.frame.payload.is_null());
+					assert_eq!(read.gap.duration_us, 0);
+				}
+				_ => unreachable!(),
+			}
+			assert_eq!(crate::moq_consume_read_free(id as u32), 0);
+			assert!(crate::moq_consume_read_free(id as u32) < 0);
+		}
 	}
 }

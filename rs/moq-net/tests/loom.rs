@@ -206,6 +206,52 @@ fn subscriber_wakes_parked_demand() {
 	});
 }
 
+/// A publisher waiting on `broadcast::Demand` while one reader hands over to the next:
+/// the last reader leaves and a new one arrives straight from the track producer, which
+/// never touches the broadcast's own state. Whatever the publisher's poll saw, it must be
+/// woken for the newcomer.
+#[test]
+fn broadcast_demand_sees_a_reader_return() {
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let video = broadcast.create_track("video", None).expect("create track");
+		let mut demand = broadcast.demand();
+		let first = block_on(consumer.track("video").expect("track").subscribe(None)).expect("subscribe");
+
+		let reader = thread::spawn(move || {
+			drop(first);
+			let next = video.subscribe(None);
+			// Returned, so neither the reader nor the track goes before the join.
+			(video, next)
+		});
+
+		// The first call reports whatever the swap left; a reader gone must not stay unseen.
+		while !block_on(demand.wanted_changed()).expect("the returning reader was missed") {}
+		drop(reader.join().unwrap());
+	});
+}
+
+/// A publisher waiting on `broadcast::Demand` while a reader comes and goes straight
+/// through the track producer: its leaving must wake the publisher.
+#[test]
+fn broadcast_demand_sees_a_reader_leave() {
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let video = broadcast.create_track("video", None).expect("create track");
+		let mut demand = broadcast.demand();
+		let reader = video.subscribe(None);
+
+		let leaver = thread::spawn(move || {
+			drop(reader);
+			video
+		});
+
+		while block_on(demand.wanted_changed()).expect("the reader leaving was missed") {}
+		drop(leaver.join().unwrap());
+	});
+}
+
 /// A reader taking and dropping a track around the front's demand poll. The front must
 /// see it go: one that missed the edge keeps its source subscribed for nobody, which
 /// shows up here as a deadlock waiting for the source to go unread.
@@ -224,18 +270,18 @@ fn a_front_sees_a_reader_come_and_go() {
 		let noop = kio::Waiter::noop();
 		let now = moq_net::time::Instant::now();
 
-		let pending = consumer.request_broadcast("room", None);
+		let pending = consumer.request("room", None);
 		driver.poll(now, &noop).unwrap();
 		let room = block_on(pending).expect("resolves");
 
 		// A first reader gets the source asked, then leaves.
-		let first = room.track("video").expect("track").query();
+		let first = room.track("video").expect("track").info();
 		driver.poll(now, &noop).unwrap();
 		assert!(demand.wanted().is_some(), "the front never asked the source");
 		drop(first);
 
 		let racing = room.clone();
-		let reader = thread::spawn(move || drop(racing.track("video").expect("track").query()));
+		let reader = thread::spawn(move || drop(racing.track("video").expect("track").info()));
 		driver.poll(now, &noop).unwrap();
 		reader.join().unwrap();
 
@@ -265,22 +311,22 @@ fn a_front_sees_a_reader_return() {
 		let noop = kio::Waiter::noop();
 		let now = moq_net::time::Instant::now();
 
-		let pending = consumer.request_broadcast("room", None);
+		let pending = consumer.request("room", None);
 		driver.poll(now, &noop).unwrap();
 		let room = block_on(pending).expect("resolves");
 
 		// A first reader comes and goes, which parks the track.
-		let first = room.track("video").expect("track").query();
+		let first = room.track("video").expect("track").info();
 		driver.poll(now, &noop).unwrap();
 		drop(first);
 		driver.poll(now, &noop).unwrap();
 		assert!(demand.wanted().is_none(), "the front kept the source for nobody");
 
-		let leaving = room.track("video").expect("track").query();
+		let leaving = room.track("video").expect("track").info();
 		let racing = room.clone();
 		let reader = thread::spawn(move || {
 			drop(leaving);
-			racing.track("video").expect("track").query()
+			racing.track("video").expect("track").info()
 		});
 		driver.poll(now, &noop).unwrap();
 		let returned = reader.join().unwrap();
@@ -343,7 +389,7 @@ fn concurrent_tracks_drain_a_shared_pool() {
 /// The teardown every wire subscriber runs when its copy of a track goes idle,
 /// racing a viewer coming back for the same name.
 ///
-/// `poll_unused` is a level snapshot, so the teardown it wakes can only be trusted
+/// `poll_wanted_changed` is a level snapshot, so the teardown it wakes can only be trusted
 /// at the instant it commits. The invariant is that the two can't both win: either
 /// the subscribe joins the live track and the teardown declines, or the teardown
 /// commits and the subscribe never sees the dead track at all. A subscription joined
@@ -361,7 +407,7 @@ fn an_idle_teardown_never_cancels_a_returning_viewer() {
 		let viewer = thread::spawn(move || consumer.track("video").map(|track| track.subscribe(None).into_inner()));
 
 		// Held to the end: a declined teardown hands back the producer still serving.
-		let teardown = track.abort_unused(Error::Cancel);
+		let teardown = track.abort_unwanted(Error::Cancel);
 		let subscribed = viewer.join().unwrap().and_then(|subscribing| {
 			match subscribing.poll_ok(&kio::Waiter::noop()) {
 				// A live track parks (nothing has been published); only an error matters.
@@ -418,7 +464,7 @@ fn a_fetch_never_joins_a_withdrawn_attempt() {
 	model(|| {
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", None).expect("create track");
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		let consumer = track.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -426,7 +472,7 @@ fn a_fetch_never_joins_a_withdrawn_attempt() {
 
 		let leaver = thread::spawn(move || {
 			drop(first);
-			request.is_used().then_some(request)
+			request.wanted().is_some().then_some(request)
 		});
 		let mut retry = consumer.fetch_group(5, None);
 		let request = match leaver.join().unwrap() {
@@ -457,11 +503,11 @@ fn a_request_never_joins_a_retiring_front() {
 		let waiter = kio::Waiter::noop();
 		let now = moq_net::time::Instant::now();
 
-		let pending = consumer.request_broadcast("room", None);
+		let pending = consumer.request("room", None);
 		driver.poll(now, &waiter).unwrap();
 		let first = block_on(pending).expect("resolves");
 
-		let requester = thread::spawn(move || consumer.request_broadcast("room", None));
+		let requester = thread::spawn(move || consumer.request("room", None));
 		drop(first);
 		driver.poll(now, &waiter).unwrap();
 		let pending = requester.join().unwrap();
@@ -479,8 +525,8 @@ fn a_request_never_joins_a_retiring_front() {
 fn a_refused_answer_is_never_announced() {
 	model(|| {
 		let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
-		let claim = producer.dynamic("room").unwrap();
-		let pending = producer.consume().request_broadcast("room/alice", None);
+		let claim = producer.requests("room").unwrap();
+		let pending = producer.consume().request("room/alice", None);
 		driver
 			.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())
 			.unwrap();
@@ -490,11 +536,11 @@ fn a_refused_answer_is_never_announced() {
 			.expect("prepare");
 		// Keep a refused answer alive so dropping it cannot hide a stray announcement.
 		let _answer = prepared.broadcast().clone();
+		// Only the claim and its answer can cover the path, so any start is a covering route.
 		let announced = |consumer: &origin::Consumer| {
-			let mut route = std::pin::pin!(consumer.routed("room/alice"));
 			matches!(
-				kio::Waiter::noop().poll_future(route.as_mut()),
-				std::task::Poll::Ready(Some(_))
+				consumer.announced().poll_next(&kio::Waiter::noop()),
+				std::task::Poll::Ready(Some(moq_net::announce::Event::Start(_)))
 			)
 		};
 
@@ -529,7 +575,7 @@ fn refused_track_race(read: fn(&mut moq_net::track::Subscriber) -> bool) {
 		let noop = kio::Waiter::noop();
 		let now = moq_net::time::Instant::now();
 
-		let pending = consumer.request_broadcast("room", None);
+		let pending = consumer.request("room", None);
 		driver.poll(now, &noop).unwrap();
 		let room = block_on(pending).expect("resolves");
 

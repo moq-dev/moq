@@ -89,11 +89,11 @@ A peer is never sent compressed bytes it was not told about.
 
 
 # MoQ Transport Signaling {#signaling}
-This extension applies to MoQ Transport draft-17 and later.
+This extension applies to MoQ Transport draft-18 and later.
 A peer offers it with the FLATE Setup Option, key `0x40B6A`, an integer with value 1.
 Other values are invalid.
 Both endpoints MUST offer FLATE before either sends a compressed track.
-Draft-14 through draft-16, and a peer that did not offer FLATE receive inflated payloads without these declarations, subject to the sealed-property refusal in {{declare}}.
+Earlier drafts, and a peer that did not offer FLATE, receive inflated payloads without these declarations, subject to the sealed-property refusal in {{declare}}.
 
 ## Compression Track Property {#property}
 COMPRESSION, property type `0x40B6C`, has Track scope and integer value 1 for the format in {{stream}}.
@@ -149,7 +149,7 @@ It also requests these entries in the MOQ Properties registry, outside the appli
 
 ## Since draft-lcurley-moq-flate-00 (in progress)
 
-- Negotiated FLATE signaling adds COMPRESSION and INFLATED_SIZE properties to MoQ Transport draft-17 and later; sealed declarations are forwarded unchanged or refused when incompatible.
+- Negotiated FLATE signaling adds COMPRESSION and INFLATED_SIZE properties to MoQ Transport draft-18 and later; sealed declarations are forwarded unchanged or refused when incompatible.
 - Compression is declared by the transport instead of the application: {{moql}} carries a Compression codec in TRACK_INFO and each object's Inflated Size on FRAME and datagrams.
 - A relay inflates for a peer whose transport does not declare compression.
 - A datagram is compressed alone, as a stream of its own.

@@ -35,8 +35,7 @@ Decided 2026-10-25 (maintainer), replacing the 2026-10-23 shape:
   break, no longer holds: moq-net already re-exports kio, and moq-quic takes
   `&kio::Waiter` too. The caller owns the waiter, so a poll that is
   abandoned leaves nothing behind, and handles stay `&self`. moq-net's
-  `transport::poll` traits take the same shape
-  ([net-poll](/quest/m1/quic-api/net-poll.md)), so their native impls
+  `transport::poll` traits take the same shape, so their native impls
   forward without a `Park`.
 
 ```rust
@@ -52,15 +51,15 @@ impl send::Stream {
 
 Keep the existing guarantees, such as draining accepted streams and
 datagrams from a closed connection before its error (moq-quic's waits carry
-that now). `handshake_confirmed` and `Endpoint::wait_idle` move off `Notify`
-too, but get no poll form until a caller needs one. Report the public API:
+that now). The `Connecting` handshake, `Endpoint::wait_idle`, and
+`Endpoint::wait_all_draining` move off `Notify` too, but get no poll form
+until a caller needs one. Report the public API:
 new poll methods on `Connection`, `send::Stream` and `Endpoint`, with the
 async forms unchanged.
 
 ## Required
 
 - [Waits](/quest/m1/quic-api/waits.md) - moq-quic's `poll_*` forms these forward to
-- [Streams](/quest/m1/quic-api/streams.md) - the `send::`/`recv::` names and `send::Finished` these signatures use
 
 ## Related
 

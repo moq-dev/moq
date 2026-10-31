@@ -39,7 +39,7 @@ type ClientConfig struct {
 	Versions []string
 	// Tokens are the credentials every dial presents. The first is the
 	// connection credential, unless the URL carries its own ?jwt=; each other
-	// one widens the session's grant. Replace them with Client.Tokens.
+	// one widens the session's grant. Replace them with Session.Tokens.
 	Tokens []string
 	// Timeout bounds one connect, dial and handshake together. Zero waits forever.
 	Timeout *time.Duration
@@ -164,8 +164,8 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 		keylog = &c.QUIC.Keylog
 	}
 	cfg := ffi.MoqClientConfig{
-		Bind:              str(c.Bind),
-		Versions:          c.Versions,
+		Bind:            str(c.Bind),
+		Versions:        c.Versions,
 		Tokens:          c.Tokens,
 		Timeout:         c.Timeout,
 		Race:            c.Race,
@@ -303,7 +303,7 @@ func Dial(ctx context.Context, url string, config ClientConfig) (*Client, error)
 // CreateBroadcast creates an unannounced broadcast at path, invisible to everyone until announced. Announce it after populating tracks.
 //
 // See [OriginProducer.CreateBroadcast].
-func (c *Client) CreateBroadcast(path string) (*BroadcastProducer, error) {
+func (c *Client) CreateBroadcast(path string) (*Publication, error) {
 	return c.publisher.CreateBroadcast(path)
 }
 
@@ -312,37 +312,19 @@ func (c *Client) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	return c.consumer.Announced(options)
 }
 
-// AnnouncedBroadcast follows path, resolving each publisher instance that serves
-// it.
-func (c *Client) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
-	return c.consumer.AnnouncedBroadcast(path)
+// Follow follows path, resolving each publisher instance that serves it. A
+// non-nil epoch follows only that instance.
+func (c *Client) Follow(path string, epoch *string) (*Following, error) {
+	return c.consumer.Follow(path, epoch)
 }
 
-// RequestBroadcast resolves a broadcast at path as soon as it can be served: an
-// existing exact-path broadcast, a covering announced route, or a dynamic
-// fallback on the origin, or an error. Unlike AnnouncedBroadcast, it does not wait
-// for a future announcement.
-func (c *Client) RequestBroadcast(ctx context.Context, path string) (*BroadcastConsumer, error) {
-	return c.consumer.RequestBroadcast(ctx, path)
-}
-
-// Tokens returns the credentials the client presents, to replace while it runs.
-func (c *Client) Tokens() *Tokens {
-	return &Tokens{inner: c.inner.Tokens()}
-}
-
-// Tokens are the credentials a Client presents, replaceable while it runs.
-type Tokens struct {
-	inner *ffi.MoqTokens
-}
-
-// Set replaces the credentials every dial presents, such as before the current
-// ones expire. The next dial presents them, and a live session with in-band
-// AUTH presents them at once, withdrawing each replaced token once its
-// replacements are answered, even when one is refused. After an authorization
-// refusal the client redials only if they changed. An empty token is refused.
-func (t *Tokens) Set(tokens ...string) error {
-	return t.inner.Set(append([]string(nil), tokens...))
+// Request resolves one publisher instance of the broadcast at path as soon as
+// it can be served: an existing exact-path broadcast, a covering announced
+// route, or a dynamic fallback on the origin, or an error. Unlike Follow, it
+// does not wait for a future announcement. A non-nil epoch refuses any other
+// instance.
+func (c *Client) Request(ctx context.Context, path string, epoch *string) (*BroadcastConsumer, error) {
+	return c.consumer.Request(ctx, path, epoch)
 }
 
 // Session returns the underlying session. Hold the client (or session) to keep

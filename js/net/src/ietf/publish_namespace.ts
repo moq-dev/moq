@@ -7,7 +7,7 @@ import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
 import { MalformedAuthToken, tokenIntoRequest } from "./token.ts";
-import { type IetfVersion, Version } from "./version.ts";
+import type { IetfVersion } from "./version.ts";
 
 /**
  * Which advertisement extensions a session negotiated: what its PUBLISH_NAMESPACE and
@@ -73,7 +73,6 @@ export async function decodeAdvert(
 	return { cluster: negotiated.cluster ? Cluster.fromParams(params) : undefined, epoch };
 }
 
-// In draft-14, ANNOUNCE is renamed to PUBLISH_NAMESPACE
 export class PublishNamespace {
 	static id = 0x06;
 
@@ -100,12 +99,9 @@ export class PublishNamespace {
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
-		if (version === Version.DRAFT_17) {
-			await w.u62(0n); // required_request_id_delta: only 0 supported until stream-per-request
-		}
 		await Namespace.encode(w, this.trackNamespace);
 		const params = advertIntoParams(this.params);
-		if (this.token) tokenIntoRequest(params, this.token, version);
+		if (this.token) tokenIntoRequest(params, this.token);
 		await params.encode(w, version);
 	}
 
@@ -129,9 +125,6 @@ export class PublishNamespace {
 
 	static async #decode(r: Reader, version: IetfVersion, negotiated: Negotiated): Promise<PublishNamespace> {
 		const requestId = await r.u62();
-		if (version === Version.DRAFT_17) {
-			await r.u62(); // required_request_id_delta
-		}
 		const trackNamespace = await Namespace.decode(r);
 		const params = await decodeAdvert(r, version, "publish-namespace", negotiated);
 		return new PublishNamespace({ requestId, trackNamespace, params });
@@ -142,52 +135,29 @@ export class PublishNamespace {
  * REQUEST_UPDATE (0x02) on a PUBLISH_NAMESPACE stream: the cluster parameters that
  * changed (draft-lcurley-moq-cluster, Updating an Advertisement).
  *
- * Draft-17+ only: the extension negotiates on nothing earlier. The publisher sends one when
- * a forwarded route's price or hop chain moves behind the same original publisher.
+ * The publisher sends one when a forwarded route's price or hop chain moves behind the same
+ * original publisher.
  */
 export class PublishNamespaceUpdate {
 	static id = 0x02;
 
 	/** The update's own Request ID; every REQUEST_UPDATE consumes one. */
 	requestId: bigint;
-	/** Draft-16 only: the PUBLISH_NAMESPACE this updates, which later drafts name by stream. */
-	namespaceRequestId?: bigint;
 	update: Cluster.Update;
 	/** A new AUTHORIZATION TOKEN, renewing the request's. Decoding leaves it unset. */
 	token?: Uint8Array;
 
-	constructor({
-		requestId,
-		namespaceRequestId,
-		update,
-		token,
-	}: {
-		requestId: bigint;
-		namespaceRequestId?: bigint;
-		update: Cluster.Update;
-		token?: Uint8Array;
-	}) {
+	constructor({ requestId, update, token }: { requestId: bigint; update: Cluster.Update; token?: Uint8Array }) {
 		this.requestId = requestId;
-		this.namespaceRequestId = namespaceRequestId;
 		this.update = update;
 		this.token = token;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		PublishNamespaceUpdate.#supported(version);
 		await w.u62(this.requestId);
-		if (version === Version.DRAFT_16) {
-			if (this.namespaceRequestId === undefined) {
-				throw new Error("a draft-16 REQUEST_UPDATE names its PUBLISH_NAMESPACE");
-			}
-			await w.u62(this.namespaceRequestId);
-		}
-		if (version === Version.DRAFT_17) {
-			await w.u62(0n); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
-		}
 		const params = new Parameters();
 		Cluster.updateIntoParams(this.update, params);
-		if (this.token) tokenIntoRequest(params, this.token, version);
+		if (this.token) tokenIntoRequest(params, this.token);
 		await params.encode(w, version);
 	}
 
@@ -196,8 +166,7 @@ export class PublishNamespaceUpdate {
 	}
 
 	/**
-	 * Decode the message. A truncated or trailing body, a draft with no such message, or a
-	 * malformed parameter block surfaces as a {@link ProtocolViolation}, which the session
+	 * Decode the message. A truncated or trailing body, or a malformed parameter block surfaces as a {@link ProtocolViolation}, which the session
 	 * dispatch closes over. A stream reset or session ending remains transport-local.
 	 */
 	static async decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceUpdate> {
@@ -219,204 +188,11 @@ export class PublishNamespaceUpdate {
 		}
 	}
 
-	static #supported(version: IetfVersion) {
-		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
-			throw new Error("REQUEST_UPDATE on PUBLISH_NAMESPACE requires draft-16+");
-		}
-	}
-
 	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceUpdate> {
-		PublishNamespaceUpdate.#supported(version);
 		const requestId = await r.u62();
-		const namespaceRequestId = version === Version.DRAFT_16 ? await r.u62() : undefined;
-		if (version === Version.DRAFT_17) {
-			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
-		}
 		const params = await Parameters.decode(r, version, "publish-namespace");
 		// An epoch is fixed for the life of an advertisement, so no update carries one.
 		if (params.epoch !== undefined) throw new ProtocolViolation("EPOCH on a PUBLISH_NAMESPACE update");
-		return new PublishNamespaceUpdate({ requestId, namespaceRequestId, update: Cluster.updateFromParams(params) });
-	}
-}
-
-export class PublishNamespaceOk {
-	static id = 0x07;
-
-	requestId: bigint;
-
-	constructor({ requestId }: { requestId: bigint }) {
-		this.requestId = requestId;
-	}
-
-	async #encode(w: Writer): Promise<void> {
-		await w.u62(this.requestId);
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<PublishNamespaceOk> {
-		return Message.decode(r, PublishNamespaceOk.#decode);
-	}
-
-	static async #decode(r: Reader): Promise<PublishNamespaceOk> {
-		const requestId = await r.u62();
-		return new PublishNamespaceOk({ requestId });
-	}
-}
-
-export class PublishNamespaceError {
-	static id = 0x08;
-
-	requestId: bigint;
-	errorCode: number;
-	reasonPhrase: string;
-
-	constructor({
-		requestId,
-		errorCode,
-		reasonPhrase,
-	}: { requestId: bigint; errorCode: number; reasonPhrase: string }) {
-		this.requestId = requestId;
-		this.errorCode = errorCode;
-		this.reasonPhrase = reasonPhrase;
-	}
-
-	async #encode(w: Writer): Promise<void> {
-		await w.u62(this.requestId);
-		await w.u62(BigInt(this.errorCode));
-		await w.string(this.reasonPhrase);
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<PublishNamespaceError> {
-		return Message.decode(r, PublishNamespaceError.#decode);
-	}
-
-	static async #decode(r: Reader): Promise<PublishNamespaceError> {
-		const requestId = await r.u62();
-		const errorCode = Number(await r.u62());
-		const reasonPhrase = await r.string();
-		return new PublishNamespaceError({ requestId, errorCode, reasonPhrase });
-	}
-}
-
-// Removed in d17
-export class PublishNamespaceCancel {
-	static id = 0x0c;
-
-	trackNamespace: Path.Valid;
-	requestId: bigint; // v16: uses request_id instead of track_namespace
-	errorCode: number;
-	reasonPhrase: string;
-
-	constructor({
-		trackNamespace = "" as Path.Valid,
-		errorCode = 0,
-		reasonPhrase = "",
-		requestId = 0n,
-	}: {
-		trackNamespace?: Path.Valid;
-		errorCode?: number;
-		reasonPhrase?: string;
-		requestId?: bigint;
-	} = {}) {
-		this.trackNamespace = trackNamespace;
-		this.requestId = requestId;
-		this.errorCode = errorCode;
-		this.reasonPhrase = reasonPhrase;
-	}
-
-	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
-			throw new Error("PublishNamespaceCancel removed in draft-17+");
-		}
-		if (version === Version.DRAFT_16) {
-			await w.u62(this.requestId);
-		} else {
-			await Namespace.encode(w, this.trackNamespace);
-		}
-		await w.u62(BigInt(this.errorCode));
-		await w.string(this.reasonPhrase);
-	}
-
-	async encode(w: Writer, version: IetfVersion): Promise<void> {
-		return Message.encode(w, (wr) => this.#encode(wr, version));
-	}
-
-	static async decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceCancel> {
-		return Message.decode(r, (rd) => PublishNamespaceCancel.#decode(rd, version));
-	}
-
-	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceCancel> {
-		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
-			throw new Error("PublishNamespaceCancel removed in draft-17+");
-		}
-		let trackNamespace = "" as Path.Valid;
-		let requestId = 0n;
-		if (version === Version.DRAFT_16) {
-			requestId = await r.u62();
-		} else {
-			trackNamespace = await Namespace.decode(r);
-		}
-		const errorCode = Number(await r.u62());
-		const reasonPhrase = await r.string();
-		return new PublishNamespaceCancel({ trackNamespace, errorCode, reasonPhrase, requestId });
-	}
-}
-
-// In draft-14, UNANNOUNCE is renamed to PUBLISH_NAMESPACE_DONE
-// In draft-16, uses request_id instead of track_namespace
-// Removed in d17
-export class PublishNamespaceDone {
-	static readonly id = 0x09;
-
-	trackNamespace: Path.Valid;
-	requestId: bigint; // v16: uses request_id instead of track_namespace
-
-	constructor({
-		trackNamespace = "" as Path.Valid,
-		requestId = 0n,
-	}: {
-		trackNamespace?: Path.Valid;
-		requestId?: bigint;
-	} = {}) {
-		this.trackNamespace = trackNamespace;
-		this.requestId = requestId;
-	}
-
-	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
-			throw new Error("PublishNamespaceDone removed in draft-17+");
-		}
-		if (version === Version.DRAFT_16) {
-			await w.u62(this.requestId);
-		} else {
-			await Namespace.encode(w, this.trackNamespace);
-		}
-	}
-
-	async encode(w: Writer, version: IetfVersion): Promise<void> {
-		return Message.encode(w, (wr) => this.#encode(wr, version));
-	}
-
-	static async decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceDone> {
-		return Message.decode(r, (rd) => PublishNamespaceDone.#decode(rd, version));
-	}
-
-	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceDone> {
-		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
-			throw new Error("PublishNamespaceDone removed in draft-17+");
-		}
-		if (version === Version.DRAFT_16) {
-			const requestId = await r.u62();
-			return new PublishNamespaceDone({ requestId });
-		}
-		const trackNamespace = await Namespace.decode(r);
-		return new PublishNamespaceDone({ trackNamespace });
+		return new PublishNamespaceUpdate({ requestId, update: Cluster.updateFromParams(params) });
 	}
 }

@@ -97,6 +97,23 @@ impl Config {
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		Ok(())
 	}
+
+	/// The game broadcast `name` publishes, and the prefix its viewers publish under.
+	///
+	/// Each piece is parsed on its own and joined, so an empty (root) prefix adds no segment.
+	fn paths(&self, name: &str) -> Result<(moq_net::Path, moq_net::Path)> {
+		let name = moq_net::Path::new(name).context("invalid --name")?;
+		let prefix = moq_net::Path::new(&self.prefix).context("invalid --prefix")?;
+		let game = match &self.prefix_game {
+			Some(game) => moq_net::Path::new(game).context("invalid --prefix-game")?,
+			None => prefix.join(&moq_net::Path::from_static("game"))?,
+		};
+		let viewer = match &self.prefix_viewer {
+			Some(viewer) => moq_net::Path::new(viewer).context("invalid --prefix-viewer")?,
+			None => prefix.join(&moq_net::Path::from_static("viewer"))?,
+		};
+		Ok((game.join(&name)?, viewer.join(&name)?))
+	}
 }
 
 /// Shared state for a game session, accessible from multiple threads/tasks.
@@ -237,13 +254,9 @@ async fn run(config: &Config) -> Result<()> {
 
 	// Publish origin: the game session broadcast.
 	let publish_origin = moq_tokio::origin::spawn();
-	let default_game_prefix = format!("{}/game", config.prefix);
-	let default_viewer_prefix = format!("{}/viewer", config.prefix);
-	let game_prefix = config.prefix_game.as_deref().unwrap_or(&default_game_prefix);
-	let viewer_prefix = config.prefix_viewer.as_deref().unwrap_or(&default_viewer_prefix);
+	let (broadcast_path, viewer_path) = config.paths(&name)?;
 
 	// Create the broadcast on the publish origin and announce its path.
-	let broadcast_path = format!("{game_prefix}/{name}");
 	let broadcast = publish_origin
 		.create_broadcast(&broadcast_path)
 		.context("failed to create broadcast")?;
@@ -255,7 +268,6 @@ async fn run(config: &Config) -> Result<()> {
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
 	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"
-	let viewer_path = format!("{viewer_prefix}/{name}");
 	let consume_origin = moq_tokio::origin::spawn();
 	let viewer_consumer = consume_origin
 		.scope(&viewer_path, &moq_net::Patterns::from(moq_net::Pattern::all()))
@@ -538,6 +550,34 @@ mod tests {
 		assert_eq!(connect.scheme(), "http");
 		assert_eq!(connect.host_str(), Some("localhost"));
 		assert_eq!(connect.port(), Some(4443));
+	}
+
+	/// An empty prefix is the root, so it adds no segment to the paths built under it.
+	#[test]
+	fn empty_prefixes_are_the_root() {
+		let parse = |args: &[&str]| {
+			let mut argv = vec!["--rom", "rom/big2small.gb"];
+			argv.extend_from_slice(args);
+			Config::parse_from(&argv.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>()).unwrap()
+		};
+		let paths = |config: Config| {
+			let (game, viewer) = config.paths("tetris").unwrap();
+			(game.to_string(), viewer.to_string())
+		};
+
+		assert_eq!(
+			paths(parse(&[])),
+			("boy/game/tetris".into(), "boy/viewer/tetris".into())
+		);
+		assert_eq!(
+			paths(parse(&["--prefix", ""])),
+			("game/tetris".into(), "viewer/tetris".into())
+		);
+		assert_eq!(
+			paths(parse(&["--prefix-game", "", "--prefix-viewer", ""])),
+			("tetris".into(), "tetris".into())
+		);
+		assert!(parse(&["--prefix", "/boy"]).paths("tetris").is_err());
 	}
 
 	/// The spelling the demo used to pass. It still parses, so the process can name

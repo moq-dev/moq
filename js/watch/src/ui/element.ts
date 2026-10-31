@@ -56,6 +56,7 @@ export default class MoqWatchUi extends HTMLElement {
 		this.#observer = new MutationObserver(() => this.#updateWatch());
 	}
 
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#updateWatch();
 		this.#observer.observe(this, { childList: true });
@@ -65,6 +66,7 @@ export default class MoqWatchUi extends HTMLElement {
 		signals.run(this.#render.bind(this));
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		this.#observer.disconnect();
 		this.#signals?.close();

@@ -1,23 +1,34 @@
 import { expect, test } from "bun:test";
-import { ClockSchema, MOQ_EPOCH_UNIX_MILLIS, wallClockTime } from "./index.ts";
+import { ClockSchema, MOQ_EPOCH_UNIX_MILLIS, u53, wallClockTime } from "./index.ts";
 import { RootSchema } from "./root.ts";
 
-// Mirrors rs/hang/fixtures/catalog-clock.json: the canonical new shape, a root clock plus an
-// archive without a wall field. A reader maps archive timestamps through the root clock after
-// timescale conversion.
+// Mirrors rs/hang/fixtures/catalog-clock.json: the canonical shape, a root clock plus a
+// per-rendition `hls` field. A reader maps HLS record timestamps (milliseconds) through the root
+// clock after timescale conversion.
 const FIXTURE = {
 	video: {
 		renditions: {
-			video: { codec: "avc1.64001f", container: { kind: "legacy" } },
+			video: {
+				codec: "avc1.64001f",
+				codedWidth: 1280,
+				codedHeight: 720,
+				container: { kind: "legacy" },
+				hls: { track: "video.hls", duration: 2000 },
+			},
 		},
 	},
 	audio: {
 		renditions: {
-			audio: { codec: "opus", container: { kind: "legacy" }, sampleRate: 48000, numberOfChannels: 2 },
+			audio: {
+				codec: "opus",
+				container: { kind: "legacy" },
+				sampleRate: 48000,
+				numberOfChannels: 2,
+				hls: { track: "audio.hls", duration: 2000 },
+			},
 		},
 	},
 	clock: { wall: 1_751_846_400_000_000, timescale: 1_000_000 },
-	archive: { timelines: { video: { track: "video.timeline.z", duration: 2000 } }, timescale: 1000 },
 };
 
 test("an omitted timescale means microseconds on the wire", () => {
@@ -76,14 +87,12 @@ test("wallClockTime refuses bad inputs", () => {
 	expect(() => wallClockTime(clock, Number.MAX_SAFE_INTEGER, 1)).toThrow();
 });
 
-test("the packaged shape maps archive timestamps through the root clock", () => {
+test("the packaged shape maps HLS record timestamps through the root clock", () => {
 	const catalog = RootSchema.parse(FIXTURE);
 	if (!catalog.clock) throw new Error("fixture lost its clock");
-	if (!catalog.archive) throw new Error("fixture lost its archive");
+	const video = catalog.video && "renditions" in catalog.video ? catalog.video.renditions.video : undefined;
+	expect(video?.hls).toEqual({ track: "video.hls", duration: u53(2000) });
 
-	// Archive PTS 2000 (ms) lands 2s after the wall epoch.
-	expect(wallClockTime(catalog.clock, 2000, catalog.archive.timescale).getTime()).toBe(
-		MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000,
-	);
-	expect("wall" in catalog.archive).toBe(false);
+	// Record PTS 2000 (ms) lands 2s after the wall epoch.
+	expect(wallClockTime(catalog.clock, 2000, 1000).getTime()).toBe(MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);
 });

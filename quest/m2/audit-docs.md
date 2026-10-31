@@ -41,11 +41,9 @@ freshest. Baselines:
   unlinted for their macOS, Windows, and Android items. `moq-gst` has 3 items
   from `gst::plugin_define!`. `moq-v4l` reports 3108, nearly all its generated
   `sys` bindings; whether the fork earns docs is still undecided.
-- JS: since [docs-js](https://github.com/moq-dev/moq/pull/6163), every
-  published package's build runs `js/common/docs.ts`, which fails on an
-  undocumented export or public class member, so check only that its
-  exemptions (private, protected, symbol brands, and custom element reactions)
-  still hold up and that docs say something.
+- JS: the doc build renders the API reference with TypeDoc and fails on any
+  TypeDoc warning, such as an unresolved link, but not on an undocumented
+  export, so look for those and check that docs say something.
 - Links: GET (not HEAD) every external URL in `doc/` with a browser user
   agent. 316 URLs: all answered except placeholder and local hosts, relay
   URLs that only speak MoQ, npmjs.com and w3.org pages that refuse

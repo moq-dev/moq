@@ -7,7 +7,8 @@ microbenchmarks stay beside their crates under `rs/*/benches`, while the
 `run.sh` owns builds, comparison rounds, and reporting. `relay.sh` owns the
 temporary relay lifecycle and load execution shared by each comparison mode.
 A temporary relay is ready only once its PID owns both the TCP listener and UDP
-socket on its assigned port. `lsof`, included in the Nix shell, verifies
+socket on its assigned port, plus the stream listener a `wss`, `tcp`, or `tls`
+case dials. `lsof`, included in the Nix shell, verifies
 ownership. A collision uses the existing startup attempts; exhausted attempts
 fail with the relay log before any load starts.
 
@@ -74,6 +75,48 @@ Compare the current tree with another revision:
 nix develop --command just bench origin/main
 ```
 
+The relay workloads run `video` over QUIC, then `chat` (per-message cost) and
+`fanout` (per-byte cost) over each transport in turn: QUIC (`https://`), and qmux
+over `ws://`, `wss://`, `tcp://`, and `tls://`. The second argument narrows the
+transports, for example to compare only WebSocket against a base:
+
+```bash
+nix develop --command just bench origin/main ws
+```
+
+Every relay serves QUIC and plain WebSocket on its port; `wss://`, `tcp://`, and
+`tls://` get their own listener on the port two above it. A base revision must
+accept the listener a case needs, so pass the transports it has: a relay without
+`listen.tcp.tls` refuses the `tls` cases. Until a release includes
+`listen.tcp.tls`, compare against it without them:
+
+```bash
+nix develop --command just bench origin/release "quic ws wss tcp"
+```
+
+Beside relay CPU in cores, each case
+reports CPU microseconds per delivered frame and cores per delivered Gbps; base
+comparisons pair those too.
+
+The qmux micro-bench isolates the transport from the relay. It connects
+client/server pairs over loopback TCP, each echoing one message at a time on one
+stream so messages are never coalesced, swept over transport, session count, and
+message size. A message up to about 16 KB, qmux's default maximum record size,
+crosses as one record; a larger one is split. It reports process CPU per message
+and per Gbps, so it also runs under `perf`; build it with the profiling profile
+and frame pointers to attribute that CPU:
+
+```bash
+nix develop --command cargo run --release -p qmux@0.7.0 --example bench
+nix develop --command cargo run --release -p qmux@0.7.0 --example bench -- --transport ws,wss --sessions 1,256 --size 300
+RUSTFLAGS="-C force-frame-pointers=yes" nix develop --command cargo build --profile profiling -p qmux@0.7.0 --example bench
+perf record -F 999 --call-graph fp -- target/profiling/examples/bench --transport ws --sessions 16 --size 1024
+```
+
+Both ends share one current-thread runtime, so its CPU covers sending and
+receiving alike. It is a local profiling tool rather than a nightly series: the
+`moq-net` session bench owns qmux's series.
+
 Compare one multi-threaded Tokio runtime with the same number of independent
 Tokio/epoll and io\_uring workers:
 
@@ -118,14 +161,27 @@ or `heap` (jemalloc retained heap and allocation churn):
 ```bash
 nix develop --command just bench-profile lock
 nix develop --command just bench-profile "cpu heap" fanout-heavy "4 16"
+nix develop --command just bench-profile "cpu heap" audio "4 16" io-uring-workers
+nix develop --command just bench-profile cpu chat 4 io-uring-workers origin/main
+nix develop --command just bench-profile cpu chat 4 tokio-workers "" ws
 ```
 
 This builds the relay with `[profile.profiling]` and frame pointers, then runs
-the workload on Tokio workers at each count twice per mode: an unprofiled
-control, then a profiled run, so the throughput and CPU difference shows the
-profiler's overhead. Each mode captures only the relay process, never the load
+the workload over the selected transport (`quic` by default, or `ws`, `wss`,
+`tcp`, or `tls`) on the selected runtime (`tokio-workers` by default, or
+`io-uring-workers`) at each count twice per mode: an unprofiled control, then a
+profiled run, so the throughput and CPU difference shows the profiler's overhead. Each mode captures only the relay process, never the load
 generator, during the profiled run's 5 s steady window, the same window as the
-summary's throughput. Linux only.
+summary's throughput. Linux only. Both runtimes use the runtime comparison's
+feature build; io\_uring uses its kernel support check too. Readiness verifies the
+selected backend and exact worker count from the relay's actual thread names,
+retained as `runtime.json`, before the generator starts.
+
+The optional final argument selects a base revision. The current harness builds
+it in a temporary worktree and drives both revisions with the current generator,
+sampler, workload and capture settings. This also works when the base's own
+profiling harness has no runtime selector. Results live under `relay/base/` and
+`relay/current/`, with one unprofiled control per revision, worker count and mode.
 
 ### Lock wait
 
@@ -172,6 +228,11 @@ refused rather than reported.
 ```bash
 sudo sysctl -w kernel.perf_event_paranoid=-1
 ```
+
+The maintainer's 24-core `desktop` workstation is the profiling host: it
+keeps `kernel.perf_event_paranoid=-1`. Profile there only while it is quiet,
+with no other agents running and load near zero, since other work on the
+host shows up as lock waits and CPU the relay did not cause.
 
 ### Heap
 
@@ -236,7 +297,8 @@ source files. The retained path is printed at the end, including on failure.
 Choose an evidence parent outside disposable worktrees when the report must survive
 worktree removal. Criterion case discovery uses isolated short measurements and
 their full JSON IDs, since `--list` truncates display names; discovery samples
-are retained separately and never used in the comparison.
+are retained separately and never used in the comparison. A target that writes
+no Criterion samples, such as one that prints its own table, is listed as skipped.
 
 Each comparison reports the median of the paired percentage deltas, their median
 absolute deviation and range, and flags fewer than three observations or a sign
@@ -269,7 +331,7 @@ process CPU (user + system, every thread) per MB into
 budget (default 1); every received frame is checked byte for byte.
 
 The binding benchmark itself lives in
-[rust2](https://github.com/kixelated/rust2/blob/main/bench/ffi/README.md), with
+[rust2](https://github.com/moq-dev/rust2/blob/main/bench/ffi/README.md), with
 the UniFFI fork whose changes it measures: its `just bench-ffi` runs these
 runners nightly at a pinned moq revision, against the fork, and reports each
 wrapper's ratio to Rust. So that they keep working here, moq's Nightly runs every
@@ -364,6 +426,12 @@ and group setup stay outside drift timing; each parked read checks its live
 payload. `ledger` uses one fixture against every checkout's internal ledger, sweeping
 ascending, descending, shuffled, and rolling-expiration arrivals over the retained
 gap count. It includes each arrival's expiration and coverage checks.
+The drift sweep includes untimed controls and timed groups with decode-order
+B-frames, independently varying publisher and reader counts and retained history.
+Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
+for mixed millisecond/microsecond timestamps, which exercise exact cross-scale
+comparison.
+
 The browser smoke lane preserves one measured round of all three fixtures, and drift
 and ledger also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
@@ -491,6 +559,26 @@ nix develop --command just gh benchmark-report gate target/bench/nightly/rust-be
 Each run's evidence directory keeps both builds' estimates (`criterion` and
 `criterion-base`), the confirmation rounds under `confirm/`, and the run's
 `paired.json`.
+
+### CodSpeed
+
+The CodSpeed workflow adds instruction counts for every `main` commit that
+touches Rust, at <https://codspeed.io/moq-dev/moq>. Its CPU simulation runs
+each bench under Valgrind on a hosted runner, so a change of a few percent
+shows without the paired comparison's rounds. It does not see syscalls, I/O,
+contention, or caches, and skips `iter_custom` benches, so `just rs codspeed`
+builds only single-threaded targets without I/O, and Nightly keeps measuring
+every bench. Workspace benches import `criterion`, which `rs/bench-harness`
+resolves to Criterion, or to CodSpeed's instrumented Criterion under
+`cargo codspeed`. Nothing gates on it.
+
+```bash
+nix develop --command just rs codspeed
+nix develop --command cargo codspeed run
+```
+
+Run locally, the benches only check that each case runs; there is no
+measurement outside CodSpeed's runner.
 
 ## Local check capacity
 

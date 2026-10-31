@@ -11,7 +11,7 @@ use std::{
 use anyhow::Context;
 use futures::FutureExt as _;
 use moq_net::origin;
-use moq_net::{Hop, stats::Tier};
+use moq_net::{Hop, Path, stats::Tier};
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::task::AbortHandle;
 use tracing::Instrument as _;
@@ -55,11 +55,12 @@ pub struct Peer {
 }
 
 impl std::fmt::Debug for Peer {
-	/// Redact `token`: [`crate::Config::load`] traces the whole resolved config,
+	/// Redact credentials: [`crate::Config::load`] traces the whole resolved config,
 	/// so a derived `Debug` would print cluster credentials into logs.
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let url = peer_url(&self.url).ok();
 		f.debug_struct("Peer")
-			.field("url", &self.url)
+			.field("url", &url.as_ref().map(moq_tokio::RedactedUrl::new))
 			.field("cost", &self.cost)
 			.field("egress", &self.egress)
 			.field("token", &self.token.as_ref().map(|_| "..."))
@@ -990,9 +991,9 @@ struct LanAuth {
 #[derive(Default)]
 #[non_exhaustive]
 pub struct Options {
-	/// Request caps for ordinary client sessions.
+	/// Session limits for ordinary client sessions.
 	pub session: crate::limits::Client,
-	/// Request caps and QUIC limits for authenticated peers and outbound cluster links.
+	/// Session and QUIC limits for authenticated peers and outbound cluster links.
 	pub peer: crate::limits::Peer,
 	/// Cluster identity, peers, and discovery.
 	pub config: Config,
@@ -1234,6 +1235,7 @@ impl Cluster {
 		if let Some(tier) = &config.tier {
 			moq_auth::tier::validate(tier).context("invalid --cluster-tier")?;
 		}
+		crate::configured_tier(config.tier.clone()).context("invalid --cluster-tier")?;
 		peer.quic.validate()?;
 		let critical = crate::critical::Critical::default();
 		let mut origin_config = origin::Config::new(id);
@@ -1356,7 +1358,7 @@ impl Cluster {
 		}
 
 		let stats = self.stats.tier(token.tier.clone()).session(&token.label);
-		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = %token.root,
+		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = ?token.root,
 			publish = ?publisher.as_ref().map(origin::Producer::allowed),
 			subscribe = ?subscriber.as_ref().map(origin::Producer::allowed),
 			"session accepted");
@@ -1438,7 +1440,7 @@ impl Cluster {
 	/// Billing tier cluster-peer traffic records under (`--cluster-tier`).
 	/// An absent or empty label selects the default unprefixed tier.
 	fn cluster_tier(&self) -> Tier {
-		crate::configured_tier(self.config.tier.clone())
+		crate::configured_tier(self.config.tier.clone()).expect("validated by Cluster::new")
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's subscribe permissions.
@@ -1468,10 +1470,11 @@ impl Cluster {
 			(false, false) => self.origin.clone(),
 		};
 		for (at, target) in &token.mounts {
-			origin = match origin.mount(token.root.join(at), target) {
+			let mounted = token.root.join(at).map_err(moq_net::Error::from);
+			origin = match mounted.and_then(|at| origin.mount(at, target)) {
 				Ok(origin) => origin,
 				Err(err) => {
-					tracing::warn!(root = %token.root, %at, %target, %err, "grant mount refused");
+					tracing::warn!(root = ?token.root, ?at, ?target, ?err, "grant mount refused");
 					return None;
 				}
 			};
@@ -1613,7 +1616,15 @@ impl Cluster {
 		}
 
 		// Build here so malformed API roots fail startup, before background work.
-		let http = if self.config.api.url.as_deref().is_some_and(connect_api_is_http) {
+		let http = if self
+			.config
+			.api
+			.url
+			.as_deref()
+			.map(connect_api_is_http)
+			.transpose()?
+			.unwrap_or(false)
+		{
 			let tls = self
 				.connect
 				.as_ref()
@@ -1899,16 +1910,13 @@ impl Cluster {
 	/// stale-if-error are handled by the HTTP cache middleware on `http`, so this
 	/// just issues the request and parses the (possibly cache-served) body.
 	async fn fetch_peer_list(http: &ClientWithMiddleware, url: Url) -> anyhow::Result<Vec<Peer>> {
-		let body = http
-			.get(url)
-			.send()
-			.await
-			.context("cluster.api.url request failed")?
-			.error_for_status()
-			.context("cluster.api.url returned an error status")?
-			.text()
-			.await
-			.context("failed to read cluster.api.url body")?;
+		let response = http.get(url).send().await.context("cluster.api.url request failed")?;
+		anyhow::ensure!(
+			response.status().is_success(),
+			"cluster.api.url returned {}",
+			response.status()
+		);
+		let body = response.text().await.context("failed to read cluster.api.url body")?;
 
 		serde_json::from_str(&body).context("cluster.api.url response is not a JSON array of peers")
 	}
@@ -2033,7 +2041,7 @@ impl Cluster {
 		};
 		// The link is one presence across reconnects: each session it dials records how it
 		// ended, and the last one to end decides whether the link failed.
-		let stats = self.stats.tier(self.cluster_tier()).session("");
+		let stats = self.stats.tier(self.cluster_tier()).session(Path::empty());
 		let mut client = client
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)
@@ -2231,8 +2239,18 @@ fn strip_jwt(url: &mut Url) {
 
 /// Whether a `--cluster-api-url` source is an http(s) URL (otherwise it's
 /// treated as a local file path, which needs no TLS client).
-fn connect_api_is_http(source: &str) -> bool {
-	Url::parse(source).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+fn connect_api_is_http(source: &str) -> anyhow::Result<bool> {
+	let Ok(url) = Url::parse(source) else { return Ok(false) };
+	if url.scheme() == "http" {
+		let loopback = match url.host() {
+			Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+			Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+			Some(url::Host::Domain(host)) => host == "localhost",
+			None => false,
+		};
+		anyhow::ensure!(loopback, "--cluster-api-url requires HTTPS except on loopback");
+	}
+	Ok(matches!(url.scheme(), "http" | "https"))
 }
 
 /// Resolve a cluster peer to the URL we dial.
@@ -2325,22 +2343,20 @@ mod tests {
 	use crate::Config as RelayConfig;
 
 	#[tokio::test]
-	async fn request_limits_follow_the_admitted_grant() {
+	async fn session_limits_follow_the_admitted_grant() {
 		let mut options = Options::default();
 		options.session.announces = 2;
-		options.session.requests = 3;
 		options.peer.announces = 20;
-		options.peer.requests = 30;
 		let cluster = Cluster::new(options).unwrap();
-		for (peer, upstream, expected) in [(false, false, (2, 3)), (true, false, (20, 30)), (true, true, (20, 30))] {
+		for (peer, upstream, expected) in [(false, false, 2), (true, false, 20), (true, true, 20)] {
 			let mut grant = moq_auth::Grant::new(moq_auth::Patterns::new(), moq_auth::Patterns::new());
 			grant.peer = peer;
 			grant.upstream = upstream;
 			let (_producer, consumer) = moq_auth::lease::Producer::new(grant);
 			// A cluster-looking path alone never selects the peer policy.
-			let lease = auth::Lease::new("/.cluster/untrusted", consumer);
+			let lease = auth::Lease::new("/.cluster/untrusted", consumer).unwrap();
 			let limits = cluster.limits(&lease);
-			assert_eq!((limits.announces, limits.requests), expected);
+			assert_eq!(limits.announces, expected);
 		}
 	}
 
@@ -2362,7 +2378,7 @@ mod tests {
 			for session in [false, true] {
 				let mut grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
 				grant.peer = peer;
-				let lease = auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant));
+				let lease = auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant)).unwrap();
 				let admitted = match session {
 					true => cluster.scope_session(lease, &request),
 					false => cluster.scope(lease, &request),
@@ -2390,7 +2406,8 @@ mod tests {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
@@ -2415,7 +2432,7 @@ mod tests {
 		let everything = || moq_net::Patterns::from(moq_net::Pattern::all());
 		let mut grant = moq_auth::Grant::new(everything(), everything());
 		grant.mounts.insert(".svc".into(), ".svc/pid".into());
-		let token = auth::Token::new("/pid", &grant);
+		let token = auth::Token::new("/pid", &grant).unwrap();
 
 		let _worker = cluster
 			.origin
@@ -2423,7 +2440,7 @@ mod tests {
 			.expect("publish at the fleet path");
 		let subscriber = cluster.subscriber(&token).expect("subscribe grant").consume();
 		let broadcast = subscriber
-			.request_broadcast(".svc/foo", None)
+			.request(".svc/foo", None)
 			.await
 			.expect("resolves through the mount");
 		assert_eq!(broadcast.info().path.as_str(), ".svc/foo");
@@ -2434,7 +2451,7 @@ mod tests {
 
 		// A mount the origin refuses admits nothing rather than half a grant.
 		grant.mounts.insert(".svc/x".into(), ".other".into());
-		let token = auth::Token::new("/pid", &grant);
+		let token = auth::Token::new("/pid", &grant).unwrap();
 		assert!(cluster.subscriber(&token).is_none());
 		assert!(cluster.publisher(&token).is_none());
 	}
@@ -2452,7 +2469,7 @@ mod tests {
 			for (at, target) in mounts {
 				grant.mounts.insert((*at).into(), (*target).into());
 			}
-			let token = auth::Token::new("/pid", &grant);
+			let token = auth::Token::new("/pid", &grant).unwrap();
 			assert!(cluster.subscriber(&token).is_none(), "{mounts:?}");
 			assert!(cluster.publisher(&token).is_none(), "{mounts:?}");
 		}
@@ -2481,27 +2498,24 @@ mod tests {
 		let stats = config.build(cluster.origin.clone()).expect("stats");
 		let cluster = cluster.with_stats(stats);
 
-		let path = moq_net::Path::new(".stats").join("node").join("test");
+		let path = moq_net::Path::from_static(".stats/node/test");
 		let consumer = cluster.origin.consume();
-		let route = tokio::time::timeout(std::time::Duration::from_secs(5), consumer.routed(&path))
-			.await
-			.expect("stats broadcast announced within 5s")
-			.expect("stats broadcast present");
-		assert!(route.epoch.is_some(), "stats announce under an epoch");
-		let broadcast = consumer
-			.request_broadcast(&path, None)
-			.await
-			.expect("stats broadcast resolves");
+		let broadcast = tokio::time::timeout(
+			std::time::Duration::from_secs(5),
+			consumer.follow(&path, None).unwrap().available(),
+		)
+		.await
+		.expect("stats broadcast announced within 5s")
+		.expect("stats broadcast resolves");
+		assert!(broadcast.info().epoch.is_some(), "stats announce under an epoch");
 
 		// Several publish intervals (1s each by default) after the handle went out
-		// of scope, the task is still running and its broadcast still open. The
-		// re-check is bounded: without the keepalive the broadcast is gone and
-		// `routed` waits forever, which must read as a failure rather
-		// than a hung test.
+		// of scope, the task is still running and its broadcast still announced: a
+		// request refuses a front whose route retracted.
 		tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-		let still_live = tokio::time::timeout(std::time::Duration::from_secs(2), consumer.routed(&path)).await;
+		let still_live = consumer.request(&path, None).await;
 		assert!(
-			matches!(still_live, Ok(Some(_))),
+			still_live.is_ok(),
 			"stats broadcast unannounced after the producer handle was dropped: \
 			 the publish task stopped while the cluster kept serving"
 		);
@@ -2557,7 +2571,10 @@ mod tests {
 			..Default::default()
 		})
 		.expect("cluster");
-		assert_eq!(cluster.cluster_tier(), Tier::new("region/sjc"));
+		assert_eq!(
+			cluster.cluster_tier(),
+			Tier::new(moq_net::Path::from_static("region/sjc"))
+		);
 
 		let quoted = new_cluster(Config {
 			tier: Some("region\"".to_string()),
@@ -2965,13 +2982,20 @@ mod tests {
 	/// credential from `Debug` instead of printing it into logs.
 	#[test]
 	fn peer_debug_redacts_token() {
-		let peer = Peer::new("https://peer.example/").with_cost(2).with_token("secret");
-		let debug = format!("{peer:?}");
-		assert!(!debug.contains("secret"), "Debug must not leak the credential: {debug}");
-		assert!(
-			debug.contains("https://peer.example/"),
-			"Debug keeps the address: {debug}"
-		);
+		for peer in [
+			Peer::new("https://peer.example/").with_cost(2).with_token("secret"),
+			Peer::new("https://user:secret@peer.example/?jwt=secret#secret"),
+			Peer::new("https://peer.example:bad/?jwt=secret"),
+		] {
+			let debug = format!("{peer:?}");
+			assert!(!debug.contains("secret"), "Debug must not leak the credential: {debug}");
+			if peer_url(peer.url()).is_ok() {
+				assert!(
+					debug.contains("https://peer.example/"),
+					"Debug keeps the address: {debug}"
+				);
+			}
+		}
 	}
 
 	/// Static `--cluster-connect` entries get the same all-or-nothing
@@ -3085,16 +3109,19 @@ mod tests {
 		assert!(pool.used() > 0, "writes charge the constructed cache pool");
 
 		let consumer = cluster.origin.consume();
-		tokio::time::timeout(Duration::from_secs(2), consumer.request_broadcast("cam", None))
+		tokio::time::timeout(Duration::from_secs(2), consumer.request("cam", None))
 			.await
 			.expect("broadcast resolves")
 			.expect("broadcast present");
 
-		let stats_path = moq_net::Path::new(".stats").join("node").join("test");
-		tokio::time::timeout(Duration::from_secs(5), consumer.routed(&stats_path))
-			.await
-			.expect("stats announced")
-			.expect("stats present");
+		let stats_path = moq_net::Path::from_static(".stats/node/test");
+		tokio::time::timeout(
+			Duration::from_secs(5),
+			consumer.follow(&stats_path, None).unwrap().available(),
+		)
+		.await
+		.expect("stats announced")
+		.expect("stats present");
 	}
 
 	/// The reserved `cluster.id` 0 is rejected, since it cannot be excluded for loop
@@ -3474,6 +3501,60 @@ mod tests {
 		assert_eq!(config.cluster.api.tls.root, vec![PathBuf::from("api.pem")]);
 	}
 
+	#[tokio::test]
+	async fn remote_plaintext_api_refuses_startup() {
+		let _ = moq_tokio::crypto::install_default();
+		for url in ["http://api.example.com/", "http://192.0.2.1/", "http://[2001:db8::1]/"] {
+			let mut config = Config::default();
+			config.api.url = Some(url.into());
+			let result = new_cluster(config)
+				.unwrap()
+				.with_connect(Default::default(), Default::default())
+				.start()
+				.await;
+			let Err(err) = result else { panic!("accepted {url}") };
+			assert!(err.to_string().contains("loopback"), "{err}");
+		}
+	}
+
+	#[test]
+	fn cluster_api_supports_loopback_http_and_local_files() {
+		for source in [
+			"http://localhost/",
+			"http://127.0.0.2/",
+			"http://[::1]/",
+			"https://api.example.com/",
+		] {
+			assert!(connect_api_is_http(source).unwrap(), "{source}");
+		}
+		for source in ["peers.json", "/etc/moq/peers.json", "file:///etc/moq/peers.json"] {
+			assert!(!connect_api_is_http(source).unwrap(), "{source}");
+		}
+		assert!(connect_api_is_http("http://localhost.example.com/").is_err());
+	}
+
+	#[tokio::test]
+	async fn cluster_api_rejects_redirect_bodies() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let _ = moq_tokio::crypto::install_default();
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+		let server = async move {
+			let (mut stream, _) = listener.accept().await.unwrap();
+			let mut data = [0; 4096];
+			assert!(stream.read(&mut data).await.unwrap() > 0);
+			// No Location header: refusing to follow alone does not reject this body.
+			stream
+				.write_all(b"HTTP/1.1 302 Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]")
+				.await
+				.unwrap();
+		};
+		let tls = moq_tokio::tls::Connect::default().build().unwrap();
+		let client = crate::http_client::build(&tls, &[]).unwrap();
+		let (peers, ()) = tokio::join!(Cluster::fetch_peer_list(&client, url), server);
+		assert!(peers.unwrap_err().to_string().contains("302"));
+	}
+
 	/// Two in-process origins share broadcasts both ways over one
 	/// fingerprint-pinned `/.cluster/<credential>` session. Wires accept to dial
 	/// directly, so the test needs no multicast and stays CI-safe. It does not
@@ -3609,7 +3690,7 @@ mod tests {
 	fn bare_quic_server(
 		connect: &moq_tokio::connect::Config,
 		idle: std::time::Duration,
-	) -> moq_tokio::quic::driver::Endpoint {
+	) -> moq_tokio::quic::driver::endpoint::Endpoint {
 		use moq_tokio::quic::driver;
 		let key = rcgen::KeyPair::generate().expect("keypair");
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
@@ -3630,11 +3711,15 @@ mod tests {
 			.map(|alpn| alpn.as_bytes().to_vec())
 			.collect();
 		let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
-		let mut transport = driver::TransportConfig::default();
-		transport.max_idle_timeout(Some(idle.try_into().expect("idle timeout")));
-		let mut server_config = driver::ServerConfig::with_crypto(Arc::new(crypto));
-		server_config.transport_config(Arc::new(transport));
-		driver::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).expect("server")
+		let mut transport = driver::transport::Config::default();
+		transport.idle_timeout = Some(idle);
+		let mut server_config = driver::server::Config::new(Arc::new(crypto));
+		server_config.transport = transport;
+		driver::endpoint::Endpoint::new(
+			driver::endpoint::Config::default().with_server(server_config),
+			std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+		)
+		.expect("server")
 	}
 
 	/// Cancelling `run` aborts the dials a peer list started, which run outside
@@ -3649,7 +3734,7 @@ mod tests {
 		let mut connect = moq_tokio::connect::Config::default();
 		connect.tls.insecure = Some(true);
 		let server = bare_quic_server(&connect, IDLE);
-		let port = server.local_addr().expect("server addr").port();
+		let port = server.local_addr().port();
 		let dir = tempfile::tempdir().expect("tempdir");
 		let peers = dir.path().join("peers.json");
 		std::fs::write(&peers, format!(r#"["moql://127.0.0.1:{port}/"]"#)).expect("write peers");
@@ -3671,6 +3756,8 @@ mod tests {
 			.await
 			.expect("dial timeout")
 			.expect("incoming")
+			.accept()
+			.expect("accept")
 			.await
 			.expect("handshake");
 		running.abort();
@@ -3696,7 +3783,7 @@ mod tests {
 		let mut connect = moq_tokio::connect::Config::default();
 		connect.tls.insecure = Some(true);
 		let server = bare_quic_server(&connect, IDLE);
-		let port = server.local_addr().expect("server addr").port();
+		let port = server.local_addr().port();
 
 		let config = Config {
 			connect: vec![Peer::new(format!("moql://127.0.0.1:{port}/"))],
@@ -3722,6 +3809,8 @@ mod tests {
 			.await
 			.expect("dial timeout")
 			.expect("incoming")
+			.accept()
+			.expect("accept")
 			.await
 			.expect("handshake");
 		cluster
@@ -3738,7 +3827,7 @@ mod tests {
 			.await
 			.expect("the peer heard no close before its idle timeout");
 		match err {
-			driver::ConnectionError::ApplicationClosed(close) => assert_eq!(&close.reason[..], b"client shutdown"),
+			driver::connection::Error::ApplicationClosed(close) => assert_eq!(close.reason, "client shutdown"),
 			other => panic!("the link ended with {other:?}, not the shutdown close"),
 		}
 	}
@@ -3870,10 +3959,10 @@ mod tests {
 		let cluster = new_cluster(Config::default()).expect("cluster");
 		let all: moq_net::Patterns = [moq_net::Pattern::all()].into_iter().collect();
 
-		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone()));
+		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone())).unwrap();
 		let mut grant = moq_auth::Grant::new(all.clone(), all);
 		grant.peer = true;
-		let peer = auth::Token::new("/", &grant);
+		let peer = auth::Token::new("/", &grant).unwrap();
 
 		let _ingest = cluster
 			.publisher(&client)
@@ -3906,12 +3995,12 @@ mod tests {
 		let cluster = new_cluster(Config::default()).expect("cluster");
 		let all: moq_net::Patterns = [moq_net::Pattern::all()].into_iter().collect();
 
-		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone()));
+		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone())).unwrap();
 		let mut grant = moq_auth::Grant::new(all.clone(), all);
 		grant.peer = true;
-		let peer = auth::Token::new("/", &grant);
+		let peer = auth::Token::new("/", &grant).unwrap();
 		grant.upstream = true;
-		let core = auth::Token::new("/", &grant);
+		let core = auth::Token::new("/", &grant).unwrap();
 
 		let _ingest = cluster
 			.publisher(&client)

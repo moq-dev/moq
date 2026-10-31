@@ -18,6 +18,12 @@ import { connect } from "./transport";
 type FrameMicros = Parameters<typeof Container.Legacy.encodeFrame>[1];
 type TimestampMicros = Parameters<typeof Moq.Time.Timestamp.fromMicros>[0];
 
+// Group completion was renamed after @moq/net 0.4.7. Select the installed API
+// once before connecting, so the same client can publish with either package.
+const groupMethods = Moq.Group.Producer.prototype as { finish?: () => void; close?: () => void };
+const finishGroup = groupMethods.finish ?? groupMethods.close;
+if (!finishGroup) throw new Error("group producer has no clean completion method");
+
 /** A catalog section's first rendition, with its name. */
 function first<T>(section: { renditions: Record<string, T> } | undefined): [string, T] | undefined {
 	return Object.entries(section?.renditions ?? {})[0];
@@ -202,6 +208,9 @@ async function audio(
 /** What a subscriber reads: a video frame and decoded audio, or the group live demand fills on a track. */
 type Read = { kind: "media"; out: string; ms: number } | { kind: "group"; file: string; track?: string };
 
+/** The released origin, which follows a path through `request`. */
+type Released = { request(path: Moq.Path.Valid, options: { announced: true }): Moq.Origin.Requesting };
+
 /** Print `received N bytes` once both media have arrived, or record the observed group. */
 async function subscribe(url: URL, broadcast: string, read: Read) {
 	install();
@@ -210,7 +219,10 @@ async function subscribe(url: URL, broadcast: string, read: Read) {
 	if (read.kind === "media" && !(await Libav.polyfill())) throw new Error("no AudioDecoder");
 	const origin = new Moq.Origin.Producer();
 	const connection = await connect({ url, consume: origin, websocket: { enabled: false } });
-	const requested = origin.request(Moq.Path.from(broadcast), { announced: true });
+	// Released packages follow with `request(path, { announced: true })`; current ones with `follow(path)`.
+	const path = Moq.Path.from(broadcast);
+	const requested =
+		"follow" in origin ? origin.follow(path) : (origin as unknown as Released).request(path, { announced: true });
 	try {
 		let bc = requested.active.peek();
 		while (!bc) {
@@ -313,7 +325,7 @@ if (command === "sign") {
 		payload: new TextEncoder().encode("compat-fetch"),
 		timestamp: Moq.Time.Timestamp.fromMicros(1 as TimestampMicros),
 	});
-	group.close();
+	finishGroup.call(group);
 	await connection.closed;
 } else if (command === "subscribe") {
 	// The flags of the interop subscriber this stands in for.

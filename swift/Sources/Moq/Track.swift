@@ -162,8 +162,8 @@ public final class TrackProducer: Sendable {
     }
 
     /// Serve fetches for groups that are not currently cached.
-    public func dynamic() throws -> TrackDynamic {
-        TrackDynamic(try ffi.dynamic())
+    public func requests() throws -> TrackRequests {
+        TrackRequests(try ffi.requests())
     }
 
     /// Append a new group, returning a producer for its frames.
@@ -187,6 +187,17 @@ public final class TrackProducer: Sendable {
     /// capped at 1200 bytes. There is no stream fallback.
     public func appendDatagram(_ payload: Data, timestampUs: UInt64? = nil) throws -> UInt64 {
         try ffi.appendDatagram(frame: Frame(payload: payload, timestampUs: timestampUs))
+    }
+
+    /// Send a best-effort datagram at an explicit sequence number, for a caller that
+    /// allocates its own. `appendDatagram` continues after the largest one.
+    public func insertDatagram(_ payload: Data, sequence: UInt64, timestampUs: UInt64? = nil) throws {
+        try ffi.insertDatagram(sequence: sequence, frame: Frame(payload: payload, timestampUs: timestampUs))
+    }
+
+    /// The newest group or datagram written, at its newest frame, or `nil` before any.
+    public func largest() throws -> Position? {
+        try ffi.largest()
     }
 
     /// Abort the track with an application error code, failing active consumers.

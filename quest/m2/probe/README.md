@@ -13,13 +13,14 @@ by default; an application can override or disable them.
 ## Plan
 
 The estimators stop learning once a connection is app-limited. moq-quic's
-BBR3 only raises `max_bw` from an app-limited sample above its current value,
-and only ages its window on a cycle that isn't app-limited (`update_max_bw`
-and `adapt_long_term_model` in `rs/moq-congestion/src/bbr3/mod.rs`).
-Chromium's QUICHE gates its BBR2 filter the same way, and its Cubic estimate
-stops growing while the sender isn't cwnd-limited. So after a rendition
-stops, the estimate freezes at the value that stopped it, and today nothing
-makes it rise: moq-net advertises PROBE `Report` only.
+BBR3 only raises `max_bw` from an app-limited sample above its current value;
+while app-limited it ages its window every 3 s, so the estimate falls to what
+the flow still delivers but never rises past it (`update_max_bw` in
+`rs/moq-congestion/src/bbr3/mod.rs`). Chromium's QUICHE gates its BBR2 filter
+the same way without the aging, and its Cubic estimate stops growing while the
+sender isn't cwnd-limited. So after a rendition stops, the estimate settles at
+or below the value that stopped it, and today nothing makes it rise: moq-net
+advertises PROBE `Report` only.
 
 Decided with the maintainer on 2026-10-17 (quest-plan on
 [#5863](https://github.com/moq-dev/moq/pull/5863)), replacing that PR's
@@ -82,13 +83,12 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Native rung disable](/quest/m1/simulcast-rung-disable.md) - Rust/FFI and OBS publishers stop encoding the top renditions their grant cannot fund, advertise `enabled: false`, and re-enable with hysteresis
+- [Native rung disable](/quest/m1/simulcast-rung-disable.md) - OBS stops sending the top renditions its grant cannot fund, as the Rust/FFI publishers do, and a shaped uplink through moq-ffi proves the resume
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
 - [Viewer targets](/quest/m2/probe/viewer-target.md) - a session sends its viewer handles as its PROBE target, probes to the peer's, splits the receive estimate into viewer grants, and advertises `Increase` where a sender exists
 - [Players set viewer targets](/quest/m2/probe/players.md) - players hold a viewer handle per watched broadcast at its highest enabled rendition's bitrate
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
-- [Back off an unreachable target](/quest/m2/probe/target-backoff.md) - failed probe rises back the target off instead of wasting media
 
 ## Related
 

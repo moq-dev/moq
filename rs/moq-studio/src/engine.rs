@@ -423,9 +423,7 @@ async fn publish(
 	let (exporter, rendition) = Exporter::new(&gpu.device, &gpu.queue, &mut config)
 		.await
 		.context("cannot encode the canvas")?;
-	let reserved = catalog
-		.reserve()
-		.with_timeline_hint(config.gop.duration(config.framerate));
+	let reserved = catalog.reserve().with_hls_hint(config.gop.duration(config.framerate));
 	let video = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition)?;
 
 	let bus = moq_audio::bus::Config::default();
@@ -634,7 +632,7 @@ mod tests {
 			.await
 			.expect("the studio starts");
 
-		let broadcast = tokio::time::timeout(TIMEOUT, relay.routed_broadcast("studio"))
+		let broadcast = tokio::time::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
 			.await
 			.expect("the relay routes the program")
 			.expect("broadcast");

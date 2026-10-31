@@ -50,28 +50,27 @@ impl send::Stream {
 ```
 
 The same pair goes on `send::Finished`, the handle `finish(self)` returns
-([quic-api streams](/quest/m1/quic-api/streams.md)); if that quest lands an
-opaque `send::Offset`, the methods take it instead of a `u64`. The
-`send::Error` says why the bytes will never be acknowledged: a reset, the
-peer's STOP_SENDING, the connection's loss, or an offset past the data
-written. Both drivers forward to `moq-quic`'s own `poll_acked` wait, which
+([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)), and the methods take its opaque `send::Offset`, which only
+`offset()` mints, instead of a `u64`. The `send::Error` says why the bytes will
+never be acknowledged: a reset, the peer's STOP_SENDING, or the connection's
+loss. Both drivers forward to `moq-quic`'s own `poll_acked` wait, which
 [waits](/quest/m1/quic-api/waits.md) makes of today's `acked(offset)` and
 `StreamEvent::Acked`. Four traps, each settled in moq-quic where the wait
 lives:
 
 - A finished stream whose every byte was acknowledged must not look like a
   reset one. moq-quic answers from the queryable send-stream end
-  [streams](/quest/m1/quic-api/streams.md) keeps until the id is released:
+  it keeps until the id is released:
   finished, with no reset or STOP_SENDING, means delivered.
-- An offset past the data written returns an error, never a panic, since a
-  panic under the connection lock poisons it for every handle (streams
-  makes moq-quic return it).
+- An offset past the data written cannot be built, and a foreign one panics
+  before moq-tokio takes the connection lock, since a panic under the lock
+  poisons it for every handle.
 - `reset_at` below the acknowledged prefix, or STOP_SENDING after a reset
   (which truncates to 0), shrinks the acknowledged prefix. The waiters fail
   anyway; keep the prefix a `poll_acked` reports monotonic.
 - The offset counts bytes on the QUIC stream. The trait method takes a byte
-  offset, like `moq-quic` (decided 2026-10-17 on #5817), and the starvation
-  quest's writer counts the bytes it writes, so neither driver needs a public
+  offset, like `moq-quic` (decided 2026-10-17 on #5817), and the lag
+  histogram's writer counts the bytes it writes, so neither driver needs a public
   `offset()`. A layer that writes its own prefix adds its length: `quic::web`
   already tracks its WebTransport header for `reset_at`.
 
@@ -79,8 +78,11 @@ The moq-tokio and moq-uring adapters implement the trait method over the
 driver's. Leave the browser transport on the default; the browser's `WebTransportSendStream.getStats()` is
 unimplemented in shipping Chrome and its `bytesAcknowledged` is at risk in the
 W3C draft. Decided 2026-10-22 (maintainer): qmux's `poll_acked` reports
-unsupported too, since writing into TCP is not delivery; over qmux the
-histogram stays at group granularity.
+unsupported too, since writing into TCP is not delivery. Decided 2026-10-26
+(maintainer, on [moq-dev/moq#6791](https://github.com/moq-dev/moq/pull/6791)):
+over qmux and the browser transport, the lag histogram, `dropped`, and the
+delivery-delay histogram are absent, never zero; group granularity is
+rejected as a fallback.
 
 Acceptance includes the first two traps, through each driver: a finished
 stream whose bytes were all acknowledged resolves `poll_acked` as delivered,
@@ -93,17 +95,11 @@ offset order, reset by sender, STOP_SENDING by the receiver, and session
 close.
 
 
-Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
-[frame-granularity starvation](/quest/m2/starvation-frames.md).
+Decided in the 2026-09-30 audit: moved to m2 with its consumers, the
+[viewer lag histogram](/quest/m2/qos/lag-histogram.md) and the
+[delivery-delay histogram](/quest/m2/delivery-delay.md).
 
 ## Required
 
 - [QUIC driver poll waits](/quest/m1/quic-api/poll.md) - the `&self, &kio::Waiter`
   driver shape `poll_acked` takes
-- [moq-net polls on kio waiters](/quest/m1/quic-api/net-poll.md) - the trait
-  shape the moq-net method takes
-
-## Related
-
-- [Starvation at frame granularity](/quest/m2/starvation-frames.md) - the
-  moq-net consumer

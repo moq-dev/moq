@@ -64,6 +64,7 @@ import {
 	type ResumeShell,
 	type ResumeSource,
 	type Run,
+	removeRun,
 	runGaps,
 } from "./internal.ts";
 import { grace } from "./ledger.ts";
@@ -263,7 +264,7 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
 		return wire.subscribe(name, subscription);
 	} catch (err) {
 		const failed = new track.Producer(name);
-		failed.close(err instanceof Error ? err : new Error(String(err)));
+		failed.abort(err instanceof Error ? err : new Error(String(err)));
 		return failed.subscribe(subscription);
 	}
 }
@@ -313,9 +314,11 @@ class Reader implements ResumeSource {
 	/** The logical track ended cleanly: the reader drains what its copies hold and follows no route. */
 	#ended = false;
 	/** The serving copy's largest when the track ended, kept once that copy goes. */
-	#last?: { largest?: track.Position; ended: true };
+	#last?: { largest?: track.Position; object?: track.Position; ended: true };
 	/** The first end any copy declared: the logical track's, whichever copy serves. */
 	#declared?: track.Position;
+	// The error a copy's end carried, kept with the boundary so releasing that copy keeps it.
+	#declaredError?: Error;
 	/** The subscriber's record of groups handed out, as the last read passed it. */
 	#delivered = new Delivered();
 	/** Runs the serving copy gave up and the reader has yet to report; see {@link #tryDrop}. */
@@ -462,7 +465,7 @@ class Reader implements ResumeSource {
 
 	/** What `copy` is asked for: the reader's own preferences, from its floor and through its replacement. */
 	#wire(copy: Pick<Copy, "floor" | "until">): track.Subscription {
-		const preferences = this.#shell.subscription.peek() ?? {};
+		const preferences = this.#shell.subscription.peek() ?? track.Subscription.default();
 		const bounds = groupBounds(preferences.groups);
 		const start = Math.max(bounds.start, copy.floor ?? 0);
 		const replaced = copyEnd(copy);
@@ -549,6 +552,15 @@ class Reader implements ResumeSource {
 			if (copy !== except && hooks.holdsGroup(copy.sub, sequence)) holding.push(copy);
 		}
 		return holding;
+	}
+
+	cachedGroup(sequence: number, from = 0): GroupConsumer | undefined {
+		for (let index = this.#copies.length - 1; index >= 0; index--) {
+			const copy = this.#copies[index];
+			const group = hooks.cachedGroup(copy.sub, sequence, from);
+			if (group) return this.#handOut(copy, group);
+		}
+		return undefined;
 	}
 
 	/**
@@ -663,7 +675,11 @@ class Reader implements ResumeSource {
 			const end = Math.min(run.end, cursor.end ?? run.end);
 			for (const gap of delivered.gaps(Math.max(run.start, cursor.start), end)) {
 				const [open] = runGaps(feeding, gap.start, gap.end);
-				if (open) return { kind: "drop", ...open, error: run.error };
+				if (open) {
+					// Report once without marking it delivered: a late fill may still land.
+					this.#drops = removeRun(this.#drops, open.start, open.end);
+					return { kind: "drop", ...open, error: run.error };
+				}
 			}
 		}
 		return undefined;
@@ -788,7 +804,11 @@ class Reader implements ResumeSource {
 		if (serving) this.#boundAtEnd(serving);
 		if (this.#letGo(this.#delivered) || this.#closed) return false;
 		this.#ended = true;
-		this.#last = { largest: serving && hooks.peekLargest(serving.sub).largest, ended: true };
+		this.#last = {
+			largest: serving && hooks.peekLargest(serving.sub).largest,
+			object: serving && hooks.objectLargest(serving.sub),
+			ended: true,
+		};
 		this.#shell.close();
 		this.route.leave(this);
 		this.#letGo(this.#delivered);
@@ -1006,8 +1026,10 @@ class Reader implements ResumeSource {
 	// refuses an end below what it received.
 	#learnEnd(): track.Position | undefined {
 		for (const copy of this.#copies) {
-			const end = copy.sub.end();
-			if (end) this.#declare(end);
+			const end = hooks.subscriberEnd(copy.sub);
+			if (!end) continue;
+			this.#declare(end);
+			this.#declaredError ??= hooks.subscriberEndError(copy.sub);
 		}
 		const declared = this.#declared;
 		if (declared && !this.#closed) {
@@ -1063,6 +1085,13 @@ class Reader implements ResumeSource {
 		return this.#learnEnd();
 	}
 
+	/** The error the logical track's end carries, if it does not end cleanly. */
+	endError(): Error | undefined {
+		this.sync();
+		this.#learnEnd();
+		return this.#declaredError;
+	}
+
 	async finished(): Promise<track.Position> {
 		for (;;) {
 			this.sync();
@@ -1094,6 +1123,12 @@ class Reader implements ResumeSource {
 		this.sync();
 		const serving = this.#serving();
 		return serving && hooks.bufferedLargest(serving.sub);
+	}
+
+	objectLargest(): track.Position | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving ? hooks.objectLargest(serving.sub) : this.#last?.object;
 	}
 
 	peekLargest(): { largest?: track.Position; ended: boolean } {
@@ -1158,7 +1193,7 @@ class Reader implements ResumeSource {
 		for (const dispose of this.#dispose) dispose();
 		this.#dispose = [];
 		// A recovery in flight settles with the group rather than adopting a replacement.
-		for (const group of this.#open) group.close(abort);
+		for (const group of this.#open) hooks.releaseGroupReader(group, abort);
 		this.#open.clear();
 		for (const copy of this.#copies) this.#drop(copy, abort);
 		this.#copies = [];
@@ -1308,11 +1343,11 @@ class Recover implements GroupRecover {
 		return routeFailed(failed) || copy.sub.closed.peek() instanceof Error;
 	}
 
-	async replace(_index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement> {
+	async replace(index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement> {
 		let fetch: Fetch | undefined;
 		let kept: GroupConsumer | undefined;
 		try {
-			const replacement = await this.#replace(failed, signal, (next) => {
+			const replacement = await this.#replace({ index, failed, signal }, (next) => {
 				fetch?.cancel();
 				fetch = next;
 			});
@@ -1326,8 +1361,7 @@ class Recover implements GroupRecover {
 	}
 
 	async #replace(
-		failed: Error | undefined,
-		signal: AbortSignal,
+		{ index, failed, signal }: { index: number; failed?: Error; signal: AbortSignal },
 		started: (fetch: Fetch) => void,
 	): Promise<Replacement> {
 		const reader = this.#reader;
@@ -1335,6 +1369,9 @@ class Recover implements GroupRecover {
 		let fetch: Fetch | undefined;
 		for (;;) {
 			signal.throwIfAborted();
+			// The serving subscription may still deliver a group its route refused to fetch.
+			let landing: PromiseLike<unknown> | undefined;
+			let unwatch: Dispose | undefined;
 			// Subscribe the reader to a new route from its newest group, which is this one or
 			// later, so that route's subscription may deliver the rest of it.
 			reader.sync();
@@ -1350,7 +1387,7 @@ class Recover implements GroupRecover {
 			// the group back and forth.
 			if (failed) {
 				const held = reader.holding(this.sequence, current)[0];
-				const cached = held && hooks.cachedGroup(held.sub, this.sequence);
+				const cached = held && hooks.cachedGroup(held.sub, this.sequence, index);
 				if (cached) return this.#replacement(cached, held);
 				// Once the track ended, no route continues it: only a copy holding it could.
 				if (reader.ended) throw failed;
@@ -1371,7 +1408,7 @@ class Recover implements GroupRecover {
 				waits.push(given.changed);
 				// A newer copy's track caches it: continue from there.
 				if (!failed && generation !== current.generation) {
-					const cached = hooks.cachedGroup(serving.sub, this.sequence);
+					const cached = hooks.cachedGroup(serving.sub, this.sequence, index);
 					if (cached) return this.#replacement(cached, serving);
 				}
 				// Otherwise ask for it, if the route's version can fetch. The subscription may still
@@ -1391,12 +1428,22 @@ class Recover implements GroupRecover {
 				const outcome = asked?.outcome;
 				if (outcome && "group" in outcome) return this.#replacement(outcome.group, serving);
 				// That route failing too waits for the next one, and a refusal is a verdict only for
-				// a copy that failed.
+				// a copy that failed, once the serving subscription will not deliver the group either.
 				if (outcome && failed && !routeFailed(outcome.error) && !(serving.sub.closed.peek() instanceof Error)) {
-					throw outcome.error;
+					const maxDelay = serving.sub.subscription.peek()?.maxDelay ?? Milli.zero;
+					const land = { start: this.sequence, end: this.sequence + 1, floor: true, grace: grace(maxDelay) };
+					if (generation === current.generation || !hooks.mayLand(serving.sub, land)) throw outcome.error;
+					landing = new Promise<void>((resolve) => {
+						unwatch = hooks.groupChanged(serving.sub, resolve);
+					});
 				}
 			}
-			await until(Signal.race(...waits), signal);
+			try {
+				const changed = Signal.race(...waits);
+				await until(landing === undefined ? changed : race([changed, landing]), signal);
+			} finally {
+				unwatch?.();
+			}
 		}
 	}
 
@@ -1465,7 +1512,7 @@ export class Front {
 					next?: Promise<{ event?: TracksEvent; err?: Error }>;
 			  }
 			| undefined;
-		const wait = () => race([Signal.race(lister.used, this.#changed), closed]);
+		const wait = () => race([Signal.race(lister.wanted, this.#changed), closed]);
 		const stop = () => {
 			listing?.reader?.close();
 			listing = undefined;
@@ -1489,7 +1536,7 @@ export class Front {
 		try {
 			for (;;) {
 				if (closed.peek() !== undefined) return;
-				if (!lister.used.peek()) {
+				if (!lister.wanted.peek()) {
 					if (listing) {
 						stop();
 						lister.clear();

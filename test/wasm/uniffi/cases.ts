@@ -281,6 +281,46 @@ const local: Record<string, () => Promise<string | undefined>> = {
 		return `${first.message}; then ${later.message}`;
 	},
 
+	"largest follows the newest group and frame": async () => {
+		using fixture = localTrack();
+		const { track } = fixture;
+		const position = () => {
+			const largest = track.largest();
+			return largest && `${largest.group}/${largest.frame}`;
+		};
+		if (position() !== undefined) throw new Error(`empty track at ${position()}`);
+		const group = track.createGroup(HIGH[0]);
+		group.writeFrame({ payload: payload(1), timestampUs: 0n });
+		group.writeFrame({ payload: payload(1), timestampUs: 0n });
+		track.createGroup(3n);
+		if (position() !== `${HIGH[0]}/1`) throw new Error(`largest ${position()} != ${HIGH[0]}/1`);
+		return undefined;
+	},
+
+	"insertDatagram keeps the caller's sequence": async () => {
+		using fixture = localTrack();
+		const { track } = fixture;
+		const consumer = track.consume(undefined);
+		track.insertDatagram(HIGH[0], { payload: payload(5), timestampUs: 7n });
+		const datagram = await within(consumer.recvDatagram(), 1000, "recvDatagram");
+		if (datagram?.sequence !== HIGH[0]) throw new Error(`sequence ${datagram?.sequence} != ${HIGH[0]}`);
+		if (datagram.timestampUs !== 7n) throw new Error(`timestamp ${datagram.timestampUs}`);
+		if (datagram.payload.byteLength !== 5) throw new Error(`payload ${datagram.payload.byteLength} bytes`);
+		const next = track.appendDatagram({ payload: payload(1), timestampUs: 8n });
+		if (next !== HIGH[0] + 1n) throw new Error(`appended at ${next}`);
+		return undefined;
+	},
+
+	"broadcast closed resolves once its producer closes": async () => {
+		using fixture = localTrack();
+		const { broadcast } = fixture;
+		const closed = broadcast.consume().closed();
+		if (!(await pending(closed))) throw new Error("closed settled while live");
+		broadcast.close();
+		await within(closed, 1000, "closed");
+		return undefined;
+	},
+
 	"closing the producer ends a pending read": async () => {
 		using fixture = localGroup();
 		const { group, consumer } = fixture;
@@ -321,23 +361,6 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 		return closed;
 	},
 
-	"a token added while dialing ends with a refused dial": async (relay) => {
-		const session = await dial(relay, "00".repeat(32));
-		// Taken before the dial settles, so the token waits for a session that never comes.
-		const adding = session.auth().add("token");
-		const state = await settled(session);
-		if (state.phase !== MoqConnectionPhase.Closed) throw new Error(`settled ${state.phase}`);
-		const added = await settle(
-			adding,
-			5000,
-			"add",
-			() => "resolved",
-			(err: unknown) => (err as Error).message,
-		);
-		if (added === "resolved") throw new Error("add resolved after a refused dial");
-		return added;
-	},
-
 	"cancelling a dial closes it": async (relay) => {
 		const session = await dial(relay);
 		session.cancel(0);
@@ -352,10 +375,11 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 		const subscriber = await connect(relay);
 		try {
 			const path = `uniffi/u64/${crypto.randomUUID()}`;
-			const broadcast = publisher.publish().createBroadcast(path);
+			const publication = publisher.publish().createBroadcast(path);
+			const broadcast = publication.broadcast();
 			const track = broadcast.publishTrack("data", TIMED);
-			broadcast.announce(MoqAnnounceRoute.create({}));
-			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
+			publication.announce(MoqAnnounceRoute.create({}));
+			const consumer = await within(subscriber.consume().follow(path, undefined).available(), 5000, "announce");
 			const sub = await consumer.subscribeTrack("data", undefined);
 			const seen: string[] = [];
 			for (const sequence of [5n, 2n ** 32n, 2n ** 53n - 1n, ...HIGH]) {
@@ -384,10 +408,11 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 		const subscriber = await connect(relay);
 		try {
 			const path = `uniffi/refuse/${crypto.randomUUID()}`;
-			const broadcast = publisher.publish().createBroadcast(path);
+			const publication = publisher.publish().createBroadcast(path);
+			const broadcast = publication.broadcast();
 			broadcast.publishTrack("data", TIMED);
-			broadcast.announce(MoqAnnounceRoute.create({}));
-			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
+			publication.announce(MoqAnnounceRoute.create({}));
+			const consumer = await within(subscriber.consume().follow(path, undefined).available(), 5000, "announce");
 			const outcome = await settle(
 				consumer.subscribeTrack("missing", undefined).then((track) => track.recvGroup()),
 				5000,
@@ -403,15 +428,36 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 		}
 	},
 
+	"broadcast closed resolves when the publisher ends it": async (relay) => {
+		const publisher = await connect(relay);
+		const subscriber = await connect(relay);
+		try {
+			const path = `uniffi/closed/${crypto.randomUUID()}`;
+			const publication = publisher.publish().createBroadcast(path);
+			publication.broadcast().publishTrack("data", TIMED);
+			publication.announce(MoqAnnounceRoute.create({}));
+			const consumer = await within(subscriber.consume().follow(path, undefined).available(), 5000, "announce");
+			const closed = consumer.closed();
+			if (!(await pending(closed))) throw new Error("closed settled while announced");
+			publication.broadcast().close();
+			await within(closed, 5000, "closed after the publisher closed");
+			return undefined;
+		} finally {
+			publisher.cancel(0);
+			subscriber.cancel(0);
+		}
+	},
+
 	"session cancel rejects a pending remote read": async (relay) => {
 		const publisher = await connect(relay);
 		const subscriber = await connect(relay);
 		try {
 			const path = `uniffi/close/${crypto.randomUUID()}`;
-			const broadcast = publisher.publish().createBroadcast(path);
+			const publication = publisher.publish().createBroadcast(path);
+			const broadcast = publication.broadcast();
 			const track = broadcast.publishTrack("data", TIMED);
-			broadcast.announce(MoqAnnounceRoute.create({}));
-			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
+			publication.announce(MoqAnnounceRoute.create({}));
+			const consumer = await within(subscriber.consume().follow(path, undefined).available(), 5000, "announce");
 			const sub = await consumer.subscribeTrack("data", undefined);
 			const group = track.appendGroup();
 			group.writeFrame({ payload: payload(4), timestampUs: 0n });

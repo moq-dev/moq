@@ -29,7 +29,7 @@ jobs:
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
-      # The JS baseline is the API reports committed on `release`.
+      # The JS baseline is rendered from `release`'s source.
       - name: Fetch release
         run: git fetch --no-tags --depth=1 origin +refs/heads/release:refs/remotes/origin/release
       - name: Diff against the last release

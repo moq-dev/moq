@@ -171,7 +171,7 @@ mod stream_transport {
 		///
 		/// `Stream` is generic over the byte stream, so it can't discover the socket
 		/// on its own; the builder that knows the concrete type attaches it. See
-		/// [`TcpStats`](crate::TcpStats).
+		/// `TcpStats` (Linux and macOS).
 		pub fn with_socket_stats(mut self, stats: crate::SharedSocketStats) -> Self {
 			self.socket_stats = Some(stats);
 			self

@@ -3,15 +3,22 @@ import type { Version } from "./session.ts";
 import Session from "./session.ts";
 
 export { SessionError, StreamError } from "./error.ts";
-export type { AcceptOptions, Config, SessionOptions, Version } from "./session.ts";
-export { selectSubprotocol } from "./session.ts";
-export type { WebSocketLike, WebSocketStreamLike } from "./web-socket-stream.ts";
+export type { AcceptOptions, Config, SendStreamOptions, SessionOptions, Version } from "./session.ts";
+export { Datagrams, selectSubprotocol } from "./session.ts";
+export type {
+	WebSocketLike,
+	WebSocketStreamCloseEvent,
+	WebSocketStreamCloseInfo,
+	WebSocketStreamData,
+	WebSocketStreamLike,
+	WebSocketStreamOpenEvent,
+} from "./web-socket-stream.ts";
 
-/** Options forwarded to every `Session` constructed by [[install]]. */
+/** Options forwarded to every `Session` constructed by {@link install}. */
 export interface InstallOptions {
-	/** ALPN -> wire-format version(s). See [[SessionOptions.versions]]. */
+	/** Wire-format version(s) by ALPN. See {@link SessionOptions.versions}. */
 	versions?: Record<string, Version | Version[] | null>;
-	/** Require the peer to negotiate an app protocol. See [[SessionOptions.requireProtocol]]. */
+	/** Require the peer to negotiate an app protocol. See {@link SessionOptions.requireProtocol}. */
 	requireProtocol?: boolean;
 }
 

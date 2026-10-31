@@ -63,11 +63,29 @@ Audio packets share groups of at least 20 ms while forwarding as they arrive.
 Each `sink_%u` request pad is one track. Pad properties: `track` names it
 (default: after the codec), `container=loc` publishes it as
 [LOC](/concept/standard#loc) instead of the legacy hang container, and
-`track-status`/`track-error` report its lifecycle. Caps that only change what
-the bitstream already carries (a video resolution) keep the track live. A run
-never publishes a track name it ended again: new codec config, a pad requested
-again, or a stream resumed after EOS publishes as `<track>/<n>`, which `track`
-reads back. Element properties:
+`track-status`/`track-error` report its lifecycle. `track-demand` is null until
+the track is active, then reports `wanted` and the wanted `group`; watch its
+property notification to gate an upstream encoder explicitly. Keep encoding
+until the track is published, though: demand is reported once the pad
+negotiates, but the first catalog needs a timed buffer and any in-band codec
+config, so stopping on the initial `wanted=false` hides the rendition from
+catalog-driven viewers and demand never arrives. The same applies to a
+`<track>/<n>` replacement (below). Setting
+`bandwidth-ceiling` to that encoder's maximum bits per second also reserves a
+fair share of the connection estimate. The same structure then reports
+`probed` and `grant-bps`; an absent grant means hold the current rate, while a
+present zero is a real zero grant. Follow a grant only while `probed` is true.
+Update `bandwidth-ceiling` if a live encoder renegotiates its maximum; setting it
+to zero releases the reservation while continuing to observe demand. The sink
+never starts, stops, or retunes an encoder itself. Zero (the default) observes
+demand without taking a reservation. Demand-gated encoding has no past media
+for FETCH or a late subscriber, so it is an application choice rather than the
+default.
+
+Caps that only change what the bitstream already carries (a video resolution)
+keep the track live. A run never publishes a track name it ended again: new
+codec config, a pad requested again, or a stream resumed after EOS publishes as
+`<track>/<n>`, which `track` reads back. Element properties:
 `url`, `broadcast`, `linger`, `connect-version`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
@@ -76,10 +94,11 @@ reports `failed` on an answer redialing can't change, such as a rejected token.
 Both elements accept the same connection properties. `connect-version` is a
 comma-separated list, matching the CLI's repeatable `--connect-version`;
 unknown versions fail startup. QUIC durations are milliseconds, with zero
-disabling the local idle timeout or keep-alive.
+disabling the local idle timeout or keep-alive. An unset keep-alive derives
+from the idle timeout and reads back as that interval.
 Each run from `READY` publishes under a fresh
 [publisher epoch](/concept/moq-lite#publisher-epochs), so on moq-lite 07 (opt-in)
-or moq-transport draft 17 and later, viewers switch to a restarted pipeline at once instead of stalling on the old
+or moq-transport, viewers switch to a restarted pipeline at once instead of stalling on the old
 one; reconnects within a run keep it. The first catalog waits for a timed buffer
 to place the shared wall clock and for every requested pad to negotiate its
 rendition, including any codec config carried in its first buffers. A linked pad
@@ -159,4 +178,9 @@ To decrypt a capture, set `quic-keylog=true` on either element along with
 `SSLKEYLOGFILE`; the variable alone writes nothing, and the flag without it fails
 the start. Existing Unix log files must be private (mode 0600); files accessible to group or others are refused.
 
-`moqsrc` creates source pads only for enabled renditions. Disabling a rendition stops its media and holds its pad idle without EOS; enabling it again resumes on the same pad.
+`moqsrc` initially selects only enabled renditions. When a selected rendition is
+disabled, it keeps reading on the same pad while no rendition of its kind is
+enabled, so media arriving before the re-enable catalog update still plays. An
+enabled alternative stops the disabled reader but keeps its pad idle without EOS;
+enabling it again resumes on that pad. Removing a rendition drains its track and
+ends its pad.

@@ -1,5 +1,5 @@
-import { expect, jest, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { expect, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Effect } from "@moq/signals";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
@@ -103,7 +103,7 @@ test("probe starts empty and stays empty without PROBE support", async () => {
 	}
 });
 
-test("Reload reports stats and probe only while connected", async () => {
+test("Reload exposes its established session stats and probe only while connected", async () => {
 	const original = globalThis.WebTransport;
 	const pair = createMockTransportPair(Lite.ALPN_06, { stats: { bytesSent: 99 } });
 	// `new` on a function returning an object yields that object, handing connect() the mock.
@@ -118,7 +118,7 @@ test("Reload reports stats and probe only while connected", async () => {
 		while (!reload.established.peek()) {
 			await new Promise((resolve) => setTimeout(resolve, 0));
 		}
-		expect((await reload.stats())?.bytesSent).toBe(99);
+		expect((await reload.established.peek()?.stats())?.bytesSent).toBe(99);
 		expect(reload.probe.peek()).toEqual({});
 
 		server.abort();
@@ -126,7 +126,7 @@ test("Reload reports stats and probe only while connected", async () => {
 			await new Promise((resolve) => setTimeout(resolve, 0));
 		}
 		expect(reload.status.peek()).toBe("disconnected");
-		expect(await reload.stats()).toBeUndefined();
+		expect(await reload.established.peek()?.stats()).toBeUndefined();
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(reload.probe.peek()).toBeUndefined();
 	} finally {
@@ -135,20 +135,10 @@ test("Reload reports stats and probe only while connected", async () => {
 	}
 });
 
-function drain(): Promise<void> {
-	return new Promise((resolve) => {
-		const channel = new MessageChannel();
-		channel.port1.onmessage = () => {
-			channel.port1.close();
-			channel.port2.close();
-			resolve();
-		};
-		channel.port2.postMessage(null);
-	});
-}
-
 test("a lite connection probes only while its estimate is observed", async () => {
-	jest.useFakeTimers();
+	const clock = new Manual();
+	const installed = clock.install();
+	const drain = () => clock.advance(Nano.zero);
 	const pair = createMockTransportPair(Lite.ALPN_06, { stats: { estimatedSendRate: 1_000_000 } });
 	const open = pair.client.createBidirectionalStream.bind(pair.client);
 	let finished = 0;
@@ -183,8 +173,7 @@ test("a lite connection probes only while its estimate is observed", async () =>
 			values.push(effect.get(client.probe));
 		});
 		await drain();
-		jest.advanceTimersByTime(100);
-		await drain();
+		await clock.advance(Nano.fromMilli(Milli(100)));
 		expect(values.at(-1)).toMatchObject({ estimatedRecvRate: 1_000_000 });
 		// A reactive one-shot listener reattaches without dropping demand between updates.
 		expect(pair.client.sendStreams.bidi).toHaveLength(1);
@@ -205,6 +194,6 @@ test("a lite connection probes only while its estimate is observed", async () =>
 		client.abort();
 		server.abort();
 		opening.mockRestore();
-		jest.useRealTimers();
+		installed.close();
 	}
 });

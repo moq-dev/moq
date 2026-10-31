@@ -24,8 +24,10 @@ fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
 
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
 ///
-/// Set `max_delay`, whose moq-net default is 0, and the other fields you care about; the
-/// rest default to moq-net's defaults (priority 0, everything still fresh, newest first).
+/// Start from [`moq_subscription_defaults`] for moq-net's defaults (priority 0, a `max_delay`
+/// of 0, everything still fresh, newest first) and change the fields you care about. Kotlin and
+/// Swift make a record built field by field name `max_delay`; Dart, Go, and C can still omit it,
+/// which means no subscriber limit.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
@@ -33,13 +35,12 @@ pub struct MoqSubscription {
 	#[uniffi(default = 0)]
 	pub priority: i8,
 	/// Maximum age of a non-latest group before it is skipped.
-	/// `0` skips immediately; a larger value tolerates that much reordering; null leaves
-	/// the publisher's max age alone to bound it.
+	/// `0` skips immediately; a larger value tolerates that much reordering; null sets no
+	/// subscriber limit and leaves the publisher's max age alone to bound it. Required,
+	/// since uniffi can't default a duration to `0`.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
-	///
-	/// It has no binding default because UniFFI cannot spell a duration literal.
 	pub max_delay: Option<Duration>,
 	/// The spans of the track to deliver, or null for everything `max_delay` still
 	/// considers fresh. An empty list asks for nothing.
@@ -51,6 +52,20 @@ pub struct MoqSubscription {
 	/// Which pending group the publisher sends first, or null for newest first.
 	#[uniffi(default = None)]
 	pub order: Option<MoqOrder>,
+}
+
+/// A subscription with moq-net's defaults, which skips a superseded group at once.
+///
+/// A null subscription argument means the same; build from this one to change a field.
+#[uniffi::export]
+pub fn moq_subscription_defaults() -> MoqSubscription {
+	let defaults = moq_net::track::Subscription::default();
+	MoqSubscription {
+		priority: defaults.priority,
+		max_delay: defaults.max_delay,
+		ranges: None,
+		order: None,
+	}
 }
 
 /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
@@ -237,9 +252,11 @@ impl MoqBroadcastConsumer {
 	) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		self.driver
 			.watch(async {
-				// Normalize before testing emptiness: this is a caller-supplied string, and one made only
-				// of slashes normalizes to the empty reference, which names this broadcast.
-				let reference = reference.map(moq_net::path::Relative::new);
+				// A caller-supplied string, refused unless it is spelled as a catalog's reference must be.
+				let reference = reference
+					.map(moq_net::path::Relative::new)
+					.transpose()
+					.map_err(moq_net::Error::from)?;
 				let epoch: Option<moq_net::Epoch> = epoch.map(str::parse).transpose()?;
 
 				let Some(origin) = self.origin.clone() else {
@@ -292,6 +309,19 @@ impl MoqBroadcastConsumer {
 				driver: self.driver.clone(),
 			},
 		}))
+	}
+
+	/// Wait until the broadcast ends: its publisher closed it, or every producer of it left.
+	///
+	/// Resolves rather than erroring when it ends, since an ended broadcast is not a failure.
+	/// Errors only when the session driving it fails first. Cancel the call to stop waiting.
+	pub async fn closed(&self) -> Result<(), MoqError> {
+		self.driver
+			.watch(async {
+				self.inner.closed().await;
+				Ok(())
+			})
+			.await
 	}
 
 	/// Subscribe to a track by name, the same pattern as moq-boy's command/status tracks.

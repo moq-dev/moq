@@ -4,26 +4,26 @@
  * This module provides path-aware operations that respect delimiter boundaries,
  * preventing issues like "foo" matching "foobar".
  *
- * Paths are automatically trimmed of leading and trailing slashes on creation,
- * making all slashes implicit at boundaries. A path names a point in the origin's
- * tree from its root; a leading slash never escapes that root. The same type names
- * an exact broadcast and the prefix a route or announcement covers, so a broadcast's
- * own path is the prefix it announces. See {@link Relative} for `..`-style references.
+ * A path is a run of non-empty segments separated by `/`, so it has exactly one spelling:
+ * {@link from} throws on a leading, trailing, or doubled slash rather than collapsing it.
+ * A `\` escapes the `\` or `/` after it, which is how a moq-transport namespace field holding
+ * either one is spelled, and any other `\` is refused. Segments still split at every `/`.
+ * The empty path is the root, which prefixes every path; a prefix needs no trailing slash.
+ * A path names a point in the origin's tree from its root. The same type names an exact
+ * broadcast and the prefix a route or announcement covers, so a broadcast's own path is
+ * the prefix it announces. See {@link Relative} for `..`-style references.
  *
  * {@link Pattern} and {@link Patterns} are re-exported from `@moq/pattern`, the owner of
- * the v1 grammar and algebra. Literal path construction and wire decoding retain
- * their existing behavior.
+ * the v1 grammar and algebra.
  *
  * @example
  * ```typescript
- * // Creation automatically trims slashes
- * const path1 = Path.from("/foo/bar/");
- * const path2 = Path.from("foo/bar");
- * console.log(path1 === path2); // true
+ * // Multiple arguments are joined with "/", and an empty one is the root
+ * const path = Path.from("api", "", "v1/users");
+ * console.log(path); // "api/v1/users"
  *
- * // Multiple arguments are joined with "/"
- * const path3 = Path.from("api", "v1", "users");
- * console.log(path3); // "api/v1/users"
+ * // A slash at a boundary or a doubled one is an empty segment
+ * Path.from("/api/v1"); // throws
  *
  * // Safe prefix matching
  * const base = Path.from("api/v1");
@@ -36,7 +36,7 @@
  * @module
  */
 
-/** A normalized broadcast path. */
+/** A broadcast path: non-empty segments separated by `/`, or the empty root. */
 export type Valid = string & { __brand: "Name" };
 
 /**
@@ -56,11 +56,40 @@ export type Relative = string & { __brand: "Relative" };
  */
 export const MAX_PARTS = 32;
 
-/** Build a path from one or more components, joining with "/" and trimming redundant slashes. */
+/**
+ * Maximum UTF-8 length of a path in bytes.
+ *
+ * Matches the IETF moq-transport limit of 4096 bytes for a namespace. Its tuple fields
+ * drop the path's separators and escapes, so every path fits both wires.
+ */
+export const MAX_BYTES = 4096;
+
+const utf8 = new TextEncoder();
+
+/**
+ * Build a path by joining components with "/", where an empty component is the root.
+ *
+ * Throws when a component has a leading, trailing, or doubled `/`, or a `\` before anything
+ * but `\` or `/`.
+ */
 export function from(...paths: string[]): Valid {
-	// Join paths with "/" and then remove leading and trailing slashes, and collapse multiple slashes into one.
-	const joined = paths.join("/");
-	return joined.replace(/\/+/g, "/").replace(/^\/+/, "").replace(/\/+$/, "") as Valid;
+	for (const path of paths) {
+		const error = spelling(path);
+		if (error) throw new Error(error);
+	}
+	return paths.filter((path) => path !== "").join("/") as Valid;
+}
+
+// Why `path` is not the one spelling of a path, or undefined when it is.
+function spelling(path: string): string | undefined {
+	if (path.startsWith("/") || path.endsWith("/") || path.includes("//")) {
+		return "path contains an empty segment";
+	}
+	// Pairs of `\` are escaped backslashes, so any `\` left must escape a `/`.
+	if (path.includes("\\") && /\\(?!\/)/.test(path.replaceAll("\\\\", ""))) {
+		return "path contains a `\\` that escapes neither `\\` nor `/`";
+	}
+	return undefined;
 }
 
 /** Split a path into its slash-separated parts. The empty path has no parts. */
@@ -69,30 +98,38 @@ export function parts(path: Valid): string[] {
 }
 
 /**
- * Validate an untrusted wire string as a path, enforcing {@link MAX_PARTS}.
+ * Validate an untrusted wire string as a path, enforcing {@link MAX_PARTS} and {@link MAX_BYTES}.
  *
- * Throws when the path has too many parts; use at wire decode sites.
+ * Throws when the path has an empty segment or is too deep or too long; use at wire decode sites.
  */
 export function decode(raw: string): Valid {
-	const path = from(raw);
-	return encode(path);
+	return encode(from(raw));
 }
 
 /**
- * Validate a path before writing it to the wire, enforcing {@link MAX_PARTS}.
+ * Validate a path before writing it to the wire, enforcing {@link MAX_PARTS} and {@link MAX_BYTES}.
  *
- * Throws when the path has too many parts; use at wire encode sites so we never
+ * Throws when the path is too deep or too long; use at wire encode sites so we never
  * emit a path the remote side is required to reject.
  */
 export function encode(path: Valid): Valid {
+	const error = check(path);
+	if (error) throw new Error(error);
+	return path;
+}
+
+/** Why `path` breaks the wire limits, or undefined when it fits. @internal */
+export function check(path: Valid): string | undefined {
 	// Count separators with an early exit instead of splitting, so a hostile path never allocates per part.
 	let count = path === "" ? 0 : 1;
 	for (let i = path.indexOf("/"); i !== -1; i = path.indexOf("/", i + 1)) {
-		if (++count > MAX_PARTS) {
-			throw new Error(`path exceeds ${MAX_PARTS} parts`);
-		}
+		if (++count > MAX_PARTS) return `path exceeds ${MAX_PARTS} parts`;
 	}
-	return path;
+	// A UTF-16 unit is at most 3 UTF-8 bytes, so only a long path needs encoding to measure.
+	if (path.length > MAX_BYTES / 3 && utf8.encode(path).length > MAX_BYTES) {
+		return `path exceeds ${MAX_BYTES} bytes`;
+	}
+	return undefined;
 }
 
 /**
@@ -108,7 +145,6 @@ export function encode(path: Valid): Valid {
  * ```typescript
  * const path = Path.from("foo/bar");
  * console.log(Path.hasPrefix(Path.from("foo"), path)); // true
- * console.log(Path.hasPrefix(Path.from("foo/"), path)); // true (trailing slash ignored)
  * console.log(Path.hasPrefix(Path.from("fo"), path)); // false
  *
  * const path2 = Path.from("foobar");
@@ -143,9 +179,6 @@ export function hasPrefix(prefix: Valid, path: Valid): boolean {
  * const path = Path.from("foo/bar/baz");
  * const suffix = Path.stripPrefix(Path.from("foo"), path);
  * console.log(suffix); // "bar/baz"
- *
- * const suffix2 = Path.stripPrefix(Path.from("foo/"), path);
- * console.log(suffix2); // "bar/baz"
  *
  * const noMatch = Path.stripPrefix(Path.from("notfound"), path);
  * console.log(noMatch); // null
@@ -186,7 +219,7 @@ export function join(path: Valid, other: Valid): Valid {
 	} else if (other === "") {
 		return path;
 	} else {
-		// Since paths are trimmed, we always need to add a slash
+		// Neither side has a boundary slash, so exactly one joins them
 		return `${path}/${other}` as Valid;
 	}
 }
@@ -197,20 +230,24 @@ export function empty(): Valid {
 }
 
 /**
- * Normalize a relative path reference: trim leading/trailing slashes, drop empty
- * segments, and drop redundant `.` segments. A reference made only of `.` segments
- * normalizes to `.` because it names the base's parent, while empty names the base.
- * `..` is preserved and only interpreted by {@link resolve}.
+ * Parse a relative path reference and drop its redundant `.` segments. It is spelled like
+ * a path, so this throws on a leading, trailing, or doubled `/` or a lone `\` rather than
+ * collapsing it. A reference made only of `.` segments normalizes to `.` because it names
+ * the base's parent, while empty names the base. `..` is preserved and only interpreted
+ * by {@link resolve}.
  *
- * Mirrors the Rust `path::Relative::new` normalization, so JS and Rust agree
- * byte-for-byte on the stored form. Two callers comparing normalized strings can
- * detect equivalent references while preserving the distinction between `""` and `"."`.
+ * Mirrors the Rust `path::Relative::new`, so JS and Rust agree byte-for-byte on the stored
+ * form. Two callers comparing normalized strings can detect equivalent references while
+ * preserving the distinction between `""` and `"."`.
  */
 export function normalizeRelative(rel: string): Relative {
+	from(rel);
 	const raw = rel.split("/");
-	const normalized = raw.filter((s) => s !== "" && s !== ".").join("/");
+	if (!raw.includes(".")) return rel as Relative;
 
-	return (normalized === "" && raw.includes(".") ? "." : normalized) as Relative;
+	const normalized = raw.filter((s) => s !== ".").join("/");
+	// Dropping a `.` after an escaped `/` strands its `\`, so the result is checked again.
+	return from(normalized === "" ? "." : normalized) as string as Relative;
 }
 
 /**
@@ -218,8 +255,11 @@ export function normalizeRelative(rel: string): Relative {
  *
  * A non-empty reference replaces the last segment of the base, matching relative URL
  * resolution. `..` segments then pop another segment; other segments are appended.
- * `.` and empty segments are no-ops. Excess `..` once the base is empty is also a no-op
+ * `.` segments are no-ops. Excess `..` once the base is empty is also a no-op
  * (subsequent named segments still append). An empty `rel` returns the base unchanged.
+ *
+ * Throws when the result ends a segment in a lone `\` because resolution dropped the
+ * escaped `/` after it.
  *
  * Mirrors the Rust `Path::resolve`, used by hang catalogs to express
  * cross-broadcast track references (a rendition's `broadcast` field).
@@ -238,7 +278,7 @@ export function resolve(base: Valid, rel: Relative): Valid {
 	segments.pop();
 
 	for (const seg of rel.split("/")) {
-		if (seg === "" || seg === ".") {
+		if (seg === ".") {
 			continue;
 		}
 		if (seg === "..") {
@@ -248,11 +288,12 @@ export function resolve(base: Valid, rel: Relative): Valid {
 		}
 	}
 
-	return segments.join("/") as Valid;
+	return from(segments.join("/"));
 }
 
 /**
- * Resolve a relative path, returning `undefined` if it escapes above the root.
+ * Resolve a relative path, returning `undefined` if it escapes above the root or
+ * {@link resolve} would throw.
  *
  * Unlike {@link resolve}, this distinguishes a valid reference to the empty root
  * path from excess `..` segments. Use it for untrusted catalog references that
@@ -265,7 +306,7 @@ export function tryResolve(base: Valid, rel: Relative): Valid | undefined {
 	segments.pop();
 
 	for (const seg of rel.split("/")) {
-		if (seg === "" || seg === ".") {
+		if (seg === ".") {
 			continue;
 		}
 		if (seg === "..") {
@@ -275,7 +316,8 @@ export function tryResolve(base: Valid, rel: Relative): Valid | undefined {
 		}
 	}
 
-	return segments.join("/") as Valid;
+	const resolved = segments.join("/");
+	return spelling(resolved) === undefined ? (resolved as Valid) : undefined;
 }
 
 /**

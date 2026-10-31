@@ -17,8 +17,7 @@ export * as Container from "./container";
 export * as Echo from "./echo";
 /** Client health graded from two consecutive media reports. */
 export * as Health from "./health";
-
+/** A rendition's HLS segment records, each segment's first group and pts. */
+export * as Hls from "./hls";
 /** Publisher media and transport snapshot schemas. */
 export * as Stats from "./stats";
-/** A track's timeline, mapping its content time to the groups and frames that carry it. */
-export * as Timeline from "./timeline";

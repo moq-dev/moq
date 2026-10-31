@@ -29,6 +29,7 @@ function summarize(support: Full): Level {
 
 /** The `<moq-publish-support>` element: a banner reporting what this browser can publish. */
 export default class MoqPublishSupport extends Support {
+	/** Detect what this browser can publish. */
 	protected async detect(): Promise<Report> {
 		const support = await isSupported();
 		return {

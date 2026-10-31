@@ -418,8 +418,8 @@ impl Publish {
 	/// Once the stream ends, the finished broadcast stays up for the
 	/// [linger](Self::with_linger), and the future resolves after that. Dropping the future
 	/// ends the linger early. A socket or demux error closes the broadcast at once.
-	pub async fn accept(self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn accept(self, origin: &origin::Producer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT publish accepted");
 		let config = moq_mux::catalog::Config::default()
@@ -493,8 +493,8 @@ impl Subscribe {
 	/// Waits for the broadcast to be announced (so a caller may connect before the
 	/// publisher), cancelling cleanly if the caller disconnects first. This future
 	/// resolves when playback ends, so callers usually run it on its own task.
-	pub async fn accept(self, origin: &origin::Consumer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn accept(self, origin: &origin::Consumer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT subscribe accepted");
 		let options = crate::ts::Options {
@@ -583,7 +583,7 @@ pub(crate) async fn serve_subscribe(
 	mut socket: SrtSocket,
 	options: crate::ts::Options,
 ) -> Result<()> {
-	// Resolve the broadcast, but watch the socket while we wait: `routed`
+	// Resolve the broadcast, but watch the socket while we wait: following it
 	// parks forever for a stream that is never published, and nothing else polls the
 	// socket during that wait, so without this a caller who requests a non-existent
 	// stream (or hangs up before it starts) would leak this task and its socket.
@@ -597,7 +597,7 @@ pub(crate) async fn serve_subscribe(
 	};
 
 	let Some(mut subscriber) = subscriber else {
-		tracing::warn!(%path, "SRT subscribe for an unroutable broadcast");
+		tracing::debug!(%path, "SRT subscribe for an unroutable broadcast");
 		return Ok(());
 	};
 
@@ -964,7 +964,8 @@ mod tests {
 			panic!("m=request must create a subscribe request");
 		};
 		let consumer = origin.consume();
-		let egress = tokio::spawn(async move { subscribe.accept(&consumer, "marker").await });
+		let egress =
+			tokio::spawn(async move { subscribe.accept(&consumer, moq_net::Path::from_static("marker")).await });
 		let mut receiver = caller.await.unwrap();
 
 		// Three seconds of program, then wait until the receiver is actually playing it
@@ -1102,7 +1103,7 @@ mod tests {
 			subscribe
 				.with_follow(follow)
 				.with_stitch(stitch)
-				.accept(&consumer, "live")
+				.accept(&consumer, moq_net::Path::from_static("live"))
 				.await
 		});
 		(caller.await.unwrap(), task)

@@ -14,8 +14,11 @@
 //! it, which a new subscription may still read. That buffer bills what it retains to the
 //! track's [`Pool`](crate::cache::Pool), like cached groups, so pressure drops the oldest.
 //!
-//! Wire counterparts: [`crate::lite::Datagram`], and on moq-transport an OBJECT_DATAGRAM at
-//! object 0 whose Group ID is the sequence ([`crate::ietf::ObjectDatagram`]).
+//! Wire counterparts: [`crate::lite::Datagram`] and moq-transport's
+//! [`crate::ietf::ObjectDatagram`], whose Group ID is the sequence. Relays preserve its Object
+//! IDs and statuses between moq-transport peers and across a moq-lite hop negotiating `ietf`.
+//! The plain reader and a lite hop without that extension deliver only normal object 0
+//! payloads, dropping other objects and statuses without refusing the track.
 
 use bytes::Bytes;
 

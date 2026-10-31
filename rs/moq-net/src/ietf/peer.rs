@@ -34,7 +34,7 @@ pub(crate) struct Peer {
 	/// publisher's epoch in both directions.
 	pub epoch: bool,
 
-	/// Whether this draft-17+ peer offered DEFLATE-compressed tracks.
+	/// Whether this peer offered DEFLATE-compressed tracks.
 	pub flate: bool,
 }
 
@@ -51,6 +51,8 @@ pub(crate) struct PeerSetup {
 	declined_epoch: bool,
 	/// Where the peer's advertised implementation is published for the session handle.
 	implementation: crate::setup::PeerImplementation,
+	/// The session's auth link to tell once the peer's SETUP accepts the connection.
+	accept: Option<crate::auth::Link>,
 }
 
 impl PeerSetup {
@@ -68,7 +70,15 @@ impl PeerSetup {
 			slot: Default::default(),
 			declined_epoch: !offered.epoch,
 			implementation: Default::default(),
+			accept: None,
 		}
+	}
+
+	/// Tell `link` once the peer's SETUP arrives that it accepted the connection credential.
+	pub fn accepting(mut self, link: crate::auth::Link) -> Self {
+		link.await_setup();
+		self.accept = Some(link);
+		self
 	}
 
 	/// Publish the peer's advertised implementation to `slot` once its SETUP is read.
@@ -92,8 +102,13 @@ impl PeerSetup {
 	pub fn set(&self, mut peer: Peer) {
 		peer.epoch &= !self.declined_epoch;
 		let mut slot = self.slot.lock();
-		if slot.is_none() {
-			*slot = Some(peer);
+		if slot.is_some() {
+			return;
+		}
+		*slot = Some(peer);
+		drop(slot);
+		if let Some(link) = &self.accept {
+			link.accepted();
 		}
 	}
 

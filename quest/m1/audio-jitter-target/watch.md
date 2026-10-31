@@ -28,7 +28,12 @@ fixtures retain their original arrivals with exact 1024-sample durations;
 `relay-mic` was re-recorded with Chromium's fake capture device because the
 old recording retained no payloads from which to recover Opus durations.
 
-Re-measured on 2026-10-22: all four replay rows have zero underruns. The
+Re-measured on 2026-10-22: all four replay rows have zero underruns. These
+numbers predate
+[moq-dev/moq#6484](https://github.com/moq-dev/moq/pull/6484),
+[moq-dev/moq#6609](https://github.com/moq-dev/moq/pull/6609), and
+[moq-dev/moq#6595](https://github.com/moq-dev/moq/pull/6595); the manual run
+re-measures them (decided 2026-10-27, maintainer). The
 fresh `relay-mic` has zero skips, stalls, or silence, a 60 ms p95 target,
 and 3.5 s convergence, over a 2 ms minimum RTT. It is a new
 fake-device recording, so that result proves neither an improvement on

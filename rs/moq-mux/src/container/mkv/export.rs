@@ -185,8 +185,8 @@ impl MkvTrack {
 		match &mut self.declared {
 			Some(clock) => clock.push(arrival, pts)?,
 			None => {
-				let arrived = arrival.arrived;
-				self.clock.push(arrival, pts, arrived)
+				let (arrived, bytes) = (arrival.arrived, arrival.bytes);
+				self.clock.push(arrival, pts, arrived, bytes)
 			}
 		}
 		self.release(name, jitter, false)
@@ -227,7 +227,9 @@ impl MkvTrack {
 		loop {
 			let settle = match flush {
 				true => Settle::All,
-				false => self.clock.settle(lookahead, self.latest, jitter.delay()),
+				false => self
+					.clock
+					.settle(lookahead, self.latest, jitter.delay(), crate::jitter::MAX_BYTES),
 			};
 			let Some((mut arrival, dts)) = self.clock.pop(lookahead, floor, settle) else {
 				break;
@@ -391,7 +393,6 @@ impl<S: Stream> Export<S> {
 			}
 		}
 
-		self.jitter.expect(self.tracks.keys().cloned());
 		self.fill(waiter)?;
 
 		// 3. Before the header is emitted: keep pulling until every video
@@ -478,11 +479,12 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	/// Read each track until it has a frame due, preserving ingress timing before buffering.
+	/// Read each track within its jitter window, preserving ingress timing before buffering.
 	fn fill(&mut self, waiter: &kio::Waiter) -> Result<()> {
 		for (name, track) in &mut self.tracks {
 			loop {
-				if self.header_emitted && self.jitter.full(name) {
+				if self.header_emitted && self.jitter.full(name, waiter) {
+					let _ = track.source.poll_received(waiter);
 					break;
 				}
 				if !self.header_emitted && track.pending.is_some() {
@@ -497,7 +499,7 @@ impl<S: Stream> Export<S> {
 					let (frame, arrived) = match track.source.poll_event(waiter)? {
 						Poll::Ready(Some(Event::Frame { frame, arrived })) => (frame, arrived.max(track.subscribed)),
 						// A group that ended or was cut short holds frames no later one can precede.
-						Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => {
+						Poll::Ready(Some(Event::GroupEnd | Event::Cut { .. })) => {
 							if track.declared.is_some() {
 								track.release(name, &mut self.jitter, true)?;
 							}
@@ -537,9 +539,9 @@ impl<S: Stream> Export<S> {
 						decode: frame.timestamp.into(),
 						restart: track.source.markers(),
 						skip: track.source.skips(),
-						cut: track.source.cuts(),
 						sync: track.kind == TrackKind::Audio || frame.keyframe,
 						leading: false,
+						bytes: frame.payload.len() + name.len(),
 						item: frame,
 					}
 				};
@@ -661,6 +663,8 @@ impl<S: Stream> Export<S> {
 			next_track_number += 1;
 		}
 
+		// Tracks change only before the header, so the clock waits on this set from here on.
+		self.jitter.expect(self.tracks.keys().cloned());
 		self.catalog_snapshot = Some(catalog);
 		Ok(())
 	}

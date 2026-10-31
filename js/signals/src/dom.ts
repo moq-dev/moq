@@ -70,7 +70,8 @@ export function create<K extends keyof HTMLElementTagNameMap>(
 
 /** Renderable content: a node, array of nodes, primitive, or nullish. Matches solid.js's JSX.Element. */
 export type Element = Node | ArrayElement | (string & {}) | number | boolean | null | undefined;
-interface ArrayElement extends Array<Element> {}
+/** A nested list of {@link Element}s. */
+export interface ArrayElement extends Array<Element> {}
 
 /** Renders `element` into `parent`, removing it again when the effect reruns or closes. */
 export function render(effect: Effect, parent: Node, element: Element | ((effect: Effect) => Element)) {

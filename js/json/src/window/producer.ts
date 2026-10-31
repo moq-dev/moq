@@ -110,11 +110,11 @@ export class Producer<T> {
 
 	#write(encoded: Encoded & { commit(): void }, at: Time.Timestamp | undefined): void {
 		// A throw leaves the edit uncommitted and the retained window unchanged. The next edit opens a
-		// new group because the attempted frame advanced the group-local compression state.
+		// new group, since a consumer may hold the group the frame was meant for.
 		if (encoded.keyframe) {
 			// The previous group is complete; no more frames will be appended to it. Drop the handle
 			// before opening the next one, so a failure below doesn't leave a closed group behind.
-			this.#group?.close();
+			this.#group?.finish();
 			this.#group = undefined;
 
 			const group = this.#track.appendGroup();
@@ -124,7 +124,7 @@ export class Producer<T> {
 			} catch (err) {
 				// The group carries no frames, so close it rather than leaving it open on the track. A
 				// consumer that already advanced into it would otherwise block with nothing to read.
-				group.close();
+				group.finish();
 				throw err;
 			}
 
@@ -153,7 +153,7 @@ export class Producer<T> {
 
 		const group = this.#group;
 		this.#group = undefined;
-		group.close();
+		group.finish();
 	}
 
 	/** Finish the track, closing any open group. */
@@ -167,9 +167,14 @@ export class Producer<T> {
 		this.#unwatch?.();
 		this.#unwatch = undefined;
 
-		this.#group?.close(abort);
+		if (abort) this.#group?.abort(abort);
+		else this.#group?.finish();
 		this.#group = undefined;
 
-		this.#track.close(abort);
+		if (abort) this.#track.abort(abort);
+		else {
+			this.#track.finish();
+			this.#track.close();
+		}
 	}
 }

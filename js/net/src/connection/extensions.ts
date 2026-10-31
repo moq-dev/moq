@@ -6,11 +6,11 @@ import * as Ietf from "../ietf/index.ts";
  * core, so this only changes moq-transport sessions.
  */
 export interface Extensions {
-	/** The MoQ Auth extension: tokens presented and granted on their own stream (draft-17+). */
+	/** The MoQ Auth extension: tokens presented and granted on their own stream (draft-18+). */
 	auth?: boolean;
 	/** The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than announcing unasked. */
 	solicit?: boolean;
-	/** The MoQ Epoch extension: announcements and requests carry the publisher's epoch, as moq-lite does (draft-17+). */
+	/** The MoQ Epoch extension: announcements and requests carry the publisher's epoch, as moq-lite does (draft-18+). */
 	epoch?: boolean;
 }
 
@@ -27,8 +27,8 @@ export function offered(extensions?: Extensions): Offered {
 }
 
 /** Write the options for the offered extensions into a SETUP. */
-export function intoSetup(params: Ietf.SetupOptions, extensions: Offered, version: Ietf.IetfVersion) {
+export function intoSetup(params: Ietf.SetupOptions, extensions: Offered) {
 	if (extensions.solicit) Ietf.solicitIntoSetup(params);
-	if (extensions.auth) Ietf.Auth.intoSetup(params, version);
-	if (extensions.epoch) Ietf.Epoch.intoSetup(params, version);
+	if (extensions.auth) Ietf.Auth.intoSetup(params);
+	if (extensions.epoch) Ietf.Epoch.intoSetup(params);
 }

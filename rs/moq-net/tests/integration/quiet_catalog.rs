@@ -19,7 +19,7 @@ fn timed() -> moq_net::track::Info {
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-16", "moq-transport-22"];
+const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
 
 /// The versions that forward a resume's floor upstream; the IETF relay subscribes without one.
 const LITE: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
@@ -59,8 +59,7 @@ fn publish(origin: &origin::Producer) -> (moq_net::origin::Publication, track::P
 
 async fn request(origin: &origin::Producer) -> broadcast::Consumer {
 	let consumer = origin.consume();
-	consumer.routed("live").await.unwrap();
-	consumer.request_broadcast("live", None).await.unwrap()
+	consumer.follow("live", None).unwrap().available().await.unwrap()
 }
 
 /// Subscribe without a floor and expect the snapshot as group 0.

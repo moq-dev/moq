@@ -27,7 +27,3 @@ clock; a follow-up decides whether it is worth chasing. Either result
 deletes this quest.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the recipe this profiles with

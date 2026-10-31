@@ -132,7 +132,7 @@ export class Producer {
 			if (this.#claims.has(semantic)) throw new Failure("reuse");
 		} catch (err) {
 			// Both refusals are Failures.
-			track.close(err as Failure);
+			track.abort(err as Failure);
 			throw err;
 		}
 		this.#claims.add(semantic);

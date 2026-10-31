@@ -38,14 +38,14 @@ the questions decided below and landed only the `track_range_filling` benchmark.
   read has to request it instead of letting `Lagged` reach the caller.
   `fill::Ask` already carries a start frame, so the miss judge can count a
   headless slot as a hole for a bounded window.
-- **Wire publishers keep parking, except on lite-07.** The lite subscriber
-  reads an upstream FIN as the track's end on a published version. Once
-  `recv_group` ends a bounded read, the IETF publisher and lite publishers
-  before lite-07 keep parking on a bounded downstream SUBSCRIBE rather than FIN
-  it, or a peer reads the range's end as the track's. A lite-07 publisher FINs
-  a covered bounded subscription without SUBSCRIBE_END, which ends only the
-  subscription (maintainer, 2026-10-25, on
-  [moq-dev/moq#6807](https://github.com/moq-dev/moq/pull/6807)).
+- **Wire publishers keep parking.** The lite subscriber reads an upstream
+  FIN as the track's end on a published version. Once `recv_group` ends a
+  bounded read, the IETF publisher and lite publishers before lite-07 keep
+  parking on a bounded downstream SUBSCRIBE rather than FIN it, or a peer
+  reads the range's end as the track's. The lite-07 half already landed in
+  [moq-dev/moq#6807](https://github.com/moq-dev/moq/pull/6807): a lite-07
+  publisher FINs a covered bounded subscription without SUBSCRIBE_END, which
+  ends only the subscription.
 - **Route recovery keeps a frame start.** `resume::Recover` fetches the rest of
   a group from frame N on the new route (`group::Fetch::frame_start`), which a
   whole-group range cannot say, so a crate-private fetch stays for it.
@@ -75,7 +75,9 @@ the questions decided below and landed only the `track_range_filling` benchmark.
   moq-transport fetch never subscribes, and a lite SUBSCRIBE before lite-05
   cannot name a missing group. A range wholly below the live edge stays out of
   the upstream SUBSCRIBE on any wire without range SUBSCRIBE and is filled by
-  per-group FETCH, keeping today's wire behavior until
+  FETCH, keeping today's wire behavior: since
+  [moq-dev/moq#6724](https://github.com/moq-dev/moq/pull/6724) a run of misses
+  is one range FETCH on moq-transport, and per-group FETCH is lite-only, until
   [lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) land. A bounded
   upstream SUBSCRIBE accounted by SUBSCRIBE_START and SUBSCRIBE_DROP was
   rejected: it works on lite-05 and later only.

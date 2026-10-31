@@ -82,7 +82,11 @@ bytes sent and received. A shutdown waits for these reports before exiting.
 **The link.** `https://` presents the relay's `connect.tls` client certificate
 when one is configured, so a remote server can tell which relay is asking;
 `unix://` speaks HTTP over a socket; `http://` is accepted for a loopback host
-only. There is no shared secret. Redirects are not followed, since each request
+only. HTTPS verifies the URL's hostname with system roots. For a private CA,
+set `auth.root` to PEM paths (or repeat `--auth-root`); these replace system
+trust for auth only and reload for new connections when rotated. Mesh roots,
+fingerprints, insecure mode, and hostname overrides never apply to auth.
+There is no shared secret. Redirects are not followed, since each request
 carries a credential: point `url` at the final address.
 
 ```toml
@@ -146,21 +150,23 @@ cannot receive it. Each further token is presented
 carries a `?jwt=`, such as a cluster peer's, keeps it as the connection
 credential, and every configured token then rides in band. Dialing
 `?jwt=<token>` directly still works, and reaches relays that predate SETUP
-tokens; a query carrying two `jwt` parameters is refused. HMAC, RSA, ECDSA, and EdDSA keys all work. A
+tokens; a query carrying two `jwt` parameters is refused. HMAC, RSA, ECDSA, and EdDSA keys all work. A private RSA key must be a complete two-prime JWK (see [moq-auth](/lib/rs/moq-auth) for its fields); export one from your provider, or generate one with `moq auth generate --algorithm RS256`. A
 key can itself be **scoped** at generation (`--root`, `--publish`,
 `--subscribe`), after which it can never sign a broader token.
 
 ### In-band renewal
 
-On moq-lite-07-wip or moq-transport draft-17 and later with MoQ Auth negotiated,
+On moq-lite-07-wip or moq-transport draft-18 and later with MoQ Auth negotiated,
 a client can present another JWT without reconnecting. Present its replacement
 before the current grant expires and keep the returned token handle alive.
 The auth handle a reconnecting connection owns (native `Connection::auth()`,
 JavaScript `connection.auth`) presents its tokens again on every reconnect.
-A native client can instead replace its configured tokens through
-`Client::tokens()`: the next dial presents them, a live session presents them in
-band and withdraws each old one once its replacement is answered, and a refusal
-redials only once the tokens have changed. Older versions refuse in-band tokens.
+A native client can instead replace its configured tokens through its
+connection's tokens (`Connection::tokens()`, `session.tokens()` in the
+bindings): the next dial presents them, a live session presents them in band and
+withdraws each old one once its replacement is answered, `answered()` reports
+the relay's verdict, and a refusal redials only once the tokens have changed.
+Older versions refuse in-band tokens.
 
 Each accepted token adds its publish and subscribe patterns to the session's
 union, within its admitted root and SETUP role. A publish-only connection cannot
@@ -250,6 +256,24 @@ the same way, as a token with an empty root.
 | `""` | `**` | `**` | everything | everything |
 
 Libraries: [`moq-auth`](/lib/rs/moq-auth) (Rust) and [`@moq/auth`](/lib/js/auth) (TypeScript) sign and verify the same tokens.
+
+### Peer grants
+
+A peer grant is the relay's short-lived statement of one session's publish and
+subscribe patterns, bound to a public key the client holds (`cnf`). Another
+client verifies it with the relay's public keys and serves the presenter only
+those paths on a direct connection. It is not a token: presented as `?jwt=`
+it is refused, and a token is never a peer grant.
+
+Peer grants need an asymmetric key, ES256 or EdDSA. A relay configured with
+only HMAC keys (HS256 and friends) issues none, since giving a client an HMAC
+key would let it forge grants, and its sessions serve nothing on a direct
+connection. The set of public keys that verify peer grants is not a secret: it
+holds only ES256 and EdDSA public keys, never HMAC material.
+
+[`moq-auth`](/lib/rs/moq-auth) signs and verifies peer grants
+(`KeySet::sign_peer`, `KeySet::verify_peer`, `KeySet::to_peer_set`). The relay
+does not issue them on the AUTH stream yet.
 
 ## Anonymous access
 

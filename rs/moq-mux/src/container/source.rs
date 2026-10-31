@@ -73,7 +73,7 @@ enum SourceState {
 /// be, and the track's name there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Target {
-	path: moq_net::PathOwned,
+	path: moq_net::Path,
 	epoch: Option<moq_net::Epoch>,
 	track: String,
 }
@@ -117,6 +117,8 @@ struct Splice {
 pub(crate) struct ExportSource {
 	/// The rendition's ID in the catalog.
 	name: String,
+	source: crate::Source,
+	priority_control: Option<crate::source::Priority>,
 	target: Target,
 	state: SourceState,
 	/// Wire format, consumed when the subscription resolves into a consumer.
@@ -277,6 +279,8 @@ impl ExportSource {
 	fn new(source: &crate::Source, name: &str, target: Target, media: HangContainer, max_delay: Duration) -> Self {
 		Self {
 			name: name.to_string(),
+			source: source.clone(),
+			priority_control: None,
 			state: target.request(source),
 			target,
 			media: Some(media),
@@ -438,9 +442,18 @@ impl ExportSource {
 		loop {
 			match ready!(self.poll_event(waiter))? {
 				Some(Event::Frame { frame, .. }) => return Poll::Ready(Ok(Some(frame))),
-				Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut) => continue,
+				Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut { .. }) => continue,
 				None => return Poll::Ready(Ok(None)),
 			}
+		}
+	}
+
+	/// Receive group handles and wait for all input bytes while frame delivery is backpressured.
+	pub fn poll_received(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		match &mut self.state {
+			SourceState::Active(consumer) => consumer.poll_received(waiter),
+			SourceState::Ended => Poll::Ready(()),
+			_ => Poll::Pending,
 		}
 	}
 
@@ -515,7 +528,7 @@ impl ExportSource {
 				Err(_) if self.instance_ended(waiter) => return self.end(),
 				Err(err) => return Poll::Ready(Err(err.into())),
 			};
-			self.state = SourceState::Subscribing(track.subscribe(subscription));
+			self.state = SourceState::Subscribing(track.subscribe(self.source.subscription(subscription)));
 		}
 
 		// Resolve the subscription before reading any frames.
@@ -536,6 +549,7 @@ impl ExportSource {
 				.media
 				.take()
 				.expect("media present until the subscription resolves");
+			self.priority_control = Some(self.source.control(track.control())?);
 			let consumer = Consumer::new(track, media);
 			let consumer = match self.live {
 				true => consumer.live(),
@@ -610,12 +624,13 @@ impl ExportSource {
 						return Poll::Ready(Ok(Some(Event::GroupEnd)));
 					}
 					// The skip is counted with the gap the next group reads.
-					Some(Item::Cut) => {
+					Some(Item::Cut { observed }) => {
 						self.finish_ends();
 						self.cuts += u64::from(std::mem::take(&mut self.open));
-						return Poll::Ready(Ok(Some(Event::Cut)));
+						return Poll::Ready(Ok(Some(Event::Cut { observed })));
 					}
 					None => {
+						self.priority_control = None;
 						self.finish_ends();
 						return Poll::Ready(Ok(None));
 					}
@@ -663,10 +678,19 @@ impl ExportSource {
 			.is_some_and(|instance| instance.poll_closed(waiter).is_ready())
 	}
 
+	/// Release a replaced instance's subscription while keeping its resolved metadata.
+	pub(crate) fn stop(&mut self) {
+		self.finish_ends();
+		self.state = SourceState::Ended;
+		self.priority_control = None;
+		self.instance = None;
+	}
+
 	/// End the rendition with its instance.
 	fn end(&mut self) -> Poll<crate::Result<Option<Event>>> {
 		self.finish_ends();
 		self.state = SourceState::Ended;
+		self.priority_control = None;
 		Poll::Ready(Ok(None))
 	}
 
@@ -790,14 +814,14 @@ mod tests {
 			inline: true,
 		});
 		config.container = Container::Legacy;
-		config.broadcast = broadcast.map(|b| Relative::new(b).into_owned());
+		config.broadcast = broadcast.map(|rel| Relative::new(rel).unwrap());
 		config
 	}
 
 	fn audio(broadcast: Option<&str>) -> AudioConfig {
 		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		config.container = Container::Legacy;
-		config.broadcast = broadcast.map(|b| Relative::new(b).into_owned());
+		config.broadcast = broadcast.map(|rel| Relative::new(rel).unwrap());
 		config
 	}
 
@@ -1076,8 +1100,7 @@ mod tests {
 			.unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let consumer = subscriber.consume();
-		consumer.routed("room").await.unwrap();
-		let remote = consumer.request_broadcast("room", None).await.unwrap();
+		let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
 		let source = crate::Source::new(consumer, remote);
 		let mut export = ExportSource::for_audio(&source, "audio", &audio(None), Duration::from_secs(1))
 			.unwrap()
@@ -1154,8 +1177,7 @@ mod tests {
 				.unwrap();
 			broadcast.announce(Default::default()).unwrap();
 			let consumer = subscriber.consume();
-			consumer.routed("room").await.unwrap();
-			let remote = consumer.request_broadcast("room", None).await.unwrap();
+			let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
 			let source = crate::Source::new(consumer, remote);
 
 			// MPEG-1 audio from TS: one 24 ms frame per group, a PES of five written at once.

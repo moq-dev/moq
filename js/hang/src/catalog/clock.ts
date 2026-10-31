@@ -1,6 +1,8 @@
 import * as z from "@zod/mini";
-import { MOQ_EPOCH_UNIX_MILLIS } from "./archive";
 import { u53Schema } from "./integers";
+
+/** The moq epoch (2020-01-01T00:00:00Z) in Unix-epoch milliseconds. */
+export const MOQ_EPOCH_UNIX_MILLIS = 1_577_836_800_000;
 
 /** Units per second for a catalog clock. Matches Rust `u32`; zero is refused. */
 const clockTimescaleSchema = z.number().check(z.int(), z.positive(), z.lte(4_294_967_295));
@@ -9,11 +11,10 @@ const clockTimescaleSchema = z.number().check(z.int(), z.positive(), z.lte(4_294
  * The broadcast's one continuous clock, advertised at the catalog root.
  *
  * `wall` is the wall-clock time of PTS zero, in `timescale` units since the moq epoch
- * ({@link MOQ_EPOCH_UNIX_MILLIS}, 2020-01-01). Every media track and the archive index refer
+ * ({@link MOQ_EPOCH_UNIX_MILLIS}, 2020-01-01). Every media track and every HLS record refer
  * to this one mapping after timescale conversion, so there are no competing wall epochs. The
  * publisher fixes it once and never overwrites it: a discontinuity marker is a delivery event,
- * not a new epoch, and a system-clock adjustment never retimes it. It is independent of the
- * `archive` entry: a live-only publisher exposes its clock without creating a segment index.
+ * not a new epoch, and a system-clock adjustment never retimes it.
  */
 export const ClockSchema = z.object({
 	// The wall-clock time of PTS zero, in `timescale` units since the moq epoch. Must fit in a

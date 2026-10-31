@@ -19,10 +19,10 @@ class Moq internal constructor(
     /**
      * Create an unannounced broadcast at [path], invisible to everyone until announced.
      *
-     * Advertise it with `announce` after populating tracks. `end()` ends it for good; `close()`
-     * (or `use`) releases the handle, which ends it once no `dynamic()` handle remains.
+     * Fill `broadcast()`, then advertise it with `announce`. The broadcast's `end()` ends it for
+     * good, as does releasing its last handle: the publication, each `broadcast()`, and `requests()`.
      */
-    fun createBroadcast(path: String): BroadcastProducer = session.publish().createBroadcast(path)
+    fun createBroadcast(path: String): Publication = session.publish().createBroadcast(path)
 
     /**
      * Discover routes matching [config]; prefixes stay relative to the origin.
@@ -35,38 +35,41 @@ class Moq internal constructor(
     /**
      * Follow exactly [path], resolving each publisher instance that serves it.
      *
-     * Unlike [requestBroadcast] this waits indefinitely for a future
-     * announcement, and each later `available()` waits for the next instance,
-     * such as a restarted publisher. Cancel the returned handle to stop waiting.
+     * Unlike [request] this waits indefinitely for a future announcement, and
+     * each later `available()` waits for the next instance, such as a restarted
+     * publisher. Pass an [epoch] (UUIDv7 text) to follow only that instance.
+     * Cancel the returned handle to stop waiting.
      */
-    fun announcedBroadcast(path: String): AnnouncedBroadcast = session.consume().announcedBroadcast(path)
+    fun follow(path: String, epoch: String? = null): Following = session.consume().follow(path, epoch)
 
     /**
-     * Resolve the broadcast at [path] as soon as it can be served: a local
-     * broadcast at the exact path, the best announced route covering it, or a
-     * dynamic fallback on the origin.
+     * Resolve one publisher instance of the broadcast at [path] as soon as it
+     * can be served: a local broadcast at the exact path, the best announced
+     * route covering it, or a dynamic fallback on the origin.
      *
-     * Unlike [announcedBroadcast] this does not wait for a future announcement;
-     * it throws when neither can serve the path.
+     * Unlike [follow] this does not wait for a future announcement; it throws
+     * when neither can serve the path. Pass an [epoch] (UUIDv7 text) to refuse
+     * any other instance.
      */
-    suspend fun requestBroadcast(path: String): BroadcastConsumer = session.consume().requestBroadcast(path)
+    suspend fun request(path: String, epoch: String? = null): BroadcastConsumer =
+        session.consume().request(path, epoch)
 
     /**
      * The session's bandwidth allocator.
      *
-     * Every call returns a handle to the same registry. [Bandwidth.reserve] a
+     * Every call returns a handle to the same registry. [Allocator.reserve] a
      * share for an app-owned encoder, or pass the handle to an audio or video
      * producer.
      */
-    fun bandwidth(): Bandwidth = session.bandwidth()
+    fun allocator(): Allocator = session.allocator()
 
     /**
-     * The session's authorization: the grant its peer gave it, and more tokens to present.
+     * Follow the grant the peer gave this session.
      *
-     * Collect [Auth.grants] to follow the grant, and [Auth.add] a fresh token before the
-     * current one expires; each added token is presented again on every reconnect.
+     * Collect `grants().updates()` for the current grant and each change. Every call returns
+     * an independent consumer.
      */
-    fun auth(): Auth = session.auth()
+    fun grants(): GrantConsumer = session.grants()
 
     /**
      * The credentials every dial presents ([ClientConfig.tokens]), to replace while running.
@@ -74,10 +77,10 @@ class Moq internal constructor(
      * [Tokens.set] replaces them, such as before the current ones expire: the next dial presents
      * them, and a live session with in-band AUTH presents them at once, withdrawing each
      * replaced token once its replacements are answered, even when one is refused. After an
-     * authorization refusal the client redials only if they changed. An empty token throws
-     * `MoqException.Config`.
+     * authorization refusal the session redials only if they changed. An empty token throws
+     * `MoqException.Config`. Suspend on [Tokens.answered] for the relay's verdict.
      */
-    fun tokens(): Tokens = client.tokens()
+    fun tokens(): Tokens = checkNotNull(session.tokens()) { "a client session presents tokens" }
 
     /**
      * Request a draining close now; await `session.closed()` for its result, then [close]

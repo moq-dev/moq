@@ -6,7 +6,8 @@
 
 use std::time::Duration;
 
-use moq_net::PathOwned;
+use anyhow::Context;
+use moq_net::Path;
 use moq_net::origin;
 use serde::{Deserialize, Serialize};
 
@@ -16,11 +17,10 @@ use serde::{Deserialize, Serialize};
 /// the relay accepts (and every cluster dial). The producer publishes a single
 /// `<prefix>/node/<node>` broadcast (or `<prefix>/node` when [`Self::node`] is
 /// unset) on the cluster origin, under a fresh epoch each run. The broadcast
-/// carries a `totals.json` track of per-tier totals, one compressed
-/// `<group>/group.json` track per [`Self::depth`] group with its per-path
-/// traffic and per-label sessions, and presence and prefix tracks on request,
-/// each JSON track with a compressed `.json.z` sibling; see `moq_stats` for the
-/// wire format and per-field semantics.
+/// carries a `totals.json` track of per-tier totals, one `<group>/group.json`
+/// track per [`Self::depth`] group with its per-path traffic and per-label
+/// sessions, and presence and prefix tracks on request, each a compressed JSON
+/// track; see `moq_stats` for the wire format and per-field semantics.
 #[derive(usage_rs::Args, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -122,13 +122,18 @@ impl Config {
 		if !self.enabled {
 			return Ok(moq_stats::Producer::new(moq_stats::produce::Config::new()));
 		}
-		let prefix = self.prefix.clone();
+		let prefix = Path::new(&self.prefix).context("invalid stats.prefix")?;
 		let interval = self.interval();
 		anyhow::ensure!(interval != Some(Duration::ZERO), "stats.interval must be non-zero");
-		let node = self.node.clone().map(PathOwned::from);
+		let node = self
+			.node
+			.as_deref()
+			.map(Path::new)
+			.transpose()
+			.context("invalid stats.node")?;
 		let depth = self.depth;
 		let linger = self.linger();
-		tracing::info!(prefix, ?interval, node = ?node, depth, ?linger, "stats publishing enabled");
+		tracing::info!(%prefix, ?interval, node = ?node, depth, ?linger, "stats publishing enabled");
 		let mut config = moq_stats::produce::Config::new()
 			.with_origin(origin)
 			.with_prefix(prefix)

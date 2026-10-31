@@ -37,7 +37,7 @@ kio's), and fix `doc/lib/rs/index.md`, `doc/setup/repository.md`, and
 `clock` name still mirrors.
 
 Public API: moq-clock's items move to `kio::clock` unchanged; kio gains
-features. Add a kio MIGRATE entry. Wire: none.
+features. Describe the kio migration in the PR's Impact section. Wire: none.
 
 ## Related
 

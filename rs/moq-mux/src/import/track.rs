@@ -40,11 +40,15 @@ fn track_info<E: CatalogExt>(
 	}
 }
 
-/// The codec parser fills everything from the init bytes, so the label and container are all the
-/// caller adds.
+/// The codec parser fills the decoder fields from the init bytes; the caller adds the label, the
+/// container, and the bitrate when it knows it, which then counts as supplied and replaces any the
+/// init bytes give.
 fn with_init(init: &AudioInit, mut config: hang::catalog::AudioConfig) -> hang::catalog::AudioConfig {
 	config.label = init.label.clone();
 	config.container = init.container.clone();
+	if init.bitrate.is_some() {
+		config.bitrate = init.bitrate;
+	}
 	config
 }
 
@@ -1145,10 +1149,10 @@ mod tests {
 		let request = broadcast.reserve_track("video").unwrap();
 		let _video = Track::video(request, catalog.reserve(), VideoInit::new(VideoFormat::Vp8, Vec::new())).unwrap();
 
-		let audio = consumer.track("audio").unwrap().query().await.unwrap();
+		let audio = consumer.track("audio").unwrap().info().await.unwrap();
 		assert_eq!(audio.priority, PRIORITY.audio);
 
-		let video = consumer.track("video").unwrap().query().await.unwrap();
+		let video = consumer.track("video").unwrap().info().await.unwrap();
 		assert_eq!(video.priority, PRIORITY.video);
 	}
 

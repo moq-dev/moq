@@ -24,7 +24,7 @@ export type Claims = {
  *
  * `root` is the room prefix, `subscribe` is `**` (everything under the room), and
  * `publish` is `<identity>/**` so a participant cannot publish at anyone else's
- * paths. Throws on an identity that is empty after normalization or contains `*`,
+ * paths. Throws on an identity that is empty, has an empty segment, or contains `*`,
  * since a wildcard would let the participant publish as someone else.
  */
 export function claims(room: string, identity: string): Claims {

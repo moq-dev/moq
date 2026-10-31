@@ -16,7 +16,7 @@ enum At {
 
 /// Drop the publisher's session at `at` and check the recording ends as incomplete.
 ///
-/// The catalog's and the timeline's subscriptions both fail with the session. Whichever reaches
+/// The catalog's and the records' subscriptions both fail with the session. Whichever reaches
 /// the cursor first must end it with a typed error, so the order is left to the session.
 async fn disconnect(at: At) {
 	let mut pair = Pair::connect().await;
@@ -60,7 +60,7 @@ async fn disconnect(at: At) {
 		matches!(
 			err,
 			moq_hls::Error::CatalogFailed { .. }
-				| moq_hls::Error::TimelineFailed { .. }
+				| moq_hls::Error::RecordsFailed { .. }
 				| moq_hls::Error::SegmentUnavailable { .. }
 		),
 		"{at:?}: a disconnect ended the recording with {err:?}"
@@ -83,7 +83,7 @@ async fn disconnect(at: At) {
 	assert!(
 		matches!(
 			refused,
-			moq_hls::Error::CatalogFailed { .. } | moq_hls::Error::TimelineFailed { .. }
+			moq_hls::Error::CatalogFailed { .. } | moq_hls::Error::RecordsFailed { .. }
 		),
 		"{at:?}: {refused:?}"
 	);

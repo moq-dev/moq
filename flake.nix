@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/ed657ba9362a941b3be9bbea55120a3c5a90374c";
+      url = "github:moq-dev/quest/1ef2ca70053ed8bc4785ddaaafb2a6c445e87614";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -124,6 +124,24 @@
           }
         );
 
+        # The CodSpeed Criterion build (`just rs codspeed`). 6.0 runs each benchmark in its own
+        # process, so allocator state no longer carries between them; nixpkgs still has 5.x.
+        cargo-codspeed = pkgs.cargo-codspeed.overrideAttrs (
+          finalAttrs: old: {
+            version = "6.0.0";
+            src = pkgs.fetchFromGitHub {
+              owner = "CodSpeedHQ";
+              repo = "codspeed-rust";
+              tag = "v${finalAttrs.version}";
+              hash = "sha256-qY+IQx2apIOGTkRXUnbNCJT4Jo6TESY/80SXyknUBWY=";
+            };
+            cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+              inherit (finalAttrs) pname version src;
+              hash = "sha256-qiyA74h80sT3tM/TToZxPDGMmnEwB8MYhFM84Wu2ySs=";
+            };
+          }
+        );
+
         # Rust dependencies
         rustDeps =
           with pkgs;
@@ -157,6 +175,7 @@
             # unification would otherwise hide a broken single-crate build.
             cargo-hack
             cargo-nextest
+            cargo-codspeed
             # Source-based test coverage (`just rs coverage`).
             # Its LLVM test helpers must read the compiler's profile format.
             (cargo-llvm-cov.override {
@@ -389,17 +408,18 @@
           doCheck = false;
         };
 
-        # uniffi-bindgen-cpp renders rs/moq-ffi for cpp/moq's CMake build. Not in
-        # nixpkgs, so build it from source; without it `just check` skips the
-        # cpp module, which CI_STRICT turns into a failure in CI.
+        # uniffi-bindgen-cpp renders rs/moq-ffi for the CMake builds of cpp/moq and,
+        # with its C backend, c/moq. Not in nixpkgs, so build it from source;
+        # without it `just check` skips the c and cpp modules, which CI_STRICT
+        # turns into a failure in CI.
         #
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
         # rs/moq-ffi/Cargo.toml. The other places name the same tag and must be
         # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
-        # cpp/moq/README.md, .github/workflows/cpp.yml,
-        # .github/workflows/platform.yml, .github/workflows/release-cpp.yml, and
-        # .github/workflows/release-shared-ffi.yml.
+        # cpp/moq/README.md, .github/workflows/{c,cpp}.yml,
+        # .github/workflows/platform.yml, .github/workflows/release-{c,cpp}.yml,
+        # and .github/workflows/release-shared-ffi.yml.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,

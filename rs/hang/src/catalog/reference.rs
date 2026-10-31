@@ -8,7 +8,7 @@ use super::{AudioConfig, BinaryConfig, JsonConfig, TextConfig, VideoConfig};
 /// optionally names the publisher instance the broadcast must be.
 pub trait Reference {
 	/// The broadcast publishing the track, relative to the catalog's; `None` is the catalog's own.
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned>;
+	fn broadcast(&self) -> Option<&moq_net::path::Relative>;
 
 	/// The publisher instance the broadcast must be; `None` accepts the first one resolved.
 	fn epoch(&self) -> Option<&moq_net::Epoch>;
@@ -20,7 +20,7 @@ pub trait Reference {
 macro_rules! reference {
 	($($config:ty),*) => {$(
 		impl Reference for $config {
-			fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
+			fn broadcast(&self) -> Option<&moq_net::path::Relative> {
 				self.broadcast.as_ref()
 			}
 

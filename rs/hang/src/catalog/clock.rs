@@ -1,7 +1,9 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::MOQ_EPOCH_UNIX_MILLIS;
 use crate::Result;
+
+/// The moq epoch (2020-01-01T00:00:00Z) in Unix-epoch milliseconds.
+pub const MOQ_EPOCH_UNIX_MILLIS: u64 = 1_577_836_800_000;
 
 /// The largest integer JSON preserves exactly (2^53 - 1).
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -38,7 +40,7 @@ struct Wire {
 /// [`wall`](Self::wall) is the wall-clock time of PTS zero since the moq epoch
 /// ([`MOQ_EPOCH_UNIX_MILLIS`], 2020-01-01). Its embedded timescale is serialized beside it as
 /// `{ wall, timescale }`, preserving the catalog wire shape while keeping the pair inseparable in
-/// Rust. Every media track and the archive index refer to this mapping after timescale conversion.
+/// Rust. Every media track and every HLS record refer to this mapping after timescale conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Clock {

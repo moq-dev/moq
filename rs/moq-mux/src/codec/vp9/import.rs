@@ -53,20 +53,18 @@ impl Import {
 		Ok(())
 	}
 
-	fn init(&mut self, vp9: hang::catalog::VP9, width: u16, height: u16) -> crate::Result<()> {
+	fn init(&mut self, vp9: hang::catalog::VP9, width: u32, height: u32) -> crate::Result<()> {
 		let mut config = hang::catalog::VideoConfig::new(vp9.clone());
 		config.color = super::color(&vp9);
-		config.coded_width = Some(width as u32);
-		config.coded_height = Some(height as u32);
+		config.coded_width = Some(width);
+		config.coded_height = Some(height);
 
 		self.apply_config(config)?;
 		Ok(())
 	}
 
-	/// Apply a resolved config, updating the catalog rendition in place.
+	/// Apply a resolved config, minting a track when the decoder identity changes.
 	///
-	/// A changed config just re-mirrors the rendition; there are no fixed tracks to reject a
-	/// reconfiguration.
 	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.catalog.publish(&mut self.track, config)
 	}

@@ -34,11 +34,10 @@ mod tests {
 
 	#[test]
 	fn every_version_round_trips() {
-		for version in [Version::Draft14, Version::Draft16, Version::Draft17, Version::Draft22] {
-			let mut params = super::super::Parameters::default();
-			assert!(!from_setup(&params, version));
-			into_setup(&mut params, version);
-			assert!(from_setup(&params, version));
-		}
+		let version = Version::Draft22;
+		let mut params = super::super::Parameters::default();
+		assert!(!from_setup(&params, version));
+		into_setup(&mut params, version);
+		assert!(from_setup(&params, version));
 	}
 }

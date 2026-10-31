@@ -33,7 +33,7 @@ function group(track: Track.Producer, timestamps: number[], end?: number) {
 			payload: encodeFrame(new Uint8Array(), Micro(end)),
 		});
 	}
-	group.close();
+	group.finish();
 }
 
 async function frame(consumer: Consumer) {
@@ -55,6 +55,7 @@ test("Consumer accepts a resuming keyframe before the estimated group end", asyn
 		expect((await frame(consumer))?.frame?.timestamp).toBe(Micro(50_000));
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 	}
 });
@@ -88,6 +89,7 @@ test("Consumer accepts leading pictures below the previous group's content", asy
 		expect((await frame(consumer))?.frame?.timestamp).toBe(Micro(150_000));
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 	}
 });
@@ -110,6 +112,7 @@ test("Consumer rejects a later frame below the previous group start", async () =
 		await expect(frame(consumer)).rejects.toThrow("below");
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 	}
 });

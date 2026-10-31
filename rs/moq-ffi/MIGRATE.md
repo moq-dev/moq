@@ -5,6 +5,34 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Compression moves to the track
+
+The `MoqFlate*` producers and `MoqFlateConfig` are deleted: publish opaque bytes on a `MoqTrackProducer`.
+`MoqJsonSnapshotConfig` and `MoqJsonWindowConfig` lose `compression`, and `MoqJsonStreamConfig` is removed: set `compress` on the `MoqTrackInfo` you publish the track with instead.
+`MoqJsonStreamProducer::new` drops its config argument, and `MoqJsonSnapshotConsumer::new`, `MoqJsonStreamConsumer::new`, and `MoqJsonWindowConsumer::new` take only the track, reading a compressed track like a plain one.
+
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+Every method taking a path, such as `MoqOriginProducer::create_broadcast` and `MoqOriginConsumer::request_broadcast`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.
+
+### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
+
+Rename `dynamic()` on `MoqOriginProducer`, `MoqBroadcastProducer`, `MoqTrackProducer`, and `MoqTrackRequest` to `requests()`.
+Their handles `MoqOriginDynamic`, `MoqBroadcastDynamic`, and `MoqTrackDynamic` are `MoqOriginRequests`, `MoqBroadcastRequests`, and `MoqTrackRequests`; their methods are unchanged.
+
+### `MoqAllocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`MoqBandwidth` is `MoqAllocator`, and `MoqSession::bandwidth()` is `allocator()`, matching `moq_net::bandwidth::Allocator`. `MoqReservation::grant()` is `rate()`, matching `moq_net::bandwidth::Reservation::rate()`. The `bandwidth` option field on audio and video producers keeps its name.
+
+### An idle reservation reads the share it would get
+
+`MoqReservation::rate` reports the slice the track would get back while nothing subscribes to it, instead of `None`; it still claims nothing from the other tracks.
+A sender that relied on `None` to hold its rate while unwatched should check the track's demand instead.
+
+### Decoders read gaps and ends
+
+`MoqAudioConsumer::next` returns `MoqAudioRead` and `MoqVideoConsumer::next` returns `MoqVideoRead`, mirroring `moq_audio::decode::Read` and `moq_video::decode::Read`, instead of a bare frame. Take the frame from the `Frame { frame }` variant where you used the return value before. `Gap { timestamp_us, duration }` marks lost media and `End { end_us }` where the publisher stopped its encoder; what follows either does not continue what came before, so restart playback there, or skip them to keep the old behavior. `None` still means the track ended.
+
 ### `MoqClientConfig` gains `tokens`
 
 It defaults to empty in every generated binding; a Rust struct literal adds `tokens: vec![]` or ends with `..Default::default()`.
@@ -14,9 +42,9 @@ It defaults to empty in every generated binding; a Rust struct literal adds `tok
 Every duration is a UniFFI `Duration` instead of an integer microsecond field, and drops its `_us` suffix: each language receives its own duration type (`timedelta`, `TimeInterval`, `java.time.Duration`, `time.Duration`, Dart `Duration`, C++ `std::chrono` nanoseconds).
 The renamed fields are `MoqClientConfig.{timeout, race, resolution_delay}`, `MoqQuicConfig.{idle_timeout, keep_alive}`, `MoqWebSocketConfig.delay`, `MoqBackoff.{initial, max, timeout}`, `MoqConnectionStats.rtt`, `MoqGrant.expires`, `MoqTrackInfo.max_age`, `MoqSubscription.max_delay`, `MoqFetchGroupOptions.max_delay`, `MoqAudio.jitter`, `MoqAudioDecoderOutput.{max_delay, delay}`, and `MoqVideoDecoderOutput.max_delay`; the methods are `MoqFill::max_delay()` and `MoqAudioConsumer::delay()`.
 `MoqAudioEncoderOutput.frame_duration_us: u32` is `frame_duration: Option<Duration>`: pass null where you passed 0 for the codec's own frame.
-`MoqSubscription.max_delay` is required, because UniFFI cannot spell a duration literal: set it to zero where you relied on the old default.
-Kotlin, Swift, and Python fail to compile or raise until you pass it, but a C++ `moq::Subscription{}` or Dart `MoqSubscription()` that omits it silently gets no staleness limit instead of moq-net's 0.
-The Python wrapper's `Subscription` keeps its own `timedelta(0)` default, and Go is unchanged: a nil `*Subscription` still takes moq-net's 0.
+`MoqSubscription.max_delay` has no default, since UniFFI can't default a duration to 0: Kotlin and Swift must name it, `0` for moq-net's default or null for no subscriber limit.
+Dart, Go, and C can still omit it (Dart's optional parameter, Go's nil `*time.Duration`, a zeroed C struct), which means no subscriber limit; name it there too.
+Start from `moq_subscription_defaults()` where you relied on that default; a null subscription argument still means it.
 `MoqTrackConsumer::info()` no longer fails.
 A duration handed out saturates at `i64::MAX` nanoseconds (about 292 years), so C, C++, and Go hold every value.
 

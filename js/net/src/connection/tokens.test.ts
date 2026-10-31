@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { Auth, Handle } from "../auth.ts";
+import type { Credential, Handle } from "../auth.ts";
 import * as Ietf from "../ietf/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Reader } from "../stream.ts";
@@ -55,19 +55,19 @@ test("no tokens present nothing", () => {
 
 /** A handle whose answers the test releases one token at a time. */
 function handle() {
-	const answers = new Map<string, (auth: Auth) => void>();
+	const answers = new Map<string, (auth: Credential) => void>();
 	const closed: string[] = [];
 	const presented: string[] = [];
 	const fake = {
 		add(token: string) {
 			presented.push(token);
-			return new Promise<Auth>((resolve) => answers.set(token, resolve));
+			return new Promise<Credential>((resolve) => answers.set(token, resolve));
 		},
 	} as unknown as Handle;
 	const answer = async (token: string) => {
 		const resolve = answers.get(token);
 		if (!resolve) throw new Error(`${token} was never presented`);
-		resolve({ close: () => closed.push(token) } as unknown as Auth);
+		resolve({ close: () => closed.push(token) } as unknown as Credential);
 		// Let the answer and the settle it schedules run.
 		for (let i = 0; i < 3; i++) await Promise.resolve();
 	};
@@ -114,7 +114,7 @@ test("sessions sharing an auth handle present each configured token once", async
 	expect(closed).toEqual([]);
 });
 
-test("a draft-17+ client presents its token in SETUP", async () => {
+test("an IETF client presents its token in SETUP", async () => {
 	const version = Ietf.Version.DRAFT_18;
 	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_18);
 	const token = new TextEncoder().encode("credential");
@@ -127,7 +127,7 @@ test("a draft-17+ client presents its token in SETUP", async () => {
 	const reader = new Reader(next.value, undefined, version);
 	expect(await reader.u53()).toBe(Ietf.Setup.id);
 	const setup = await Ietf.Setup.decode(reader, version);
-	const presented = Ietf.tokenFromSetup(setup.parameters, version);
+	const presented = Ietf.tokenFromSetup(setup.parameters);
 	expect(presented?.kind).toBe(Ietf.TOKEN_OUT_OF_BAND);
 	expect(new TextDecoder().decode(presented?.value)).toBe("credential");
 	pair.client.close();

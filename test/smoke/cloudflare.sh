@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# End-to-end smoke test using the current cloudflare/moq-rs default branch.
+# End-to-end smoke test using the head of cloudflare/moq-rs's draft-18 branch.
 #
 # This is intentionally separate from smoke.sh's public-package media matrix:
 # cloudflare/moq-rs uses a different application catalog/track layout. We build
 # a purpose-built Cloudflare client and both projects' relays from their latest
-# Git source. The client validates every byte of sustained subgroup payloads
+# Git source. cloudflare/moq-rs's default branch speaks only moq-transport-16,
+# which moq-dev/moq dropped, so both Cloudflare builds follow its draft-18 branch.
+# The client validates every byte of sustained subgroup payloads
 # through both relays; Cloudflare's relay also exercises datagrams.
 set -euo pipefail
 
 SMOKE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CLOUDFLARE_CLIENT="$SMOKE_DIR/clients/cloudflare"
 CLOUDFLARE_MOQ_REPO="https://github.com/cloudflare/moq-rs"
+CLOUDFLARE_MOQ_BRANCH="draft-18-dev"
 MOQ_REPO="https://github.com/moq-dev/moq"
 PORT="${CLOUDFLARE_SMOKE_PORT:-4443}"
 TIMEOUT="${CLOUDFLARE_SMOKE_TIMEOUT:-20}"
@@ -26,13 +29,13 @@ CLIENT="${CLOUDFLARE_CLIENT_BIN:-}"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# build_git <repo> <package> <dir>: build one package from a repo's default
-# branch with its committed Cargo.lock, into <dir>/target/release. A plain
+# build_git <repo> <package> <dir> [branch]: build one package from the head of
+# a repo's branch (its default branch when omitted) with its committed Cargo.lock, into <dir>/target/release. A plain
 # `cargo build` in a checkout rather than `cargo install --git`: a compile cache
 # (mbx in CI) reuses unchanged crates across builds, but not across installs.
 build_git() {
-    local repo="$1" package="$2" dir="$3"
-    git clone --quiet --depth 1 "$repo" "$dir" &&
+    local repo="$1" package="$2" dir="$3" branch="${4:-}"
+    git clone --quiet --depth 1 ${branch:+--branch "$branch"} "$repo" "$dir" &&
         cargo build --quiet --release --locked --manifest-path "$dir/Cargo.toml" -p "$package" \
             --target-dir "$dir/target"
 }
@@ -65,11 +68,11 @@ if [[ ${#missing[@]} -gt 0 ]]; then
 fi
 
 if [[ -z "$CLOUDFLARE_RELAY" ]]; then
-    echo "building moq-relay-ietf from $CLOUDFLARE_MOQ_REPO (latest default branch)..."
+    echo "building moq-relay-ietf from $CLOUDFLARE_MOQ_REPO (latest $CLOUDFLARE_MOQ_BRANCH)..."
     # Follow Git HEAD, but honor that checkout's committed Cargo.lock. Without
     # --locked Cargo currently selects a newer hyper-util that does not compile
     # with moq-rs's hyper-serve dependency.
-    if build_git "$CLOUDFLARE_MOQ_REPO" moq-relay-ietf "$TMP/cloudflare-moq" >"$TMP/relay-build.log" 2>&1; then
+    if build_git "$CLOUDFLARE_MOQ_REPO" moq-relay-ietf "$TMP/cloudflare-moq" "$CLOUDFLARE_MOQ_BRANCH" >"$TMP/relay-build.log" 2>&1; then
         CLOUDFLARE_RELAY="$TMP/cloudflare-moq/target/release/moq-relay-ietf"
     else
         echo "error: failed to build moq-relay-ietf" >&2

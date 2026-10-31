@@ -61,11 +61,7 @@ async fn setup(version: Version) -> Setup {
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("room"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -162,22 +158,4 @@ async fn subscribe_tracks_needs_forward_0_on_draft_18() {
 	assert_eq!(reply.get(3), Some(&0x03), "not NOT_SUPPORTED: {reply:?}");
 
 	deliver(&mut setup, b"after").await;
-}
-
-/// Before draft-18, 0x51 is not a message at all, so it is still a protocol violation.
-#[moq_clock::test]
-async fn subscribe_tracks_before_draft_18_closes_the_session() {
-	let setup = setup("moq-transport-17".parse().unwrap()).await;
-	let (mut send, _recv) = setup
-		.pair
-		.server_transport
-		.clone()
-		.open_bi(Default::default())
-		.await
-		.expect("open_bi");
-	send.write(SUBSCRIBE_TRACKS).await.expect("write");
-
-	moq_clock::timeout(TIMEOUT, setup.pair.client.closed())
-		.await
-		.expect("the session stayed open");
 }

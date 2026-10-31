@@ -79,8 +79,8 @@ Include idle connections and stalled
 readers as well as high-bandwidth, high-RTT relay links before recommending
 smaller windows. Receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)) own budget
 correctness; settings must preserve useful bandwidth-delay product and
-failover behavior. [Keepalive](/quest/m2/quic-keep-alive.md) already owns timer
-policy. Do not add a generic tuning surface without a measured consumer.
+failover behavior. The keep-alive already derives from the negotiated idle
+timeout, so leave timer policy alone. Do not add a generic tuning surface without a measured consumer.
 
 Reuse [the benchmark harness](/bench/README.md). Criterion's
 [timing-loop guidance](https://bheisler.github.io/criterion.rs/book/user_guide/timing_loops.html)
@@ -143,10 +143,11 @@ No duplicate quest or workflow edit belongs here.
 
 ### Existing ownership and deliberately deferred work
 
-- [Release performance](/quest/m1/release-perf/README.md) fixed sparse gaps,
-  resume duplicates, idle GC, stats drain, FETCH fan-out, JS frame regressions,
-  and paired comparison correctness; its remaining work is the final
-  main-against-release comparison.
+- [Release performance](/quest/m1/release-perf/README.md) owns the main
+  against release comparison for this cut, including the sparse read slope;
+  it already fixed or accepted resume duplicates, idle GC, stats drain, FETCH
+  fan-out, JS frame regressions, and paired comparison correctness. The
+  [performance audit](/quest/m2/audit-perf.md) repeats it before later cuts.
 - [Perf](/quest/m2/perf/README.md) owns measured channel contention, relay
   allocations, ingest batching, worker quiescence and runtime selection.
 - The [release audit](/quest/m1/release-audit/README.md) bounded the media
@@ -154,13 +155,12 @@ No duplicate quest or workflow edit belongs here.
   and fixed QMux copying in
   [moq-dev/moq#6381](https://github.com/moq-dev/moq/pull/6381). MKV
   fragmentation below concerns parser replay before those queues.
-- [Binding bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md),
-  [foreign polling](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md),
-  [Kotlin calls](https://github.com/kixelated/rust2/blob/main/quest/m1/kt-ffi-calls.md),
+- [Binding bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md),
+  [foreign polling](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-poll-protocol.md),
+  [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md),
   [NVENC pooling](/quest/m2/nvenc-pool.md), and
   [watch worker planning](/quest/m2/plan-watch-worker.md) retain their scopes.
-- [Route wakes](/quest/m2/route-wakes.md),
-  [keyed prefix polling](/quest/m2/keyed-prefix-polling.md), and
+- [Route wakes](/quest/m2/route-wakes.md) and
   [front parking](/quest/m2/origin-front-parks.md) own discovery scans/wakes.
 - The [recurring audit](/quest/m2/audit-perf.md) retains real congestion-
   controller/loss-recovery coverage, broader importer/container coverage,

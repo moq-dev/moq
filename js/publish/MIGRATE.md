@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `muted` and `invisible` keep capture open
+
+`<moq-publish muted>` and `invisible` now stop only the encoder, so the microphone and camera stay open and the browser's capture indicators stay lit.
+Unmuting no longer waits on getUserMedia, a new AudioContext, or a camera reopen.
+A camera source opens both devices even when it starts muted or hidden.
+To release the devices, clear `source` or remove the element; to release one and keep the other, build the pipeline with the library and toggle `Source.Microphone` or `Source.Camera` `enabled`.
+
+### Element reflection and invalid configuration
+
+Property and built-in UI changes now reflect into attributes. Invalid source/preview/backend/announce modes, URLs, and version lists throw instead of selecting defaults; remove an attribute to use its default.
+Catch those property setter errors. A browser reports malformed markup through its normal `error` event, and the element suspends media until those invalid attributes are corrected or removed. A valid property assignment also corrects that attribute. An empty, duplicate, or unsupported `versions` list now throws from the setter instead of failing on `el.connection.error`; check a list up front with `Net.Connection.checkVersions`.
+A `File` source reflects as `source="file"` while retaining the selected `File`; reflection does not reopen the picker or replace it with a source selector.
+
 ### `announce="never"` is gone
 
 A broadcast that is never announced has no route at the relay, so nobody could subscribe to it.

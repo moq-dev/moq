@@ -141,7 +141,7 @@ where
 	/// the socket itself. A server that kept a handle on the accepted connection
 	/// can attach it here and get the kernel's RTT (and, on Linux, delivery rate)
 	/// instead of only QMux's own `QX_PING` measurement. See
-	/// [`TcpStats`](crate::TcpStats).
+	/// `TcpStats` (Linux and macOS).
 	pub fn with_socket_stats(mut self, stats: crate::SharedSocketStats) -> Self {
 		self.socket_stats = Some(stats);
 		self
@@ -514,7 +514,7 @@ mod tests {
 			)
 			.await
 			.unwrap();
-		let mut session = accept.await.unwrap().unwrap();
+		let session = accept.await.unwrap().unwrap();
 
 		// A masked binary frame declaring 1 MiB, with none of its payload sent.
 		let mut frame = vec![0x82, 0x80 | 127];

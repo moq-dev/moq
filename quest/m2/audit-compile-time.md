@@ -42,6 +42,14 @@ What to check first:
   other fMP4 path uses `Cursor<&[u8]>`. It was skipped for
   [moq-dev/moq#6379](https://github.com/moq-dev/moq/pull/6379), which has
   since merged, so it is ready to fix.
+- Measurement pitfalls found by [moq-dev/moq#7146](https://github.com/moq-dev/moq/pull/7146)
+  (added 2026-10-28): run `perf stat` with `--no-scale`, since without it the
+  two core types' counters are each scaled to the whole run and overcount up to
+  2x on the hybrid host. And measure an edit through mbx, whose
+  `learned_incremental` compiles the edited crate incrementally; plain cargo
+  under the host's `incremental = false` rebuilds it whole. Measured with
+  incremental on, a one-line moq-net edit costs about 7.5 G instructions to
+  check, against 26.3 G whole.
 - Whether `cargo-llvm-lines` joined the pinned shell. `flake.nix` had four
   open PRs at the m1 run, so it was not added.
 
@@ -107,7 +115,7 @@ instantiating the whole map.
   in clean builds; the crypto provider stays (m0). usage-rs derive output
   scales with config fields and is external code. serde visitors per
   deserializer are inherent to TOML config. moq-rtmp, moq-srt and moq-rtc
-  entry points generic over `impl AsPath` instantiate their async bodies in
+  entry points generic over `impl Into<Path>` instantiate their async bodies in
   the `moq` bin (20,327 lines with drop glue, 1.8%); a non-generic inner
   function would move them, but adds code for little. The catalog JSON diff instantiated
   per crate is [catalog publish once](/quest/m2/catalog-publish-once.md).

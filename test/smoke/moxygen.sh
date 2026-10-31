@@ -12,7 +12,7 @@ DOCKER="${MOXYGEN_DOCKER:-docker}"
 MOXYGEN_IMAGE="${MOXYGEN_IMAGE:-ghcr.io/facebookexperimental/moxygen-interop-client:latest-amd64}"
 PORT="${MOXYGEN_SMOKE_PORT:-4444}"
 TIMEOUT="${MOXYGEN_SMOKE_TIMEOUT:-45}"
-VERSION="${MOXYGEN_MOQT_VERSION:-16}"
+VERSION="${MOXYGEN_MOQT_VERSION:-18}"
 HTTPS_URL="https://127.0.0.1:${PORT}"
 MOQT_URL="moqt://127.0.0.1:${PORT}"
 CONTAINER_PREFIX="moxygen-smoke-$$"
@@ -143,9 +143,9 @@ run_transport() {
     "$DOCKER" rm -f "$name" >/dev/null 2>&1 || true
 }
 
-# moxygen recommends draft-16 for new integrations while its draft-18 support
-# remains experimental. Pinning the wire draft is intentional; both source-head
-# implementations are still refreshed on every run.
+# Draft 18 is the oldest draft both sides speak, though moxygen still calls its
+# draft-18 support experimental. Pinning the wire draft is intentional; both
+# source-head implementations are still refreshed on every run.
 run_transport webtransport "$HTTPS_URL"
 run_transport quic "$MOQT_URL"
 

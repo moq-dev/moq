@@ -773,15 +773,15 @@ impl<I: HttpStream> HttpStream for TlsStream<I> {
 ///
 /// The stream owns the accepted TCP socket, so the extra bound narrows nothing;
 /// it exists because a `cfg` can't be written on a `where` clause directly.
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) trait AcceptStream: AsyncRead + AsyncWrite + Unpin + Send + std::os::fd::AsFd + 'static {}
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + std::os::fd::AsFd + 'static> AcceptStream for T {}
 
-/// As above, where no descriptor is available.
-#[cfg(not(unix))]
+/// As above, where kernel TCP statistics are unavailable.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) trait AcceptStream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
-#[cfg(not(unix))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AcceptStream for T {}
 
 impl<I, S, A> Accept<I, S> for WebAcceptor<A>
@@ -832,14 +832,14 @@ where
 
 /// The kernel's view of `stream`, when this platform exposes one and there is a
 /// qmux session that could use it.
-#[cfg(all(unix, feature = "websocket"))]
+#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "websocket"))]
 fn socket_stats<I: AcceptStream>(stream: &I) -> Option<SocketStats> {
 	qmux::TcpStats::new(stream)
 		.ok()
 		.map(|s| SocketStats(std::sync::Arc::new(s)))
 }
 
-#[cfg(not(all(unix, feature = "websocket")))]
+#[cfg(not(all(any(target_os = "linux", target_os = "macos"), feature = "websocket")))]
 fn socket_stats<I: AcceptStream>(_stream: &I) -> Option<SocketStats> {
 	None
 }
@@ -1052,7 +1052,8 @@ async fn serve_announced(
 	while let Some(event) = announced.try_next() {
 		if let moq_net::announce::Event::Start(update)
 		| moq_net::announce::Event::Update(update)
-		| moq_net::announce::Event::Restart(update) = event
+		| moq_net::announce::Event::Restart(update)
+		| moq_net::announce::Event::Takeover { announce: update, .. } = event
 		{
 			broadcasts.push(update.prefix);
 		}
@@ -1101,7 +1102,8 @@ async fn serve_fetch(
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until a route covers the broadcast (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before the announce arrives.
-		let broadcast = origin.routed_broadcast("").await.map_err(|_| StatusCode::NOT_FOUND)?;
+		let mut following = origin.follow("", None).map_err(|_| StatusCode::NOT_FOUND)?;
+		let broadcast = following.available().await.map_err(|_| StatusCode::NOT_FOUND)?;
 		let sequence = match params.group {
 			FetchGroup::Num(sequence) => Some(sequence),
 			FetchGroup::Latest => None,
@@ -1440,7 +1442,7 @@ mod tests {
 		assert_eq!(report.traffic.len(), 2);
 		assert_eq!(report.sessions.len(), 2);
 		for label in ["first", "second"] {
-			let tier = Tier::new(label);
+			let tier = Tier::new(moq_net::Path::from_static(label));
 			let traffic = report.traffic.iter().find(|entry| entry.tier == tier).unwrap();
 			assert_eq!(traffic.path.as_str(), "room");
 			assert_eq!(

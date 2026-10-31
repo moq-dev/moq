@@ -16,17 +16,10 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const SETTLE: Duration = Duration::from_secs(1);
 
 /// Every moq-transport draft, each of which carries the SOLICIT option.
-const MOQT: [&str; 6] = [
-	"moq-transport-14",
-	"moq-transport-15",
-	"moq-transport-16",
-	"moq-transport-17",
-	"moq-transport-18",
-	"moq-transport-22",
-];
+const MOQT: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
 
-/// The first draft that negotiates MoQ Auth, and the newest.
-const AUTH: [&str; 2] = ["moq-transport-17", "moq-transport-22"];
+/// The oldest draft we speak, which negotiates MoQ Auth, and the newest.
+const AUTH: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
@@ -53,7 +46,8 @@ fn announced(origin: &origin::Producer, path: &str) -> bool {
 		match event {
 			moq_net::announce::Event::Start(update)
 			| moq_net::announce::Event::Update(update)
-			| moq_net::announce::Event::Restart(update) => {
+			| moq_net::announce::Event::Restart(update)
+			| moq_net::announce::Event::Takeover { announce: update, .. } => {
 				live |= update.prefix.as_str() == path;
 			}
 			moq_net::announce::Event::End(update) => {
@@ -157,7 +151,8 @@ fn route(origin: &origin::Producer, path: &str) -> Option<origin::Route> {
 		match event {
 			moq_net::announce::Event::Start(update)
 			| moq_net::announce::Event::Update(update)
-			| moq_net::announce::Event::Restart(update) => {
+			| moq_net::announce::Event::Restart(update)
+			| moq_net::announce::Event::Takeover { announce: update, .. } => {
 				if update.prefix.as_str() == path {
 					route = Some(update.route);
 				}
@@ -173,14 +168,12 @@ fn route(origin: &origin::Producer, path: &str) -> Option<origin::Route> {
 }
 
 /// MoQ Epoch carries the publisher's epoch, in either direction, only when both sides
-/// offer it on draft-17 or later. A side declining it, or an older draft, leaves the
-/// route epochless exactly as before the extension, and nothing on the wire breaks the
-/// session.
+/// offer it. A side declining it leaves the route epochless exactly as before the
+/// extension, and nothing on the wire breaks the session.
 #[moq_clock::test]
 async fn an_epoch_crosses_only_when_both_offer_it() {
 	for name in MOQT {
 		let version: Version = name.parse().unwrap();
-		let negotiable = !matches!(name, "moq-transport-14" | "moq-transport-15" | "moq-transport-16");
 		for server_publishes in [true, false] {
 			for declines in [None, Some("server"), Some("client")] {
 				let context = format!("{name}, server publishes: {server_publishes}, declines: {declines:?}");
@@ -214,7 +207,7 @@ async fn an_epoch_crosses_only_when_both_offer_it() {
 				moq_clock::sleep(SETTLE).await;
 
 				let route = route(&subscriber, "room/cam").unwrap_or_else(|| panic!("{context}: never announced"));
-				let expected = (negotiable && declines.is_none()).then_some(epoch);
+				let expected = declines.is_none().then_some(epoch);
 				assert_eq!(route.epoch, expected, "{context}");
 				assert_open(&pair, &context);
 			}

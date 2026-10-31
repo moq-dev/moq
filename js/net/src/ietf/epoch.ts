@@ -1,5 +1,4 @@
 import { SetupOption, type SetupOptions } from "./setup_options.ts";
-import { type IetfVersion, Version } from "./version.ts";
 
 /**
  * The MoQ Epoch extension (draft-lcurley-moq-epoch-00).
@@ -11,24 +10,19 @@ import { type IetfVersion, Version } from "./version.ts";
  * that resolves one (SUBSCRIBE, FETCH, and TRACK_STATUS). A namespace and an EPOCH name one
  * broadcast; a request carrying one is refused rather than served by another instance.
  *
- * Negotiated on draft-17+ only, where SETUP is a Key-Value-Pair block, and only when both
+ * Negotiated on draft-18+ only, where SETUP is a Key-Value-Pair block, and only when both
  * endpoints declare the option.
  *
  * @module
  * @internal
  */
 
-/** Whether a version negotiates the extension: draft-17+, like MoQ Cluster. @internal */
-export function supported(version: IetfVersion): boolean {
-	return version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16;
-}
-
 /** Whether the peer declared the option. @internal */
-export function fromSetup(params: SetupOptions, version: IetfVersion): boolean {
-	return supported(version) && params.getVarint(SetupOption.Epoch) !== undefined;
+export function fromSetup(params: SetupOptions): boolean {
+	return params.getVarint(SetupOption.Epoch) !== undefined;
 }
 
-/** Declare that we understand the EPOCH parameter, on the versions that negotiate it. @internal */
-export function intoSetup(params: SetupOptions, version: IetfVersion) {
-	if (supported(version)) params.setVarint(SetupOption.Epoch, 1n);
+/** Declare that we understand the EPOCH parameter. @internal */
+export function intoSetup(params: SetupOptions) {
+	params.setVarint(SetupOption.Epoch, 1n);
 }

@@ -220,7 +220,7 @@ async fn a_recording_round_trips() {
 
 	let (broadcast, _run) = serve(&store).await;
 	let served = broadcast.consume().track("video").unwrap();
-	let info = served.query().await.unwrap();
+	let info = served.info().await.unwrap();
 	assert_eq!(info.priority, 3);
 	assert_eq!(info.timescale, Some(Timescale::MILLI));
 	assert_eq!(info.max_age, None);
@@ -240,7 +240,7 @@ async fn a_recording_round_trips() {
 	assert_eq!(reader.finished().await.unwrap(), Position::group(6));
 
 	// The untimed track keeps its datagram a datagram.
-	let info = broadcast.consume().track("log").unwrap().query().await.unwrap();
+	let info = broadcast.consume().track("log").unwrap().info().await.unwrap();
 	assert_eq!((info.priority, info.timescale), (9, None));
 	assert_eq!(fetch(&broadcast, "log", 0).await.unwrap(), ["a"]);
 	assert!(matches!(
@@ -431,7 +431,7 @@ async fn a_growing_archive_is_followed() {
 	assert_eq!(next(&mut b).await.unwrap(), (51, expected(true, 51, 0..2)));
 
 	assert!(matches!(
-		broadcast.consume().track("c").unwrap().query().await,
+		broadcast.consume().track("c").unwrap().info().await,
 		Err(moq_net::Error::NotFound)
 	));
 	archive.track("c", 0, false).await;
@@ -529,7 +529,7 @@ async fn a_store_failure_aborts_the_served_tracks() {
 }
 
 /// A completed archive ends each track at its recorded end, mid-group included, and an
-/// errored track replays its stored groups.
+/// errored track replays its stored groups, then its error.
 #[tokio::test(start_paused = true)]
 async fn a_completed_archive_ends_as_recorded() {
 	let archive = Archive::new();
@@ -566,10 +566,19 @@ async fn a_completed_archive_ends_as_recorded() {
 		assert_eq!(reader.finished().await.unwrap(), end, "{track}");
 	}
 
+	// Every stored group, then the error the source ended with, and still fetchable after.
 	let mut reader = subscribe(&broadcast, "errored").await;
-	assert_eq!(next(&mut reader).await.unwrap().0, 0);
-	assert_eq!(next(&mut reader).await.unwrap().0, 1);
-	assert!(next(&mut reader).await.is_none());
+	assert_eq!(next(&mut reader).await.unwrap(), (0, expected(true, 0, 0..1)));
+	assert_eq!(next(&mut reader).await.unwrap(), (1, expected(true, 1, 0..1)));
+	let end = timeout(Duration::from_secs(10), reader.next_group())
+		.await
+		.expect("the track ends");
+	let end = end.map(|group| group.map(|group| group.sequence));
+	assert!(
+		matches!(end, Err(moq_net::Error::Stream(moq_net::StreamError::App(7)))),
+		"{end:?}"
+	);
+	assert_eq!(fetch(&broadcast, "errored", 0).await.unwrap(), expected(true, 0, 0..1));
 
 	// The sequence below the end replays as an empty group, and those before it as dropped.
 	let mut reader = subscribe(&broadcast, "tail").await;

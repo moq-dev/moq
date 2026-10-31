@@ -83,12 +83,17 @@ impl Credential {
 	/// # Errors
 	///
 	/// [`Error::Identity`](crate::Error::Identity) if `semantic` exceeds 65535 bytes.
-	pub fn path(&self, semantic: &str) -> Result<moq_net::PathOwned> {
+	pub fn path(&self, semantic: &str) -> Result<moq_net::Path> {
 		let material: [u8; PATH_LEN] = self.expand(&self.path_info(semantic)?);
-		Ok(moq_net::Path::new(&URL_SAFE_NO_PAD.encode(material)).into_owned())
+		// A fixed-length encoding, far under the path limit.
+		Ok(moq_net::Path::new(&URL_SAFE_NO_PAD.encode(material)).expect("a fixed-length path fits"))
 	}
 
 	/// Mint a fresh epoch and a producing generation whose clones share track claims.
+	///
+	/// The generation belongs to this publisher instance alone. A cloned process image (a
+	/// `fork` without `exec`, a restored snapshot or checkpoint) copies its epoch and nonce
+	/// counters, so each copy must mint its own before it encrypts.
 	pub fn produce(&self) -> generation::Producer {
 		generation::Producer::new(self.clone(), Epoch::mint())
 	}

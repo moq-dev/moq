@@ -6,20 +6,35 @@ import { compareRouteCandidates, coveringPrefixes } from "./internal.ts";
 import type * as Path from "./path.ts";
 import { type Instance, sameInstance } from "./wire.ts";
 
+// Unroutable, as in Rust: the instance going away is an end, not a failure.
+function retired(): StreamError {
+	return new StreamError(StreamCode.Unroutable, { message: "broadcast instance retired" });
+}
+
 class Validity {
 	#current = new AbortController();
+	#answering = new AbortController();
 
 	get signal(): AbortSignal {
 		return this.#current.signal;
 	}
 
-	update(allowed: boolean): void {
+	/**
+	 * Aborted once another instance takes the path, which may answer a request still unanswered.
+	 * A withdrawal alone leaves it, and the instance winning again keeps it.
+	 */
+	get answering(): AbortSignal {
+		return this.#answering.signal;
+	}
+
+	update(allowed: boolean, replaced = false): void {
 		if (allowed) {
 			if (this.#current.signal.aborted) this.#current = new AbortController();
-		} else if (!this.#current.signal.aborted) {
-			// Unroutable, as in Rust: the instance going away is an end, not a failure.
-			this.#current.abort(new StreamError(StreamCode.Unroutable, { message: "broadcast instance retired" }));
+			if (this.#answering.signal.aborted) this.#answering = new AbortController();
+			return;
 		}
+		if (!this.#current.signal.aborted) this.#current.abort(retired());
+		if (replaced && !this.#answering.signal.aborted) this.#answering.abort(retired());
 	}
 }
 
@@ -159,7 +174,8 @@ export class BroadcastCache {
 		for (const path of this.#paths.get(prefix) ?? []) {
 			const selected = this.instance(path);
 			for (const entry of this.#cache.get(path)?.values() ?? []) {
-				entry.selection.validity?.update(sameInstance(entry.selection, selected));
+				const same = sameInstance(entry.selection, selected);
+				entry.selection.validity?.update(same, !same && !(selected instanceof Blind));
 			}
 		}
 	}

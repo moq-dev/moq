@@ -33,7 +33,7 @@ return work their owner polls. List any spawn that has to stay, with why, in
 the PR.
 
 Public API: constructors that spawned return a handle to poll or await
-instead. Add MIGRATE entries for the published crates whose API changes. Wire:
+instead. The PR's Impact section describes migration for the published crates whose API changes. Wire:
 none.
 
 ## Required

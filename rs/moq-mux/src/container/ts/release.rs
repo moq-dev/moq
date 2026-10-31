@@ -141,12 +141,13 @@ impl Release {
 			&& let Some((name, track)) = self.track.as_mut()
 		{
 			loop {
-				if self.jitter.full(&()) {
+				if self.jitter.full(&(), waiter) {
+					let _ = track.poll_received(waiter);
 					break;
 				}
 				let (frame, arrived) = match track.poll_event(waiter) {
 					Poll::Ready(Ok(Some(Event::Frame { frame, arrived }))) => (frame, arrived),
-					Poll::Ready(Ok(Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut))) => continue,
+					Poll::Ready(Ok(Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut { .. }))) => continue,
 					Poll::Ready(Ok(None)) => {
 						self.finished = true;
 						break;
@@ -162,11 +163,11 @@ impl Release {
 					decode: frame.timestamp.into(),
 					restart: track.markers(),
 					skip: track.skips(),
-					cut: track.cuts(),
 					// The output opens on a group, at a random access point; from then on every
 					// object goes out on its own, so one dropped late is a gap of its packets only.
 					sync: frame.keyframe || self.released,
 					leading: false,
+					bytes: frame.payload.len(),
 					item: frame,
 				};
 				if self.jitter.push((), arrival)? == Push::Late {

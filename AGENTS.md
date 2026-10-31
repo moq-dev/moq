@@ -6,7 +6,7 @@ This is a polyglot monorepo with Rust (server/native) and TypeScript (browser) i
 Start with [doc/setup/repository.md](doc/setup/repository.md) to locate a feature, its examples, and its tests.
 Use this checkout's source and docs for repository work; published API references may describe a different version.
 
-- Read `CONTRIBUTING.md` when dealing with PRs.
+- Read `CONTRIBUTING.md` when dealing with PRs, and `REVIEW.md` when reviewing one or triaging review findings.
 - Read `PROMPTING.md` before instructing other agents via context, memory, plans, or reviews.
 - Before editing, read each `AGENTS.md` along the path from the root to the file, including package-level instructions. Use `rg --files -g AGENTS.md` to find them; root-level sessions may not load nested instructions automatically.
 - `doc/` is the feature entry point, not a reference. Update it only when a change alters what a user would do; see `doc/AGENTS.md`.
@@ -59,7 +59,7 @@ The API is the most important thing to get right.
 A bad shape costs a breaking change in every language, and the surface is huge.
 
 - Report the public API and wire impact of every change, in the PR description and whenever asked.
-- A breaking change marks its title with `!` and its Impact bullet says how to migrate.
+- A breaking change marks its title with `!` and its Impact bullet says how to migrate. Only the release cut writes `MIGRATE.md` sections; leave existing Unreleased notes for that cut to consume.
 - Keep things private until a current or planned consumer needs them. Scrutinize every new exported item.
 - Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` instead.
 - Let the type system make misuse unrepresentable
@@ -102,13 +102,13 @@ just fix          # Auto-fix lint/formatting, same scope
 These diff the branch against its base and only run the affected packages.
 
 Quests: before starting work, run `quest guide` and follow it.
-The `quest` binary comes from the kixelated/quest flake input and serves the quest skills; change them upstream and bump the input.
+The `quest` binary comes from the moq-dev/quest flake input and serves the quest skills; change them upstream and bump the input.
 
 # Cross-Package Sync
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/moq-c`, `{py,swift,kt,dart}/`, `go/wrapper/` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `cpp/moq`, `cpp/obs/src`, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md` |
+| `rs/moq-ffi` | `rs/moq-c`, `c/moq`, `{py,swift,kt,dart}/`, `go/wrapper/` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `cpp/moq`, `cpp/obs/src`, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
 | `rs/hang` catalog/container (the `m2ts` section is Rust-only) | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
 | `rs/moq-auth` | `js/auth`, `doc/bin/relay/auth.md` |

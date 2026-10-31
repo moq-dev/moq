@@ -6,8 +6,6 @@ import { Parameters } from "./parameters.ts";
 import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-// PUBLISH messages are new in draft-14
-
 export class Publish {
 	static id = 0x1d;
 
@@ -63,51 +61,27 @@ export class Publish {
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
-		if (version === Version.DRAFT_17) {
-			await w.u62(0n); // required_request_id_delta = 0 (Draft17 only)
-		}
-		await Namespace.encode(w, this.trackNamespace);
-		await w.string(this.trackName);
+		await Namespace.encodeTrack(w, this.trackNamespace, this.trackName);
 		await w.u62(this.trackAlias);
 
-		if (version === Version.DRAFT_14) {
-			await w.u8(this.groupOrder);
-			await w.bool(this.contentExists);
-			if (this.contentExists !== !!this.largest) {
-				throw new Error("contentExists and largest must both be true or false");
-			}
-			if (this.largest) {
-				await w.u62(this.largest.groupId);
-				await w.u62(this.largest.objectId);
-			}
-			await w.bool(this.forward);
-			await w.u53(0); // size of parameters
-		} else {
-			// v15+: fields in parameters
-			if (this.contentExists !== !!this.largest) {
-				throw new Error("contentExists and largest must both be true or false");
-			}
-			const params = this.parameters ?? new Parameters();
-			// GROUP_ORDER is a legal PUBLISH parameter only through draft-15; a later peer closes
-			// the session with PROTOCOL_VIOLATION when it sees one. The publisher's preference is
-			// a DEFAULT_PUBLISHER_GROUP_ORDER track property instead, which we write from
-			// draft-17 on. Draft-16 gets neither form; see Properties.encode.
-			if (version === Version.DRAFT_15) {
-				params.groupOrder = this.groupOrder;
-			}
-			params.forward = this.forward;
-			if (this.largest) {
-				params.largest = this.largest;
-			}
-			await params.encode(w, version);
-
-			// Track Properties are the final field, so nothing may follow.
-			await Properties.encode(
-				w,
-				this.properties ?? { groupOrder: this.groupOrder, priority: this.priority },
-				version,
-			);
+		if (this.contentExists !== !!this.largest) {
+			throw new Error("contentExists and largest must both be true or false");
 		}
+		const params = this.parameters ?? new Parameters();
+		// The publisher's group order is a DEFAULT_PUBLISHER_GROUP_ORDER track property: a
+		// draft-18 or 19 peer closes the session on a GROUP_ORDER parameter here.
+		params.forward = this.forward;
+		if (this.largest) {
+			params.largest = this.largest;
+		}
+		await params.encode(w, version);
+
+		// Track Properties are the final field, so nothing may follow.
+		await Properties.encode(
+			w,
+			this.properties ?? { groupOrder: this.groupOrder, priority: this.priority },
+			version,
+		);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -120,34 +94,12 @@ export class Publish {
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<Publish> {
 		const requestId = await r.u62();
-		if (version === Version.DRAFT_17) {
-			await r.u62(); // required_request_id_delta (Draft17 only)
-		}
 		const { namespace: trackNamespace, name: trackName } = await Namespace.decodeTrack(r);
 		const trackAlias = await r.u62();
 
-		if (version === Version.DRAFT_14) {
-			const groupOrder = await r.u8();
-			const contentExists = await r.bool();
-			const largest = contentExists ? { groupId: await r.u62(), objectId: await r.u62() } : undefined;
-			const forward = await r.bool();
-			await Parameters.decode(r, version); // ignore parameters
-			return new Publish({
-				requestId,
-				trackNamespace,
-				trackName,
-				trackAlias,
-				groupOrder,
-				contentExists,
-				largest,
-				forward,
-			});
-		}
-		// v15+: parameters followed by Track Properties (draft-17+)
 		const params = await Parameters.decode(r, version, "publish");
 		const properties = await Properties.decode(r, version);
-		// GROUP_ORDER is legal here in draft-15 and draft-22. Draft-16 ignores it.
-		// Draft-17 and draft-18 close the session.
+		// GROUP_ORDER is legal here from draft-22; draft-18 closes the session.
 		const groupOrder = properties.groupOrder ?? params.groupOrder ?? 0x02;
 		const forward = params.forward ?? true;
 		const largest = params.largest;
@@ -167,46 +119,7 @@ export class Publish {
 	}
 }
 
-export class PublishError {
-	static id = 0x1f;
-
-	requestId: bigint;
-	errorCode: number;
-	reasonPhrase: string;
-
-	constructor({
-		requestId,
-		errorCode,
-		reasonPhrase,
-	}: { requestId: bigint; errorCode: number; reasonPhrase: string }) {
-		this.requestId = requestId;
-		this.errorCode = errorCode;
-		this.reasonPhrase = reasonPhrase;
-	}
-
-	async #encode(w: Writer): Promise<void> {
-		await w.u62(this.requestId);
-		await w.u62(BigInt(this.errorCode));
-		await w.string(this.reasonPhrase);
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<PublishError> {
-		return Message.decode(r, PublishError.#decode);
-	}
-
-	static async #decode(r: Reader): Promise<PublishError> {
-		const requestId = await r.u62();
-		const errorCode = Number(await r.u62());
-		const reasonPhrase = await r.string();
-		return new PublishError({ requestId, errorCode, reasonPhrase });
-	}
-}
-
-/** PUBLISH_DONE status codes this implementation distinguishes. Stable across drafts 14 through 22. */
+/** PUBLISH_DONE status codes this implementation distinguishes. Stable across drafts 18 through 22. */
 export const PublishDoneStatus = {
 	INTERNAL_ERROR: 0x0,
 	UNAUTHORIZED: 0x1,
@@ -224,10 +137,6 @@ export function publishDoneClean(statusCode: number, version: IetfVersion): bool
 	if (statusCode === PublishDoneStatus.TRACK_ENDED) return true;
 	if (statusCode !== PublishDoneStatus.SUBSCRIPTION_ENDED) return false;
 	switch (version) {
-		case Version.DRAFT_14:
-		case Version.DRAFT_15:
-		case Version.DRAFT_16:
-		case Version.DRAFT_17:
 		case Version.DRAFT_18:
 			return true;
 		default:
@@ -235,11 +144,9 @@ export function publishDoneClean(statusCode: number, version: IetfVersion): bool
 	}
 }
 
-// In draft-14, this message is renamed from SUBSCRIBE_DONE to PUBLISH_DONE
 export class PublishDone {
 	static readonly id = 0x0b;
 
-	requestId: bigint | undefined;
 	statusCode: number;
 	/**
 	 * How many data streams the publisher opened for the subscription, fill streams included.
@@ -249,44 +156,34 @@ export class PublishDone {
 	reasonPhrase: string;
 
 	constructor({
-		requestId,
 		statusCode,
 		streamCount = 0n,
 		reasonPhrase,
-	}: { requestId?: bigint; statusCode: number; streamCount?: bigint; reasonPhrase: string }) {
-		this.requestId = requestId;
+	}: { statusCode: number; streamCount?: bigint; reasonPhrase: string }) {
 		this.statusCode = statusCode;
 		this.streamCount = streamCount;
 		this.reasonPhrase = reasonPhrase;
 	}
 
-	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			if (this.requestId === undefined) throw new Error("requestId required for draft14-16");
-			await w.u62(this.requestId);
-		}
+	async #encode(w: Writer): Promise<void> {
 		await w.u62(BigInt(this.statusCode));
 		await w.u62(this.streamCount);
 		await w.string(this.reasonPhrase);
 	}
 
-	async encode(w: Writer, version: IetfVersion): Promise<void> {
-		return Message.encode(w, (mw) => this.#encode(mw, version));
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
+		return Message.encode(w, (mw) => this.#encode(mw));
 	}
 
-	static async decode(r: Reader, version: IetfVersion): Promise<PublishDone> {
-		return Message.decode(r, (mr) => PublishDone.#decode(mr, version));
+	static async decode(r: Reader, _version: IetfVersion): Promise<PublishDone> {
+		return Message.decode(r, PublishDone.#decode);
 	}
 
-	static async #decode(r: Reader, version: IetfVersion): Promise<PublishDone> {
-		const requestId =
-			version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
-				? await r.u62()
-				: undefined;
+	static async #decode(r: Reader): Promise<PublishDone> {
 		const statusCode = Number(await r.u62());
 		const streamCount = await r.u62();
 		const reasonPhrase = await r.string();
 
-		return new PublishDone({ requestId, statusCode, streamCount, reasonPhrase });
+		return new PublishDone({ statusCode, streamCount, reasonPhrase });
 	}
 }

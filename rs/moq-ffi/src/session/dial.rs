@@ -50,8 +50,8 @@ pub(crate) struct Dial {
 	bandwidth: moq_net::bandwidth::Allocator,
 	/// The session's receive estimate, forwarded while a consumer holds it.
 	recv: moq_net::bandwidth::Weak,
-	/// Persistent from before the handshake, so a token added while dialing waits for the
-	/// session; ended with the dial.
+	/// Persistent from before the handshake, so a grant consumer taken while dialing follows
+	/// the session; ended with the dial.
 	auth: moq_net::auth::Handle,
 }
 
@@ -67,7 +67,7 @@ impl Dial {
 		let recv = moq_net::bandwidth::Producer::new();
 		let bandwidth = moq_net::bandwidth::Allocator::new(send.consume());
 		let auth = moq_net::auth::Handle::new();
-		let client = client.with_bandwidth(bandwidth.clone()).with_auth(auth.clone());
+		let client = client.with_allocator(bandwidth.clone()).with_auth(auth.clone());
 		let dial = Self {
 			state: state.clone(),
 			bandwidth,
@@ -188,7 +188,7 @@ impl Dial {
 		}
 	}
 
-	pub fn bandwidth(&self) -> moq_net::bandwidth::Allocator {
+	pub fn allocator(&self) -> moq_net::bandwidth::Allocator {
 		self.bandwidth.clone()
 	}
 
@@ -276,9 +276,14 @@ async fn forward_send(source: Option<moq_net::bandwidth::Consumer>, out: &moq_ne
 /// Forward the receive estimate only while someone holds `out`, since holding the
 /// session's consumer is what requests PROBE.
 async fn forward_recv(session: &moq_net::Session, out: &moq_net::bandwidth::Producer) {
+	let mut demand = out.demand();
 	loop {
-		if out.used().await.is_err() {
-			return;
+		loop {
+			match demand.wanted_changed().await {
+				Ok(true) => break,
+				Ok(false) => {}
+				Err(_) => return,
+			}
 		}
 		let Some(mut source) = session.recv_bandwidth() else {
 			return;
@@ -286,9 +291,11 @@ async fn forward_recv(session: &moq_net::Session, out: &moq_net::bandwidth::Prod
 		loop {
 			tokio::select! {
 				biased;
-				unused = out.unused() => {
-					if unused.is_err() {
-						return;
+				wanted = demand.wanted_changed() => {
+					match wanted {
+						Ok(true) => continue,
+						Ok(false) => {}
+						Err(_) => return,
 					}
 					let _ = out.set(None);
 					break;

@@ -215,9 +215,10 @@ final class Moq {
 
   /// Create an unannounced broadcast at [path], invisible to everyone until announced.
   ///
-  /// Advertise it with `announce` after populating tracks. Create, `dynamic`
-  /// if tracks are served on demand, populate, then announce.
-  BroadcastProducer createBroadcast(String path) =>
+  /// Populate its `broadcast`, calling `requests` first if tracks are served
+  /// on demand, then advertise it with `announce`. Disposing the publication
+  /// keeps the route; closing the broadcast ends it.
+  Publication createBroadcast(String path) =>
       session.publish().createBroadcast(path: path);
 
   /// Discover routes matching [options]; prefixes stay relative to the origin.
@@ -229,27 +230,28 @@ final class Moq {
   }) => session.consume().announced(config: options._ffi);
 
   /// Follow the broadcast at exactly [path]: each `available()` resolves the
-  /// next publisher instance serving it, such as a restarted publisher.
-  AnnouncedBroadcast announcedBroadcast(String path) =>
-      session.consume().announcedBroadcast(path: path);
+  /// next publisher instance serving it, such as a restarted publisher. Pass an
+  /// [epoch] (UUIDv7 text) to follow only that instance.
+  Following follow(String path, {String? epoch}) =>
+      session.consume().follow(path: path, epoch: epoch);
 
-  /// Resolve an existing broadcast at [path].
-  Future<BroadcastConsumer> requestBroadcast(String path) =>
-      session.consume().requestBroadcast(path: path);
+  /// Resolve one publisher instance of the broadcast at [path]. Pass an
+  /// [epoch] (UUIDv7 text) to refuse any other instance.
+  Future<BroadcastConsumer> request(String path, {String? epoch}) =>
+      session.consume().request(path: path, epoch: epoch);
 
   /// The session's bandwidth allocator.
   ///
-  /// Every call returns a handle to the same registry. [Bandwidth.reserve]
+  /// Every call returns a handle to the same registry. [Allocator.reserve]
   /// a share for an app-owned encoder; dropping the [Reservation] hands
   /// the room back.
-  Bandwidth bandwidth() => session.bandwidth();
+  Allocator allocator() => session.allocator();
 
-  /// The session's authorization: the grant its peer gave it, and more tokens to present.
+  /// Follow the grant the peer gave this session.
   ///
-  /// Listen to [AuthGrants.grants] to follow the grant, and [Auth.add] a fresh
-  /// token before the current one expires; each added token is presented again
-  /// on every reconnect.
-  Auth auth() => session.auth();
+  /// Listen to [GrantConsumerUpdates.updates] for the current grant and each
+  /// change. Every call returns an independent consumer.
+  GrantConsumer grants() => session.grants();
 
   /// The credentials every dial presents ([ConnectOptions.tokens]), to
   /// replace while running.
@@ -258,9 +260,9 @@ final class Moq {
   /// next dial presents them, and a live session with in-band AUTH presents
   /// them at once, withdrawing each replaced token once its replacements are
   /// answered, even when one is refused. After an authorization refusal the
-  /// client redials only if they changed. An empty token throws
-  /// `ConfigMoqException`.
-  Tokens tokens() => _client.tokens();
+  /// session redials only if they changed. An empty token throws
+  /// `ConfigMoqException`. Await [Tokens.answered] for the relay's verdict.
+  Tokens tokens() => session.tokens()!;
 
   /// Drain within one second, then stop the client.
   ///
@@ -278,13 +280,13 @@ final class Moq {
 }
 
 /// A [Stream] view over a session's grant.
-extension AuthGrants on Auth {
+extension GrantConsumerUpdates on GrantConsumer {
   /// The current grant, then each change, null while there is none.
   ///
-  /// Listens on one [Auth] share its place in the changes, so a second watcher
-  /// takes its own from [Moq.auth]. Cancelling releases only its pending read.
-  /// Ends when the session shuts down, and errors with its close reason otherwise.
-  Stream<Grant?> grants() => _Grants(this);
+  /// Listen once: the consumer is cancelled and released when the subscription
+  /// ends. Ends when the session shuts down, and errors with its close reason
+  /// otherwise.
+  Stream<Grant?> updates() => _Grants(this);
 }
 
 /// A [Stream] view over an announcement cursor.
@@ -297,18 +299,27 @@ extension AnnounceConsumerUpdates on AnnounceConsumer {
 }
 
 final class _Grants extends NativeStream<Grant?> {
-  final Auth auth;
-  _Grants(this.auth);
+  final GrantConsumer grants;
+  _Grants(this.grants);
 
   @override
-  Iterable<Grant?> initial() => [auth.grant()];
+  Iterable<Grant?> initial() => [grants.grant()];
 
   @override
-  UniffiRustFuture<Grant?> read() => auth.grantChanged();
+  UniffiRustFuture<Grant?> read() => grants.changed();
 
   @override
   bool ended(Object error) =>
       error is CancelledMoqException || error is ClosedMoqException;
+
+  @override
+  void release() {
+    try {
+      grants.cancel();
+    } finally {
+      grants.dispose();
+    }
+  }
 }
 
 final class _Updates extends NativeStream<AnnounceEvent?> {

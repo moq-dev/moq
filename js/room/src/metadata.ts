@@ -54,7 +54,9 @@ export type Preview = {
 	typing?: boolean;
 };
 
-type TrackRef = {
+/** Points a `hang` catalog section at a track. */
+export type TrackRef = {
+	/** The track name. */
 	track: string;
 };
 
@@ -159,7 +161,10 @@ function serveSnapshot<T>(
 			maxAge: Milli(86_400_000),
 			priority: PRIORITY,
 		});
-		effect.cleanup(() => track.close());
+		effect.cleanup(() => {
+			track.finish();
+			track.close();
+		});
 
 		const producer = new Json.Snapshot.Producer<T>({ track });
 		effect.cleanup(() => producer.finish());
@@ -170,7 +175,8 @@ function serveSnapshot<T>(
 	});
 }
 
-type Consumed = {
+/** The signals {@link consume} reads, and how to stop reading them. */
+export type Consumed = {
 	user: Readonlys<UserInput>;
 	preview: Getter<Preview>;
 	close: () => void;
@@ -231,7 +237,7 @@ function subscribeJson<T>(
 	effect: Effect,
 	update: (value: T) => void,
 ): void {
-	const track = broadcast.track(name).subscribe({ priority: PRIORITY });
+	const track = broadcast.track(name).subscribe({ ...Moq.Track.Subscription.default(), priority: PRIORITY });
 	effect.cleanup(() => track.close());
 
 	const consumer = new Json.Snapshot.Consumer<T>({ track });

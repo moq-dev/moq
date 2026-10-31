@@ -1,7 +1,7 @@
 //! The media task: subscribe, pick renditions, and decode into the window and
 //! the speaker.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,8 +42,8 @@ const AUDIO_BUFFER_MIN: Duration = Duration::from_millis(50);
 /// the excess on its own.
 const AUDIO_SLACK: Duration = Duration::from_millis(20);
 
-/// Silence written per slice when padding, so the buffer stays a fixed size.
-const AUDIO_SILENCE: Duration = Duration::from_millis(20);
+/// Maximum sample frames per silence write, independent of the catalog rate.
+const AUDIO_SILENCE: usize = 960;
 
 /// How much longer than the speaker holds to wait for it to drain. A device that
 /// never opens reports its queue as full forever, and a truncated tail beats
@@ -130,8 +130,9 @@ impl<O: Output> Media<O> {
 		let mut catalogs = catalog::Consumer::<()>::new(&broadcast, self.args.catalog_format(&self.broadcast))
 			.await
 			.context("failed to subscribe to the catalog")?;
-		// Applied by hand rather than with `select`, which drops disabled renditions: a disabled
-		// rendition stops now, while one that leaves the catalog plays out its tail.
+		// Applied by hand rather than with `select`, so each snapshot holds the renditions that are
+		// actually playing, and so the player can tell a disabled rendition it lets go, which stops
+		// now, from one that leaves the catalog, which plays out its tail.
 		let selection = self.args.select.selection(None);
 		let mut tasks = tokio::task::JoinSet::new();
 		let mut playback = Playback::default();
@@ -189,9 +190,17 @@ impl<O: Output> Media<O> {
 					snapshot = catalogs.next(), if playback.following() => {
 						match snapshot.context("failed to read the catalog")? {
 							Some(mut snapshot) => {
-								stop_disabled(&mut video_demand, snapshot.video.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
-								stop_disabled(&mut audio_demand, snapshot.audio.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
-								selection.retain(&mut snapshot);
+								// A playing rendition its publisher disabled is held while nothing else
+								// of its kind is enabled, so an unmute plays without a resubscribe.
+								let video_disabled = disabled(&video_demand, &snapshot.video.renditions, |config| config.enabled);
+								let audio_disabled = disabled(&audio_demand, &snapshot.audio.renditions, |config| config.enabled);
+								let playing = moq_mux::select::Selected {
+									video: video_demand.iter().map(|demand| demand.name.clone()).collect(),
+									audio: audio_demand.iter().map(|demand| demand.name.clone()).collect(),
+								};
+								selection.retain(&mut snapshot, &playing);
+								stop_released(&mut video_demand, video_disabled, &snapshot.video.renditions);
+								stop_released(&mut audio_demand, audio_disabled, &snapshot.audio.renditions);
 								if let Some(demand) = &mut video_demand
 									&& demand.retire_moved(&source, snapshot.video.renditions.get(&demand.name))
 								{
@@ -441,13 +450,20 @@ impl Demand {
 	}
 }
 
-// Cancel through the task's own result so it still reports which half ended.
-fn stop_disabled<'a>(playing: &mut Option<Demand>, mut disabled: impl Iterator<Item = &'a String>) {
-	if playing
+/// Whether the catalog still lists the rendition `playing` names, disabled.
+fn disabled<C>(playing: &Option<Demand>, renditions: &BTreeMap<String, C>, enabled: impl Fn(&C) -> bool) -> bool {
+	playing
 		.as_ref()
-		.is_some_and(|playing| disabled.any(|disabled| *disabled == playing.name))
-	{
-		let _ = playing.take().unwrap().stop.send(());
+		.and_then(|playing| renditions.get(&playing.name))
+		.is_some_and(|config| !enabled(config))
+}
+
+/// Stop the rendition `playing` if it was `disabled` and the selection let it go, because
+/// another of its kind is enabled. Cancelled through the task's own result so it still reports
+/// which half ended.
+fn stop_released<C>(playing: &mut Option<Demand>, disabled: bool, selected: &BTreeMap<String, C>) {
+	if disabled && let Some(demand) = playing.take_if(|playing| !selected.contains_key(&playing.name)) {
+		let _ = demand.stop.send(());
 	}
 }
 
@@ -520,7 +536,7 @@ async fn play_audio<O: Output>(
 	let stride = channels as usize * size_of::<f32>();
 	let samples = |duration: Duration| (duration.as_secs_f64() * sample_rate as f64).round() as u64;
 	let slack = samples(AUDIO_SLACK);
-	let silence = vec![0u8; samples(AUDIO_SILENCE).max(1) as usize * stride];
+	let mut silence = Vec::new();
 
 	// The longest hole worth playing through, in samples. A hole this player would
 	// rather sit through is one it is already willing to buffer, which is what the
@@ -749,16 +765,22 @@ async fn play_audio<O: Output>(
 			let fit = fit(dry, buffered, target, slack, timing.silence, length as u64);
 			dry = false;
 
-			// Playback drops stay on the live timeline; retrying them would add latency,
-			// and the sink already reports them in its logs.
+			// The packet pays for the channel count; the catalog cannot allocate
+			// a duration's worth of silence before any samples arrive.
+			silence.resize(length.min(AUDIO_SILENCE) * stride, 0);
 			let mut quiet = fit.pad + timing.silence.saturating_sub(fit.skip);
-			while quiet > 0 {
-				let part = (quiet as usize * stride).min(silence.len());
-				sink.write(&silence[..part])?;
-				quiet -= (part / stride) as u64;
+			while quiet > 0 && !silence.is_empty() {
+				let frames = quiet.min((silence.len() / stride) as u64) as usize;
+				let written = sink.write(&silence[..frames * stride])?;
+				// Once full, padding is dropped just like live media. A catalog's
+				// rate must not make us walk seconds of refused input samples.
+				if written.dropped_sample_frames != 0 {
+					break;
+				}
+				quiet -= frames as u64;
 			}
 			let skip = fit.skip.saturating_sub(timing.silence) as usize * stride;
-			sink.write(&frame.data[skip.min(frame.data.len())..])?;
+			let _ = sink.write(&frame.data[skip.min(frame.data.len())..])?;
 
 			// Anchor the playout clock on where the speaker has actually reached, which
 			// is the only half of the pipeline that cannot skip ahead. A move has to
@@ -805,6 +827,31 @@ mod tests {
 	/// Samples per packet.
 	const PACKET: u64 = 960;
 	const PACKET_DURATION: Duration = Duration::from_millis(20);
+
+	#[tokio::test(start_paused = true)]
+	async fn an_unfed_catalog_needs_no_silence_buffer() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let _track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let consumer = moq_audio::decode::Consumer::new(
+			&broadcast.consume(),
+			&AudioConfig::new(AudioCodec::Pcm, 4_000_000_000, 8),
+			"audio",
+			moq_audio::decode::Options::new(),
+		)
+		.await
+		.unwrap();
+		let recorder = Recorder::default();
+		let playback = AudioPlayback {
+			changed: Default::default(),
+			speaker: recorder.clone(),
+			presentation: Arc::new(Mutex::new(Presentation::new(AUDIO_BUFFER_MIN))),
+			latency: AUDIO_BUFFER_MIN,
+			output: recorder,
+		};
+		let _sink = play_audio(consumer, playback, std::future::ready(())).await.unwrap();
+	}
 
 	#[tokio::test]
 	async fn a_quick_audio_resume_preserves_the_old_speaker_tail() {
@@ -1422,6 +1469,43 @@ mod tests {
 		);
 	}
 
+	/// Muting the only audio rendition holds it, so the unmute plays on the subscription it
+	/// already had rather than a new one.
+	#[tokio::test]
+	async fn a_muted_rendition_is_held_through_the_unmute() {
+		tokio::time::pause();
+		let origin = moq_tokio::origin::spawn();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let mut catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
+		let mut audio = rendition(&broadcast, &catalog, "audio");
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		let mut enable = |enabled: bool| {
+			catalog
+				.mutate(|catalog| catalog.audio.renditions.get_mut("audio").unwrap().enabled = enabled)
+				.unwrap()
+		};
+
+		write(&mut audio, 10, 0.25).await;
+		enable(false);
+		// Half a second muted, with the timeline running on through it.
+		let demand = audio.demand();
+		for _ in 0..25 {
+			tokio::time::sleep(PACKET_DURATION).await;
+			assert!(demand.wanted().is_some(), "the mute unsubscribed");
+		}
+		enable(true);
+		for index in 35..60 {
+			audio.write(packet(index, 0.5)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+
+		settle(player, &recorder).await;
+		assert!(played(&recorder, 0.25).0 > Duration::ZERO);
+		assert!(played(&recorder, 0.5).0 > Duration::ZERO, "the unmute did not play");
+	}
+
 	/// A publisher retires an audio rendition by naming its replacement and then
 	/// finishing the old track. The retired sink still holds a delay of audio, and
 	/// the replacement's sink holds its own before its first sample sounds, so
@@ -1601,7 +1685,7 @@ mod tests {
 
 	/// Answer the next request through `claim` with one `audio` rendition, under `route`'s epoch.
 	async fn answer(
-		claim: &moq_net::origin::Dynamic,
+		claim: &moq_net::origin::Requests,
 		route: &moq_net::origin::Route,
 	) -> (
 		moq_net::origin::Publication,
@@ -1689,7 +1773,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_refused_broadcast_ends_the_player() {
 		let origin = moq_tokio::origin::spawn();
-		let handler = origin.dynamic("").unwrap();
+		let handler = origin.requests("").unwrap();
 		let recorder = Recorder::default();
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		let request = handler.requested_broadcast().await.unwrap();
@@ -1827,7 +1911,7 @@ mod tests {
 		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let mut config = AudioConfig::new(AudioCodec::Pcm, SAMPLE_RATE, 1);
 		let absent = Track::of(&source, &config, "audio");
-		config.broadcast = Some(moq_net::path::RelativeOwned::new(""));
+		config.broadcast = Some(moq_net::path::Relative::new("").unwrap());
 		assert_eq!(Track::of(&source, &config, "audio"), absent);
 	}
 
@@ -1853,7 +1937,7 @@ mod tests {
 		// The broadcast ends while its route stands, so the player goes idle.
 		tokio::time::sleep(Duration::from_secs(60)).await;
 
-		let pool = origin.dynamic("").unwrap();
+		let pool = origin.requests("").unwrap();
 		drop(exact);
 		let (served, served_catalog, mut new) = answer(&pool, &route).await;
 		write(&mut new, 10, NEW).await;
@@ -1890,7 +1974,7 @@ mod tests {
 		}
 
 		exact.unannounce();
-		let pool = origin.dynamic("").unwrap();
+		let pool = origin.requests("").unwrap();
 		let (mirror, mirror_catalog, mut copy) = answer(&pool, &route).await;
 		for index in 50..60 {
 			copy.write(packet(index, NEW)).unwrap();

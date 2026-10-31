@@ -59,8 +59,7 @@ Decided with the maintainer on 2026-10-17 (see the
 - **`Increase` only with a sender.** SETUP advertises `Increase` only when
   the session has a sender behind the seam the send target defines: native
   probing on moq-quic, padding in the browser. A browser session on a version
-  [padding](/quest/m2/probe/padding.md) refuses (lite-05, lite-06, IETF
-  drafts 14 to 17) has none, so it keeps `Report`.
+  [padding](/quest/m2/probe/padding.md) refuses (lite-05, lite-06) has none, so it keeps `Report`.
 - **Automatic, opt-out.** Targets are on by default; an application can
   override them or disable probing.
 

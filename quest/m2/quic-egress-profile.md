@@ -13,6 +13,11 @@ Decided in the 2026-09-30 audit: send batching, kernel pacing, and send
 buffer pools merged into this one measure-first quest, since all three are
 questions about the same egress path and share one profile.
 
+Decided 2026-10-30 (maintainer): the profile also covers moq-quic's
+ingress and egress (`just bench-profile cpu` on `io-uring-workers`), since
+[quic-io-boundary](/quest/m2/quic-io-boundary.md) waits on it to rank its
+candidates.
+
 Measure first, on the chat and fanout shapes with many connections, tokio
 workers versus io_uring workers, with the existing profiling captures:
 
@@ -49,10 +54,6 @@ Report CPU per Gbps, RSS, loss, and p99 latency on Linux: `just bench BASE`
 for tokio, and `just bench-runtime` at both revisions for the ring, since
 `just bench BASE` runs only tokio. The verdict names which levers ship and which qdisc, if any, relay
 hosts need.
-
-## Required
-
-- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the ring half of the profile
 
 ## Related
 

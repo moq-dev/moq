@@ -28,10 +28,6 @@ decision exempts from a gate.
 
 Public API: none until the port. Wire: none.
 
-## Required
-
-- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the recipe this measures with
-
 ## Related
 
 - [Stream transports](/quest/m2/perf/stream/README.md) - the TCP and WebSocket half, ported in m2

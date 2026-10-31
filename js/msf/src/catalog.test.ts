@@ -304,3 +304,21 @@ test("preserves a track namespace through MSF decoding and encoding", () => {
 		]);
 	}
 });
+
+test("refuses duplicate JSON members before schema validation", () => {
+	for (const text of [
+		'{"version":1,"version":"draft-01","tracks":[]}',
+		'{"version":1,"tracks":[{"name":"a","name":"b","packaging":"loc"}]}',
+		'{"version":1,"tracks":[],"extension":{"x":0,"x":1}}',
+	]) {
+		expect(() => decode(new TextEncoder().encode(text))).toThrow(/duplicate JSON object key/);
+	}
+});
+
+test("refuses malformed Unicode in catalogs", () => {
+	for (const text of ['\ufeff{"version":1}', '{"version":1,"extension":"\\ud800"}', '{"version":1,"\\udfff":0}']) {
+		expect(() => decode(new TextEncoder().encode(text))).toThrow();
+	}
+	const prefix = new TextEncoder().encode('{"version":1,"extension":"');
+	expect(() => decode(new Uint8Array([...prefix, 0xff, 0x22, 0x7d]))).toThrow();
+});

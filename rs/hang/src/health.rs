@@ -40,7 +40,7 @@ pub enum Role {
 #[non_exhaustive]
 pub struct Observer {
 	/// The publisher's media broadcast, or the viewer's echo broadcast.
-	pub path: moq_net::PathOwned,
+	pub path: moq_net::Path,
 	/// The reporting broadcast's publisher epoch, when its route carries one.
 	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -49,7 +49,7 @@ pub struct Observer {
 
 impl Observer {
 	/// Name the broadcast a report was read from.
-	pub fn new(path: moq_net::PathOwned, epoch: Option<moq_net::Epoch>) -> Self {
+	pub fn new(path: moq_net::Path, epoch: Option<moq_net::Epoch>) -> Self {
 		Self { path, epoch }
 	}
 }
@@ -642,7 +642,7 @@ mod tests {
 
 	fn report<S: DeserializeOwned>(fixture: &Fixture) -> Report<S> {
 		let epoch = fixture.observer.epoch.as_deref().map(|epoch| epoch.parse().unwrap());
-		let observer = Observer::new(moq_net::Path::new(&fixture.observer.path).to_owned(), epoch);
+		let observer = Observer::new(moq_net::Path::new(&fixture.observer.path).unwrap(), epoch);
 		Report::new(observer, serde_json::from_value(fixture.snapshot.clone()).unwrap())
 	}
 
@@ -721,7 +721,7 @@ mod tests {
 				..Default::default()
 			}
 		};
-		let observer = Observer::new(moq_net::Path::new("room/live").to_owned(), None);
+		let observer = Observer::new(moq_net::Path::from_static("room/live"), None);
 		let previous = Report::new(observer.clone(), snapshot(0, 0));
 		let current = Report::new(observer, snapshot(u64::MAX, u64::MAX));
 		let sample = Sample::new(&current, Duration::ZERO).with_previous(&previous, Duration::from_secs(1));

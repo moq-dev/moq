@@ -1,4 +1,4 @@
-/** Compare the duplicate-refusing frame parse against bare `JSON.parse`, over catalog and stats frames. */
+/** Compare the strict frame parse against bare `JSON.parse`, over catalog and stats frames. */
 import { parse } from "../src/parse.ts";
 
 // A catalog with a few renditions, nested a couple of levels deep.
@@ -45,6 +45,10 @@ function stats(rows: number) {
 const decoder = new TextDecoder();
 const cases: [string, Uint8Array][] = [
 	["catalog", new TextEncoder().encode(JSON.stringify(catalog))],
+	...[16, 1024, 65536].map((length): [string, Uint8Array] => [
+		`unicode-${length}`,
+		new TextEncoder().encode(JSON.stringify({ ["é🌍".repeat(length)]: "é🌍".repeat(length) })),
+	]),
 	...[10, 100, 1000].map((rows): [string, Uint8Array] => [
 		`stats-${rows}`,
 		new TextEncoder().encode(JSON.stringify(stats(rows))),

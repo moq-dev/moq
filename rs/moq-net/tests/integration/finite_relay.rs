@@ -33,8 +33,7 @@ const VERSIONS: &[&str] = &[
 	"moq-lite-05",
 	"moq-lite-06",
 	"moq-lite-07-wip",
-	"moq-transport-14",
-	"moq-transport-17",
+	"moq-transport-18",
 	"moq-transport-22",
 ];
 
@@ -77,11 +76,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 	let downstream = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -135,7 +130,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 	// tells the relay where its feed starts; otherwise the outcome rests on whether the
 	// first group is written before SUBSCRIBE_OK.
 	moq_clock::sleep(Duration::from_millis(1)).await;
-	track.finish_at(moq_net::track::Position::group(GROUPS)).unwrap();
+	track.finish_at(moq_net::track::Position::group(GROUPS), None).unwrap();
 	match arrival {
 		Arrival::HeldTails => {
 			let mut groups = Vec::new();

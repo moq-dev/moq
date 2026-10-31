@@ -1,5 +1,6 @@
 /** Time one varint encode and one decode, for both wire formats, at their 1, 2, 4, and 8-byte sizes. */
-import { Version } from "../src/ietf/version.ts";
+import { Version as Ietf } from "../src/ietf/version.ts";
+import { Version as Lite } from "../src/lite/version.ts";
 import { Cursor } from "../src/stream.ts";
 import * as Varint from "../src/varint.ts";
 
@@ -10,18 +11,18 @@ const reps = 9;
 const scratch = new ArrayBuffer(9);
 let checksum = 0;
 
-// QUIC varints (lite, and moq-transport before draft-17), and leading-ones (draft-17+), each at the
+// QUIC varints (lite before 07) and leading-ones (lite-07 and moq-transport), each at the
 // largest value of its 1, 2, 4, and 8-byte forms that a `number` holds.
 const formats = [
 	{
 		name: "quic",
-		version: Version.DRAFT_16,
+		version: Lite.DRAFT_06,
 		encode: Varint.encodeTo,
 		values: [2 ** 6 - 1, 2 ** 14 - 1, 2 ** 30 - 1, Number.MAX_SAFE_INTEGER],
 	},
 	{
 		name: "leading-ones",
-		version: Version.DRAFT_17,
+		version: Ietf.DRAFT_18,
 		encode: Varint.encodeLeadingOnesTo,
 		values: [2 ** 7 - 1, 2 ** 14 - 1, 2 ** 28 - 1, Number.MAX_SAFE_INTEGER],
 	},

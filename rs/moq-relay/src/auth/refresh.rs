@@ -130,7 +130,9 @@ impl Refresh {
 	}
 
 	fn valid(&self, grant: &Grant) -> bool {
-		let fresh = self.admitted.recheck(grant);
+		let Ok(fresh) = self.admitted.recheck(grant) else {
+			return false;
+		};
 		super::still_valid(grant).is_ok()
 			&& fresh.root == self.admitted.root
 			&& fresh.mounts == self.admitted.mounts
@@ -371,7 +373,7 @@ impl Refresh {
 					}
 				}
 				Event::Changed(id, Change::Grant(grant)) if self.valid(&grant) => {
-					let fresh = self.admitted.recheck(&grant);
+					let fresh = self.admitted.recheck(&grant).expect("checked by valid");
 					let credential = self.credentials.get_mut(&id).expect("observed credential");
 					credential.expires = grant.deadline();
 					if credential.initial {
@@ -597,16 +599,39 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn an_invalid_label_added_before_protocol_setup_is_refused() {
-		refused_before_setup(|grant| grant.label = Some("project/*".into())).await;
+		let _clock = manual();
+		refused_before_setup(
+			|grant| grant.label = Some("project/*".into()),
+			SessionError::Unauthorized,
+		)
+		.await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_grant_expiring_before_protocol_setup_is_refused_as_expired() {
+		let clock = manual();
+		refused_before_setup(
+			|_| {
+				// Expire the grant before the client's independent SETUP deadline.
+				clock.advance(Duration::from_secs(2));
+			},
+			SessionError::Expired,
+		)
+		.await;
 	}
 
 	/// Admit a session, apply `change` to its grant before protocol setup, and check
 	/// that setup refuses it as a failure.
-	async fn refused_before_setup(change: fn(&mut moq_auth::Grant)) {
-		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
+	async fn refused_before_setup(change: impl FnOnce(&mut moq_auth::Grant), expected: SessionError) {
+		let initial = grant("a/**", 1);
+		let (producer, consumer) = lease::Producer::new(initial.clone());
 		let registry = moq_net::stats::Registry::new(Default::default());
-		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
-		let lease = super::super::Lease::new("/room", consumer).with_stats(stats.clone());
+		let stats = registry
+			.tier(moq_net::stats::Tier::default())
+			.session(moq_net::Path::from_static("room"));
+		let lease = super::super::Lease::new("/room", consumer)
+			.unwrap()
+			.with_stats(stats.clone());
 		let (client_transport, server) = transports().await;
 		let now = moq_net::time::Instant::now();
 		let origin = moq_tokio::origin::spawn();
@@ -625,23 +650,31 @@ mod tests {
 				.accept_request(now, server)
 				.await
 				.unwrap();
-			let mut changed = grant("a/**", 3000);
+			let mut changed = initial;
 			change(&mut changed);
 			producer.update(changed);
-			assert!(matches!(
-				lease.preparing(request.auth(), request.requests(), request.role()),
-				Err(moq_net::Error::Unauthorized)
-			));
-			request.close(moq_net::Error::Unauthorized);
+			let error = lease
+				.preparing(request.auth(), request.requests(), request.role())
+				.err()
+				.expect("setup must refuse the grant");
+			assert_eq!(SessionError::from(&error), expected);
+			request.close(error);
 		};
 		let ((session, driver), ()) = tokio::join!(connecting, refusing);
-		assert!(driver.await.unwrap().to_string().contains("unauthorized"));
+		let error = driver.await.unwrap();
+		assert_eq!(error.session(), Some(&expected), "{error:?}");
 		drop(session);
 		drop(stats);
 		let presence = registry.snapshot().sessions()[0].1;
 		assert_eq!(presence.sessions_ended, 1);
+		let failure = if expected == SessionError::Expired {
+			moq_net::stats::Failure::Expired
+		} else {
+			moq_net::stats::Failure::Application
+		};
 		assert_eq!(
-			presence.sessions_failed.application, 1,
+			presence.sessions_failed.count(failure),
+			1,
 			"an admitted session refused before SETUP is a failure"
 		);
 	}
@@ -709,8 +742,10 @@ mod tests {
 		] {
 			let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
 			let registry = moq_net::stats::Registry::new(Default::default());
-			let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
-			let lease = super::super::Lease::new("/room", consumer).with_stats(stats);
+			let stats = registry
+				.tier(moq_net::stats::Tier::default())
+				.session(moq_net::Path::from_static("room"));
+			let lease = super::super::Lease::new("/room", consumer).unwrap().with_stats(stats);
 			let (client, supervising) = sessions(lease).await;
 			producer.revoke(reason.clone());
 			supervising.await.unwrap();
@@ -911,7 +946,7 @@ mod tests {
 		moq_net::Session,
 		moq_net::Session,
 		super::super::Lease,
-		moq_net::auth::Auth,
+		moq_net::auth::Credential,
 	) {
 		let (auth, mut admissions) = super::super::Auth::embedded("test");
 		let (owner, consumer) = lease::Producer::new(grant("a/**", 3));
@@ -920,7 +955,9 @@ mod tests {
 			admissions.next().await.unwrap().grant(consumer);
 		});
 		let registry = moq_net::stats::Registry::new(Default::default());
-		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
+		let stats = registry
+			.tier(moq_net::stats::Tier::default())
+			.session(moq_net::Path::from_static("room"));
 		let (client, session, mut lease) = connect(lease.unwrap().with_stats(stats)).await;
 		let auth = client.auth();
 		let (token, ()) = tokio::join!(

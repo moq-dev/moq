@@ -17,7 +17,8 @@ export interface FileProps extends Inputs<FileInput> {
 	file?: globalThis.File | Signal<globalThis.File | undefined>;
 }
 
-type FileOutput = {
+/** Signals the file source derives. */
+export type FileOutput = {
 	// The sources decoded from the file, undefined while disabled or undecodable.
 	source: Signal<Media | undefined>;
 };

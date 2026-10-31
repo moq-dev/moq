@@ -112,7 +112,7 @@ impl Room {
 	fn join(&mut self, n: usize) -> moq_net::track::Subscriber {
 		let session = moq_net::fuzz::excluding(self.producer.consume(), Hop::random());
 		let path = format!("room/{}", n % self.broadcasts);
-		let resolved = self.drive(session.request_broadcast(path, None)).unwrap();
+		let resolved = self.drive(session.request(path, None)).unwrap();
 		let mut subscription = self.drive(resolved.track("video").unwrap().subscribe(None)).unwrap();
 		self.drive(subscription.recv_group())
 			.unwrap()
@@ -181,7 +181,7 @@ fn bench_churn(c: &mut Criterion) {
 				room.leave(subscription);
 			}
 			b.iter(|| {
-				let covering = room.producer.dynamic("room").unwrap();
+				let covering = room.producer.requests("room").unwrap();
 				room.poll();
 				drop(covering);
 				room.poll();

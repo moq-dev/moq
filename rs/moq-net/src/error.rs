@@ -38,9 +38,8 @@ pub enum SessionError {
 	#[error("key-value formatting error")]
 	KeyValueFormatting,
 
-	/// The peer went past what the session allows: more announcements than its
-	/// `crate::session::Limits`, or on moq-transport drafts 14 to 16, a request ID at or past
-	/// the MAX_REQUEST_ID we advertised or more live requests than the window.
+	/// The peer went past what the session allows, such as more announcements than its
+	/// `crate::session::Limits`.
 	#[error("too many requests")]
 	TooManyRequests,
 
@@ -224,8 +223,9 @@ pub enum StreamError {
 	#[error("old")]
 	Old,
 
-	/// The group was dropped under memory pressure. Unlike [`Old`](Self::Old) it was still
-	/// current, so it can be re-fetched.
+	/// The group, or the frames a reader still needed from its front, was dropped under
+	/// memory pressure. Unlike [`Old`](Self::Old) it was still current, so it can be
+	/// re-fetched.
 	#[error("evicted")]
 	Evicted,
 
@@ -237,7 +237,7 @@ pub enum StreamError {
 	#[error("frame too large")]
 	FrameTooLarge,
 
-	/// A group grew past its cache budget and was aborted.
+	/// A group could not make room for a write, even by shedding its front, and was aborted.
 	#[error("group too large")]
 	GroupTooLarge,
 
@@ -378,6 +378,14 @@ pub enum Error {
 	#[error("broadcast path contains a navigation segment")]
 	NavigationSegment,
 
+	/// A path was spelled with a leading, trailing, or doubled `/`.
+	#[error("path contains an empty segment")]
+	EmptySegment,
+
+	/// A path was spelled with a `\` before anything but `\` or `/`.
+	#[error(r"path contains a `\` that escapes neither `\` nor `/`")]
+	InvalidEscape,
+
 	/// A duplicate ID was used
 	// The broadcast/track is a duplicate
 	#[error("duplicate")]
@@ -456,8 +464,8 @@ pub enum Error {
 	#[error(transparent)]
 	Encode(#[from] coding::EncodeError),
 
-	/// The peer went past this session's `crate::session::Limits`: too many announcements, or
-	/// too many requests on moq-transport drafts 14 to 16.
+	/// The peer went past this session's `crate::session::Limits`, such as too many
+	/// announcements.
 	#[error("too many requests")]
 	TooManyRequests,
 
@@ -476,9 +484,8 @@ pub enum Error {
 
 	/// The reader asked for a frame the group never held: below
 	/// [`crate::group::Producer::start_at`]. Named from the consumer's side; distinct
-	/// from [`Self::GroupTooLarge`], which aborts the whole group when a write exceeds
-	/// the cache budget, and from [`Self::Evicted`], which drops a whole group under the
-	/// pool's memory pressure.
+	/// from [`Self::Evicted`], for frames the group held but shed from its front or
+	/// dropped whole under memory pressure.
 	#[error("lagged")]
 	Lagged,
 
@@ -486,9 +493,10 @@ pub enum Error {
 	#[error("frame too large")]
 	FrameTooLarge,
 
-	/// A write would grow the group past its cache budget (byte size or frame count).
-	/// The write is refused and the group is aborted, so every reader sees the same
-	/// failure rather than a prefix some of them missed.
+	/// A write could not make room in the group even by shedding its front: what is left,
+	/// such as the frame in flight, already fills the live tail
+	/// ([`MAX_CACHE_BYTES`](crate::group::MAX_CACHE_BYTES)). The write is refused and the
+	/// group is aborted.
 	#[error("group too large")]
 	GroupTooLarge,
 
@@ -500,8 +508,9 @@ pub enum Error {
 
 	/// The group was evicted under memory pressure: by its own track to pay eviction debt
 	/// (see [`cache::Pool`](crate::cache::Pool)), or by the transport when incomplete
-	/// messages spent its receive window. Unlike [`Self::Old`], the group was still within
-	/// the publisher's window; it can be re-fetched.
+	/// messages spent its receive window. Also a read of a frame the group shed from its
+	/// front, past its live tail or under that debt. Unlike [`Self::Old`], the group was
+	/// still within the publisher's window; it can be re-fetched.
 	#[error("evicted")]
 	Evicted,
 
@@ -616,6 +625,13 @@ impl From<StreamError> for Error {
 	}
 }
 
+/// Lets an entry point taking `impl TryInto<Path, Error: Into<Error>>` accept a `Path` too.
+impl From<std::convert::Infallible> for Error {
+	fn from(never: std::convert::Infallible) -> Self {
+		match never {}
+	}
+}
+
 /// Which session code to send for a local error.
 ///
 /// Lossy on purpose: [`Error`] describes what went wrong locally, while the registry is what
@@ -646,7 +662,9 @@ impl From<&Error> for SessionError {
 			| Error::WrongSize
 			| Error::BoundsExceeded(_)
 			| Error::InvalidPath(_)
-			| Error::NavigationSegment => Self::ProtocolViolation,
+			| Error::NavigationSegment
+			| Error::EmptySegment
+			| Error::InvalidEscape => Self::ProtocolViolation,
 			Error::App(app) => Self::App(*app),
 			// A code we did not recognize, so we cannot say which space it came from.
 			// Forwarding it into this one risks landing on a value that IS registered here
@@ -711,6 +729,8 @@ impl From<&Error> for StreamError {
 			| Error::BoundsExceeded(_)
 			| Error::InvalidPath(_)
 			| Error::NavigationSegment
+			| Error::EmptySegment
+			| Error::InvalidEscape
 			| Error::MalformedTrack => Self::MalformedTrack,
 			Error::App(app) => Self::App(*app),
 			// See the SessionError impl: an unregistered code carries no registry, so

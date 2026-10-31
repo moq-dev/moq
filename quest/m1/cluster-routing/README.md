@@ -98,9 +98,13 @@ Existing mesh deployments remain supported; the full edge/core topology
 migration is independent. Basic outbound federation proves the common routing
 contract without requiring that deployment migration.
 
-Recent baseline: #5375's two-second retraction quarantine reduced stale
-revivals but left residual cases; #5391 bounded its queue under repeated
-same-clock churn. #5382 and #5393 separately reduced idle-session polling.
+Recent baseline: [moq-dev/moq#5375](https://github.com/moq-dev/moq/pull/5375)'s
+two-second retraction quarantine reduced stale revivals but left residual
+cases; [moq-dev/moq#5391](https://github.com/moq-dev/moq/pull/5391) bounded
+its queue under repeated same-clock churn.
+[moq-dev/moq#5382](https://github.com/moq-dev/moq/pull/5382) and
+[moq-dev/moq#5393](https://github.com/moq-dev/moq/pull/5393) separately
+reduced idle-session polling.
 The 300 ms update hold alone is no longer the baseline. Keep regression
 coverage for announcement churn, idle work, active continuity, and retained
 state separately; fewer control bytes does not prove cheaper runtime work.
@@ -122,6 +126,7 @@ setup after the capabilities land.
 
 ## Required
 
+- [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - grants carry an issuer-qualified subject, scoped tokens without one are refused, and the routing model drops its `proved` exemption
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
 

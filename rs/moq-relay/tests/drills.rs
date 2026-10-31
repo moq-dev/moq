@@ -414,9 +414,9 @@ struct Reader {
 
 /// Wait for `path` to be announced, then subscribe to [`TRACK`].
 async fn subscribe(origin: &moq_net::origin::Consumer, path: &str) -> Reader {
-	// `routed_broadcast` parks until a route covers the path; `request_broadcast`
-	// would race the announcement and report a live broadcast as unroutable.
-	let broadcast = tokio::time::timeout(TIMEOUT, origin.routed_broadcast(path))
+	// Following parks until a route covers the path, where a request could find the
+	// discovery synced before the announcement reaches this relay.
+	let broadcast = tokio::time::timeout(TIMEOUT, origin.follow(path, None).unwrap().available())
 		.await
 		.expect("announcement timed out")
 		.expect("origin closed before announcing");
@@ -1359,9 +1359,10 @@ async fn no_publisher_never_delivers(lane: Lane) {
 	};
 
 	let mut announced = subscribed.announced();
+	let mut following = subscribed.follow("live", None).unwrap();
 	let (update, resolved) = tokio::join!(
 		tokio::time::timeout(quiet, next_update(&mut announced)),
-		tokio::time::timeout(quiet, subscribed.routed_broadcast("live")),
+		tokio::time::timeout(quiet, following.available()),
 	);
 	if let Ok(update) = update {
 		let path = update.map(|(update, _)| update.prefix.to_string());
@@ -1381,7 +1382,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }
@@ -1447,7 +1449,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 		.await
 		.unwrap();
 	write_group(&mut track, b"warmup");
-	let remote = tokio::time::timeout(TIMEOUT, consumed.routed_broadcast("live"))
+	let remote = tokio::time::timeout(TIMEOUT, consumed.follow("live", None).unwrap().available())
 		.await
 		.unwrap()
 		.unwrap();

@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### RSA uses aws-lc-rs (#6898)
+
+Private RSA JWKs must supply `d`, `p`, `q`, `dp`, `dq`, and `qi`; partial private keys and multi-prime `oth` are refused, including on verify-only imports.
+Export a complete two-prime JWK from your key provider or generate one with `moq auth generate --algorithm RS256`.
+Existing complete JWKs, public keys, and tokens keep their format; generated RSA keys remain 2048 bits.
+`Error` no longer implements `From<rsa::Error>` or `From<rsa::pkcs1::Error>`: handle those dependency errors in your own caller instead of converting them through moq-auth.
+
 ### Tiers are metric-safe names (#6778)
 
 A tier is `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`, checked by `tier::validate`; the empty tier is the default.

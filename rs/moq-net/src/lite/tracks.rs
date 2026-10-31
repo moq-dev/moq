@@ -17,15 +17,15 @@ const SYNCED: u64 = 0x4;
 ///
 /// Lite07+ only.
 #[derive(Clone, Debug)]
-pub struct Tracks<'a> {
-	pub broadcast: Path<'a>,
+pub struct Tracks {
+	pub broadcast: Path,
 	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
 	pub epoch: Option<crate::Epoch>,
 }
 
-impl Message for Tracks<'_> {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::TrackInfo);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Message<'a> for Tracks {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::TrackInfo);
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_tracks() {
 			return Err(DecodeError::Version);
 		}
@@ -61,7 +61,7 @@ pub enum TracksEvent<'a> {
 
 impl Encode<Version> for TracksEvent<'_> {
 	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		w.control = Some(crate::stats::Control::TrackInfo);
+		w.control = Some(crate::stats::Message::TrackInfo);
 		if !version.has_tracks() {
 			return Err(EncodeError::Version);
 		}
@@ -88,9 +88,9 @@ impl Encode<Version> for TracksEvent<'_> {
 	}
 }
 
-impl Decode<Version> for TracksEvent<'_> {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		r.control = Some(crate::stats::Control::TrackInfo);
+impl<'a> Decode<'a, Version> for TracksEvent<'a> {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
+		r.control = Some(crate::stats::Message::TrackInfo);
 		if !version.has_tracks() {
 			return Err(DecodeError::Version);
 		}
@@ -101,14 +101,14 @@ impl Decode<Version> for TracksEvent<'_> {
 		let msg = (|| {
 			Ok(match typ {
 				TRACKS_ADD => Self::Added {
-					name: Cow::Owned(body.string()?),
+					name: Cow::Borrowed(body.str()?),
 					info: TrackInfo::decode(&mut body, version)?,
 				},
 				TRACKS_REMOVE => Self::Removed {
-					name: Cow::Owned(body.string()?),
+					name: Cow::Borrowed(body.str()?),
 				},
 				TRACKS_FINISH => Self::Finished {
-					name: Cow::Owned(body.string()?),
+					name: Cow::Borrowed(body.str()?),
 				},
 				SYNCED => Self::Synced,
 				// A new stream with no earlier builds to tolerate.
@@ -132,7 +132,19 @@ mod test {
 
 	fn roundtrip(event: &TracksEvent<'_>) -> TracksEvent<'static> {
 		let buf = event.encode_bytes(Version::Lite07).unwrap();
-		TracksEvent::decode_slice(&buf, Version::Lite07).unwrap().0
+		match TracksEvent::decode_slice(&buf, Version::Lite07).unwrap().0 {
+			TracksEvent::Added { name, info } => TracksEvent::Added {
+				name: name.into_owned().into(),
+				info,
+			},
+			TracksEvent::Removed { name } => TracksEvent::Removed {
+				name: name.into_owned().into(),
+			},
+			TracksEvent::Finished { name } => TracksEvent::Finished {
+				name: name.into_owned().into(),
+			},
+			TracksEvent::Synced => TracksEvent::Synced,
+		}
 	}
 
 	#[test]
@@ -196,19 +208,19 @@ mod test {
 	fn the_request_roundtrips() {
 		let epoch: crate::Epoch = "01900000-0000-7000-8000-000000000001".parse().unwrap();
 		let msg = Tracks {
-			broadcast: Path::new("room/alice").to_owned(),
+			broadcast: Path::from_static("room/alice"),
 			epoch: Some(epoch.clone()),
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
 		let (got, _) = Tracks::decode_slice(&buf, Version::Lite07).unwrap();
-		assert_eq!(got.broadcast, Path::new("room/alice"));
+		assert_eq!(got.broadcast, Path::from_static("room/alice"));
 		assert_eq!(got.epoch, Some(epoch));
 	}
 
 	#[test]
 	fn older_versions_have_no_tracks_stream() {
 		let msg = Tracks {
-			broadcast: Path::new("room").to_owned(),
+			broadcast: Path::from_static("room"),
 			epoch: None,
 		};
 		assert!(msg.encode_bytes(Version::Lite06).is_err());

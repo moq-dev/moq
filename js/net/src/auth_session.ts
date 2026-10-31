@@ -1,10 +1,9 @@
-import { Instant, Milli, Nano, now, sleep, wall } from "@moq/clock";
+import { Instant, Milli, Nano, now, sleep, wall, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
-import type { Auth, Grant, Issued, Request, Requests } from "./auth.ts";
+import type { Credential, Grant, Issued, Request, Requests } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
 import type { Reader, Stream, Writer } from "./stream.ts";
-import { nextTask } from "./util/yield.ts";
 
 /** Write a grant's patterns as a count and each one's canonical text, the encoding both wires' AUTH_OK share. @internal */
 export async function encodePatterns(w: Writer, patterns: Path.Patterns) {
@@ -153,7 +152,7 @@ class Presented {
 }
 
 /** A token the application added to a {@link Handle}, presented on every session of it. */
-class Token implements Auth {
+class Token implements Credential {
 	readonly grant = new Signal<Grant | undefined>(undefined);
 	readonly closed: Promise<Error | null>;
 	readonly answered: Promise<void>;
@@ -325,7 +324,7 @@ export function ended(handle: Handle): Error | undefined {
  *
  * A session made without one creates its own, returned by `Established.auth`, which ends with
  * that session. Pass one to `connect` as `auth` instead and it outlives its sessions: each
- * presents every token the handle holds, so an {@link Auth} it returned keeps riding a route's
+ * presents every token the handle holds, so a {@link Credential} it returned keeps riding a route's
  * announcements across a reconnect. It backs one active session at a time, plus the ones
  * draining after a GOAWAY or a `close()`. Mirrors the Rust `moq_net::auth::Handle`.
  */
@@ -354,7 +353,7 @@ export class Handle {
 	 * handle's end. On moq-transport without AUTH it resolves at once with no grant: only a
 	 * request whose route names it carries it.
 	 */
-	async add(token: string | Uint8Array): Promise<Auth> {
+	async add(token: string | Uint8Array): Promise<Credential> {
 		// A copy, so the caller reusing its buffer never changes what a request carries.
 		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token.slice();
 		const added = stateOf(this).add(bytes);
@@ -585,7 +584,7 @@ export class AuthSession {
 	// Whoever answers the peer's tokens is decided once, after the task that established
 	// the session: an app that calls requests() as soon as connect/accept resolves always
 	// wins, however quickly the peer's first token arrives.
-	#decided = nextTask();
+	#decided = yieldNow();
 
 	/** Throws {@link Duplicate} while `handle` backs another active session, or the handle's end. */
 	constructor({ wire, requests, peerGrant, handle, draining }: AuthSessionProps) {
@@ -680,7 +679,7 @@ export class AuthSession {
 	 * The bytes a request carries for `token`: undefined for none, for one another handle
 	 * issued, or for one that ended here.
 	 */
-	carried(token: Auth | undefined): Uint8Array | undefined {
+	carried(token: Credential | undefined): Uint8Array | undefined {
 		if (!this.#requests || !(token instanceof Token)) return undefined;
 		const presented = this.#byToken.get(token);
 		if (!presented || presented.ended || presented.withdrawn) return undefined;

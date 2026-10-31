@@ -10,7 +10,10 @@
 use crate::{cache, stats, track};
 use std::{
 	collections::HashSet,
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	},
 	task::{Poll, ready},
 };
 
@@ -18,7 +21,7 @@ use crate::Error;
 use crate::origin::Route;
 
 use super::origin_impl::Announcer;
-use super::{Requests, WeakCache};
+use super::{RequestQueue, WeakCache, WeakEntry};
 
 #[path = "listing.rs"]
 mod listing;
@@ -56,7 +59,7 @@ pub struct Info {
 	///
 	/// Empty (the default) for a standalone broadcast with no origin, which is then its own
 	/// root: any `..` reference escapes.
-	pub path: crate::PathOwned,
+	pub path: crate::Path,
 
 	/// The epoch of the route a [`Consumer`] was resolved through, naming the publisher
 	/// instance it reads.
@@ -75,7 +78,7 @@ impl Default for Info {
 		Self {
 			pool: cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)),
 			cache_duration: std::time::Duration::MAX,
-			path: crate::PathOwned::default(),
+			path: crate::Path::default(),
 			epoch: None,
 			frames: Default::default(),
 		}
@@ -112,7 +115,7 @@ struct BroadcastState {
 	// and waiting for a dynamic handler to accept or deny them. A request leaves
 	// here once handed out (the handler caches it in `tracks`, so lookups keep
 	// coalescing onto it there).
-	requests: Requests<Arc<str>, track::Request>,
+	requests: RequestQueue<Arc<str>, track::Request>,
 
 	// The tracks the broadcast lists, and the readers listing them; see [`Tracks`].
 	listing: listing::ListingState,
@@ -120,23 +123,46 @@ struct BroadcastState {
 	// Set once the broadcast ends: `Producer::close()` or the last producer-side
 	// handle dropping. Every lookup after it answers `Unroutable`.
 	closing: bool,
+
+	// The tracks cached since each [`Demand`] handle last looked, by handle, so a
+	// handle watches each track once rather than rescanning the table.
+	demands: slab::Slab<Vec<track::TrackWeak>>,
 }
 
 impl BroadcastState {
 	/// Insert a track weak handle into the lookup, returning an error if a live
 	/// track already holds the name. A closed entry under the name is reclaimed.
 	fn insert_track(&mut self, weak: track::TrackWeak) -> Result<(), Error> {
-		match self.tracks.insert(weak.name().clone(), weak) {
+		match self.cache_track(weak) {
 			Some(_) => Err(Error::Duplicate),
 			None => Ok(()),
 		}
+	}
+
+	/// Cache a track under its name and hand it to every [`Demand`], unless a live track
+	/// already holds the name, which is returned instead.
+	fn cache_track(&mut self, weak: track::TrackWeak) -> Option<track::TrackWeak> {
+		if let Some(live) = self.tracks.insert(weak.name().clone(), weak.clone()) {
+			return Some(live);
+		}
+		for (_, cached) in &mut self.demands {
+			// A handle that stops polling must not pin every track it was handed. Headroom
+			// for as many tracks as survive defers the next scan until the inbox doubles,
+			// so a full inbox losing one track doesn't rescan it on every insert.
+			if cached.len() == cached.capacity() {
+				cached.retain(|track| !track.is_closed());
+				cached.reserve(cached.len());
+			}
+			cached.push(weak.clone());
+		}
+		None
 	}
 
 	/// Resolve every name the broadcast never filled, so subscribers waiting on a
 	/// [`track::Info`] that can no longer arrive fail with `err` instead of parking.
 	///
 	/// Covers a reservation nobody accepted and a request still queued for a handler.
-	/// A request a [`Dynamic`] already took is left alone: it may be in flight to a peer
+	/// A request a [`Requests`] already took is left alone: it may be in flight to a peer
 	/// still serving it, and the handler answers or drops it. So is a track that carries
 	/// its info: an end there is that publisher's call, and its cache stays readable.
 	fn reject_unserved(&mut self, err: Error) {
@@ -173,12 +199,12 @@ impl BroadcastState {
 ///
 /// Create tracks up front with [Self::create_track], reserve a name to fill in
 /// later with [Self::reserve_track], or handle on-demand consumer requests via
-/// [Self::dynamic].
+/// [Self::requests].
 ///
 /// # Lifetime
 ///
 /// A broadcast lives until [`Self::close`] or until the last [`Producer`] (or
-/// [`Dynamic`]) drops, whichever comes first; both end it the same way. A publisher
+/// [`Requests`]) drops, whichever comes first; both end it the same way. A publisher
 /// whose input ended cleanly finishes its tracks first: a subscriber still catching up
 /// drains them after the close. Children
 /// do *not* keep it alive: cloning a [`Consumer`] or holding a [`track::Producer`]
@@ -189,7 +215,7 @@ pub struct Producer {
 	// handle (threaded down by [`Self::create_track`] / [`Self::reserve_track`]).
 	info: Arc<Info>,
 
-	// Broadcast liveness, shared with every `Dynamic`. Consumers watch it (read-only)
+	// Broadcast liveness, shared with every `Requests`. Consumers watch it (read-only)
 	// for close; the guard ends the broadcast when the last of those handles drops.
 	alive: Arc<Alive>,
 
@@ -273,6 +299,7 @@ impl Producer {
 		&self,
 		mut announcer: Announcer,
 		route: Route,
+		predecessor: Option<&kio::Shared<crate::model::origin_impl::ServeState>>,
 		admit: impl FnOnce() -> bool,
 	) -> Result<bool, Error> {
 		let refused = {
@@ -283,7 +310,7 @@ impl Producer {
 			if self.alive.state.lock().closing {
 				Err(Error::Closed)
 			} else {
-				match announcer.announce_if(route, admit) {
+				match announcer.announce_if(route, predecessor, admit) {
 					Ok(true) => {
 						*slot = Some(announcer);
 						return Ok(true);
@@ -311,6 +338,11 @@ impl Producer {
 		&self.info
 	}
 
+	/// A watch-only handle to whether anyone reads the broadcast. See [`Demand`].
+	pub fn demand(&self) -> Demand {
+		Demand::new(self.alive.token.consume().weak(), self.state.clone())
+	}
+
 	/// Produce a new track and insert it into the broadcast.
 	///
 	/// Pass a name and an optional [`track::Info`], so a bare name works:
@@ -325,7 +357,7 @@ impl Producer {
 		let mut state = self.state.lock();
 
 		// A consumer may have requested this name before it existed (a live
-		// [`Dynamic`] queues such requests). Creating the track fulfills that
+		// [`Requests`] queues such requests). Creating the track fulfills that
 		// request: its consumers resolve against this very producer. Without
 		// this they would be stranded, since the name is taken the moment the
 		// track exists, so no handler could ever serve their queue entry.
@@ -334,7 +366,7 @@ impl Producer {
 			// Cache it like a served request so concurrent lookups coalesce; a
 			// live same-name entry cannot exist (its presence would have kept
 			// the request from queuing).
-			let _ = state.tracks.insert(name.clone(), track.weak());
+			let _ = state.cache_track(track.weak());
 			let unlist = Unlist::list(&self.state, &mut state.listing, name, &info);
 			return Ok(track.listed(unlist));
 		}
@@ -351,7 +383,7 @@ impl Producer {
 	/// [`track::Request::accept`] to set its info and start producing. Use this when
 	/// the producer can't pick the track's properties (e.g. timescale) until it has
 	/// inspected the media, the same shape as a consumer-driven
-	/// [`Dynamic::poll_requested_track`].
+	/// [`Requests::poll_requested_track`].
 	///
 	/// Subscribers wait on the name until it is accepted, so a reservation the producer
 	/// ends up never filling has to be dropped or rejected. Ending the broadcast
@@ -404,8 +436,8 @@ impl Producer {
 	}
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
-	pub fn dynamic(&self) -> Dynamic {
-		Dynamic::new(
+	pub fn requests(&self) -> Requests {
+		Requests::new(
 			self.info.clone(),
 			self.alive.clone(),
 			self.state.clone(),
@@ -433,7 +465,7 @@ impl Producer {
 	/// with [`Error::Closed`]. Tracks already handed out carry on and end with their
 	/// own finish or abort. Every later [`Consumer::track`], and every name reserved or
 	/// still queued for a handler, answers [`Error::Unroutable`]: the same answer an
-	/// origin gives for a path nobody publishes. A request a [`Dynamic`] already took is
+	/// origin gives for a path nobody publishes. A request a [`Requests`] already took is
 	/// left for that handler to answer.
 	///
 	/// Dropping the last producer does the same. Closing twice is a no-op.
@@ -443,17 +475,17 @@ impl Producer {
 
 	/// Whether any [`Consumer`] handle exists, which is not itself demand for a track.
 	pub(super) fn is_held(&self) -> bool {
-		self.alive.token.is_used()
+		self.alive.token.wanted()
 	}
 
 	/// `Ready(Ok)` once a [`Consumer`] handle exists, `Ready(Err)` once the broadcast ended.
 	pub(super) fn poll_held(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
-		self.alive.token.poll_used(waiter)
+		self.alive.token.poll_wanted_changed(waiter, false).map_ok(drop)
 	}
 
 	/// `Ready(Ok)` once no [`Consumer`] handle is left, `Ready(Err)` once the broadcast ended.
 	pub(crate) fn poll_unheld(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
-		self.alive.token.poll_unused(waiter)
+		self.alive.token.poll_wanted_changed(waiter, true).map_ok(drop)
 	}
 
 	/// [`Self::close`], unless a [`Consumer`] holds the broadcast or a track it asked for
@@ -470,7 +502,7 @@ impl Producer {
 }
 
 /// Ends the broadcast on [`Producer::close`] or when the last [`Producer`] or
-/// [`Dynamic`] drops, closing the liveness channel every [`Consumer`] watches.
+/// [`Requests`] drops, closing the liveness channel every [`Consumer`] watches.
 ///
 /// A refcount rather than a "am I the last one?" check inside `Drop`: that answer is
 /// a snapshot, and acting on it is exactly what invalidates it.
@@ -533,10 +565,10 @@ impl Alive {
 			}
 			// Held under the lock a consumer's first mint takes, so none appears until the
 			// close below lands.
-			let token = match self.token.write_unused() {
-				kio::Unused::Idle(token) => token,
-				kio::Unused::Used => return false,
-				kio::Unused::Closed => return true,
+			let token = match self.token.write_unwanted() {
+				kio::Unwanted::Idle(token) => token,
+				kio::Unwanted::Wanted => return false,
+				kio::Unwanted::Closed => return true,
 			};
 			state.closing = true;
 			state.reject_unserved(Error::Unroutable);
@@ -571,8 +603,12 @@ pub(crate) enum RequestValidity {
 	Unrestricted,
 	Route(kio::Consumer<()>),
 	Selected(std::sync::Arc<crate::model::origin_impl::Selection>),
-	/// One period of a selection, captured by [`Self::start`].
-	Period(kio::Consumer<()>, std::sync::Arc<crate::model::origin_impl::Selection>),
+	/// One period of a selection and its answering lease, captured by [`Self::start`].
+	Period(
+		kio::Consumer<()>,
+		kio::Consumer<()>,
+		std::sync::Arc<crate::model::origin_impl::Selection>,
+	),
 }
 
 impl RequestValidity {
@@ -582,7 +618,7 @@ impl RequestValidity {
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn for_source(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
+	pub(crate) fn for_source(route: &crate::origin::Requests, path: &crate::Path) -> Self {
 		route
 			.request_validity(path)
 			.map(|selected| Self::Selected(std::sync::Arc::new(selected)))
@@ -592,7 +628,7 @@ impl RequestValidity {
 	/// Capture one selection period so a pending request never revives after a replacement.
 	pub(crate) fn start(&self) -> Self {
 		match self {
-			Self::Selected(selected) => Self::Period(selected.current(), selected.clone()),
+			Self::Selected(selected) => Self::Period(selected.current(), selected.answering(), selected.clone()),
 			other => other.clone(),
 		}
 	}
@@ -601,12 +637,29 @@ impl RequestValidity {
 		match self {
 			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
 			// A replacement retires the period only once its held `Restart` is released.
-			Self::Period(route, selected)
+			Self::Period(route, _, selected)
 				if route.poll_closed(waiter).is_ready() || selected.poll_retired(waiter).is_ready() =>
 			{
 				Err(crate::Error::Unroutable)
 			}
 			Self::Selected(_) => self.start().check(waiter),
+			_ => Ok(()),
+		}
+	}
+
+	/// [`Self::check`] for a request already sent but not yet answered: only another
+	/// instance taking the path refuses it, since without an epoch that instance may be
+	/// the one answering. A withdrawal leaves it to its answer, as moq-lite has the
+	/// publisher conclude in-flight requests.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn check_unanswered(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
+		match self {
+			Self::Period(_, answering, selected)
+				if answering.poll_closed(waiter).is_ready() || selected.poll_retired(waiter).is_ready() =>
+			{
+				Err(crate::Error::Unroutable)
+			}
+			Self::Selected(_) => self.start().check_unanswered(waiter),
 			_ => Ok(()),
 		}
 	}
@@ -625,7 +678,7 @@ impl Producer {
 }
 
 /// A session-owned source broadcast, closed on drop even while the session's
-/// serve machines still hold its [`Dynamic`].
+/// serve machines still hold its [`Requests`].
 ///
 /// A peer's retraction and a dead session end the source the same way: a broadcast
 /// carries no end cause past this hop. Shared by the lite and IETF subscribers.
@@ -661,7 +714,7 @@ impl Drop for SourceGuard {
 /// [`track::Request::reject`]s it. Dropped when no longer needed; pending requests
 /// are automatically aborted.
 #[derive(Clone)]
-pub struct Dynamic {
+pub struct Requests {
 	info: Arc<Info>,
 	// Keeps the broadcast alive while a handler exists (mirrors a producer).
 	alive: Arc<Alive>,
@@ -675,7 +728,7 @@ pub struct Dynamic {
 	_handler: Handler,
 }
 
-/// Counts one live [`Dynamic`], rejecting the queued requests when the last one drops.
+/// Counts one live [`Requests`], rejecting the queued requests when the last one drops.
 struct Handler(kio::Shared<BroadcastState>);
 
 impl Handler {
@@ -708,7 +761,7 @@ impl Drop for Handler {
 	}
 }
 
-impl Dynamic {
+impl Requests {
 	fn new(info: Arc<Info>, alive: Arc<Alive>, state: kio::Shared<BroadcastState>, stats: stats::Scope) -> Self {
 		Self {
 			info,
@@ -751,7 +804,7 @@ impl Dynamic {
 		let pending = state.requests.remove(&name).expect("popped key must be pending");
 		// Cache the served track so concurrent lookups coalesce onto it. If a live track already
 		// holds the name (a publish raced the request), `insert` keeps it rather than shadowing it.
-		let _ = state.tracks.insert(name, pending.weak());
+		let _ = state.cache_track(pending.weak());
 		// Attribute the served track to this broadcast's ingress scope (no-op untagged).
 		Poll::Ready(Ok(pending.claim().with_stats(self.stats.clone())))
 	}
@@ -810,7 +863,7 @@ use futures::FutureExt;
 
 #[cfg(test)]
 #[expect(missing_docs, reason = "test-only assertion helpers")]
-impl Dynamic {
+impl Requests {
 	pub fn assert_request(&mut self) -> track::Request {
 		kio::wait(|waiter| self.poll_requested_track(waiter))
 			.now_or_never()
@@ -871,7 +924,7 @@ impl Consumer {
 	/// references resolve against is where the *reader* found the broadcast, not where its
 	/// producer happened to create it. Free when the two already agree, which is the case
 	/// for a broadcast created at the path an unrooted cursor asks for.
-	pub(super) fn with_path(mut self, path: crate::PathOwned) -> Self {
+	pub(super) fn with_path(mut self, path: crate::Path) -> Self {
 		if self.info.path != path {
 			let mut info = (*self.info).clone();
 			info.path = path;
@@ -900,12 +953,12 @@ impl Consumer {
 	/// Nothing is requested until the handle queries, subscribes, or fetches, each of
 	/// which looks the name up again. Fails with [`Error::Unroutable`] once the broadcast
 	/// has ended, and [`Error::NotFound`] when nothing publishes the track and no
-	/// [`Dynamic`] would serve a request for it.
+	/// [`Requests`] would serve a request for it.
 	pub fn track(&self, name: &str) -> Result<track::Consumer, Error> {
 		let current = {
 			let mut state = self.state.lock();
 			// An ended broadcast serves nothing new, not even a track it still has:
-			// the lookup answers what a fresh `request_broadcast` for the path would.
+			// the lookup answers what a fresh `request` for the path would.
 			// Tracks already handed out are untouched.
 			if state.closing {
 				return Err(Error::Unroutable);
@@ -926,7 +979,7 @@ impl Consumer {
 		)
 	}
 
-	/// Join the demand of the track serving `name`, requesting it from a [`Dynamic`]
+	/// Join the demand of the track serving `name`, requesting it from a [`Requests`]
 	/// when nothing serves it yet. Registers the subscription before exposing demand.
 	/// Errors as [`Self::track`] does.
 	pub(super) fn resolve_track(
@@ -1072,6 +1125,151 @@ impl super::WeakEntry for WeakConsumer {
 	}
 }
 
+/// A cloneable, watch-only handle to whether anyone reads a broadcast.
+///
+/// Obtained from [`Producer::demand`]. The broadcast is wanted while any of its tracks is
+/// ([`track::Demand::wanted`] is `Some`) or a track request waits for a [`Requests`]
+/// handler, so a publisher can follow its readers without holding every track's producer.
+/// It's a weak handle: it neither keeps the broadcast alive nor counts as demand.
+/// Each clone watches on its own, so its first
+/// [`poll_wanted_changed`](Self::poll_wanted_changed) reports the current value.
+pub struct Demand {
+	alive: kio::ConsumerWeak<()>,
+	state: kio::Shared<BroadcastState>,
+	// This handle's inbox in [`BroadcastState::demands`].
+	inbox: usize,
+	// One watcher per track, each counting its track in `wanted` while the track is wanted,
+	// so a reader coming or going re-polls only its own track.
+	watchers: kio::Tasks<Watcher>,
+	wanted: Arc<AtomicUsize>,
+	// The value `poll_wanted_changed` last returned, or `None` before it returned any.
+	prev: Option<bool>,
+}
+
+impl Clone for Demand {
+	fn clone(&self) -> Self {
+		Self::new(self.alive.clone(), self.state.clone())
+	}
+}
+
+impl Demand {
+	fn new(alive: kio::ConsumerWeak<()>, state: kio::Shared<BroadcastState>) -> Self {
+		let inbox = {
+			let mut state = state.lock();
+			let open = state
+				.tracks
+				.iter()
+				.filter(|track| !track.is_closed())
+				.cloned()
+				.collect();
+			state.demands.insert(open)
+		};
+		Self {
+			alive,
+			state,
+			inbox,
+			watchers: kio::Tasks::new(),
+			wanted: Arc::default(),
+			prev: None,
+		}
+	}
+
+	/// Whether the broadcast is open and any of its tracks is wanted or requested right now.
+	pub fn wanted(&self) -> bool {
+		if self.alive.is_closed() {
+			return false;
+		}
+		let state = self.state.read();
+		!state.requests.is_empty() || state.tracks.iter().any(|track| track.is_wanted())
+	}
+
+	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
+	/// immediately on the first call, then on each change. Errors once the broadcast closes.
+	///
+	/// So `while !demand.wanted_changed().await? {}` waits for a reader, and
+	/// `while demand.wanted_changed().await? {}` waits for the last one to leave.
+	#[cfg(feature = "async")]
+	pub async fn wanted_changed(&mut self) -> Result<bool, Error> {
+		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
+	}
+
+	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
+	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool, Error>> {
+		if self.alive.poll_closed(waiter).is_ready() {
+			return Poll::Ready(Err(Error::Dropped));
+		}
+		let requested = self.poll_cached(waiter);
+		// Ready only while no track is watched; the parent waker is registered either way.
+		let _ = self.watchers.poll(waiter);
+		let wanted = requested || self.wanted.load(Ordering::Relaxed) > 0;
+		if self.prev == Some(wanted) {
+			return Poll::Pending;
+		}
+		self.prev = Some(wanted);
+		Poll::Ready(Ok(wanted))
+	}
+
+	/// Watch the tracks cached since the last look, returning whether a track request is
+	/// pending. Parks `waiter` on either changing.
+	fn poll_cached(&mut self, waiter: &kio::Waiter) -> bool {
+		loop {
+			let mut requested = false;
+			let polled = self.state.poll(waiter, |state| {
+				requested = !state.requests.is_empty();
+				match state.demands[self.inbox].is_empty() {
+					true => Poll::Pending,
+					false => Poll::Ready(()),
+				}
+			});
+			let Poll::Ready(mut state) = polled else {
+				return requested;
+			};
+			let cached = std::mem::take(&mut state.demands[self.inbox]);
+			drop(state);
+			for track in cached {
+				self.watchers.push(Watcher {
+					track: track.demand(),
+					counted: false,
+					wanted: self.wanted.clone(),
+				});
+			}
+		}
+	}
+}
+
+impl Drop for Demand {
+	fn drop(&mut self) {
+		self.state.lock().demands.remove(self.inbox);
+	}
+}
+
+/// Counts one track in its [`Demand`] while the track is wanted.
+struct Watcher {
+	track: track::Demand,
+	counted: bool,
+	wanted: Arc<AtomicUsize>,
+}
+
+impl kio::Task for Watcher {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let state = self.track.poll_state(waiter);
+		let wanted = state == track::DemandState::Active;
+		if wanted != self.counted {
+			self.counted = wanted;
+			match wanted {
+				true => self.wanted.fetch_add(1, Ordering::Relaxed),
+				false => self.wanted.fetch_sub(1, Ordering::Relaxed),
+			};
+		}
+		match state {
+			track::DemandState::Closed => Poll::Ready(()),
+			_ => Poll::Pending,
+		}
+	}
+}
+
 #[cfg(test)]
 #[expect(missing_docs, reason = "test-only assertion helpers")]
 impl Consumer {
@@ -1091,7 +1289,6 @@ impl Consumer {
 
 	/// The tracks still open on the broadcast, whether or not anyone reads them.
 	pub fn open_tracks(&self) -> usize {
-		use super::WeakEntry;
 		self.state
 			.read()
 			.tracks
@@ -1108,7 +1305,7 @@ mod test {
 	#[test]
 	fn a_subscription_is_registered_before_its_request_is_visible() {
 		struct Serve {
-			dynamic: std::sync::Mutex<Dynamic>,
+			dynamic: std::sync::Mutex<Requests>,
 			request: std::sync::Mutex<Option<track::Request>>,
 			subscription: std::sync::Mutex<Option<Option<track::Subscription>>>,
 		}
@@ -1128,7 +1325,7 @@ mod test {
 
 		let producer = Info::new().produce();
 		let serve = Arc::new(Serve {
-			dynamic: std::sync::Mutex::new(producer.dynamic()),
+			dynamic: std::sync::Mutex::new(producer.requests()),
 			request: Default::default(),
 			subscription: Default::default(),
 		});
@@ -1304,6 +1501,165 @@ mod test {
 		assert_eq!(producer.unique_name(""), "12");
 	}
 
+	/// Records whether it was woken.
+	#[derive(Default)]
+	struct Flag(std::sync::atomic::AtomicBool);
+
+	impl std::task::Wake for Flag {
+		fn wake(self: Arc<Self>) {
+			self.0.store(true, Ordering::Relaxed);
+		}
+	}
+
+	impl Flag {
+		fn waiter(self: &Arc<Self>) -> kio::Waiter {
+			kio::Waiter::new(self.clone().into())
+		}
+
+		fn take(&self) -> bool {
+			self.0.swap(false, Ordering::Relaxed)
+		}
+	}
+
+	/// Poll `demand` for a change with `waiter`, without waiting.
+	fn wanted_changed(demand: &mut Demand, waiter: &kio::Waiter) -> Option<bool> {
+		match demand.poll_wanted_changed(waiter) {
+			Poll::Ready(res) => Some(res.unwrap()),
+			Poll::Pending => None,
+		}
+	}
+
+	/// Any track's demand is the broadcast's, whether the track existed before the handle or
+	/// came after it, and a reader arriving straight through a track producer, which never
+	/// touches the broadcast's state, still wakes it. It stays wanted until the last wanted
+	/// track goes.
+	#[test]
+	fn demand_follows_every_track() {
+		let producer = Info::new().produce();
+		let video = producer.create_track("video", None).unwrap();
+		let mut demand = producer.demand();
+		let audio = producer.create_track("audio", None).unwrap();
+		let flag = Arc::new(Flag::default());
+		let waiter = flag.waiter();
+		assert_eq!(
+			wanted_changed(&mut demand, &waiter),
+			Some(false),
+			"the first call reports"
+		);
+
+		let _bare = producer.consume().track("audio").unwrap();
+		assert_eq!(
+			wanted_changed(&mut demand, &waiter),
+			None,
+			"a bare handle is not demand"
+		);
+
+		flag.take();
+		let reading_audio = audio.subscribe(None);
+		assert!(flag.take(), "a reader wakes the parked poll");
+		assert_eq!(wanted_changed(&mut demand, &waiter), Some(true));
+		assert!(demand.wanted());
+
+		let reading_video = video.subscribe(None);
+		assert_eq!(wanted_changed(&mut demand, &waiter), None, "already wanted");
+		drop(reading_audio);
+		assert_eq!(wanted_changed(&mut demand, &waiter), None, "video is still read");
+		flag.take();
+		drop(reading_video);
+		assert!(flag.take(), "the last reader leaving wakes the parked poll");
+		assert_eq!(wanted_changed(&mut demand, &waiter), Some(false));
+		assert!(!demand.wanted());
+
+		// A clone reports the current value first, whatever the original last returned.
+		let _reading = video.subscribe(None);
+		assert_eq!(wanted_changed(&mut demand.clone(), &waiter), Some(true));
+	}
+
+	/// A request waiting for a handler is demand, and handing it out moves that demand onto
+	/// the track it became without a gap, until its subscriber leaves.
+	#[test]
+	fn a_pending_request_is_demand_until_its_reader_leaves() {
+		let producer = Info::new().produce();
+		let mut requests = producer.requests();
+		let mut demand = producer.demand();
+		let waiter = kio::Waiter::noop();
+		assert_eq!(wanted_changed(&mut demand, &waiter), Some(false));
+
+		let subscribing = producer.consume().track("video").unwrap().subscribe(None);
+		assert_eq!(wanted_changed(&mut demand, &waiter), Some(true), "queued");
+
+		let Poll::Ready(Ok(request)) = requests.poll_requested_track(&waiter) else {
+			panic!("the request was not queued");
+		};
+		assert_eq!(wanted_changed(&mut demand, &waiter), None, "handed out, still read");
+		let _track = request.accept(None);
+		assert_eq!(wanted_changed(&mut demand, &waiter), None, "accepted, still read");
+
+		drop(subscribing);
+		assert_eq!(wanted_changed(&mut demand, &waiter), Some(false));
+	}
+
+	/// A closed track is never demand, even while a reader lingers to drain it.
+	#[test]
+	fn a_closed_track_is_not_demand() {
+		let producer = Info::new().produce();
+		let video = producer.create_track("video", None).unwrap();
+		let mut demand = producer.demand();
+		let _reading = video.subscribe(None);
+		let waiter = kio::Waiter::noop();
+		assert_eq!(wanted_changed(&mut demand, &waiter), Some(true));
+
+		video.abort(Error::Cancel).unwrap();
+		assert_eq!(wanted_changed(&mut demand, &waiter), Some(false));
+		assert!(!demand.wanted());
+	}
+
+	/// The handle reports the broadcast closing, wanted or not.
+	#[test]
+	fn demand_errors_once_closed() {
+		let producer = Info::new().produce();
+		let video = producer.create_track("video", None).unwrap();
+		let _reading = video.subscribe(None);
+		let mut demand = producer.demand();
+		producer.close();
+		assert!(!demand.wanted());
+		assert!(matches!(
+			demand.poll_wanted_changed(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::Dropped))
+		));
+	}
+
+	/// A reader of a frame keeps its group wanted, the group its track, and the track the
+	/// broadcast, after every handle above it is gone.
+	#[test]
+	fn a_frame_read_keeps_the_broadcast_wanted() {
+		let producer = Info::new().produce();
+		let video = producer.create_track("video", track::Info::timed()).unwrap();
+		let mut demand = producer.demand();
+		let waiter = kio::Waiter::noop();
+		let mut subscriber = video.subscribe(None);
+		let mut writing = video.append_group().unwrap();
+		writing.write_frame(crate::Timestamp::ZERO, &b"key"[..]).unwrap();
+		assert_eq!(wanted_changed(&mut demand, &waiter), Some(true));
+
+		let mut group = subscriber.assert_group();
+		drop(subscriber);
+		assert_eq!(wanted_changed(&mut demand, &waiter), None, "the group is read");
+		assert!(video.demand().wanted().is_some());
+
+		let Poll::Ready(Ok(Some(frame))) = group.poll_next_frame(&waiter) else {
+			panic!("the frame was written");
+		};
+		drop(group);
+		assert!(writing.demand().wanted(), "the frame's reader reads the group");
+		assert_eq!(wanted_changed(&mut demand, &waiter), None, "the frame is read");
+
+		drop(frame);
+		assert!(!writing.demand().wanted());
+		assert_eq!(video.demand().wanted(), None);
+		assert_eq!(wanted_changed(&mut demand, &waiter), Some(false));
+	}
+
 	/// Subscribe and assert the result hasn't resolved yet (it stays pending until
 	/// a publisher accepts). Returns the pending subscription to resolve after accepting.
 	macro_rules! subscribe_pending {
@@ -1347,7 +1703,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn closed() {
 		let mut producer = Info::new().produce();
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 
 		let consumer = producer.consume();
 		consumer.assert_not_closed();
@@ -1402,7 +1758,7 @@ mod test {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn requests() {
-		let mut producer = Info::new().produce().dynamic();
+		let mut producer = Info::new().produce().requests();
 
 		let consumer = producer.consume();
 		let consumer2 = consumer.clone();
@@ -1443,7 +1799,7 @@ mod test {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn stale_producer() {
-		let mut broadcast = Info::new().produce().dynamic();
+		let mut broadcast = Info::new().produce().requests();
 		let consumer = broadcast.consume();
 
 		// Subscribe to a track and serve it.
@@ -1482,7 +1838,7 @@ mod test {
 	fn replacement_starts_over() {
 		let at = |millis| crate::Timestamp::from_millis(millis).unwrap();
 		let producer = Info::new().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let track = consumer.track("media").unwrap().subscribe(None);
@@ -1501,7 +1857,7 @@ mod test {
 		drop((group, second, track));
 
 		let mut third = producer.create_track("media", crate::track::Info::timed()).unwrap();
-		third.finish_at(crate::track::Position::group(0)).unwrap();
+		third.finish_at(crate::track::Position::group(0), None).unwrap();
 	}
 
 	/// Names that are gone leave nothing behind, served or not, so churning distinct names
@@ -1509,7 +1865,7 @@ mod test {
 	#[test]
 	fn gone_names_are_forgotten() {
 		let producer = Info::new().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 		for i in 0..1000 {
 			let track = consumer.track(&format!("requested/{i}")).unwrap().subscribe(None);
@@ -1532,7 +1888,7 @@ mod test {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn requested_unused() {
-		let mut broadcast = Info::new().produce().dynamic();
+		let mut broadcast = Info::new().produce().requests();
 		let bc = broadcast.consume();
 
 		// Subscribe to a track that doesn't exist yet, then serve it.
@@ -1587,7 +1943,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn create_track_fulfills_queued_request() {
 		let producer = Info::new().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let bc = dynamic.consume();
 
 		// Queue a request for a track that doesn't exist yet.
@@ -1607,14 +1963,14 @@ mod test {
 		again.assert_is_clone(&track.subscribe(None));
 	}
 
-	// Cloning a `Dynamic` and dropping the clone must not flip the handler
+	// Cloning a `Requests` and dropping the clone must not flip the handler
 	// count to zero. The relay's lite subscriber clones the
 	// dynamic per spawned subscribe; if Clone skipped the increment, the
 	// first finished subscribe would tear down the broadcast and any
 	// follow-up `track` would return `NotFound`.
 	#[test]
 	fn dynamic_clone_keeps_alive() {
-		let broadcast = Info::new().produce().dynamic();
+		let broadcast = Info::new().produce().requests();
 		let consumer = broadcast.consume();
 
 		let clone = broadcast.clone();
@@ -1631,7 +1987,7 @@ mod test {
 	#[test]
 	fn close_unheld_yields_to_holders() {
 		let producer = Info::new().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 		let weak = consumer.weak();
 		assert!(producer.is_held());
@@ -1676,7 +2032,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn close_resolves_a_queued_request() {
 		let producer = Info::new().produce();
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = dynamic.consume();
 
 		let pending = subscribe_pending!(consumer, "track1");
@@ -1687,11 +2043,11 @@ mod test {
 	}
 
 	/// A queued request answers the same when the broadcast ends by its last handle
-	/// dropping, even when that handle is the `Dynamic` that would have served it.
+	/// dropping, even when that handle is the `Requests` that would have served it.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn dropping_the_last_handle_resolves_a_queued_request() {
-		let dynamic = Info::new().produce().dynamic();
+		let dynamic = Info::new().produce().requests();
 		let consumer = dynamic.consume();
 
 		let pending = subscribe_pending!(consumer, "track1");
@@ -1710,7 +2066,7 @@ mod test {
 		let producer = Info::new()
 			.produce()
 			.with_validity(RequestValidity::Route(route.consume()));
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let pending = subscribe_pending!(consumer, "accepted");
@@ -1733,7 +2089,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn dropping_the_last_handler_resolves_a_queued_request_dropped() {
 		let producer = Info::new().produce();
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = dynamic.consume();
 
 		let pending = subscribe_pending!(consumer, "track1");
@@ -1750,7 +2106,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn close_leaves_a_claimed_request_to_its_handler() {
 		let producer = Info::new().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = dynamic.consume();
 
 		let accepted = subscribe_pending!(consumer, "track1");
@@ -1786,7 +2142,7 @@ mod test {
 		let consumer = producer.consume();
 
 		let request = producer.reserve_track("track1").unwrap();
-		let dynamic = request.dynamic();
+		let dynamic = request.requests();
 		let track = consumer.track("track1").unwrap();
 		let pending_fetch = track.fetch_group(0, None);
 		let fetch = dynamic.requested_fill_group().await.unwrap();
@@ -1945,7 +2301,7 @@ mod test {
 		// Demand returns in the gap before it commits.
 		let viewer = consumer.track("video").unwrap().subscribe(None);
 		let track = track
-			.abort_unused(Error::Cancel)
+			.abort_unwanted(Error::Cancel)
 			.expect_err("viewer keeps the track alive");
 
 		// So the viewer holds a live track, not a cancelled one.
@@ -1958,22 +2314,22 @@ mod test {
 		// Once the viewer really leaves, the same teardown commits, and the lookup
 		// re-requests the track instead of resolving the closed one.
 		drop(subscriber);
-		assert!(track.abort_unused(Error::Cancel).is_ok());
+		assert!(track.abort_unwanted(Error::Cancel).is_ok());
 		assert!(matches!(consumer.track("video"), Err(Error::NotFound)));
 
 		producer.close();
 	}
 
 	#[test]
-	fn abort_unused_accepts_an_already_closed_track_with_consumers() {
+	fn abort_unwanted_accepts_an_already_closed_track_with_consumers() {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
 		let _viewer = consumer.track("video").unwrap().subscribe(None);
-		assert!(track.demand().is_used());
+		assert!(track.demand().is_wanted());
 		track.clone().abort(Error::Cancel).unwrap();
-		assert!(!track.demand().is_used());
-		assert!(track.abort_unused(Error::Cancel).is_ok());
+		assert!(!track.demand().is_wanted());
+		assert!(track.abort_unwanted(Error::Cancel).is_ok());
 		producer.close();
 	}
 }

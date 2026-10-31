@@ -100,3 +100,15 @@ test("an endpoint does not trim media resumed in a later group", () => {
 	expect(terminal.end).toBeUndefined();
 	expect(terminal.span({ timestamp: 5_000_000, sampleRate: 48_000, numberOfFrames: 960 }).frames).toBe(960);
 });
+
+test("a hole preserves a declared endpoint until a later group starts a new timeline", () => {
+	const terminal = new Terminal();
+	terminal.update(frame(0, 0));
+	terminal.update(end(1, 20_000));
+	expect(terminal.update(gap)).toBe(true);
+	expect(terminal.end).toBe(20_000 as Micro);
+	expect(terminal.update(frame(1, 10_000))).toBe(false);
+	expect(terminal.span({ timestamp: 10_000, sampleRate: 48_000, numberOfFrames: 960 }).frames).toBe(480);
+	expect(terminal.update(frame(2, 1_000_000))).toBe(true);
+	expect(terminal.end).toBeUndefined();
+});

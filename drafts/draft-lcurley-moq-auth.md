@@ -69,7 +69,7 @@ AUTH Setup Option {
 The extension is negotiated when both endpoints sent the option with a value of 1.
 An endpoint MUST NOT send AUTH on a session that did not negotiate it, and an endpoint that receives AUTH anyway MUST close the session with PROTOCOL_VIOLATION, as it would for any unknown message type.
 
-This extension is defined for the versions of {{moqt}} with the unified SETUP message, draft-17 and later.
+This extension is defined for the versions of {{moqt}} with the unified SETUP message, draft-18 and later.
 
 
 # Auth Requests {#requests}
@@ -243,6 +243,7 @@ This document requests three registrations in the "MOQT Message Types" registry 
 - AUTH_ERROR can carry GOING_AWAY, refusing an AUTH past the acceptor's GOAWAY without refusing the token.
 - AUTH_OK carries moq-lite Path Patterns instead of Track Namespace prefixes, and a grant is refused only when too large for one AUTH_OK.
 - The AUTH Setup Option moves from 0x40B60 to 0x40B70.
+- Defined for {{moqt}} draft-18 and later, instead of draft-17 and later.
 
 # Acknowledgments
 {:numbered="false"}

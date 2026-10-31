@@ -37,12 +37,14 @@ typealias Transport = uniffi.moq.MoqTransport
 // Origin (broadcast discovery / announcement).
 /** The publish side of an origin: create broadcasts so subscribers can discover them. */
 typealias OriginProducer = uniffi.moq.MoqOriginProducer
+/** An origin's handle on one broadcast: `broadcast()` to fill it, `announce` and `unannounce` to advertise it. */
+typealias Publication = uniffi.moq.MoqPublication
 /** Config for creating an origin, such as its total cache budget. */
 typealias OriginConfig = uniffi.moq.MoqOriginConfig
 /** The subscribe side of an origin: discover and request published broadcasts. */
 typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
 /** A served route: advertises a path prefix and yields broadcast requests beneath it. */
-typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
+typealias OriginRequests = uniffi.moq.MoqOriginRequests
 /** A requested broadcast not yet accepted: fulfill it with a producer or reject it. */
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
 /** A claim answer being filled before its exact route is announced. */
@@ -51,13 +53,13 @@ typealias BroadcastPrepared = uniffi.moq.MoqBroadcastPrepared
 typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
 /** A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery. */
 typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
-/** A pending wait for a route to cover a specific path. */
-typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
+/** Follows a specific broadcast path across the publisher instances that serve it. */
+typealias Following = uniffi.moq.MoqFollowing
 /** A route over a prefix: its origin-relative path, wildcard captures, and route metadata. */
 typealias Announce = uniffi.moq.MoqAnnounce
 /**
  * What an [AnnounceConsumer] yields: [AnnounceEventStart], [AnnounceEventUpdate],
- * [AnnounceEventEnd], or [AnnounceEventRestart].
+ * [AnnounceEventEnd], [AnnounceEventRestart], or [AnnounceEventTakeover].
  */
 typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
 // Kotlin cannot reach a sealed class's subtypes through its typealias, so each
@@ -70,19 +72,24 @@ typealias AnnounceEventUpdate = uniffi.moq.MoqAnnounceEvent.Update
 typealias AnnounceEventEnd = uniffi.moq.MoqAnnounceEvent.End
 /** Another publisher instance now serves the prefix: drop what was resolved under it and request afresh. */
 typealias AnnounceEventRestart = uniffi.moq.MoqAnnounceEvent.Restart
+/**
+ * A route now covers the prefix and continues what the route at `predecessor` served beneath
+ * it: keep what was resolved through that one.
+ */
+typealias AnnounceEventTakeover = uniffi.moq.MoqAnnounceEvent.Takeover
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
 /** The read side of a broadcast: subscribe to its catalog and tracks. */
 typealias BroadcastConsumer = uniffi.moq.MoqBroadcastConsumer
 /** Receives tracks requested from a dynamically served broadcast. */
-typealias BroadcastDynamic = uniffi.moq.MoqBroadcastDynamic
+typealias BroadcastRequests = uniffi.moq.MoqBroadcastRequests
 /** The write side of a raw track: append groups of frames. */
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
 /** A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or abort it. */
 typealias TrackRequest = uniffi.moq.MoqTrackRequest
 /** A stream of the fills readers of one track need: runs of groups the cache lacks. */
-typealias TrackDynamic = uniffi.moq.MoqTrackDynamic
+typealias TrackRequests = uniffi.moq.MoqTrackRequests
 /** A watch-only handle to whether a published track has subscribers; holding it keeps nothing open. */
 typealias TrackDemand = uniffi.moq.MoqTrackDemand
 /** The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind. */
@@ -105,6 +112,14 @@ typealias AnnounceRoute = uniffi.moq.MoqAnnounceRoute
 typealias Route = uniffi.moq.MoqRoute
 /** Tunes how a track subscription is delivered: priority, latency budget, ranges, and group ordering. */
 typealias Subscription = uniffi.moq.MoqSubscription
+
+/**
+ * moq-net's defaults, whose `maxDelay` of zero skips a superseded group at once. A null
+ * subscription means the same; `copy` this one to change a field. A `Subscription(...)`
+ * must name `maxDelay`, where null sets no subscriber limit.
+ */
+fun uniffi.moq.MoqSubscription.Companion.default(): Subscription = uniffi.moq.moqSubscriptionDefaults()
+
 /** A span of a track to deliver: from `start` up to `end`, or onward when `end` is null. */
 typealias Range = uniffi.moq.MoqRange
 /** Where one end of a [Range] falls: [AnchorAbsolute], [AnchorRelative], or [AnchorTime]. */
@@ -117,6 +132,8 @@ typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
 typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 /** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
 typealias Order = uniffi.moq.MoqOrder
+/** A location within a track: a group sequence and a frame index in it. */
+typealias Position = uniffi.moq.MoqPosition
 /** Options for fetching one past group by sequence. */
 typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 /** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */
@@ -150,17 +167,15 @@ typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 /** Which encoder implementation to use: automatic, hardware, software, or one named backend. */
 typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
 /** Divides one connection's send estimate among the tracks sharing it. */
-typealias Bandwidth = uniffi.moq.MoqBandwidth
+typealias Allocator = uniffi.moq.MoqAllocator
 /** An owned bandwidth estimate; release it to stop receive PROBE demand. */
 typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
-/** One track's standing claim on a [Bandwidth]. */
+/** One track's standing claim on an [Allocator]. */
 typealias Reservation = uniffi.moq.MoqReservation
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
-/** A session's authorization: the grant its peer gave it, and more tokens to present. */
-typealias Auth = uniffi.moq.MoqAuth
-/** One token presented with [Auth.add]; cancel it to withdraw the token. */
-typealias AuthToken = uniffi.moq.MoqAuthToken
+/** Follows the grant a session's peer gave it; cancel it to release a pending wait. */
+typealias GrantConsumer = uniffi.moq.MoqGrantConsumer
 /** What the peer lets this side do: publish and subscribe patterns, and an expiry. */
 typealias Grant = uniffi.moq.MoqGrant
 /** A connection lifecycle transition reported by [Session.state]. */

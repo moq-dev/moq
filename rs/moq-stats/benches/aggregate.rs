@@ -55,7 +55,7 @@ impl Node {
 			.unwrap();
 		let track = source
 			.create_track(
-				group_track("acme"),
+				group_track(moq_net::Path::from_static("acme")),
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
@@ -118,7 +118,7 @@ async fn measure(live: usize, departed: usize, grace: Duration, state: State) ->
 	let (origin, driver) = origin::Producer::new(origin::Config::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
 	let agg = aggregate::Consumer::new(origin.consume(), aggregate::Config::new().with_grace(grace));
-	let mut traffic = agg.group("acme");
+	let mut traffic = agg.group(moq_net::Path::from_static("acme"));
 
 	// Every node contributes 1 byte per path, so the total counts nodes seen.
 	let mut total = 0;

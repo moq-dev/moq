@@ -53,7 +53,7 @@ for (const end of [
 		const consumer = new Container.Consumer(track.subscribe(), { format: new Container.Legacy.Format("data") });
 		try {
 			const pending = nextMedia(consumer);
-			track.close(end);
+			track.abort(end);
 			if (end instanceof Moq.Error.Stream) expect(await pending).toBeUndefined();
 			else await expect(pending).rejects.toBe(end);
 		} finally {

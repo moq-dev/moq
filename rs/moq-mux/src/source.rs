@@ -6,7 +6,7 @@
 //! broadcast's own path and an [`moq_net::origin::Consumer`] to fetch the
 //! referenced broadcast from. [`Source`] bundles the two, and resolves every
 //! referenced broadcast through the same origin so
-//! [`request_broadcast`](moq_net::origin::Consumer::request_broadcast) deduplicates
+//! [`request`](moq_net::origin::Consumer::request) deduplicates
 //! shared subscriptions.
 
 use std::collections::HashMap;
@@ -14,7 +14,29 @@ use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
 
 /// The broadcast held for each path, shared by a source's clones and its requests.
-type Pins = Arc<Mutex<HashMap<moq_net::PathOwned, moq_net::broadcast::Consumer>>>;
+type Pins = Arc<Mutex<HashMap<moq_net::Path, moq_net::broadcast::Consumer>>>;
+
+#[derive(Default)]
+struct Priorities {
+	value: i8,
+	controls: HashMap<usize, std::sync::Weak<moq_net::track::Control>>,
+}
+
+/// A program's control registration, removed with the subscription that owns it.
+pub(crate) struct Priority {
+	control: Arc<moq_net::track::Control>,
+	shared: Arc<Mutex<Priorities>>,
+}
+
+impl Drop for Priority {
+	fn drop(&mut self) {
+		self.shared
+			.lock()
+			.expect("priorities poisoned")
+			.controls
+			.remove(&(Arc::as_ptr(&self.control) as usize));
+	}
+}
 
 /// The subscription side of an export: an origin and the catalog broadcast that drives it.
 ///
@@ -42,8 +64,9 @@ type Pins = Arc<Mutex<HashMap<moq_net::PathOwned, moq_net::broadcast::Consumer>>
 #[derive(Clone)]
 pub struct Source {
 	origin: moq_net::origin::Consumer,
-	path: moq_net::PathOwned,
+	path: moq_net::Path,
 	pins: Pins,
+	priority: Arc<Mutex<Priorities>>,
 	/// What each rendition an export reads through this source has received. See
 	/// [`stats`](Self::stats).
 	received: Arc<crate::stats::Registry<crate::stats::Received>>,
@@ -55,7 +78,7 @@ impl Source {
 	/// `broadcast` is the catalog broadcast as resolved through `origin`: a rendition's relative
 	/// `broadcast` reference resolves against its [path](moq_net::broadcast::Info::path), and the
 	/// referenced broadcast is fetched via
-	/// [`origin.request_broadcast`](moq_net::origin::Consumer::request_broadcast), so it must be
+	/// [`origin.request`](moq_net::origin::Consumer::request), so it must be
 	/// reachable through `origin` (by exact path, or served by a dynamic handler). A standalone
 	/// broadcast has an empty path, so it is its own root and any `..` reference escapes.
 	pub fn new(origin: moq_net::origin::Consumer, broadcast: moq_net::broadcast::Consumer) -> Self {
@@ -65,6 +88,7 @@ impl Source {
 			origin,
 			path,
 			pins: Arc::new(Mutex::new(pins)),
+			priority: Arc::default(),
 			received: Default::default(),
 		}
 	}
@@ -77,8 +101,49 @@ impl Source {
 			origin: self.origin.clone(),
 			path: self.path.clone(),
 			pins: Arc::new(Mutex::new(pins)),
+			priority: Arc::default(),
 			received: self.received.clone(),
 		}
+	}
+
+	/// Give one export its own delivery preferences while sharing bindings and counters.
+	pub(crate) fn isolate(&mut self) {
+		self.priority = Arc::default();
+	}
+
+	/// Set the subscriber priority of this program's current and future tracks.
+	pub(crate) fn priority(&self, value: i8) -> moq_net::Result<()> {
+		let mut priority = self.priority.lock().expect("priorities poisoned");
+		priority.value = value;
+		for control in priority.controls.values().filter_map(std::sync::Weak::upgrade) {
+			match control.update(control.subscription().with_priority(value)) {
+				Ok(()) | Err(moq_net::Error::Closed) => {}
+				Err(err) => return Err(err),
+			}
+		}
+		Ok(())
+	}
+
+	/// Start a new track at the program's current priority.
+	pub(crate) fn subscription(&self, subscription: moq_net::track::Subscription) -> moq_net::track::Subscription {
+		subscription.with_priority(self.priority.lock().expect("priorities poisoned").value)
+	}
+
+	/// Keep a track at its program's priority until the returned registration drops.
+	pub(crate) fn control(&self, control: moq_net::track::Control) -> moq_net::Result<Priority> {
+		let mut priority = self.priority.lock().expect("priorities poisoned");
+		match control.update(control.subscription().with_priority(priority.value)) {
+			Ok(()) | Err(moq_net::Error::Closed) => {}
+			Err(err) => return Err(err),
+		}
+		let control = Arc::new(control);
+		priority
+			.controls
+			.insert(Arc::as_ptr(&control) as usize, Arc::downgrade(&control));
+		Ok(Priority {
+			control,
+			shared: self.priority.clone(),
+		})
 	}
 
 	/// The counters an export reading rendition `name` bumps.
@@ -110,7 +175,7 @@ impl Source {
 		&self.origin
 	}
 
-	pub(crate) fn path(&self) -> &moq_net::PathOwned {
+	pub(crate) fn path(&self) -> &moq_net::Path {
 		&self.path
 	}
 
@@ -139,19 +204,26 @@ impl Source {
 
 	/// The broadcast `path` is pinned to, or a lookup that waits for the path's first
 	/// announcement and pins its answer, either checked against `epoch` on every read.
-	pub(crate) fn request_path(&self, path: &moq_net::PathOwned, epoch: Option<&moq_net::Epoch>) -> Binding {
-		let bound = match self.pins.lock().expect("pins poisoned").get(path) {
-			Some(pinned) => Bound::Ready(pinned.clone()),
+	pub(crate) fn request_path(&self, path: &moq_net::Path, epoch: Option<&moq_net::Epoch>) -> Binding {
+		let pinned = self.pins.lock().expect("pins poisoned").get(path).cloned();
+		let bound = match pinned {
+			Some(pinned) => Bound::Ready(pinned),
 			// Unpinned even with an epoch: an epochless route still answers, best effort, and
 			// the read refuses a route that proves another instance.
 			None => {
-				let mut routing = self.origin.routed_broadcast(path).into_inner();
+				let mut following = self.origin.follow(path, None);
 				// Issue the request now: a handler answers it whether or not anyone reads yet.
-				let _ = kio::Task::poll(&mut routing, &kio::Waiter::noop());
-				Bound::Requested {
-					routing: Box::new(Mutex::new(routing)),
-					pins: self.pins.clone(),
-					path: path.clone(),
+				match poll_first(&mut following, &kio::Waiter::noop()) {
+					// The follower hands an instance out once, so an answer on hand is pinned now.
+					Poll::Ready(Ok(broadcast)) => {
+						let mut pins = self.pins.lock().expect("pins poisoned");
+						Bound::Ready(pins.entry(path.clone()).or_insert(broadcast).clone())
+					}
+					_ => Bound::Requested {
+						following: Box::new(Mutex::new(following)),
+						pins: self.pins.clone(),
+						path: path.clone(),
+					},
 				}
 			}
 		};
@@ -167,7 +239,7 @@ impl Source {
 	/// A missing or empty reference returns the catalog broadcast path. A valid reference
 	/// may return the empty root path, which still names a broadcast. `None` means the
 	/// reference walked above the root and names nothing.
-	pub fn resolve_reference(&self, rel: Option<&moq_net::path::Relative<'_>>) -> Option<moq_net::PathOwned> {
+	pub fn resolve_reference(&self, rel: Option<&moq_net::path::Relative>) -> Option<moq_net::Path> {
 		match rel.filter(|rel| !rel.is_empty()) {
 			Some(rel) => self.path.try_resolve(rel),
 			None => Some(self.path.clone()),
@@ -178,7 +250,7 @@ impl Source {
 	///
 	/// The erroring counterpart to [`Self::resolve_reference`], for the consumer side, where
 	/// an escaping reference is a fault to report rather than a rendition to drop.
-	fn target(&self, rel: Option<&moq_net::path::Relative<'_>>) -> crate::Result<moq_net::PathOwned> {
+	fn target(&self, rel: Option<&moq_net::path::Relative>) -> crate::Result<moq_net::Path> {
 		self.resolve_reference(rel).ok_or_else(|| {
 			let rel = rel.map_or("", |rel| rel.as_str());
 			tracing::error!(rel, catalog = %self.path, "broadcast reference escapes the root");
@@ -239,7 +311,7 @@ impl Source {
 	/// no broadcast, so there is nothing to resolve.
 	pub async fn resolve(
 		&self,
-		rel: Option<&moq_net::path::Relative<'_>>,
+		rel: Option<&moq_net::path::Relative>,
 		epoch: Option<&moq_net::Epoch>,
 	) -> crate::Result<moq_net::broadcast::Consumer> {
 		self.bind(rel, epoch)?.broadcast().await
@@ -262,7 +334,7 @@ impl Source {
 	/// `epoch` on every read.
 	pub fn bind(
 		&self,
-		rel: Option<&moq_net::path::Relative<'_>>,
+		rel: Option<&moq_net::path::Relative>,
 		epoch: Option<&moq_net::Epoch>,
 	) -> crate::Result<Binding> {
 		Ok(self.request_path(&self.target(rel)?, epoch))
@@ -283,7 +355,7 @@ impl Source {
 	/// use it to honor cross-broadcast renditions without reimplementing the path math.
 	pub async fn subscribe_track(
 		&self,
-		rel: Option<&moq_net::path::Relative<'_>>,
+		rel: Option<&moq_net::path::Relative>,
 		epoch: Option<&moq_net::Epoch>,
 		name: &str,
 	) -> crate::Result<moq_net::track::Subscriber> {
@@ -306,7 +378,7 @@ impl Source {
 	/// Rejects an escaping reference exactly as [`resolve`](Self::resolve) does.
 	pub fn follow(
 		&self,
-		rel: Option<&moq_net::path::Relative<'_>>,
+		rel: Option<&moq_net::path::Relative>,
 		epoch: Option<&moq_net::Epoch>,
 	) -> crate::Result<crate::follow::Instances> {
 		let path = self.target(rel)?;
@@ -342,7 +414,7 @@ pub(crate) fn check_epoch(
 /// A held broadcast or the retained result of one eagerly issued broadcast request.
 ///
 /// A pending request waits for a path nothing announces yet and rides out route churn until it
-/// resolves (see [`routed_broadcast`](moq_net::origin::Consumer::routed_broadcast)). Once the
+/// resolves (see [`follow`](moq_net::origin::Consumer::follow)). Once the
 /// path is pinned, reading the binding answers that pin and never looks the path up again, even
 /// after its publisher is replaced or goes. Issuing a request does not establish an epoch
 /// relationship with a separate catalog broadcast. A binding made with an epoch refuses a
@@ -360,12 +432,13 @@ pub struct Binding {
 enum Bound {
 	/// A broadcast the caller already holds.
 	Ready(moq_net::broadcast::Consumer),
-	/// A request issued when the binding was made, resolved once something announces the path.
+	/// A request issued when the binding was made, resolved once something announces the path,
+	/// or the failure it ended with.
 	Requested {
-		routing: Box<Mutex<moq_net::origin::Routing>>,
+		following: Box<Mutex<Following>>,
 		/// Where the answer is pinned, the first for its path winning.
 		pins: Pins,
-		path: moq_net::PathOwned,
+		path: moq_net::Path,
 	},
 }
 
@@ -390,17 +463,17 @@ impl Binding {
 	pub fn poll_broadcast(&self, waiter: &kio::Waiter) -> Poll<crate::Result<moq_net::broadcast::Consumer>> {
 		let broadcast = match &self.bound {
 			Bound::Ready(broadcast) => broadcast.clone(),
-			Bound::Requested { routing, pins, path } => {
+			Bound::Requested { following, pins, path } => {
+				// The follower stays locked until its answer is pinned: it hands each instance
+				// out once, so a concurrent read that polled it in between would wait for the next.
+				let mut following = following.lock().expect("following poisoned");
 				// Once a path is pinned, its pin is the answer: a request that raced another for
-				// the path takes the one pinned first, and the routing is never polled again, since
+				// the path takes the one pinned first, and the follower is never polled again, since
 				// it would wait out the gap after the pinned instance goes.
 				if let Some(pinned) = pins.lock().expect("pins poisoned").get(path) {
 					pinned.clone()
 				} else {
-					let broadcast = {
-						let mut routing = routing.lock().expect("routing poisoned");
-						ready!(kio::Task::poll(&mut *routing, waiter))?
-					};
+					let broadcast = ready!(poll_first(&mut following, waiter))?;
 					// The path's first answer is pinned even when it fails this binding's epoch, so
 					// no later reference resolves the path independently.
 					let mut pins = pins.lock().expect("pins poisoned");
@@ -417,6 +490,25 @@ impl Binding {
 	pub async fn broadcast(&self) -> crate::Result<moq_net::broadcast::Consumer> {
 		kio::wait(|waiter| self.poll_broadcast(waiter)).await
 	}
+}
+
+/// A binding's follower, or the failure it ended with.
+type Following = Result<moq_net::origin::Following, moq_net::Error>;
+
+/// Poll a binding's follower for its first instance, keeping the failure it ends with so every
+/// later read answers the same.
+fn poll_first(
+	following: &mut Following,
+	waiter: &kio::Waiter,
+) -> Poll<Result<moq_net::broadcast::Consumer, moq_net::Error>> {
+	let result = match following {
+		Ok(following) => ready!(following.poll_available(waiter)),
+		Err(err) => Err(err.clone()),
+	};
+	if let Err(err) = &result {
+		*following = Err(err.clone());
+	}
+	Poll::Ready(result)
 }
 
 /// Test helper: build an origin producer, spawning its driver on the ambient runtime.
@@ -437,10 +529,7 @@ pub(crate) fn produce_origin() -> moq_net::origin::Producer {
 #[cfg(test)]
 pub(crate) async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> Source {
 	let consumer = origin.consume();
-	let broadcast = consumer
-		.request_broadcast(path, None)
-		.await
-		.expect("the broadcast resolves");
+	let broadcast = consumer.request(path, None).await.expect("the broadcast resolves");
 	Source::new(consumer, broadcast)
 }
 
@@ -461,6 +550,41 @@ mod tests {
 	use hang::catalog::{H264, VideoConfig};
 	use moq_net::path::Relative;
 
+	/// Priorities belong to one export, follow late tracks, preserve delivery bounds, and
+	/// retain no subscription once its owning reader drops.
+	#[tokio::test(start_paused = true)]
+	async fn export_priorities_follow_subscription_ownership() {
+		let origin = produce_origin();
+		let source = created(&origin);
+		let mut independent = source.clone();
+		independent.isolate();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("audio", None).unwrap();
+		let preferences = moq_net::track::Subscription::default()
+			.with_max_delay(std::time::Duration::from_secs(3))
+			.with_range(5..=10);
+		let first = track.subscribe(preferences.clone());
+		let held = source.control(first.control()).unwrap();
+		let other = track.subscribe(preferences.clone());
+		let _other = independent.control(other.control()).unwrap();
+
+		source.priority(-1).unwrap();
+		assert_eq!(first.subscription(), preferences.clone().with_priority(-1));
+		assert_eq!(other.subscription(), preferences);
+		let late = track.subscribe(source.subscription(preferences.clone()));
+		let late_held = source.control(late.control()).unwrap();
+		assert_eq!(late.subscription(), first.subscription());
+		source.priority(0).unwrap();
+		assert_eq!(first.subscription(), preferences);
+		assert_eq!(late.subscription(), preferences);
+		track.finish().unwrap();
+		source.priority(-1).unwrap(); // A closed track has no priority left to change.
+		drop((held, late_held));
+		assert!(source.priority.lock().unwrap().controls.is_empty());
+		drop((first, late, other, _other));
+		assert!(track.subscription().is_none());
+	}
+
 	/// Let the origin's driver run the fronts that requests and announcements
 	/// started: they serve asynchronously, shortly after the call returns.
 	async fn settle() {
@@ -475,8 +599,8 @@ mod tests {
 		let _catalog = origin.publish("pub", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "pub").await;
-		let dynamic = origin.dynamic("media").unwrap();
-		let binding = source.bind(Some(&Relative::new("media")), None).unwrap();
+		let dynamic = origin.requests("media").unwrap();
+		let binding = source.bind(Some(&Relative::new("media").unwrap()), None).unwrap();
 		let request = dynamic.requested_broadcast().await.unwrap();
 
 		assert!(
@@ -511,7 +635,7 @@ mod tests {
 		let _catalog = origin.publish("pub", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "pub").await;
-		let media = Relative::new("media");
+		let media = Relative::new("media").unwrap();
 		let binding = source.bind(Some(&media), None).unwrap();
 		settle().await;
 		assert!(binding.poll_broadcast(&kio::Waiter::noop()).is_pending());
@@ -547,7 +671,7 @@ mod tests {
 		let _old = origin.publish("live", Default::default()).unwrap();
 		settle().await;
 		let consumer = origin.consume();
-		let first = consumer.request_broadcast("live", None).await.unwrap();
+		let first = consumer.request("live", None).await.unwrap();
 
 		let new = origin.publish("live", Default::default()).unwrap();
 		let _late = new.create_track("late", None).unwrap();
@@ -577,12 +701,12 @@ mod tests {
 
 		let timeout = std::time::Duration::from_secs(5);
 		let consumer = subscriber.consume();
-		let catalog = tokio::time::timeout(timeout, consumer.routed_broadcast("a/pub"))
+		let catalog = tokio::time::timeout(timeout, consumer.follow("a/pub", None).unwrap().available())
 			.await
 			.expect("the catalog resolves")
 			.unwrap();
 		let source = Source::new(consumer, catalog);
-		let sibling = tokio::time::timeout(timeout, source.resolve(Some(&Relative::new("./source")), None))
+		let sibling = tokio::time::timeout(timeout, source.resolve(Some(&Relative::new("./source").unwrap()), None))
 			.await
 			.expect("the sibling resolves without the stalled session")
 			.unwrap();
@@ -590,7 +714,7 @@ mod tests {
 
 		// Nothing serves a later sibling yet and the stalled session never syncs, so its
 		// lookup keeps waiting rather than failing, and resolves once it is published.
-		let binding = source.bind(Some(&Relative::new("./late")), None).unwrap();
+		let binding = source.bind(Some(&Relative::new("./late").unwrap()), None).unwrap();
 		settle().await;
 		assert!(binding.poll_broadcast(&kio::Waiter::noop()).is_pending());
 		let _late = healthy.publish("a/late", Default::default()).unwrap();
@@ -609,7 +733,7 @@ mod tests {
 		let _old = origin.publish("a/source", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
-		let sibling = Relative::new("./source");
+		let sibling = Relative::new("./source").unwrap();
 		let first = source
 			.resolve(Some(&sibling), None)
 			.await
@@ -644,7 +768,7 @@ mod tests {
 		let _sibling = origin.publish("a/source", route(&sibling)).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
-		let rel = Relative::new("./source");
+		let rel = Relative::new("./source").unwrap();
 
 		let first = source.resolve(Some(&rel), None).await.unwrap();
 		assert_eq!(first.info().epoch.as_ref(), Some(&sibling));
@@ -668,7 +792,7 @@ mod tests {
 		let _new = origin.publish("a/source", route(&new_epoch)).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
-		let rel = Relative::new("./source");
+		let rel = Relative::new("./source").unwrap();
 
 		assert!(is_mismatch(
 			source.resolve(Some(&rel), Some(&old_epoch)).await,
@@ -689,7 +813,7 @@ mod tests {
 		let _old = origin.publish("a/source", route(&old_epoch)).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
-		let rel = Relative::new("./source");
+		let rel = Relative::new("./source").unwrap();
 		let first = source.resolve(Some(&rel), Some(&old_epoch)).await.unwrap();
 
 		let _new = origin.publish("a/source", route(&new_epoch)).unwrap();
@@ -724,7 +848,7 @@ mod tests {
 		let source = resolved(&origin, "a/pub").await;
 
 		for reference in [None, Some("./pub")] {
-			let rel = reference.map(Relative::new);
+			let rel = reference.map(|rel| Relative::new(rel).unwrap());
 			let own = source.resolve(rel.as_ref(), Some(&catalog)).await.unwrap();
 			assert!(own.is_clone(&source.broadcast()), "{reference:?}");
 			assert!(is_mismatch(source.resolve(rel.as_ref(), Some(&other)).await, &other));
@@ -746,8 +870,11 @@ mod tests {
 		let source = resolved(&origin, "a/pub").await;
 		let epoch = moq_net::Epoch::mint();
 
-		let sibling = source.resolve(Some(&Relative::new("./source")), Some(&epoch)).await;
-		assert!(sibling.unwrap().info().epoch.is_none());
+		let sibling = source
+			.resolve(Some(&Relative::new("./source").unwrap()), Some(&epoch))
+			.await
+			.unwrap();
+		assert!(sibling.info().epoch.is_none());
 		assert!(source.resolve(None, Some(&epoch)).await.is_ok());
 	}
 
@@ -764,7 +891,7 @@ mod tests {
 		settle().await;
 
 		for reference in [None, Some(""), Some("live"), Some("./live"), Some("../a/live")] {
-			let rel = reference.map(Relative::new);
+			let rel = reference.map(|rel| Relative::new(rel).unwrap());
 			let bound = source.bind(rel.as_ref(), None).unwrap().broadcast().await.unwrap();
 			assert!(
 				bound.is_closed(),
@@ -825,7 +952,7 @@ mod tests {
 		let source = resolved(&origin, "a/pub").await;
 
 		// Names the catalog within its own parent.
-		let rel = Relative::new("./pub");
+		let rel = Relative::new("./pub").unwrap();
 		source
 			.subscribe_track(Some(&rel), None, "video")
 			.await
@@ -852,7 +979,7 @@ mod tests {
 		// above the root. A lone `..` stops at the root, which still names a broadcast, so
 		// it is not in this set.
 		for reference in ["../../elsewhere", "../..", "../../.."] {
-			let rel = Relative::new(reference);
+			let rel = Relative::new(reference).unwrap();
 			assert!(
 				source.resolve_reference(Some(&rel)).is_none(),
 				"{reference} should escape"
@@ -890,9 +1017,9 @@ mod tests {
 			level: 0x1e,
 			inline: false,
 		});
-		escaped.broadcast = Some(Relative::new("../../source").to_owned());
+		escaped.broadcast = Some(Relative::new("../../source").unwrap());
 		let mut sibling = escaped.clone();
-		sibling.broadcast = Some(Relative::new("./source").to_owned());
+		sibling.broadcast = Some(Relative::new("./source").unwrap());
 
 		let mut catalog = hang::Catalog::<()>::default();
 		catalog.video.renditions.insert("escaped".to_string(), escaped);
@@ -938,9 +1065,9 @@ mod tests {
 		let source = created(&origin);
 
 		let mut escaped = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
-		escaped.broadcast = Some(Relative::new("../../source").to_owned());
+		escaped.broadcast = Some(Relative::new("../../source").unwrap());
 		let mut sibling = escaped.clone();
-		sibling.broadcast = Some(Relative::new("./source").to_owned());
+		sibling.broadcast = Some(Relative::new("./source").unwrap());
 
 		let mut catalog = hang::Catalog::<()>::default();
 		catalog.text.renditions.insert("escaped".to_string(), escaped);
@@ -966,7 +1093,7 @@ mod tests {
 		let source = resolved(&origin, "a/pub").await;
 
 		// The reference resolves to `a/source`, whose "video" track answers the subscribe.
-		let rel = Relative::new("./source");
+		let rel = Relative::new("./source").unwrap();
 		source
 			.subscribe_track(Some(&rel), None, "video")
 			.await
@@ -986,7 +1113,7 @@ mod tests {
 		settle().await;
 
 		let source = resolved(&origin, "a/source/transcode").await;
-		let rel = Relative::new(".");
+		let rel = Relative::new(".").unwrap();
 		source
 			.subscribe_track(Some(&rel), None, "video")
 			.await
@@ -1006,7 +1133,7 @@ mod tests {
 		settle().await;
 
 		let source = resolved(&origin, "top").await;
-		let rel = Relative::new(".");
+		let rel = Relative::new(".").unwrap();
 		source
 			.subscribe_track(Some(&rel), None, "video")
 			.await

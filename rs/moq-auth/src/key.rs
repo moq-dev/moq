@@ -5,8 +5,7 @@ use base64::Engine;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header};
 use p256::elliptic_curve::SecretKey;
 use p256::elliptic_curve::pkcs8::EncodePrivateKey;
-use rsa::BigUint;
-use rsa::pkcs1::EncodeRsaPrivateKey;
+use pkcs1::der::Encode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::str::FromStr;
 use std::sync::OnceLock;
@@ -56,7 +55,11 @@ pub enum KeyMaterial {
 		#[serde(flatten)]
 		public: RsaPublicKey,
 		/// The private parameters, absent for a public key.
-		#[serde(flatten, skip_serializing_if = "Option::is_none")]
+		#[serde(
+			flatten,
+			skip_serializing_if = "Option::is_none",
+			deserialize_with = "deserialize_rsa_private"
+		)]
 		private: Option<RsaPrivateKey>,
 	},
 	/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6.4>
@@ -145,9 +148,52 @@ pub struct RsaPrivateKey {
 	/// The first CRT coefficient.
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 	pub qi: Vec<u8>,
-	/// Other prime information, for keys with more than two primes.
+	/// Other prime information. Multi-prime RSA is refused on import.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub oth: Option<Vec<RsaAdditionalPrime>>,
+}
+
+// Flattening Option<RsaPrivateKey> otherwise swallows missing-field errors and turns
+// malformed private keys into public keys. Decide whether private material exists first.
+fn deserialize_rsa_private<'de, D>(deserializer: D) -> Result<Option<RsaPrivateKey>, D::Error>
+where
+	D: Deserializer<'de>,
+{
+	let fields = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+	if fields.contains_key("oth") {
+		return Err(serde::de::Error::custom("multi-prime RSA (oth) is unsupported"));
+	}
+	if ["d", "p", "q", "dp", "dq", "qi"]
+		.iter()
+		.any(|field| fields.contains_key(*field))
+	{
+		serde_json::from_value(serde_json::Value::Object(fields))
+			.map(Some)
+			.map_err(serde::de::Error::custom)
+	} else {
+		Ok(None)
+	}
+}
+
+impl RsaPrivateKey {
+	fn to_der(&self, public: &RsaPublicKey) -> crate::Result<Vec<u8>> {
+		use pkcs1::UintRef;
+		let encode = || -> Result<_, pkcs1::der::Error> {
+			pkcs1::RsaPrivateKey {
+				modulus: UintRef::new(&public.n)?,
+				public_exponent: UintRef::new(&public.e)?,
+				private_exponent: UintRef::new(&self.d)?,
+				prime1: UintRef::new(&self.p)?,
+				prime2: UintRef::new(&self.q)?,
+				exponent1: UintRef::new(&self.dp)?,
+				exponent2: UintRef::new(&self.dq)?,
+				coefficient: UintRef::new(&self.qi)?,
+				other_prime_infos: None,
+			}
+			.to_der()
+		};
+		encode().map_err(|e| crate::Error::Crypto(e.to_string()))
+	}
 }
 
 /// Additional prime information for multi-prime RSA keys.
@@ -233,6 +279,14 @@ impl Jwk {
 			&& secret.len() < MIN_OCT_SECRET_BYTES
 		{
 			return Err(KeyError::SecretTooShort(MIN_OCT_SECRET_BYTES).into());
+		}
+
+		if let KeyMaterial::RSA {
+			private: Some(private), ..
+		} = &self.material
+			&& private.oth.is_some()
+		{
+			return Err(crate::Error::Crypto("multi-prime RSA (oth) is unsupported".into()));
 		}
 
 		Ok(Key {
@@ -425,7 +479,7 @@ impl Key {
 		}
 	}
 
-	fn to_decoding_key(&self) -> crate::Result<&DecodingKey> {
+	pub(crate) fn to_decoding_key(&self) -> crate::Result<&DecodingKey> {
 		if let Some(key) = self.decode.get() {
 			return Ok(key);
 		}
@@ -489,7 +543,7 @@ impl Key {
 		Ok(self.decode.get_or_init(|| decoding_key))
 	}
 
-	fn to_encoding_key(&self) -> crate::Result<&EncodingKey> {
+	pub(crate) fn to_encoding_key(&self) -> crate::Result<&EncodingKey> {
 		if let Some(key) = self.encode.get() {
 			return Ok(key);
 		}
@@ -535,17 +589,8 @@ impl Key {
 				ref public,
 				ref private,
 			} => {
-				let n = BigUint::from_bytes_be(&public.n);
-				let e = BigUint::from_bytes_be(&public.e);
 				let private = private.as_ref().ok_or(KeyError::MissingPrivateKey)?;
-				let d = BigUint::from_bytes_be(&private.d);
-				let p = BigUint::from_bytes_be(&private.p);
-				let q = BigUint::from_bytes_be(&private.q);
-
-				let rsa = rsa::RsaPrivateKey::from_components(n, e, d, vec![p, q]);
-				let pem = rsa?.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF);
-
-				EncodingKey::from_rsa_pem(pem?.as_bytes())?
+				EncodingKey::from_rsa_der(&private.to_der(public)?)
 			}
 		};
 
@@ -565,16 +610,7 @@ impl Key {
 	/// Verify the signature, claims, and key scope but not the times, so an expired
 	/// token's root is still known to be genuine.
 	pub(crate) fn verify_claims(&self, token: &str) -> crate::Result<Claims> {
-		if !self.operations.contains(&KeyOperation::Verify) {
-			return Err(KeyError::VerifyUnsupported.into());
-		}
-		let header = jsonwebtoken::decode_header(token)?;
-		match (self.kid.as_ref(), header.kid.as_deref()) {
-			(Some(expected), Some(actual)) if expected.encode() == actual => {}
-			(Some(_), None) => return Err(KeyError::MissingKid.into()),
-			(_, Some(actual)) => return Err(KeyError::KeyNotFound(actual.to_string()).into()),
-			(None, None) => {}
-		}
+		self.check_kid(token)?;
 
 		let mut validation = jsonwebtoken::Validation::new(self.algorithm.into());
 		validation.required_spec_claims = Default::default();
@@ -587,12 +623,31 @@ impl Key {
 		Ok(claims)
 	}
 
+	/// Refuse a key that cannot verify, or a token whose `kid` header names another key.
+	pub(crate) fn check_kid(&self, token: &str) -> crate::Result<()> {
+		if !self.operations.contains(&KeyOperation::Verify) {
+			return Err(KeyError::VerifyUnsupported.into());
+		}
+		let header = jsonwebtoken::decode_header(token)?;
+		match (self.kid.as_ref(), header.kid.as_deref()) {
+			(Some(expected), Some(actual)) if expected.encode() == actual => Ok(()),
+			(Some(_), None) => Err(KeyError::MissingKid.into()),
+			(_, Some(actual)) => Err(KeyError::KeyNotFound(actual.to_string()).into()),
+			(None, None) => Ok(()),
+		}
+	}
+
 	/// Sign the claims with this key, returning the encoded token.
+	///
+	/// Fails with [`Error::InvalidRoot`](crate::Error::InvalidRoot) on a root spelled with an
+	/// empty segment, a `\` escaping anything but `\` or `/`, or more than 4096 bytes.
+	/// Verifying stays lenient on the empty segments, so tokens minted before stay valid.
 	pub fn sign(&self, payload: &Claims) -> crate::Result<String> {
 		if !self.operations.contains(&KeyOperation::Sign) {
 			return Err(KeyError::SignUnsupported.into());
 		}
 
+		crate::path::validate(&payload.root)?;
 		payload.validate()?;
 		self.validate_scope(payload)?;
 
@@ -612,8 +667,9 @@ impl Key {
 	/// Derive a key with an authorization scope attached, capping what its tokens may grant.
 	///
 	/// The scope is validated here, and it is the only way to set one, so a key can never carry a
-	/// scope that permits nothing.
+	/// scope that permits nothing, nor a root [`sign`](Self::sign) would refuse.
 	pub fn with_scope(mut self, scope: crate::Scope) -> crate::Result<Self> {
+		crate::path::validate(&scope.root)?;
 		scope.validate()?;
 		self.jwk.scope = Some(scope);
 		Ok(self)
@@ -625,7 +681,7 @@ impl Key {
 		self
 	}
 
-	fn validate_scope(&self, claims: &Claims) -> crate::Result<()> {
+	pub(crate) fn validate_scope(&self, claims: &Claims) -> crate::Result<()> {
 		if let Some(scope) = &self.scope {
 			scope.validate()?;
 			if !scope.allows(claims) {
@@ -898,6 +954,40 @@ mod tests {
 
 		let forged = unrestricted.sign(&denied).unwrap();
 		assert!(matches!(scoped.verify(&forged), Err(crate::Error::ScopeExceeded)));
+	}
+
+	/// A token or key scope never names a root no peer can spell, though one already minted
+	/// with boundary slashes still verifies.
+	#[test]
+	fn test_key_mints_only_strict_roots() {
+		let key = create_test_key();
+		let claims = |root: &str| Claims {
+			root: root.into(),
+			publish: patterns(&["**"]),
+			..Default::default()
+		};
+		let scope = |root: &str| crate::Scope {
+			root: root.into(),
+			publish: patterns(&["**"]),
+			subscribe: patterns(&[]),
+		};
+
+		for root in ["/room", "room/", "a//b", r"a\b"] {
+			assert!(
+				matches!(key.sign(&claims(root)), Err(crate::Error::InvalidRoot(_))),
+				"{root:?}"
+			);
+			assert!(
+				matches!(key.clone().with_scope(scope(root)), Err(crate::Error::InvalidRoot(_))),
+				"{root:?}"
+			);
+		}
+
+		let legacy = sign_raw(&key, serde_json::json!({"root": "/room/", "publish": ["**"]}));
+		assert_eq!(
+			key.verify(&legacy).unwrap().authorize("room").unwrap().publish,
+			patterns(&["**"])
+		);
 	}
 
 	/// A key's crypto material is derived once and cached, so the fields it was derived from must
@@ -1419,6 +1509,61 @@ mod tests {
 			let token = key.sign(&claims).unwrap();
 			let verified_claims = key.verify(&token).unwrap();
 			assert_eq!(verified_claims.root, claims.root);
+		}
+	}
+
+	#[test]
+	fn private_rsa_requires_complete_components() {
+		let key = Key::generate(Algorithm::RS256, None).unwrap();
+		let original = serde_json::to_value(&key).unwrap();
+		for field in ["d", "p", "q", "dp", "dq", "qi"] {
+			let mut incomplete = original.clone();
+			incomplete.as_object_mut().unwrap().remove(field);
+			// A verify-only import must not silently discard malformed private material.
+			incomplete["key_ops"] = serde_json::json!(["verify"]);
+			let error = serde_json::from_value::<Key>(incomplete).expect_err(field);
+			assert!(error.to_string().contains(field), "{field}: {error}");
+		}
+	}
+
+	#[test]
+	fn private_rsa_rejects_other_primes() {
+		let key = Key::generate(Algorithm::RS256, None).unwrap();
+		let mut jwk = key.export();
+		let KeyMaterial::RSA {
+			private: Some(private), ..
+		} = &mut jwk.material
+		else {
+			unreachable!();
+		};
+		private.oth = Some(vec![]);
+		assert!(
+			jwk.clone()
+				.import()
+				.expect_err("oth must be refused")
+				.to_string()
+				.contains("oth")
+		);
+		let json = serde_json::to_value(jwk).unwrap();
+		assert!(
+			serde_json::from_value::<Key>(json)
+				.expect_err("oth must be refused")
+				.to_string()
+				.contains("oth")
+		);
+	}
+
+	#[test]
+	fn private_rsa_uses_supplied_crt_parameters() {
+		let key = Key::generate(Algorithm::RS256, None).unwrap();
+		for field in ["dp", "dq", "qi"] {
+			let mut json = serde_json::to_value(&key).unwrap();
+			json[field] = serde_json::json!("AQ");
+			let invalid: Key = serde_json::from_value(json).unwrap();
+			assert!(
+				invalid.sign(&create_test_claims()).is_err(),
+				"{field} was silently recomputed"
+			);
 		}
 	}
 

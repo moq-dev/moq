@@ -1,5 +1,6 @@
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
-import { asIetf, type Cursor, type Reader, Writer } from "../stream.ts";
+import type { Cursor, Reader } from "../stream.ts";
+import { concat, encodeVarint, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import { U64 } from "../util/u64.ts";
 import { DEFAULT_WIRE } from "./priority.ts";
@@ -21,66 +22,30 @@ const PROP_TIMESTAMP = 0x10n;
 // object 0 is still the payload head; a standalone terminal may name a later ID.
 const FIRST_OBJECT_BIT = 0x40;
 
-/** Whether the subgroup header carries FIRST_OBJECT: draft-18 and later, not drafts 14-17. */
-export function hasFirstObjectBit(version: IetfVersion): boolean {
-	switch (version) {
-		case Version.DRAFT_14:
-		case Version.DRAFT_15:
-		case Version.DRAFT_16:
-		case Version.DRAFT_17:
-			return false;
-		default:
-			return true;
-	}
-}
-
-function hasDeltaObjectPropertyTypes(version: IetfVersion | undefined): boolean {
-	switch (version) {
-		case Version.DRAFT_14:
-		case Version.DRAFT_15:
-			return false;
-		default:
-			return true;
-	}
-}
-
-async function encodeObjectPropertyType(w: Writer, id: bigint, prev: bigint, version: IetfVersion): Promise<void> {
-	const encoded = hasDeltaObjectPropertyTypes(version) ? id - prev : id;
-	await w.u62(encoded);
-}
-
-// The units come from the track's TIMESCALE property, not from here: repeating the
-// timescale on every object would cost bytes per frame to restate something fixed for
-// the track's lifetime. The timestamp is converted into the track's units so the value
-// on the wire matches what the track declared.
-async function encodeObjectTime(
-	w: Writer,
-	timestamp: Timestamp,
-	timescale: Timescale,
-	version: IetfVersion,
-): Promise<void> {
-	// The shared conversion: exact at the same scale, and refused before anything is written when
-	// the result leaves the range a Timestamp, and so the receiver, can hold.
-	const value = Math.round(timestamp.as(timescale));
-	await encodeObjectPropertyType(w, PROP_TIMESTAMP, 0n, version);
-	await w.u62(BigInt(value));
-}
-
 /**
  * Encode an object's Properties block: its Timestamp in `timescale` units, or nothing.
  *
  * Without units (`timescale` undefined) there is no Timestamp to write, even if the frame has one.
+ * Synchronous, like the rest of an object's header: every object of a timed track pays for it.
  */
-export async function encodeObjectExtensions(
+export function encodeObjectExtensions(
 	timestamp: Timestamp | undefined,
 	timescale: Timescale | undefined,
 	version: IetfVersion,
-): Promise<Uint8Array> {
+): Uint8Array {
 	if (timestamp === undefined || timescale === undefined) {
 		return new Uint8Array();
 	}
 
-	return Writer.collect(version, (w) => encodeObjectTime(w, timestamp, timescale, version));
+	// The units come from the track's TIMESCALE property, not from here: repeating the
+	// timescale on every object would cost bytes per frame to restate something fixed for
+	// the track's lifetime. The timestamp is converted into the track's units so the value
+	// on the wire matches what the track declared. The shared conversion is exact at the same
+	// scale, and refused before anything is written when the result leaves the range a
+	// Timestamp, and so the receiver, can hold.
+	const value = Math.round(timestamp.as(timescale));
+	// The only property, so its type's delta from the previous one is from zero.
+	return concat([encodeVarint(PROP_TIMESTAMP, version), encodeVarint(value, version)]);
 }
 
 /** Decode the Timestamp an object's Properties block carries, consuming the whole block. */
@@ -91,7 +56,7 @@ export function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | u
 
 	while (c.remaining > 0) {
 		const step = c.u62();
-		const id = !hasDeltaObjectPropertyTypes(asIetf(c.version)) || first ? step : prevType + step;
+		const id = first ? step : prevType + step;
 		first = false;
 		prevType = id;
 
@@ -169,7 +134,7 @@ export class Group {
 		await w.write(await Writer.collect(version, (h) => this.#encode(h, version)));
 	}
 
-	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+	async #encode(w: Writer, _version: IetfVersion): Promise<void> {
 		if (!this.flags.hasSubgroup && this.subGroupId !== 0) {
 			throw new Error(`Subgroup ID must be 0 if hasSubgroup is false: ${this.subGroupId}`);
 		}
@@ -188,7 +153,7 @@ export class Group {
 		if (this.flags.hasEnd) {
 			id |= 0x08;
 		}
-		if (this.flags.firstObject && hasFirstObjectBit(version)) {
+		if (this.flags.firstObject) {
 			id |= FIRST_OBJECT_BIT;
 		}
 		await w.u53(id);
@@ -203,14 +168,12 @@ export class Group {
 	}
 
 	/** Decode a SUBGROUP_HEADER. Pass `type` when the caller already read it to classify the stream. */
-	static async decode(r: Reader, version: IetfVersion, type?: number): Promise<Group> {
+	static async decode(r: Reader, _version: IetfVersion, type?: number): Promise<Group> {
 		const raw = type ?? (await r.u53());
-		// Strip the draft-18 FIRST_OBJECT bit before the range check, but keep the value:
-		// it is the only signal that a subgroup starts partway through. Drafts that predate
-		// it carry no such signal, so they are taken at their word.
-		const legacy = !hasFirstObjectBit(version);
-		const firstObject = legacy || (raw & FIRST_OBJECT_BIT) !== 0;
-		const id = legacy ? raw : raw & ~FIRST_OBJECT_BIT;
+		// Strip the FIRST_OBJECT bit before the range check, but keep the value: it is the only
+		// signal that a subgroup starts partway through.
+		const firstObject = (raw & FIRST_OBJECT_BIT) !== 0;
+		const id = raw & ~FIRST_OBJECT_BIT;
 
 		// An invalid type MUST close the session, including the reserved SUBGROUP_ID_MODE
 		// 0b11 (draft-22 section 11.3.1).
@@ -303,33 +266,37 @@ export class Frame {
 		version: IetfVersion,
 		idDelta = 0,
 	): Promise<void> {
-		await w.u53(idDelta);
+		// Everything before the payload is built in memory and goes out as one write: a stream
+		// write is far costlier than a varint, and a backlog pays it for every object.
+		const header = [encodeVarint(idDelta, version)];
 
 		if (flags.hasExtensions) {
-			const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
-			await w.u53(extensions.byteLength);
-			await w.write(extensions);
+			const extensions = encodeObjectExtensions(this.timestamp, timescale, version);
+			header.push(encodeVarint(extensions.byteLength, version), extensions);
 		}
 
+		const payload = this.endOfTrack ? undefined : this.payload;
 		if (this.endOfTrack) {
-			await w.u53(0); // length = 0
-			await w.u53(END_OF_TRACK);
-		} else if (this.payload !== undefined) {
-			await w.u53(this.payload.byteLength);
-
-			if (this.payload.byteLength === 0) {
-				await w.u53(0); // status = normal
-			} else {
-				await w.write(this.payload);
-			}
+			header.push(encodeVarint(0, version), encodeVarint(END_OF_TRACK, version)); // length = 0
+		} else if (payload === undefined) {
+			header.push(encodeVarint(0, version), encodeVarint(GROUP_END, version)); // length = 0
 		} else {
-			await w.u53(0); // length = 0
-			await w.u53(GROUP_END);
+			header.push(encodeVarint(payload.byteLength, version));
+			if (payload.byteLength === 0) header.push(encodeVarint(0, version)); // status = normal
 		}
+
+		await w.write(concat(header));
+		if (payload !== undefined && payload.byteLength > 0) await w.write(payload);
 	}
 
-	/** Decode a frame using the group flags, at the cursor's negotiated IETF version. */
-	static decode(c: Cursor, flags: GroupFlags, timescale: Timescale | undefined): Frame {
+	/**
+	 * Decode a frame using the group flags, at the cursor's negotiated IETF version.
+	 *
+	 * `offset` lets a stream's first object start past zero, reporting its absolute Object ID
+	 * in `idDelta` rather than throwing {@link ObjectIdGap}: that is the live tail of a group
+	 * whose head a joining FETCH or a fill brings.
+	 */
+	static decode(c: Cursor, flags: GroupFlags, timescale: Timescale | undefined, offset = false): Frame {
 		// The first object's delta is its absolute Object ID; every later one is the prior ID
 		// plus the delta plus one. moq-lite groups start at object 0 and never skip one, so
 		// a sequential group is a zero delta throughout, and any other value means the group
@@ -365,14 +332,15 @@ export class Frame {
 		const payloadLength = c.u53();
 
 		if (payloadLength > 0) {
-			if (delta !== 0) throw new ObjectIdGap(delta);
+			if (delta !== 0 && !offset) throw new ObjectIdGap(delta);
 			const payload = c.read(payloadLength);
-			return new Frame({ payload, timestamp });
+			const frame = new Frame({ payload, timestamp });
+			frame.idDelta = delta;
+			return frame;
 		}
 
 		const status = c.u53();
-		// Only draft 14 lets a status object carry properties.
-		if (status !== 0 && hasProperties && asIetf(c.version) !== Version.DRAFT_14) {
+		if (status !== 0 && hasProperties) {
 			throw new ProtocolViolation(`status object ${status} carries properties`);
 		}
 
@@ -383,12 +351,20 @@ export class Frame {
 			frame.hasProperties = hasProperties;
 			return frame;
 		}
-		if (delta !== 0) throw new ObjectIdGap(delta);
+		if (delta !== 0 && !(offset && (status === 0 || status === GROUP_END))) throw new ObjectIdGap(delta);
 		// Allowed even when the header marks the group's end: that bit only lets a FIN imply it,
 		// and imquic sends both.
-		if (status === GROUP_END) return new Frame();
+		if (status === GROUP_END) {
+			const frame = new Frame();
+			frame.idDelta = delta;
+			return frame;
+		}
 
-		if (status === 0) return new Frame({ payload: new Uint8Array(0), timestamp });
+		if (status === 0) {
+			const frame = new Frame({ payload: new Uint8Array(0), timestamp });
+			frame.idDelta = delta;
+			return frame;
+		}
 
 		throw new Error(`Unsupported object status: ${status}`);
 	}
@@ -407,17 +383,21 @@ export interface FetchPosition {
 	group: number;
 	/** The object's id within that group. */
 	object: number;
-	/** Whether this is the stream's first object, which is what carries the absolute ids. */
+	/**
+	 * Whether this is the stream's first object, which carries the priority the rest inherit,
+	 * and its absolute ids unless an End of Range came before it.
+	 */
 	first: boolean;
+	/** The group of the prior object or End of Range when this object starts a different group. */
+	previousGroup?: number;
 }
 
 /**
  * A moq-transport object inside a fetch stream, which a publisher writes to serve a fill.
  *
- * The first object carries its absolute Group and Object IDs plus the priority; every later
- * one inherits them and increments the Object ID, so only the properties and the payload go
- * on the wire. A fetch object has no status field: a zero payload length is simply an empty
- * object.
+ * The first object carries absolute Group and Object IDs plus the priority. A new group
+ * carries its delta and absolute Object ID; subsequent objects inherit the group and
+ * increment the Object ID. A zero payload length is simply an empty object.
  */
 export class FetchFrame {
 	/** The object payload. */
@@ -441,29 +421,172 @@ export class FetchFrame {
 		version: IetfVersion,
 	): Promise<void> {
 		const stamped = this.timestamp !== undefined && timescale !== undefined;
-		if (position.first) {
+		const previous = position.previousGroup;
+		// Everything before the payload goes out as one write, as in Frame.encode.
+		const header: Uint8Array[] = [];
+		if (position.first || previous !== undefined) {
 			// Include the priority too: "same as the prior object" has no prior to refer to.
 			const properties = stamped ? FETCH_PROPERTIES : 0;
-			await w.u53(FETCH_GROUP_ID | FETCH_OBJECT_ID | FETCH_PRIORITY | properties);
-			await w.u53(position.group);
-			await w.u53(position.object);
-			await w.u8(0);
+			header.push(
+				encodeVarint(
+					FETCH_GROUP_ID | FETCH_OBJECT_ID | (position.first ? FETCH_PRIORITY : 0) | properties,
+					version,
+				),
+				encodeVarint(
+					previous === undefined ? position.group : Math.abs(position.group - previous) - 1,
+					version,
+				),
+				encodeVarint(position.object, version),
+			);
+			if (position.first) header.push(Uint8Array.of(0));
 		} else {
 			// Same group and priority; the Object ID is the prior one plus one.
-			await w.u53(stamped ? FETCH_PROPERTIES : 0);
+			header.push(encodeVarint(stamped ? FETCH_PROPERTIES : 0, version));
 		}
 
 		// Omitted entirely rather than written empty when the object carries no timestamp:
 		// the track declared no units, so there is no property to send.
 		if (stamped) {
-			const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
-			await w.u53(extensions.byteLength);
-			await w.write(extensions);
+			const extensions = encodeObjectExtensions(this.timestamp, timescale, version);
+			header.push(encodeVarint(extensions.byteLength, version), extensions);
 		}
 
-		await w.u53(this.payload.byteLength);
+		header.push(encodeVarint(this.payload.byteLength, version));
+		await w.write(concat(header));
 		if (this.payload.byteLength > 0) {
 			await w.write(this.payload);
 		}
 	}
+}
+
+/** Why the Locations a {@link FetchEndOfRange} closes are left out of a fetch stream. */
+export const EndOfRange = {
+	/** They do not exist. */
+	NonExistent: 0x8c,
+	/** Their state is unknown, which before draft-22 includes a FILL_TIMEOUT running out. */
+	Unknown: 0x10c,
+	/** The FILL_TIMEOUT ran out before they arrived, from draft-22. */
+	TimedOut: 0x20c,
+} as const;
+
+/** A reason {@link EndOfRange} names. */
+export type EndOfRange = (typeof EndOfRange)[keyof typeof EndOfRange];
+
+/**
+ * An End of Range on a fetch stream: every Location after the prior object, through this
+ * one, is missing for its reason.
+ *
+ * Its Group and Object IDs are absolute, wherever it falls. Read as deltas, the Group ID could
+ * never name the group it follows, and every implementation reads them as absolute
+ * (moq-wg/moq-transport#1861). Nothing follows them: no payload length.
+ */
+export class FetchEndOfRange {
+	reason: EndOfRange;
+	group: bigint;
+	object: bigint;
+
+	constructor({ reason, group, object }: { reason: EndOfRange; group: bigint; object: bigint }) {
+		this.reason = reason;
+		this.group = group;
+		this.object = object;
+	}
+
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		if (this.reason === EndOfRange.TimedOut && version === Version.DRAFT_18) {
+			throw new Error("End of Timed-Out Range needs draft-22");
+		}
+		await w.u53(this.reason);
+		await w.u62(this.group);
+		await w.u62(this.object);
+	}
+}
+
+const END_OF_RANGE: readonly number[] = Object.values(EndOfRange);
+
+// Serialization Flags at or above this are named values, not a set of flags.
+const FETCH_NAMED = 0x80;
+// The flag of an object published as a datagram, whose low bits then mean nothing.
+const FETCH_DATAGRAM = 0x40;
+// The low bits, which spell the Subgroup ID.
+const FETCH_SUBGROUP = 0x03;
+
+/** How a fetched object names its Subgroup ID. */
+export type FetchSubgroup = "zero" | "prior" | "next" | "explicit" | "datagram";
+
+/** One object read off a fetch stream, the inverse of {@link FetchFrame.encode}. */
+export type FetchedObject =
+	| {
+			kind: "object";
+			/** The Group ID field: absolute on the first object, a delta to a different group after. */
+			group?: number;
+			/** How the Subgroup ID is spelled. */
+			subgroup: FetchSubgroup;
+			/** The explicit Subgroup ID, for `subgroup: "explicit"`. */
+			subgroupId?: number;
+			/** The Object ID field: absolute with `group`, otherwise a delta from the prior one. */
+			object?: number;
+			/** The Publisher Priority, absent when it repeats the prior object's. */
+			priority?: number;
+			/** The Timestamp in the track's units, when it declared some. */
+			timestamp?: Timestamp;
+			/** The object payload; empty for an empty object. */
+			payload: Uint8Array;
+	  }
+	| { kind: "endOfRange"; reason: EndOfRange; group: number; object: number };
+
+/**
+ * Decode the next object on a fetch stream, in the track's `timescale`, or not at all when
+ * it declared none.
+ */
+export function decodeFetchObject(c: Cursor, timescale: Timescale | undefined): FetchedObject {
+	const flags = c.u53();
+	if (flags >= FETCH_NAMED) {
+		if (!END_OF_RANGE.includes(flags)) {
+			throw new ProtocolViolation(`unknown fetch serialization flags: 0x${flags.toString(16)}`);
+		}
+		return { kind: "endOfRange", reason: flags as EndOfRange, group: c.u53(), object: c.u53() };
+	}
+
+	// Wire order: Group ID, Subgroup ID, Object ID, Priority, Properties.
+	const group = flags & FETCH_GROUP_ID ? c.u53() : undefined;
+	let subgroup: FetchSubgroup;
+	let subgroupId: number | undefined;
+	if (flags & FETCH_DATAGRAM) {
+		subgroup = "datagram";
+	} else {
+		switch (flags & FETCH_SUBGROUP) {
+			case 0:
+				subgroup = "zero";
+				break;
+			case 1:
+				subgroup = "prior";
+				break;
+			case 2:
+				subgroup = "next";
+				break;
+			default:
+				subgroup = "explicit";
+				subgroupId = c.u53();
+		}
+	}
+	const object = flags & FETCH_OBJECT_ID ? c.u53() : undefined;
+	const priority = flags & FETCH_PRIORITY ? c.u8() : undefined;
+
+	let timestamp: Timestamp | undefined;
+	if (flags & FETCH_PROPERTIES) {
+		const length = c.u53();
+		if (length > MAX_OBJECT_EXTENSIONS) {
+			throw new StreamError(StreamCode.MalformedTrack, { message: "object extensions exceed 64 KiB" });
+		}
+		if (timescale !== undefined) {
+			timestamp = c.exact(length, (e) => decodeObjectTime(e, timescale));
+		} else {
+			c.read(length);
+		}
+	}
+
+	// A fetch stream carries no Object Status: a zero length is simply an empty object.
+	const length = c.u53();
+	const payload = length > 0 ? c.read(length) : new Uint8Array(0);
+	return { kind: "object", group, subgroup, subgroupId, object, priority, timestamp, payload };
 }

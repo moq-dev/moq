@@ -19,7 +19,9 @@ async fn export_echo_reports_where_the_import_solicits() {
 	let publication = origin.create_broadcast("demo").unwrap();
 	let mut broadcast = publication.broadcast().clone();
 	let mut catalog_value = moq_mux::catalog::hang::Catalog::<ts::Ext>::default();
-	catalog_value.echo = Some(hang::catalog::Echo::new("viewers"));
+	catalog_value.echo = Some(hang::catalog::Echo::new(
+		hang::moq_net::path::Relative::new("viewers").unwrap(),
+	));
 	let config = moq_mux::catalog::Config::default()
 		.with_catalog(catalog_value)
 		.with_max_age(Duration::from_secs(1));
@@ -27,7 +29,8 @@ async fn export_echo_reports_where_the_import_solicits() {
 	let mut import = ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&CLIP[..HALF]).unwrap();
 	publication.announce(Default::default()).unwrap();
-	origin.consume().routed("demo").await.unwrap();
+	let consumer = origin.consume();
+	let resolved = consumer.follow("demo", None).unwrap().available().await.unwrap();
 
 	let args = SubscribeArgs {
 		format: SubscribeFormat::Ts,
@@ -40,9 +43,7 @@ async fn export_echo_reports_where_the_import_solicits() {
 		catalog: None,
 		select: SelectArgs::default(),
 	};
-	let subscribe = Subscribe::new(origin.consume(), "demo", CatalogFormat::Hang, args)
-		.await
-		.unwrap();
+	let subscribe = Subscribe::new(moq_mux::Source::new(consumer, resolved), CatalogFormat::Hang, args);
 	let target = EchoTarget {
 		origin: origin.clone(),
 		name: "alice".parse().unwrap(),

@@ -10,7 +10,8 @@
 //! `fuzz/fuzz_targets/`. Compiled only under `cfg(test)` or the `fuzz` feature, so none
 //! of this is part of the published API. See `fuzz/README.md` for the workflow.
 //!
-//! [`Plaintext`] is the crypto the `connection` target and the benchmarks run on.
+//! [`Plaintext`] is the crypto the `connection` target and the benchmarks run on, and
+//! [`SentPackets`] is the sent-packet storage its benchmark drives.
 
 mod connection;
 mod plaintext;
@@ -22,8 +23,7 @@ use bytes::{Bytes, BytesMut};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use crate::{
-	ConnectionId, DEFAULT_SUPPORTED_VERSIONS, Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, SendStream, Side, StreamId, Streams,
-	VarInt,
+	ConnectionId, Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, Side, StreamId, Streams, VarInt,
 	coding::BufMutExt,
 	connection::{Retransmits, State, StreamsState},
 	frame::{self, Frame},
@@ -31,6 +31,8 @@ use crate::{
 	transport_parameters::{PreferredAddress, TransportParameters},
 };
 
+#[cfg(feature = "fuzz")]
+pub use crate::connection::BenchSentPackets as SentPackets;
 pub use connection::connection;
 pub use plaintext::Plaintext;
 
@@ -61,7 +63,6 @@ pub fn packet(data: &[u8]) -> bool {
 	let Ok((decoded, rest)) = PartialDecode::new(
 		BytesMut::from(packet),
 		&FixedLengthConnectionIdParser::new(cid_len),
-		DEFAULT_SUPPORTED_VERSIONS,
 		grease & 1 == 1,
 	) else {
 		return false;
@@ -184,7 +185,7 @@ pub fn streams(data: &[u8]) -> bool {
 				Streams::new(&mut state, &conn_state).accept(dir);
 			}
 			StreamOp::Finish { id } => {
-				let _ = SendStream::new(StreamId(id), &mut state, &mut pending, &conn_state).finish();
+				let _ = crate::send::Stream::new(StreamId(id), &mut state, &mut pending, &conn_state).finish();
 			}
 			StreamOp::ReceivedStopSending { id, error_code } => {
 				let _ = state.received_stop_sending(StreamId(id), varint(error_code));
@@ -203,7 +204,8 @@ pub fn streams(data: &[u8]) -> bool {
 				});
 			}
 			StreamOp::Reset { id } => {
-				let _ = SendStream::new(StreamId(id), &mut state, &mut pending, &conn_state).reset(0u32.into());
+				let _ =
+					crate::send::Stream::new(StreamId(id), &mut state, &mut pending, &conn_state).reset(0u32.into());
 			}
 		}
 	}

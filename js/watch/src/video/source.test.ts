@@ -241,6 +241,102 @@ describe("Source disabled rendition selection", () => {
 		source.close();
 	});
 
+	it("holds the selected rendition while every rendition is disabled", async () => {
+		const state = mutableBroadcast({
+			low: config("avc1.64001e", { bitrate: 1_000_000 }),
+			high: config("avc1.640028", { bitrate: 2_000_000 }),
+		});
+		const source = new Source({ broadcast: state.broadcast, supported: async () => true });
+
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+
+		state.catalog.set({
+			video: {
+				renditions: {
+					low: config("avc1.64001e", { bitrate: 1_000_000, enabled: false }),
+					high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }),
+				},
+			},
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+		expect(source.out.config.peek()?.enabled).toBe(false);
+
+		// An enabled alternative takes over from the held rendition.
+		state.catalog.set({
+			video: {
+				renditions: {
+					low: config("avc1.64001e", { bitrate: 1_000_000 }),
+					high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }),
+				},
+			},
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("low");
+		source.close();
+	});
+
+	it("drops a held rendition once it is removed", async () => {
+		const state = mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) });
+		const source = new Source({ broadcast: state.broadcast, supported: async () => true });
+
+		await settle();
+		state.catalog.set({
+			video: { renditions: { high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }) } },
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+
+		state.catalog.set({
+			video: { renditions: { low: config("avc1.64001e", { bitrate: 1_000_000, enabled: false }) } },
+		});
+		await settle();
+		expect(source.out.track.peek()).toBeUndefined();
+		expect(source.out.config.peek()).toBeUndefined();
+		source.close();
+	});
+
+	it("does not hold an enabled selection into another broadcast's disabled rendition", async () => {
+		const current = new Signal<Broadcast | undefined>(
+			mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) }).broadcast,
+		);
+		const source = new Source({ broadcast: current, supported: async () => true });
+
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+
+		current.set(
+			mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }) }).broadcast,
+		);
+		await settle();
+		expect(source.out.track.peek()).toBeUndefined();
+		expect(source.out.config.peek()).toBeUndefined();
+		source.close();
+	});
+
+	it("holds on a broadcast whose renditions match the previous one", async () => {
+		const current = new Signal<Broadcast | undefined>(
+			mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) }).broadcast,
+		);
+		const source = new Source({ broadcast: current, supported: async () => true });
+		await settle();
+
+		// The new probe publishes an equal `available`, so only its broadcast tag changes.
+		const next = mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) });
+		current.set(next.broadcast);
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+
+		next.catalog.set({
+			video: { renditions: { high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }) } },
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+		expect(source.out.config.peek()?.enabled).toBe(false);
+		source.close();
+	});
+
 	it("ignores a legacy stalled flag", async () => {
 		const source = new Source({
 			broadcast: mockBroadcast({
@@ -452,5 +548,25 @@ describe("Source rendition preference", () => {
 		await settle();
 		expect(source.out.track.peek()).toBe("video/360p");
 		source.close();
+	});
+});
+
+describe("conflicting rendition metadata", () => {
+	it("keeps the first ranking's best picture when bitrate metadata has no common name", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				picture: config("avc1.640028", { codedWidth: 640, codedHeight: 360 }),
+				bitrate: config("avc1.640028", { bitrate: 500000 }),
+			}),
+			target: { width: 640, height: 360, bitrate: 1000000 },
+			supported: async () => true,
+		});
+		try {
+			if (!source.pending.peek()) await source.pending.changed();
+			while (source.pending.peek()) await source.pending.changed();
+			expect(source.out.track.peek()).toBe("picture");
+		} finally {
+			source.close();
+		}
 	});
 });

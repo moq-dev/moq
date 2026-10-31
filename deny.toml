@@ -9,12 +9,9 @@ all-features = true
 version = 2
 yanked = "deny"
 ignore = [
-    # rsa 0.9.x Marvin Attack (RSA private-key timing sidechannel). The
-    # `rsa` crate is a direct dep of moq-auth but is only used for keygen
-    # and PEM serialization of JWK components. JWT signing/verification
-    # itself runs through `jsonwebtoken` backed by `aws-lc-rs` (constant
-    # time), so the vulnerable code path is not exercised. Drop the ignore
-    # when rustcrypto/RSA publishes a constant-time fix.
+    # rsa 0.9.x Marvin Attack: test-only compatibility fixtures use published
+    # moq-auth 0.2.1 and moq-token 0.7, which still depend on rsa. Production
+    # key generation and signing use aws-lc-rs; no normal/build graph holds rsa.
     "RUSTSEC-2023-0071",
 
     # paste is unmaintained (proc-macro, build-time only). Pulled by
@@ -56,6 +53,7 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
     "CC0-1.0",
     "CDLA-Permissive-2.0", # webpki-roots cert bundle
     "ISC",
@@ -67,7 +65,7 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
-exceptions = []
+exceptions = [{ name = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] }]
 
 [bans]
 multiple-versions = "warn"

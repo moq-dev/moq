@@ -14,8 +14,7 @@ from moq_ffi import (
 )
 
 from ._records import Backoff, ClientTls, QuicConfig, WebSocketConfig, _implementation, _strs
-from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer
-from .publish import BroadcastProducer
+from .origin import AnnounceConsumer, Following, OriginConsumer, OriginProducer, Publication
 from .session import Session
 from .subscribe import BroadcastConsumer
 
@@ -30,25 +29,6 @@ def versions() -> list[str]:
 def qlog_supported() -> bool:
     """Whether this build can write qlog traces; ``qlog`` raises `moq.Error` otherwise."""
     return moq_qlog_supported()
-
-
-class Tokens:
-    """The credentials a :class:`Client` presents, replaceable while it runs."""
-
-    def __init__(self, client: Client) -> None:
-        self._client = client
-
-    def set(self, tokens: Sequence[str]) -> None:
-        """Replace the credentials every dial presents, such as before the current ones expire.
-
-        The next dial presents them, and a live session with in-band AUTH presents them at
-        once, withdrawing each replaced token once its replacements are answered, even when
-        one is refused. After an authorization refusal the client redials only if they changed.
-        """
-        tokens = _strs(tokens, "tokens")
-        if self._client._inner is not None:
-            self._client._inner.tokens().set(tokens)
-        self._client._config.tokens = tokens
 
 
 class Client:
@@ -175,11 +155,7 @@ class Client:
                 self._inner.cancel()
                 self._inner = None
 
-    def tokens(self) -> Tokens:
-        """The credentials every dial presents, to replace while running."""
-        return Tokens(self)
-
-    def create_broadcast(self, path: str) -> BroadcastProducer:
+    def create_broadcast(self, path: str) -> Publication:
         """Create an unannounced broadcast at ``path``, invisible until announced. Announce it after populating tracks.
 
         See :meth:`OriginProducer.create_broadcast`.
@@ -193,16 +169,19 @@ class Client:
         """
         return self._require_consumer().announced(prefix, filter=filter, hidden=hidden)
 
-    def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
+    def follow(self, path: str, *, epoch: str | None = None) -> Following:
         """Follow the broadcast at exactly ``path`` across its publisher instances.
 
-        See :meth:`OriginConsumer.announced_broadcast`.
+        See :meth:`OriginConsumer.follow`.
         """
-        return self._require_consumer().announced_broadcast(path)
+        return self._require_consumer().follow(path, epoch=epoch)
 
-    async def request_broadcast(self, path: str) -> BroadcastConsumer:
-        """Request a broadcast by path, resolving as soon as it can be served."""
-        return await self._require_consumer().request_broadcast(path)
+    async def request(self, path: str, *, epoch: str | None = None) -> BroadcastConsumer:
+        """Request the broadcast at ``path``, resolving one publisher instance as soon as it can be served.
+
+        See :meth:`OriginConsumer.request`.
+        """
+        return await self._require_consumer().request(path, epoch=epoch)
 
     def _require_publisher(self) -> OriginProducer:
         if self._publisher is None:

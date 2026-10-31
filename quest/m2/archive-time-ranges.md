@@ -23,7 +23,7 @@ handler. [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171) deferred c
 landed without it.
 
 - `moq-net` passes a time anchor the cache can't resolve to the
-  `track::Dynamic` handler, unresolved, in its fill.
+  `track::Requests` handler, unresolved, in its fill.
 - The consumer resolves it from its index: every object key carries its first
   frame's pts, so the object holding pts is one lookup, and the group within
   it comes from the stored group timestamps.

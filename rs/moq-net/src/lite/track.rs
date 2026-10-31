@@ -16,23 +16,34 @@ const LEGACY_UNLIMITED: u64 = (1u64 << 53) - 1;
 /// Lite05+ only.
 #[derive(Clone, Debug)]
 pub struct Track<'a> {
-	pub broadcast: Path<'a>,
+	pub broadcast: Path,
 	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
 	/// Lite07+ only.
 	pub epoch: Option<crate::Epoch>,
 	pub track: Cow<'a, str>,
 }
 
-impl Message for Track<'_> {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::TrackInfo);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl Track<'_> {
+	/// Copy the borrowed track name, so the request outlives the bytes it came from.
+	pub fn into_owned(self) -> Track<'static> {
+		Track {
+			broadcast: self.broadcast,
+			epoch: self.epoch,
+			track: Cow::Owned(self.track.into_owned()),
+		}
+	}
+}
+
+impl<'a> Message<'a> for Track<'a> {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::TrackInfo);
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
 
 		let broadcast = Path::decode(r, version)?;
 		let epoch = super::epoch::decode_epoch(r, version)?;
-		let track = Cow::Owned(r.string()?);
+		let track = Cow::Borrowed(r.str()?);
 
 		Ok(Self {
 			broadcast,
@@ -133,9 +144,9 @@ impl Framing {
 	}
 }
 
-impl Message for TrackInfo {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::TrackInfo);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Message<'a> for TrackInfo {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::TrackInfo);
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
@@ -230,7 +241,7 @@ mod test {
 		info.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		let mut slice = buf.as_slice();
-		crate::coding::decode_buf(&mut slice, version, TrackInfo::decode_msg).unwrap()
+		crate::coding::decode_buf(&mut slice, version, |r, v| TrackInfo::decode_msg(r, v)).unwrap()
 	}
 
 	#[test]
@@ -394,7 +405,7 @@ mod test {
 		*buf.last_mut().unwrap() = 2;
 		let mut slice = buf.as_slice();
 		assert!(matches!(
-			crate::coding::decode_buf(&mut slice, Version::Lite07, TrackInfo::decode_msg),
+			crate::coding::decode_buf(&mut slice, Version::Lite07, |r, v| TrackInfo::decode_msg(r, v)),
 			Err(DecodeError::InvalidValue)
 		));
 	}
@@ -483,15 +494,15 @@ mod test {
 	fn track_request_roundtrips_on_lite05() {
 		let msg = Track {
 			epoch: None,
-			broadcast: Path::new("room").to_owned(),
+			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
 		let mut slice = buf.as_slice();
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Track::decode_msg).unwrap();
-		assert_eq!(got.broadcast, Path::new("room"));
+		let got = crate::coding::decode_from(&mut slice, Version::Lite05, Track::decode_msg).unwrap();
+		assert_eq!(got.broadcast, Path::from_static("room"));
 		assert_eq!(got.track, "video");
 	}
 
@@ -499,7 +510,7 @@ mod test {
 	fn track_request_errors_before_lite05() {
 		let msg = Track {
 			epoch: None,
-			broadcast: Path::new("room").to_owned(),
+			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};
 		let mut buf = Vec::new();

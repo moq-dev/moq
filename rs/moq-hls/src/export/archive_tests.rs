@@ -1,9 +1,9 @@
 //! Serving a `moq-archive` recording as HLS.
 //!
-//! A source broadcast, its catalog and timelines included, is recorded by an
+//! A source broadcast, its catalog and HLS records included, is recorded by an
 //! [`moq_archive::Producer`] and served back by an [`moq_archive::Consumer`], so the exporter
 //! serves the archived catalog exactly like a live broadcast. These tests pin the storage traffic
-//! that composition produces: playlists read only the timelines, and a segment GETs only objects
+//! that composition produces: playlists read only the records, and a segment GETs only objects
 //! of the requested rendition.
 
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use futures::stream::BoxStream;
-use hang::timeline::{Position, Record};
+use hang::hls::Record;
 use moq_archive::Store;
 use moq_archive::object_store::memory::InMemory;
 use moq_archive::object_store::path::Path;
@@ -21,7 +21,6 @@ use moq_archive::object_store::{
 	self, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
 	PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
-use moq_json::window;
 use moq_net::{Timescale, Timestamp, group, track};
 
 use super::*;
@@ -102,16 +101,12 @@ impl ObjectStore for Counting {
 	}
 }
 
-/// One rendition of the source: its media track, and its timeline track with the window encoder
-/// that writes it.
+/// One rendition of the source: its media track, and the records that segment it.
 struct Source {
 	media: track::Producer,
-	timeline: track::Producer,
-	encoder: window::Encoder<Record>,
-	/// The timeline group still open, which a pop may extend.
-	group: Option<group::Producer>,
-	/// Next timeline group sequence.
-	next: u64,
+	records: moq_mux::hls::Producer,
+	/// The record track, to finish its retained group with the recording.
+	track: track::Producer,
 	/// Next record sequence.
 	record: u64,
 }
@@ -149,15 +144,13 @@ impl Recording {
 				.with_timescale(Timescale::new(1_000_000).unwrap())
 				.with_priority(1);
 			let media = broadcast.create_track(name, media).unwrap();
-			let timeline = track::Info::default().with_timescale(Timescale::MILLI);
-			let timeline = broadcast.create_track(timeline_name(name), timeline).unwrap();
-			let config = window::ProducerConfig::default().with_compression(true).with_ops(false);
+			let track = broadcast
+				.create_track(hang::hls::default_name(name), moq_mux::hls::Producer::info())
+				.unwrap();
 			let source = Source {
 				media,
-				timeline,
-				encoder: window::Encoder::new(config),
-				group: None,
-				next: 0,
+				records: moq_mux::hls::Producer::new(track.clone()),
+				track,
 				record: 0,
 			};
 			sources.insert(name.to_string(), source);
@@ -170,7 +163,7 @@ impl Recording {
 		let recorder = tokio::spawn(moq_archive::Producer::new(store.clone(), broadcast.consume(), config).run());
 		// Subscribed before anything is published, so every group is recorded live.
 		for source in sources.values() {
-			while source.media.subscription().is_none() || source.timeline.subscription().is_none() {
+			while source.media.subscription().is_none() || source.track.subscription().is_none() {
 				tokio::time::sleep(Duration::from_millis(1)).await;
 			}
 		}
@@ -184,9 +177,9 @@ impl Recording {
 		}
 	}
 
-	/// Publish `track`'s next record: `groups`, each a list of frame timestamps in micros,
-	/// spanning `pts..pts + duration` in milliseconds, popping `pop` older records.
-	fn add(&mut self, track: &str, pts: u64, duration: u64, groups: &[(u64, &[u64])], pop: u64) {
+	/// Publish `track`'s next segment from `pts` milliseconds: `groups`, each a list of frame
+	/// timestamps in micros.
+	fn add(&mut self, track: &str, pts: u64, groups: &[(u64, &[u64])]) {
 		let source = self.sources.get_mut(track).unwrap();
 		for &(sequence, frames) in groups {
 			let mut group = source.media.create_group(group::Info { sequence }).unwrap();
@@ -196,41 +189,20 @@ impl Recording {
 			}
 			group.finish().unwrap();
 		}
-
-		let sequence = source.record;
-		source.record += 1;
 		let first = groups.first().unwrap().0;
-		let last = groups.last().unwrap().0;
-		let record = Record::new(
-			sequence,
-			pts,
-			duration,
-			Position::group(first),
-			Position::group(last + 1),
-		);
-		let mut payloads = Vec::new();
-		let pending = source.encoder.push(&record).unwrap();
-		payloads.push((pending.keyframe, pending.payload.clone()));
-		pending.commit();
-		if let Some(pending) = source.encoder.pop(pop).unwrap() {
-			payloads.push((pending.keyframe, pending.payload.clone()));
-			pending.commit();
-		}
-		for (keyframe, payload) in payloads {
-			if keyframe || source.group.is_none() {
-				if let Some(mut group) = source.group.take() {
-					group.finish().unwrap();
-				}
-				let group = source
-					.timeline
-					.create_group(group::Info { sequence: source.next })
-					.unwrap();
-				source.group = Some(group);
-				source.next += 1;
-			}
-			let timestamp = Timestamp::from_millis(pts).unwrap();
-			source.group.as_mut().unwrap().write_frame(timestamp, payload).unwrap();
-		}
+		self.push(track, Record::new(0, first, pts));
+	}
+
+	/// Record that `track`'s content stopped at `pts` milliseconds, before group `group`.
+	fn stop(&mut self, track: &str, group: u64, pts: u64) {
+		self.push(track, Record::new(0, group, pts).with_duration(0));
+	}
+
+	fn push(&mut self, track: &str, mut record: Record) {
+		let source = self.sources.get_mut(track).unwrap();
+		record.sequence = source.record;
+		source.record += 1;
+		source.records.push(&record).unwrap();
 	}
 
 	/// Wait until the recorder subscribed to every track and stored what was published.
@@ -242,11 +214,8 @@ impl Recording {
 	async fn finish(mut self) -> Store<Counting> {
 		self.catalog.finish().unwrap();
 		for source in self.sources.values_mut() {
-			if let Some(mut group) = source.group.take() {
-				group.finish().unwrap();
-			}
 			source.media.finish().unwrap();
-			source.timeline.finish().unwrap();
+			source.records.finish().unwrap();
 		}
 		self.stored().await;
 		self.broadcast.close();
@@ -258,10 +227,6 @@ impl Recording {
 	fn gets(&self) -> Vec<String> {
 		self.counting.take()
 	}
-}
-
-fn timeline_name(track: &str) -> String {
-	hang::timeline::default_name(track)
 }
 
 /// One Legacy frame: a VP8 keyframe for video (geometry the muxer can parse), filler otherwise.
@@ -280,25 +245,20 @@ fn legacy(track: &str, micros: u64, keyframe: bool) -> Bytes {
 	encoded.freeze()
 }
 
-/// The source's catalog: every rendition's config, plus an `archive` entry naming each
-/// rendition's timeline. Out-of-band configs, so no init needs media.
+/// The source's catalog: every rendition's config, each naming its HLS records. Out-of-band
+/// configs, so no init needs media.
 fn catalog() -> hang::Catalog {
-	let mut archive = hang::catalog::Archive::new();
-	for track in ["360p", "1080p", "audio"] {
-		archive.timelines.insert(
-			track.to_string(),
-			hang::catalog::Timeline::new(timeline_name(track), 4_000),
-		);
-	}
+	let hls = |track: &str| hang::catalog::Hls::new(hang::hls::default_name(track), Duration::from_secs(2));
 	let mut catalog = hang::Catalog::default();
-	catalog.archive = Some(archive);
 	for (name, width, height) in [("360p", 640, 360), ("1080p", 1920, 1080)] {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.coded_width = Some(width);
 		config.coded_height = Some(height);
+		config.hls = Some(hls(name));
 		catalog.video.renditions.insert(name.to_string(), config);
 	}
-	let audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+	let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+	audio.hls = Some(hls("audio"));
 	catalog.audio.renditions.insert("audio".to_string(), audio);
 	catalog
 }
@@ -372,38 +332,40 @@ impl Drop for Replay {
 	}
 }
 
-/// A stored media object: neither a timeline, the catalog, nor a marker.
+/// The record tracks' suffix as the store escapes it in a path.
+const HLS: &str = "%2Ehls";
+
+/// A stored media object: neither records, the catalog, nor a marker.
 fn is_media(path: &str) -> bool {
 	let name = path.rsplit('/').next().unwrap_or_default();
 	let marker = [".info", "end", ".end"].contains(&name);
-	!marker && !path.contains("timeline") && !path.contains("catalog")
+	!marker && !path.contains(HLS) && !path.contains("catalog")
 }
 
-/// `count` 2s segments: one keyframe group per video record, four audio groups per audio record.
-/// The first video rendition by name, 1080p, is the reference.
+/// `count` 2s segments: one keyframe group per video segment, four audio groups per audio one.
 async fn segments(count: u64) -> Recording {
 	let mut recording = Recording::new().await;
 	for segment in 0..count {
-		add_segment(&mut recording, segment, 0);
+		add_segment(&mut recording, segment);
 	}
 	recording
 }
 
-fn add_segment(recording: &mut Recording, segment: u64, pop: u64) {
+fn add_segment(recording: &mut Recording, segment: u64) {
 	let pts = segment * 2_000_000;
 	for video in ["360p", "1080p"] {
-		recording.add(video, segment * 2000, 2000, &[(segment, &[pts, pts + 1_000_000])], pop);
+		recording.add(video, segment * 2000, &[(segment, &[pts, pts + 1_000_000])]);
 	}
 	let audio: Vec<(u64, [u64; 1])> = (0..4).map(|i| (segment * 4 + i, [pts + i * 500_000])).collect();
 	let audio: Vec<(u64, &[u64])> = audio
 		.iter()
 		.map(|(sequence, frames)| (*sequence, &frames[..]))
 		.collect();
-	recording.add("audio", segment * 2000, 2000, &audio, pop);
+	recording.add("audio", segment * 2000, &audio);
 }
 
 #[tokio::test(start_paused = true)]
-async fn playlists_read_only_timelines_and_segments_their_own_objects() {
+async fn playlists_read_only_records_and_segments_their_own_objects() {
 	let recording = segments(3).await;
 	recording.stored().await;
 	let replay = Replay::open(&recording.store, 64 * 1024 * 1024).await;
@@ -412,19 +374,15 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 	assert!(master.contains("video/360p/media.m3u8") && master.contains("video/1080p/media.m3u8"));
 
 	// Render and reload every playlist with media GETs refused: shared numbering, and not one
-	// media GET. The reference lists every segment; the others hold back the newest until their
-	// own timeline passes its end, or ends.
+	// media GET. The newest segment waits for the record after it.
 	recording.counting.reject_media(true);
 	for _ in 0..2 {
-		for (kind, name, listed) in [
-			(Kind::Video, "1080p", 3),
-			(Kind::Video, "360p", 2),
-			(Kind::Audio, "audio", 3),
-		] {
+		for (kind, name) in [(Kind::Video, "1080p"), (Kind::Video, "360p"), (Kind::Audio, "audio")] {
 			let playlist = replay.playlist(kind, name).await;
+			let tag = replay.broadcaster.rendition(kind, name).unwrap().tag().to_string();
 			for segment in 0..3 {
-				let line = format!("seg/29b1cd67.{segment}.m4s\n");
-				assert_eq!(playlist.contains(&line), segment < listed, "{name}: {playlist}");
+				let line = format!("seg/{tag}.{segment}.m4s\n");
+				assert_eq!(playlist.contains(&line), segment < 2, "{name}: {playlist}");
 			}
 			assert!(!playlist.contains("#EXT-X-ENDLIST"), "the recording is still growing");
 		}
@@ -436,13 +394,12 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 			"track properties bind before media: {gets:?}"
 		);
 	}
-	assert!(gets.iter().any(|path| path.contains("timeline")), "{gets:?}");
+	assert!(gets.iter().any(|path| path.contains(HLS)), "{gets:?}");
 	recording.counting.reject_media(false);
 
 	// Switching renditions downloads only the selected rendition's objects.
 	for (kind, name, segment) in [
 		(Kind::Video, "360p", 1),
-		// Not the newest: a growing archive keeps its newest group open, as a live track does.
 		(Kind::Video, "1080p", 1),
 		// An audio segment spans four groups.
 		(Kind::Audio, "audio", 1),
@@ -494,43 +451,60 @@ async fn a_bounded_cache_rereads_evicted_objects() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn missing_rendition_segments_are_gaps_and_time_jumps_are_discontinuities() {
+async fn stopped_segments_are_gaps_and_a_resume_is_a_discontinuity() {
 	let mut recording = Recording::new().await;
-	recording.add("1080p", 0, 2000, &[(0, &[0])], 0);
-	recording.add("360p", 0, 8000, &[(0, &[0])], 0);
-	recording.add("audio", 0, 2000, &[(0, &[0])], 0);
-	// 360p stored nothing for segment 1.
-	recording.add("1080p", 2000, 2000, &[(1, &[2_000_000])], 0);
-	// Content time jumps from 4s to 10s.
-	recording.add("1080p", 10_000, 2000, &[(2, &[10_000_000])], 0);
-	recording.add("360p", 10_000, 2000, &[(1, &[10_000_000])], 0);
-	// The completed archive resolves each rendition's newest segment.
+	// 1080p: two segments, a stop, then content resumes at 10s.
+	recording.add("1080p", 0, &[(0, &[0])]);
+	recording.add("1080p", 2000, &[(1, &[2_000_000])]);
+	recording.stop("1080p", 2, 4000);
+	recording.add("1080p", 10_000, &[(2, &[10_000_000])]);
+	recording.stop("1080p", 3, 12_000);
+	// 360p starts its segment 1 a second and a half late. Each rendition lists its own records,
+	// so it is listed as is.
+	recording.add("360p", 0, &[(0, &[0])]);
+	recording.add("360p", 3500, &[(1, &[3_500_000])]);
+	recording.stop("360p", 2, 4000);
+	recording.add("360p", 10_000, &[(2, &[10_000_000])]);
+	recording.stop("360p", 3, 12_000);
+	recording.add("audio", 0, &[(0, &[0])]);
+	recording.stop("audio", 1, 2000);
 	let counting = recording.counting.clone();
 	let store = recording.finish().await;
 
 	let replay = Replay::open(&store, 64 * 1024 * 1024).await;
-	let low = replay
+	replay
 		.playlist_until(Kind::Video, "360p", |playlist| playlist.contains("#EXT-X-ENDLIST"))
 		.await;
-	let expected = concat!(
-		"#EXTINF:2.00000,\nseg/29b1cd67.0.m4s\n",
-		"#EXT-X-GAP\n#EXTINF:2.00000,\nseg/29b1cd67.1.m4s\n",
-		"#EXT-X-DISCONTINUITY\n#EXTINF:2.00000,\nseg/29b1cd67.2.m4s\n",
-	);
-	assert!(low.contains(expected), "{low}");
-	let high = replay.playlist(Kind::Video, "1080p").await;
-	assert!(!high.contains("#EXT-X-GAP"), "{high}");
-	assert!(
-		high.contains("#EXT-X-DISCONTINUITY\n#EXTINF:2.00000,\nseg/29b1cd67.2.m4s\n"),
-		"{high}"
-	);
+	let low = replay.rendition(Kind::Video, "360p").snapshot();
+	let flags = |snapshot: &playlist::Snapshot| {
+		snapshot
+			.segments
+			.iter()
+			.map(|s| (s.segment, s.gap, s.discontinuity))
+			.collect::<Vec<_>>()
+	};
+	let expected = [
+		(0, false, false),
+		(1, false, false),
+		(2, true, false),
+		(3, false, true),
+		(4, true, false),
+	];
+	assert_eq!(flags(&low), expected);
+	replay
+		.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("#EXT-X-ENDLIST"))
+		.await;
+	let high = replay.rendition(Kind::Video, "1080p").snapshot();
+	assert_eq!(flags(&high), expected);
 
 	// A gap is never fetched.
 	counting.take();
 	let rendition = replay.rendition(Kind::Video, "360p");
-	assert!(rendition.listed_segment(1).await.unwrap().is_none());
+	assert!(rendition.listed_segment(2).await.unwrap().is_none());
 	assert!(!counting.take().iter().any(|path| is_media(path)));
-	let after = rendition.listed_segment(2).await.unwrap().unwrap();
+	let late = rendition.listed_segment(1).await.unwrap().unwrap();
+	assert_eq!(&late[4..8], b"moof");
+	let after = rendition.listed_segment(3).await.unwrap().unwrap();
 	assert_eq!(&after[4..8], b"moof");
 }
 
@@ -542,42 +516,55 @@ async fn a_growing_recording_ends_with_its_markers() {
 	recording.stored().await;
 	let replay = Replay::open(&recording.store, 64 * 1024 * 1024).await;
 	replay.playlist(Kind::Video, "1080p").await;
+	let tag = replay
+		.broadcaster
+		.rendition(Kind::Video, "1080p")
+		.unwrap()
+		.tag()
+		.to_string();
 
-	// A DVR commit: segment 3 arrives and segment 0 expires.
-	add_segment(&mut recording, 3, 1);
+	add_segment(&mut recording, 3);
 	recording.stored().await;
 	let playlist = replay
 		.playlist_until(Kind::Video, "1080p", |playlist| {
-			playlist.contains("seg/29b1cd67.3.m4s\n")
+			playlist.contains(&format!("seg/{tag}.2.m4s\n"))
 		})
 		.await;
-	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:1\n"), "{playlist}");
-	assert!(!playlist.contains("seg/29b1cd67.0.m4s"), "{playlist}");
 	assert!(
 		!playlist.contains("#EXT-X-ENDLIST"),
 		"a recording without markers stays live"
 	);
 
+	for track in ["360p", "1080p", "audio"] {
+		let group = if track == "audio" { 16 } else { 4 };
+		recording.stop(track, group, 8_000);
+	}
 	recording.finish().await;
 	let playlist = replay
 		.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("#EXT-X-ENDLIST"))
 		.await;
-	assert!(playlist.contains("seg/29b1cd67.3.m4s\n#EXT-X-ENDLIST\n"), "{playlist}");
+	assert!(playlist.contains(&format!("seg/{tag}.3.m4s\n")), "{playlist}");
 }
 
-/// A durable timeline still lists only the default 16s window: a live playlist stays bounded
-/// however much the store retains.
+/// A durable record track still lists only the default 16s window: a live playlist stays
+/// bounded however much the store retains.
 #[tokio::test(start_paused = true)]
-async fn a_durable_timeline_lists_the_window() {
-	let recording = segments(12).await;
+async fn durable_records_list_the_window() {
+	let recording = segments(13).await;
 	recording.stored().await;
 	let replay = Replay::open(&recording.store, 64 * 1024 * 1024).await;
+	let tag = replay
+		.broadcaster
+		.rendition(Kind::Video, "1080p")
+		.unwrap()
+		.tag()
+		.to_string();
 	let playlist = replay
 		.playlist_until(Kind::Video, "1080p", |playlist| {
-			playlist.contains("seg/29b1cd67.11.m4s\n")
+			playlist.contains(&format!("seg/{tag}.11.m4s\n"))
 		})
 		.await;
 	// Eight 2s segments cover the window.
 	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:4\n"), "{playlist}");
-	assert!(!playlist.contains("seg/29b1cd67.3.m4s\n"), "{playlist}");
+	assert!(!playlist.contains(&format!("seg/{tag}.3.m4s\n")), "{playlist}");
 }

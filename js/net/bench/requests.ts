@@ -1,9 +1,9 @@
-/** Sweep request restart and cancellation over independent origin and waiter dimensions. */
+/** Sweep request restart, cancellation, and discovery settlement over independent origin and waiter dimensions. */
 import { Producer as Broadcast } from "../src/broadcast";
 import * as Epoch from "../src/epoch";
-import { NativeSession } from "../src/ietf/adapter";
 import { Publisher as IetfPublisher } from "../src/ietf/publisher";
 import { RequestOk } from "../src/ietf/request";
+import { NativeSession } from "../src/ietf/session";
 import {
 	SubscribeNamespace,
 	SubscribeNamespaceEntry,
@@ -34,7 +34,7 @@ for (const touched of ["watched", "unrelated"])
 				broadcastPublication.announce();
 				return broadcast;
 			});
-			const requests = Array.from({ length: followers }, () => origin.request(path, { announced: true }));
+			const requests = Array.from({ length: followers }, () => origin.follow(path));
 			await settle();
 			let current = broadcasts[0];
 			let unrelated: (typeof broadcasts)[number] | undefined;
@@ -74,7 +74,7 @@ console.log("unrelated,waiters,cancel_us");
 for (const unrelated of [8, 128, 2048])
 	for (const waiters of [1, 8, 32]) {
 		const origin = new Producer();
-		origin.dynamicRoute(Path.from("pending"));
+		origin.requestsRoute(Path.from("pending"));
 		const held = Array.from({ length: unrelated }, (_, i) => origin.request(Path.from(`pending/${i}`)));
 		const wire = wireOf(origin.consume());
 		const samples: number[] = [];
@@ -94,6 +94,40 @@ for (const unrelated of [8, 128, 2048])
 		origin.close();
 	}
 
+// An initial set landing settles only the pending requests beneath its prefix, never every
+// request in the table, however many land in one task.
+console.log("pending,landed,settle_us");
+for (const pending of [128, 1024, 8192])
+	for (const landed of [1, 16, 128]) {
+		const samples: number[] = [];
+		for (let round = 0; round < 5; round++) {
+			const origin = new Producer();
+			const wire = wireOf(origin);
+			const detach = wire.attach(true);
+			const initialSets = new Map<Path.Valid, () => void>();
+			const stop = wire.interests((prefix, wanted) => {
+				if (wanted) initialSets.set(prefix, wire.snapshot(prefix));
+			});
+			const held = Array.from({ length: pending }, (_, i) => origin.request(Path.from(`held/${i}`)));
+			const touched = Array.from({ length: landed }, (_, i) => origin.request(Path.from(`touched/${i}`)));
+			await settle();
+			const start = performance.now();
+			for (let i = 0; i < landed; i++) initialSets.get(Path.from(`touched/${i}`))?.();
+			// The settlement is one microtask queued by the first landing, ahead of this one.
+			await Promise.resolve();
+			if (round > 0) samples.push((performance.now() - start) * 1000);
+			if (touched.some((request) => request.closed.peek() === undefined)) throw new Error("absence unsettled");
+			if (held.some((request) => request.closed.peek() !== undefined)) throw new Error("unsynced path settled");
+			for (const request of [...held, ...touched]) request.close();
+			for (const release of initialSets.values()) release();
+			stop();
+			detach();
+			origin.close();
+		}
+		samples.sort((a, b) => a - b);
+		console.log(`${pending},${landed},${samples[2].toFixed(2)}`);
+	}
+
 // Keep old instances on distinct same-epoch failovers, then cancel new demand.
 // This exercises ownership checks inside one cleanup, independently of wire sharing.
 console.log("failovers,extra_routes,cancel_us");
@@ -108,9 +142,9 @@ for (const failovers of [0, 1, 16, 128])
 			const sources: Broadcast[] = [];
 			for (let i = 0; i < failovers; i++) {
 				const epoch = Epoch.mint();
-				const primary = origin.dynamicRoute(prefix, { epoch, cost: 0n });
+				const primary = origin.requestsRoute(prefix, { epoch, cost: 0n });
 				const ar = primary.requested();
-				const br = origin.dynamicRoute(prefix, { epoch, cost: 1n }).requested();
+				const br = origin.requestsRoute(prefix, { epoch, cost: 1n }).requested();
 				const held = origin.request(path);
 				const source = new Broadcast();
 				sources.push(source);
@@ -120,8 +154,8 @@ for (const failovers of [0, 1, 16, 128])
 				entries.push({ primary, ar, br, held });
 			}
 			const epoch = Epoch.mint();
-			origin.dynamicRoute(prefix, { epoch });
-			for (let i = 0; i < extraRoutes; i++) origin.dynamicRoute(prefix, { epoch, cost: BigInt(i + 1) });
+			origin.requestsRoute(prefix, { epoch });
+			for (let i = 0; i < extraRoutes; i++) origin.requestsRoute(prefix, { epoch, cost: BigInt(i + 1) });
 			const pending = [];
 			for (const entry of entries) {
 				entry.primary.close();
@@ -183,7 +217,7 @@ for (const operation of ["cancel-forward", "cancel-reverse", "drain-local"])
 			const settled: number[] = [];
 			for (let round = 0; round < 4; round++) {
 				const origin = new Producer();
-				const dynamic = origin.dynamicRoute(Path.from("pending"));
+				const dynamic = origin.requestsRoute(Path.from("pending"));
 				const requests = dynamic.requested();
 				const wire = wireOf(origin.consume());
 				const names = Array.from({ length: paths }, (_, i) => Path.from(`pending/${i}`));
@@ -241,7 +275,7 @@ for (const survivor of [false, true])
 				const origin = new Producer();
 				const prefix = Path.from("competing");
 				const path = Path.from("competing/touched");
-				for (let i = 0; i < routes; i++) origin.dynamicRoute(prefix, { cost: BigInt(i) });
+				for (let i = 0; i < routes; i++) origin.requestsRoute(prefix, { cost: BigInt(i) });
 				const wire = wireOf(origin.consume());
 				const kept = survivor ? new AbortController() : undefined;
 				const remaining = kept ? wire.demand(path, undefined, kept.signal).catch(() => {}) : undefined;

@@ -189,9 +189,9 @@ async fn publish_version(port: u16, version: &str) -> Publisher {
 }
 
 async fn publish_unknown(port: u16) -> Publisher {
-	// Draft-14 has no Cluster extension, so the accepting relay must represent
+	// Lite-03 declares no origin identity, so the accepting relay must represent
 	// this external publisher with the wire-defined UNKNOWN Hop ID.
-	publish_version(port, "moq-transport-14").await
+	publish_version(port, "moq-lite-03").await
 }
 
 /// Subscribe to [`PATH`] through the relay on `port` and read its first frame.
@@ -207,14 +207,12 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 		.map_err(|err| format!("subscriber connect failed: {err}"))?;
 
 	// Wait for the announcement rather than asking the moment the session connects:
-	// `request_broadcast` answers on the spot, so it would race the announcement that
+	// `request` answers on the spot, so it would race the announcement that
 	// makes the path routable.
-	tokio::time::timeout(TIMEOUT, consumer.routed(PATH))
-		.await
-		.map_err(|_| "routed timed out".to_string())?
-		.ok_or_else(|| "origin closed before the broadcast was announced".to_string())?;
 	let broadcast = consumer
-		.request_broadcast(PATH, None)
+		.follow(PATH, None)
+		.unwrap()
+		.available()
 		.await
 		.map_err(|err| format!("broadcast unroutable: {err}"))?;
 
@@ -308,7 +306,7 @@ async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_ne
 
 /// Every ingest version that can carry a broadcast must survive the same
 /// redundant mesh. The pre-fix failure set was exactly the versions that
-/// declare no origin identity (lite <= 03, moq-transport <= 16): their
+/// declare no origin identity (lite <= 03): their
 /// broadcasts enter with an UNKNOWN first hop, and the reflected copy replaced
 /// the live source instead of parking. The identity-carrying versions held
 /// even before the fix, so this pins both halves of the boundary.
@@ -321,9 +319,7 @@ async fn every_ingest_version_crosses_a_redundant_mesh() {
 		"moq-lite-03",
 		"moq-lite-04",
 		"moq-lite-05",
-		"moq-transport-14",
-		"moq-transport-16",
-		"moq-transport-17",
+		"moq-transport-18",
 	] {
 		let mesh = Mesh::start(None).await;
 		let _publisher = publish_version(mesh.a(), version).await;
@@ -404,7 +400,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }
