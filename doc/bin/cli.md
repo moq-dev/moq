@@ -91,7 +91,9 @@ stream stepping back, flagged or not, or more than 10 s forward without a
 `discontinuity_indicator`. The broadcast finishes there, and the rest of the
 input publishes as a new instance under a new
 [epoch](/concept/moq-lite#publisher-epochs), on the same SRT connection, which
-`export ts --stitch --follow` carries on into. An unflagged step usually means
+`export ts --stitch --follow` carries on into. The new instance keeps the mux
+rate the old one measured, so its catalog goes out with its first media rather
+than after a fresh two-second measurement. An unflagged step usually means
 redundant encoders behind a changeover switch: time-lock their clocks, or have
 the switch set `discontinuity_indicator`. `--program all` and `--passthrough`
 still end at a rewind. A flagged MPEG-TS discontinuity that
