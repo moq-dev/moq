@@ -100,10 +100,11 @@ comparisons pair those too.
 
 The qmux micro-bench isolates the transport from the relay. It connects
 client/server pairs over loopback TCP, each echoing one message at a time on one
-stream so every message crosses as its own record, swept over transport, session
-count, and message size. It reports process CPU per record and per Gbps, so it
-also runs under `perf`; build it with the profiling profile and frame pointers to
-attribute that CPU:
+stream so messages are never coalesced, swept over transport, session count, and
+message size. A message up to about 16 KB, qmux's default maximum record size,
+crosses as one record; a larger one is split. It reports process CPU per message
+and per Gbps, so it also runs under `perf`; build it with the profiling profile
+and frame pointers to attribute that CPU:
 
 ```bash
 nix develop --command cargo run --release -p qmux@0.7.0 --example bench

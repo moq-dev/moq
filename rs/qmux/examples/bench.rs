@@ -2,9 +2,11 @@
 //!
 //! Every case connects `sessions` client/server pairs over loopback TCP. Each client
 //! keeps one message of `size` bytes in flight on one bidirectional stream, and its
-//! server echoes it back, so every message crosses as its own record rather than being
-//! coalesced with the next. Both ends run in this process on one current-thread
-//! runtime, so the CPU covers sending and receiving alike.
+//! server echoes it back, so messages are never coalesced. A message that fits in one
+//! record (16382 bytes by default, less the frame header) crosses as exactly one; a
+//! larger one is split, so the per-message numbers then cover several records. Both
+//! ends run in this process on one current-thread runtime, so the CPU covers sending
+//! and receiving alike.
 //!
 //! It reports process CPU time (user plus system), not wall clock, so it still means
 //! something under a profiler; `bench/README.md` shows how to run and profile it.
@@ -192,7 +194,7 @@ async fn connect(transport: Transport, tls: &Tls, addr: SocketAddr) -> anyhow::R
 }
 
 /// Echo every chunk back on the same stream until the client finishes it.
-async fn serve(mut session: Session) -> anyhow::Result<()> {
+async fn serve(session: Session) -> anyhow::Result<()> {
 	let (mut send, mut recv) = session.accept_bi().await?;
 	while let Some(chunk) = recv.read_chunk(usize::MAX).await? {
 		send.write_chunk(chunk).await?;
@@ -201,7 +203,7 @@ async fn serve(mut session: Session) -> anyhow::Result<()> {
 }
 
 /// Send `payload`, read it back whole, and count the round trip, until aborted.
-async fn drive(mut session: Session, payload: Bytes, done: Arc<AtomicU64>) -> anyhow::Result<()> {
+async fn drive(session: Session, payload: Bytes, done: Arc<AtomicU64>) -> anyhow::Result<()> {
 	let (mut send, mut recv) = session.open_bi(SendOptions::default()).await?;
 	let mut echoed = Vec::with_capacity(payload.len());
 	loop {
@@ -287,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
 
 	println!(
 		"{:<9} {:>8} {:>7} {:>11} {:>9} {:>10} {:>11} {:>12}",
-		"transport", "sessions", "size-B", "records/s", "Gbps", "CPU-cores", "CPU-us/rec", "cores/Gbps"
+		"transport", "sessions", "size-B", "msgs/s", "Gbps", "CPU-cores", "CPU-us/msg", "cores/Gbps"
 	);
 	for &transport in &args.transports {
 		for &sessions in &args.sessions {
@@ -295,20 +297,20 @@ async fn main() -> anyhow::Result<()> {
 				let sample = measure(transport, &tls, sessions, size, args.duration)
 					.await
 					.with_context(|| format!("{} with {sessions} sessions of {size} B", transport.name()))?;
-				// Every round trip is two records of `size` payload bytes, one each way.
-				let records = 2.0 * sample.round_trips as f64;
+				// Every round trip is two messages of `size` payload bytes, one each way.
+				let messages = 2.0 * sample.round_trips as f64;
 				let wall = sample.wall.as_secs_f64();
 				let cpu = sample.cpu.as_secs_f64();
-				let gbps = records * size as f64 * 8.0 / wall / 1e9;
+				let gbps = messages * size as f64 * 8.0 / wall / 1e9;
 				println!(
 					"{:<9} {:>8} {:>7} {:>11.0} {:>9.3} {:>10.3} {:>11.3} {:>12.3}",
 					transport.name(),
 					sessions,
 					size,
-					records / wall,
+					messages / wall,
 					gbps,
 					cpu / wall,
-					cpu * 1e6 / records,
+					cpu * 1e6 / messages,
 					cpu / wall / gbps,
 				);
 			}

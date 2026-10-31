@@ -18,9 +18,10 @@ Facts from the 2026-10-22 audit, so quests don't re-litigate them:
 - `just bench` runs `chat` and `fanout` over QUIC and qmux over `ws://`,
   `wss://`, `tcp://`, and `tls://`, reporting relay CPU per delivered frame and
   per Gbps; `just bench-profile` takes the transport as its last argument. The
-  qmux micro-bench (`rs/qmux/examples/bench.rs`) echoes one record at a time
+  qmux micro-bench (`rs/qmux/examples/bench.rs`) echoes one message at a time
   over loopback, swept over transport x sessions x message size, and reports
-  process CPU per record. `bench/README.md` covers both.
+  process CPU per message, which is one record up to the 16382-byte default
+  maximum record size. `bench/README.md` covers both.
 - The relay's WebSocket path is axum (hyper, `axum-server`, tokio-rustls),
   then axum's tungstenite 0.29, converted zero-copy into qmux's tungstenite
   0.30 (`rs/moq-relay/src/websocket.rs`). The relay therefore compiles two
