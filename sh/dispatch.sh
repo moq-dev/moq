@@ -110,7 +110,8 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/l
 # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
 # moq-cli builds the Rust interop clients as examples from outside its
 # crate; sh/rs/select.test.py fails when a target's directory is missing.
-module rs '^(\.cargo/|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
+# moq-relay's tests read its NixOS module.
+module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
     tools='cargo jq' compiles='check fix' fix
 # rs's crates again, each compiled alone at its feature extremes: its own
 # module because one clippy pass per package outgrows a hosted job beside rs.
@@ -161,7 +162,7 @@ module drafts '^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)' \
 module markdown '' \
     tools='bun' lane=bun fix
 module gh '' \
-    tools='actionlint bun python3 cargo clippy-driver dpkg-deb nfpm rpm' lane=bun
+    tools='actionlint zizmor bun python3 cargo clippy-driver dpkg-deb nfpm rpm' lane=bun
 # The drill mutations patch Rust source, so a Rust change can move the code
 # they target. Only nightly runs the drills; this catches a stale patch.
 module drill '^(rs/|test/drill/)'
@@ -293,6 +294,8 @@ fi
 # rs selects crates from the same list, or the whole workspace.
 rs_list=$changed
 [[ -z "$all" ]] || rs_list=--all
+rs_feature_scope=
+[[ "$action" != check ]] || rs_feature_scope=changed
 
 # large_files diffs against the same base, or checks every file.
 large_base=$base
@@ -320,8 +323,10 @@ step() {
         check:moq_sh) just infra moq-sh test ;;
         # The check keeps docs and target-specific lints; the test phase
         # enforces default-feature clippy without a second compile.
-        check:rs) just rs lint-changed "$rs_list" ;;
-        check:rs_shapes) just rs feature-shapes-changed "$rs_list" ;;
+        # Locally, the feature-contract checks skip the dependents of the
+        # changed crates; the landing worker keeps them (see sh/rs/select.sh).
+        check:rs) RS_FEATURE_SCOPE=$rs_feature_scope just rs lint-changed "$rs_list" ;;
+        check:rs_shapes) RS_FEATURE_SCOPE=$rs_feature_scope just rs feature-shapes-changed "$rs_list" ;;
         check:bench)
             python3 bench/compare.test.py
             bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
@@ -341,6 +346,13 @@ step() {
                     echo "$action: skipping flake; the local Nix builder cannot create user namespaces" >&2
                     return 77
                 fi
+            fi
+            # Without KVM, QEMU falls back to emulation and the VM tests time
+            # out long after. Refuse rather than skip, so a local gate never
+            # reads as passing without them.
+            if [[ "$OSTYPE" == linux* && "$HOSTTYPE" == x86_64 && ! -e /dev/kvm ]]; then
+                echo "$action: flake's NixOS VM tests need KVM, but /dev/kvm is missing; run them on a KVM host, as CI does" >&2
+                return 1
             fi
             # 77 marks the probe's skip, so the check's own 77 is a failure.
             # Full build logs name a failing VM subtest; Nix otherwise keeps
