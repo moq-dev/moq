@@ -89,10 +89,11 @@ declare -A scope=(
     [swift]='^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
     [go]='^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)'
     [dart]='^(\.cargo/config\.toml$|dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)'
-    # The C package links moq-c's native-libs lists, and the C++ package's FFI pin.
-    [c]='^(\.cargo/config\.toml$|c/|sh/c/|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)'
+    # The C package links moq-c's native-libs lists, and the C++ package's FFI
+    # pin. Both packages format with sh/clang-format.sh and OBS's style file.
+    [c]='^(\.cargo/config\.toml$|c/|sh/c/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)'
     # The package links moq-c's native-libs lists, and compiles its doc samples.
-    [cpp]='^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
+    [cpp]='^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
     # The plugin and its tests call through the bindings generated from cpp/moq
     # and moq-ffi and link through moq-c's native-libs lists, and flake.nix owns
     # the libobs headers it compiles against.
@@ -106,6 +107,8 @@ declare -A scope=(
     # ts.yml's crate filters against the closure test/ts/run.sh builds, which
     # moves only with a manifest, the lockfile, or the harness's packages.
     [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)'
+    # Ruff lints and formats every Python file under the nearest pyproject.toml.
+    [python]='(\.pyi?|(^|/)pyproject\.toml)$'
     [markdown]=''
     [shell]=''
     [large_files]=''
@@ -146,7 +149,8 @@ fi
 # The tools each module needs. A module missing one is skipped locally, so an
 # incomplete toolchain checks less; under CI_STRICT (CI) it is an error, up
 # front, because there a skip is indistinguishable from a pass. swift needs
-# none: it skips off macOS by design, and platform.yml is its real gate.
+# none: it skips off macOS by design, and platform.yml is its real gate. Its
+# formatter is absent where nixpkgs cannot build it (see flake.nix).
 declare -A tools=(
     [js]='bun python3'
     [workers]='bun'
@@ -159,17 +163,18 @@ declare -A tools=(
     [quest]='quest'
     [drill]=''
     [py]='uv'
-    [kt]='cargo gradle java'
+    [kt]='cargo gradle java ktfmt'
     [swift]=''
     [go]='cargo go uniffi-bindgen-go'
     [dart]='cargo dart uniffi_bindgen_dart'
-    [c]='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp'
-    [cpp]='cargo cmake c++ uniffi-bindgen-cpp'
+    [c]='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp clang-format'
+    [cpp]='cargo cmake c++ uniffi-bindgen-cpp clang-format'
     [obs_compile]='cargo cmake pkg-config uniffi-bindgen-cpp'
     [obs]='clang-format cmake gersemi jq'
     [flake]='nix'
     [ts_paths]='cargo python3'
     [markdown]='bun'
+    [python]='ruff'
     [shell]='shellcheck shfmt'
     [large_files]=''
     [toml]='taplo'
@@ -193,8 +198,8 @@ declare -A compiles=(
 # Lanes start in this order, so the slowest come first. dart runs alone (see
 # below), so it waits for the rest.
 case "$action" in
-    check | ci) modules=(py rs rs_shapes c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
-    fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
+    check | ci) modules=(py rs rs_shapes c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths python shell large_files toml nix justfile dart) ;;
+    fix) modules=(js rs dart go kt swift c cpp obs python markdown shell toml nix justfile) ;;
 esac
 
 # Modules that share mutable state run in one lane, in module order; every
@@ -360,6 +365,10 @@ step() {
             sh/markdown.sh check
             ;;
         check:large_files) sh/large-files.sh "$large_base" ;;
+        check:python)
+            files '*.py' '*.pyi' | xargs -0 ruff check --force-exclude
+            files '*.py' '*.pyi' | xargs -0 ruff format --check --force-exclude
+            ;;
         check:toml) RUST_LOG=error taplo format --check ;;
         check:nix) files '*.nix' | xargs -0 nixfmt --check ;;
         check:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --check --justfile ;;
@@ -372,6 +381,10 @@ step() {
         fix:markdown)
             bun install
             sh/markdown.sh fix
+            ;;
+        fix:python)
+            files '*.py' '*.pyi' | xargs -0 ruff check --fix --force-exclude
+            files '*.py' '*.pyi' | xargs -0 ruff format --force-exclude
             ;;
         fix:toml) RUST_LOG=error taplo format ;;
         fix:nix) files '*.nix' | xargs -0 nixfmt ;;

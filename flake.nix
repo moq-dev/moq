@@ -307,13 +307,23 @@
         # skip a module whose tools aren't on $PATH. CI sets CI_STRICT=1,
         # which turns that skip into an error (see the tools map in
         # sh/dispatch.sh), so this list and that one have to stay in step.
-        lintDeps = with pkgs; [
-          shellcheck
-          shfmt
-          actionlint
-          taplo
-          nixfmt
-        ];
+        lintDeps =
+          with pkgs;
+          [
+            shellcheck
+            shfmt
+            actionlint
+            taplo
+            nixfmt
+            # Formats and lints every Python file; the same version uv.lock pins.
+            ruff
+          ]
+          # Apple's formatter, so `just swift check` checks formatting off macOS
+          # too. nixpkgs marks the Swift compiler it builds with broken on
+          # aarch64-linux, where the check skips instead.
+          ++ lib.optionals (!(stdenv.hostPlatform.isLinux && stdenv.hostPlatform.isAarch64)) [
+            swift-format
+          ];
 
         # Kotlin wrapper (kt/) toolchain so `just kt check` actually compiles
         # the wrapper and runs :moq:jvmTest instead of silently skipping.
@@ -323,6 +333,8 @@
         ktDeps = with pkgs; [
           jdk17
           gradle_8
+          # `just kt check` fails on Kotlin it would reformat; `just kt fix` applies it.
+          ktfmt
         ];
 
         # uniffi-bindgen-go renders rs/moq-ffi into the generated half of
@@ -519,6 +531,7 @@
             # too. Same 0.8.2 that obs-deps carries.
             simde
             qt6.qtbase
+            # clang-format, for the plugin and the c/ and cpp/moq packages.
             clang-tools
             gersemi
           ]
