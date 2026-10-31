@@ -62,6 +62,7 @@ serde_json = { workspace = true }
 # The benches run on tokio. test-util (tokio::time::pause/advance) is test-only and
 # is NOT supported on wasm, so it must not leak into the normal dependency feature set.
 tokio = { workspace = true, features = ["rt", "test-util", "time"] }
+tracing-test = { workspace = true }
 
 # wasm model-layer tests (tests/wasm.rs). getrandom's wasm backend is enabled
 # only here (dev), so it isn't forced on downstream consumers. They select

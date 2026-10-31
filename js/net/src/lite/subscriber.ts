@@ -22,7 +22,7 @@ import {
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { groupBounds, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { groupBounds, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import { grace } from "../ledger.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
@@ -931,7 +931,7 @@ export class Subscriber {
 			track: request.name,
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
-			maxDelay: subscription.maxDelay,
+			maxDelay: maxDelayOf(subscription),
 			startGroup: subscription.groups?.start === undefined ? undefined : bounds.start,
 			endGroup: inclusiveGroupEnd(bounds.end),
 		});
@@ -1513,7 +1513,7 @@ export class Subscriber {
 				try {
 					// Lower groups may still be on the wire behind a higher one, so readers hold
 					// at a hole below the end until the tail settles.
-					hooks.endTrack(entry.track, { group: entry.end, frame: 0 });
+					hooks.endTrack(entry.track, { group: entry.end, frame: 0 }, resp.end.cause());
 				} catch (err) {
 					// lite-05 specified an inclusive end, and @moq/net 0.1.3 to 0.1.9 sent one, so
 					// there an end below a received group only costs the early boundary: the FIN
@@ -1650,7 +1650,7 @@ export class Subscriber {
 				wantedGroup: refresh ?? sentWanted,
 				priority: current.priority ?? 0,
 				order: current.order,
-				maxDelay: current.maxDelay,
+				maxDelay: maxDelayOf(current),
 				startGroup: current.groups?.start === undefined ? undefined : bounds.start,
 				endGroup: inclusiveGroupEnd(bounds.end),
 			});
