@@ -21,10 +21,10 @@ impl<T> Mutex<T> {
 		self.0.lock().ok()
 	}
 
-	/// The lock even after a holder panicked, as `Err` with the guard it left behind.
+	/// The guard a panicked holder left behind, or `None` while the value is intact.
 	///
-	/// Only for failing the connection's waiters, and reading the error that records why.
-	pub(crate) fn lock_recovered(&self) -> Result<MutexGuard<'_, T>, MutexGuard<'_, T>> {
-		self.0.lock().map_err(std::sync::PoisonError::into_inner)
+	/// Only for waking waiters, so they reach the poisoned [`lock`](Self::lock) instead of hanging.
+	pub(crate) fn poisoned(&self) -> Option<MutexGuard<'_, T>> {
+		self.0.lock().err().map(std::sync::PoisonError::into_inner)
 	}
 }

@@ -125,9 +125,9 @@ async fn close_endpoint() {
 	}
 }
 
-/// A driver panic fails the handshake it was driving instead of leaving it pending forever.
+/// A driver panic wakes the handshake it was driving instead of leaving it pending forever.
 ///
-/// A server's accept polls every pending handshake, so one panicking there ends all of them.
+/// The waiter panics on the poisoned state, for its owner to isolate (as `Server` does per handshake).
 #[tokio::test]
 async fn driver_panic_fails_connecting() {
 	let _guard = subscribe();
@@ -146,13 +146,9 @@ async fn driver_panic_fails_connecting() {
 		.unwrap();
 	connecting.poison();
 
-	// The handshake fails, without panicking whoever polls it or aborting as it drops.
-	match timeout(Duration::from_secs(5), connecting).await {
-		Ok(Err(crate::quic::driver::connection::Error::TransportError(_))) => {}
-		Ok(Err(e)) => panic!("unexpected error: {e}"),
-		Ok(Ok(_)) => panic!("unexpected success"),
-		Err(_) => panic!("the handshake waiter hung"),
-	}
+	// The waiter wakes into the poisoned state and panics there, and dropping it doesn't abort.
+	let woken = timeout(Duration::from_secs(5), crate::panic::isolate(connecting)).await;
+	assert!(matches!(woken, Ok(None)), "the handshake waiter hung");
 }
 
 #[test]

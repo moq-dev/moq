@@ -244,7 +244,8 @@ pub struct Server {
 		feature = "tcp",
 		all(feature = "uds", unix)
 	))]
-	accept: FuturesUnordered<BoxFuture<'static, crate::Result<Request>>>,
+	/// Pending handshakes, each isolated: one panicking (`None`) must not end the listener.
+	accept: FuturesUnordered<BoxFuture<'static, Option<crate::Result<Request>>>>,
 	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 	streams: StreamListeners,
 	#[cfg(feature = "iroh")]
@@ -738,7 +739,7 @@ impl Server {
 							_conn.refuse();
 							continue;
 						};
-						self.accept.push(async move {
+						self.accept.push(crate::panic::isolate(async move {
 							// Accept the transport (capturing url + mTLS identity) and exchange the
 							// MoQ SETUP up front, so path/role are known before the caller authorizes
 							// (like the stream bindings).
@@ -751,7 +752,7 @@ impl Server {
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
 							Ok(Request { transport, url, identity, authority, link, handshake: Box::new(request), quic, deadline, active })
-						}.boxed());
+						}).boxed());
 					}
 				}
 				Some(_conn) = iroh_accept => {
@@ -768,7 +769,7 @@ impl Server {
 							_conn.refuse();
 							continue;
 						};
-						self.accept.push(async move {
+						self.accept.push(crate::panic::isolate(async move {
 							let Accepted { session, url, identity, authority, link } = within(deadline, super::iroh::accept(_conn, alpns)).await?;
 							let address = match url { Some(_) => moq_net::transport::Address::Uri, None => moq_net::transport::Address::Setup };
 							let session = crate::iroh::Session::new(session, address);
@@ -785,7 +786,7 @@ impl Server {
 								deadline,
 								active,
 							})
-						}.boxed());
+						}).boxed());
 					}
 				}
 				Some(_pending) = ws_accept => {
@@ -801,18 +802,20 @@ impl Server {
 						let Some(active) = setup.activity.enter() else {
 							continue;
 						};
-						self.accept.push(async move {
+						self.accept.push(crate::panic::isolate(async move {
 							let (session, url, accepted) = within(deadline, _pending).await?;
 							let mut options = crate::websocket::Options::new(url, setup.server, active);
 							options.link = Link { remote: Some(accepted.remote), local, alpn: Some(accepted.protocol), ..Default::default() };
 							accept_websocket(session, options, deadline).await
-						}.boxed());
+						}).boxed());
 					}
 				}
 				Some(res) = self.accept.next() => {
 					match res {
-						Ok(session) => return Ok(session),
-						Err(err) => tracing::debug!(%err, "failed to accept session"),
+						Some(Ok(session)) => return Ok(session),
+						Some(Err(err)) => tracing::debug!(%err, "failed to accept session"),
+						// `isolate` logged and counted the panic; only this handshake is lost.
+						None => {}
 					}
 				}
 				// Nothing is configured that could accept: a dead listener returned above.
