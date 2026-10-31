@@ -10,6 +10,12 @@
 //! Compiled only under `cfg(test)` or the `fuzz` feature, so none of this is part of
 //! the published API. See `fuzz/README.md` for the workflow.
 
+mod ingest;
+mod request;
+
+pub use ingest::ingest;
+pub use request::request;
+
 use bytes::Bytes;
 
 use crate::{
@@ -93,6 +99,8 @@ pub const TARGETS: &[(&str, Target)] = &[
 	("varint", varint),
 	("path", path),
 	("pattern", pattern),
+	("ingest", ingest),
+	("request", request),
 ];
 
 /// The moq-lite versions a target decodes at, selected by the input's first byte.
@@ -1478,7 +1486,44 @@ pub fn seeds() -> Vec<Seed> {
 		});
 	}
 
+	// Length prefixes at and one past each cap, ahead of a body far too short for them, so
+	// the fuzzer starts beside every rejection path instead of searching for its bound: a
+	// moq-lite message's size (0xffff for most, 64 MiB for ANNOUNCE_INIT) and a
+	// moq-transport control message's two-byte length.
+	for (index, version) in LITE_VERSIONS.iter().enumerate() {
+		for kind in 0..LITE_KINDS {
+			for size in limits(&[0xffff, 64 << 20]) {
+				let mut data = vec![index as u8, kind];
+				Encoder::new(&mut data, (*version).into()).varint(size).unwrap();
+				data.extend_from_slice(&[0; 4]);
+				seeds.push(Seed {
+					target: "lite",
+					kind,
+					data,
+				});
+			}
+		}
+	}
+	for index in 0..IETF_VERSIONS.len() as u8 {
+		for kind in 0..IETF_KINDS {
+			seeds.push(Seed {
+				target: "ietf",
+				kind,
+				data: vec![index, kind, 0xff, 0xff, 0, 0, 0, 0],
+			});
+		}
+	}
+
+	seeds.extend(ingest::seeds());
+	seeds.extend(ingest::limit_seeds());
+	seeds.extend(request::seeds());
+
 	seeds
+}
+
+/// Each of `caps`, and one past it.
+pub(crate) fn limits(caps: &[u64]) -> impl Iterator<Item = u64> + '_ {
+	caps.iter().flat_map(|cap| [*cap, cap + 1])
 }
 
 type FrameReader = coding::Reader<crate::transport::poll::Buffered<Chunks>, lite::Version>;
@@ -1687,6 +1732,24 @@ mod tests {
 
 		let missing: Vec<_> = expected.difference(&decoded).collect();
 		assert!(missing.is_empty(), "no seed decodes for {missing:?}");
+	}
+
+	/// The stream seeds are built from our own framing, one per version and protocol, so
+	/// each must decode whole: one that does not leaves its version's path unseeded. Those
+	/// at a cap must not, or they sit beside no rejection path.
+	#[test]
+	fn stream_seeds_decode() {
+		for seed in ingest::seeds().into_iter().chain(request::seeds()) {
+			assert!(
+				target(seed.target)(&seed.data),
+				"{} seed {:x?} does not decode",
+				seed.target,
+				seed.data
+			);
+		}
+		for seed in ingest::limit_seeds() {
+			assert!(!ingest(&seed.data), "ingest seed {:x?} decodes past its cap", seed.data);
+		}
 	}
 
 	/// Replay the crash inputs committed under `fuzz/regressions/`, so a bug the fuzzer
