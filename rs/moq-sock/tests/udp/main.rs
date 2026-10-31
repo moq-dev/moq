@@ -714,7 +714,6 @@ struct AlignedCmsgBuf([u8; 32]);
 
 #[test]
 #[cfg(any(target_os = "linux", target_os = "android"))]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 fn recv_transport_error() {
 	let sock = Socket::from(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap());
 
@@ -752,6 +751,10 @@ fn recv_transport_error() {
 				break;
 			}
 			_ => {
+				#[expect(
+					clippy::disallowed_methods,
+					reason = "a sync test with no runtime polls a real kernel socket"
+				)]
 				std::thread::sleep(Duration::from_millis(10));
 			}
 		}
@@ -776,7 +779,6 @@ fn recv_transport_error() {
 
 #[test]
 #[cfg(any(target_os = "linux", target_os = "android"))]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 fn recv_transport_error_ipv6() {
 	let sock = Socket::from(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap());
 
@@ -812,6 +814,10 @@ fn recv_transport_error_ipv6() {
 			received = Some(err);
 			break;
 		}
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "a sync test with no runtime polls a real kernel socket"
+		)]
 		std::thread::sleep(Duration::from_millis(10));
 	}
 
@@ -833,7 +839,6 @@ fn recv_transport_error_ipv6() {
 /// doing so allows a subsequent send to succeed and deliver its payload.
 #[test]
 #[cfg(any(target_os = "linux", target_os = "android"))]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 fn draining_error_queue_before_send_prevents_absorption() {
 	let sock = Socket::from(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap());
 
@@ -863,6 +868,10 @@ fn draining_error_queue_before_send_prevents_absorption() {
 		)
 		.unwrap();
 
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "a sync test with no runtime polls a real kernel socket"
+	)]
 	std::thread::sleep(Duration::from_millis(20));
 
 	// Drain the error queue before sending — this is the intended usage pattern
@@ -873,6 +882,10 @@ fn draining_error_queue_before_send_prevents_absorption() {
 				got_error = true;
 				break;
 			}
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "a sync test with no runtime polls a real kernel socket"
+			)]
 			_ => std::thread::sleep(Duration::from_millis(10)),
 		}
 	}
@@ -894,6 +907,10 @@ fn draining_error_queue_before_send_prevents_absorption() {
 		)
 		.expect("send failed after draining the error queue");
 
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "a sync test with no runtime polls a real kernel socket"
+	)]
 	std::thread::sleep(Duration::from_millis(20));
 
 	let mut buf = [0u8; 64];

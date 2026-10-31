@@ -503,11 +503,6 @@ fn url_set_scheme(url: Url, scheme: &str) -> Result<Url> {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 
@@ -609,7 +604,7 @@ mod tests {
 	/// same pairing as the quic backend.
 	#[test]
 	fn congestion_factory_maps_each_family() {
-		let now = std::time::Instant::now();
+		let now = moq_clock::now().into_std();
 		let mtu = 1200;
 
 		let loss = congestion_factory(CongestionControl::Loss).build(now, mtu);

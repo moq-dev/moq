@@ -638,11 +638,6 @@ impl Publisher {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use std::time::Duration;
 
@@ -819,7 +814,7 @@ mod tests {
 			let mut listed = copy.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 			assert!(listed.recv_group().await.unwrap().is_some());
 
-			let start = tokio::time::Instant::now();
+			let start = moq_clock::now();
 			catalog.finish().unwrap();
 			broadcast.close();
 			drop(importer);
@@ -911,7 +906,7 @@ mod tests {
 		let epoch = moq_net::Epoch::mint();
 		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&epoch)).unwrap();
 		let (_new, _new_catalog) = publish(&upstream, &epoch, NEW_IDR);
-		tokio::time::timeout(Duration::from_secs(5), instances.next())
+		moq_clock::timeout(Duration::from_secs(5), instances.next())
 			.await
 			.expect("the new publisher takes over")
 			.unwrap();
@@ -1002,7 +997,7 @@ mod tests {
 			.await
 			.expect("subscribe catalog")
 			.ordered();
-		let mut group = tokio::time::timeout(Duration::from_secs(5), catalog_track.next_group())
+		let mut group = moq_clock::timeout(Duration::from_secs(5), catalog_track.next_group())
 			.await
 			.expect("catalog read timed out")
 			.expect("catalog read")
