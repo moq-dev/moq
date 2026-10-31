@@ -66,7 +66,11 @@ impl std::fmt::Debug for Parameters {
 			// Values can carry credentials, so only their lengths.
 			.field(
 				"bytes",
-				&self.bytes.iter().map(|(kind, value)| (kind, value.len())).collect::<Vec<_>>(),
+				&self
+					.bytes
+					.iter()
+					.map(|(kind, value)| (kind, value.len()))
+					.collect::<Vec<_>>(),
 			)
 			.finish()
 	}

@@ -353,7 +353,9 @@ mod tests {
 		tracing::trace!(?setup, ?decoded, ?params, "SETUP diagnostics");
 
 		let uri = format!("https://relay.example/room?jwt={secret}");
-		let goaway = lite::Goaway { uri: uri.as_str().into() };
+		let goaway = lite::Goaway {
+			uri: uri.as_str().into(),
+		};
 		let wire = goaway.encode_bytes(lite::Version::Lite07).unwrap();
 		lite::Goaway::decode_slice(&wire, lite::Version::Lite07).unwrap();
 		let goaway = crate::ietf::GoAway {
