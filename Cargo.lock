@@ -5895,8 +5895,8 @@ name = "moq-sign"
 version = "0.0.1"
 dependencies = [
  "aws-lc-rs",
+ "bench-harness",
  "bytes",
- "criterion",
  "hex",
  "kio 0.6.2",
  "moq-net",

@@ -165,7 +165,7 @@ impl Published {
 	/// The broadcast as a subscriber resolves it, verifying against `key`.
 	async fn consume(&self, key: PublicKey) -> broadcast::Consumer {
 		settle().await;
-		let inner = self.origin.consume().request_broadcast(&self.path, None).await.unwrap();
+		let inner = self.origin.consume().request(&self.path, None).await.unwrap();
 		broadcast::Consumer::new(inner, key, self.path.clone()).unwrap()
 	}
 
