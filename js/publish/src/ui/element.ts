@@ -100,25 +100,29 @@ export default class MoqPublishUi extends HTMLElement {
 		player.append(scrimTop, center(effect, publish), chrome, panel);
 		DOM.render(effect, this.#root, player);
 
-		// Capture can be live without a preview, so size the box by the slotted content's rendered
-		// size. With nothing rendered, reserve the last rendered aspect ratio (initially 16:9).
-		const aspect = new Signal(16 / 9);
-		const rendered = new Signal(false);
+		// Capture can be live without a preview, so size the box by what the slotted content renders,
+		// not by the capture alone. With nothing shown, reserve the last shown aspect ratio (initially
+		// 16:9) instead of snapping, and ignore an idle preview's placeholder size.
+		let lastAspect = 16 / 9;
+		const rendered = new Signal<number | undefined>(undefined);
 		const resize = new ResizeObserver(([entry]) => {
 			const { width, height } = entry.contentRect;
-			if (width > 0 && height > 0) aspect.set(width / height);
-			rendered.set(width > 0 && height > 0);
+			rendered.set(width > 0 && height > 0 ? width / height : undefined);
 		});
 		resize.observe(publish);
 		effect.cleanup(() => resize.disconnect());
 
 		effect.run((e) => {
 			// A hidden camera stays open but shows no preview, so it sizes the box like no video at all.
-			if (e.get(rendered) && !e.get(publish.controls.invisible)) {
+			const capture = e.get(publish.controls.invisible) ? undefined : e.get(publish.video.in.capture);
+			const src = capture ? e.get(capture.in.source) : undefined;
+			const aspect = e.get(rendered);
+			if (src && aspect) {
+				lastAspect = aspect;
 				player.classList.remove("player--empty");
 				player.style.aspectRatio = "";
 			} else {
-				player.style.aspectRatio = String(e.get(aspect));
+				player.style.aspectRatio = String(lastAspect);
 				player.classList.add("player--empty");
 			}
 		});
