@@ -382,7 +382,14 @@ impl Fill {
 
 	/// The publisher ended the subscription cleanly: release the head, and any still being
 	/// written when it lands.
+	///
+	/// [`Fill::Failed`] stays: a joining FETCH is not in PUBLISH_DONE's Stream Count, so its
+	/// head can land after the end, and the tail it owed may already have been dropped.
+	/// Releasing that head would publish a cut group as complete.
 	fn end(&mut self) {
+		if matches!(self, Fill::Failed { .. }) {
+			return;
+		}
 		self.release();
 		*self = Fill::Ended;
 	}
@@ -391,7 +398,8 @@ impl Fill {
 	///
 	/// The group may still be open upstream, so finishing it would cut it short for good: a
 	/// rejoin could not replace the cached group, and its readers would see it end early.
-	/// A clean end already settled the head, so [`Fill::Ended`] stays.
+	/// A clean end already settled the head, so [`Fill::Ended`] stays. So does
+	/// [`Fill::Failed`], so a tail still opening on this fill is dropped as headless.
 	fn cancel(&mut self) {
 		self.abort(Error::Cancel);
 	}
@@ -403,6 +411,7 @@ impl Fill {
 				let _ = producer.abort(err);
 			}
 			Fill::Ended => *self = Fill::Ended,
+			Fill::Failed { sequence } => *self = Fill::Failed { sequence },
 			_ => {}
 		}
 	}
@@ -780,6 +789,9 @@ struct TrackState {
 
 	// The joining FETCH or latest fill update's own request id, when one was sent.
 	fetch_id: Option<RequestId>,
+	// The group a replaced fill failed to head. Its mid-group tail can still arrive after
+	// the update's fill settles, and has the same hole at the front.
+	headless: Option<u64>,
 
 	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
 	tail: kio::Producer<Tail>,
@@ -822,6 +834,7 @@ impl TrackState {
 			fill_start: None,
 			fill,
 			fetch_id: None,
+			headless: None,
 			tail: Default::default(),
 		}
 	}
@@ -3761,6 +3774,9 @@ impl Subscriber {
 					if let Some(mut filling) = filling {
 						// A handler may already have the old header and be waiting on its
 						// answer. It must keep the old state, never claim the new request.
+						if let Fill::Failed { sequence } = *filling {
+							held.headless = Some(sequence);
+						}
 						filling.cancel();
 						drop(filling);
 						held.fill = kio::Producer::new(Fill::Requested);
@@ -4547,13 +4563,14 @@ impl Subscriber {
 			}
 		};
 
-		let (mut track, timescale, fill, mut reading) = {
+		let (mut track, timescale, fill, headless, mut reading) = {
 			let state = self.state.lock();
 			let track = state.subscribes.get(&request_id).ok_or(Error::NotFound)?;
 			(
 				track.producer.clone().ok_or(Error::NotFound)?,
 				track.timescale,
 				track.fill.clone(),
+				track.headless == Some(group.group_id),
 				// Every data stream counts toward PUBLISH_DONE's Stream Count, even one
 				// dropped below, and the subscription's end waits until it is read.
 				Reading::open(&track.tail, Some(group.group_id), self.runtime.now()),
@@ -4577,6 +4594,7 @@ impl Subscriber {
 				stream,
 				&mut opening,
 				&fill,
+				headless,
 				&group,
 				&mut reading
 			)));
@@ -4871,6 +4889,8 @@ impl Subscriber {
 		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 		track: &mut track::Producer,
 		fill: &kio::Producer<Fill>,
+		// Whether a fill an update replaced failed to head this group.
+		headless: bool,
 		header: &ietf::GroupHeader,
 		reading: &mut Reading,
 	) -> Result<Opened, Error> {
@@ -4936,7 +4956,7 @@ impl Subscriber {
 		// when it arrives before the fill settles, below.
 		if !fill.read().outstanding() {
 			let start = first.map_or(0, |first| first.id);
-			if start != 0 && fill.read().headless(sequence) {
+			if start != 0 && (headless || fill.read().headless(sequence)) {
 				tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
 				return Err(Error::Unsupported);
 			}
@@ -14166,6 +14186,58 @@ mod stitch_tests {
 		assert!(matches!(group.read_frame().await, Err(Error::Cancel)));
 	}
 
+	/// A joining FETCH is not in PUBLISH_DONE's Stream Count, so the subscription can end
+	/// cleanly after its request failed and its headless tail was dropped, with the head
+	/// still writing. That head is cancelled when it lands, not published as the whole group.
+	#[moq_clock::test]
+	async fn a_clean_end_keeps_a_failed_fill_terminal() {
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			track::Info::default().with_timescale(Timescale::MICRO),
+		);
+		let mut producer = track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+		producer.write_frame(timestamp(0), b"head-0".as_slice()).unwrap();
+		let mut group = producer.consume();
+
+		let mut fill = Fill::Failed { sequence: SEQUENCE };
+		fill.end();
+		assert!(
+			matches!(fill, Fill::Failed { sequence: SEQUENCE }),
+			"the end keeps it failed"
+		);
+		fill.install(Fill::Ready {
+			sequence: SEQUENCE,
+			next: 1,
+			producer,
+		});
+
+		assert!(matches!(group.read_frame().await, Err(Error::Cancel)));
+	}
+
+	/// A widening update replaced the fill that failed to head the group, and the new one
+	/// has settled. The group's mid-group tail is still headless, so it is dropped.
+	#[moq_clock::test]
+	async fn a_headless_tail_after_its_fill_was_replaced_is_dropped() {
+		let h = Harness::new(
+			Fill::Done,
+			vec![
+				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
+				tail_stream(SEQUENCE + 1, 0, &[b"next-0"]),
+			],
+		);
+		h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().headless = Some(SEQUENCE);
+		let mut consumer = h.track.subscribe(None);
+
+		h.dispatch_refused().await;
+
+		let mut next = h.stream().await;
+		h.subscriber.clone().recv_group(&mut next).await.expect("next group");
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, SEQUENCE + 1, "the headless group was dropped");
+		assert_eq!(frames.len(), 1);
+	}
+
 	/// Leaving a track while its head waits for the tail cancels that group rather than
 	/// finishing it: the group may still be open upstream, and a finished copy would cut it
 	/// short for a rejoin.
@@ -16713,6 +16785,68 @@ mod new_group_tests {
 		assert!(
 			matches!(*fill.read(), Fill::Failed { sequence: 5 }),
 			"only the current header claimed the slot, and it carried no head"
+		);
+		relay.serving.abort();
+	}
+
+	/// A widening update replaces a fill that failed to head its group, while that group's
+	/// mid-group tail can still be in flight. The tail stays headless both to a stream
+	/// already opening on the old fill and to one opening after the replacement.
+	#[moq_clock::test]
+	async fn a_replaced_failed_fill_keeps_its_group_headless() {
+		use crate::{coding::Encode, lite::test_transport::ScriptedSession};
+
+		let header = |request_id| async move {
+			let mut bytes = Vec::new();
+			let mut encoder = crate::coding::Encoder::new(&mut bytes, VERSION.into());
+			encoder.varint(ietf::FetchHeader::TYPE).unwrap();
+			ietf::FetchHeader { request_id }.encode(&mut encoder, VERSION).unwrap();
+			let session = ScriptedSession::per_stream_eof(vec![bytes]);
+			let (_, reader) = session.open_bi(Default::default()).await.unwrap();
+			Reader::new(crate::transport::boxed::RecvStream::new(reader), VERSION)
+		};
+
+		let (mut relay, mut first) = relay().await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, false, 5).await;
+		let subscription = *relay.probe.state.lock().subscribes.keys().next().unwrap();
+		first.update(track::Subscription::default().with_range(6..)).unwrap();
+		let _ = read(&mut stream).await;
+		answer(&mut stream).await;
+
+		// The widening's fill answers with no objects, so it owes group 5's head for good.
+		first.update(track::Subscription::default().with_range(4..)).unwrap();
+		let (id, body) = read(&mut stream).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID);
+		let widening = ietf::SubscribeUpdate::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
+		assert!(widening.fill.is_some());
+		stream
+			.writer
+			.encode_message(&ietf::RequestOk {
+				largest: Some(ietf::Location { group: 5, object: 0 }),
+				active: None,
+			})
+			.await
+			.unwrap();
+		settle().await;
+		let mut empty = header(widening.request_id).await;
+		relay.probe.clone().recv_fill(&mut empty).await.unwrap();
+		let failed = relay.probe.state.lock().subscribes[&subscription].fill.clone();
+		assert!(matches!(*failed.read(), Fill::Failed { sequence: 5 }));
+
+		first.update(track::Subscription::default()).unwrap();
+		let (id, body) = read(&mut stream).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID);
+		let newest = ietf::SubscribeUpdate::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
+		assert!(newest.fill.is_some(), "the next widening replaced the failed fill");
+		assert!(
+			matches!(*failed.read(), Fill::Failed { sequence: 5 }),
+			"a stream already opening on the old fill still finds group 5 headless"
+		);
+		assert_eq!(
+			relay.probe.state.lock().subscribes[&subscription].headless,
+			Some(5),
+			"a stream opening after the replacement does too"
 		);
 		relay.serving.abort();
 	}
