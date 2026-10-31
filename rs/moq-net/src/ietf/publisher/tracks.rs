@@ -1248,7 +1248,7 @@ impl Publisher {
 					},
 					cache: track.clone(),
 					namespace: namespace.clone(),
-					token: false,
+					grant: None,
 					ranking: serve.ranking.clone(),
 				},
 				(Filter::NextObject, None) => Joined::Empty,
