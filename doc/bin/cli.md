@@ -510,10 +510,11 @@ arrives or the replacement goes, keeping the old publisher playing meanwhile,
 so even the default `--follow 0s` switches to a replacement that is still
 starting. After the catalog arrives, the old instance keeps feeding for up to
 `--follow` while the replacement acquires its clock and first usable media.
-The marked switch then drops the old instance's buffered tail, so the
-replacement plays at `--delay` rather than behind it. A replacement usable
-within that window adds no gap to the output; one still acquiring when it runs
-out, such as on a link too slow to carry both instances, starts after a gap.
+Its subscriptions take lower priority so the replacement can acquire on a
+congested link. The marked switch drops the old instance's buffered tail, so
+the replacement plays at `--delay` rather than behind it. An unimpaired switch
+usable within that window adds no gap. Congestion can starve the old instance
+sooner or leave the replacement acquiring past the window, causing a gap.
 Timestamps across epochs are not aligned. Without `--stitch` the export stays
 on the old publisher while it is up. Only lite-07 and moq-transport sessions
 carry epochs, so on the
