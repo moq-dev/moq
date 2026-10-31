@@ -154,7 +154,7 @@ async fn round(version: &str, late: Late, final_sequence: u64, max_delay: Option
 		group.finish().unwrap();
 	}
 	track
-		.finish_at(moq_net::track::Position::group(final_sequence))
+		.finish_at(moq_net::track::Position::group(final_sequence), None)
 		.unwrap();
 	drop(track);
 
@@ -413,7 +413,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 			.await
 			.expect("no subscriber appeared");
 
-		track.finish_at(moq_net::track::Position::group(2)).unwrap();
+		track.finish_at(moq_net::track::Position::group(2), None).unwrap();
 		let mut groups = [track.append_group().unwrap(), track.append_group().unwrap()];
 		// Paused time advances only once every task is idle: both headers and the end
 		// have reached the subscriber, ahead of any frame.

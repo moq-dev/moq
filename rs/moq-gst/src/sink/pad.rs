@@ -46,6 +46,15 @@ impl Sink {
 			Sink::Opaque(producer) => producer.name().to_owned(),
 		}
 	}
+
+	/// A watch-only handle to this track's subscriber demand.
+	fn demand(&self) -> moq_net::track::Demand {
+		match self {
+			Sink::Media(media) => media.track.demand(),
+			Sink::Text(text) => text.producer.track().demand(),
+			Sink::Opaque(producer) => producer.demand(),
+		}
+	}
 }
 
 /// Every configured track name a run has published, and whether it ended.
@@ -389,6 +398,11 @@ impl Pad {
 	/// True once this pad has been invalidated by a bad caps/bitstream; the caller drops its buffers.
 	pub fn is_failed(&self) -> bool {
 		self.failed
+	}
+
+	/// A watch-only handle to the active track's subscriber demand.
+	pub(super) fn demand(&self) -> Option<moq_net::track::Demand> {
+		self.track.as_ref().map(Sink::demand)
 	}
 
 	/// (Re)build the producer when the pad's caps change, under `track` when the pad was given a name.
