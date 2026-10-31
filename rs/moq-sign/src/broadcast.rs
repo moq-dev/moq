@@ -61,7 +61,8 @@ impl std::fmt::Debug for Producer {
 /// The subscribing side of a signed broadcast.
 ///
 /// Every frame must verify against the expected publisher key under the epoch of the route the
-/// broadcast was resolved through.
+/// broadcast was resolved through. The route comes from the relay, so this checks that frames
+/// belong together, not that the instance is live: a relay can replay a recorded instance whole.
 #[derive(Clone)]
 pub struct Consumer {
 	inner: moq_net::broadcast::Consumer,

@@ -4,7 +4,9 @@
 //! grouped frame with its endpoint's [`SecretKey`], binding the broadcast path, its publisher
 //! epoch, the track, the group, the frame index, and the timestamp. A subscriber hands a frame
 //! to the application only after it verifies against the [`PublicKey`] it expects, so a relay
-//! can proxy and cache without forging, replaying, retiming, or splicing content.
+//! can proxy and cache without forging, retiming, relocating, or splicing content. Signatures
+//! authenticate content, not liveness: a relay that recorded an instance can replay it whole under
+//! its epoch.
 //!
 //! [draft-lcurley-moq-sign]: https://datatracker.ietf.org/doc/draft-lcurley-moq-sign/
 //!

@@ -7,7 +7,8 @@ Workspace-only implementation; this crate is not published.
 Per-frame Ed25519 signatures for [Media over QUIC](https://moq.dev) broadcasts. Profile
 `moq-sign-00` from [draft-lcurley-moq-sign](https://datatracker.ietf.org/doc/draft-lcurley-moq-sign/).
 
-Relays forward and cache signed frames; they cannot forge, replay, or relocate them.
+Relays forward and cache signed frames; they cannot forge, retime, or relocate them. Signatures
+authenticate content, not liveness: a relay that recorded an instance can replay it whole.
 
 ## Shape
 

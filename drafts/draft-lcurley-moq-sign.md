@@ -40,7 +40,7 @@ informative:
 
 This document specifies moq-sign-00, a versioned profile that authenticates MoQ application payloads with a per-frame Ed25519 signature.
 A publisher signs each grouped frame with its endpoint key, binding the broadcast path, the publisher epoch, the track, the group, the frame index, and the frame's timestamp.
-A subscriber that expects that key delivers a frame only after its signature verifies, so a relay can forward and cache content without forging, replaying, or relocating it.
+A subscriber that expects that key delivers a frame only after its signature verifies, so a relay can forward and cache content without forging it, retiming it, or moving it to another position.
 
 --- note_Note_to_Readers
 
@@ -178,6 +178,13 @@ Any subscriber can verify but none can sign, so subscribers that share a broadca
 A relay can still delay, drop, or reorder groups.
 A relay that presents a wrong epoch only causes `signature` failures.
 
+## Freshness {#freshness}
+The profile authenticates content, not liveness.
+The subscriber learns the epoch from the route, which a relay presents, so a relay that recorded an instance can later announce that epoch again and replay the instance's frames, whole or in part, after the publisher has gone or restarted.
+Every replayed frame verifies, because the publisher did sign it at that position.
+Binding the epoch only keeps frames of different instances from being spliced into one.
+An application that needs freshness learns the expected epoch from a channel it trusts, or checks the signed timestamps against a clock it shares with the publisher.
+
 ## Group End {#group-end}
 Nothing authenticates where a group ends: a relay can end a group after any frame, and the subscriber sees an ordinary end of group.
 MoQ already lets a relay drop the tail of a group, for example when it falls behind the subscriber's delivery deadline, so the profile does not try to prevent it.
@@ -201,4 +208,4 @@ This document requests no registrations.
 ## draft-lcurley-moq-sign-00
 {:numbered="false"}
 
-- Initial `moq-sign-00` profile: Ed25519 endpoint keys with a z-base-32 ID, a message binding path, epoch, track, group, frame index, and timestamp, a payload-then-signature frame body, group-ending failures, an unauthenticated group end, and shared vectors.
+- Initial `moq-sign-00` profile: Ed25519 endpoint keys with a z-base-32 ID, a message binding path, epoch, track, group, frame index, and timestamp, a payload-then-signature frame body, group-ending failures, an unauthenticated group end, no freshness guarantee, and shared vectors.
