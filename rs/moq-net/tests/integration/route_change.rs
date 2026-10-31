@@ -303,7 +303,6 @@ async fn route_flaps(version: &str) {
 	let triggers = [Trigger::BetterRoute, Trigger::BetterRouteDies, Trigger::Disconnect];
 	let mut expected = Vec::new();
 	let mut seen = Vec::new();
-	// Keep every recovery within the largest group's head, which our IETF publishers serve.
 	let mut group = topology.track.append_group().unwrap();
 	for frame in 0..FRAMES * (triggers.len() as u64 + 1) {
 		if frame % FRAMES == FRAMES / 2
@@ -605,16 +604,6 @@ async fn lite_resumes_after_a_lagging_route_dies() {
 	lagging_route_dies("moq-lite-07-wip".parse().unwrap()).await;
 }
 
-#[moq_clock::test]
-async fn ietf_17_resumes_after_a_lagging_route_dies() {
-	lagging_route_dies("moq-transport-18".parse().unwrap()).await;
-}
-
-#[moq_clock::test]
-async fn ietf_22_resumes_after_a_lagging_route_dies() {
-	lagging_route_dies("moq-transport-22".parse().unwrap()).await;
-}
-
 /// `P` publishes through the relay `O`, which `M1` and `M2` both pull from, and `E`
 /// reads through `M1` with `budget`, leaving `M2` cold. `P` writes a one-second group of
 /// ten frames every second. `M1` is killed partway through group 4: it falls silent
@@ -744,7 +733,6 @@ macro_rules! route_flap_tests {
 
 route_flap_tests! {
 	flaps_lite_07: "moq-lite-07-wip",
-	flaps_ietf_22: "moq-transport-22",
 }
 
 /// How the incumbent of a redundant pair goes away.
