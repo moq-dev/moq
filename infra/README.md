@@ -95,9 +95,10 @@ names the Environment, and a branch that is not on the list fails to start it.
 
 `workflow_run`, schedule, and default dispatch jobs run as `main`, so no job
 that names `publish` runs that way: a tag's own run calls its publishers as
-reusable workflows, and release dispatches name `--ref release`. The
-`workflow_run` publishers that remain need only the moq-bot key and name `bot`. `publish` keeps
-admitting `main` until [the maintainer drops it](../quest/m0/ci/publish-release-only.md).
+reusable workflows or dispatches them with `--ref` naming the tag or `release`
+(`sh/gh/trigger-repo-publish.sh`). The `workflow_run` publishers that remain
+need only the moq-bot key and name `bot`. `publish` keeps admitting `main`
+until [the maintainer drops it](../quest/m0/ci/publish-release-only.md).
 A job that needs only the moq-bot key, such as Dependabot's, names `bot`; the land gate holds no key
 and gets its token from [the token broker](#the-token-broker). A job that also runs dry on other refs names the Environment
 only when it publishes, as in `environment: ${{ github.ref_type == 'tag' &&

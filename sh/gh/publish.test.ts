@@ -41,17 +41,12 @@ test("no workflow that runs as main names the publish Environment", async () => 
 	}
 });
 
-test("tag runs call their publishers instead of chaining them by workflow_run", async () => {
-	const binary = await read("release-binary");
-	expect(binary.jobs.winget.uses).toBe("./.github/workflows/release-winget.yml");
-	expect(binary.jobs.winget.needs).toEqual(["release"]);
-	expect(binary.jobs.winget.if).toBe("github.ref_type == 'tag'");
-	expect(binary.jobs.winget.with).toEqual({ submit: true });
-
+test("tag runs reach their publishers without workflow_run", async () => {
+	// winget runs as the tag it submits, dispatched rather than nested so a
+	// failed submission leaves the release run, which release-brew needs green.
 	const winget = await read("release-winget");
-	expect(Object.keys(winget.on).sort()).toEqual(["workflow_call", "workflow_dispatch"]);
-	expect(winget.jobs.publish.environment).toBe("${{ inputs.submit && 'publish' || '' }}");
-	expect(winget.jobs.publish.if).toContain("inputs.submit && github.ref_type == 'tag'");
+	expect(Object.keys(winget.on)).toEqual(["workflow_dispatch"]);
+	expect(winget.jobs.publish.environment).toBe("${{ github.ref_type == 'tag' && 'publish' || '' }}");
 
 	const shared = await read("release-shared-ffi");
 	const lib = shared.jobs["kotlin-lib"];
@@ -63,9 +58,16 @@ test("tag runs call their publishers instead of chaining them by workflow_run", 
 	expect((await read("release-kt-lib")).on.workflow_run).toBeUndefined();
 });
 
-test("release dispatches name the release branch", async () => {
+test("release dispatches name a release ref", async () => {
 	const script = await Bun.file("sh/gh/trigger-repo-publish.sh").text();
-	const dispatches = script.split("\n").filter((line) => line.trim().startsWith("gh workflow run"));
-	expect(dispatches.length).toBe(3);
-	for (const line of dispatches) expect(line).toContain("--ref release");
+	const dispatches = script
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.startsWith("gh workflow run"));
+	expect(dispatches).toEqual([
+		'gh workflow run apt-repo.yml --ref release -f "tag=$TAG"',
+		'gh workflow run rpm-repo.yml --ref release -f "tag=$TAG"',
+		'gh workflow run release-winget.yml --ref "$TAG"',
+		"gh workflow run moq-sh.yml --ref release",
+	]);
 });

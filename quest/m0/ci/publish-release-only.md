@@ -13,9 +13,9 @@ and `gh api repos/moq-dev/moq/environments/alert`.
 ## Plan
 
 [moq-dev/moq#7431](https://github.com/moq-dev/moq/pull/7431) moved every job
-that names `publish` off `main`: `release-winget` and the Kotlin wrapper are
-called from their tag's own run instead of chained by `workflow_run`, apt and
-rpm dispatches name `--ref release`, `alert` names a new `alert` Environment,
+that names `publish` off `main`: the tag's own run dispatches `release-winget`
+on the tag and calls the Kotlin wrapper, instead of chaining them by
+`workflow_run`, apt and rpm dispatches name `--ref release`, `alert` names a new `alert` Environment,
 and Smoke's Cachix push names `cache-write`.
 
 What remains is the maintainer's, in order:

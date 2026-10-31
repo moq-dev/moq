@@ -1,15 +1,18 @@
 name: release-winget
 
 # Submits/updates the winget manifest for a CLI after its release workflow
-# publishes the GitHub Release (with the Windows .zip assets). release-binary.yml
-# calls it from the tag's own run, so the submission runs as the tag, which the
-# `publish` Environment admits, rather than as `main` under workflow_run.
+# publishes the GitHub Release (with the Windows .zip assets). The release is
+# created by the default GITHUB_TOKEN, which can't trigger a `release` event,
+# so sh/gh/trigger-repo-publish.sh dispatches this on the release tag. The run
+# is the tag, which the `publish` Environment admits, rather than `main` as a
+# workflow_run would be. It stays independent of the tag's own run, so a failed
+# submission blocks neither release-brew nor any other publisher.
 #
-# workflow_dispatch runs the same logic as a dry run: it resolves the winget
-# identifier and verifies the Windows .zip asset exists on the release, then
-# stops without opening a winget-pkgs PR. Use it to sanity-check a tag before
-# (or instead of) a real submission. winget-releaser itself has no dry-run
-# flag, hence the separate path.
+# A dispatch on a branch is a dry run instead: it resolves the winget
+# identifier and verifies the Windows .zip asset exists on the `tag` input's
+# release, then stops without opening a winget-pkgs PR. Use it to sanity-check
+# a tag before (or instead of) a real submission. winget-releaser itself has no
+# dry-run flag, hence the separate path.
 #
 # One-time bootstrap (winget-pkgs only lets you UPDATE an existing package):
 #   1. A maintainer lands the first manifest once via `wingetcreate new` (or a
@@ -22,20 +25,18 @@ name: release-winget
 # submit is a clean no-op (the dry run still works without it).
 
 on:
-  # A called run inherits its caller's event, so the caller says it submits
-  # rather than the event. Only a tag's run submits, and it submits that tag.
-  workflow_call:
-    inputs:
-      submit:
-        description: "Submit the calling tag's manifest instead of a dry run"
-        type: boolean
-        default: false
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to dry-run (e.g. moq-cli-v0.7.31)"
-        required: true
+        description: "Release tag to dry-run from a branch (e.g. moq-cli-v0.7.31); a dispatch on a tag submits that tag"
+        required: false
         type: string
+
+concurrency:
+  # Key on the release tag, so different packages submit in parallel and only
+  # repeat runs of the same tag serialize.
+  group: ${{ github.workflow }}-${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -48,19 +49,10 @@ env:
 jobs:
   publish:
     name: Submit winget manifest
-    # A submission runs only as a release tag; the tag's own Release job
-    # already created the GitHub Release it reads. A dispatch is a dry run.
-    if: inputs.submit && github.ref_type == 'tag' || !inputs.submit && inputs.tag != ''
     runs-on: windows-latest
     # WINGET_TOKEN lives in the `publish` Environment, which only release refs
     # can deploy to. A dry run needs no token, so it can run from any branch.
-    environment: ${{ inputs.submit && 'publish' || '' }}
-    # Key on the release tag, so different packages submit in parallel and
-    # only repeat runs of the same tag serialize. A called job's
-    # github.workflow names its caller, so the group names this workflow.
-    concurrency:
-      group: release-winget-${{ inputs.submit && github.ref_name || inputs.tag }}
-      cancel-in-progress: false
+    environment: ${{ github.ref_type == 'tag' && 'publish' || '' }}
 
     steps:
       - name: Resolve mode and tag
@@ -68,14 +60,16 @@ jobs:
         shell: bash
         env:
           DISPATCH_TAG: ${{ inputs.tag }}
-          SUBMIT: ${{ inputs.submit }}
         run: |
-          if [[ "$SUBMIT" == "true" ]]; then
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             echo "dry_run=false" >> "$GITHUB_OUTPUT"
             echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
-          else
+          elif [[ -n "$DISPATCH_TAG" ]]; then
             echo "dry_run=true" >> "$GITHUB_OUTPUT"
             echo "tag=$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Dispatch on a release tag to submit it, or name a tag to dry-run."
+            exit 1
           fi
 
       - name: Parse crate and version
