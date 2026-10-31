@@ -1279,7 +1279,7 @@ impl Publisher {
 					},
 					cache: track.clone(),
 					namespace: namespace.clone(),
-					grant: None,
+					binding: None,
 					ranking: serve.ranking.clone(),
 				},
 				(Filter::NextObject, None) => Joined::Empty,

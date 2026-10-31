@@ -2244,8 +2244,18 @@ impl RequestBinding {
 	}
 
 	/// The grant the request's token earned, if it named one.
+	#[cfg(test)]
 	pub(crate) fn grant(&self) -> Option<RequestGrant> {
 		self.token.read().clone()
+	}
+
+	/// Follow this request's authority, including a token an update names later, without
+	/// holding its slot. A follower never verifies a token itself.
+	pub(crate) fn follower(&self) -> Self {
+		Self {
+			hold: None,
+			..self.clone()
+		}
 	}
 
 	/// End the request's grant, if it has one; see [`RequestGrant::end`].

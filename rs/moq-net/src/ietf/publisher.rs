@@ -842,9 +842,10 @@ enum Joined<G> {
 		cache: track::Consumer,
 		/// The subscription's namespace, which the fetch is held to the grant on.
 		namespace: crate::Path,
-		/// The grant the subscription's own request token earned, if one authorized it. The
-		/// fetch is held to it too, past the subscription's end, and the limit bounds neither.
-		grant: Option<crate::auth::RequestGrant>,
+		/// The subscription's request authority, following a token an update names later. Once
+		/// it names one, the fetch is held to that grant alone, past the subscription's end, and
+		/// the limit bounds neither.
+		binding: Option<crate::auth::RequestBinding>,
 		/// The subscription's ranking, which the fetch joins.
 		ranking: Ranking<G>,
 	},
@@ -1436,7 +1437,7 @@ impl Publisher {
 									},
 									cache: cache.clone(),
 									namespace: namespace.clone(),
-									grant: binding.grant(),
+									binding: Some(binding.follower()),
 									ranking: ranking.clone(),
 								},
 								(Filter::NextObject, None) => Joined::Empty,
@@ -2862,7 +2863,8 @@ impl Publisher {
 		// authority: the gate, and the token grant if one authorized the subscription, which
 		// ends it on the token's expiry, revocation, or a refused renewal.
 		let mut lapses_with = None;
-		let mut token_grant = None;
+		let mut binding = None;
+		let mut named_gate = None;
 		let (track, start, end, joined, ranking, mut gate) = match fetch_type {
 			FetchType::Standalone {
 				namespace,
@@ -2935,7 +2937,7 @@ impl Publisher {
 					return Err(Error::Unauthorized);
 				};
 				debug_assert_eq!(id, subscriber_request_id);
-				let (end, cache, namespace, ranking, grant) = match self
+				let (end, cache, namespace, ranking, joined_binding) = match self
 					.joined(&mut stream, &mut finished, &mut messages, subscriber_request_id)
 					.await?
 				{
@@ -2943,12 +2945,17 @@ impl Publisher {
 					Err((err, reason)) => return self.reject_fetch(stream, &err, reason).await,
 				};
 				// The cache outlives the subscription, so the fetch holds its own gate rather than
-				// trusting the cache. One the subscription's request token authorized is held to
-				// the peer's grant alone, as the subscription is.
+				// trusting the cache. Once the subscription names a request token, the fetch is held
+				// to the peer's grant alone, as the subscription is.
+				if joined_binding.is_some() {
+					named_gate = Some(
+						crate::auth::Gate::new(auth.clone(), namespace.clone(), crate::auth::Direction::Publish)
+							.named(),
+					);
+				}
 				let gate = crate::auth::Gate::new(auth, namespace, crate::auth::Direction::Publish);
-				let gate = if grant.is_some() { gate.named() } else { gate };
 				lapses_with = Some(subscriber_request_id);
-				token_grant = grant;
+				binding = joined_binding;
 				let start = match fetch_type {
 					FetchType::RelativeJoining { group_offset: 0, .. } => end.group,
 					FetchType::RelativeJoining { .. } => {
@@ -2996,10 +3003,15 @@ impl Publisher {
 					.is_ready()
 			})
 		};
-		let expired = |waiter: &kio::Waiter| {
-			token_grant
-				.as_ref()
-				.is_some_and(|grant: &crate::auth::RequestGrant| grant.poll_ended(waiter).is_ready())
+		// The gate in force: the named one once the subscription's token holds the fetch to its
+		// grant, which also ends it on the token's expiry, revocation, or a refused renewal.
+		let mut denied = |waiter: &kio::Waiter| match (&binding, &mut named_gate) {
+			(Some(binding), Some(named)) if binding.named() => {
+				binding.poll_ended(waiter).is_ready() || named.poll_denied(waiter).is_ready()
+			}
+			// Registered even while unnamed, so a token an update names wakes the fetch.
+			(Some(binding), _) => binding.poll_ended(waiter).is_ready() || gate.poll_denied(waiter).is_ready(),
+			(None, _) => gate.poll_denied(waiter).is_ready(),
 		};
 
 		// Read the group before FETCH_OK promises it, while a refusal is still possible.
@@ -3019,7 +3031,7 @@ impl Publisher {
 				{
 					return Poll::Ready(None);
 				}
-				if gate.poll_denied(waiter).is_ready() || unsubscribed(waiter) || expired(waiter) {
+				if denied(waiter) || unsubscribed(waiter) {
 					let err = Error::Unauthorized;
 					let reason = err.to_string();
 					return Poll::Ready(Some(Err((err, reason))));
@@ -3106,7 +3118,7 @@ impl Publisher {
 		let res = {
 			let mut ok = std::pin::pin!(ok);
 			kio::wait(|waiter| {
-				if gate.poll_denied(waiter).is_ready() || unsubscribed(waiter) || expired(waiter) {
+				if denied(waiter) || unsubscribed(waiter) {
 					return Poll::Ready(Err(Error::Unauthorized));
 				}
 				waiter.poll_future(ok.as_mut())
@@ -3147,7 +3159,7 @@ impl Publisher {
 				{
 					return Poll::Ready(None);
 				}
-				if gate.poll_denied(waiter).is_ready() || expired(waiter) {
+				if denied(waiter) {
 					return Poll::Ready(Some(Err(Error::Unauthorized)));
 				}
 				waiter.poll_future(respond.as_mut()).map(Some)
@@ -3188,7 +3200,7 @@ impl Publisher {
 				track::Consumer,
 				crate::Path,
 				Ranking<GroupOf<Transport>>,
-				Option<crate::auth::RequestGrant>,
+				Option<crate::auth::RequestBinding>,
 			),
 			(Error, &'static str),
 		>,
@@ -3231,8 +3243,8 @@ impl Publisher {
 				cache,
 				namespace,
 				ranking,
-				grant,
-			})) => return Ok(Ok((end, cache, namespace, ranking, grant))),
+				binding,
+			})) => return Ok(Ok((end, cache, namespace, ranking, binding))),
 			Ok(None) => (
 				match self.version {
 					Version::Draft18 => Error::InvalidJoiningRequestId,
@@ -7922,6 +7934,52 @@ mod serve_tests {
 		let mut buf = bytes::Bytes::from(joining_fetch(&h, mark).await.unwrap());
 		let id = crate::coding::decode_varint(&mut buf, version).unwrap();
 		assert_eq!(id, ietf::FetchOk::ID, "the joining FETCH was refused");
+	}
+
+	/// A token an update names after SUBSCRIBE_OK holds a later joining FETCH to its grant, as it
+	/// holds the subscription, rather than to the session scope it replaced.
+	#[moq_clock::test]
+	async fn a_joining_fetch_follows_a_token_an_update_names() {
+		let version = Version::Draft18;
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::all());
+		let mut requests = auth.handle().requests();
+		let h = serve_with_auth(version, auth.clone(), Vec::new());
+		let runtime = h.publisher.runtime.clone();
+		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(timestamp(), b"head".as_slice()).unwrap();
+		let mut request = ScriptedSession::new(Vec::new());
+		request.log = h.log.clone();
+		let stream = Stream::open(&mut crate::driver::Transport::new(request.clone()), version)
+			.await
+			.unwrap();
+		let mut serve = std::pin::pin!(
+			h.publisher
+				.clone()
+				.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+		);
+		serve_until(serve.as_mut(), "SUBSCRIBE_OK", || {
+			!h.log.trail().is_empty() && Wire::read(&h.log, version).sent(ietf::SubscribeOk::ID).is_some()
+		})
+		.await;
+
+		request.push(&subscribe_update_with_token(version, true).await);
+		let request = match futures::future::select(std::pin::pin!(requests.next()), serve.as_mut()).await {
+			futures::future::Either::Left((Some(request), _)) => request,
+			futures::future::Either::Left((None, _)) => panic!("no verifier"),
+			futures::future::Either::Right((res, _)) => panic!("subscription ended: {res:?}"),
+		};
+		let _issued = request.accept(grant_all_expiring(&runtime, None));
+		serve_until(serve.as_mut(), "the token's REQUEST_OK", || {
+			Wire::read(&h.log, version).sent(ietf::RequestOk::ID).is_some()
+		})
+		.await;
+		auth.handle().authorize(&crate::auth::Grant::default());
+
+		let mark = h.log.writes.lock().unwrap().len();
+		let mut buf = bytes::Bytes::from(joining_fetch(&h, mark).await.unwrap());
+		let id = crate::coding::decode_varint(&mut buf, version).unwrap();
+		assert_eq!(id, ietf::FetchOk::ID, "the joining FETCH was held to the session scope");
 	}
 
 	/// A resume that cannot subscribe again fails its update: REQUEST_ERROR answers it, then
