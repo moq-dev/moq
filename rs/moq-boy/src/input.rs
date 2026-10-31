@@ -84,7 +84,7 @@ pub async fn handle_viewers(
 			if !restart && readers.get(&viewer_id).is_some_and(|reader| !reader.is_finished()) {
 				continue;
 			}
-			let Ok(broadcast) = viewer_origin.request_broadcast(&update.prefix, None).await else {
+			let Ok(broadcast) = viewer_origin.request(&update.prefix, None).await else {
 				continue;
 			};
 			tracing::info!(%viewer_id, restart, "viewer connected");

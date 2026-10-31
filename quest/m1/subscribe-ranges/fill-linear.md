@@ -29,6 +29,10 @@ peer can multiply the CPU a relay spends on every group of a track.
   touches only the ranges around a group.
 - Include `track::Subscriber::covered`, which the lite-07 publisher runs on
   each idle wake of a bounded subscription and walks every range.
+- Include the lite-07 publisher's `Frames::start`/`Frames::end`
+  (`rs/moq-net/src/lite/publisher.rs`), which scan every decoded range per
+  served group and per datagram; key them by group (the 2026-10-27 security
+  audit's NET-1 found about 16k ranges fit one SUBSCRIBE).
 
 Decided 2026-10-27 (maintainer):
 

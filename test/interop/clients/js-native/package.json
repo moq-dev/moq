@@ -10,7 +10,7 @@
 		"@moq/hang": "workspace:*",
 		"@moq/json": "workspace:*",
 		"@moq/net": "workspace:*",
-		"@moq/web-transport": "^0.1.5",
+		"@moq/web-transport": "^0.1.6",
 		"@zod/mini": "^4.6.7",
 		"zod": "^4.6.7"
 	},

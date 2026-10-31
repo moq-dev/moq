@@ -92,7 +92,6 @@ work, because obs-moq ships on its own schedule.
 
 - [JS subscription ranges](/quest/m1/subscribe-ranges/js.md) - range lists and frame offsets build on the bounds fixed here
 - [OBS video source](/quest/m2/obs-moq-video/source.md) - the decoder replacement keeps the timing and EOF behavior fixed here
-- [Compressed tracks](/quest/m1/compress/README.md) - application migration has an existing owner
 - [Measured release performance](/quest/m1/release-perf/README.md) - existing paired benchmark regressions and their confirmation runs
 - [Transport performance audit](/quest/m2/audit-perf.md) - congestion-control coverage remains outstanding
 - [Binding timestamps](/quest/m1/binding-timestamps.md) - exact timestamps across language APIs

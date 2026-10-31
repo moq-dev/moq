@@ -119,48 +119,54 @@ fn bench_encode(c: &mut Criterion<ThreadCpu>) {
 }
 
 /// Packet and frame decode: the server ingests forged packets of DATAGRAM frames, frames per
-/// packet against packets. Only the ingest is timed.
+/// packet against packets. `padded` is one small DATAGRAM frame with PADDING filling the rest of
+/// the packet, as a padded Initial or MTU probe arrives. Only the ingest is timed.
 fn bench_decode(c: &mut Criterion<ThreadCpu>) {
 	let mut group = c.benchmark_group("wire_decode");
+	let mut shapes = Vec::new();
 	for frames in [1, 16] {
+		let data = datagram(frames);
+		let mut body = BytesMut::new();
+		for _ in 0..frames {
+			datagram_frame(&mut body, &data);
+		}
+		shapes.push((format!("frames_{frames}"), frames, body));
+	}
+	let mut padded = BytesMut::new();
+	datagram_frame(&mut padded, &payload(1));
+	padded.resize(ROOM, 0);
+	shapes.push(("padded".to_string(), 1, padded));
+	for (shape, frames, body) in shapes {
 		for packets in [64, 1024] {
 			let mut state = None;
 			group.throughput(Throughput::Elements(packets as u64));
-			group.bench_function(
-				BenchmarkId::new(format!("frames_{frames}"), format!("packets_{packets}")),
-				|b| {
-					let (pair, forge, _) = state.get_or_insert_with(quiet);
-					let data = datagram(frames);
-					let mut body = BytesMut::new();
-					for _ in 0..frames {
-						datagram_frame(&mut body, &data);
-					}
-					b.iter_custom(|iters| {
-						let mut busy = Duration::ZERO;
-						for _ in 0..iters {
-							let forged: Vec<_> = (0..packets).map(|_| forge.packet(&body)).collect();
-							let start = ThreadTime::now();
-							for packet in forged {
-								deliver(pair, packet);
-							}
-							busy += start.elapsed();
-
-							let conn = pair.server.conn();
-							let mut received = 0;
-							while conn.datagrams().recv().is_some() {
-								received += 1;
-							}
-							assert_eq!(received, packets * frames, "server dropped datagrams");
-
-							// Send the ACKs, which no forged packet acknowledges back.
-							let empty = conn.datagrams().send_buffer_space();
-							flush(pair, empty);
-							tick(pair);
+			group.bench_function(BenchmarkId::new(&shape, format!("packets_{packets}")), |b| {
+				let (pair, forge, _) = state.get_or_insert_with(quiet);
+				b.iter_custom(|iters| {
+					let mut busy = Duration::ZERO;
+					for _ in 0..iters {
+						let forged: Vec<_> = (0..packets).map(|_| forge.packet(&body)).collect();
+						let start = ThreadTime::now();
+						for packet in forged {
+							deliver(pair, packet);
 						}
-						busy
-					});
-				},
-			);
+						busy += start.elapsed();
+
+						let conn = pair.server.conn();
+						let mut received = 0;
+						while conn.datagrams().recv().is_some() {
+							received += 1;
+						}
+						assert_eq!(received, packets * frames, "server dropped datagrams");
+
+						// Send the ACKs, which no forged packet acknowledges back.
+						let empty = conn.datagrams().send_buffer_space();
+						flush(pair, empty);
+						tick(pair);
+					}
+					busy
+				});
+			});
 		}
 	}
 	group.finish();

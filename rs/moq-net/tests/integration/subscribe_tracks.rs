@@ -61,11 +61,7 @@ async fn setup(version: Version) -> Setup {
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("room"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");

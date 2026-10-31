@@ -2,8 +2,9 @@
 
 The shared-input rules rarely force every module. Keep the conservative Rust
 lockfile rule rather than add a second dependency resolver. Fix the missing
-Cargo-configuration edge now. Replaying historical full-run failures for missed
-edges remains open.
+Cargo-configuration edge now. Replaying the full-gate failures found no missed
+path edge; it found one missed queue edge, now fixed: a merge group diffed from
+the entry ahead of it rather than from main.
 
 ## Observation window and method
 
@@ -107,17 +108,83 @@ settle the rule decisions above without a new measurement window.
 
 ## Missed edges
 
-Two recent full-run failures illustrate why replay needs to distinguish selector
-bugs from other failures. The [October 25 full gate](https://github.com/moq-dev/moq/actions/runs/40192013303/job/121164806731)
-failed because its shallow checkout had no `HEAD~1` for a tooling test. That is a
-checkout-history problem, not a missed package edge. The same Nightly's
-[feature lane](https://github.com/moq-dev/moq/actions/runs/40192013303/job/121164807008)
-failed on no-default-feature rustdoc links in moq-net. The current selected
-net-feature boundary already invokes that documentation build; workspace feature
-unification is separately being addressed in
-[moq-dev/moq#6830](https://github.com/moq-dev/moq/pull/6830) and the async-free
+### Full-gate replay
+
+Nightly began running the queue's gate over every package (`just gate`) on
+October 20, in [moq-dev/moq#6038](https://github.com/moq-dev/moq/pull/6038); before that no full run existed to
+compare against. Every scheduled Nightly gate from October 20 through October 27
+is below. Other Nightly lanes, such as the feature matrix, run work the queue never
+selects, so they cannot expose a selection miss.
+
+| Nightly | Gate | Cause | Selection miss |
+| --- | --- | --- | --- |
+| [October 20](https://github.com/moq-dev/moq/actions/runs/39421743227) | passed | | |
+| [October 21](https://github.com/moq-dev/moq/actions/runs/39600361153/job/119223010596) | failed | Dangling quest link | Yes, the queue base below |
+| [October 22](https://github.com/moq-dev/moq/actions/runs/39779729461/job/119827590096) | failed | Nine `@moq/watch` CMAF decoder tests | No |
+| [October 23](https://github.com/moq-dev/moq/actions/runs/39951870847) | passed | | |
+| [October 24](https://github.com/moq-dev/moq/actions/runs/40090959108/job/120863338990) | failed | Shallow checkout has no `HEAD~1` | No |
+| [October 25](https://github.com/moq-dev/moq/actions/runs/40192013303/job/121164806731) | failed | Same | No |
+| [October 26](https://github.com/moq-dev/moq/actions/runs/40332938121) | passed | | |
+| [October 27](https://github.com/moq-dev/moq/actions/runs/40506938673/job/122198526371) | timed out | No output for its last 36 minutes | No |
+
+- October 21: [moq-dev/moq#5849](https://github.com/moq-dev/moq/pull/5849) deleted a quest that
+  [moq-dev/moq#6122](https://github.com/moq-dev/moq/pull/6122) had just linked. Its own queue entry
+  [failed on that link](https://github.com/moq-dev/moq/actions/runs/39572680575), yet it merged when the next entry,
+  [moq-dev/moq#6012](https://github.com/moq-dev/moq/pull/6012), [passed](https://github.com/moq-dev/moq/actions/runs/39578702167). That entry diffed from
+  the failed entry's head, touched no quest, and so never ran the quest check.
+- October 22: the queue entry for [moq-dev/moq#6219](https://github.com/moq-dev/moq/pull/6219)
+  [ran these tests](https://github.com/moq-dev/moq/actions/runs/39747822278), 387 passing. At the Nightly head, the whole
+  `@moq/watch` suite passes locally while `src/video/decoder.test.ts` alone fails
+  the same nine tests: they depend on test-file order, which differs between
+  runners. That file passes alone on current main.
+- October 24 and 25: the queue fetches full history; Nightly checks out shallowly.
+  [moq-dev/moq#6708](https://github.com/moq-dev/moq/pull/6708) made the test build its own history.
+- October 27: outside the window. The job hit its 60-minute timeout 36 minutes
+  after its last output, a hang rather than a narrower selection.
+
+The feature lane's no-default-feature rustdoc failure in
+[that October 25 Nightly](https://github.com/moq-dev/moq/actions/runs/40192013303/job/121164807008) is a workspace feature
+unification problem, addressed in [moq-dev/moq#6830](https://github.com/moq-dev/moq/pull/6830) and the async-free
 contract in [moq-dev/moq#6851](https://github.com/moq-dev/moq/pull/6851).
-These observations do not substitute for replaying all month's full-run failures
-against the contemporaneous selected gate. That replay remains in
-[its quest](/quest/m0/ci/select-audit.md). No claim of complete missed-edge
-coverage is made here.
+
+### Queue entries merged without passing
+
+The October 21 miss is one instance of a wider hole. From October 20 23:58 to
+October 22 23:33 UTC, the main ruleset's merge queue used the `HEADGREEN`
+grouping strategy, which merges every entry under a passing head, while Check
+diffed each entry from `merge_group.base_sha`, the entry ahead of it. A head
+therefore vouched for entries whose changes it never selected. Thirty-seven
+attempts landed on main without their head ever passing, all within
+that interval and none under `ALLGREEN`:
+
+| Failure carried into main | Attempts |
+| --- | ---: |
+| Dangling quest links, four different deletions | 13 |
+| `@moq/net` request and draining-session tests | 6 |
+| Cancelled | 5 |
+| JS doc comments missing on exported error members | 3 |
+| `moq-cli` redundant-importer bufferbloat test | 3 |
+| `moq-video` hev1 CMAF round trip | 2 |
+| `moq-srt` late-payload host instant | 2 |
+| `moq-net` test build, a call with the wrong argument count | 1 |
+| JS type check, a removed `Manual.advanceAsync` | 1 |
+| `moq-relay` GOAWAY deadline drain | 1 |
+
+The static failures (links, doc comments, type and compile errors) are
+deterministic breakage that reached main. The test failures were not reproduced
+here, so some may be flakes. Either way, a narrower selection is what let them
+through: the passing head never ran them.
+
+Check now diffs a merge group from `origin/main`, the main commit its head is
+built on, so a head's run selects every entry it can merge, whichever grouping
+strategy the ruleset uses. `sh/gh/queue.test.ts` pins the workflow base, and
+`sh/dispatch-query.test.py` covers an unmerged entry ahead. The change costs
+nothing at today's settings: of 487 attempts from October 22 23:33 UTC to the
+window end, with one entry built at a time, none started before the entry ahead
+had merged. With five entries built at once, October 10 through 20, 806 of 1,047
+attempts started on an unmerged entry and would now also select its changes.
+
+Five pull requests merged outside the queue after October 10, four of them on
+October 23 between 21:33 and 22:56 UTC while the ruleset had no merge queue rule.
+They skipped Check entirely, which no selection rule can address, and none caused
+a full-gate failure above.
