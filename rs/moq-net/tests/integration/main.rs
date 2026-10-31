@@ -8,6 +8,7 @@
 //! counting global allocator would apply to every test in the binary.
 
 mod announce_covering_route;
+mod announce_takeover;
 mod announce_to_serve;
 mod auth;
 mod broadcast_close;
@@ -20,6 +21,7 @@ mod datagram;
 mod dial_split_horizon;
 mod drained_claim;
 mod empty_group;
+mod errored_end;
 mod extensions;
 mod fetch_cancel;
 mod fetch_fanout;
@@ -53,6 +55,7 @@ mod session_close;
 mod session_panic;
 mod settled_end_survives_abort;
 mod setup_negotiation;
+mod slow_joiner;
 mod source_errors;
 mod stream_credit;
 mod subscribe_priority;

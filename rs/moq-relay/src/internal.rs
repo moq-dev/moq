@@ -931,7 +931,8 @@ mod tests {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
@@ -1237,7 +1238,7 @@ mod tests {
 	#[test]
 	fn label_values_are_escaped() {
 		let stats = moq_net::stats::Registry::new(Default::default());
-		let tier = "a\\b\"} 9\nmoq_relay_requests_total{tier=\"x";
+		let tier = "a\\\\b\"} 9\nmoq_relay_requests_total{tier=\"x";
 		drop(
 			stats
 				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static(tier)))
@@ -1245,7 +1246,7 @@ mod tests {
 		);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(
-			body.contains(r#"moq_relay_requests_total{tier="a\\b\"} 9\nmoq_relay_requests_total{tier=\"x"} 1"#),
+			body.contains(r#"moq_relay_requests_total{tier="a\\\\b\"} 9\nmoq_relay_requests_total{tier=\"x"} 1"#),
 			"{body}"
 		);
 		assert!(

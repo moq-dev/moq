@@ -6,8 +6,8 @@ use crate::origin;
 use crate::time::{Deadlines, Instant};
 use crate::transport::poll::Session as _;
 use crate::{
-	ALPN_18, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume,
-	Error, NEGOTIATED, Session, SessionError, Version, Versions,
+	ALPN_18, ALPN_20, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP,
+	Consume, Error, NEGOTIATED, Session, SessionError, Version, Versions,
 	coding::{Encode, Stream},
 	ietf, lite,
 	setup::{self, Role},
@@ -42,14 +42,14 @@ impl Activity {
 	/// Wait until every admitted connection has left, then refuse new ones.
 	pub async fn close(&self) {
 		loop {
-			if self.state.unused().await.is_err() {
+			if self.state.wanted_changed(true).await.is_err() {
 				return;
 			}
-			match self.state.write_unused() {
-				kio::Unused::Idle(state) => return state.close(),
+			match self.state.write_unwanted() {
+				kio::Unwanted::Idle(state) => return state.close(),
 				// Admitted between the wake and the commit: wait for it too.
-				kio::Unused::Used => continue,
-				kio::Unused::Closed => return,
+				kio::Unwanted::Wanted => continue,
+				kio::Unwanted::Closed => return,
 			}
 		}
 	}
@@ -319,9 +319,10 @@ impl Server {
 
 	async fn handshake(&self, runtime: Deadlines, mut session: Transport) -> Result<Handshake, Error> {
 		let supported = match session.protocol() {
-			Some(alpn @ (ALPN_22 | ALPN_18)) => {
+			Some(alpn @ (ALPN_22 | ALPN_20 | ALPN_18)) => {
 				let draft = match alpn {
 					ALPN_22 => ietf::Version::Draft22,
+					ALPN_20 => ietf::Version::Draft20,
 					_ => ietf::Version::Draft18,
 				};
 
@@ -1387,13 +1388,24 @@ mod tests {
 
 	#[moq_clock::test]
 	async fn uri_address_rejects_setup_path_presence() {
-		for alpn in [ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP] {
-			for path in ["", "/team/room"] {
-				let mut session = FakeSession::new(alpn, [lite05_setup(Some(path), None, None)]);
+		for version in [
+			Version::Lite(lite::Version::Lite05),
+			Version::Lite(lite::Version::Lite06),
+			Version::Lite(lite::Version::Lite07),
+			Version::Ietf(ietf::Version::Draft18),
+			Version::Ietf(ietf::Version::Draft22),
+		] {
+			let alpn = version.alpn();
+			for path in ["", "/team/room?jwt=other"] {
+				let setup = match version {
+					Version::Lite(_) => lite05_setup(Some(path), None, None),
+					Version::Ietf(version) => ietf_setup(version, Some(path)),
+				};
+				let mut session = FakeSession::new(alpn, [setup]);
 				session.address = crate::transport::Address::Uri;
 				let observed = session.clone();
 				let result = Server::new()
-					.with_versions(alpn.parse::<Version>().unwrap().into())
+					.with_versions(version.into())
 					.accept_request(moq_clock::now(), session)
 					.await;
 				assert!(
@@ -1407,10 +1419,27 @@ mod tests {
 
 	#[moq_clock::test]
 	async fn uri_address_accepts_setup_without_path() {
-		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
-		session.address = crate::transport::Address::Uri;
-		let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
-		assert_eq!(request.path(), "");
+		for version in [
+			Version::Lite(lite::Version::Lite05),
+			Version::Lite(lite::Version::Lite06),
+			Version::Lite(lite::Version::Lite07),
+			Version::Ietf(ietf::Version::Draft18),
+			Version::Ietf(ietf::Version::Draft22),
+		] {
+			let alpn = version.alpn();
+			let setup = match version {
+				Version::Lite(_) => lite05_setup(None, None, None),
+				Version::Ietf(version) => ietf_setup(version, None),
+			};
+			let mut session = FakeSession::new(alpn, [setup]);
+			session.address = crate::transport::Address::Uri;
+			let request = Server::new()
+				.with_versions(version.into())
+				.accept_request(moq_clock::now(), session)
+				.await
+				.unwrap();
+			assert_eq!(request.path(), "");
+		}
 	}
 
 	#[moq_clock::test]
