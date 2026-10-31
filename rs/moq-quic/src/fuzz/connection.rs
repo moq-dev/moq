@@ -14,16 +14,16 @@ use std::{
 };
 
 use arbitrary::{Arbitrary, Unstructured};
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 
 use super::plaintext::{Clear, Plaintext, TAG_LEN};
 use crate::{
-	Dir, Duration, Event, Instant, LeaseError, Limits, ReadError, Side, StreamId, client,
+	Dir, Duration, Event, Instant, Limits, Side, StreamId, client,
 	connection::Connection,
 	endpoint::{self, ConnectionHandle, DatagramEvent, Dial, Endpoint, Received},
 	frame::{self, Frame},
 	packet::{FixedLengthConnectionIdParser, PartialDecode},
-	server, transport,
+	recv, server, transport,
 };
 
 /// The connection ID length both endpoints issue, which a captured packet needs to parse.
@@ -578,14 +578,16 @@ impl Pair {
 			} => {
 				if let Some((id, conn)) = send_stream(self.peer(who), stream) {
 					let mut stream = conn.send_stream(id);
-					let offset = u64::from(offset) % (stream.offset() + 1);
+					let end = stream.offset();
+					let offset = end.rewind(u64::from(offset) % (u64::from(end) + 1));
 					let _ = stream.reset_at(offset, code.into());
 				}
 			}
 			Op::Acked { who, stream, offset } => {
 				if let Some((id, conn)) = send_stream(self.peer(who), stream) {
 					let mut stream = conn.send_stream(id);
-					let offset = u64::from(offset) % (stream.offset() + 1);
+					let end = stream.offset();
+					let offset = end.rewind(u64::from(offset) % (u64::from(end) + 1));
 					let _ = stream.acked(offset);
 				}
 			}
@@ -671,7 +673,7 @@ impl Pair {
 					.datagrams()
 					.send(
 						data,
-						crate::SendOptions {
+						crate::send::Options {
 							group: None,
 							priority: priority.into(),
 						},
@@ -752,7 +754,7 @@ impl Pair {
 		let data: Vec<u8> = (sent.len..sent.len + len)
 			.map(|offset| stream_byte(side, id, offset))
 			.collect();
-		if let Ok(written) = conn.send_stream(id).write(&data) {
+		if let Ok(written) = conn.send_stream(id).write(&mut &data[..]) {
 			sent.len += written as u64;
 		}
 	}
@@ -847,7 +849,8 @@ fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, m
 				}
 				break;
 			}
-			Err(ReadError::Blocked | ReadError::Reset(_)) => break,
+			Err(recv::Error::Blocked | recv::Error::Reset(_)) => break,
+			Err(err) => unreachable!("{err}"),
 		}
 	}
 
@@ -868,9 +871,9 @@ fn lease(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, 
 	let Some((_, conn)) = &mut peer.conn else {
 		return;
 	};
-	match conn.recv_stream(id).lease(want) {
-		Ok(_) => {}
-		Err(LeaseError::Evicted) => {
+	let mut lease = match conn.recv_stream(id).lease(want).0 {
+		Ok(lease) => lease,
+		Err(recv::Error::Evicted) => {
 			conn.recv_stream(id)
 				.stop(0u32.into())
 				.expect("an evicted stream stops once");
@@ -878,23 +881,22 @@ fn lease(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, 
 		}
 		// Waiting, reset, or stopped: nothing to check yet.
 		Err(_) => return,
-	}
-	let Some(lease) = conn.leased(id) else {
-		return;
 	};
 	let offset = peer.read.entry(id).or_default();
-	let n = max.min(lease.len());
+	let n = max.min(lease.remaining());
 	if !forged {
 		let written = sent.get(&(writer, id)).map_or(0, |sent| sent.len);
-		assert!(*offset + lease.len() as u64 <= written, "leased past what was written");
+		assert!(
+			*offset + lease.remaining() as u64 <= written,
+			"leased past what was written"
+		);
 		for (at, &byte) in (*offset..).zip(lease.chunks().flatten().take(n)) {
 			assert_eq!(byte, stream_byte(writer, id, at), "corrupt stream data");
 		}
 	}
 	*offset += n as u64;
-	let mut recv = conn.recv_stream(id);
-	recv.advance(n);
-	let _ = recv.release();
+	lease.advance(n);
+	let _ = conn.recv_stream(id).release(lease);
 }
 
 /// The byte a writer puts at `offset` of a stream, unique enough to catch misplaced data.

@@ -1,4 +1,4 @@
-import { Group } from "@moq/net";
+import { Group, Error as NetError } from "@moq/net";
 import type * as z from "@zod/mini";
 
 import { deepEqual, diff } from "../diff.ts";
@@ -30,10 +30,12 @@ export interface Config<T> {
 	initial?: T;
 
 	/**
-	 * Bytes a group may hold before it rolls, defaulting to moq-net's per-group cache limit. Lets a
-	 * test reach the limit without megabytes of JSON. Must fit the snapshot's own frame.
+	 * The most bytes a group may hold, snapshot and deltas together.
 	 *
-	 * @internal
+	 * A delta that would pass it rolls a fresh snapshot instead, and a snapshot past it throws
+	 * `FrameTooLarge`. Lowering it lets a test reach the limit without megabytes of JSON; a value
+	 * above moq-net's per-group cache limit is clamped to it, since moq-net refuses a larger group
+	 * anyway. Defaults to that limit.
 	 */
 	maxGroupBytes?: number;
 }
@@ -126,7 +128,7 @@ export class Encoder<T> {
 
 	constructor(config: Config<T> = {}) {
 		this.#config = config;
-		this.#maxGroupBytes = config.maxGroupBytes ?? Group.MAX_GROUP_CACHE_BYTES;
+		this.#maxGroupBytes = Math.min(config.maxGroupBytes ?? Infinity, Group.MAX_GROUP_CACHE_BYTES);
 	}
 
 	/**
@@ -255,8 +257,11 @@ export class Encoder<T> {
 		return new TextEncoder().encode(JSON.stringify(result.patch));
 	}
 
-	// Encode a group's snapshot (frame 0), returning its payload.
+	// Encode a group's snapshot (frame 0), returning its payload. A snapshot past the budget is
+	// refused before any state changes, so the previous value stays readable rather than superseded
+	// by a frame moq-net would refuse on write.
 	#snapshot(frame: Uint8Array): Uint8Array {
+		if (frame.length > this.#maxGroupBytes) throw new NetError.FrameTooLarge();
 		this.#groupBytes = frame.length;
 		this.#groupFrames = 1;
 		this.#resync = false;

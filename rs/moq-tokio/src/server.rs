@@ -1626,8 +1626,7 @@ pub struct Link {
 pub struct Request {
 	active: moq_net::server::Active,
 	transport: Transport,
-	/// The request URL, for transports that carry one (QUIC/WebTransport/WebSocket). `None` for the
-	/// URL-less stream bindings, whose request path rides the SETUP instead.
+	/// The request URL for WebTransport/WebSocket. `None` for bindings whose path rides SETUP.
 	url: Option<Url>,
 	/// The authority the client dialed, when it offered one: the TLS SNI on raw QUIC, the CONNECT
 	/// authority on WebTransport. `None` on the URL-less stream bindings and on iroh.
@@ -1745,10 +1744,9 @@ impl Request {
 		self.transport
 	}
 
-	/// Returns the request URL for transports that carry one (QUIC/WebTransport/WebSocket).
+	/// Returns the request URL for WebTransport/WebSocket.
 	///
-	/// `None` for the URL-less stream bindings (`tcp`/`unix`); use [`Self::path`] for their
-	/// in-band request path.
+	/// `None` for bindings without a request URI; use [`Self::path`] for their in-band path.
 	pub fn url(&self) -> Option<&Url> {
 		self.url.as_ref()
 	}
@@ -1767,18 +1765,14 @@ impl Request {
 
 	/// The request path the client advertised, uniform across transports.
 	///
-	/// Taken from the SETUP for the URL-less stream bindings (and moq-transport, which
-	/// carries it in-band), or the request [`url`](Self::url) for
-	/// WebTransport/QUIC/WebSocket.
+	/// Taken from the request [`url`](Self::url) for WebTransport/WebSocket, or SETUP
+	/// for bindings without a request URI.
 	/// The missing or root path is returned as an empty string.
 	pub fn path(&self) -> &str {
-		// An empty SETUP path means the client advertised none, so fall back to the
-		// request URL. URL-carrying bindings are the ones that must not send a path at
-		// all, so this never discards a path the client meant us to use.
-		let setup = self.handshake.path();
-		let path = if setup.is_empty() {
-			self.url.as_ref().map(Url::path).unwrap_or("")
+		let path = if let Some(url) = &self.url {
+			url.path()
 		} else {
+			let setup = self.handshake.path();
 			setup.split_once('?').map_or(setup, |(path, _)| path)
 		};
 		if path == "/" { "" } else { path }
@@ -1788,11 +1782,10 @@ impl Request {
 	///
 	/// Query values can contain credentials. Avoid logging this value.
 	pub fn query(&self) -> Option<&str> {
-		let setup = self.handshake.path();
-		if setup.is_empty() {
-			self.url.as_ref().and_then(Url::query)
+		if let Some(url) = &self.url {
+			url.query()
 		} else {
-			setup.split_once('?').map(|(_, query)| query)
+			self.handshake.path().split_once('?').map(|(_, query)| query)
 		}
 	}
 
@@ -2239,6 +2232,47 @@ mod tests {
 		assert!(activity.close().now_or_never().is_none());
 		drop(request);
 		assert!(activity.close().now_or_never().is_some());
+	}
+
+	#[cfg(feature = "websocket")]
+	#[tokio::test(start_paused = true)]
+	async fn upgraded_websocket_refuses_setup_path_presence() {
+		use moq_net::transport::poll::{SendOptions, SendStream as _, Session as _};
+		use qmux::ws::tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+
+		for protocol in ["qmux-01.moq-lite-06", "qmux-01.moqt-18", "qmux-01.moqt-22"] {
+			for path in ["", "/room?jwt=url-token", "/other?jwt=setup-token"] {
+				let (client, server) = tokio::io::duplex(64 * 1024);
+				let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+				let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+				let activity = moq_net::server::Activity::default();
+				let mut options = crate::websocket::Options::new(
+					"wss://example.com/room?jwt=url-token".parse().unwrap(),
+					moq_net::Server::new(),
+					activity.enter().unwrap(),
+				);
+				options.link.alpn = Some(protocol.into());
+				let accept = tokio::spawn(crate::websocket::accept(server, options));
+				let client = qmux::ws::Upgraded::new(client, protocol).connect().unwrap();
+				// A single Path parameter, including the empty value: lite uses a
+				// counted parameter bag; IETF uses a u16-sized SETUP option block.
+				let mut bytes = if protocol.contains("moq-lite") {
+					vec![1, (3 + path.len()) as u8, 1, 2, path.len() as u8]
+				} else {
+					vec![0xaf, 0, 0, (2 + path.len()) as u8, 1, path.len() as u8]
+				};
+				bytes.extend_from_slice(path.as_bytes());
+				let mut setup = client.open_uni(SendOptions::default()).await.unwrap();
+				assert_eq!(setup.write(&bytes).await.unwrap(), bytes.len());
+				let result = accept.await.unwrap();
+				assert!(matches!(
+					result,
+					Err(crate::Error::MoqNet(moq_net::Error::ProtocolViolation))
+				));
+				let error = client.closed().await;
+				assert_eq!(moq_net::transport::Error::session_error(&error).unwrap().0, 3);
+			}
+		}
 	}
 
 	/// A scripted peer, recording the code it was closed with.

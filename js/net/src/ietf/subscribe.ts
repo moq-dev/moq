@@ -46,14 +46,19 @@ function decodeGroupOrder(value: number): Order {
 }
 
 /**
- * The filter this implementation joins a live track with.
+ * How this implementation joins a live track: at the current group, from its first object,
+ * as the Rust subscriber does.
  *
- * moq-lite joins at the start of the current group, which is a decodable point, and
- * draft-22's relative form is the first that can name it without knowing Largest Object.
- * Earlier drafts request unfiltered delivery because this client does not send joining FETCH.
+ * The subscription itself starts at the next object (draft 18's Largest Object), and the
+ * group's head comes on a fetch stream. Draft 22 asks for it with a fill one group back from
+ * the next, its current-group join (section 3.5); earlier drafts have no fill, so the
+ * subscriber sends a Relative Joining FETCH once SUBSCRIBE_OK names Largest. Spelling the
+ * filter keeps a peer from reading an absent one its own way.
  */
-export function joinFilter(version: IetfVersion): Filter.Filter {
-	return Filter.isDraft22(version) ? { kind: "relative", groups: 1n } : { kind: "unfiltered" };
+export function joinFilter(version: IetfVersion): { filter: Filter.Filter; fill?: Filter.Fill } {
+	const filter: Filter.Filter = { kind: "nextObject" };
+	if (!Filter.isDraft22(version)) return { filter };
+	return { filter, fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false } };
 }
 
 export class Subscribe {
