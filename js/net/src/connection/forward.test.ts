@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { type Installed, Manual, Milli, Nano } from "@moq/clock";
-import { Once } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { AuthSession } from "../auth_session.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
@@ -72,7 +71,6 @@ class FakeSession {
 	constructor({ exclusive = false } = {}) {
 		registerWire(this, {
 			consume: (path) => this.consume(path),
-			goaway: new Once(),
 			exclusive,
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
 		});

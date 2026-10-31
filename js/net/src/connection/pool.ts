@@ -30,7 +30,7 @@ import {
 import type { Established as EstablishedType } from "./established.ts";
 import type { Extensions as ExtensionsType } from "./extensions.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
-import type { GoawayProps, Redirect as RedirectType } from "./goaway.ts";
+import type { Drain as DrainType, GoawayProps, Redirect as RedirectType } from "./goaway.ts";
 import { pumpAnnounced, Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
@@ -402,6 +402,8 @@ export namespace Connection {
 	export type Goaway = GoawayProps;
 	/** What to do with the URI a relay names in its GOAWAY. @reexport */
 	export type Redirect = RedirectType;
+	/** A relay's GOAWAY as a one-shot session received it. @reexport */
+	export type Drain = DrainType;
 	/** Current state of a {@link Connection}. @reexport */
 	export type Status = ReloadStatus;
 	/** The current connection's PROBE estimates. @reexport */

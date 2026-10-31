@@ -151,12 +151,17 @@ export namespace Connection {
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;
 	}
+	export interface Drain {
+		readonly timeout?: Milli;
+		readonly uri: string;
+	}
 	export interface Established {
 		abort(): void;
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly auth: Auth.Handle;
 		close(): Promise<void>;
 		closed: Promise<Error | null>;
+		readonly draining: Signals.GetPromise<Connection.Drain>;
 		readonly peerImplementation: Promise<string | undefined>;
 		readonly probe: Signals.Getter<Connection.Probe>;
 		stats(): Promise<Connection.Stats>;
