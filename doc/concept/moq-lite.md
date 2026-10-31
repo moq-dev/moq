@@ -300,7 +300,10 @@ Ranges are both a request and a filter. A subscriber reads only the groups its
 own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
-served. A group they cover below the live feed that the cache lacks (evicted
+served. A reader that has read every group its ranges cover waits rather than
+ends, since the track goes on: a moq-lite-07 publisher ends a bounded
+subscription once it covered it, and the copy stays cached for the same ranges
+until a wider demand asks again. A group they cover below the live feed that the cache lacks (evicted
 before the subscriber first looked for it, skipped, or below where the feed
 starts) is asked of the track's dynamic handler
 as a fill, which a relay serves by fetching upstream one group at a time, skipping
@@ -313,7 +316,8 @@ track, and over moq-lite-07, which carries a relative or time start upstream and
 reports the live edge and media time, so a copy resolves the ends itself. A Rust
 moq-transport copy resolves a relative anchor from the Largest Object its live join
 reports, accepts time anchors its cache can already resolve, and sends group bounds
-upstream; it refuses any other time anchor. Older
+upstream; it refuses any other time anchor. A JavaScript one refuses every time
+anchor. Older
 moq-lite versions accept absolute anchors but refuse time anchors and relative anchors other
 than the live and default starts. An untimed track refuses a time anchor. At the live
 edge, a time end

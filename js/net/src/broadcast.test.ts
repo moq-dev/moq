@@ -356,12 +356,12 @@ test("a request exposes the aggregate subscription options", async () => {
 	consumer.track("video").subscribe({
 		priority: 3,
 		maxDelay: Milli(100),
-		groups: { start: { included: 10 }, end: { excluded: 20 } },
+		ranges: [{ start: { absolute: 10 }, end: { absolute: 20 } }],
 	});
 	consumer.track("video").subscribe({
 		priority: 7,
 		maxDelay: Milli(250),
-		groups: { start: { included: 0 }, end: { excluded: 30 } },
+		ranges: [{ start: { absolute: 0 }, end: { absolute: 30 } }],
 	});
 
 	const request = await pendingRequest(consumer);
@@ -369,7 +369,7 @@ test("a request exposes the aggregate subscription options", async () => {
 		priority: 7,
 		maxDelay: Milli(250),
 		order: "descending",
-		groups: { start: { included: 0 }, end: { excluded: 30 } },
+		ranges: [{ start: { absolute: 0 }, end: { absolute: 30 } }],
 	});
 	expect(request?.priority).toBe(7);
 });

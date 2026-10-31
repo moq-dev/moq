@@ -20,6 +20,23 @@ import type { Timestamp } from "./time.ts";
 import type { Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
+/**
+ * A subscription's `maxDelay` as a budget in milliseconds, `0` without one: `null` waits as
+ * long as anything could, which the publisher's max age clamps.
+ */
+export function delayBudget(subscription: Pick<Subscription, "maxDelay"> | undefined): number {
+	const maxDelay = subscription?.maxDelay;
+	return maxDelay === null ? Number.POSITIVE_INFINITY : (maxDelay ?? 0);
+}
+
+/**
+ * The `Subscriber Max Age` a wire carries for `maxDelay`: `null` is the publisher's max age
+ * alone, which the largest value every peer can read leaves to its clamp.
+ */
+export function wireDelay(subscription: Pick<Subscription, "maxDelay"> | undefined): number {
+	return Math.min(delayBudget(subscription), Number.MAX_SAFE_INTEGER);
+}
+
 /** Normalize public group bounds into an inclusive start and exclusive end. */
 export function groupBounds(groups: Groups = {}): { start: number; end?: number } {
 	const bound = (value: Groups["start"] | undefined, start: boolean): number | undefined => {
@@ -313,6 +330,8 @@ export interface ResumeSource {
 	start(): number | "pending" | undefined;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Position | undefined;
+	/** Where each range starts on the serving copy once delivery starts at `from`, undefined without one. */
+	starts(from: number): (number | undefined)[] | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
 	finished(): Promise<Position>;
 	/** The serving copy's newest buffered frame, which a wire answer names as its edge. */
@@ -419,6 +438,12 @@ export const hooks: {
 	 * waits on its START, as the Rust `request_start`.
 	 */
 	startTrack: (producer: Producer, served: { start?: number | null; requested?: number }) => void;
+	/**
+	 * Mark a track as a copy received over a wire without ranges, which cannot carry a relative
+	 * anchor other than the live start, so its readers refuse one rather than guess from a
+	 * partial copy. Mirrors the Rust `Holdings::drops_anchors`; assigned by `track.ts`.
+	 */
+	dropAnchors: (producer: Producer) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -464,6 +489,21 @@ export const hooks: {
 	 * kept for it, so a resumed reader takes groups the plain way and drops from here.
 	 */
 	tryDrop: (subscriber: Subscriber) => (Recv & { kind: "drop" }) | undefined;
+	/**
+	 * The runs of `[start, end)` a subscriber reads: inside its ranges and its local bounds.
+	 * Assigned by `track.ts`.
+	 */
+	servingRuns: (subscriber: Subscriber, start: number, end: number) => Run[];
+	/**
+	 * The exclusive end past every group a subscriber reads, or undefined while one of its ranges
+	 * stays open. Assigned by `track.ts`.
+	 */
+	servingEnd: (subscriber: Subscriber) => number | undefined;
+	/**
+	 * Where each of a subscriber's ranges starts once delivery starts at `from`, undefined for one
+	 * with no group there: what lite-07 SUBSCRIBE_START answers. Assigned by `track.ts`.
+	 */
+	servingStarts: (subscriber: Subscriber, from: number) => (number | undefined)[];
 	/** The sequence {@link tryNextGroup} (`ordered`) or {@link tryRecvGroup} would take next, without taking it. */
 	peekGroup: (subscriber: Subscriber, ordered: boolean) => number | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
@@ -630,6 +670,18 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	startTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	dropAnchors: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingRuns: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingEnd: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingStarts: () => {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {

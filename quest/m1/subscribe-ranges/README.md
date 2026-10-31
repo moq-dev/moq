@@ -105,7 +105,7 @@ every sequence delivered or dropped.
 - [Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md) - filling stays flat as range count and span grow, so a subscription's range count cannot multiply per-group cost
 - [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - `fetch_group` becomes a one-range subscription that ends once its range is accounted for
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity, and the on-demand request surface
+- [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net`'s on-demand request surface and `fetchGroup` as a range
 - [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - FETCH removed from lite-07 in Rust, JS, and the draft
 - [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md) - what each lite cursor is owed and dropped lives in the model, and `TrackRun` only translates it per version
 

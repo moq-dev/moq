@@ -20107,6 +20107,49 @@ mod test {
 		assert_eq!(drain(&mut seek), vec![1, 2]);
 	}
 
+	/// A time start resolves once a group starts, not at the latest group: a copy can show
+	/// the route's answer (here an empty group) before the groups its publisher resolved the
+	/// time to start, and a producer can open groups before their first frames.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_start_waits_for_a_group_to_start() {
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let since = [Range {
+			start: Anchor::Time(at(2500)),
+			end: None,
+		}];
+		for (copy, order) in [
+			(false, Order::Ascending),
+			(true, Order::Ascending),
+			(true, Order::Descending),
+		] {
+			let mut producer = track_producer("test", Info::timed());
+			if copy {
+				producer.set_idle();
+				producer.set_live(Some(Position::group(9)), Some(2));
+			}
+			let mut groups: Vec<_> = (2..9)
+				.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
+				.collect();
+			producer
+				.create_group(group::Info { sequence: 9 })
+				.unwrap()
+				.finish()
+				.unwrap();
+
+			let mut subscriber = producer.subscribe(replay().with_ranges(since).with_order(order));
+			assert_eq!(drain(&mut subscriber), Vec::<u64>::new(), "copy: {copy}, {order:?}");
+			for (group, sequence) in groups.iter_mut().zip(2..) {
+				group
+					.write_frame(at(sequence * 1000), bytes::Bytes::from_static(b"x"))
+					.unwrap();
+			}
+			let mut read = drain(&mut subscriber);
+			read.sort_unstable();
+			assert_eq!(read, (2..10).collect::<Vec<_>>(), "copy: {copy}, {order:?}");
+		}
+	}
+
 	/// A time end stays open across a group that has yet to start: it may start before the
 	/// end, so a later group starting after it settles nothing.
 	#[test]

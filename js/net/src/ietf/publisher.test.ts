@@ -2563,7 +2563,7 @@ test("draft-22: an absolute filter trims the range it serves", async () => {
 		// The request forwarded upstream carries the model's exclusive end, one past the
 		// filter's inclusive last group.
 		expect(track.subscription.peek()).toMatchObject({
-			groups: { start: { included: 1 }, end: { excluded: 3 } },
+			ranges: [{ start: { absolute: 1 }, end: { absolute: 3 } }],
 		});
 
 		const first = await nextUni(fx.uni);
@@ -3620,7 +3620,7 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		expect(track.subscription.peek()?.priority).toBe(117);
 		// Only the priority changes; retention and the group range survive.
 		expect(track.subscription.peek()?.maxDelay).toBe(before?.maxDelay);
-		expect(track.subscription.peek()?.groups).toEqual(before?.groups);
+		expect(track.subscription.peek()?.ranges).toEqual(before?.ranges);
 		await client.writer.write(new Uint8Array([0x02, 0, 2, 4, 0]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
@@ -4073,7 +4073,7 @@ test("IETF draft-18: range updates preserve the shared subscription", async () =
 			await new SubscribeUpdate({ requestId: id, parameters }).encode(client.writer, fx.version);
 			expect(await client.reader.u53()).toBe(RequestOk.id);
 			await RequestOk.decode(client.reader, fx.version);
-			expect(track.subscription.peek()?.groups).toEqual({ start: { included: 6 }, end: { excluded: 8 } });
+			expect(track.subscription.peek()?.ranges).toEqual([{ start: { absolute: 6 }, end: { absolute: 8 } }]);
 		}
 	} finally {
 		client.close();

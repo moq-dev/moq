@@ -256,11 +256,9 @@ interface Reader {
 	gone: boolean;
 	/** The subscription's group range. */
 	ranges: Range;
-	/**
-	 * The one group cursor reads honor. Unlike the Rust reader's two filters, a JS subscriber's
-	 * subscription range only seeds it: an update resets it to that range, and local bounds
-	 * replace it in either direction.
-	 */
+	/** The local bounds `withRange` last set, which narrow the subscription's range. */
+	local: Range;
+	/** The groups reads honor: the subscription's range within the local bounds. */
 	cursor: Range;
 	/** Every group handed out, in order. */
 	handed: number[];
@@ -295,6 +293,11 @@ function capped(reader: Reader): boolean {
 	return (reader.cursor?.[1] ?? GROUPS) < GROUPS;
 }
 
+function intersect(a: Range, b: Range): Range {
+	if (!a || !b) return a ?? b;
+	return [Math.max(a[0], b[0]), Math.min(a[1], b[1])];
+}
+
 function within(range: Range, group: number): boolean {
 	return range === undefined || (range[0] <= group && group < range[1]);
 }
@@ -315,7 +318,10 @@ function groups(range: Range): track.Groups {
 }
 
 function subscription(budget: Budget, range: Range): track.Subscription {
-	return { maxDelay: budget === "hour" ? HOUR : SHORT, groups: range ? groups(range) : undefined };
+	return {
+		maxDelay: budget === "hour" ? HOUR : SHORT,
+		ranges: range ? [{ start: { absolute: range[0] }, end: { absolute: range[1] } }] : undefined,
+	};
 }
 
 function max(values: Iterable<number>): number | undefined {
@@ -431,7 +437,7 @@ class Model {
 				const reader = this.readers[op.reader];
 				if (!reader) return;
 				reader.ranges = op.range;
-				reader.cursor = op.range;
+				reader.cursor = intersect(op.range, reader.local);
 				reader.sub.update(subscription(reader.spec.budget, op.range));
 				this.poll(op.reader);
 				break;
@@ -439,7 +445,8 @@ class Model {
 			case "bounds": {
 				const reader = this.readers[op.reader];
 				if (!reader) return;
-				reader.cursor = op.range;
+				reader.local = op.range;
+				reader.cursor = intersect(reader.ranges, op.range);
 				(reader.ordered ?? reader.sub).withRange(groups(op.range));
 				this.poll(op.reader);
 				break;
@@ -583,6 +590,7 @@ class Model {
 			flag: false,
 			gone: false,
 			ranges: spec.range,
+			local: undefined,
 			cursor: spec.range,
 			handed: [],
 			reading: new Map(),

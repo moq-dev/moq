@@ -193,7 +193,7 @@ test("a routed source start follows the serving copy and its subscriber floor", 
 	hooks.startTrack(tb.producer, { start: 5, requested: 3 });
 	const front = new Front();
 	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe({ groups: { start: { included: 3 } } });
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: { absolute: 3 } }] });
 	try {
 		expect(hooks.sourceStart(sub)).toBe(3);
 		const subscribed = tb.producer.subscription.changed();
@@ -270,7 +270,7 @@ test("a resumed fork has its own preferences and replay cursor", async () => {
 	front.serve(a.consume());
 	const parent = front.consumer.track("seq").subscribe({
 		priority: 2,
-		groups: { start: { included: 1 } },
+		ranges: [{ start: { absolute: 1 } }],
 	});
 	ta.write(0);
 	ta.write(1);
@@ -1910,7 +1910,7 @@ test("the largest honours the reader's bounds on the serving copy", async () => 
 		.track("seq")
 		.subscribe()
 		.withRange({ end: { excluded: 3 } });
-	const floored = front.consumer.track("seq").subscribe({ groups: { start: { included: 8 } } });
+	const floored = front.consumer.track("seq").subscribe({ ranges: [{ start: { absolute: 8 } }] });
 	for (let sequence = 0; sequence < 5; sequence++) ta.write(sequence);
 
 	const next = capped.largest();
@@ -2572,7 +2572,7 @@ test.each([
 			}
 			return sequences;
 		};
-		const asked = () => tb.producer.subscription.peek()?.groups?.start?.included;
+		const asked = () => tb.producer.subscription.peek()?.ranges?.[0]?.start?.absolute;
 		try {
 			sub.withRange({ start: { included: 4 } });
 			await clock.advance(Nano.zero);

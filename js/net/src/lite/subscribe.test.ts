@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
-import { ProtocolViolation } from "../error.ts";
+import { ProtocolViolation, TimestampMismatch } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import {
 	decodeSubscribeResponse,
-	emptyRange,
 	encodeSubscribeResponse,
-	exclusiveGroupEnd,
 	inclusiveGroupEnd,
+	requestedRanges,
 	Subscribe,
 	SubscribeDrop,
 	SubscribeEnd,
@@ -15,6 +15,7 @@ import {
 	type SubscribeResponse,
 	SubscribeStart,
 	SubscribeUpdate,
+	toWireRanges,
 } from "./subscribe.ts";
 import { Version } from "./version.ts";
 
@@ -207,26 +208,66 @@ test("a lite-07 list decodes as the span covering it", async () => {
 	// Groups 2 through 4 and 7 through frame 1 of group 9.
 	const sparse = await update([2, 1, 2, 0, 1, 5, 0, 1, 7, 0, 1, 9, 2]);
 	expect([sparse.startGroup, sparse.startFrame, sparse.endGroup, sparse.endFrame]).toEqual([2, 0, 9, 1]);
+	// The ranges stay whole groups, so an end past frame 0 includes its group.
 	expect(sparse.ranges).toEqual([
-		{ start: 2, end: 5 },
-		{ start: 7, end: 10 },
+		{ start: { absolute: 2 }, end: { absolute: 5 } },
+		{ start: { absolute: 7 }, end: { absolute: 10 } },
 	]);
 
-	// Preserve that a relative anchor needs resolution before the publisher can serve it.
+	// The span covering a relative start has no floor; the ranges keep it for the serving reader.
 	const relative = await update([2, 2, 3, 1, 5, 0, 1, 7, 0, 1, 9, 0]);
 	expect([relative.startGroup, relative.endGroup, relative.endFrame]).toEqual([undefined, 8, undefined]);
 	expect(relative.ranges).toEqual([
-		{ start: 0, end: 5, unresolved: true },
-		{ start: 7, end: 9 },
+		{ start: { relative: 3 }, end: { absolute: 5 } },
+		{ start: { absolute: 7 }, end: { absolute: 9 } },
 	]);
+	// A time anchor carries ticks of the track's timescale, which only the serving track knows.
+	const timed = await update([1, 3, 40, 3, 90]);
+	expect(timed.ranges).toEqual([{ start: { time: 40 }, end: { time: 90 } }]);
+	expect([timed.startGroup, timed.endGroup]).toEqual([undefined, undefined]);
+	expect(requestedRanges(timed, Timescale.MILLI)).toEqual([
+		{ start: { time: Timestamp.fromMillis(40) }, end: { time: Timestamp.fromMillis(90) } },
+	]);
+	expect(() => requestedRanges(timed, undefined)).toThrow(TimestampMismatch);
 
-	// No start reaches back to group 0; an empty range has no groups.
+	// No start reaches back to group 0; one empty partway through group 5 covers no group.
 	const oldest = await update([2, 0, 1, 3, 0, 1, 5, 2, 1, 5, 2]);
-	expect(oldest.ranges).toEqual([{ start: 0, end: 3 }, undefined]);
+	expect(oldest.ranges).toEqual([{ end: { absolute: 3 } }, { start: { absolute: 5 }, end: { absolute: 5 } }]);
 
 	await expect(update([0])).rejects.toThrow(ProtocolViolation);
 	await expect(update([1, 4, 0, 0])).rejects.toThrow(ProtocolViolation);
 	await expect(update([1, 0, 1, 0, 0])).rejects.toThrow(ProtocolViolation);
+});
+
+test("lite-07 carries every range, relative and time anchors included, and older wires the span alone", async () => {
+	const ranges = toWireRanges(
+		[
+			{ start: { absolute: 2 }, end: { absolute: 5 } },
+			{ start: { relative: 1 } },
+			{ end: { relative: 0 } },
+			// In the track's timescale, rounded down.
+			{ start: { time: Timestamp.fromMicros(1_500_900) }, end: { time: Timestamp.fromMillis(3_000) } },
+		],
+		Timescale.MILLI,
+	);
+	expect(ranges[3]).toEqual({ start: { time: 1_500 }, end: { time: 3_000 } });
+	expect(() => toWireRanges([{ start: { time: Timestamp.fromMillis(1) } }], undefined)).toThrow(TimestampMismatch);
+	const message = new Subscribe({
+		id: 1n,
+		broadcast: Path.from("test"),
+		track: "video",
+		priority: 0,
+		startGroup: 0,
+		ranges,
+	});
+	const decode = async (version: Version) =>
+		Subscribe.decode(new Reader(undefined, await encodeMessage(version, message), version), version);
+	expect((await decode(Version.DRAFT_07)).ranges).toEqual(ranges);
+	const older = await decode(Version.DRAFT_05);
+	expect([older.ranges, older.startGroup, older.endGroup]).toEqual([undefined, 0, undefined]);
+	await expect(encodeMessage(Version.DRAFT_07, new Subscribe({ ...message, ranges: [] }))).rejects.toThrow(
+		"empty subscription range cannot be encoded",
+	);
 });
 
 test("SubscribeStart round-trips on draft-05", async () => {
@@ -319,23 +360,11 @@ test("frame bounds without their group bounds are rejected before encoding", asy
 	);
 });
 
-test("model and wire group ends convert without an off-by-one", () => {
-	expect(exclusiveGroupEnd(undefined)).toBeUndefined();
-	expect(exclusiveGroupEnd(0)).toBe(1);
-	expect(exclusiveGroupEnd(9)).toBe(10);
+test("model group ends convert to the wire without an off-by-one", () => {
 	expect(inclusiveGroupEnd(undefined)).toBeUndefined();
 	expect(inclusiveGroupEnd(1)).toBe(0);
 	expect(inclusiveGroupEnd(10)).toBe(9);
 	expect(() => inclusiveGroupEnd(0)).toThrow("empty subscription range cannot be encoded");
-});
-
-test("a requested range is empty when its bounds meet anywhere", () => {
-	expect(emptyRange({})).toBe(false);
-	expect(emptyRange({ endGroup: 0 })).toBe(true);
-	expect(emptyRange({ startGroup: 5, endGroup: 5 })).toBe(true);
-	expect(emptyRange({ startGroup: 6, endGroup: 5 })).toBe(true);
-	expect(emptyRange({ startGroup: 5, endGroup: 6 })).toBe(false);
-	expect(emptyRange({ startGroup: 5 })).toBe(false);
 });
 
 // Lite-07 carries `Group Order` right after the priority, on SUBSCRIBE and SUBSCRIBE_UPDATE

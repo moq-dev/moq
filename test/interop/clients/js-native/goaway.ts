@@ -28,7 +28,7 @@ async function active(request: (typeof requests)[number]) {
 	return broadcast;
 }
 try {
-	const track = (await active(requests[0])).track("video").subscribe({ groups: { start: { included: 0 } } });
+	const track = (await active(requests[0])).track("video").subscribe({ ranges: [{ start: { absolute: 0 } }] });
 	try {
 		for (let sequence = 0; sequence < 3; sequence++) {
 			const group = await track.recvGroup();
@@ -64,7 +64,7 @@ try {
 				replacementProbe = wireOf(replacement)
 					.consume(Moq.Path.from("handover"))
 					.track("video")
-					.subscribe({ groups: { start: { included: 1 } } });
+					.subscribe({ ranges: [{ start: { absolute: 1 } }] });
 				const probe = await replacementProbe.recvGroup();
 				assert(probe, "replacement has no group");
 				try {

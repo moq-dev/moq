@@ -122,6 +122,9 @@ pub(in crate::model) struct Window {
 	missable: RangeInclusiveSet<u64>,
 	/// A relative anchor waits on a first group, so nothing is filtered yet.
 	pending: bool,
+	/// The ranges, by index, whose time start waits on a group starting, so they read
+	/// nothing yet, with the latest group their relative end counts back from.
+	waiting: Vec<(usize, Option<u64>)>,
 	/// Nothing is left to resolve: see [`Self::is_settled`]. Kept so a read checks it once
 	/// per group, not once per range.
 	settled: bool,
@@ -331,6 +334,7 @@ impl Window {
 			groups: RangeInclusiveSet::new(),
 			missable: RangeInclusiveSet::new(),
 			pending: false,
+			waiting: Vec::new(),
 			settled: false,
 		};
 		window.place(latest, holdings)?;
@@ -348,7 +352,7 @@ impl Window {
 	}
 
 	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and
-	/// time ends as groups start. Returns whether the groups in range moved.
+	/// time starts and ends as groups start. Returns whether the groups in range moved.
 	pub fn settle(&mut self, latest: Option<u64>, holdings: &impl Holdings) -> bool {
 		if self.pending {
 			if latest.is_none() {
@@ -359,6 +363,11 @@ impl Window {
 			return !self.pending;
 		}
 		let mut moved = false;
+		// A relative end counts back from the latest group when asked, or the first observed
+		// group on an empty track, even while the time start waits.
+		for (index, latest) in std::mem::take(&mut self.waiting) {
+			moved |= self.span(index, latest, holdings);
+		}
 		for span in &mut self.spans {
 			let End::Time(time) = &mut span.end else { continue };
 			let limit = time.limit;
@@ -384,9 +393,12 @@ impl Window {
 		})
 	}
 
-	/// The lowest sequence whose start could still move an unsettled time end, `None`
-	/// without one or once the last sequence is in range.
+	/// The lowest sequence whose start could still move an unsettled time start or end,
+	/// `None` without one or once the last sequence is in range.
 	pub fn watch_starts(&self) -> Option<u64> {
+		if !self.waiting.is_empty() {
+			return Some(0);
+		}
 		self.spans
 			.iter()
 			.filter_map(|span| match span.end {
@@ -432,28 +444,28 @@ impl Window {
 			})
 	}
 
-	/// The lowest group in range, `None` while a relative anchor waits. Nothing in range
-	/// floors nowhere: group 0.
+	/// The lowest group in range, `None` while an anchor waits. Nothing in range floors
+	/// nowhere: group 0.
 	pub fn floor(&self) -> Option<u64> {
-		match self.pending {
+		match self.pending || !self.waiting.is_empty() {
 			true => None,
 			false => Some(self.groups.iter().next().map_or(0, |run| *run.start())),
 		}
 	}
 
 	/// The lowest group the ranges name, `None` while one reaches back to the oldest group
-	/// or a relative anchor waits on a first group.
+	/// or an anchor waits.
 	pub fn start(&self) -> Option<u64> {
-		if self.pending || self.spans.iter().any(|span| !span.floored) {
+		if self.pending || !self.waiting.is_empty() || self.spans.iter().any(|span| !span.floored) {
 			return None;
 		}
 		self.spans.iter().map(|span| span.start).min()
 	}
 
-	/// The lowest group a range names, `None` when none does or a relative anchor waits.
+	/// The lowest group a range names, `None` when none does or an anchor waits.
 	/// Unlike [`Self::start`], a range reaching back to the oldest group names nothing.
 	pub fn named(&self) -> Option<u64> {
-		match self.pending {
+		match self.pending || !self.waiting.is_empty() {
 			true => None,
 			false => self
 				.spans
@@ -464,9 +476,9 @@ impl Window {
 		}
 	}
 
-	/// Each range resolved, in the order given: `None` for one empty as given or still
-	/// waiting on a first group. One that only resolves empty keeps its span, ending at or
-	/// below its start. An unsettled time end is reported open, never at its cap.
+	/// Each range resolved, in the order given: `None` for one empty as given or whose start
+	/// still waits. One that only resolves empty keeps its span, ending at or below its
+	/// start. An unsettled time end is reported open, never at its cap.
 	pub fn resolved(&self) -> Vec<Option<Resolved>> {
 		let mut resolved = vec![None; self.ranges.len()];
 		for span in &self.spans {
@@ -482,7 +494,7 @@ impl Window {
 	}
 
 	/// Where each range starts once delivery starts at `from`, in the order given: `None`
-	/// for one with no group there, or still waiting on a first group.
+	/// for one with no group there, or whose start still waits.
 	pub fn starts(&self, from: u64) -> Vec<Option<u64>> {
 		self.resolved()
 			.into_iter()
@@ -494,10 +506,10 @@ impl Window {
 			.collect()
 	}
 
-	/// The exclusive end past every group in range, `None` when one stays open. An
-	/// unsettled time end counts as open: its cap only holds reads back meanwhile.
+	/// The exclusive end past every group in range, `None` when one stays open or an anchor
+	/// waits. An unsettled time end counts as open: its cap only holds reads back meanwhile.
 	pub fn end(&self) -> Option<u64> {
-		if self.pending || self.spans.iter().any(|span| matches!(span.end, End::Time(_))) {
+		if self.pending || !self.waiting.is_empty() || self.spans.iter().any(|span| matches!(span.end, End::Time(_))) {
 			return None;
 		}
 		match self.groups.iter().next_back() {
@@ -573,37 +585,60 @@ impl Window {
 		}
 		self.spans.clear();
 		self.pending = false;
-		for (index, range) in self.ranges.iter().enumerate().filter(|(_, range)| !range.is_empty()) {
-			let (Some((start, floored)), Some(end)) = (start(range.start, latest, holdings), end(range.end, latest))
-			else {
-				self.pending = true;
-				continue;
-			};
-			let end = match end {
-				End::Time(mut time) => {
-					time = TimeEnd::new(time.pts, start);
-					time.advance(start, holdings).map_or(End::Time(time), End::Before)
-				}
-				end => end,
-			};
-			let reach = match range.start {
-				Anchor::Time(_) if !floored => holdings.next_start(0).map_or(start, |(oldest, _)| oldest),
-				_ => start,
-			};
-			self.spans.push(Span {
-				index,
-				start,
-				end,
-				floored,
-				reach,
-			});
+		self.waiting.clear();
+		for index in 0..self.ranges.len() {
+			self.span(index, latest, holdings);
 		}
 		self.rebuild();
 		Ok(())
 	}
 
+	/// Resolve range `index` into a span, or note what it waits on. Returns whether it
+	/// resolved.
+	fn span(&mut self, index: usize, latest: Option<u64>, holdings: &impl Holdings) -> bool {
+		let range = self.ranges[index];
+		if range.is_empty() {
+			return false;
+		}
+		let Some(end) = end(range.end, latest) else {
+			self.pending = true;
+			return false;
+		};
+		let (start, floored) = match start(range.start, latest, holdings) {
+			Start::At(start, floored) => (start, floored),
+			Start::Waiting => {
+				self.waiting.push((index, latest));
+				return false;
+			}
+			Start::Pending => {
+				self.pending = true;
+				return false;
+			}
+		};
+		let end = match end {
+			End::Time(mut time) => {
+				time = TimeEnd::new(time.pts, start);
+				time.advance(start, holdings).map_or(End::Time(time), End::Before)
+			}
+			end => end,
+		};
+		let reach = match range.start {
+			Anchor::Time(_) if !floored => holdings.next_start(0).map_or(start, |(oldest, _)| oldest),
+			_ => start,
+		};
+		self.spans.push(Span {
+			index,
+			start,
+			end,
+			floored,
+			reach,
+		});
+		true
+	}
+
 	fn rebuild(&mut self) {
-		self.settled = !self.pending && !self.spans.iter().any(|span| matches!(span.end, End::Time(_)));
+		self.settled =
+			!self.pending && self.waiting.is_empty() && !self.spans.iter().any(|span| matches!(span.end, End::Time(_)));
 		self.groups = RangeInclusiveSet::new();
 		self.missable = RangeInclusiveSet::new();
 		for span in &self.spans {
@@ -622,20 +657,36 @@ impl Window {
 	}
 }
 
-/// The first group a range starts at, and whether it names that group rather than
-/// reaching back to the oldest one. `None` while it waits on a latest group.
-fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Option<(u64, bool)> {
+/// Where a range starts.
+enum Start {
+	/// At this group, and whether it names that group rather than reaching back to the
+	/// oldest one.
+	At(u64, bool),
+	/// A time start no group has started for yet, so it reads nothing.
+	Waiting,
+	/// Waiting on a latest group, reading everything meanwhile.
+	Pending,
+}
+
+fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Start {
 	match anchor {
-		Anchor::Absolute(start) => Some((start, true)),
+		Anchor::Absolute(start) => Start::At(start, true),
 		// Nothing sits below group 0, so the farthest offset needs no latest group.
-		Anchor::Relative(u64::MAX) => Some((0, false)),
-		Anchor::Relative(back) => Some((latest?.saturating_sub(back), true)),
+		Anchor::Relative(u64::MAX) => Start::At(0, false),
+		Anchor::Relative(back) => latest.map_or(Start::Pending, |latest| Start::At(latest.saturating_sub(back), true)),
 		Anchor::Time(pts) => match holdings.containing(pts) {
-			Containing::Group(group) => Some((group, true)),
+			Containing::Group(group) => Start::At(group, true),
 			// The group holding it is older than any held, so reach back to the oldest.
-			Containing::Before => Some((0, false)),
-			// Nothing has started yet: like the live edge, the latest group.
-			Containing::Unknown => Some((latest?, true)),
+			Containing::Before => Start::At(0, false),
+			// Before any group, as for a relative anchor, which a hop that holds none (such as
+			// a reader following route copies) leaves to the copies to resolve.
+			Containing::Unknown if latest.is_none() => Start::Pending,
+			// Nothing can start any more, so nothing held reaches past it.
+			Containing::Unknown if holdings.complete() => Start::At(0, false),
+			// Nothing has started yet, so wait for a group that has, rather than guess the
+			// latest: groups arrive before the frames that show where they start, so a copy
+			// can see the live edge before the groups its publisher resolved the time to.
+			Containing::Unknown => Start::Waiting,
 		},
 	}
 }
@@ -863,10 +914,14 @@ mod tests {
 		let window = Window::new(&[range(time(1000), time(2500))], Some(6), &groups).unwrap();
 		assert_eq!(covered(&window, 8), vec![0, 1, 2]);
 
-		// Nothing started yet: a time start waits like the live edge.
+		// Nothing started yet: a time start waits on a first group, then on one starting.
 		let mut window = Window::new(&[range(time(1000), None)], None, &Groups::default()).unwrap();
 		assert!(window.is_pending());
-		assert!(window.settle(Some(4), &Groups::new([(4, Held::Pending)])));
+		let mut held = Groups::new([(4, Held::Pending)]);
+		assert!(window.settle(Some(4), &held));
+		assert!(!window.contains(4), "4 has not started");
+		held.held.insert(4, Held::Started(at(1000)));
+		assert!(window.settle(Some(4), &held));
 		assert_eq!(window.floor(), Some(4));
 	}
 
@@ -1063,6 +1118,81 @@ mod tests {
 		assert_eq!(window.resolved(), vec![Some(Resolved { start: 0, end: Some(2) })]);
 		assert!(window.admits_datagram(1, Some(at(4000))));
 		assert!(!window.admits_datagram(1, Some(at(7000))));
+	}
+
+	/// A time start no held group has started for yet reads nothing of its range, rather
+	/// than guess the latest group, and resolves once one starts. A track that can start
+	/// nothing more reaches back to the oldest group.
+	#[test]
+	fn a_time_start_waits_for_a_group_to_start() {
+		let pending = (2..10).map(|sequence| (sequence, Held::Pending));
+		let mut groups = Groups::new(pending.clone());
+		let ranges = [
+			range(time(2500), None),
+			range(Anchor::Absolute(20), Anchor::Absolute(21)),
+		];
+		let mut window = Window::new(&ranges, Some(9), &groups).unwrap();
+		assert!(!window.is_pending() && !window.is_settled());
+		assert_eq!(covered(&window, 22), vec![20], "only the other range reads");
+		assert_eq!((window.floor(), window.start(), window.end()), (None, None, None));
+		assert_eq!(
+			window.resolved(),
+			vec![
+				None,
+				Some(Resolved {
+					start: 20,
+					end: Some(21)
+				})
+			]
+		);
+		assert_eq!(window.watch_starts(), Some(0), "any group starting may resolve it");
+		assert!(!window.settle(Some(9), &groups), "nothing started");
+
+		groups.held.insert(3, Held::Started(at(3000)));
+		assert!(window.settle(Some(9), &groups));
+		assert_eq!(
+			window.resolved()[0],
+			Some(Resolved { start: 0, end: None }),
+			"3 starts past it"
+		);
+		groups.held.insert(2, Held::Started(at(2000)));
+		let window = Window::new(&ranges, Some(9), &groups).unwrap();
+		assert_eq!(window.resolved()[0], Some(Resolved { start: 2, end: None }));
+		assert!(window.is_settled());
+
+		let groups = Groups {
+			complete: true,
+			..Groups::new(pending)
+		};
+		let window = Window::new(&ranges, Some(9), &groups).unwrap();
+		assert_eq!(window.resolved()[0], Some(Resolved { start: 0, end: None }));
+	}
+
+	/// A relative end counts back from the latest group it was asked against, however many
+	/// arrive while its time start waits.
+	#[test]
+	fn a_waiting_time_start_keeps_its_relative_end() {
+		for latest in [None, Some(9)] {
+			let mut groups = Groups::default();
+			let ranges = [range(time(2500), Anchor::Relative(0))];
+			let mut window = Window::new(&ranges, latest, &groups).unwrap();
+			assert_eq!(window.is_pending(), latest.is_none());
+			groups.held.extend((2..10).map(|sequence| (sequence, Held::Pending)));
+			window.settle(Some(9), &groups);
+			assert!(!window.is_pending());
+			groups.held.insert(10, Held::Pending);
+			assert!(!window.settle(Some(10), &groups), "nothing started");
+
+			groups.held.insert(2, Held::Started(at(2000)));
+			assert!(window.settle(Some(10), &groups));
+			assert_eq!(
+				window.resolved()[0],
+				Some(Resolved {
+					start: 2,
+					end: Some(10)
+				})
+			);
+		}
 	}
 
 	#[test]

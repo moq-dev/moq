@@ -21,15 +21,7 @@ import {
 } from "../error.ts";
 import type * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import {
-	finalSequence,
-	groupBounds,
-	hiddenBelow,
-	hooks,
-	scopeCaptures,
-	scopeHead,
-	scopeOverlaps,
-} from "../internal.ts";
+import { finalSequence, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps, wireDelay } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
@@ -41,6 +33,7 @@ import { closeUnwanted } from "../util/announce.ts";
 import { Deadline, requestOptions } from "../util/deadline.ts";
 import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
+import { wireSpan } from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
@@ -1087,7 +1080,7 @@ export class Subscriber {
 			// keeps what it last asked for until one returns, as on lite and in Rust.
 			const subscription = producer.subscription.peek();
 			const wanted = toWire(subscription?.priority ?? 0);
-			const wantedMaxAge = this.#maxAge ? subscription?.maxDelay : undefined;
+			const wantedMaxAge = this.#maxAge ? wireDelay(subscription) : undefined;
 			if (!subscription || (wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
 				const disposes: Dispose[] = [];
 				const wake = new Promise<void>((resolve) => {
@@ -1256,7 +1249,7 @@ export class Subscriber {
 			trackName: request.name,
 			// Read now, since a subscriber can join while the stream opened. Updates follow it.
 			subscriberPriority: toWire(request.priority),
-			maxAge: this.#maxAge ? (request.subscription.maxDelay ?? 0) : undefined,
+			maxAge: this.#maxAge ? wireDelay(request.subscription) : undefined,
 			// Fixed for the subscription's life: no REQUEST_UPDATE parameter carries it.
 			groupOrder: request.subscription.order,
 			// Joins at the current group, from its first object: the subscription delivers the
@@ -1336,10 +1329,9 @@ export class Subscriber {
 		// The live join starts at the publisher's edge, whatever floor the demand asked for.
 		// With no Largest it skips nothing, so every group is owed: a lower one's stream may
 		// still arrive after a higher one's.
-		const groups = request.subscription.groups;
 		hooks.startTrack(producer, {
 			start: ok.largest ? Number(ok.largest.groupId) : 0,
-			requested: groups?.start === undefined ? undefined : groupBounds(groups).start,
+			requested: wireSpan(request.subscription.ranges ?? [{}]).start,
 		});
 		staged.commit();
 		state.fill?.(subscription);
