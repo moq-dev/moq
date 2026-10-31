@@ -460,16 +460,16 @@ impl Track {
 			self.declared = depth.map(DeclaredClock::new);
 		}
 		let pts = to_ticks(pending.frame.timestamp);
-		let arrived = pending.arrived;
+		let (arrived, bytes) = (pending.arrived, pending.frame.payload.len());
 		let item = (pending, self.source.description().cloned());
 		match &mut self.declared {
 			Some(clock) => clock.push(Some(item), pts)?,
-			None => self.clock.push(item, pts, arrived),
+			None => self.clock.push(item, pts, arrived, bytes),
 		}
 		self.release(name, jitter, false)
 	}
 
-	/// Read until a frame is due, or hold the first frame until the program tables are built.
+	/// Read within the jitter window, or hold the first frame until the program tables are built.
 	fn fill(&mut self, name: &str, waiter: &kio::Waiter, input: &mut Input<'_>) -> crate::Result<()> {
 		if self.key.name.is_empty() {
 			self.key.name = name.to_string();
@@ -481,11 +481,15 @@ impl Track {
 		// A placed frame is judged at release, against the keyframe's departure ([`Export::leads_video`]).
 		let aligned = !is_video && !self.kind.placed();
 		loop {
-			if !input.waiting_for_header && input.jitter.full(&self.key) {
+			if !input.waiting_for_header && input.jitter.full(&self.key, waiter) {
+				let _ = self.source.poll_received(waiter);
 				break;
 			}
 			match self.source.poll_event(waiter)? {
 				Poll::Ready(Some(Event::Frame { frame, arrived })) => {
+					if is_video && frame.keyframe && input.waiting_for_header {
+						tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "keyframe", now = ?moq_clock::now(), program = self.key.program, ?arrived);
+					}
 					let arrived = arrived.max(self.subscribed);
 					// The frame settles what its group's end left held, so they are ready as it lands.
 					self.latest = self.latest.max(arrived);
@@ -706,7 +710,9 @@ impl Track {
 		loop {
 			let settle = match flush {
 				true => Settle::All,
-				false => self.clock.settle(lookahead, self.latest, jitter.delay()),
+				false => self
+					.clock
+					.settle(lookahead, self.latest, jitter.delay(), jitter::MAX_BYTES),
 			};
 			let Some(((mut pending, description), dts)) = self.clock.pop(lookahead, delay, settle) else {
 				break;
@@ -777,6 +783,7 @@ impl Track {
 			skip,
 			sync,
 			leading,
+			bytes: frame.payload.len() + self.key.name.len(),
 			item: Queued {
 				frame,
 				decode,
@@ -1145,6 +1152,7 @@ impl Pack {
 /// reduces its newest complete group into the current section set, and remembers
 /// when it last hit the wire so it re-emits on its own cadence.
 struct SiTrack {
+	source: crate::Source,
 	/// The catalog's track name for this entry, so a catalog update that repoints
 	/// the entry at a different track (a restarted publisher) is detected and the
 	/// subscription rebuilt rather than left repeating the old track's sections.
@@ -1181,7 +1189,10 @@ enum SiState {
 	Subscribing(kio::Pending<moq_net::track::Subscribing>),
 	/// The resolved subscription, reading snapshot groups. Boxed: a reader is far larger
 	/// than the other states.
-	Active(Box<moq_net::track::Ordered>),
+	Active {
+		track: Box<moq_net::track::Ordered>,
+		_priority: crate::source::Priority,
+	},
 	/// The track ended or failed; the last complete snapshot keeps re-emitting,
 	/// mirroring how a real mux repeats its tables between (absent) revisions.
 	Done,
@@ -1201,6 +1212,7 @@ impl SiTrack {
 			(SiState::Done, Self::inline(entry))
 		};
 		Self {
+			source: source.clone(),
 			track: entry.track.clone(),
 			interval: entry.interval,
 			state,
@@ -1242,7 +1254,10 @@ impl SiTrack {
 			self.state = match resolved {
 				Ok((broadcast, name)) => match broadcast.track(&name) {
 					Ok(track) => SiState::Subscribing(
-						track.subscribe(moq_net::track::Subscription::default().with_max_delay(self.max_age)),
+						track.subscribe(
+							self.source
+								.subscription(moq_net::track::Subscription::default().with_max_delay(self.max_age)),
+						),
 					),
 					Err(err) => {
 						tracing::warn!(%err, track = %name, "SI track unavailable; carrying the last snapshot");
@@ -1262,12 +1277,18 @@ impl SiTrack {
 					unreachable!("just matched Subscribing");
 				};
 				match pending.poll_ok(waiter) {
-					Poll::Ready(result) => result,
+					Poll::Ready(result) => result.and_then(|track| {
+						let priority = self.source.control(track.control())?;
+						Ok((track, priority))
+					}),
 					Poll::Pending => return,
 				}
 			};
 			self.state = match resolved {
-				Ok(track) => SiState::Active(Box::new(track.ordered())),
+				Ok((track, priority)) => SiState::Active {
+					track: Box::new(track.ordered()),
+					_priority: priority,
+				},
 				Err(err) => {
 					tracing::warn!(%err, "SI subscription failed; carrying the last snapshot");
 					SiState::Done
@@ -1276,7 +1297,7 @@ impl SiTrack {
 		}
 
 		let mut ended = false;
-		if let SiState::Active(track) = &mut self.state {
+		if let SiState::Active { track, .. } = &mut self.state {
 			loop {
 				// Drain to the newest group first: a snapshot obsoletes every older
 				// one, including a partially-read pending group.
@@ -1335,7 +1356,8 @@ impl<S: Stream> Program<S>
 where
 	S::Ext: catalog::Catalog,
 {
-	fn new(source: crate::Source, catalog: S) -> Self {
+	fn new(mut source: crate::Source, catalog: S) -> Self {
+		source.isolate();
 		let instance = source.broadcast().info().epoch.clone();
 		Self {
 			id: 0,
@@ -1505,6 +1527,7 @@ where
 					}
 					tracing::warn!(%err, "replacement left before it went out, keeping the old program");
 					self.cancel_pending();
+					self.program.source.priority(0)?;
 					self.follow_until = None;
 					self.follow_timer = None;
 					break;
@@ -1569,9 +1592,14 @@ where
 
 		// Once every source has ended, the tail goes out late if it must: the end of the
 		// stream is not a missed deadline.
-		self.program
-			.schedule
-			.set_ended(!self.program.tracks.is_empty() && self.program.tracks.values().all(|track| track.finished));
+		self.program.schedule.set_ended(
+			!self.program.tracks.is_empty()
+				&& self
+					.program
+					.tracks
+					.values_mut()
+					.all(|track| track.finished || track.source.poll_received(waiter).is_ready()),
+		);
 
 		// 4. Mux each frame the jitter buffer lets go (the first carries the buffered
 		// PAT/PMT), then lay out every grid slot whose time has come ([`Self::lay_due`]).
@@ -1680,9 +1708,12 @@ where
 					self.leave(err)?;
 				}
 				if ended || self.program.retired {
-					self.program
-						.schedule
-						.set_ended(self.program.tracks.values().all(|track| track.finished));
+					self.program.schedule.set_ended(
+						self.program
+							.tracks
+							.values_mut()
+							.all(|track| track.finished || track.source.poll_received(waiter).is_ready()),
+					);
 				}
 			}
 		}
@@ -1876,7 +1907,7 @@ where
 			}
 		}
 
-		// 2. Read each source until it has a frame due, or before the program tables
+		// 2. Read each source within its jitter window, or before the program tables
 		// are built, hold one per track.
 		self.fill(waiter)?;
 
@@ -2049,7 +2080,7 @@ where
 		Ok(())
 	}
 
-	/// Read each source until it has a frame due.
+	/// Read each source within its jitter window.
 	///
 	/// Before the program tables are built, each track holds its first frame instead,
 	/// and slices that arrive before their codec config resolves are dropped: a receiver
@@ -2606,6 +2637,7 @@ where
 		if self.pending.is_some() && self.program.instance.is_some() && broadcast.info().epoch == self.program.instance
 		{
 			self.cancel_pending();
+			self.program.source.priority(0)?;
 			self.follow_until = None;
 			self.follow_timer = None;
 		}
@@ -5011,7 +5043,7 @@ mod tests {
 		let mut clock = DecodeClock::default();
 		let mut dts = vec![0; pts.len()];
 		for (i, &p) in pts.iter().enumerate() {
-			clock.push(i, p, moq_clock::Instant::ZERO);
+			clock.push(i, p, moq_clock::Instant::ZERO, 0);
 			while let Some((i, d)) = clock.pop(jitter, floor, Settle::Due) {
 				dts[i] = d;
 			}
@@ -5020,6 +5052,77 @@ mod tests {
 			dts[i] = d;
 		}
 		dts
+	}
+
+	/// A burst sharing one PTS, read at once, never settles by time or by a later PTS, so the
+	/// byte budget settles it.
+	#[test]
+	fn a_decode_clock_burst_sharing_a_pts_settles_at_the_byte_budget() {
+		const MAX_BYTES: usize = 10_000;
+		let start = moq_clock::Instant::ZERO;
+		let delay = Duration::from_millis(500);
+		let mut clock = DecodeClock::default();
+		let (mut held, mut most) = (0, 0);
+		for index in 0..1_000u32 {
+			clock.push(index, 0, start, 1_000);
+			held += 1;
+			while clock
+				.pop(90_000, 0, clock.settle(90_000, start, delay, MAX_BYTES))
+				.is_some()
+			{
+				held -= 1;
+			}
+			most = most.max(held);
+		}
+		assert!(
+			most <= 17,
+			"held {most} frames of 1,000 bytes past a {MAX_BYTES} byte budget"
+		);
+	}
+
+	/// One frame alone filling the byte budget does not settle the B-frames reordered around it:
+	/// fewer frames are held than any codec reorders.
+	#[test]
+	fn a_frame_filling_the_byte_budget_keeps_the_reorder() {
+		const MAX_BYTES: usize = 1_000_000;
+		let start = moq_clock::Instant::ZERO;
+		let delay = Duration::from_millis(500);
+		let mut clock = DecodeClock::default();
+		let mut dts = vec![0; 5];
+		let frames = [(0, 16), (4, MAX_BYTES - 8), (2, 8), (1, 8), (3, 8)];
+		for (i, (rank, bytes)) in frames.into_iter().enumerate() {
+			clock.push(i, 900_000 + rank * 18_000, start, bytes);
+			while let Some((i, d)) = clock.pop(90_000, 36_000, clock.settle(90_000, start, delay, MAX_BYTES)) {
+				dts[i] = d;
+			}
+		}
+		while let Some((i, d)) = clock.pop(90_000, 36_000, Settle::All) {
+			dts[i] = d;
+		}
+		assert_eq!(dts, [864_000, 882_000, 900_000, 918_000, 936_000]);
+	}
+
+	/// A budget filled by one frame and the reordered frames around it still counts the B-frames
+	/// already read in the reorder delay, so none decodes after it is presented.
+	#[test]
+	fn a_budget_filled_past_the_reorder_depth_keeps_the_delay() {
+		const MAX_BYTES: usize = 1_000_000;
+		let start = moq_clock::Instant::ZERO;
+		let delay = Duration::from_millis(500);
+		let ranks = [0, 4, 2, 1, 3].into_iter().chain(5..=40);
+		let mut clock = DecodeClock::default();
+		let mut dts = Vec::new();
+		for (i, rank) in ranks.enumerate() {
+			let bytes = if i == 1 { MAX_BYTES - 512 } else { 16 };
+			clock.push(i, 900_000 + rank * 3_000, start, bytes);
+			while let Some((i, d)) = clock.pop(90_000, 0, clock.settle(90_000, start, delay, MAX_BYTES)) {
+				dts.push((i, d));
+			}
+		}
+		assert_eq!(
+			dts[..5],
+			[(0, 894_000), (1, 897_000), (2, 900_000), (3, 903_000), (4, 906_000)]
+		);
 	}
 
 	/// Decode-order PTS for a constant-frame-rate display timeline with `b` B-frames between

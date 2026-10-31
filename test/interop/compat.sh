@@ -193,6 +193,13 @@ fetch() {
         bash "$DIR/interop.sh" --publishers rust --subscribers rust
 }
 
+# The released CLI's fMP4 import restamps media on its arrival clock, so its tone
+# does not start at timestamp zero and its decodes cannot be held to the tone's
+# phase (see phase_checked in interop.sh). Its readers' phase is still checked.
+live_publisher() {
+    [[ "$1" == "$RELEASED" ]] && echo 1 || echo 0
+}
+
 # Same-source cells keep exercising the compat reader while version-pairing
 # exceptions skip cross-source media. A control always uses its own binary,
 # relay, and package set, and can never be covered by a planned break.
@@ -206,7 +213,7 @@ while read -r source version <&3; do
             ;;
     esac
     cell media-control "$version" "$source" "$source" env RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$pub" INTEROP_VERSION="$version" \
-        INTEROP_COMPAT_CLIENT="$js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers rust,js-native-node
+        INTEROP_COMPAT_CLIENT="$js" INTEROP_DECODE=1 INTEROP_PUB_LIVE="$(live_publisher "$pub")" bash "$DIR/interop.sh" --subscribers rust,js-native-node
 done 3<"$HARNESS_RUN/controls"
 
 # Existing media drivers: current publisher -> released clients and the reverse,
@@ -245,7 +252,7 @@ while read -r version <&3; do
             # One cell per reader, so a planned break in one reader's release keeps the other running.
             for reader in rust js-native-node; do
                 cell "media-$reader" "$version" "$relay_source" "$source" env RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-                    INTEROP_COMPAT_CLIENT="$other_js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers "$reader"
+                    INTEROP_COMPAT_CLIENT="$other_js" INTEROP_DECODE=1 INTEROP_PUB_LIVE="$(live_publisher "$pub")" bash "$DIR/interop.sh" --subscribers "$reader"
             done
             [[ "$released_fetch" == true && "$current_fetch" == true ]] || continue
             # Drive JS publication from actual subscriber demand: the publisher's own JS
@@ -261,13 +268,13 @@ while read -r version <&3; do
     done
 done 3<"$HARNESS_RUN/shared"
 echo "session cells: $ran ran, $skipped skipped"
+if ((${#failed[@]})); then
+    printf 'FAIL %s\n' "${failed[@]}" >&2
+    exit 1
+fi
 if [[ -n "$remeasure" ]]; then
     bun "$DIR/compat/resolve.ts" remeasure "$DIR/compat/planned-breaks.json" "$HARNESS_RUN/current-help" "$HARNESS_RUN/released-help" "$HARNESS_RUN/versions.json" "$HARNESS_RUN/measured"
     bun x biome format --write "$DIR/compat/planned-breaks.json"
     echo "rewrote compat/planned-breaks.json: review the diff and refresh each reason"
-fi
-if ((${#failed[@]})); then
-    printf 'FAIL %s\n' "${failed[@]}" >&2
-    exit 1
 fi
 echo "wire compatibility: token, session, catalog, and container lanes passed"

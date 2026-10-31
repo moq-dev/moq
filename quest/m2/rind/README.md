@@ -2,7 +2,7 @@
 
 ## Goal
 
-Every MoQ crate takes its crypto from [rind](https://github.com/kixelated/rind),
+Every MoQ crate takes its crypto from [rind](https://github.com/moq-dev/rind),
 a pure-Rust fork of graviola, so no build compiles C crypto: on every release
 target, including armv7 Android, `cargo tree -e normal,build -i` finds no
 aws-lc-sys, ring, or `cc` in a crypto crate's graph. rind is MoQ's only crypto,
@@ -19,9 +19,9 @@ supersedes the m3 pure-crypto epic, which only moved moq-relay to graviola once
 upstream graviola and ACME releases made it cheap. rind owns those gaps
 instead, so every crate drops C, not just the relay.
 
-- rind lives at kixelated/rind, a GitHub fork of ctz/graviola with moq's repo
+- rind lives at moq-dev/rind, a GitHub fork of ctz/graviola with moq's repo
   setup. Its own quests live in its `quest/` tree; its
-  [MoQ coverage epic](https://github.com/kixelated/rind/blob/main/quest/m1/moq/README.md)
+  [MoQ coverage epic](https://github.com/moq-dev/rind/blob/main/quest/m1/moq/README.md)
   carries rind's plan.
 - MoQ uses rind's own API plus its adapter crates (`rind-rustls`,
   `rind-jsonwebtoken`, ...), never a ring facade through `[patch.crates-io]`,
