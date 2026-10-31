@@ -1,6 +1,6 @@
 ---
 title: Transport
-description: QUIC, WebTransport, the WebSocket fallback, raw QUIC, stream listeners, WebRTC data channels, and iroh
+description: QUIC, WebTransport, the WebSocket fallback, raw QUIC, stream listeners, and WebRTC data channels
 ---
 
 # Transport
@@ -81,32 +81,6 @@ host candidates on every interface, server-reflexive candidates from the STUN
 servers it is given, and mDNS resolution of a browser's `.local` candidates.
 The application still carries the offer, answer, and candidates; the offering
 peer connects as the MoQ client and the answering peer accepts.
-
-## iroh (peer-to-peer, experimental)
-
-[iroh](https://www.iroh.computer/) swaps "dial a hostname" for "dial a public
-key". Two native MoQ endpoints on the same network can exchange media with no
-relay, no DNS, and no certificate authority: the endpoint's key is its address
-and its TLS identity. Build `moq` from source with
-`cargo build -p moq-cli --release --features iroh,play,openh264` for native playback;
-published binaries, Docker images, and the Nix package leave iroh out.
-
-```bash
-moq --iroh-enabled --iroh-disable-relay \
-    --connect "iroh://<endpoint-id>/anon" --broadcast cam.hang play
-```
-
-Keep it on the local network. Across the internet iroh falls back to an n0
-relay that forwards opaque packets, which is a TURN-shaped hop that cannot
-cache or fan out; a [MoQ relay](/bin/relay/) is the right tool there.
-`--iroh-disable-relay` pins traffic to direct addresses but also removes hole
-punching. Discovery still publishes the endpoint's addresses to n0's DNS
-whichever way it is configured. Browsers can't use iroh at all: WebTransport
-gives a page a connection, not an endpoint.
-
-Build the relay from source with `cargo build -p moq-relay --release --features iroh`,
-then opt in with `[iroh] enabled = true` and a persisted `secret` so the
-endpoint id survives restarts. See the [config reference](/bin/relay/config#iroh).
 
 ## Custom Rust transports
 

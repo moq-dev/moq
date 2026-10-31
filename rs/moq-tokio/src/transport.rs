@@ -27,8 +27,6 @@ pub use owned::Error;
 pub enum Transport {
 	/// Raw QUIC, negotiating a MoQ ALPN directly.
 	Quic,
-	/// An Iroh QUIC connection.
-	Iroh,
 	/// A WebSocket connection using qmux framing.
 	WebSocket,
 	/// A plaintext TCP connection using qmux framing.
@@ -46,7 +44,6 @@ impl Transport {
 	pub const fn as_str(self) -> &'static str {
 		match self {
 			Self::Quic => "quic",
-			Self::Iroh => "iroh",
 			Self::WebSocket => "websocket",
 			Self::Tcp => "tcp",
 			Self::Unix => "unix",

@@ -104,7 +104,7 @@ Add `--quic-keylog` (`MOQ_QUIC_KEYLOG`, `[quic] keylog = true`) to capture them;
 ### Cluster dials build from a template (#5674)
 
 `Relay::client()` and `Cluster::with_client` are removed.
-Give the cluster `with_connect(connect, quic)`, plus `with_iroh(endpoint)` for `iroh://` peers, and build your own `moq_tokio::Client` for other outbound dials.
+Give the cluster `with_connect(connect, quic)`, and build your own `moq_tokio::Client` for other outbound dials.
 
 ### `max_streams = 0` is refused (#5871)
 
@@ -126,11 +126,6 @@ Set it to keep the old placement.
 [runtime]
 pin = true
 ```
-
-### iroh is opt-in (#5223)
-
-The default build has no iroh listener and no `--iroh-*` flags or `[iroh]` table.
-Build with `--features iroh` to keep it.
 
 ### The `noq` cargo feature is `quic`
 

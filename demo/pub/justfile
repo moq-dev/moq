@@ -71,12 +71,6 @@ ts name url='http://localhost:4443' *args:
     cargo build --bin moq
     just ffmpeg-ts "media/{{ name }}.mp4" | cargo run --bin moq -- "${@:3}" --connect "{{ url }}" --broadcast "{{ name }}.hang" import ts
 
-# Publish a video via iroh.
-iroh name url prefix="":
-    just download "{{ name }}"
-    cargo build --bin moq --features iroh
-    just ffmpeg-ts "media/{{ name }}.mp4" | cargo run --bin moq --features iroh -- --iroh-enabled --connect "{{ url }}" --broadcast "{{ prefix }}{{ name }}.hang" import ts
-
 # Generate and ingest an HLS stream from a video file.
 [positional-arguments]
 hls name relay="http://localhost:4443":

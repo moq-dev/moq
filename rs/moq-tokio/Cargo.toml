@@ -41,7 +41,6 @@ qlog = ["moq-quic?/qlog"]
 # A provider is also all it takes to sign and serve certificates, so each turns on
 # `_certs` even where there is no QUIC backend to serve them for.
 aws-lc-rs = ["_certs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "moq-quic?/rustls-aws-lc-rs"]
-iroh = ["_transport", "dep:web-transport-iroh", "dep:web-transport-proto", "dep:noq-proto", "dep:tokio-util"]
 # LAN peer discovery over mDNS (the `mdns` module).
 mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
@@ -78,10 +77,6 @@ moq-net = { workspace = true, optional = true }
 # The QUIC state machine `quic::driver` drives; the crypto-provider features pick its provider.
 moq-quic = { workspace = true, optional = true }
 moq-sock = { workspace = true }
-# iroh runs on upstream noq rather than moq-quic, and re-exports only the
-# ControllerFactory trait, not the concrete congestion configs. Version matched to
-# the copy iroh pulls in.
-noq-proto = { workspace = true, optional = true }
 notify = { version = "8", optional = true }
 pin-project-lite = { version = "0.2", optional = true }
 qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
@@ -103,13 +98,11 @@ tikv-jemalloc-ctl = { version = "0.7", optional = true }
 tikv-jemallocator = { version = "0.7", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tokio-util = { workspace = true, features = ["io"], optional = true }
 toml = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = { version = "2", features = ["serde"] }
 usage-rs = { workspace = true, features = ["config"] }
-web-transport-iroh = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
 web-transport-trait = { workspace = true, optional = true }
 x509-parser = { workspace = true }
@@ -138,7 +131,7 @@ moq-clock = { path = "../moq-clock", features = ["sim"] }
 # A bufferbloated path for the receive-credit tests and benchmark.
 moq-shaper = { path = "../moq-shaper" }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
-# rustls without a provider, as iroh builds it, so the default test build covers an
+# rustls without a provider, as another crate in the graph may build it, so the default test build covers an
 # `http://` dial's certificate fetch with no process default installed.
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
 # Sockets a test holds or inspects: which ones the process still holds, so the

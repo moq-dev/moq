@@ -83,8 +83,8 @@ Transport tuning, applied to accepted and dialed connections alike.
 congestion_control = "delay"         # "delay" (BBR, the default), "loss" (CUBIC), or "none".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
-# keep_alive = "3s"                  # Ping interval; unset derives it from the idle timeout, "0s" disables it. iroh refuses zero and keeps a separate 5s path heartbeat.
-gso = true                           # UDP segmentation offload. iroh cannot turn it off.
+# keep_alive = "3s"                  # Ping interval; unset derives it from the idle timeout, "0s" disables it.
+gso = true                           # UDP segmentation offload. Default.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 134217728           # Whole-connection window, in bytes. Default (128 MiB).
 stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
@@ -100,7 +100,6 @@ Set `keylog` only while debugging, since the file decrypts every captured sessio
 Tokio and io\_uring open the configured path at initialization. New Unix files are
 mode 0600; an existing file readable by group or others is refused without changing
 its permissions. `SSLKEYLOGFILE` does not configure native relay logging.
-Iroh currently refuses an explicit keylog path when enabled.
 
 `idle_timeout` is how long a peer that vanished without a close keeps its
 sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).
@@ -112,8 +111,7 @@ on: 3/10 of it, so 3s against the 10s default, and shorter against a peer that
 advertises a shorter `max_idle_timeout`. Changing `idle_timeout` then needs no
 matching change here. Set it only for a NAT binding that expires sooner than
 the idle timeout. A value no shorter than the negotiated idle timeout could
-never keep the connection up, so it is capped at the derived interval. iroh
-cannot see the peer's timeout, so it derives from the local `idle_timeout`.
+never keep the connection up, so it is capped at the derived interval.
 
 Raise the receive windows when a fat, long path idles below the link rate. The
 128 MiB `receive_window` default carries several Gbps at a 100 ms RTT and bounds
@@ -122,8 +120,7 @@ buffer. It has to fit the largest message, just over 64 MiB, so a smaller
 value, here or in `[limits.peer.quic]`, is refused at startup. When incomplete
 messages fill the window, the relay cancels the least urgent stream: the
 lowest subscription priority, then the group its subscription would deliver
-last. Over iroh the window bounds only
-unread data, and over WebSocket or TCP nothing bounds incomplete messages.
+last. Over WebSocket or TCP nothing bounds incomplete messages.
 `stream_receive_window` only paces one stream: its credit returns as bytes are
 read, whether or not their message is complete.
 
@@ -152,7 +149,7 @@ any other `[quic]` key is refused. They replace the `[quic]` values for a
 peer's QUIC connection once its grant is known, before the SETUP reply. Links
 the relay dials get them from the handshake on. A link carrying a whole cluster is then
 not throttled by `[quic]` limits sized for one viewer, for example
-`--limits-peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
+`--limits-peer-quic-max-streams=200000`. Peers over WebSocket or TCP keep
 their transport's own limits.
 
 These are the defaults. Each subscription and FETCH holds a stream, as does each
@@ -379,23 +376,6 @@ dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
 [Stats](/concept/stats) describes the paths, tracks, and encodings; read them
 with the [`moq-stats`](https://docs.rs/moq-stats) crate.
-
-## \[iroh]
-
-Iroh requires building the relay from source with `cargo build --release -p moq-relay --features iroh`. Published binaries, Docker images, and the Nix package leave it out.
-
-```toml
-[iroh]
-enabled = true
-secret = "./iroh-secret.key"         # Persist the key so the endpoint id survives restarts.
-# disable_relay = true               # Direct addresses only. Right on a LAN, wrong on the internet.
-```
-
-The secret path must be a regular file, not a symlink. A missing file is created
-exclusively, with mode `0600` on Unix. Existing Unix files readable by group or
-others are refused; use `chmod 600` to make an existing key private before startup.
-
-See [Transport](/concept/transport#iroh-peer-to-peer-experimental).
 
 ## Shutdown
 

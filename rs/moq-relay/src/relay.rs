@@ -256,18 +256,11 @@ impl Relay {
 		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
 		let quic_owned_elsewhere = workers_addr.is_some();
 
-		#[cfg(feature = "iroh")]
-		let iroh = config.iroh.bind(&config.quic).await?;
-
 		let mut server_config = moq_tokio::server::Config::default();
 		server_config.listen = listen;
 		server_config.tls = served;
 		server_config.quic = config.quic.clone();
 		server_config.activity = shutdown.activity.clone();
-		#[cfg(feature = "iroh")]
-		{
-			server_config.iroh = iroh.clone();
-		}
 		let server = match quic_owned_elsewhere {
 			true => server_config.init_streams()?,
 			false => server_config.init()?,
@@ -311,11 +304,6 @@ impl Relay {
 		let cluster = cluster::Cluster::new(cluster_options)?
 			.with_connect(config.connect.clone(), config.quic.clone())
 			.with_advertise(advertise);
-		#[cfg(feature = "iroh")]
-		let cluster = match iroh {
-			Some(iroh) => cluster.with_iroh(iroh),
-			None => cluster,
-		};
 		let stats = config.stats.build(cluster.origin.clone())?;
 		// The cluster takes over keeping the publish task alive, so an embedder that
 		// drops the producer keeps publishing for as long as it serves.
@@ -727,15 +715,8 @@ impl Relay {
 		let quic_on_workers = has_workers || uring_serving;
 		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
 		let quic_on_workers = has_workers;
-		// Iroh is not an `accept(2)` listener, so it never shows up in the
-		// health list; pending on the shared loop would leave its endpoint
-		// unpolled and every inbound `iroh://` connection hanging.
-		#[cfg(feature = "iroh")]
-		let has_iroh = server.iroh_endpoint().is_some();
-		#[cfg(not(feature = "iroh"))]
-		let has_iroh = false;
 		let serve_shared = {
-			let idle = quic_on_workers && server.accept_health().is_empty() && !has_iroh;
+			let idle = quic_on_workers && server.accept_health().is_empty();
 			let server = &mut server;
 			let cluster = cluster.clone();
 			let auth = auth.clone();

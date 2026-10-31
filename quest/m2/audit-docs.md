@@ -53,7 +53,7 @@ freshest. Baselines:
   the crate's first publish.
 - CLI: all 68 shell invocations in `doc/`, `README.md`, and
   `rs/moq-cli/README.md` parse with `--help` appended against a build with
-  `capture,play,transcode,iroh,openh264`, after substituting a URL for the
+  `capture,play,transcode,openh264`, after substituting a URL for the
   elided `moq ...` connect. Unknown flags fail but bad values do not.
   `gst-inspect-1.0` of a debug `moq-gst` build lists every element and pad
   property `doc/bin/gstreamer.md` names.

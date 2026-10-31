@@ -66,9 +66,6 @@ Open at the end of the m1 run:
 
 - vt100 0.17 and 0.18 (moq-cli dev-dependency) were still inside the
   cooldown (published 2026-10-18 and 19).
-- web-transport-iroh 0.8.4 takes kio 0.6, removing the kio 0.5 duplicate.
-  It shipped the day of the run, so Dependabot's cargo group should land it;
-  confirm.
 - `test/smoke/flake.lock` lands through the Smoke toolchain update workflow,
   which bumps the npm `playwright` pin with it; Dependabot auto-merge refuses
   a lock-only smoke PR. Confirm those coupled PRs land.
@@ -88,8 +85,8 @@ Advisories waiting on upstream:
   (also removing vulnerable esbuild). Remove each override when its parent,
   remark-cli/unified-args, `@tailwindcss/typography`, or VitePress, declares
   a safe dependency range. The root and Worker lockfiles audit clean.
-- paste (RUSTSEC-2024-0436) remains through tikv-jemalloc-ctl and iroh's
-  netlink-packet-core 0.8. tikv-jemallocator's unreleased main drops it.
+- paste (RUSTSEC-2024-0436) remains through tikv-jemalloc-ctl.
+  tikv-jemallocator's unreleased main drops it.
 
 ### Baselines (2026-10-20, m1 run)
 
@@ -114,8 +111,7 @@ locks have none. Most duplicates are ecosystem transitions owned upstream:
   webpki-roots 0.26). winit 0.30 holds rustix 0.38, x11rb 0.13, and objc2 0.5
   until 0.31 leaves beta.
 - gstreamer 0.25 moved to system-deps 9; libspa (PipeWire) still holds 7.
-- Our own crates: web-transport-iroh 0.8.3 holds kio 0.5 (see above),
-  moq-vaapi holds bindgen 0.70, libloading 0.8, and thiserror 1, and mp4-atom
+- Our own crates: moq-vaapi holds bindgen 0.70, libloading 0.8, and thiserror 1, and mp4-atom
   holds thiserror 1.
 - Bun has no dedupe, so same-major duplicates (`@babel/types`,
   `@vue/shared`, `minimatch`, `picomatch`, `yaml`) persist until a parent

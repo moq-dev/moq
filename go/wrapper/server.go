@@ -15,8 +15,6 @@ type Transport = ffi.MoqTransport
 const (
 	// TransportQUIC is a session that arrived over native QUIC.
 	TransportQUIC = ffi.MoqTransportQuic
-	// TransportIroh is a session that arrived over an Iroh peer-to-peer connection.
-	TransportIroh = ffi.MoqTransportIroh
 	// TransportWebSocket is a session that arrived over the WebSocket fallback transport.
 	TransportWebSocket = ffi.MoqTransportWebSocket
 	// TransportTCP is a session that arrived over a plaintext TCP connection.

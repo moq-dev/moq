@@ -381,7 +381,7 @@ impl Client {
 				tracing::warn!(url = %RedactedUrl::new(&fingerprint), "performing insecure HTTP request for certificate");
 
 				// Even a plaintext fetch builds reqwest's TLS stack, which panics without a
-				// process default when another crate (iroh) builds it as `rustls-no-provider`.
+				// process default when another crate in the graph builds it as `rustls-no-provider`.
 				// An error only means one is already installed.
 				let _ = crate::crypto::install_default();
 
@@ -867,7 +867,7 @@ mod tests {
 	}
 
 	/// The certificate fetch goes out without a process-default crypto provider installed,
-	/// even when reqwest is built with rustls but no provider (as iroh builds it).
+	/// even when reqwest is built with rustls but no provider.
 	#[tokio::test]
 	async fn http_dial_needs_no_installed_provider() {
 		use tokio::io::{AsyncReadExt, AsyncWriteExt};

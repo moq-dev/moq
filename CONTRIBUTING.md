@@ -84,7 +84,7 @@ Focus on the core problem, offering a potential solution only if it's obvious.
 
 # Forks
 
-`rs/moq-quic` is our hard fork of quinn, the QUIC stack MoQ builds on; iroh keeps upstream noq.
+`rs/moq-quic` is our hard fork of quinn, the QUIC stack MoQ builds on.
 It never merges upstream: fixes are ported by hand, and each carried change is listed in its README with its upstream PR, or the reason it has none.
 For an advisory against Quinn, follow the advisory triage in [`rs/moq-quic/README.md`](rs/moq-quic/README.md).
 

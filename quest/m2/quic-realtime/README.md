@@ -10,7 +10,7 @@ delay where BBR3 builds a standing queue, accepting lower throughput against
 competing loss-based flows. This is for teleoperation uplinks (drones, robots)
 over cellular and radio links, where a standing queue is control latency.
 
-Browsers, iroh/noq peers, and every other egress keep their controller.
+Browsers and every other egress keep their controller.
 Without the extension, `Realtime` falls back to BBR3.
 
 ## Plan
@@ -58,8 +58,7 @@ Remaining work once the candidates finish (this README's own job):
 - Ship the winner as `Realtime` in moq-tokio and moq-uring, mapped through
   `MoqCongestionControl` in moq-ffi and every binding in the cross-package
   sync table, and a `congestion-control` property on `moqsink` forwarded
-  into its QUIC config (moq-gst has no CLI or TOML loader). iroh maps
-  `Realtime` to BBR3 (noq has no extension).
+  into its QUIC config (moq-gst has no CLI or TOML loader).
 - Delete the losing candidates' code.
 - Wire the winner's moq-shaper run into the nightly so a regression in
   queuing delay shows up.
