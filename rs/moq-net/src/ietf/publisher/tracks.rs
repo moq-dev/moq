@@ -252,6 +252,9 @@ struct Listed {
 	/// On draft-18, claims the track's one subscription for as long as the PUBLISH lives.
 	subscribed: Option<Subscribed>,
 	params: Params,
+	/// The listing request's token, if it named one: the PUBLISH is held to that grant alone,
+	/// as the listing is, and ends with it.
+	token: Option<crate::auth::RequestGrant>,
 }
 
 /// How a paused PUBLISH subscription resumes forwarding.
@@ -843,6 +846,7 @@ impl Publisher {
 						slot: self.subscriptions.hold(),
 						subscribed,
 						params: request.params,
+						token: gate.token_observer(),
 					};
 					entries.listed.insert(name, entry);
 					let this = self.clone();
@@ -885,6 +889,7 @@ impl Publisher {
 			slot,
 			subscribed,
 			mut params,
+			token,
 		} = task;
 		let _slot = slot;
 		let _subscribed = subscribed;
@@ -941,6 +946,9 @@ impl Publisher {
 		written?;
 
 		let mut gate = crate::auth::Gate::new(self.auth.clone(), namespace.clone(), crate::auth::Direction::Publish);
+		if let Some(token) = token {
+			gate.bind(token);
+		}
 		let mut finished = false;
 		let mut goaways = super::super::request_stream::Messages::new(self.session.clone(), self.control.client());
 
@@ -2556,6 +2564,48 @@ mod tests {
 			auth.granted(0, crate::auth::Grant::all());
 			let (mut stream, ..) = h.publish().await;
 			publish_ok(&mut stream).await;
+		}
+	}
+
+	/// A listing its own token admitted holds the PUBLISHes it sends to that token too: they
+	/// outlast a session scope that never covered them, and end once the token is revoked.
+	#[moq_clock::test]
+	async fn a_listing_token_holds_its_publishes() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let mut h = harness(version);
+			let auth = crate::auth::Link::new(false);
+			auth.handle().authorize(&crate::auth::Grant::default());
+			let mut requests = auth.handle().requests();
+			h.publisher = h.publisher.clone().with_auth(auth.clone());
+
+			let mut msg = listing(false);
+			msg.authorization_token = Some(crate::ietf::token::RequestToken(crate::setup::Token {
+				kind: 0,
+				value: b"listing".to_vec(),
+			}));
+			let mut request = h.request(&msg).await;
+			let issued = timeout(requests.next())
+				.await
+				.unwrap()
+				.accept(crate::auth::Grant::all());
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let (mut first, ..) = h.publish().await;
+			let (mut second, ..) = h.publish().await;
+			publish_ok(&mut first).await;
+			publish_ok(&mut second).await;
+			for stream in [&mut first, &mut second] {
+				assert!(
+					moq_clock::timeout(Duration::from_millis(50), stream.reader.varint())
+						.await
+						.is_err(),
+					"{version}: the PUBLISH was held to the session scope"
+				);
+			}
+
+			issued.revoke(crate::SessionError::Unauthorized, "revoked");
+			for stream in [&mut first, &mut second] {
+				assert_eq!(next(stream).await.0, ietf::PublishDone::ID, "{version}");
+			}
 		}
 	}
 

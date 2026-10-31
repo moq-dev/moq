@@ -920,7 +920,10 @@ impl Link {
 		let token = Bytes::from(token.value);
 		let (lifetime, fresh) = self.with_state(|state, id| {
 			let link = attached(&mut state.links, id);
-			if let Some(lifetime) = link.request_tokens.get(&token).and_then(std::sync::Weak::upgrade) {
+			// A verdict the acceptor already finished with is not shared: the token verifies again.
+			if let Some(lifetime) = link.request_tokens.get(&token).and_then(std::sync::Weak::upgrade)
+				&& !lifetime.issue.read().done
+			{
 				return (lifetime, false);
 			}
 			let lifetime = std::sync::Arc::new(RequestLifetime {
@@ -2598,7 +2601,8 @@ impl Gate {
 				Direction::Subscribe => token.grant.publish.clone(),
 			}
 		});
-		version += token.epoch;
+		// The token ending empties the limit, so it counts as a change too.
+		version += token.epoch + u64::from(ended);
 		if version == *epoch {
 			return Poll::Pending;
 		}
@@ -3433,6 +3437,28 @@ mod request_token_tests {
 		assert_eq!(later.grant().await.unwrap(), Grant::default());
 	}
 
+	/// A request naming a token whose grant the acceptor already dropped verifies it again,
+	/// rather than sharing the finished verdict with a naming request still on its way out.
+	#[moq_clock::test]
+	async fn a_token_the_acceptor_dropped_verifies_again() {
+		let handle = Link::new(true);
+		let mut requests = handle.handle().requests();
+		let first = handle.verify_request(token(b"shared", 0), None);
+		let issued = requests.next().await.unwrap().accept(Grant::all());
+		first.grant().await.unwrap();
+		drop(issued);
+		let later = handle.verify_request(token(b"shared", 0), None);
+		let _issued = requests.next().await.unwrap().accept(Grant::default());
+		assert_eq!(later.grant().await.unwrap(), Grant::default());
+		drop(first);
+		let again = handle.verify_request(token(b"shared", 0), None);
+		assert!(
+			requests.poll_next(&kio::Waiter::noop()).is_pending(),
+			"the live verdict is shared"
+		);
+		assert_eq!(again.grant().await.unwrap(), Grant::default());
+	}
+
 	#[moq_clock::test]
 	async fn every_naming_request_observes_updates_revocation_and_expiry() {
 		for revoke in [false, true] {
@@ -3543,6 +3569,32 @@ mod request_token_tests {
 		drop(gate);
 		assert!(matches!(issued.closed().await, Error::Cancel));
 		assert!(observer.poll_ended(&kio::Waiter::noop()).is_ready());
+	}
+
+	/// A gate bound to a token reports the token ending as a permit that allows nothing, so a
+	/// caller reading permits alone stops too.
+	#[moq_clock::test]
+	async fn a_bound_token_ending_is_a_new_permit() {
+		let runtime = crate::time::sim();
+		let handle = Link::new(true);
+		handle.handle().authorize(&Grant::all());
+		let mut requests = handle.handle().requests();
+		let mut gate = Gate::new(handle.clone(), crate::Path::default(), Direction::Publish).discovery();
+		let verdict = gate.verify(token(b"room", 0), None);
+		let issued = requests.next().await.unwrap().accept(subscribe_only("room"));
+		let answer = verdict.grant().await;
+		gate.admit(&runtime, (verdict, answer)).unwrap();
+		let mut epoch = 0;
+		let Poll::Ready(permit) = gate.poll_permit(&mut epoch, &kio::Waiter::noop()) else {
+			panic!("no initial permit");
+		};
+		assert!(permit.matches("room/alice"));
+		issued.revoke(SessionError::Unauthorized, "revoked");
+		let Poll::Ready(permit) = gate.poll_permit(&mut epoch, &kio::Waiter::noop()) else {
+			panic!("the token's end went unreported");
+		};
+		assert!(!permit.matches("room/alice"));
+		assert!(gate.poll_permit(&mut epoch, &kio::Waiter::noop()).is_pending());
 	}
 
 	#[moq_clock::test]
