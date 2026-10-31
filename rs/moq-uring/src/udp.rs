@@ -2400,8 +2400,9 @@ mod tests {
 		drop(sock);
 		assert!(weak.upgrade().is_some(), "the receive is still armed");
 
+		// Even a future that is ready on its first poll cannot return past it.
 		let err = worker
-			.block_on(std::future::pending::<()>())
+			.block_on(std::future::ready(()))
 			.expect_err("the cancel failure surfaces");
 		assert!(
 			matches!(&err, Error::Io(err) if err.raw_os_error() == Some(libc::EBADF)),

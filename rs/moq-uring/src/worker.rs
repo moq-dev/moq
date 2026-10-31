@@ -214,6 +214,11 @@ impl Worker {
 			for task in spawns {
 				self.tasks.push(task);
 			}
+			// A failure recorded between calls (or as the last call's future
+			// resolved) surfaces before a ready future can return past it.
+			if let Some(err) = self.shared.failed.take() {
+				return Err(err.into());
+			}
 
 			let cx = Context::from_waker(&waker);
 			let waiter = self.park.hold(&cx);
