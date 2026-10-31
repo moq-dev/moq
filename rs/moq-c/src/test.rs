@@ -6783,8 +6783,9 @@ fn listen(cb: &Callback) -> (u32, String, String) {
 	(server, addr, fingerprint)
 }
 
-/// Dial `url`, pinning `fingerprint`, with `consume` receiving the peer's broadcasts.
-fn dial_pinned(url: &str, fingerprint: &str, consume: u32, user_data: *mut c_void) -> u32 {
+/// Dial `url`, pinning `fingerprint`, announcing `publish` to the peer and with `consume`
+/// receiving the peer's broadcasts.
+fn dial_pinned(url: &str, fingerprint: &str, publish: u32, consume: u32, user_data: *mut c_void) -> u32 {
 	let fingerprints = [moq_str(fingerprint)];
 	let mut config = client_config();
 	config.tls_fingerprints = fingerprints.as_ptr();
@@ -6796,7 +6797,7 @@ fn dial_pinned(url: &str, fingerprint: &str, consume: u32, user_data: *mut c_voi
 			url.as_ptr() as *const c_char,
 			url.len(),
 			&config,
-			0,
+			publish,
 			consume,
 			Some(state_callback),
 			user_data,
@@ -6805,6 +6806,10 @@ fn dial_pinned(url: &str, fingerprint: &str, consume: u32, user_data: *mut c_voi
 }
 
 /// Received routes expose each traversed origin in order, rather than an empty local path.
+///
+/// The relay accepts both sessions, as a relay server does: a server asks its peer about
+/// everything, while a client session asks only about what a local reader watches, which
+/// a session forwarding the relay's origin downstream is not.
 #[test]
 fn announce_route_hops_cross_a_relay_session() {
 	let source = id(moq_origin_create());
@@ -6819,13 +6824,13 @@ fn announce_route_hops_cross_a_relay_session() {
 	let url = format!("https://{addr}/");
 
 	let upstream_client_cb = States::new();
-	let upstream_client = dial_pinned(&url, &fingerprint, relay, upstream_client_cb.ptr);
+	let upstream_client = dial_pinned(&url, &fingerprint, source, 0, upstream_client_cb.ptr);
 	let upstream_cb = States::new();
 	let upstream = id(unsafe {
-		moq_session_request_accept(id(server_cb.recv()), source, 0, Some(state_callback), upstream_cb.ptr)
+		moq_session_request_accept(id(server_cb.recv()), 0, relay, Some(state_callback), upstream_cb.ptr)
 	});
 	let downstream_client_cb = States::new();
-	let downstream_client = dial_pinned(&url, &fingerprint, sink, downstream_client_cb.ptr);
+	let downstream_client = dial_pinned(&url, &fingerprint, 0, sink, downstream_client_cb.ptr);
 	let downstream_cb = States::new();
 	let downstream = id(unsafe {
 		moq_session_request_accept(id(server_cb.recv()), relay, 0, Some(state_callback), downstream_cb.ptr)
@@ -6891,6 +6896,7 @@ fn server_accepts_a_session() {
 	let client = dial_pinned(
 		&format!("https://{addr}/room?jwt=abc"),
 		&fingerprint,
+		0,
 		received,
 		client_cb.ptr,
 	);
@@ -7002,7 +7008,7 @@ fn server_rejects_a_session() {
 	let (server, addr, fingerprint) = listen(&server_cb);
 
 	let client_cb = States::new();
-	let client = dial_pinned(&format!("https://{addr}/"), &fingerprint, 0, client_cb.ptr);
+	let client = dial_pinned(&format!("https://{addr}/"), &fingerprint, 0, 0, client_cb.ptr);
 
 	let request = id(server_cb.recv());
 	let mut path = moq_str("x");
