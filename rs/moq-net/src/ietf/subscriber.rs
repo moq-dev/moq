@@ -3377,7 +3377,7 @@ impl Subscriber {
 		// none and the copy keeps the ones it learned. Before that the answer declares them
 		// again. A pause holds these too, so a later resume still knows DYNAMIC_GROUPS.
 		let properties = match &resumed {
-			Some(idle) if held.is_none() && !properties_wanted && ietf::Filter::is_draft22(self.version) => {
+			Some(idle) if held.is_none() && !properties_wanted && ietf::Filter::is_draft20(self.version) => {
 				idle.properties.clone()
 			}
 			_ => properties,
