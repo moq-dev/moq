@@ -26,7 +26,7 @@ function origin(paths: string[]): Origin.Producer {
 function broadcast(name: string, paths: string[] = [name]): { source: Broadcast; owner: Origin.Producer } {
 	const owner = origin(paths);
 	const source = new Broadcast({
-		origin: owner,
+		origin: owner.consume(),
 		name: Path.from(name),
 		enabled: true,
 		follow: false,

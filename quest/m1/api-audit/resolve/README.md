@@ -1,4 +1,4 @@
-# Two broadcast resolutions
+# [M] Two broadcast resolutions
 
 ## Goal
 
@@ -49,10 +49,6 @@ across languages, the required Nix gate, and all-language interop
 Public API: breaking task shape in moq-net; behavior changes in `@moq/net` and
 the bindings. The method and epoch renames broke every wrapper.
 Wire: none.
-
-## Required
-
-- [The player takes any read-side origin](/quest/m1/api-audit/resolve/watch-origin.md) - `@moq/watch`'s `Player` and `Broadcast` accept a read-only `Origin.Consumer` as well as a `Table`
 
 ## Related
 
