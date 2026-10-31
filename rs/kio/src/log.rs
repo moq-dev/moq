@@ -10,12 +10,13 @@
 //! it, so it either sees the entry or is woken by the guard that appended it.
 //!
 //! Entries live in segments whose slots never move, doubling from one slot to 64, so a
-//! one-entry log holds one slot. Eviction advances the base and retires each segment
-//! wholly below it. A reader holds nothing between reads: it reads through a [`Read`],
-//! which pins the log only while it lives. A retired segment is freed once every pin
-//! taken before its retirement is gone (epoch-based reclamation), so eviction frees
-//! memory whatever readers do, and a reader that stopped reading finds its entries
-//! [`Evicted`] when it comes back.
+//! one-entry log holds one slot. Eviction advances the base, retires each segment
+//! wholly below it, and moves the evicted entries out of a segment it leaves live. A
+//! reader holds nothing between reads: it reads through a [`Read`], which pins the log
+//! only while it lives. A retired segment, or a moved-out entry, is freed once every pin
+//! taken before its eviction is gone (epoch-based reclamation), so eviction frees memory
+//! whatever readers do, and a reader that stopped reading finds its entries [`Evicted`]
+//! when it comes back.
 
 use std::{
 	alloc::{self, Layout},
@@ -60,6 +61,12 @@ struct Segment<T> {
 	capacity: usize,
 	/// Slots written so far, from the first. Only the writer stores it, after the slot.
 	filled: AtomicUsize,
+	/// Leading slots whose entries eviction already handed to the collector to drop, while
+	/// the segment still held later ones. Only the writer stores it.
+	taken: AtomicUsize,
+	/// Owners of the allocation: the writer until it retires the segment, and each
+	/// pending drop of entries evicted from it. The last one frees it.
+	owners: AtomicUsize,
 	/// The segment after this one, set before anything is written into it.
 	next: AtomicPtr<Segment<T>>,
 	/// Read by every reader access and written by the free, so loom flags a reader that
@@ -96,6 +103,8 @@ impl<T> Segment<T> {
 				start,
 				capacity,
 				filled: AtomicUsize::new(0),
+				taken: AtomicUsize::new(0),
+				owners: AtomicUsize::new(1),
 				next: AtomicPtr::new(ptr::null_mut()),
 				#[cfg(loom)]
 				alive: UnsafeCell::new(()),
@@ -149,26 +158,62 @@ impl<T> Segment<T> {
 		}
 	}
 
-	/// Drop the written entries and free the segment.
+	/// Drop the written entries in `range`, in place.
 	///
 	/// # Safety
 	///
-	/// No reader can reach `segment` any more, and this is its only free.
+	/// `segment` is live, every slot in `range` is written, no reader can reach them any
+	/// more, and this is their only drop.
+	unsafe fn drop_entries(segment: NonNull<Self>, range: std::ops::Range<usize>) {
+		for at in range {
+			// SAFETY: written and unreachable, per the caller.
+			unsafe { (*Self::slot(segment, at)).with_mut(|value| (*value).assume_init_drop()) };
+		}
+	}
+
+	/// Drop the entries eviction didn't already hand over, and give up the writer's
+	/// ownership.
+	///
+	/// # Safety
+	///
+	/// No reader can reach `segment` any more, and this is its only retirement.
 	unsafe fn free(segment: NonNull<Self>) {
-		// SAFETY: the segment is live until the dealloc below, and nothing else uses it.
+		// SAFETY: live until the release below, and the writer stored both counts before
+		// retiring it.
 		unsafe {
 			let header = segment.as_ref();
+			let (taken, filled) = (
+				header.taken.load(Ordering::Acquire),
+				header.filled.load(Ordering::Acquire),
+			);
+			Self::drop_entries(segment, taken..filled);
+			Self::release(segment);
+		}
+	}
+
+	/// Give up one ownership, freeing the segment if it was the last. Its entries were
+	/// all dropped already.
+	///
+	/// # Safety
+	///
+	/// The caller owns `segment` and touches it no more.
+	unsafe fn release(segment: NonNull<Self>) {
+		// SAFETY: live while the caller owns it.
+		let header = unsafe { segment.as_ref() };
+		// Release so the last owner's free comes after every other owner's drops.
+		if header.owners.fetch_sub(1, Ordering::Release) != 1 {
+			return;
+		}
+		fence(Ordering::Acquire);
+		// SAFETY: the last owner, so nothing else uses the segment.
+		unsafe {
 			#[cfg(loom)]
 			header.alive.with_mut(|_| ());
-			let (capacity, filled) = (header.capacity, header.filled.load(Ordering::Acquire));
+			let capacity = header.capacity;
 			for at in 0..capacity {
 				let slot = Self::slot(segment, at).cast_mut();
 				// A write access even to an empty slot, so loom flags any read racing it.
-				(*slot).with_mut(|value| {
-					if at < filled {
-						(*value).assume_init_drop();
-					}
-				});
+				(*slot).with_mut(|_| ());
 				ptr::drop_in_place(slot);
 			}
 			ptr::drop_in_place(segment.as_ptr());
@@ -182,6 +227,13 @@ impl<T> Segment<T> {
 
 /// A retired segment on its way to the epoch collector.
 struct Retired<T>(NonNull<Segment<T>>);
+
+/// Entries evicted from a live segment, on their way to the epoch collector, which
+/// drops them in place and then gives up their hold on the segment.
+struct Taken<T>(NonNull<Segment<T>>, std::ops::Range<usize>);
+
+// SAFETY: whichever thread runs the collector drops the entries, which `T: Send` allows.
+unsafe impl<T: Send> Send for Taken<T> {}
 
 // SAFETY: whichever thread frees the segment drops its entries, which `T: Send` allows.
 unsafe impl<T: Send> Send for Retired<T> {}
@@ -331,6 +383,7 @@ impl<T: Send + Sync + 'static> Writer<T> {
 			segment.start + segment.filled.load(Ordering::Relaxed) as u64 <= index
 		});
 		if evicted == 0 {
+			self.take_evicted(index);
 			return;
 		}
 		let head = self
@@ -348,6 +401,43 @@ impl<T: Send + Sync + 'static> Writer<T> {
 			self.heap -= Segment::<T>::heap(unsafe { segment.as_ref() }.capacity);
 		}
 		Self::retire(retired);
+		self.take_evicted(index);
+	}
+
+	/// Hand the entries evicted from the oldest live segment to the epoch collector,
+	/// dropping them in place once no read pinned before the base moved can reach them,
+	/// rather than when the whole segment retires: an entry can be large, and the segment
+	/// holds up to 64. They stay in their slots until then, so a read still borrowing one
+	/// sees it whole, interior mutability included.
+	fn take_evicted(&mut self, index: u64) {
+		let Some(&segment) = self.segments.first() else {
+			return;
+		};
+		// SAFETY: the writer's segments are live.
+		let header = unsafe { segment.as_ref() };
+		let taken = header.taken.load(Ordering::Relaxed);
+		let end = (index.saturating_sub(header.start) as usize).min(header.filled.load(Ordering::Relaxed));
+		if end <= taken {
+			return;
+		}
+		// The pending drop owns the segment too, so a retirement before it runs can't free
+		// the slots under it. Relaxed: the writer still owns it.
+		header.owners.fetch_add(1, Ordering::Relaxed);
+		header.taken.store(end, Ordering::Release);
+		let guard = epoch::pin();
+		let entries = Taken(segment, taken..end);
+		// SAFETY: below the base, which is stored first, so only a read pinned before this
+		// can still reach them, and the collector waits those out. The segment's free
+		// skips them, and the ownership taken above keeps it allocated. `T: 'static`.
+		unsafe {
+			guard.defer_unchecked(move || {
+				let Taken(segment, range) = entries;
+				Segment::drop_entries(segment, range);
+				Segment::release(segment);
+			});
+		}
+		// Hand the garbage to the collector now rather than when this thread's bag fills.
+		guard.flush();
 	}
 
 	/// Hand segments no reader can reach any more to the epoch collector.
@@ -564,9 +654,14 @@ impl<T> Read<'_, T> {
 
 #[cfg(all(test, not(loom)))]
 mod test {
-	use std::sync::Arc as StdArc;
+	use std::sync::{Arc as StdArc, Mutex};
 
 	use super::*;
+
+	// Crossbeam shares its collector across logs. Keep unrelated tests from holding
+	// pins or queuing garbage while another test checks reclamation. Nextest isolates
+	// tests in processes, but libtest runs them concurrently in one process.
+	static COLLECTOR: Mutex<()> = Mutex::new(());
 
 	/// The `[start, end)` of each live segment, oldest first.
 	fn layout<T: Send + Sync + 'static>(writer: &Writer<T>) -> Vec<(u64, u64)> {
@@ -578,8 +673,7 @@ mod test {
 			.collect()
 	}
 
-	/// Run the epoch collector until whatever was retired is freed. Each test runs in its
-	/// own process, so no other thread holds a pin.
+	/// Drive reclamation without unrelated pins or garbage, under `COLLECTOR`.
 	fn collect() {
 		for _ in 0..8 {
 			epoch::pin().flush();
@@ -594,6 +688,7 @@ mod test {
 	/// reader that started before any of them existed or one that jumps.
 	#[test]
 	fn reads_every_entry_across_segments() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
 		assert_eq!(get(&mut reader, 0), Ok(None));
@@ -618,6 +713,7 @@ mod test {
 	/// is allocated.
 	#[test]
 	fn segments_double_up_to_the_largest() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::<u64>::new(0);
 		assert_eq!(writer.heap(), Writer::<u64>::SHARED);
 		writer.reserve();
@@ -655,6 +751,7 @@ mod test {
 	/// A segment's heap is its allocation's real size.
 	#[test]
 	fn heap_matches_layout() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let header = Layout::new::<Segment<StdArc<()>>>();
 		let slots = Layout::array::<Slot<StdArc<()>>>(4).unwrap();
 		let layout = header.extend(slots).unwrap().0.pad_to_align();
@@ -664,6 +761,7 @@ mod test {
 	/// A log can start past zero; nothing below its start is readable.
 	#[test]
 	fn starts_past_zero() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(10);
 		let mut reader = writer.reader();
 		writer.push("a");
@@ -676,6 +774,7 @@ mod test {
 	/// [`Evicted`] rather than a stale entry, even in the segment it last read.
 	#[test]
 	fn eviction_retires_whole_segments() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
 		for i in 0..10u64 {
@@ -705,6 +804,7 @@ mod test {
 	/// and that reader finds them evicted if it does.
 	#[test]
 	fn eviction_frees_whatever_readers_do() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let entry = StdArc::new(());
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
@@ -722,6 +822,7 @@ mod test {
 	/// A read in progress keeps what it can reach until it ends.
 	#[test]
 	fn a_read_outlasts_eviction() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let entry = StdArc::new(());
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
@@ -740,6 +841,7 @@ mod test {
 	/// entry, though the segment it last read was cut off from the new one.
 	#[test]
 	fn a_read_spans_a_full_eviction() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
 		writer.push(0u64);
@@ -756,6 +858,7 @@ mod test {
 	/// misread.
 	#[test]
 	fn evicting_the_tail_starts_a_new_segment() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
 		for i in 0..2u64 {
@@ -780,9 +883,66 @@ mod test {
 		}
 	}
 
+	/// Evicting part of a segment drops those entries once no read can reach them, not
+	/// when the whole segment retires, and never drops one twice.
+	#[test]
+	fn evicting_inside_a_segment_drops_its_entries() {
+		let _collector = COLLECTOR.lock().unwrap();
+		let mut writer = Writer::new(0);
+		let entries: Vec<_> = (0..6).map(Arc::new).collect();
+		for entry in &entries {
+			writer.push(entry.clone());
+		}
+		// Segments of 1, 2, and 4 slots: the last holds entries 3 to 5 of its 4.
+		writer.evict(4);
+		writer.evict(5);
+		for _ in 0..64 {
+			epoch::pin().flush();
+		}
+		for (index, entry) in entries.iter().enumerate() {
+			let held = usize::from(index >= 5);
+			assert_eq!(Arc::strong_count(entry), 1 + held, "entry {index}");
+		}
+		drop(writer);
+		for _ in 0..64 {
+			epoch::pin().flush();
+		}
+		assert!(entries.iter().all(|entry| Arc::strong_count(entry) == 1));
+	}
+
+	/// A read that still holds an evicted entry may mutate it through interior
+	/// mutability, and the entry dropped later is the one it mutated, not a stale copy.
+	#[test]
+	fn an_evicted_entry_a_read_still_holds_drops_as_mutated() {
+		let _collector = COLLECTOR.lock().unwrap();
+		let mut writer = Writer::new(0);
+		let held = StdArc::new(());
+		for _ in 0..3 {
+			writer.push(Mutex::new(vec![held.clone()]));
+		}
+		let mut reader = writer.reader();
+		let mut read = reader.read();
+		// Segments of 1 and 2 slots: entry 1 shares the second with entry 2.
+		let entry = read.get(1).unwrap().unwrap();
+		writer.evict(2);
+		let taken = std::mem::take(&mut *entry.lock().unwrap());
+		drop(read);
+		drop(taken);
+		for _ in 0..64 {
+			epoch::pin().flush();
+		}
+		assert_eq!(StdArc::strong_count(&held), 2, "only entry 2 still holds it");
+		drop(writer);
+		for _ in 0..64 {
+			epoch::pin().flush();
+		}
+		assert_eq!(StdArc::strong_count(&held), 1);
+	}
+
 	/// Evicting past the end skips those indices: the next entry lands at the new base.
 	#[test]
 	fn evicting_past_the_end_skips() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
 		writer.reserve();
@@ -801,6 +961,7 @@ mod test {
 	/// A clone reads independently from where the original's segment was.
 	#[test]
 	fn clones_read_independently() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
 		for i in 0..20u64 {
@@ -817,6 +978,7 @@ mod test {
 	/// alive for it.
 	#[test]
 	fn reader_outlives_writer() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let entry = StdArc::new(());
 		let mut writer = Writer::new(0);
 		let mut reader = writer.reader();
@@ -835,6 +997,7 @@ mod test {
 	/// it evicts behind them.
 	#[test]
 	fn concurrent_readers_see_every_entry() {
+		let _collector = COLLECTOR.lock().unwrap();
 		let mut writer = Writer::new(0);
 		let readers: Vec<_> = (0..4)
 			.map(|_| {

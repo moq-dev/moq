@@ -85,7 +85,16 @@ moq --connect https://relay.example.com/rooms/1 --connect-token "$TOKEN" --broad
 The `ts`, `fmp4`, and `flv` imports publish the input's own timestamps, mapped
 to the wall time the first frame arrived. A timeline that rewinds, such as a
 restarted encoder or a looping file wrapping to the top, ends the import with
-an error; run it again to publish anew. A flagged MPEG-TS discontinuity that
+an error; run it again to publish anew. `import ts` and `import srt` republish
+instead when an MPEG-TS clock steps onto another timeline: the PCR and every
+stream stepping back, flagged or not, or more than 10 s forward without a
+`discontinuity_indicator`. The broadcast finishes there, and the rest of the
+input publishes as a new instance under a new
+[epoch](/concept/moq-lite#publisher-epochs), on the same SRT connection, which
+`export ts --stitch --follow` carries on into. An unflagged step usually means
+redundant encoders behind a changeover switch: time-lock their clocks, or have
+the switch set `discontinuity_indicator`. `--program all` and `--passthrough`
+still end at a rewind. A flagged MPEG-TS discontinuity that
 jumps forward continues the broadcast and is declared on the exported clock.
 MPEG-TS timestamps follow their source history across the 33-bit wrap
 (every 26.5 hours), including files imported faster than real time and flagged
@@ -501,10 +510,11 @@ arrives or the replacement goes, keeping the old publisher playing meanwhile,
 so even the default `--follow 0s` switches to a replacement that is still
 starting. After the catalog arrives, the old instance keeps feeding for up to
 `--follow` while the replacement acquires its clock and first usable media.
-The marked switch then drops the old instance's buffered tail, so the
-replacement plays at `--delay` rather than behind it. A replacement usable
-within that window adds no gap to the output; one still acquiring when it runs
-out, such as on a link too slow to carry both instances, starts after a gap.
+Its subscriptions take lower priority so the replacement can acquire on a
+congested link. The marked switch drops the old instance's buffered tail, so
+the replacement plays at `--delay` rather than behind it. An unimpaired switch
+usable within that window adds no gap. Congestion can starve the old instance
+sooner or leave the replacement acquiring past the window, causing a gap.
 Timestamps across epochs are not aligned. Without `--stitch` the export stays
 on the old publisher while it is up. Only lite-07 and moq-transport sessions
 carry epochs, so on the

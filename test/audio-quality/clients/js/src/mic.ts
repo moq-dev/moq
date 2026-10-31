@@ -1,5 +1,6 @@
 /**
- * The publisher page for the microphone trace: the demo's `<moq-publish>` capturing audio only.
+ * The publisher page for the microphone trace: the demo's `<moq-publish>` publishing audio only
+ * (`invisible` still opens the camera, but nothing encodes it).
  *
  * Whatever device Chromium offers is captured through the element's real path (getUserMedia, the
  * capture worklet, WebCodecs Opus), so the trace carries a browser publisher's own cadence. Under
