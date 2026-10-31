@@ -16,13 +16,14 @@ categories = ["cryptography", "multimedia", "network-programming"]
 [dependencies]
 aws-lc-rs = { workspace = true }
 bytes = { workspace = true }
-hex = { workspace = true }
+data-encoding = { workspace = true }
 kio = { workspace = true }
 moq-net = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+hex = { workspace = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

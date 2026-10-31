@@ -13,7 +13,7 @@ use crate::scope::Scope;
 /// A grouped frame whose signature verified.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
-	/// Presentation timestamp, or `None` when untimed. Not signed.
+	/// Presentation timestamp at the track's timescale, or `None` when untimed. Signed.
 	pub timestamp: Option<moq_net::Timestamp>,
 	/// The application bytes, without the signature.
 	pub payload: Bytes,
@@ -43,8 +43,16 @@ impl Producer {
 	/// A net error if the group is closed, the timestamp does not match the track, or the
 	/// signed frame exceeds the frame size limit.
 	pub fn write_frame(&mut self, timestamp: impl Into<Option<moq_net::Timestamp>>, payload: &[u8]) -> Result<()> {
+		// Signed at the track's timescale, the value the net group stores and every hop carries.
+		// A frame whose timedness disagrees with the track is left for the write to refuse.
+		let timestamp = match (timestamp.into(), self.inner.timescale()) {
+			(Some(at), Some(timescale)) => Some(at.convert(timescale).map_err(|_| moq_net::Error::TimestampMismatch)?),
+			(timestamp, _) => timestamp,
+		};
 		let frame = self.inner.frame_count() as u64;
-		let body = self.scope.sign(&self.key, self.inner.sequence, frame, payload);
+		let body = self
+			.scope
+			.sign(&self.key, self.inner.sequence, frame, timestamp, payload);
 		self.inner.write_frame(timestamp, body)?;
 		Ok(())
 	}
@@ -121,7 +129,10 @@ impl Consumer {
 		// The cursor already advanced past the frame, so a group resumed above frame 0 still
 		// verifies at the index the publisher signed.
 		let index = inner.index() - 1;
-		match self.scope.verify(&self.key, self.sequence, index, frame.payload) {
+		match self
+			.scope
+			.verify(&self.key, self.sequence, index, frame.timestamp, frame.payload)
+		{
 			Ok(payload) => Poll::Ready(Ok(Some(Frame {
 				timestamp: frame.timestamp,
 				payload,

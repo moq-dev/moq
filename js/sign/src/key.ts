@@ -4,6 +4,7 @@
  * @module
  */
 import { Failure } from "./failure.ts";
+import * as ZBase32 from "./zbase32.ts";
 
 const KEY_LEN = 32;
 const ED25519 = { name: "Ed25519" } as const;
@@ -15,8 +16,9 @@ const PKCS8_PREFIX = Uint8Array.from([
 /**
  * An endpoint's Ed25519 public key, which is also its endpoint ID.
  *
- * Its text form is the 64-character lowercase hex of the key, the form iroh displays. Parsing
- * accepts only that form, so one key has exactly one ID to name a path by.
+ * Its text form is the 52-character z-base-32 of the key, the form pkarr and iroh's DNS
+ * discovery use, which is also a valid DNS label. Parsing accepts only that form (lowercase,
+ * zero trailing bits), so one key has exactly one ID to name a path by.
  */
 export class PublicKey {
 	#bytes: Uint8Array<ArrayBuffer>;
@@ -32,10 +34,11 @@ export class PublicKey {
 		return new PublicKey(Uint8Array.from(bytes));
 	}
 
-	/** Parse an endpoint ID; throws {@link Failure} `key` unless it is 64 lowercase hex characters. */
+	/** Parse an endpoint ID; throws {@link Failure} `key` unless it is 52 z-base-32 characters. */
 	static parse(text: string): PublicKey {
-		if (!/^[0-9a-f]{64}$/.test(text)) throw new Failure("key");
-		return new PublicKey(Uint8Array.from(text.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16)));
+		const bytes = ZBase32.decode(text, KEY_LEN);
+		if (!bytes) throw new Failure("key");
+		return new PublicKey(bytes);
 	}
 
 	/** Whether `other` is the same key. */
@@ -43,9 +46,9 @@ export class PublicKey {
 		return this.#bytes.every((byte, i) => byte === other.#bytes[i]);
 	}
 
-	/** The endpoint ID: 64 lowercase hex characters. */
+	/** The endpoint ID: 52 z-base-32 characters. */
 	toString(): string {
-		return Array.from(this.#bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+		return ZBase32.encode(this.#bytes);
 	}
 
 	/** Whether `signature` is this key's Ed25519 signature over `message`. @internal */

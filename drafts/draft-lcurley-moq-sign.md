@@ -18,8 +18,13 @@ author:
 
 normative:
   moql: I-D.lcurley-moq-lite
-  RFC4648:
   RFC8032:
+  zbase32:
+    title: "Human-oriented base-32 encoding"
+    author:
+      - fullname: Zooko Wilcox-O'Hearn
+    date: 2002
+    target: https://philzimmermann.com/docs/human-oriented-base-32-encoding.txt
 
 informative:
   moqt: I-D.ietf-moq-transport
@@ -27,11 +32,14 @@ informative:
   iroh:
     title: "iroh"
     target: https://github.com/n0-computer/iroh
+  pkarr:
+    title: "Pkarr: Public-Key Addressable Resource Records"
+    target: https://github.com/pubky/pkarr
 
 --- abstract
 
 This document specifies moq-sign-00, a versioned profile that authenticates MoQ application payloads with a per-frame Ed25519 signature.
-A publisher signs each grouped frame with its endpoint key, binding the broadcast path, the publisher epoch, the track, the group, and the frame index.
+A publisher signs each grouped frame with its endpoint key, binding the broadcast path, the publisher epoch, the track, the group, the frame index, and the frame's timestamp.
 A subscriber that expects that key delivers a frame only after its signature verifies, so a relay can forward and cache content without forging, replaying, or relocating it.
 
 --- note_Note_to_Readers
@@ -53,6 +61,10 @@ This profile lets a subscriber check that every frame it delivers came from the 
 A signature per frame costs 64 bytes and one verification, and adds no delay beyond receiving the whole frame: no hash chain or checkpoint has to arrive first.
 The profile provides authenticity, not confidentiality; {{e2ee}} encrypts payloads and can be layered beneath it.
 
+The profile uses public-key signatures rather than a symmetric MAC or AEAD tag.
+A symmetric key, as in {{e2ee}}, is shared by everyone who verifies, so any subscriber holding it could forge frames that every other subscriber accepts.
+A signature verifies under the publisher's public key alone, so only the holder of the secret key can produce one, whoever else reads the broadcast.
+
 
 # Profile Version
 This document defines profile `moq-sign-00`.
@@ -62,8 +74,9 @@ Both ends agree on the profile out of band; a subscriber MUST NOT accept unsigne
 # Endpoint Key {#key}
 A publisher holds an Ed25519 key pair ({{RFC8032}}).
 The 32-byte public key is the endpoint ID.
-Its text form is the lowercase base16 encoding ({{RFC4648}} Section 8) of the key: 64 characters, the form {{iroh}} displays.
-An implementation MUST refuse other text, including uppercase, so one key has exactly one ID.
+Its text form is the z-base-32 encoding ({{zbase32}}) of the key, most significant bit first and without padding: 52 characters, the form {{pkarr}} and {{iroh}}'s DNS discovery use, and a valid DNS label.
+The last character carries one bit of the key; its remaining four bits MUST be zero.
+An implementation MUST refuse other text, including uppercase, nonzero trailing bits, and other encodings of the key such as hex, so one key has exactly one ID.
 
 The key identifies an endpoint for as long as the endpoint exists.
 An implementation MUST NOT replace a stored key that fails to load; that would silently change the endpoint's identity.
@@ -82,6 +95,8 @@ message = "moq-sign-00"
           || bytes(track)
           || u64(group)
           || u64(frame)
+          || u64(timescale)
+          || u64(timestamp)
           || payload
 ~~~
 
@@ -92,6 +107,7 @@ A relay may mount a broadcast under another prefix, so this is the application's
 **epoch**:
 The UUID text of the publisher instance's epoch, carried on the broadcast's route ({{moql}}).
 A publisher instance MUST sign under an epoch it minted and no other instance has used.
+The epoch names one sequence space: a publisher that restarts its group sequences signs under a new one.
 
 **track**:
 The UTF-8 track name.
@@ -104,11 +120,19 @@ The group sequence.
 The frame's index within its group.
 moq-lite numbers frames from 0 in write order; on MoQ Transport this is the Object ID, which a publisher assigns contiguously from zero.
 
+**timescale**:
+The track's timescale in units per second, or 0 for an untimed track.
+No timescale is 0, so an untimed frame cannot be confused with a timed one.
+
+**timestamp**:
+The frame's presentation timestamp at the track's timescale, as the transport carries it, or 0 for an untimed track.
+A publisher signs the value after any conversion to the track's timescale, so the subscriber verifies against exactly what it receives.
+
 **payload**:
 The application bytes.
 
 Each length prefix keeps one field's bytes from shifting into the next.
-Timestamps and other frame properties are not signed.
+Other frame properties are not signed.
 
 
 # Frame Body {#body}
@@ -129,25 +153,36 @@ Other groups of the track continue, since each verifies on its own.
 
 A subscriber that cannot learn the broadcast's epoch from its route MUST refuse to read it (`epoch`).
 
+Every hop between the publisher and the subscriber must carry the route's epoch and each frame's timestamp and timescale unchanged; in {{moql}} that is moq-lite-07.
+A hop that cannot, such as a moq-lite-05 or -06 hop that stamps an untimed frame with its send time, causes `signature` failures rather than a frame delivered with the wrong time.
+
 Datagrams are not covered by this profile; a subscriber MUST NOT deliver datagrams from a track it reads under it.
 
 
 # Test Vectors {#vectors}
 Known-answer and negative vectors live in `moq-sign-00.json` beside this draft.
-Hex strings are octet sequences.
-The file covers key derivation from a seed, including {{RFC8032}} Section 7.1 TEST 1; signed messages and bodies for an empty payload, groups and frame indices above 32 bits, an empty path, and a non-ASCII track; relocation across every identity field, including a byte shifted between two fields; a wrong key; tampered payloads and signatures; truncated, extended, and empty bodies; and endpoint ID text that MUST be refused.
+Hex strings are octet sequences, and `endpoint` strings are endpoint ID text.
+The file covers key derivation from a seed, including {{RFC8032}} Section 7.1 TEST 1, and each key's endpoint ID; signed messages and bodies for an empty payload, groups, frame indices, and timestamps above 32 bits, an empty path, a non-ASCII track, and a timed frame; relocation across every identity field, including a byte shifted between two fields, a timestamp rescaled to the same instant, and a timestamp added to or dropped from a frame; a wrong key; tampered payloads and signatures; truncated, extended, and empty bodies; and endpoint ID text that MUST be refused.
 
 
 # Security Considerations
 Relays, caches, and recorders are untrusted for content.
 The publisher's secret key is trusted; anyone holding it can sign as that endpoint.
 
-The signature binds every field a relay could otherwise change to move an authentic frame: the path, the epoch, the track, the group, and the frame index.
+The signature binds every field a relay could otherwise change to move or retime an authentic frame: the path, the epoch, the track, the group, the frame index, and the timestamp.
 Binding the epoch keeps a frame from an earlier instance of the same broadcast, which restarted its sequences, from verifying in a later one.
+Binding the timestamp keeps a relay from changing when a frame presents.
 
-A relay can still delay, drop, or reorder groups, end a group after any frame, and rewrite timestamps.
-Nothing authenticates where a group ends, so an application MUST NOT treat a group's end as authentic.
+Any subscriber can verify but none can sign, so subscribers that share a broadcast cannot forge frames to each other, as they could with a shared symmetric key.
+
+A relay can still delay, drop, or reorder groups.
 A relay that presents a wrong epoch only causes `signature` failures.
+
+## Group End {#group-end}
+Nothing authenticates where a group ends: a relay can end a group after any frame, and the subscriber sees an ordinary end of group.
+MoQ already lets a relay drop the tail of a group, for example when it falls behind the subscriber's delivery deadline, so the profile does not try to prevent it.
+An application MUST NOT treat a group's end as proof that it received every frame the publisher wrote.
+One that needs a complete group, such as a byte stream reading the end as a clean close, signs its own end marker as the group's last frame.
 
 A relay can observe everything a signature does not hide: paths, epochs, track names, payloads, sizes, and timing.
 
@@ -166,4 +201,4 @@ This document requests no registrations.
 ## draft-lcurley-moq-sign-00
 {:numbered="false"}
 
-- Initial `moq-sign-00` profile: Ed25519 endpoint keys with a lowercase hex ID, a message binding path, epoch, track, group, and frame index, a payload-then-signature frame body, group-ending failures, and shared vectors.
+- Initial `moq-sign-00` profile: Ed25519 endpoint keys with a z-base-32 ID, a message binding path, epoch, track, group, frame index, and timestamp, a payload-then-signature frame body, group-ending failures, an unauthenticated group end, and shared vectors.

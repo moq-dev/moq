@@ -12,12 +12,12 @@ Relays forward and cache signed frames; they cannot forge, replay, or relocate t
 
 ## Shape
 
-An endpoint's `SecretKey` signs; its `PublicKey` is the endpoint ID, displayed as 64 lowercase
-hex characters. `SecretKey.generate()` keeps the private half a nonextractable `CryptoKey`.
+An endpoint's `SecretKey` signs; its `PublicKey` is the endpoint ID, displayed as 52 z-base-32
+characters (a DNS label). `SecretKey.generate()` keeps the private half a nonextractable `CryptoKey`.
 
 `Broadcast.Producer` wraps the `@moq/net` broadcast, mints a fresh epoch, and signs each frame
-over the application path, epoch, track, group, and frame index. Announce the broadcast with that
-epoch on its route:
+over the application path, epoch, track, group, frame index, and timestamp (rounded to the
+track's timescale, as the wire carries it). Announce the broadcast with that epoch on its route:
 
 ```ts
 import { Broadcast, SecretKey } from "@moq/sign";
@@ -38,7 +38,9 @@ group.finish();
 A subscriber wraps the broadcast an origin resolved in a `Broadcast.Consumer` with the key it
 expects and the same application path; it takes the epoch from the route. A frame reaches the
 application only after it verifies. A forged or relocated frame ends its group with `Failure`
-code `signature`, and the track keeps delivering other groups.
+code `signature`, and the track keeps delivering other groups. Every hop must carry the epoch and
+timestamps unchanged, which means moq-lite-07. A group's end is not signed: a relay may drop a
+group's tail, as MoQ already allows.
 
 ## Processing
 

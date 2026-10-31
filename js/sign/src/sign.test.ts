@@ -76,7 +76,8 @@ test("frames roundtrip signed, timestamps included", async () => {
 
 	const group = video.appendGroup();
 	await group.writeFrame(Time.Timestamp.fromMillis(1), encoder.encode("keyframe"));
-	await group.writeFrame(Time.Timestamp.fromMillis(2), new Uint8Array());
+	// Signed at the track's scale, rounded as the wire rounds it.
+	await group.writeFrame(Time.Timestamp.fromMicros(2_400), new Uint8Array());
 
 	const consumer = await published.consume(key.public);
 	expect(consumer.epoch).toBe(published.signed.epoch);
@@ -85,7 +86,10 @@ test("frames roundtrip signed, timestamps included", async () => {
 	const first = await received?.readFrame();
 	expect(decoder.decode(first?.payload)).toBe("keyframe");
 	expect(first?.timestamp?.as(Time.Timescale.MILLI)).toBe(1);
-	expect(await payload(received)).toBe("");
+	const second = await received?.readFrame();
+	expect(second?.payload.byteLength).toBe(0);
+	expect(second?.timestamp?.value).toBe(2);
+	expect(second?.timestamp?.scale).toBe(Time.Timescale.MILLI);
 
 	await group.writeFrame(Time.Timestamp.fromMillis(3), encoder.encode("late"));
 	group.finish();

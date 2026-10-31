@@ -1,6 +1,6 @@
 // Every vector in drafts/moq-sign-00.json, run against the internal primitives.
 import { expect, test } from "bun:test";
-import { Epoch, type Path } from "@moq/net";
+import { Epoch, type Path, Time } from "@moq/net";
 import { Failure } from "./failure.ts";
 import { PublicKey, SecretKey } from "./key.ts";
 import { Scope } from "./scope.ts";
@@ -27,22 +27,31 @@ function scope(row: Row): Scope {
 	return new Scope(String(row.path) as Path.Valid, Epoch.parse(String(row.epoch)), String(row.track));
 }
 
+// A row's timestamp at its timescale, or undefined when the timescale is 0 (untimed).
+function timestamp(row: Row): Time.Timestamp | undefined {
+	const scale = Number(row.timescale);
+	return scale === 0 ? undefined : new Time.Timestamp(Number(row.timestamp), Time.Timescale(scale));
+}
+
 test("keys", async () => {
 	for (const row of vectors.keys) {
-		const key = await SecretKey.fromSeed(unhex(row.seed));
-		expect(key.public.toString()).toBe(String(row.public));
-		expect(PublicKey.parse(String(row.public)).equals(key.public)).toBe(true);
+		const endpoint = PublicKey.parse(String(row.endpoint));
+		expect(endpoint.equals(PublicKey.fromBytes(unhex(row.public)))).toBe(true);
+		expect(endpoint.toString()).toBe(String(row.endpoint));
+		if (row.seed !== undefined) {
+			expect((await SecretKey.fromSeed(unhex(row.seed))).public.equals(endpoint)).toBe(true);
+		}
 	}
 });
 
 test("frames", async () => {
 	for (const row of vectors.frames) {
 		const s = scope(row);
-		const [group, frame] = [Number(row.group), Number(row.frame)];
-		expect(hex(s.message(group, frame, unhex(row.payload)))).toBe(String(row.message));
-		const body = await s.sign(await SecretKey.fromSeed(unhex(row.seed)), group, frame, unhex(row.payload));
+		const [group, frame, at] = [Number(row.group), Number(row.frame), timestamp(row)];
+		expect(hex(s.message(group, frame, at, unhex(row.payload)))).toBe(String(row.message));
+		const body = await s.sign(await SecretKey.fromSeed(unhex(row.seed)), group, frame, at, unhex(row.payload));
 		expect(hex(body)).toBe(String(row.body));
-		const payload = await s.verify(PublicKey.parse(String(row.public)), group, frame, unhex(row.body));
+		const payload = await s.verify(PublicKey.parse(String(row.endpoint)), group, frame, at, unhex(row.body));
 		expect(hex(payload)).toBe(String(row.payload));
 	}
 });
@@ -50,13 +59,28 @@ test("frames", async () => {
 test("negative", async () => {
 	for (const row of vectors.negative) {
 		const verified = scope(row).verify(
-			PublicKey.parse(String(row.public)),
+			PublicKey.parse(String(row.endpoint)),
 			Number(row.group),
 			Number(row.frame),
+			timestamp(row),
 			unhex(row.body),
 		);
 		await expect(verified).rejects.toEqual(new Failure("signature"));
 	}
+});
+
+test("a fractional timestamp never verifies", async () => {
+	const row = vectors.frames.find((frame) => frame.id === "timed");
+	if (!row) throw new Error("expected the timed vector");
+	const at = new Time.Timestamp(Number(row.timestamp) + 0.5, Time.Timescale(Number(row.timescale)));
+	const verified = scope(row).verify(
+		PublicKey.parse(String(row.endpoint)),
+		Number(row.group),
+		Number(row.frame),
+		at,
+		unhex(row.body),
+	);
+	await expect(verified).rejects.toEqual(new Failure("signature"));
 });
 
 test("invalid ids", () => {

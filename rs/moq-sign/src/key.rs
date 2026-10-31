@@ -13,14 +13,29 @@ use crate::scope::SIGNATURE_LEN;
 /// Ed25519 key length in bytes, for both the secret seed and the public key.
 const KEY_LEN: usize = 32;
 
+/// z-base-32: most significant bit first, no padding, trailing bits must be zero.
+static ZBASE32: std::sync::LazyLock<data_encoding::Encoding> = std::sync::LazyLock::new(|| {
+	let mut spec = data_encoding::Specification::new();
+	spec.symbols.push_str("ybndrfg8ejkmcpqxot1uwisza345h769");
+	spec.encoding().expect("a valid z-base-32 specification")
+});
+
 /// An endpoint's Ed25519 public key, which is also its endpoint ID.
 ///
-/// Its text form is the 64-character lowercase hex of the key, the form iroh displays. Parsing
-/// accepts only that form, so one key has exactly one ID to name a path by.
+/// Its text form is the 52-character [z-base-32] of the key, the form pkarr and iroh's DNS
+/// discovery use, which is also a valid DNS label. Parsing accepts only that form (lowercase,
+/// zero trailing bits), so one key has exactly one ID to name a path by.
+///
+/// [z-base-32]: https://philzimmermann.com/docs/human-oriented-base-32-encoding.txt
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PublicKey([u8; KEY_LEN]);
 
 impl PublicKey {
+	#[cfg(test)]
+	pub(crate) fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
+		Self(bytes)
+	}
+
 	/// Whether `signature` is this key's Ed25519 signature over `message`.
 	pub(crate) fn verify(&self, message: &[u8], signature: &[u8; SIGNATURE_LEN]) -> bool {
 		UnparsedPublicKey::new(&ED25519, &self.0)
@@ -29,9 +44,9 @@ impl PublicKey {
 	}
 }
 
-/// The text is not the 64-character lowercase hex of a 32-byte key.
+/// The text is not the 52-character z-base-32 of a 32-byte key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("invalid key: expected 64 lowercase hex characters")]
+#[error("invalid key: expected 52 z-base-32 characters")]
 #[non_exhaustive]
 pub struct InvalidKey;
 
@@ -39,13 +54,13 @@ impl FromStr for PublicKey {
 	type Err = InvalidKey;
 
 	fn from_str(text: &str) -> Result<Self, Self::Err> {
-		Ok(Self(parse_hex(text)?))
+		Ok(Self(decode(text)?))
 	}
 }
 
 impl fmt::Display for PublicKey {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str(&hex::encode(self.0))
+		f.write_str(&ZBASE32.encode(&self.0))
 	}
 }
 
@@ -55,13 +70,14 @@ impl fmt::Debug for PublicKey {
 	}
 }
 
-/// Decode exactly 64 lowercase hex characters, refusing uppercase so a key has one text form.
-fn parse_hex(text: &str) -> Result<[u8; KEY_LEN], InvalidKey> {
-	if text.len() != KEY_LEN * 2 || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-		return Err(InvalidKey);
-	}
+/// Decode exactly 52 z-base-32 characters. The alphabet is lowercase-only and nonzero trailing
+/// bits are refused, so a key has one text form.
+fn decode(text: &str) -> Result<[u8; KEY_LEN], InvalidKey> {
 	let mut out = [0u8; KEY_LEN];
-	hex::decode_to_slice(text, &mut out).map_err(|_| InvalidKey)?;
+	match ZBASE32.decode_len(text.len()) {
+		Ok(KEY_LEN) => ZBASE32.decode_mut(text.as_bytes(), &mut out).map_err(|_| InvalidKey)?,
+		_ => return Err(InvalidKey),
+	};
 	Ok(out)
 }
 
@@ -101,7 +117,7 @@ impl SecretKey {
 
 	/// Load the key stored at `path`, or generate one and store it there if the file is missing.
 	///
-	/// The file holds the seed as 64 lowercase hex characters and a newline, created with mode
+	/// The file holds the seed as 52 z-base-32 characters and a newline, created with mode
 	/// `0600`. A key is never replaced implicitly: an existing file that does not parse, or that
 	/// other users can read, is an error rather than a reason to generate a new identity.
 	///
@@ -127,7 +143,9 @@ impl SecretKey {
 			Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Self::load(path),
 			Err(err) => return Err(err),
 		};
-		let mut text = Zeroizing::new(hex::encode(key.0.seed.as_ref()));
+		// Sized up front, so appending the newline never leaves an unzeroized copy behind.
+		let mut text = Zeroizing::new(String::with_capacity(ZBASE32.encode_len(KEY_LEN) + 1));
+		ZBASE32.encode_append(key.0.seed.as_ref(), &mut text);
 		text.push('\n');
 		file.write_all(text.as_bytes())?;
 		file.sync_all()?;
@@ -148,11 +166,11 @@ impl SecretKey {
 		}
 		let mut text = Zeroizing::new(String::new());
 		io::Read::read_to_string(&mut &file, &mut text)?;
-		let hex = text.strip_suffix('\n').unwrap_or(&text);
-		let seed = parse_hex(hex).map_err(|_| {
+		let encoded = text.strip_suffix('\n').unwrap_or(&text);
+		let seed = decode(encoded).map_err(|_| {
 			io::Error::new(
 				io::ErrorKind::InvalidData,
-				format!("key file {} is not 64 lowercase hex characters", path.display()),
+				format!("key file {} is not 52 z-base-32 characters", path.display()),
 			)
 		})?;
 		Ok(Self::from_seed(Zeroizing::new(seed)))

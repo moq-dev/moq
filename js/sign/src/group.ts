@@ -3,7 +3,7 @@
  *
  * @module
  */
-import type { Group as NetGroup, Time } from "@moq/net";
+import { type Group as NetGroup, Time } from "@moq/net";
 import { Failure } from "./failure.ts";
 import type { PublicKey, SecretKey } from "./key.ts";
 import type { Pump } from "./pump.ts";
@@ -11,7 +11,7 @@ import type { Scope } from "./scope.ts";
 
 /** A grouped frame whose signature verified. */
 export interface Frame {
-	/** Presentation timestamp, or `undefined` when untimed. Not signed. */
+	/** Presentation timestamp at the track's timescale, or `undefined` when untimed. Signed. */
 	timestamp?: Time.Timestamp;
 	/** The application bytes, without the signature. */
 	payload: Uint8Array;
@@ -23,6 +23,8 @@ export interface Writer {
 	pump: Pump;
 	key: SecretKey;
 	scope: Scope;
+	// The track's timescale, which every timestamp is signed at; undefined when untimed.
+	timescale?: Time.Timescale;
 	// Set by release or abort: no new writes, including on existing groups.
 	closed: boolean;
 	aborted?: Error;
@@ -68,11 +70,17 @@ export class Producer {
 	async writeFrame(timestamp: Time.Timestamp | undefined, payload: Uint8Array): Promise<void> {
 		if (this.#closed || this.#writer.closed) throw this.#writer.aborted ?? new Error("group is closed");
 		const owned = payload.slice();
+		// Signed at the track's timescale, rounded as the wire rounds it, and written that way so a
+		// local reader sees the signed value too. A frame whose timedness disagrees with the track
+		// is left for the net write to refuse.
+		const scale = this.#writer.timescale;
+		const at =
+			timestamp && scale !== undefined ? new Time.Timestamp(Math.round(timestamp.as(scale)), scale) : timestamp;
 		return this.#writer.pump.run(async () => {
 			this.#check();
-			const body = await this.#writer.scope.sign(this.#writer.key, this.sequence, this.#next, owned);
+			const body = await this.#writer.scope.sign(this.#writer.key, this.sequence, this.#next, at, owned);
 			this.#check();
-			this.#inner.writeFrame({ payload: body, timestamp });
+			this.#inner.writeFrame({ payload: body, timestamp: at });
 			this.#next += 1;
 		});
 	}
@@ -142,7 +150,13 @@ export class Consumer {
 		if (!frame) return undefined;
 		// The frame's transport index, so a group resumed above frame 0 still verifies.
 		try {
-			const payload = await this.#scope.verify(this.#key, this.sequence, frame.sequence, frame.payload);
+			const payload = await this.#scope.verify(
+				this.#key,
+				this.sequence,
+				frame.sequence,
+				frame.timestamp,
+				frame.payload,
+			);
 			return { timestamp: frame.timestamp, payload };
 		} catch (err) {
 			if (err instanceof Failure) {

@@ -2,9 +2,9 @@
 //!
 //! Implements profile `moq-sign-00` from [draft-lcurley-moq-sign]. A publisher signs every
 //! grouped frame with its endpoint's [`SecretKey`], binding the broadcast path, its publisher
-//! epoch, the track, the group, and the frame index. A subscriber hands a frame to the
-//! application only after it verifies against the [`PublicKey`] it expects, so a relay can
-//! proxy and cache without forging, replaying, or splicing content.
+//! epoch, the track, the group, the frame index, and the timestamp. A subscriber hands a frame
+//! to the application only after it verifies against the [`PublicKey`] it expects, so a relay
+//! can proxy and cache without forging, replaying, retiming, or splicing content.
 //!
 //! [draft-lcurley-moq-sign]: https://datatracker.ietf.org/doc/draft-lcurley-moq-sign/
 //!

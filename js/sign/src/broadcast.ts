@@ -40,7 +40,8 @@ export class Producer {
 	/** Create a track whose frames are signed; throws the net error if the broadcast already holds it. */
 	createTrack(name: string, info: Partial<NetTrack.Info> = {}): Track.Producer {
 		const inner = this.#inner.createTrack(name, info);
-		return Track.Producer.make(inner, this.#key, new Scope(this.#path, this.epoch, name));
+		const timescale = info.timescale ?? undefined;
+		return Track.Producer.make(inner, this.#key, new Scope(this.#path, this.epoch, name), timescale);
 	}
 
 	/** End the wrapped broadcast, as `@moq/net`'s `close` does. Idempotent. */

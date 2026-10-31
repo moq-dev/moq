@@ -26,25 +26,37 @@ fn public(value: &Value) -> PublicKey {
 	value.as_str().unwrap().parse().unwrap()
 }
 
-/// A vector row's identity: its scope, group, and frame.
-fn identity(row: &Value) -> (Arc<Scope>, u64, u64) {
+/// A vector row's identity: its scope, group, frame, and timestamp (timescale 0 when untimed).
+fn identity(row: &Value) -> (Arc<Scope>, u64, u64, Option<moq_net::Timestamp>) {
 	let path = moq_net::Path::new(row["path"].as_str().unwrap()).unwrap();
 	let epoch = row["epoch"].as_str().unwrap().parse().unwrap();
 	let scope = Scope::new(&path, &epoch, row["track"].as_str().unwrap());
-	(scope, row["group"].as_u64().unwrap(), row["frame"].as_u64().unwrap())
+	let timestamp = match row["timescale"].as_u64().unwrap() {
+		0 => None,
+		scale => Some(moq_net::Timestamp::from_scale(row["timestamp"].as_u64().unwrap(), scale).unwrap()),
+	};
+	(
+		scope,
+		row["group"].as_u64().unwrap(),
+		row["frame"].as_u64().unwrap(),
+		timestamp,
+	)
 }
 
 #[test]
 fn vector_keys() {
 	for row in vectors()["keys"].as_array().unwrap() {
-		let key = seed(&row["seed"]);
+		let id = &row["id"];
+		let endpoint = public(&row["endpoint"]);
 		assert_eq!(
-			key.public().to_string(),
-			row["public"].as_str().unwrap(),
-			"{}",
-			row["id"]
+			endpoint,
+			PublicKey::from_bytes(hex(&row["public"]).try_into().unwrap()),
+			"{id}"
 		);
-		assert_eq!(key.public(), public(&row["public"]));
+		assert_eq!(endpoint.to_string(), row["endpoint"].as_str().unwrap(), "{id}");
+		if !row["seed"].is_null() {
+			assert_eq!(seed(&row["seed"]).public(), endpoint, "{id}");
+		}
 	}
 }
 
@@ -52,12 +64,18 @@ fn vector_keys() {
 fn vector_frames() {
 	for row in vectors()["frames"].as_array().unwrap() {
 		let id = &row["id"];
-		let (scope, group, frame) = identity(row);
+		let (scope, group, frame, timestamp) = identity(row);
 		let payload = hex(&row["payload"]);
-		assert_eq!(scope.message(group, frame, &payload), hex(&row["message"]), "{id}");
-		let body = scope.sign(&seed(&row["seed"]), group, frame, &payload);
+		assert_eq!(
+			scope.message(group, frame, timestamp, &payload),
+			hex(&row["message"]),
+			"{id}"
+		);
+		let body = scope.sign(&seed(&row["seed"]), group, frame, timestamp, &payload);
 		assert_eq!(body.as_ref(), hex(&row["body"]), "{id}");
-		let opened = scope.verify(&public(&row["public"]), group, frame, body).unwrap();
+		let opened = scope
+			.verify(&public(&row["endpoint"]), group, frame, timestamp, body)
+			.unwrap();
 		assert_eq!(opened.as_ref(), payload, "{id}");
 	}
 }
@@ -65,9 +83,9 @@ fn vector_frames() {
 #[test]
 fn vector_negative() {
 	for row in vectors()["negative"].as_array().unwrap() {
-		let (scope, group, frame) = identity(row);
+		let (scope, group, frame, timestamp) = identity(row);
 		let body = Bytes::from(hex(&row["body"]));
-		let result = scope.verify(&public(&row["public"]), group, frame, body);
+		let result = scope.verify(&public(&row["endpoint"]), group, frame, timestamp, body);
 		assert_eq!(row["error"], "signature");
 		assert!(matches!(result, Err(Error::Signature)), "{}", row["id"]);
 	}
@@ -97,6 +115,16 @@ fn key_file_persists_and_never_rotates() {
 	}
 	let loaded = SecretKey::load_or_generate(&path).unwrap();
 	assert_eq!(created.public(), loaded.public());
+	// The seed as 52 z-base-32 characters and a newline.
+	let text = std::fs::read_to_string(&path).unwrap();
+	let encoded = text.strip_suffix('\n').unwrap();
+	assert_eq!(encoded.len(), 52);
+	assert!(
+		encoded
+			.bytes()
+			.all(|b| b"ybndrfg8ejkmcpqxot1uwisza345h769".contains(&b)),
+		"{text}"
+	);
 
 	// A damaged file is an error, never a reason to mint a new identity.
 	std::fs::write(&path, "not a key\n").unwrap();
@@ -122,6 +150,7 @@ fn debug_redacts_the_seed() {
 	let key = SecretKey::from_seed(Zeroizing::new([0x42; 32]));
 	let debug = format!("{key:?}");
 	assert!(!debug.contains(&"42".repeat(32)), "{debug}");
+	assert!(debug.contains("<redacted>"), "{debug}");
 	assert!(debug.contains(&key.public().to_string()));
 }
 
@@ -210,8 +239,9 @@ async fn roundtrip_through_an_origin() {
 	group
 		.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"keyframe")
 		.unwrap();
+	// Signed at the track's scale, which the net group converts it to.
 	group
-		.write_frame(moq_net::Timestamp::from_millis(2).unwrap(), b"")
+		.write_frame(moq_net::Timestamp::from_micros(2_400).unwrap(), b"")
 		.unwrap();
 	group.finish().unwrap();
 
@@ -219,7 +249,9 @@ async fn roundtrip_through_an_origin() {
 	let first = received.read_frame().await.unwrap().unwrap();
 	assert_eq!(first.payload, &b"keyframe"[..]);
 	assert_eq!(first.timestamp, Some(moq_net::Timestamp::from_millis(1).unwrap()));
-	assert_eq!(read(&mut received).await.unwrap().unwrap(), &b""[..]);
+	let second = received.read_frame().await.unwrap().unwrap();
+	assert_eq!(second.payload, &b""[..]);
+	assert_eq!(second.timestamp, Some(moq_net::Timestamp::from_millis(2).unwrap()));
 	assert_eq!(read(&mut received).await.unwrap(), None);
 }
 
@@ -392,7 +424,8 @@ fn bun(input: Value) -> Value {
 	serde_json::from_slice(&output.stdout).unwrap()
 }
 
-/// Rust-signed groups verify in JS and a relocated one does not; JS-signed groups verify in Rust.
+/// Rust-signed groups verify in JS and a relocated or retimed one does not; JS-signed groups
+/// verify in Rust, timestamps included.
 #[test]
 #[ignore = "requires Bun; run by just test interop"]
 fn sign_interop() {
@@ -404,47 +437,88 @@ fn sign_interop() {
 
 	let payloads: [&[u8]; 3] = [b"zero", b"", &[0xff; 300]];
 	let expected: Vec<String> = payloads.iter().map(hex::encode).collect();
-	// A group's bodies as Rust signs them at `signed_as`, delivered at `group`.
-	let sign_group = |group: u64, signed_as: u64| {
-		let scope = Scope::new(&path, &epoch, "video");
-		let bodies: Vec<String> = payloads
+	let millis = |value: u64| moq_net::Timestamp::from_millis(value).unwrap();
+	// A group's frames as Rust signs them at `signed_as` and `timestamps` (in milliseconds on a
+	// timed track), delivered at `group` and `delivered`.
+	let sign_group = |group: u64, signed_as: u64, timestamps: Option<([u64; 3], [u64; 3])>| {
+		let track = if timestamps.is_some() { "video" } else { "data" };
+		let scope = Scope::new(&path, &epoch, track);
+		let frames: Vec<Value> = payloads
 			.iter()
 			.enumerate()
-			.map(|(frame, payload)| hex::encode(scope.sign(&key, signed_as, frame as u64, payload)))
+			.map(|(frame, payload)| {
+				let (signed, delivered) = match timestamps {
+					Some((signed, delivered)) => (Some(millis(signed[frame])), Some(delivered[frame])),
+					None => (None, None),
+				};
+				let body = scope.sign(&key, signed_as, frame as u64, signed, payload);
+				serde_json::json!({ "body": hex::encode(body), "timestamp": delivered })
+			})
 			.collect();
-		serde_json::json!({ "track": "video", "group": group, "bodies": bodies })
+		let timescale = timestamps.map(|_| 1000);
+		serde_json::json!({ "track": track, "group": group, "timescale": timescale, "frames": frames })
+	};
+	let write = |track: &str, micros: Option<[u64; 3]>| {
+		let frames: Vec<Value> = expected
+			.iter()
+			.enumerate()
+			.map(|(frame, payload)| serde_json::json!({ "payload": payload, "micros": micros.map(|m| m[frame]) }))
+			.collect();
+		serde_json::json!({ "track": track, "timescale": micros.map(|_| 1000), "frames": frames })
 	};
 
+	let stamps = [10, 20, 30];
 	let output = bun(serde_json::json!({
 		"seed": hex::encode(seed.as_ref()),
 		"path": path.as_str(),
 		"epoch": epoch.as_str(),
-		"rust": [sign_group(7, 7), sign_group(8, 7)],
-		"payloads": [expected, ["6a73"]],
+		"rust": [
+			sign_group(7, 7, None),
+			sign_group(8, 7, None),
+			sign_group(9, 9, Some((stamps, stamps))),
+			sign_group(10, 10, Some((stamps, [11, 20, 30]))),
+		],
+		// Microseconds on a millisecond track: JS signs the rounded value the wire carries.
+		"js": [write("js", None), write("js", None), write("js-video", Some([2_400, 2_600, 3_000]))],
 	}));
 
 	assert_eq!(output["public"], key.public().to_string());
 	assert_eq!(output["verified"][0], serde_json::json!(expected));
 	assert_eq!(output["verified"][1], "signature");
+	assert_eq!(output["verified"][2], serde_json::json!(expected));
+	assert_eq!(output["verified"][3], "signature");
 
 	let js_epoch = output["epoch"].as_str().unwrap().parse().unwrap();
 	let groups = output["js"].as_array().unwrap();
-	assert_eq!(groups.len(), 2);
-	for (row, payloads) in groups.iter().zip([expected, vec!["6a73".to_string()]]) {
+	assert_eq!(groups.len(), 3);
+	for row in groups {
 		let scope = Scope::new(&path, &js_epoch, row["track"].as_str().unwrap());
 		let group = row["group"].as_u64().unwrap();
-		let bodies = row["bodies"].as_array().unwrap();
-		let opened: Vec<String> = bodies
+		let timestamp = |frame: &Value| {
+			let scale = row["timescale"].as_u64()?;
+			Some(moq_net::Timestamp::from_scale(frame["timestamp"].as_u64().unwrap(), scale).unwrap())
+		};
+		let frames = row["frames"].as_array().unwrap();
+		let opened: Vec<String> = frames
 			.iter()
 			.enumerate()
-			.map(|(frame, body)| {
-				let opened = scope.verify(&key.public(), group, frame as u64, Bytes::from(hex(body)));
+			.map(|(index, frame)| {
+				let body = Bytes::from(hex(&frame["body"]));
+				let opened = scope.verify(&key.public(), group, index as u64, timestamp(frame), body);
 				hex::encode(opened.unwrap())
 			})
 			.collect();
-		assert_eq!(opened, payloads);
+		assert_eq!(opened, expected);
 		// The same body does not verify at the neighboring group.
-		let relocated = scope.verify(&key.public(), group + 1, 0, Bytes::from(hex(&bodies[0])));
+		let body = Bytes::from(hex(&frames[0]["body"]));
+		let relocated = scope.verify(&key.public(), group + 1, 0, timestamp(&frames[0]), body);
 		assert!(matches!(relocated, Err(Error::Signature)));
 	}
+	let timed: Vec<u64> = groups[2]["frames"]
+		.as_array()
+		.unwrap()
+		.iter()
+		.map(|frame| frame["timestamp"].as_u64().unwrap())
+		.collect();
+	assert_eq!(timed, [2, 3, 3]);
 }
