@@ -36,6 +36,20 @@ test("compressed roundtrip in order", async () => {
 	expect(await drain(track.subscribe())).toEqual(Array.from({ length: 20 }, (_, n) => n));
 });
 
+test("a record whose worst-case slice outgrows the frame cap is refused, leaving the track open", async () => {
+	const track = new Track.Producer("test").accept({ compress: true });
+	const producer = new Producer<string>({ track });
+	// 32 MiB of JSON fits the plain cap, but its DEFLATE bound does not.
+	expect(() => producer.append({ value: "x".repeat(32 * 1024 * 1024 - 2) })).toThrow(
+		expect.objectContaining({ code: StreamCode.FrameTooLarge }),
+	);
+	producer.append({ value: "small" });
+	producer.finish();
+
+	const consumer = new Consumer<string>({ track: track.subscribe() });
+	expect((await consumer.next())?.value).toBe("small");
+});
+
 test("the whole log rides one group, never rolled", async () => {
 	const track = new Track.Producer("test").accept({ compress: true });
 	const producer = new Producer<Rec>({ track });
