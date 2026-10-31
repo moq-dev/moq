@@ -575,6 +575,8 @@ test("the producer aggregate is not clamped to the track's maxAge", () => {
 	expect(producer.subscription.peek()).toEqual(before);
 	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(10_000));
 	expect(track.subscription.peek()?.maxDelay).toBe(Milli(10_000));
+	// A late group is waited for no longer than the publisher keeps it.
+	expect(hooks.tailGrace(producer)).toBe(Milli(2_000));
 });
 
 test("nextGroup skips late arrivals", async () => {
@@ -847,6 +849,7 @@ test("the default subscription skips superseded groups and a bare options object
 	// aggregate leaves to the publisher.
 	for (const sequence of [0, 1, 2]) expect((await bare.recvGroup())?.sequence).toBe(sequence);
 	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(Number.MAX_SAFE_INTEGER));
+	expect(hooks.tailGrace(producer)).toBe(Milli(5000));
 	producer.finish();
 	producer.close();
 });

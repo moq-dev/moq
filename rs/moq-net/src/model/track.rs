@@ -3763,6 +3763,13 @@ impl Producer {
 		self.prev_subscription = Some(seen);
 	}
 
+	/// How long a subscriber session's tail waits for a late group: `budget`, bounded by how
+	/// long the publisher keeps one. The aggregate asked upstream is not bounded by it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn tail_grace(&self, budget: Duration) -> Duration {
+		ledger::grace(clamp_max_delay(budget, self.state.read().max_age_bound()))
+	}
+
 	/// Create a [`Requests`] handle that serves on-demand fetches of uncached
 	/// (old) groups. Most producers never need this; a relay creates one to fetch
 	/// past groups from upstream.
@@ -10755,6 +10762,10 @@ mod test {
 		let producer = request.accept(Info::timed().with_max_age(Duration::from_secs(2)));
 		assert_eq!(producer.subscription().unwrap().max_delay, before);
 		assert_eq!(producer.state.read().max_age_bound(), Some(Duration::from_secs(2)));
+		// A session's tail still waits for a late group no longer than the publisher keeps it,
+		// even for a subscriber that defers to the max age alone.
+		assert_eq!(producer.tail_grace(Duration::from_secs(60)), Duration::from_secs(2));
+		assert_eq!(producer.tail_grace(Duration::MAX), Duration::from_secs(2));
 		waiting.await.unwrap();
 	}
 

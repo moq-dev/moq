@@ -23,7 +23,6 @@ import {
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
-import { grace } from "../ledger.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
@@ -1155,9 +1154,9 @@ export class Subscriber {
 			...framing,
 			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
-			// for a late group anyway.
+			// for a late group anyway, and no longer than the publisher keeps one.
 			tail: new Tail({
-				grace: () => grace(producer.subscription.peek()?.maxDelay ?? Milli.zero),
+				grace: () => hooks.tailGrace(producer),
 			}),
 			requested: msg.startGroup,
 			bounded: msg.endGroup !== undefined,

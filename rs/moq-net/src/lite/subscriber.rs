@@ -7151,7 +7151,7 @@ impl TrackServe {
 							start..floor.unwrap_or(u64::MAX)
 						});
 						if let Ok(mut tail) = active.tail.write() {
-							tail.set_grace(tail::grace(subscription.budget()));
+							tail.set_grace(producer.tail_grace(subscription.budget()));
 							if let Some(groups) = lowered {
 								tail.demand(groups, self.subscriber.runtime.now());
 							}
@@ -7319,7 +7319,12 @@ impl TrackServe {
 
 		tracing::debug!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
-		let tail = kio::Producer::new(Tail::new(tail::grace(subscription.budget())));
+		// A pipelined SUBSCRIBE has no copy, so no max age, until it is adopted.
+		let grace = match &copy {
+			Some(copy) => copy.producer.tail_grace(subscription.budget()),
+			None => tail::grace(subscription.budget()),
+		};
+		let tail = kio::Producer::new(Tail::new(grace));
 		self.subscriber
 			.subscribes
 			.lock()
@@ -8282,6 +8287,14 @@ impl ServeLoop {
 			PipelinedState::Open(active) => active.requested,
 		};
 		serve.request_floor(&mut self.serving, floor);
+		// The tail's grace waited on the max age the accepted copy now carries.
+		let tail = match &pipelined.state {
+			PipelinedState::Opening(establish) => &establish.tail,
+			PipelinedState::Open(active) => &active.tail,
+		};
+		if let Ok(mut tail) = tail.write() {
+			tail.set_grace(self.serving.tail_grace(pipelined.pref.budget()));
+		}
 		self.parked = Some(pipelined.id());
 		self.serving.seen_subscription(pipelined.pref);
 		match pipelined.state {
@@ -8637,7 +8650,7 @@ impl ServeLoop {
 								tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "subscribe covered");
 								let budget = self.serving.subscription().map(|sub| sub.budget());
 								if let Ok(mut tail) = active.tail.write() {
-									tail.set_grace(tail::grace(budget.unwrap_or_default()));
+									tail.set_grace(self.serving.tail_grace(budget.unwrap_or_default()));
 									tail.expire(serve.subscriber.runtime.now());
 								}
 								self.mode = ServeMode::Tail {
@@ -8665,9 +8678,10 @@ impl ServeLoop {
 								// subscriber was willing to wait for a late group anyway.
 								if let Ok(mut tail) = active.tail.write() {
 									tail.end();
-									tail.set_grace(tail::grace(
-										subscription.map(|sub| sub.budget()).unwrap_or_default(),
-									));
+									tail.set_grace(
+										self.serving
+											.tail_grace(subscription.map(|sub| sub.budget()).unwrap_or_default()),
+									);
 									tail.expire(serve.subscriber.runtime.now());
 								}
 								self.mode = ServeMode::Tail {
