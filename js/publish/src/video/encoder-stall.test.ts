@@ -112,6 +112,8 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();

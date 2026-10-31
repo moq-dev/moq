@@ -1,6 +1,7 @@
 import { Micro, Milli, type Second } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
+import type * as Hls from "@moq/hang/hls";
 import type * as Moq from "@moq/net";
 import {
 	type Computed,
@@ -14,11 +15,14 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { errors, watched } from "../internal";
+import { errors, hlsHint, watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
+
+// The keyframe interval when the config sets none.
+const DEFAULT_KEYFRAME_INTERVAL = Milli.fromSecond(2 as Second);
 
 /** Cumulative encoder output totals, measured from the chunks the encoder produces. */
 export interface Stats {
@@ -338,6 +342,11 @@ export class Encoder {
 		errors.set(rendition, failure);
 		effect.cleanup(() => rendition.close());
 
+		// The longest GOP fixes each new track's HLS segment duration, as moq-video's encoders hint theirs.
+		const hint = (config: Config | undefined) => hlsHint(config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL);
+		rendition.hlsHint.set(hint(this.config.peek()));
+		effect.subscribe(this.config, (config) => rendition.hlsHint.set(hint(config)));
+
 		// Publish the resolved catalog config; undefined (until one resolves) leaves it out of the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
 
@@ -349,7 +358,7 @@ export class Encoder {
 			effect.set(this.#out.active, enabled && !!track && !error, false);
 			if (!enabled || !track || error) return;
 
-			this.#encode(track, broadcast.order, effect);
+			this.#encode(track, rendition.hls(track), broadcast.order, effect);
 		});
 
 		// Reserve against the connection while a subscriber is attached. Wait for a ceiling so we
@@ -385,11 +394,11 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, order: Order, effect: Effect): void {
+	#encode(track: Moq.Track.Producer, hls: Hls.Recorder | undefined, order: Order, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
-		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
+		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"), hls);
 		const demand = track.demand();
 
 		let lastKeyframe: Micro | undefined;
@@ -507,7 +516,7 @@ export class Encoder {
 							}
 							lastEncoded = frame.timestamp as Micro;
 
-							const interval = config?.keyframeInterval ?? Milli.fromSecond(2 as Second);
+							const interval = config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
 
 							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, the
 							// caller asked for one, or a join wants a group past the largest. No spacing: the

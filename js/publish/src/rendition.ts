@@ -1,3 +1,5 @@
+import type { Micro } from "@moq/clock";
+import type * as Hls from "@moq/hang/hls";
 import type * as Moq from "@moq/net";
 import { type Getter, Signal } from "@moq/signals";
 
@@ -28,6 +30,14 @@ export class Rendition<Config> {
 	readonly config = new Signal<Config | undefined>(undefined);
 
 	/**
+	 * The rendition's longest group duration, when known (a video encoder's keyframe interval). Read
+	 * when each of its tracks is created, it fixes that track's HLS segment duration up front, so the
+	 * catalog advertises the records before any media is encoded, as an on-demand broadcast needs.
+	 * Without one, the first segment declares the duration.
+	 */
+	readonly hlsHint = new Signal<Micro | undefined>(undefined);
+
+	/**
 	 * The open track producer, or `undefined` while the network broadcast is down, after the track
 	 * closes, and, with the broadcast's `onDemand`, while no subscriber is attached. Producers should
 	 * encode only while this is set, and only media matching the current {@link config}: a new
@@ -35,15 +45,32 @@ export class Rendition<Config> {
 	 */
 	readonly track: Getter<Moq.Track.Producer | undefined>;
 
+	readonly #hls: (track: Moq.Track.Producer) => Hls.Recorder | undefined;
 	readonly #close: () => void;
 	#closed = false;
 
-	/** @internal Constructed by {@link Broadcast}; `track` and `close` are owned by it. */
-	constructor(name: string, kind: Kind, track: Getter<Moq.Track.Producer | undefined>, close: () => void) {
+	/** @internal Constructed by {@link Broadcast}; `track`, `hls`, and `close` are owned by it. */
+	constructor(
+		name: string,
+		kind: Kind,
+		track: Getter<Moq.Track.Producer | undefined>,
+		hls: (track: Moq.Track.Producer) => Hls.Recorder | undefined,
+		close: () => void,
+	) {
 		this.name = name;
 		this.kind = kind;
 		this.track = track;
+		this.#hls = hls;
 		this.#close = close;
+	}
+
+	/**
+	 * The HLS recorder of `track`, one of this rendition's {@link Rendition.track | tracks}, or `undefined` when it
+	 * publishes no records. Pass it to the container producer writing the track, so each group it
+	 * writes is reported into the records the catalog advertises in the rendition's `hls` field.
+	 */
+	hls(track: Moq.Track.Producer): Hls.Recorder | undefined {
+		return this.#hls(track);
 	}
 
 	/**

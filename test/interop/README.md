@@ -506,6 +506,7 @@ clients/
   rust/audio.rs           the Rust subscriber's audio decode via rs/moq-audio (`interop-audio`)
   rust/tail.rs            the finite raw-track client (`interop-tail`)
   rust/catalog.rs         the compressed-catalog publisher (`interop-catalog`)
+  rust/hls.rs             the HLS-records publisher and reader (`interop-hls`)
   python/interop.py       publish/subscribe via py/moq-rs (import moq)
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
   cpp/main.cpp            publish/subscribe via cpp/moq (find_package(moq-cpp))
@@ -522,6 +523,7 @@ clients/
     src/close.ts          the refused session, read off `WebTransport.closed`
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
   js-native/catalog.ts    the compressed-catalog reader, pinned to one version
+  js-native/hls.ts        the HLS-records publisher via @moq/hang
   c/subscribe.c           subscribe via rs/moq-c
 ```
 
@@ -605,3 +607,9 @@ readers at once, each pinned to lite-07, lite-06, or moq-transport-22 and readin
 `@moq/watch` does. Only the lite-07 reader sees the flag; the other two share the relay's
 inflated copy, so `moq_relay_inflated_bytes_total` must grow by exactly the catalog's
 inflated size. The harness enables the relay's `[stats]` and `[internal]` listener for it.
+
+The HLS-records lane has the Rust publisher (moq-mux) and each native JS runtime
+(`@moq/hang`'s recorder) publish one fixed frame schedule, with GOPs on and off the 4 s
+grid, a discontinuity, and a finish, and the Rust reader prints each broadcast's
+declared `hls` durations and every record. The two readouts must be identical, so a
+browser-published broadcast exports as HLS like a native one.

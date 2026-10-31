@@ -14,7 +14,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { errors, watched } from "../internal";
+import { errors, hlsHint, watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
@@ -388,6 +388,9 @@ export class Encoder {
 		const rendition = broadcast.audio(this.name);
 		errors.set(rendition, failure);
 		effect.cleanup(() => rendition.close());
+		// Audio groups are far shorter than a segment, so any hint declares the grid's own duration up front.
+		rendition.hlsHint.set(hlsHint(this.groupDuration.peek()));
+		effect.subscribe(this.groupDuration, (duration) => rendition.hlsHint.set(hlsHint(duration)));
 
 		// Publish the resolved config; undefined (no capture) drops it from the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
@@ -415,7 +418,11 @@ export class Encoder {
 
 			const live = {
 				track,
-				producer: new Container.Legacy.Producer(track, new Container.Legacy.Format("audio")),
+				producer: new Container.Legacy.Producer(
+					track,
+					new Container.Legacy.Format("audio"),
+					rendition.hls(track),
+				),
 			};
 			this.#live = live;
 			effect.cleanup(() => {

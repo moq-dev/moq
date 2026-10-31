@@ -479,6 +479,7 @@ plan_pass() {
             record "not run" case=compress publisher="$runtime" subscriber=rust version="$version"
         done
         record "not run" case="compressed catalog" publisher=rust subscriber="$runtime"
+        record "not run" case="hls records" publisher="$runtime" subscriber=rust
     done
     needs js-native-node || return 0
     for version in "${DROP_VERSIONS[@]}"; do
@@ -556,7 +557,7 @@ build_relay_cli() {
         exit 1
     }
     if [[ "$MEDIA" -eq 0 ]]; then
-        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail --example interop-catalog --example interop-audio --example interop-control --example interop-goaway --example interop-goaway-client --example interop-finish)
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail --example interop-catalog --example interop-audio --example interop-hls --example interop-control --example interop-goaway --example interop-goaway-client --example interop-finish)
     fi
     [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
     # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
@@ -2285,6 +2286,62 @@ run_catalog_fanout() {
     rm "$fifo"
 }
 
+# shellcheck disable=SC2329  # invoked indirectly via harness_spawn
+run_hls_publisher() {
+    local fifo="$1" runtime="$2"
+    shift 2
+    case "$runtime" in
+        rust) timeout -k 3 $((TIMEOUT * 2)) "$TARGET_BASE/$PROFILE/examples/interop-hls" publish "$@" <"$fifo" 9>&- ;;
+        js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 $((TIMEOUT * 2)) node --import tsx hls.ts "$@" <"$fifo" 9>&-) ;;
+        js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 $((TIMEOUT * 2)) bun hls.ts "$@" <"$fifo" 9>&-) ;;
+    esac
+}
+
+# A native JS publisher's HLS records and declared durations match Rust's for the same frames:
+# moq-mux and @moq/hang each publish one schedule through the relay, and the Rust reader's
+# readout of the two broadcasts must be identical.
+run_hls_records() {
+    local runtime="$1" started=$SECONDS publisher pid why="" want got
+    local name="hls-$1" fifo="$LOGS/hls-ack" broadcast="hls-$1-$$-$RANDOM"
+    local cell=(case="hls records" publisher="$runtime" subscriber=rust log="$LOGS/$name-$runtime-read.log")
+    if is_broken "$runtime"; then
+        echo "  FAIL  hls records $runtime -> rust (client unavailable)"
+        record fail "${cell[@]}" detail="client unavailable"
+        overall=1
+        return
+    fi
+    mkfifo "$fifo"
+    exec 9<>"$fifo"
+    for publisher in rust "$runtime"; do
+        harness_spawn "$name-$publisher-pub" "$LOGS/$name-$publisher-pub.log" run_hls_publisher "$fifo" "$publisher" "$(token_url --publish "$broadcast-$publisher/**")" "$broadcast-$publisher"
+        pid="$HARNESS_PID"
+        harness_spawn "$name-$publisher-read" "$LOGS/$name-$publisher-read.log" timeout -k 3 "$TIMEOUT" "$TARGET_BASE/$PROFILE/examples/interop-hls" read "$(token_url --subscribe "$broadcast-$publisher/**")" "$broadcast-$publisher"
+        harness_wait "$HARNESS_PID" || why="${why:-$publisher records unreadable}"
+        printf 'clean end\n' >&9
+        harness_wait "$pid" || true
+        grep -qx 'hls acknowledged' "$LOGS/$name-$publisher-pub.log" || why="${why:-$publisher publisher did not acknowledge}"
+    done
+    want=$(grep '^hls ' "$LOGS/$name-rust-read.log" || true)
+    got=$(grep '^hls ' "$LOGS/$name-$runtime-read.log" || true)
+    if [[ -z "$why" && -z "$want" ]]; then
+        why="rust published no records"
+    elif [[ -z "$why" && "$want" != "$got" ]]; then
+        why="records differ from rust"
+    fi
+    if [[ -z "$why" ]]; then
+        echo "  PASS  hls records $runtime -> rust (match moq-mux)"
+        record pass "${cell[@]}" seconds=$((SECONDS - started))
+    else
+        echo "  FAIL  hls records $runtime -> rust ($why)"
+        record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="$why"
+        overall=1
+        diff <(echo "$want") <(echo "$got") || true
+        for publisher in rust "$runtime"; do cat "$LOGS/$name-$publisher-pub.log" "$LOGS/$name-$publisher-read.log"; done
+    fi
+    exec 9>&-
+    rm "$fifo"
+}
+
 # This checkout's CLI FETCH and finite track tails in this pass, then the lite drop lanes.
 run_tails() {
     local runtime version
@@ -2326,6 +2383,7 @@ run_tails() {
             run_tail_pair "$runtime" rust compress "$version"
         done
         run_catalog_fanout "$runtime"
+        run_hls_records "$runtime"
     done
     if needs js-native-node; then
         for version in "${DROP_VERSIONS[@]}"; do
