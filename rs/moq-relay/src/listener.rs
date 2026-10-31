@@ -35,6 +35,12 @@ pub(crate) struct Accepted {
 	pub(crate) admission: Option<Admission>,
 }
 
+impl Accepted {
+	pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
+		self.stream.local_addr()
+	}
+}
+
 impl AsyncRead for Accepted {
 	fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
 		Pin::new(&mut self.stream).poll_read(cx, buf)
