@@ -1,0 +1,20 @@
+{
+	// Cloudflare Wrangler configuration for token.moq.dev, which trades a GitHub
+	// Actions OIDC token for a scoped moq-bot installation token.
+	// Secrets: APP_PRIVATE_KEY (PKCS#8 PEM) and APP_CLIENT_ID; see ../README.md.
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "token-moq-dev",
+	"main": "src/worker.ts",
+	"compatibility_date": "2025-07-09",
+	"account_id": "dd618f5dbd5da77b8296f1613c301f5c",
+	"workers_dev": false,
+	"route": {
+		"pattern": "token.moq.dev",
+		"custom_domain": true
+	},
+	"observability": {
+		"logs": {
+			"enabled": true
+		}
+	}
+}

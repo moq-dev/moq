@@ -94,12 +94,14 @@ async fn refused_code(server: &Server, alpn: &str) -> Option<driver::VarInt> {
 
 	// SETUP type, then a one-byte message holding zero parameters.
 	let mut setup = conn.open_uni(Default::default()).await.expect("open");
-	setup.write_all(&[0x01, 0x01, 0x00]).await.expect("write");
-	setup.finish().expect("finish");
+	setup.write_all(&[0x01, 0x01, 0x00][..]).await.expect("write");
+	setup.finish();
 
 	// GROUP type, then a three-byte header: subscribe 7, sequence 0, frame start 0.
 	let mut send = conn.open_uni(Default::default()).await.expect("open");
-	send.write_all(&[0x00, 0x03, 0x07, 0x00, 0x00]).await.expect("write");
+	send.write_all(&[0x00, 0x03, 0x07, 0x00, 0x00][..])
+		.await
+		.expect("write");
 
 	tokio::time::timeout(Duration::from_secs(10), send.stopped())
 		.await

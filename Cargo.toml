@@ -1,10 +1,11 @@
 [workspace]
 # Keep source-only members discoverable in Maturin's dependency-pruned archive,
 # including the separately packaged UniFFI generator.
-members = ["demo/carla/bridge", "rs/*", "rs/moq-clock/macros", "rs/moq-net/fuzz", "rs/moq-quic/fuzz"]
+members = ["demo/carla/bridge", "rs/*", "rs/kio/macros", "rs/moq-clock/macros", "rs/moq-net/fuzz", "rs/moq-quic/fuzz"]
 default-members = [
     "rs/bench-harness",
     "rs/kio",
+    "rs/kio/macros",
     "rs/hang",
     # "rs/moq-c",     # requires C toolchain
     "rs/moq-clock",
@@ -126,6 +127,7 @@ indexmap = "2.14.2"
 io-uring = "0.7.15"
 jsonwebtoken = "11"
 kio = { version = "0.6.2", path = "rs/kio" }
+kio-macros = { version = "0.1.0", path = "rs/kio/macros" }
 libc = "0.2"
 libloading = "0.9"
 linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }

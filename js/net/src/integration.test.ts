@@ -2642,7 +2642,7 @@ const DEATH = SessionCode(71);
 async function runSessionDeath(
 	protocol: string,
 	version?: number,
-	local = false,
+	kill: "death" | "remote" | "local" = "death",
 ): Promise<[Error | null, Error | null, Position | undefined]> {
 	const pair = createMockTransportPair(protocol);
 	const origin = new OriginProducer();
@@ -2667,7 +2667,9 @@ async function runSessionDeath(
 	if (!group) throw new Error("missing group");
 	expect(await group.readString()).toBe("head");
 
-	if (local) client.close();
+	if (kill === "local") client.close();
+	// The track is live, so the drain runs to its deadline and closes anyway.
+	else if (kill === "remote") void server.close().catch(() => {});
 	else pair.server.close({ closeCode: DEATH, reason: "killed" });
 	const groupEnd = Promise.resolve(group.closed);
 	const closed = await withTimeout(
@@ -2701,13 +2703,19 @@ for (const [name, protocol, version] of [
 		expect(groupEnd).toBeInstanceOf(SessionError);
 		expect((groupEnd as SessionError).code).toBe(DEATH);
 	});
-	// A local close is a dead route, not finished content: it declares no end, so a resumed
-	// reader's replacement route continues past it.
-	test(`integration: ${name} ends a locally closed track cleanly without declaring an end`, async () => {
-		const [closed, , end] = await runSessionDeath(protocol, version, true);
-		expect(closed).toBeNull();
-		expect(end).toBeUndefined();
-	});
+	// A clean close cuts off the track and its open group, and a local close reads exactly as
+	// the remote one does. It declares no end, so a resumed reader's replacement route
+	// continues past it.
+	for (const kill of ["remote", "local"] as const) {
+		test(`integration: ${name} cancels the track on a ${kill} session close`, async () => {
+			const [closed, groupEnd, end] = await runSessionDeath(protocol, version, kill);
+			expect(closed).toBeInstanceOf(SessionError);
+			expect((closed as SessionError).code).toBe(SessionCode.Cancel);
+			expect(groupEnd).toBeInstanceOf(SessionError);
+			expect((groupEnd as SessionError).code).toBe(SessionCode.Cancel);
+			expect(end).toBeUndefined();
+		});
+	}
 }
 
 // On lite-05+ the subscribe stream carries responses until its FIN, so a reset of it is how the

@@ -50,8 +50,8 @@ async def main():
             if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart)):
                 continue  # AnnounceEventUpdate or AnnounceEventEnd
             announcement = event.announce
-            print(announcement.captures)  # what * matched, or None for a partial overlap
-            broadcast = await client.request_broadcast(announcement.prefix)
+            print(announcement.captures)  # what * matched
+            broadcast = await client.request(announcement.prefix)
             catalog = await moq.media.catalog(broadcast)
             id, audio = next(iter(catalog.audio.items()))
             async for frame in await moq.media.TrackConsumer.subscribe(broadcast, id, audio):
@@ -127,6 +127,7 @@ shows which module holds each.
 - **Tokens.** Pass `tokens=[...]` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `session.tokens().set([...])` replaces a client session's tokens before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `await tokens.answered()` returns once the relay accepts them and raises its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
 - **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
+- **Subscription defaults.** `moq.Subscription.default()` returns moq-net's defaults, whose zero `max_delay` skips a superseded group at once; passing no subscription means the same. `dataclasses.replace` it rather than starting from `moq.Subscription()`, whose `None` `max_delay` sets no subscriber limit.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 ## Runtime
@@ -143,7 +144,7 @@ kind `ProtocolKind.TOO_MANY_REQUESTS`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
-A session closed because its credential expired reports `ProtocolKind.EXPIRED`, and a request refused for an expired token raises `Error.Expired`; refresh the token before retrying.
+A session closed because its credential expired reports `ProtocolKind.EXPIRED`, and a request refused for an expired token raises `Error.Expired`; refresh the token before retrying. Malformed credentials report `ProtocolKind.MALFORMED_AUTH_TOKEN`; correct the token before reconnecting with it.
 A catalog that needs a newer moq-hang draft than this build reads raises `Error.UnsupportedCatalog`; upgrade the library to read it.
 
 ## Reference

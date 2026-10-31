@@ -123,6 +123,29 @@ impl Demux {
 		})
 	}
 
+	/// Where [`next`](Self::next) frames from: the input offset of the first byte not yet framed,
+	/// and the framer's state there, for [`peek`](Self::peek) to read ahead from.
+	pub fn cursor(&self) -> (u64, Framer) {
+		(self.position + self.off as u64, self.framer)
+	}
+
+	/// Frame the next whole packet at or after input offset `*at` without routing it, advancing
+	/// `*at` and `framer` as [`next`](Self::next) would. `None` once only a partial packet
+	/// remains, with both left where more input resumes.
+	pub fn peek(&self, at: &mut u64, framer: &mut Framer) -> Option<(u64, &[u8; TsPacket::SIZE])> {
+		let mut off = usize::try_from(*at - self.position).expect("an offset in the pushed input");
+		let found = framer.next(&self.scratch, &mut off);
+		*at = self.position + off as u64;
+		let found = found?;
+		let pkt = self.scratch[found..found + TsPacket::SIZE].try_into().unwrap();
+		Some((self.position + found as u64, pkt))
+	}
+
+	/// The input pushed but not yet framed: what [`next`](Self::next) would read on.
+	pub fn remainder(&self) -> Bytes {
+		Bytes::copy_from_slice(&self.scratch[self.off..])
+	}
+
 	/// Drop the framed input, keeping a trailing partial packet for the next push.
 	pub fn drain(&mut self) {
 		self.health.drained(&self.scratch, self.off);
