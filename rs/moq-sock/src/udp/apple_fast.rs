@@ -157,7 +157,7 @@ pub(crate) fn recv_via_recvmsg_x(
 	let msg_count =
 		retry_if_interrupted(|| unsafe { recvmsg_x(io.as_raw_fd(), hdrs.as_mut_ptr(), max_msg_count as _, 0) })?;
 	for i in 0..(msg_count as usize) {
-		meta[i] = decode_recv(&names[i], &hdrs[i], hdrs[i].msg_datalen as usize)?;
+		meta[i] = decode_recv(&names[i], &hdrs[i], hdrs[i].msg_flags, hdrs[i].msg_datalen as usize)?;
 	}
 	Ok(msg_count as usize)
 }
