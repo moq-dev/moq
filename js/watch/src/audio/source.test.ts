@@ -329,7 +329,9 @@ test("mute and unmute reuse the decoder support verdict and publish the new meta
 	try {
 		await settled(source);
 		for (const enabled of [false, true, false, true]) {
-			state.catalog.set({ audio: { renditions: { mic: config("opus", { enabled, jitter: 20, bitrate: 96_000 }) } } });
+			state.catalog.set({
+				audio: { renditions: { mic: config("opus", { enabled, jitter: 20, bitrate: 96_000 }) } },
+			});
 			await settled(source);
 			expect(source.out.available.peek().mic.enabled).toBe(enabled);
 			expect(source.out.track.peek()).toBe("mic");
