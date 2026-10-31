@@ -750,6 +750,30 @@ async fn markers_wait_for_the_listing_to_end() {
 	assert!(complete(&store).await);
 }
 
+/// A track that ends with an error records that error, though every group below the end stays.
+#[tokio::test(start_paused = true)]
+async fn an_errored_end_records_its_error() {
+	let store = store();
+	let broadcast = broadcast::Info::new().produce();
+	let mut video = broadcast.create_track("video", timed()).unwrap();
+	let task = spawn(&store, &broadcast, config());
+	subscribed(&video).await;
+	group(&video, 0, &[(0, "a")]);
+	group(&video, 1, &[(1000, "b")]);
+	video.finish_at(Position::group(2), Some(moq_net::Error::App(7))).unwrap();
+	settle().await;
+	broadcast.close();
+	finished(task).await;
+
+	let frames: Vec<String> = contents(&objects(&store, "video", true).await)
+		.into_iter()
+		.flatten()
+		.flat_map(|(_, _, frames)| frames)
+		.collect();
+	assert_eq!(frames, ["0/a", "1000/b"]);
+	assert_eq!(end(&store, "video").await, Some(End::Error(64 + 7)));
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_re_added_track_continues_and_its_marker_records_the_last_run() {
 	let store = store();

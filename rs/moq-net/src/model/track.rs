@@ -7236,14 +7236,13 @@ impl Subscriber {
 		let Some((fin, err)) = end else {
 			return Ok(None);
 		};
-		// A range that stops short of the end never reached it.
-		let cap = [self.bounds().end, self.subscription().end()]
-			.into_iter()
-			.flatten()
-			.min();
-		match cap {
-			Some(cap) if cap < fin => Ok(None),
-			_ => Err(err),
+		// A range that stops short of the end never reached it: the last group is past the
+		// cap, or past every range as resolved, whatever its anchors.
+		let reached = self.bounds().end.is_none_or(|cap| cap >= fin)
+			&& fin.checked_sub(1).is_none_or(|last| self.next_in_range(last).is_some());
+		match reached {
+			true => Err(err),
+			false => Ok(None),
 		}
 	}
 
@@ -13561,6 +13560,13 @@ mod test {
 		let mut capped = producer.subscribe(replay().with_range(0..)).with_range(..1);
 		assert_eq!(capped.assert_group().sequence, 0);
 		assert!(capped.recv_group().await.unwrap().is_none());
+		// So does a range whose relative end excludes the last group.
+		let mut relative = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Absolute(0),
+			end: Some(Anchor::Relative(1)),
+		}]));
+		assert_eq!(relative.assert_group().sequence, 0);
+		assert!(relative.recv_group().await.unwrap().is_none());
 
 		// Unlike an abort, the history stays: a later reader and a fetch still get it.
 		producer.clone().abort(Error::Timeout).unwrap();

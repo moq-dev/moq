@@ -2575,6 +2575,30 @@ mod test {
 		}
 	}
 
+	/// Without the end error on the wire, an errored end is not declared early: a clean
+	/// boundary could let the subscriber settle before the reset at the end arrives.
+	#[moq_clock::test]
+	async fn recv_next_withholds_an_errored_boundary_without_the_end_error() {
+		use futures::FutureExt;
+
+		for end_error in [false, true] {
+			let mut producer = track_producer("test");
+			let mut subscriber = producer.subscribe(None);
+			producer.finish_at(track::Position::group(7), Some(Error::App(7))).unwrap();
+			let next = |subscriber: &mut track::Subscriber| {
+				kio::wait(|waiter| poll_recv_next(subscriber, true, false, true, end_error, waiter)).now_or_never()
+			};
+			match (end_error, next(&mut subscriber)) {
+				(true, Some(Ok(Recv::Boundary(end)))) => {
+					assert_eq!(end.group, 7);
+					assert!(matches!(end.error, Some(StreamError::App(7))));
+				}
+				(false, None) => {}
+				_ => panic!("end_error={end_error}: expected the boundary only with the end error"),
+			}
+		}
+	}
+
 	/// A relay can ingest back-to-back groups micro-reordered (the upstream leg
 	/// sends newest-first). The older group is cached and in demand, so serving
 	/// must still deliver it; a sequence cursor would skip it permanently.
@@ -3459,13 +3483,18 @@ fn poll_recv_next(
 		// No live data ready: report the boundary (if declared) before signalling Finished, so a
 		// future boundary reaches the subscriber while the trailing groups are still in flight.
 		if emit_boundary && let Poll::Ready(res) = track.poll_finished(waiter) {
-			let error = end_error.then(|| track.end_error()).flatten();
-			return Poll::Ready(res.map(|end| {
-				Recv::Boundary(lite::SubscribeEnd {
-					group: final_sequence(end),
-					error: error.as_ref().map(StreamError::from),
-				})
-			}));
+			let error = track.end_error();
+			// Without the end error on the wire, an errored end is only the reset at that end: a
+			// clean boundary sent early could let the subscriber settle before the reset arrives.
+			if end_error || error.is_none() || groups_finished || res.is_err() {
+				let error = error.filter(|_| end_error);
+				return Poll::Ready(res.map(|end| {
+					Recv::Boundary(lite::SubscribeEnd {
+						group: final_sequence(end),
+						error: error.as_ref().map(StreamError::from),
+					})
+				}));
+			}
 		}
 		if groups_finished {
 			return Poll::Ready(Ok(Recv::Finished));

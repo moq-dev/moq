@@ -1238,6 +1238,10 @@ export class Publisher {
 			);
 		};
 
+		// Before lite-07 an errored end is only the reset at that end: a clean SUBSCRIBE_END sent
+		// early could let the subscriber settle before the reset arrives.
+		const declareEarly = () => hasEndError(this.version) || !hooks.subscriberEndError(track);
+
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track, publisher);
 
@@ -1373,7 +1377,7 @@ export class Publisher {
 							}
 						}
 						// A declared end goes out while lower groups are still being produced.
-						if (!endSent && hooks.subscriberEnd(track) !== undefined) {
+						if (!endSent && hooks.subscriberEnd(track) !== undefined && declareEarly()) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
@@ -1382,7 +1386,7 @@ export class Publisher {
 					case "boundary":
 						// The producer finished but is still holding groups above the cap.
 						// Declare the boundary, then wait for an update to release them.
-						if (!endSent) {
+						if (!endSent && declareEarly()) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}

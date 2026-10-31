@@ -1795,6 +1795,51 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 	}
 });
 
+// Before lite-07 an errored end goes out only as the reset at that end: a clean SUBSCRIBE_END
+// sent early could let the subscriber settle before the reset arrives.
+test("lite draft-06: an errored end is not declared early", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_06);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+	void publisher.runSubscribe(
+		new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
+		server,
+	);
+
+	try {
+		const first = track.createGroup(0);
+		first.writeFrame(textFrame("hello"));
+		first.finish();
+		track.finishAt({ group: 2, frame: 0 }, new StreamError(StreamCode(71)));
+
+		const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_06);
+		expect("start" in start).toBe(true);
+		const pending = decodeSubscribeResponse(client.reader, Version.DRAFT_06);
+		const early = await Promise.race([
+			pending.then(
+				() => "response",
+				() => "reset",
+			),
+			new Promise((resolve) => setTimeout(() => resolve("none"), 20)),
+		]);
+		expect(early).toBe("none");
+
+		const second = track.createGroup(1);
+		second.writeFrame(textFrame("hello"));
+		second.finish();
+		await expect(pending).rejects.toBeDefined();
+	} finally {
+		publisher.close();
+		client.close();
+	}
+});
+
 // Serves one group with its stream open held until `open(ok)`, and returns the pending
 // SUBSCRIBE_END plus the call that lets the open succeed or fail.
 async function heldOpenEnd() {
