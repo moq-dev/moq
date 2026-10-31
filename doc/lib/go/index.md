@@ -75,7 +75,7 @@ for event, err := range announced.All(ctx) {
     }
     // Prefix stays origin-relative; Captures reports what each wildcard matched.
     fmt.Printf("captures: %v\n", ann.Captures)
-    broadcast, err := client.RequestBroadcast(ctx, ann.Prefix)
+    broadcast, err := client.Request(ctx, ann.Prefix, nil)
     if err != nil {
         log.Fatal(err)
     }
@@ -125,7 +125,7 @@ The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
 one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
-- **Context cancellation.** Every call that can block takes a `context.Context` first, and cancelling it tears down the native work, not just your wait. A one-shot call (`RequestBroadcast`, `FetchGroup`, `Server.Accept`) aborts alone; a stream read (`Next`, `ReadFrame`, and the iterators over them) cancels the stream it reads.
+- **Context cancellation.** Every call that can block takes a `context.Context` first, and cancelling it tears down the native work, not just your wait. A one-shot call (`Request`, `FetchGroup`, `Server.Accept`) aborts alone; a stream read (`Next`, `ReadFrame`, and the iterators over them) cancels the stream it reads.
 - **Keep owners reachable.** An origin from `moq.NewOriginProducer` has no `Close`. It ends when the garbage collector reaches its last owner (each producer, published broadcast, and `OriginRequests`), and its consumers then fail with `moq.ErrClosed`.
 - **Bandwidth ownership.** An encoder you manage can reserve a share of the session's bandwidth. Reuse its reservation when the ceiling changes; before abandoning or replacing it, call `Update(0)` to return its share and automatic probe ceiling without waiting for garbage collection. The track can stay subscribed and the reservation can be reused.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `Cut()`: after every frame, or at a segment cadence to align with video.
@@ -139,6 +139,7 @@ shows which module holds each.
 - **Tokens.** Set `ClientConfig.Tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `Session().Tokens().Set(...)` replaces a client session's tokens before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `Answered(ctx)` returns nil once the relay accepts them, or its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 - **Errors.** Read diagnostic payloads from `Reason` and structured protocol failures from `Details`.
 - **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `Preference`; `0` is the default and `-1` marks a compatibility transcode.
+- **Subscription defaults.** `moq.DefaultSubscription()` returns moq-net's defaults, whose zero `MaxDelay` skips a superseded group at once; a nil `*Subscription` means the same. Change its fields rather than starting from `Subscription{}`, whose nil `MaxDelay` sets no subscriber limit.
 - **Track demand.** Obtain a dynamic track request’s `Demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 ## Runtime
@@ -155,7 +156,7 @@ kind `ProtocolKindTooManyRequests`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
-A session closed because its credential expired reports `ProtocolKindExpired`, and a request refused for an expired token raises `moq.ErrExpired`; refresh the token before retrying.
+A session closed because its credential expired reports `ProtocolKindExpired`, and a request refused for an expired token raises `moq.ErrExpired`; refresh the token before retrying. Malformed credentials report `ProtocolKindMalformedAuthToken`; correct the token before reconnecting with it.
 A catalog that needs a newer moq-hang draft than this build reads raises `moq.ErrUnsupportedCatalog`; upgrade the library to read it.
 
 ## Reference

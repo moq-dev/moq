@@ -203,33 +203,6 @@ impl Outcome {
 		self.partial.get(&sequence).filter(|copy| copy.covers(frames)).cloned()
 	}
 
-	/// The sequences of `span` accepted, lowest first.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn accepted_in(&self, span: &ops::Range<u64>) -> impl Iterator<Item = u64> {
-		self.accepted
-			.overlapping(span)
-			.flat_map(|run| run.start.max(span.start)..run.end.min(span.end))
-			.collect::<Vec<_>>()
-			.into_iter()
-	}
-
-	/// Why the sequences of `span` were refused, lowest first.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn refused_in(&self, span: &ops::Range<u64>) -> impl Iterator<Item = &Error> {
-		self.refused.overlapping(span).map(|(_, refusal)| &refusal.err)
-	}
-
-	/// The runs of `span` refused as too old under a budget, lowest first: a reader with no
-	/// budget of its own may still be served them.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn budget_old_in(&self, span: &ops::Range<u64>) -> Vec<ops::Range<u64>> {
-		self.refused
-			.overlapping(span)
-			.filter(|(_, refusal)| matches!(refusal.err, Error::Old) && refusal.asked.is_some())
-			.map(|(run, _)| run.start.max(span.start)..run.end.min(span.end))
-			.collect()
-	}
-
 	/// What was answered within `wanted`: accepted, or refused with why and the budget
 	/// the fill asked with.
 	#[expect(
@@ -352,19 +325,6 @@ impl Drop for Join {
 impl Join {
 	fn is_ours(&self, pending: &Pending) -> bool {
 		pending.result.weak().same_channel(&self.attempt)
-	}
-
-	/// Poll until every group this reader still reads is answered, or the fill ends.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn poll_answered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.outcome()
-			.poll(waiter, |outcome| {
-				match self.held.iter().all(|run| outcome.resolved.gaps(run).next().is_none()) {
-					true => Poll::Ready(()),
-					false => Poll::Pending,
-				}
-			})
-			.map(drop)
 	}
 
 	/// Whether the reader holds none of the fill any more.

@@ -16,7 +16,7 @@ drop judged under a narrower budget or range, as in
 [Drop set](/quest/m1/drop-set.md), proves nothing for a wider FETCH. That
 group is unknown, so the publisher fills it or the range is refused. Any
 other range stays refused, as
-[Our moq-transport publishers serve at most one group](/quest/m1/ietf-publisher-one-group.md)
+[moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204)
 leaves it.
 
 ## Plan
@@ -60,5 +60,4 @@ Our publishers answer multi-group FETCH and fills over known caches.
 
 ## Required
 
-- [Our moq-transport publishers serve at most one group](/quest/m1/ietf-publisher-one-group.md) - the refusal this lifts
 - [Drop set](/quest/m1/drop-set.md) - the per-track runs that say which groups are known holes
