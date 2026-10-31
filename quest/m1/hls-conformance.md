@@ -33,6 +33,14 @@ Decided 2026-10-30 (maintainer): fix first. The two bugs the test found
 are their own quests, required below, and the test lands once it passes
 with both checks intact.
 
+Decided 2026-10-31 (maintainer): the fixture muxes with
+`-max_interleave_delta 0`, so `video1`'s size switch no longer lands in the TS
+ahead of the other streams, and the mid-run estimate edit only raises jitter.
+With that, the import fails at the switch with `catalog jitter cannot decrease
+for a published rendition`: `Rendition::set` in moq-mux resolves the new
+config's jitter without the floor the edit published. That fix is a separate
+quest the test also waits on.
+
 ## Required
 
 - [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - the conformance test's same-codec switch fails until it lands
