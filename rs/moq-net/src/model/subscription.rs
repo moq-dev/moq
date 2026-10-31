@@ -121,8 +121,9 @@ pub enum Order {
 /// it answers, never from the groups an ended feed left in its cache.
 ///
 /// Over moq-lite-07, a copy resolves them from the reported live edge and media time.
-/// A Rust moq-transport copy accepts anchors its cache can already resolve, translating
-/// them to group bounds upstream; an unknown time end is refused. Older moq-lite versions
+/// A Rust moq-transport copy resolves a relative anchor from the Largest Object its live
+/// join reports, and accepts time anchors its cache can already resolve, translating both
+/// to group bounds upstream; any other time anchor is refused. Older moq-lite versions
 /// accept absolute anchors but refuse time anchors and relative anchors other
 /// than [`Range::live`] and [`Range::oldest`] with [`Error::Unsupported`](crate::Error::Unsupported)
 /// rather than guess from a partial copy.
@@ -349,6 +350,7 @@ impl Subscription {
 	/// from the latest group. An empty list is the empty range, ending at group 0.
 	///
 	/// The form a wire without ranges carries, alongside [`Self::start`].
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn end(&self) -> Option<u64> {
 		let mut end = Some(0);
 		for range in &self.ranges {

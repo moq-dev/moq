@@ -760,7 +760,9 @@ async fn an_errored_end_records_its_error() {
 	subscribed(&video).await;
 	group(&video, 0, &[(0, "a")]);
 	group(&video, 1, &[(1000, "b")]);
-	video.finish_at(Position::group(2), Some(moq_net::Error::App(7))).unwrap();
+	video
+		.finish_at(Position::group(2), Some(moq_net::Error::App(7)))
+		.unwrap();
 	settle().await;
 	broadcast.close();
 	finished(task).await;

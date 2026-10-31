@@ -2589,7 +2589,9 @@ mod test {
 				true => subscriber.with_range(..3),
 				false => subscriber,
 			};
-			producer.finish_at(track::Position::group(7), Some(Error::App(7))).unwrap();
+			producer
+				.finish_at(track::Position::group(7), Some(Error::App(7)))
+				.unwrap();
 			let next = |subscriber: &mut track::Subscriber| {
 				kio::wait(|waiter| poll_recv_next(subscriber, true, false, true, end_error, waiter)).now_or_never()
 			};
