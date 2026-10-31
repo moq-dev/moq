@@ -227,28 +227,12 @@ impl State {
 			if let Some(producer) = track.producer {
 				let _ = producer.abort(err.clone());
 			}
-			if let Fill::Ready { producer, .. } = &*track.fill.read() {
-				let _ = producer.handle().abort(err.clone());
+			if let Ok(mut fill) = track.fill.write() {
+				fill.abort(err.clone());
 			}
 		}
 		for (_, producer) in self.lingering.drain() {
 			let _ = producer.abort(err.clone());
-		}
-	}
-	fn close(&mut self) {
-		for (_, mut track) in self.subscribes.drain() {
-			if let Some(request) = track.pending.take() {
-				request.reject(Error::Cancel);
-			}
-			if let Some(producer) = track.producer {
-				let _ = producer.abort(Error::Stream(crate::StreamError::Session(SessionError::Cancel)));
-			}
-			if let Ok(mut fill) = track.fill.write() {
-				fill.cancel();
-			}
-		}
-		for (_, producer) in self.lingering.drain() {
-			let _ = producer.abort(Error::Stream(crate::StreamError::Session(SessionError::Cancel)));
 		}
 	}
 }
@@ -387,9 +371,14 @@ impl Fill {
 	/// rejoin could not replace the cached group, and its readers would see it end early.
 	/// A clean end already settled the head, so [`Fill::Ended`] stays.
 	fn cancel(&mut self) {
+		self.abort(Error::Cancel);
+	}
+
+	/// [`Self::cancel`], with `err` as the reason the head was cut short.
+	fn abort(&mut self, err: Error) {
 		match std::mem::replace(self, Fill::Done) {
 			Fill::Ready { producer, .. } => {
-				let _ = producer.abort(Error::Cancel);
+				let _ = producer.abort(err);
 			}
 			Fill::Ended => *self = Fill::Ended,
 			_ => {}
@@ -1168,10 +1157,6 @@ impl Subscriber {
 		self.state.lock().abort(err);
 	}
 
-	pub fn close(&self) {
-		self.state.lock().close();
-	}
-
 	/// Settle waits for control state that cannot arrive on the closed transport,
 	/// retaining known aliases and tracks until their buffered data is consumed.
 	pub fn settle_control(&self) {
@@ -1525,11 +1510,14 @@ impl Subscriber {
 			false => writer.abort(&Error::Cancel),
 		}
 		let session = self.session.clone();
+		// A peer still streaming entries must not hold the session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		kio::wait(|waiter| {
 			if session.poll_closed(waiter).is_ready() {
 				return Poll::Ready(());
 			}
 			loop {
+				ready!(budget.poll_yield(waiter));
 				match ready!(messages.poll_next(&mut reader, waiter)) {
 					Ok(Some(_)) => continue,
 					Ok(None) | Err(_) => return Poll::Ready(()),
@@ -1552,7 +1540,11 @@ impl Subscriber {
 		mut initial: Initial,
 		live: &kio::Consumer<()>,
 	) -> Result<namespaces::Ended, Error> {
+		// Each entry routes into the origin, so a peer streaming them must not hold the
+		// session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			// Every counted NAMESPACE is in the origin by now, dropped ones included.
 			if initial.initial == 0 {
 				initial.snapshot = None;
@@ -2019,7 +2011,11 @@ impl Subscriber {
 
 		// Request IDs of updates queued behind a pending verdict, already spent.
 		let mut spent = std::collections::HashSet::new();
+		// Each update re-routes in the origin and is answered, so a peer streaming them must
+		// not hold the session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			// Handle one buffered update before reading the next, so answers stay in order.
 			let turn = if let Some((id, body)) = renewal.next() {
 				Turn::Message(id, body)
@@ -2947,8 +2943,16 @@ impl Subscriber {
 				None => Ok(subscription),
 			})
 			.transpose();
+		// A relative anchor the copy cannot settle yet counts back from the Largest Object, so
+		// the live join that names it goes first and the answer resolves the anchor. No Group ID
+		// arithmetic spells it upstream. A time anchor names no group the answer settles.
+		let deferred = matches!(subscription, Err(Error::Unsupported))
+			&& target
+				.subscription()
+				.is_some_and(|subscription| !has_time(&subscription));
 		let subscription = match subscription {
 			Ok(subscription) => subscription,
+			Err(_) if deferred => None,
 			Err(err) => {
 				target.fail(err);
 				return None;
@@ -3424,6 +3428,11 @@ impl Subscriber {
 		// the group carries over: its first frame is the edge a reader can count on.
 		if let Some(largest) = largest {
 			track.report_object(largest.group, largest.object);
+			// A live join's Largest is where its feed is, which a relative anchor counts back
+			// from even when a newer group lands before the joined one.
+			if live {
+				track.report_edge(largest.group);
+			}
 		}
 		// A live join starts at the publisher's edge; an absolute one where it asked. With
 		// no Largest the join skips nothing, so every group is owed: a lower one's stream
@@ -3435,6 +3444,14 @@ impl Subscriber {
 		if let Some(staged) = staged {
 			staged.commit();
 		}
+		// Resolved while the answer's Largest is still the live edge: no data stream reaches
+		// the copy before its alias is bound below.
+		let settled = match deferred {
+			true => track
+				.subscription()
+				.map(|subscription| (settle_bounds(&mut resolved, &track, &subscription), subscription)),
+			false => None,
+		};
 		let mut fetching: Option<JoiningTask> = None;
 		{
 			let mut state = self.state.lock();
@@ -3494,6 +3511,17 @@ impl Subscriber {
 		let mut priority = priority;
 		let mut sent_bounds = (start, subscription.as_ref().and_then(|subscription| subscription.end()));
 		let mut wanted_bounds = Ok(sent_bounds);
+		// A deferred relative anchor, until the copy learns the live edge it counts back from:
+		// an answer with no Largest leaves it to the first group. The bounds it then resolves
+		// to go upstream as an update, absolute like any other.
+		let mut unsettled = None;
+		match settled {
+			Some((Ok(Some(bounds)), _)) => wanted_bounds = Ok(bounds),
+			Some((Ok(None), subscription)) => unsettled = Some(subscription),
+			Some((Err(err), _)) => wanted_bounds = Err(err),
+			None => {}
+		}
+		let mut edge = track.consume();
 		// REQUEST_UPDATEs sent and not yet answered.
 		let unanswered = AtomicU64::new(0);
 
@@ -3565,14 +3593,28 @@ impl Subscriber {
 						subscribed = subscription
 							.as_ref()
 							.is_some_and(|subscription| !subscription.ranges.is_empty());
+						unsettled = None;
 						if let Some(subscription) = subscription {
 							priority = subscription.priority;
-							wanted_bounds = resolved
-								.resolve(&track, &subscription)
-								.map(|subscription| wire_bounds(&subscription));
+							match settle_bounds(&mut resolved, &track, &subscription) {
+								Ok(Some(bounds)) => wanted_bounds = Ok(bounds),
+								Ok(None) => unsettled = Some(subscription.clone()),
+								Err(err) => wanted_bounds = Err(err),
+							}
 							if max_age_supported {
 								wanted_max_age = Some(super::max_age::millis(subscription.budget()));
 							}
+						}
+					}
+					if let Some(subscription) = &unsettled {
+						while let Poll::Ready(Some(_)) = edge.poll_largest(waiter) {}
+						match settle_bounds(&mut resolved, &track, subscription) {
+							Ok(Some(bounds)) => {
+								wanted_bounds = Ok(bounds);
+								unsettled = None;
+							}
+							Ok(None) => {}
+							Err(err) => return Poll::Ready(End::Invalid(err)),
 						}
 					}
 					loop {
@@ -4561,7 +4603,7 @@ impl Subscriber {
 		let mut producer = crate::recv::Group::new(producer);
 		let observing = producer.handle().clone();
 
-		let mut ingest = GroupIngest::new(self, &group, timescale);
+		let mut ingest = GroupIngest::new(self.version, &group, timescale);
 		ingest.expected_first = Some(start);
 		let res = {
 			kio::wait(|waiter| {
@@ -4735,7 +4777,7 @@ enum Opened {
 
 /// How a subgroup stream ended cleanly.
 #[derive(Debug, PartialEq, Eq)]
-enum Ended {
+pub(crate) enum Ended {
 	/// The stream finished, or carried an explicit end of group.
 	Group,
 	/// It carried an END_OF_TRACK after the group's last object, and whether that
@@ -4962,13 +5004,13 @@ impl Subscriber {
 /// Pumps moq-transport subgroup objects from a reader into a group producer:
 /// the id delta, the extension headers (carrying the timestamp), the size, the
 /// status for empty objects, and the streamed payload.
-struct GroupIngest {
+pub(crate) struct GroupIngest {
 	has_extensions: bool,
 	timescale: Option<Timescale>,
 	version: Version,
 	prior_object: Option<u64>,
 	/// The live tail must begin exactly after the filled head, even if it is quiet.
-	expected_first: Option<u64>,
+	pub(crate) expected_first: Option<u64>,
 	properties: crate::model::object::Properties,
 	/// The property list `properties` was read from, for a status object, which has no frame.
 	raw: bytes::Bytes,
@@ -4995,11 +5037,11 @@ enum IngestPhase {
 }
 
 impl GroupIngest {
-	fn new(subscriber: &Subscriber, group: &ietf::GroupHeader, timescale: Option<Timescale>) -> Self {
+	pub(crate) fn new(version: Version, group: &ietf::GroupHeader, timescale: Option<Timescale>) -> Self {
 		Self {
 			has_extensions: group.flags.has_extensions,
 			timescale,
-			version: subscriber.version,
+			version,
 			prior_object: None,
 			expected_first: None,
 			properties: Default::default(),
@@ -5457,8 +5499,9 @@ impl Subscriber {
 				range_filters: false,
 				fill_timeout: false,
 				// The copy learned the track before any fetch, from SUBSCRIBE_OK or
-				// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste.
-				properties_wanted: false,
+				// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste, except that only its
+				// TIMESCALE opts the answer into the timestamps a timed copy needs.
+				properties_wanted: timescale.is_some(),
 				epoch: self.epoch.clone(),
 			},
 		);
@@ -5987,15 +6030,19 @@ impl GroupIngest {
 	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
 	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
 	/// group; an object cut short mid-payload was already aborted here with the reason.
-	fn poll<R: crate::transport::poll::RecvStream>(
+	pub(crate) fn poll<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut crate::recv::Group,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Ended, Error>> {
+		// An empty object is a few bytes, so a peer keeping them ready must not hold the
+		// session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			match &mut self.phase {
 				IngestPhase::Delta => {
+					ready!(budget.poll_yield(waiter));
 					let Some(id_delta) = ready!(reader.poll_varint_maybe(waiter))? else {
 						return Poll::Ready(Ok(Ended::Group));
 					};
@@ -12003,6 +12050,27 @@ impl ResolvedRanges {
 	}
 }
 
+/// The wire bounds `subscription` resolves to, `None` while a relative anchor still waits
+/// for the live edge it counts back from.
+fn settle_bounds(
+	resolved: &mut ResolvedRanges,
+	track: &track::Producer,
+	subscription: &track::Subscription,
+) -> Result<Option<WireBounds>, Error> {
+	match resolved.resolve(track, subscription) {
+		Ok(subscription) => Ok(Some(wire_bounds(&subscription))),
+		Err(Error::Unsupported) if !has_time(subscription) => Ok(None),
+		Err(err) => Err(err),
+	}
+}
+
+fn has_time(subscription: &track::Subscription) -> bool {
+	subscription
+		.ranges
+		.iter()
+		.any(|range| matches!(range.start, track::Anchor::Time(_)) || matches!(range.end, Some(track::Anchor::Time(_))))
+}
+
 fn needs_resolution(subscription: &track::Subscription) -> bool {
 	subscription.ranges.iter().any(|range| {
 		let start = match range.start {
@@ -12014,8 +12082,11 @@ fn needs_resolution(subscription: &track::Subscription) -> bool {
 	})
 }
 
+/// A subscription's single wire span: its start and exclusive end group, each open when `None`.
+type WireBounds = (Option<u64>, Option<u64>);
+
 /// The single wire span covers mixed absolute/live starts from group zero.
-fn wire_bounds(subscription: &track::Subscription) -> (Option<u64>, Option<u64>) {
+fn wire_bounds(subscription: &track::Subscription) -> WireBounds {
 	let start = subscription.start().or_else(|| {
 		subscription
 			.ranges
@@ -13665,15 +13736,6 @@ mod stitch_tests {
 		h.dispatch_refused().await;
 	}
 
-	/// More objects than a group may hold.
-	#[moq_clock::test]
-	async fn an_oversized_group_is_refused() {
-		// Each empty object is its delta, a zero size, and the Normal status.
-		let objects = vec![0u64; 3 * (crate::group::MAX_GROUP_FRAMES + 1)];
-		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &objects, &[])], None);
-		h.dispatch_refused().await;
-	}
-
 	/// A second stream for a group the track already holds.
 	#[moq_clock::test]
 	async fn a_second_stream_for_a_group_is_refused() {
@@ -13982,13 +14044,10 @@ mod stitch_tests {
 		let mut fill = h.stream().await;
 		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
 		let mut group = consumer.recv_group().await.unwrap().unwrap();
-		h.subscriber.close();
+		h.subscriber.abort(&Error::Session(SessionError::Cancel));
 		let result = group.read_frame().await;
 		assert!(
-			matches!(
-				result,
-				Err(Error::Stream(crate::StreamError::Session(SessionError::Cancel)))
-			),
+			matches!(result, Err(Error::Session(SessionError::Cancel))),
 			"{result:?}"
 		);
 		assert!(

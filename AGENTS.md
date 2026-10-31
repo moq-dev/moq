@@ -102,7 +102,7 @@ just fix          # Auto-fix lint/formatting, same scope
 These diff the branch against its base and only run the affected packages.
 
 Quests: before starting work, run `quest guide` and follow it.
-The `quest` binary comes from the kixelated/quest flake input and serves the quest skills; change them upstream and bump the input.
+The `quest` binary comes from the moq-dev/quest flake input and serves the quest skills; change them upstream and bump the input.
 
 # Cross-Package Sync
 

@@ -5602,6 +5602,7 @@ dependencies = [
  "moq-clock",
  "moq-pattern 0.1.2",
  "num_enum",
+ "proptest",
  "rand 0.10.3",
  "rangemap",
  "serde",
@@ -5918,7 +5919,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-test",
+ "tracing-subscriber",
 ]
 
 [[package]]

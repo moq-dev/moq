@@ -277,7 +277,6 @@ test("announcing and subscribing after GOAWAY still open streams", async () => {
 		const announced = subscriber.announced();
 		await waitUntil(() => opened);
 		announced.close();
-		subscriber.close();
 	}
 });
 

@@ -26,22 +26,43 @@ const updates = 32;
 let checksum = 0;
 
 console.log("scope,routes,observers,update_us");
-for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-producers"] as const) {
+for (const scope of [
+	"unscoped",
+	"distinct-scopes",
+	"producer-scopes",
+	"rooted-producers",
+	"full-name",
+	"overlap-only",
+] as const) {
 	for (const routeCount of routeCounts) {
 		for (const observerCount of observerCounts) {
 			const origin = new Producer();
 			const handles = Array.from({ length: routeCount }, (_, index) =>
-				origin.requests(Path.from(`room/${index}`)),
+				origin.requests(Path.from(`room/${index}${scope === "full-name" ? ".chat" : ""}`)),
 			);
-			const touched = Path.from(scope === "rooted-producers" ? "0" : "room/0");
+			const touched = Path.from(
+				scope === "rooted-producers" ? "0" : scope === "full-name" ? "room/0.chat" : "room/0",
+			);
 			let notifications = 0;
 			const streams = Array.from({ length: observerCount }, (_, index) =>
-				(scope === "producer-scopes"
-					? origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse(`room/**/tag-${index}`)]))
-					: scope === "rooted-producers"
-						? origin.scope(Path.from("room"), new Path.Patterns([Path.Pattern.parse(`**/tag-${index}`)]))
-						: origin
-				).announced(scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined),
+				scope === "full-name" || scope === "overlap-only"
+					? origin.consume().announced(Path.Pattern.parse("**/*.chat"))
+					: (scope === "producer-scopes"
+							? origin.scope(
+									Path.empty(),
+									new Path.Patterns([Path.Pattern.parse(`room/**/tag-${index}`)]),
+								)
+							: scope === "rooted-producers"
+								? origin.scope(
+										Path.from("room"),
+										new Path.Patterns([Path.Pattern.parse(`**/tag-${index}`)]),
+									)
+								: origin
+						).announced(
+							scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined,
+							// These scopes only overlap `room/<index>`, so they measure the covering view.
+							{ covering: scope !== "unscoped" },
+						),
 			);
 			const readers = streams.map(async (stream) => {
 				for await (const event of stream) {
@@ -59,8 +80,9 @@ for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-p
 				await new Promise<void>((resolve) => setImmediate(resolve));
 			}
 			const elapsed = performance.now() - start;
-			if (notifications !== updates * observerCount) {
-				throw new Error(`expected ${updates * observerCount} notifications, got ${notifications}`);
+			const expected = scope === "overlap-only" ? 0 : updates * observerCount;
+			if (notifications !== expected) {
+				throw new Error(`expected ${expected} notifications, got ${notifications}`);
 			}
 			console.log(`${scope},${routeCount},${observerCount},${((elapsed * 1000) / updates).toFixed(1)}`);
 			for (const stream of streams) stream.close();
