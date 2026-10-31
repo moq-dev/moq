@@ -303,8 +303,12 @@ class Graph:
         self.recipes = justfiles[root]
         self.reached: dict[str, Recipe] = {}
         self.bindings: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+        # Script files reached shell text names, whose own text is then walked.
         self.files: set[Path] = set()
-        # Files a reached shell command runs, not merely names, as the checker names its own.
+        # Files only another language names, like a test running a script under stubs or the
+        # checker naming the runners it knows: reached, but nothing they call is.
+        self.named: set[Path] = set()
+        # Files a reached shell command runs, not merely names.
         self.executed: set[Path] = set()
         self.branches: set[tuple[Path, int, int]] = set()
         self.runs: list[Run] = []
@@ -430,12 +434,14 @@ class Graph:
                         self.execute(path)
             mentions = Counter(self.scripts(text, cwd, file))
             for path, count in mentions.items():
-                # Other languages only name a script, like a test running it under stubs, so they
-                # select none of its branches. A shell mention that is not a command may pass any.
+                # A shell mention that is not a command may pass any argument.
                 if not runs:
-                    self.visit_file(path, cwd, [])
+                    self.named.add(path)
                 else:
                     self.visit_file(path, cwd, arguments[path] if len(arguments[path]) == count else None)
+
+    def reaches(self, path: Path) -> bool:
+        return path in self.files or path in self.named
 
 
 def shell(text: str, file: Path | None) -> bool:
@@ -859,7 +865,7 @@ def runs_tests(graph: Graph, recipe: Recipe, found: set[Path]) -> bool:
         if RUNNER.search(re.sub(r" +", " ", re.sub(r"[\"',]", " ", text))):
             return True
         for path in graph.scripts(text, recipe.cwd, file):
-            if path in seen or path in graph.files:
+            if path in seen or graph.reaches(path):
                 continue
             seen.add(path)
             relative = str(path.relative_to(graph.root))
@@ -970,7 +976,7 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
         if path.suffix in (".ts", ".js") and not path.name.endswith(".browser.ts") and any(
                 path.resolve().is_relative_to(directory) for directory in found):
             continue
-        if path.resolve() not in graph.files:
+        if not graph.reaches(path.resolve()):
             orphans.append((f"script {relative}", relative))
     return orphans, errors
 
