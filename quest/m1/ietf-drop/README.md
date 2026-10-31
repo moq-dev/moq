@@ -57,10 +57,18 @@ the other breaks before the cut. Drafts 14 to 17
 ([moq-dev/moq#6753](https://github.com/moq-dev/moq/pull/6753)) and 19 to 21
 ([moq-dev/moq#6754](https://github.com/moq-dev/moq/pull/6754)) are gone.
 
-This README's remaining work: open a PR on
-`englishm/moq-interop-runner` narrowing the `moq-dev-rs` and `moq-dev-js`
-entries in `implementations.json` to drafts 18 and 22. The maintainer
-approved posting there on 2026-10-24.
+The registry change is open as
+[englishm/moq-interop-runner#178](https://github.com/englishm/moq-interop-runner/pull/178),
+narrowing the `moq-dev-rs` and `moq-dev-js` entries in `implementations.json`
+to drafts 18 and 22 and updating their stale notes. The maintainer approved
+posting there on 2026-10-24. Schema validation and the registry's dry-run
+matrix checks pass; no image or endpoint was changed.
+
+Remaining condition: that PR merges and the runner's default registry names
+only drafts 18 and 22 for both entries. Check its state and the default
+branch's `implementations.json`, then delete this quest. The maintainer
+requested PR production without merges on 2026-10-27, so the external PR
+stays open and this quest remains.
 
 ## Related
 
