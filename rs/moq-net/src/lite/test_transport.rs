@@ -936,6 +936,8 @@ pub struct ScriptedSession {
 	/// Set by [`Self::gated_open`]: parks `poll_open_bi` until the gate opens, standing in
 	/// for a transport header blocked on send capacity.
 	open_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::with_open_uni_gate`].
+	uni_open_gate: Option<kio::Consumer<bool>>,
 	credit: kio::Producer<bool>,
 	/// Scripts the peer pushes at us on unidirectional streams, popped by `accept_uni`
 	/// in order. See [`Self::with_incoming_unis`].
@@ -980,6 +982,7 @@ impl ScriptedSession {
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
+			uni_open_gate: None,
 			credit: kio::Producer::new(true),
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
@@ -1001,6 +1004,12 @@ impl ScriptedSession {
 	/// Open send groups, as native QUIC does, recording them in the log.
 	pub fn with_groups(mut self) -> Self {
 		self.groups = true;
+		self
+	}
+
+	/// Hold unidirectional stream opens until `gate` grants stream credit.
+	pub fn with_open_uni_gate(mut self, gate: kio::Consumer<bool>) -> Self {
+		self.uni_open_gate = Some(gate);
 		self
 	}
 
@@ -1188,9 +1197,15 @@ impl poll::Session for ScriptedSession {
 
 	fn poll_open_uni(
 		&self,
-		_waiter: &kio::Waiter,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<Self::SendStream, Self::Error>> {
+		if let Some(gate) = &self.uni_open_gate {
+			match gate.poll(waiter, |open| (**open).then_some(()).map_or(Poll::Pending, Poll::Ready)) {
+				Poll::Ready(Ok(())) => {}
+				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
+			}
+		}
 		let mut send = SinkSend::new(self.log.clone());
 		send.unacked_fin = self
 			.unacked_unis
