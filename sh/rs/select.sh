@@ -15,7 +15,8 @@ list=${2:?$usage}
 
 cd "$(git rev-parse --show-toplevel)"
 
-# Print `ALL`, nothing (no crate affected), or cargo package ids.
+# Print `ALL`, nothing (no crate affected), or cargo package ids: the changed
+# crates and their dependents, or with `seeds`, the changed crates alone.
 select_packages() {
     if [[ "$action" == uring && -f "$list" ]] && grep -qE '^(justfile|flake\.(nix|lock)|sh/changed\.sh|\.github/workflows/uring\.yml|\.cargo/.*|\.github/actions/.*)$' "$list"; then
         echo ALL
@@ -60,6 +61,8 @@ select_packages() {
     # selector's tests check that.
     seeds=$({
         sed -n '\|^rs/[^/]*/benches/|d; s|^rs/\([^/]*\)/.*|\1|p' "$list"
+        # moq-relay's tests read its NixOS module.
+        sed -n 's|^nix/modules/moq-relay\.nix$|moq-relay|p' "$list"
         jq -r --rawfile list "$list" '
             def resolve: gsub("\\\\"; "/") | reduce split("/")[] as $s ([];
                 if $s == ".." then .[:-1] elif $s == "." then . else . + [$s] end) | join("/");
@@ -81,7 +84,8 @@ select_packages() {
     # names that are not workspace crates, such as a seed from `rs/AGENTS.md`.
     # The seeds go through the environment because BSD awk (macOS) rejects a
     # newline in a `-v` value.
-    selected=$(SEEDS="$seeds" awk '
+    selected=$seeds
+    [[ "${1:-}" == seeds ]] || selected=$(SEEDS="$seeds" awk '
 		BEGIN { split(ENVIRON["SEEDS"], s, "\n"); for (i in s) want[s[i]] = 1 }
 		{ pkg[NR] = $1; dep[NR] = $2 }
 		END {
@@ -111,16 +115,34 @@ select_packages() {
 packages=$(select_packages)
 
 # Ids are `path+file://<dir>#<version>` for a directory named after its crate.
-names=$(tr ' ' '\n' <<<"$packages" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' ')
+crate_names() {
+    tr ' ' '\n' <<<"$1" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' '
+}
+names=$(crate_names "$packages")
+
+# The feature-contract checks lint each crate without the features workspace
+# unification adds, and a changed crate recompiles in every shape it is
+# checked in. `RS_FEATURE_SCOPE=changed`, which `just check` sets, checks only
+# the changed crates; the landing worker's `just ci` keeps their dependents too.
+shape_packages=$packages
+if [[ "${RS_FEATURE_SCOPE:-}" == changed && "$packages" != ALL && "$action" =~ ^(check|check-test|lint|feature-shapes)$ ]]; then
+    shape_packages=$(select_packages seeds)
+fi
+shape_names=$(crate_names "$shape_packages")
 
 # True when the selection includes a crate matching the pattern.
 wants() {
     [[ "$packages" == ALL ]] || grep -qwE "$1" <<<"$names"
 }
 
-# Isolated permutations protect the edited crate's own feature gates. A
-# dependency edit still runs its consumers' boundary checks without rebuilding
-# every permutation of every consumer. Shared build inputs select them all.
+# True when the feature-contract selection includes a crate matching the pattern.
+shapes_want() {
+    [[ "$shape_packages" == ALL ]] || grep -qwE "$1" <<<"$shape_names"
+}
+
+# True when the diff edits the crate's own compiled code or build definition,
+# so its isolated permutations run too. A dependency edit keeps only its
+# consumers' boundary checks; shared build inputs select every owner's.
 changed() {
     [[ "$packages" == ALL ]] || grep -qE "^rs/$1/(src/|tests/|examples/|Cargo\\.toml$|build\\.rs$)" "$list"
 }
@@ -148,6 +170,11 @@ else
     # shellcheck disable=SC2206
     flags=($packages)
 fi
+shape_flags=("${flags[@]}")
+if [[ "$shape_packages" != "$packages" ]]; then
+    # shellcheck disable=SC2206
+    shape_flags=($shape_packages)
+fi
 
 case "$action" in
     uring)
@@ -159,25 +186,21 @@ case "$action" in
         # gates. Keep the boundary checks isolated and the full matrix nightly.
         # The dispatcher runs them as a module of their own (rs_shapes), so a
         # gate split across jobs can give them one.
-        [[ "$action" == lint ]] || just rs feature-shapes "${flags[@]}"
-        if wants '(kio|moq-net)'; then just rs loom --no-run; fi
-        if wants moq-net; then just rs net-features; fi
-        if wants moq-quic; then just rs quic-features; fi
-        if wants moq-tokio; then
+        [[ "$action" == lint || -z "$shape_packages" ]] || just rs feature-shapes "${shape_flags[@]}"
+        if wants '(kio|moq-net)'; then just rs loom-check; fi
+        if shapes_want moq-net; then just rs net-features; fi
+        if shapes_want moq-quic; then just rs quic-features; fi
+        if shapes_want moq-tokio; then
             isolated=()
             if changed moq-tokio; then isolated=(--all); fi
-            just rs tokio-features "${isolated[@]}"
+            just rs tokio-features ${isolated[@]+"${isolated[@]}"}
         fi
-        if wants '(moq-video|moq-audio|moq-transcode)'; then
+        if shapes_want '(moq-video|moq-audio|moq-transcode)'; then
             isolated=()
-            if [[ "$packages" == ALL ]]; then
-                isolated=(--all)
-            else
-                for crate in moq-video moq-audio moq-transcode; do
-                    if changed "$crate"; then isolated+=(--package "$crate"); fi
-                done
-            fi
-            just rs media-features "${isolated[@]}"
+            for crate in moq-video moq-audio moq-transcode; do
+                if changed "$crate"; then isolated+=(--package "$crate"); fi
+            done
+            just rs media-features ${isolated[@]+"${isolated[@]}"}
         fi
         # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a
         # wasm32 pass checks it. moq-mux, moq-ffi, and moq-clock ride along in that pass, and
@@ -194,7 +217,7 @@ case "$action" in
         if wants moq-relay; then just rs uring-check; fi
         ;;
     feature-shapes)
-        just rs feature-shapes "${flags[@]}"
+        [[ -z "$shape_packages" ]] || just rs feature-shapes "${shape_flags[@]}"
         ;;
     fix)
         just rs fix "${flags[@]}"

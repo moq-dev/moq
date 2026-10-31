@@ -1158,7 +1158,7 @@ impl Inner {
 		if let Ok(mut state) = TrackState::modify(&self.state)
 			&& state.end.is_none()
 		{
-			let _ = state.set_end(Position::group(final_sequence));
+			let _ = state.set_end(Position::group(final_sequence), None);
 		}
 	}
 }
