@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Compression moves to the track
+
+`catalog::Compression`, the `compression` field on `JsonConfig` and `BinaryConfig`, `Catalog::COMPRESSED_NAME`, and `catalog::Consumer::compressed` are gone.
+A compressed track is one name with `compress: true` on its `moq_net::track::Info`, and moq-net hands every reader plain frames, so read `catalog.json` with `Consumer::new` whether or not it is compressed.
+`Catalog::default_track_info()` sets `compress`, so a publisher using it compresses `catalog.json`; stop publishing `catalog.json.z`.
+An old catalog's `"compression"` key on a data track lands in the entry's `extra`, and its frames are still app-level DEFLATE nothing here inflates.
+
 ### `moq_net::Path` has no lifetime
 
 `catalog` reference fields, `Echo::path`, and `health::Observer` use the lifetime-free `moq_net::path::Relative` and `moq_net::Path`: replace `RelativeOwned` with `Relative` and `PathOwned` with `Path`. `Echo::new` takes `impl Into<Relative>`: pass `Relative::new(s)?` rather than a string. See moq-net's migration for the rest.
@@ -16,7 +23,7 @@ Delete matches on `TooManyRenditions`. An application that wants a limit counts 
 ### HLS records replace the root archive
 
 `catalog::Archive`, `catalog::Timeline`, `Catalog::archive`, and the `timeline` module are gone.
-A video or audio rendition opts in to HLS with its own `hls: Option<catalog::Hls>` field, naming its record track and nominal segment duration.
+A video or audio rendition carries its own `hls: Option<catalog::Hls>` field, naming its record track and nominal segment duration.
 Records are `hls::Record { sequence, group, pts, duration }` in milliseconds on a `<track>.hls` track (`hls::default_name`, `hls::SUFFIX`).
 Build one with `Record::new(sequence, group, pts)`, adding `with_duration(0)` where content stops.
 A catalog with an old root `archive` still parses, with the entry ignored.

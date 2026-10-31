@@ -12,7 +12,8 @@
 //!
 //! A start is no promise, since a group below it may still arrive late. A hole under it is
 //! asked at once, but a refusal is final only once the ledger gives up on it too; until
-//! then the live feed may still deliver it.
+//! then the live feed may still deliver it. Under a received copy's start, only what the
+//! reader may still want is a hole: see [`Misses::judge`].
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
@@ -349,11 +350,17 @@ impl Misses {
 	}
 
 	/// Judge the holes in `target` the last probe has not, returning the runs to ask a
-	/// fill for. Gives up a run already stale under this reader's budget.
+	/// fill for. Gives up a run already stale under this reader's budget. `named` is the
+	/// lowest group the reader's ranges name, which may reach below the feed's start.
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "one probe's inputs, borrowed apart from its cursor"
+	)]
 	pub fn judge(
 		&mut self,
 		state: &TrackState,
 		key: (u64, u64, Option<u64>),
+		named: Option<u64>,
 		mut target: impl FnMut(RangeInclusive<u64>) -> RangeInclusiveSet<u64>,
 		drift: &Drift,
 		given_up: &mut GivenUp,
@@ -377,27 +384,37 @@ impl Misses {
 			state.start_sequence,
 			state.drops_revision,
 		);
-		let now = state.cache.pool().now_wall();
-		let grace = state.arrival_grace();
 		let ended = state.abort.is_some() || state.is_complete();
+		let ledger = state.arrivals.changes();
+		let drops = &state.drops_changes;
+		// Every reader probes on every poll, mostly with nothing changed since the last, so
+		// that answer costs neither the subscriptions' lock nor a clock read.
+		let unchanged = self.at == Some(at)
+			&& self.budget == Some(drift.budget)
+			&& self.ended == ended
+			&& self.ledger_revision == ledger.revision()
+			&& self.drops_revision == drops.revision();
+		// The grace only times deferred gaps, so with none a new one has nothing to move.
+		// It is judged once something else changes.
+		if unchanged && self.deferred.runs.is_empty() {
+			return asks;
+		}
+		let grace = state.arrival_grace();
+		let unchanged = unchanged && self.grace == Some(grace);
+		let deadline = self.deferred.deadline();
+		if unchanged && deadline.is_none() {
+			return asks;
+		}
+		let now = state.cache.pool().now_wall();
+		if unchanged && let Some(at) = deadline.filter(|at| *at > now) {
+			state.cache.watch_wall(at, waiter);
+			return asks;
+		}
 		let terms = self.at.is_none_or(|previous| {
 			previous.1 != at.1 || previous.2 != at.2 || previous.4 != at.4 || previous.5 != at.5 || at.0 < previous.0
 		}) || self.budget != Some(drift.budget)
 			|| self.grace != Some(grace)
 			|| self.ended != ended;
-		let ledger = state.arrivals.changes();
-		let drops = &state.drops_changes;
-		if !terms
-			&& self.at == Some(at)
-			&& self.ledger_revision == ledger.revision()
-			&& self.drops_revision == drops.revision()
-			&& self.deferred.deadline().is_none_or(|at| at > now)
-		{
-			if let Some(at) = self.deferred.deadline() {
-				state.cache.watch_wall(at, waiter);
-			}
-			return asks;
-		}
 		let low = state.live_floor.unwrap_or(0).max(key.0);
 		let top = newest.min(u64::MAX - 1);
 		let mut candidates = RangeSet::new();
@@ -491,7 +508,36 @@ impl Misses {
 			self.judged.insert(run.clone());
 		}
 		let start = state.start_sequence.unwrap_or(0);
+		let (stale_below, unasked) = match state.start_budget {
+			// Its publisher skipped every older group as stale under a budget no tighter
+			// than this reader's, so they are stale for it too.
+			Some(budget) if drift.budget <= budget => (start, false),
+			// Such a copy cannot tell a group a looser reader's budget reaches, so it leaves
+			// them to the feed's re-offer.
+			Some(_) => (0, state.fills_from_start),
+			// The feed began at the live edge or the floor the copy asked for, so older
+			// groups are history only a reader naming them asked for.
+			None => (
+				0,
+				state.fills_from_start || state.received && named.is_none_or(|named| named >= start),
+			),
+		};
+		if unasked && start > 0 {
+			candidates.remove(0..start);
+		}
 		for run in candidates.iter() {
+			// Backfill another reader's fill cached is no hole, yet the arrival walk never
+			// reaches it: this reader takes it as filled where it would ask for a hole.
+			for held in backfill(state, run.clone()).iter() {
+				let (unfed, awaited) = state.unfed(held.clone(), now);
+				for run in unfed.iter() {
+					self.filled.extend(run.clone());
+				}
+				for (run, folds) in awaited {
+					self.filled.extend(run.start..run.end.min(start));
+					self.deferred.insert(run.start.max(start)..run.end, folds);
+				}
+			}
 			for hole in holes(state, run.clone()) {
 				for hole in self.unclaimed(state, hole) {
 					let (unfed, awaited) = state.unfed(hole, now);
@@ -539,8 +585,10 @@ impl Misses {
 		// budget is stale throughout.
 		let stale: Vec<ops::Range<u64>> = asks
 			.iter()
-			.filter(|run| state.drifted(run.end - 1, &drift.edge, drift.budget))
-			.cloned()
+			.filter_map(|run| match state.drifted(run.end - 1, &drift.edge, drift.budget) {
+				true => Some(run.clone()),
+				false => Some(run.start..run.end.min(stale_below)).filter(|run| !run.is_empty()),
+			})
 			.collect();
 		for run in stale {
 			asks.remove(run.clone());
@@ -722,6 +770,16 @@ impl TrackState {
 	}
 }
 
+/// The runs of `run` the cache holds as backfill: servable, but out of the arrival walk.
+fn backfill(state: &TrackState, run: ops::Range<u64>) -> RangeSet<u64> {
+	state
+		.lookup
+		.range(run)
+		.filter(|(_, slot)| !slot.is_walked() && slot.serves_end())
+		.map(|(&sequence, _)| sequence..sequence + 1)
+		.collect()
+}
+
 /// The runs of `run` the cache holds nothing servable for.
 pub(super) fn holes(state: &TrackState, run: ops::Range<u64>) -> Vec<ops::Range<u64>> {
 	let mut holes = Vec::new();
@@ -797,6 +855,7 @@ mod tests {
 		let asks = misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			|span| [span].into_iter().collect(),
 			&drift,
 			&mut given_up,
@@ -835,6 +894,7 @@ mod tests {
 		misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			|_| panic!("the edge has not moved"),
 			&drift,
 			&mut given_up,
@@ -858,6 +918,7 @@ mod tests {
 		misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			|_| panic!("recreation extends no span"),
 			&drift,
 			&mut given_up,
@@ -898,6 +959,7 @@ mod tests {
 		let asks = misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			|span| [span].into_iter().collect(),
 			&drift,
 			&mut given_up,
@@ -930,6 +992,7 @@ mod tests {
 		let asks = misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			|_| panic!("the edge has not moved"),
 			&drift,
 			&mut given_up,
@@ -965,6 +1028,7 @@ mod tests {
 				.judge(
 					&state,
 					(0, 0, None),
+					None,
 					|span| [span].into_iter().collect(),
 					&drift,
 					&mut given_up,
@@ -979,6 +1043,7 @@ mod tests {
 				.judge(
 					&state,
 					(0, 0, None),
+					None,
 					|_| panic!("an unchanged probe rebuilds no span"),
 					&drift,
 					&mut given_up,
@@ -998,6 +1063,7 @@ mod tests {
 				.judge(
 					&state,
 					(0, 0, None),
+					None,
 					|_| panic!("a late arrival extends no span"),
 					&drift,
 					&mut given_up,
@@ -1013,6 +1079,7 @@ mod tests {
 		let asks = misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			|_| panic!("a due gap extends no span"),
 			&drift,
 			&mut given_up,
@@ -1021,6 +1088,78 @@ mod tests {
 		assert!(asks.is_empty(), "the successor has aged past this reader's budget too");
 		assert_eq!(given_up, vec![3..4]);
 		assert!(misses.deferred.runs.is_empty());
+	}
+
+	/// A grace change with nothing deferred has no deadline to move, so an unchanged probe
+	/// skips it; the next gap is still timed by the new grace.
+	#[moq_clock::test]
+	async fn a_grace_change_with_nothing_deferred_times_the_next_gap() {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let track = broadcast.create_track("grace", crate::track::Info::default()).unwrap();
+		let budget = Duration::from_secs(5);
+		let _reader = track.subscribe(Subscription::default().with_max_delay(budget));
+		for sequence in 0..3 {
+			track
+				.create_group(crate::group::Info { sequence })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		let mut misses = Misses::default();
+		let mut given_up = Vec::new();
+		let waiter = kio::Waiter::noop();
+		let state = track.state.read();
+		let drift = Drift {
+			budget,
+			bounded: false,
+			edge: state.drift_edge(&Servable::ALL),
+		};
+		let full = |span| [span].into_iter().collect();
+		assert!(
+			misses
+				.judge(&state, (0, 0, None), None, full, &drift, &mut given_up, &waiter)
+				.is_empty()
+		);
+		assert!(misses.deferred.runs.is_empty(), "a contiguous feed defers nothing");
+		drop(state);
+
+		let wider = Duration::from_secs(20);
+		let _wide = track.subscribe(Subscription::default().with_max_delay(wider));
+		let state = track.state.read();
+		assert_eq!(state.arrival_grace(), wider);
+		assert!(
+			misses
+				.judge(
+					&state,
+					(0, 0, None),
+					None,
+					|_| panic!("nothing deferred: the new grace waits for a change"),
+					&drift,
+					&mut given_up,
+					&waiter
+				)
+				.is_empty()
+		);
+		drop(state);
+
+		track
+			.create_group(crate::group::Info { sequence: 4 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let state = track.state.read();
+		let opened = state.cache.pool().now_wall();
+		assert!(
+			misses
+				.judge(&state, (0, 0, None), None, full, &drift, &mut given_up, &waiter)
+				.is_empty()
+		);
+		assert_eq!(misses.deferred.overlapping(0..5).collect::<Vec<_>>(), vec![3..4]);
+		assert_eq!(
+			misses.deferred.deadline(),
+			Some(opened + wider),
+			"timed by the new grace"
+		);
 	}
 
 	#[test]

@@ -1,4 +1,4 @@
-import { expect, jest, mock, spyOn, test } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
@@ -189,9 +189,13 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 	},
 );
 
-// Delivers `sequences` in the given order, finishes the track, and returns the
-// SUBSCRIBE_END the publisher put on the wire.
-async function subscribeEnd(sequences: number[], version: Version = Version.DRAFT_05): Promise<SubscribeEnd> {
+// Delivers `sequences` in the given order, finishes the track (with `error`, if given), and
+// returns the SUBSCRIBE_END the publisher put on the wire.
+async function subscribeEnd(
+	sequences: number[],
+	version: Version = Version.DRAFT_05,
+	error?: Error,
+): Promise<SubscribeEnd> {
 	const pair = createMockTransportPair(version === Version.DRAFT_07 ? ALPN_07_WIP : ALPN_05);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
@@ -218,7 +222,8 @@ async function subscribeEnd(sequences: number[], version: Version = Version.DRAF
 		// arrives late opens no stream at all, so there is nothing firmer to wait on.
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
-	track.finish();
+	if (error) track.finishAt({ group: Math.max(-1, ...sequences) + 1, frame: 0 }, error);
+	else track.finish();
 	track.close();
 
 	try {
@@ -677,6 +682,7 @@ function gateWrites(target: WritableStream<Uint8Array>, hold: boolean) {
 // against a group the loop is already holding.
 async function servedSubscription(
 	options: {
+		ranges?: Subscribe["ranges"];
 		startGroup?: number;
 		startFrame?: number;
 		endGroup?: number;
@@ -686,6 +692,7 @@ async function servedSubscription(
 		// Frame payloads written into every served group. Frame bounds need draft-06.
 		frames?: string[];
 		version?: Version;
+		maxDatagramSize?: number;
 		// Answer the subscription with a front's broadcast, as an application forwarding a
 		// routed one does, so the track reads through the front's serving route.
 		routed?: boolean;
@@ -694,6 +701,8 @@ async function servedSubscription(
 	const version = options.version ?? Version.DRAFT_05;
 	const frames = options.frames ?? ["hello"];
 	const pair = createMockTransportPair(version === Version.DRAFT_06 ? ALPN_06 : ALPN_05);
+	if (options.maxDatagramSize !== undefined)
+		Object.defineProperty(pair.server.datagrams, "maxDatagramSize", { value: options.maxDatagramSize });
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
@@ -738,6 +747,7 @@ async function servedSubscription(
 	// Kept so a test can wait for the whole subscription to unwind, decoder included, rather
 	// than only for what reached the wire. It reports failures by tearing down, never by
 	// rejecting.
+	msg.ranges = options.ranges;
 	const serving = publisher.runSubscribe(msg, server);
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
@@ -824,6 +834,28 @@ async function servedSubscription(
 			routed?.front.consumer.close();
 		},
 	};
+}
+
+// Refuse unsupported anchors on either control message before promising a delivery start.
+for (const kind of [2, 3]) {
+	for (const end of [false, true]) {
+		for (const update of [false, true]) {
+			test(`lite-07 refuses anchor ${kind} at ${end ? "end" : "start"} in ${update ? "UPDATE" : "SUBSCRIBE"}`, async () => {
+				const version = Version.DRAFT_07;
+				const anchor = end ? [0, kind, 0] : [kind, 0, 0];
+				const bytes = new Uint8Array([8, 128, 0, 0, 1, ...anchor, 0]);
+				const decoded = await SubscribeUpdate.decode(new Reader(undefined, bytes, version), version);
+				const sub = await servedSubscription({ version, ranges: update ? undefined : decoded.ranges });
+				try {
+					if (update) await sub.client.writer.write(bytes);
+					await sub.serving;
+					await expect(decodeSubscribeResponse(sub.client.reader, version)).rejects.toThrow();
+				} finally {
+					await sub.close();
+				}
+			});
+		}
+	}
 }
 
 // A relay can ingest back-to-back groups micro-reordered (the upstream leg sends
@@ -947,6 +979,31 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	});
 }
 
+for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
+	for (const transport of [900, 1400]) {
+		test(`lite ${version}: datagram bodies fit the wire and ${transport}-byte transport`, async () => {
+			const installed = new Manual().install();
+			const sub = await servedSubscription({ version, startGroup: 0, maxDatagramSize: transport });
+			const reader = sub.datagrams.getReader();
+			const max = Math.min(1200, transport);
+			try {
+				// Each body has three one-byte varints before its payload.
+				sub.track.insertDatagram(0, Timestamp.fromMillis(0), new Uint8Array(max - 2));
+				sub.track.insertDatagram(1, Timestamp.fromMillis(1), new Uint8Array(max - 3));
+				const next = await reader.read();
+				if (next.done) throw new Error("datagrams ended early");
+				expect(next.value.byteLength).toBe(max);
+				expect((await DatagramMessage.decode(next.value, version, () => ({ timed: true }))).sequence).toBe(1);
+			} finally {
+				await reader.cancel();
+				await sub.close();
+				await sub.serving;
+				installed.close();
+			}
+		});
+	}
+}
+
 test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group and frame bounds", async (version) => {
 	const clock = new Manual();
 	const installed = clock.install();
@@ -1011,9 +1068,8 @@ test("lite draft-06: the end sweep does not drop a sent datagram", async () => {
 	}
 });
 
-// A cut this subscription already dropped stays dropped: the subscriber accounted for it, so
-// a group the publisher re-creates under it afterwards is not served.
-test("lite draft-06: a cut dropped then re-created is not served", async () => {
+// A drop describes what was missing then; a late copy of the same group is still served.
+test("lite draft-06: a reported cut still allows a late group", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0 });
 	try {
 		sub.serve(0);
@@ -1028,6 +1084,7 @@ test("lite draft-06: a cut dropped then re-created is not served", async () => {
 
 		sub.serve(1);
 		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(1);
 		expect(await sub.servedSequence()).toBe(2);
 		sub.track.finish();
 		sub.track.close();
@@ -1130,7 +1187,7 @@ test("lite draft-05: a straggler below the announced start group is not served",
 		// The publisher announced group 2 as the resolved start.
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
 		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
-		expect(resp.start.group).toBe(2);
+		expect(resp.start.starts[0]).toBe(2);
 
 		// A straggler below the announced start never reaches the wire: the next
 		// stream the publisher opens is group 3's.
@@ -1152,7 +1209,7 @@ test("lite draft-05: an explicit floor still serves a group below the first one"
 
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
 		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
-		expect(resp.start.group).toBe(2);
+		expect(resp.start.starts[0]).toBe(2);
 
 		sub.serve(0);
 		expect(await sub.servedSequence()).toBe(0);
@@ -1177,7 +1234,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 				expect(await sub.servedSequence()).toBe(6);
 				const response = await decodeSubscribeResponse(sub.client.reader, version);
 				if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
-				expect(response.start.group).toBe(expected);
+				expect(response.start.starts[0]).toBe(expected);
 				if (expected < 6) {
 					sub.serve(expected);
 					expect(await sub.servedSequence()).toBe(expected);
@@ -1201,7 +1258,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			hooks.startTrack(sub.track, { start: 3, requested: 2 });
 			const response = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
-			expect(response.start.group).toBe(3);
+			expect(response.start.starts[0]).toBe(3);
 			expect(await sub.servedSequence()).toBe(6);
 		} finally {
 			await sub.close();
@@ -1243,7 +1300,7 @@ for (const skipped of ["failed", "stale"] as const) {
 			sub.serve(6);
 			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
-			expect(response.start.group).toBe(6);
+			expect(response.start.starts[0]).toBe(6);
 			if (skipped === "failed") {
 				const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 				if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
@@ -1517,13 +1574,17 @@ test("lite draft-06: a newer update wins before a buffered group backlog drains"
 		startGroup: 0,
 		gated: true,
 	});
+	// Encoded up front, so the second update arrives whole the way a peer's would.
+	const capped = await Writer.collect(Version.DRAFT_06, (w) =>
+		replayUpdate({ priority: 0, endGroup: 1 }).encode(w, Version.DRAFT_06),
+	);
 	let second!: Promise<void>;
 	const withRange = TrackSubscriber.prototype.withRange;
 	const ranges = spyOn(TrackSubscriber.prototype, "withRange").mockImplementation(function (
 		this: TrackSubscriber,
 		groups,
 	) {
-		second ??= replayUpdate({ priority: 0, endGroup: 1 }).encode(sub.client.writer, Version.DRAFT_06);
+		second ??= sub.client.writer.write(capped);
 		return withRange.call(this, groups);
 	});
 
@@ -1668,6 +1729,13 @@ test("lite draft-05: subscribe end is 0 when no groups were produced", async () 
 	expect((await subscribeEnd([])).group).toBe(0);
 });
 
+// Lite-07 forwards an errored end's error with its boundary, so the subscriber keeps the history.
+test("lite draft-07: subscribe end carries the track's error", async () => {
+	const end = await subscribeEnd([0, 1], Version.DRAFT_07, new StreamError(StreamCode(71)));
+	expect([end.group, end.error]).toEqual([2, 71]);
+	expect((await subscribeEnd([0, 1], Version.DRAFT_07)).error).toBeUndefined();
+});
+
 // The boundary clears every produced group even when a sequence was skipped.
 test("lite draft-07: subscribe end names the final boundary", async () => {
 	const end = await subscribeEnd([0, 2], Version.DRAFT_07);
@@ -1719,6 +1787,68 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 	} finally {
 		publisher.close();
 		client.close();
+	}
+});
+
+// Before lite-07 an errored end goes out only as the reset at that end: a clean SUBSCRIBE_END
+// sent early could let the subscriber settle before the reset arrives.
+test("lite draft-06: an errored end is not declared early", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_06);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+	void publisher.runSubscribe(
+		new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
+		server,
+	);
+
+	try {
+		const first = track.createGroup(0);
+		first.writeFrame(textFrame("hello"));
+		first.finish();
+		track.finishAt({ group: 2, frame: 0 }, new StreamError(StreamCode(71)));
+
+		const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_06);
+		expect("start" in start).toBe(true);
+		const pending = decodeSubscribeResponse(client.reader, Version.DRAFT_06);
+		const early = await Promise.race([
+			pending.then(
+				() => "response",
+				() => "reset",
+			),
+			new Promise((resolve) => setTimeout(() => resolve("none"), 20)),
+		]);
+		expect(early).toBe("none");
+
+		const second = track.createGroup(1);
+		second.writeFrame(textFrame("hello"));
+		second.finish();
+		await expect(pending).rejects.toBeDefined();
+	} finally {
+		publisher.close();
+		client.close();
+	}
+});
+
+// A subscription capped short of an errored end is owed no error, so its boundary still goes out.
+test("lite draft-06: a subscription capped short of an errored end gets its boundary", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, endGroup: 1 });
+	try {
+		for (const sequence of [0, 1, 2, 3]) sub.serve(sequence);
+		sub.track.finishAt({ group: 4, frame: 0 }, new StreamError(StreamCode(71)));
+		for (;;) {
+			const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+			if (!("end" in resp)) continue;
+			expect(resp.end.group).toBe(4);
+			break;
+		}
+	} finally {
+		await sub.close();
 	}
 });
 
@@ -2006,7 +2136,7 @@ async function serve(
 		let end: number | undefined;
 		for (;;) {
 			const resp = await decodeSubscribeResponse(client.reader, Version.DRAFT_06);
-			if ("start" in resp) start = resp.start.group;
+			if ("start" in resp) start = resp.start.starts[0];
 			if ("end" in resp) {
 				end = resp.end.group;
 				break;
@@ -2822,7 +2952,7 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 	try {
 		const response = await decodeSubscribeResponse(client.reader, version);
 		if (!("start" in response)) throw new Error("expected SUBSCRIBE_OK");
-		expect(response.start.group).toBe(startGroup);
+		expect(response.start.starts[0]).toBe(startGroup);
 		expect(response.start.largest).toEqual({ group: 0, frame: 0 });
 	} finally {
 		client.close();
@@ -2860,7 +2990,7 @@ test("lite draft-07 reports the source's largest position past what a relay hold
 	try {
 		const response = await decodeSubscribeResponse(client.reader, version);
 		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
-		expect([response.start.group, response.start.largest]).toEqual([0, { group: 4, frame: 0 }]);
+		expect([response.start.starts[0], response.start.largest]).toEqual([0, { group: 4, frame: 0 }]);
 	} finally {
 		client.close();
 		publisher.close();
@@ -2872,21 +3002,10 @@ test("lite draft-07 reports the source's largest position past what a relay hold
 	}
 });
 
-async function settleControls(): Promise<void> {
-	await new Promise<void>((resolve) => {
-		const channel = new MessageChannel();
-		channel.port1.onmessage = () => {
-			channel.port1.close();
-			channel.port2.close();
-			resolve();
-		};
-		channel.port2.postMessage(null);
-	});
-}
-
 for (const version of [Version.DRAFT_03, Version.DRAFT_04, Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	test(`Report consumes PROBE targets and observes their FIN (${version})`, async () => {
-		jest.useFakeTimers();
+		const clock = new Manual();
+		const installed = clock.install();
 		const pair = createMockTransportPair(ALPN_05, { stats: { estimatedSendRate: 1_000_000, smoothedRtt: 12 } });
 		const publisher = new Publisher(pair.server, version, randomHop());
 		const client = await Stream.open(pair.client, { version });
@@ -2897,13 +3016,11 @@ for (const version of [Version.DRAFT_03, Version.DRAFT_04, Version.DRAFT_05, Ver
 		const serving = publisher.runProbe(server);
 		try {
 			await new ProbeMessage({ bitrate: 4_000_000, rtt: 20 }).encode(client.writer, version);
-			await settleControls();
-			jest.advanceTimersByTime(100);
-			await settleControls();
+			await clock.advance(Nano.fromMilli(Milli(100)));
 			expect((await ProbeMessage.decode(client.reader, version)).bitrate).toBe(1_000_000);
 			expect(reset).not.toHaveBeenCalled();
 			client.writer.close();
-			await settleControls();
+			await clock.advance(Nano.zero);
 			expect(close).toHaveBeenCalled();
 		} finally {
 			client.close();
@@ -2913,13 +3030,15 @@ for (const version of [Version.DRAFT_03, Version.DRAFT_04, Version.DRAFT_05, Ver
 			await serving;
 			reset.mockRestore();
 			close.mockRestore();
-			jest.useRealTimers();
+			installed.close();
 		}
 	});
 }
 
 for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	test(`malformed SUBSCRIBE_UPDATE closes the session after request setup (${version})`, async () => {
+		const clock = new Manual();
+		const installed = clock.install();
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const broadcast = publish(origin, Path.from("test"));
@@ -2934,10 +3053,10 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 			server,
 		);
 		try {
-			await settleControls();
+			await clock.advance(Nano.zero);
 			// The complete zero-length update cannot hold its required fields.
 			await client.writer.write(new Uint8Array([0]));
-			await settleControls();
+			await clock.advance(Nano.zero);
 			expect(close.mock.calls.some(([info]) => info?.closeCode === SessionCode.ProtocolViolation)).toBe(true);
 		} finally {
 			client.close();
@@ -2950,6 +3069,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 			pair.client.close();
 			await serving;
 			close.mockRestore();
+			installed.close();
 		}
 	});
 }

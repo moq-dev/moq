@@ -45,8 +45,8 @@ export class SafetyCommandBroadcast {
 
 	constructor(command: Command, broadcast = new Moq.Broadcast.Producer()) {
 		this.broadcast = broadcast;
-		const track = this.broadcast.createTrack("control");
-		this.#producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track, compression: "deflate" });
+		const track = this.broadcast.createTrack("control", { compress: true });
+		this.#producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
 		this.#producer.update({
 			value: { ...command.cmd, sequence: command.sequence, timestamps: command.timestamps },
 		});
@@ -371,7 +371,6 @@ export class Truck {
 		const consumer = new Json.Snapshot.Consumer({
 			track: statusTrack,
 			schema: TruckStatusSchema,
-			compression: "deflate",
 		});
 
 		effect.spawn(async () => {
@@ -425,8 +424,8 @@ export class Truck {
 			this.#sentAt.clear();
 		});
 
-		const track = driverBroadcast.createTrack("control");
-		const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track, compression: "deflate" });
+		const track = driverBroadcast.createTrack("control", { compress: true });
+		const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
 		effect.cleanup(() => producer.finish());
 		effect.run(this.#runControlTrack.bind(this, track, producer));
 		// A fresh epoch per lease: the truck binds its single driver to this path and epoch.

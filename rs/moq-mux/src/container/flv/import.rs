@@ -16,7 +16,7 @@
 //! Each codec's out-of-band config record (avcC / hvcC / av1C / `AudioSpecificConfig`
 //! / `OpusHead`) becomes the catalog `description`; VP9 and the verbatim audio
 //! codecs (MP3 / AC-3 / E-AC-3) carry their config in band, so they configure from
-//! the first frame instead. Sample bytes already match the codec payload, so no codec
+//! the frames instead, a changed config starting a new track. Sample bytes already match the codec payload, so no codec
 //! transform is needed before the selected media container wraps them. FLAC (`fLaC`)
 //! enhanced audio, and any other unsupported codec, fail the import.
 
@@ -349,11 +349,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		if sound_format == AUDIO_FORMAT_MP3 {
 			// Legacy MP3: the raw frame follows the one-byte tag header, with the
-			// config in band. Configure from the first frame, then write it.
+			// config in band. Configure from each frame, which starts a new track only
+			// when the header changes, then write it.
 			let frame = &body[1..];
-			if !self.audio.contains_key(&DEFAULT_TRACK_ID) {
-				self.init_audio(DEFAULT_TRACK_ID, config_from_mp3(frame)?)?;
-			}
+			self.init_audio(DEFAULT_TRACK_ID, config_from_mp3(frame)?)?;
 			return self.write_audio(DEFAULT_TRACK_ID, frame, timestamp);
 		}
 		if sound_format != AUDIO_FORMAT_AAC {
@@ -437,18 +436,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				self.init_audio(track_id, config)
 			}
 			AUDIO_PACKET_CODED_FRAMES => {
-				// MP3 / AC-3 / E-AC-3 carry their config in the frame header, so
-				// configure from the first frame when no sequence header preceded it.
-				if !self.audio.contains_key(&track_id) {
-					let config = match fourcc {
-						b".mp3" => Some(config_from_mp3(payload)?),
-						b"ac-3" => Some(config_from_ac3(payload)?),
-						b"ec-3" => Some(config_from_eac3(payload)?),
-						_ => None,
-					};
-					if let Some(config) = config {
-						self.init_audio(track_id, config)?;
-					}
+				// MP3 / AC-3 / E-AC-3 carry their config in the frame header, so configure from
+				// each frame, which starts a new track only when the header changes.
+				let config = match fourcc {
+					b".mp3" => Some(config_from_mp3(payload)?),
+					b"ac-3" => Some(config_from_ac3(payload)?),
+					b"ec-3" => Some(config_from_eac3(payload)?),
+					_ => None,
+				};
+				if let Some(config) = config {
+					self.init_audio(track_id, config)?;
 				}
 				self.write_audio(track_id, payload, timestamp)
 			}
@@ -570,26 +567,38 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Drop any existing video track `track_id` (finishing it and clearing its
-	/// catalog rendition) and allocate a fresh one.
+	/// Retire any existing video track `track_id` and allocate a fresh one.
 	fn replace_video(&mut self, track_id: u8) -> anyhow::Result<moq_net::track::Producer> {
-		if let Some(mut old) = self.video.remove(&track_id) {
-			old.track.finish()?;
+		if let Some(old) = self.video.remove(&track_id) {
+			self.retire(old.track)?;
 		}
 		Ok(self
 			.broadcast
 			.unique_track(".flv-v", self.catalog.track_info(hang::catalog::PRIORITY.video))?)
 	}
 
-	/// Drop any existing audio track `track_id` (finishing it and clearing its
-	/// catalog rendition) and allocate a fresh one.
+	/// Retire any existing audio track `track_id` and allocate a fresh one.
 	fn replace_audio(&mut self, track_id: u8) -> anyhow::Result<moq_net::track::Producer> {
-		if let Some(mut old) = self.audio.remove(&track_id) {
-			old.track.finish()?;
+		if let Some(old) = self.audio.remove(&track_id) {
+			self.retire(old.track)?;
 		}
 		Ok(self
 			.broadcast
 			.unique_track(".flv-a", self.catalog.track_info(hang::catalog::PRIORITY.audio))?)
+	}
+
+	/// End a track this importer is done with, clearing its catalog rendition and retiring its HLS
+	/// records. Every track takes a fresh name, so a publisher changing its config holds only its live
+	/// tracks.
+	fn retire<R: Clone + Send + 'static>(
+		&self,
+		mut track: crate::container::Producer<crate::catalog::hang::Container, R>,
+	) -> anyhow::Result<()> {
+		let ended = track.end();
+		let name = track.name().to_string();
+		drop(track);
+		self.catalog.retire(&name)?;
+		Ok(ended?)
 	}
 
 	/// Close the current group on every track and reopen at `sequence`.
@@ -622,12 +631,28 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// generic [`moq_net::Error::Dropped`] a bare drop surfaces. The counterpart to
 	/// [`Self::finish`] for a failed teardown (e.g. the RTMP client disconnected).
 	/// Consumes the importer.
+	///
+	/// Unlike a drop, this leaves the tracks' HLS records to the catalog, whose abort fails them
+	/// rather than ending them as a complete recording.
 	pub fn abort(mut self, err: moq_net::Error) {
 		for stream in std::mem::take(&mut self.video).into_values() {
 			stream.track.abort(err.clone());
 		}
 		for stream in std::mem::take(&mut self.audio).into_values() {
 			stream.track.abort(err.clone());
+		}
+	}
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
+	fn drop(&mut self) {
+		let (video, audio) = (std::mem::take(&mut self.video), std::mem::take(&mut self.audio));
+		let video = video.into_values().map(|stream| self.retire(stream.track));
+		let audio = audio.into_values().map(|stream| self.retire(stream.track));
+		for result in video.chain(audio) {
+			if let Err(err) = result {
+				tracing::warn!(%err, "failed to end a dropped FLV track");
+			}
 		}
 	}
 }

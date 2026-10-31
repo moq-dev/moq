@@ -372,7 +372,7 @@ impl Publisher {
 			}
 		};
 		let mut broadcasts = TaskSet::owned();
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		let mut finished = false;
 		let mut goaways = super::super::request_stream::Messages::new(self.session.clone(), self.control.client());
 
@@ -386,16 +386,14 @@ impl Publisher {
 		let cancelled = loop {
 			let event = broadcasts
 				.drive(|waiter| {
-					let mut cx = waiter.context();
-					if session.poll_closed(&mut cx).is_ready() {
+					if session.poll_closed(waiter).is_ready() {
 						return Poll::Ready(Event::Closed);
 					}
-					if let Poll::Ready(res) =
-						self.poll_listing_cancel(&mut stream, &mut finished, &mut goaways, &mut cx)
+					if let Poll::Ready(res) = self.poll_listing_cancel(&mut stream, &mut finished, &mut goaways, waiter)
 					{
 						return Poll::Ready(Event::Cancelled(res));
 					}
-					if let Err(err) = Self::poll_write_skips(&mut stream, &request.skips, waiter, &mut cx) {
+					if let Err(err) = Self::poll_write_skips(&mut stream, &request.skips, waiter) {
 						return Poll::Ready(Event::Cancelled(Err(err)));
 					}
 					if !answered {
@@ -412,8 +410,11 @@ impl Publisher {
 			let announce = match event {
 				Event::Closed => return Ok(()),
 				Event::Cancelled(res) => break res,
+				// moq-transport has no takeover: listing it is listing another instance.
 				Event::Announce(
-					crate::announce::Event::Start(announce) | crate::announce::Event::Restart(announce),
+					crate::announce::Event::Start(announce)
+					| crate::announce::Event::Restart(announce)
+					| crate::announce::Event::Takeover { announce, .. },
 				) => announce,
 				Event::Announce(crate::announce::Event::End(announce)) => {
 					withdraw(&mut routes, &announce.prefix);
@@ -455,11 +456,10 @@ impl Publisher {
 		// each ending once its broadcast does, even while the peer is slow to take the close.
 		loop {
 			let event = kio::wait(|waiter| {
-				let mut cx = waiter.context();
 				if let Some(writer) = closing.as_mut() {
 					let closed = 'close: {
 						if !fin {
-							match writer.poll_flush(&mut cx) {
+							match writer.poll_flush(waiter) {
 								Poll::Pending => break 'close Poll::Pending,
 								Poll::Ready(res) => {
 									if res.and_then(|()| writer.finish()).is_err() {
@@ -469,13 +469,13 @@ impl Publisher {
 							}
 							fin = true;
 						}
-						writer.poll_close(&mut cx).map(|_| ())
+						writer.poll_close(waiter).map(|_| ())
 					};
 					if closed.is_ready() {
 						closing = None;
 					}
 				}
-				if session.poll_closed(&mut cx).is_ready() {
+				if session.poll_closed(waiter).is_ready() {
 					return Poll::Ready(None);
 				}
 				if broadcasts.poll(waiter).is_ready() && closing.is_none() {
@@ -502,14 +502,14 @@ impl Publisher {
 		stream: &mut Stream<Transport, Version>,
 		finished: &mut bool,
 		goaways: &mut super::super::request_stream::Messages,
-		cx: &mut std::task::Context<'_>,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
 		use super::super::request_stream::{NamespaceUpdate, Next};
-		if stream.writer.poll_closed(cx).is_ready() {
+		if stream.writer.poll_closed(waiter).is_ready() {
 			return Poll::Ready(Ok(()));
 		}
 		while !*finished {
-			match ready!(stream.reader.poll_decode_maybe::<Next<NamespaceUpdate<true>>>(cx)) {
+			match ready!(stream.reader.poll_decode_maybe::<Next<NamespaceUpdate<true>>>(waiter)) {
 				Ok(Some(Next::Message(update))) => {
 					// Its Request ID is spent like any other: a bad one is the session's error,
 					// and one past our GOAWAY is refused as such.
@@ -559,9 +559,8 @@ impl Publisher {
 		stream: &mut Stream<Transport, Version>,
 		skips: &Skips,
 		waiter: &kio::Waiter,
-		cx: &mut std::task::Context<'_>,
 	) -> Result<(), Error> {
-		while stream.writer.poll_flush(cx)?.is_ready() {
+		while stream.writer.poll_flush(waiter)?.is_ready() {
 			let Poll::Ready(mut pending) = skips.poll(waiter, |skips| match skips.is_empty() {
 				true => Poll::Pending,
 				false => Poll::Ready(()),
@@ -605,7 +604,7 @@ impl Publisher {
 
 		// Resolving may wait on a route for the broadcast, which its going ends.
 		let resolved = {
-			let mut requesting = std::pin::pin!(request.origin.request_broadcast(&suffix, epoch));
+			let mut requesting = std::pin::pin!(request.origin.request(&suffix, epoch));
 			kio::wait(|waiter| {
 				if route.poll_closed(waiter).is_ready() || request.live.poll_closed(waiter).is_ready() {
 					return Poll::Ready(None);
@@ -624,7 +623,7 @@ impl Publisher {
 		};
 		let mut entries = Entries::default();
 		let mut publishes = TaskSet::owned();
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		// The listing ended, the request did, or the route was withdrawn: nothing more to add.
 		let mut adding = true;
 		let mut withdrawn = false;
@@ -716,7 +715,7 @@ impl Publisher {
 					return Poll::Ready(Some(Event::Regrant(permit)));
 				}
 				if entries.staged.is_some()
-					&& let Poll::Ready(opened) = Stream::poll_open(&mut session, self.version, &mut waiter.context())
+					&& let Poll::Ready(opened) = Stream::poll_open(&session, self.version, waiter)
 				{
 					return Poll::Ready(Some(Event::Opened(opened)));
 				}
@@ -869,7 +868,7 @@ impl Publisher {
 
 		// Every wait on the peer for the PUBLISH's bytes lasts only while the track is listed
 		// and the request stands.
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		let mut stream = stream.with_stats(self.stats());
 		// Dropped unwritten, the stream is reset before its header, which the peer ignores.
 		let noop = kio::Waiter::noop();
@@ -879,7 +878,7 @@ impl Publisher {
 		let request_id = self.control.next_request_id();
 
 		// A joining FETCH needs the subscription forwarding.
-		let join = (!Filter::is_draft22(self.version)).then(|| self.register_join(request_id));
+		let join = (!Filter::is_draft20(self.version)).then(|| self.register_join(request_id));
 		self.pause_join(join.as_ref());
 
 		tracing::debug!(id = %request_id, broadcast = %absolute, track = %name, "publish started");
@@ -921,11 +920,10 @@ impl Publisher {
 		// answer has nothing to end yet, so the request is reset. One that finished waits for
 		// the answer, then ends with TRACK_ENDED, since the peer listed it on the PUBLISH.
 		let answer = kio::wait(|waiter| {
-			let mut cx = waiter.context();
-			if session.poll_closed(&mut cx).is_ready() || (listed.poll_closed(waiter).is_ready() && !*listed.read()) {
+			if session.poll_closed(waiter).is_ready() || (listed.poll_closed(waiter).is_ready() && !*listed.read()) {
 				return Poll::Ready(None);
 			}
-			goaways.poll_next(&mut stream.reader, &mut cx).map(Some)
+			goaways.poll_next(&mut stream.reader, waiter).map(Some)
 		})
 		.await;
 		// A NEW_GROUP_REQUEST on a PUBLISH_OK that leaves the subscription paused waits for
@@ -968,7 +966,7 @@ impl Publisher {
 						refused = Some(Served::UpdateFailed(Error::Unsupported));
 					}
 					new_group = ok.new_group.or(params.new_group.filter(|_| dynamic));
-					(ok.forward && !Filter::is_draft22(self.version)).then(|| Resume {
+					(ok.forward && !Filter::is_draft20(self.version)).then(|| Resume {
 						fill: None,
 						new_group: new_group.take(),
 						answer: false,
@@ -989,7 +987,11 @@ impl Publisher {
 		// What to resume with, and whether an update asked for it: a forwarding PUBLISH_OK
 		// resumes at once, with no update to answer.
 		let mut resume: Option<Resume> = resume;
+		// Each turn answers a REQUEST_UPDATE, so a peer streaming them must not hold the
+		// session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		let done = loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			if let Some(how) = resume.take() {
 				match self
 					.resume_publish(
@@ -1025,8 +1027,7 @@ impl Publisher {
 			}
 
 			let wait = kio::wait(|waiter| {
-				let mut cx = waiter.context();
-				if session.poll_closed(&mut cx).is_ready() || stream.writer.poll_closed(&mut cx).is_ready() {
+				if session.poll_closed(waiter).is_ready() || stream.writer.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Wait::Cancelled);
 				}
 				if gate.poll_denied(waiter).is_ready() {
@@ -1035,7 +1036,7 @@ impl Publisher {
 				if listed.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Wait::Removed);
 				}
-				match ready!(self.poll_update(&mut stream, &mut finished, &mut goaways, &mut cx)) {
+				match ready!(self.poll_update(&mut stream, &mut finished, &mut goaways, waiter)) {
 					UpdateRead::Update(update) => Poll::Ready(Wait::Update(update)),
 					UpdateRead::Cancelled => Poll::Ready(Wait::Cancelled),
 					UpdateRead::Malformed(err) => {
@@ -1188,7 +1189,7 @@ impl Publisher {
 		// route may take a while to say where its live edge is.
 		let mut subscribing = std::pin::pin!(track.subscribe(subscription.clone()));
 		let subscribed = kio::wait(|waiter| {
-			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
+			if stream.writer.poll_closed(waiter).is_ready() {
 				return Poll::Ready(Err(()));
 			}
 			if listed.poll_closed(waiter).is_ready() {
@@ -1207,7 +1208,7 @@ impl Publisher {
 			}
 		};
 		let live = kio::wait(|waiter| {
-			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
+			if stream.writer.poll_closed(waiter).is_ready() {
 				return Poll::Ready(Err(()));
 			}
 			if listed.poll_closed(waiter).is_ready() {
@@ -1250,7 +1251,7 @@ impl Publisher {
 					},
 					cache: track.clone(),
 					namespace: namespace.clone(),
-					token: false,
+					grant: None,
 					ranking: serve.ranking.clone(),
 				},
 				(Filter::NextObject, None) => Joined::Empty,
@@ -1260,7 +1261,7 @@ impl Publisher {
 		}
 		let fill = how
 			.fill
-			.filter(|_| Filter::is_draft22(self.version))
+			.filter(|_| Filter::is_draft20(self.version))
 			.map(|fill| fill_range(fill, params.filter, edge.largest));
 
 		if how.answer && self.write_request_ok(&mut stream.writer, edge.largest).await.is_err() {
@@ -1336,7 +1337,7 @@ mod tests {
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
 
-	const DRAFTS: [Version; 2] = [Version::Draft18, Version::Draft22];
+	const DRAFTS: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 	/// A publisher whose origin holds broadcast `room/cam` listing `video` and `audio`, and
 	/// the peer's end of its session.
@@ -1633,13 +1634,13 @@ mod tests {
 			// The joined group's remainder, then the live group.
 			let mut opened = 0;
 			loop {
-				let recv = timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
+				let recv = timeout(kio::wait(|waiter| h.peer.poll_accept_uni(waiter)))
 					.await
 					.unwrap();
 				opened += 1;
 				let mut reader = crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
 				let mut bytes = Vec::new();
-				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
+				while let Some(chunk) = timeout(kio::wait(|waiter| reader.poll_read_chunk(waiter, 1024)))
 					.await
 					.unwrap()
 				{
@@ -1657,7 +1658,7 @@ mod tests {
 			group.write_frame(crate::Timestamp::ZERO, b"paused".as_slice()).unwrap();
 			group.finish().unwrap();
 			moq_clock::sleep(Duration::from_millis(10)).await;
-			let more = futures::poll!(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)));
+			let more = futures::poll!(kio::wait(|waiter| h.peer.poll_accept_uni(waiter)));
 			assert!(more.is_pending(), "{version}: a paused PUBLISH forwarded");
 
 			// Ending the track while paused ends the PUBLISH, counting the streams it opened.
@@ -1710,12 +1711,12 @@ mod tests {
 				let mut group = data.append_group().unwrap();
 				group.write_frame(crate::Timestamp::ZERO, payload.clone()).unwrap();
 				group.finish().unwrap();
-				let recv = timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
+				let recv = timeout(kio::wait(|waiter| h.peer.poll_accept_uni(waiter)))
 					.await
 					.unwrap();
 				let mut reader = crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
 				let mut bytes = Vec::new();
-				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
+				while let Some(chunk) = timeout(kio::wait(|waiter| reader.poll_read_chunk(waiter, 1024)))
 					.await
 					.unwrap()
 				{
@@ -1869,7 +1870,7 @@ mod tests {
 	/// are listed.
 	#[moq_clock::test]
 	async fn a_forwarding_listing_reads_only_as_skips_go_out() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for catalog in CATALOGS {
 				let h = harness(version);
 				let _extra: Vec<_> = (h.tracks.len()..catalog)
@@ -2044,7 +2045,7 @@ mod tests {
 			let mut group = video.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"live".as_slice()).unwrap();
 			group.finish().unwrap();
-			timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
+			timeout(kio::wait(|waiter| h.peer.poll_accept_uni(waiter)))
 				.await
 				.unwrap();
 			drop(video);
@@ -2070,7 +2071,7 @@ mod tests {
 				..update(1, false)
 			};
 			send(&mut request, &bare).await;
-			let closed = timeout(std::future::poll_fn(|cx| h.peer.poll_closed(cx))).await;
+			let closed = timeout(kio::wait(|waiter| h.peer.poll_closed(waiter))).await;
 			assert!(
 				matches!(&closed, memory::Error::Session { reason, .. } if reason == "invalid request ID"),
 				"{version}: {closed:?}"
@@ -2088,7 +2089,7 @@ mod tests {
 			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
 			let refused = ietf::SubscribeUpdate {
 				filter: None,
-				forward: Filter::is_draft22(version).then_some(false),
+				forward: Filter::is_draft20(version).then_some(false),
 				..update(2, false)
 			};
 			send(&mut request, &refused).await;
@@ -2241,7 +2242,7 @@ mod tests {
 	/// while forwarding as while paused.
 	#[moq_clock::test]
 	async fn a_pausing_new_group_is_refused() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let _live = h
 				.broadcast
@@ -2272,7 +2273,7 @@ mod tests {
 	/// An update taken while forwarding outlives a pause: the next resume keeps it.
 	#[moq_clock::test]
 	async fn a_forwarding_update_outlives_a_pause() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let video = h.tracks.remove("video").unwrap();
 			let mut request = h.request(&listing(false)).await;
@@ -2345,7 +2346,7 @@ mod tests {
 		}
 	}
 
-	/// From draft-22 each PUBLISH states the listing's subscription parameters, which the
+	/// From draft-20 each PUBLISH states the listing's subscription parameters, which the
 	/// subscriber otherwise takes as the defaults; earlier drafts carry them on PUBLISH_OK.
 	/// Draft-22 sends none of them on SUBSCRIBE_TRACKS.
 	#[moq_clock::test]
@@ -2369,7 +2370,7 @@ mod tests {
 			assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
 			let body: ietf::Body = stream.reader.decode().await.unwrap();
 			let publish: ietf::Publish = body.message(version).unwrap();
-			let stated = Filter::is_draft22(version);
+			let stated = Filter::is_draft20(version);
 			assert_eq!(publish.subscriber_priority, stated.then_some(7), "{version}");
 			assert_eq!(
 				publish.group_order,
@@ -2384,7 +2385,7 @@ mod tests {
 	/// than this stack's unset 127.
 	#[moq_clock::test]
 	async fn a_listing_without_a_priority_states_the_default() {
-		for version in DRAFTS.into_iter().filter(|version| Filter::is_draft22(*version)) {
+		for version in DRAFTS.into_iter().filter(|version| Filter::is_draft20(*version)) {
 			let mut h = harness(version);
 			let mut request = h.request(&listing(false)).await;
 			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
@@ -2401,7 +2402,7 @@ mod tests {
 	/// has not ended, so neither does the PUBLISH cleanly.
 	#[moq_clock::test]
 	async fn an_unlisted_forwarding_publish_ends() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let video = h.tracks.remove("video").unwrap();
 			let mut request = h.request(&listing(false)).await;
@@ -2450,7 +2451,7 @@ mod tests {
 	/// withholds the credit its REQUEST_ERROR needs.
 	#[moq_clock::test]
 	async fn a_closing_listing_still_unlists() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let config = memory::Config {
 				stream_buffer: 32,
 				..Default::default()
@@ -2484,7 +2485,7 @@ mod tests {
 	/// its prefix.
 	#[moq_clock::test]
 	async fn a_listing_waits_for_the_setup_answer() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let auth = crate::auth::Link::new(true);
 			let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
@@ -2534,7 +2535,7 @@ mod tests {
 			subscribe: crate::Patterns::new(),
 			expires: None,
 		};
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let auth = crate::auth::Link::new(false);
 			auth.handle().authorize(&nothing());

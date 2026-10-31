@@ -22,7 +22,6 @@ export type { AudioConfig } from "./audio";
 export { AudioConfigSchema, AudioSchema } from "./audio";
 export * from "./binary";
 export * from "./clock";
-export * from "./compression";
 export * from "./container";
 export * from "./echo";
 export * from "./format";

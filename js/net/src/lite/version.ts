@@ -405,6 +405,12 @@ export function hasAnnounceRestart(version: Version): boolean {
 	}
 }
 
+/** Whether the announce stream has ANNOUNCE_TAKEOVER: a new advertisement continuing what a
+ * live one served beneath its path. Added in lite-07. Older versions send an ANNOUNCE_START. */
+export function hasAnnounceTakeover(version: Version): boolean {
+	return hasAnnounceRestart(version);
+}
+
 /** Whether ANNOUNCE_START, TRACK, SUBSCRIBE, and FETCH carry the publisher epoch. Added in lite-07.
  * Older versions carry nothing, so a received route has no epoch and is never resumed elsewhere. */
 export function hasEpoch(version: Version): boolean {
@@ -567,6 +573,25 @@ export function hasDropCode(version: Version): boolean {
 }
 
 /**
+ * Whether SUBSCRIBE_END carries the error the track ended with, so an errored end keeps its
+ * history across a hop. Added in lite-07; earlier versions can only reset.
+ */
+export function hasEndError(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
  * The timescale the wire carries for a track with `timescale`, or `undefined` when its frames
  * and datagrams carry no timestamp. Lite-05 and lite-06 always carry one, so an untimed track
  * declares milliseconds there and its payloads carry their send times instead.
@@ -588,6 +613,21 @@ export function wireTimescale(version: Version, timescale: Timescale | null | un
 
 /** Whether discovery streams mark their initial set with SYNCED rather than a count. */
 export function hasSynced(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/** Whether SETUP recognizes the Implementation parameter, added in lite-07. */
+export function hasImplementation(version: Version): boolean {
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:

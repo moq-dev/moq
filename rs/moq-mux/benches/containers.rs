@@ -85,7 +85,7 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 	}
 	catalog.finish().unwrap();
 	broadcast.announce(Default::default()).unwrap();
-	let resolved = origin.consume().request_broadcast("bench", None).await.unwrap();
+	let resolved = origin.consume().request("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	let stream = source.catalog::<()>(CatalogFormat::Hang).await.unwrap();
 	let fixture = Fixture {
@@ -207,12 +207,13 @@ fn interleaved(init: &[u8], tracks: usize, runs: usize, fragments: usize, payloa
 					trun: (0..runs)
 						.map(|run| mp4_atom::Trun {
 							data_offset: Some(0),
-							entries: vec![mp4_atom::TrunEntry {
+							samples: vec![mp4_atom::TrunEntry {
 								duration: Some(trak.mdia.mdhd.timescale / 50),
 								size: Some(payload.len() as u32),
 								flags: Some(if run == 0 { 0 } else { 0x0001_0000 }),
 								cts: None,
-							}],
+							}]
+							.into(),
 						})
 						.collect(),
 					..Default::default()

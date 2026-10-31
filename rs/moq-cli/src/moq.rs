@@ -26,9 +26,6 @@ pub struct ImportTarget {
 	/// How long a cleanly ended broadcast stays up (`--linger`).
 	pub linger: std::time::Duration,
 
-	/// Whether the catalog records HLS segments (`--hls`).
-	pub hls: bool,
-
 	/// Connection allocator each passthrough track claims its peak-hold bitrate on,
 	/// so a co-resident encoder targets what is left. Unlimited when there is no
 	/// uplink estimate.

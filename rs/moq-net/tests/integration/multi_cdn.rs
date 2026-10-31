@@ -129,7 +129,10 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timest
 /// Whether the route passes through the preferred CDN.
 fn via_a(announce: &announce::Event) -> bool {
 	let route = match announce {
-		announce::Event::Start(a) | announce::Event::Update(a) | announce::Event::Restart(a) => &a.route,
+		announce::Event::Start(a)
+		| announce::Event::Update(a)
+		| announce::Event::Restart(a)
+		| announce::Event::Takeover { announce: a, .. } => &a.route,
 		announce::Event::End(_) => return false,
 	};
 	route.hops.iter().any(|hop| *hop == Hop::new(A).unwrap())
@@ -187,7 +190,7 @@ impl Topology {
 	}
 
 	async fn subscribe(&self) -> mpsc::UnboundedReceiver<Delivery> {
-		let remote = self.subscriber.consume().request_broadcast("live", None).await.unwrap();
+		let remote = self.subscriber.consume().request("live", None).await.unwrap();
 		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 		read(remote.track("video").unwrap().subscribe(prefs).await.unwrap())
 	}

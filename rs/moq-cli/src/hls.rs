@@ -168,15 +168,13 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 		name,
 		max_age,
 		linger,
-		hls,
 		bandwidth,
 	} = target;
 	let producer = origin.create_broadcast(&name).context("failed to create broadcast")?;
 
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(max_age)
-		.with_bandwidth(bandwidth)
-		.with_hls(hls.then(moq_mux::hls::Config::default));
+		.with_bandwidth(bandwidth);
 	let catalog = moq_mux::catalog::Producer::new(&mut producer.broadcast().clone(), config)?;
 	// Announced once the catalog first goes out, which waits for every rendition's init: a
 	// relay queries a broadcast's tracks the moment it is announced, and keeps the refusals of a
@@ -301,7 +299,8 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 		// Wait for a covering route rather than asking on the spot: a recording started beside
 		// its publisher, or over a session that discovers only watched paths, sees no route yet.
 		let broadcast = scoped
-			.routed_broadcast(name.as_str())
+			.follow(name.as_str(), None)?
+			.available()
 			.await
 			.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
 		let source = moq_mux::Source::new(scoped.clone(), broadcast);
@@ -516,7 +515,6 @@ mod test {
 			name: "hls".to_string(),
 			max_age: None,
 			linger: moq_mux::Linger::DEFAULT,
-			hls: false,
 			bandwidth: Default::default(),
 		};
 		let args = ImportArgs {
@@ -526,7 +524,7 @@ mod test {
 		let importing = tokio::spawn(import(target, args, moq_net::Epoch::mint()));
 
 		announced.next().await.expect("announced");
-		let broadcast = consumer.request_broadcast("hls", None).await.unwrap();
+		let broadcast = consumer.request("hls", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
 		let catalog = catalogs.next().await.unwrap().expect("a catalog");
 		let name = catalog.audio.renditions.keys().next().expect("an audio rendition");

@@ -5,7 +5,7 @@ import { type Getter, Signal } from "@moq/signals";
 export type Kind = "video" | "audio" | "text";
 
 /**
- * A registered rendition track on a {@link Broadcast}: the catalog slot plus the demand-gated track.
+ * A registered rendition track on a {@link Broadcast}: the catalog slot plus its track.
  *
  * Constructed only by {@link Broadcast} via `broadcast.video(name)` / `broadcast.audio(name)`; the
  * producer (usually an encoder) writes {@link config} and encodes into {@link track} while it's set.
@@ -28,9 +28,10 @@ export class Rendition<Config> {
 	readonly config = new Signal<Config | undefined>(undefined);
 
 	/**
-	 * The live track producer while a subscriber is attached, `undefined` otherwise.
-	 * Producers should encode only while this is set (the demand gate), and only media matching
-	 * the current {@link config}: a new identity swaps in a new track.
+	 * The open track producer, or `undefined` while the network broadcast is down, after the track
+	 * closes, and, with the broadcast's `onDemand`, while no subscriber is attached. Producers should
+	 * encode only while this is set, and only media matching the current {@link config}: a new
+	 * identity swaps in a new track.
 	 */
 	readonly track: Getter<Moq.Track.Producer | undefined>;
 

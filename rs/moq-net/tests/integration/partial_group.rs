@@ -40,11 +40,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 	broadcast.announce(Default::default()).unwrap();
 
 	let consumer = downstream.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("room"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");

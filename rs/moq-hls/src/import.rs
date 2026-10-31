@@ -427,9 +427,9 @@ impl TrackState {
 
 	/// Give up on this rendition's current importer generation after repeated failures.
 	///
-	/// Dropping the importer closes its recorders and retires its catalog entries, so players
-	/// stop selecting a rendition that no longer advances; a later successful step rebuilds it
-	/// from the init segment.
+	/// Dropping the importer ends its tracks and retires their catalog entries and HLS records, so
+	/// players stop selecting a rendition that no longer advances; a later successful step rebuilds
+	/// it from the init segment.
 	fn evict(&mut self) {
 		self.importer = None;
 		self.map = None;
@@ -2207,6 +2207,20 @@ mod tests {
 		old_groups: Vec<(u64, u128)>,
 		terminal: Option<moq_net::Error>,
 		new_groups: Vec<(u64, u128)>,
+		/// The first generation's HLS record track has ended.
+		old_records_ended: bool,
+	}
+
+	/// Whether `subscriber` has ended, after draining the groups it already holds.
+	fn ended(subscriber: &mut moq_net::track::Ordered) -> bool {
+		loop {
+			match subscriber.poll_next_group(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(_))) => continue,
+				Poll::Ready(Ok(None)) => return true,
+				Poll::Pending => return false,
+				Poll::Ready(Err(error)) => panic!("the record track failed: {error:?}"),
+			}
+		}
 	}
 
 	/// A one-track fMP4 muxer for synthesized VP8 video or Opus audio.
@@ -2287,6 +2301,13 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
+		let mut old_records = consumer
+			.track(&hang::hls::default_name(&before_name))
+			.unwrap()
+			.subscribe(replay.clone())
+			.await
+			.unwrap()
+			.ordered();
 		let after = format!(
 			"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n{tags}#EXTINF:1,\n1.m4s\n"
 		);
@@ -2294,6 +2315,7 @@ mod tests {
 		let result = track.consume_segments(&local, &after, &base).await;
 		let after_name = name(&catalog.snapshot());
 		let (old_groups, terminal) = group_stamps(&mut old);
+		let old_records_ended = ended(&mut old_records);
 		let new_groups = if before_name != after_name {
 			let mut new = consumer
 				.track(&after_name)
@@ -2316,6 +2338,7 @@ mod tests {
 			old_groups,
 			terminal,
 			new_groups,
+			old_records_ended,
 		}
 	}
 
@@ -2426,6 +2449,7 @@ mod tests {
 					case.result.unwrap();
 					assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
 					assert_ne!(case.before, case.after);
+					assert!(case.old_records_ended, "the replaced generation retires its records");
 					assert_eq!(case.old_groups, [(0, 5_000_000)]);
 					assert_eq!(case.new_groups, [(moq_sequence(1, 1).unwrap(), u128::from(after_us))]);
 				}

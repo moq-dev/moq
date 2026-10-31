@@ -1,8 +1,6 @@
 use std::time::Duration;
 
-use anyhow::Context;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
-use hang::moq_net;
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use moq_mux::select;
 use tokio::io::AsyncWriteExt;
@@ -29,8 +27,6 @@ pub enum SubscribeFormat {
 #[derive(usage_rs::ValueEnum, Clone, Copy)]
 pub enum CatalogFormatArg {
 	Hang,
-	#[usage(name = "hangz")]
-	HangZ,
 	Msf,
 }
 
@@ -38,7 +34,6 @@ impl From<CatalogFormatArg> for CatalogFormat {
 	fn from(format: CatalogFormatArg) -> Self {
 		match format {
 			CatalogFormatArg::Hang => Self::Hang,
-			CatalogFormatArg::HangZ => Self::HangZ,
 			CatalogFormatArg::Msf => Self::Msf,
 		}
 	}
@@ -84,6 +79,15 @@ impl From<AudioCodecArg> for AudioCodecKind {
 	}
 }
 
+/// Whether to select renditions of a medium.
+#[derive(usage_rs::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+	/// Keep renditions matching the name and codec filters.
+	On,
+	/// Select no rendition of this medium.
+	Off,
+}
+
 /// Rendition selection flags for the stdout container sinks that honor them and
 /// native playback. With no flags set, every rendition is kept.
 #[derive(usage_rs::Args, Clone, Default)]
@@ -97,9 +101,9 @@ pub struct SelectArgs {
 	#[usage(long, value_enum)]
 	pub video_codec: Option<VideoCodecArg>,
 
-	/// Leave video out (audio only); native playback opens no window.
-	#[usage(long, conflicts("--video-name", "--video-codec", "--no-audio"))]
-	pub no_video: bool,
+	/// Select video (on by default); off leaves audio only and opens no playback window.
+	#[usage(long, value_enum)]
+	pub video: Option<Mode>,
 
 	/// Pick the audio rendition with this exact name.
 	#[usage(long)]
@@ -109,12 +113,29 @@ pub struct SelectArgs {
 	#[usage(long, value_enum)]
 	pub audio_codec: Option<AudioCodecArg>,
 
-	/// Leave audio out (video only).
-	#[usage(long, conflicts("--audio-name", "--audio-codec"))]
-	pub no_audio: bool,
+	/// Select audio (on by default); off leaves video only.
+	#[usage(long, value_enum)]
+	pub audio: Option<Mode>,
 }
 
 impl SelectArgs {
+	/// Refuse contradictory filters and a selection with both media disabled.
+	pub(crate) fn validate(&self) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			self.video != Some(Mode::Off) || self.audio != Some(Mode::Off),
+			"--video off and --audio off select no renditions"
+		);
+		anyhow::ensure!(
+			self.video != Some(Mode::Off) || (self.video_name.is_none() && self.video_codec.is_none()),
+			"--video off conflicts with --video-name and --video-codec"
+		);
+		anyhow::ensure!(
+			self.audio != Some(Mode::Off) || (self.audio_name.is_none() && self.audio_codec.is_none()),
+			"--audio off conflicts with --audio-name and --audio-codec"
+		);
+		Ok(())
+	}
+
 	/// Build the rendition selection shared by stdout exports and native playback.
 	///
 	/// `force` takes the place of `--video-codec`, for a sink whose format implies
@@ -122,7 +143,7 @@ impl SelectArgs {
 	pub(crate) fn selection(&self, force: Option<VideoCodecKind>) -> select::Broadcast {
 		let mut selection = select::Broadcast::default();
 
-		if !self.no_video {
+		if self.video != Some(Mode::Off) {
 			let mut video = select::Video::default();
 			if let Some(name) = &self.video_name {
 				video = video.name(name);
@@ -133,7 +154,7 @@ impl SelectArgs {
 			selection = selection.video(video);
 		}
 
-		if !self.no_audio {
+		if self.audio != Some(Mode::Off) {
 			let mut audio = select::Audio::default();
 			if let Some(name) = &self.audio_name {
 				audio = audio.name(name);
@@ -152,8 +173,8 @@ impl SelectArgs {
 		[
 			(self.video_name.is_some(), "--video-name"),
 			(self.video_codec.is_some(), "--video-codec"),
-			(self.no_video, "--no-video"),
-			(self.no_audio, "--no-audio"),
+			(self.video.is_some(), "--video"),
+			(self.audio.is_some(), "--audio"),
 		]
 		.into_iter()
 		.find_map(|(given, flag)| given.then_some(flag))
@@ -163,6 +184,7 @@ impl SelectArgs {
 	/// The first flag passed that selects an audio rendition, for a sink with no audio.
 	pub(crate) fn audio_flag(&self) -> Option<&'static str> {
 		[
+			(self.audio == Some(Mode::On), "--audio"),
 			(self.audio_name.is_some(), "--audio-name"),
 			(self.audio_codec.is_some(), "--audio-codec"),
 		]
@@ -249,8 +271,6 @@ impl SubscribeArgs {
 
 /// Exports one broadcast from the Origin to stdout in the requested format.
 pub struct Subscribe {
-	origin: moq_net::origin::Consumer,
-	path: moq_net::Path,
 	source: moq_mux::Source,
 	catalog: CatalogFormat,
 	args: SubscribeArgs,
@@ -273,28 +293,15 @@ fn log_release(release: &moq_mux::container::ts::stats::Release, message: &'stat
 }
 
 impl Subscribe {
-	/// Resolve the broadcast at `path` on `origin` to export it with the resolved settings;
-	/// [`run`](Self::run) drives it.
-	pub async fn new(
-		origin: moq_net::origin::Consumer,
-		path: &str,
-		catalog: CatalogFormat,
-		args: SubscribeArgs,
-	) -> anyhow::Result<Self> {
-		let path = moq_net::Path::new(path)?;
-		let broadcast = origin
-			.request_broadcast(&path, None)
-			.await
-			.with_context(|| format!("failed to resolve broadcast `{path}`"))?;
-		let source = moq_mux::Source::new(origin.clone(), broadcast);
-		Ok(Self {
-			origin,
-			path,
+	/// Export the resolved broadcast `source` with the resolved settings; [`run`](Self::run)
+	/// drives it.
+	pub fn new(source: moq_mux::Source, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
+		Self {
 			source,
 			catalog,
 			args,
 			sections: None,
-		})
+		}
 	}
 
 	/// The resolved broadcast, whose [`stats`](moq_mux::Source::stats) count what the export reads.
@@ -309,7 +316,7 @@ impl Subscribe {
 	}
 
 	/// Build the catalog stream, narrowed by the rendition selection flags. The
-	/// catalog source honors the requested format (e.g. compressed `HangZ` or `Msf`).
+	/// catalog source honors the requested format (e.g. `Msf`).
 	async fn stream(&self) -> anyhow::Result<catalog::Select<catalog::Consumer>> {
 		let consumer = self.source.catalog(self.catalog).await?;
 		Ok(consumer.select(self.args.selection()?))
@@ -393,12 +400,6 @@ impl Subscribe {
 	}
 
 	async fn run_ts(self) -> anyhow::Result<()> {
-		self.origin.routed(&self.path).await.with_context(|| {
-			format!(
-				"broadcast `{}` is outside the session's scope, or the origin closed before it was announced",
-				self.path
-			)
-		})?;
 		if self.args.passthrough {
 			return self.run_ts_passthrough().await;
 		}

@@ -17,81 +17,28 @@ use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::producer::{Child, MoqBroadcastProducer, MoqTrackProducer};
 
-/// Options for a JSON snapshot track (lossy latest-value mode).
+/// Options for a JSON snapshot producer (lossy latest-value mode).
 ///
-/// The same config is passed to both the producer and the consumer, but the consumer reads only
-/// [`compression`](Self::compression); [`deltas`](Self::deltas) is producer-only.
+/// Compression is the track's: set `compress` on the [`MoqTrackInfo`](crate::producer::MoqTrackInfo)
+/// the track is created with. A consumer reads either kind with no option of its own.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqJsonSnapshotConfig {
 	/// Encode updates as deltas against the group's snapshot. When off, each update opens a new
 	/// group with a full snapshot. How long a group runs is set by the track's `refresh` ratio
-	/// instead. Ignored by the consumer.
+	/// instead.
 	#[uniffi(default = true)]
 	pub deltas: bool,
-
-	/// DEFLATE-compress each group. Must match on the producer and consumer.
-	#[uniffi(default = false)]
-	pub compression: bool,
 }
 
-fn compression(on: bool) -> moq_json::Compression {
-	if on {
-		moq_json::Compression::Deflate
-	} else {
-		moq_json::Compression::None
-	}
-}
-
-impl From<MoqJsonSnapshotConfig> for moq_json::snapshot::Config {
-	fn from(config: MoqJsonSnapshotConfig) -> Self {
-		let mut out = moq_json::snapshot::Config::default();
-		out.deltas = config.deltas;
-		out.compression = compression(config.compression);
-		out
-	}
-}
-
-impl From<MoqJsonSnapshotConfig> for moq_json::snapshot::consumer::Config {
-	fn from(config: MoqJsonSnapshotConfig) -> Self {
-		let mut out = moq_json::snapshot::consumer::Config::default();
-		out.compression = compression(config.compression);
-		out
-	}
-}
-
-/// Options for a JSON stream track (lossless append-log mode).
+/// Options for a JSON window producer (a sliding run of records).
 ///
-/// The same config is passed to both the producer and the consumer.
-#[derive(Clone, uniffi::Record)]
-pub struct MoqJsonStreamConfig {
-	/// DEFLATE-compress the group. Must match on the producer and consumer.
-	#[uniffi(default = false)]
-	pub compression: bool,
-}
-
-impl From<MoqJsonStreamConfig> for moq_json::stream::Config {
-	fn from(config: MoqJsonStreamConfig) -> Self {
-		let mut out = moq_json::stream::Config::default();
-		out.compression = compression(config.compression);
-		out
-	}
-}
-
-/// Options for a JSON window track (a sliding run of records).
-///
-/// The same config is passed to both the producer and the consumer, but the consumer reads only
-/// [`compression`](Self::compression); [`checkpoint_records`](Self::checkpoint_records) is
-/// producer-only.
+/// Compression is the track's, as for [`MoqJsonSnapshotConfig`].
 #[derive(Clone, uniffi::Record)]
 pub struct MoqJsonWindowConfig {
-	/// DEFLATE-compress each group. Must match on the producer and consumer.
-	#[uniffi(default = false)]
-	pub compression: bool,
-
 	/// Maximum records retained and restated when a group rolls, or null to restate the whole
 	/// window. Bounds the producer's memory for a window that is never popped: a reader that keeps
 	/// up still sees every record, while one joining later gets a skip event for the older ones.
-	/// Must be at least one. Ignored by the consumer.
+	/// Must be at least one.
 	#[uniffi(default = None)]
 	pub checkpoint_records: Option<u64>,
 }
@@ -100,7 +47,7 @@ impl TryFrom<MoqJsonWindowConfig> for moq_json::window::ProducerConfig {
 	type Error = MoqError;
 
 	fn try_from(config: MoqJsonWindowConfig) -> Result<Self, MoqError> {
-		let mut out = moq_json::window::ProducerConfig::default().with_compression(config.compression);
+		let mut out = moq_json::window::ProducerConfig::default();
 		if let Some(records) = config.checkpoint_records {
 			let records = usize::try_from(records)
 				.ok()
@@ -114,12 +61,6 @@ impl TryFrom<MoqJsonWindowConfig> for moq_json::window::ProducerConfig {
 	}
 }
 
-impl From<MoqJsonWindowConfig> for moq_json::window::ConsumerConfig {
-	fn from(config: MoqJsonWindowConfig) -> Self {
-		moq_json::window::ConsumerConfig::default().with_compression(config.compression)
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	// The `#[uniffi(default = ...)]` attributes have to be literals, so they restate moq-json's
@@ -129,21 +70,7 @@ mod tests {
 	fn record_defaults_match_moq_json() {
 		let snapshot = moq_json::snapshot::Config::default();
 		assert!(snapshot.deltas, "update #[uniffi(default)] on deltas");
-		assert_eq!(
-			snapshot.compression,
-			moq_json::Compression::None,
-			"update #[uniffi(default)] on compression"
-		);
-		assert_eq!(
-			moq_json::stream::Config::default().compression,
-			moq_json::Compression::None,
-			"update #[uniffi(default)] on MoqJsonStreamConfig::compression"
-		);
 		let window = moq_json::window::ProducerConfig::default();
-		assert!(
-			!window.compression,
-			"update #[uniffi(default)] on MoqJsonWindowConfig::compression"
-		);
 		assert_eq!(
 			window.checkpoint_records, None,
 			"update #[uniffi(default)] on MoqJsonWindowConfig::checkpoint_records"
@@ -217,8 +144,8 @@ impl MoqJsonSnapshotProducer {
 	/// `track` must come from `broadcast`; otherwise the catalog advertises a track the broadcast
 	/// does not carry.
 	///
-	/// The catalog carries `json.tracks.<name>` (`mode: snapshot`, and `compression: deflate` when
-	/// set) for as long as the producer lives; finishing or dropping it retires the entry. Takes
+	/// The catalog carries `json.tracks.<name>` (`mode: snapshot`) for as long as the producer
+	/// lives; finishing or dropping it retires the entry. Takes
 	/// over `track`, whose handle is closed afterward. Errors if the catalog already carries an
 	/// entry under the track's name.
 	#[uniffi::constructor]
@@ -229,7 +156,7 @@ impl MoqJsonSnapshotProducer {
 	) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let options = moq_mux::json::Options::default().with_deltas(config.deltas);
-		let config = moq_mux::json::Config::default().with_compression(config.compression);
+		let config = moq_mux::json::Config::default();
 		let this = track.adopt(|track| {
 			let producer =
 				broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config, options)?))?;
@@ -309,13 +236,13 @@ pub struct MoqJsonSnapshotConsumer {
 impl MoqJsonSnapshotConsumer {
 	/// Read `track` as a JSON snapshot track (lossy latest-value).
 	///
-	/// Pass the same [`MoqJsonSnapshotConfig::compression`] the producer used. Takes over
-	/// `track`, whose handle is closed afterward; errors if it has already read a group.
+	/// Reads a compressed track the same as a plain one. Takes over `track`, whose handle is
+	/// closed afterward; errors if it has already read a group.
 	#[uniffi::constructor]
-	pub fn new(track: &MoqTrackConsumer, config: MoqJsonSnapshotConfig) -> Result<Arc<Self>, MoqError> {
+	pub fn new(track: &MoqTrackConsumer) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let (track, driver) = track.take()?;
-		let consumer = moq_json::snapshot::Consumer::<Value>::new(track, config.into());
+		let consumer = moq_json::snapshot::Consumer::<Value>::new(track, Default::default());
 		Ok(Arc::new(Self {
 			task: Task::new(SnapshotConsumer { inner: consumer }).supervised(driver),
 		}))
@@ -386,13 +313,9 @@ impl MoqJsonStreamProducer {
 	/// lives. Takes over `track`, whose handle is closed afterward. Errors if the catalog already
 	/// carries an entry under the track's name.
 	#[uniffi::constructor]
-	pub fn new(
-		broadcast: &MoqBroadcastProducer,
-		track: &MoqTrackProducer,
-		config: MoqJsonStreamConfig,
-	) -> Result<Arc<Self>, MoqError> {
+	pub fn new(broadcast: &MoqBroadcastProducer, track: &MoqTrackProducer) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let config = moq_mux::json::Config::default().with_compression(config.compression);
+		let config = moq_mux::json::Config::default();
 		track.adopt(|track| {
 			let producer = broadcast.with_state(|state| Ok(state.catalog.json_stream::<Value>(track, config)?))?;
 			Ok(Self {
@@ -445,13 +368,13 @@ pub struct MoqJsonStreamConsumer {
 impl MoqJsonStreamConsumer {
 	/// Read `track` as a JSON stream track (lossless append-log).
 	///
-	/// Pass the same [`MoqJsonStreamConfig::compression`] the producer used. Takes over `track`,
-	/// whose handle is closed afterward; errors if it has already read a group.
+	/// Reads a compressed track the same as a plain one. Takes over `track`, whose handle is
+	/// closed afterward; errors if it has already read a group.
 	#[uniffi::constructor]
-	pub fn new(track: &MoqTrackConsumer, config: MoqJsonStreamConfig) -> Result<Arc<Self>, MoqError> {
+	pub fn new(track: &MoqTrackConsumer) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let (track, driver) = track.take()?;
-		let consumer = moq_json::stream::Consumer::<Value>::new(track, config.into());
+		let consumer = moq_json::stream::Consumer::<Value>::new(track, Default::default());
 		Ok(Arc::new(Self {
 			task: Task::new(StreamConsumer { inner: consumer }).supervised(driver),
 		}))
@@ -698,13 +621,13 @@ pub struct MoqJsonWindowConsumer {
 impl MoqJsonWindowConsumer {
 	/// Read `track` as a JSON window track.
 	///
-	/// Pass the same [`MoqJsonWindowConfig::compression`] the producer used. Takes over `track`,
-	/// whose handle is closed afterward; errors if it has already read a group.
+	/// Reads a compressed track the same as a plain one. Takes over `track`, whose handle is
+	/// closed afterward; errors if it has already read a group.
 	#[uniffi::constructor]
-	pub fn new(track: &MoqTrackConsumer, config: MoqJsonWindowConfig) -> Result<Arc<Self>, MoqError> {
+	pub fn new(track: &MoqTrackConsumer) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let (track, driver) = track.take()?;
-		let consumer = moq_json::window::Consumer::<Value>::new(track, config.into());
+		let consumer = moq_json::window::Consumer::<Value>::new(track, Default::default());
 		Ok(Arc::new(Self {
 			task: Task::new(WindowConsumer { inner: consumer }).supervised(driver),
 		}))

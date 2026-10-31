@@ -4,11 +4,6 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
-### `import --hls` publishes the records `export hls` needs
-
-Imports no longer publish HLS records by default, so `export hls` lists nothing for a broadcast published without them.
-Pass `--hls` to `import` (the stdin formats, `hls`, `rtsp`, and `capture`); renditions' segments line up wherever their keyframes share timestamps.
-
 ### `--broadcast` refuses empty segments ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 A broadcast name or prefix with a leading, trailing, or doubled `/` is an error instead of being collapsed: pass `--broadcast room/cam`, not `/room/cam/`.
@@ -56,7 +51,7 @@ If your auth server can take longer than the handshake timeout allows, raise `--
 
 ### `--epoch` is removed (#5967)
 
-Remove `--epoch` and `MOQ_EPOCH`: `--epoch` is now an unknown flag, and `MOQ_EPOCH` is ignored.
+Remove `--epoch` and `MOQ_EPOCH`: either stops startup as an unknown flag or environment variable.
 Every `moq` run mints its own epoch, so two importers fed one stream publish two instances, and the newest wins new requests.
 To fail over between them, follow restarts: `export ts --stitch` switches programs, and players follow the announced restart.
 Other consumers, such as `export ts --passthrough`, end with the instance they read.

@@ -98,6 +98,12 @@ Coroutine read_one(std::shared_ptr<moq::TrackConsumer> consumer, std::optional<m
 }
 #endif
 
+// Only the defaults carry moq-net's zero max delay; a bare record sets no subscriber limit.
+void subscription_defaults() {
+    CHECK(moq::subscription_defaults().max_delay == std::chrono::nanoseconds::zero());
+    CHECK(!moq::Subscription{}.max_delay.has_value());
+}
+
 // Exercise the installed audio publisher and consumer rather than only generated signatures.
 void audio_roundtrip() {
     auto broadcast = ok(moq::BroadcastProducer::init(), "audio broadcast");
@@ -172,6 +178,7 @@ void audio_roundtrip() {
 } // namespace
 
 int main() {
+    subscription_defaults();
     audio_roundtrip();
     auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
     auto timebase_other = ok(moq::BroadcastProducer::init(), "timebase other");
@@ -202,16 +209,30 @@ int main() {
     // It prints the message Rust's Display gives.
     CHECK(fingerprints.error().to_string() == "bind: not listening; call listen() first");
 
-    // Publisher: a server whose origin serves one broadcast with one track.
+    // Publisher: a server whose origin serves one broadcast with one track. Dropping the
+    // publication keeps the route, which lasts until the broadcast closes.
     auto origin = moq::OriginProducer::init({});
-    auto broadcast = ok(origin->create_broadcast("probe"), "create_broadcast");
-    moq::TrackInfo info;
-    info.timescale = 1000000;
-    auto track = ok(broadcast->publish_track("data", info), "publish_track");
-    ok(broadcast->announce({}), "announce");
+    std::shared_ptr<moq::BroadcastProducer> broadcast;
+    std::shared_ptr<moq::TrackProducer> track;
+    {
+        auto publication = ok(origin->create_broadcast("probe"), "create_broadcast");
+        broadcast = publication->broadcast();
+        moq::TrackInfo info;
+        info.timescale = 1000000;
+        track = ok(broadcast->publish_track("data", info), "publish_track");
+        ok(publication->announce({}), "announce");
+    }
+
+    // A closed broadcast's publication can no longer announce.
+    auto stale = ok(origin->create_broadcast("stale"), "create_broadcast");
+    ok(stale->broadcast()->close(), "close stale broadcast");
+    auto reannounced = stale->announce({});
+    CHECK(!reannounced);
+    CHECK(std::holds_alternative<moq::Error::kClosed>(reannounced.error().get_variant()));
 
     moq::ServerConfig server_config;
     server_config.bind = "127.0.0.1:0";
+    server_config.versions = {"moq-lite-07-wip"};
     server_config.tls.generate = {"localhost"};
     server_config.publish = origin;
     auto server = ok(moq::Server::init(server_config), "server init");
@@ -221,6 +242,7 @@ int main() {
     // thread blocks on one at a time.
     moq::ClientConfig client_config;
     client_config.tls.insecure = true;
+    client_config.versions = server_config.versions;
     client_config.implementation = moq::IMPLEMENTATION;
     auto client = ok(moq::Client::init(client_config), "client init");
     auto accepting = server->accept();
@@ -234,7 +256,7 @@ int main() {
     auto session = ok(connecting.get(), "connect");
 
     // Subscriber: resolve the announced broadcast and subscribe to its track.
-    auto announced = ok(session->consume()->announced_broadcast("probe"), "announced_broadcast");
+    auto announced = ok(session->consume()->follow("probe", std::nullopt), "follow");
     auto remote = ok(announced->available().get(), "available");
     auto consumer = ok(remote->subscribe_track("data", std::nullopt).get(), "subscribe_track");
 
@@ -262,6 +284,7 @@ int main() {
     CHECK(!reading.valid());
     CHECK(frame.has_value());
     CHECK(frame->payload == bytes("hello"));
+    // Lite-07 carries both the Implementation parameter and frame timestamps.
     CHECK(frame->timestamp_us == 1000);
 
     // A continuation receives the next frame on the executor.

@@ -728,10 +728,10 @@ test("Consumer releases its open groups when an error ends it", async () => {
 	const later = track.createGroup(1);
 	later.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() });
 	await open;
-	expect(later.demand().used.peek()).toBe(true);
+	expect(later.demand().wanted.peek()).toBe(true);
 
 	await expect(consumer.next()).rejects.toThrow("malformed");
-	expect(later.demand().used.peek()).toBe(false);
+	expect(later.demand().wanted.peek()).toBe(false);
 	consumer.close();
 });
 
@@ -1496,12 +1496,12 @@ test("Consumer duration-skips a stalled group once it is covered", async () => {
 	g1.finish();
 
 	track.finish();
-	track.close();
 
 	const frames = await drainFrames(consumer, 200);
 	expect(frames.map((f) => f.timestamp as number)).toEqual([0, 33_000]);
 	expect(frames.map((f) => f.group)).toEqual([0, 1]);
 	consumer.close();
+	track.close();
 });
 
 test("Consumer does not duration-skip when the gap is not covered", async () => {

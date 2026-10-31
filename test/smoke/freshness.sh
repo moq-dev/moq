@@ -150,14 +150,16 @@ else
     fail=1
 fi
 # C: smoke.sh resolves the newest libmoq-v* release, never a fixed version.
-if grep -q "grep '\^libmoq-v' | head -1" smoke.sh; then
+# shellcheck disable=SC2016  # match the literal helper invocation
+if grep -qF '"$SMOKE_DIR/release.sh" libmoq-v' smoke.sh; then
     note ok "libmoq -> latest release"
 else
     note FAIL "smoke.sh no longer resolves the latest libmoq-v* release"
     fail=1
 fi
 # GStreamer: smoke.sh resolves the newest moq-gst-v* release, never a fixed version.
-if grep -q "grep '\^moq-gst-v' | head -1" smoke.sh; then
+# shellcheck disable=SC2016  # match the literal helper invocation
+if grep -qF '"$SMOKE_DIR/release.sh" moq-gst-v' smoke.sh; then
     note ok "moq-gst -> latest release"
 else
     note FAIL "smoke.sh no longer resolves the latest moq-gst-v* release"

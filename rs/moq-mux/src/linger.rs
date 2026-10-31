@@ -97,7 +97,7 @@ mod tests {
 	/// Whether the origin has stopped routing [`PATH`].
 	async fn unroutable(origin: &moq_net::origin::Producer) -> bool {
 		matches!(
-			origin.consume().request_broadcast(PATH, None).await,
+			origin.consume().request(PATH, None).await,
 			Err(moq_net::Error::Unroutable)
 		)
 	}
@@ -112,7 +112,7 @@ mod tests {
 		let linger = tokio::spawn(Linger::new([broadcast], track, Duration::from_secs(30)).wait());
 
 		moq_clock::sleep(Duration::from_secs(29)).await;
-		let late = origin.consume().request_broadcast(PATH, None).await.unwrap();
+		let late = origin.consume().request(PATH, None).await.unwrap();
 		let video = late.track("video").unwrap();
 		for sequence in 0..3 {
 			let mut group = video.fetch_group(sequence, None).await.unwrap();

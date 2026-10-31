@@ -207,14 +207,12 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 		.map_err(|err| format!("subscriber connect failed: {err}"))?;
 
 	// Wait for the announcement rather than asking the moment the session connects:
-	// `request_broadcast` answers on the spot, so it would race the announcement that
+	// `request` answers on the spot, so it would race the announcement that
 	// makes the path routable.
-	tokio::time::timeout(TIMEOUT, consumer.routed(PATH))
-		.await
-		.map_err(|_| "routed timed out".to_string())?
-		.ok_or_else(|| "origin closed before the broadcast was announced".to_string())?;
 	let broadcast = consumer
-		.request_broadcast(PATH, None)
+		.follow(PATH, None)
+		.unwrap()
+		.available()
 		.await
 		.map_err(|err| format!("broadcast unroutable: {err}"))?;
 
@@ -402,7 +400,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

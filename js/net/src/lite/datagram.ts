@@ -16,6 +16,9 @@ import { hasCompression, type Version, wireTimescale } from "./version.ts";
  * {@link Datagram} in `../datagram.ts`.
  */
 export class Datagram {
+	/** The largest encoded datagram body a lite hop carries. */
+	static readonly MAX_SIZE = 1200;
+
 	/** Subscribe ID this datagram is delivered on. */
 	subscribe: bigint;
 	/** Group sequence number (shared with the track's group namespace). */

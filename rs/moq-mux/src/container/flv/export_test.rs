@@ -1753,13 +1753,14 @@ async fn delay_drops_late_frames_and_drains_the_final_frame() {
 	tokio::time::advance(std::time::Duration::from_millis(200)).await;
 	assert!(export.poll_next(&kio::Waiter::noop()).is_pending());
 	live.track.write(raw_frame(20_000, b"expired", true)).unwrap();
-	live.track.write(raw_frame(400_000, b"final", true)).unwrap();
+	// Sent a delay ahead: any further would be a step in its timeline, which re-acquires.
+	live.track.write(raw_frame(300_000, b"final", true)).unwrap();
 	live.track.finish().unwrap();
 	live.catalog.finish().unwrap();
 	let final_frame = export.next().await.unwrap().unwrap();
 	assert!(final_frame.windows(5).any(|part| part == b"final"));
 	assert!(!final_frame.windows(7).any(|part| part == b"expired"));
-	assert!(start.elapsed() >= std::time::Duration::from_millis(500));
+	assert!(start.elapsed() >= std::time::Duration::from_millis(400));
 	assert!(export.next().await.unwrap().is_none());
 }
 
