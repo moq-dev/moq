@@ -2581,20 +2581,25 @@ mod test {
 	async fn recv_next_withholds_an_errored_boundary_without_the_end_error() {
 		use futures::FutureExt;
 
-		for end_error in [false, true] {
+		for (end_error, capped) in [(false, false), (true, false), (false, true)] {
 			let mut producer = track_producer("test");
-			let mut subscriber = producer.subscribe(None);
+			let subscriber = producer.subscribe(None);
+			// A range that stops short of the end is owed no error, so its boundary goes out.
+			let mut subscriber = match capped {
+				true => subscriber.with_range(..3),
+				false => subscriber,
+			};
 			producer.finish_at(track::Position::group(7), Some(Error::App(7))).unwrap();
 			let next = |subscriber: &mut track::Subscriber| {
 				kio::wait(|waiter| poll_recv_next(subscriber, true, false, true, end_error, waiter)).now_or_never()
 			};
-			match (end_error, next(&mut subscriber)) {
+			match (end_error || capped, next(&mut subscriber)) {
 				(true, Some(Ok(Recv::Boundary(end)))) => {
 					assert_eq!(end.group, 7);
-					assert!(matches!(end.error, Some(StreamError::App(7))));
+					assert_eq!(end.error.is_some(), end_error);
 				}
 				(false, None) => {}
-				_ => panic!("end_error={end_error}: expected the boundary only with the end error"),
+				_ => panic!("end_error={end_error} capped={capped}: unexpected boundary"),
 			}
 		}
 	}
@@ -3486,7 +3491,12 @@ fn poll_recv_next(
 			let error = track.end_error();
 			// Without the end error on the wire, an errored end is only the reset at that end: a
 			// clean boundary sent early could let the subscriber settle before the reset arrives.
-			if end_error || error.is_none() || groups_finished || res.is_err() {
+			// A range that stops short of the end is owed no error, so its boundary goes out.
+			let withheld = !end_error
+				&& !groups_finished
+				&& error.is_some()
+				&& res.as_ref().is_ok_and(|end| track.reaches(final_sequence(*end)));
+			if !withheld {
 				let error = error.filter(|_| end_error);
 				return Poll::Ready(res.map(|end| {
 					Recv::Boundary(lite::SubscribeEnd {

@@ -7233,17 +7233,18 @@ impl Subscriber {
 			Inner::Plain(cursor) => cursor.state.read().end_error(),
 			Inner::Resume(resume, _) => resume.end_error(datagrams),
 		};
-		let Some((fin, err)) = end else {
-			return Ok(None);
-		};
-		// A range that stops short of the end never reached it: the last group is past the
-		// cap, or past every range as resolved, whatever its anchors.
-		let reached = self.bounds().end.is_none_or(|cap| cap >= fin)
-			&& fin.checked_sub(1).is_none_or(|last| self.next_in_range(last).is_some());
-		match reached {
-			true => Err(err),
-			false => Ok(None),
+		match end {
+			Some((fin, err)) if self.reaches(fin) => Err(err),
+			_ => Ok(None),
 		}
+	}
+
+	/// Whether this reader's range reaches an end at the exclusive final sequence `fin`: a
+	/// range that stops short of it, past the cap or past every range as resolved, whatever
+	/// its anchors, never reaches the end.
+	pub(crate) fn reaches(&self, fin: u64) -> bool {
+		self.bounds().end.is_none_or(|cap| cap >= fin)
+			&& fin.checked_sub(1).is_none_or(|last| self.next_in_range(last).is_some())
 	}
 
 	/// Reserve the next group without advancing past it, so the subsequent read

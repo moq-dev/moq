@@ -1239,8 +1239,12 @@ export class Publisher {
 		};
 
 		// Before lite-07 an errored end is only the reset at that end: a clean SUBSCRIBE_END sent
-		// early could let the subscriber settle before the reset arrives.
-		const declareEarly = () => hasEndError(this.version) || !hooks.subscriberEndError(track);
+		// early could let the subscriber settle before the reset arrives. A subscription capped
+		// short of the end is owed no error, so its boundary goes out.
+		const declareEarly = () =>
+			hasEndError(this.version) ||
+			!hooks.subscriberEndError(track) ||
+			(bounds.endGroup !== undefined && bounds.endGroup + 1 < boundary());
 
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track, publisher);

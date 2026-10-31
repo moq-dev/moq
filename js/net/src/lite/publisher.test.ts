@@ -1840,6 +1840,23 @@ test("lite draft-06: an errored end is not declared early", async () => {
 	}
 });
 
+// A subscription capped short of an errored end is owed no error, so its boundary still goes out.
+test("lite draft-06: a subscription capped short of an errored end gets its boundary", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, endGroup: 1 });
+	try {
+		for (const sequence of [0, 1, 2, 3]) sub.serve(sequence);
+		sub.track.finishAt({ group: 4, frame: 0 }, new StreamError(StreamCode(71)));
+		for (;;) {
+			const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+			if (!("end" in resp)) continue;
+			expect(resp.end.group).toBe(4);
+			break;
+		}
+	} finally {
+		await sub.close();
+	}
+});
+
 // Serves one group with its stream open held until `open(ok)`, and returns the pending
 // SUBSCRIBE_END plus the call that lets the open succeed or fail.
 async function heldOpenEnd() {
