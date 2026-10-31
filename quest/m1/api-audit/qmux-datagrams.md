@@ -44,8 +44,8 @@ option):
   as `WebTransportDatagramDuplexStream`. The restriction must hold at
   runtime, not only in the types: `push`, the size update, and `close`
   become `#` private members that the session reaches through module-private
-  functions assigned in a `static {}` block (the `Origin` pattern, as in
-  [no constructible internal handles](/quest/m1/api-audit/internal-constructors.md)),
+  functions assigned in a `static {}` block (the
+  [Origin pattern](/js/net/src/origin.ts)),
   with a private constructor.
 - Tests: a lowered high-water mark sheds later overflow, a raised one admits
   more, `NaN` and negative values throw, reads drain and cancel the readable

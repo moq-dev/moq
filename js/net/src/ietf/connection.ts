@@ -44,7 +44,7 @@ function handed(task: Promise<void>): Promise<void> {
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
  *
- * @public
+ * @internal
  */
 export class Connection implements Established {
 	#closing?: Promise<void>;

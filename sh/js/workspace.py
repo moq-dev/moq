@@ -153,7 +153,7 @@ def run(action, plan):
     command("bun", "install", "--frozen-lockfile")
     if action == "test":
         command("python3", "sh/js/playwright.test.py")
-        command("bun", "test", "js/common/api.test.ts", "js/common/deps.test.ts", "js/common/worklet.test.ts",
+        command("bun", "test", "js/common/api.test.ts", "js/common/constructors.test.ts", "js/common/deps.test.ts", "js/common/worklet.test.ts",
                 "js/common/release.test.ts")
         scripts("test")
         return
