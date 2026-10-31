@@ -834,7 +834,7 @@ class MoqSubscription {
   final MoqOrder? order;
   MoqSubscription({
     this.priority = 0,
-    this.maxDelay = null,
+    this.maxDelay,
     this.ranges = null,
     this.order = null,
   });

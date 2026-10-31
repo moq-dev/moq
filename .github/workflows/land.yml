@@ -3,7 +3,8 @@ name: Land
 # Read the queue on hosted infrastructure, test without a push credential, then
 # reconstruct and land the passing prefix on a separate hosted runner.
 on:
-  pull_request_target:
+  # Only the self-hosted check job runs queued PR code, with a read-only token.
+  pull_request_target: # zizmor: ignore[dangerous-triggers]
     types: [auto_merge_enabled, auto_merge_disabled, synchronize, closed, edited]
   push:
     branches: [main]
@@ -35,7 +36,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/nix
       - name: Install trusted quest
-        run: |
+        run: | # zizmor: ignore[github-env] the path is a build of main's flake, not of the PR.
           mkdir -p .tmp
           nix build --out-link .tmp/quest-cli .#quest
           echo "$PWD/.tmp/quest-cli/bin" >> "$GITHUB_PATH"
@@ -72,7 +73,7 @@ jobs:
           persist-credentials: true
       - uses: ./.github/actions/just
       - name: Install trusted quest
-        run: |
+        run: | # zizmor: ignore[github-env] the path is a build of main's flake, not of the PR.
           mkdir -p .tmp
           nix build --out-link .tmp/quest-cli .#quest
           echo "$PWD/.tmp/quest-cli/bin" >> "$GITHUB_PATH"
@@ -125,7 +126,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/nix
       - name: Install trusted quest
-        run: |
+        run: | # zizmor: ignore[github-env] the path is a build of main's flake, not of the PR.
           mkdir -p .tmp
           nix build --out-link .tmp/quest-cli .#quest
           echo "$PWD/.tmp/quest-cli/bin" >> "$GITHUB_PATH"

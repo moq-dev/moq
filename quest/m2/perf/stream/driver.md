@@ -48,10 +48,6 @@ change on its own.
 Public API: the constructor shape changes in `qmux`, `moq-tokio`, and any
 binding that starts a qmux session. The Impact bullet says how to migrate.
 
-## Required
-
-- [Bench](/quest/m2/perf/stream/bench.md) - the baseline this is measured against
-
 ## Related
 
 - [qmux byte counters](/quest/m2/wire-stats/qmux.md) - refreshes `Wire` counters on qmux's read/write path
