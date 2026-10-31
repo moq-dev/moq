@@ -6028,7 +6028,6 @@ pub(super) mod test {
 		);
 	}
 
-	/// Read every retained frame of the single audio rendition in `catalog`.
 	/// Where the only audio rendition's HLS records end, once the catalog finishes.
 	async fn hls_audio_end<E: crate::catalog::hang::CatalogExt>(
 		consumer: &moq_net::broadcast::Consumer,
@@ -6049,6 +6048,7 @@ pub(super) mod test {
 		end
 	}
 
+	/// Read every retained frame of the single audio rendition in `catalog`.
 	async fn read_audio_frames<E: crate::catalog::hang::CatalogExt>(
 		consumer: &moq_net::broadcast::Consumer,
 		catalog: &crate::catalog::Producer<E>,
