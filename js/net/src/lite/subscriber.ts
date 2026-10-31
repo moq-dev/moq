@@ -1889,23 +1889,32 @@ export class Subscriber {
 	}
 
 	// Send `target` on the PROBE stream whenever it changes, in order, while `scope` lives.
-	// Nothing is sent while it is zero, until it retracts a target already sent.
+	// Nothing is sent while it is zero, until it retracts a target already sent. One write is
+	// in flight at a time, and the next sends the latest target, so a peer that stops reading
+	// holds one target however often it changes.
 	#sendTarget(stream: Stream, target: Getter<number>, scope: Effect): void {
 		let sent = 0;
-		let writing: Promise<void> = Promise.resolve();
-		scope.run((effect) => {
-			effect.get(target);
-			writing = writing
-				.then(async () => {
+		let writing = false;
+		const write = async () => {
+			writing = true;
+			try {
+				for (;;) {
 					// The wire carries whole bits per second.
 					const next = Math.floor(target.peek());
 					if (next === sent) return;
 					sent = next;
 					// Zero reads as unknown on the wire, which retracts the last target.
 					await new Probe({ bitrate: next > 0 ? next : undefined }).encode(stream.writer, this.version);
-				})
+				}
+			} catch {
 				// A failed write surfaces through the stream's reader, which ends the probe.
-				.catch(() => {});
+			} finally {
+				writing = false;
+			}
+		};
+		scope.run((effect) => {
+			effect.get(target);
+			if (!writing) void write();
 		});
 	}
 

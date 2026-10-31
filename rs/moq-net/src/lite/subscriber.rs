@@ -1484,15 +1484,20 @@ impl ProbeStream {
 		stream.writer.buffer(&lite::ControlType::Probe)?;
 		wait!(Send => stream.writer.poll_flush(waiter))?;
 		Poll::Ready(wait!(Read => {
-			if target != self.sent {
-				// Zero reads as unknown on the wire, which retracts the last target.
-				let bitrate = (target > bandwidth::Rate::ZERO).then_some(target.as_bps());
-				stream.writer.buffer(&lite::Probe { bitrate, rtt: None })?;
-				self.sent = target;
-			}
-			// Deliver the target without holding up the estimates behind it.
+			// Deliver the target without holding up the estimates behind it. Only a flushed
+			// writer takes the next one, so a peer that stops reading holds one target, and
+			// the latest is sent once it drains.
 			if let Poll::Ready(res) = stream.writer.poll_flush(waiter) {
 				res?;
+				if target != self.sent {
+					// Zero reads as unknown on the wire, which retracts the last target.
+					let bitrate = (target > bandwidth::Rate::ZERO).then_some(target.as_bps());
+					stream.writer.buffer(&lite::Probe { bitrate, rtt: None })?;
+					self.sent = target;
+					if let Poll::Ready(res) = stream.writer.poll_flush(waiter) {
+						res?;
+					}
+				}
 			}
 			let bandwidth = self.subscriber.recv_bandwidth.as_ref().expect("gated by RecvBandwidth");
 			// Each estimate wakes every reader, so a peer streaming them must not hold
