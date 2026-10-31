@@ -557,7 +557,8 @@ just test interop-report /tmp/results.jsonl /tmp/interop-report
 JS, then feeds them into each implementation's subscriber over an in-memory
 transport. It checks bare FIN before and after SUBSCRIBE\_START on lite-05/06/07,
 and FIN without PUBLISH\_DONE on IETF draft-18. Clean-end controls use the same
-path. This tests response interoperability, not network delivery or relay behavior.
+path. On lite-05/06/07 it also ends a track owing group 0 and kills the session
+before that group arrives, which each subscriber must end with the session's error. This tests response interoperability, not network delivery or relay behavior.
 The interop workflow runs it alongside the real-transport matrix.
 
 ## Varints
