@@ -126,14 +126,8 @@ pub const DEFAULT_SEND_WINDOW: u64 = 16 << 20;
 ///
 /// A peer that dies or drops off the network sends no close, so this is how long
 /// its routes and subscriptions stay stuck. Short enough to fail over in seconds;
-/// [`DEFAULT_KEEP_ALIVE`] keeps a live but quiet peer from reaching it.
+/// the keep-alive, derived from it, keeps a live but quiet peer from reaching it.
 pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Default keep-alive ping interval.
-///
-/// Under a third of [`DEFAULT_IDLE_TIMEOUT`], so a lost ping is followed by
-/// another (plus QUIC's probe retransmits) before the peer's timer runs out.
-pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(3);
 
 /// The `--quic-*` transport section, applied to dialed and accepted connections alike.
 #[derive(Clone, Debug, Default, usage_rs::Args, serde::Serialize, serde::Deserialize)]
@@ -182,7 +176,13 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub idle_timeout: Option<crate::cli::Duration>,
 
-	/// Keep-alive ping interval. Defaults to 3s; set `0s` to disable.
+	/// Keep-alive ping interval; set `0s` to disable. Defaults to under a third of
+	/// the idle timeout both ends settle on (3s against the 10s default), so changing
+	/// the idle timeout needs no matching change here.
+	///
+	/// Set it for a NAT binding that lives shorter than the idle timeout. A value no
+	/// shorter than the negotiated idle timeout could never keep the connection up,
+	/// so it is capped at the derived interval.
 	///
 	/// `None` uses the default; zero disables this duration.
 	#[usage(
@@ -586,11 +586,9 @@ impl Config {
 	/// first when the config came from a parser: a released spelling would show up
 	/// here as the default rather than the value that was written.
 	pub fn resolve(&self) -> Resolved {
-		// A zero keep-alive means "disabled"; anything else (including unset) keeps
-		// the connection warm, defaulting to 3s.
 		let idle_timeout = self.idle_timeout.map(Into::into).unwrap_or(DEFAULT_IDLE_TIMEOUT);
-		let keep_alive = self.keep_alive.map(Into::into).unwrap_or(DEFAULT_KEEP_ALIVE);
-		let keep_alive = (!keep_alive.is_zero()).then_some(keep_alive);
+		// Unset stays unset: the backend derives it from the negotiated idle timeout.
+		let keep_alive = self.keep_alive.map(Into::into);
 
 		Resolved {
 			max_streams: self.max_streams.unwrap_or(DEFAULT_MAX_STREAMS),
@@ -633,7 +631,12 @@ pub struct Resolved {
 	pub gso: Option<bool>,
 	/// Idle timeout.
 	pub idle_timeout: Duration,
-	/// Keep-alive interval, or `None` when disabled.
+	/// Keep-alive interval, `None` to derive it from the negotiated idle timeout, or
+	/// zero when disabled.
+	///
+	/// Unset by default, since the interval depends on the peer's idle timeout;
+	/// [`keep_alive_interval`](Self::keep_alive_interval) is what it comes to
+	/// against a peer that does not shorten ours.
 	pub keep_alive: Option<Duration>,
 	/// Whether to run path MTU discovery.
 	pub mtu_discovery: bool,
@@ -673,6 +676,14 @@ impl Resolved {
 	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub(crate) fn qlog_dir(&self) -> Option<&std::path::Path> {
 		self.qlog.as_deref()
+	}
+
+	/// The keep-alive interval against a peer whose idle timeout is no shorter than
+	/// ours, or `None` when there is none.
+	#[cfg(feature = "_transport")]
+	pub fn keep_alive_interval(&self) -> Option<Duration> {
+		let idle_timeout = (!self.idle_timeout.is_zero()).then_some(self.idle_timeout);
+		moq_quic::transport::keep_alive_interval(self.keep_alive, idle_timeout)
 	}
 
 	/// The flow-control limits as moq-quic spells them.
@@ -729,25 +740,37 @@ mod tests {
 		let quic = Config::default().resolve();
 		assert_eq!(quic.max_streams, DEFAULT_MAX_STREAMS);
 		assert_eq!(quic.idle_timeout, DEFAULT_IDLE_TIMEOUT);
-		assert_eq!(quic.keep_alive, Some(DEFAULT_KEEP_ALIVE));
+		assert_eq!(quic.keep_alive, None);
 		assert!(!quic.mtu_discovery);
 		assert_eq!(quic.gso, None);
 		assert!(quic.keylog.is_none());
 	}
 
+	#[cfg(feature = "_transport")]
 	#[test]
-	fn zero_keep_alive_disables_it() {
-		let disabled = Config {
-			keep_alive: Some((Duration::ZERO).into()),
-			..Default::default()
+	fn keep_alive_interval_derives_from_the_idle_timeout() {
+		let interval = |idle: u64, keep_alive: Option<Duration>| {
+			Config {
+				idle_timeout: Some((Duration::from_secs(idle)).into()),
+				keep_alive: keep_alive.map(Into::into),
+				..Default::default()
+			}
+			.resolve()
+			.keep_alive_interval()
 		};
-		assert_eq!(disabled.resolve().keep_alive, None);
-
-		let explicit = Config {
-			keep_alive: Some((Duration::from_secs(2)).into()),
-			..Default::default()
-		};
-		assert_eq!(explicit.resolve().keep_alive, Some(Duration::from_secs(2)));
+		assert_eq!(Resolved::default().keep_alive_interval(), Some(Duration::from_secs(3)));
+		assert_eq!(interval(30, None), Some(Duration::from_secs(9)));
+		assert_eq!(interval(0, None), None);
+		assert_eq!(interval(10, Some(Duration::ZERO)), None);
+		assert_eq!(interval(10, Some(Duration::from_secs(5))), Some(Duration::from_secs(5)));
+		assert_eq!(
+			interval(10, Some(Duration::from_secs(20))),
+			Some(Duration::from_secs(3))
+		);
+		assert_eq!(
+			interval(0, Some(Duration::from_secs(20))),
+			Some(Duration::from_secs(20))
+		);
 	}
 
 	#[test]
@@ -1047,6 +1070,6 @@ mod duration_tests {
 		keep_alive,
 		"--quic-keep-alive",
 		|c: &Config| c.resolve().keep_alive,
-		|d: Duration| (!d.is_zero()).then_some(d)
+		Some
 	);
 }

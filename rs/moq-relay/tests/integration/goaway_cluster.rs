@@ -216,7 +216,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 			// Without an epoch, B's route is another source: a restart.
 			if let moq_net::announce::Event::Start(update)
 			| moq_net::announce::Event::Update(update)
-			| moq_net::announce::Event::Restart(update) = event
+			| moq_net::announce::Event::Restart(update)
+			| moq_net::announce::Event::Takeover { announce: update, .. } = event
 				&& update.route.cost != moq_net::origin::Cost::DRAIN
 			{
 				break;
@@ -853,7 +854,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

@@ -96,6 +96,9 @@ async fn follow(
 			// A new route or a new instance for a path already announced, which changes
 			// nothing shown.
 			Event::Update(_) | Event::Restart(_) => continue,
+			// A route continuing another: new to the list unless it replaced that one in place.
+			Event::Takeover { announce, predecessor } if predecessor != announce.prefix => (announce, true),
+			Event::Takeover { .. } => continue,
 		};
 
 		let path = announce.prefix.as_str();
