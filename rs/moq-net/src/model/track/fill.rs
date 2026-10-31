@@ -21,7 +21,7 @@ use std::{
 use rangemap::{RangeMap, RangeSet};
 
 use super::{Info, Order, Position, TrackState, clamp_max_delay};
-use crate::{Error, Result, StreamError, group};
+use crate::{Error, Result, StreamError, group, util::SendCell};
 
 /// The fills a track's readers asked for, queued or taken by a handler, under one lock.
 #[derive(Default)]
@@ -203,33 +203,6 @@ impl Outcome {
 		self.partial.get(&sequence).filter(|copy| copy.covers(frames)).cloned()
 	}
 
-	/// The sequences of `span` accepted, lowest first.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn accepted_in(&self, span: &ops::Range<u64>) -> impl Iterator<Item = u64> {
-		self.accepted
-			.overlapping(span)
-			.flat_map(|run| run.start.max(span.start)..run.end.min(span.end))
-			.collect::<Vec<_>>()
-			.into_iter()
-	}
-
-	/// Why the sequences of `span` were refused, lowest first.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn refused_in(&self, span: &ops::Range<u64>) -> impl Iterator<Item = &Error> {
-		self.refused.overlapping(span).map(|(_, refusal)| &refusal.err)
-	}
-
-	/// The runs of `span` refused as too old under a budget, lowest first: a reader with no
-	/// budget of its own may still be served them.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn budget_old_in(&self, span: &ops::Range<u64>) -> Vec<ops::Range<u64>> {
-		self.refused
-			.overlapping(span)
-			.filter(|(_, refusal)| matches!(refusal.err, Error::Old) && refusal.asked.is_some())
-			.map(|(run, _)| run.start.max(span.start)..run.end.min(span.end))
-			.collect()
-	}
-
 	/// What was answered within `wanted`: accepted, or refused with why and the budget
 	/// the fill asked with.
 	#[expect(
@@ -352,19 +325,6 @@ impl Drop for Join {
 impl Join {
 	fn is_ours(&self, pending: &Pending) -> bool {
 		pending.result.weak().same_channel(&self.attempt)
-	}
-
-	/// Poll until every group this reader still reads is answered, or the fill ends.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn poll_answered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.outcome()
-			.poll(waiter, |outcome| {
-				match self.held.iter().all(|run| outcome.resolved.gaps(run).next().is_none()) {
-					true => Poll::Ready(()),
-					false => Poll::Pending,
-				}
-			})
-			.map(drop)
 	}
 
 	/// Whether the reader holds none of the fill any more.
@@ -664,7 +624,9 @@ pub(super) fn poll_requested(
 			asks,
 			result,
 		};
-		return Poll::Ready(Ok(Fill { inner: Arc::new(inner) }));
+		return Poll::Ready(Ok(Fill {
+			inner: Arc::new(SendCell::new(inner)),
+		}));
 	}
 
 	// No fill queued: surface a track abort so the handler loop can exit.
@@ -690,7 +652,9 @@ pub(super) fn poll_requested(
 /// A reader narrowing its ranges may leave a single group, so stop serving that one when
 /// [`poll_unwanted`](Self::poll_unwanted) is ready and move on to [`next`](Self::next).
 pub struct Fill {
-	inner: Arc<Inner>,
+	// Its track state reaches every group of the track, so the cell proves `Send` once
+	// here instead of inside every session machine holding a fill.
+	inner: Arc<SendCell<Inner>>,
 }
 
 /// The state a [`Fill`] and its per-group handles share. The last one dropping settles what
@@ -1024,8 +988,13 @@ impl Inner {
 			return Err(Error::Duplicate);
 		}
 		// Cache the group before answering: readers resolve an accept through the cache.
-		let res =
-			TrackState::modify(&self.state).and_then(|mut state| state.insert_group_request(sequence, frames, info));
+		let res = TrackState::modify(&self.state).and_then(|mut state| {
+			let res = state.insert_group_request(sequence, frames, info);
+			let deferred = state.deferred();
+			drop(state);
+			deferred.wake();
+			res
+		});
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(sequence..end);
 			if let Ok(group) = &res
@@ -1235,7 +1204,7 @@ impl Readers {
 /// that group of the fill; dropping it unanswered leaves the group to the fill.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct GroupFill {
-	inner: Arc<Inner>,
+	inner: Arc<SendCell<Inner>>,
 	sequence: u64,
 	frame_start: u64,
 	frame_end: Option<u64>,

@@ -17,15 +17,9 @@ const WINDOW: u64 = 4 * 1024 * 1024;
 const DATAGRAM: usize = 1000;
 
 fn pair() -> Pair {
-	let mut transport = TransportConfig::default();
-	transport.receive_window(PRE_AUTH.into());
-	let mut pair = Pair::new(
-		Default::default(),
-		ServerConfig {
-			transport: Arc::new(transport),
-			..server_config()
-		},
-	);
+	let mut server = server_config();
+	server.transport.limits.receive_window = NonZeroU64::new(PRE_AUTH.into());
+	let mut pair = Pair::new(Default::default(), server);
 	pair.latency = LATENCY;
 	pair
 }
@@ -61,9 +55,9 @@ fn run(pair: &mut Pair, duration: Duration, mut app: impl FnMut(&mut Pair)) {
 }
 
 /// Write `stream` until flow control blocks it
-fn write_flat_out(send: &mut SendStream<'_>) {
+fn write_flat_out(send: &mut send::Stream<'_>) {
 	let buf = [0xAB; 16 * 1024];
-	while let Ok(n) = send.write(&buf) {
+	while let Ok(n) = send.write(&mut &buf[..]) {
 		if n == 0 {
 			break;
 		}
@@ -71,7 +65,7 @@ fn write_flat_out(send: &mut SendStream<'_>) {
 }
 
 /// Read everything that arrived on `stream`, returning how many bytes
-fn read_all(mut recv: RecvStream<'_>) -> u64 {
+fn read_all(mut recv: recv::Stream<'_>) -> u64 {
 	let Ok(mut chunks) = recv.read() else {
 		return 0;
 	};
@@ -95,7 +89,7 @@ fn open(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: ConnectionHandl
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, s).write(b"x").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"x"[..]).unwrap();
 	pair.drive();
 	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
 	assert_eq!(read_all(pair.server_recv(server_ch, s)), 1);
@@ -147,7 +141,7 @@ fn a_datagram_flood_is_held_to_the_cap() {
 		for _ in 0..(10 * RATE / 1000 / DATAGRAM as u64) {
 			if pair
 				.client_datagrams(client_ch)
-				.send(vec![0; DATAGRAM].into(), Default::default())
+				.send(Bytes::from(vec![0; DATAGRAM]), Default::default())
 				.is_ok()
 			{
 				sent += DATAGRAM as u64;
@@ -181,9 +175,11 @@ fn mixed_traffic_under_the_cap_loses_no_datagrams() {
 	run(&mut pair, Duration::from_secs(5), |pair| {
 		if pair.time >= next {
 			next += Duration::from_millis(10);
-			pair.client_send(client_ch, s).write(&vec![0; per_tick]).unwrap();
+			pair.client_send(client_ch, s)
+				.write(&mut &vec![0; per_tick][..])
+				.unwrap();
 			pair.client_datagrams(client_ch)
-				.send(vec![0; per_tick].into(), Default::default())
+				.send(Bytes::from(vec![0; per_tick]), Default::default())
 				.unwrap();
 			sent += 1;
 		}
@@ -300,11 +296,11 @@ fn a_frame_larger_than_the_burst_arrives_gradually() {
 	let start = pair.time;
 	run(&mut pair, Duration::from_secs(5), |pair| {
 		if written < frame
-			&& let Ok(n) = pair.client_send(client_ch, s).write(&data[written..])
+			&& let Ok(n) = pair.client_send(client_ch, s).write(&mut &data[written..])
 		{
 			written += n;
 		}
-		if leased.is_none() && pair.server_recv(server_ch, s).lease(frame).is_ok() {
+		if leased.is_none() && pair.server_recv(server_ch, s).lease(frame).0.is_ok() {
 			leased = Some(pair.time);
 		}
 	});
@@ -335,7 +331,7 @@ fn an_uncapped_session_gets_its_window() {
 	pair.drive();
 	let written = pair
 		.client_send(client_ch, s)
-		.write(&vec![0; PRE_AUTH as usize * 4])
+		.write(&mut &vec![0; PRE_AUTH as usize * 4][..])
 		.unwrap();
 	assert_eq!(
 		written,
@@ -414,4 +410,43 @@ fn egress_is_held_to_the_send_cap() {
 		"sent {sent} past the cap"
 	);
 	assert!(read >= RATE * duration.as_secs() * 8 / 10, "read only {read}");
+}
+
+/// Caps set at construction hold both directions from the first byte, the initial window
+/// counting as credit already granted.
+#[test]
+fn caps_set_at_construction_hold() {
+	let mut server = server_config();
+	server.transport.limits.receive_window = NonZeroU64::new(PRE_AUTH.into());
+	server.transport.limits.receive_rate = capped(RATE);
+	server.transport.limits.send_rate = capped(RATE);
+	let mut pair = Pair::new(Default::default(), server);
+	pair.latency = LATENCY;
+	let (client_ch, server_ch) = pair.connect();
+	let up = open(&mut pair, client_ch, server_ch);
+	let down = pair
+		.server_streams(server_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+
+	let sent = |pair: &mut Pair| pair.server_conn_mut(server_ch).stats().udp_tx.bytes;
+	let before = sent(&mut pair);
+	let duration = Duration::from_secs(5);
+	let (mut up_read, mut down_read) = (0, 0);
+	run(&mut pair, duration, |pair| {
+		write_flat_out(&mut pair.client_send(client_ch, up));
+		write_flat_out(&mut pair.server_send(server_ch, down));
+		up_read += read_all(pair.server_recv(server_ch, up));
+		down_read += read_all(pair.client_recv(client_ch, down));
+	});
+
+	let limit = allowance(RATE, duration, PRE_AUTH.into());
+	assert!(up_read <= limit, "read {up_read} past the receive cap");
+	assert!(up_read >= RATE * duration.as_secs() * 8 / 10, "read only {up_read}");
+	let sent = sent(&mut pair) - before;
+	assert!(
+		sent <= allowance(RATE, duration, DEFAULT_MTU as u64),
+		"sent {sent} past the send cap"
+	);
+	assert!(down_read >= RATE * duration.as_secs() * 7 / 10, "read only {down_read}");
 }

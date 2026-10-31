@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 
 use crate::decode::Read;
 use crate::ffi::OnStatus;
-use crate::{moq_decode_gap, moq_decode_read_kind};
+use crate::{moq_decode_gap, moq_decode_read_kind, moq_decode_start};
 
 use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
@@ -125,6 +125,10 @@ pub struct moq_audio_decoder_output {
 	/// buffer (tens to a few hundred ms) for a softer skip. This bounds
 	/// group staleness rather than setting a minimum playout delay.
 	pub max_delay_us: u64,
+	/// `moq_decode_start` discriminant: where to start on a track that already
+	/// holds groups. 0 = the oldest, decoding everything cached; a live player
+	/// sets `MOQ_DECODE_START_LATEST`.
+	pub start: u32,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -538,7 +542,7 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 /// again, so release `user_data` there. The terminal callback fires even after
 /// [`moq_decode_audio_cancel`].
 ///
-/// Starts at the newest cached group so reopening live playback skips the backlog.
+/// `output->start` picks where it starts on a track that already holds groups.
 ///
 /// A packet the codec cannot decode is logged and skipped rather than ending
 /// the subscription, so a single bad frame costs that frame and not the stream.
@@ -559,7 +563,10 @@ pub unsafe extern "C" fn moq_decode_audio(
 		let raw = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 
 		let mut config = moq_audio::decode::Options::default();
-		config.start = moq_audio::decode::Start::Latest;
+		config.start = match moq_decode_start::from_u32(raw.start)? {
+			moq_decode_start::MOQ_DECODE_START_OLDEST => moq_audio::decode::Start::Oldest,
+			moq_decode_start::MOQ_DECODE_START_LATEST => moq_audio::decode::Start::Latest,
+		};
 		config.output.format = audio_format_from_u32(raw.format)?;
 		config.output.sample_rate = zeroable(raw.sample_rate);
 		config.output.layout = zeroable(raw.channels)

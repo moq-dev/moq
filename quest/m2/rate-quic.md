@@ -3,7 +3,7 @@
 ## Goal
 
 A relay session over QUIC (tokio and io_uring workers) never receives more
-than its `publish.rate` or sends more than its `subscribe.rate`, whatever
+than its `publish_rate` or sends more than its `subscribe_rate`, whatever
 the client does, and a capped session over QUIC is admitted instead of
 refused.
 
@@ -12,7 +12,8 @@ refused.
 The stack half landed in [#7094](https://github.com/moq-dev/moq/pull/7094):
 `moq_quic::Limits` carries `receive_rate` and `send_rate` (a
 `moq_quic::Rate`, bytes per second or unlimited), re-exported by both
-runtimes and set through the same `set_limits` seam on a live connection.
+runtimes and set through `set_limits` on a live connection or through
+`transport::Config::limits` at construction (QMux ignores them).
 
 - A receive cap paces `MAX_DATA` from a token bucket holding one second of
   `rate`, granted in eighths of it. Stream bytes and datagram payload are
@@ -29,6 +30,12 @@ runtimes and set through the same `set_limits` seam on a live connection.
 - A send cap gates ack-eliciting packets beside the controller's pacer,
   retransmissions included, and reports the hold as application-limited.
 
+Decided 2026-10-31 (maintainer) on [#7094](https://github.com/moq-dev/moq/pull/7094): the stack half lands alone; the
+send cap counts ack-eliciting packets, QUIC overhead and retransmissions
+included, since that bounds what a subscriber can make the relay send,
+faked loss included; and the egress burst is one second of the rate, as on
+ingress, since the controller's pacer already spreads it at path rate.
+
 What remains is the auth and relay half.
 
 Token claims and HTTP grants carry path patterns only; object roles, including
@@ -44,6 +51,13 @@ enforces it. The audit that removed `Access` (2026-10-22) objected to
 be additive; released verifiers already refuse the `{"path","rate"}` object
 role (`rs/moq-auth/tests/released_token.rs`), so a cap cannot be silently
 discarded by an old relay.
+
+- **The cap shape.** Decided 2026-10-31 (maintainer) on [#7094](https://github.com/moq-dev/moq/pull/7094): additive
+  Rust fields, `publish_rate` and `subscribe_rate` beside `publish:
+  Patterns` and `subscribe: Patterns`, so `grant.publish.matches(..)` stays,
+  with the `{"path": [...], "rate": bps}` object role on the wire. `js/auth`
+  mirrors it. Restoring `Access { path, rate }` was rejected for the
+  `.path` ergonomics the 2026-10-22 audit removed it over.
 
 - **Credit cannot be retracted** (RFC 9000 §4.1). Every session, capped or
   not, starts with an `initial_max_data` shrunk to what the handshake,
@@ -65,8 +79,8 @@ discarded by an old relay.
   uncapped grant lifts it, matching the union's permissive meaning. Decided
   in the 2026-10-04 plan; `moq-auth` and `js/auth` carry no union helper
   until this quest needs one.
-- The relay's receive cap is the session's `publish.rate`, its send cap the
-  `subscribe.rate`, converted from bits to bytes per second.
+- The relay's receive cap is the session's `publish_rate`, its send cap the
+  `subscribe_rate`, converted from bits to bytes per second.
 - QUIC admission accepts capped roles only on the moq-quic stack (tokio and
   io_uring); WebSocket, iroh, and HTTP `/fetch` and `/announced` keep refusing
   them, including a capped grant arriving in band or at revalidation.

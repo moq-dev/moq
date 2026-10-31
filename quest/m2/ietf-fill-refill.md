@@ -1,10 +1,11 @@
-# [M] A moq-transport group head fills its hole in place
+# [M] A moq-transport group head is a flight
 
 ## Goal
 
-A moq-transport fill (draft 22) or joining FETCH (draft 18) writes a group's
-missing head into the same group the subscription's tail is writing, over a
-disjoint object range, instead of the 7-state `Fill` claim, park, and install
+A moq-transport fill (draft 22) or joining FETCH (draft 18) serves a group's
+missing head as a [flight](/quest/m1/unbounded-groups/flights.md): a separate
+copy whose readers hand over to the subscription's tail copy at the first
+object the tail holds, instead of the 7-state `Fill` claim, park, and install
 handoff between two producers.
 
 ## Plan
@@ -24,15 +25,16 @@ Group stitching across two streams drew repeated fixes:
 and its handoff (`rs/moq-net/src/ietf/subscriber.rs` about lines 273-396
 and 4712-4862) exist only because the model has one producer per group.
 
-Once [front eviction](/quest/m1/unbounded-groups/front-eviction.md) lets a
-group be refilled in place, the head is a refill of the group's leading
-hole, which also keeps a tail whose head never arrives, as the headless
-group quest decided. Joining at the next group instead was considered and
+Decided 2026-10-28 (maintainer): nothing is written into a group copy below
+its live log, so the head no longer fills the tail's group in place. Once
+[Flights](/quest/m1/unbounded-groups/flights.md) lands, the head is a flight
+from object 0 that hands over to the tail copy, which also keeps a tail
+whose head never arrives, as the headless group quest decided. Joining at the next group instead was considered and
 rejected: it costs a GOP of startup and drops objects already received.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - in-place refill of a group's holes
+- [Flights](/quest/m1/unbounded-groups/flights.md) - separate paced copies and the handover between them
 - [moq-transport requests end through one lease](/quest/m2/ietf-request-lease.md) - restructures the same files first

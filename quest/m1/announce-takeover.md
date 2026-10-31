@@ -12,9 +12,11 @@ job never inherits those readers. Rust and JS expose the transition as
 
 Decided in the 2026-10-10 quest audit interview: replace response-only claim
 epochs with `ANNOUNCE_TAKEOVER`. Keep this shared-model and lite-07 work in
-m1 and a prerequisite of the lite-07 cut, not the m0 release. The negotiated
-IETF counterpart remains separate. Ordinary Start/Restart is a supported
-fallback, including the accepted cold-start reset before this lands.
+m1 and a prerequisite of the lite-07 cut, not the m0 release. moq-transport
+gets no counterpart, since [moq-transport carries no epoch](/quest/m1/ietf-epoch-cut.md)
+(decided 2026-10-28), so a moq-transport hop uses Start/Restart. Ordinary
+Start/Restart is a supported fallback, including the accepted cold-start
+reset before this lands.
 
 - A worker advertises `transcode/` without an epoch. Demand for a path starts
   one job, which announces `transcode/path` with its own freshly minted epoch
@@ -80,9 +82,9 @@ model of whichever ROUTE/ANNOUNCE shape is on `main` rather than adding a
 second one. Account for TAKEOVER in announcement IDs, compression bases,
 snapshot counts, route filtering, duplicate-advertisement rules and
 retirement. Update the lite draft and existing identity/compatibility docs in
-the implementation PR, and add a takeover section to the
-[identity and recovery guide](/quest/m1/identity-guide.md) if that has
-landed; the guide does not replace inline docs.
+the implementation PR, and add a takeover section to the identity and
+recovery guide (`doc/concept/identity.md`), whose cold-start step and
+lazy-job lifecycle it changes; the guide does not replace inline docs.
 
 Tests with controlled time: first view before/after takeover; absent reader;
 invalid/retired predecessor; same ID after Restart; two workers at one prefix;
@@ -105,6 +107,4 @@ ANNOUNCE_TAKEOVER; published versions retain their framing.
 
 - [Claim answer epochs](https://github.com/moq-dev/moq/pull/5678) - `Request::prepare` then `publish` answers a claim at the exact path under a fresh epoch, the operation TAKEOVER continues
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route layer whose ANNOUNCE_START layout overlaps this one's
-- [IETF takeover](/quest/m1/ietf-takeover.md) - negotiated IETF counterpart
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - replacements never substitute content into held handles
-- [Identity and recovery guide](/quest/m1/identity-guide.md) - explains takeover alongside restart and legacy behavior

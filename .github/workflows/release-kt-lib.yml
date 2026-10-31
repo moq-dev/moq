@@ -74,6 +74,22 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # head_branch names a branch as readily as a tag, and anyone who can push
+      # may name a branch and a workflow after a release. Only a tag the
+      # `release tags` ruleset protects, at the run's commit, is a release.
+      - name: Require a release tag at the run's commit
+        if: github.event_name == 'workflow_run'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$TAG" --jq .sha)
+          if [[ "$commit" != "$SHA" ]]; then
+            echo "::error::$TAG is not a release tag at $SHA"
+            exit 1
+          fi
       - uses: ./.github/actions/just
       - name: Check independent publisher
         id: publisher
@@ -179,11 +195,15 @@ jobs:
     # pending run per group and drops the older one, so a PR or a no-op push
     # sharing it silently cancelled a queued release. Scoped to this job so runs
     # that skip publishing never enter it. Dry-runs get a per-ref group instead
-    # and cancel their superseded builds.
+    # and cancel their superseded builds. `inputs.dry-run` is null outside
+    # workflow_call, and a null cancel-in-progress fails the job.
     concurrency:
-      group: release-kt-lib-${{ (github.event_name == 'pull_request' || inputs.dry-run) && github.ref || 'publish' }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' || inputs.dry-run }}
+      group: release-kt-lib-${{ (github.event_name == 'pull_request' || inputs.dry-run == true) && github.ref || 'publish' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' || inputs.dry-run == true }}
     runs-on: ubuntu-latest
+    # Maven and signing credentials live in the `publish` Environment, which
+    # only protected refs can deploy to. A dry-run needs no secrets.
+    environment: ${{ github.event_name != 'pull_request' && !inputs.dry-run && 'publish' || '' }}
     env:
       # Picked up by com.vanniktech.maven.publish via Gradle project properties.
       ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}

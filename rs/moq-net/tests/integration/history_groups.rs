@@ -71,11 +71,7 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -220,8 +216,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	options.client_subscribe = Some(first.clone());
 	let first_pair = connect_mock(options).await;
 	let consumer = first.consume();
-	consumer.routed("bcast").await.unwrap();
-	let remote = consumer.request_broadcast("bcast", None).await.unwrap();
+	let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
 	let subscription = Subscription::default().with_max_delay(FOREVER).with_range(0..);
 	let first_subscription = subscription.clone();
 	let first_reader = moq_clock::sim::spawn(async move {
@@ -258,8 +253,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	options.client_subscribe = Some(late.clone());
 	let late_pair = connect_mock(options).await;
 	let consumer = late.consume();
-	consumer.routed("bcast").await.unwrap();
-	let remote = consumer.request_broadcast("bcast", None).await.unwrap();
+	let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
 	let mut late_sub = remote.track("history").unwrap().subscribe(subscription).await.unwrap();
 	moq_clock::timeout(TIMEOUT, read_history(&mut late_sub))
 		.await

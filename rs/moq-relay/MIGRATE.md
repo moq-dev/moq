@@ -152,7 +152,8 @@ Each used to be ignored: drop it, or add the listener it configures.
 
 ### `--cluster-mesh` and `--cluster-linger` are unknown flags (#4818)
 
-They, TOML `mesh` and `linger`, and `MOQ_CLUSTER_MESH` / `MOQ_CLUSTER_LINGER` are no longer read.
+Remove the flags, TOML `mesh` and `linger`, and `MOQ_CLUSTER_MESH` / `MOQ_CLUSTER_LINGER`.
+The removed environment variables stop startup rather than being ignored.
 List every peer with `--cluster-connect` or `--cluster-connect-api`.
 In Rust, `cluster::Config` has no `mesh` or `linger` field.
 
