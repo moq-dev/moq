@@ -10,9 +10,10 @@ generate wrappers for them. Behavior and public signatures are unchanged.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-28: split from
-[kio::machine](/quest/m1/poll-first/machine.md) so the macro lands with its
-hand-written machines first, and these conversions follow as their own PR.
+Decided with the maintainer on 2026-10-28: split from the kio::machine quest,
+which landed the macro with its hand-written machines in
+[moq-dev/moq#7148](https://github.com/moq-dev/moq/pull/7148), so these
+conversions follow as their own PR.
 Bodies with a loop or a branch around a wait stay with async-feature, which
 converts them by hand.
 
@@ -21,9 +22,9 @@ converts them by hand.
 - The existing tests are the proof; add one only where a conversion changes
   cancellation (a value that used to drop at an `.await` now lives in a named
   variant).
+- The macro has only the `impl` form: an `async fn`'s parameters become the
+  struct's fields. A conditional wait is one whose poll is ready at once, and a
+  wait that ends the body is `Poll::Ready(wait!(..))`; see `kio::machine`'s docs
+  for the rest of the dialect.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [kio::machine](/quest/m1/poll-first/machine.md) - the macro these conversions use

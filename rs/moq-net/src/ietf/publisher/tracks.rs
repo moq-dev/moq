@@ -1015,7 +1015,11 @@ impl Publisher {
 		// What to resume with, and whether an update asked for it: a forwarding PUBLISH_OK
 		// resumes at once, with no update to answer.
 		let mut resume: Option<Resume> = resume;
+		// Each turn answers a REQUEST_UPDATE, so a peer streaming them must not hold the
+		// session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		let done = loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			if let Some(how) = resume.take() {
 				match self
 					.resume_publish(
@@ -1275,7 +1279,7 @@ impl Publisher {
 					},
 					cache: track.clone(),
 					namespace: namespace.clone(),
-					token: None,
+					grant: None,
 					ranking: serve.ranking.clone(),
 				},
 				(Filter::NextObject, None) => Joined::Empty,

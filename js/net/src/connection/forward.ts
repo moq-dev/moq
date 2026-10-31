@@ -172,9 +172,9 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 			}
 		}
 
-		// Hidden routes are mirrored too; each local reader opts in on its own.
+		// Hidden and covering routes are mirrored too; each local reader opts in on its own.
 		const interest: Interest = {
-			announced: conn.announced(Path.Pattern.subtree(prefix), { hidden: true }),
+			announced: conn.announced(Path.Pattern.subtree(prefix), { hidden: true, covering: true }),
 			reported: new Set(),
 			closing: false,
 			held: new Map(),
