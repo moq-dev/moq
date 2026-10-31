@@ -5436,7 +5436,7 @@ dependencies = [
  "bytes",
  "data-encoding",
  "hex",
- "kio 0.6.2",
+ "kio",
  "moq-net",
  "serde_json",
  "tempfile",
