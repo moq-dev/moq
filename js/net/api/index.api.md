@@ -24,6 +24,7 @@ export namespace Announce {
 		kind: "start" | "update" | "restart" | "end";
 	} & Announce.Announce;
 	export interface Options {
+		covering?: boolean;
 		hidden?: boolean;
 	}
 }
@@ -621,7 +622,7 @@ export namespace Track {
 		createGroup(sequence: number): Group.Producer;
 		demand(): Track.Demand;
 		finish(): void;
-		finishAt(end: Track.Position): void;
+		finishAt(end: Track.Position, error?: Error): void;
 		info(): Promise<Track.Info>;
 		insertDatagram(sequence: number, timestamp: Time.Timestamp | undefined, payload: Uint8Array): void;
 		largest(): Track.Position | undefined;
@@ -654,9 +655,12 @@ export namespace Track {
 		update(options: Track.Subscription): void;
 		withRange(groups: Track.Groups): this;
 	}
+	export const Subscription: {
+		default(): Track.Subscription;
+	};
 	export interface Subscription {
 		groups?: Track.Groups;
-		maxDelay?: Milli;
+		maxDelay?: Milli | null;
 		order?: Track.Order;
 		priority?: number;
 	}

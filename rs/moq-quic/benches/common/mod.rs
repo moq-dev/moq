@@ -16,7 +16,7 @@ use std::{
 	time::Duration,
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cpu_time::ThreadTime;
 use criterion::{
 	Criterion,
@@ -25,12 +25,13 @@ use criterion::{
 use moq_clock::Instant;
 use moq_congestion::{Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent};
 use moq_quic::{
-	ConnectionId, ConnectionIdGenerator, Event, LeaseError, RandomConnectionIdGenerator, ReadError, StreamEvent,
-	StreamId, VarInt, client,
+	ConnectionId, ConnectionIdGenerator, Event, RandomConnectionIdGenerator, StreamEvent, VarInt, client,
 	connection::Connection,
 	endpoint::{self, ConnectionHandle, DatagramEvent, Dial, Endpoint, Received as Inbound},
 	fuzz::Plaintext,
-	server, transport,
+	recv, server,
+	stream::Id as StreamId,
+	transport,
 };
 
 /// The most datagrams one `poll_transmit` may batch, as a GSO-capable socket would take.
@@ -249,8 +250,8 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
 				received.finished += 1;
 				break;
 			}
-			Err(ReadError::Blocked) => break,
-			Err(ReadError::Reset(_)) => {
+			Err(recv::Error::Blocked) => break,
+			Err(recv::Error::Reset(_)) => {
 				received.reset += 1;
 				break;
 			}
@@ -270,29 +271,27 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
 /// discards its lease.
 fn lease(conn: &mut Connection, id: StreamId, want: usize, received: &mut Received) {
 	loop {
-		let ended = match conn.recv_stream(id).lease(want) {
-			Ok(_) => None,
-			Err(LeaseError::Blocked(_) | LeaseError::ClosedStream) => return,
-			Err(LeaseError::Reset(_)) => Some(&mut received.reset),
-			Err(LeaseError::Evicted) => Some(&mut received.evicted),
-			Err(err) => panic!("lease failed: {err}"),
-		};
-		if let Some(count) = ended {
-			*count += 1;
-			let _ = conn.recv_stream(id).stop(VarInt::from_u32(0));
-			return;
-		}
-		let fin = conn.leased(id).expect("leased above").is_fin();
 		let mut stream = conn.recv_stream(id);
-		// Taken a chunk at a time, as moq-net hands a frame's payload on.
-		loop {
-			let chunk = stream.take(usize::MAX);
-			if chunk.is_empty() {
-				break;
+		let mut lease = match stream.lease(want).0 {
+			Ok(lease) => lease,
+			Err(recv::Error::Blocked | recv::Error::Closed) => return,
+			Err(err) => {
+				match err {
+					recv::Error::Reset(_) => received.reset += 1,
+					recv::Error::Evicted => received.evicted += 1,
+					err => panic!("lease failed: {err}"),
+				}
+				let _ = stream.stop(VarInt::from_u32(0));
+				return;
 			}
+		};
+		let fin = lease.is_fin();
+		// Taken a chunk at a time, as moq-net hands a frame's payload on.
+		while lease.has_remaining() {
+			let chunk = lease.copy_to_bytes(lease.chunk().len());
 			received.bytes += chunk.len() as u64;
 		}
-		let _ = stream.release();
+		let _ = stream.release(lease);
 		if fin {
 			received.finished += 1;
 			let _ = stream.stop(VarInt::from_u32(0));

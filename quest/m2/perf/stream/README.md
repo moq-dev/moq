@@ -15,9 +15,13 @@ Out of scope: h2 or h3 WebSocket, permessage-deflate, and any wire change.
 
 Facts from the 2026-10-22 audit, so quests don't re-litigate them:
 
-- Nothing measures WebSocket or TCP throughput today. The moq-uring benches
-  are UDP and QUIC only, and `rs/moq-relay/benches/http_idle.rs` measures idle
-  accepts.
+- `just bench` runs `chat` and `fanout` over QUIC and qmux over `ws://`,
+  `wss://`, `tcp://`, and `tls://`, reporting relay CPU per delivered frame and
+  per Gbps; `just bench-profile` takes the transport as its last argument. The
+  qmux micro-bench (`rs/qmux/examples/bench.rs`) echoes one message at a time
+  over loopback, swept over transport x sessions x message size, and reports
+  process CPU per message, which is one record up to the 16382-byte default
+  maximum record size. `bench/README.md` covers both.
 - The relay's WebSocket path is axum (hyper, `axum-server`, tokio-rustls),
   then axum's tungstenite 0.29, converted zero-copy into qmux's tungstenite
   0.30 (`rs/moq-relay/src/websocket.rs`). The relay therefore compiles two
@@ -32,7 +36,8 @@ Facts from the 2026-10-22 audit, so quests don't re-litigate them:
     (`rs/qmux/src/session.rs`)
   - a new `Vec` per outbound record from `mux::fill`
   - on plain TCP, a `BytesMut::zeroed` allocation per inbound record and a
-    `BytesMut` per outbound size varint
+    `BytesMut` per outbound size varint, behind the same shape as WebSocket:
+    `tokio::io::split`, a `reader_loop` task, and an `mpsc` channel
 - qmux is hard-wired to tokio: `tokio::spawn`, `tokio::sync::mpsc`,
   `tokio::select!`, and `tokio::time` for the WebSocket keep-alive. That is
   why it cannot run on an io_uring worker today, and why the driver is a
@@ -42,6 +47,46 @@ Facts from the 2026-10-22 audit, so quests don't re-litigate them:
   default), and Text is a protocol violation. The browser
   (`js/qmux/src/web-socket-stream.ts`) masks every frame and picks its own
   fragmentation, so a server still unmasks and reassembles continuations.
+
+Measured 2026-10-28 on the 24-core `desktop`, with other agents running
+(load near 10), so read shares rather than absolute numbers. Shares come from
+`perf` at 999 Hz on profiling builds with frame pointers, each sample charged
+to the innermost layer that owns it; syscalls and allocator calls are charged
+to themselves.
+
+qmux micro-bench, 1024 B echo, 16 and 256 sessions:
+
+| Transport | CPU per record | Syscalls | tungstenite | TLS | qmux session | moq-quic mux | tokio | split | mpsc | allocator |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| tcp | 2.4 / 3.2 us | 52 / 52% | | | 16 / 18% | 10 / 10% | 12 / 10% | 1 / 1% | 3 / 3% | 2 / 2% |
+| tls | 3.1 / 5.1 us | 44 / 44% | | 16 / 13% | 14 / 14% | 9 / 9% | 9 / 9% | 1 / 2% | 2 / 3% | 2 / 2% |
+| ws | 4.5 / 10.0 us | 33 / 26% | 32 / 43% | | 11 / 9% | 8 / 5% | 8 / 7% | 4 / 4% | 1 / 2% | 1 / 1% |
+| wss | 5.2 / 15.1 us | 30 / 27% | 29 / 32% | 11 / 7% | 9 / 11% | 6 / 7% | 7 / 5% | 3 / 4% | 1 / 3% | 3 / 1% |
+
+Relay `chat` (one publisher, 2,000 viewers, 20,000 frames/s delivered) on 4
+Tokio workers: QUIC costs 94 us of relay CPU per delivered frame, `ws` 33,
+`wss` 35, `tcp` 30, and `tls` 31. Over the stream transports, moq-net takes
+36-41% of relay CPU, kio 19-22%, syscalls 14-16%, moq-quic 7%, the qmux
+session 6-7%, tungstenite 5% (ws and wss), TLS 2-3%, the allocator 3%, the
+split at most 2%, and `mpsc` under 0.5%.
+
+What that says, layer by layer:
+
+- **tungstenite** is the largest transport cost on WebSocket, and almost all of
+  it is one thing: its read buffer is resized with zeros to its full capacity
+  (`read_buffer_size`, 128 KiB) on every read attempt, including one that
+  returns `WouldBlock`. That is 29-43% of the micro-bench and grows with the
+  session count, but 5% of relay `chat`, where only the publisher's socket is
+  read. Its `out_buffer` copy and memmove do not register.
+- **The split, pump, channel, and mutex hops** are small: the BiLock 3-4% on
+  WebSocket, `tokio::io::split` 1-2% on TCP, `mpsc` 1-3%, and the session
+  `Mutex` never contends on one thread, so it shows only inside the session's
+  own 9-18%.
+- **Per-record allocations**: the allocator is 1-3% everywhere.
+- **TLS**: 7-16% of the micro-bench, 2-3% of relay `chat`.
+- **Syscalls** are a quarter to a half of the micro-bench, where every record
+  costs a send and a read, and 14-16% of relay `chat`. That is the ring's
+  target.
 
 Decisions (2026-10-22), each with its reason:
 
@@ -68,9 +113,21 @@ Decisions (2026-10-22), each with its reason:
 - **Ranked second in m2/perf**, after kio channel contention, which is the
   largest cost measured so far.
 
+Decided 2026-10-31 (maintainer), in
+[moq-dev/moq#7086](https://github.com/moq-dev/moq/pull/7086):
+
+- **`just bench` keeps all five transports by default, `tls` included.** A base
+  without `listen.tcp.tls`, such as `origin/release` today, fails at its first
+  `tls` case, so pass `"quic ws wss tcp"` until a release includes it
+  (`bench/README.md`). Probing the base relay first would mean building it
+  before Criterion, and a QUIC-only default would hide the transports this line
+  measures.
+- **The longer bench is accepted.** The relay phase grew from 2 cases to 11,
+  about 15 minutes against a base at 3 rounds; the transport argument narrows a
+  run when that matters.
+
 ## Required
 
-- [Bench](/quest/m2/perf/stream/bench.md) - WebSocket, WSS, and TLS qmux relay workloads plus a qmux micro-bench attribute stream-transport CPU to its layers
 - [Driver](/quest/m2/perf/stream/driver.md) - a qmux session is one caller-spawned task polling the socket it owns, with no split, pump, channel, or per-record allocation
 - [Ring TCP ablation](/quest/m2/perf/stream/ablation.md) - measured ring TCP against tokio TCP under the qmux workload picks the mechanisms the port uses
 - [Ring TCP](/quest/m2/perf/stream/ring.md) - moq-uring serves TCP, and hyper (therefore axum) runs on it

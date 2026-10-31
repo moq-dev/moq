@@ -10,6 +10,12 @@
 //! Compiled only under `cfg(test)` or the `fuzz` feature, so none of this is part of
 //! the published API. See `fuzz/README.md` for the workflow.
 
+mod ingest;
+mod request;
+
+pub use ingest::ingest;
+pub use request::request;
+
 use bytes::Bytes;
 
 use crate::{
@@ -93,6 +99,8 @@ pub const TARGETS: &[(&str, Target)] = &[
 	("varint", varint),
 	("path", path),
 	("pattern", pattern),
+	("ingest", ingest),
+	("request", request),
 ];
 
 /// The moq-lite versions a target decodes at, selected by the input's first byte.
@@ -107,7 +115,7 @@ const LITE_VERSIONS: &[lite::Version] = &[
 ];
 
 /// The moq-transport drafts a target decodes at, selected by the input's first byte.
-const IETF_VERSIONS: &[ietf::Version] = &[ietf::Version::Draft18, ietf::Version::Draft22];
+const IETF_VERSIONS: &[ietf::Version] = &[ietf::Version::Draft18, ietf::Version::Draft20, ietf::Version::Draft22];
 
 /// How many types [`lite_wire`] dispatches over.
 const LITE_KINDS: u8 = 30;
@@ -168,17 +176,18 @@ where
 
 /// Assert the invariant every path holds once built: its spelling parses back to it under
 /// the strict constructor, and so does every run of its leading segments, which is what
-/// stats grouping and announce compression derive from it.
+/// stats grouping and announce compression derive from it. Only a run ending at an
+/// escaped `/` has no head, since it would end in half an escape.
 fn assert_strict(path: &Path) {
 	let reparsed = Path::new(path.as_str()).unwrap_or_else(|err| panic!("{path:?} is refused: {err}"));
 	assert_eq!(reparsed, *path, "{path:?} did not parse back to itself");
 	let count = path.parts().count();
 	for n in 0..=count {
-		let head = path.head(n).expect("a path has a head per segment");
-		assert!(
-			Path::new(head.as_str()).is_ok(),
-			"{path:?} has an invalid head {head:?}"
-		);
+		let cut = path.parts().take(n).collect::<Vec<_>>().join("/");
+		match path.head(n) {
+			Some(head) => assert_eq!(Path::new(&cut), Ok(head), "{path:?} has a wrong head at {n}"),
+			None => assert!(cut.ends_with('\\'), "{path:?} has no head at {n}"),
+		}
 	}
 	assert!(path.head(count + 1).is_none(), "{path:?} has a head past its segments");
 }
@@ -220,7 +229,12 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 	let mut any = false;
 	for &negotiated in negotiated {
 		for timescale in [Some(crate::Timescale::MILLI), None] {
-			for ietf in [None, Some(ietf::Version::Draft18), Some(ietf::Version::Draft22)] {
+			for ietf in [
+				None,
+				Some(ietf::Version::Draft18),
+				Some(ietf::Version::Draft20),
+				Some(ietf::Version::Draft22),
+			] {
 				for compressed in [false, true] {
 					let framing = lite::Framing {
 						timescale,
@@ -363,13 +377,6 @@ pub fn received(track: &track::Producer) {
 	track.received();
 }
 
-/// Fill the `groups` of `track` its cache misses, a run per FETCH, as a publisher answers a
-/// range FETCH, for the session bench. The returned guard keeps the filled groups cached.
-pub async fn fill_groups(track: &track::Consumer, groups: std::ops::Range<u64>) -> crate::Result<impl Sized> {
-	track.info().await?;
-	Ok(track.fill_groups(groups, 0).await)
-}
-
 /// `origin` as a session connected to `peer` serves it, for the viewers bench.
 pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
 	origin.excluding(peer)
@@ -381,7 +388,18 @@ pub fn requests_route(
 	prefix: impl Into<crate::Path>,
 	route: crate::origin::Route,
 ) -> Result<crate::origin::Requests, crate::Error> {
-	origin.requests_route(prefix, route)
+	origin.requests_route(prefix, route, None)
+}
+
+/// Land a claim taking over the peer's `predecessor` claim, as a session lands an
+/// ANNOUNCE_TAKEOVER, for the origin bench.
+pub fn takeover_route(
+	origin: &crate::origin::Producer,
+	prefix: impl Into<crate::Path>,
+	route: crate::origin::Route,
+	predecessor: &crate::origin::Requests,
+) -> Result<crate::origin::Requests, crate::Error> {
+	origin.requests_route(prefix, route, Some(predecessor))
 }
 
 /// Replace a peer claim's route in place, as a session does on a route update.
@@ -829,8 +847,8 @@ impl Default for Messages {
 				}],
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
-				group: 1_234,
 				largest: None,
+				starts: vec![Some(1_234)],
 			}),
 			lite_info: lite::TrackInfo {
 				refresh: None,
@@ -1048,13 +1066,15 @@ pub fn path(data: &[u8]) -> bool {
 
 	let (target, base) = text.split_once('\n').unwrap_or((text, ""));
 
-	// A spelling is refused exactly when it is over the limit or has an empty segment, so
-	// each path has one spelling.
+	// A spelling is refused exactly when it is over the limit, has an empty segment, or has
+	// a `\` escaping anything but `\` or `/`, so each path has one spelling.
 	for s in [target, base] {
 		let expected = if s.len() > Path::MAX_BYTES {
-			Err(crate::path::Invalid::TooLong)
+			Err(crate::path::Error::TooLong)
 		} else if !s.is_empty() && s.split('/').any(str::is_empty) {
-			Err(crate::path::Invalid::EmptySegment)
+			Err(crate::path::Error::EmptySegment)
+		} else if s.replace(r"\\", "").replace(r"\/", "").contains('\\') {
+			Err(crate::path::Error::InvalidEscape)
 		} else {
 			Ok(())
 		};
@@ -1107,9 +1127,24 @@ pub fn path(data: &[u8]) -> bool {
 	// Resolving arbitrary references must stay inside the clamped/unclamped contract:
 	// `try_resolve` only refuses by walking above the root, so whenever it answers, it
 	// answers the same as `resolve`.
-	let rel = Relative::new(base.as_str()).expect("a reference no longer than its path fits");
-	if let Some(resolved) = target.try_resolve(&rel) {
-		assert_eq!(Ok(resolved), target.resolve(&rel), "try_resolve disagreed with resolve");
+	match Relative::new(base.as_str()) {
+		Ok(rel) => {
+			if let Some(resolved) = target.try_resolve(&rel) {
+				assert_eq!(Ok(resolved), target.resolve(&rel), "try_resolve disagreed with resolve");
+			}
+		}
+		// Only dropping a `.` segment can make a valid path an invalid reference, by stranding
+		// the `\` of the escaped `/` before it.
+		Err(err) => assert_eq!(err, crate::path::Error::InvalidEscape, "{base:?} is no reference"),
+	}
+
+	// The moq-transport namespace tuple is the same path back, so the mapping is symmetric.
+	let mut tuple = Vec::new();
+	let form = Form::LeadingOnes;
+	if ietf::namespace::encode_namespace(&mut Encoder::new(&mut tuple, form), &target).is_ok() {
+		let decoded = ietf::namespace::decode_namespace(&mut Decoder::new(&tuple, form))
+			.expect("could not decode our own namespace");
+		assert_eq!(decoded, target, "path did not survive the namespace tuple");
 	}
 
 	// The wire form is the same path back, whenever the path is expressible at all.
@@ -1467,7 +1502,44 @@ pub fn seeds() -> Vec<Seed> {
 		});
 	}
 
+	// Length prefixes at and one past each cap, ahead of a body far too short for them, so
+	// the fuzzer starts beside every rejection path instead of searching for its bound: a
+	// moq-lite message's size (0xffff for most, 64 MiB for ANNOUNCE_INIT) and a
+	// moq-transport control message's two-byte length.
+	for (index, version) in LITE_VERSIONS.iter().enumerate() {
+		for kind in 0..LITE_KINDS {
+			for size in limits(&[0xffff, 64 << 20]) {
+				let mut data = vec![index as u8, kind];
+				Encoder::new(&mut data, (*version).into()).varint(size).unwrap();
+				data.extend_from_slice(&[0; 4]);
+				seeds.push(Seed {
+					target: "lite",
+					kind,
+					data,
+				});
+			}
+		}
+	}
+	for index in 0..IETF_VERSIONS.len() as u8 {
+		for kind in 0..IETF_KINDS {
+			seeds.push(Seed {
+				target: "ietf",
+				kind,
+				data: vec![index, kind, 0xff, 0xff, 0, 0, 0, 0],
+			});
+		}
+	}
+
+	seeds.extend(ingest::seeds());
+	seeds.extend(ingest::limit_seeds());
+	seeds.extend(request::seeds());
+
 	seeds
+}
+
+/// Each of `caps`, and one past it.
+pub(crate) fn limits(caps: &[u64]) -> impl Iterator<Item = u64> + '_ {
+	caps.iter().flat_map(|cap| [*cap, cap + 1])
 }
 
 type FrameReader = coding::Reader<crate::transport::poll::Buffered<Chunks>, lite::Version>;
@@ -1676,6 +1748,24 @@ mod tests {
 
 		let missing: Vec<_> = expected.difference(&decoded).collect();
 		assert!(missing.is_empty(), "no seed decodes for {missing:?}");
+	}
+
+	/// The stream seeds are built from our own framing, one per version and protocol, so
+	/// each must decode whole: one that does not leaves its version's path unseeded. Those
+	/// at a cap must not, or they sit beside no rejection path.
+	#[test]
+	fn stream_seeds_decode() {
+		for seed in ingest::seeds().into_iter().chain(request::seeds()) {
+			assert!(
+				target(seed.target)(&seed.data),
+				"{} seed {:x?} does not decode",
+				seed.target,
+				seed.data
+			);
+		}
+		for seed in ingest::limit_seeds() {
+			assert!(!ingest(&seed.data), "ingest seed {:x?} decodes past its cap", seed.data);
+		}
 	}
 
 	/// Replay the crash inputs committed under `fuzz/regressions/`, so a bug the fuzzer

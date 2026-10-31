@@ -23,13 +23,15 @@ class Windows(unittest.TestCase):
             host.write_text(''.join(json.dumps(row) + '\n' for row in records))
             summary = root / 'summary.json'
             summary.write_text(json.dumps(dict(throughput_window_start_ms=500,
-                                               throughput_window_end_ms=2500)))
+                                               throughput_window_end_ms=2500, recv_fps=2000, recv_mbps=500)))
             subprocess.run(['bash', '-c', 'source bench/relay.sh; add_host_summary "$1" "$2" 7',
                             'test', str(host), str(summary)], check=True)
             result = json.loads(summary.read_text())
             self.assertEqual(result['host_window_start_ms'], 500)
             self.assertEqual(result['host_window_end_ms'], 2500)
             self.assertEqual(result['cpu_cores'], 1)
+            self.assertEqual(result['cpu_us_per_frame'], 500)
+            self.assertEqual(result['cpu_cores_per_gbps'], 2)
             self.assertEqual(result['thread_cpu'], [dict(tid=8, name='moq-worker-0', cpu_cores=1)])
 
     def test_refuses_unbracketed_window_and_backward_counters(self):
