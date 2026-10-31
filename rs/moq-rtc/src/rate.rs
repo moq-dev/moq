@@ -137,10 +137,12 @@ impl std::fmt::Debug for Limit {
 /// It charges whole frames as str0m completes them, stamped with their first packet's
 /// arrival, so frames can be charged out of order: a frame that completes after a
 /// later-starting one is charged behind it. str0m 0.24 surfaces individual RTP packets
-/// only in `rtp_mode`, which gives up depacketization. The meter remembers the credit it
-/// discarded while full and refunds a late frame what was discarded since its arrival, up
-/// to its size, so it never closes a publisher that charging in arrival order would
-/// accept. It errs lenient by at most the cap's rate over a frame's assembly time.
+/// only in `rtp_mode`, which gives up depacketization. The meter refills to each frame's
+/// completion, remembers the credit it discarded while full, and refunds a frame what was
+/// discarded since its arrival, up to its size. So a frame is credited for its own
+/// assembly, a keyframe larger than the burst included, and the meter never closes a
+/// publisher that charging packets in arrival order would accept. It errs lenient by at
+/// most the cap's rate over a frame's assembly time.
 pub(crate) struct Meter {
 	cap: Option<Cap>,
 	/// Bytes still allowed before the cap plus burst is exceeded.
@@ -186,8 +188,9 @@ impl Meter {
 		self.cap = cap;
 	}
 
-	/// Charge `bytes` of media arriving at `now`, returning the cap it exceeded.
-	pub fn charge(&mut self, bytes: usize, now: Instant) -> Result<(), Cap> {
+	/// Charge a frame of `bytes` whose first packet arrived at `arrival` and that completed
+	/// at `now`, returning the cap it exceeded.
+	pub fn charge(&mut self, bytes: usize, arrival: Instant, now: Instant) -> Result<(), Cap> {
 		let Some(cap) = self.cap else {
 			return Ok(());
 		};
@@ -195,7 +198,7 @@ impl Meter {
 		let bytes = bytes as f64;
 		// Charged in arrival order, this frame would have kept the bucket below full
 		// for the credit discarded since it arrived.
-		self.tokens += self.refund(now, bytes) - bytes;
+		self.tokens += self.refund(arrival, bytes) - bytes;
 		if self.tokens < 0.0 {
 			return Err(cap);
 		}
@@ -260,6 +263,13 @@ mod tests {
 		Cap::new(Rate::from_kbps(8))
 	}
 
+	impl Meter {
+		/// Charge a frame that completed as it arrived.
+		fn charge_at(&mut self, bytes: usize, at: Instant) -> Result<(), Cap> {
+			self.charge(bytes, at, at)
+		}
+	}
+
 	#[test]
 	fn steering_never_exceeds_the_cap() {
 		for bps in [0, 1, 8_000, 2_500_000, u64::MAX] {
@@ -274,7 +284,7 @@ mod tests {
 		let mut meter = Meter::new(Some(cap()), t0);
 		// 500 bytes every half second is exactly the cap, for a minute.
 		for i in 0..120 {
-			assert!(meter.charge(500, t0 + Duration::from_millis(500 * i)).is_ok(), "{i}");
+			assert!(meter.charge_at(500, t0 + Duration::from_millis(500 * i)).is_ok(), "{i}");
 		}
 	}
 
@@ -283,10 +293,10 @@ mod tests {
 		let t0 = Instant::now();
 		let mut meter = Meter::new(Some(cap()), t0);
 		// The whole burst at once is allowed.
-		assert!(meter.charge(1000, t0).is_ok());
+		assert!(meter.charge_at(1000, t0).is_ok());
 		// A second later, one more second of the cap is allowed, but no more.
-		assert!(meter.charge(1000, t0 + Duration::from_secs(1)).is_ok());
-		assert_eq!(meter.charge(1, t0 + Duration::from_secs(1)), Err(cap()));
+		assert!(meter.charge_at(1000, t0 + Duration::from_secs(1)).is_ok());
+		assert_eq!(meter.charge_at(1, t0 + Duration::from_secs(1)), Err(cap()));
 	}
 
 	#[test]
@@ -294,7 +304,7 @@ mod tests {
 		let t0 = Instant::now();
 		let mut meter = Meter::new(Some(cap()), t0);
 		// 10% over the cap: 550 bytes every half second spends 50 bytes of burst per tick.
-		let refused = (1..100).find(|i| meter.charge(550, t0 + Duration::from_millis(500 * i)).is_err());
+		let refused = (1..100).find(|i| meter.charge_at(550, t0 + Duration::from_millis(500 * i)).is_err());
 		assert_eq!(refused, Some(11));
 	}
 
@@ -303,8 +313,8 @@ mod tests {
 		let t0 = Instant::now();
 		let mut meter = Meter::new(Some(cap()), t0);
 		let later = t0 + Duration::from_secs(3600);
-		assert!(meter.charge(1000, later).is_ok());
-		assert!(meter.charge(1, later).is_err());
+		assert!(meter.charge_at(1000, later).is_ok());
+		assert!(meter.charge_at(1, later).is_err());
 	}
 
 	#[test]
@@ -313,15 +323,15 @@ mod tests {
 		let ms = |ms| t0 + Duration::from_millis(ms);
 
 		// A 1000-byte video frame arrives over 0..50 ms with 10-byte audio frames at 20 and
-		// 40 ms, which str0m completes first. In arrival order the bucket ends at 20 bytes.
+		// 40 ms, which str0m completes first. In arrival order the bucket ends at 30 bytes.
 		let mut ordered = Meter::new(Some(cap()), t0);
-		for (bytes, at) in [(1000, ms(0)), (10, ms(20)), (10, ms(40))] {
-			assert!(ordered.charge(bytes, at).is_ok());
+		for (bytes, at) in [(1000, ms(0)), (10, ms(20)), (10, ms(40)), (0, ms(50))] {
+			assert!(ordered.charge_at(bytes, at).is_ok());
 		}
 
 		let mut meter = Meter::new(Some(cap()), t0);
-		for (bytes, at) in [(10, ms(20)), (10, ms(40)), (1000, ms(0))] {
-			assert!(meter.charge(bytes, at).is_ok());
+		for (bytes, at, done) in [(10, ms(20), ms(20)), (10, ms(40), ms(40)), (1000, ms(0), ms(50))] {
+			assert!(meter.charge(bytes, at, done).is_ok());
 		}
 		assert!(
 			(meter.tokens - ordered.tokens).abs() < 1e-6,
@@ -329,7 +339,21 @@ mod tests {
 			meter.tokens,
 			ordered.tokens
 		);
-		assert!((meter.tokens - 20.0).abs() < 1e-6);
+		assert!((meter.tokens - 30.0).abs() < 1e-6);
+	}
+
+	#[test]
+	fn a_frame_is_credited_for_its_own_assembly() {
+		let t0 = Instant::now();
+		// 2 Mbps with a 100 ms burst holds 25 kB. A 100 kB keyframe over 500 ms is 1.6 Mbps,
+		// under the cap, though four times the burst.
+		let cap = Cap::new(Rate::from_kbps(2_000)).with_burst(Duration::from_millis(100));
+		let mut meter = Meter::new(Some(cap), t0);
+		assert!(meter.charge(100_000, t0, t0 + Duration::from_millis(500)).is_ok());
+
+		// The same keyframe over 100 ms is 8 Mbps.
+		let mut meter = Meter::new(Some(cap), t0);
+		assert_eq!(meter.charge(100_000, t0, t0 + Duration::from_millis(100)), Err(cap));
 	}
 
 	#[test]
@@ -339,9 +363,9 @@ mod tests {
 		// 20-byte audio frames at 20..180 ms. Arrival order accepts all of them.
 		let mut meter = Meter::new(Some(cap().with_burst(Duration::from_millis(100))), t0);
 		for i in 1..10 {
-			assert!(meter.charge(20, t0 + Duration::from_millis(20 * i)).is_ok(), "{i}");
+			assert!(meter.charge_at(20, t0 + Duration::from_millis(20 * i)).is_ok(), "{i}");
 		}
-		assert!(meter.charge(100, t0).is_ok());
+		assert!(meter.charge(100, t0, t0 + Duration::from_millis(180)).is_ok());
 	}
 
 	#[test]
@@ -349,8 +373,12 @@ mod tests {
 		let t0 = Instant::now();
 		// Idle for a minute, then a frame at 60 s and one charged late from 10 ms before it.
 		let mut meter = Meter::new(Some(cap()), t0);
-		assert!(meter.charge(10, t0 + Duration::from_secs(60)).is_ok());
-		assert!(meter.charge(1000, t0 + Duration::from_millis(59_990)).is_ok());
+		assert!(meter.charge_at(10, t0 + Duration::from_secs(60)).is_ok());
+		assert!(
+			meter
+				.charge(1000, t0 + Duration::from_millis(59_990), t0 + Duration::from_secs(60))
+				.is_ok()
+		);
 		// Only the 10 bytes discarded over those 10 ms came back.
 		assert!((meter.tokens - 0.0).abs() < 1e-6, "{}", meter.tokens);
 	}
@@ -360,18 +388,19 @@ mod tests {
 		let t0 = Instant::now();
 		let mut meter = Meter::new(Some(cap()), t0);
 		// 100 bytes discarded over 0..100 ms, then two frames from 0 ms charged late.
-		assert!(meter.charge(0, t0 + Duration::from_millis(100)).is_ok());
-		assert!(meter.charge(600, t0).is_ok());
-		assert!(meter.charge(500, t0).is_ok());
+		assert!(meter.charge_at(0, t0 + Duration::from_millis(100)).is_ok());
+		let done = t0 + Duration::from_millis(100);
+		assert!(meter.charge(600, t0, done).is_ok());
+		assert!(meter.charge(500, t0, done).is_ok());
 		assert!((meter.tokens - 0.0).abs() < 1e-6, "{}", meter.tokens);
-		assert!(meter.charge(1, t0).is_err());
+		assert!(meter.charge(1, t0, done).is_err());
 	}
 
 	#[test]
 	fn an_uncapped_meter_passes_everything() {
 		let t0 = Instant::now();
 		let mut meter = Meter::new(None, t0);
-		assert!(meter.charge(usize::MAX, t0).is_ok());
+		assert!(meter.charge_at(usize::MAX, t0).is_ok());
 	}
 
 	#[test]
@@ -380,18 +409,18 @@ mod tests {
 		let mut meter = Meter::new(Some(cap()), t0);
 		let lower = Cap::new(Rate::from_kbps(4));
 		meter.set(Some(lower), t0);
-		assert!(meter.charge(500, t0).is_ok());
-		assert_eq!(meter.charge(1, t0), Err(lower));
+		assert!(meter.charge_at(500, t0).is_ok());
+		assert_eq!(meter.charge_at(1, t0), Err(lower));
 	}
 
 	#[test]
 	fn capping_an_uncapped_session_grants_a_full_burst() {
 		let t0 = Instant::now();
 		let mut meter = Meter::new(None, t0);
-		assert!(meter.charge(1_000_000, t0).is_ok());
+		assert!(meter.charge_at(1_000_000, t0).is_ok());
 		meter.set(Some(cap()), t0 + Duration::from_secs(1));
-		assert!(meter.charge(1000, t0 + Duration::from_secs(1)).is_ok());
-		assert!(meter.charge(1, t0 + Duration::from_secs(1)).is_err());
+		assert!(meter.charge_at(1000, t0 + Duration::from_secs(1)).is_ok());
+		assert!(meter.charge_at(1, t0 + Duration::from_secs(1)).is_err());
 	}
 
 	#[test]

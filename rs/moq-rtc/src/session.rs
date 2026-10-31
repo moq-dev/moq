@@ -277,7 +277,7 @@ impl Session {
 				if let MediaRole::Ingest(sink) = &mut self.role {
 					let arrival = Instant::from_std(data.network_time);
 					if let Some(rate) = &mut self.rate
-						&& let Err(cap) = rate.meter.charge(data.data.len(), arrival)
+						&& let Err(cap) = rate.meter.charge(data.data.len(), arrival, Instant::now())
 					{
 						tracing::warn!(cap = cap.rate.as_bps(), "ingest exceeded its cap plus burst; closing");
 						return Err(Error::RateLimited { cap: cap.rate });
