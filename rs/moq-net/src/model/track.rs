@@ -446,7 +446,8 @@ pub(crate) struct TrackState {
 	// Whether a received copy's wire tells it what relative and time anchors resolve
 	// against, so they resolve here as at the publisher.
 	anchored: bool,
-	// This copy can translate only anchors its cache has already settled.
+	// This copy can translate only time anchors its cache has already settled. A relative one
+	// waits for the live edge its wire reports, as on an `anchored` copy.
 	cached_anchors: bool,
 	// Whether readers ask no fills below `start_sequence`: its publisher resolved it from the
 	// budget, but neither this copy's timestamps nor a fill can judge an older group against
@@ -2085,9 +2086,9 @@ impl TrackState {
 			// Readers and group demand reach it at once. Its arrival starts the wall clock of
 			// the reads it succeeds, but it counts as content only once it starts.
 			self.arrival.push_back((sequence, stamp));
-			// Registration holds a track read lock, so this exclusive insert sees
-			// its hint. Reveal only holds a read lock and cannot use the shortcut.
-			if self.cache.wakes().has_landing_waiters() {
+			// Publishes the landing to reads judging expiry without the track lock, then
+			// checks for one parked. Reveal only holds a read lock and cannot use the shortcut.
+			if self.cache.wakes().land(sequence) {
 				self.wake_landed(sequence);
 			}
 		}
@@ -3378,7 +3379,8 @@ impl Producer {
 		}
 	}
 
-	/// Let readers use only anchors this cache can already translate to group bounds.
+	/// Let readers use only time anchors this cache can already translate to group bounds. A
+	/// relative anchor counts back from the live edge the wire reports, once it does.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn anchored_cached(&self) {
 		if let Ok(mut state) = self.modify() {
@@ -3442,6 +3444,18 @@ impl Producer {
 	pub(crate) fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) {
 		if let Ok(mut state) = self.modify() {
 			state.set_live(largest, start);
+		}
+	}
+
+	/// The live feed's route answered that it reaches `group`: a relative start counts back
+	/// from it, rather than from whichever group lands first. A no-op unless live.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn report_edge(&self, group: u64) {
+		if let Ok(mut state) = self.modify()
+			&& let Feed::Live { first, edge } = &mut state.feed
+		{
+			*edge = (*edge).max(Some(group));
+			first.get_or_insert(group);
 		}
 	}
 
@@ -5354,19 +5368,21 @@ impl kio::Task for Fetching {
 			self.frame_start,
 			self.result.as_ref(),
 		);
-		{
+		let cache = {
 			let state = state.read();
 			let budget = clamp_max_delay(self.max_delay.unwrap_or(Duration::MAX), state.max_age_bound());
-			state.cache.wakes().watch_landing(sequence, waiter);
+			let _ = state.cache.wakes().watch_landing(sequence, waiter);
 			if state.poll_drifted(sequence, &Servable::ALL, budget, None, waiter) {
 				return Poll::Ready(Err(Error::Old));
 			}
-		}
+			state.cache.clone()
+		};
 
 		// Hand back a consumer sitting where the caller asked rather than at the group's
 		// own start. Coverage was checked first, so this can only skip frames they excluded.
 		let expiry: Arc<dyn group::Expiry> = Arc::new(FetchExpiry {
 			state: state.weak(),
+			cache,
 			reading: Reading::new(state.clone()),
 			sequence,
 			max_delay: self.max_delay,
@@ -5563,6 +5579,9 @@ struct Drift {
 /// Keeps one handed-out group tied to the subscription whose cursor selected it.
 struct GroupExpiry {
 	state: kio::ConsumerWeak<TrackState>,
+	/// The track's cache account, whose wakes judge a group with nothing above it without
+	/// locking `state`.
+	cache: Arc<cache::Track>,
 	reading: Reading,
 	subscription: kio::Consumer<Subscription>,
 	/// What the cursor can be served; see [`Cursor::published`].
@@ -5574,6 +5593,8 @@ struct GroupExpiry {
 /// Keeps one fetched group tied to this caller's age budget.
 struct FetchExpiry {
 	state: kio::ConsumerWeak<TrackState>,
+	/// See [`GroupExpiry::cache`].
+	cache: Arc<cache::Track>,
 	reading: Reading,
 	sequence: u64,
 	max_delay: Option<Duration>,
@@ -5619,10 +5640,17 @@ impl group::Expiry for FetchExpiry {
 	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
 		// A replacement copy is always one track instance; the fallback is never read.
 		let state = track.with_state(|state| state.cloned());
-		let state = state.unwrap_or_else(|| self.state.clone());
+		let (state, cache) = match state {
+			Some(state) => {
+				let cache = state.read().cache.clone();
+				(state, cache)
+			}
+			None => (self.state.clone(), self.cache.clone()),
+		};
 		Arc::new(Self {
 			reading: self.reading.moved(&state),
 			state,
+			cache,
 			sequence: self.sequence,
 			max_delay: self.max_delay,
 			superseded: Superseded::default(),
@@ -5634,6 +5662,10 @@ impl group::Expiry for FetchExpiry {
 	}
 
 	fn is_expired(&self, max_delay: Option<Duration>, waiter: &kio::Waiter) -> bool {
+		// Parked first, so a group landing above while this judges wakes it.
+		if !self.cache.wakes().watch_landing(self.sequence, waiter) {
+			return false;
+		}
 		let state = self.state.read();
 		let budget = match (self.max_delay, max_delay) {
 			(Some(fetch), Some(route)) => fetch.min(route),
@@ -5642,7 +5674,6 @@ impl group::Expiry for FetchExpiry {
 			(None, None) => Duration::MAX,
 		};
 		let budget = clamp_max_delay(budget, state.max_age_bound());
-		state.cache.wakes().watch_landing(self.sequence, waiter);
 		state.poll_drifted(self.sequence, &Servable::ALL, budget, Some(&self.superseded), waiter)
 	}
 }
@@ -5651,10 +5682,17 @@ impl group::Expiry for GroupExpiry {
 	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
 		// A replacement copy is always one track instance; the fallback is never read.
 		let state = track.with_state(|state| state.cloned());
-		let state = state.unwrap_or_else(|| self.state.clone());
+		let (state, cache) = match state {
+			Some(state) => {
+				let cache = state.read().cache.clone();
+				(state, cache)
+			}
+			None => (self.state.clone(), self.cache.clone()),
+		};
 		Arc::new(Self {
 			reading: self.reading.moved(&state),
 			state,
+			cache,
 			subscription: self.subscription.clone(),
 			servable: self.servable.clone(),
 			sequence: self.sequence,
@@ -5666,7 +5704,15 @@ impl group::Expiry for GroupExpiry {
 		self.reading.release();
 	}
 
+	/// A group nothing ever landed above has no successor, so neither clock can convict it:
+	/// that verdict, the common one at the live edge, takes neither the track's lock nor the
+	/// subscription's. Nothing it skips parking on can move it until a group lands above,
+	/// which wakes the read.
 	fn is_expired(&self, max_delay: Option<Duration>, waiter: &kio::Waiter) -> bool {
+		// Parked first, so a group landing above while this judges wakes it.
+		if !self.cache.wakes().watch_landing(self.sequence, waiter) {
+			return false;
+		}
 		let max_delay = max_delay.unwrap_or_else(|| {
 			let mut max_delay = Duration::default();
 			let _ = self.subscription.poll(waiter, |subscription| {
@@ -5684,7 +5730,6 @@ impl group::Expiry for GroupExpiry {
 
 		let state = self.state.read();
 		let budget = clamp_max_delay(max_delay, state.max_age_bound());
-		state.cache.wakes().watch_landing(self.sequence, waiter);
 		state.poll_drifted(self.sequence, &servable, budget, Some(&self.superseded), waiter)
 	}
 }
@@ -5887,6 +5932,9 @@ impl PresentationEdge {
 /// The read cursor behind a [`Subscriber`].
 struct Cursor {
 	state: kio::Consumer<TrackState>,
+	/// The track's cache account, handed to each group's [`GroupExpiry`] without locking
+	/// `state` per delivery.
+	cache: Arc<cache::Track>,
 
 	subscription: Preferences,
 	/// Arrival-order cursor used by `recv_group`.
@@ -6089,7 +6137,7 @@ impl Cursor {
 		if subscription.read().joins_live() {
 			TrackState::join(state.read());
 		}
-		let (filter, datagram_index) = {
+		let (filter, datagram_index, cache) = {
 			let preferences = subscription.read();
 			let ranges_revision = subscription.ranges_revision();
 			let state = state.read();
@@ -6122,11 +6170,12 @@ impl Cursor {
 				admitted_at: None,
 				owed: RangeInclusiveSet::new(),
 			};
-			(filter, state.datagram_offset + start)
+			(filter, state.datagram_offset + start, state.cache.clone())
 		};
 		let published = Published::new(Servable::new(filter.window.runs(0)), filter.resolved, None);
 		Self {
 			state,
+			cache,
 			subscription,
 			min_sequence: 0,
 			filter: Box::new(filter),
@@ -6535,6 +6584,7 @@ impl Cursor {
 		let sequence = group.sequence;
 		group.with_expiry(Arc::new(GroupExpiry {
 			state: self.state.weak(),
+			cache: self.cache.clone(),
 			reading: Reading::new(self.state.clone()),
 			subscription: self.subscription.consume(),
 			servable: self.published.consume(),
@@ -7052,9 +7102,9 @@ impl Control {
 	}
 }
 
-/// A group-only wire refuses an unresolved anchor before changing shared demand.
+/// A group-only wire refuses an unresolved time anchor before changing shared demand.
 fn refuse_cached_anchors(state: &TrackState, subscription: &Subscription) -> Result<()> {
-	if state.cached_anchors && subscription.ranges.iter().any(|range| !range.is_wire()) {
+	if state.cached_anchors && subscription.has_time() {
 		let window = Window::new(&subscription.ranges, state.latest_live(), state)?;
 		if !window.is_settled() {
 			return Err(Error::Unsupported);
@@ -9095,6 +9145,26 @@ mod test {
 
 		framed(&producer, 5, 1).finish().unwrap();
 		assert_eq!(ready_groups(&mut reader), vec![5]);
+	}
+
+	/// A live join's answer anchors a relative start where it says the feed is, both for the
+	/// copy's readers and for the bounds sent upstream, even once a newer group lands before
+	/// the one it named.
+	#[test]
+	fn a_relative_start_counts_from_the_answered_edge() {
+		let producer = track_producer("test", Info::default());
+		let back = Range {
+			start: super::super::subscription::Anchor::Relative(2),
+			end: None,
+		};
+		let mut reader = producer.subscribe(replay().with_ranges([back]));
+		producer.report_edge(4);
+		let upstream = producer.resolve_subscription(&replay().with_ranges([back])).unwrap();
+		assert_eq!(upstream.start(), Some(2), "the answer resolves the upstream bounds");
+
+		framed(&producer, 5, 1).finish().unwrap();
+		assert_eq!(ready_groups(&mut reader), vec![5]);
+		assert_eq!(reader.floor(), Some(2), "the answer anchors the start");
 	}
 
 	/// An idle copy forgets the edge its previous feed answered with, which only a datagram

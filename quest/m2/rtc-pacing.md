@@ -30,8 +30,11 @@ WHEP enforcement needs it and nobody owned it.
   and a resend with no credit left is skipped, so faking loss only spends the
   credit the viewer's next group would have used. str0m fulfils NACKs from
   its video send buffer (`rs/moq-rtc/src/session.rs`), so charging needs a
-  hook on that path: find one in str0m 0.24's API, or propose one upstream
-  to str0m with the maintainer's approval.
+  hook on that path. Decided 2026-10-30 (maintainer): add it to the vendored str0m
+  ([WebRTC epic](/quest/m2/webrtc/README.md)) rather than upstream.
+- Decided 2026-10-30 (maintainer): the pacer is moq-congestion's, made public and
+  extended with payload credit here, so moq-quic and moq-webrtc share one
+  pacer; the vendored str0m's leaky pacer is deleted.
 - A per-session rate handle sets the cap and accepts live updates. The pacer
   counts media; the docs advise headroom for RTP overhead.
 - Tests: a capped viewer never receives more than cap plus burst, including
@@ -41,6 +44,10 @@ WHEP enforcement needs it and nobody owned it.
   their own cap plus burst.
 
 Public API: a rate handle on moq-rtc's WHEP server. Wire: none.
+
+## Required
+
+- [Vendor and trim the stack](/quest/m2/webrtc/vendor.md) - the vendored str0m this adds the NACK hook to
 
 ## Related
 
