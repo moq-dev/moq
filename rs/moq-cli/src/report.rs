@@ -489,7 +489,7 @@ async fn write_echo(
 				let event = event.context("announcements ended")?;
 				let (announce, active) = match event {
 					// A restart is another publisher instance, which a reader still on the old one never sees.
-					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => {
+					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) | moq_net::announce::Event::Takeover { announce, .. } => {
 						(announce, true)
 					}
 					moq_net::announce::Event::End(announce) => (announce, false),

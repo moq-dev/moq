@@ -109,9 +109,9 @@ async fn synced(announced: &mut announce::Consumer) -> Vec<String> {
 			.expect("synced in time")
 			.expect("the stream stays open");
 		match event {
-			announce::Event::Start(announce) | announce::Event::Restart(announce) => {
-				seen.push(announce.prefix.to_string())
-			}
+			announce::Event::Start(announce)
+			| announce::Event::Restart(announce)
+			| announce::Event::Takeover { announce, .. } => seen.push(announce.prefix.to_string()),
 			announce::Event::End(announce) => seen.retain(|prefix| *prefix != announce.prefix.as_str()),
 			announce::Event::Update(_) => {}
 		}
@@ -421,9 +421,9 @@ async fn settled(announced: &mut announce::Consumer, held: &mut Vec<String>) -> 
 	let mut ended = false;
 	while let Some(event) = announced.try_next() {
 		match event {
-			announce::Event::Start(announce) | announce::Event::Restart(announce) => {
-				held.push(announce.prefix.to_string())
-			}
+			announce::Event::Start(announce)
+			| announce::Event::Restart(announce)
+			| announce::Event::Takeover { announce, .. } => held.push(announce.prefix.to_string()),
 			announce::Event::End(announce) => {
 				ended = true;
 				held.retain(|prefix| *prefix != announce.prefix.as_str())

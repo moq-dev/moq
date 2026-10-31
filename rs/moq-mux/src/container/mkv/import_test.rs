@@ -2052,3 +2052,155 @@ async fn real_live_webm_imports_across_chunk_boundaries() {
 		assert!(timestamps.windows(2).all(|pair| pair[0] < pair[1]));
 	}
 }
+
+/// A WebM with one VP9 track whose `Video` element holds `children` beside its dimensions.
+fn spatial_webm(children: Vec<MatroskaSpec>) -> Vec<u8> {
+	use MatroskaSpec::*;
+	let mut video = vec![PixelWidth(320), PixelHeight(240)];
+	video.extend(children);
+	MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![TrackEntry(Master::Full(vec![
+			TrackNumber(1),
+			TrackType(1),
+			CodecID("V_VP9".into()),
+			Video(Master::Full(video)),
+		]))])
+		.segment_end()
+		.build()
+}
+
+/// An equirectangular `Projection` whose private data is an `equi` body with these bounds.
+fn equirectangular(bounds: [u32; 4], pose: [f64; 3]) -> MatroskaSpec {
+	use MatroskaSpec::*;
+	let mut private = vec![0; 4];
+	for bound in bounds {
+		private.extend(bound.to_be_bytes());
+	}
+	Projection(Master::Full(vec![
+		ProjectionType(1),
+		ProjectionPrivate(private),
+		ProjectionPoseYaw(pose[0]),
+		ProjectionPosePitch(pose[1]),
+		ProjectionPoseRoll(pose[2]),
+	]))
+}
+
+#[test]
+fn projection_and_stereo_mode_fill_the_catalog() {
+	use MatroskaSpec::*;
+	use hang::catalog::{Projection as Proj, Stereo};
+	let quarter = 1 << 30;
+	for (children, projection, stereo) in [
+		(vec![], None, None),
+		(
+			vec![StereoMode(0), equirectangular([0; 4], [0.0; 3])],
+			Some(Proj::Equirectangular { fov: None }),
+			None,
+		),
+		// VR180, side by side.
+		(
+			vec![StereoMode(1), equirectangular([0, 0, quarter, quarter], [0.0; 3])],
+			Some(Proj::Equirectangular { fov: Some(180.0) }),
+			Some(Stereo::LeftRight),
+		),
+		// Equirectangular without private data covers the whole sphere.
+		(
+			vec![StereoMode(3), Projection(Master::Full(vec![ProjectionType(1)]))],
+			Some(Proj::Equirectangular { fov: None }),
+			Some(Stereo::TopBottom),
+		),
+		(vec![Projection(Master::Full(vec![ProjectionType(0)]))], None, None),
+	] {
+		let catalog = run(&spatial_webm(children));
+		let video = catalog.video.renditions.values().next().unwrap();
+		assert_eq!((&video.projection, &video.stereo), (&projection, &stereo));
+	}
+}
+
+#[test]
+fn projection_and_stereo_mode_the_catalog_cannot_describe_are_refused() {
+	use MatroskaSpec::*;
+	let quarter = 1 << 30;
+	let mut short = vec![0; 4];
+	short.extend([0; 12]);
+	for (name, child) in [
+		("cubemap", Projection(Master::Full(vec![ProjectionType(2)]))),
+		("mesh", Projection(Master::Full(vec![ProjectionType(3)]))),
+		("unknown projection", Projection(Master::Full(vec![ProjectionType(4)]))),
+		("asymmetric bounds", equirectangular([0, 0, quarter, 0], [0.0; 3])),
+		("vertical crop", equirectangular([quarter, 0, 0, 0], [0.0; 3])),
+		("yawed", equirectangular([0; 4], [90.0, 0.0, 0.0])),
+		("pitched", equirectangular([0; 4], [0.0, -10.0, 0.0])),
+		("rolled", equirectangular([0; 4], [0.0, 0.0, f64::NAN])),
+		(
+			"short private data",
+			Projection(Master::Full(vec![ProjectionType(1), ProjectionPrivate(short)])),
+		),
+		("top-bottom right eye first", StereoMode(2)),
+		("checkerboard", StereoMode(5)),
+		("row interleaved", StereoMode(7)),
+		("anaglyph", StereoMode(10)),
+		("side by side right eye first", StereoMode(11)),
+		("laced eyes", StereoMode(13)),
+	] {
+		let data = spatial_webm(vec![child]);
+		for initial in [false, true] {
+			assert!(
+				matches!(
+					import_result(&data, initial),
+					Err(crate::Error::Mkv(super::Error::UnsupportedSpatial(_)))
+				),
+				"{name}"
+			);
+		}
+	}
+}
+
+/// An OpusHead in channel mapping family 2 with `channels` channels, each its own stream.
+fn ambisonic_head(channels: u8) -> Vec<u8> {
+	let mut head = b"OpusHead".to_vec();
+	head.extend([1, channels, 0, 0, 0x80, 0xBB, 0, 0, 0, 0, 2, channels, 0]);
+	head.extend(0..channels);
+	head
+}
+
+fn opus_webm(head: Vec<u8>) -> Vec<u8> {
+	use MatroskaSpec::*;
+	MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![TrackEntry(Master::Full(vec![
+			TrackNumber(1),
+			TrackType(2),
+			CodecID("A_OPUS".into()),
+			CodecPrivate(head),
+		]))])
+		.segment_end()
+		.build()
+}
+
+#[test]
+fn opus_family_two_is_ambisonic() {
+	let catalog = run(&opus_webm(ambisonic_head(4)));
+	let audio = catalog.audio.renditions.values().next().unwrap();
+	assert_eq!(audio.layout, Some(hang::catalog::AudioLayout::Ambisonic));
+	assert_eq!(audio.channel_count, 4);
+
+	// Zeroth order, first order with a non-diegetic stereo pair, and a count RFC 8486 forbids.
+	for channels in [1, 6, 5] {
+		let data = opus_webm(ambisonic_head(channels));
+		for initial in [false, true] {
+			assert!(
+				matches!(
+					import_result(&data, initial),
+					Err(crate::Error::Opus(crate::codec::opus::Error::UnsupportedChannelCount(c))) if c == channels as u32
+				),
+				"{channels} channels"
+			);
+		}
+	}
+}

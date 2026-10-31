@@ -46,7 +46,8 @@ fn announced(origin: &origin::Producer, path: &str) -> bool {
 		match event {
 			moq_net::announce::Event::Start(update)
 			| moq_net::announce::Event::Update(update)
-			| moq_net::announce::Event::Restart(update) => {
+			| moq_net::announce::Event::Restart(update)
+			| moq_net::announce::Event::Takeover { announce: update, .. } => {
 				live |= update.prefix.as_str() == path;
 			}
 			moq_net::announce::Event::End(update) => {
@@ -150,7 +151,8 @@ fn route(origin: &origin::Producer, path: &str) -> Option<origin::Route> {
 		match event {
 			moq_net::announce::Event::Start(update)
 			| moq_net::announce::Event::Update(update)
-			| moq_net::announce::Event::Restart(update) => {
+			| moq_net::announce::Event::Restart(update)
+			| moq_net::announce::Event::Takeover { announce: update, .. } => {
 				if update.prefix.as_str() == path {
 					route = Some(update.route);
 				}

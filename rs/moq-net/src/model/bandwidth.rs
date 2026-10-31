@@ -2,6 +2,7 @@
 //!
 //! A [Producer] is used to set the current estimated bitrate, notifying consumers.
 //! A [Consumer] can read the current estimate and wait for changes.
+//! A [Demand] watches whether anyone reads it, so a producer estimates only on demand.
 //!
 //! One estimate covers a whole connection, so senders sharing one divide it with
 //! an [Allocator] rather than each targeting the whole thing. How a sender then
@@ -114,31 +115,69 @@ impl Producer {
 		Weak(self.state.weak())
 	}
 
-	/// Block until there are no active consumers.
+	/// A watch-only handle to whether anyone reads the estimate.
+	pub fn demand(&self) -> Demand {
+		Demand {
+			state: self.state.weak(),
+			prev: None,
+		}
+	}
+
+	/// Poll for consumer presence to differ from `last`, with the new value once it does.
+	/// Errors once the channel closes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_wanted_changed(&self, waiter: &kio::Waiter, last: bool) -> Poll<Result<bool>> {
+		self.state.poll_wanted_changed(waiter, last).map_err(|_| Error::Dropped)
+	}
+}
+
+/// A cloneable, watch-only handle to whether anyone reads a bandwidth estimate.
+///
+/// Holding it is not demand and keeps nothing open. Once every [`Producer`] is gone, its
+/// waits end with [`Error::Dropped`]. Each clone watches on its own, so its first
+/// [`poll_wanted_changed`](Self::poll_wanted_changed) reports the current value.
+pub struct Demand {
+	state: kio::ProducerWeak<State>,
+	// The value `poll_wanted_changed` last returned, or `None` before it returned any.
+	prev: Option<bool>,
+}
+
+impl Clone for Demand {
+	fn clone(&self) -> Self {
+		Self {
+			state: self.state.clone(),
+			prev: None,
+		}
+	}
+}
+
+impl Demand {
+	/// Whether the estimate is still produced and a consumer reads it right now.
+	pub fn wanted(&self) -> bool {
+		!self.state.is_closed() && self.state.wanted()
+	}
+
+	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
+	/// immediately on the first call, then on each change. Errors once every producer is gone.
 	#[cfg(feature = "async")]
-	pub async fn unused(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_unused(waiter)).await
+	pub async fn wanted_changed(&mut self) -> Result<bool> {
+		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
 	}
 
-	/// Poll until there are no active consumers. Errors if the channel closes first.
-	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_unused(waiter).map_err(|_| Error::Dropped)
-	}
-
-	/// Whether at least one active consumer exists right now.
-	pub fn is_used(&self) -> bool {
-		self.state.is_used()
-	}
-
-	/// Block until there is at least one active consumer.
-	#[cfg(feature = "async")]
-	pub async fn used(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_used(waiter)).await
-	}
-
-	/// Poll until at least one active consumer exists. Errors if the channel closes first.
-	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_used(waiter).map_err(|_| Error::Dropped)
+	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
+	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool>> {
+		loop {
+			if self.state.is_closed() {
+				return Poll::Ready(Err(Error::Dropped));
+			}
+			let wanted = self.state.wanted();
+			if self.prev != Some(wanted) {
+				self.prev = Some(wanted);
+				return Poll::Ready(Ok(wanted));
+			}
+			// Closing fails the wait, which errors above.
+			let _ = std::task::ready!(self.state.poll_wanted_changed(waiter, wanted));
+		}
 	}
 }
 
@@ -557,7 +596,7 @@ impl Share {
 			// then left, needs that to know when to resume.
 			.filter(|(want, demand)| match want.id == self.id {
 				true => !demand.is_closed(),
-				false => demand.is_used(),
+				false => demand.is_wanted(),
 			})
 			.map(|(want, _)| want)
 			.collect();
@@ -1205,7 +1244,7 @@ mod tests {
 		retired.update(bps(4_000_000));
 		assert_eq!(sibling.rate(), Some(bps(1_000_000)));
 		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
-		assert!(encoder.demand().is_used());
+		assert!(encoder.demand().is_wanted());
 	}
 
 	/// A reader parked on `changed` has to be woken by its own reservation moving, not

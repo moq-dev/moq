@@ -1077,7 +1077,10 @@ impl AnnounceRun {
 		let mut current: HashMap<crate::Path, crate::origin::Route> = HashMap::new();
 		while let Some(event) = snapshot.try_next() {
 			match event {
-				announce::Event::Start(update) | announce::Event::Update(update) | announce::Event::Restart(update) => {
+				announce::Event::Start(update)
+				| announce::Event::Update(update)
+				| announce::Event::Restart(update)
+				| announce::Event::Takeover { announce: update, .. } => {
 					current.insert(update.prefix, update.route);
 				}
 				announce::Event::End(update) => {
@@ -1190,6 +1193,40 @@ impl AnnounceRun {
 		stream.writer.buffer(&lite::AnnounceBroadcast::Active {
 			epoch,
 			suffix: wire,
+			hops: chain,
+			cost,
+		})?;
+		self.sent(stream)?;
+		Ok(())
+	}
+
+	/// Advertise `suffix` as continuing the peer's live `predecessor` (suffix and id):
+	/// ANNOUNCE_TAKEOVER, which retires the predecessor when it held `suffix`.
+	#[expect(clippy::too_many_arguments, reason = "private plumbing mirroring start and restart")]
+	fn takeover(
+		&mut self,
+		stream: &mut Stream<Transport, Version>,
+		predecessor: (crate::Path, u64),
+		suffix: crate::Path,
+		hops: Hops,
+		cost: crate::origin::Cost,
+		epoch: Option<crate::Epoch>,
+		absolute: &crate::Path,
+	) -> Result<(), Error> {
+		tracing::debug!(route = %absolute, predecessor = %predecessor.0, "takeover");
+		let (id, wire, chain) = self.encoder.takeover(predecessor.1, suffix.clone(), hops.clone());
+		self.live.insert(
+			suffix,
+			Advertised {
+				id: Some(id),
+				hops,
+				cost,
+			},
+		);
+		stream.writer.buffer(&lite::AnnounceBroadcast::Takeover {
+			predecessor: predecessor.1,
+			suffix: wire,
+			epoch,
 			hops: chain,
 			cost,
 		})?;
@@ -1409,10 +1446,11 @@ impl AnnounceRun {
 				return Poll::Pending;
 			};
 
-			let (update, active, restart) = match next {
-				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true, false),
-				Some(announce::Event::Restart(update)) => (update, true, true),
-				Some(announce::Event::End(update)) => (update, false, false),
+			let (update, active, restart, predecessor) = match next {
+				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true, false, None),
+				Some(announce::Event::Restart(update)) => (update, true, true, None),
+				Some(announce::Event::Takeover { announce, predecessor }) => (announce, true, false, Some(predecessor)),
+				Some(announce::Event::End(update)) => (update, false, false, None),
 				None => {
 					if self.initial.take().is_some() {
 						stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
@@ -1434,7 +1472,26 @@ impl AnnounceRun {
 				continue;
 			}
 
+			// A takeover names its predecessor's id, so only one the peer holds. Elsewhere it
+			// is another instance, in place or not.
+			let taken = predecessor
+				.as_ref()
+				.filter(|_| self.version.has_announce_takeover())
+				.filter(|predecessor| **predecessor == suffix || !self.live.contains_key(&suffix))
+				.and_then(|predecessor| Some((predecessor.clone(), self.live.get(predecessor)?.id?)));
+			let restart = restart || predecessor.as_ref() == Some(&suffix);
 			match self.outgoing(&update.route, &absolute) {
+				Some((hops, cost)) if let Some((predecessor, id)) = taken => {
+					self.takeover(
+						stream,
+						(predecessor, id),
+						suffix,
+						hops,
+						cost,
+						update.route.epoch,
+						&absolute,
+					)?;
+				}
 				Some((hops, cost)) if restart && self.live.contains_key(&suffix) => {
 					self.restart(stream, suffix, hops, cost, update.route.epoch, &absolute)?;
 				}
@@ -7406,13 +7463,14 @@ mod tests {
 				crate::origin::Route::default()
 					.with_hops(echoed_hops)
 					.with_via(assigned),
+				None,
 			)
 			.unwrap();
 
 		let mut local_hops = Hops::new();
 		local_hops.push(upstream).unwrap();
 		let _local = origin
-			.requests_route("local", crate::origin::Route::default().with_hops(local_hops))
+			.requests_route("local", crate::origin::Route::default().with_hops(local_hops), None)
 			.unwrap();
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.
@@ -7880,7 +7938,13 @@ mod tests {
 		let mut _route = None;
 		let mut held = None;
 		match wait {
-			Wait::Broadcast => _route = Some(origin.requests_route("room", crate::origin::Route::default()).unwrap()),
+			Wait::Broadcast => {
+				_route = Some(
+					origin
+						.requests_route("room", crate::origin::Route::default(), None)
+						.unwrap(),
+				)
+			}
 			Wait::Track => {
 				let broadcast = origin.create_broadcast("room").unwrap();
 				let dynamic = broadcast.requests();

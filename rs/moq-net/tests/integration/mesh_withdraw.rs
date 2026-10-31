@@ -38,6 +38,7 @@ enum Kind {
 	Start,
 	Update,
 	Restart,
+	Takeover,
 	End,
 }
 
@@ -62,6 +63,7 @@ fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, 
 				announce::Event::Start(announce) => (Kind::Start, announce),
 				announce::Event::Update(announce) => (Kind::Update, announce),
 				announce::Event::Restart(announce) => (Kind::Restart, announce),
+				announce::Event::Takeover { announce, .. } => (Kind::Takeover, announce),
 				announce::Event::End(announce) => (Kind::End, announce),
 			};
 			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {

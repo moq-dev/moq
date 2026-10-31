@@ -100,6 +100,34 @@ test("AnnounceBroadcast carries a restart only on draft-07", async () => {
 	expect(await decodeAnnounceBroadcast(reader, Version.DRAFT_06)).toEqual({ status: "skipped" });
 });
 
+test("AnnounceBroadcast carries a takeover only on draft-07", async () => {
+	const hops = [HopSchema.parse(7n)];
+	const msg = {
+		status: "takeover" as const,
+		predecessor: 2n,
+		suffix: Path.from("p"),
+		pathBase: { distance: 1n, keep: 1 },
+		epoch: Epoch.mint(),
+		hops,
+		hopBase: undefined,
+		cost: 12n,
+	};
+	expect(await roundTrip(msg, Version.DRAFT_07)).toEqual(msg);
+
+	// Older versions send a start instead.
+	await expect(
+		bytes(
+			(w) =>
+				encodeAnnounceBroadcast(
+					w,
+					{ status: "takeover", predecessor: 0n, suffix: Path.from("p"), hops: [] },
+					Version.DRAFT_06,
+				),
+			Version.DRAFT_06,
+		),
+	).rejects.toThrow();
+});
+
 test("AnnounceBroadcast skips an unknown type on draft-06", async () => {
 	const encoded = await bytes(async (w) => {
 		await w.u53(4);

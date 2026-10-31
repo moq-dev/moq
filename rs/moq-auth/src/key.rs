@@ -479,7 +479,7 @@ impl Key {
 		}
 	}
 
-	fn to_decoding_key(&self) -> crate::Result<&DecodingKey> {
+	pub(crate) fn to_decoding_key(&self) -> crate::Result<&DecodingKey> {
 		if let Some(key) = self.decode.get() {
 			return Ok(key);
 		}
@@ -543,7 +543,7 @@ impl Key {
 		Ok(self.decode.get_or_init(|| decoding_key))
 	}
 
-	fn to_encoding_key(&self) -> crate::Result<&EncodingKey> {
+	pub(crate) fn to_encoding_key(&self) -> crate::Result<&EncodingKey> {
 		if let Some(key) = self.encode.get() {
 			return Ok(key);
 		}
@@ -610,16 +610,7 @@ impl Key {
 	/// Verify the signature, claims, and key scope but not the times, so an expired
 	/// token's root is still known to be genuine.
 	pub(crate) fn verify_claims(&self, token: &str) -> crate::Result<Claims> {
-		if !self.operations.contains(&KeyOperation::Verify) {
-			return Err(KeyError::VerifyUnsupported.into());
-		}
-		let header = jsonwebtoken::decode_header(token)?;
-		match (self.kid.as_ref(), header.kid.as_deref()) {
-			(Some(expected), Some(actual)) if expected.encode() == actual => {}
-			(Some(_), None) => return Err(KeyError::MissingKid.into()),
-			(_, Some(actual)) => return Err(KeyError::KeyNotFound(actual.to_string()).into()),
-			(None, None) => {}
-		}
+		self.check_kid(token)?;
 
 		let mut validation = jsonwebtoken::Validation::new(self.algorithm.into());
 		validation.required_spec_claims = Default::default();
@@ -630,6 +621,20 @@ impl Key {
 		claims.validate()?;
 		self.validate_scope(&claims)?;
 		Ok(claims)
+	}
+
+	/// Refuse a key that cannot verify, or a token whose `kid` header names another key.
+	pub(crate) fn check_kid(&self, token: &str) -> crate::Result<()> {
+		if !self.operations.contains(&KeyOperation::Verify) {
+			return Err(KeyError::VerifyUnsupported.into());
+		}
+		let header = jsonwebtoken::decode_header(token)?;
+		match (self.kid.as_ref(), header.kid.as_deref()) {
+			(Some(expected), Some(actual)) if expected.encode() == actual => Ok(()),
+			(Some(_), None) => Err(KeyError::MissingKid.into()),
+			(_, Some(actual)) => Err(KeyError::KeyNotFound(actual.to_string()).into()),
+			(None, None) => Ok(()),
+		}
 	}
 
 	/// Sign the claims with this key, returning the encoded token.
@@ -676,7 +681,7 @@ impl Key {
 		self
 	}
 
-	fn validate_scope(&self, claims: &Claims) -> crate::Result<()> {
+	pub(crate) fn validate_scope(&self, claims: &Claims) -> crate::Result<()> {
 		if let Some(scope) = &self.scope {
 			scope.validate()?;
 			if !scope.allows(claims) {

@@ -100,6 +100,9 @@ mod video;
 /// A variable-rate window publishes without a rate, as does four seconds of media without a
 /// complete PCR window; EOF releases a shorter input too.
 /// Imports without that extension do not wait for a rate measurement.
+/// Neither does a catalog that already records `mpegts.muxRate`, such as a restarted import's
+/// carrying its predecessor's measurement of the same multiplex ([`Restart`](super::Restart)):
+/// it goes out with that rate, which the measurement then refines as usual.
 ///
 /// The selected container applies only to decoded media renditions. Verbatim tracks in the
 /// `mpegts` catalog section continue to use the legacy Hang container.
@@ -253,6 +256,8 @@ impl<E: catalog::Catalog> Import<E> {
 		let mut snapshot = catalog.snapshot();
 		let mpegts = snapshot.ext.mpegts_mut();
 		let supports_mpegts = mpegts.is_some();
+		// A rate the catalog already records measured this multiplex, so the catalog needn't wait.
+		let measured = mpegts.as_deref().and_then(|mpegts| mpegts.mux_rate);
 		// What the catalog already advertises, so the first PMT republishes only a difference.
 		let program_info = mpegts
 			.map(|mpegts| std::mem::take(&mut mpegts.program_descriptors))
@@ -261,7 +266,7 @@ impl<E: catalog::Catalog> Import<E> {
 			catalog.count_ext_tracks(|ext: &mut E| ext.mpegts_mut().is_some_and(|mpegts| mpegts.has_track()));
 		}
 		let si = super::si::Capture::new(broadcast.clone(), catalog.clone());
-		let mux_rate_reservation = supports_mpegts.then(|| reserved.clone());
+		let mux_rate_reservation = (supports_mpegts && measured.is_none()).then(|| reserved.clone());
 		Self {
 			broadcast,
 			catalog,
@@ -293,7 +298,7 @@ impl<E: catalog::Catalog> Import<E> {
 			health: Health::default(),
 			pcr_pid: None,
 			unclocked_since: Some(0),
-			mux_rate: Default::default(),
+			mux_rate: super::mux_rate::Meter::measured(measured),
 			published: false,
 			initialized: false,
 			sections: HashMap::new(),
@@ -703,13 +708,17 @@ impl<E: catalog::Catalog> Import<E> {
 		// Which PID speaks for the program clock, so a `discontinuity_indicator` there
 		// can be read as a timebase reset rather than a counter jump.
 		if self.pcr_pid != pmt.pcr_pid {
+			// The first clock a PMT names measured nothing yet, but may keep a rate it was given.
+			let changed = self.pcr_pid.is_some();
 			self.pcr_pid = pmt.pcr_pid;
 			self.health.pcr_pid(pmt.pcr_pid.map(|pid| pid.as_u16()));
 			// A new clock: the intervals straddling the switch measure nothing, and the whole PES
 			// the old one began are placed on its timebase, never between its PCRs and the new.
 			self.liveness.discontinuity();
 			self.si.discontinuity();
-			self.reset_mux_rate()?;
+			if changed {
+				self.reset_mux_rate()?;
+			}
 			self.settle_placement()?;
 		}
 
@@ -10066,6 +10075,45 @@ pub(super) mod test {
 			};
 			assert_eq!(first.ext.mpegts.mux_rate, cbr.then_some(3_760_000));
 		}
+	}
+
+	/// A catalog that already records a rate, as a restarted import's carries its predecessor's,
+	/// goes out with the first media, and the first window still refines the rate.
+	#[test]
+	fn a_measured_ts_catalog_goes_out_with_the_first_media() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut initial = Catalog::<Ext>::default();
+		initial.ext.mpegts.mux_rate = Some(3_000_000);
+		let catalog =
+			crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default().with_catalog(initial))
+				.unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2PacketizedData, PCR_PID)], false))
+			.unwrap();
+		import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
+		let waiter = kio::Waiter::noop();
+		let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
+			panic!("a measured catalog waited for a window");
+		};
+		assert_eq!(first.ext.mpegts.mux_rate, Some(3_000_000));
+
+		for i in 0..=50 {
+			let mut bytes = pcr_packet(PCR_PID, i * 27_000_000 / 25);
+			for _ in 0..99 {
+				bytes.extend_from_slice(&super::super::export::NULL_PACKET);
+			}
+			import.decode(&bytes).unwrap();
+		}
+		assert_eq!(
+			catalog.snapshot().ext.mpegts.mux_rate,
+			Some(3_760_000),
+			"the window refines the rate"
+		);
 	}
 
 	/// A live source with no PCR never completes a window, so media time releases its catalog.

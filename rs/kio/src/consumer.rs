@@ -7,7 +7,7 @@ use crate::{Closed, Counts, State, lock::*, producer::Ref, sync::Arc, waiter::*,
 /// Consumers have read-only access to the shared value and are notified when
 /// a producer modifies it. Cloning a consumer increments the consumer reference
 /// count. When the last consumer is dropped, the consumer-count waiters
-/// (e.g. [`Producer::unused`](crate::Producer::unused)) are notified.
+/// (e.g. [`Producer::wanted_changed`](crate::Producer::wanted_changed)) are notified.
 #[derive(Debug)]
 pub struct Consumer<T> {
 	pub(crate) state: Lock<State<T>>,
@@ -36,7 +36,7 @@ fn mint<T>(state: &Lock<State<T>>, counts: &Arc<Counts>, only_open: bool) -> Opt
 			return None;
 		}
 
-		// Wake `used()` waiters when the first consumer appears, after the lock is
+		// Wake `wanted_changed()` waiters when the first consumer appears, after the lock is
 		// released.
 		match counts.consumers.fetch_add(1, Ordering::AcqRel) {
 			0 => Some(guard.waiters_consumer.take()),
@@ -165,7 +165,7 @@ impl<T> Drop for Consumer<T> {
 			return;
 		}
 
-		// We were the last consumer, so wake the `unused()` waiters. The value
+		// We were the last consumer, so wake the `wanted_changed()` waiters. The value
 		// and closed waiters don't care about the consumer count, so leave
 		// them alone.
 		let mut waiters = {

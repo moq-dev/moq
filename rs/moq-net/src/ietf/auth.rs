@@ -647,7 +647,7 @@ mod tests {
 	/// Every draft that negotiates the extension round-trips the option.
 	#[test]
 	fn setup_option_round_trips_on_supported_drafts() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut params = super::super::Parameters::default();
 			assert_eq!(from_setup(&params), None);
 			into_setup(&mut params);

@@ -5735,12 +5735,12 @@ mod test {
 		let logical = logical(&routes);
 		let demand = logical.demand();
 		let mut fetched = logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap();
-		assert!(demand.is_used(), "an open fetched group holds the track");
+		assert!(demand.is_wanted(), "an open fetched group holds the track");
 		let mut frame = fetched.next_frame().now_or_never().unwrap().unwrap().unwrap();
 		drop(fetched);
-		assert!(demand.is_used(), "an unread frame holds the track");
+		assert!(demand.is_wanted(), "an unread frame holds the track");
 		assert_eq!(frame.read_all().now_or_never().unwrap().unwrap(), b"a".as_ref());
-		assert!(!demand.is_used(), "a read frame does not");
+		assert!(!demand.is_wanted(), "a read frame does not");
 	}
 
 	/// A rerouted fetch keeps its own age budget: the new route is asked with it, and a

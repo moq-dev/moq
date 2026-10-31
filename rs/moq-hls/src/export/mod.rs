@@ -597,7 +597,7 @@ mod tests {
 		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
 			if let mp4_atom::Any::Moof(moof) = atom {
 				return moof.traf[0].trun[0]
-					.entries
+					.samples
 					.iter()
 					.map(|entry| entry.duration)
 					.collect();
