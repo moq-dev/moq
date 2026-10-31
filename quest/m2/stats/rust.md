@@ -37,6 +37,13 @@
   catalog. The report writer lives in `rs/moq-cli/src/report.rs` and reads the
   transport from a `moq_tokio` connection monitor, which the gateway crates do
   not see.
+- Decided 2026-10-31 (maintainer): move the report writer into `moq-mux`, with
+  the transport passed in as data rather than read from a `moq_tokio` monitor,
+  and give each gateway builder `with_report` and `with_echo`. A library user
+  embedding a gateway gets reports too; the cost, accepted, is that `Stats`
+  becomes a library API. Rejected: handing each session's catalog back to the
+  CLI through a returned handle, which keeps the writer in `moq-cli` but leaves
+  library users without reports.
 - `moq play --echo` reconciles each watched catalog's `echo` section as
   `export --echo` does, and refuses `--catalog-format msf` the same way: the
   MSF catalog does not carry an `echo` solicitation. `play` attaches only the
