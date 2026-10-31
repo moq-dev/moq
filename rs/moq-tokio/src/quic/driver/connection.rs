@@ -503,6 +503,13 @@ impl Connection {
 		self.0.state.lock().inner.stats()
 	}
 
+	/// The receive windows now in force: the connection's, and the most one stream holds.
+	#[cfg(feature = "net")]
+	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
+		let state = self.0.state.lock();
+		moq_net::transport::ReceiveWindow::new(state.inner.receive_window(), state.inner.stream_receive_window())
+	}
+
 	/// How many send streams the connection still holds state for
 	#[cfg(test)]
 	pub(crate) fn send_streams(&self) -> usize {

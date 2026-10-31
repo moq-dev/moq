@@ -200,6 +200,9 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 	fn probe(&self) -> Option<moq::Probe> {
 		super::Grouped::probe(&self.session)
 	}
+	fn receive_window(&self) -> Option<moq::ReceiveWindow> {
+		super::Grouped::receive_window(&self.session)
+	}
 }
 impl<S: super::GroupedSend + 'static> poll::SendStream for BridgedSend<S> {
 	type Error = Error<S::Error>;
@@ -258,6 +261,9 @@ impl poll::RecvStream for crate::quic::web::RecvStream {
 	fn stop(&mut self, code: u32) {
 		// A stream already closed has nobody left to tell.
 		crate::quic::web::RecvStream::stop(self, code);
+	}
+	fn poll_reset(&mut self, waiter: &moq_net::kio::Waiter) -> Poll<Self::Error> {
+		crate::quic::web::RecvStream::poll_reset(self, &mut waiter.context()).map(Error)
 	}
 }
 

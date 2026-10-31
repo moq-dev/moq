@@ -16768,7 +16768,7 @@ mod test {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_refresh_survives_eviction() {
-		let (mut producer, _pool) = pooled_producer(10_000);
+		let (mut producer, _pool) = pooled_producer(11_000);
 		let consumer = producer.consume();
 
 		finished_group(&mut producer, 3_000); // seq 0
@@ -17533,7 +17533,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn same_tick_fetch_protects() {
 		// No time advances at all: every timestamp lands in the same tick.
-		let (mut producer, _pool) = pooled_producer(10_000);
+		let (mut producer, _pool) = pooled_producer(11_000);
 		let consumer = producer.consume();
 
 		finished_group(&mut producer, 3_000); // seq 0

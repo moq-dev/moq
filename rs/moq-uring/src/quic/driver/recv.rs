@@ -214,7 +214,13 @@ impl Stream {
 	///
 	/// Cancel-safe.
 	pub async fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
-		poll_fn(|cx| self.parked(cx, Self::wait_received_reset)).await
+		poll_fn(|cx| self.poll_received_reset(cx)).await
+	}
+
+	/// Poll form of [`Self::received_reset`]. It takes no bytes, so a lease in progress is
+	/// left as it was.
+	pub(crate) fn poll_received_reset(&mut self, cx: &Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
+		self.parked(cx, Self::wait_received_reset)
 	}
 
 	fn wait_received_reset(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {

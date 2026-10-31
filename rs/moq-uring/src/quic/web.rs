@@ -459,6 +459,11 @@ impl Session {
 		self.conn.streams_evicted()
 	}
 
+	/// The receive windows now in force: the connection's, and the most one stream holds.
+	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
+		self.conn.receive_window()
+	}
+
 	/// Open a send group at `priority`, for streams to join with
 	/// [`SendStream::set_group`]. The HTTP/3 streams stay outside every
 	/// group, so they go first.
@@ -1071,6 +1076,20 @@ impl RecvStream {
 	pub fn set_priority(&mut self, priority: i64) {
 		if let Some(inner) = &mut self.inner {
 			inner.set_priority(priority);
+		}
+	}
+
+	/// Poll until the peer resets the stream or the connection closes, without reading it;
+	/// pending for good once every byte arrived. See [`recv::Stream::received_reset`].
+	pub fn poll_reset(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
+		let web = self.web;
+		let Some(inner) = &mut self.inner else {
+			return Poll::Ready(Error::Closed);
+		};
+		match ready!(inner.poll_received_reset(cx)) {
+			Ok(None) => Poll::Pending,
+			Ok(Some(code)) => Poll::Ready(map(web, Error::Reset(code.into_inner()))),
+			Err(err) => Poll::Ready(map(web, err.into())),
 		}
 	}
 }

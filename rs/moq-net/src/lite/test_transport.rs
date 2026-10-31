@@ -613,6 +613,8 @@ pub struct SinkSession {
 	stats: Arc<Mutex<SinkStats>>,
 	/// Set by [`Self::with_probe`].
 	probe: Option<crate::transport::Probe>,
+	/// Set by [`Self::with_receive_window`].
+	receive_window: Option<crate::transport::ReceiveWindow>,
 }
 
 impl SinkSession {
@@ -639,6 +641,12 @@ impl SinkSession {
 	/// Accept datagrams up to `max_size` bytes, recording them in the log.
 	pub fn with_datagrams(mut self, max_size: usize) -> Self {
 		self.datagram_size = max_size;
+		self
+	}
+
+	/// Report `window` as the receive windows in force.
+	pub fn with_receive_window(mut self, window: crate::transport::ReceiveWindow) -> Self {
+		self.receive_window = Some(window);
 		self
 	}
 
@@ -826,6 +834,10 @@ impl poll::Session for SinkSession {
 
 	fn probe(&self) -> Option<crate::transport::Probe> {
 		self.probe.clone()
+	}
+
+	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
+		self.receive_window
 	}
 }
 

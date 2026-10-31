@@ -46,6 +46,15 @@ Open, for the implementer to bring to the maintainer:
   to move to the cache without a window where the bytes are billed twice or not at
   all.
 
+Idea for later (maintainer, 2026-10-30, from the
+[fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) iteration
+in [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388)): instead of
+moq-quic granting `MAX_STREAM_DATA` automatically as a stream is read, the
+application could pause a stream, or grant it an explicit
+`allow(fastest + 16 MB)`, so flow control never grants credit past the pacing
+window. Paused streams would then hold no credit beyond that window, replacing
+moq-net's per-session cap on paused credit.
+
 Lessons from other stacks: QUICHE frees 8 KiB blocks as they are consumed, msquic
 never advertises credit it could not back, and quinn and lsquic both let a slice
 pin its packet buffer. #5878 already handles the last with compaction.

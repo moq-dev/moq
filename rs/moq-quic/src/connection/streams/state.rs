@@ -174,6 +174,9 @@ pub(crate) struct StreamsState {
 	/// new stream starts with whatever [`stream_receive_window`](Self::stream_receive_window)
 	/// became since
 	pub(super) initial_stream_receive_window: u64,
+	/// The largest stream receive window ever in force, which bounds the credit a stream may
+	/// still hold after the window shrinks
+	peak_stream_receive_window: u64,
 
 	// Pertinent state from the TransportParameters supplied by the peer
 	initial_max_stream_data_uni: VarInt,
@@ -242,6 +245,7 @@ impl StreamsState {
 			send_window,
 			stream_receive_window: stream_receive_window.into(),
 			initial_stream_receive_window: stream_receive_window.into(),
+			peak_stream_receive_window: stream_receive_window.into(),
 			initial_max_stream_data_uni: 0u32.into(),
 			initial_max_stream_data_bidi_local: 0u32.into(),
 			initial_max_stream_data_bidi_remote: 0u32.into(),
@@ -1063,10 +1067,22 @@ impl StreamsState {
 		self.send_window = send_window;
 	}
 
+	/// The connection receive window now in force.
+	pub(crate) fn receive_window(&self) -> u64 {
+		self.receive_window
+	}
+
+	/// The most credit one receive stream may hold: the largest window ever in force, since
+	/// credit already granted outlives a shrink.
+	pub(crate) fn peak_stream_receive_window(&self) -> u64 {
+		self.peak_stream_receive_window
+	}
+
 	/// Set the receive window of each stream, which applies as each stream's credit is next
 	/// extended: credit already granted cannot be taken back.
 	pub(crate) fn set_stream_receive_window(&mut self, window: u64) {
 		self.stream_receive_window = window;
+		self.peak_stream_receive_window = self.peak_stream_receive_window.max(window);
 	}
 
 	/// Set the receive_window and returns whether the receive_window has been
@@ -2802,6 +2818,17 @@ mod tests {
 		assert_eq!(server.receive_window_shrink_debt, 0);
 		assert_eq!(server.local_max_data, prev_local_max_data + credits);
 		assert!(should_transmit.should_transmit());
+	}
+
+	/// A stream may still hold credit granted under a larger window, so the bound reported to
+	/// the application never falls when the window shrinks.
+	#[test]
+	fn stream_receive_window_reports_its_peak() {
+		let mut server = make(Side::Server);
+		let initial = server.peak_stream_receive_window();
+		server.set_stream_receive_window(initial * 4);
+		server.set_stream_receive_window(initial / 2);
+		assert_eq!(server.peak_stream_receive_window(), initial * 4);
 	}
 
 	#[test]
