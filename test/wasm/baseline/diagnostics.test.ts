@@ -20,3 +20,12 @@ test("circular and non-Error rejections remain diagnostic failures", async () =>
 	await expect(diagnose(Promise.reject(undefined))).rejects.toThrow("undefined");
 	await expect(diagnose(Promise.reject("refused"))).rejects.toThrow("refused");
 });
+
+test("unserializable rejections keep the original error", async () => {
+	const error = Object.assign(new Error("original failure"), {
+		toJSON() {
+			throw new Error("serialization failed");
+		},
+	});
+	await expect(diagnose(Promise.reject(error))).rejects.toBe(error);
+});
