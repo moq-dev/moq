@@ -24,7 +24,3 @@ Decided with the maintainer on 2026-10-26; see the
 
 Public API: moq-auth's error conversions from aws-lc-rs types change
 (breaking). Wire and key formats: unchanged.
-
-## Required
-
-- [rind 0.1.0 is on crates.io](/quest/m2/rind/released.md) - the rind release this switches to

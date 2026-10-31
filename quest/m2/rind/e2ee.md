@@ -14,7 +14,3 @@ implementation before the switch, so interop with already-protected content
 is proven, not assumed.
 
 Public API: none, unless an error type exposes aws-lc-rs. Wire: unchanged.
-
-## Required
-
-- [rind 0.1.0 is on crates.io](/quest/m2/rind/released.md) - the rind release this switches to

@@ -39,7 +39,8 @@ instead, so every crate drops C, not just the relay.
   kept as alternatives, so there is one provider and no exclusion gate.
 - The migration waits for rind's armv7 support, so no target is dropped.
   Decided 2026-10-31 (maintainer): each area waits only on the rind pieces it
-  uses, so most areas switch once rind 0.1.0 is on crates.io, and only relay
+  uses, so most areas switch once rind 0.1.0 is on crates.io (published
+  2026-10-31), and only relay
   ACME waits on `rind-instant-acme`. aws-lc-rs stays in the workspace until
   the last area lands, which is when this epic removes it.
 - Split per area, each landing once rind covers it. Docs a change makes stale
@@ -56,7 +57,6 @@ The epic's own work, once every child has merged:
 
 ## Required
 
-- [rind 0.1.0 is on crates.io](/quest/m2/rind/released.md) - waiting on the rind release every area switches to
 - [rind-instant-acme is on crates.io](/quest/m2/rind/instant-acme.md) - waiting on the adapter relay ACME needs
 - [Drop iroh](/quest/m2/rind/drop-iroh.md) - moq-tokio, moq-relay, and moq-cli lose the `iroh` feature and web-transport-iroh
 - [Transport on rind](/quest/m2/rind/transport.md) - moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take rind, and the `aws-lc-rs`/`ring` features go

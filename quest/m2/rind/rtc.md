@@ -30,5 +30,4 @@ offered.
 
 ## Required
 
-- [rind 0.1.0 is on crates.io](/quest/m2/rind/released.md) - the rind release this switches to
 - [Vendor and trim the stack](/quest/m2/webrtc/vendor.md) - where str0m and dimpl live once vendored

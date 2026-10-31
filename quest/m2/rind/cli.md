@@ -20,7 +20,3 @@ Decided with the maintainer on 2026-10-26; see the
   RustCrypto `sha2`, with identical names.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [rind 0.1.0 is on crates.io](/quest/m2/rind/released.md) - the rind release this switches to
