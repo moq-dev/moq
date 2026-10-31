@@ -173,7 +173,7 @@ impl Fixture {
 			let sessions = sessions.clone();
 			let handle = tokio::spawn(async move {
 				let mut id = 0;
-				while let Some(request) = server.accept().await {
+				while let Ok(request) = server.accept().await {
 					let conn = Connection::new(request, cluster.clone(), auth.clone())
 						.with_id(id)
 						.with_sessions(sessions.clone());

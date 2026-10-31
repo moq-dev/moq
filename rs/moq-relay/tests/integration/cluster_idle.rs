@@ -65,7 +65,7 @@ async fn spawn_peer() -> (u16, tokio::runtime::Runtime) {
 			.expect("peer listen");
 		let _ = bound.send(listener.local_addr().expect("peer addr").port());
 
-		while let Some(request) = listener.accept().await {
+		while let Ok(request) = listener.accept().await {
 			let origin = origin.clone();
 			tokio::spawn(async move {
 				if let Ok(session) = request.with_publisher(&origin).ok().await {

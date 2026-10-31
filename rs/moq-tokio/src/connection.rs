@@ -2713,7 +2713,7 @@ mod tests {
 	async fn dial_any_walks_past_the_dead_addresses() {
 		let client = client();
 		let (mut server, live) = live().await;
-		tokio::spawn(async move { while server.accept().await.is_some() {} });
+		tokio::spawn(async move { while server.accept().await.is_ok() {} });
 
 		let dead_a = dead().await;
 		let dead_b = dead().await;
@@ -3215,7 +3215,7 @@ mod tests {
 		let server_addr = server.local_addr().unwrap();
 		let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
 		tokio::spawn(async move {
-			while let Some(request) = server.accept().await {
+			while let Ok(request) = server.accept().await {
 				let transport = request.transport();
 				if let Ok(session) = request.ok().await {
 					let _ = accepted.send((transport, session));
@@ -3290,7 +3290,7 @@ mod tests {
 
 		let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
 		let task = tokio::spawn(async move {
-			while let Some(request) = server.accept().await {
+			while let Ok(request) = server.accept().await {
 				if let Ok(session) = request.with_publisher(&origin).ok().await {
 					let _ = accepted.send(session);
 				}

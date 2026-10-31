@@ -2581,7 +2581,7 @@ async fn one_shot_connect_surfaces_the_session_close() {
 	let server_accepts = accepts.clone();
 	let pub_origin = moq_tokio::origin::spawn();
 	let server_handle = tokio::spawn(async move {
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			server_accepts.fetch_add(1, Ordering::SeqCst);
 			let session = request.with_publisher(&pub_origin).ok().await?;
 			session.abort(moq_net::Error::Cancel);
@@ -3310,7 +3310,7 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let server_handle = tokio::spawn(async move {
 		// Accept and immediately sever, over and over.
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			let session = request.with_publisher(&pub_origin).ok().await?;
 			session.abort(moq_net::Error::Cancel);
 		}
@@ -3343,7 +3343,7 @@ async fn session_close_surfaces_a_rejection_code() {
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let server_handle = tokio::spawn(async move {
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			request.reject(moq_net::SessionError::Unauthorized).await?;
 		}
 		Ok::<_, anyhow::Error>(())
@@ -3377,7 +3377,7 @@ async fn reconnect_stops_on_a_session_level_rejection() {
 
 		let reject = code.clone();
 		let server_handle = tokio::spawn(async move {
-			while let Some(request) = server.accept().await {
+			while let Ok(request) = server.accept().await {
 				request.reject(reject.clone()).await?;
 			}
 			Ok::<_, anyhow::Error>(())
@@ -3409,7 +3409,7 @@ async fn one_shot_surfaces_a_session_level_rejection() {
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let server_handle = tokio::spawn(async move {
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			request.reject(moq_net::SessionError::Unauthorized).await?;
 		}
 		Ok::<_, anyhow::Error>(())

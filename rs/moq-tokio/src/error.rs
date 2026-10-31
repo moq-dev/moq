@@ -230,6 +230,12 @@ pub enum Error {
 	#[error("panicked")]
 	Panic,
 
+	/// A listener's endpoint stopped, so [`Listener::accept`](crate::Listener::accept) can never
+	/// yield another session. The endpoint's own failure is logged where it happened.
+	#[cfg(feature = "_transport")]
+	#[error("the {0} listener stopped accepting")]
+	Accept(crate::Transport),
+
 	/// Loading certificates or building the TLS config failed.
 	#[error(transparent)]
 	Tls(Arc<crate::tls::Error>),

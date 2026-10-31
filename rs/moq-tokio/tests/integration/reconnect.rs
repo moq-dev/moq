@@ -77,7 +77,7 @@ async fn a_handshake_slower_than_the_retry_window_still_lands() {
 	let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
 	let _server = tokio::spawn(async move {
 		let origin = moq_tokio::origin::spawn();
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			if let Ok(session) = request.with_publisher(&origin).ok().await {
 				let _ = accepted.send(session);
 			}
@@ -184,7 +184,7 @@ async fn spawn_server() -> (
 
 	let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
 	let handle = tokio::spawn(async move {
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			let origin = moq_tokio::origin::spawn();
 			match request.with_publisher(&origin).ok().await {
 				Ok(session) => {
@@ -400,7 +400,7 @@ async fn rides_out_a_drain(backoff: moq_tokio::Backoff, drained: usize) {
 		let origin = moq_tokio::origin::spawn();
 		// Held, as a draining server does: each one closes when the client leaves it.
 		let mut held = Vec::new();
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			let Ok(session) = request.with_publisher(&origin).ok().await else {
 				continue;
 			};
