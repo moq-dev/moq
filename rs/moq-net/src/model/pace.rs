@@ -52,7 +52,9 @@ impl Pace {
 
 	/// Wake the writer, if parked, since what it waits on changed.
 	fn wake(&self) {
-		if self.parked.swap(false, Ordering::SeqCst) {
+		// A load first, so a writer not parked costs a read rather than a locked swap; still
+		// SeqCst, to stay in the order `park` pairs with.
+		if self.parked.load(Ordering::SeqCst) && self.parked.swap(false, Ordering::SeqCst) {
 			let writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner).take();
 			if let Some(writer) = writer {
 				writer.wake();

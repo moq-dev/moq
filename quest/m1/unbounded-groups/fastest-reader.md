@@ -92,10 +92,13 @@ payload loop (`coding::Reader::poll_read_frame`) waits on
 its declared size fits the window (`coding::Reader::poll_admit`), so moq-lite
 and moq-transport ingest both pause past the 16 MB window. A reader that took every
 committed frame counts as waiting on the writer, so a frame larger than the
-window never stalls it. Tests cover one hop on lite-06, lite-07-wip, and
-moq-transport-22: an idle reader holds the relay copy near the window and then
-receives every frame, a slow reader ends `Evicted` while the fast one keeps
-up, and a session past its credit cap reads on. The same PR landed the credit
+window never stalls it. A paused stream is not read, so it is watched for a
+reset instead (`poll::RecvStream::poll_reset`, which moq-quic answers through
+moq-tokio and moq-uring without taking bytes). Tests cover one hop on lite-06,
+lite-07-wip, and moq-transport-22: an idle reader holds the relay copy near the
+window and then receives every frame, a slow reader ends `Evicted` while the
+fast one keeps up, a session past its credit cap reads on, and a publisher's
+reset ends a paused relay copy. The same PR landed the credit
 cap (each paused stream reserves its stream window from a per-session budget
 in `rs/moq-net/src/transport/boxed.rs`; moq-quic reports its windows through
 moq-tokio and moq-uring, and a transport that reports none never pauses) and
@@ -105,15 +108,19 @@ What remains:
 
 - Receive-window reporting for the transports that report none yet (quinn,
   iroh, qmux, WebTransport in the browser, and the FFI adapters), whose ingest
-  never pauses until they do.
+  never pauses until they do. Each must also answer
+  `poll::RecvStream::poll_reset`, or a reset goes unseen while paused.
 - A sized readiness check for local writers: `group::Producer::ready()`
   waits for room but not for the next frame's size, so a local frame larger
   than the room left still sheds what the egress has yet to send.
 - JS parity.
 - A two-relay chain test with memory measured near the window.
-- Benchmarks of the hot path in `group.rs`: the cursor's report is one
-  relaxed load per frame or batch, and a store only for the fastest reader.
-  They were not run on the busy host that landed the first slice.
+- A quiet-host comparison against the base of `group_read_frames`,
+  `group_contended`, and `group_relay_frames`, plus `group_paced` (a writer
+  parked at the window, over 1, 8, and 64 readers), which the first slice
+  added. The cursor's report is one relaxed load per frame or batch, and a
+  `fetch_max` only for the fastest reader. On the busy host that landed it,
+  runs swung by up to 50% either way between repeats.
 - Fills that write a whole batch of groups at once evict their own earlier
   groups before the reader takes them (the follow-up from
   [moq-dev/moq#7339](https://github.com/moq-dev/moq/pull/7339)). Pacing within
