@@ -303,10 +303,10 @@ impl Fanout {
 	/// Replacing a generation drops what was listed under it and the inits built from it: those
 	/// belong to the run it named. The first one only labels the run already flowing, so an
 	/// embedder that supplies it right after construction loses nothing to a race with the first
-	/// records.
+	/// records. A cut set keeps its generation, so its ended playlists keep their URLs.
 	pub fn set_generation(&self, generation: Option<Arc<str>>) {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		if feed.generation == generation {
+		if feed.generation == generation || feed.cut {
 			return;
 		}
 		let restart = feed.generation.is_some();

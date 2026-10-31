@@ -130,21 +130,21 @@ impl Followed {
 	/// its id, which then names the new broadcaster.
 	///
 	/// One still open is being replaced: its playlists and recordings end at what it listed so
-	/// far, even while its publisher keeps sending. The replacement never waits on that drain.
+	/// far, even while its publisher keeps sending. It is cut before the replacement is listed,
+	/// so no reader that sees the replacement finds the old playlists still growing. The
+	/// replacement never waits on that drain.
 	/// If that instance takes the path back, it is served afresh under the same id: it reads the
 	/// same records, so its segment URLs name the same bytes, and playlists are never cached, so
 	/// only a player that reloads its ended playlist sees it go on.
 	fn start(&self, broadcaster: Arc<Broadcaster>) {
-		let replaced = {
-			let mut instances = self.instances.lock().unwrap();
-			instances
-				.by_id
-				.insert(broadcaster.instance().clone(), broadcaster.clone());
-			std::mem::replace(&mut instances.current, broadcaster.clone())
-		};
-		if !Arc::ptr_eq(&replaced, &broadcaster) && !replaced.is_closed() {
-			replaced.replaced();
+		let mut instances = self.instances.lock().unwrap();
+		if !Arc::ptr_eq(&instances.current, &broadcaster) && !instances.current.is_closed() {
+			instances.current.replaced();
 		}
+		instances
+			.by_id
+			.insert(broadcaster.instance().clone(), broadcaster.clone());
+		instances.current = broadcaster;
 	}
 
 	/// Keep serving every instance of `replaced` still open, unless this one lists its id.
