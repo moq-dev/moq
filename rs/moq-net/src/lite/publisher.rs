@@ -90,10 +90,10 @@ struct Shared {
 	estimate: kio::ProducerWeak<crate::session::Estimate>,
 	/// The peer's latest PROBE target, which the session's sender probes up to.
 	peer_target: kio::Producer<crate::bandwidth::Rate>,
-	/// The PROBE stream that set `peer_target` last, so a superseded stream ending
-	/// after its replacement already sent a target cannot clear it.
+	/// The newest PROBE stream to set `peer_target`, so a superseded stream whose
+	/// buffered targets or end arrive after its replacement's target can't touch it.
 	peer_target_owner: Mutex<u64>,
-	/// Numbers each PROBE stream for `peer_target_owner`, from 1.
+	/// Numbers each PROBE stream for `peer_target_owner` in accept order, from 1.
 	probe_streams: AtomicU64,
 }
 
@@ -134,9 +134,12 @@ fn cursor_floor(version: Version, start_group: Option<u64>, latest: Option<u64>)
 
 impl Shared {
 	/// Record the peer's PROBE target from stream `owner`, which only a session with a
-	/// sender acts on. The latest stream to send one wins.
+	/// sender acts on. The newest stream to send one wins; an older one is ignored.
 	fn set_peer_target(&self, owner: u64, target: crate::bandwidth::Rate) {
 		let mut current = self.peer_target_owner.lock().unwrap();
+		if owner < *current {
+			return;
+		}
 		*current = owner;
 		self.write_peer_target(target);
 	}
@@ -7662,7 +7665,8 @@ mod tests {
 	}
 
 	/// A subscriber that drops its PROBE stream and opens another can see the new
-	/// stream's target land before the old stream's end: that end must not clear it.
+	/// stream's target land before the old stream's buffered targets and end: neither
+	/// may replace or clear it.
 	#[moq_clock::test]
 	async fn a_superseded_probe_stream_keeps_its_successors_target() {
 		use crate::bandwidth::Rate;
@@ -7679,6 +7683,8 @@ mod tests {
 
 		shared.set_peer_target(old.id, Rate::from_bps(1_000_000));
 		shared.set_peer_target(new.id, Rate::from_bps(2_000_000));
+		shared.set_peer_target(old.id, Rate::from_bps(3_000_000));
+		assert_eq!(*target.read(), Rate::from_bps(2_000_000));
 		shared.clear_peer_target(old.id);
 		assert_eq!(*target.read(), Rate::from_bps(2_000_000));
 
