@@ -533,10 +533,145 @@ test("buffered frames are still readable after the group closes", async () => {
 	expect(await consumer.readFrame()).toBeUndefined();
 });
 
-test("whole-frame writes retain their allocation guard until chunked reads", () => {
+test("a plain frame has no size cap, while a compressed one keeps its whole-frame guard", () => {
 	const producer = new Producer(0);
-	expect(() => producer.writeFrame({ payload: new Uint8Array(32 * 1024 * 1024 + 1) })).toThrow(FrameTooLarge);
-	expect(hooks.groupFrameCount(producer)).toBe(0);
+	producer.writeFrame({ payload: new Uint8Array(32 * 1024 * 1024 + 1) });
+	expect(hooks.groupFrameCount(producer)).toBe(1);
+	producer.finish();
+
+	const compressed = new Producer(1);
+	hooks.bindGroupCompression(compressed, true);
+	expect(() => compressed.writeFrame({ payload: new Uint8Array(32 * 1024 * 1024 + 1) })).toThrow(FrameTooLarge);
+	expect(() => compressed.createFrame({ size: 32 * 1024 * 1024 + 1 })).toThrow(FrameTooLarge);
+	expect(hooks.groupFrameCount(compressed)).toBe(0);
+	compressed.finish();
+});
+
+// A deterministic byte at each frame offset, so a reordered or dropped chunk shows.
+function pattern(offset: number, size: number): Uint8Array {
+	const out = new Uint8Array(size);
+	for (let i = 0; i < size; i++) out[i] = (offset + i) % 251;
+	return out;
+}
+
+test("a frame many times the tail streams through a reader that keeps up", async () => {
+	const MiB = 1024 * 1024;
+	const size = 96 * MiB + 123;
+	const producer = new Producer(0);
+	const reader = producer.consume();
+	const open = producer.createFrame({ size });
+	const frame = await reader.nextFrame();
+	expect(frame?.sequence).toBe(0);
+	expect(frame?.size).toBe(size);
+
+	let read = 0;
+	for (let written = 0; written < size; ) {
+		const n = Math.min(size - written, 300 * 1024);
+		open.write(pattern(written, n));
+		written += n;
+		expect(hooks.groupCacheBytes(producer)).toBeLessThanOrEqual(32 * MiB + MiB);
+		for (;;) {
+			if (read === written) break;
+			const chunk = await frame?.readChunk();
+			if (!chunk) throw new Error("ended early");
+			expect(chunk).toEqual(pattern(read, chunk.byteLength));
+			read += chunk.byteLength;
+		}
+	}
+	open.finish();
+	expect(await frame?.readChunk()).toBeUndefined();
+	expect(frame?.arrived).toBeDefined();
+	// The head was shed, so nobody can read it whole any more.
+	await expect(producer.consume().readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
+	producer.finish();
+	expect(await reader.nextFrame()).toBeUndefined();
+});
+
+test("a reader that falls a tail behind inside a frame is evicted there", async () => {
+	const MiB = 1024 * 1024;
+	const producer = new Producer(0);
+	const slow = producer.consume();
+	const waiting = producer.consume();
+	const open = producer.createFrame({ size: 64 * MiB });
+	const frame = await slow.nextFrame();
+	for (let written = 0; written < 40 * MiB; written += MiB) open.write(pattern(written, MiB));
+	// A reader that had not taken the frame can no longer start it.
+	await expect(waiting.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
+	await expect(frame?.readChunk()).rejects.toMatchObject({ code: StreamCode.Evicted });
+	producer.abort(new Error("done"));
+});
+
+test("a whole read of a frame being written collects it as it streams", async () => {
+	const MiB = 1024 * 1024;
+	const size = 40 * MiB;
+	const producer = new Producer(0);
+	const reader = producer.consume();
+	const open = producer.createFrame({ size });
+	expect(reader.tryReadFrame()).toBeUndefined();
+	const whole = reader.readFrame();
+	for (let written = 0; written < size; written += MiB) {
+		open.write(pattern(written, MiB));
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+	open.finish();
+	const frame = await whole;
+	expect(frame?.payload.byteLength).toBe(size);
+	expect(frame?.payload.subarray(size - 10)).toEqual(pattern(size - 10, 10));
+	producer.finish();
+});
+
+test("a small frame written in pieces reads whole once it completes", async () => {
+	const producer = new Producer(0);
+	const reader = producer.consume();
+	const readable = reader.readable();
+	const open = producer.createFrame({ size: 6 });
+	expect(() => producer.writeFrame(textFrame("x"))).toThrow("a frame is still being written");
+	open.write(new TextEncoder().encode("abc"));
+	expect(reader.tryReadFrame()).toBeUndefined();
+	expect(() => open.finish()).toThrow(RangeError);
+	expect(() => open.write(new Uint8Array(4))).toThrow(RangeError);
+	open.write(new TextEncoder().encode("def"));
+	open.finish();
+	await readable;
+	expect(dec.decode(reader.tryReadFrame()?.payload)).toBe("abcdef");
+	producer.writeFrame(textFrame("next"));
+	expect(dec.decode((await reader.readFrame())?.payload)).toBe("next");
+	producer.finish();
+});
+
+test("a frame written whole in one piece stays the writer's buffer", async () => {
+	const producer = new Producer(0);
+	const reader = producer.consume();
+	const payload = new Uint8Array(3 * 1024 * 1024);
+	const open = producer.createFrame({ size: payload.byteLength });
+	open.write(payload);
+	open.finish();
+	const frame = await reader.nextFrame();
+	expect(await frame?.readChunk()).toBe(payload);
+	producer.finish();
+});
+
+test("ending a group mid-frame fails the frame and its readers", async () => {
+	const producer = new Producer(0);
+	const reader = producer.consume();
+	const open = producer.createFrame({ size: 10 });
+	open.write(new Uint8Array(4));
+	const frame = await reader.nextFrame();
+	expect((await frame?.readChunk())?.byteLength).toBe(4);
+	producer.finish();
+	await expect(frame?.readChunk()).rejects.toThrow("group finished while a frame was being written");
+	expect(() => open.write(new Uint8Array(1))).toThrow("group is closed");
+	await expect(reader.nextFrame()).rejects.toThrow("group finished while a frame was being written");
+});
+
+test("a frame read whole through nextFrame returns its payload once", async () => {
+	const producer = new Producer(0);
+	const reader = producer.consume();
+	producer.writeFrame(textFrame("hello"));
+	const frame = await reader.nextFrame();
+	expect(frame?.size).toBe(5);
+	expect(dec.decode(await frame?.readAll())).toBe("hello");
+	expect(await frame?.readChunk()).toBeUndefined();
 	producer.finish();
 });
 

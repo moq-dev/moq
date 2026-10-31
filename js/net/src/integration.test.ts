@@ -2763,3 +2763,58 @@ test("integration: lite draft-05 ends a track with the publisher's reset", async
 	server.abort();
 	origin.close();
 });
+
+test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
+	"integration: %s streams a frame larger than any whole-frame limit",
+	async (protocol) => {
+		const MiB = 1024 * 1024;
+		const size = 80 * MiB + 7;
+		const byte = (offset: number) => (offset * 7 + 3) % 251;
+		const pair = createMockTransportPair(protocol);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+
+		const broadcast = publish(origin, Path.from("test"));
+		const serving = (async () => {
+			const request = await wireOf(broadcast).requested();
+			if (!request) return;
+			const group = request.accept({ timescale: Timescale.MILLI }).appendGroup();
+			const frame = group.createFrame({ size, timestamp: Timestamp.fromMillis(5) });
+			for (let written = 0; written < size; ) {
+				const chunk = new Uint8Array(Math.min(size - written, MiB + 13));
+				for (let i = 0; i < chunk.byteLength; i++) chunk[i] = byte(written + i);
+				frame.write(chunk);
+				written += chunk.byteLength;
+				await sleep(0);
+			}
+			frame.finish();
+			group.writeFrame(textFrame("after"));
+			group.finish();
+		})();
+
+		const remote = wireOf(client).consume(Path.from("test"));
+		const subscriber = remote.track("video").subscribe();
+		const group = await subscriber.recvGroup();
+		const frame = await group?.nextFrame();
+		expect(frame?.size).toBe(size);
+		let read = 0;
+		for (let chunk = await frame?.readChunk(); chunk; chunk = await frame?.readChunk()) {
+			expect(chunk[0]).toBe(byte(read));
+			expect(chunk[chunk.byteLength - 1]).toBe(byte(read + chunk.byteLength - 1));
+			read += chunk.byteLength;
+		}
+		expect(read).toBe(size);
+		expect(new TextDecoder().decode((await group?.readFrame())?.payload)).toBe("after");
+
+		await serving;
+		subscriber.close();
+		remote.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+	},
+	30_000,
+);

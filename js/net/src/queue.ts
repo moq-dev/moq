@@ -15,6 +15,15 @@ export class Queue<T> implements Iterable<T> {
 		return this.#items[this.#head];
 	}
 
+	get last(): T | undefined {
+		return this.length === 0 ? undefined : this.#items[this.#items.length - 1];
+	}
+
+	/** The retained entry `index` places from the front. */
+	at(index: number): T | undefined {
+		return index < 0 || index >= this.length ? undefined : this.#items[this.#head + index];
+	}
+
 	push(item: T): void {
 		this.#items.push(item);
 	}

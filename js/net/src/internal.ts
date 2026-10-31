@@ -12,7 +12,7 @@ import type { Datagram } from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import type * as Epoch from "./epoch.ts";
 import { toStreamCode } from "./error.ts";
-import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
+import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
 import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -202,6 +202,8 @@ export interface ReadGroupFrame {
 	frame: Frame;
 	/** The stored slice's declared plain size, on compressed reads. */
 	inflated?: number;
+	/** The payload to stream instead of `frame.payload`, for a frame written in pieces. */
+	chunks?: FrameConsumer;
 }
 
 /** What a resumed reader's {@link ResumeSource} sees of the subscriber it serves. */
@@ -573,7 +575,7 @@ export const hooks: {
 	/** Carry a handed-out group across its logical track's route changes. */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
-	readGroupFrame: (group: GroupConsumer, compressed: boolean) => Promise<ReadGroupFrame | undefined>;
+	readGroupFrame: (group: GroupConsumer, compressed: boolean, from?: number) => Promise<ReadGroupFrame | undefined>;
 	/** Notify the owning track when a reader reaches its shed front. */
 	onShedRead: (group: GroupConsumer, notify: () => void) => void;
 	/**
