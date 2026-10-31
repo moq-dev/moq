@@ -1,4 +1,4 @@
-# Two broadcast resolutions
+# [M] Two broadcast resolutions
 
 ## Goal
 
@@ -49,9 +49,6 @@ across languages, the required Nix gate, and all-language interop
 Public API: breaking task shape in moq-net; behavior changes in `@moq/net` and
 the bindings. The method and epoch renames broke every wrapper.
 Wire: none.
-
-## Required
-
 
 ## Related
 
