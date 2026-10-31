@@ -23,8 +23,8 @@ thiserror = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
-hex = { workspace = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
+hex = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
