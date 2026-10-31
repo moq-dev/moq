@@ -254,7 +254,8 @@ struct Pending {
 	/// How many marker groups had declared a break in the track's timeline when the frame
 	/// was read.
 	restart: u64,
-	/// How many times its playhead had jumped, markers included ([`jitter::Arrival::skip`]).
+	/// How many times its playhead had jumped (a skipped group, or a restart) when the frame
+	/// was read.
 	skip: u64,
 	/// How many of those jumps cut a group short ([`ExportSource::cuts`]).
 	cut: u64,
@@ -741,7 +742,6 @@ impl Track {
 		let Pending {
 			frame,
 			restart,
-			skip,
 			arrived,
 			read,
 			..
@@ -780,7 +780,6 @@ impl Track {
 			read: read - ahead,
 			decode: key.into(),
 			restart,
-			skip,
 			sync,
 			leading,
 			bytes: frame.payload.len() + self.key.name.len(),
