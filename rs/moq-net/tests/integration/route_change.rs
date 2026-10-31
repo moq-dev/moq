@@ -26,7 +26,7 @@ use moq_net::{Error, Hop, Timestamp, Version, announce, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
-fn timed() -> moq_net::track::Info {
+pub(super) fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 }
 
@@ -35,19 +35,24 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Frames per group.
 const FRAMES: u64 = 4;
 
-fn produce_origin(hop: u64) -> origin::Producer {
+pub(super) fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
 
 /// Have `to` pull everything `from` publishes.
-async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) -> MockPair {
+pub(super) async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) -> MockPair {
 	priced_link(version, from, to, None).await
 }
 
 /// [`link`], with `to` pricing the link at `cost` when given.
-async fn priced_link(version: Version, from: &origin::Producer, to: &origin::Producer, cost: Option<u64>) -> MockPair {
+pub(super) async fn priced_link(
+	version: Version,
+	from: &origin::Producer,
+	to: &origin::Producer,
+	cost: Option<u64>,
+) -> MockPair {
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(from.consume());
 	options.client_subscribe = Some(to.clone());
@@ -55,7 +60,7 @@ async fn priced_link(version: Version, from: &origin::Producer, to: &origin::Pro
 	connect_mock(options).await
 }
 
-fn payload(group: u64, frame: u64) -> Vec<u8> {
+pub(super) fn payload(group: u64, frame: u64) -> Vec<u8> {
 	format!("{group}.{frame}").into_bytes()
 }
 
@@ -65,7 +70,7 @@ fn tagged(name: &str, group: u64, frame: u64) -> Vec<u8> {
 }
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
-async fn settle() {
+pub(super) async fn settle() {
 	moq_clock::sleep(Duration::from_millis(500)).await;
 }
 
@@ -177,10 +182,10 @@ impl Topology {
 }
 
 /// A frame as the reader saw it: its group, then its timestamp and payload.
-type Delivery = (u64, moq_net::Result<(Option<Timestamp>, Vec<u8>)>);
+pub(super) type Delivery = (u64, moq_net::Result<(Option<Timestamp>, Vec<u8>)>);
 
 /// Read every group in full, reporting each frame as it arrives.
-fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
+pub(super) fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 	let (tx, rx) = mpsc::unbounded();
 	moq_clock::sim::spawn(async move {
 		loop {

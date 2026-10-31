@@ -49,6 +49,7 @@ mod relay_upstream_close;
 mod replacement;
 mod request_caps;
 mod route_change;
+mod route_health;
 mod routing_contracts;
 mod segmented_frame;
 mod session_close;
