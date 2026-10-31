@@ -125,7 +125,8 @@ impl Import {
 		Ok(())
 	}
 
-	/// The MoQ track name this importer publishes on.
+	/// The MoQ track name this importer publishes on, which a decoder identity change replaces
+	/// with a newly minted one.
 	pub fn name(&self) -> &str {
 		self.track.name()
 	}
@@ -133,6 +134,12 @@ impl Import {
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
+	}
+
+	/// The track this importer publishes on, which a decoder identity change replaces with a
+	/// newly named one.
+	pub fn track(&self) -> &moq_net::track::Producer {
+		self.track.track()
 	}
 
 	/// Finish the track, flushing the current group.
@@ -196,10 +203,8 @@ impl Import {
 		Ok(())
 	}
 
-	/// Apply a resolved config, updating the catalog rendition in place.
+	/// Apply a resolved config, minting a track when the decoder identity changes.
 	///
-	/// A changed config just re-mirrors the rendition; there are no fixed tracks to reject a
-	/// reconfiguration.
 	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.catalog.publish(&mut self.track, config)
 	}
@@ -308,14 +313,16 @@ mod tests {
 		let mut frames = split.decode(&au, pts).unwrap();
 		frames.extend(split.flush(pts).unwrap());
 		import.decode(frames).unwrap();
-		let color = || catalog.snapshot().video.renditions["video"].color.clone();
-		assert!(color().unwrap().mastering.is_some());
+		let color = |name: &str| catalog.snapshot().video.renditions[name].color.clone();
+		assert!(color("video").unwrap().mastering.is_some());
 
-		// An SPS that signals no colour: nothing is left once the stale metadata goes.
+		// An SPS that signals no colour: nothing is left once the stale metadata goes. It is also a
+		// new profile and level, so it publishes a new track.
 		import
 			.initialize(&annexb(&[fixtures::VPS, fixtures::SPS, fixtures::PPS]))
 			.unwrap();
-		assert_eq!(color(), None);
+		assert_eq!(import.name(), "video/1");
+		assert_eq!(color("video/1"), None);
 	}
 
 	/// An HDR10 keyframe publishes its VUI colour and the static HDR metadata its SEI carries.

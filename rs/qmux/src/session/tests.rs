@@ -127,8 +127,8 @@ async fn every_version_establishes_and_negotiates_in_band() {
 async fn reading_returns_flow_control_credit() {
 	for &version in Version::ALL {
 		let mut small = config(version);
-		small.receive_window = 64 * 1024;
-		small.stream_receive_window = 16 * 1024;
+		small.limits.receive_window = std::num::NonZeroU64::new(64 * 1024);
+		small.limits.stream_receive_window = std::num::NonZeroU64::new(16 * 1024);
 		let (client, server) = pair(config(version), small).await;
 
 		let data = payload(1 << 20, 3);
@@ -197,10 +197,23 @@ async fn resets_and_stops_carry_their_codes() {
 	assert!(matches!(send.closed().await, Err(Error::StreamStop(11))));
 }
 
+/// A send stream dropped before `finish` resets with code 0, so its reader learns it ended.
+#[tokio::test(start_paused = true)]
+async fn dropping_an_unfinished_send_resets_it() {
+	let (client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
+
+	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+	write_all(&mut send, Bytes::from_static(b"partial")).await;
+	drop(send);
+	let mut recv = server.accept_uni().await.unwrap();
+	let read = moq_clock::timeout(Duration::from_secs(5), read_all(&mut recv)).await;
+	assert!(matches!(read, Ok(Err(Error::StreamReset(0)))), "{read:?}");
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_peer_limits_concurrent_streams() {
 	let mut server = config(Version::QMux02);
-	server.max_streams_uni = 1;
+	server.limits.max_streams = std::num::NonZeroU64::new(1);
 	let (client, server) = pair(config(Version::QMux02), server).await;
 
 	let mut first = client.open_uni(SendOptions::default()).await.unwrap();
@@ -220,7 +233,7 @@ async fn the_peer_limits_concurrent_streams() {
 #[tokio::test(start_paused = true)]
 async fn request_credit_is_refused_without_parking_an_open() {
 	let mut server_config = config(Version::QMux02);
-	server_config.max_streams_bidi = 1;
+	server_config.limits.max_streams = std::num::NonZeroU64::new(1);
 	let (client, server) = pair(config(Version::QMux02), server_config).await;
 	let waiter = &kio::Waiter::noop();
 	let Poll::Ready(Ok(Some((mut send, mut recv)))) = client.poll_open_request(waiter, Default::default()) else {

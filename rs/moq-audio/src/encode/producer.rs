@@ -295,7 +295,15 @@ impl Producer {
 	/// Retune the live encoder to `bitrate`.
 	pub fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 		let encoder = self.encoder.as_mut().ok_or(moq_net::Error::Closed)?;
+		let previous = encoder.bitrate();
 		encoder.set_bitrate(bitrate)?;
+		// Advertise the configured target in place, so encoded-byte estimates cannot replace it.
+		if let Err(err) = self.track.set_bitrate(encoder.bitrate().as_bps()) {
+			// Keep the encoder on what the catalog still advertises. It accepted that rate before,
+			// so the publish error is the one to report.
+			let _ = encoder.set_bitrate(previous);
+			return Err(err.into());
+		}
 		self.bitrate = encoder.bitrate();
 		Ok(())
 	}
@@ -1330,6 +1338,32 @@ mod tests {
 
 		let second = Producer::new(&mut broadcast, catalog, Input::default(), &Options::default()).unwrap();
 		assert_eq!(second.track_name(), "1.opus");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn retuning_updates_the_published_bitrate_in_place() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let options = Options {
+			track: Some("audio".into()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
+		let before = catalog.snapshot().audio.renditions["audio"].clone();
+		let bitrate = moq_net::bandwidth::Rate::from_bps(64_000);
+		producer.set_bitrate(bitrate).unwrap();
+		let after = catalog.snapshot();
+		assert_eq!(after.audio.renditions.len(), 1);
+		let mut expected = before;
+		expected.bitrate = Some(64_000);
+		assert_eq!(after.audio.renditions["audio"], expected);
+		assert_eq!(producer.track_name(), "audio");
+		assert_eq!(producer.bitrate(), bitrate);
+		// Encoded-byte detection must not replace the newly configured target.
+		for timestamp in [0, 20_000, 40_000] {
+			producer.write(&pcm_frame(&vec![0.1; 1920], timestamp)).unwrap();
+		}
+		assert_eq!(catalog.snapshot().audio.renditions["audio"].bitrate, Some(64_000));
 	}
 
 	/// The rendition a producer publishes is the encoder's own catalog, so neither can drift.

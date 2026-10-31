@@ -166,22 +166,25 @@ where
 		+ Unpin
 		+ 'static,
 {
-	let timeout = options.timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT);
-	let deadline = (!timeout.is_zero())
-		.then(|| moq_clock::now().checked_add(timeout))
-		.flatten();
-	// A vanished peer sends no FIN. Ping and timeout bound the same stale-session
-	// lifetime that QUIC's idle timeout bounds on the native path.
-	// The subprotocol names the QMux version; an upgrade without one has no wire format.
-	let alpn = options.link.alpn.as_deref().unwrap_or_default();
-	let mut upgraded = qmux::ws::Upgraded::new(socket, alpn)
-		.with_keep_alive(qmux::ws::KeepAlive::default())
-		.with_session_config(crate::qmux_config());
-	if let Some(stats) = &options.socket_stats {
-		upgraded = upgraded.with_socket_stats(stats.clone());
-	}
-	let session = upgraded.accept().map_err(Error::accept)?;
-	crate::server::accept_websocket(session, options, deadline).await
+	crate::runtime::scope(async move {
+		let timeout = options.timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT);
+		let deadline = (!timeout.is_zero())
+			.then(|| moq_clock::now().checked_add(timeout))
+			.flatten();
+		// A vanished peer sends no FIN. Ping and timeout bound the same stale-session
+		// lifetime that QUIC's idle timeout bounds on the native path.
+		// The subprotocol names the QMux version; an upgrade without one has no wire format.
+		let alpn = options.link.alpn.as_deref().unwrap_or_default();
+		let mut upgraded = qmux::ws::Upgraded::new(socket, alpn)
+			.with_keep_alive(qmux::ws::KeepAlive::default())
+			.with_session_config(crate::qmux_config());
+		if let Some(stats) = &options.socket_stats {
+			upgraded = upgraded.with_socket_stats(stats.clone());
+		}
+		let session = upgraded.accept().map_err(Error::accept)?;
+		crate::server::accept_websocket(session, options, deadline).await
+	})
+	.await
 }
 
 /// Servers (host, port) where WebSocket won the race, so later dials skip QUIC's head start.
@@ -606,13 +609,16 @@ pub struct Listener {
 impl Listener {
 	/// Bind a listener to the given address, accepting every moq ALPN we know about.
 	pub async fn bind(addr: net::SocketAddr) -> Result<Self> {
-		let listener = tokio::net::TcpListener::bind(addr).await?;
-		let protocols = supported_subprotocols(moq_net::ALPNS);
-		Ok(Self {
-			listener,
-			protocols,
-			health: crate::accept::Health::new("websocket"),
+		crate::runtime::scope(async move {
+			let listener = tokio::net::TcpListener::bind(addr).await?;
+			let protocols = supported_subprotocols(moq_net::ALPNS);
+			Ok(Self {
+				listener,
+				protocols,
+				health: crate::accept::Health::new("websocket"),
+			})
 		})
+		.await
 	}
 
 	/// Accept only the given moq ALPNs, in preference order.
@@ -654,9 +660,12 @@ impl Listener {
 	///
 	/// As in [`crate::tcp`], the `Option` has no `None` case left to report.
 	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
-		self.accept_with_url()
-			.await
-			.map(|result| result.map(|(session, _, _)| session))
+		crate::runtime::scope(async move {
+			self.accept_with_url()
+				.await
+				.map(|result| result.map(|(session, _, _)| session))
+		})
+		.await
 	}
 
 	/// Accept the next connection and retain the WebSocket request URL, the chosen

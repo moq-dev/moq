@@ -114,7 +114,7 @@ impl Topology {
 		let p_to_a = link(version, &publisher, &relay_a, None).await;
 		let p_to_b = link(version, &publisher, &relay_b, None).await;
 		let a_to_r = link(version, &relay_a, &subscriber, None).await;
-		subscriber.consume().routed("live").await.unwrap();
+		crate::support::announced(&subscriber.consume(), "live").await;
 
 		let mut topology = Self {
 			version,
@@ -167,7 +167,7 @@ impl Topology {
 
 	/// A new reader on `R`: a fresh broadcast request and a floorless subscription.
 	async fn reader(&self) -> Reader {
-		let remote = moq_clock::timeout(READ_TIMEOUT, self.subscriber.consume().request_broadcast("live", None))
+		let remote = moq_clock::timeout(READ_TIMEOUT, self.subscriber.consume().request("live", None))
 			.await
 			.expect("request hung")
 			.expect("request refused");
@@ -391,12 +391,7 @@ async fn fetch_after_leave(version: &str, pause: Duration) {
 	drop(reader);
 	moq_clock::sleep(pause).await;
 
-	let remote = topology
-		.subscriber
-		.consume()
-		.request_broadcast("live", None)
-		.await
-		.unwrap();
+	let remote = topology.subscriber.consume().request("live", None).await.unwrap();
 	let fetch = remote.track("catalog.json").unwrap().fetch_group(0, None);
 	let mut group = moq_clock::timeout(READ_TIMEOUT, fetch)
 		.await

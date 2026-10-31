@@ -162,10 +162,18 @@ async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
 	let (c, _c_broadcast) = peer("c", &forward_c).await;
 
 	// The mesh converges: each side learns the other's broadcasts.
-	within("A learns b", a.origin.consume().routed("b")).await;
-	within("C learns b", c.origin.consume().routed("b")).await;
-	within("B learns a", b_origin.consume().routed("a")).await;
-	within("B learns c", b_origin.consume().routed("c")).await;
+	within("A learns b", a.origin.consume().follow("b", None).unwrap().available())
+		.await
+		.expect("resolves");
+	within("C learns b", c.origin.consume().follow("b", None).unwrap().available())
+		.await
+		.expect("resolves");
+	within("B learns a", b_origin.consume().follow("a", None).unwrap().available())
+		.await
+		.expect("resolves");
+	within("B learns c", b_origin.consume().follow("c", None).unwrap().available())
+		.await
+		.expect("resolves");
 	assert_eq!(forward_a.sessions(b_addr), 1);
 	assert_eq!(forward_c.sessions(b_addr), 1);
 
@@ -199,8 +207,18 @@ async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
 		pass(&clock, STEP).await;
 		waited += STEP;
 	}
-	within("B' learns a", b2_origin.consume().routed("a")).await;
-	within("B' learns c", b2_origin.consume().routed("c")).await;
+	within(
+		"B' learns a",
+		b2_origin.consume().follow("a", None).unwrap().available(),
+	)
+	.await
+	.expect("resolves");
+	within(
+		"B' learns c",
+		b2_origin.consume().follow("c", None).unwrap().available(),
+	)
+	.await
+	.expect("resolves");
 
 	// And reconnects exactly once.
 	pass(&clock, Duration::from_secs(30)).await;

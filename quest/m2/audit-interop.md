@@ -30,6 +30,8 @@ Decided with the maintainer on 2026-10-21:
   through every registered public relay), plus every cell of the runner's
   report with a moq.dev side: our clients, our docker relay, or
   `cdn.moq.dev`, including third-party clients failing against our relay.
+  Smoke's upstream runner job fails only on our clients against our relay,
+  so this audit is what catches every other red cell.
 - Sync new registry entries. The smoke workflow's upstream runner job runs
   the runner's HEAD, so check that newly registered clients and docker-only
   relays show up in its [report](https://git.moq.dev/interop-runner/),
@@ -125,6 +127,11 @@ Theirs, reported or waiting on others:
   IPv6 address of `cdn.moq.dev` and needs an explicit port in an `https://`
   URL; and the runner lists moqxr as not run for lack of a published image.
   Search before filing again.
+- To file: cloudflare/moq-rs `SubscribeRecv::error` returns before setting
+  `closed` when `TrackWriter::close` fails because the track has no reader,
+  so a REQUEST_ERROR reaches the caller as `done` instead of not-found.
+  Smoke's Cloudflare probe holds its reader to avoid it
+  ([moq-dev/moq#7073](https://github.com/moq-dev/moq/pull/7073)).
 - Not reported, lower value: red5 subscribes the published prefix instead
   of the requested tuple namespace (no public repo); moqlivemock's relay
   refuses a SUBSCRIBE under an announced prefix; libquicr answers

@@ -243,13 +243,16 @@ pub struct Listener {
 impl Listener {
 	/// Bind a TCP listener to the given address.
 	pub async fn bind(addr: net::SocketAddr) -> Result<Self> {
-		let listener = tokio::net::TcpListener::bind(addr).await?;
-		Ok(Self {
-			listener,
-			protocols: Vec::new(),
-			health: crate::accept::Health::new("tcp"),
-			tls: None,
+		crate::runtime::scope(async move {
+			let listener = tokio::net::TcpListener::bind(addr).await?;
+			Ok(Self {
+				listener,
+				protocols: Vec::new(),
+				health: crate::accept::Health::new("tcp"),
+				tls: None,
+			})
 		})
+		.await
 	}
 
 	/// Serve TLS with `config`, whose ALPN list already names each
@@ -268,7 +271,7 @@ impl Listener {
 	/// Report into `health` instead of the one this listener made for itself.
 	///
 	/// For an owner that has to hand the handle out *before* the listener exists:
-	/// [`crate::Server`] binds these lazily (they need a runtime), but an embedder
+	/// [`crate::Server`] binds these lazily (they bind asynchronously), but an embedder
 	/// registering them with a metrics endpoint does so at startup.
 	pub fn with_accept_health(mut self, health: crate::accept::Health) -> Self {
 		self.health = health;
@@ -303,7 +306,7 @@ impl Listener {
 	/// loop, so this always yields. It stays because dropping it is a breaking change
 	/// to a published signature.
 	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
-		Some(self.accept_pending().await.await.map(|(session, _)| session))
+		crate::runtime::scope(async move { Some(self.accept_pending().await.await.map(|(session, _)| session)) }).await
 	}
 
 	/// Accept a socket and return its independently driven qmux handshake.

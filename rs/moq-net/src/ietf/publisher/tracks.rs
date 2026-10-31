@@ -601,7 +601,7 @@ impl Publisher {
 
 		// Resolving may wait on a route for the broadcast, which its going ends.
 		let resolved = {
-			let mut requesting = std::pin::pin!(request.origin.request_broadcast(&suffix, epoch));
+			let mut requesting = std::pin::pin!(request.origin.request(&suffix, epoch));
 			kio::wait(|waiter| {
 				if route.poll_closed(waiter).is_ready() || request.live.poll_closed(waiter).is_ready() {
 					return Poll::Ready(None);
@@ -984,7 +984,11 @@ impl Publisher {
 		// What to resume with, and whether an update asked for it: a forwarding PUBLISH_OK
 		// resumes at once, with no update to answer.
 		let mut resume: Option<Resume> = resume;
+		// Each turn answers a REQUEST_UPDATE, so a peer streaming them must not hold the
+		// session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		let done = loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			if let Some(how) = resume.take() {
 				match self
 					.resume_publish(
@@ -1244,7 +1248,7 @@ impl Publisher {
 					},
 					cache: track.clone(),
 					namespace: namespace.clone(),
-					token: false,
+					grant: None,
 					ranking: serve.ranking.clone(),
 				},
 				(Filter::NextObject, None) => Joined::Empty,

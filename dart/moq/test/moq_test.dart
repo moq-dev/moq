@@ -4,7 +4,6 @@ import 'dart:typed_data';
 
 import 'package:moq/audio.dart' as moq_audio;
 import 'package:moq/media.dart' as moq_media;
-import 'package:moq/flate.dart' as moq_flate;
 import 'package:moq/json.dart' as moq_json;
 import 'package:moq/moq.dart';
 import 'package:moq/video.dart' as moq_video;
@@ -56,39 +55,6 @@ void main() {
     expect(() => catalog.now(), throwsA(isA<ClosedMoqException>()));
   });
 
-  for (final timestamp in <int?>[null, 123456]) {
-    for (final mode in ['snapshot', 'stream']) {
-      test('flate $mode preserves timestamp $timestamp', () async {
-        final broadcast = BroadcastProducer();
-        final info = timestamp == null ? null : TrackInfo(timescale: 1000000);
-        final track = broadcast.publishTrack(name: 'data', info: info);
-        final consumer = track.consume(subscription: null);
-        final payload = utf8.encode('payload');
-        if (mode == 'snapshot') {
-          final producer = moq_flate.SnapshotProducer(
-            broadcast: broadcast,
-            track: track,
-            config: moq_flate.Config(),
-          );
-          producer.update(payload: payload, timestampUs: timestamp);
-          producer.finish();
-        } else {
-          final producer = moq_flate.StreamProducer(
-            broadcast: broadcast,
-            track: track,
-            config: moq_flate.Config(),
-          );
-          producer.append(payload: payload, timestampUs: timestamp);
-          producer.finish();
-        }
-        final frame = await consumer.readFrame().timeout(timeout);
-        expect(frame?.payload, payload);
-        expect(frame?.timestampUs, timestamp);
-        broadcast.close();
-      });
-    }
-  }
-
   test('raw writes without timestamps stay untimed', () async {
     final broadcast = BroadcastProducer();
     final track = broadcast.publishTrack(name: 'untimed', info: null);
@@ -99,6 +65,11 @@ void main() {
     expect(consumer.info().timescale, isNull);
     track.finish();
     broadcast.close();
+  });
+
+  test('a default subscription skips superseded groups at once', () {
+    expect(defaultSubscription().maxDelay, Duration.zero);
+    expect(Subscription().maxDelay, isNull);
   });
 
   test('a negative duration in a raw record is refused', () {
@@ -253,9 +224,7 @@ void main() {
         (await announcement.timeout(timeout) as AnnounceEventStart).announce;
     expect(announced.prefix, 'live');
 
-    final requested = await client
-        .requestBroadcast(announced.prefix)
-        .timeout(timeout);
+    final requested = await client.request(announced.prefix).timeout(timeout);
     final consumer = await requested
         .subscribeTrack(name: 'events', subscription: null)
         .timeout(timeout);
@@ -436,7 +405,7 @@ void main() {
     broadcast.publishTrack(name: 'events', info: null);
     final consumer = origin.consume();
     await expectLater(
-      consumer.requestBroadcast(path: 'live').timeout(timeout),
+      consumer.request(path: 'live').timeout(timeout),
       throwsA(anything),
     );
 
@@ -451,17 +420,17 @@ void main() {
     expect(retracted, isA<AnnounceEventEnd>());
     expect((retracted as AnnounceEventEnd).announce.prefix, 'live');
     await expectLater(
-      consumer.requestBroadcast(path: 'live').timeout(timeout),
+      consumer.request(path: 'live').timeout(timeout),
       throwsA(anything),
     );
 
     publication.announce(route: AnnounceRoute());
     expect(await nextRoute(announced), isA<AnnounceEventStart>());
-    await consumer.requestBroadcast(path: 'live').timeout(timeout);
+    await consumer.request(path: 'live').timeout(timeout);
 
     // Disposing the publication keeps the route; closing the broadcast ends it.
     publication.dispose();
-    await consumer.requestBroadcast(path: 'live').timeout(timeout);
+    await consumer.request(path: 'live').timeout(timeout);
     broadcast.close();
     expect(await nextRoute(announced), isA<AnnounceEventEnd>());
     announced.cancel();
@@ -481,7 +450,7 @@ void main() {
       throwsA(isA<ClosedMoqException>()),
     );
     expect(() => stale.unannounce(), throwsA(isA<ClosedMoqException>()));
-    await origin.consume().requestBroadcast(path: 'live').timeout(timeout);
+    await origin.consume().request(path: 'live').timeout(timeout);
     replacement.broadcast().close();
   });
 
@@ -524,7 +493,7 @@ void main() {
   test('dynamic serves a request under a prefix', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final dynamic = origin.requests(prefix: 'live');
-    final pending = origin.consume().requestBroadcast(path: 'live/cam');
+    final pending = origin.consume().request(path: 'live/cam');
     final request = await dynamic.requestedBroadcast().timeout(timeout);
     expect(request.path(), 'live/cam');
     final prepared = request.prepare(epoch: mintEpoch());
@@ -544,7 +513,7 @@ void main() {
       broadcast: broadcast,
       track: broadcast.publishTrack(
         name: 'status',
-        info: MoqTrackInfo(timescale: 1000000),
+        info: MoqTrackInfo(timescale: 1000000, compress: true),
       ),
       config: moq_json.SnapshotConfig(),
     );
@@ -552,10 +521,7 @@ void main() {
         .consume()
         .subscribeTrack(name: 'status', subscription: null)
         .timeout(timeout);
-    final consumer = moq_json.SnapshotConsumer(
-      track: track,
-      config: moq_json.SnapshotConfig(),
-    );
+    final consumer = moq_json.SnapshotConsumer(track: track);
 
     for (var n = 1; n <= 4; n++) {
       producer.update(value: jsonEncode({'n': n}), timestampUs: n * 1000);
@@ -581,18 +547,15 @@ void main() {
     final producer = moq_json.WindowProducer(
       track: broadcast.publishTrack(
         name: 'log',
-        info: MoqTrackInfo(timescale: 1000000),
+        info: MoqTrackInfo(timescale: 1000000, compress: true),
       ),
-      config: moq_json.WindowConfig(compression: true),
+      config: moq_json.WindowConfig(),
     );
     final track = await broadcast
         .consume()
         .subscribeTrack(name: 'log', subscription: null)
         .timeout(timeout);
-    final consumer = moq_json.WindowConsumer(
-      track: track,
-      config: moq_json.WindowConfig(compression: true),
-    );
+    final consumer = moq_json.WindowConsumer(track: track);
 
     for (var n = 0; n < 3; n++) {
       producer.push(value: jsonEncode({'n': n}), timestampUs: n * 1000);

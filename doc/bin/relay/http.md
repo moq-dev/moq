@@ -45,8 +45,14 @@ listen = "127.0.0.1:9101"
 Prometheus text: payload bytes, frames, groups, announces, subscriptions, and
 viewers split by `tier` and `role`; requests and sessions by `tier`; and
 accept-loop counters per TCP listener. Payload counters accumulate for the
-node's lifetime and leave out the stats feed's own traffic. Host CPU and memory
-belong to a node exporter.
+node's lifetime and leave out the stats feed's own traffic. Every counter fed by
+sessions and requests, through the wire and control bytes below, counts only
+while [stats](/bin/relay/config#stats) are enabled. Host CPU and memory belong
+to a node exporter.
+
+`moq_relay_inflated_bytes_total` counts the bytes the relay inflated from
+[compressed tracks](/concept/compression) for readers that cannot carry
+compression, once per group however many share the copy.
 
 `moq_relay_wire_tx_bytes_total` and `moq_relay_wire_rx_bytes_total` sum the
 per-session [transport counters](/concept/stats#sessions) by `tier`, including

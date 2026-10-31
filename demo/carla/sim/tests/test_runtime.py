@@ -372,7 +372,7 @@ def test_session_announces_with_the_run_epoch_after_populating_tracks() -> None:
     calls: list[object] = []
     publication = SimpleNamespace(
         broadcast=SimpleNamespace(
-            publish_track=lambda name: calls.append(name) or SimpleNamespace(demand=SimpleNamespace)
+            publish_track=lambda name, info=None: calls.append(name) or SimpleNamespace(demand=SimpleNamespace)
         ),
         announce=lambda route: calls.append(route),
     )

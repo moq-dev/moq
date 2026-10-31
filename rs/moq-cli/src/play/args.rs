@@ -281,8 +281,8 @@ mod tests {
 		assert_eq!(parse(&[]).catalog_format("room.msf"), CatalogFormat::Msf);
 		assert_eq!(parse(&[]).catalog_format("room"), CatalogFormat::DEFAULT);
 		assert_eq!(
-			parse(&["--catalog-format", "hangz"]).catalog_format("room.msf"),
-			CatalogFormat::HangZ
+			parse(&["--catalog-format", "hang"]).catalog_format("room.msf"),
+			CatalogFormat::Hang
 		);
 	}
 }

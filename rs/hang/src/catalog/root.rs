@@ -225,23 +225,19 @@ impl Catalog<()> {
 	/// The default name for the catalog track.
 	pub const DEFAULT_NAME: &str = "catalog.json";
 
-	/// The track name for the DEFLATE-compressed catalog: the `.z` sibling of [`DEFAULT_NAME`](Self::DEFAULT_NAME).
-	///
-	/// Carries the identical catalog JSON, compressed per group (see `moq-json`). A publisher serves
-	/// both tracks; a consumer reads whichever it prefers.
-	pub const COMPRESSED_NAME: &str = "catalog.json.z";
-
 	/// Track properties for creating the catalog track via
 	/// [`create_track`](moq_net::broadcast::Producer::create_track) at
 	/// [`DEFAULT_NAME`](Self::DEFAULT_NAME).
 	///
 	/// Keeps the bare `moq_net` retention rather than the media one: the catalog is
 	/// snapshot mode, so the useful value is the live edge, which is always kept.
-	/// Timed in milliseconds, so snapshots share the broadcast clock with media.
+	/// Timed in milliseconds, so snapshots share the broadcast clock with media, and
+	/// [`compress`](moq_net::track::Info::compress)ed, since catalog JSON is small and repetitive.
 	pub fn default_track_info() -> moq_net::track::Info {
 		moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_priority(PRIORITY.catalog)
+			.with_compress(true)
 	}
 
 	/// The subscription preferences used for the catalog track (high priority so
@@ -405,9 +401,7 @@ impl<E: Serialize> Catalog<E> {
 mod test {
 	use std::collections::BTreeMap;
 
-	use crate::catalog::{
-		AudioCodec::Opus, AudioConfig, BinaryConfig, Compression, Container, H264, JsonConfig, Mode, VideoConfig,
-	};
+	use crate::catalog::{AudioCodec::Opus, AudioConfig, BinaryConfig, Container, H264, JsonConfig, Mode, VideoConfig};
 
 	use super::*;
 
@@ -980,7 +974,7 @@ mod test {
 	#[test]
 	fn a_malformed_data_section_still_fails() {
 		for section in ["json", "binary"] {
-			let wire = format!(r#"{{"{section}":{{"tracks":{{"chat":{{"compression":"deflate"}}}}}}}}"#);
+			let wire = format!(r#"{{"{section}":{{"tracks":{{"chat":{{"schema":"chat"}}}}}}}}"#);
 			assert!(
 				Catalog::<()>::from_str(&wire).is_err(),
 				"a mode-less {section} track decoded instead of failing"
@@ -1130,7 +1124,6 @@ mod test {
 				"tracks": {
 					"chat": {
 						"mode": "stream",
-						"compression": "deflate",
 						"schema": "https://example.com/chat.schema.json"
 					},
 					"status": {
@@ -1152,7 +1145,6 @@ mod test {
 		encoded.retain(|c| !c.is_whitespace());
 
 		let mut chat = JsonConfig::new(Mode::Stream);
-		chat.compression = Some(Compression::Deflate);
 		chat.schema = Some("https://example.com/chat.schema.json".to_string());
 
 		let mut status = JsonConfig::new(Mode::Snapshot);
@@ -1226,26 +1218,25 @@ mod test {
 			mavlink: BTreeMap<String, Mavlink>,
 		}
 
-		let encoded =
-			r#"{"com.example.mavlink":{"telemetry":{"config":{"mode":"stream","compression":"deflate"},"sysid":1}}}"#;
+		let encoded = r#"{"com.example.mavlink":{"telemetry":{"config":{"mode":"stream","mime":"application/mavlink"},"sysid":1}}}"#;
 
 		let catalog = Catalog::<Ext>::from_str(encoded).unwrap();
 		let entry = &catalog.ext.mavlink["telemetry"];
 		assert_eq!(entry.sysid, 1);
 		assert_eq!(entry.config.mode, Mode::Stream);
-		assert_eq!(entry.config.compression, Some(Compression::Deflate));
+		assert_eq!(entry.config.mime.as_deref(), Some("application/mavlink"));
 		assert_eq!(catalog.to_json().unwrap(), encoded);
 	}
 
-	/// A track using a future mode or compression must survive a reparse-and-republish intact, so a
-	/// relay doesn't corrupt what it can't read. Its siblings stay readable.
+	/// A track using a future mode must survive a reparse-and-republish intact, so a relay doesn't
+	/// corrupt what it can't read. Its siblings stay readable.
 	#[test]
-	fn unknown_mode_and_compression_keep_siblings() {
+	fn unknown_mode_keeps_siblings() {
 		let encoded = r#"{
 			"json": {
 				"tracks": {
-					"future": {"mode": "windowed", "compression": "zstd"},
-					"known": {"mode": "stream", "compression": "deflate"}
+					"future": {"mode": "windowed"},
+					"known": {"mode": "stream"}
 				}
 			}
 		}"#;
@@ -1254,11 +1245,9 @@ mod test {
 
 		let known = parsed.json.tracks.get("known").expect("missing track");
 		assert_eq!(known.mode, Mode::Stream);
-		assert_eq!(known.compression, Some(Compression::Deflate));
 
 		let future = parsed.json.tracks.get("future").expect("missing track");
 		assert_eq!(future.mode, Mode::Unknown("windowed".to_string()));
-		assert_eq!(future.compression, Some(Compression::Unknown("zstd".to_string())));
 
 		let output = parsed.to_json().expect("failed to encode");
 		assert!(
@@ -1290,7 +1279,7 @@ mod test {
 	/// last, so an entry without a mode is malformed rather than assumed.
 	#[test]
 	fn a_track_without_a_mode_is_rejected() {
-		Catalog::<()>::from_str(r#"{"json":{"tracks":{"chat":{"compression":"deflate"}}}}"#)
+		Catalog::<()>::from_str(r#"{"json":{"tracks":{"chat":{"schema":"chat"}}}}"#)
 			.expect_err("a mode-less track must not decode");
 	}
 
