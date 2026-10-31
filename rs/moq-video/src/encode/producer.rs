@@ -869,7 +869,9 @@ async fn capture_loop<S: CaptureSource>(
 		// reopened camera starts optimistic again rather than inheriting the
 		// backed-off rate from whatever the link was doing last time.
 		let mut rate = Some(rate::Follower::new(claim.consume(), rate::Policy::new(ceiling)));
-		producer.report_bitrate(ceiling);
+		// The encoder's current target, reported again on any track the capture moves to.
+		let mut bitrate = ceiling;
+		producer.report_bitrate(bitrate);
 		// Per encoder, since a fresh one opens with a keyframe that serves every earlier ask.
 		let mut forced = Cuts::new(served);
 		// Rate control follows the grant only while someone watches. The first poll of `watch`
@@ -898,8 +900,9 @@ async fn capture_loop<S: CaptureSource>(
 						break; // no viewers: release the camera, then wait for one
 					}
 					if watched
-						&& !wanted && let Some(bitrate) = rest(&mut encoder, &mut rate, claim, ceiling).await
+						&& !wanted && let Some(rested) = rest(&mut encoder, &mut rate, claim, ceiling).await
 					{
+						bitrate = rested;
 						producer.report_bitrate(bitrate);
 					}
 					watched = wanted;
@@ -908,7 +911,8 @@ async fn capture_loop<S: CaptureSource>(
 				// Retune between frames rather than mid-encode, and only when
 				// the policy says the target actually moved.
 				target = next_target(&mut rate), if watched => {
-					if let Some(bitrate) = apply_target(&mut encoder, &mut rate, target).await {
+					if let Some(applied) = apply_target(&mut encoder, &mut rate, target).await {
+						bitrate = applied;
 						producer.report_bitrate(bitrate);
 					}
 					continue;
@@ -950,9 +954,11 @@ async fn capture_loop<S: CaptureSource>(
 				}
 				watch = demand.clone();
 				watched = false;
-				if let Some(bitrate) = rest(&mut encoder, &mut rate, claim, ceiling).await {
-					producer.report_bitrate(bitrate);
+				// The new track's stats start empty, so they learn the target whether or not it rests.
+				if let Some(rested) = rest(&mut encoder, &mut rate, claim, ceiling).await {
+					bitrate = rested;
 				}
+				producer.report_bitrate(bitrate);
 			}
 		}
 
