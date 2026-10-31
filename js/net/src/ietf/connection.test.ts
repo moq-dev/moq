@@ -122,6 +122,7 @@ for (const [version, alpn] of [
 /** We list no tracks by PUBLISH: each SUBSCRIBE_TRACKS gets NOT_SUPPORTED, and the session stays usable. */
 for (const [version, alpn] of [
 	[Version.DRAFT_18, ALPN.DRAFT_18],
+	[Version.DRAFT_20, ALPN.DRAFT_20],
 	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const) {
 	test(`SUBSCRIBE_TRACKS is refused on its own stream on ${alpn}`, async () => {

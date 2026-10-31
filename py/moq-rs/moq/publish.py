@@ -21,6 +21,7 @@ from ._records import _subscription, _track_info
 from ._stream import _Stream
 from .types import (
     Frame,
+    Position,
     Subscription,
     TrackInfo,
 )
@@ -127,6 +128,18 @@ class TrackProducer:
         transport and wire version; there is no stream fallback.
         """
         return self._inner.append_datagram(Frame(payload, timestamp)._ffi())
+
+    def insert_datagram(self, sequence: int, payload: bytes, timestamp: timedelta | None = None) -> None:
+        """Send a best-effort datagram at an explicit sequence number.
+
+        For a caller that allocates its own sequences; :meth:`append_datagram`
+        continues after the largest one.
+        """
+        self._inner.insert_datagram(sequence, Frame(payload, timestamp)._ffi())
+
+    def largest(self) -> Position | None:
+        """The newest group or datagram written, at its newest frame; ``None`` before any."""
+        return self._inner.largest()
 
     def consume(self, subscription: Subscription | None = None) -> TrackConsumer:
         """Create a consumer that reads directly from this producer's track.

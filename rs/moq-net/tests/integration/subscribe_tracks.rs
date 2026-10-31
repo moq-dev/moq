@@ -125,7 +125,7 @@ async fn subscribe_tracks(pair: &MockPair) -> Vec<u8> {
 /// stream, and the subscription already on the session keeps going.
 #[moq_clock::test]
 async fn subscribe_tracks_is_refused_per_request() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
 		let mut setup = setup(version.parse().unwrap()).await;
 		deliver(&mut setup, b"before").await;
 

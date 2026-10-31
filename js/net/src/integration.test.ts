@@ -1295,6 +1295,7 @@ test("integration: ietf fetch group is unsupported", async () => {
 test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
 	for (const [protocol, version] of [
 		[Ietf.ALPN.DRAFT_18, Ietf.Version.DRAFT_18],
+		[Ietf.ALPN.DRAFT_20, Ietf.Version.DRAFT_20],
 		[Ietf.ALPN.DRAFT_22, Ietf.Version.DRAFT_22],
 	] as const) {
 		const pair = createMockTransportPair(protocol);

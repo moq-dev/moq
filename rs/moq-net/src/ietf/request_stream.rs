@@ -52,7 +52,7 @@ pub(super) fn poll_withdrawn(
 /// One whole `[type][length][body]` message off a request stream, decoded at once so a read
 /// dropped part-way consumes nothing.
 #[derive(Debug)]
-pub(super) struct Framed(pub(super) u64, pub(super) super::Body);
+pub(crate) struct Framed(pub(crate) u64, pub(crate) super::Body);
 
 impl<'a> Decode<'a, Version> for Framed {
 	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
@@ -68,7 +68,7 @@ impl<'a> Decode<'a, Version> for Framed {
 /// A message following the request on a request stream: `T`, or a GOAWAY migrating this
 /// one request (draft-22 section 9.2).
 #[derive(Debug)]
-pub(super) enum Next<T> {
+pub(crate) enum Next<T> {
 	Message(T),
 	/// `redirect` is whether it names a new session, which only a server may do.
 	GoAway {
@@ -79,7 +79,9 @@ pub(super) enum Next<T> {
 impl<'a, T: Decode<'a, Version>> Decode<'a, Version> for Next<T> {
 	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let mut peek = r.clone();
-		if peek.varint()? == super::GoAway::ID {
+		// A type cut short falls through to `T`, whose own read of it records what it
+		// needed on `r`, where the reader looks for it.
+		if peek.varint().is_ok_and(|id| id == super::GoAway::ID) {
 			*r = peek;
 			r.uncounted = r.position();
 			let msg = super::GoAway::decode(r, version)?;
@@ -229,7 +231,7 @@ pub(super) async fn write_error<W: crate::transport::poll::SendStream>(
 
 /// A framed subscription update, preserving omitted preferences.
 #[derive(Debug)]
-pub(super) struct Update {
+pub(crate) struct Update {
 	/// The update's own Request ID.
 	pub(super) request_id: super::RequestId,
 	pub(super) priority: Option<u8>,
@@ -263,7 +265,7 @@ impl Update {
 			0x10 => forward: Option<bool>,
 			0x20 => priority: Option<u8>,
 			0x21 => filter: Option<Filter>,
-			0x23 => fill: Option<Fill> where Filter::is_draft22(version),
+			0x23 => fill: Option<Fill> where Filter::is_draft20(version),
 			0x25 => subgroup_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x26 => object_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x27 => priority_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
@@ -329,7 +331,7 @@ impl<'a> Decode<'a, Version> for Update {
 
 /// The namespace-only parameters of a REQUEST_UPDATE.
 #[derive(Debug)]
-pub(super) struct NamespaceUpdate {
+pub(crate) struct NamespaceUpdate {
 	pub(super) request_id: super::RequestId,
 	pub(super) prefix: Option<crate::Path>,
 	pub(super) refused: Option<Error>,
@@ -384,7 +386,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn request_messages_keep_goaway_state_across_response_phases() {
 		use crate::lite::test_transport::ScriptedSession;
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			// GOAWAY, REQUEST_OK, then another GOAWAY on the same stream.
 			let script = vec![0x10, 0, 2, 0, 0, 0x07, 0, 0, 0x10, 0, 2, 0, 0];
 			let session = ScriptedSession::eof(script);
@@ -428,7 +430,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_goaway_does_not_cancel_a_pending_request() {
 		use crate::lite::test_transport::ScriptedSession;
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
 			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
 				.await
@@ -465,7 +467,7 @@ mod tests {
 
 	#[test]
 	fn delivery_timeouts_on_subscription_updates_are_accepted() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			// Request ID 2; OBJECT_DELIVERY_TIMEOUT=7, SUBGROUP_DELIVERY_TIMEOUT=9.
 			let mut buf = bytes::Bytes::from_static(&[2, 2, 0x02, 7, 0x04, 9]);
 			let update = crate::coding::decode_buf(&mut buf, version, Update::decode_body).unwrap();
@@ -490,7 +492,7 @@ mod tests {
 	fn track_property_filter_on_namespace_update_closes() {
 		// REQUEST_UPDATE, 6 bytes: Request ID 2, one parameter: 0x29 with a two-byte value.
 		const FRAME: &[u8] = &[0x02, 0x00, 0x06, 2, 1, 0x29, 2, 0, 0];
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut buf = bytes::Bytes::from_static(FRAME);
 			let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::decode(r, v));
 			assert!(decoded.is_err(), "{version}");

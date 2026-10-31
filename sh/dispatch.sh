@@ -337,6 +337,13 @@ step() {
                     return 77
                 fi
             fi
+            # Without KVM, QEMU falls back to emulation and the VM tests time
+            # out long after. Refuse rather than skip, so a local gate never
+            # reads as passing without them.
+            if [[ "$OSTYPE" == linux* && "$HOSTTYPE" == x86_64 && ! -e /dev/kvm ]]; then
+                echo "$action: flake's NixOS VM tests need KVM, but /dev/kvm is missing; run them on a KVM host, as CI does" >&2
+                return 1
+            fi
             # 77 marks the probe's skip, so the check's own 77 is a failure.
             # Full build logs name a failing VM subtest; Nix otherwise keeps
             # only the last 25 lines, which are QEMU's cleanup.
