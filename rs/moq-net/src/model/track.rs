@@ -18765,6 +18765,11 @@ mod test {
 		assert_eq!(drain_groups(&mut subscriber), [1]);
 		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
 		assert!(drained_drops(&mut subscriber).is_empty(), "nothing was given up");
+		let Inner::Plain(cursor) = &subscriber.inner else {
+			unreachable!("a plain subscription");
+		};
+		let misses = cursor.misses.as_ref().expect("the reader judged its misses");
+		assert!(misses.refilled().is_empty(), "a refill handed out is forgotten");
 	}
 
 	/// An eviction waits only for a reader that judged the evicted group cached: a reader

@@ -200,6 +200,12 @@ impl Misses {
 		&self.given_up
 	}
 
+	/// What was refilled after an eviction and not handed out yet.
+	#[cfg(all(test, feature = "async"))]
+	pub fn refilled(&self) -> &RangeSet<u64> {
+		&self.refilled
+	}
+
 	/// The next answered group still cached in `order`, giving up one evicted before it was
 	/// read: [`Self::judge`] asked a first eviction again, so this one was refilled already.
 	pub fn next_filled(
@@ -223,8 +229,10 @@ impl Misses {
 		}
 	}
 
-	/// Take `sequence` as handed out, if a fill answered it.
+	/// Take `sequence` as handed out, if a fill answered it. A refill handed out is never
+	/// judged again, so it is forgotten too.
 	pub fn take_filled(&mut self, sequence: u64) {
+		self.refilled.remove(sequence..sequence + 1);
 		if self.filled.remove(&sequence) {
 			self.release(sequence);
 		}
