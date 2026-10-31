@@ -377,17 +377,19 @@ fn allows_request<B>(request: &http::Request<B>, local: net::SocketAddr) -> bool
 	if request.headers().contains_key(http::header::ORIGIN) {
 		return false;
 	}
+	// HTTP/1.1 carries one Host header, HTTP/2 and absolute-form requests a URI
+	// authority. At least one must be present, and each present must name this socket.
 	let mut hosts = request.headers().get_all(http::header::HOST).iter();
-	let host = hosts.next();
-	let authority = request.uri().authority();
-	hosts.next().is_none()
-		&& (host.is_some() || authority.is_some())
-		&& host.is_none_or(|host| {
-			host.to_str()
-				.ok()
-				.and_then(|host| host.parse::<http::uri::Authority>().ok())
-				.is_some_and(|host| owns_authority(&host, local))
-		}) && authority.is_none_or(|authority| owns_authority(authority, local))
+	let host = match (hosts.next(), hosts.next()) {
+		(None, _) => None,
+		(Some(host), None) => match http::uri::Authority::try_from(host.as_bytes()) {
+			Ok(host) => Some(host),
+			Err(_) => return false,
+		},
+		(Some(_), Some(_)) => return false,
+	};
+	let mut authorities = host.iter().chain(request.uri().authority()).peekable();
+	authorities.peek().is_some() && authorities.all(|authority| owns_authority(authority, local))
 }
 
 fn owns_authority(authority: &http::uri::Authority, local: net::SocketAddr) -> bool {
@@ -401,7 +403,8 @@ fn owns_authority(authority: &http::uri::Authority, local: net::SocketAddr) -> b
 	}
 	let host = authority.host();
 	if host.eq_ignore_ascii_case("localhost") {
-		return local.ip().is_loopback();
+		// A dual-stack wildcard bind reports an IPv4 peer as `::ffff:127.0.0.1`.
+		return local.ip().to_canonical().is_loopback();
 	}
 	let host = host
 		.strip_prefix('[')
@@ -1005,6 +1008,8 @@ mod tests {
 			("[::1]:80", "[::1]", true),
 			("[::1]:9101", "[0:0:0:0:0:0:0:1]:9101", true),
 			("[::ffff:127.0.0.1]:9101", "127.0.0.1:9101", true),
+			("[::ffff:127.0.0.1]:9101", "localhost:9101", true),
+			("[::ffff:192.0.2.1]:9101", "localhost:9101", false),
 		] {
 			assert_eq!(
 				owns_authority(&authority.parse().unwrap(), local.parse().unwrap()),

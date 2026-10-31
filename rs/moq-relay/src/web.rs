@@ -394,13 +394,13 @@ impl Web {
 	/// once across the merged router). GET CORS is applied to the complete router by [`Self::serve`],
 	/// including any routes the embedder merges in without their own policy.
 	pub fn routes(&self) -> Router {
-		let app = Router::new()
+		// These responses depend on the caller's grant, including when auth or
+		// extraction fails. Publisher bytes must never become active content.
+		let granted = Router::new()
 			.route("/announced", get(serve_announced))
 			.route("/announced/{*prefix}", get(serve_announced))
 			.route("/fetch/{*path}", get(serve_fetch))
 			.layer(axum::middleware::map_response(async |mut response: Response| {
-				// These responses depend on the caller's grant, including when auth or
-				// extraction fails. Publisher bytes must never become active content.
 				let headers = response.headers_mut();
 				headers.insert(
 					http::header::CACHE_CONTROL,
@@ -411,9 +411,11 @@ impl Web {
 					http::HeaderValue::from_static("nosniff"),
 				);
 				response
-			}))
+			}));
+		let app = Router::new()
 			.route("/health", get(serve_health))
-			.route("/certificate.sha256", get(serve_fingerprint));
+			.route("/certificate.sha256", get(serve_fingerprint))
+			.merge(granted);
 
 		// If WebSocket is enabled, add the WebSocket route. Both `/` and
 		// `/{*path}` map to the same handler so a client that dials a bare
