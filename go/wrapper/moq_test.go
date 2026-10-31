@@ -530,6 +530,70 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 	}
 }
 
+func TestInsertDatagramAndLargest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	track, err := broadcast.PublishTrack("events", timedInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := track.Consume(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if largest, err := track.Largest(); err != nil || largest != nil {
+		t.Fatalf("empty track: largest %v, err %v", largest, err)
+	}
+
+	if err := track.InsertDatagram(7, moq.Frame{Payload: []byte("seven"), Timestamp: ts(0)}); err != nil {
+		t.Fatal(err)
+	}
+	datagram, err := consumer.RecvDatagram(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if datagram == nil || datagram.Sequence != 7 || string(datagram.Payload) != "seven" {
+		t.Fatalf("got datagram %+v", datagram)
+	}
+	largest, err := track.Largest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if largest == nil || *largest != (moq.Position{Group: 7, Frame: 0}) {
+		t.Fatalf("largest %+v", largest)
+	}
+	if next, err := track.AppendDatagram(moq.Frame{Payload: []byte("next"), Timestamp: ts(0)}); err != nil || next != 8 {
+		t.Fatalf("appended at %d, err %v", next, err)
+	}
+}
+
+func TestBroadcastConsumerClosed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- consumer.Closed(ctx) }()
+	if err := broadcast.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()

@@ -51,10 +51,11 @@ let client = try Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
 for try await event in try session.consume.announced(prefix: "live/", filter: "*/camera") {
-    // A restart is a new publisher run at the same path: request it again.
+    // A restart is a new publisher run at the same path: request it again. A takeover
+    // continues what an earlier route served, like a start.
     let announcement: Announce
     switch event {
-    case .start(let started), .restart(let started): announcement = started
+    case .start(let started), .restart(let started), .takeover(let started, _): announcement = started
     default: continue // .update or .end
     }
     // Prefixes stay origin-relative; captures reports what each wildcard matched.

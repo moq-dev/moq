@@ -299,6 +299,7 @@ impl Producer {
 		&self,
 		mut announcer: Announcer,
 		route: Route,
+		predecessor: Option<&kio::Shared<crate::model::origin_impl::ServeState>>,
 		admit: impl FnOnce() -> bool,
 	) -> Result<bool, Error> {
 		let refused = {
@@ -309,7 +310,7 @@ impl Producer {
 			if self.alive.state.lock().closing {
 				Err(Error::Closed)
 			} else {
-				match announcer.announce_if(route, admit) {
+				match announcer.announce_if(route, predecessor, admit) {
 					Ok(true) => {
 						*slot = Some(announcer);
 						return Ok(true);

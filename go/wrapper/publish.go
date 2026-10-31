@@ -223,6 +223,22 @@ func (t *TrackProducer) AppendDatagram(frame Frame) (uint64, error) {
 	return t.inner.AppendDatagram(f)
 }
 
+// InsertDatagram sends frame as a best-effort datagram at an explicit sequence, for a
+// caller that allocates its own. AppendDatagram continues after the largest one.
+func (t *TrackProducer) InsertDatagram(sequence uint64, frame Frame) error {
+	f, err := frame.ffi()
+	if err != nil {
+		return err
+	}
+	return t.inner.InsertDatagram(sequence, f)
+}
+
+// Largest reports the newest group or datagram written, at its newest frame, or nil
+// before any.
+func (t *TrackProducer) Largest() (*Position, error) {
+	return t.inner.Largest()
+}
+
 // Abort closes the track with an application error code.
 func (t *TrackProducer) Abort(errorCode uint16) error {
 	return t.inner.Abort(errorCode)
