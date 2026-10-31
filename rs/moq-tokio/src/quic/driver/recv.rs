@@ -434,8 +434,9 @@ impl Buf for Lease<'_> {
 
 impl Drop for Lease<'_> {
 	fn drop(&mut self) {
-		if let Some(lease) = self.inner.take() {
-			let mut conn = self.stream.conn.state.lock();
+		if let Some(lease) = self.inner.take()
+			&& let Some(mut conn) = self.stream.conn.state.lock_for_drop()
+		{
 			if conn.inner.recv_stream(self.stream.id).restore(lease).should_transmit() {
 				conn.wake();
 			}
@@ -469,7 +470,9 @@ impl tokio::io::AsyncRead for Stream {
 
 impl Drop for Stream {
 	fn drop(&mut self) {
-		let mut conn = self.conn.state.lock();
+		let Some(mut conn) = self.conn.state.lock_for_drop() else {
+			return;
+		};
 
 		// clean up any previously registered wakers
 		conn.blocked_readers.remove(&self.id);

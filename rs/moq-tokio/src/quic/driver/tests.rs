@@ -125,6 +125,30 @@ async fn close_endpoint() {
 	}
 }
 
+/// A driver panic fails the handshake it was driving instead of leaving it pending forever.
+#[tokio::test]
+async fn driver_panic_fails_connecting() {
+	let _guard = subscribe();
+
+	// Avoid NoRootAnchors error
+	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+	let mut roots = RootCertStore::empty();
+	roots.add(cert.cert.into()).unwrap();
+
+	let endpoint = client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+	endpoint.set_default_client_config(client::Config::with_root_certificates(Arc::new(roots)).unwrap());
+
+	// Nothing answers here, and the dead driver can't time the handshake out.
+	let connecting = endpoint
+		.dial(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234), "localhost")
+		.unwrap();
+	connecting.poison();
+
+	// The waiter wakes into the poisoned state and panics there, and dropping it doesn't abort.
+	let woken = timeout(Duration::from_secs(5), crate::panic::isolate(connecting)).await;
+	assert!(matches!(woken, Ok(None)), "the handshake waiter hung");
+}
+
 #[test]
 fn local_addr() {
 	let socket = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
