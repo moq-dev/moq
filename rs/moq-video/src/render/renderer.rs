@@ -505,29 +505,26 @@ mod tests {
 	/// [`output`](super::super::output) keeps GPU frames only for a device that
 	/// imports them, so a source feeding a device without the import feature
 	/// decodes to the CPU instead of handing over DMA-BUFs it would refuse.
+	///
+	/// Mesa's software driver cannot import DMA-BUFs, so the supported half
+	/// asks for the device's answer with the feature present instead of
+	/// opening a second device that has it.
 	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn the_output_follows_the_device() {
-		let instance = wgpu::Instance::default();
-		let adapter = instance
-			.request_adapter(&wgpu::RequestAdapterOptions::default())
-			.await
-			.expect("a GPU adapter");
-		let open = |features| {
-			adapter.request_device(&wgpu::DeviceDescriptor {
-				required_features: features,
-				..Default::default()
-			})
-		};
+		use super::super::source::output_with;
 
-		let (without, _queue) = open(wgpu::Features::empty()).await.expect("a GPU device");
-		assert_eq!(super::super::output(&without), crate::Output::Cpu);
-
+		let (device, _queue) = gpu().await;
 		let import = wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
-		assert!(adapter.features().contains(import), "the adapter imports DMA-BUFs");
-		let (with, _queue) = open(import).await.expect("a DMA-BUF-capable GPU device");
-		assert_eq!(super::super::output(&with), crate::Output::Render);
+		assert!(
+			!device.features().contains(import),
+			"the device was opened without import"
+		);
+		assert_eq!(super::super::output(&device), crate::Output::Cpu);
+
+		assert_eq!(output_with(&device, device.features()), crate::Output::Cpu);
+		assert_eq!(output_with(&device, device.features() | import), crate::Output::Render);
 	}
 
 	/// Capture packed PipeWire DMA-BUFs, import them through Vulkan, and turn

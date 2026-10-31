@@ -24,6 +24,7 @@ export namespace Announce {
 		kind: "start" | "update" | "restart" | "end";
 	} & Announce.Announce;
 	export interface Options {
+		covering?: boolean;
 		hidden?: boolean;
 	}
 }
@@ -653,6 +654,9 @@ export namespace Track {
 		update(options: Track.Subscription): void;
 		withRange(groups: Track.Groups): this;
 	}
+	export const Subscription: {
+		default(): Track.Subscription;
+	};
 	export interface Subscription {
 		groups?: Track.Groups;
 		maxDelay?: Milli;

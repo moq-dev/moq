@@ -463,7 +463,7 @@ class Reader implements ResumeSource {
 
 	/** What `copy` is asked for: the reader's own preferences, from its floor and through its replacement. */
 	#wire(copy: Pick<Copy, "floor" | "until">): track.Subscription {
-		const preferences = this.#shell.subscription.peek() ?? {};
+		const preferences = this.#shell.subscription.peek() ?? track.Subscription.default();
 		const bounds = groupBounds(preferences.groups);
 		const start = Math.max(bounds.start, copy.floor ?? 0);
 		const replaced = copyEnd(copy);
@@ -1358,6 +1358,9 @@ class Recover implements GroupRecover {
 		let fetch: Fetch | undefined;
 		for (;;) {
 			signal.throwIfAborted();
+			// The serving subscription may still deliver a group its route refused to fetch.
+			let landing: PromiseLike<unknown> | undefined;
+			let unwatch: Dispose | undefined;
 			// Subscribe the reader to a new route from its newest group, which is this one or
 			// later, so that route's subscription may deliver the rest of it.
 			reader.sync();
@@ -1414,12 +1417,22 @@ class Recover implements GroupRecover {
 				const outcome = asked?.outcome;
 				if (outcome && "group" in outcome) return this.#replacement(outcome.group, serving);
 				// That route failing too waits for the next one, and a refusal is a verdict only for
-				// a copy that failed.
+				// a copy that failed, once the serving subscription will not deliver the group either.
 				if (outcome && failed && !routeFailed(outcome.error) && !(serving.sub.closed.peek() instanceof Error)) {
-					throw outcome.error;
+					const maxDelay = serving.sub.subscription.peek()?.maxDelay ?? Milli.zero;
+					const land = { start: this.sequence, end: this.sequence + 1, floor: true, grace: grace(maxDelay) };
+					if (generation === current.generation || !hooks.mayLand(serving.sub, land)) throw outcome.error;
+					landing = new Promise<void>((resolve) => {
+						unwatch = hooks.groupChanged(serving.sub, resolve);
+					});
 				}
 			}
-			await until(Signal.race(...waits), signal);
+			try {
+				const changed = Signal.race(...waits);
+				await until(landing === undefined ? changed : race([changed, landing]), signal);
+			} finally {
+				unwatch?.();
+			}
 		}
 	}
 

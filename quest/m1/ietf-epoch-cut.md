@@ -46,36 +46,43 @@ Decision prompts:
 - Docs: ✅ inline fixes only; a separate docs page.
 - Rank: ✅ m1, after the other moq-transport narrowing quests; m2.
 
-Implemented in this quest's PR:
+Implementation:
 
-- Rust and JS no longer negotiate, encode, or interpret the IETF EPOCH option
-  or parameter. The IETF replacement and request-pinning paths are removed;
-  moq-lite and the shared epoch model remain unchanged.
-- Removed Rust `Extensions::epoch`, JS `extensions.epoch`, and `Ietf.Epoch`.
-  Updated the API report and existing docs. The epoch, cluster, and hang
-  drafts stay unchanged as decided.
-- Updated replacement, pending-catalog, route-change, multi-CDN, browser
-  identity, and cross-language GOAWAY scenarios for epochless IETF restarts.
-  Local epoch pinning for a publisher's own track-listing resolution remains.
+- **Rust.** Delete `rs/moq-net/src/ietf/epoch.rs`, the `Peer::epoch` flag,
+  the declined-offer bookkeeping in `ietf/peer.rs`, the SETUP option in
+  `ietf/session.rs`, and the EPOCH parameter on PUBLISH_NAMESPACE,
+  NAMESPACE, SUBSCRIBE, FETCH, and TRACK_STATUS in `ietf/publisher.rs`,
+  `ietf/subscriber.rs`, and the message codecs. Delete the replacement
+  branches only an epoch-carrying advertisement takes (around `replaces` in
+  `ietf/publisher.rs`, and the subscriber's refusal of a namespace that gains
+  or loses an epoch). An inbound EPOCH parameter, now never negotiated, is
+  handled like any other unknown parameter. Remove `Extensions::epoch`
+  from `rs/moq-net/src/setup.rs` and its test
+  `an_epoch_crosses_only_when_both_offer_it` in
+  `rs/moq-net/tests/integration/extensions.rs`.
+- **JS.** Delete `js/net/src/ietf/epoch.ts` and its tests, the `epoch`
+  option in `js/net/src/connection/extensions.ts`, the handshake's
+  `Ietf.Epoch.fromSetup`, the `Ietf.Epoch` export, and the EPOCH paths in the
+  IETF publisher, subscriber, and message codecs.
+- **Tests.** The integration tests that run epoch scenarios across versions
+  (`replacement`, `rejoin`, `route_change`, `catalog_handover`, `multi_cdn`,
+  and the rest under `rs/moq-net/tests/integration`), and the interop clients
+  in `test/interop/clients`, expect epochless behavior on moq-transport
+  instead of epoch behavior. Delete the cases that only pinned EPOCH framing.
+  The priority-update coverage in `rs/moq-net-tests/tests/integration/restart.rs`
+  has a "moq-transport-18 after an epoch switch, relayed" case; turn it into an
+  epochless restart. If a compat cell
+  in `test/interop/compat.sh` asserted an epoch across moq-transport, add a
+  planned break to `test/interop/compat/planned-breaks.json`.
+- **Docs.** Say moq-lite 07 only where a doc promises epochs or redundant
+  ingest over moq-transport: `doc/setup/redundancy.md`,
+  `doc/concept/moq-lite.md`, `doc/concept/standard.md`,
+  `doc/concept/stats.md`, and `doc/bin/relay/cluster.md`. Remove the
+  `epoch` lines from `doc/bin/relay/config.md`. The PR's Impact section says
+  how to migrate (delete any `epoch` extension setting), for the release cut
+  to write into `MIGRATE.md`.
 
-Remaining work before readiness:
-
-- Rerun the corrected multi-CDN tests and the full moq-net suite. The last
-  full run compiled and reached 2,880 passing tests before stopping on the
-  old multi-CDN error expectation. The test now expects the cancelled old
-  session and checks a fresh subscription on the IETF route; that change
-  still needs execution.
-- Run `just check`, `just ci`, `just test interop --all`, and
-  `just test wire-compat`. All four attempts remained at `quest gate` host
-  admission, with no suite output. Finish the updated GOAWAY clients' runtime
-  validation as part of interop.
-- Complete the quest and remove its file and links only after these checks
-  pass. JS unit tests passed (2,563), and the JS workspace build and API
-  report update passed before the last interop-client edits.
-
-The compat matrix covers only moq-lite, so this cut adds no planned break.
-[Wire compatibility remeasurement](/quest/m0/interop-green/wire-compat-remeasure.md)
-owns the existing release-pin problem if the compat run reaches it.
+Run `just check`, `just test interop --all`, and the compat lane.
 
 Public API: breaking. `setup::Extensions::epoch` and JS `extensions.epoch`
 are removed, and so is `Ietf.Epoch`. Wire: moq-transport sessions stop
@@ -84,4 +91,3 @@ offering EPOCH and never send its parameter. moq-lite is unchanged.
 ## Related
 
 - [Announcement takeover](/quest/m1/announce-takeover.md) - the lite-07 takeover, which no moq-transport counterpart follows
-- [Our moq-transport publishers serve at most one group](/quest/m1/ietf-publisher-one-group.md) - the same narrowing for FETCH

@@ -195,10 +195,11 @@ jobs:
     # pending run per group and drops the older one, so a PR or a no-op push
     # sharing it silently cancelled a queued release. Scoped to this job so runs
     # that skip publishing never enter it. Dry-runs get a per-ref group instead
-    # and cancel their superseded builds.
+    # and cancel their superseded builds. `inputs.dry-run` is null outside
+    # workflow_call, and a null cancel-in-progress fails the job.
     concurrency:
-      group: release-kt-lib-${{ (github.event_name == 'pull_request' || inputs.dry-run) && github.ref || 'publish' }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' || inputs.dry-run }}
+      group: release-kt-lib-${{ (github.event_name == 'pull_request' || inputs.dry-run == true) && github.ref || 'publish' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' || inputs.dry-run == true }}
     runs-on: ubuntu-latest
     # Maven and signing credentials live in the `publish` Environment, which
     # only protected refs can deploy to. A dry-run needs no secrets.

@@ -60,10 +60,9 @@ writes the first two objects of group 0 before any subscriber exists and leaves 
 open. The subscriber joins at the latest group, as a player does, and reports once it has
 read those two objects; only then does the harness release the rest of the group and
 group 1. A join that skips the head cannot pass by racing the publisher. On
-moq-transport a Rust subscriber, and the relay toward its publisher, recover the head
-with a joining FETCH before draft 22 and a fill from it. A JS subscriber requests
-neither: on draft 22 it subscribes from the current group's start, and before that the
-Rust relay replays the group on the subscription.
+moq-transport the subscription starts after Largest Object, so the relay does not replay
+the group on it: a subscriber, Rust or JS, and the relay toward its publisher, recover the
+head with a joining FETCH before draft 22 and a fill from it.
 
 `--tail` runs the FETCH round, the late joins, and the five finite-tail lanes. The
 wire-compat lanes, which swap in released relays and clients, skip them.
