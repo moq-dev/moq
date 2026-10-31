@@ -1841,7 +1841,7 @@ pub(crate) struct RequestVerdict {
 
 /// Why a request token did not authorize its request: the error whose code the peer is
 /// sent, and the reason phrase with it, which the acceptor chose when it refused.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Refusal {
 	pub error: Error,
 	pub reason: String,
@@ -1961,6 +1961,58 @@ struct Held {
 	/// The token of the renewal being verified, until the serve loop applies its verdict.
 	renewing: Option<kio::Shared<Issue>>,
 	clock: crate::time::Deadlines,
+	/// Why the request ended, once it has. A channel, so every clone waiting on the grant
+	/// wakes when [`RequestGrant::end`] latches it.
+	ended: kio::Producer<Option<Refusal>>,
+}
+
+impl Held {
+	/// See [`RequestGrant::poll_ended`].
+	fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Refusal> {
+		loop {
+			// The acceptor granted a renewal the serve loop has yet to apply: it takes over rather
+			// than the request ending between the two, whether the old grant lapsed or dropped.
+			// Watched, so a request that abandons the renewal, such as one cancelled while a
+			// joined FETCH outlives it, falls back to the old grant's end.
+			let handover = self.renewing.as_ref().is_some_and(|issue| {
+				issue
+					.poll(waiter, |issue| match granted(issue) {
+						true => Poll::Pending,
+						false => Poll::Ready(()),
+					})
+					.is_pending()
+			});
+			if self.deadline.poll(waiter).is_ready() {
+				if handover {
+					return Poll::Pending;
+				}
+				return Poll::Ready(Refusal::new(Error::Expired, "request token expired"));
+			}
+			match self.verdict.poll_reply(waiter) {
+				Poll::Ready(None) if handover => return Poll::Pending,
+				Poll::Ready(None) => {
+					return Poll::Ready(Refusal::new(
+						Error::Session(SessionError::Unauthorized),
+						"grant dropped",
+					));
+				}
+				Poll::Ready(Some(Reply::Grant(grant))) => {
+					if !self.kind.covers(&grant, self.path.as_str()) {
+						return Poll::Ready(Refusal::new(Error::Unauthorized, "request token no longer granted"));
+					}
+					self.deadline.set(grant.expires);
+					self.grant = grant;
+					// Re-poll: the new deadline may already have lapsed, or another reply may
+					// be waiting.
+					continue;
+				}
+				Poll::Ready(Some(Reply::Refuse { code, reason })) => {
+					return Poll::Ready(Refusal::new(Error::Session(code), &reason));
+				}
+				Poll::Pending => return Poll::Pending,
+			}
+		}
+	}
 }
 
 impl RequestGrant {
@@ -1990,6 +2042,7 @@ impl RequestGrant {
 			hold,
 			renewing: None,
 			clock: clock.clone(),
+			ended: kio::Producer::new(None),
 		}))))
 	}
 
@@ -2039,47 +2092,37 @@ impl RequestGrant {
 		Ok(())
 	}
 
+	/// End the grant with `refusal`, waking every clone still watching it, unless it already
+	/// ended. A refused renewal ends the request without the grant ending itself, so the serve
+	/// loop calls this to end anything else serving under the grant, such as a joining FETCH
+	/// that outlives its subscription.
+	pub(crate) fn end(&self, refusal: Refusal) {
+		latch(&self.held().ended, refusal);
+	}
+
 	/// Resolve with the refusal that ends the request: the deadline lapsing
 	/// ([`Error::Expired`]), the acceptor revoking or dropping the grant (its code and
 	/// reason), or an acceptor-side update that no longer covers the request
 	/// ([`Error::Unauthorized`]). A covering update, such as a lowered expiry, is folded in and
 	/// polling continues. Never resolves while the grant still stands.
 	pub(crate) fn poll_ended(&self, waiter: &kio::Waiter) -> Poll<Refusal> {
-		let mut held = self.held();
-		loop {
-			// The acceptor granted a renewal the serve loop has yet to apply: it takes over rather
-			// than the request ending between the two, whether the old grant lapsed or dropped.
-			let handover = held.renewing.as_ref().is_some_and(granted);
-			if held.deadline.poll(waiter).is_ready() {
-				if handover {
-					return Poll::Pending;
-				}
-				return Poll::Ready(Refusal::new(Error::Expired, "request token expired"));
-			}
-			match held.verdict.poll_reply(waiter) {
-				Poll::Ready(None) if handover => return Poll::Pending,
-				Poll::Ready(None) => {
-					return Poll::Ready(Refusal::new(
-						Error::Session(SessionError::Unauthorized),
-						"grant dropped",
-					));
-				}
-				Poll::Ready(Some(Reply::Grant(grant))) => {
-					if !held.kind.covers(&grant, held.path.as_str()) {
-						return Poll::Ready(Refusal::new(Error::Unauthorized, "request token no longer granted"));
-					}
-					held.deadline.set(grant.expires);
-					held.grant = grant;
-					// Re-poll: the new deadline may already have lapsed, or another reply may
-					// be waiting.
-					continue;
-				}
-				Poll::Ready(Some(Reply::Refuse { code, reason })) => {
-					return Poll::Ready(Refusal::new(Error::Session(code), &reason));
-				}
-				Poll::Pending => return Poll::Pending,
-			}
+		let held = &mut *self.held();
+		// Latched, as each acceptor reply is read once: every clone watching the grant sees
+		// the same end, whichever polled first.
+		let latched = match held.ended.poll_ref(waiter, |ended| match &**ended {
+			Some(ended) => Poll::Ready(ended.clone()),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(ended)) => Some(ended),
+			// Never closed: the grant owns its only producer.
+			Poll::Ready(Err(_)) | Poll::Pending => None,
+		};
+		if let Some(ended) = latched {
+			return Poll::Ready(ended);
 		}
+		let ended = std::task::ready!(held.poll_end(waiter));
+		latch(&held.ended, ended.clone());
+		Poll::Ready(ended)
 	}
 
 	/// Run `body`, everything a request does once admitted, until it finishes or `grant`
@@ -2092,6 +2135,15 @@ impl RequestGrant {
 			Some(grant) => grant.poll_ended(waiter),
 			None => Poll::Pending,
 		}))
+	}
+}
+
+/// Record `refusal` as why a request grant ended, unless an earlier end already is.
+fn latch(ended: &kio::Producer<Option<Refusal>>, refusal: Refusal) {
+	if let Ok(mut ended) = ended.write()
+		&& ended.is_none()
+	{
+		*ended = Some(refusal);
 	}
 }
 
@@ -2124,10 +2176,10 @@ fn live(clock: &crate::time::Deadlines, kind: RequestKind, path: &str, grant: &G
 	kind.covers(grant, path) && grant.expires.is_none_or(|expires| expires > clock.now())
 }
 
-/// Whether the acceptor granted the token behind `issue` and still holds the grant.
-fn granted(issue: &kio::Shared<Issue>) -> bool {
-	let issue = issue.read();
-	!issue.done && issue.outbox.iter().any(|reply| matches!(reply, Reply::Grant(_)))
+/// Whether the acceptor granted the token behind `issue` and still holds the grant, for a
+/// request still waiting to apply it.
+fn granted(issue: &Issue) -> bool {
+	issue.peer.is_none() && !issue.done && issue.outbox.iter().any(|reply| matches!(reply, Reply::Grant(_)))
 }
 
 /// A grant issued to one of the peer's tokens, which the session enforces. Dropping it

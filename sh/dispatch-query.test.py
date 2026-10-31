@@ -384,7 +384,7 @@ esac
                         next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")))
 
     def test_feature_shapes_follow_the_rust_tests_in_their_lane(self):
-        self.change("rs/moq-clock/src/lib.rs")
+        self.change("rs/kio/src/clock/mod.rs")
         calls = [call.split()[1] for call in self.run_ci() if call.startswith("rs ")]
         self.assertEqual(calls, ["lint-changed", "test-changed", "feature-shapes-changed"])
 
