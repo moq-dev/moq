@@ -11,14 +11,14 @@ enforced instead of rediscovered by each coverage audit.
 From the 2026-10-27 coverage audit. nextest and `bun test` find ordinary tests
 by themselves; the gaps are the opt-in ones. The m1
 [coverage audit](/quest/m2/audit-test-coverage.md) found uncalled VA-API
-tests by hand, and `js/common/worklet-matrix.ts` still says "Not in CI".
+tests and the worklet bundler matrix by hand.
 
 Decided 2026-10-27 (maintainer): check the opt-in targets, not everything.
 
 - Every `#[ignore]` test is matched by some recipe's `--run-ignored` filter.
 - Every fuzz target and every bench target runs in some workflow.
 - Every `just` recipe that runs tests is reachable from a workflow.
-- Every standalone test script (like `worklet-matrix.ts`) has a caller.
+- Every standalone test script (like `test/worklet/matrix.ts`) has a caller.
 
 It runs in the merge gate beside the CI-selection tests, and reports each
 orphan by name with where it was found. An intentionally local-only target
