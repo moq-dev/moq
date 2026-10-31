@@ -198,3 +198,29 @@ test("the covering group is kept while it arrives after the first read, without 
 	await flush();
 	expect(frames(results)).toEqual(["4@4400000", "4@4433000", "4@4700000", "4@4900000", "5@5000000"]);
 });
+
+test("an age skip that ends the start still warms until the start's target", async () => {
+	const { track, results, flush } = setup(200, 300);
+	// Group 4 alone does not cover its 4.5s target, so the start waits.
+	group(track, 4, [5_000_000]);
+	await flush();
+	// Groups 5 and 6 decode in one pass: group 6's 6.2s edge puts the 500ms reach's target at 5.7s,
+	// and the age skip drops group 4, whose successor starts past the reach, before the start sees it.
+	const covering = group(track, 5, []);
+	const newest = group(track, 6, []);
+	await flush();
+	write(covering, 5_600_000);
+	write(covering, 5_900_000);
+	write(newest, 6_200_000);
+	await flush();
+	expect(frames(results)).toEqual(["5@5600000", "5@5900000"]);
+
+	// The reader warms until 6.0s (the target plus the warmup), not 5.9s (the first frame plus the
+	// warmup), so newer content does not yet drop the covering group.
+	write(newest, 6_210_000);
+	await flush();
+	write(covering, 5_950_000);
+	covering.finish();
+	await flush();
+	expect(frames(results)).toEqual(["5@5600000", "5@5900000", "5@5950000", "6@6200000", "6@6210000"]);
+});

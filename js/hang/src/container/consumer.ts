@@ -539,8 +539,12 @@ export class Consumer {
 		}
 
 		if (skipped) {
-			// What the start would wait for is older than the reach, so it is past.
-			this.#starting = false;
+			// What the start would wait for is older than the reach, so it is past. The reader still
+			// warms until the start's target, as it would had the wait ended on its own.
+			if (this.#starting) {
+				this.#starting = false;
+				this.#target = this.#startTarget(this.#reach(this.#delay.peek()));
+			}
 			console.warn(
 				`skipping slow groups: track=${this.#track.name} ${start} -> ${this.#active} count=${skipped}`,
 			);
@@ -921,25 +925,32 @@ export class Consumer {
 			return undefined;
 		}
 		this.#anchor ??= this.#groups[this.#groups.length - 1].consumer.arrived;
-		// The live edge: the newest content. Untimed content, such as a marker, has none to reach back from.
-		let edge: number | undefined;
-		for (const group of this.#groups) {
-			if (group.latest !== undefined && (edge === undefined || group.latest > edge)) edge = group.latest;
-		}
-		// Media starts at zero, so a reach past it is covered there.
-		const target = edge === undefined ? undefined : Math.max(0, edge - reach);
+		const target = this.#startTarget(reach);
 		const covered =
 			target !== undefined && this.#groups.some((group) => group.start !== undefined && group.start <= target);
 		// Nothing earlier can arrive or be held.
 		const lowest = this.#groups[0].consumer.sequence === 0;
 		// Wall time: the newest group landed a whole reach ago.
 		const elapsed = Instant.durationSince(now(), this.#anchor) >= reach * 1000;
-		if (ended || this.#full() || edge === undefined || covered || lowest || elapsed) {
+		if (ended || this.#full() || target === undefined || covered || lowest || elapsed) {
 			this.#starting = false;
 			this.#target = target;
 			return undefined;
 		}
 		return this.#anchor;
+	}
+
+	// The point the start reaches back to: the live edge (the newest content) less `reach`. Undefined
+	// for a zero reach, which the newest group covers, and before any timed content, since untimed
+	// content such as a marker has no edge to reach back from.
+	#startTarget(reach: number): number | undefined {
+		if (reach === 0) return undefined;
+		let edge: number | undefined;
+		for (const group of this.#groups) {
+			if (group.latest !== undefined && (edge === undefined || group.latest > edge)) edge = group.latest;
+		}
+		// Media starts at zero, so a reach past it is covered there.
+		return edge === undefined ? undefined : Math.max(0, edge - reach);
 	}
 
 	// How stale the buffered span may get before the age skip drops its oldest group, in microseconds:
