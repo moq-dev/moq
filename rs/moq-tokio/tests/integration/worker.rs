@@ -838,3 +838,25 @@ async fn rotated_identity_reaches_every_worker() {
 	group.shutdown().await;
 	result.expect("every worker must serve both snapshots");
 }
+
+/// Both shutdowns join on tokio's blocking pool, which a caller outside any runtime
+/// reaches through moq-tokio's fallback.
+#[test]
+fn shutting_down_outside_a_runtime_joins_the_workers() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+
+	let workers =
+		bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).expect("bind workers");
+	let owned = bound(workers.local_addr());
+	futures::executor::block_on(workers.shutdown());
+	assert!(owned.is_disjoint(&open_sockets()), "the workers left the port bound");
+
+	let workers =
+		bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).expect("bind workers");
+	let owned = bound(workers.local_addr());
+	futures::executor::block_on(workers.split().shutdown());
+	assert!(owned.is_disjoint(&open_sockets()), "the group left the port bound");
+}

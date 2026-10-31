@@ -63,11 +63,13 @@ async fn next_broadcast(
 			.await
 			.expect("origin closed")
 		{
-			moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => break,
+			moq_net::announce::Event::Start(_)
+			| moq_net::announce::Event::Restart(_)
+			| moq_net::announce::Event::Takeover { .. } => break,
 			moq_net::announce::Event::End(_) | moq_net::announce::Event::Update(_) => {}
 		}
 	}
-	let broadcast = running(child, "the broadcast", consumer.request_broadcast("camera", None))
+	let broadcast = running(child, "the broadcast", consumer.request("camera", None))
 		.await
 		.expect("announced broadcast resolves");
 	let mut catalogs = running(

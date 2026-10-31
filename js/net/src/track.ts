@@ -30,6 +30,7 @@ import {
 	insertRun,
 	type Land,
 	MAX_DATAGRAMS,
+	NO_MAX_DELAY,
 	type Recv,
 	type RecvDatagram,
 	type ResumeSource,
@@ -47,11 +48,12 @@ export type { Datagram } from "./datagram.ts";
 
 // The group a non-blocking read takes, skipping drops and throwing the track's error;
 // `undefined` when nothing is deliverable now.
-function taken(read: () => Recv): GroupConsumer | undefined {
+function taken(read: () => Recv, ended: () => undefined): GroupConsumer | undefined {
 	for (;;) {
 		const recv = read();
 		if (recv.kind === "group") return recv.group;
 		if (recv.kind === "error") throw recv.error;
+		if (recv.kind === "done") return ended();
 		if (recv.kind !== "drop") return undefined;
 	}
 }
@@ -225,12 +227,16 @@ export interface Subscription {
 	/**
 	 * How long (milliseconds) a non-latest group stays worth delivering, by the same two
 	 * clocks as {@link Info.maxAge}: it is skipped once its successor arrived this long ago
-	 * or starts this far behind the live edge. Defaults to `0`, the live edge only, timed or not.
+	 * or starts this far behind the live edge, and never past the publisher's
+	 * {@link Info.maxAge}. Omitted (or `undefined`) means `0`, the live edge only, timed or
+	 * not, as in {@link Subscription.default}. `null` sets no subscriber limit, so the
+	 * publisher's {@link Info.maxAge} alone bounds it, which is what a reader reaching back
+	 * for history wants; read in order, see {@link Ordered} for where that can block.
 	 * Rounded up to a whole millisecond, so a value derived from a measurement is never
 	 * shortened. A negative or non-finite value, or one past `Number.MAX_SAFE_INTEGER`
 	 * after rounding, is refused.
 	 */
-	maxDelay?: Milli;
+	maxDelay?: Milli | null;
 	/**
 	 * The groups this reader may receive, with an optional floor and cap.
 	 *
@@ -264,14 +270,28 @@ export interface Subscription {
  */
 export type Order = "ascending" | "descending";
 
+/** Constructors for {@link Subscription}. */
+export const Subscription: {
+	/**
+	 * The default subscription, used when none is passed: priority `0`, descending order, and
+	 * a `maxDelay` of zero that skips a superseded group at once. Mirrors the Rust
+	 * `Subscription::default()`. Spread it to change one field and keep the rest:
+	 * `{ ...Subscription.default(), priority: 2 }`.
+	 */
+	default(): Subscription;
+} = {
+	default: () => ({ priority: DEFAULT_PRIORITY, maxDelay: Milli.zero, order: "descending" }),
+};
+
 // Materialize the defaults at the model boundary so every layer observes a complete
 // subscription rather than interpreting an omitted field differently.
-function subscriptionDefaults(subscription: Subscription = {}): Subscription {
+function subscriptionDefaults(subscription: Subscription = Subscription.default()): Subscription {
 	if ("maxAge" in subscription) throw new TypeError("Subscriber maxAge is unsupported; use maxDelay");
 	const bounds = groupBounds(subscription.groups ?? {});
 	return {
 		priority: priorityValue(subscription.priority ?? DEFAULT_PRIORITY),
-		maxDelay: wireMillis("maxDelay", subscription.maxDelay ?? Milli.zero),
+		maxDelay:
+			subscription.maxDelay === null ? NO_MAX_DELAY : wireMillis("maxDelay", subscription.maxDelay ?? Milli.zero),
 		order: orderOf(subscription.order),
 		groups: {
 			start: subscription.groups?.start === undefined ? undefined : { included: bounds.start },
@@ -386,14 +406,10 @@ export class Request {
 		};
 	}
 
-	/** Reject the request, closing the track optionally with an error. */
-	reject(err?: Error): void {
+	/** Reject the request with the error its subscribers receive. */
+	reject(err: Error): void {
 		this.#pending.delete(this);
-		if (err) this.#producer.abort(err);
-		else {
-			this.#producer.finish();
-			this.#producer.close();
-		}
+		this.#producer.abort(err);
 	}
 }
 
@@ -439,8 +455,10 @@ export class Consumer {
 	 *
 	 * The cursor starts at the group the subscription named (its floor), or 0.
 	 * {@link Subscription.maxDelay} is what asks for data: delivery skips everything above
-	 * the floor that the budget convicts, so the default budget of zero delivers only the
-	 * latest group and a larger one reaches back over what it can still use.
+	 * the floor that the budget convicts. Without options this is {@link Subscription.default},
+	 * whose budget of zero delivers only the latest group; a larger one reaches back over what
+	 * it can still use, and an options object without `maxDelay` reaches back as far as the
+	 * publisher retains.
 	 */
 	subscribe(options?: Subscription): Subscriber {
 		return this.#broadcast.subscribe(this.name, options);
@@ -523,6 +541,9 @@ class TrackState {
 	 * the Rust `end`.
 	 */
 	end = new Signal<Position | undefined>(undefined);
+	// The error the track ended with at `end`, if it did not end cleanly: a reader reaching the
+	// end gets it instead of the end of stream. Set before `end`, so its wake sees it.
+	endError?: Error;
 	// A wire subscription's pending tail still owes a group below the end, so reaching the
 	// end does not end readers yet. Mirrors the Rust `awaits_tail`.
 	owed = new Signal(false);
@@ -621,6 +642,7 @@ let makeOrdered: (subscriber: Subscriber) => Ordered;
 let ordered_: {
 	nextGroup(subscriber: Subscriber): Promise<GroupConsumer | undefined>;
 	tryNextGroup(subscriber: Subscriber): Recv;
+	ended(subscriber: Subscriber): undefined;
 	readFrame(subscriber: Subscriber): Promise<({ group: number; frame: number } & Frame) | undefined>;
 	readString(subscriber: Subscriber): Promise<string | undefined>;
 	readJson(subscriber: Subscriber): Promise<unknown | undefined>;
@@ -677,7 +699,8 @@ export class Demand {
 
 	/**
 	 * Settles once the track's outcome is final: `null` once its declared end is reached and
-	 * settled, or on a clean release, else the abort {@link Error}. Never because readers left.
+	 * settled (its error, if declared with one), or on a clean release, else the abort
+	 * {@link Error}. Never because readers left.
 	 */
 	get closed(): GetPromise<Error | null> {
 		return this.#state.outcome;
@@ -760,8 +783,8 @@ export class Producer {
 	// to close, rather than end at the boundary with groups still to arrive.
 	#tailPending = false;
 	// The first group the wire subscription's live feed serves (see `hooks.startTrack`), unset
-	// until its START resolves it, and the floor the SUBSCRIBE requested.
-	#served?: { start?: number; requested?: number };
+	// until its START resolves it, null for a resolved-empty range, and the requested floor.
+	#served?: { start?: number | null; requested?: number };
 	// The sequences the live feed delivered, as a group or a datagram: what a pending tail is
 	// judged by. Eviction never touches it. A gap folds away a subscription's grace after a
 	// later arrival opened it, as the session's tail does, so this holds only the gaps still
@@ -779,7 +802,7 @@ export class Producer {
 		sourceStart = (producer) => producer.#served && producer.#feedStart();
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
-		hooks.endTrack = (producer, end) => producer.#endPending(end);
+		hooks.endTrack = (producer, end, error) => producer.#endPending(end, error);
 		hooks.releaseTrack = (producer) => producer.#close(undefined);
 		hooks.trackReleased = (producer) => producer.#state.closed;
 		hooks.trackFinished = (producer) => producer.#state.end.peek() !== undefined;
@@ -901,8 +924,8 @@ export class Producer {
 
 	/**
 	 * Settles once the track's outcome is final: `null` once its declared end is reached and
-	 * settled (every group below it finished) or on a clean release, else the abort
-	 * {@link Error}. The producer stays open after a settled end, serving its cache.
+	 * settled (every group below it finished; its error, if declared with one) or on a clean
+	 * release, else the abort {@link Error}. The producer stays open after a settled end, serving its cache.
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 */
 	get closed(): GetPromise<Error | null> {
@@ -966,10 +989,12 @@ export class Producer {
 	 *
 	 * Its cursor starts at the group the subscription named (its floor), or 0.
 	 * {@link Subscription.maxDelay} is what asks for data: delivery skips everything above
-	 * the floor that the budget convicts, so the default budget of zero delivers only the
-	 * latest group and a larger one reaches back over what it can still use.
+	 * the floor that the budget convicts. Without options this is {@link Subscription.default},
+	 * whose budget of zero delivers only the latest group; a larger one reaches back over what
+	 * it can still use, and an options object without `maxDelay` reaches back as far as the
+	 * publisher retains.
 	 */
-	subscribe(options: Subscription = {}): Subscriber {
+	subscribe(options: Subscription = Subscription.default()): Subscriber {
 		const sink = new TrackState(options);
 		this.#addSink(sink);
 		return makeSubscriber(this.name, sink);
@@ -1043,7 +1068,8 @@ export class Producer {
 				for (const entry of this.#cache) {
 					const mirror = entry.mirrors.get(sink);
 					if (mirror) {
-						hooks.releaseGroupReader(mirror, abort);
+						// A group its recovery moved to another copy no longer reads this one.
+						if (hooks.readsMirrored(mirror)) hooks.releaseGroupReader(mirror, abort);
 						entry.mirrors.delete(sink);
 					}
 				}
@@ -1057,6 +1083,7 @@ export class Producer {
 		sink.drops.set(this.#state.drops.peek());
 
 		sink.received.set(this.#received);
+		sink.endError = this.#state.endError;
 		sink.end.set(this.#state.end.peek());
 		sink.owed.set(this.#state.owed.peek());
 		if (closed !== undefined) {
@@ -1106,8 +1133,7 @@ export class Producer {
 			EVICTED.add(evicted);
 			entry.group.abort(evicted);
 		}
-		const mirrors = [...entry.mirrors.values()];
-		for (const mirror of mirrors) hooks.evictGroup(mirror);
+		const mirrors = [...entry.mirrors.values()].filter((mirror) => hooks.evictGroup(mirror));
 		this.#unlink(entry);
 		for (const mirror of mirrors) mirror.close();
 	}
@@ -1535,27 +1561,35 @@ export class Producer {
 	 * the remaining groups are written. Readers end once the live edge reaches the end's
 	 * group, independently of closure. Throws if the track is closed, already has an end, or
 	 * `end` would orphan a group or frame already produced.
+	 *
+	 * With an `error`, the track ended that way rather than cleanly, yet keeps its history, unlike
+	 * {@link abort}: readers still get every group below the end, and a reader reaching the end
+	 * gets the error instead of the end of stream.
 	 */
-	finishAt(end: Position): void {
+	finishAt(end: Position, error?: Error): void {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
 		const declared = this.#state.end.peek();
 		if (declared !== undefined) throw new Error(`track already ends at ${declared.group}/${declared.frame}`);
-		this.#declareEnd(end);
+		this.#declareEnd(end, error);
 	}
 
 	// The wire's end: repeating it is a no-op, and a mid-group end may refine the group
-	// boundary it falls just before. Mirrors the Rust `finish_at` on a `received()` copy.
-	#endPending(end: Position): void {
+	// boundary it falls just before. Either must carry the same error code. Mirrors the Rust
+	// `finish_at` on a `received()` copy.
+	#endPending(end: Position, error?: Error): void {
 		// Before the end lands, so settling it already counts what the tail still owes.
 		this.#tailPending = true;
 		const declared = this.#state.end.peek();
+		const code = (err?: Error) => (err === undefined ? undefined : toStreamCode(err));
 		if (declared === undefined) {
-			this.finishAt(end);
+			this.finishAt(end, error);
+		} else if (code(this.#state.endError) !== code(error)) {
+			throw new ProtocolViolation(`conflicting track end error: ${error}`);
 		} else if (declared.group !== end.group || declared.frame !== end.frame) {
 			if (declared.frame !== 0 || end.frame === 0 || finalSequence(end) !== declared.group) {
 				throw new ProtocolViolation(`conflicting track end: ${end.group}/${end.frame}`);
 			}
-			this.#declareEnd(end);
+			this.#declareEnd(end, error);
 		}
 		this.#owe();
 	}
@@ -1587,7 +1621,8 @@ export class Producer {
 	// write that could reopen it (a late group below the end, a fresh grace for the tail): that
 	// write is still served, but the clean outcome stays final. Mirrors the Rust `latch_settled`.
 	#settle(): void {
-		if (this.#state.outcome.peek() === undefined && this.#settled()) this.#state.outcome.set(null);
+		if (this.#state.outcome.peek() === undefined && this.#settled())
+			this.#state.outcome.set(this.#state.endError ?? null);
 	}
 
 	// Whether the pending tail misses a sequence from where the feed starts up to `final`: one
@@ -1603,6 +1638,7 @@ export class Producer {
 		const requested = groups?.start === undefined ? undefined : groupBounds(groups).start;
 		const served = this.#served;
 		if (!served || served.requested !== requested) return requested;
+		if (served.start === null) return requested;
 		if (served.start !== undefined) return served.start;
 		// A closed track never gets its START.
 		return this.#state.closed.peek() === undefined ? "pending" : requested;
@@ -1616,7 +1652,7 @@ export class Producer {
 		return !this.#arrivals.covers(Math.min(floor, final), final);
 	}
 
-	#declareEnd(end: Position): void {
+	#declareEnd(end: Position, error: Error | undefined): void {
 		const { group, frame } = end;
 		if (!Number.isSafeInteger(group) || group < 0 || !Number.isSafeInteger(frame) || frame < 0) {
 			throw new RangeError(`invalid track end: ${group}/${frame}`);
@@ -1628,8 +1664,10 @@ export class Producer {
 		const cut = frame === 0 ? undefined : this.#cached.get(group)?.group;
 		if (cut) hooks.limitGroup(cut, frame);
 		end = { group, frame };
-		this.#state.end.set(end);
-		for (const sink of this.#sinks) sink.end.set(end);
+		for (const state of [this.#state, ...this.#sinks]) {
+			state.endError = error;
+			state.end.set(end);
+		}
 		this.#endLargest();
 	}
 
@@ -1689,7 +1727,7 @@ export class Producer {
 	}
 
 	// `abort` is undefined for a clean close, which keeps whatever end was declared. A received
-	// copy whose session closed locally closes cleanly without one: a dead route, not finished
+	// copy released because nobody wants it closes cleanly without one: a dead route, not finished
 	// content.
 	#close(abort: Error | undefined) {
 		if (this.#state.closed.peek() !== undefined) return;
@@ -1698,13 +1736,15 @@ export class Producer {
 		if (abort && (this.#state.outcome.peek() === null || this.#settled())) abort = undefined;
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
-		const open = abort ? this.#cache.filter((entry) => entry.group.closed.peek() === undefined) : [];
+		const open = this.#cache.filter((entry) => entry.group.closed.peek() === undefined);
 		closeTrackState(this.#state, abort);
-		if (this.#state.outcome.peek() === undefined) this.#state.outcome.set(abort ?? null);
-		for (const { group } of this.#cache) {
-			if (abort) group.abort(abort);
-			else group.finish();
-		}
+		if (this.#state.outcome.peek() === undefined) this.#state.outcome.set(abort ?? this.#state.endError ?? null);
+		// Closing a copy never supplies the missing tail of a group. Already finished groups
+		// ignore the abort and stay readable; unfinished ones retain their truncation cause.
+		const groupError =
+			abort ??
+			new StreamError(StreamCode.Cancel, { message: `track ${this.name} closed with unfinished groups` });
+		for (const { group } of this.#cache) group.abort(groupError);
 		for (const entry of open) {
 			this.#unlink(entry);
 			this.#uncache(entry);
@@ -2119,6 +2159,8 @@ export class Subscriber {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.subscriberEnd = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.end() : subscriber.#state.end.peek();
+		hooks.subscriberEndError = (subscriber) =>
+			subscriber.#resume ? subscriber.#resume.endError() : subscriber.#state.endError;
 		hooks.joinSubscriber = (subscriber) => {
 			if (subscriber.#resume) subscriber.#resume.join();
 			else if (subscriber.#state.producer) hooks.joinProducer(subscriber.#state.producer);
@@ -2207,7 +2249,7 @@ export class Subscriber {
 			return producer !== undefined && mayLand(producer, land);
 		};
 		hooks.resumeSubscriber = (name, subscription, source) => {
-			const state = new TrackState(subscription);
+			const state = new TrackState(subscription ?? Subscription.default());
 			const subscriber = new Subscriber(name, state);
 			subscriber.#resume = source({
 				subscription: state.update,
@@ -2267,6 +2309,7 @@ export class Subscriber {
 		ordered_ = {
 			nextGroup: (subscriber) => subscriber.#nextGroup(),
 			tryNextGroup: (subscriber) => subscriber.#tryNextGroup(),
+			ended: (subscriber) => subscriber.#ended(),
 			readFrame: (subscriber) => subscriber.#readFrame(),
 			readString: (subscriber) => subscriber.#readString(),
 			readJson: (subscriber) => subscriber.#readJson(),
@@ -2465,7 +2508,7 @@ export class Subscriber {
 	 * beyond the cap stays buffered (not dropped) and is offered once the cap rises, even
 	 * after a clean close, without blocking in-range groups that arrive behind it.
 	 * A group whose presentation time is further behind the live edge than this
-	 * subscriber's `maxDelay` is skipped. The default of zero takes the live edge.
+	 * subscriber's `maxDelay` is skipped. The default subscription's zero takes the live edge.
 	 * The budget remains attached after return, so a pending frame read rejects if a stalled
 	 * group becomes stale while newer data advances.
 	 *
@@ -2482,7 +2525,7 @@ export class Subscriber {
 				case "drop":
 					continue;
 				case "done":
-					return undefined;
+					return this.#ended();
 				case "error":
 					throw recv.error;
 			}
@@ -2490,6 +2533,17 @@ export class Subscriber {
 			// Idle, or parked at the boundary waiting for the cap to rise.
 			await this.#wait();
 		}
+	}
+
+	// A drained read: the end of stream, or the error the track ended with once this reader's
+	// range reaches that end. A range short of the end never reaches the error.
+	#ended(): undefined {
+		const error = hooks.subscriberEndError(this);
+		if (error === undefined) return undefined;
+		const end = hooks.subscriberEnd(this);
+		const cap = this.#cursor.peek().end;
+		if (end !== undefined && cap !== undefined && cap < finalSequence(end)) return undefined;
+		throw error;
 	}
 
 	// Park until a group read may go differently.
@@ -2656,7 +2710,10 @@ export class Subscriber {
 	tryRecvGroup(): GroupConsumer | undefined {
 		this.#live();
 		this.#mode = "arrival";
-		return taken(() => this.#tryRecvGroup());
+		return taken(
+			() => this.#tryRecvGroup(),
+			() => this.#ended(),
+		);
 	}
 
 	/**
@@ -2683,7 +2740,7 @@ export class Subscriber {
 				case "datagram":
 					return recv.datagram;
 				case "done":
-					return undefined;
+					return this.#ended();
 				case "error":
 					throw recv.error;
 			}
@@ -2731,7 +2788,7 @@ export class Subscriber {
 				case "group":
 					return recv.group;
 				case "done":
-					return undefined;
+					return this.#ended();
 				case "error":
 					throw recv.error;
 			}
@@ -2919,6 +2976,14 @@ export class Subscriber {
  * inside the budget is still delivered whole, as a burst in order. The budget follows a
  * group already handed out too: a stalled group's pending frame read rejects once newer
  * content has pulled that far ahead.
+ *
+ * A history or VOD read sets `maxDelay: null` (no limit). This reader skips a missing
+ * group rather than waiting for it, but the Rust reader waits for one a subscription still
+ * owes, within the budget, or until it resolves without one. An unlimited or long budget
+ * only avoids blocking where the feed signals its gaps: moq-lite, whose publisher sends
+ * `SUBSCRIBE_DROP` for every group it won't deliver, or an ordered moq-transport FETCH.
+ * Over a moq-transport SUBSCRIBE, which signals no gaps, that wait can last until the
+ * track ends.
  */
 export class Ordered {
 	/** The track name. */
@@ -2984,8 +3049,8 @@ export class Ordered {
 	 * Return the next group with a strictly-greater sequence number than the last returned.
 	 *
 	 * Late arrivals (sequence at or below the last returned) are silently skipped, as is a
-	 * group whose every frame is further behind the live edge than `maxDelay` (the default of
-	 * zero keeps only what nothing newer has superseded). Honors the bounds set by
+	 * group whose every frame is further behind the live edge than `maxDelay` (the default
+	 * subscription's zero keeps only what nothing newer has superseded). Honors the bounds set by
 	 * {@link withRange}.
 	 */
 	nextGroup(): Promise<GroupConsumer | undefined> {
@@ -2997,7 +3062,10 @@ export class Ordered {
 	 * {@link Subscriber.tryRecvGroup}. Mirrors the Rust `poll_next_group`.
 	 */
 	tryNextGroup(): GroupConsumer | undefined {
-		return taken(() => ordered_.tryNextGroup(this.#subscriber));
+		return taken(
+			() => ordered_.tryNextGroup(this.#subscriber),
+			() => ordered_.ended(this.#subscriber),
+		);
 	}
 
 	/**

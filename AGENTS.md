@@ -6,7 +6,7 @@ This is a polyglot monorepo with Rust (server/native) and TypeScript (browser) i
 Start with [doc/setup/repository.md](doc/setup/repository.md) to locate a feature, its examples, and its tests.
 Use this checkout's source and docs for repository work; published API references may describe a different version.
 
-- Read `CONTRIBUTING.md` when dealing with PRs.
+- Read `CONTRIBUTING.md` when dealing with PRs, and `REVIEW.md` when reviewing one or triaging review findings.
 - Read `PROMPTING.md` before instructing other agents via context, memory, plans, or reviews.
 - Before editing, read each `AGENTS.md` along the path from the root to the file, including package-level instructions. Use `rg --files -g AGENTS.md` to find them; root-level sessions may not load nested instructions automatically.
 - `doc/` is the feature entry point, not a reference. Update it only when a change alters what a user would do; see `doc/AGENTS.md`.
@@ -15,7 +15,7 @@ Use this checkout's source and docs for repository work; published API reference
 
 - Pull the latest origin changes before working.
 - Dig into the root cause and fix it at the source. Never work around a fixable bug with a retry, sleep, or timeout, nor pass a flaky test by loosening its assertion or disabling production behavior.
-- Fail loud and early. Error on unsupported or malformed input rather than warn and continue: supported or refused.
+- Fail loud and early. Error on unsupported or malformed input rather than warn and continue: supported or refused. Never paper over a partial failure: when any part of an input or operation fails, fail the whole instead of skipping that part, and never report partly failed work as done.
 - Treat anything received over the network as untrusted. Ask how a hostile peer could abuse it, such as memory, CPU, or state it makes the other side hold, and bound that cost by design (backpressure, flow control, ownership), never with a constant whose only effect is a runtime refusal. A peer must never crash the process, reach another tenant's data, or receive a credential it was not issued.
 - Don't detect a peer reusing or duplicating an ID, name, or sequence unless our own correctness or the hostile-peer bounds above depend on it. A duplicate that only confuses the sender's own requests is its problem; track a high-water mark or nothing.
 - Reproduce bugs before fixing them. Tests must be worth their weight long-term: cover edge cases, not old bugs or trivial values.
@@ -102,7 +102,7 @@ just fix          # Auto-fix lint/formatting, same scope
 These diff the branch against its base and only run the affected packages.
 
 Quests: before starting work, run `quest guide` and follow it.
-The `quest` binary comes from the kixelated/quest flake input and serves the quest skills; change them upstream and bump the input.
+The `quest` binary comes from the moq-dev/quest flake input and serves the quest skills; change them upstream and bump the input.
 
 # Cross-Package Sync
 

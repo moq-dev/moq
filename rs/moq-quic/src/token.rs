@@ -8,10 +8,11 @@ use bytes::{Buf, BufMut, Bytes};
 use rand::{Rng, RngExt};
 
 use crate::{
-	Duration, RESET_TOKEN_SIZE, ServerConfig, UNIX_EPOCH, Wall,
+	Duration, RESET_TOKEN_SIZE, UNIX_EPOCH, Wall,
 	coding::{BufExt, BufMutExt},
 	crypto::{HandshakeTokenKey, HmacKey},
 	packet::InitialHeader,
+	server,
 	shared::ConnectionId,
 };
 
@@ -102,7 +103,7 @@ impl IncomingToken {
 	/// cannot be established
 	pub(crate) fn from_header(
 		header: &InitialHeader,
-		server_config: &ServerConfig,
+		server_config: &server::Config,
 		remote_address: SocketAddr,
 	) -> Result<Self, InvalidRetryTokenError> {
 		let unvalidated = Self {

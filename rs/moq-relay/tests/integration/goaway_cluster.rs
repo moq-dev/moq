@@ -171,9 +171,10 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 
 	let session_a = within("A accepts", accepted_a.recv()).await.expect("A accepts");
 	let consumer = cluster.origin.consume();
-	within("routed via A", consumer.routed("cam")).await.expect("routed");
 	let bc = consumer
-		.request_broadcast("cam", None)
+		.follow("cam", None)
+		.unwrap()
+		.available()
 		.await
 		.expect("broadcast resolves");
 	let mut sub = within("subscribe", bc.track("video").expect("track").subscribe(None))
@@ -215,7 +216,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 			// Without an epoch, B's route is another source: a restart.
 			if let moq_net::announce::Event::Start(update)
 			| moq_net::announce::Event::Update(update)
-			| moq_net::announce::Event::Restart(update) = event
+			| moq_net::announce::Event::Restart(update)
+			| moq_net::announce::Event::Takeover { announce: update, .. } = event
 				&& update.route.cost != moq_net::origin::Cost::DRAIN
 			{
 				break;
@@ -314,12 +316,10 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 
 		// ── downstream consumer on the cluster origin ───────────────────
 		let consumer = cluster.origin.consume();
-		consumer
-			.routed("cam")
-			.await
-			.expect("broadcast announced through sibling A");
 		let bc = consumer
-			.request_broadcast("cam", None)
+			.follow("cam", None)
+			.unwrap()
+			.available()
 			.await
 			.expect("broadcast resolves");
 		let mut sub = bc
@@ -563,8 +563,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	let bc = within("broadcast resolves on the subscriber origin", async {
 		let consumer = sub_origin.consume();
-		consumer.routed("diamond").await?;
-		consumer.request_broadcast("diamond", None).await.ok()
+		consumer.follow("diamond", None).unwrap().available().await.ok()
 	})
 	.await
 	.expect("broadcast announced");
@@ -855,7 +854,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

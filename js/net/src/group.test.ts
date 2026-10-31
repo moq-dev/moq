@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
-import { Manual } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { FrameTooLarge, GroupTooLarge, StreamCode, StreamError } from "./error.ts";
 import { MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES, Producer } from "./group.ts";
 import { hooks, type Replacement } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timestamp } from "./time.ts";
+import { Producer as TrackProducer } from "./track.ts";
 
 const dec = new TextDecoder();
 
@@ -65,6 +66,111 @@ test("reordered frames keep the highest group PTS in live and later mirrors", ()
 	}
 });
 
+test("a frame read late keeps the instant it landed, plain, compressed, or resumed", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const plain = new Producer(0);
+		const compressed = new Producer(0);
+		// Frame 0 lands before compression binds, so the restored copy must carry its stamp too.
+		compressed.writeFrame(textFrame("a"));
+		hooks.bindGroupCompression(compressed, true);
+		const first = clock.now();
+		plain.writeFrame(textFrame("a"));
+		clock.jump(Nano.fromMilli(Milli(10)));
+		const second = clock.now();
+		plain.writeFrame(textFrame("b"));
+		compressed.writeFrame(textFrame("b"));
+		clock.jump(Nano.fromMilli(Milli(1000)));
+
+		const reader = plain.consume();
+		expect(reader.tryReadFrame()?.arrived).toBe(first);
+		expect((await reader.readFrameSequence())?.arrived).toBe(second);
+		const stored = compressed.consume();
+		expect((await hooks.readGroupFrame(stored, true))?.frame.arrived).toBe(first);
+		expect((await stored.readFrame())?.arrived).toBe(second);
+
+		// A frame written in with a stamp of its own still gets this node's.
+		const forwarded = new Producer(0);
+		forwarded.writeFrame({ payload: new Uint8Array([1]), arrived: first });
+		expect(forwarded.consume().tryReadFrame()?.arrived).toBe(clock.now());
+
+		// A resumed read takes the stamp the replacement copy holds, not when it was adopted.
+		const failing = new Producer(0);
+		const resumed = failing.mirror();
+		const replacement = new Producer(0);
+		replacement.writeFrame(textFrame("a"));
+		const landed = clock.now();
+		replacement.writeFrame(textFrame("b"));
+		hooks.recoverGroup(resumed, {
+			changed: new Signal(0),
+			wants: (failed) => failed !== undefined,
+			replace: async () => ({
+				group: replacement.mirror(),
+				expiry: { expired: () => false, changed: [] },
+				adopt: () => {},
+				discard: () => {},
+			}),
+		});
+		failing.writeFrame(textFrame("a"));
+		await resumed.readFrame();
+		clock.jump(Nano.fromMilli(Milli(1000)));
+		failing.abort(new Error("copy failed"));
+		expect((await resumed.readFrame())?.arrived).toBe(landed);
+
+		for (const producer of [plain, compressed, forwarded, replacement]) producer.finish();
+	} finally {
+		installed.close();
+	}
+});
+
+test("a group read late keeps the instant it joined, alone, on a track, or resumed", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const created = clock.now();
+		const alone = new Producer(0);
+		const track = new TrackProducer("test");
+		const subscriber = track.subscribe();
+		const live = track.createGroup(0);
+		live.writeFrame(textFrame("a"));
+		clock.jump(Nano.fromMilli(Milli(1000)));
+
+		expect(alone.consume().arrived).toBe(created);
+		expect((await subscriber.recvGroup())?.arrived).toBe(created);
+
+		// A resumed read keeps the original group's arrival, not the replacement copy's.
+		const original = clock.now();
+		const failing = new Producer(0);
+		const resumed = failing.mirror();
+		clock.jump(Nano.fromMilli(Milli(1000)));
+		const replacement = new Producer(0);
+		replacement.writeFrame(textFrame("a"));
+		replacement.writeFrame(textFrame("b"));
+		hooks.recoverGroup(resumed, {
+			changed: new Signal(0),
+			wants: (failed) => failed !== undefined,
+			replace: async () => ({
+				group: replacement.mirror(),
+				expiry: { expired: () => false, changed: [] },
+				adopt: () => {},
+				discard: () => {},
+			}),
+		});
+		failing.writeFrame(textFrame("a"));
+		await resumed.readFrame();
+		failing.abort(new Error("copy failed"));
+		expect((await resumed.readFrame())?.payload).toEqual(textFrame("b").payload);
+		expect(resumed.arrived).toBe(original);
+
+		for (const producer of [alone, live, replacement]) producer.finish();
+		subscriber.close();
+		track.close();
+	} finally {
+		installed.close();
+	}
+});
+
 test("zero group PTS keeps its scale and untimed groups stay unstamped", () => {
 	const installed = new Manual().install();
 	try {
@@ -82,39 +188,26 @@ test("zero group PTS keeps its scale and untimed groups stay unstamped", () => {
 	}
 });
 
-test("used reflects mirror demand and unused resolves when the last reader leaves", async () => {
+test("wanted reflects mirror demand until the last reader leaves", async () => {
 	const producer = new Producer(0);
 
 	// No mirror readers: no demand.
-	expect(producer.demand().used.peek()).toBe(false);
+	expect(producer.demand().wanted.peek()).toBe(false);
 
 	const a = producer.mirror();
 	const b = producer.mirror();
-	expect(producer.demand().used.peek()).toBe(true);
+	expect(producer.demand().wanted.peek()).toBe(true);
 
-	// Closing one of two keeps demand, so unused() stays pending.
+	// Closing one of two keeps demand.
 	a.close();
-	expect(producer.demand().used.peek()).toBe(true);
+	expect(producer.demand().wanted.peek()).toBe(true);
 
-	// Closing the last reader drops demand; unused() resolves. Fetch coalescing awaits this to
-	// cancel a download that everyone has abandoned (a group may never end on its own).
+	// Closing the last reader drops demand. Fetch coalescing watches this to cancel a download
+	// that everyone has abandoned (a group may never end on its own).
 	b.close();
-	await producer.demand().unused();
-	expect(producer.demand().used.peek()).toBe(false);
-});
-
-test("unused rejects once the group closes, even while read", async () => {
-	const producer = new Producer(0);
-	const reader = producer.mirror();
-	const pending = producer.demand().unused();
-	const abort = new Error("boom");
-	producer.abort(abort);
-	await expect(pending).rejects.toBe(abort);
-
-	const finished = new Producer(1);
-	finished.finish();
-	await expect(finished.demand().unused()).rejects.toThrow("group is closed");
-	reader.close();
+	const wanted = producer.demand().wanted;
+	while (wanted.peek()) await wanted.changed();
+	expect(wanted.peek()).toBe(false);
 });
 
 function pair(sequence: number) {

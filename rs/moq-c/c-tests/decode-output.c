@@ -35,10 +35,13 @@ _Static_assert(offsetof(moq_video_decoder_output, max_delay_us) == 0, "max_delay
 _Static_assert(offsetof(moq_video_decoder_output, format) == 8, "format moved");
 _Static_assert(offsetof(moq_video_decoder_output, width) == 12, "width moved");
 _Static_assert(offsetof(moq_video_decoder_output, height) == 16, "height moved");
+_Static_assert(offsetof(moq_video_decoder_output, start) == 20, "start moved");
 _Static_assert(sizeof(moq_video_decoder_output) == 24, "decoder output size changed");
 _Static_assert(MOQ_DECODE_READ_FRAME == 0, "frame read discriminant moved");
 _Static_assert(MOQ_DECODE_READ_GAP == 1, "gap read discriminant moved");
 _Static_assert(MOQ_DECODE_READ_END == 2, "end read discriminant moved");
+_Static_assert(MOQ_DECODE_START_OLDEST == 0, "oldest start discriminant moved");
+_Static_assert(MOQ_DECODE_START_LATEST == 1, "latest start discriminant moved");
 
 // Numeric codes from rs/moq-c/src/error.rs. They are the contract a C caller
 // matches on; if they drift, this fixture fails and the header is stale.
@@ -235,10 +238,13 @@ int main(void) {
     if (origin <= 0) fail("error: moq_origin_create failed: %d\n", origin);
 
     const char *path = "c-decoder-output-test";
-    int32_t broadcast = moq_origin_create_broadcast((uint32_t)origin, path, strlen(path));
-    if (broadcast <= 0) fail("error: moq_origin_create_broadcast failed: %d\n", broadcast);
-    if (moq_publish_announce((uint32_t)broadcast, NULL) < 0)
-        fail("error: moq_publish_announce failed (%s)\n", moq_error());
+    uint32_t broadcast = 0;
+    int32_t publication = moq_origin_create_broadcast((uint32_t)origin, path, strlen(path), &broadcast);
+    if (publication <= 0) fail("error: moq_origin_create_broadcast failed: %d\n", publication);
+    if (moq_publication_announce((uint32_t)publication, NULL) < 0)
+        fail("error: moq_publication_announce failed (%s)\n", moq_error());
+    if (moq_publication_free((uint32_t)publication) < 0)
+        fail("error: moq_publication_free failed (%s)\n", moq_error());
 
     moq_video_encoder_input input = {MOQ_VIDEO_PIXEL_FORMAT_RGBA, WIDTH, HEIGHT, {30000, 1001}};
     moq_video_encoder_output output = {MOQ_VIDEO_CODEC_H264, 0, 0, MOQ_VIDEO_ENCODER_KIND_SOFTWARE, NULL, 0};
@@ -249,7 +255,7 @@ int main(void) {
         fail("error: moq_encode_video_cut failed (%s)\n", moq_error());
     publish_frames(producer, 5);
 
-    int32_t request = moq_origin_request((uint32_t)origin, path, strlen(path), on_broadcast, &c);
+    int32_t request = moq_origin_request((uint32_t)origin, path, strlen(path), NULL, 0, on_broadcast, &c);
     if (request <= 0) fail("error: moq_origin_request failed: %d\n", request);
 
     pthread_mutex_lock(&c.mu);

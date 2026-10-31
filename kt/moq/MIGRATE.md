@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Compression moves to the track
+
+`dev.moq.flate` is removed: publish opaque bytes on a `TrackProducer`.
+`SnapshotConfig` and `WindowConfig` lose `compression`, and `StreamConfig` is removed. Publish the track with `TrackInfo(compress = true)` instead.
+`StreamProducer` drops its config argument, and `SnapshotConsumer`, `StreamConsumer`, and `WindowConsumer` take only the track.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 Publishing, serving, or requesting a broadcast at a path with a leading, trailing, or doubled `/` throws instead of collapsing it. Pass the canonical path, such as `room/cam`.
@@ -26,7 +32,7 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 The records carry durations as `java.time.Duration` fields instead of `*Us` microsecond integers, so the duration extension properties are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
 Convert with `toKotlinDuration()` and `toJavaDuration()` where you want `kotlin.time.Duration`.
 `AudioEncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs = 0u` for the codec's own frame.
-`Subscription.maxDelay` has no default: pass `java.time.Duration.ZERO` for the old one.
+`Subscription.maxDelay` has no default: start from `Subscription.default()`, or pass `java.time.Duration.ZERO`, for the old default. Null sets no subscriber limit.
 `TrackConsumer.info()` no longer throws.
 
 ### Connection state

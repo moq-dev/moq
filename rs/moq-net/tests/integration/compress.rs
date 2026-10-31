@@ -101,8 +101,7 @@ async fn relay(published: Published, hops: [&str; 2], subscription: moq_net::tra
 	let downstream = connect_mock(options).await;
 
 	let consumer = origin.consume();
-	consumer.routed("bcast").await.unwrap();
-	let remote = consumer.request_broadcast("bcast", None).await.unwrap();
+	let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
 	let subscriber = remote.track("data").unwrap().subscribe(subscription).await.unwrap();
 	support::harness::subscribed(&track).await;
 
@@ -293,8 +292,7 @@ async fn datagrams_meter_the_bytes_on_the_wire() {
 			let downstream = connect_mock(options).await;
 
 			let consumer = origin.consume();
-			consumer.routed("bcast").await.unwrap();
-			let remote = consumer.request_broadcast("bcast", None).await.unwrap();
+			let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
 			let mut subscriber = remote.track("data").unwrap().subscribe(None).await.unwrap();
 			support::harness::subscribed(&track).await;
 
@@ -392,8 +390,13 @@ async fn ietf_fetch_keeps_the_stored_form() {
 			options.server_publish = Some(publisher.consume());
 			options.client_subscribe = Some(origin.clone());
 			let _pair = connect_mock(options).await;
-			origin.consume().routed("bcast").await.unwrap();
-			let remote = origin.consume().request_broadcast("bcast", None).await.unwrap();
+			let remote = origin
+				.consume()
+				.follow("bcast", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap();
 			let consumer = remote.track("data").unwrap();
 			assert!(consumer.info().await.unwrap().compress, "{version}");
 			let mut fetched = consumer.fetch_group(0, moq_net::group::Fetch::default()).await.unwrap();

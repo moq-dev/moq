@@ -25,19 +25,11 @@ use crate::{Error, Result};
 /// ```
 ///
 /// Applying and materializing are separate on purpose. Frames must be applied in order (the merge
-/// patches and the DEFLATE window are both sequential), but a consumer catching up on a backlog only
+/// patches are sequential), but a consumer catching up on a backlog only
 /// wants the value at the head, so it applies every frame and calls [`decode`](Self::decode) once.
 /// A caller that wants a value per frame just calls it every time.
 pub struct Decoder<T> {
-	/// Whether frames are DEFLATE-compressed, matching the encoder's config.
-	compression: bool,
 	max_size: Option<usize>,
-
-	/// The current group's DEFLATE decoder (one window per group), rebuilt at each snapshot.
-	flate: Option<moq_flate::Decoder>,
-
-	/// Reused output for inflated delta frames.
-	plain: Vec<u8>,
 
 	/// Reused key buffers for validating remote patches before changing the baseline.
 	check: RefCell<crate::strict::Scratch>,
@@ -52,10 +44,7 @@ impl<T> Decoder<T> {
 	/// Create a decoder with no value, awaiting its first [`snapshot`](Self::snapshot).
 	pub fn new(config: Config) -> Self {
 		Self {
-			compression: config.compression.is_deflate(),
 			max_size: config.max_size,
-			flate: None,
-			plain: Vec::new(),
 			check: RefCell::new(crate::strict::Scratch::default()),
 			current: None,
 			_marker: PhantomData,
@@ -64,21 +53,16 @@ impl<T> Decoder<T> {
 
 	/// Apply a group's first frame: a full snapshot that replaces the current value.
 	///
-	/// Also starts the group's DEFLATE window, so this must be called at every group boundary, not
-	/// only the first.
+	/// Call this at every group boundary, not only the first.
 	pub fn snapshot(&mut self, payload: &[u8]) -> Result<()> {
 		self.current = None;
-		// Every group starts a new DEFLATE window, which holds the whole group to the group budget.
-		self.flate = self.compression.then(moq_flate::Decoder::new);
-		let inflated = self.flate.as_mut().map(|flate| flate.frame(payload)).transpose()?;
-		let plain = inflated.as_deref().unwrap_or(payload);
 		if let Some(limit) = self.max_size
-			&& plain.len() > limit
+			&& payload.len() > limit
 		{
 			return Err(Error::TooLarge(limit));
 		}
-		crate::strict::check(plain, &self.check)?;
-		self.current = Some(serde_json::from_slice(plain)?);
+		crate::strict::check(payload, &self.check)?;
+		self.current = Some(serde_json::from_slice(payload)?);
 		self.check_size()
 	}
 
@@ -89,21 +73,14 @@ impl<T> Decoder<T> {
 			return Err(Error::MissingSnapshot);
 		}
 		let result = (|| {
-			let plain = match self.flate.as_mut() {
-				Some(flate) => {
-					flate.frame_into(payload, &mut self.plain)?;
-					self.plain.as_slice()
-				}
-				None => payload,
-			};
 			if let Some(limit) = self.max_size
-				&& plain.len() > limit
+				&& payload.len() > limit
 			{
 				return Err(Error::TooLarge(limit));
 			}
 			crate::merge::apply_bytes(
 				self.current.as_mut().expect("a snapshot precedes any delta"),
-				plain,
+				payload,
 				&self.check,
 			)?;
 			self.check_size()
@@ -185,29 +162,13 @@ mod test {
 	use super::super::encoder::MAX_DELTA_FRAMES;
 	use super::super::{Config, Encoder};
 	use super::*;
-	use crate::Compression;
 	use serde_json::{Value, json};
-
-	fn consume(compression: Compression) -> ConsumerConfig {
-		ConsumerConfig {
-			compression,
-			..Default::default()
-		}
-	}
-
-	fn deflate() -> Config {
-		Config {
-			compression: Compression::Deflate,
-			..Default::default()
-		}
-	}
 
 	/// Round-trip a sequence of values through an encoder and decoder, yielding the value the
 	/// decoder reconstructs after each frame.
 	fn roundtrip(config: Config, values: &[Value]) -> Vec<Value> {
-		let compression = config.compression;
 		let mut encoder = Encoder::<Value>::new(config);
-		let mut decoder = Decoder::<Value>::new(consume(compression));
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 
 		let mut out = Vec::new();
 		for value in values {
@@ -230,7 +191,7 @@ mod test {
 	fn duplicate_keys_are_refused() {
 		let vectors = crate::strict::test::vectors();
 		for payload in &vectors.refused {
-			let mut decoder = Decoder::<Value>::new(consume(Compression::None));
+			let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 			let err = decoder.snapshot(payload.as_bytes()).unwrap_err();
 			assert!(matches!(err, Error::DuplicateKey), "{payload}: {err}");
 			assert!(decoder.value().is_none());
@@ -241,71 +202,29 @@ mod test {
 			assert!(decoder.value().is_none());
 		}
 		for payload in &vectors.accepted {
-			let mut decoder = Decoder::<Value>::new(consume(Compression::None));
+			let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 			decoder.snapshot(payload.as_bytes()).unwrap();
 			decoder.delta(payload.as_bytes()).unwrap();
 		}
 	}
 
 	#[test]
-	fn inflated_snapshots_and_patches_obey_the_budget() {
-		for snapshot in [true, false] {
-			let mut config = consume(Compression::Deflate);
-			config.max_size = Some(1024);
-			let mut decoder = Decoder::<Value>::new(config);
-			let mut encoder = moq_flate::Encoder::new();
-			if !snapshot {
-				decoder.snapshot(&encoder.frame(b"{}")).unwrap();
-			}
-			let payload = encoder.frame(
-				serde_json::to_string(&json!({"large": "x".repeat(4096)}))
-					.unwrap()
-					.as_bytes(),
-			);
-			assert!(payload.len() < 1024);
-			let result = if snapshot {
-				decoder.snapshot(&payload)
-			} else {
-				decoder.delta(&payload)
-			};
-			assert!(matches!(result, Err(Error::TooLarge(1024))));
-			assert!(decoder.value().is_none());
-		}
-	}
-
-	#[test]
 	fn patches_cannot_accumulate_past_the_budget() {
-		for compression in [Compression::None, Compression::Deflate] {
-			let mut config = consume(compression);
-			config.max_size = Some(13);
-			let mut decoder = Decoder::<Value>::new(config);
-			let mut encoder = moq_flate::Encoder::new();
-			let mut payload = |bytes: &[u8]| {
-				if compression == Compression::Deflate {
-					encoder.frame(bytes).to_vec()
-				} else {
-					bytes.to_vec()
-				}
-			};
-			decoder.snapshot(&payload(br#"{"a":1}"#)).unwrap();
-			decoder.delta(&payload(br#"{"b":2}"#)).unwrap(); // exactly 13 bytes
-			assert_eq!(decoder.value(), Some(&json!({"a":1,"b":2})));
-			decoder.delta(&payload(br#"{"a":null}"#)).unwrap(); // deletion frees budget
-			decoder.delta(&payload(br#"{"c":3}"#)).unwrap();
-			assert!(matches!(
-				decoder.delta(&payload(br#"{"d":4}"#)),
-				Err(Error::TooLarge(13))
-			));
-			assert!(decoder.value().is_none());
-			assert!(matches!(decoder.delta(b"{}"), Err(Error::MissingSnapshot)));
-			// A fresh group can recover after refusal.
-			let bytes = if compression == Compression::Deflate {
-				moq_flate::Encoder::new().frame(b"{}").to_vec()
-			} else {
-				b"{}".to_vec()
-			};
-			decoder.snapshot(&bytes).unwrap();
-		}
+		let config = ConsumerConfig {
+			max_size: Some(13),
+			..Default::default()
+		};
+		let mut decoder = Decoder::<Value>::new(config);
+		decoder.snapshot(br#"{"a":1}"#).unwrap();
+		decoder.delta(br#"{"b":2}"#).unwrap(); // exactly 13 bytes
+		assert_eq!(decoder.value(), Some(&json!({"a":1,"b":2})));
+		decoder.delta(br#"{"a":null}"#).unwrap(); // deletion frees budget
+		decoder.delta(br#"{"c":3}"#).unwrap();
+		assert!(matches!(decoder.delta(br#"{"d":4}"#), Err(Error::TooLarge(13))));
+		assert!(decoder.value().is_none());
+		assert!(matches!(decoder.delta(b"{}"), Err(Error::MissingSnapshot)));
+		// A fresh group can recover after refusal.
+		decoder.snapshot(b"{}").unwrap();
 	}
 
 	#[test]
@@ -331,25 +250,16 @@ mod test {
 		assert_eq!(roundtrip(Config::default(), &values), values);
 	}
 
+	/// Deltas are per group, so a keyframe mid-stream has to restart the baseline on both sides. An
+	/// encoder that diffed across the boundary would emit patches a joiner starting at the new group
+	/// can't apply.
 	#[test]
-	fn compressed_roundtrip() {
-		let values = vec![
-			json!({ "a": 1, "b": 1 }),
-			json!({ "a": 1, "b": 2 }),
-			json!({ "a": 5, "b": 2 }),
-		];
-		assert_eq!(roundtrip(deflate(), &values), values);
-	}
-
-	/// The window is per group, so a keyframe mid-stream has to restart it on both sides. An encoder
-	/// that kept the old window would emit frames a joiner starting at the new group can't inflate.
-	#[test]
-	fn compressed_roundtrip_across_a_group_boundary() {
-		let mut encoder = Encoder::<Value>::new(deflate().with_deltas(true));
+	fn roundtrip_across_a_group_boundary() {
+		let mut encoder = Encoder::<Value>::new(Config::default().with_deltas(true));
 		// One decoder reads every group in turn, and a joiner starts cold at each group, as a late
-		// subscriber does. The joiner catches an encoder that carries its window across the boundary.
-		let mut decoder = Decoder::<Value>::new(consume(Compression::Deflate));
-		let mut joiner = Decoder::<Value>::new(consume(Compression::Deflate));
+		// subscriber does.
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut joiner = Decoder::<Value>::new(ConsumerConfig::default());
 
 		// The frame cap rolls the group partway through, and a restatement rolls it again.
 		let restate = MAX_DELTA_FRAMES + 10;
@@ -364,7 +274,7 @@ mod test {
 			};
 			if frame.keyframe {
 				keyframes += 1;
-				joiner = Decoder::<Value>::new(consume(Compression::Deflate));
+				joiner = Decoder::<Value>::new(ConsumerConfig::default());
 				decoder.snapshot(&frame.payload).unwrap();
 				joiner.snapshot(&frame.payload).unwrap();
 			} else {

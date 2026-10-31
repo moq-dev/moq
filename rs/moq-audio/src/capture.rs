@@ -8,7 +8,7 @@
 //! `unsafe-libopus`, so audio never touches ffmpeg.
 //!
 //! Both backends deliver buffers from a realtime callback through a bounded
-//! async channel that the on-demand capture loop awaits, so dropping the
+//! async channel that the capture loop awaits, so dropping the
 //! publish future (e.g. on Ctrl+C) cancels the read and releases the device. A
 //! reader that falls behind loses buffers rather than growing the queue, and
 //! each read reports whether that happened so the encoder can re-anchor.

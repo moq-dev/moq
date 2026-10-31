@@ -48,7 +48,7 @@ export class TrackStatusRequest {
 		// Only the opt-out is worth bytes, and a peer before draft-22 would read
 		// INCLUDE_PROPERTIES as unknown, which is a protocol violation.
 		const params = new Parameters();
-		if (!this.propertiesWanted && Filter.isDraft22(version)) params.includeProperties = false;
+		if (!this.propertiesWanted && Filter.isDraft20(version)) params.includeProperties = false;
 		params.epoch = this.epoch;
 		await params.encode(w, version);
 	}

@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Instant, now } from "@moq/clock";
+import { type Instant, now } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import {
 	FrameTooLarge,
@@ -39,6 +39,14 @@ export interface Frame {
 	 * refused with {@link TimestampMismatch}.
 	 */
 	timestamp?: Timestamp;
+	/**
+	 * When the frame landed in this node's group, on the installed clock.
+	 *
+	 * Every frame a group returns carries the instant it was written, received, or fetched
+	 * into it, so a reader judges lateness on that rather than on when it got around to
+	 * reading. A write ignores it and stamps its own.
+	 */
+	arrived?: Instant;
 }
 
 /** Options for a sequence-aware frame read. */
@@ -86,14 +94,32 @@ class GroupState {
 	// so this mirror drives no media-time expiry.
 	unverified = false;
 	// When the group joined the track this mirror belongs to, at this hop: the wall clock a
-	// superseded predecessor ages from. Per track, since one group can join several.
-	arrived = Instant.zero;
+	// superseded predecessor ages from. Per track, since one group can join several. A group
+	// no track holds arrived when it was created.
+	arrived = now();
 	// Called with the frame count on every write, synchronously: a track's largest must not
 	// trail a write that already returned, as a batched `total` notification would.
 	progress = new Set<(total: number) => void>();
 
 	constructor(sequence: number) {
 		this.sequence = sequence;
+	}
+}
+
+// A written frame and when it landed. It keeps the writer's frame rather than copying it, so a
+// lazy payload is read only when a reader takes it.
+class Landed implements Frame {
+	readonly arrived: Instant;
+	#frame: Frame;
+	constructor(frame: Frame, arrived: Instant) {
+		this.#frame = frame;
+		this.arrived = arrived;
+	}
+	get payload(): Uint8Array {
+		return this.#frame.payload;
+	}
+	get timestamp(): Timestamp | undefined {
+		return this.#frame.timestamp;
 	}
 }
 
@@ -117,7 +143,7 @@ function appendFrame(state: GroupState, frame: Frame) {
 	for (const fn of state.progress) fn(state.total.peek());
 }
 
-let makeDemand: (sequence: number, used: Getter<boolean>, state: GroupState) => Demand;
+let makeDemand: (sequence: number, wanted: Getter<boolean>, state: GroupState) => Demand;
 
 /**
  * A watch-only view of a group's mirror readers, including coalesced fetches.
@@ -127,32 +153,22 @@ let makeDemand: (sequence: number, used: Getter<boolean>, state: GroupState) => 
 export class Demand {
 	/** The group sequence this handle watches. */
 	readonly sequence: number;
-	#used: Getter<boolean>;
+	#wanted: Getter<boolean>;
 	#state: GroupState;
 
-	private constructor(sequence: number, used: Getter<boolean>, state: GroupState) {
+	private constructor(sequence: number, wanted: Getter<boolean>, state: GroupState) {
 		this.sequence = sequence;
-		this.#used = used;
+		this.#wanted = wanted;
 		this.#state = state;
 	}
 
 	static {
-		makeDemand = (sequence, used, state) => new Demand(sequence, used, state);
+		makeDemand = (sequence, wanted, state) => new Demand(sequence, wanted, state);
 	}
 
 	/** Whether any mirror reader is attached. */
-	get used(): Getter<boolean> {
-		return this.#used;
-	}
-
-	/** Wait until all mirror readers leave. Throws once the group closes: its abort error, or a clean-close error. */
-	async unused(): Promise<void> {
-		for (;;) {
-			const closed = this.#state.closed.peek();
-			if (closed !== undefined) throw closed ?? new Error("group is closed");
-			if (!this.#used.peek()) return;
-			await Signal.race(this.#used, this.#state.closed);
-		}
+	get wanted(): Getter<boolean> {
+		return this.#wanted;
 	}
 
 	/** The group's clean close or abort error. */
@@ -173,10 +189,10 @@ export class Producer {
 	#state: GroupState;
 	#mirrors?: Set<GroupState>;
 
-	// Whether any mirror reader is attached (see {@link Demand.used}). Fetch coalescing watches it to
+	// Whether any mirror reader is attached (see {@link Demand.wanted}). Fetch coalescing watches it to
 	// cancel an abandoned download; a group can stay open indefinitely (a catalog or JSON stream),
 	// so this is what stops a reader-less fetch instead of the stream ending on its own.
-	#used = new Signal<boolean>(false);
+	#wanted = new Signal<boolean>(false);
 	#demand: Demand;
 
 	// Exclusive cap on the frame count, set when the track ends inside this group: a write
@@ -194,7 +210,7 @@ export class Producer {
 	constructor(sequence: number) {
 		this.#state = new GroupState(sequence);
 		this.sequence = sequence;
-		this.#demand = makeDemand(sequence, this.#used, this.#state);
+		this.#demand = makeDemand(sequence, this.#wanted, this.#state);
 	}
 
 	static {
@@ -304,6 +320,8 @@ export class Producer {
 		dst.latest = this.#state.latest;
 		dst.flate = this.#state.flate;
 		dst.compressed = this.#state.compressed;
+		// A track restamps its own mirror with when the group joined it.
+		dst.arrived = this.#state.arrived;
 		for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
 		dst.start = this.#state.start;
 		dst.offset = this.#state.offset;
@@ -320,14 +338,14 @@ export class Producer {
 
 		this.#mirrors ??= new Set();
 		this.#mirrors.add(dst);
-		this.#used.set(true);
+		this.#wanted.set(true);
 
 		// Track this mirror's close eagerly (not just lazily on the next write) so demand drops the
 		// moment the last reader leaves, letting an abandoned fetch cancel even with no more frames.
 		const dispose = dst.closed.subscribe((c) => {
 			if (c === undefined) return;
 			this.#mirrors?.delete(dst);
-			this.#used.set((this.#mirrors?.size ?? 0) > 0);
+			this.#wanted.set((this.#mirrors?.size ?? 0) > 0);
 			dispose();
 		});
 
@@ -382,13 +400,15 @@ export class Producer {
 			this.#overflow();
 		}
 
+		const arrived = now();
+		frame = new Landed(frame, arrived);
 		if (this.#state.flate) {
 			frame = this.#state.flate.push(frame, inflated);
 			if (this.#state.flate.stored > MAX_GROUP_CACHE_BYTES) {
 				this.#overflow();
 			}
 		}
-		this.#activity = now();
+		this.#activity = arrived;
 		appendFrame(this.#state, frame);
 		if (commits) {
 			this.#admits = undefined;
@@ -636,6 +656,8 @@ export class Consumer {
 	readonly sequence: number;
 
 	#state: GroupState;
+	// The copy it was mirrored from, which that copy's cache evicts.
+	readonly #mirrored: GroupState;
 	#expiry?: Expiry;
 	// Carries the group across its logical track's route changes; see `resume.ts`.
 	#recover?: GroupRecover;
@@ -650,10 +672,25 @@ export class Consumer {
 	#expired?: Expired;
 	// Closed by its reader, which ends it whatever is left unread.
 	#released = false;
+	// The arrival of the copy first read, kept once a replacement copy is adopted.
+	#arrived?: Instant;
 
 	private constructor(state: GroupState) {
 		this.#state = state;
+		this.#mirrored = state;
 		this.sequence = state.sequence;
+	}
+
+	/**
+	 * When the group joined its track at this hop, before its first frame, on the installed
+	 * clock: its header was received, or it was fetched or created here.
+	 *
+	 * A reader that gets to the group late still measures from when it landed, as
+	 * {@link Frame.arrived} does for each frame. A consumer resumed onto a replacement copy
+	 * keeps the original group's arrival.
+	 */
+	get arrived(): Instant {
+		return this.#arrived ?? this.#state.arrived;
 	}
 
 	/**
@@ -702,6 +739,7 @@ export class Consumer {
 	static {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
+		hooks.readsMirrored = (group) => group.#state === group.#mirrored;
 		hooks.groupTimestamp = (group) =>
 			group.#state.unverified || group.#state.offset !== 0 ? undefined : group.#state.timestamp;
 		hooks.groupLatest = (group) => (group.#state.unverified ? undefined : group.#state.latest);
@@ -733,9 +771,7 @@ export class Consumer {
 				group.#closed = undefined;
 		};
 		hooks.readGroupFrame = (group, compressed) => group.#readFrame(0, compressed);
-		hooks.evictGroup = (group) => {
-			group.#evict();
-		};
+		hooks.evictGroup = (group) => group.#evict();
 	}
 
 	// Evaluate the drift budget for a read that has nothing buffered and is about to
@@ -757,7 +793,9 @@ export class Consumer {
 		return true;
 	}
 
-	#evict() {
+	#evict(): boolean {
+		// A group read on from another copy is that copy's to reclaim.
+		if (this.#state !== this.#mirrored) return false;
 		const frames = this.#bufferedFrames();
 		if (frames.length > 0) {
 			// Unread content is going away either way. If the budget had already given up
@@ -775,6 +813,9 @@ export class Consumer {
 		this.#state.cacheBytes = 0;
 		this.#state.flate = undefined;
 		this.#state.frames.set([]);
+		// A failed copy holds nothing more to reclaim, and its recovery may still continue the group.
+		const closed = this.#state.closed.peek();
+		return !(closed instanceof Error && this.#recovers(closed));
 	}
 
 	// The next change a parked read waits for.
@@ -860,6 +901,7 @@ export class Consumer {
 		replacement.adopt();
 		// The copy left behind stops teeing into the state this consumer read.
 		if (this.#state.closed.peek() === undefined) this.#state.closed.set(null);
+		this.#arrived ??= this.#state.arrived;
 		this.#state = next;
 		this.#expiry = replacement.expiry;
 		this.#skip = index;
@@ -887,7 +929,11 @@ export class Consumer {
 		const slice = compressed ? stored(buffered) : undefined;
 		let frame: Frame;
 		try {
-			frame = { payload: slice?.payload ?? buffered.payload, timestamp: buffered.timestamp };
+			frame = {
+				payload: slice?.payload ?? buffered.payload,
+				timestamp: buffered.timestamp,
+				arrived: buffered.arrived,
+			};
 		} catch (error) {
 			this.#terminal = error instanceof Error ? error : new Error(String(error));
 			if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
@@ -945,7 +991,7 @@ export class Consumer {
 		if (this.#terminal) return undefined;
 		const read = this.#readBufferedFrame();
 		if (!read) return undefined;
-		return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
+		return { sequence: read.sequence, ...read.frame };
 	}
 
 	/** Resolves once {@link readFrame} would not block. */
@@ -987,7 +1033,7 @@ export class Consumer {
 	async readFrameSequence(options?: ReadOptions): Promise<({ sequence: number } & Frame) | undefined> {
 		const read = await this.#readFrame(options?.from ?? 0);
 		if (!read) return undefined;
-		return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
+		return { sequence: read.sequence, ...read.frame };
 	}
 
 	async #readFrame(from: number, compressed = false): Promise<ReadGroupFrame | undefined> {

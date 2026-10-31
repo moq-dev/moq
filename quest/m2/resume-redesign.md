@@ -15,8 +15,11 @@ From the 2026-10-24 pre-cut audit at 151a529670. Internal only: no public API
 or wire change, so it can ship after the cut. The audit recommended after
 the cut, not before: a rewrite now would discard the large resume test
 corpus right before release. Decided 2026-10-25 (maintainer): the
-[model test](/quest/m1/resume-model-test.md) comes first and gates the cut;
-this rewrite moves to m1 only if that test shows design-level bugs.
+model test (`rs/moq-net/src/model/resume_model.rs`) came first and gated the
+cut; this rewrite moves to m1 only if that test shows design-level bugs.
+It found single missed checks
+([moq-dev/moq#6947](https://github.com/moq-dev/moq/pull/6947)), so this
+stays after the cut, with the model as its oracle.
 
 **Why.** Main replaced release's splice design with per-reader route copies
 in 0382d309f4 (2026-10-04). Since then about 30 of 58 commits to
@@ -61,8 +64,9 @@ paths diverged.
    `Retain`, `Candidate`, per-reader datagram dedupe (dedupe once on insert),
    and per-reader `learn_end`.
 4. `Recover` attaches to the slot, not a handed-out group: continuing a
-   group whose copy failed is the in-place refill that
-   [front eviction](/quest/m1/unbounded-groups/front-eviction.md) builds.
+   group whose copy failed is a
+   [flight](/quest/m1/unbounded-groups/flights.md) from the reader's frame on
+   the new route, which hands over like any other flight.
 
 Hard constraint from the splice era: two caches sharing one group handle
 caused expiry bugs (f9b7982e01, 6c2b733bbb) and boundary churn (06bcadd06c,
@@ -78,7 +82,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - the in-place refill `Recover` folds into
+- [Flights](/quest/m1/unbounded-groups/flights.md) - the paced copy and handover `Recover` folds into
 - [Release cut](/quest/m2/release/cut.md) - wait for the release in flight to ship
 
 ## Related

@@ -1,0 +1,17 @@
+error[E0308]: mismatched types
+  --> tests/ui/wrong_annotation.rs:17:20
+   |
+17 |         let label: u32 = format!("m-{a}");
+   |                          ^^^^^^^^^^^^^^^^ expected `u32`, found `String`
+
+error[E0599]: no method named `len` found for type `u32` in the current scope
+  --> tests/ui/wrong_annotation.rs:19:24
+   |
+19 |         Poll::Ready(Ok(label.len() as u64 + a + b))
+   |                              ^^^
+   |
+help: there is a method `le` with a similar name, but with different arguments
+  --> $RUST/core/src/cmp.rs
+   |
+   |     fn le(&self, other: &Rhs) -> bool {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

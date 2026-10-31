@@ -34,8 +34,12 @@ Decided with the maintainer on 2026-10-22:
   rendition never wraps), then bitrate. Audio (`hang::catalog::Audio::ranked`) sorts
   by enabled, then bitrate, then sample rate, then channel count. Skip
   disabled renditions and take the first one the source can decode. A
-  section where every rendition is disabled is handled like an absent
-  section: clear the track, and blank it for video. Don't add a ranking API
+  section where every rendition is disabled keeps the rendition already
+  selected, still subscribed, when it remains in the catalog (decided
+  2026-10-28, [push-to-talk](/quest/m1/push-to-talk/README.md): consumers
+  "should not select" a disabled rendition, but hold one). With nothing
+  selected, it is handled like an absent section: clear the track, and blank
+  it for video. Don't add a ranking API
   to moq-ffi until another binding consumer needs one.
 - Make `epoch` part of rendition identity for both the active and the
   pending track.

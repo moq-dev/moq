@@ -81,7 +81,10 @@ impl Room {
 			let (update, active) = match ready!(self.announced.poll_next(waiter)) {
 				// A restart resolves the new instance, replacing the one handed out before.
 				Some(
-					announce::Event::Start(update) | announce::Event::Update(update) | announce::Event::Restart(update),
+					announce::Event::Start(update)
+					| announce::Event::Update(update)
+					| announce::Event::Restart(update)
+					| announce::Event::Takeover { announce: update, .. },
 				) => (update, true),
 				Some(announce::Event::End(update)) => (update, false),
 				None => return Poll::Ready(None),
@@ -102,7 +105,7 @@ impl Room {
 				}));
 			}
 
-			let mut request = self.origin.request_broadcast(&path, None).into_inner();
+			let mut request = self.origin.request(&path, None).into_inner();
 			match kio::Task::poll(&mut request, waiter) {
 				Poll::Ready(Ok(broadcast)) => {
 					return Poll::Ready(Some(Event {

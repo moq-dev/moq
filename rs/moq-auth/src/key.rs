@@ -479,7 +479,7 @@ impl Key {
 		}
 	}
 
-	fn to_decoding_key(&self) -> crate::Result<&DecodingKey> {
+	pub(crate) fn to_decoding_key(&self) -> crate::Result<&DecodingKey> {
 		if let Some(key) = self.decode.get() {
 			return Ok(key);
 		}
@@ -543,7 +543,7 @@ impl Key {
 		Ok(self.decode.get_or_init(|| decoding_key))
 	}
 
-	fn to_encoding_key(&self) -> crate::Result<&EncodingKey> {
+	pub(crate) fn to_encoding_key(&self) -> crate::Result<&EncodingKey> {
 		if let Some(key) = self.encode.get() {
 			return Ok(key);
 		}
@@ -610,16 +610,7 @@ impl Key {
 	/// Verify the signature, claims, and key scope but not the times, so an expired
 	/// token's root is still known to be genuine.
 	pub(crate) fn verify_claims(&self, token: &str) -> crate::Result<Claims> {
-		if !self.operations.contains(&KeyOperation::Verify) {
-			return Err(KeyError::VerifyUnsupported.into());
-		}
-		let header = jsonwebtoken::decode_header(token)?;
-		match (self.kid.as_ref(), header.kid.as_deref()) {
-			(Some(expected), Some(actual)) if expected.encode() == actual => {}
-			(Some(_), None) => return Err(KeyError::MissingKid.into()),
-			(_, Some(actual)) => return Err(KeyError::KeyNotFound(actual.to_string()).into()),
-			(None, None) => {}
-		}
+		self.check_kid(token)?;
 
 		let mut validation = jsonwebtoken::Validation::new(self.algorithm.into());
 		validation.required_spec_claims = Default::default();
@@ -632,12 +623,31 @@ impl Key {
 		Ok(claims)
 	}
 
+	/// Refuse a key that cannot verify, or a token whose `kid` header names another key.
+	pub(crate) fn check_kid(&self, token: &str) -> crate::Result<()> {
+		if !self.operations.contains(&KeyOperation::Verify) {
+			return Err(KeyError::VerifyUnsupported.into());
+		}
+		let header = jsonwebtoken::decode_header(token)?;
+		match (self.kid.as_ref(), header.kid.as_deref()) {
+			(Some(expected), Some(actual)) if expected.encode() == actual => Ok(()),
+			(Some(_), None) => Err(KeyError::MissingKid.into()),
+			(_, Some(actual)) => Err(KeyError::KeyNotFound(actual.to_string()).into()),
+			(None, None) => Ok(()),
+		}
+	}
+
 	/// Sign the claims with this key, returning the encoded token.
+	///
+	/// Fails with [`Error::InvalidRoot`](crate::Error::InvalidRoot) on a root spelled with an
+	/// empty segment, a `\` escaping anything but `\` or `/`, or more than 4096 bytes.
+	/// Verifying stays lenient on the empty segments, so tokens minted before stay valid.
 	pub fn sign(&self, payload: &Claims) -> crate::Result<String> {
 		if !self.operations.contains(&KeyOperation::Sign) {
 			return Err(KeyError::SignUnsupported.into());
 		}
 
+		crate::path::validate(&payload.root)?;
 		payload.validate()?;
 		self.validate_scope(payload)?;
 
@@ -657,8 +667,9 @@ impl Key {
 	/// Derive a key with an authorization scope attached, capping what its tokens may grant.
 	///
 	/// The scope is validated here, and it is the only way to set one, so a key can never carry a
-	/// scope that permits nothing.
+	/// scope that permits nothing, nor a root [`sign`](Self::sign) would refuse.
 	pub fn with_scope(mut self, scope: crate::Scope) -> crate::Result<Self> {
+		crate::path::validate(&scope.root)?;
 		scope.validate()?;
 		self.jwk.scope = Some(scope);
 		Ok(self)
@@ -670,7 +681,7 @@ impl Key {
 		self
 	}
 
-	fn validate_scope(&self, claims: &Claims) -> crate::Result<()> {
+	pub(crate) fn validate_scope(&self, claims: &Claims) -> crate::Result<()> {
 		if let Some(scope) = &self.scope {
 			scope.validate()?;
 			if !scope.allows(claims) {
@@ -943,6 +954,40 @@ mod tests {
 
 		let forged = unrestricted.sign(&denied).unwrap();
 		assert!(matches!(scoped.verify(&forged), Err(crate::Error::ScopeExceeded)));
+	}
+
+	/// A token or key scope never names a root no peer can spell, though one already minted
+	/// with boundary slashes still verifies.
+	#[test]
+	fn test_key_mints_only_strict_roots() {
+		let key = create_test_key();
+		let claims = |root: &str| Claims {
+			root: root.into(),
+			publish: patterns(&["**"]),
+			..Default::default()
+		};
+		let scope = |root: &str| crate::Scope {
+			root: root.into(),
+			publish: patterns(&["**"]),
+			subscribe: patterns(&[]),
+		};
+
+		for root in ["/room", "room/", "a//b", r"a\b"] {
+			assert!(
+				matches!(key.sign(&claims(root)), Err(crate::Error::InvalidRoot(_))),
+				"{root:?}"
+			);
+			assert!(
+				matches!(key.clone().with_scope(scope(root)), Err(crate::Error::InvalidRoot(_))),
+				"{root:?}"
+			);
+		}
+
+		let legacy = sign_raw(&key, serde_json::json!({"root": "/room/", "publish": ["**"]}));
+		assert_eq!(
+			key.verify(&legacy).unwrap().authorize("room").unwrap().publish,
+			patterns(&["**"])
+		);
 	}
 
 	/// A key's crypto material is derived once and cached, so the fields it was derived from must

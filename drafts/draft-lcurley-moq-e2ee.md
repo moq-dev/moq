@@ -149,6 +149,8 @@ A relay that presents a wrong epoch causes authentication failure; a relay that 
 Neither can cause a nonce to repeat, because only the publisher instance chooses the epoch it encrypts under.
 
 A restart or replacement of a publisher is a new instance and mints a new epoch.
+So is a cloned process image, such as a `fork` without `exec`, a restored VM snapshot or process checkpoint, or a producing generation prepared once and copied to two processes: each copy MUST mint its own generation before it encrypts.
+A clone copies the epoch and the per-track counters verbatim, so two copies that both encrypt would protect different plaintext under the same key and nonce, and nothing on the wire lets a receiver or relay detect it.
 Transport sequence numbers therefore restart freely without any coordination between instances.
 An ended instance stays readable only for as long as relays or archives retain it under its epoch; once a newer epoch wins the shared path, subscribers resolve the newer one.
 
@@ -276,12 +278,12 @@ Those three varints are at most 24 bytes, so datagram plaintext MUST be at most 
 
 ## Catalogs
 A catalog is a track like any other: published under the physical name derived from its semantic name, with each snapshot or delta protected at its own group and frame identity.
-Hang {{hang}} `catalog.json` and `catalog.json.z` and MSF's `catalog` are semantic names; authorized clients derive those physical names from the generation.
+Hang {{hang}} `catalog.json` and MSF's `catalog` are semantic names; authorized clients derive those physical names from the generation.
 The decrypted catalog is unchanged from its plaintext form: every track it references, including rendition-map keys, `track` fields, and application extensions, keeps its semantic name.
 A subscriber derives the physical name of each track it reads; neither side rewrites the catalog, so extensions need no profile support.
 
-If a representation is compressed, compression is applied to the catalog bytes before AEAD and reversed after decryption.
-Encrypting then compressing is forbidden: ciphertext does not compress, and the `.z` sibling would leak the uncompressed size ratio.
+If a track is compressed, compression is applied to the plaintext before AEAD and reversed after decryption.
+Encrypting then compressing is forbidden: ciphertext does not compress.
 
 
 # Bounds {#bounds}

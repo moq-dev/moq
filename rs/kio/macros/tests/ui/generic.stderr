@@ -1,0 +1,5 @@
+error: #[kio::machine] does not support generic impls
+  --> tests/ui/generic.rs:11:5
+   |
+11 | impl<T> M<T> {
+   |     ^^^

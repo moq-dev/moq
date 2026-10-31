@@ -15,7 +15,6 @@
 #![cfg_attr(test, allow(dead_code, reason = "test builds compile helpers only some tests call"))]
 
 use std::{
-	fmt,
 	net::{IpAddr, SocketAddr},
 	ops,
 };
@@ -40,30 +39,23 @@ pub use varint::{VarInt, VarIntBoundsExceeded};
 mod bloom_token_log;
 use bloom_token_log::BloomTokenLog;
 
-mod connection;
+pub mod connection;
 pub use crate::connection::{
-	Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, CreditStats, Datagrams, Event,
-	FinishError, FrameStats, LeaseError, Leased, PathStats, ReadError, ReadableError, RecvStream, SendDatagramError,
-	SendGroup, SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError,
-	Written,
+	CreditStats, Datagrams, Event, FrameStats, PathStats, ShouldTransmit, StreamEvent, Streams, UdpStats, recv, send,
 };
+
+pub mod stream;
 #[cfg(feature = "mux")]
 #[doc(hidden)]
 pub use connection::mux;
-#[cfg(feature = "qlog")]
-pub use connection::qlog::QlogStream;
+pub(crate) use stream::{Dir, Id as StreamId};
 
 #[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
 pub use rustls;
 
 mod config;
 mod limits;
-#[cfg(feature = "qlog")]
-pub use config::QlogConfig;
-pub use config::{
-	AckFrequencyConfig, ClientConfig, ConfigError, EndpointConfig, IdleTimeout, MtuDiscoveryConfig, ServerConfig,
-	TransportConfig, ValidationTokenConfig,
-};
+pub use config::{ConfigError, client, server, transport};
 pub use limits::{Limits, LimitsError};
 
 pub mod crypto;
@@ -72,10 +64,7 @@ mod frame;
 use crate::frame::Frame;
 pub use crate::frame::{ApplicationClose, ConnectionClose, Datagram, FrameType};
 
-mod endpoint;
-pub use crate::endpoint::{
-	AcceptError, Accepted, Accepting, ConnectError, ConnectionHandle, DatagramEvent, Endpoint, Incoming, RetryError,
-};
+pub mod endpoint;
 
 mod packet;
 pub use packet::SpaceId;
@@ -104,16 +93,31 @@ pub(crate) use moq_clock::{Instant, Wall};
 pub(crate) use std::time::Duration;
 pub(crate) const UNIX_EPOCH: Wall = Wall::UNIX_EPOCH;
 
-/// The QUIC protocol version implemented.
-pub const DEFAULT_SUPPORTED_VERSIONS: &[u32] = &[
-	0x00000001,
-	0xff00_001d,
-	0xff00_001e,
-	0xff00_001f,
-	0xff00_0020,
-	0xff00_0021,
-	0xff00_0022,
-];
+/// A QUIC version this crate speaks
+#[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Hash)]
+#[non_exhaustive]
+pub enum Version {
+	/// QUIC version 1, [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000.html)
+	#[default]
+	V1,
+}
+
+impl Version {
+	/// Every version, in preference order
+	const ALL: &[Self] = &[Self::V1];
+
+	/// The version's number on the wire
+	pub(crate) fn wire(self) -> u32 {
+		match self {
+			Self::V1 => 0x0000_0001,
+		}
+	}
+
+	/// The version a wire number names, if this crate speaks it
+	pub(crate) fn from_wire(version: u32) -> Option<Self> {
+		Self::ALL.iter().copied().find(|v| v.wire() == version)
+	}
+}
 
 /// Whether an endpoint was the initiator of a connection
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -148,101 +152,12 @@ impl ops::Not for Side {
 	}
 }
 
-/// Whether a stream communicates data in both directions or only from the initiator
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum Dir {
-	/// Data flows in both directions
-	Bi = 0,
-	/// Data flows only from the stream's initiator
-	Uni = 1,
-}
-
-impl Dir {
-	fn iter() -> impl Iterator<Item = Self> {
-		[Self::Bi, Self::Uni].iter().cloned()
-	}
-}
-
-impl fmt::Display for Dir {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		use Dir::*;
-		f.pad(match *self {
-			Bi => "bidirectional",
-			Uni => "unidirectional",
-		})
-	}
-}
-
-/// Identifier for a stream within a particular connection
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct StreamId(u64);
-
-impl fmt::Display for StreamId {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let initiator = match self.initiator() {
-			Side::Client => "client",
-			Side::Server => "server",
-		};
-		let dir = match self.dir() {
-			Dir::Uni => "uni",
-			Dir::Bi => "bi",
-		};
-		write!(f, "{} {}directional stream {}", initiator, dir, self.index())
-	}
-}
-
-impl StreamId {
-	/// Create a new StreamId
-	pub fn new(initiator: Side, dir: Dir, index: u64) -> Self {
-		Self((index << 2) | ((dir as u64) << 1) | initiator as u64)
-	}
-	/// Which side of a connection initiated the stream
-	pub fn initiator(self) -> Side {
-		if self.0 & 0x1 == 0 { Side::Client } else { Side::Server }
-	}
-	/// Which directions data flows in
-	pub fn dir(self) -> Dir {
-		if self.0 & 0x2 == 0 { Dir::Bi } else { Dir::Uni }
-	}
-	/// Distinguishes streams of the same initiator and directionality
-	pub fn index(self) -> u64 {
-		self.0 >> 2
-	}
-}
-
-impl From<StreamId> for VarInt {
-	fn from(x: StreamId) -> Self {
-		unsafe { Self::from_u64_unchecked(x.0) }
-	}
-}
-
-impl From<VarInt> for StreamId {
-	fn from(v: VarInt) -> Self {
-		Self(v.0)
-	}
-}
-
-impl From<StreamId> for u64 {
-	fn from(x: StreamId) -> Self {
-		x.0
-	}
-}
-
-impl coding::Codec for StreamId {
-	fn decode<B: bytes::Buf>(buf: &mut B) -> coding::Result<Self> {
-		VarInt::decode(buf).map(|x| Self(x.into_inner()))
-	}
-	fn encode<B: bytes::BufMut>(&self, buf: &mut B) {
-		VarInt::from_u64(self.0).unwrap().encode(buf);
-	}
-}
-
 /// An outgoing packet
 #[derive(Debug)]
 #[must_use]
 pub struct Transmit {
-	/// The socket this datagram should be sent to
-	pub destination: SocketAddr,
+	/// The address to send the datagram to
+	pub remote: SocketAddr,
 	/// Explicit congestion notification bits to set on the packet
 	pub ecn: Option<EcnCodepoint>,
 	/// Amount of data written to the caller-supplied buffer
@@ -250,8 +165,8 @@ pub struct Transmit {
 	/// The segment size if this transmission contains multiple datagrams.
 	/// This is `None` if the transmit only contains a single datagram
 	pub segment_size: Option<usize>,
-	/// Optional source IP address for the datagram
-	pub src_ip: Option<IpAddr>,
+	/// The local IP address to send the datagram from, if the socket chooses one
+	pub local_ip: Option<IpAddr>,
 }
 
 //

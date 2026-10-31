@@ -44,7 +44,7 @@ fn drain(c: &mut Criterion) {
 					b.iter(|| {
 						let mut clock = decode::DecodeClock::default();
 						for index in 0..held {
-							clock.push(payload.clone(), pts(shape, index), Instant::ZERO);
+							clock.push(payload.clone(), pts(shape, index), Instant::ZERO, 0);
 						}
 						let mut drained = 0;
 						while clock.pop(decode::MAX_REORDER, 0, decode::Settle::All).is_some() {
@@ -77,10 +77,10 @@ fn read(c: &mut Criterion) {
 					let (mut held, mut most) = (0, 0);
 					for index in 0..frames {
 						let latest = Instant::ZERO + Duration::from_millis(index);
-						clock.push(index, pts(shape, index), latest);
+						clock.push(index, pts(shape, index), latest, 0);
 						held += 1;
 						loop {
-							let settle = clock.settle(lookahead, latest, delay);
+							let settle = clock.settle(lookahead, latest, delay, usize::MAX);
 							if clock.pop(lookahead, 0, settle).is_none() {
 								break;
 							}

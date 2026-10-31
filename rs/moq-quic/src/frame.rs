@@ -253,16 +253,16 @@ pub struct ConnectionClose {
 	pub error_code: TransportErrorCode,
 	/// Type of frame that caused the close
 	pub frame_type: Option<FrameType>,
-	/// Human-readable reason for the close
-	pub reason: Bytes,
+	/// Human-readable reason for the close, with invalid UTF-8 replaced
+	pub reason: String,
 }
 
 impl fmt::Display for ConnectionClose {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		self.error_code.fmt(f)?;
-		if !self.reason.as_ref().is_empty() {
+		if !self.reason.is_empty() {
 			f.write_str(": ")?;
-			f.write_str(&String::from_utf8_lossy(&self.reason))?;
+			f.write_str(&self.reason)?;
 		}
 		Ok(())
 	}
@@ -273,7 +273,7 @@ impl From<TransportError> for ConnectionClose {
 		Self {
 			error_code: x.code,
 			frame_type: x.frame,
-			reason: x.reason.into(),
+			reason: x.reason,
 		}
 	}
 }
@@ -291,9 +291,9 @@ impl ConnectionClose {
 		let max_len = max_len
 			- 3 - VarInt::from_u64(ty).unwrap().size()
 			- VarInt::from_u64(self.reason.len() as u64).unwrap().size();
-		let actual_len = self.reason.len().min(max_len);
+		let actual_len = self.reason.floor_char_boundary(max_len);
 		out.write_var(actual_len as u64); // <= 8 bytes
-		out.put_slice(&self.reason[0..actual_len]); // whatever's left
+		out.put_slice(&self.reason.as_bytes()[0..actual_len]); // whatever's left
 	}
 }
 
@@ -302,14 +302,14 @@ impl ConnectionClose {
 pub struct ApplicationClose {
 	/// Application-specific reason code
 	pub error_code: VarInt,
-	/// Human-readable reason for the close
-	pub reason: Bytes,
+	/// Human-readable reason for the close, with invalid UTF-8 replaced
+	pub reason: String,
 }
 
 impl fmt::Display for ApplicationClose {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		if !self.reason.as_ref().is_empty() {
-			f.write_str(&String::from_utf8_lossy(&self.reason))?;
+		if !self.reason.is_empty() {
+			f.write_str(&self.reason)?;
 			f.write_str(" (code ")?;
 			self.error_code.fmt(f)?;
 			f.write_str(")")?;
@@ -329,9 +329,9 @@ impl ApplicationClose {
 		out.write(FrameType::APPLICATION_CLOSE); // 1 byte
 		out.write(self.error_code); // <= 8 bytes
 		let max_len = max_len - 1 - self.error_code.size() - VarInt::from_u64(self.reason.len() as u64).unwrap().size();
-		let actual_len = self.reason.len().min(max_len);
+		let actual_len = self.reason.floor_char_boundary(max_len);
 		out.write_var(actual_len as u64); // <= 8 bytes
-		out.put_slice(&self.reason[0..actual_len]); // whatever's left
+		out.put_slice(&self.reason.as_bytes()[0..actual_len]); // whatever's left
 	}
 }
 
@@ -573,7 +573,12 @@ impl Iter {
 		let ty = self.bytes.get::<FrameType>()?;
 		self.last_ty = Some(ty);
 		Ok(match ty {
-			FrameType::PADDING => Frame::Padding,
+			FrameType::PADDING => {
+				// Each zero byte is its own PADDING frame, so yield the whole run as one
+				let run = self.bytes.iter().position(|&b| b != 0).unwrap_or(self.bytes.len());
+				self.bytes.advance(run);
+				Frame::Padding
+			}
 			FrameType::RESET_STREAM => Frame::ResetStream(ResetStream {
 				id: self.bytes.get()?,
 				error_code: self.bytes.get()?,
@@ -592,11 +597,11 @@ impl Iter {
 					let x = self.bytes.get_var()?;
 					if x == 0 { None } else { Some(FrameType(x)) }
 				},
-				reason: self.take_len()?,
+				reason: String::from_utf8_lossy(&self.take_len()?).into_owned(),
 			})),
 			FrameType::APPLICATION_CLOSE => Frame::Close(Close::Application(ApplicationClose {
 				error_code: self.bytes.get()?,
-				reason: self.take_len()?,
+				reason: String::from_utf8_lossy(&self.take_len()?).into_owned(),
 			})),
 			FrameType::MAX_DATA => Frame::MaxData(self.bytes.get()?),
 			FrameType::MAX_STREAM_DATA => Frame::MaxStreamData {
@@ -923,23 +928,6 @@ impl FrameStruct for Datagram {
 }
 
 impl Datagram {
-	pub(crate) fn encode(&self, length: bool, out: &mut Vec<u8>) {
-		out.write(FrameType(*DATAGRAM_TYS.start() | u64::from(length))); // 1 byte
-		if length {
-			// Safe to unwrap because we check length sanity before queueing datagrams
-			out.write(VarInt::from_u64(self.data.len() as u64).unwrap()); // <= 8 bytes
-		}
-		out.extend_from_slice(&self.data);
-	}
-
-	pub(crate) fn size(&self, length: bool) -> usize {
-		1 + if length {
-			VarInt::from_u64(self.data.len() as u64).unwrap().size()
-		} else {
-			0
-		} + self.data.len()
-	}
-
 	/// The largest payload whose length-prefixed frame fits in `budget` bytes, if any frame does
 	///
 	/// Exact, rather than reserving [`SIZE_BOUND`](FrameStruct::SIZE_BOUND)'s 8-byte length: a
@@ -951,6 +939,53 @@ impl Datagram {
 			payload -= 1;
 		}
 		Some(payload)
+	}
+}
+
+/// An outgoing datagram's payload, kept as the chunks it was handed in
+///
+/// A header chained in front of a payload costs no copy of the payload.
+#[derive(Debug)]
+pub(crate) struct OutgoingDatagram {
+	chunks: tinyvec::TinyVec<[Bytes; 2]>,
+	len: usize,
+}
+
+impl OutgoingDatagram {
+	/// Take all of `data`, a chunk at a time.
+	pub(crate) fn new(mut data: impl Buf) -> Self {
+		let len = data.remaining();
+		let mut chunks = tinyvec::TinyVec::new();
+		while data.has_remaining() {
+			let chunk = data.chunk().len();
+			chunks.push(data.copy_to_bytes(chunk));
+		}
+		Self { chunks, len }
+	}
+
+	/// The payload's length.
+	pub(crate) fn len(&self) -> usize {
+		self.len
+	}
+
+	/// The length-prefixed frame's size.
+	pub(crate) fn size(&self) -> usize {
+		Self::frame_size(self.len)
+	}
+
+	/// The size of the length-prefixed frame of a `len`-byte payload.
+	pub(crate) fn frame_size(len: usize) -> usize {
+		1 + VarInt::from_u64(len as u64).map_or(8, |len| len.size()) + len
+	}
+
+	/// Write the length-prefixed frame.
+	pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+		out.write(FrameType(*DATAGRAM_TYS.start() | 1)); // 1 byte
+		// Safe to unwrap because we check length sanity before queueing datagrams
+		out.write(VarInt::from_u64(self.len as u64).unwrap()); // <= 8 bytes
+		for chunk in &self.chunks {
+			out.extend_from_slice(chunk);
+		}
 	}
 }
 
@@ -986,9 +1021,18 @@ mod test {
 	}
 
 	#[test]
+	fn padding_runs_decode_as_one_frame() {
+		let mut iter = Iter::new(Bytes::from_static(&[0, 0, 0, 0x01, 0, 0])).unwrap();
+		assert_matches!(iter.next_with_size(), Some((Ok(Frame::Padding), 3)));
+		assert_matches!(iter.next_with_size(), Some((Ok(Frame::Ping), 1)));
+		assert_matches!(iter.next_with_size(), Some((Ok(Frame::Padding), 2)));
+		assert!(iter.next().is_none());
+	}
+
+	#[test]
 	fn application_close_coding() {
 		for &error_code in APPLICATION_ERROR_CODES {
-			for reason in [Bytes::new(), Bytes::from_static(b"application closed")] {
+			for reason in [String::new(), "application closed".to_string()] {
 				let original = ApplicationClose {
 					error_code: VarInt::from_u64(error_code).unwrap(),
 					reason,
@@ -1004,6 +1048,25 @@ mod test {
 					x => panic!("incorrect frame {x:?}"),
 				}
 			}
+		}
+	}
+
+	/// Truncation never splits a character, so the peer decodes the prefix without replacement
+	#[test]
+	fn close_reason_truncation_keeps_whole_characters() {
+		let original = ApplicationClose {
+			error_code: VarInt(0),
+			reason: "é".repeat(64),
+		};
+		// An odd budget lands mid-character.
+		let mut buf = Vec::new();
+		original.encode(&mut buf, ApplicationClose::SIZE_BOUND + 10);
+		match &frames(buf)[0] {
+			Frame::Close(Close::Application(decoded)) => {
+				assert!(!decoded.reason.is_empty());
+				assert!(original.reason.starts_with(&decoded.reason));
+			}
+			x => panic!("incorrect frame {x:?}"),
 		}
 	}
 
@@ -1023,7 +1086,7 @@ mod test {
 			] {
 				let original = ApplicationClose {
 					error_code: VarInt::from_u64(error_code).unwrap(),
-					reason: (0..reason_len).map(|i| (i % 251) as u8).collect(),
+					reason: (0..reason_len).map(|i| char::from(b'a' + (i % 26) as u8)).collect(),
 				};
 				let mut buf = Vec::new();
 				original.encode(&mut buf, max_len);
@@ -1039,7 +1102,7 @@ mod test {
 						assert_eq!(decoded.error_code, original.error_code);
 						assert!(!decoded.reason.is_empty());
 						assert!(decoded.reason.len() < original.reason.len());
-						assert_eq!(decoded.reason, original.reason.slice(..decoded.reason.len()));
+						assert_eq!(decoded.reason, original.reason[..decoded.reason.len()]);
 					}
 					x => panic!("incorrect frame {x:?}"),
 				}
@@ -1135,18 +1198,35 @@ mod test {
 	];
 
 	#[test]
+	fn outgoing_datagram_chains_without_copying() {
+		let payload = Bytes::from(vec![7; 100]);
+		let datagram = OutgoingDatagram::new((&b"hdr"[..]).chain(payload.clone()));
+		assert_eq!(datagram.len(), 103);
+		assert_eq!(
+			datagram.chunks[1].as_ptr(),
+			payload.as_ptr(),
+			"the payload is not copied"
+		);
+
+		let mut out = Vec::new();
+		datagram.encode(&mut out);
+		assert_eq!(out.len(), datagram.size());
+		let frame = Iter::new(Bytes::from(out)).unwrap().next().unwrap().unwrap();
+		let Frame::Datagram(frame) = frame else {
+			panic!("{frame:?}")
+		};
+		assert_eq!(&frame.data[..3], b"hdr");
+		assert_eq!(frame.data[3..], payload[..]);
+	}
+
+	#[test]
 	fn datagram_max_payload_is_exact() {
 		// Not even an empty frame fits
 		assert_eq!(Datagram::max_payload(0), None);
 		assert_eq!(Datagram::max_payload(1), None);
 		for budget in [2u64, 3, 64, 65, 66, 1200, 16385, 16386, 1 << 20] {
 			let payload = Datagram::max_payload(budget).unwrap();
-			let frame = |n: u64| {
-				Datagram {
-					data: Bytes::from(vec![0; n as usize]),
-				}
-				.size(true) as u64
-			};
+			let frame = |n: u64| OutgoingDatagram::new(Bytes::from(vec![0; n as usize])).size() as u64;
 			assert!(frame(payload) <= budget, "{budget}: {payload} overflows");
 			assert!(frame(payload + 1) > budget, "{budget}: {payload} isn't the largest");
 		}

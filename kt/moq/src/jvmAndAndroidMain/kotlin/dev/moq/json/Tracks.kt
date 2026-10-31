@@ -4,10 +4,11 @@ package dev.moq.json
 // producer takes over a `dev.moq.TrackProducer` (the snapshot and stream
 // producers also advertise it in the broadcast's catalog, which has no window
 // mode), and a consumer takes over a `dev.moq.TrackConsumer` that has not read
-// a group yet:
+// a group yet. Compression is the track's, set through `TrackInfo(compress = true)`:
 //
-//     val status = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), SnapshotConfig())
-//     val reader = SnapshotConsumer(consumer.subscribeTrack("status", null), SnapshotConfig())
+//     val track = broadcast.publishTrack("status", TrackInfo(compress = true))
+//     val status = SnapshotProducer(broadcast, track, SnapshotConfig())
+//     val reader = SnapshotConsumer(consumer.subscribeTrack("status", null))
 
 import dev.moq.MoqJson
 import dev.moq.pull
@@ -25,17 +26,15 @@ typealias SnapshotConsumer = uniffi.moq.MoqJsonSnapshotConsumer
 typealias StreamProducer = uniffi.moq.MoqJsonStreamProducer
 /** Consumes a lossless stream of JSON records from a track it takes over. */
 typealias StreamConsumer = uniffi.moq.MoqJsonStreamConsumer
-/** Configures a lossy latest-value JSON track. */
+/** Configures a lossy latest-value JSON producer. */
 typealias SnapshotConfig = uniffi.moq.MoqJsonSnapshotConfig
-/** Configures a lossless JSON stream track. */
-typealias StreamConfig = uniffi.moq.MoqJsonStreamConfig
 /** A JSON string and the timestamp of the frame that carried it. */
 typealias Value = uniffi.moq.MoqJsonValue
 /** Publishes a sliding window of JSON records, pushed at the back and popped from the front. */
 typealias WindowProducer = uniffi.moq.MoqJsonWindowProducer
 /** Consumes each push, pop, and skip of a JSON window from a track it takes over. */
 typealias WindowConsumer = uniffi.moq.MoqJsonWindowConsumer
-/** Configures a JSON window track. */
+/** Configures a JSON window producer. */
 typealias WindowConfig = uniffi.moq.MoqJsonWindowConfig
 /** One change to a window: [WindowEventPush], [WindowEventPop], or [WindowEventSkip]. */
 typealias WindowEvent = uniffi.moq.MoqJsonWindowEvent
