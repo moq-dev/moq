@@ -9891,7 +9891,7 @@ async fn a_return_after_an_abandoned_switch_restores_priority() {
 
 	/// Take what the follower muxes until it idles for a second, well within the follow.
 	async fn pump(follower: &mut super::Follower) {
-		while let Ok(next) = tokio::time::timeout(Duration::from_secs(1), follower.next()).await {
+		while let Ok(next) = moq_clock::timeout(Duration::from_secs(1), follower.next()).await {
 			assert!(next.unwrap().is_some(), "the follower keeps waiting");
 		}
 	}

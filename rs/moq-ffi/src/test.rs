@@ -2636,7 +2636,7 @@ async fn fill_wanted_changed_cancelled_before_free_leaves_the_change() {
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
-	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
+	let fill = moq_clock::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
 		.expect("timed out waiting for fill")
 		.unwrap();
@@ -2653,7 +2653,7 @@ async fn fill_wanted_changed_cancelled_before_free_leaves_the_change() {
 
 	let next = fill.wanted_changed();
 	drop(cancelled);
-	let wanted = tokio::time::timeout(TIMEOUT, next)
+	let wanted = moq_clock::timeout(TIMEOUT, next)
 		.await
 		.expect("the cancelled call took the change")
 		.unwrap();
@@ -4087,7 +4087,7 @@ async fn video_decode_start() {
 	let broadcast_consumer = await_announced(&consumer, "video-decode-start").await;
 	// The newest group must be cached before `Latest` subscribes, or it would join the first.
 	let raw = broadcast_consumer.subscribe_track("camera".into(), None).await.unwrap();
-	while tokio::time::timeout(TIMEOUT, raw.recv_group())
+	while moq_clock::timeout(TIMEOUT, raw.recv_group())
 		.await
 		.expect("timed out")
 		.unwrap()
@@ -4096,7 +4096,7 @@ async fn video_decode_start() {
 		== 0
 	{}
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
 		.unwrap()
@@ -4124,7 +4124,7 @@ async fn video_decode_start() {
 
 	let timestamps = async |decoder: Arc<MoqVideoConsumer>| {
 		let mut timestamps = Vec::new();
-		while let Some(read) = tokio::time::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
+		while let Some(read) = moq_clock::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
 			match read {
 				MoqVideoRead::Frame { frame } => timestamps.push(frame.timestamp_us()),
 				MoqVideoRead::End { .. } => break,
@@ -5088,7 +5088,7 @@ async fn raw_track_insert_datagram_keeps_its_sequence() {
 	let (_broadcast, track, consumer) = raw_track();
 
 	track.insert_datagram(7, datagram_frame(b"seven")).unwrap();
-	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+	let datagram = moq_clock::timeout(TIMEOUT, consumer.recv_datagram())
 		.await
 		.expect("timed out waiting for the inserted datagram")
 		.unwrap()
@@ -5130,7 +5130,7 @@ async fn broadcast_consumer_closed_resolves_on_close() {
 	assert!(!closed.is_finished(), "closed resolved while the broadcast is live");
 
 	broadcast.close().unwrap();
-	tokio::time::timeout(TIMEOUT, closed)
+	moq_clock::timeout(TIMEOUT, closed)
 		.await
 		.expect("timed out waiting for closed")
 		.expect("closed panicked")
