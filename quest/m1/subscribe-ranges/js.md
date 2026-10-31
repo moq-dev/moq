@@ -13,9 +13,11 @@ Landed in [moq-dev/moq#6949](https://github.com/moq-dev/moq/pull/6949):
 `groups`, a per-reader window (`js/net/src/window.ts`) with the Rust time-end
 walk, the union aggregate, lite-07 SUBSCRIBE carrying the list with times in
 the track's timescale (older wires the covering span, refusing other relative
-and time anchors per reader), `maxDelay: null`, the lite-07 publisher FINning a
-covered bounded subscription without SUBSCRIBE_END, and the subscriber opening
-a fresh SUBSCRIBE on the same track when that FIN leaves the demand uncovered.
+and time anchors per reader), `maxDelay: null`, the lite-07 publisher resolving
+relative and time anchors and naming each range's start in SUBSCRIBE_START,
+FINning a covered bounded subscription without SUBSCRIBE_END, and the
+subscriber keeping that copy and opening a fresh SUBSCRIBE on the same track
+once the demand moves past what it covered.
 
 Decided 2026-10-31 (maintainer): a range-bounded reader parks once its ranges
 are covered, in JavaScript as in Rust. A lite-07 copy outlives a covered FIN,
