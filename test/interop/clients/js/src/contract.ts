@@ -271,3 +271,13 @@ export function publish(commands: Partial<InteropControl>): void {
 
 /** Prefix of the console line carrying each player {@link Sample} to the driver. */
 export const SAMPLE_EVENT = "__moqInteropSample:";
+
+/**
+ * Prefix of the console line carrying the fixture's {@link FixtureState}, or `null` once it closes.
+ * Publishers report over the console like players do, so the driver reads any engine without
+ * evaluating in the page, which would grant it user activation.
+ */
+export const FIXTURE_EVENT = "__moqInteropFixture:";
+
+/** Prefix of the console line carrying the capture publisher's {@link CaptureState}. */
+export const CAPTURE_EVENT = "__moqInteropCapture:";

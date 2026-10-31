@@ -5868,7 +5868,7 @@ mod group_priority_test {
 					assert!(serve.poll(&kio::Waiter::noop()).is_pending());
 					assert!(log.trail().iter().any(|(_, event)| matches!(event, Sent::Finish)));
 				}
-				track.finish_at(track::Position { group: 5, frame: 5 }).unwrap();
+				track.finish_at(track::Position { group: 5, frame: 5 }, None).unwrap();
 				if !finished {
 					group.finish().unwrap();
 				}
@@ -10870,7 +10870,7 @@ mod serve_tests {
 			}
 			Largest::IdleEnded => {
 				h.track.set_idle();
-				h.track.finish_at(track::Position::group(10)).unwrap();
+				h.track.finish_at(track::Position::group(10), None).unwrap();
 				None
 			}
 			Largest::IdleFinished => {
