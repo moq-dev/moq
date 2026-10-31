@@ -2103,9 +2103,23 @@ impl RequestGrant {
 
 	/// Watch this grant without owning a naming request or its verification credit.
 	fn observe(&self) -> Self {
+		let (path, kind) = {
+			let held = self.held();
+			(held.path.clone(), held.kind)
+		};
+		self.observe_as(path, kind)
+	}
+
+	/// [`Self::observe`] for a request of its own under the grant, such as a PUBLISH a token
+	/// listing sends: it ends once the grant no longer covers `path` as `kind`.
+	pub(crate) fn observe_as(&self, path: crate::Path, kind: RequestKind) -> Self {
 		let held = self.held();
 		let mut deadline = crate::time::Deadline::new(&held.clock);
 		deadline.set(held.grant.expires);
+		let ended = held.ended.read().clone().or_else(|| {
+			(!kind.covers(&held.grant, path.as_str()))
+				.then(|| Refusal::new(Error::Unauthorized, "request token no longer granted"))
+		});
 		Self(std::sync::Arc::new(crate::sync::Mutex::new(Held {
 			verdict: RequestVerdict {
 				issue: held.verdict.issue.clone(),
@@ -2114,13 +2128,13 @@ impl RequestGrant {
 			},
 			grant: held.grant.clone(),
 			deadline,
-			path: held.path.clone(),
-			kind: held.kind,
+			path,
+			kind,
 			hold: None,
 			renewing: None,
 			clock: held.clock.clone(),
 			epoch: held.epoch,
-			ended: kio::Producer::new(held.ended.read().clone()),
+			ended: kio::Producer::new(ended),
 		})))
 	}
 
@@ -3595,6 +3609,37 @@ mod request_token_tests {
 		};
 		assert!(!permit.matches("room/alice"));
 		assert!(gate.poll_permit(&mut epoch, &kio::Waiter::noop()).is_pending());
+	}
+
+	/// An observer for a request of its own ends once the grant stops covering that request,
+	/// even where the observed grant, a discovery's, still stands.
+	#[moq_clock::test]
+	async fn an_observer_as_another_request_checks_its_own_coverage() {
+		let runtime = crate::time::sim();
+		let handle = Link::new(true);
+		let mut requests = handle.handle().requests();
+		let mut gate = Gate::new(handle.clone(), crate::Path::default(), Direction::Publish).discovery();
+		let verdict = gate.verify(token(b"room", 0), None);
+		let issued = requests.next().await.unwrap().accept(subscribe_only("room"));
+		let answer = verdict.grant().await;
+		gate.admit(&runtime, (verdict, answer)).unwrap();
+		let listing = gate.token_guard().unwrap();
+		let publish = listing.observe_as(subscribe_path(), RequestKind::Subscribe);
+		let waiter = kio::Waiter::noop();
+		assert!(publish.poll_ended(&waiter).is_pending());
+		issued.update(subscribe_only("elsewhere"));
+		assert!(listing.poll_ended(&waiter).is_pending(), "the discovery still stands");
+		assert!(
+			publish.poll_ended(&waiter).is_ready(),
+			"the publish outlived its coverage"
+		);
+		assert!(
+			listing
+				.observe_as(subscribe_path(), RequestKind::Subscribe)
+				.poll_ended(&waiter)
+				.is_ready(),
+			"an observer made after narrowing starts ended"
+		);
 	}
 
 	#[moq_clock::test]

@@ -1287,14 +1287,16 @@ impl Publisher {
 					},
 					cache: track.clone(),
 					namespace: namespace.clone(),
-					// A joining FETCH is held to the PUBLISH's token too, once one authorized it.
+					// A joining FETCH is held to the PUBLISH's token too, once one authorized it,
+					// covering this track as the PUBLISH must.
 					binding: gate.token_guard().map(|grant| {
+						let kind = crate::auth::RequestKind::Subscribe;
 						crate::auth::RequestBinding::new(
 							&self.runtime,
 							namespace.clone(),
-							crate::auth::RequestKind::Subscribe,
+							kind,
 							None,
-							Some(grant),
+							Some(grant.observe_as(namespace.clone(), kind)),
 						)
 					}),
 					ranking: serve.ranking.clone(),
