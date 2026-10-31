@@ -66,7 +66,7 @@ class SelectionTest(unittest.TestCase):
         subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
         calls = self.root / "calls"
         summary = self.root / "summary"
-        with patch.dict(os.environ, CHECK_MODULES="py", CHECK_JOBS="invalid", GITHUB_ACTIONS="true",
+        with patch.dict(os.environ, CI_STRICT="1", CHECK_MODULES="py", CHECK_JOBS="invalid", GITHUB_ACTIONS="true",
                         GITHUB_BASE_REF="missing", GITHUB_STEP_SUMMARY=str(summary)):
             env = dispatch_env(PATH=f"{tools}:{os.environ['PATH']}", ALLOW_HOST_TOOLCHAIN="1",
                                SELECT_CALLS=str(calls))
