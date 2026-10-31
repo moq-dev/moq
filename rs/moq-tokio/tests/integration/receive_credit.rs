@@ -522,7 +522,7 @@ impl Reversed {
 				.expect("open");
 				// The credit an eviction frees can reach the writer before the stop does, letting
 				// the whole write queue, so only the stop itself proves the stream was stopped.
-				let _ = send.write_all(&bytes).await;
+				let _ = send.write_all(&bytes[..]).await;
 				if let Ok(Some(_)) = send.stopped().await {
 					let _ = tx.send(());
 				}
@@ -693,12 +693,12 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	let mut high = subscribe(&remote, "high", 100).await;
 
 	// Wait until three quarters of the window holds a frame that can never complete.
-	commands.write_all(b"low\n").await.unwrap();
+	commands.write_all(&b"low\n"[..]).await.unwrap();
 	let mut partial = partial_frame(&mut low).await;
 	read_partial(&mut partial, WINDOW * 3 / 4).await;
 
 	// Half the window, which only fits once the low frame lets go.
-	commands.write_all(b"high\n").await.unwrap();
+	commands.write_all(&b"high\n"[..]).await.unwrap();
 	assert_eq!(next_frame(&mut high).await, vec![2u8; WINDOW / 2], "{version}");
 	loop {
 		let chunk = tokio::time::timeout(TIMEOUT, partial.read_chunk())
@@ -712,7 +712,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	}
 
 	// The session survives, and the low track keeps delivering what fits.
-	commands.write_all(b"after\n").await.unwrap();
+	commands.write_all(&b"after\n"[..]).await.unwrap();
 	assert_eq!(next_frame(&mut low).await, &b"after"[..], "{version}");
 
 	drop(commands);

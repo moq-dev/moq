@@ -2,9 +2,8 @@
 
 ## Goal
 
-A relay fills a lite-07 upstream by subscribing to the missing ranges, and
-SUBSCRIBE_OK carries the resolved start. Older wires and moq-transport carry
-the anchors they can, and refuse only the rest. FETCH stays on lite-07 until
+A relay fills a lite-07 upstream by subscribing to the missing ranges. Older
+wires and moq-transport carry the anchors they can, and refuse only the rest. FETCH stays on lite-07 until
 [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md)
 removes it from both implementations.
 
@@ -16,12 +15,6 @@ moves out of this quest (to its own quest since 2026-10-27), since JS still requ
 (`track.Consumer.fetchGroup`), so a Rust-only removal would drop a current
 cross-language capability. This quest keeps FETCH on lite-07 and makes the
 range fill work without it.
-
-Decided 2026-10-22 (maintainer): SUBSCRIBE_OK carries the resolved start for
-a relative range start, so a reader's ordered cursor takes its floor from it
-([Container reads drop backfill](/quest/m1/read-backfill.md)). Decided
-2026-10-27 (maintainer): it is part of the Goal, since read-backfill now
-requires this quest for it.
 
 ### Range fill through the subscription
 
@@ -68,7 +61,11 @@ relative joining FETCH. Reason: both count back by Group ID arithmetic, which
 breaks once [time addressing](/quest/m1/time-addressing/model.md) makes legacy
 Group IDs sparse start ticks. A range with a bounded end
 resolves both bounds against the Largest Object and goes upstream as an
-absolute range. Live keeps today's join (`ietf::subscriber::subscribe_join`).
+absolute range. Live keeps today's join (`ietf::subscriber::subscribe_join`). A copy already
+resolves what its cache settles (`ResolvedRanges`, from
+[moq-dev/moq#6815](https://github.com/moq-dev/moq/pull/6815)) and refuses the
+rest (`anchored_cached`); what remains is a cold copy resolving `Relative(n)`
+from the Largest Object of a live join instead of refusing it.
 Each mapping that makes a wire carry an anchor lifts that wire's
 `Unsupported` refusal for it, and extends the per-wire table in
 `rs/moq-net/tests/integration/range_anchors.rs`.
@@ -78,5 +75,4 @@ Update `drafts/draft-lcurley-moq-lite.md` with each wire change here. Run
 
 ## Related
 
-- [Container reads drop backfill](/quest/m1/read-backfill.md) - floors its ordered cursor on the resolved start
 - [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - removes FETCH from lite-07 in both implementations once this and JS ranges land

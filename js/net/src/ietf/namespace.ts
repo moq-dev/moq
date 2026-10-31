@@ -4,7 +4,11 @@ import type { Reader, Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-/** Convert the escaped moq-net path representation into IETF namespace tuple fields. */
+/**
+ * Convert the escaped moq-net path representation into IETF namespace tuple fields.
+ *
+ * Every `\` in a valid path escapes the `\` or `/` after it.
+ */
 function toTuple(namespace: Path.Valid): string[] {
 	if (namespace === "") return [];
 
@@ -13,7 +17,7 @@ function toTuple(namespace: Path.Valid): string[] {
 		const ch = namespace[i];
 		if (ch === "/") {
 			parts.push("");
-		} else if (ch === "\\" && (namespace[i + 1] === "/" || namespace[i + 1] === "\\")) {
+		} else if (ch === "\\") {
 			parts[parts.length - 1] += namespace[++i];
 		} else {
 			parts[parts.length - 1] += ch;
@@ -25,8 +29,10 @@ function toTuple(namespace: Path.Valid): string[] {
 /**
  * Convert IETF namespace tuple fields into the escaped moq-net path representation.
  *
- * Throws when a field ends in `/`, which escapes to a path with an empty segment, or when the
- * separators and escapes push the path past {@link Path.MAX_BYTES}.
+ * Every `\` and `/` in a field is escaped, the only spelling a path accepts, so every path
+ * returns from its own tuple unchanged. Throws when a field ends in `/`, which escapes to a
+ * path with an empty segment, or when the separators and escapes push the path past
+ * {@link Path.MAX_BYTES}.
  */
 export function fromTuple(parts: string[]): Path.Valid {
 	const escaped = parts.map((part) => part.replaceAll("\\", "\\\\").replaceAll("/", "\\/")).join("/");
