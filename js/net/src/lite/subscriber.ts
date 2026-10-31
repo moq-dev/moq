@@ -968,9 +968,15 @@ export class Subscriber {
 			console.debug(`subscribe reopen: id=${id} broadcast=${broadcast} track=${producer.name}`);
 			// Bounded like the first setup, and given up once nobody wants the track, so a peer
 			// that stops reading holds neither the stream nor its entry.
+			// Watched only while the setup runs, so a reopen leaves no watcher behind.
 			const left = new AbortController();
-			const leave = () => left.abort(new StreamError(StreamCode.Cancel, { message: "cancel" }));
-			void abandoned(producer.demand()).then(leave, leave);
+			const demand = producer.demand();
+			let unwatch: Dispose | undefined;
+			const watch = () => {
+				if (isAbandoned(demand)) left.abort(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+				else unwatch = Signal.race(demand.wanted, hooks.demandReleased(demand)).changed(watch);
+			};
+			watch();
 			let sent: Promise<Stream> | undefined;
 			valid?.addEventListener("abort", retire);
 			try {
@@ -1008,6 +1014,7 @@ export class Subscriber {
 				);
 				return;
 			} finally {
+				unwatch?.();
 				valid?.removeEventListener("abort", retire);
 			}
 		}
