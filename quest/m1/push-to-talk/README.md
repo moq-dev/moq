@@ -1,4 +1,4 @@
-# Push-to-talk loses no speech
+# [M] Push-to-talk loses no speech
 
 ## Goal
 
@@ -51,10 +51,6 @@ reopen the microphone, which made a new source and so recovered a failed
 encoder. Capture now stays open, so only a device swap, a settings change or a
 new `source` recovers one. Decide whether re-enabling should retry a failed
 encoder, and record why.
-
-## Required
-
-- [Watch caches audio codec support](/quest/m1/push-to-talk/audio-support-cache.md) - an unmute resumes audio without waiting on a support check
 
 ## Closes
 

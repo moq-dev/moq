@@ -155,6 +155,11 @@ ring-bench:
     bun install --frozen-lockfile
     bun watch/bench/ring.ts
 
+# Sweep audio rendition count against repeated mute/unmute catalog updates.
+audio-support-bench:
+    bun install --frozen-lockfile
+    bun watch/bench/support.ts
+
 # Sweep decoder count against PCM callback size during audio warmup.
 audio-warmup-bench:
     bun install --frozen-lockfile
