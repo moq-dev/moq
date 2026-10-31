@@ -956,9 +956,13 @@ pub enum moq_announce_kind {
 	/// Another publisher instance now serves the prefix: drop what was resolved under
 	/// it and request afresh.
 	MOQ_ANNOUNCE_KIND_RESTART = 3,
+	/// A route now covers the prefix and continues what the route at
+	/// [moq_announce_event::predecessor] served beneath it: keep what was resolved through it.
+	MOQ_ANNOUNCE_KIND_TAKEOVER = 4,
 }
 
-/// An announce event from an origin: a route starting, updating, ending, or restarting.
+/// An announce event from an origin: a route starting, updating, ending, restarting, or
+/// taking over.
 #[repr(C)]
 pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
@@ -981,6 +985,11 @@ pub struct moq_announce_event {
 	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_END` it carries the last
 	/// advertised route.
 	pub route: moq_route,
+	/// For [moq_announce_kind::MOQ_ANNOUNCE_KIND_TAKEOVER], the prefix of the route continued,
+	/// relative to the origin, NOT NULL terminated. Empty for every other kind.
+	pub predecessor: *const c_char,
+	/// The length in bytes of `predecessor`.
+	pub predecessor_len: usize,
 }
 
 /// Where a session is in its lifecycle, reported by [moq_connection_state].

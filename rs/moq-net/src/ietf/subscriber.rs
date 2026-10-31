@@ -2408,7 +2408,7 @@ impl Subscriber {
 		if self.going_away.is_set() {
 			route.cost = crate::origin::Cost::DRAIN;
 		}
-		entry.dynamic = Some(self.origin.requests_route(path, route)?);
+		entry.dynamic = Some(self.origin.requests_route(path, route, None)?);
 		entry.generation += 1;
 		tracing::info!(route = %crate::path::Rooted(self.origin.root(), path), "namespace authorized again");
 		Ok(Some(entry.generation))
@@ -2500,7 +2500,7 @@ impl Subscriber {
 					return Ok(());
 				}
 				// Propagates Error::Unauthorized if the namespace is out of scope.
-				let dynamic = self.origin.requests_route(&path, route.clone())?;
+				let dynamic = self.origin.requests_route(&path, route.clone(), None)?;
 
 				entry.insert(BroadcastState {
 					route: route.clone(),
@@ -8803,7 +8803,8 @@ mod tests {
 			crate::announce::Event::End(_) => None,
 			crate::announce::Event::Start(announce)
 			| crate::announce::Event::Update(announce)
-			| crate::announce::Event::Restart(announce) => Some(announce.route),
+			| crate::announce::Event::Restart(announce)
+			| crate::announce::Event::Takeover { announce, .. } => Some(announce.route),
 		}
 	}
 
