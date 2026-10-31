@@ -6,10 +6,14 @@
 
 ## Plan
 
-Decided 2026-10-30 (maintainer, follow-up planning): m2. Use the same start resolution the container consumer uses rather than a second one. With `min` and warmup at 0, the start is unchanged. Add a test of a cold join with a 2-group-old start.
+Decided 2026-10-30 (maintainer, follow-up planning): m2. Use the same start resolution the container consumer uses rather than a second one. With `min` and warmup at 0, the start is unchanged. Add a test of a cold join with a 2-group-old start. [Audio join budget](/quest/m2/audio-join-budget.md) changes the same `joining_latest` path in `rs/moq-audio/src/decode/consumer.rs`; whichever lands second builds its start on the other's.
 
 Public API: none. Wire: none.
 
 ## Required
 
 - [A max-delay decoder joins an earlier group](/quest/m2/intra-refresh/join-earlier-group.md) - its PR, #7311, adds the start rule
+
+## Related
+
+- [Audio join budget](/quest/m2/audio-join-budget.md) - the other `Start::Latest` join fix in `rs/moq-audio/src/decode/consumer.rs`
