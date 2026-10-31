@@ -17,7 +17,9 @@ already reads the catalog, which keeps moq-net catalog-agnostic, and only an
 enabled rendition is one it could switch to. Targets are on by default.
 
 - The handle is a `Bandwidth.Viewer` from `connection.viewers` in `@moq/net`
-  (`Session::viewers` or `moq_tokio::Connection::viewers` in Rust), landed in
+  (`Session::viewers` or `moq_tokio::Connection::viewers` in Rust, and
+  `MoqSession::viewers` through moq-ffi and every binding, decided with the
+  maintainer on 2026-10-31), landed in
   [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090); this quest only decides its `max`.
 - Settle what a rendition without a catalog bitrate contributes.
 - A probe that reaches the target must make the rendition selectable.
