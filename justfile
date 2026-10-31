@@ -45,8 +45,9 @@ dev:
     just demo
 
 # Benchmark the current tree, or compare it with a commit: `just bench origin/main`.
-bench $BASE="":
-    bench/run.sh "$BASE"
+# TRANSPORTS picks what chat and fanout dial. Example: `just bench origin/main ws`.
+bench $BASE="" $TRANSPORTS="quic ws wss tcp tls":
+    BENCH_TRANSPORTS="$TRANSPORTS" bench/run.sh "$BASE"
 
 # Compare admitted suites across checkouts and worker counts; see bench/README.md.
 [positional-arguments]
@@ -69,9 +70,10 @@ bench-shard $SHARDS="0 1 4 16" $CONNECTIONS="16 64 256":
     BENCH_SHARD_COUNTS="$SHARDS" BENCH_SHARD_CONNECTIONS="$CONNECTIONS" bench/run.sh --shard
 
 # Profile the relay at each worker count: std mutex waits by stack (lock), CPU
-# stacks (cpu), or jemalloc heap and churn (heap). Example: `just bench-profile "cpu heap" fanout-heavy 4`.
-bench-profile $MODES $WORKLOAD="fanout" $WORKERS="1 4 16" $RUNTIME="tokio-workers" $BASE="":
-    BENCH_PROFILE_MODES="$MODES" BENCH_PROFILE_WORKLOAD="$WORKLOAD" BENCH_PROFILE_WORKERS="$WORKERS" BENCH_PROFILE_RUNTIME="$RUNTIME" BENCH_BASE="$BASE" bench/run.sh --profile
+# stacks (cpu), or jemalloc heap and churn (heap), over one transport (quic, ws, wss, tcp, or tls).
+# Example: `just bench-profile "cpu heap" fanout-heavy 4`, or `just bench-profile cpu chat 4 tokio-workers "" ws`.
+bench-profile $MODES $WORKLOAD="fanout" $WORKERS="1 4 16" $RUNTIME="tokio-workers" $BASE="" $TRANSPORT="quic":
+    BENCH_PROFILE_MODES="$MODES" BENCH_PROFILE_WORKLOAD="$WORKLOAD" BENCH_PROFILE_WORKERS="$WORKERS" BENCH_PROFILE_RUNTIME="$RUNTIME" BENCH_BASE="$BASE" BENCH_PROFILE_TRANSPORT="$TRANSPORT" bench/run.sh --profile
 
 # Real-browser transport, CMAF, and publish/watch costs, optionally against a base:
 # `just bench-browser origin/main`. `--smoke` is the bounded correctness lane.

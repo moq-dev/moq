@@ -67,7 +67,8 @@ declare -A scope=(
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
     # moq-cli builds the Rust interop clients as examples from outside its
     # crate; sh/rs/select.test.py fails when a target's directory is missing.
-    [rs]='^(\.cargo/|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
+    # moq-relay's tests read its NixOS module.
+    [rs]='^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
     # The CARLA demo's simulator worker and launchers. Its player is a JS
     # package and its GPU bridge a Rust crate, so those modules cover them.
@@ -175,7 +176,7 @@ declare -A tools=(
     [toml]='taplo'
     [nix]='nixfmt'
     [justfile]=''
-    [gh]='actionlint bun python3 cargo clippy-driver dpkg-deb nfpm rpm'
+    [gh]='actionlint zizmor bun python3 cargo clippy-driver dpkg-deb nfpm rpm'
 )
 
 # CI and the local check share one selection and one lint/test dispatch.
@@ -290,6 +291,8 @@ fi
 # rs selects crates from the same list, or the whole workspace.
 rs_list=$changed
 [[ -z "$all" ]] || rs_list=--all
+rs_feature_scope=
+[[ "$action" != check ]] || rs_feature_scope=changed
 
 # large_files diffs against the same base, or checks every file.
 large_base=$base
@@ -317,8 +320,10 @@ step() {
         check:moq_sh) just infra moq-sh test ;;
         # The check keeps docs and target-specific lints; the test phase
         # enforces default-feature clippy without a second compile.
-        check:rs) just rs lint-changed "$rs_list" ;;
-        check:rs_shapes) just rs feature-shapes-changed "$rs_list" ;;
+        # Locally, the feature-contract checks skip the dependents of the
+        # changed crates; the landing worker keeps them (see sh/rs/select.sh).
+        check:rs) RS_FEATURE_SCOPE=$rs_feature_scope just rs lint-changed "$rs_list" ;;
+        check:rs_shapes) RS_FEATURE_SCOPE=$rs_feature_scope just rs feature-shapes-changed "$rs_list" ;;
         check:bench)
             python3 bench/compare.test.py
             bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring

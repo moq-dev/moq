@@ -4,20 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### An omitted `maxDelay` sets no subscriber limit ([#7077](https://github.com/moq-dev/moq/pull/7077))
+### `maxDelay: null` sets no subscriber limit ([#7403](https://github.com/moq-dev/moq/pull/7403))
 
-A `Track.Subscription` without `maxDelay` now reaches back as far as the publisher's `Track.Info.maxAge` keeps, as `None` does in Rust, instead of meaning zero.
-`subscribe()` with no options still uses the default subscription, now spelled `Track.Subscription.default()`, whose zero `maxDelay` skips a superseded group at once.
-A live reader that passed options without `maxDelay` spreads the default to keep its behavior:
-
-```ts
-// Before
-const sub = track.subscribe({ priority: 2 });
-// After
-const sub = track.subscribe({ ...Track.Subscription.default(), priority: 2 });
-```
-
-The same applies to `Subscriber.update(options)`, which replaces every field.
+A `Track.Subscription` whose `maxDelay` is `null` reaches back as far as the publisher's `Track.Info.maxAge` keeps, as `None` does in Rust. An omitted or `undefined` `maxDelay` is still zero.
 
 ### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 
