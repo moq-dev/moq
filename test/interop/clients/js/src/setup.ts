@@ -94,15 +94,12 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 	// The driver stops and restarts the publisher in place to exercise a same-path republish, which
 	// has to reuse this page so the audio context keeps its user activation.
 	publish({
-		stop: async () => {
-			const stopped = fixture;
+		stop: () => {
+			fixture?.close();
 			fixture = undefined;
-			await stopped?.close();
 		},
-		start: async () => {
-			const stopped = fixture;
-			fixture = undefined;
-			await stopped?.close();
+		start: () => {
+			fixture?.close();
 			fixture = new Fixture(host, {
 				url,
 				name: broadcast,
