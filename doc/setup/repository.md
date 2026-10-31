@@ -32,6 +32,7 @@ wrap the Rust core. [Layers](/lib/layers) maps the binding namespaces.
 | Language bindings | [`rs/moq-ffi`](https://github.com/moq-dev/moq/tree/main/rs/moq-ffi), [`rs/moq-c`](https://github.com/moq-dev/moq/tree/main/rs/moq-c), then `py/`, `swift/`, `kt/`, `go/`, `dart/`, or `cpp/moq/` | [Binding layers](/lib/layers) |
 | Rooms, chat, and application data | [`rs/moq-room`](https://github.com/moq-dev/moq/tree/main/rs/moq-room), [`js/room`](https://github.com/moq-dev/moq/tree/main/js/room), `rs/moq-json`, `js/json` | [Rooms](/lib/js/room), [JSON tracks](/lib/js/json) |
 | End-to-end encryption | [`rs/moq-e2ee`](https://github.com/moq-dev/moq/tree/main/rs/moq-e2ee), [`js/e2ee`](https://github.com/moq-dev/moq/tree/main/js/e2ee) | [Media encryption](/concept/hang), [E2EE draft](/draft/moq-e2ee) |
+| Signed content | [`rs/moq-sign`](https://github.com/moq-dev/moq/tree/main/rs/moq-sign), [`js/sign`](https://github.com/moq-dev/moq/tree/main/js/sign) | [Signing draft](/draft/moq-sign) |
 | Async primitives and deterministic time | [`rs/kio`](https://github.com/moq-dev/moq/tree/main/rs/kio), [`rs/moq-clock`](https://github.com/moq-dev/moq/tree/main/rs/moq-clock), [`js/clock`](https://github.com/moq-dev/moq/tree/main/js/clock) | [Rust conventions](/lib/rs/#conventions), [clock](/lib/js/clock) |
 
 ## Find the surrounding work

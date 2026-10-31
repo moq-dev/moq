@@ -3,10 +3,10 @@
 ## Goal
 
 qmux implements the RFC 6455 subset it uses, and tungstenite and
-tokio-tungstenite leave the dependency tree, but only if the
-[bench](/quest/m2/perf/stream/bench.md) attributes a material share of
-WebSocket CPU to tungstenite once the [driver](/quest/m2/perf/stream/driver.md)
-has landed. If the bench shows no such share, delete this quest.
+tokio-tungstenite leave the dependency tree, but only if the stream
+transport bench (see the [epic](/quest/m2/perf/stream/README.md)) attributes a
+material share of WebSocket CPU to tungstenite once the
+[driver](/quest/m2/perf/stream/driver.md) has landed. If the bench shows no such share, delete this quest.
 
 ## Plan
 
