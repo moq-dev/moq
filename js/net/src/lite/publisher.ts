@@ -330,7 +330,7 @@ class SubscriptionControls {
 
 	async #decode({ reader, version, apply, quic }: SubscriptionControlOptions) {
 		try {
-			// Runs until the peer's half ends, even past our own FIN: a lite-07 publisher waits
+			// Runs until the peer's half ends, even past our own FIN: a lite-05+ publisher waits
 			// for that end, and every other teardown stops the reader.
 			for (;;) {
 				const update = await SubscribeUpdate.decodeMaybe(reader, version);
@@ -998,8 +998,9 @@ export class Publisher {
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
-			// A lite-07 subscriber FINs once it has read the tail, so leave its half open and
-			// wait for that. Older versions stop it here, which ends the decoder.
+			// A lite-05+ subscriber FINs once it has read the tail, so leave its half open and
+			// wait for that: a receiver may drop unread bytes on close. Older versions stop it
+			// here, which ends the decoder.
 			if (waitsForSubscriberFin(this.version)) stream.writer.close();
 			else stream.close();
 			// Ends the datagram loop.

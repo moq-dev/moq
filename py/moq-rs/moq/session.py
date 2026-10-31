@@ -78,9 +78,8 @@ class Session:
     def shutdown(self) -> None:
         """Request a draining close now; await :meth:`closed` for its result.
 
-        Explicit ``moq-lite-07-wip`` waits for the peer to receive finished tails;
-        older Lite versions, including the default lite-06, wait only for transport
-        ACKs. IETF also waits for transport ACKs.
+        ``moq-lite-05`` and newer wait for the peer to receive finished tails; older
+        Lite versions and IETF wait only for transport ACKs.
         """
         self._inner.shutdown()
 

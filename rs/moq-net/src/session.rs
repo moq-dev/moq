@@ -270,9 +270,9 @@ impl Session {
 	///
 	/// Waits until every stream still serving the peer (a subscription whose track
 	/// finished, a fetch, a track info reply) has written its data and FIN and the
-	/// transport acknowledged them, then closes the transport. Explicit lite-07-wip
-	/// also waits for the subscriber to receive a subscription's tail. Older Lite
-	/// versions, including the default lite-06, and IETF wait only for transport ACKs. Returns
+	/// transport acknowledged them, then closes the transport. Lite-05 and newer, including
+	/// the default lite-06, also wait for the subscriber to receive a subscription's tail.
+	/// Older Lite versions and IETF wait only for transport ACKs. Returns
 	/// [`Error::Timeout`] if that takes longer than one second, closing anyway, or
 	/// the session's terminal error if it ended some other way first. A track that
 	/// is still live never finishes, so finish or abort tracks before closing.

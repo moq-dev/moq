@@ -85,9 +85,8 @@ class Moq internal constructor(
     /**
      * Request a draining close now; await `session.closed()` for its result, then [close]
      * to release the client.
-     * Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
-     * Lite versions, including the default lite-06, wait only for transport ACKs.
-     * IETF also waits for transport ACKs.
+     * `moq-lite-05` and newer wait for the peer to receive finished tails; older
+     * Lite versions and IETF wait only for transport ACKs.
      */
     fun shutdown() {
         session.shutdown()
