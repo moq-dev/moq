@@ -88,6 +88,9 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// keyframe), so each track cuts its HLS segments where it opens its group for the segment.
 	declared: bool,
 	dropped_metadata: u64,
+
+	// A seek or discontinuity waiting for the fragment still publishing.
+	deferred: Deferred,
 }
 
 /// The catalog entry for one passthrough track, whichever section it lives in.
@@ -276,6 +279,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			segment: 0,
 			declared: false,
 			dropped_metadata: 0,
+			deferred: Deferred::default(),
 		}
 	}
 
@@ -438,16 +442,29 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 				Body::Media(mut mdat) => {
 					let count = mdat.remaining.unwrap_or(data.len()).min(data.len());
-					if let Err(err) = self.write_mdat(&mut mdat, &data[..count]) {
-						self.body = Some(Body::Media(mdat));
-						return Err(err);
-					}
+					let written = self.write_mdat(&mut mdat, &data[..count]);
 					data = &data[count..];
 					if let Some(remaining) = &mut mdat.remaining {
 						*remaining -= count;
 					}
+					if let Err(err) = written {
+						// The fragment is refused: its open frames fail, and the rest of its mdat is
+						// discarded so framing resumes at the next box.
+						mdat.abort(moq_net::Error::MalformedTrack);
+						if mdat.remaining != Some(0) {
+							self.body = Some(Body::Skip(mdat.remaining));
+						}
+						if let Err(settle) = self.settle() {
+							tracing::warn!(%settle, "failed to apply a control deferred by a refused fMP4 fragment");
+						}
+						return Err(err);
+					}
+					let published = mdat.chunks.is_empty();
 					if mdat.remaining != Some(0) {
 						self.body = Some(Body::Media(mdat));
+					}
+					if published {
+						self.settle()?;
 					}
 				}
 			}
@@ -1018,6 +1035,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		};
 		// Validate every track before opening any payload writer. Otherwise a later traf's
 		// backwards run or reused bytes could fail after earlier tracks published data.
+		let mut anchored = false;
 		for traf in &moof.traf {
 			let id = traf.tfhd.track_id;
 			if let Some(track) = self.text.get_mut(&id) {
@@ -1031,6 +1049,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						},
 					});
 				}
+				anchored = true;
 				continue;
 			}
 			let track = match self.tracks.get_mut(&id) {
@@ -1038,10 +1057,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				None if self.skipped.contains(&id) => continue,
 				None => return Err(Error::UnknownTrack(id).into()),
 			};
+			// A fragment wholly before the edit or the first sync sample publishes nothing.
 			let Some(run) = track.run(traf, &mut resolver)? else {
 				continue;
 			};
+			// The moov declared every track, so any track's anchored fragment releases the catalog.
 			let offset = self.timebase.anchor(run.earliest)?;
+			anchored = true;
 			let placement = Placement {
 				offset,
 				new_segment: track.segment != Some(self.segment),
@@ -1074,7 +1096,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		mdat.chunks
 			.make_contiguous()
 			.sort_unstable_by_key(|chunk| chunk.range.start);
-		self.initial_reservation = None;
+		if anchored {
+			self.initial_reservation = None;
+		}
 		Ok(mdat)
 	}
 
@@ -1374,13 +1398,20 @@ fn fragment(traf: &mp4_atom::Traf, moof: &Moof, run: &Run, defaults: &sample::De
 	adjusted_moof.encode(&mut moof_buf)?;
 	let new_moof_size = moof_buf.len();
 
+	// A payload past 4 GiB takes the 16-byte largesize header.
+	let mut mdat = Vec::new();
+	mp4_atom::Header {
+		kind: (*b"mdat").into(),
+		size: Some(run.samples.iter().map(|sample| sample.range.len()).sum()),
+	}
+	.encode(&mut mdat)?;
+
 	// Re-encode moof with corrected per-trun data_offset for the per-track fragment.
 	// Each trun's data_offset points to the start of that run's data within the new mdat.
-	let mdat_header_size_new = 8u64; // 4 bytes size + 4 bytes 'mdat'
-	let mut cumulative_offset = 0u64;
+	let mut cumulative_offset = (new_moof_size + mdat.len()) as u64;
 	for traf_mut in &mut adjusted_moof.traf {
 		for trun_mut in &mut traf_mut.trun {
-			trun_mut.data_offset = Some((new_moof_size as u64 + mdat_header_size_new + cumulative_offset) as i32);
+			trun_mut.data_offset = Some(i32::try_from(cumulative_offset).map_err(|_| Error::InvalidDataOffset)?);
 
 			// Advance past this trun's sample data
 			let trun_data_size: u64 = trun_mut
@@ -1394,12 +1425,9 @@ fn fragment(traf: &mp4_atom::Traf, moof: &Moof, run: &Run, defaults: &sample::De
 
 	moof_buf.clear();
 	adjusted_moof.encode(&mut moof_buf)?;
-
-	mp4_atom::Header {
-		kind: (*b"mdat").into(),
-		size: Some(run.samples.iter().map(|sample| sample.range.len()).sum()),
-	}
-	.encode(&mut moof_buf)?;
+	// Each data_offset was reserved above, so restating them keeps the moof's size.
+	debug_assert_eq!(moof_buf.len(), new_moof_size);
+	moof_buf.extend_from_slice(&mdat);
 
 	Ok(Bytes::from(moof_buf))
 }
@@ -1574,15 +1602,30 @@ fn start_sample<E: crate::catalog::hang::CatalogExt>(
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
+	///
+	/// A fragment whose samples are still arriving was truncated: its open frames abort, failing
+	/// their groups, every track still finishes, and this returns
+	/// [`UnexpectedEof`](mp4_atom::Error::UnexpectedEof).
 	pub fn finish(&mut self) -> Result<()> {
 		// No input follows, so the buffer that waited for the rest of an atom is done.
 		self.buffer = BytesMut::new();
-		if let Some(Body::Media(mut mdat)) = self.body.take() {
-			if !mdat.chunks.is_empty() {
+		// A seek or discontinuity waiting on the truncated fragment has no fragment left to land on.
+		self.deferred = Deferred::default();
+		let truncated = match self.body.take() {
+			Some(Body::Media(mut mdat)) if !mdat.chunks.is_empty() => {
 				mdat.abort(moq_net::Error::WrongSize);
-				return Err(mp4_atom::Error::UnexpectedEof.into());
+				true
 			}
+			_ => false,
+		};
+		self.finish_tracks()?;
+		if truncated {
+			return Err(mp4_atom::Error::UnexpectedEof.into());
 		}
+		Ok(())
+	}
+
+	fn finish_tracks(&mut self) -> Result<()> {
 		for track in self.text.values_mut() {
 			track.producer.finish()?;
 		}
@@ -1625,7 +1668,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// [`discontinuity`](Self::discontinuity). Text spends a group per cue, so a text track that
 	/// is already past `sequence` continues from its own next group instead. Video resumes at its
 	/// next sync sample, dropping the samples before it.
+	///
+	/// A fragment whose samples are still arriving owns its groups until its last sample, so the
+	/// seek waits for it to finish publishing.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		if self.publishing() {
+			self.deferred.seek = Some(sequence);
+			return Ok(());
+		}
+		self.apply_seek(sequence)
+	}
+
+	fn apply_seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.text.values_mut() {
 			let next = track.producer.next_sequence();
 			track.producer.seek(sequence.max(next))?;
@@ -1647,8 +1701,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// fragment's decode time is not compared with the last one on each track. A timeline that
 	/// restarts below where it was still fails with
 	/// [`TimestampRewind`](crate::container::TimestampRewind): a track refuses a group that
-	/// rewinds, before publishing any of it.
+	/// rewinds, before publishing any of it. Like [`seek`](Self::seek), it waits for a fragment
+	/// still arriving to finish publishing.
 	pub fn discontinuity(&mut self) -> Result<()> {
+		if self.publishing() {
+			self.deferred.discontinuity = true;
+			return Ok(());
+		}
+		self.apply_discontinuity();
+		Ok(())
+	}
+
+	fn apply_discontinuity(&mut self) {
 		for track in self.text.values_mut() {
 			track.end_decode_time = None;
 			track.discontinuity = true;
@@ -1656,8 +1720,31 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for track in self.tracks.values_mut() {
 			track.last_decode_time = None;
 		}
+	}
+
+	/// Whether a fragment has samples still to arrive, whose open frames hold their groups.
+	fn publishing(&self) -> bool {
+		matches!(&self.body, Some(Body::Media(mdat)) if !mdat.chunks.is_empty())
+	}
+
+	/// Apply the controls deferred while a fragment was publishing, in the order HLS issues them.
+	fn settle(&mut self) -> Result<()> {
+		let Deferred { seek, discontinuity } = std::mem::take(&mut self.deferred);
+		if discontinuity {
+			self.apply_discontinuity();
+		}
+		if let Some(sequence) = seek {
+			self.apply_seek(sequence)?;
+		}
 		Ok(())
 	}
+}
+
+/// Controls called while a fragment was still publishing, applied once it has.
+#[derive(Default)]
+struct Deferred {
+	seek: Option<u64>,
+	discontinuity: bool,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
@@ -1737,7 +1824,7 @@ mod tests {
 	}
 
 	// Only the headers are supplied. The declared mdat may never finish.
-	fn media_header(id: u32, offsets: &[usize], size: u32, len: Option<usize>) -> Vec<u8> {
+	fn media_header(id: u32, decode_time: u64, offsets: &[usize], size: u32, len: Option<usize>) -> Vec<u8> {
 		let mut moof = Moof {
 			mfhd: Default::default(),
 			traf: vec![mp4_atom::Traf {
@@ -1747,7 +1834,9 @@ mod tests {
 					default_sample_duration: Some(1024),
 					..Default::default()
 				},
-				tfdt: Some(Default::default()),
+				tfdt: Some(mp4_atom::Tfdt {
+					base_media_decode_time: decode_time,
+				}),
 				trun: offsets
 					.iter()
 					.map(|_| mp4_atom::Trun {
@@ -1787,7 +1876,7 @@ mod tests {
 				Output::Passthrough(output) => output.track.subscribe(None),
 				_ => unreachable!(),
 			};
-			let header = media_header(id, &[4, 0], 4, Some(8));
+			let header = media_header(id, 0, &[4, 0], 4, Some(8));
 			let err = import.decode(&header).unwrap_err();
 			assert!(matches!(err, crate::Error::Cmaf(Error::BackwardsDataOffset)), "{err:?}");
 			assert!(consumer.recv_group().now_or_never().is_none());
@@ -1800,7 +1889,7 @@ mod tests {
 		for passthrough in [false, true] {
 			for len in [Some(1usize << 62), None] {
 				let (mut import, id, pool) = initialized(passthrough);
-				let header = media_header(id, &[0, SIZE + 17], SIZE as u32, len);
+				let header = media_header(id, 0, &[0, SIZE + 17], SIZE as u32, len);
 				for byte in &header {
 					import.decode(&[*byte]).unwrap();
 				}
@@ -1834,6 +1923,124 @@ mod tests {
 				}
 				import.finish().unwrap();
 			}
+		}
+	}
+
+	fn replay(output: &Output<()>) -> moq_net::track::Subscriber {
+		let replay = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30));
+		match output {
+			Output::Audio(output) => output.subscribe(replay),
+			Output::Passthrough(output) => output.track.subscribe(replay),
+			_ => unreachable!(),
+		}
+	}
+
+	/// Each closed group's sequence and frame count, or `None` for a group that failed.
+	fn groups(consumer: &mut moq_net::track::Subscriber) -> Vec<(u64, Option<usize>)> {
+		use futures::FutureExt;
+		let mut groups = Vec::new();
+		while let Some(mut group) = consumer.recv_group().now_or_never().and_then(|r| r.ok().flatten()) {
+			let mut frames = Some(0);
+			loop {
+				match group.next_frame().now_or_never() {
+					Some(Ok(Some(_))) => frames = frames.map(|count| count + 1),
+					Some(Ok(None)) => break,
+					Some(Err(_)) => {
+						frames = None;
+						break;
+					}
+					None => panic!("group {} left open", group.sequence),
+				}
+			}
+			groups.push((group.sequence, frames));
+		}
+		groups
+	}
+
+	#[test]
+	fn seek_waits_for_the_publishing_fragment() {
+		const SIZE: usize = 64;
+		for passthrough in [false, true] {
+			let (mut import, id, _) = initialized(passthrough);
+			let mut consumer = replay(&import.tracks[&id].output);
+			let sample = [0xA5; SIZE];
+			import
+				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
+				.unwrap();
+			import.decode(&sample[..SIZE / 2]).unwrap();
+			// The open frame holds group 0, so neither control may close it underneath the sample.
+			import.discontinuity().unwrap();
+			import.seek(100).unwrap();
+			import.decode(&sample[SIZE / 2..]).unwrap();
+			assert_eq!(groups(&mut consumer), [(0, Some(1))], "passthrough: {passthrough}");
+			// The discontinuity lets the next fragment restate the decode time.
+			import
+				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
+				.unwrap();
+			import.decode(&sample).unwrap();
+			import.finish().unwrap();
+			assert_eq!(groups(&mut consumer), [(100, Some(1))], "passthrough: {passthrough}");
+		}
+	}
+
+	#[test]
+	fn truncated_sample_fails_its_group_and_finishes_the_track() {
+		const SIZE: usize = 64;
+		for passthrough in [false, true] {
+			let (mut import, id, _) = initialized(passthrough);
+			let mut consumer = replay(&import.tracks[&id].output);
+			import
+				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
+				.unwrap();
+			import.decode(&[0xA5; SIZE]).unwrap();
+			import
+				.decode(&media_header(id, 1024, &[0], SIZE as u32, Some(SIZE)))
+				.unwrap();
+			import.decode(&[0xA5; SIZE / 2]).unwrap();
+			let err = import.finish().unwrap_err();
+			assert!(matches!(err, crate::Error::Mp4(_)), "{err:?}");
+			assert_eq!(
+				groups(&mut consumer),
+				[(0, Some(1)), (1, None)],
+				"passthrough: {passthrough}"
+			);
+			let finished = match &import.tracks[&id].output {
+				Output::Audio(output) => output.finished(),
+				Output::Passthrough(output) => output.track.finished(),
+				_ => unreachable!(),
+			};
+			assert!(finished.is_some(), "passthrough: {passthrough}");
+		}
+	}
+
+	#[test]
+	fn refused_fragment_discards_its_mdat() {
+		const SIZE: usize = 64;
+		for passthrough in [false, true] {
+			let (mut import, id, _) = initialized(passthrough);
+			let mut consumer = replay(&import.tracks[&id].output);
+			import
+				.decode(&media_header(id, 48_000, &[0], SIZE as u32, Some(SIZE)))
+				.unwrap();
+			import.decode(&[0xA5; SIZE]).unwrap();
+			// A new timeline that restarts below the published one is refused at its first sample.
+			import.discontinuity().unwrap();
+			import
+				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
+				.unwrap();
+			import.decode(&[0xA5; SIZE / 2]).unwrap_err();
+			// The rest of the refused mdat is discarded rather than parsed as boxes.
+			import.decode(&[0xA5; SIZE / 2]).unwrap();
+			import
+				.decode(&media_header(id, 96_000, &[0], SIZE as u32, Some(SIZE)))
+				.unwrap();
+			import.decode(&[0xA5; SIZE]).unwrap();
+			import.finish().unwrap();
+			assert_eq!(
+				groups(&mut consumer),
+				[(0, Some(1)), (1, Some(1))],
+				"passthrough: {passthrough}"
+			);
 		}
 	}
 }
