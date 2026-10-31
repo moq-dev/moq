@@ -205,7 +205,8 @@ async fn replacement(version: &str) {
 		(changed(&mut catalog_follow).await, changed(&mut media_follow).await)
 	})
 	.await;
-	assert_eq!(catalog_restart, version != "moq-lite-06");
+	// Only lite-07 carries the epoch, so only it restarts in place.
+	assert_eq!(catalog_restart, version == LITE_07);
 	assert_eq!(media_restart, catalog_restart);
 	println!(
 		"{version}: relay replacement observed in {:?} of {:?} (publisher already connected)",

@@ -20,8 +20,9 @@ predecessor's prefix serves that incarnation, and relays forward it on that
 same condition, falling back to Start or Restart. The identity guide
 describes it.
 Keep the rest in m1 as a prerequisite of the lite-07 cut. moq-transport gets
-no counterpart, since [moq-transport carries no epoch](/quest/m1/ietf-epoch-cut.md)
-(decided 2026-10-28), so a moq-transport hop uses Start/Restart.
+no counterpart, since moq-transport carries no epoch (decided 2026-10-28,
+removed in [moq-dev/moq#7239](https://github.com/moq-dev/moq/pull/7239)), so a
+moq-transport hop uses Start/Restart.
 
 Decided 2026-10-29 (maintainer, settling #6994): the event stays
 `Takeover { announce, predecessor }`, with `predecessor == announce.prefix`

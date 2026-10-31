@@ -21,8 +21,7 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, 
 	connect_mock(options).await
 }
 
-/// `carries_epoch`: the wire carries the epoch, as lite-07 and moq-transport with the MoQ
-/// Epoch extension do.
+/// `carries_epoch`: the wire carries the epoch, as lite-07 does.
 async fn acquisition(version: &str, carries_epoch: bool) {
 	let version: Version = version.parse().unwrap();
 	let publisher = origin(1);
@@ -81,11 +80,11 @@ async fn acquisition(version: &str, carries_epoch: bool) {
 #[moq_clock::test]
 async fn epochless_replacement_refuses_pending_catalog() {
 	acquisition("moq-lite-06", false).await;
+	acquisition("moq-transport-18", false).await;
+	acquisition("moq-transport-22", false).await;
 }
 
 #[moq_clock::test]
 async fn same_epoch_replacement_acquires_pending_catalog() {
 	acquisition("moq-lite-07-wip", true).await;
-	acquisition("moq-transport-18", true).await;
-	acquisition("moq-transport-22", true).await;
 }

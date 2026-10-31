@@ -1089,7 +1089,9 @@ try {
 					predicate: (s) => s.generation === 0 && !s.audioStalled,
 				});
 				check(
-					version === "moq-lite-06" ? first.broadcastEpoch === undefined : first.broadcastEpoch !== undefined,
+					version === "moq-lite-07-wip"
+						? first.broadcastEpoch !== undefined
+						: first.broadcastEpoch === undefined,
 					"negotiated epoch identity",
 					() => JSON.stringify(first),
 				);
@@ -1121,7 +1123,7 @@ try {
 					predicate: (s) => s.generation === 1 && !s.audioStalled && playsInSync(s),
 				});
 				const replacementMs = Date.now() - ready;
-				if (version !== "moq-lite-06")
+				if (version === "moq-lite-07-wip")
 					check(switched.broadcastEpoch !== first.broadcastEpoch, "replacement has a fresh epoch", () =>
 						JSON.stringify(switched),
 					);
