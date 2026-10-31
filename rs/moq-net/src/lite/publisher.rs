@@ -721,9 +721,17 @@ impl ProbeServe {
 		match ready!(self.poll_probe(waiter)) {
 			Ok(()) => tracing::debug!("probe stream closed"),
 			Err(err) => {
-				tracing::warn!(%err, "probe stream error");
 				self.stream.take().expect("stream present").writer.abort(&err);
-				return Poll::Ready(Err(err));
+				match err {
+					// The session or the peer ended it cleanly: not an error for the control stream.
+					Error::Cancel
+					| Error::Stream(crate::StreamError::Cancel)
+					| Error::Session(crate::SessionError::Cancel) => tracing::debug!(%err, "probe stream cancelled"),
+					err => {
+						tracing::warn!(%err, "probe stream error");
+						return Poll::Ready(Err(err));
+					}
+				}
 			}
 		}
 		Poll::Ready(Ok(()))

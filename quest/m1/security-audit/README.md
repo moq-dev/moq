@@ -25,8 +25,8 @@ Placed elsewhere (decided 2026-10-27, maintainer):
 - qmux buffering a peer-declared size (NET-3): owned by
   [qmux receive lease](/quest/m2/qmux-receive-lease.md).
 - Media parser fuzzing: owned by [media fuzz](/quest/m2/media-fuzz.md).
-- E2EE cloned-process rule and CryptoKey length:
-  [cloned process](/quest/m2/e2ee/cloned-process.md).
+- E2EE cloned-process rule and CryptoKey length: documented in the
+  E2EE draft and the `moq-e2ee` and `@moq/e2ee` docs.
 
 Dropped, with reasons:
 

@@ -97,6 +97,7 @@ none.
 
 ## Related
 
+- [UniFFI generator forks are current](/quest/m1/vendor-sync/uniffi.md) - keeps the forks this replaces synced with upstream until the switch; its fixes must reach rust2's fork
 - [ubrn generates UniFFI 0.32 TypeScript](/quest/m2/rs2ts/ubrn-032.md) - the browser generator this switch must keep working
 - [Payload bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md) - the first patch the fork carries
 - [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
