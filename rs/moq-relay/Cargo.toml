@@ -76,6 +76,8 @@ moq-net = { workspace = true }
 moq-quic = { workspace = true }
 moq-stats = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
+# The /metrics text encoder; the protobuf features stay off.
+prometheus-client = "0.25.1"
 qmux = { workspace = true, features = ["ws"], optional = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
