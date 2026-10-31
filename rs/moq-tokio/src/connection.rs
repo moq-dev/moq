@@ -1877,6 +1877,9 @@ async fn run_session(
 /// Own the live session's receive consumer only while an external consumer needs it.
 #[derive(Default)]
 struct RecvBandwidth {
+	// Watches `out`, taken on the first poll.
+	demand: Option<moq_net::bandwidth::Demand>,
+	wanted: bool,
 	source: Option<BandwidthConsumer>,
 }
 
@@ -1887,23 +1890,27 @@ impl RecvBandwidth {
 		waiter: &kio::Waiter,
 		source: impl FnOnce() -> Option<BandwidthConsumer>,
 	) {
+		let demand = self.demand.get_or_insert_with(|| out.demand());
+		// Drain every edge, so `waiter` is armed for the next one. Demand can arrive during
+		// retirement, which the next turn of the loop reports.
 		loop {
-			match out.poll_unused(waiter) {
+			match demand.poll_wanted_changed(waiter) {
 				Poll::Pending => break,
 				Poll::Ready(Err(_)) => {
 					self.source = None;
 					return;
 				}
-				Poll::Ready(Ok(())) => {
-					self.source = None;
-					let _ = out.set(None);
+				Poll::Ready(Ok(wanted)) => {
+					self.wanted = wanted;
+					if !wanted {
+						self.source = None;
+						let _ = out.set(None);
+					}
 				}
 			}
-			match out.poll_used(waiter) {
-				// Demand can arrive during retirement, before a waiter was armed.
-				Poll::Ready(Ok(())) => continue,
-				Poll::Ready(Err(_)) | Poll::Pending => return,
-			}
+		}
+		if !self.wanted {
+			return;
 		}
 		if self.source.is_none() {
 			self.source = source();
@@ -2430,35 +2437,41 @@ mod tests {
 		first.set(Some(moq_net::bandwidth::Rate::from_bps(123))).unwrap();
 		let mut forward = RecvBandwidth::default();
 		forward.poll(&out, &waiter, || Some(first.consume()));
-		assert!(!first.is_used(), "the connection handle is not demand");
+		assert!(!first.demand().wanted(), "the connection handle is not demand");
 		let reader = handle.consume();
 		forward.poll(&out, &waiter, || Some(first.consume()));
-		assert!(first.is_used());
+		assert!(first.demand().wanted());
 		assert_eq!(reader.peek(), Some(moq_net::bandwidth::Rate::from_bps(123)));
 		let clone = reader.clone();
 		drop(reader);
 		forward.poll(&out, &waiter, || Some(first.consume()));
-		assert!(first.is_used(), "a remaining clone is demand");
+		assert!(first.demand().wanted(), "a remaining clone is demand");
 		drop(clone);
 		forward.poll(&out, &waiter, || Some(first.consume()));
-		assert!(!first.is_used(), "the last drop releases the live session's consumer");
+		assert!(
+			!first.demand().wanted(),
+			"the last drop releases the live session's consumer"
+		);
 		let reader = handle.consume();
 		assert_eq!(reader.peek(), None, "an unused estimate is cleared");
 		forward.poll(&out, &waiter, || Some(first.consume()));
-		assert!(first.is_used(), "demand can resume on the same session");
+		assert!(first.demand().wanted(), "demand can resume on the same session");
 		drop(forward);
-		assert!(!first.is_used());
+		assert!(!first.demand().wanted());
 		out.set(None).unwrap();
 		assert_eq!(reader.peek(), None, "disconnected");
 		let second = BandwidthProducer::new();
 		second.set(Some(moq_net::bandwidth::Rate::from_bps(456))).unwrap();
 		let mut forward = RecvBandwidth::default();
 		forward.poll(&out, &waiter, || Some(second.consume()));
-		assert!(second.is_used(), "the same reader demands the replacement session");
+		assert!(
+			second.demand().wanted(),
+			"the same reader demands the replacement session"
+		);
 		assert_eq!(reader.peek(), Some(moq_net::bandwidth::Rate::from_bps(456)));
 		drop(reader);
 		forward.poll(&out, &waiter, || Some(second.consume()));
-		assert!(!second.is_used());
+		assert!(!second.demand().wanted());
 	}
 
 	#[test]
@@ -2497,7 +2510,7 @@ mod tests {
 		forward.poll(&out, &kio::Waiter::noop(), || Some(source.consume()));
 		assert!(demand.consumer.lock().unwrap().is_some());
 		assert!(
-			source.is_used(),
+			source.demand().wanted(),
 			"new demand must be forwarded without unrelated activity"
 		);
 	}
