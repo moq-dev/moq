@@ -864,12 +864,14 @@ static void moq_source_on_audio_subscribed(struct moq_source *ctx, const std::sh
 	moq_source_read_audio(ctx, conn, track);
 }
 
-// Whether moq-audio decodes the codec: Opus, AAC-LC (the one AAC profile it has), or PCM.
-// moq-ffi reports a refusal only once the subscribe fails, as an audio error with no kind,
-// so check here to let an unsupported rendition fall through. A configuration moq-audio
-// still refuses, such as a malformed OpusHead, discards the candidate when it subscribes.
-static bool moq_source_audio_codec_supported(const std::string &codec)
+// Whether moq-audio decodes the rendition: Opus, PCM, or mono or stereo AAC-LC (the one AAC
+// profile and the layouts it has). moq-ffi reports a refusal only once the subscribe fails,
+// as an audio error with no kind, so check here to let an unsupported rendition fall through.
+// A configuration moq-audio still refuses, such as a malformed OpusHead, discards the
+// candidate when it subscribes.
+static bool moq_source_audio_decodes(const moq::Audio &config)
 {
+	const auto &codec = config.codec;
 	if (codec == "opus" || codec == "pcm")
 		return true;
 	// hang reads the AAC profile as a decimal, so `mp4a.40.02` is AAC-LC too.
@@ -877,7 +879,8 @@ static bool moq_source_audio_codec_supported(const std::string &codec)
 	if (codec.rfind(aac, 0) != 0)
 		return false;
 	const auto profile = codec.find_first_not_of('0', aac.size());
-	return profile != std::string::npos && codec.compare(profile, std::string::npos, "2") == 0;
+	return profile != std::string::npos && codec.compare(profile, std::string::npos, "2") == 0 &&
+	       (config.channel_count == 1 || config.channel_count == 2);
 }
 
 // The channels moq-audio should remix a rendition to, and where OBS puts them. A count
@@ -1029,8 +1032,9 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 			return;
 
 		// A codec moq-audio can't decode, or a layout OBS can't place, falls through to the next rendition.
-		if (!moq_source_audio_codec_supported(config.codec)) {
-			LOG_ERROR("Unsupported audio codec '%s' in rendition %s", config.codec.c_str(), id.c_str());
+		if (!moq_source_audio_decodes(config)) {
+			LOG_ERROR("Unsupported audio codec '%s' with %u channels in rendition %s", config.codec.c_str(),
+				  config.channel_count, id.c_str());
 			continue;
 		}
 		auto layout = moq_source_audio_layout(config.channel_count);

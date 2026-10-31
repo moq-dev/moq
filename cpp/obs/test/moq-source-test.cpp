@@ -1189,16 +1189,27 @@ int main()
 		CHECK(moq_source_candidates(moq_source_ranked_audio(audios), none).empty());
 
 		// The codecs moq-audio decodes, with AAC-LC in either spelling hang parses.
+		const auto decodes = [](const char *codec, uint32_t channels) {
+			moq::Audio config{};
+			config.codec = codec;
+			config.channel_count = channels;
+			return moq_source_audio_decodes(config);
+		};
 		for (const char *codec : {"opus", "pcm", "mp4a.40.2", "mp4a.40.02"})
-			CHECK(moq_source_audio_codec_supported(codec));
+			CHECK(decodes(codec, 2));
 		for (const char *codec : {"flac", "mp4a.40.5", "mp4a.40.20", "mp4a.40.", "mp4a.40.0"})
-			CHECK(!moq_source_audio_codec_supported(codec));
+			CHECK(!decodes(codec, 2));
+		// moq-audio decodes AAC only in mono or stereo, unlike Opus and PCM.
+		CHECK(decodes("mp4a.40.2", 1));
+		CHECK(!decodes("mp4a.40.2", 6));
+		CHECK(decodes("opus", 6));
+		CHECK(decodes("pcm", 6));
 	}
 	report("renditions rank like hang");
 
 	// A disabled rendition is never chosen while an enabled one is available, and an
-	// undecodable top rendition (a codec nothing decodes, or a channel count OBS has no
-	// layout for) falls through to the next playable one.
+	// undecodable top rendition (a codec nothing decodes, a layout moq-audio does not decode
+	// it in, or a channel count OBS has no layout for) falls through to the next playable one.
 	{
 		TestRelay relay;
 		reset(relay.Url());
@@ -1244,6 +1255,13 @@ int main()
 		he_aac_audio.description.reset();
 		he_aac_audio.bitrate = 5500000;
 		catalog.audio.emplace("he-aac", he_aac_audio);
+		// 5.1 AAC-LC: OBS has the layout, but moq-audio decodes AAC only in mono or stereo.
+		auto surround_aac_audio = audio;
+		surround_aac_audio.codec = "mp4a.40.2";
+		surround_aac_audio.description.reset();
+		surround_aac_audio.channel_count = 6;
+		surround_aac_audio.bitrate = 5200000;
+		catalog.audio.emplace("surround-aac", surround_aac_audio);
 		auto unplaceable_audio = audio;
 		unplaceable_audio.channel_count = 9;
 		unplaceable_audio.bitrate = 5000000;
