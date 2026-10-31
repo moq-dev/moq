@@ -2211,7 +2211,7 @@ mod tests {
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let quic = super::super::session::quic_config(&resolved).resolve();
 		assert_eq!(quic.idle_timeout, Duration::ZERO);
-		assert_eq!(quic.keep_alive, None);
+		assert_eq!(quic.keep_alive, Some(Duration::ZERO));
 		assert!(quic.keylog.is_some());
 	}
 

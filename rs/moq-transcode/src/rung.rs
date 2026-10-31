@@ -554,8 +554,7 @@ fn spawn_fill(
 	tasks.spawn(async move {
 		let _permit = permit;
 		let mut last = None;
-		while fill.is_used()
-			&& let Some(sequence) = fill.next()
+		while let Some(sequence) = fill.wanted()
 			&& last != Some(sequence)
 		{
 			last = Some(sequence);
