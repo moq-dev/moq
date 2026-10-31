@@ -116,7 +116,11 @@ impl Connecting {
 			self.handshake_data_ready = None;
 		}
 		let conn = self.conn.as_ref().unwrap();
-		let inner = conn.state.lock();
+		// A panicked driver recorded why before it died: fail with that instead of panicking the accept.
+		let inner = conn
+			.state
+			.lock_recovered()
+			.map_err(|inner| inner.error.clone().unwrap_or_else(driver_panicked))?;
 		inner
 			.inner
 			.crypto_session()
@@ -129,7 +133,9 @@ impl Connecting {
 	/// Will panic if called after `poll` has returned `Ready`.
 	pub fn remote_address(&self) -> SocketAddr {
 		let conn_ref: &ConnectionRef = self.conn.as_ref().expect("used after yielding Ready");
-		conn_ref.state.lock().inner.remote_address()
+		// A plain field, so still readable once a driver panic poisoned the state.
+		let conn = conn_ref.state.lock_recovered().unwrap_or_else(|conn| conn);
+		conn.inner.remote_address()
 	}
 
 	/// Panic while holding the state, as a driver bug would, then wake the driver into it.
@@ -140,7 +146,10 @@ impl Connecting {
 			let _guard = conn.state.lock();
 			panic!("injected");
 		}));
-		conn.state.poisoned().expect("the panic poisoned the state").wake();
+		conn.state
+			.lock_recovered()
+			.expect_err("the panic poisoned the state")
+			.wake();
 	}
 }
 
@@ -149,15 +158,18 @@ impl Future for Connecting {
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		Pin::new(&mut self.connected).poll(cx).map(|_| {
 			let conn = self.conn.take().unwrap();
-			let inner = conn.state.lock();
-			if inner.connected {
-				drop(inner);
-				Ok(Connection(conn))
-			} else {
-				Err(inner
+			match conn.state.lock_recovered() {
+				Ok(inner) if inner.connected => {
+					drop(inner);
+					Ok(Connection(conn))
+				}
+				Ok(inner) => Err(inner
 					.error
 					.clone()
-					.expect("connected signaled without connection success or error"))
+					.expect("connected signaled without connection success or error")),
+				// A panicked driver recorded why before it died: fail with that instead of panicking
+				// the accept, which polls every pending handshake.
+				Err(inner) => Err(inner.error.clone().unwrap_or_else(driver_panicked)),
 			}
 		})
 	}
@@ -250,12 +262,19 @@ impl Future for ConnectionDriver {
 impl Drop for ConnectionDriver {
 	fn drop(&mut self) {
 		// A panic poisoned the state, and without a driver nothing will time the connection out:
-		// fail every waiter now, so it reaches the poisoned lock instead of hanging.
-		if let Some(mut conn) = self.conn.state.poisoned() {
-			let reason = TransportError::new(TransportErrorCode::INTERNAL_ERROR, "connection driver panicked".to_string());
-			conn.terminate(Error::TransportError(reason), &self.conn.shared);
+		// fail every waiter now instead of leaving it to hang.
+		if let Err(mut conn) = self.conn.state.lock_recovered() {
+			conn.terminate(driver_panicked(), &self.conn.shared);
 		}
 	}
+}
+
+/// Why a connection ended when its driver panicked.
+fn driver_panicked() -> Error {
+	Error::TransportError(TransportError::new(
+		TransportErrorCode::INTERNAL_ERROR,
+		"connection driver panicked".to_string(),
+	))
 }
 
 /// A QUIC connection.

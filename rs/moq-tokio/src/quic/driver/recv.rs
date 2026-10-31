@@ -436,10 +436,9 @@ impl Drop for Lease<'_> {
 	fn drop(&mut self) {
 		if let Some(lease) = self.inner.take()
 			&& let Some(mut conn) = self.stream.conn.state.lock_for_drop()
+			&& conn.inner.recv_stream(self.stream.id).restore(lease).should_transmit()
 		{
-			if conn.inner.recv_stream(self.stream.id).restore(lease).should_transmit() {
-				conn.wake();
-			}
+			conn.wake();
 		}
 	}
 }
