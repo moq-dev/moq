@@ -1189,8 +1189,8 @@ int main()
 		CHECK(moq_source_candidates(moq_source_ranked_audio(audios), none).empty());
 
 		// The codecs moq-audio decodes, with AAC-LC in either spelling hang parses.
-		const auto decodes = [](const char *codec, uint32_t channels) {
-			moq::Audio config{};
+		const auto decodes = [&](const char *codec, uint32_t channels) {
+			auto config = base_audio;
 			config.codec = codec;
 			config.channel_count = channels;
 			return moq_source_audio_decodes(config);
