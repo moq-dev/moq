@@ -63,7 +63,11 @@ impl std::fmt::Debug for Parameters {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("Parameters")
 			.field("vars", &self.vars)
-			.field("bytes_count", &self.bytes.len())
+			// Values can carry credentials, so only their lengths.
+			.field(
+				"bytes",
+				&self.bytes.iter().map(|(kind, value)| (kind, value.len())).collect::<Vec<_>>(),
+			)
 			.finish()
 	}
 }
