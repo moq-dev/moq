@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
-use std::task::Poll;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 use moq_clock::Instant;
@@ -38,6 +38,8 @@ pub(super) struct Ordered {
 	timer: Option<Pin<Box<moq_clock::Sleep>>>,
 	groups_done: bool,
 	datagrams_done: bool,
+	/// The first error a channel ended with: an end declared with an error, or an abort.
+	error: Option<moq_net::Error>,
 }
 
 impl Ordered {
@@ -54,6 +56,7 @@ impl Ordered {
 			timer: None,
 			groups_done: false,
 			datagrams_done: false,
+			error: None,
 		}
 	}
 
@@ -64,14 +67,22 @@ impl Ordered {
 			match self.subscriber.poll_recv_group(waiter) {
 				Poll::Ready(Ok(Some(group))) => self.arrive(group.sequence, Item::Group(Box::new(group)), now),
 				// How the track ended is read from `poll_finished`.
-				Poll::Ready(_) => self.groups_done = true,
+				Poll::Ready(Ok(None)) => self.groups_done = true,
+				Poll::Ready(Err(err)) => {
+					self.error.get_or_insert(err);
+					self.groups_done = true;
+				}
 				Poll::Pending => break,
 			}
 		}
 		while !self.datagrams_done {
 			match self.subscriber.poll_recv_datagram(waiter) {
 				Poll::Ready(Ok(Some(datagram))) => self.arrive(datagram.sequence, Item::Datagram(datagram), now),
-				Poll::Ready(_) => self.datagrams_done = true,
+				Poll::Ready(Ok(None)) => self.datagrams_done = true,
+				Poll::Ready(Err(err)) => {
+					self.error.get_or_insert(err);
+					self.datagrams_done = true;
+				}
 				Poll::Pending => break,
 			}
 		}
@@ -141,9 +152,14 @@ impl Ordered {
 		}
 	}
 
-	/// How the track ended, once it has.
+	/// How the track ended, once it has: the error a channel ended with, which an end declared
+	/// with an error reads as while keeping its history, or else its declared end.
 	pub(super) fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<moq_net::Result<Position>> {
-		self.subscriber.poll_finished(waiter)
+		let end = ready!(self.subscriber.poll_finished(waiter))?;
+		Poll::Ready(match self.error.clone() {
+			Some(err) => Err(err),
+			None => Ok(end),
+		})
 	}
 }
 

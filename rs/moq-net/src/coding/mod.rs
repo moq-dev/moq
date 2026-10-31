@@ -12,7 +12,6 @@ mod version;
 #[cfg(feature = "async")]
 mod writer;
 
-#[cfg(feature = "async")]
 pub use codes::*;
 pub use decode::*;
 pub use encode::*;
