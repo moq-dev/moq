@@ -1,7 +1,7 @@
 //! One UDP port shared by QUIC and the WebRTC media path.
 //!
 //! A QUIC listener's socket classifies every datagram it reads with
-//! [`moq_sock::demux`]: QUIC stays on the endpoint, and ICE checks, DTLS, and RTP
+//! [`moq_sock::demux`]: QUIC stays on the endpoint, and ICE, DTLS, and RTP
 //! are diverted to a [`WebRtc`] feed that an embedder hands to its WebRTC stack.
 //! Anything else is dropped and counted. The split runs inline in the endpoint's
 //! receive, so a QUIC datagram is never copied or handed across tasks.
@@ -39,7 +39,8 @@ const CAPACITY: usize = 4 << 20;
 /// [`server::Config::demux`](crate::server::Config::demux) and keep a clone.
 #[derive(Clone, Debug, Default)]
 pub struct Demux {
-	/// Liveness: a [`WebRtc`] consumes it, and closes when every clone is gone.
+	/// Liveness: a [`WebRtc`] consumes it, and closes once every clone and every
+	/// listening socket's [`Divert`] is gone.
 	live: kio::Producer<()>,
 	shared: Arc<Shared>,
 	/// The listening sockets a [`WebRtc`] answers through.
@@ -85,10 +86,12 @@ impl Demux {
 		}
 	}
 
-	/// The receive half a listening socket runs, which never keeps the feed open.
+	/// The receive half a listening socket runs, which keeps the feed open until the
+	/// endpoint releases the socket, so the feed ends with the listener even when no
+	/// clone of this is kept.
 	pub(crate) fn divert(&self) -> Divert {
 		Divert {
-			live: self.live.weak(),
+			live: self.live.clone(),
 			shared: self.shared.clone(),
 		}
 	}
@@ -132,7 +135,7 @@ pub struct Datagram {
 	pub data: Bytes,
 }
 
-/// The WebRTC media path of a [`Demux`]: ICE checks, DTLS, and RTP from its
+/// The WebRTC media path of a [`Demux`]: ICE, DTLS, and RTP from its
 /// socket, and a way to answer through it.
 ///
 /// Diverting runs while any feed is alive; drop it to stop.
@@ -144,7 +147,8 @@ pub struct WebRtc {
 }
 
 impl WebRtc {
-	/// Poll for the next datagram; `None` once every [`Demux`] clone is gone.
+	/// Poll for the next datagram; `None` once every [`Demux`] clone is gone and
+	/// every listening socket it split is released.
 	pub fn poll_recv(&self, waiter: &kio::Waiter) -> Poll<Option<Datagram>> {
 		if let Poll::Ready(mut queue) = self.shared.queue.poll(waiter, |queue| match queue.is_empty() {
 			true => Poll::Pending,
@@ -159,7 +163,8 @@ impl WebRtc {
 		}
 	}
 
-	/// Receive the next datagram; `None` once every [`Demux`] clone is gone.
+	/// Receive the next datagram; `None` once the listener and every [`Demux`]
+	/// clone are gone; see [`Self::poll_recv`].
 	pub async fn recv(&self) -> Option<Datagram> {
 		kio::wait(|waiter| self.poll_recv(waiter)).await
 	}
@@ -245,7 +250,7 @@ impl AsyncUdpSocket for Split {
 /// The receive half of a [`Demux`], run by each listening socket.
 #[derive(Clone, Debug)]
 pub(crate) struct Divert {
-	live: kio::ProducerWeak<()>,
+	live: kio::Producer<()>,
 	shared: Arc<Shared>,
 }
 
@@ -472,8 +477,14 @@ mod tests {
 		split(&divert, &[(remote(1), &[&[0x80, 0]])]);
 		drop(demux);
 
-		// What was queued still arrives, then the end.
+		// The listening socket still diverts, so the feed stays open.
 		let waiter = kio::Waiter::noop();
+		assert!(matches!(feed.poll_recv(&waiter), Poll::Ready(Some(_))));
+		assert!(feed.poll_recv(&waiter).is_pending());
+
+		// What was queued still arrives, then the end.
+		split(&divert, &[(remote(1), &[&[0x80, 0]])]);
+		drop(divert);
 		assert!(matches!(feed.poll_recv(&waiter), Poll::Ready(Some(_))));
 		assert!(matches!(feed.poll_recv(&waiter), Poll::Ready(None)));
 	}

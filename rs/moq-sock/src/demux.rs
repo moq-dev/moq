@@ -23,9 +23,11 @@ use arc_swap::ArcSwap;
 pub enum Class {
 	/// A QUIC packet: the fixed bit is set, in a long (192 to 255) or short (64 to 127) header.
 	Quic,
-	/// A STUN Binding request carrying USERNAME: an ICE connectivity check.
-	Check,
-	/// Any other STUN message, such as a public Binding query or a response.
+	/// ICE: a STUN Binding request carrying USERNAME (a connectivity check), or a
+	/// Binding response, which answers a request only the WebRTC agent sends from
+	/// this port, since a full ICE agent needs its own checks answered.
+	Ice,
+	/// Any other STUN message, such as a public Binding query or an indication.
 	Stun,
 	/// A DTLS record (20 to 63).
 	Dtls,
@@ -38,12 +40,14 @@ pub enum Class {
 const STUN_HEADER: usize = 20;
 const STUN_COOKIE: [u8; 4] = [0x21, 0x12, 0xA4, 0x42];
 const STUN_BINDING_REQUEST: [u8; 2] = [0x00, 0x01];
+const STUN_BINDING_SUCCESS: [u8; 2] = [0x01, 0x01];
+const STUN_BINDING_ERROR: [u8; 2] = [0x01, 0x11];
 const STUN_USERNAME: u16 = 0x0006;
 
 /// Classify a datagram by RFC 7983's first-byte ranges.
 pub fn classify(datagram: &[u8]) -> Class {
 	match datagram.first() {
-		Some(0..=3) if is_check(datagram) => Class::Check,
+		Some(0..=3) if is_ice(datagram) => Class::Ice,
 		Some(0..=3) => Class::Stun,
 		Some(20..=63) => Class::Dtls,
 		Some(64..=127 | 192..=255) => Class::Quic,
@@ -52,16 +56,19 @@ pub fn classify(datagram: &[u8]) -> Class {
 	}
 }
 
-/// Whether `datagram` is a well-formed STUN Binding request with a USERNAME attribute.
-fn is_check(datagram: &[u8]) -> bool {
+/// Whether `datagram` is a well-formed STUN Binding response, or Binding request
+/// with a USERNAME attribute.
+fn is_ice(datagram: &[u8]) -> bool {
 	let Some((header, mut attributes)) = datagram.split_at_checked(STUN_HEADER) else {
 		return false;
 	};
-	if header[0..2] != STUN_BINDING_REQUEST || header[4..8] != STUN_COOKIE {
+	if header[4..8] != STUN_COOKIE || usize::from(u16::from_be_bytes([header[2], header[3]])) != attributes.len() {
 		return false;
 	}
-	if usize::from(u16::from_be_bytes([header[2], header[3]])) != attributes.len() {
-		return false;
+	match [header[0], header[1]] {
+		STUN_BINDING_SUCCESS | STUN_BINDING_ERROR => return true,
+		STUN_BINDING_REQUEST => {}
+		_ => return false,
 	}
 
 	while let Some((attribute, rest)) = attributes.split_at_checked(4) {
@@ -84,7 +91,7 @@ fn is_check(datagram: &[u8]) -> bool {
 pub enum Route {
 	/// The QUIC endpoint.
 	Quic,
-	/// The WebRTC media path: ICE checks, DTLS, and RTP.
+	/// The WebRTC media path: ICE, DTLS, and RTP.
 	WebRtc,
 	/// Nowhere; counted under this reason.
 	Discard(Discard),
@@ -93,7 +100,7 @@ pub enum Route {
 /// Why a datagram was dropped instead of delivered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Discard {
-	/// STUN that is not an ICE check, such as a public Binding query; the public
+	/// STUN that is not ICE, such as a public Binding query; the public
 	/// responder binds its own port.
 	Stun,
 	/// Nothing this socket serves.
@@ -170,7 +177,7 @@ impl Flows {
 		}
 		match classify(datagram) {
 			Class::Quic => Route::Quic,
-			Class::Check | Class::Dtls | Class::Rtp => Route::WebRtc,
+			Class::Ice | Class::Dtls | Class::Rtp => Route::WebRtc,
 			Class::Stun => Route::Discard(Discard::Stun),
 			Class::Unknown => Route::Discard(Discard::Unknown),
 		}
@@ -293,6 +300,11 @@ mod tests {
 
 	/// A Binding request: header, then the given attributes.
 	fn binding(attributes: &[(u16, &[u8])]) -> Vec<u8> {
+		stun(STUN_BINDING_REQUEST, attributes)
+	}
+
+	/// A STUN message of `kind`: header, then the given attributes.
+	fn stun(kind: [u8; 2], attributes: &[(u16, &[u8])]) -> Vec<u8> {
 		let mut body = Vec::new();
 		for (kind, value) in attributes {
 			body.extend_from_slice(&kind.to_be_bytes());
@@ -301,7 +313,7 @@ mod tests {
 			body.resize(body.len().next_multiple_of(4), 0);
 		}
 		let mut out = Vec::new();
-		out.extend_from_slice(&STUN_BINDING_REQUEST);
+		out.extend_from_slice(&kind);
 		out.extend_from_slice(&(body.len() as u16).to_be_bytes());
 		out.extend_from_slice(&STUN_COOKIE);
 		out.extend_from_slice(&[7; 12]);
@@ -310,6 +322,7 @@ mod tests {
 	}
 
 	const PRIORITY: u16 = 0x0024;
+	const XOR_MAPPED_ADDRESS: u16 = 0x0020;
 
 	fn addr(port: u16) -> SocketAddr {
 		SocketAddr::from(([192, 0, 2, 1], port))
@@ -319,8 +332,15 @@ mod tests {
 	fn first_byte_classes() {
 		let check = binding(&[(PRIORITY, &[0, 0, 0, 1]), (STUN_USERNAME, b"abc:def")]);
 		let cases: &[(&[u8], Class)] = &[
-			(&check, Class::Check),
+			(&check, Class::Ice),
+			(
+				&stun(STUN_BINDING_SUCCESS, &[(XOR_MAPPED_ADDRESS, &[0; 8])]),
+				Class::Ice,
+			),
+			(&stun(STUN_BINDING_ERROR, &[]), Class::Ice),
 			(&binding(&[(PRIORITY, &[0, 0, 0, 1])]), Class::Stun),
+			// A Binding indication, which no ICE agent here waits on.
+			(&stun([0x00, 0x11], &[]), Class::Stun),
 			(&[0x01, 0x01, 0, 0], Class::Stun),
 			(&[3], Class::Stun),
 			(&[4], Class::Unknown),
@@ -350,9 +370,9 @@ mod tests {
 		cookie[4] ^= 1;
 		assert_eq!(classify(&cookie), Class::Stun);
 
-		// A Binding success response carrying USERNAME is still not a check.
-		let mut response = check.clone();
-		response[0..2].copy_from_slice(&[0x01, 0x01]);
+		// A response is held to the same framing as a check.
+		let mut response = stun(STUN_BINDING_SUCCESS, &[(XOR_MAPPED_ADDRESS, &[0; 8])]);
+		response.push(0);
 		assert_eq!(classify(&response), Class::Stun);
 
 		// The header's length must cover the attributes exactly.
@@ -372,6 +392,7 @@ mod tests {
 		let flows = Flows::default();
 		let check = binding(&[(STUN_USERNAME, b"abc:def")]);
 		assert_eq!(flows.route(addr(1), &check), Route::WebRtc);
+		assert_eq!(flows.route(addr(1), &stun(STUN_BINDING_SUCCESS, &[])), Route::WebRtc);
 		assert_eq!(flows.route(addr(1), &[0x16]), Route::WebRtc);
 		assert_eq!(flows.route(addr(1), &[0x80]), Route::WebRtc);
 		assert_eq!(flows.route(addr(1), &[0x40]), Route::Quic);

@@ -30,7 +30,7 @@ Decided with the maintainer on 2026-10-13:
   in SDP. Both sides pin it with the existing `tls.fingerprint` check. MoQ
   AUTH with a [peer grant](/quest/m2/p2p/peer-grant.md) still runs on top.
 - After nomination the session's socket carries ICE consent checks and
-  QUIC, split by `moq_sock::demux::classify`: `Check` and `Stun` go to the
+  QUIC, split by `moq_sock::demux::classify`: `Ice` and `Stun` go to the
   ICE agent and `Quic` to the endpoint. The tokio listener's `quic::demux`
   routes for a relay (STUN queries dropped, no ICE agent), so the session
   socket needs its own small policy over the same classifier.

@@ -471,7 +471,7 @@ impl Relay {
 		self.admissions.take()
 	}
 
-	/// The WebRTC media path (ICE checks, DTLS, and RTP) arriving on the QUIC port,
+	/// The WebRTC media path (ICE, DTLS, and RTP) arriving on the QUIC port,
 	/// for an embedder's WebRTC stack to serve and answer through the same port.
 	///
 	/// Until a feed is taken, and once every feed is dropped, that traffic is

@@ -62,7 +62,7 @@ unpin message or idle expiry in the flow table, as SRT's pins have.
 
 The demux side has landed: `moq_tokio::quic::demux::WebRtc` (from
 `Demux::webrtc`, or `moq_relay::Relay::webrtc` for an embedded relay) yields
-ICE checks, DTLS, and RTP as `Datagram`s whose `remote` is already in
+ICE checks and responses, DTLS, and RTP as `Datagram`s whose `remote` is already in
 `moq_ice::canonical` form, sends a `Transmit` from the shared port (mapping an
 IPv4 destination for an AF_INET6 socket), and pins a remote with `pin`, which
 returns a guard that releases the pin on drop. So the fed `Socket` takes a

@@ -86,7 +86,9 @@ decided.
 
 Decided 2026-10-08: the public STUN responder is left to P2P (m2), its
 only consumer. Here, a Binding request carrying USERNAME is an ICE check
-and goes to WebRTC; any other is dropped and counted. Decided 2026-10-13:
+and goes to WebRTC, as does every Binding response, since the WebRTC agent
+runs full ICE and only it sends requests from this port. Any other STUN is
+dropped and counted. Decided 2026-10-13:
 the responder binds its own port ([relay STUN](/doc/bin/relay/config.md#stun)),
 so the shared port never answers public Binding requests.
 

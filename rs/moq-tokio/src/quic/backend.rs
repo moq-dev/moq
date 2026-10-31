@@ -909,10 +909,12 @@ mod tests {
 	/// QUIC and the WebRTC media path share the listening port: a QUIC session
 	/// connects while a WebRTC peer's ICE check, DTLS, and RTP reach the feed and
 	/// its reply leaves from the same port, and a public STUN query is dropped.
+	/// The feed lives as long as the listener, without a clone of its demux kept.
 	#[tokio::test]
 	async fn one_port_serves_quic_and_webrtc() {
 		let demux = crate::quic::demux::Demux::default();
 		let feed = demux.webrtc();
+		let counters = demux.counters().clone();
 		let quic = crate::quic::Config::default();
 		let config = listen::Config {
 			bind: Some("[::]:0".parse().unwrap()),
@@ -928,7 +930,7 @@ mod tests {
 			quic: quic.clone(),
 			member: None,
 			tls,
-			demux: demux.clone(),
+			demux,
 		})
 		.expect("server init");
 		let port = server.local_addr().port();
@@ -995,7 +997,11 @@ mod tests {
 		assert_eq!(received, sent.map(<[u8]>::to_vec));
 		assert_eq!(reply, b"reply");
 		assert_eq!(from, port);
-		assert_eq!(demux.counters().get(crate::quic::demux::Discard::Stun), 1);
+		assert_eq!(counters.get(crate::quic::demux::Discard::Stun), 1);
+
+		server.shutdown().await;
+		let end = tokio::time::timeout(Duration::from_secs(5), feed.recv()).await;
+		assert!(end.expect("the feed outlived the listener").is_none());
 	}
 
 	async fn pinned_connection(bind: &str, host_name: Option<&str>) {
