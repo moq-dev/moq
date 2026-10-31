@@ -1867,7 +1867,12 @@ impl Subscriber {
 				let version = self.version;
 				let verified = kio::wait(|waiter| {
 					if session.poll_closed(waiter).is_ready()
-						|| super::request_stream::poll_withdrawn(&mut stream, version, waiter).is_ready()
+						|| super::request_stream::poll_withdrawn(
+							&mut stream,
+							super::request_stream::fin_cancels(version),
+							waiter,
+						)
+						.is_ready()
 					{
 						return Poll::Ready(None);
 					}

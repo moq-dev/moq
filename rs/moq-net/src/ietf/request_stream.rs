@@ -8,21 +8,28 @@ use crate::{
 	coding::{Decode, DecodeError, Decoder, Stream},
 };
 
+/// Whether the requester finishing its messages withdraws a request on `version`.
+///
+/// Draft 18 asks for a reset or STOP_SENDING (section 3.3.2) and names a FIN as a cancel only for
+/// SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS (section 6.1), but our own draft-18 requesters cancel
+/// by FIN, so we read one that way. TRACK_STATUS passes `false` instead: nothing can follow it, so
+/// a requester may FIN right after it (moxygen does).
 pub(super) fn fin_cancels(version: Version) -> bool {
 	matches!(version, Version::Draft18)
 }
 
-/// Watch abrupt cancellation after the requester has finished sending messages.
+/// Watch abrupt cancellation after the requester has finished sending messages, and its FIN
+/// where `fin_cancels`.
 pub(super) fn poll_cancel(
 	stream: &mut Stream<Transport, Version>,
 	finished: &mut bool,
 	messages: &mut Messages,
-	version: Version,
+	fin_cancels: bool,
 	waiter: &kio::Waiter,
 ) -> Poll<Result<(), Error>> {
 	if !*finished {
 		match messages.poll_end(&mut stream.reader, waiter) {
-			Poll::Ready(Ok(())) if !fin_cancels(version) => *finished = true,
+			Poll::Ready(Ok(())) if !fin_cancels => *finished = true,
 			Poll::Ready(result) => return Poll::Ready(result),
 			Poll::Pending => {}
 		}
@@ -33,17 +40,18 @@ pub(super) fn poll_cancel(
 /// Watch for the requester ending a request it has not been answered on yet, without consuming
 /// what it sent meanwhile: a waiting message (an update, say) ends the watch on the reader and
 /// is read once the request is answered. A withdrawal queued behind an update is therefore seen
-/// only then; until the verifier answers, the requester holds nothing but its own slot.
+/// only then; until the verifier answers, the requester holds nothing but its own slot. A FIN
+/// withdraws it only where `fin_cancels`.
 pub(super) fn poll_withdrawn(
 	stream: &mut Stream<Transport, Version>,
-	version: Version,
+	fin_cancels: bool,
 	waiter: &kio::Waiter,
 ) -> Poll<()> {
 	if stream.writer.poll_closed(waiter).is_ready() {
 		return Poll::Ready(());
 	}
 	match stream.reader.poll_has_more(waiter) {
-		Poll::Ready(Ok(false)) if fin_cancels(version) => Poll::Ready(()),
+		Poll::Ready(Ok(false)) if fin_cancels => Poll::Ready(()),
 		Poll::Ready(Err(_)) => Poll::Ready(()),
 		_ => Poll::Pending,
 	}
@@ -446,7 +454,7 @@ mod tests {
 					&mut stream,
 					&mut finished,
 					&mut messages,
-					version,
+					fin_cancels(version),
 					waiter,
 				)))
 				.is_pending(),
@@ -460,7 +468,7 @@ mod tests {
 					&mut stream,
 					&mut finished,
 					&mut messages,
-					version,
+					fin_cancels(version),
 					waiter,
 				))),
 				Poll::Ready(Err(Error::ProtocolViolation))

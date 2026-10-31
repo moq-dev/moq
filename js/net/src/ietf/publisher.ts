@@ -2173,7 +2173,9 @@ export class Publisher {
 	 * @internal
 	 */
 	runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream): Promise<void> {
-		const request = new RequestStream(stream, this.#session, this.#quic);
+		// Nothing can follow a TRACK_STATUS, so a FIN only ends the requester's input; a reset or
+		// STOP_SENDING withdraws it.
+		const request = new RequestStream(stream, this.#session, this.#quic, { finCancels: false });
 		return request.serve(this.#runTrackStatusRequest(msg, request));
 	}
 

@@ -10,7 +10,14 @@ import type { Session } from "./session.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-/** Whether the draft treats the requester finishing its messages as cancellation. */
+/**
+ * Whether the requester finishing its messages withdraws a request on `version`.
+ *
+ * Draft 18 asks for a reset or STOP_SENDING (section 3.3.2) and names a FIN as a cancel only for
+ * SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS (section 6.1), but our own draft-18 requesters cancel
+ * by FIN, so we read one that way. TRACK_STATUS passes `false` instead: nothing can follow it, so
+ * a requester may FIN right after it (moxygen does).
+ */
 function finCancels(version: IetfVersion): boolean {
 	return version === Version.DRAFT_18;
 }
@@ -146,6 +153,8 @@ export class RequestStream {
 	readonly #stream: Stream;
 	readonly #session: Session;
 	readonly #quic?: WebTransport;
+	// Whether the peer's FIN withdraws the request, rather than only ending its input.
+	readonly #finCancels: boolean;
 	// The next message, read ahead of whoever takes it. Unset until someone first waits.
 	#ahead?: Promise<Framed | undefined>;
 	#taking = false;
@@ -154,12 +163,16 @@ export class RequestStream {
 	readonly #ended: Promise<void>;
 	#end!: () => void;
 
-	/** Own `stream` for a request on `session`, closing `quic` over the peer's violations. */
-	constructor(stream: Stream, session: Session, quic?: WebTransport) {
+	/**
+	 * Own `stream` for a request on `session`, closing `quic` over the peer's violations. The
+	 * peer's FIN withdraws the request where `finCancels`, by default as the draft has it.
+	 */
+	constructor(stream: Stream, session: Session, quic?: WebTransport, options: { finCancels?: boolean } = {}) {
 		this.#stream = stream;
 		this.writer = stream.writer;
 		this.#session = session;
 		this.#quic = quic;
+		this.#finCancels = options.finCancels ?? finCancels(session.version);
 		this.#ended = new Promise((resolve) => {
 			this.#end = resolve;
 		});
@@ -199,7 +212,7 @@ export class RequestStream {
 	 */
 	cancel(): void {
 		if (this.#closed) return;
-		if (finCancels(this.#session.version)) this.writer.close();
+		if (this.#finCancels) this.writer.close();
 		else this.writer.reset(new StreamError(StreamCode.Cancel, { message: "cancel" }));
 	}
 
@@ -247,12 +260,11 @@ export class RequestStream {
 	// Start reading on the first wait.
 	#read(): Promise<Framed | undefined> {
 		if (this.#ahead === undefined) {
-			const version = this.#session.version;
 			this.#ahead = this.#readAhead();
 			// The read ahead stops at an untaken message, so watch for the peer's end apart from it.
 			this.#stream.reader.closed.then(
 				() => {
-					if (finCancels(version)) this.#end();
+					if (this.#finCancels) this.#end();
 				},
 				() => this.#end(),
 			);
@@ -270,7 +282,7 @@ export class RequestStream {
 		const read = this.#readFramed();
 		read.then(
 			(framed) => {
-				if (framed === undefined && finCancels(this.#session.version)) this.#end();
+				if (framed === undefined && this.#finCancels) this.#end();
 			},
 			(err: unknown) => {
 				if (err instanceof ProtocolViolation) this.abort(err);
