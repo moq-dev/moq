@@ -2368,6 +2368,22 @@ test("a higher epoch that is not the best route still supersedes a local broadca
 	origin.close();
 });
 
+test("a publisher weighs a local broadcast against the routes it may forward only", () => {
+	const origin = new Producer();
+	const path = Path.from("camera");
+	const identity = Identity.random();
+	const localPublication = origin.createBroadcast(path);
+	localPublication.announce({ identity, epoch: 1n, cost: 0n });
+	const originated = origin.requestsRoute(path, { cost: 5n });
+	// A session delivered the higher epoch, which a publisher never forwards back out.
+	const received = wireOf(origin).receive(path, { identity, epoch: 2n, cost: 10n, hops: [PEER] });
+	expect(wireOf(origin.consume()).local(path, identity)).toBeDefined();
+	received.close();
+	originated.close();
+	localPublication.broadcast.close();
+	origin.close();
+});
+
 test("a scope's merged covering prefixes never supersede across prefixes", async () => {
 	const origin = new Producer();
 	const identity = Identity.random();

@@ -1059,9 +1059,11 @@ class OriginState {
 	 * session or dynamic handle announced there. They compare as any two routes do: an
 	 * identified route strictly cheaper than the local one wins, and the local broadcast wins a
 	 * tie. A route at a shorter prefix never competes, since the most specific prefix wins
-	 * outright. False when nothing is announced locally at `path`.
+	 * outright. A higher epoch of the local broadcast's identity at the path supersedes it, among
+	 * the routes `skip` leaves, which must be what `entry` was chosen from. False when nothing is
+	 * announced locally at `path`.
 	 */
-	localWins(path: Path.Valid, entry: RouteEntry | undefined): boolean {
+	localWins(path: Path.Valid, entry: RouteEntry | undefined, skip?: (entry: RouteEntry) => boolean): boolean {
 		const local = this.advertisedLocal.peek()?.get(path);
 		if (!local || !this.local.peek()?.has(path)) return false;
 		if (!entry || !this.routes.peek()?.get(path)?.includes(entry)) return true;
@@ -1070,7 +1072,7 @@ class OriginState {
 		// any route at the path the request could take supersedes the local broadcast, not only
 		// the best one.
 		const rivals = (this.routes.peek()?.get(path) ?? [])
-			.filter((candidate) => candidate.server && candidate.scope.matches(path))
+			.filter((candidate) => candidate.scope.matches(path) && !(skip?.(candidate) ?? false))
 			.map((candidate) => candidate.route.peek());
 		if (superseded(local, rivals)) return false;
 		if (superseded(remote, [local])) return true;
@@ -2224,7 +2226,7 @@ export class Consumer {
 	 */
 	#local(path: Path.Valid, identity?: Identity.Valid): broadcast.Consumer | undefined {
 		const local = this.#state.local.peek()?.get(path);
-		if (!local || !this.#state.localWins(path, this.#state.bestEntry(path, received))) return undefined;
+		if (!local || !this.#state.localWins(path, this.#state.bestEntry(path, received), received)) return undefined;
 		if (identity !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.identity !== identity)
 			return undefined;
 		return local;
