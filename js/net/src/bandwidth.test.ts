@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Signal } from "@moq/signals";
-import { Allocator, allocate, type Want } from "./bandwidth.ts";
+import { Allocator, allocate, follow, type Want } from "./bandwidth.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
 /** Priorities matching hang's, which is what the allocator sees in practice. */
@@ -311,5 +311,83 @@ test("reserve and update reject a non-finite or negative ceiling", () => {
 	}
 	expect(reserved.peek()).toBe(1_000_000);
 
+	allocator.close();
+});
+
+test("the target sums every reservation, demanded or not", async () => {
+	const allocator = Allocator.unlimited();
+	const target = follow(allocator);
+	expect(target.rate.peek()).toBe(0);
+
+	const watchedTrack = track(VIDEO);
+	watchedTrack.subscribe();
+	const watched = allocator.reserve(watchedTrack.demand(), 4_000_000);
+	expect(target.rate.peek()).toBe(4_000_000);
+
+	// Nobody watches this one, which is exactly the rung that must still be funded.
+	const idleTrack = track(VIDEO);
+	const idle = allocator.reserve(idleTrack.demand(), 1_000_000);
+	expect(target.rate.peek()).toBe(5_000_000);
+
+	idle.update(2_000_000);
+	expect(target.rate.peek()).toBe(6_000_000);
+
+	watched.close();
+	expect(target.rate.peek()).toBe(2_000_000);
+
+	// A closed track's claim leaves with it, even while its reservation is still held.
+	const next = target.rate.changed();
+	idleTrack.close();
+	expect(await next).toBe(0);
+
+	target.close();
+	allocator.close();
+});
+
+test("an override replaces the sum until it is cleared", () => {
+	const allocator = Allocator.unlimited();
+	const target = follow(allocator);
+	const producer = track(VIDEO);
+	allocator.reserve(producer.demand(), 4_000_000);
+	expect(target.rate.peek()).toBe(4_000_000);
+
+	allocator.setTarget(0);
+	expect(target.rate.peek()).toBe(0);
+	allocator.setTarget(10_000_000);
+	expect(target.rate.peek()).toBe(10_000_000);
+	allocator.setTarget(undefined);
+	expect(target.rate.peek()).toBe(4_000_000);
+
+	expect(() => allocator.setTarget(-1)).toThrow(/finite non-negative/);
+
+	target.close();
+	allocator.close();
+});
+
+test("a reservation is probed while a session follows a target above zero", () => {
+	const allocator = new Allocator(new Signal<number | undefined>(2_000_000));
+	const producer = track(VIDEO);
+	producer.subscribe();
+	const reserved = allocator.reserve(producer.demand(), 4_000_000);
+	expect(reserved.probed.peek()).toBe(false);
+
+	const target = follow(allocator);
+	expect(reserved.probed.peek()).toBe(true);
+
+	// A zero target turns probing off, though the session still follows it.
+	allocator.setTarget(0);
+	expect(reserved.probed.peek()).toBe(false);
+	allocator.setTarget(undefined);
+	expect(reserved.probed.peek()).toBe(true);
+
+	target.close();
+	target.close();
+	expect(reserved.probed.peek()).toBe(false);
+
+	const again = follow(allocator);
+	reserved.close();
+	expect(reserved.probed.peek()).toBe(false);
+
+	again.close();
 	allocator.close();
 });

@@ -9,6 +9,7 @@ import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError, sessionClosed } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
+import { Padding } from "../padding.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { withTimeout } from "../util/timeout.ts";
@@ -77,6 +78,9 @@ export class Connection implements Established {
 
 	// Opens request streams and allocates request IDs.
 	#session: NativeSession;
+
+	// Probes the session up to its target over WebTransport, the only transport with an estimate.
+	#padding?: Padding;
 
 	// Module for contributing tracks.
 	#publisher: Publisher;
@@ -180,6 +184,8 @@ export class Connection implements Established {
 		this.peerImplementation = Promise.resolve(peerImplementation);
 
 		this.#session = new NativeSession(quic, version, client);
+		// Every draft this package speaks defines PADDING (draft-18+).
+		if (this.transport === "webtransport") this.#padding = new Padding({ quic, version, type: PADDING });
 		// The SETUP stream only carries GOAWAY from here on.
 		void this.#runGoAway(control, version);
 
@@ -242,6 +248,7 @@ export class Connection implements Established {
 			// declared MoQ Solicit is ours and holds both; any other may enforce it.
 			exclusive: solicit === undefined,
 			auth: this.#auth,
+			sender: this.#padding,
 		});
 
 		void this.#run(early);
@@ -274,6 +281,7 @@ export class Connection implements Established {
 
 		this.#closed = true;
 		this.#publisher.close();
+		this.#padding?.close();
 
 		this.#auth.close();
 

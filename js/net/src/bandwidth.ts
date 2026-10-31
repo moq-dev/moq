@@ -5,6 +5,10 @@
  * an {@link Allocator} rather than each targeting the whole thing. How a sender
  * then follows its share is policy and lives with the sender.
  *
+ * The same reservations set the connection's probe target: their ceilings summed,
+ * which the connection hands to its padding sender so the estimate can rise to
+ * fund them.
+ *
  * @module
  */
 import { Effect, type Getter, Signal } from "@moq/signals";
@@ -82,6 +86,7 @@ interface Entry {
 	priority: number;
 	max: number;
 	rate: Signal<number | undefined>;
+	probed: Signal<boolean>;
 }
 
 interface Registry {
@@ -134,7 +139,31 @@ function ceiling(max: number): number {
 export interface Handle {
 	/** Reserve up to `max` for `track`; see {@link Allocator.reserve}. */
 	reserve(track: Demand, max: number): Reservation;
+	/** Override the probe target, for every sender sharing it; see {@link Allocator.setTarget}. */
+	setTarget(target: number | undefined): void;
 }
+
+/**
+ * An allocator's probe target, followed by the session that probes for it.
+ *
+ * @internal
+ */
+export interface Target {
+	/** The rate to probe up to in bits per second; zero means don't probe. */
+	readonly rate: Getter<number>;
+	/** Stop probing for the reservations, so they no longer read as probed. Idempotent. */
+	close(): void;
+}
+
+/**
+ * Follow `allocator`'s probe target, for the session that probes on its reservations' behalf.
+ *
+ * Holding it is what marks the reservations {@link Reservation.probed}, so only a session
+ * with a sender takes one.
+ *
+ * @internal
+ */
+export let follow: (allocator: Allocator) => Target;
 
 /**
  * Divides one connection's bandwidth estimate among the tracks sharing it.
@@ -148,12 +177,23 @@ export interface Handle {
  * all (PCM audio has a fixed bitrate), still sends what it sends; the transport
  * sheds the excess by dropping groups.
  *
+ * The reservations also set the connection's probe target: the sum of every live
+ * reservation's ceiling, demanded or not, so a sender that stopped for lack of
+ * bandwidth keeps asking the connection for its room. A connection probes for its
+ * own allocator, so reserve on `Connection.allocator` rather than building one: an
+ * allocator from the constructor divides an estimate but probes for nothing.
+ *
  * Hand the same instance to every sender on the connection.
  */
 export class Allocator implements Handle {
 	#estimate: Getter<number | undefined> | undefined;
 	#entries = new Signal<Entry[]>([]);
 	#alive = new Signal(true);
+	// The application's override of the reservations' sum as the probe target.
+	#override = new Signal<number | undefined>(undefined);
+	#target = new Signal(0);
+	// How many sessions probe for these reservations, each through a followed target.
+	#probes = new Signal(0);
 	#nextId = 0;
 	#signals = new Effect();
 	#registry: Registry;
@@ -196,6 +236,38 @@ export class Allocator implements Handle {
 		return new Allocator();
 	}
 
+	static {
+		follow = (allocator) => allocator.#follow();
+	}
+
+	/**
+	 * Probe up to `target` instead of the sum of the reservations, or `undefined` to follow
+	 * them again.
+	 *
+	 * Zero turns probing off. The override is the allocator's, so it holds across the
+	 * reconnects a connection's allocator spans.
+	 */
+	setTarget(target: number | undefined): void {
+		this.#override.set(target === undefined ? undefined : ceiling(target));
+		this.#publish();
+	}
+
+	// Count a session probing for the reservations until the returned target closes.
+	#follow(): Target {
+		this.#probes.update((probes) => probes + 1);
+		this.#publish();
+		let closed = false;
+		return {
+			rate: this.#target,
+			close: () => {
+				if (closed) return;
+				closed = true;
+				this.#probes.update((probes) => probes - 1);
+				this.#publish();
+			},
+		};
+	}
+
 	/**
 	 * Reserve up to `max` for `track`, returning the reservation.
 	 *
@@ -224,6 +296,7 @@ export class Allocator implements Handle {
 
 		const id = this.#nextId++;
 		const rate = new Signal<number | undefined>(undefined);
+		const probed = new Signal(false);
 		this.#entries.mutate((entries) => {
 			entries.push({
 				id,
@@ -231,10 +304,11 @@ export class Allocator implements Handle {
 				priority: hooks.demandPriority(track),
 				max,
 				rate,
+				probed,
 			});
 		});
 
-		const reservation = makeReservation(this.#registry, id, rate);
+		const reservation = makeReservation(this.#registry, id, rate, probed);
 		this.#publish();
 		return reservation;
 	}
@@ -248,8 +322,10 @@ export class Allocator implements Handle {
 		this.#alive.set(false);
 		for (const entry of this.#entries.peek()) {
 			entry.rate.set(undefined);
+			entry.probed.set(false);
 		}
 		this.#entries.set([]);
+		this.#target.set(0);
 		this.#signals.close();
 	}
 
@@ -264,8 +340,20 @@ export class Allocator implements Handle {
 		const estimate = this.#estimate?.peek();
 		const entries = this.#entries.peek();
 		const wants = wantsOf(entries);
+
+		// Demanded or not: a rendition stopped for lack of bandwidth lost its viewers, and
+		// still has to be funded to resume. A closed track claims nothing.
+		let reserved = 0;
+		for (const entry of entries) {
+			if (hooks.demandReleased(entry.demand).peek() === undefined) reserved += entry.max;
+		}
+		const target = this.#override.peek() ?? reserved;
+		this.#target.set(target);
+		const probed = this.#probes.peek() > 0 && target > 0;
+
 		for (const entry of entries) {
 			entry.rate.set(estimate == null ? undefined : shareOf(estimate, wants, entry));
+			entry.probed.set(probed);
 		}
 	}
 
@@ -299,7 +387,12 @@ export class Allocator implements Handle {
 	}
 }
 
-let makeReservation: (registry: Registry, id: number, rate: Signal<number | undefined>) => Reservation;
+let makeReservation: (
+	registry: Registry,
+	id: number,
+	rate: Signal<number | undefined>,
+	probed: Signal<boolean>,
+) => Reservation;
 
 /**
  * One track's standing claim on an {@link Allocator}, held for as long as the
@@ -313,16 +406,18 @@ export class Reservation implements Disposable {
 	readonly #registry: Registry;
 	readonly #id: number;
 	readonly #rate: Signal<number | undefined>;
+	readonly #probed: Signal<boolean>;
 	#closed = false;
 
-	private constructor(registry: Registry, id: number, rate: Signal<number | undefined>) {
+	private constructor(registry: Registry, id: number, rate: Signal<number | undefined>, probed: Signal<boolean>) {
 		this.#registry = registry;
 		this.#id = id;
 		this.#rate = rate;
+		this.#probed = probed;
 	}
 
 	static {
-		makeReservation = (registry, id, rate) => new Reservation(registry, id, rate);
+		makeReservation = (registry, id, rate, probed) => new Reservation(registry, id, rate, probed);
 	}
 
 	/**
@@ -349,6 +444,19 @@ export class Reservation implements Disposable {
 	}
 
 	/**
+	 * Whether the connection probes for this reservation, so the estimate can rise to fund
+	 * it even while its sender is stopped.
+	 *
+	 * Only a connection with a padding sender probes, and none does while
+	 * {@link Allocator.setTarget} turns probing off. Without one the estimate stops learning
+	 * once the connection is app-limited, so a sender that stops for lack of bandwidth could
+	 * never see enough to resume.
+	 */
+	get probed(): Getter<boolean> {
+		return this.#probed;
+	}
+
+	/**
 	 * Change the ceiling, keeping the same claim.
 	 *
 	 * For a sender whose ceiling genuinely moved: an encoder reopening at a
@@ -365,6 +473,7 @@ export class Reservation implements Disposable {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#rate.set(undefined);
+		this.#probed.set(false);
 		this.#registry.release(this.#id);
 	}
 
