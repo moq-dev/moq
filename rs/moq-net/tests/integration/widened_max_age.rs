@@ -129,7 +129,8 @@ async fn received(subscriber: &mut track::Subscriber) -> BTreeSet<u64> {
 
 /// A fresh reader asks no fill for the history below where its feed starts, through a relay
 /// or not: below a start resolved from a budget no tighter than its own, every group is
-/// stale, and below a live edge start it names no floor under, none was asked for.
+/// stale by its media time, and below a live edge start it names no floor under, none was
+/// asked for.
 #[moq_clock::test]
 async fn a_fresh_reader_fills_nothing_below_its_start() {
 	for (version, want) in [
@@ -155,7 +156,7 @@ async fn a_fresh_reader_fills_nothing_below_its_start() {
 
 /// Tighten while no start is selectable, then ask for a budget between the old and
 /// selected ones. Hold the publisher's driver so only an actual fill request, rather
-/// than its live re-offer, can prove the copy retained the selected budget.
+/// than its live re-offer, can prove the copy left the history below its start fillable.
 #[moq_clock::test]
 async fn a_tightened_start_leaves_history_fillable_by_an_intermediate_reader() {
 	for relay in [false, true] {
@@ -188,7 +189,7 @@ async fn a_tightened_start_leaves_history_fillable_by_an_intermediate_reader() {
 		let upstream = &chain.links[0].client_transport;
 		moq_clock::timeout(TIMEOUT, upstream.bidi_count(3, before + 1))
 			.await
-			.expect("the proven tighter start allows fills");
+			.expect("the history below the start is fillable");
 		*chain.source_gate.write().ok().unwrap() = true;
 		// This reader can also receive the feed's re-offer once the source resumes.
 		assert_eq!(reading.await.unwrap(), (4..GROUPS).collect(), "relay={relay}");

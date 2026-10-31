@@ -435,9 +435,9 @@ pub(crate) struct TrackState {
 	// [`Subscriber::poll_start`]) wait on it; everything else treats the floor as usual.
 	start_pending: bool,
 
-	// The budget the publisher resolved `start_sequence` from (a lite-06+ SUBSCRIBE_START),
-	// skipping every older group as stale under it. Cleared by any other declaration.
-	start_budget: Option<Duration>,
+	// Whether the publisher resolved `start_sequence` (a lite-06+ SUBSCRIBE_START), which
+	// may sit above history a reader can still fill. Cleared by any other declaration.
+	start_resolved: bool,
 
 	// A copy received from a remote publisher, whose declared end waits for groups still
 	// in flight below it (see `tail`), and whose readers' relative and time anchors are
@@ -2343,7 +2343,7 @@ impl TrackState {
 		self.latch_settled();
 		self.start_sequence = start_sequence;
 		self.start_pending = pending;
-		self.start_budget = None;
+		self.start_resolved = false;
 		if let Some(start) = start_sequence {
 			self.cache.wakes().arrived(..start);
 			let now = self.cache.pool().now_wall();
@@ -3317,13 +3317,14 @@ impl Producer {
 		Ok(())
 	}
 
-	/// [`Self::start_at`] a start the publisher resolved from `budget`: every older group
-	/// is stale under it, so a reader whose budget is no looser gives them up unasked.
+	/// [`Self::start_at`] a start the publisher resolved from its subscriber's budget. An
+	/// update can cross the response, so that budget is unknown: every older group stays
+	/// fillable, and a fill that finds none ends empty.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn start_resolved(&mut self, sequence: u64, budget: Duration) -> Result<()> {
+	pub(crate) fn start_resolved(&mut self, sequence: u64) -> Result<()> {
 		let mut state = self.modify()?;
 		state.set_start(Some(sequence), false);
-		state.start_budget = Some(budget);
+		state.start_resolved = true;
 		Ok(())
 	}
 
@@ -18098,29 +18099,26 @@ mod test {
 		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
 	}
 
-	/// Below a start its publisher resolved from a budget, a reader no looser than it gives
-	/// every group up unasked, while a looser one may still reach some, so it asks.
+	/// Below a start its publisher resolved, a reader asks for the history its budget
+	/// reaches: an update may have crossed the start, so the copy cannot tell which budget
+	/// skipped those groups, and a fill that finds none ends empty.
 	#[test]
 	#[cfg(feature = "async")]
-	fn below_a_start_resolved_from_a_budget_only_a_looser_reader_asks() {
+	fn below_a_resolved_start_a_reader_asks() {
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
-		let mut narrow = producer.subscribe(replay());
-		let mut wide = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(60)));
-		producer.start_resolved(2, Duration::from_secs(30)).unwrap();
+		let mut reader = producer.subscribe(replay());
+		producer.start_resolved(2).unwrap();
 		write_group(&producer, 2);
 		write_group(&producer, 3);
 		let waiter = kio::Waiter::noop();
-		assert_eq!(drain_groups(&mut narrow), [2, 3]);
-		assert_eq!(drained_drops(&mut narrow), [(0, 2)]);
+		assert_eq!(drain_groups(&mut reader), [2, 3]);
 		assert!(
-			dynamic.poll_requested_fill(&waiter).is_pending(),
-			"the narrow reader asks nothing"
+			drained_drops(&mut reader).is_empty(),
+			"nothing below the start is given up unasked"
 		);
-
-		assert_eq!(drain_groups(&mut wide), [2, 3]);
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
-			panic!("the wide reader asks below the start");
+			panic!("the reader asks below the start");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 2));
 	}
