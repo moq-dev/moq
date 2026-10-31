@@ -90,6 +90,10 @@ impl Credential {
 	}
 
 	/// Mint a fresh epoch and a producing generation whose clones share track claims.
+	///
+	/// The generation belongs to this publisher instance alone. A cloned process image (a
+	/// `fork` without `exec`, a restored snapshot or checkpoint) copies its epoch and nonce
+	/// counters, so each copy must mint its own before it encrypts.
 	pub fn produce(&self) -> generation::Producer {
 		generation::Producer::new(self.clone(), Epoch::mint())
 	}

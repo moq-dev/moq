@@ -54,6 +54,7 @@ test:
     python3 sh/rs/package-rename.test.py
     python3 sh/dart/build.test.py
     python3 sh/rs/select.test.py
+    python3 sh/rs/config.test.py
     python3 sh/js/workspace.test.py
     python3 sh/js/audit.test.py
     python3 sh/rs/test-lints.test.py

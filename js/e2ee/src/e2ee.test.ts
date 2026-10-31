@@ -429,7 +429,7 @@ test("grouped failure wakes pending reads and releases demand", async () => {
 	const good = await recvGroup(p.consumer);
 	expect(await readText(good)).toBe("ok");
 	const forged = await recvGroup(p.consumer);
-	expect(badDemand.used.peek()).toBe(true);
+	expect(badDemand.wanted.peek()).toBe(true);
 
 	// Sibling frame, next group, and datagram reads have nothing to return until the failure.
 	const frame = good.readFrame();
@@ -442,8 +442,8 @@ test("grouped failure wakes pending reads and releases demand", async () => {
 	expect(await failure(datagram)).toBe("authentication");
 
 	expect(demand.wanted.peek()).toBeUndefined();
-	expect(badDemand.used.peek()).toBe(false);
-	expect(open.demand().used.peek()).toBe(false);
+	expect(badDemand.wanted.peek()).toBe(false);
+	expect(open.demand().wanted.peek()).toBe(false);
 	expect(p.net.closed.peek()).toBeUndefined();
 });
 
