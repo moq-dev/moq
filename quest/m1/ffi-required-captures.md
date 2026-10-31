@@ -6,8 +6,8 @@ In moq-ffi and every binding generated from it (Dart, Go, Python, Kotlin,
 Swift), and in the hand-written C binding, an announcement's captures are
 always present: a required list rather than an optional one. Rust's
 `moq-net` and JS keep `captures` optional, because a covering route really
-can have none. Starts once [moq-dev/moq#7266](https://github.com/moq-dev/moq/pull/7266)
-merges; if it is still open, this quest waits.
+can have none. Builds on [moq-dev/moq#7266](https://github.com/moq-dev/moq/pull/7266),
+merged 2026-10-30.
 
 ## Plan
 
@@ -22,8 +22,9 @@ JS types to tell exact and covering events apart was rejected for now.
   `go/wrapper/types.go` follows the FFI type.
 - moq-c wraps `moq-net` directly, not moq-ffi. Drop `has_captures` from its
   public struct (`rs/moq-c/src/api.rs`, whose doc comment still says false
-  means the route overlaps) and from the generated header. Update
-  `rs/moq-c/src/test.rs`. Including C was a planning call, since the
+  means the route overlaps) and from the generated header. Drop its
+  assignment in `Origin::announced_info` (`rs/moq-c/src/origin.rs`) and
+  update `rs/moq-c/src/test.rs`. Including C was a planning call, since the
   decision named "FFI and generated bindings"; the PR confirms it.
 - Remove the nil checks this makes dead: `swift/README.md` (`captures ?? []`)
   and `go/wrapper/moq_test.go`.
