@@ -450,7 +450,7 @@ pub(super) struct TestEndpoint {
 	pub(super) addr: SocketAddr,
 	socket: Option<UdpSocket>,
 	/// Each connection's next timer, as of its last poll
-	timeouts: BTreeMap<ConnectionHandle, Instant>,
+	pub(super) timeouts: BTreeMap<ConnectionHandle, Instant>,
 	pub(super) outbound: VecDeque<(Transmit, Bytes)>,
 	delayed: VecDeque<(Transmit, Bytes)>,
 	/// Datagrams in flight to this endpoint, in arrival order

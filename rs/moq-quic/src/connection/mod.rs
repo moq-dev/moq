@@ -735,13 +735,21 @@ impl Connection {
 						trace!("blocked by pacing");
 						break;
 					}
+				}
 
-					if let Some(delay) = self.send_rate.as_mut().and_then(|cap| cap.delay(now, bytes_to_send)) {
-						self.timers.set(Timer::Pacing, delay);
-						rate_blocked = true;
-						trace!("blocked by the send rate cap");
-						break;
-					}
+				// Loss probes are held to the send rate cap too: it refills with time, unlike the
+				// congestion window, so a probe only waits, and a peer faking loss cannot draw
+				// probes past the cap.
+				if ack_eliciting
+					&& !close && let Some(delay) = self
+					.send_rate
+					.as_mut()
+					.and_then(|cap| cap.delay(now, segment_size as u64 + untracked_bytes))
+				{
+					self.timers.set(Timer::Pacing, delay);
+					rate_blocked = true;
+					trace!("blocked by the send rate cap");
+					break;
 				}
 
 				// Finish current packet
@@ -2946,8 +2954,11 @@ impl Connection {
 		packet: Packet,
 	) -> Result<(), TransportError> {
 		let payload = packet.payload.freeze();
-		// Earned before anything this packet carries is charged against the cap.
-		self.streams.refill_receive_rate(now);
+		// Earned before anything this packet carries is charged against the cap, and granted now:
+		// the refill retires the credit deadline, so a later timeout would not grant it.
+		if self.streams.grant_receive_rate(now).should_transmit() {
+			self.spaces[SpaceId::Data].pending.max_data = true;
+		}
 		let mut is_probing_packet = true;
 		let mut close = None;
 		let payload_len = payload.len();
@@ -3830,6 +3841,12 @@ impl Connection {
 	#[cfg(test)]
 	pub(crate) fn congestion_window(&self) -> u64 {
 		self.path.congestion.window().saturating_sub(self.path.in_flight.bytes)
+	}
+
+	/// When the receive rate cap next grants credit
+	#[cfg(test)]
+	pub(crate) fn receive_rate_deadline(&self) -> Option<Instant> {
+		self.streams.receive_rate_deadline()
 	}
 
 	/// Whether no timers but keepalive, idle, rtt, pushnewcid, and key discard are running

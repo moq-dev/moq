@@ -450,3 +450,69 @@ fn caps_set_at_construction_hold() {
 	);
 	assert!(down_read >= RATE * duration.as_secs() * 7 / 10, "read only {down_read}");
 }
+
+/// A packet that arrives once the credit is due, before the timeout runs, grants that credit
+/// rather than retiring the deadline that would have.
+#[test]
+fn a_packet_past_the_credit_deadline_grants_it() {
+	let mut pair = pair();
+	let (client_ch, server_ch) = pair.connect();
+	let s = open(&mut pair, client_ch, server_ch);
+	pair.server_conn_mut(server_ch).set_limits(cap_receive(RATE)).unwrap();
+	// The server never reads, so only the cap grants credit.
+	run(&mut pair, Duration::from_secs(1), |pair| {
+		write_flat_out(&mut pair.client_send(client_ch, s));
+	});
+
+	let deadline = pair
+		.server_conn_mut(server_ch)
+		.receive_rate_deadline()
+		.expect("the sender spent its credit");
+	let before = pair.server_conn_mut(server_ch).stats().credit.available;
+	// A ping that lands past the deadline and is handled before the timer, as a busy event loop
+	// may, and then the late timer.
+	pair.time = deadline;
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	pair.time = deadline + LATENCY;
+	pair.server.timeouts.remove(&server_ch);
+	pair.drive_server();
+	pair.server.timeouts.insert(server_ch, deadline);
+	pair.drive_server();
+
+	let after = pair.server_conn_mut(server_ch).stats().credit.available;
+	assert!(after > before, "credit stayed at {before}: the due grant was lost");
+}
+
+/// A peer whose acknowledgments never arrive draws loss probes, which the send cap holds too.
+#[test]
+fn loss_probes_are_held_to_the_send_cap() {
+	/// Low enough that probes past the cap would show.
+	const SLOW: u64 = 2_000;
+	let mut pair = pair();
+	let (_, server_ch) = pair.connect();
+	pair.server_conn_mut(server_ch)
+		.set_limits(Limits {
+			send_rate: capped(SLOW),
+			..Limits::default()
+		})
+		.unwrap();
+	let s = pair
+		.server_streams(server_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	write_flat_out(&mut pair.server_send(server_ch, s));
+	pair.to_server.loss = 1.0;
+
+	let sent = |pair: &mut Pair| pair.server_conn_mut(server_ch).stats().udp_tx.bytes;
+	// While the probes back off, before the cap's later sends would repay what they overdrew.
+	let duration = Duration::from_secs(3);
+	let before = sent(&mut pair);
+	run(&mut pair, duration, |_| {});
+
+	let sent = sent(&mut pair) - before;
+	assert!(
+		sent <= allowance(SLOW, duration, DEFAULT_MTU as u64),
+		"sent {sent} past the cap"
+	);
+}

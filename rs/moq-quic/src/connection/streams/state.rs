@@ -1196,8 +1196,8 @@ impl StreamsState {
 		ShouldTransmit(self.max_data_due())
 	}
 
-	/// Earn the rate cap's credit up to `now`, before charging anything that arrived then.
-	pub(crate) fn refill_receive_rate(&mut self, now: Instant) {
+	/// Earn the rate cap's credit up to `now`.
+	fn refill_receive_rate(&mut self, now: Instant) {
 		if let Some(bucket) = &mut self.receive_rate {
 			bucket.refill(now);
 		}

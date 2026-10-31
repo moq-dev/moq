@@ -36,9 +36,10 @@ pub struct Limits {
 	/// A cap set at construction counts the initial window as credit already granted. A QMux
 	/// connection ignores it.
 	pub receive_rate: Option<Rate>,
-	/// Cap on what this side sends, counting every ack-eliciting packet, retransmissions included
+	/// Cap on what this side sends, counting every ack-eliciting packet, retransmissions and loss
+	/// probes included
 	///
-	/// A QMux connection ignores it.
+	/// Set at construction, it counts the handshake too. A QMux connection ignores it.
 	pub send_rate: Option<Rate>,
 }
 
