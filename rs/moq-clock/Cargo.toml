@@ -62,6 +62,7 @@ wasm-bindgen-test = "=0.3.79"
 [target.'cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))'.dev-dependencies]
 # Test the installed manual clock, which needs tokio's runtime and so is native only.
 moq-clock = { path = ".", default-features = false, features = ["manual", "sim", "serde"] }
+test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "test-util", "time"] }
 
 [lints]

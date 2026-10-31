@@ -307,6 +307,11 @@ mod tests {
 	/// on one another runtime advanced.
 	#[test]
 	fn paused_runtimes_own_their_anchors() {
+		// A fresh process keeps other tests from taking the shared origin first.
+		if !test_env::Env::default().set("MOQ_CLOCK_TEST_ORIGIN", "fresh").isolate() {
+			return;
+		}
+		assert!(super::ORIGIN.get().is_none());
 		let paused = || {
 			tokio::runtime::Builder::new_current_thread()
 				.enable_time()
@@ -314,17 +319,17 @@ mod tests {
 				.build()
 				.unwrap()
 		};
-		// Built before anything reads the clock, so in a fresh process each counts
-		// from its own origin.
+		// Built before the shared origin, so each counts from its own origin.
 		let first = paused();
 		let second = paused();
 		let _ = crate::now();
 		first.block_on(async {
-			let _ = crate::now();
+			assert_eq!(crate::now(), crate::Instant::from_origin(super::LEAD));
 			tokio::time::advance(Duration::from_secs(60)).await;
 			let _ = crate::origin();
 		});
 		second.block_on(async {
+			assert_eq!(crate::now(), crate::Instant::from_origin(super::LEAD));
 			let (instant, _) = crate::origin();
 			assert_eq!(instant, crate::now());
 		});
