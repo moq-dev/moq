@@ -1252,15 +1252,22 @@ impl TrackState {
 		self.lookup.get(&sequence)?.copies().find(|group| group.covers(frames))
 	}
 
-	/// The local retention bound, or `None` when unknown or unlimited.
-	/// Bounds the aggregate subscription without changing the publisher's metadata.
+	/// The local retention bound, or `None` when unknown or unlimited: how long a reader
+	/// may wait for a late group, without changing the publisher's metadata.
 	fn max_age_bound(&self) -> Option<Duration> {
 		let published = self.info.as_ref()?.max_age;
-		let ceiling = self.broadcast.cache_duration;
 		match published {
-			Some(age) => Some(age.min(ceiling)),
-			None => (ceiling != Duration::MAX).then_some(ceiling),
+			Some(age) => Some(age.min(self.broadcast.cache_duration)),
+			None => self.demand_bound(),
 		}
+	}
+
+	/// The bound on the aggregate subscription: the local cache ceiling alone, or `None`
+	/// when unlimited. It needs no info, so a track asks upstream for the same demand
+	/// before and after its info lands, and the publisher enforces its own max age.
+	fn demand_bound(&self) -> Option<Duration> {
+		let ceiling = self.broadcast.cache_duration;
+		(ceiling != Duration::MAX).then_some(ceiling)
 	}
 
 	/// The live edge a subscription served `servable` measures drift against: the
@@ -3732,12 +3739,13 @@ impl Producer {
 	/// when there are no live subscribers. Unlike [`Self::subscription`], this
 	/// doesn't wait for a change or advance the change cursor.
 	///
-	/// The aggregate's [`Subscription::max_delay`] is clamped to this track's
-	/// [`Info::max_age`]: no subscriber can wait for a late group longer than the
-	/// publisher keeps it.
+	/// The aggregate's [`Subscription::max_delay`] is the subscribers' own, capped only by
+	/// the local cache ceiling ([`broadcast::Info::cache_duration`]). The publisher
+	/// enforces its own [`Info::max_age`], which each reader's lateness budget also
+	/// applies, so the demand asked upstream is the same before and after the info lands.
 	pub fn subscription(&self) -> Option<Subscription> {
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
 		drop(state);
 		snapshot_subscription(&subs, bound)
 	}
@@ -3755,10 +3763,25 @@ impl Producer {
 
 		// Read the bound before locking `subs`, so the aggregation never nests the two locks.
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
 		drop(state);
 
 		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter).map(Ok)
+	}
+
+	/// Count `seen` as the aggregate already acted on, so
+	/// [`Self::poll_subscription_changed`] reports only a change from it: the demand a
+	/// subscriber session asked upstream for before accepting the track.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn seen_subscription(&mut self, seen: Subscription) {
+		self.prev_subscription = Some(seen);
+	}
+
+	/// How long a subscriber session's tail waits for a late group: `budget`, bounded by how
+	/// long the publisher keeps one. The aggregate asked upstream is not bounded by it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn tail_grace(&self, budget: Duration) -> Duration {
+		ledger::grace(clamp_max_delay(budget, self.state.read().max_age_bound()))
 	}
 
 	/// Create a [`Requests`] handle that serves on-demand fetches of uncached
@@ -3995,15 +4018,18 @@ fn snapshot_subscription(subs: &kio::Lock<Subscriptions>, bound: Option<Duration
 	clamp_combined(subs.lock().combined(), bound)
 }
 
-/// Clamp a drift budget to the publisher's retention window: nobody can wait for a late
-/// group longer than the publisher keeps it around.
+/// Clamp a drift budget to a retention window: nobody can wait for a late group longer
+/// than it is kept around.
 ///
 /// The single clamp point. Subscribers hold their preferences verbatim, so what they asked
 /// for stays readable, and it is applied here on both sides of the aggregate: to the
-/// combined request the publisher sees ([`clamp_combined`]) and to one subscriber's own
-/// budget when it decides a group is stale ([`TrackState::is_stale`]). Those agree because
-/// `min` distributes over the `max` that combines them. `bound` is `None` on a track whose
-/// info isn't known yet (an unaccepted [`Request`]), which imposes no window.
+/// combined request the publisher sees ([`clamp_combined`]), with the local cache ceiling
+/// ([`TrackState::demand_bound`]), and to one subscriber's own budget when it decides a
+/// group is stale ([`TrackState::is_stale`]), with the publisher's window too
+/// ([`TrackState::max_age_bound`]). The publisher applies its own window to the request,
+/// and `min` distributes over the `max` that combines the subscribers, so a group is stale
+/// under the request exactly when it is stale for one of them. `bound` is `None` when
+/// nothing imposes a window.
 fn clamp_max_delay(mut max_delay: Duration, bound: Option<Duration>) -> Duration {
 	if let Some(bound) = bound {
 		max_delay = max_delay.min(bound);
@@ -4011,7 +4037,7 @@ fn clamp_max_delay(mut max_delay: Duration, bound: Option<Duration>) -> Duration
 	max_delay
 }
 
-/// Clamp the aggregate's max delay budget to the publisher's window; see [`clamp_max_delay`].
+/// Clamp the aggregate's max delay budget to `bound`; see [`clamp_max_delay`].
 fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Option<Subscription> {
 	let mut combined = combined?;
 	if bound.is_some() {
@@ -4097,7 +4123,7 @@ impl TrackWeak {
 	/// The readers' aggregate demand and contribution count, or `None` without one.
 	pub(super) fn subscription(&self) -> Option<(Subscription, usize)> {
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
 		drop(state);
 		let subs = subs.lock();
 		Some((clamp_combined(subs.combined(), bound)?, subs.len()))
@@ -8234,7 +8260,7 @@ impl Request {
 	/// or `None` if nobody is waiting. Useful for sizing the track before accepting.
 	pub fn subscription(&self) -> Option<Subscription> {
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
 		drop(state);
 		snapshot_subscription(&subs, bound)
 	}
@@ -8249,7 +8275,7 @@ impl Request {
 	/// Poll for a changed subscription.
 	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<Subscription>> {
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
 		drop(state);
 
 		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter)
@@ -10660,10 +10686,10 @@ mod test {
 
 	#[test]
 	fn max_delay_clamped_to_cache() {
-		let producer = track_producer("test", Info::timed().with_max_age(Duration::from_secs(2)));
+		let producer = track_producer_capped("test", Info::timed(), Duration::from_secs(2));
 
 		// A max delay budget beyond the cache is capped in the aggregate; a group can't be
-		// waited for longer than the publisher keeps it. The subscriber's own preference
+		// waited for longer than the cache keeps it. The subscriber's own preference
 		// is stored verbatim, so what it asked for stays readable.
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
 		assert_eq!(subscriber.subscription().max_delay, Some(Duration::from_secs(10)));
@@ -10752,7 +10778,7 @@ mod test {
 
 	#[test]
 	fn max_delay_clamped_via_every_update_path() {
-		let producer = track_producer("test", Info::timed().with_max_age(Duration::from_secs(2)));
+		let producer = track_producer_capped("test", Info::timed(), Duration::from_secs(2));
 		let over = Subscription::default().with_max_delay(Duration::from_secs(10));
 
 		// The clamp lives in the aggregation, so it applies no matter which entry point
@@ -10769,7 +10795,7 @@ mod test {
 
 	#[test]
 	fn max_delay_aggregate_clamps_across_subscribers() {
-		let producer = track_producer("test", Info::timed().with_max_age(Duration::from_secs(2)));
+		let producer = track_producer_capped("test", Info::timed(), Duration::from_secs(2));
 
 		// The aggregate takes the max, then clamps once. Equivalent to clamping each
 		// subscriber first, since `min` distributes over `max`.
@@ -10777,6 +10803,40 @@ mod test {
 		let _b = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
 
 		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::from_secs(2)));
+	}
+
+	/// The publisher enforces its own max age, so the demand asked of it is the subscribers'
+	/// own, and a request asks for the same before and after its info lands.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn the_aggregate_is_not_clamped_to_the_publisher_max_age() {
+		let broadcast = broadcast::Info {
+			cache_duration: Duration::from_secs(30),
+			..Default::default()
+		}
+		.produce();
+		let mut dynamic = broadcast.requests();
+		let consumer = broadcast.consume();
+		let mut waiting = std::pin::pin!(
+			consumer
+				.track("test")
+				.unwrap()
+				.subscribe(Subscription::default().with_max_delay(Duration::from_secs(60)))
+		);
+		assert!(futures::poll!(waiting.as_mut()).is_pending());
+		let request = dynamic.requested_track().await.unwrap();
+		// Capped by the local ceiling alone.
+		let before = request.subscription().unwrap().max_delay;
+		assert_eq!(before, Some(Duration::from_secs(30)));
+
+		let producer = request.accept(Info::timed().with_max_age(Duration::from_secs(2)));
+		assert_eq!(producer.subscription().unwrap().max_delay, before);
+		assert_eq!(producer.state.read().max_age_bound(), Some(Duration::from_secs(2)));
+		// A session's tail still waits for a late group no longer than the publisher keeps it,
+		// even for a subscriber that defers to the max age alone.
+		assert_eq!(producer.tail_grace(Duration::from_secs(60)), Duration::from_secs(2));
+		assert_eq!(producer.tail_grace(Duration::MAX), Duration::from_secs(2));
+		waiting.await.unwrap();
 	}
 
 	#[test]
@@ -11972,8 +12032,8 @@ mod test {
 	#[cfg(feature = "async")]
 	fn max_age_bounds_the_budget() {
 		// The publisher only keeps a group around for 500ms, so a subscriber asking to
-		// wait ten seconds for one still gives up at 500ms: the same clamp the aggregate
-		// applies, on the subscriber's own side of it.
+		// wait ten seconds for one still gives up at 500ms: the window the publisher
+		// applies to the aggregate, on the subscriber's own side of it.
 		let mut producer = track_producer("test", Info::timed().with_max_age(Duration::from_millis(500)));
 		append_at(&mut producer, 0);
 		append_at(&mut producer, 1000);

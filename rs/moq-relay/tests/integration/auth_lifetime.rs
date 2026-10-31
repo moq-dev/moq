@@ -886,12 +886,17 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			.await
 			.expect("subscribe");
 		send(0, 1);
-		let group = tokio::time::timeout(TIMEOUT, audio.recv_group())
-			.await
-			.expect("recv_group timeout")
-			.expect("recv_group failed")
-			.expect("the undeafened track closed");
-		assert!(group.sequence >= 1, "{scheme}");
+		// The SUBSCRIBE went out with the TRACK, so the latest group when it arrived may come first.
+		loop {
+			let group = tokio::time::timeout(TIMEOUT, audio.recv_group())
+				.await
+				.expect("recv_group timeout")
+				.expect("recv_group failed")
+				.expect("the undeafened track closed");
+			if group.sequence >= 1 {
+				break;
+			}
+		}
 
 		for (session, what) in [(pub_session, "publisher"), (sub_session, "subscriber")] {
 			assert!(
