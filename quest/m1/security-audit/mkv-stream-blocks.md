@@ -17,7 +17,7 @@ it to every sized tag, including the Segment and Cluster masters, so it would
 refuse ordinary files larger than the limit.
 
 Decided 2026-10-27 (maintainer): stream the block payload, the same principle
-as [fMP4 import streams mdat](/quest/m1/security-audit/fmp4-stream-mdat.md),
+as the fMP4 importer's streamed mdat ([moq-dev/moq#7232](https://github.com/moq-dev/moq/pull/7232)),
 rather than a size pre-check. A pre-check would compare against the frame cap
 that [unbounded groups](/quest/m1/unbounded-groups/README.md) removes, after
 which a large block is a legal large frame. This needs a small block reader
@@ -31,7 +31,8 @@ still pins input. Bring options with a recommendation, such as handling
 their children incrementally as the importer already does for Clusters; a
 blanket tag-size cap is ruled out above. Tests feed a huge declared block,
 metadata master, and ignored element in chunks and assert held bytes stay
-bounded. Settle this together with the same question in
-[fMP4 import streams mdat](/quest/m1/security-audit/fmp4-stream-mdat.md).
+bounded. The fMP4 importer answered the same question by refusing a `moov`,
+`moof`, or text sample over 32 MiB at its header (maintainer, 2026-10-31,
+[moq-dev/moq#7232](https://github.com/moq-dev/moq/pull/7232)).
 
 Public API: none expected. Wire: none.

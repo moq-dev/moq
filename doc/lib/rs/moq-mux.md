@@ -13,7 +13,7 @@ back. This is what `moq import` / `export` and the gateways are built on.
 
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
-| fMP4 / CMAF | yes | yes | Audio/video unwrapped to `legacy` by default, or passed through as `cmaf` with `with_passthrough`; `wvtt` subtitles import as timed WebVTT text and `stpp` TTML (IMSC timing profile) as `ttml` documents on the broadcast clock, preserving source language and label when present; other subtitle codecs are skipped. |
+| fMP4 / CMAF | yes | yes | Audio/video unwrapped to `legacy` by default, or passed through as `cmaf` with `with_passthrough`; `wvtt` subtitles import as timed WebVTT text and `stpp` TTML (IMSC timing profile) as `ttml` documents on the broadcast clock, preserving source language and label when present; other subtitle codecs are skipped. Import streams media samples as they arrive; each track's samples must be in forward byte order, and a `moov`, `moof`, or text sample over 32 MiB is refused. |
 | MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3, Opus up to 7.1; SCTE-35 sections and every other undecoded PES stream (KLV, subtitles, DVB AC-3) as tracks; service tables round-trip. |
 | FLV / RTMP | yes | yes | Legacy H.264 + AAC + MP3, plus enhanced-RTMP HEVC, AV1, VP9, Opus, AC-3, E-AC-3, and multitrack. |
 | Matroska / WebM | yes | yes | Timed SRT and WebVTT subtitles import as WebVTT text renditions, preserving source language and label when present; other subtitle codecs are skipped. |
