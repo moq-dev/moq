@@ -465,6 +465,11 @@ impl Copy {
 
 	fn update(&mut self, reader: &Subscription) {
 		let wire = self.wire(reader);
+		self.send(wire);
+	}
+
+	/// Ask for `wire` instead, answered or not.
+	fn send(&mut self, wire: Subscription) {
 		let _ = match &mut self.sub {
 			Sub::Pending(pending) => pending.update(wire),
 			Sub::Ready(sub) => sub.update(wire),
@@ -1456,6 +1461,11 @@ impl Reader {
 		if let Some(lowest) = lowest {
 			return Some(Poll::Ready(Ok(Some(lowest))));
 		}
+		// A copy answering this pass may have placed the ranges the switch's backfill waits
+		// for: ask for it now, since no later group is sure to wake the read.
+		if self.resumed.is_some() && self.window().floor().is_some() {
+			return None;
+		}
 		let drained = self.bound_at_end();
 		let waits = self.let_go(delivered, waiter);
 		match self.poll_end(waiter, |copy| copy.done.clone()) {
@@ -1757,6 +1767,9 @@ impl Reader {
 		{
 			return;
 		}
+		// Resolved as the reader first had them: the newest copy's resolution starts at its
+		// resume point, and a bounded copy's own ends at its earlier cap.
+		let resolved = self.window().resolved();
 		// A later resume point widens the route's backfill rather than asking again, so flaps
 		// over a gap keep one per route. Waited for as long as a new one would be.
 		let last = self.copies.len() - 1;
@@ -1766,12 +1779,12 @@ impl Reader {
 		{
 			copy.until = Some(lowered.end.checked_sub(1));
 			copy.since = Some(copy.track.now());
-			copy.update(&self.mirrored);
+			copy.from = self.mirrored.ranges.clone();
+			copy.resolved = resolved;
+			let wire = self.mirrored.clamped(copy.floor, copy.end(), &copy.resolved);
+			copy.send(wire);
 			return;
 		}
-		// Resolved as the reader first had them: the newest copy's resolution starts at its
-		// resume point.
-		let resolved = self.window().resolved();
 		let floor = Some(lowered.start);
 		let wire = self.mirrored.clamped(floor, Some(lowered.end), &resolved);
 		let copy = Copy {
@@ -4576,7 +4589,8 @@ mod test {
 	}
 
 	/// Ranges widened while only an unanswered replacement can place them keep the switch's
-	/// backfill pending: once it answers, the groups below its resume point come once.
+	/// backfill pending: the read it answers in asks for the groups below its resume point,
+	/// which come once without waiting on a later group.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_range_widened_before_the_replacement_answers_backfills_once() {
@@ -4614,10 +4628,58 @@ mod test {
 			write(&b, sequence);
 		}
 		let mut rest = drain(&mut sub, false);
-		write(&b, 6);
-		rest.extend(drain(&mut sub, false));
 		rest.sort_unstable();
-		assert_eq!(rest, [1, 2, 3, 4, 6]);
+		assert_eq!(rest, [1, 2, 3, 4]);
+		write(&b, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+	}
+
+	/// A route's backfill widened by a later resume point asks for the wider span even once
+	/// it answered for the narrower one: a range ending relative to the latest group keeps the
+	/// reader's end, not the backfill's earlier cap.
+	#[moq_clock::test]
+	async fn a_widened_backfill_reaches_past_its_earlier_cap() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let b = copy();
+		// The latest group, past the range's end at 11, which it resolves without handing out.
+		write(&a, 1001);
+		routes.serve(a.consume());
+		let subscription = Subscription::default().with_max_delay(HOUR).with_ranges([track::Range {
+			start: track::Anchor::Absolute(0),
+			end: Some(track::Anchor::Relative(990)),
+		}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		write(&a, 2);
+		assert_eq!(drain(&mut sub, false), [2]);
+		// B resumes at 2, so its backfill asks for the groups below it.
+		routes.serve(b.consume());
+		write(&b, 4);
+		assert_eq!(drain(&mut sub, false), [4]);
+
+		// C never answers, so B's copy keeps delivering uncapped.
+		let c = track::Request::new(Arc::new(broadcast::Info::default()), "video");
+		routes.serve(c.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		write(&b, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+
+		// B returns at 6, widening its backfill past 2.
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		for sequence in [1, 3, 5] {
+			write(&b, sequence);
+		}
+		let mut late = drain(&mut sub, false);
+		late.sort_unstable();
+		assert_eq!(late, [1, 3, 5]);
+		drop(c);
 	}
 
 	/// A copy updated while pending, then answering, hands its own resolution of the
