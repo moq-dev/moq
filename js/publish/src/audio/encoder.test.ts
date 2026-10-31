@@ -192,21 +192,32 @@ class Feed {
 	}
 }
 
-// An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes].
-async function setup(baseline = new Baseline(), codec?: Codec) {
+// An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes]
+// and how many frames each group carries.
+async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: Time.Milli) {
 	const configured = new Promise<AudioEncoderConfig>((resolve) => {
 		LaggingAudioEncoder.onConfigure = resolve;
 	});
 
 	const track = new Moq.Track.Producer("audio").accept();
 	const written: [number, number][] = [];
+	const groups: number[] = [];
+	const appended: ReturnType<typeof track.appendGroup>[] = [];
 	const writes = { onWrite: undefined as (() => void) | undefined };
-	const writeFrame = track.writeFrame.bind(track);
-	track.writeFrame = (frame) => {
-		const [timestamp, payload] = Moq.Varint.decode(frame.payload);
-		written.push([timestamp, payload.byteLength]);
-		writeFrame(frame);
-		writes.onWrite?.();
+	const appendGroup = track.appendGroup.bind(track);
+	track.appendGroup = () => {
+		const group = appendGroup();
+		appended.push(group);
+		const index = groups.push(0) - 1;
+		const writeFrame = group.writeFrame.bind(group);
+		group.writeFrame = (frame) => {
+			const [timestamp, payload] = Moq.Varint.decode(frame.payload);
+			written.push([timestamp, payload.byteLength]);
+			groups[index]++;
+			writeFrame(frame);
+			writes.onWrite?.();
+		};
+		return group;
 	};
 
 	const rendition = {
@@ -230,6 +241,7 @@ async function setup(baseline = new Baseline(), codec?: Codec) {
 		broadcast: { audio: () => rendition, baseline } as never,
 		capture: capture as never,
 		codec,
+		groupDuration,
 	});
 
 	const config = await configured;
@@ -242,6 +254,8 @@ async function setup(baseline = new Baseline(), codec?: Codec) {
 		rendition,
 		feed,
 		written,
+		groups,
+		appended,
 		writes,
 		[Symbol.dispose]() {
 			encoder.close();
@@ -294,7 +308,7 @@ test("a demand gap marks where submitted audio ends and drops the chunks held ac
 test("a push completing several frames keeps the encoder running", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup();
-	const { feed, written } = env;
+	const { feed, written, appended } = env;
 
 	// Two 20ms Opus frames per push.
 	for (let index = 0; index < 3; index++) {
@@ -308,6 +322,64 @@ test("a push completing several frames keeps the encoder running", async () => {
 		[58_700, 1],
 		[78_700, 1],
 	]);
+	// Without a group duration, each frame's group closes as soon as it is written.
+	expect(appended.map((group) => group.closed.peek())).toEqual([null, null, null, null]);
+});
+
+// The first frame at the minimum opens the next group. A demand gap closes the group early, so the
+// first frame after it opens a fresh one.
+test("a group duration packs frames until the minimum and restarts after a demand gap", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup(new Baseline(), undefined, Time.Milli(100));
+	const { track, rendition, feed, written, groups, appended, writes } = env;
+
+	let index = 0;
+	const push = async (count: number) => {
+		for (let i = 0; i < count; i++, index++) {
+			await feed.push({ timestamp: Time.Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+	};
+
+	await push(7); // five written, two held
+	expect(groups).toEqual([5]);
+	expect(appended[0].closed.peek()).toBeUndefined();
+	await push(2); // the next frame opens a new group and closes the first
+	expect(groups).toEqual([5, 2]);
+	expect(appended[0].closed.peek()).toBeNull();
+
+	const marked = new Promise<void>((resolve) => {
+		writes.onWrite = resolve;
+	});
+	rendition.track.set(undefined);
+	await marked;
+	writes.onWrite = undefined;
+	expect(appended[1].closed.peek()).toBeNull();
+
+	rendition.track.set(track);
+	await push(4); // releases the two held pre-gap chunks, which are dropped, then two resumed ones
+
+	expect(written.map(([timestamp]) => timestamp)).toEqual([
+		20_000, 40_000, 60_000, 80_000, 100_000, 120_000, 140_000, 200_000, 200_000, 220_000,
+	]);
+	// 120ms opens the next group, closing the five frames at 20-100ms. The gap ends the 120-140ms
+	// group early, so resumed frames start a fresh group after the marker.
+	expect(groups).toEqual([5, 2, 1, 2]);
+});
+
+// A negative or non-finite duration has no meaning, so the rendition drops out of the catalog.
+test("an invalid group duration refuses the rendition", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup(new Baseline(), undefined, Time.Milli(100));
+	const { encoder } = env;
+
+	expect(encoder.out.catalog.peek()).toBeDefined();
+	encoder.groupDuration.set(Time.Milli(-1));
+	await settle();
+	expect(encoder.out.catalog.peek()).toBeUndefined();
+	encoder.groupDuration.set(Time.Milli(0));
+	await settle();
+	expect(encoder.out.catalog.peek()).toBeDefined();
 });
 
 test("passes an explicit Opus DTX request to the encoder", async () => {

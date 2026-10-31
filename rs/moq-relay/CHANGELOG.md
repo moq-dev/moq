@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.10](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.9...moq-relay-v0.17.10) - 2026-10-30
+
+### Added
+
+- *(relay)* bound advertised hop paths with a cluster setting (backport #6427)
+- *(relay)* expose control byte counters (backport #6235)
+- *(relay)* expose announce metrics (backport #5696)
+
+### Fixed
+
+- *(relay)* keep cluster peers on a draining relay until it closes (backport #6423)
+
 ## [0.17.9](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.8...moq-relay-v0.17.9) - 2026-10-28
 
 ### Other

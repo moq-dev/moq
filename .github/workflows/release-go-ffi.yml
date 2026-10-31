@@ -117,6 +117,9 @@ jobs:
     name: Publish to Go module mirror
     needs: [ffi, package]
     runs-on: ubuntu-latest
+    # The moq-bot key lives in the `bot` Environment, which only protected
+    # refs can deploy to, not in an organization secret any branch can read.
+    environment: bot
     if: github.ref_type == 'tag'
 
     steps:

@@ -54,6 +54,17 @@ framerate, and bitrate are tunable through `el.video.config`; the audio
 encoder exposes its codec and volume. For simulcast or several renditions,
 drop the element and register your own encoders on a `Publish.Broadcast`.
 
+Each audio frame is its own group by default, so a relay pays a stream and a
+group's bookkeeping per 20ms frame. `el.audio.groupDuration` sets a minimum
+per group instead, such as `Time.Milli(100)`: the first frame at least 100ms
+after the group's first timestamp opens the next group and closes the previous
+one. If encoding pauses, the current group stays open until the next frame, a
+timeline marker, or the encoder stopping. Frames still forward as they are
+encoded, so grouping does not buffer them, but loss gets coarser: a viewer that
+falls behind skips a whole group, and a lost frame holds back the rest of its
+group until it is retransmitted. A 60ms Opus `frameDuration` also cuts the
+group rate, without code, at the cost of encoder latency.
+
 The video and audio encoders measure how far their output falls behind the media
 clock when they flush frames. Catalog jitter is the spread above each
 rendition's own recent minimum lateness, so a constant encoder delay is not jitter.

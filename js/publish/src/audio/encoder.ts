@@ -101,6 +101,9 @@ export type EncoderProps = Inputs<EncoderInput> & {
 
 	// Codec selection plus encoder settings. Defaults to "opus".
 	codec?: Codec | Signal<Codec>;
+
+	// The minimum audio carried by each group. Defaults to 0, a group per frame.
+	groupDuration?: Time.Milli | Signal<Time.Milli>;
 };
 
 type EncoderOutput = {
@@ -139,6 +142,12 @@ export class Encoder {
 	volume: Signal<number>;
 	/** The live-editable codec selection plus its encoder settings. */
 	codec: Signal<Codec>;
+	/**
+	 * The minimum timestamp span before a frame opens the next group, closing the previous one. 0 puts every frame in its own group. A longer group costs the
+	 * relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group. A
+	 * negative or non-finite duration refuses the rendition.
+	 */
+	groupDuration: Signal<Time.Milli>;
 
 	/**
 	 * The capture supplying this rendition, or undefined while none is wired.
@@ -177,6 +186,14 @@ export class Encoder {
 	// marker and are dropped.
 	#floor: Time.Micro | undefined;
 
+	// The group still accepting frames and the track it belongs to, with its first timestamp. Only
+	// held while groupDuration is positive; otherwise each frame's group closes once written.
+	#group: { track: Moq.Track.Producer; group: Moq.Group.Producer; start: Time.Micro } | undefined;
+
+	// The last valid group duration. #runConfig refuses the rendition on an invalid one, so a bad
+	// value never reaches the writer.
+	#groupDuration = Time.Micro(0);
+
 	// The fatal error an AudioEncoder reported, if any. That instance can never encode again and
 	// reconfiguring it would be a retry, so the rendition stays down for the life of this encoder.
 	#fatal = new Signal<Error | undefined>(undefined);
@@ -212,6 +229,7 @@ export class Encoder {
 		};
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
+		this.groupDuration = Signal.from(props?.groupDuration ?? Time.Milli(0));
 
 		// Only the capture graph has a node to expose.
 		this.#signals.run((effect) => {
@@ -318,6 +336,8 @@ export class Encoder {
 			const track = effect.get(rendition.track);
 			if (!track) return;
 			effect.cleanup(() => {
+				// The marker's group follows, so the open one ends here and resumed frames open a fresh one.
+				this.#closeGroup();
 				const end = this.#next;
 				this.#next = undefined;
 				if (end === undefined || track.closed.peek() !== undefined) return;
@@ -369,6 +389,11 @@ export class Encoder {
 	// Gated on `enabled` the same way the video encoder is: a disabled rendition has to drop out of
 	// the catalog, and a sample source keeps its format while muted rather than tearing down.
 	#runConfig(effect: Effect): void {
+		const groupDuration = effect.get(this.groupDuration);
+		if (!Number.isFinite(groupDuration) || groupDuration < 0)
+			throw new Error(`audio group duration must be a finite, non-negative number of ms: ${groupDuration}`);
+		this.#groupDuration = Time.Micro.fromMilli(groupDuration);
+
 		const capture = effect.get(this.in.capture);
 		const captured = capture ? effect.get(capture.out.format) : undefined;
 		if (!effect.get(this.in.enabled) || !captured) {
@@ -456,15 +481,11 @@ export class Encoder {
 							bytes: stats.bytes + frame.byteLength,
 						}));
 
-						// Each audio frame is its own group so the relay can forward it without
-						// waiting for a group boundary. Loss is handled by the codec's PLC.
 						const live = track.peek();
 						if (!live) return;
-						if (this.#floor !== undefined && frame.timestamp < this.#floor) return;
-						live.writeFrame({
-							payload: Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro),
-							timestamp: Time.Timestamp.fromMicros(frame.timestamp as Time.Micro),
-						});
+						const timestamp = frame.timestamp as Time.Micro;
+						if (this.#floor !== undefined && timestamp < this.#floor) return;
+						this.#write(live, frame, timestamp);
 						if (this.#estimator.flush(frame.timestamp, baseline)) {
 							const catalog = this.#out.catalog.peek();
 							if (catalog) this.#out.catalog.set({ ...catalog, ...this.#estimator.estimate });
@@ -477,9 +498,11 @@ export class Encoder {
 						this.#fatal.set(err);
 					},
 				});
-				// A fatal error already closed the codec, and closing it twice throws.
+				// A fatal error already closed the codec, and closing it twice throws. A rebuilt encoder
+				// restarts its output clock, so its first frame opens a fresh group.
 				effect.cleanup(() => {
 					if (encoder.state !== "closed") encoder.close();
+					this.#closeGroup();
 				});
 
 				console.debug("encoding audio", encoderConfig);
@@ -548,6 +571,33 @@ export class Encoder {
 				});
 			});
 		});
+	}
+
+	// Every audio frame decodes on its own, so any of them can open a group: the first one at or past
+	// the minimum after the open group's start. Frames forward as they are written rather than
+	// waiting for the group to fill. A dropped group leaves a gap for the codec's PLC.
+	#write(track: Moq.Track.Producer, data: EncodedAudioChunk, timestamp: Time.Micro): void {
+		const frame = {
+			payload: Container.Legacy.encodeFrame(data, timestamp),
+			timestamp: Time.Timestamp.fromMicros(timestamp),
+		};
+
+		const open = this.#group;
+		if (open?.track === track && timestamp - open.start < this.#groupDuration) {
+			open.group.writeFrame(frame);
+			return;
+		}
+
+		this.#closeGroup();
+		const group = track.appendGroup();
+		group.writeFrame(frame);
+		if (this.#groupDuration > 0) this.#group = { track, group, start: timestamp };
+		else group.close();
+	}
+
+	#closeGroup(): void {
+		this.#group?.group.close();
+		this.#group = undefined;
 	}
 
 	#setDecoderDescription(config: Catalog.AudioConfig, source: AllowSharedBufferSource | undefined): void {
