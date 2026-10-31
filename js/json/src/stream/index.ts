@@ -10,15 +10,12 @@
  * bound the record rate throttles at the source. Interoperable on the wire with the Rust
  * `moq_json::stream`.
  *
- * That one group bounds the log at `@moq/net`'s group budget: 32 MiB of payload and 8192 frames. An
- * append that does not fit throws `GroupTooLarge` before it is written, and the log stays intact and
- * writable. Each record is charged its JSON size, compressed or not. The budget covers the whole log, so once it is spent every append throws and a publisher with more to say opens a new
- * track.
+ * The log has no cumulative record or byte ceiling. Each record must fit the whole-frame limit. Its group retains a bounded live tail; a consumer
+ * that falls behind the shed front receives `Evicted` instead of a silently truncated log.
  *
  * {@link Producer} and {@link Consumer} own a track: pass `{ track, ... }`. {@link Encoder} and
  * {@link Decoder} are the same logic without it, for when something else is already in charge of the
- * track; they carry the group's budget and nothing else, since a log has no group boundaries to
- * report.
+ * track. A log has no group boundaries to report.
  *
  * @module
  */
