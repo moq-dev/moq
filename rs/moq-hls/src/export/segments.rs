@@ -365,6 +365,24 @@ impl Producer {
 		}
 	}
 
+	/// Poll until the window lists a row, even after it closed: a predecessor whose rows its
+	/// replacement still lists (see [`Rendition::after`]).
+	pub fn poll_rows(&self, waiter: &kio::Waiter) -> Poll<()> {
+		match self.state.poll_ref(waiter, |state| match state.rows.is_empty() {
+			false => Poll::Ready(()),
+			true => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(())) => Poll::Ready(()),
+			Poll::Ready(Err(state)) if !state.rows.is_empty() => Poll::Ready(()),
+			_ => Poll::Pending,
+		}
+	}
+
+	/// Resolve once the window is closed: its records watcher lists no more rows.
+	pub async fn closed(&self) {
+		self.state.closed().await;
+	}
+
 	/// Poll until the window fails.
 	#[cfg_attr(
 		not(feature = "server"),
