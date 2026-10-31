@@ -56,6 +56,8 @@ for event, err := range announced.All(ctx) {
 		fmt.Println("got broadcast", event.Announce.Prefix)
 	case moq.AnnounceEventRestart: // a new publisher run at the same path
 		fmt.Println("restarted broadcast", event.Announce.Prefix)
+	case moq.AnnounceEventTakeover: // continues what an earlier route served
+		fmt.Println("took over broadcast", event.Announce.Prefix)
 	}
 }
 ```
@@ -143,14 +145,15 @@ the session closed, i.e. not a real failure) and `moq.IsAuthError(err)` (HTTP
 
 Every call that can block takes a `context.Context` and aborts cleanly when it is
 cancelled, leaving nothing running in the background. A one-shot call (a subscribe,
-a fetch, `Request`, `Resolve`, `WantedChanged`, `Used`/`Unused`, `Server.Accept`) aborts on
+a fetch, `Request`, `Resolve`, `WantedChanged`, `Server.Accept`) aborts on
 its own and leaves the object usable; a stream read cancels the stream it reads.
 See the package doc for details.
 
 ## Raw datagrams
 
 Raw tracks support best-effort datagrams alongside groups: `TrackProducer.AppendDatagram`
-sends one `Frame` and returns its sequence number, while `TrackConsumer.RecvDatagram`
+sends one `Frame` and returns its sequence number (`InsertDatagram` takes the caller's
+own sequence instead), while `TrackConsumer.RecvDatagram`
 and `TrackConsumer.Datagrams` receive them in arrival order. Payloads are capped at
 1200 bytes. Datagram delivery requires a datagram-capable transport and lite-05 or
 newer moq-lite, or moq-transport; pre-lite-05, WebSocket, and TCP paths do not
