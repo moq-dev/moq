@@ -235,7 +235,7 @@ impl Recording {
 					),
 					rendition: None,
 					variant: Variant::of(&rendition),
-					playlist: Playlist::default(),
+					playlist: Playlist::new(rendition.target_duration()),
 					recording: None,
 					queued: VecDeque::new(),
 					instances: 0,
@@ -243,6 +243,18 @@ impl Recording {
 				})
 			}
 		};
+		// A reconfigure keeps the exporter's target, but a rendition removed and re-added derives
+		// its own, while the recording's header can't change: the exporter judges overruns
+		// against a target this playlist doesn't carry.
+		if rendition.target_duration() != slot.playlist.target {
+			tracing::warn!(
+				kind = rendition.kind.as_str(),
+				rendition = %rendition.name,
+				served = rendition.target_duration(),
+				recorded = slot.playlist.target,
+				"rendition returned with another HLS target duration; the recording keeps its own"
+			);
+		}
 		slot.rendition = Some(rendition);
 		slot.queued.push_back((track, cursor));
 		Ok(match slot.recording {
@@ -399,8 +411,10 @@ impl Slot {
 #[derive(Default)]
 struct Playlist {
 	entries: Vec<Entry>,
-	/// The highest `EXT-X-VERSION` and `EXT-X-TARGETDURATION` the entries need.
+	/// The highest `EXT-X-VERSION` the entries need.
 	version: u32,
+	/// `EXT-X-TARGETDURATION`, in whole seconds: the first instance's, which the exporter serves
+	/// too, kept through reconfigurations so the header never changes (RFC 8216 6.2.1).
 	target: u64,
 	/// What the file holds: its header and how many entries.
 	written: Option<(Header, usize)>,
@@ -414,7 +428,6 @@ struct Playlist {
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Header {
 	version: u32,
-	target: u64,
 	sequence: u64,
 	discontinuity: u64,
 }
@@ -433,15 +446,26 @@ struct Entry {
 }
 
 impl Playlist {
+	/// A playlist whose `EXT-X-TARGETDURATION` is `target` seconds.
+	fn new(target: u64) -> Self {
+		Self {
+			target,
+			..Default::default()
+		}
+	}
+
 	/// The number of the next entry: the source's for the first, then consecutive.
 	fn next(&self, source: u64) -> u64 {
 		self.entries.last().map_or(source, |last| last.segment + 1)
 	}
 
+	/// Append `entry`.
+	///
+	/// RFC 8216 4.3.3.1 requires every EXTINF, rounded to the nearest second, to fit the target
+	/// duration. An entry past it is listed anyway, as the exporter lists it (and warns): refusing
+	/// it loses content, and raising the target would rewrite a header players already read.
 	fn push(&mut self, mut entry: Entry) {
 		self.version = self.version.max(if entry.gap { VERSION_GAP } else { VERSION });
-		// Every EXTINF, rounded up to whole seconds, must fit the target duration.
-		self.target = self.target.max(entry.duration.as_secs_f64().ceil() as u64).max(1);
 		if std::mem::take(&mut self.switching)
 			&& let Some(last) = self.entries.last()
 		{
@@ -462,7 +486,6 @@ impl Playlist {
 		};
 		let header = Header {
 			version: self.version,
-			target: self.target,
 			sequence: first.segment,
 			discontinuity: first.discontinuity,
 		};
@@ -476,7 +499,7 @@ impl Playlist {
 			_ => {
 				let mut out = format!(
 					"#EXTM3U\n#EXT-X-VERSION:{}\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{}\n",
-					header.version, header.target, header.sequence
+					header.version, self.target, header.sequence
 				);
 				if header.discontinuity > 0 {
 					out += &format!("#EXT-X-DISCONTINUITY-SEQUENCE:{}\n", header.discontinuity);
@@ -760,6 +783,8 @@ mod tests {
 			let segments = listed(&playlist);
 			assert!(segments.len() > 1 && consecutive(&segments, 0), "{playlist}");
 			assert_eq!(duration(&playlist), Duration::from_secs(6), "{playlist}");
+			// The exporter's target: the declared duration, the 2s hint's multiple at the 4s grid.
+			assert!(playlist.contains("\n#EXT-X-TARGETDURATION:4\n"), "{playlist}");
 			assert!(playlist.contains("\n#EXT-X-MEDIA-SEQUENCE:0\n"), "{playlist}");
 			assert!(
 				playlist.contains("#EXT-X-MAP:URI=\"init.0.mp4\"\n#EXT-X-PROGRAM-DATE-TIME:"),
@@ -980,7 +1005,7 @@ mod tests {
 		assert_eq!(replacement.admit(1, 0).unwrap(), Admit::Record { transition: false });
 
 		// The recording numbers its segments on from the predecessor's.
-		let mut playlist = Playlist::default();
+		let mut playlist = Playlist::new(2);
 		for source in 3..=5 {
 			let number = playlist.next(source);
 			playlist.push(entry(number, 0));
@@ -1017,7 +1042,7 @@ mod tests {
 	#[test]
 	fn a_discontinuity_restates_the_program_date_time() {
 		let at = |secs| Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(secs));
-		let mut playlist = Playlist::default();
+		let mut playlist = Playlist::new(2);
 		for (segment, discontinuity, secs) in [(0, 0, 0), (1, 0, 2), (2, 1, 10), (3, 1, 12)] {
 			playlist.push(Entry {
 				program_date_time: at(secs),
@@ -1042,7 +1067,7 @@ mod tests {
 	/// sequence starts below the recording's.
 	#[test]
 	fn a_switch_to_a_lower_sequence_is_a_discontinuity() {
-		let mut playlist = Playlist::default();
+		let mut playlist = Playlist::new(2);
 		playlist.push(entry(0, 0));
 		playlist.push(entry(1, 2));
 		playlist.transition();
@@ -1063,7 +1088,7 @@ mod tests {
 	async fn a_transition_appends_a_discontinuity() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("media.m3u8");
-		let mut playlist = Playlist::default();
+		let mut playlist = Playlist::new(2);
 		for segment in 0..3 {
 			playlist.push(entry(segment, 0));
 			playlist.flush(dir.path()).await.unwrap();
@@ -1082,7 +1107,8 @@ mod tests {
 			"{text}"
 		);
 
-		// A longer gap raises the target duration and the version, which rewrites the header.
+		// A gap raises the version, which rewrites the header; one past the target duration
+		// leaves the target as declared.
 		playlist.push(Entry {
 			duration: Duration::from_millis(4_500),
 			gap: true,
@@ -1091,7 +1117,7 @@ mod tests {
 		playlist.flush(dir.path()).await.unwrap();
 		let text = read(path);
 		assert!(
-			text.starts_with("#EXTM3U\n#EXT-X-VERSION:8\n#EXT-X-TARGETDURATION:5\n"),
+			text.starts_with("#EXTM3U\n#EXT-X-VERSION:8\n#EXT-X-TARGETDURATION:2\n"),
 			"{text}"
 		);
 		assert!(text.ends_with("#EXT-X-GAP\n#EXTINF:4.50000,\n5.m4s\n"), "{text}");

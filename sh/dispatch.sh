@@ -68,7 +68,8 @@ declare -A scope=(
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
     # moq-cli builds the Rust interop clients as examples from outside its
     # crate; sh/rs/select.test.py fails when a target's directory is missing.
-    [rs]='^(\.cargo/|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
+    # moq-relay's tests read its NixOS module.
+    [rs]='^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
     # The CARLA demo's simulator worker and launchers. Its player is a JS
     # package and its GPU bridge a Rust crate, so those modules cover them.
@@ -336,6 +337,13 @@ step() {
                     echo "$action: skipping flake; the local Nix builder cannot create user namespaces" >&2
                     return 77
                 fi
+            fi
+            # Without KVM, QEMU falls back to emulation and the VM tests time
+            # out long after. Refuse rather than skip, so a local gate never
+            # reads as passing without them.
+            if [[ "$OSTYPE" == linux* && "$HOSTTYPE" == x86_64 && ! -e /dev/kvm ]]; then
+                echo "$action: flake's NixOS VM tests need KVM, but /dev/kvm is missing; run them on a KVM host, as CI does" >&2
+                return 1
             fi
             # 77 marks the probe's skip, so the check's own 77 is a failure.
             # Full build logs name a failing VM subtest; Nix otherwise keeps
