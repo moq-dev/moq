@@ -16,6 +16,8 @@ const ANNOUNCE_UPDATE: u64 = 2;
 // lite-07: another publisher instance replaces the advertisement.
 const ANNOUNCE_RESTART: u64 = 3;
 const SYNCED: u64 = 4;
+// lite-07: a new advertisement continues what a live one served beneath its prefix.
+const ANNOUNCE_TAKEOVER: u64 = 5;
 
 /// Whether the negotiated version can update a live advertisement's metadata. On lite-05 an
 /// update travels as a duplicate ANNOUNCE (a second `active` for an already-announced path); on
@@ -33,9 +35,10 @@ pub fn update_supported(version: Version) -> bool {
 /// An announcement on the Announce Stream, advertising or retracting a broadcast.
 ///
 /// On lite-06+ these are independently-typed messages (`ANNOUNCE_START`,
-/// `ANNOUNCE_END`, `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART`), each
+/// `ANNOUNCE_END`, `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART` and
+/// `ANNOUNCE_TAKEOVER`), each
 /// framed as `Type | Length | Body` like the subscribe stream's responses. Each
-/// `Active` (ANNOUNCE_START) implicitly assigns the next announce id (a
+/// `Active` (ANNOUNCE_START) or `Takeover` implicitly assigns the next announce id (a
 /// per-stream ordinal starting at 0); the others reference that id instead of
 /// repeating the path. Older versions send a single `ANNOUNCE_BROADCAST`
 /// message that retracts by path (`Ended`).
@@ -69,6 +72,16 @@ pub enum AnnounceBroadcast {
 	/// under its prefix is the old instance. The id stays live.
 	Restart {
 		id: u64,
+		epoch: Option<Epoch>,
+		hops: HopsRef,
+		cost: Cost,
+	},
+	/// ANNOUNCE_TAKEOVER (lite-07+): an `Active` that continues what the live
+	/// announcement `predecessor` served beneath this one's path. It assigns the next
+	/// announce id; one at the predecessor's own path retires the predecessor.
+	Takeover {
+		predecessor: u64,
+		suffix: PathRef,
 		epoch: Option<Epoch>,
 		hops: HopsRef,
 		cost: Cost,
@@ -224,6 +237,9 @@ impl Encode<Version> for AnnounceBroadcast {
 				Self::Restart { .. } if version.has_announce_restart() => ANNOUNCE_RESTART,
 				// Older versions send an end and a start instead.
 				Self::Restart { .. } => return Err(EncodeError::Version),
+				Self::Takeover { .. } if version.has_announce_takeover() => ANNOUNCE_TAKEOVER,
+				// Older versions send a start instead.
+				Self::Takeover { .. } => return Err(EncodeError::Version),
 				// The pre-lite-06 path-form retraction has no place on lite-06.
 				Self::Ended { .. } => return Err(EncodeError::Version),
 				// Decode-only: an unknown type is never sent.
@@ -252,6 +268,19 @@ impl Encode<Version> for AnnounceBroadcast {
 				}
 				Self::Restart { id, epoch, hops, cost } => {
 					w.varint(*id)?;
+					super::epoch::encode_epoch(w, version, epoch.as_ref())?;
+					hops.encode(w, version)?;
+					cost.encode(w, version)?;
+				}
+				Self::Takeover {
+					predecessor,
+					suffix,
+					epoch,
+					hops,
+					cost,
+				} => {
+					w.varint(*predecessor)?;
+					suffix.encode(w, version)?;
 					super::epoch::encode_epoch(w, version, epoch.as_ref())?;
 					hops.encode(w, version)?;
 					cost.encode(w, version)?;
@@ -286,7 +315,12 @@ impl Encode<Version> for AnnounceBroadcast {
 				encode_hops(w, version, hops)?;
 			}
 			// The id-referencing forms only exist on lite-06+.
-			Self::EndedId { .. } | Self::Update { .. } | Self::Restart { .. } | Self::Skipped | Self::Synced => {
+			Self::EndedId { .. }
+			| Self::Update { .. }
+			| Self::Restart { .. }
+			| Self::Takeover { .. }
+			| Self::Skipped
+			| Self::Synced => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -323,6 +357,13 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 					},
 					ANNOUNCE_RESTART if version.has_announce_restart() => Self::Restart {
 						id: body.varint()?,
+						epoch: super::epoch::decode_epoch(&mut body, version)?,
+						hops: HopsRef::decode(&mut body, version)?,
+						cost: Cost::decode(&mut body, version)?,
+					},
+					ANNOUNCE_TAKEOVER if version.has_announce_takeover() => Self::Takeover {
+						predecessor: body.varint()?,
+						suffix: PathRef::decode(&mut body, version)?,
 						epoch: super::epoch::decode_epoch(&mut body, version)?,
 						hops: HopsRef::decode(&mut body, version)?,
 						cost: Cost::decode(&mut body, version)?,
@@ -829,7 +870,7 @@ mod tests {
 		for epoch in [None, Some(Epoch::mint())] {
 			let restart = AnnounceBroadcast::Restart {
 				id: 3,
-				epoch,
+				epoch: epoch.clone(),
 				hops: HopsRef {
 					base: 4,
 					literal: hops.clone(),
@@ -838,7 +879,43 @@ mod tests {
 				cost,
 			};
 			assert_eq!(broadcast_round_trip(&restart, Version::Lite07), restart);
+
+			let takeover = AnnounceBroadcast::Takeover {
+				predecessor: 2,
+				suffix: PathRef {
+					base: 1,
+					keep: 1,
+					rest: Path::from_static("p"),
+				},
+				epoch,
+				hops: HopsRef {
+					base: 1,
+					literal: hops.clone(),
+					keep: 1,
+				},
+				cost,
+			};
+			assert_eq!(broadcast_round_trip(&takeover, Version::Lite07), takeover);
 		}
+	}
+
+	// Only lite-07 carries ANNOUNCE_TAKEOVER: older versions send a start instead.
+	#[test]
+	fn announce_takeover_needs_lite07() {
+		let takeover = AnnounceBroadcast::Takeover {
+			predecessor: 0,
+			suffix: PathRef::literal(Path::from_static("p")),
+			epoch: Some(Epoch::mint()),
+			hops: HopsRef::default(),
+			cost: Cost::default(),
+		};
+		assert!(matches!(
+			takeover.encode(
+				&mut Encoder::new(&mut Vec::new(), Version::Lite06.into()),
+				Version::Lite06
+			),
+			Err(EncodeError::Version)
+		));
 	}
 
 	// Only lite-07 carries ANNOUNCE_RESTART: older versions send an end and a start, and an
