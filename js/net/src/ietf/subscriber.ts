@@ -746,9 +746,9 @@ export class Subscriber {
 	async #refuseListing(lister: Lister): Promise<void> {
 		try {
 			for (;;) {
-				while (!lister.used.peek()) {
+				while (!lister.wanted.peek()) {
 					if (lister.closed.peek() !== undefined) return;
-					await race([Signal.race(lister.used, lister.closed)]);
+					await race([Signal.race(lister.wanted, lister.closed)]);
 				}
 				lister.abort(new Error("track listing requires moq-lite-07 or newer"));
 			}

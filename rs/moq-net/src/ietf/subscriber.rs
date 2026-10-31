@@ -2811,12 +2811,12 @@ impl Subscriber {
 		loop {
 			match listening {
 				None => {
-					if !matches!(lister.poll_used(waiter), Poll::Ready(Ok(()))) {
+					if !matches!(lister.poll_wanted(waiter), Poll::Ready(Ok(()))) {
 						return;
 					}
 					*listening = Some(self.listen(path.to_owned(), lister.clone()));
 				}
-				Some(_) if lister.poll_unused(waiter).is_ready() => {
+				Some(_) if lister.poll_unwanted(waiter).is_ready() => {
 					*listening = None;
 					lister.clear();
 				}
@@ -2870,7 +2870,7 @@ impl Subscriber {
 					request.reject(Error::Unauthorized);
 					return;
 				}
-				None if request.reject_unused(Error::Cancel) => return,
+				None if request.reject_unwanted(Error::Cancel) => return,
 				// Demand returned in the gap.
 				None => continue,
 			}
@@ -3013,7 +3013,7 @@ impl Subscriber {
 								self.unwant(key, handoff);
 								return Some(idle);
 							}
-							Target::Request(ref request) if request.reject_unused(Error::Cancel) => {
+							Target::Request(ref request) if request.reject_unwanted(Error::Cancel) => {
 								self.unwant(key, handoff);
 								return None;
 							}
@@ -3259,7 +3259,7 @@ impl Subscriber {
 						else {
 							break None;
 						};
-						if pending.reject_unused(Error::Cancel) {
+						if pending.reject_unwanted(Error::Cancel) {
 							break None;
 						}
 						if let Some(held) = state.subscribes.get_mut(&request_id) {
@@ -4051,7 +4051,7 @@ impl Subscriber {
 					group_fetches.push(fetch);
 				}
 				Step::Subscribe => break true,
-				Step::Expired => match idle.track.abort_unused(Error::Cancel) {
+				Step::Expired => match idle.track.abort_unwanted(Error::Cancel) {
 					Ok(()) => {
 						tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), broadcast_path), track = %track_name, "track released (idle)");
 						self.state.lock().lingering.remove(&id);
@@ -4405,7 +4405,7 @@ impl Subscriber {
 				.await;
 				match res {
 					Some(res) => break Some(res),
-					None if request.reject_unused(Error::Cancel) => break None,
+					None if request.reject_unwanted(Error::Cancel) => break None,
 					None => continue,
 				}
 			}
@@ -5375,9 +5375,7 @@ impl Subscriber {
 	async fn serve_fill(self, broadcast: Path, name: String, fill: track::Fill, timescale: Option<Timescale>) {
 		let fill = std::sync::Arc::new(fill);
 		let mut last = None;
-		while fill.is_used()
-			&& let Some(run) = fill.next_run()
-		{
+		while let Some(run) = fill.next_run() {
 			let run = match fill.live_group() {
 				Some(live) if run.contains(&live) => {
 					let mut pieces = [run.start..live, live..live + 1, live + 1..run.end]
@@ -5653,7 +5651,7 @@ impl Subscriber {
 			slot.poll(waiter, |state| match &**state {
 				GroupFetch::Done => Poll::Ready(()),
 				GroupFetch::Receiving(Some(group))
-					if unwanted && group.poll_unused(waiter).is_ready() && group.abort_unused(Error::Cancel) =>
+					if unwanted && group.poll_unwanted(waiter).is_ready() && group.abort_unwanted(Error::Cancel) =>
 				{
 					abandoned = true;
 					Poll::Ready(())

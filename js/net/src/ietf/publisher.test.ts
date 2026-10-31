@@ -14,6 +14,7 @@ import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
+import { unwanted } from "../util/demand.ts";
 import { wireOf } from "../wire.ts";
 import type * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
@@ -417,12 +418,14 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		const served = new BroadcastProducer();
 		const trackRequest = wireOf(served).requested();
 		hooks.acceptRequest(request, served);
-		expect((await trackRequest)?.name).toBe("video");
-		expect(served.demand().used.peek()).toBe(true);
+		const track = await trackRequest;
+		expect(track?.name).toBe("video");
 		late.cancel();
 		await looking;
 		expect(late.written).toEqual([]);
-		await served.demand().unused();
+		// The withdrawn lookup no longer holds the track, so the answer lets it go.
+		const producer = track?.accept({ timescale: Timescale.MILLI });
+		await producer?.closed;
 
 		await requests.return?.();
 		served.close();
@@ -467,12 +470,14 @@ test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", as
 		const served = new BroadcastProducer();
 		const trackRequest = wireOf(served).requested();
 		hooks.acceptRequest(request, served);
-		expect((await trackRequest)?.name).toBe("video");
-		expect(served.demand().used.peek()).toBe(true);
+		const track = await trackRequest;
+		if (!track) throw new Error("no request for video");
+		expect(track.name).toBe("video");
+		expect(track.demand().wanted.peek()).toBeDefined();
 		late.withdraw();
 		await subscribing;
 		expect(late.written).toEqual([]);
-		await served.demand().unused();
+		await unwanted(track.demand());
 
 		await requests.return?.();
 		served.close();

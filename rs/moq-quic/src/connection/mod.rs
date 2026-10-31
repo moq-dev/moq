@@ -205,6 +205,8 @@ pub struct Connection {
 	permit_idle_reset: bool,
 	/// Negotiated idle timeout
 	idle_timeout: Option<Duration>,
+	/// Keep-alive interval, derived from [`Self::idle_timeout`] unless configured
+	keep_alive: Option<Duration>,
 	/// The time we send next bundled ACK
 	///
 	/// The goal is to wait long enough for the peer to acknowledge our previous
@@ -351,6 +353,8 @@ impl Connection {
 				None | Some(VarInt(0)) => None,
 				Some(dur) => Some(Duration::from_millis(dur.0)),
 			},
+			// Armed only once established, after the peer's parameters set it.
+			keep_alive: None,
 			timers: TimerTable::default(),
 			authentication_failures: 0,
 			early_1rtt: Vec::new(),
@@ -2170,11 +2174,16 @@ impl Connection {
 	}
 
 	fn reset_keep_alive(&mut self, now: Instant) {
-		let interval = match self.config.keep_alive {
+		let interval = match self.keep_alive {
 			Some(x) if self.state.is_established() => x,
 			_ => return,
 		};
-		self.timers.set(Timer::KeepAlive, now + interval);
+		// A peer may advertise an idle timeout whose derived interval is too far out to represent;
+		// that keep-alive never fires.
+		match now.checked_add(interval) {
+			Some(deadline) => self.timers.set(Timer::KeepAlive, deadline),
+			None => self.timers.stop(Timer::KeepAlive),
+		}
 	}
 
 	fn reset_cid_retirement(&mut self) {
@@ -3611,7 +3620,11 @@ impl Connection {
 	fn set_peer_params(&mut self, params: TransportParameters) {
 		self.streams.set_params(&params);
 		self.idle_timeout = negotiate_max_idle_timeout(self.config.max_idle_timeout(), Some(params.max_idle_timeout));
-		trace!("negotiated max idle timeout {:?}", self.idle_timeout);
+		self.keep_alive = transport::keep_alive_interval(self.config.keep_alive, self.idle_timeout);
+		trace!(
+			"negotiated max idle timeout {:?}, keep-alive {:?}",
+			self.idle_timeout, self.keep_alive
+		);
 		if let Some(info) = params.preferred_address {
 			self.rem_cids
 				.insert(NewConnectionId {

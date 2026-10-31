@@ -42,14 +42,14 @@ impl Activity {
 	/// Wait until every admitted connection has left, then refuse new ones.
 	pub async fn close(&self) {
 		loop {
-			if self.state.unused().await.is_err() {
+			if self.state.wanted_changed(true).await.is_err() {
 				return;
 			}
-			match self.state.write_unused() {
-				kio::Unused::Idle(state) => return state.close(),
+			match self.state.write_unwanted() {
+				kio::Unwanted::Idle(state) => return state.close(),
 				// Admitted between the wake and the commit: wait for it too.
-				kio::Unused::Used => continue,
-				kio::Unused::Closed => return,
+				kio::Unwanted::Wanted => continue,
+				kio::Unwanted::Closed => return,
 			}
 		}
 	}
