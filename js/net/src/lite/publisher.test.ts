@@ -1350,21 +1350,25 @@ test("lite draft-05: an update dropping the floor re-pins to the latest group", 
 	}
 });
 
-// A SUBSCRIBE sent alongside its TRACK can beat the track resolving. Groups the track holds
-// once it does are older than the join, so an absent Group Start is still the latest group.
-test("lite draft-05: a subscribe that beats its track resolving joins at the latest group", async () => {
-	const sub = await servedSubscription({ pending: true });
-	try {
-		await sub.accept();
-		sub.serve(0);
-		sub.serve(1);
-		sub.serve(2);
-		expect(await sub.servedSequence()).toBe(2);
-		expect(await sub.servedSequence()).toBeUndefined();
-	} finally {
-		await sub.close();
-	}
-});
+// A SUBSCRIBE can beat its track resolving, as one a relay serves from a copy still fetching
+// upstream. Groups the track holds once it does are older than the join, so an absent Group
+// Start is still the latest group.
+test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_05])(
+	"lite %s: a subscribe that beats its track resolving joins at the latest group",
+	async (version) => {
+		const sub = await servedSubscription({ version, pending: true });
+		try {
+			await sub.accept();
+			sub.serve(0);
+			sub.serve(1);
+			sub.serve(2);
+			expect(await sub.servedHeader()).toBe(2);
+			expect(await sub.servedSequence()).toBeUndefined();
+		} finally {
+			await sub.close();
+		}
+	},
+);
 
 // On an empty track the re-pin has no latest group to name, so the first group the
 // track produces is served, even below the dropped floor.

@@ -922,11 +922,12 @@ export class Publisher {
 			// priority.
 			const info = await untilAborted(track.info(), left.signal);
 			const publisher = info.priority;
-			// On lite-05, a SUBSCRIBE sent alongside its TRACK can arrive before the track
-			// resolves, when no group is known yet: the newest once it resolves stands in, as it
-			// would for one sent after.
+			// A SUBSCRIBE can arrive before its track resolves, such as one a relay serves from a
+			// copy still fetching upstream, or on lite-05 one sent alongside its TRACK, when no
+			// group is known yet: the newest once it resolves stands in, as it would for one
+			// sent after.
 			const resolved = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
-			if (latest === undefined && hasTrackStream(this.version) && resolved !== floor) {
+			if (latest === undefined && resolved !== floor) {
 				floor = resolved;
 				track.withRange({
 					start: { included: floor },
