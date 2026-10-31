@@ -268,7 +268,7 @@ export class Game {
 		const active = effect.get(this.broadcast.out.active);
 		if (!active) return;
 
-		const statusTrack = active.track("status").subscribe({ priority: 10 });
+		const statusTrack = active.track("status").subscribe({ ...Moq.Track.Subscription.default(), priority: 10 });
 		effect.cleanup(() => statusTrack.close());
 
 		// Reconstruct each status from snapshots and deltas, validated against the schema.

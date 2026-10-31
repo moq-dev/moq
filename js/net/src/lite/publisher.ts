@@ -49,6 +49,7 @@ import {
 	hasDatagrams,
 	hasLargest,
 	hasProbeRtt,
+	hasRanges,
 	hasRouteCost,
 	hasSynced,
 	hasTrackStream,
@@ -346,6 +347,12 @@ class SubscriptionControls {
 		}
 		this.#finish(null);
 	}
+}
+
+// Where each range of `track` starts once delivery starts at `from`, undefined for one with no
+// group there. Before lite-07 there is one range, which starts there.
+function rangeStarts(version: Version, track: track.Subscriber, from: number): (number | undefined)[] {
+	return hasRanges(version) ? hooks.servingStarts(track, from) : [from];
 }
 
 // The later of two locations, either of which may be unknown.
@@ -1337,7 +1344,10 @@ export class Publisher {
 								startSent = true;
 								startSequence = bounds.startGroup;
 								raiseFloor(bounds.startGroup);
-								const start = new SubscribeStart(bounds.startGroup, largest);
+								const start = new SubscribeStart(
+									rangeStarts(this.version, track, bounds.startGroup),
+									largest,
+								);
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)
@@ -1431,7 +1441,7 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(startSequence, largest) },
+								{ start: new SubscribeStart(rangeStarts(this.version, track, startSequence), largest) },
 								this.version,
 							),
 						))

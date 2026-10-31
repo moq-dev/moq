@@ -17,6 +17,12 @@ and time anchors per reader), `maxDelay: null`, the lite-07 publisher FINning a
 covered bounded subscription without SUBSCRIBE_END, and the subscriber opening
 a fresh SUBSCRIBE on the same track when that FIN leaves the demand uncovered.
 
+Decided 2026-10-31 (maintainer): a range-bounded reader parks once its ranges
+are covered, in JavaScript as in Rust. A lite-07 copy outlives a covered FIN,
+so the cache stays warm for the same range and a widening update still
+delivers. A read that should end once its range is served belongs to the
+request surface and `fetchGroup` below, not to a subscription.
+
 What remains:
 
 - **On-demand request surface.** Decided in the 2026-10-05 audit: the producer

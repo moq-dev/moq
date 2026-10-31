@@ -2404,7 +2404,7 @@ test("an end a replaced copy declared holds once the copy is let go in the same 
 	b.close();
 });
 
-test("a replaced copy whose session closed locally binds no end", async () => {
+test("a replaced copy whose session closed binds no end", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
@@ -2419,8 +2419,8 @@ test("a replaced copy whose session closed locally binds no end", async () => {
 
 	front.serve(b.consume());
 	await settle();
-	// A clean close would declare an end at group 1, refusing b's next group.
-	hooks.releaseTrack(ta.producer);
+	// A session close, local or remote, cancels the copy: a failed route, not an end at group 1.
+	ta.producer.abort(new SessionError(SessionCode.Cancel));
 	tb.write(1);
 	await settle();
 	expect(drain(sub)).toEqual([1]);

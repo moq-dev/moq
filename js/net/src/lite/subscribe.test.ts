@@ -230,6 +230,10 @@ test("a lite-07 list decodes as the span covering it", async () => {
 	]);
 	expect(() => requestedRanges(timed, undefined)).toThrow(TimestampMismatch);
 
+	// No start reaches back to group 0; one empty partway through group 5 covers no group.
+	const oldest = await update([2, 0, 1, 3, 0, 1, 5, 2, 1, 5, 2]);
+	expect(oldest.ranges).toEqual([{ end: { absolute: 3 } }, { start: { absolute: 5 }, end: { absolute: 5 } }]);
+
 	await expect(update([0])).rejects.toThrow(ProtocolViolation);
 	await expect(update([1, 4, 0, 0])).rejects.toThrow(ProtocolViolation);
 	await expect(update([1, 0, 1, 0, 0])).rejects.toThrow(ProtocolViolation);
@@ -267,26 +271,37 @@ test("lite-07 carries every range, relative and time anchors included, and older
 });
 
 test("SubscribeStart round-trips on draft-05", async () => {
-	const got = await responseRoundtrip(Version.DRAFT_05, { start: new SubscribeStart(42) });
+	const got = await responseRoundtrip(Version.DRAFT_05, { start: new SubscribeStart([42]) });
 	expect("start" in got).toBe(true);
 	if (!("start" in got)) throw new Error("expected start");
-	expect(got.start.group).toBe(42);
+	expect(got.start.starts).toEqual([42]);
 });
 
 test("SubscribeStart carries the largest position on draft-07", async () => {
-	// Type, length, group, largest group + 1, largest frame.
-	expect(await encode(Version.DRAFT_07, { start: new SubscribeStart(4, { group: 3, frame: 2 }) })).toEqual(
-		new Uint8Array([0, 3, 4, 4, 2]),
+	// Type, length, largest group + 1, largest frame, one range start plus one.
+	expect(await encode(Version.DRAFT_07, { start: new SubscribeStart([4], { group: 3, frame: 2 }) })).toEqual(
+		new Uint8Array([0, 4, 4, 2, 1, 5]),
 	);
 	for (const largest of [undefined, { group: 3, frame: 2 }]) {
-		const got = await responseRoundtrip(Version.DRAFT_07, { start: new SubscribeStart(4, largest) });
+		const got = await responseRoundtrip(Version.DRAFT_07, { start: new SubscribeStart([4], largest) });
 		if (!("start" in got)) throw new Error("expected start");
-		expect([got.start.group, got.start.largest]).toEqual([4, largest]);
+		expect(got.start.largest).toEqual(largest);
 	}
 	// Draft-06 has no largest position on the wire.
-	expect(await encode(Version.DRAFT_06, { start: new SubscribeStart(4, { group: 3, frame: 2 }) })).toEqual(
+	expect(await encode(Version.DRAFT_06, { start: new SubscribeStart([4], { group: 3, frame: 2 }) })).toEqual(
 		new Uint8Array([0, 1, 4]),
 	);
+});
+
+test("SubscribeStart carries each range's start in place of one group on draft-07", async () => {
+	const start = new SubscribeStart([2, undefined, 0]);
+	// Type, length, no largest, three starts each plus one with 0 for none.
+	expect(await encode(Version.DRAFT_07, { start })).toEqual(new Uint8Array([0, 5, 0, 3, 3, 0, 1]));
+	const got = await responseRoundtrip(Version.DRAFT_07, { start });
+	if (!("start" in got)) throw new Error("expected start");
+	expect(got.start.starts).toEqual([2, undefined, 0]);
+	// Draft-06's one `Group` names a single range.
+	await expect(encode(Version.DRAFT_06, { start })).rejects.toThrow();
 });
 
 test("SubscribeEnd round-trips on draft-05", async () => {

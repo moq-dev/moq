@@ -682,6 +682,7 @@ function gateWrites(target: WritableStream<Uint8Array>, hold: boolean) {
 // against a group the loop is already holding.
 async function servedSubscription(
 	options: {
+		ranges?: Subscribe["ranges"];
 		startGroup?: number;
 		startFrame?: number;
 		endGroup?: number;
@@ -695,6 +696,8 @@ async function servedSubscription(
 		// Answer the subscription with a front's broadcast, as an application forwarding a
 		// routed one does, so the track reads through the front's serving route.
 		routed?: boolean;
+		// Groups the track holds before the SUBSCRIBE arrives, stamped by sequence.
+		prefill?: number[];
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
@@ -720,6 +723,11 @@ async function servedSubscription(
 		broadcast = publish(origin, Path.from("test"));
 	}
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: options.maxAge });
+	for (const sequence of options.prefill ?? []) {
+		const group = track.createGroup(sequence);
+		for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(sequence)));
+		group.finish();
+	}
 
 	const client = await Stream.open(pair.client, { version: version });
 
@@ -746,6 +754,7 @@ async function servedSubscription(
 	// Kept so a test can wait for the whole subscription to unwind, decoder included, rather
 	// than only for what reached the wire. It reports failures by tearing down, never by
 	// rejecting.
+	msg.ranges = options.ranges;
 	const serving = publisher.runSubscribe(msg, server);
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
@@ -833,6 +842,34 @@ async function servedSubscription(
 		},
 	};
 }
+
+// SUBSCRIBE_START tells the subscriber where each range's start landed, which a relative or time
+// start leaves it no way to work out from the groups it receives. Mirrors the Rust
+// `lite07_start_names_each_resolved_range_start`.
+test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		prefill: [0, 1, 2, 3, 4],
+		maxAge: Milli(3_600_000),
+		ranges: [
+			{ start: { relative: 1 } },
+			// Group 1 starts at 1 ms.
+			{ start: { time: 1 }, end: { absolute: 2 } },
+			// Empty, so it starts nowhere.
+			{ start: { absolute: 3 }, end: { absolute: 3 } },
+			// Empty only once its start resolves to group 4.
+			{ start: { relative: 0 }, end: { absolute: 2 } },
+		],
+	});
+	try {
+		const resp = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
+		expect(resp.start.starts).toEqual([3, 1, undefined, undefined]);
+	} finally {
+		await sub.close();
+	}
+});
 
 // A relay can ingest back-to-back groups micro-reordered (the upstream leg sends
 // newest-first). The older group is cached and in demand, so serving must still
@@ -1163,7 +1200,7 @@ test("lite draft-05: a straggler below the announced start group is not served",
 		// The publisher announced group 2 as the resolved start.
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
 		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
-		expect(resp.start.group).toBe(2);
+		expect(resp.start.starts[0]).toBe(2);
 
 		// A straggler below the announced start never reaches the wire: the next
 		// stream the publisher opens is group 3's.
@@ -1185,7 +1222,7 @@ test("lite draft-05: an explicit floor still serves a group below the first one"
 
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
 		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
-		expect(resp.start.group).toBe(2);
+		expect(resp.start.starts[0]).toBe(2);
 
 		sub.serve(0);
 		expect(await sub.servedSequence()).toBe(0);
@@ -1210,7 +1247,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 				expect(await sub.servedSequence()).toBe(6);
 				const response = await decodeSubscribeResponse(sub.client.reader, version);
 				if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
-				expect(response.start.group).toBe(expected);
+				expect(response.start.starts[0]).toBe(expected);
 				if (expected < 6) {
 					sub.serve(expected);
 					expect(await sub.servedSequence()).toBe(expected);
@@ -1234,7 +1271,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			hooks.startTrack(sub.track, { start: 3, requested: 2 });
 			const response = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
-			expect(response.start.group).toBe(3);
+			expect(response.start.starts[0]).toBe(3);
 			expect(await sub.servedSequence()).toBe(6);
 		} finally {
 			await sub.close();
@@ -1276,7 +1313,7 @@ for (const skipped of ["failed", "stale"] as const) {
 			sub.serve(6);
 			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
-			expect(response.start.group).toBe(6);
+			expect(response.start.starts[0]).toBe(6);
 			if (skipped === "failed") {
 				const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 				if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
@@ -2043,7 +2080,7 @@ async function serve(
 		let end: number | undefined;
 		for (;;) {
 			const resp = await decodeSubscribeResponse(client.reader, Version.DRAFT_06);
-			if ("start" in resp) start = resp.start.group;
+			if ("start" in resp) start = resp.start.starts[0];
 			if ("end" in resp) {
 				end = resp.end.group;
 				break;
@@ -2859,7 +2896,7 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 	try {
 		const response = await decodeSubscribeResponse(client.reader, version);
 		if (!("start" in response)) throw new Error("expected SUBSCRIBE_OK");
-		expect(response.start.group).toBe(startGroup);
+		expect(response.start.starts[0]).toBe(startGroup);
 		expect(response.start.largest).toEqual({ group: 0, frame: 0 });
 	} finally {
 		client.close();
@@ -2897,7 +2934,7 @@ test("lite draft-07 reports the source's largest position past what a relay hold
 	try {
 		const response = await decodeSubscribeResponse(client.reader, version);
 		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
-		expect([response.start.group, response.start.largest]).toEqual([0, { group: 4, frame: 0 }]);
+		expect([response.start.starts[0], response.start.largest]).toEqual([0, { group: 4, frame: 0 }]);
 	} finally {
 		client.close();
 		publisher.close();

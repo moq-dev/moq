@@ -669,6 +669,18 @@ export class Window {
 		return resolved;
 	}
 
+	/**
+	 * Where each range starts once delivery starts at `from`, in the order given: undefined for
+	 * one with no group there, or whose start still waits. Mirrors the Rust `Window::starts`.
+	 */
+	starts(from: number): (number | undefined)[] {
+		return this.resolved().map((range) => {
+			if (!range) return undefined;
+			const start = Math.max(range.start, from);
+			return range.end === undefined || range.end > start ? start : undefined;
+		});
+	}
+
 	// The first run ending past `sequence`.
 	#runAt(sequence: number): Run | undefined {
 		let lo = 0;

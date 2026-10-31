@@ -228,9 +228,9 @@ jobs:
     needs: [ffi-release, build, verify]
     runs-on: ubuntu-latest
     if: ${{ needs.build.outputs.publish == 'true' }}
-    # The moq-bot key lives in the `publish` Environment, which only protected
+    # The moq-bot key lives in the `bot` Environment, which only protected
     # refs can deploy to: `release`, and `main` for workflow_run.
-    environment: publish
+    environment: bot
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6

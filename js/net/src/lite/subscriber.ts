@@ -140,6 +140,11 @@ interface SubscribeEntry {
 	// (SUBSCRIBE_END), once it declares them.
 	start?: number;
 	end?: number;
+	// Where SUBSCRIBE_START says each of `asked` starts on lite-07, undefined for one with
+	// nothing to deliver. It answers `asked` unless `updated`.
+	starts?: (number | undefined)[];
+	// Whether a SUBSCRIBE_UPDATE went out, which the publisher may have read before answering.
+	updated?: boolean;
 	// Set by the subscribe stream's FIN before lite-05, the track's only end there.
 	finished?: boolean;
 	// Settles once the subscribe stream's responses are read to its FIN or reset, which
@@ -271,6 +276,9 @@ export class Subscriber {
 	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
 	 * `options.hidden` opts in. The opt-in rides the request on lite-07+; an older peer
 	 * never hides anything, so the rule is also applied here.
+	 *
+	 * Only routes whose literal name matches `scope` are reported, unless `options.covering`
+	 * also asks for those whose subtree overlaps it.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		const announced = new announce.Producer();
@@ -278,7 +286,13 @@ export class Subscriber {
 		const consumer = announced.consume();
 		// The last reader leaving ends the stream, which cancels the request.
 		closeUnwanted(announced);
-		void this.#runAnnounced(announced, scopeHead(scope), scope, options?.hidden ?? false);
+		void this.#runAnnounced(
+			announced,
+			scopeHead(scope),
+			scope,
+			options?.hidden ?? false,
+			options?.covering ?? false,
+		);
 		return consumer;
 	}
 
@@ -287,6 +301,7 @@ export class Subscriber {
 		prefix: Path.Valid,
 		scope: Path.Pattern,
 		hidden: boolean,
+		covering: boolean,
 	): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
 		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
@@ -294,7 +309,8 @@ export class Subscriber {
 		// version, where we drop the reflected announce on receipt instead. Matches the
 		// Rust subscriber's `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
 		const msg = new AnnounceRequest(prefix, this.hop, hidden);
-		const visible = (path: Path.Valid) => scopeOverlaps(scope, path) && (hidden || !hiddenBelow(prefix, path));
+		const visible = (path: Path.Valid) =>
+			(covering ? scopeOverlaps(scope, path) : scope.matches(path)) && (hidden || !hiddenBelow(prefix, path));
 
 		// Opened outside the try so the catch can reach it: a protocol violation below has
 		// to reset the stream, not just close our side of it.
@@ -1575,12 +1591,25 @@ export class Subscriber {
 
 			if ("ok" in resp) throw new ProtocolViolation("duplicate SUBSCRIBE_OK");
 			if ("start" in resp) {
-				entry.start = resp.start.group;
-				hooks.startTrack(entry.track, { start: entry.start, requested: entry.requested });
+				// One start per range the SUBSCRIBE carried, unless an update the publisher read
+				// first replaced them.
+				if (hasRanges(this.version) && !entry.updated && resp.start.starts.length !== entry.asked.length)
+					throw new ProtocolViolation(
+						`SUBSCRIBE_START resolves ${resp.start.starts.length} ranges, not ${entry.asked.length}`,
+					);
+				if (hasRanges(this.version)) entry.starts = resp.start.starts;
+				// The lowest range start is the first group served; none leaves nothing owed.
+				entry.start = resp.start.starts.reduce<number | undefined>(
+					(lowest, start) =>
+						start === undefined || (lowest !== undefined && lowest <= start) ? lowest : start,
+					undefined,
+				);
+				hooks.startTrack(entry.track, { start: entry.start ?? null, requested: entry.requested });
 				hooks.reportedLargest(entry.track, resp.start.largest);
 				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
 				// demand asks later. One that still arrives is delivered.
-				if (entry.requested !== undefined) entry.tail.account(entry.requested, entry.start);
+				if (entry.requested !== undefined && entry.start !== undefined)
+					entry.tail.account(entry.requested, entry.start);
 			} else if ("end" in resp) {
 				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
 				entry.end = resp.end.group;
@@ -1618,40 +1647,56 @@ export class Subscriber {
 	// demand uncovered: it covered the bounded range it read, and the demand has moved since.
 	async #settleTail(entry: SubscribeEntry): Promise<boolean> {
 		const { tail, track } = entry;
-
-		const complete = () => {
-			const ranges = wireRanges(track.subscription.peek()?.ranges ?? [{}]);
-			const span = wireSpan(ranges);
-			// Without SUBSCRIBE_END (older drafts) nothing says which groups are owed, unless a
-			// lite-07 publisher covered the bounded ranges.
-			const end =
-				entry.end === undefined
-					? hasRanges(this.version)
-						? span.end
-						: undefined
-					: Math.min(entry.end, span.end ?? entry.end);
-			if (end === undefined) return false;
-			// Without SUBSCRIBE_START the publisher served no group at all.
-			if (entry.start === undefined) return true;
-			// Owed from the floor the demand last asked for, which an update can move either
-			// way, or where SUBSCRIBE_START resolved a live-edge one. The groups the SUBSCRIBE
-			// asked for below its SUBSCRIBE_START were accounted for when it arrived. Only the
-			// groups inside the ranges are owed: the publisher accounts for nothing between them.
-			const start = rangesStart(ranges) ?? entry.start;
-			// A time start resolved at the publisher, which named it with SUBSCRIBE_START.
-			const owed = ranges.map((range) => (range.start?.time ? { ...range, start: { absolute: start } } : range));
-			const window = new Window(owed, track.largest()?.group);
-			return window.runs(start, end).every((run) => tail.covers(run.start, run.end));
-		};
-
+		const complete = () => this.#covered(entry);
 		const released = hooks.trackReleased(track);
 		await tail.settle(complete, released);
 		if (entry.end !== undefined || !hasRanges(this.version) || released.peek() !== undefined) return true;
-		const demand = wireRanges(track.subscription.peek()?.ranges ?? [{}]);
+		return this.#demandCovered(entry);
+	}
+
+	// Whether a lite-07 FIN without SUBSCRIBE_END covered the demand: the ranges it asked for, or
+	// the groups that arrived account for the demand since.
+	#demandCovered(entry: SubscribeEntry): boolean {
+		const demand = wireRanges(entry.track.subscription.peek()?.ranges ?? [{}]);
 		if (JSON.stringify(demand) === JSON.stringify(entry.asked)) return true;
 		// Without SUBSCRIBE_START nothing says which ranges the publisher read, so only the
 		// groups that arrived prove the demand covered.
-		return entry.start !== undefined && complete();
+		return entry.start !== undefined && this.#covered(entry);
+	}
+
+	// Whether the groups received and dropped account for every group the demand is owed once
+	// the publisher ended the subscription.
+	#covered(entry: SubscribeEntry): boolean {
+		const ranges = wireRanges(entry.track.subscription.peek()?.ranges ?? [{}]);
+		const span = wireSpan(ranges);
+		// Without SUBSCRIBE_END (older drafts) nothing says which groups are owed, unless a
+		// lite-07 publisher covered the bounded ranges.
+		const end =
+			entry.end === undefined
+				? hasRanges(this.version)
+					? span.end
+					: undefined
+				: Math.min(entry.end, span.end ?? entry.end);
+		if (end === undefined) return false;
+		// Without SUBSCRIBE_START the publisher served no group at all.
+		if (entry.start === undefined) return true;
+		// Owed from the floor the demand last asked for, which an update can move either
+		// way, or where SUBSCRIBE_START resolved a live-edge one. The groups the SUBSCRIBE
+		// asked for below its SUBSCRIBE_START were accounted for when it arrived. Only the
+		// groups inside the ranges are owed: the publisher accounts for nothing between them.
+		// While SUBSCRIBE_START answers these ranges, each is owed from the start it named, which
+		// accounts for a skipped prefix and resolves a relative or time start. Otherwise a time
+		// start resolved at the publisher, at the lowest start it named.
+		const starts = !entry.updated && JSON.stringify(ranges) === JSON.stringify(entry.asked) && entry.starts;
+		const start = starts ? entry.start : (rangesStart(ranges) ?? entry.start);
+		const owed = starts
+			? ranges.flatMap((range, index) => {
+					const at = starts[index];
+					return at === undefined ? [] : [{ ...range, start: { absolute: at } }];
+				})
+			: ranges.map((range) => (range.start?.time ? { ...range, start: { absolute: start } } : range));
+		const window = new Window(owed, entry.track.largest()?.group);
+		return window.runs(start, end).every((run) => entry.tail.covers(run.start, run.end));
 	}
 
 	/**
@@ -1673,7 +1718,11 @@ export class Subscriber {
 		stream: Stream,
 	): Promise<void> {
 		const track = entry.track;
-		const stopped: Promise<null> = race([hooks.trackReleased(track), stream.reader.closed]).then(() => null);
+		// A reset stops updates too; the responses decide how the track ends.
+		const stopped: Promise<null> = race([hooks.trackReleased(track), stream.reader.closed]).then(
+			() => null,
+			() => null,
+		);
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
 			order: msg.order,
@@ -1741,6 +1790,7 @@ export class Subscriber {
 			}
 			if (refresh !== undefined) sentWanted = refresh;
 			entry.bounded ||= bounded(ranges);
+			entry.updated = true;
 			lastSent = { ...current };
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}
@@ -1977,27 +2027,23 @@ export class Subscriber {
 	}
 
 	/**
-	 * Ends every subscribed track: cleanly without declaring an end for a deliberate close, or
-	 * with `err` when the session died, since those tracks were cut off rather than ended.
-	 * A track whose publisher already ended it finishes either way.
+	 * Ends every subscribed track, fetch, and setup exchange with `err`, the session's end, which
+	 * defaults to a clean close: they were cut off rather than ended. A track whose publisher
+	 * already ended it finishes instead.
 	 */
-	close(err?: Error) {
-		// A fetch or setup exchange cut off by the session is incomplete even on a deliberate
-		// close, so it always ends with an error.
-		const cut = err ?? new StreamError(StreamCode.SessionClosed, { message: "session closed" });
-		this.#closed.abort(cut);
+	close(err: Error = new SessionError(SessionCode.Cancel)) {
+		this.#closed.abort(err);
 
 		for (const { track, finished } of this.#subscribes.values()) {
 			if (finished) track.finish();
-			if (err) track.abort(err);
-			else hooks.releaseTrack(track);
+			track.abort(err);
 		}
 
 		this.#subscribes.clear();
 
 		// This also releases callers still awaiting acceptance.
 		for (const { group } of this.#fetches.values()) {
-			group.abort(cut);
+			group.abort(err);
 		}
 	}
 }
