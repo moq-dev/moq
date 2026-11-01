@@ -518,7 +518,8 @@ export class Broadcast {
 				inner.run((gate) => {
 					if (gate.get(served.closed) !== undefined) return;
 					// Audio gates its own encode on demand, retaining raw PCM meanwhile.
-					if (rendition.kind !== "audio" && gate.get(this.in.onDemand) && !wanted(gate, served, recorder)) return;
+					if (rendition.kind !== "audio" && gate.get(this.in.onDemand) && !wanted(gate, served, recorder))
+						return;
 					gate.set(signal, served);
 				});
 			}

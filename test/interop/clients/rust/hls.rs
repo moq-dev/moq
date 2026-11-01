@@ -23,7 +23,7 @@ type Schedule = Vec<Vec<(u64, bool)>>;
 fn frames(start: u64, end: u64, step: u64, gop: u64) -> Vec<(u64, bool)> {
 	(start..end)
 		.step_by(step as usize)
-		.map(|ms| (ms, (ms - start) % gop == 0))
+		.map(|ms| (ms, (ms - start).is_multiple_of(gop)))
 		.collect()
 }
 
@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
 		.connect(url)
 		.established()
 		.await?;
-	moq_clock::timeout(Duration::from_secs(30), async {
+	kio::clock::timeout(Duration::from_secs(30), async {
 		let broadcast = origin.consume().follow(path, None)?.available().await?;
 		let mut catalogs =
 			moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang).await?;
