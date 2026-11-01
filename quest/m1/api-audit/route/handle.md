@@ -113,4 +113,4 @@ wrappers. Wire: none.
 
 ## Related
 
-- [No constructible internal handles](/quest/m1/api-audit/internal-constructors.md) - the same JS hygiene rule
+- No constructible internal handles - the same JS hygiene rule

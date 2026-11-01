@@ -7,7 +7,7 @@ use axum::{
 use axum_server::accept::Accept;
 use futures::{future::BoxFuture, task::AtomicWaker};
 use http_body::Body as _;
-use moq_clock::{Instant, Sleep};
+use kio::clock::{Instant, Sleep};
 use std::{
 	io,
 	pin::Pin,
@@ -56,7 +56,7 @@ where
 		let since = Instant::now();
 		Box::pin(async move {
 			let (inner, service) = match timeout.and_then(|timeout| since.checked_add(timeout)) {
-				Some(deadline) => moq_clock::timeout_at(deadline, accepted)
+				Some(deadline) => kio::clock::timeout_at(deadline, accepted)
 					.await
 					.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "HTTP connection idle deadline"))??,
 				None => accepted.await?,
@@ -70,7 +70,7 @@ where
 				}),
 				wake: AtomicWaker::new(),
 			});
-			let timer = Box::pin(moq_clock::sleep(Duration::ZERO));
+			let timer = Box::pin(kio::clock::sleep(Duration::ZERO));
 			Ok((
 				Io {
 					inner,
@@ -266,7 +266,7 @@ mod tests {
 			timeout: Some(TIMEOUT),
 		};
 		let start = Instant::now();
-		let result = moq_clock::timeout(TIMEOUT * 2, acceptor.accept(server, ()))
+		let result = kio::clock::timeout(TIMEOUT * 2, acceptor.accept(server, ()))
 			.await
 			.expect("stalled handshake survived its deadline");
 		assert_eq!(result.err().unwrap().kind(), io::ErrorKind::TimedOut);
@@ -415,7 +415,7 @@ mod tests {
 				continue;
 			}
 			let start = Instant::now();
-			let result = moq_clock::timeout(TIMEOUT * 2, serving)
+			let result = kio::clock::timeout(TIMEOUT * 2, serving)
 				.await
 				.expect("idle HTTP/2 connection survived its deadline")
 				.unwrap();

@@ -77,12 +77,12 @@ pub struct Arrival {
 	pub timestamp: moq_net::Timestamp,
 	/// The arrival wall time, encoded in milliseconds since the MoQ epoch.
 	#[serde_as(as = "crate::snapshot::Wall")]
-	pub wall: moq_clock::Wall,
+	pub wall: kio::clock::Wall,
 }
 
 impl Arrival {
 	/// Pair a received media timestamp with the wall time it arrived.
-	pub fn new(timestamp: moq_net::Timestamp, wall: moq_clock::Wall) -> Self {
+	pub fn new(timestamp: moq_net::Timestamp, wall: kio::clock::Wall) -> Self {
 		Self { timestamp, wall }
 	}
 }

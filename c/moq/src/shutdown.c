@@ -4,7 +4,8 @@
  * declare it. */
 void moq_ffi_shutdown(void);
 
-void moq_shutdown(void) {
-    moq_ffi_shutdown();
-    moq_shutdown_dispatcher();
+void moq_shutdown(void)
+{
+	moq_ffi_shutdown();
+	moq_shutdown_dispatcher();
 }
