@@ -811,8 +811,11 @@ impl<S: Shape> Merged<S> {
 		// unannounce. A closed stream ends the merged view.
 		loop {
 			match self.announce.poll_next(waiter) {
+				// A takeover continues what was read through its predecessor, like an update.
 				Poll::Ready(Some(
-					moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update),
+					moq_net::announce::Event::Start(update)
+					| moq_net::announce::Event::Update(update)
+					| moq_net::announce::Event::Takeover { announce: update, .. },
 				)) => changed |= self.apply_announce(update, true),
 				Poll::Ready(Some(moq_net::announce::Event::End(update))) => {
 					changed |= self.apply_announce(update, false)
@@ -1161,7 +1164,8 @@ mod tests {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}

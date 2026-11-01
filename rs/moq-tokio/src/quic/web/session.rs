@@ -1141,6 +1141,28 @@ mod tests {
 		(client, server, endpoints)
 	}
 
+	#[tokio::test]
+	#[tracing_test::traced_test]
+	async fn connect_credentials_stay_out_of_traces() {
+		let (client, server, _endpoints) = pair().await;
+		let url: url::Url = "https://localhost/room?jwt=url-credential".parse().unwrap();
+		let request = ConnectRequest::new(url)
+			.with_header(http::header::AUTHORIZATION, "Bearer header-credential".parse().unwrap())
+			.with_header(http::header::COOKIE, "session=cookie-credential".parse().unwrap());
+		let accept = async {
+			let request = crate::quic::web::Connecting::accept(&server).await.unwrap();
+			assert_eq!(request.headers[http::header::COOKIE], "session=cookie-credential");
+			request.respond(http::StatusCode::OK).await.unwrap()
+		};
+		let (client, server) = tokio::join!(Connected::open(&client, request), accept);
+		assert_eq!(client.unwrap().request.url, server.request.url);
+		assert!(logs_contain("sending CONNECT request"));
+		assert!(logs_contain("received CONNECT request"));
+		for secret in ["url-credential", "header-credential", "cookie-credential"] {
+			assert!(!logs_contain(secret));
+		}
+	}
+
 	async fn gated_pair() -> (
 		crate::quic::driver::connection::Connection,
 		crate::quic::driver::connection::Connection,

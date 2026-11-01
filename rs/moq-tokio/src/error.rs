@@ -166,9 +166,9 @@ pub enum Error {
 	#[error("Iroh support is not enabled")]
 	IrohDisabled,
 
-	/// A client CA or pinned peers were configured on a stream-only server, which has no QUIC listener to verify them.
+	/// A client CA or pinned peers were configured on a server with no QUIC or `tls://` listener to verify them.
 	#[error(
-		"mTLS (--listen-tls-root or tls.peers) needs a QUIC listener (--listen); the TCP and Unix listeners never ask for a client certificate"
+		"mTLS (--listen-tls-root or tls.peers) needs a QUIC listener (--listen) or a TLS TCP listener (--listen-tcp-tls); the plaintext TCP and Unix listeners never ask for a client certificate"
 	)]
 	MtlsUnsupported,
 

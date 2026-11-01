@@ -8,10 +8,11 @@ use std::sync::{Arc, Mutex};
 use crate::credential::{Credential, append_bytes};
 use crate::error::{Error, Result};
 use crate::key::TrackKey;
-use crate::limits::{KEY_LABEL, KEY_LEN, NAME_KEY_LABEL, NAME_MAC_LABEL};
+use crate::limits::{KEY_LABEL, NAME_KEY_LABEL, NAME_MAC_LABEL};
 use crate::name::{self, Name};
 use crate::track;
 use moq_net::Epoch;
+use rind::{aead, hmac};
 
 /// Grouped-frame versus datagram key domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,8 +58,8 @@ impl fmt::Debug for Consumer {
 impl Consumer {
 	pub(crate) fn new(credential: Credential, epoch: Epoch) -> Self {
 		let names = name::Keys::new(
-			credential.expand(&name_mac_info(&credential, &epoch)),
-			credential.expand(&name_key_info(&credential, &epoch)),
+			credential.derive(&name_mac_info(&credential, &epoch), &hmac::HMAC_SHA256),
+			credential.derive(&name_key_info(&credential, &epoch), &aead::AES_128_GCM),
 		);
 		Self(Arc::new(Inner {
 			credential,
@@ -115,11 +116,8 @@ impl Consumer {
 	}
 
 	pub(crate) fn key(&self, semantic: &str, domain: Domain) -> Result<TrackKey> {
-		Ok(TrackKey::new(self.key_bytes(semantic, domain)?))
-	}
-
-	pub(crate) fn key_bytes(&self, semantic: &str, domain: Domain) -> Result<[u8; KEY_LEN]> {
-		Ok(self.0.credential.expand(&self.key_info(semantic, domain)?))
+		let info = self.key_info(semantic, domain)?;
+		Ok(TrackKey::new(self.0.credential.derive(&info, &aead::AES_128_GCM)))
 	}
 
 	pub(crate) fn key_info(&self, semantic: &str, domain: Domain) -> Result<Vec<u8>> {

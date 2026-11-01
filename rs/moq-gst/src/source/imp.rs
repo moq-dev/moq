@@ -4134,7 +4134,9 @@ mod session_tests {
 		await_event(&mut follow, |event| {
 			matches!(
 				event,
-				moq_net::announce::Event::Restart(_) | moq_net::announce::Event::Start(_)
+				moq_net::announce::Event::Restart(_)
+					| moq_net::announce::Event::Takeover { .. }
+					| moq_net::announce::Event::Start(_)
 			)
 		});
 
