@@ -6,7 +6,7 @@
 //! how long a transfer takes: uncapped, the same transfer takes milliseconds.
 #![cfg(feature = "quic")]
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use moq_relay::{Config, Relay};
 use moq_tokio::moq_net;
@@ -98,7 +98,7 @@ async fn transfer(
 		.await
 		.expect("subscribe");
 
-	let start = Instant::now();
+	let start = kio::clock::now();
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, vec![7u8; FRAME])
@@ -115,7 +115,7 @@ async fn transfer(
 		.expect("read_frame failed")
 		.expect("group closed");
 	assert_eq!(frame.payload.len(), FRAME);
-	start.elapsed()
+	kio::clock::now() - start
 }
 
 /// A capped publisher feeds the relay at its rate, and a capped subscriber is fed at its.
@@ -178,7 +178,7 @@ async fn window_opens_once_admitted(mut relay: Relay, port: u16) {
 	});
 	let blocked = async {
 		while conn.stats().frame_tx.data_blocked == 0 {
-			tokio::time::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 		}
 	};
 	kio::clock::timeout(TIMEOUT, blocked)
@@ -197,7 +197,7 @@ async fn window_opens_once_admitted(mut relay: Relay, port: u16) {
 	admission.grant(moq_auth::lease::Consumer::fixed(grant(None, None)));
 	let opened = async {
 		while conn.stats().frame_rx.max_data == credited {
-			tokio::time::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 		}
 	};
 	kio::clock::timeout(TIMEOUT, opened)
