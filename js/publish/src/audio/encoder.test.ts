@@ -1,5 +1,5 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
-import { Micro, Milli } from "@moq/clock";
+import { Manual, Micro, Milli, Nano, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
@@ -9,6 +9,15 @@ import { Broadcast } from "../broadcast";
 import { Estimator, Order } from "../order";
 import type { AudioFrame, Format } from "./capture";
 import { type Codec, Encoder, resolve, toEncoderConfig } from "./encoder";
+
+/** Install a Manual clock reading `ms`, set forward the way a mocked `performance.now()` was. */
+function manualAt(ms: number) {
+	const clock = new Manual();
+	const installed = clock.install();
+	const set = (to: number) => clock.jump(Nano(Nano.fromMilli(Milli(to)) - clock.now()));
+	set(ms);
+	return { set, close: () => installed.close(), [Symbol.dispose]: () => installed.close() };
+}
 
 // Bun does not load Vite's worklet URL imports from the public audio entrypoint.
 mock.module("./capture-worklet.ts?worklet", () => ({ default: async () => "blob:fake-capture" }));
@@ -650,7 +659,7 @@ test("the catalog bitrate only rises", async () => {
 // this one trailing it, which the catalog advertises as `delay`.
 test("a rendition written behind another advertises delay", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	const clock = spyOn(performance, "now").mockReturnValue(200);
+	const clock = manualAt(200);
 
 	try {
 		const order = new Order();
@@ -660,10 +669,10 @@ test("a rendition written behind another advertises delay", async () => {
 		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
 
 		// A sibling that already wrote media up to now.
-		new Estimator().write(performance.now() * 1000, order);
+		new Estimator().write(Nano.toMicro(Nano(now())), order);
 
 		// Captured 100ms ago, with a clock origin that keeps timestamps nonnegative.
-		const start = performance.now() * 1000 - 100_000;
+		const start = Nano.toMicro(Nano(now())) - 100_000;
 		for (let index = 0; index < 4; index++) {
 			await feed.push({ timestamp: Micro(start + index * 20_000), channels: [new Float32Array(960)] });
 		}
@@ -675,7 +684,7 @@ test("a rendition written behind another advertises delay", async () => {
 		]);
 		expect(encoder.out.catalog.peek()).toMatchObject({ delay: 100 });
 	} finally {
-		clock.mockRestore();
+		clock.close();
 	}
 });
 
@@ -744,7 +753,7 @@ async function settle(times = 5): Promise<void> {
 
 test("a failed audio encoder keeps its last catalog config disabled", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using _now = spyOn(performance, "now").mockReturnValue(0);
+	using _now = manualAt(0);
 	using _error = spyOn(console, "error").mockImplementation(() => {});
 	using env = await setup();
 	const live = LaggingAudioEncoder.instances.at(-1);
@@ -761,7 +770,7 @@ test("a failed audio encoder keeps its last catalog config disabled", async () =
 
 test("audio failure stays local through demand changes and capture format re-arms a fresh track", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using _now = spyOn(performance, "now").mockReturnValue(0);
+	using _now = manualAt(0);
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("failure.hang") });
 	const feed = new Feed();
 	const capture = fakeCapture(feed);
@@ -864,7 +873,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 
 test("an audio failure without demand still recovers under a fresh track name", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using _now = spyOn(performance, "now").mockReturnValue(0);
+	using _now = manualAt(0);
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("idle.hang") });
 	const configuring = configured();
 	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(new Feed()) as never });
@@ -906,7 +915,7 @@ test.each(["failure first", "config first"])(
 	"same-turn audio failure and config recovery keep a fresh track: %s",
 	async (order) => {
 		using _webcodecs = installFakeWebCodecs();
-		using _now = spyOn(performance, "now").mockReturnValue(0);
+		using _now = manualAt(0);
 		const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("coalesced.hang") });
 		const configuring = configured();
 		const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(new Feed()) as never });

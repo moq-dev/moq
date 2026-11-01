@@ -2,7 +2,6 @@ use std::{
 	fmt,
 	future::Future,
 	pin::Pin,
-	// std, not `crate::sync`: loom's Arc has no `downgrade`. See `sync.rs`.
 	sync::{
 		Arc, OnceLock, Weak,
 		atomic::{AtomicBool, AtomicU64, Ordering},
@@ -432,7 +431,7 @@ where
 	crate::Pending::new(poll)
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 

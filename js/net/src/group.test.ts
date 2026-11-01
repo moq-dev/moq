@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { FrameTooLarge, GroupTooLarge, StreamCode, StreamError } from "./error.ts";
 import { MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES, Producer } from "./group.ts";
@@ -188,39 +188,26 @@ test("zero group PTS keeps its scale and untimed groups stay unstamped", () => {
 	}
 });
 
-test("used reflects mirror demand and unused resolves when the last reader leaves", async () => {
+test("wanted reflects mirror demand until the last reader leaves", async () => {
 	const producer = new Producer(0);
 
 	// No mirror readers: no demand.
-	expect(producer.demand().used.peek()).toBe(false);
+	expect(producer.demand().wanted.peek()).toBe(false);
 
 	const a = producer.mirror();
 	const b = producer.mirror();
-	expect(producer.demand().used.peek()).toBe(true);
+	expect(producer.demand().wanted.peek()).toBe(true);
 
-	// Closing one of two keeps demand, so unused() stays pending.
+	// Closing one of two keeps demand.
 	a.close();
-	expect(producer.demand().used.peek()).toBe(true);
+	expect(producer.demand().wanted.peek()).toBe(true);
 
-	// Closing the last reader drops demand; unused() resolves. Fetch coalescing awaits this to
-	// cancel a download that everyone has abandoned (a group may never end on its own).
+	// Closing the last reader drops demand. Fetch coalescing watches this to cancel a download
+	// that everyone has abandoned (a group may never end on its own).
 	b.close();
-	await producer.demand().unused();
-	expect(producer.demand().used.peek()).toBe(false);
-});
-
-test("unused rejects once the group closes, even while read", async () => {
-	const producer = new Producer(0);
-	const reader = producer.mirror();
-	const pending = producer.demand().unused();
-	const abort = new Error("boom");
-	producer.abort(abort);
-	await expect(pending).rejects.toBe(abort);
-
-	const finished = new Producer(1);
-	finished.finish();
-	await expect(finished.demand().unused()).rejects.toThrow("group is closed");
-	reader.close();
+	const wanted = producer.demand().wanted;
+	while (wanted.peek()) await wanted.changed();
+	expect(wanted.peek()).toBe(false);
 });
 
 function pair(sequence: number) {
@@ -587,7 +574,7 @@ test("a group that ends on its own abandons the replacement it asked for", async
 
 	route.set(1);
 	const read = consumer.readFrame();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	expect(signal?.aborted).toBe(false);
 
 	producer.finish();
@@ -695,7 +682,7 @@ test("a stalled group whose copy then fails asks again with the failure", async 
 
 	route.set(1);
 	const read = consumer.readFrame();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	producer.abort(new Error("route failed"));
 	await expect(read).rejects.toBe(verdict);
 });

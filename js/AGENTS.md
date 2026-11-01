@@ -2,7 +2,7 @@ The `/js` TypeScript workspace. Extends the root `AGENTS.md`.
 
 # Packages
 
-Bun workspaces listed in the repo-root `package.json`, published as `@moq/<component>`. Run recipes via `just js <recipe>`. `@moq/signals` is the reactive core every package uses, `@moq/wasm` wraps `rs/moq-wasm`, and `@moq/boy` is the only Solid/`.tsx` package.
+Bun workspaces listed in the repo-root `package.json`, published as `@moq/<component>`. Run recipes via `just js <recipe>`. `@moq/signals` is the reactive core every package uses, and `@moq/boy` is the only Solid/`.tsx` package.
 
 Entrypoints re-export deps under namespaces (`Net`, `Signals`, `Hang`). Only re-export what is part of the public API.
 

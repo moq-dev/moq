@@ -118,6 +118,29 @@ async def test_fetch_of_a_dropped_group_is_not_found():
     await task
 
 
+async def test_insert_datagram_keeps_its_sequence_and_largest_follows():
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("events")
+    consumer = track.consume()
+    assert track.largest() is None
+
+    track.insert_datagram(7, b"seven")
+    datagram = await asyncio.wait_for(consumer.recv_datagram(), 5)
+    assert datagram is not None
+    assert (datagram.sequence, datagram.payload) == (7, b"seven")
+    assert track.largest() == moq.Position(group=7, frame=0)
+    assert track.append_datagram(b"next") == 8
+
+
+async def test_broadcast_consumer_closed_resolves_on_close():
+    broadcast = moq.BroadcastProducer()
+    closed = asyncio.create_task(broadcast.consume().closed())
+    await asyncio.sleep(0.01)
+    assert not closed.done()
+    broadcast.close()
+    await asyncio.wait_for(closed, 5)
+
+
 def test_protocol_error_helper_covers_known_app_and_unknown():
     cases = [
         (moq.ErrorScope.SESSION, 0x2, moq.ProtocolKind.UNAUTHORIZED, True),
@@ -459,9 +482,10 @@ def test_track_info_keeps_native_default_priority():
 
 
 def test_default_subscription_skips_superseded_groups_at_once():
-    """Only the default carries moq-net's zero max delay; a bare record sets no limit."""
+    """A bare record carries moq-net's zero max delay too; only an explicit None sets no limit."""
     assert moq.Subscription.default()._ffi().max_delay == timedelta(0)
-    assert moq.Subscription()._ffi().max_delay is None
+    assert moq.Subscription()._ffi().max_delay == timedelta(0)
+    assert moq.Subscription(max_delay=None)._ffi().max_delay is None
 
 
 def test_string_sequences_refuse_a_bare_string():
@@ -491,8 +515,7 @@ async def test_fetch_group_and_serve_dynamic_miss():
     fill = await asyncio.wait_for(dynamic.requested_fill(), timeout=5.0)
     assert (fill.start_group, fill.start_frame, fill.end_group) == (7, 0, 8)
     assert fill.priority == 11
-    assert fill.next() == 7
-    assert fill.is_used()
+    assert fill.wanted() == 7
     assert fill.is_wanted(7)
     assert not fill.is_wanted(8)
 

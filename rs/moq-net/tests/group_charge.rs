@@ -11,7 +11,7 @@
 //! A counting allocator needs the whole binary to itself, hence a test of its own.
 
 // Every size here is pointer-width dependent, and the derivation is checked on the
-// 64-bit targets a relay runs on. This also keeps the global allocator off wasm.
+// 64-bit targets a relay runs on.
 #![cfg(target_pointer_width = "64")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
