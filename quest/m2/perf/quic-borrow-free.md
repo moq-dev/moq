@@ -49,6 +49,39 @@ moq-net's `transport::poll` traits. Only context passing would revisit their
 
 Public API: none; prototypes stay on a branch. The adoption is its own quest.
 
+### Mechanism prototypes (2026-11-01)
+
+[moq-dev/moq#7531](https://github.com/moq-dev/moq/pull/7531) has the full
+report. The prototypes are on the `proto/quic-borrow-free` branch
+([c368f72](https://github.com/moq-dev/moq/commit/c368f72c0b)), not to land:
+`rs/moq-quic/benches/share.rs` runs a relay that writes new uni streams to N
+subscribers over real moq-quic connections (plaintext, virtual time). Every
+shape makes the same moq-quic calls through the [waits](/quest/m1/quic-api/waits.md)
+`poll_*` forms. The four shapes are context passing, `RefCell`, `Mutex`, and a
+driver-owned connection. In the driver-owned shape, each send stream is a
+`kio::log` the handle appends to against published credit, and each received
+lease goes through a cell to the reader and comes back for release.
+
+Instructions per stream (`instructions:u`, pinned core, runs differ by under
+0.6%):
+
+- **`RefCell`** costs 0.2–1.0% more than context passing, and **`Mutex`**
+  costs 1.1–3.5% more (about 290 instructions per stream, plus about 100 per
+  extra write).
+- **Channel** costs 5–29% more: about 4.2–4.8k instructions per stream plus
+  about 320 per extra write. The cost is highest for one write per stream,
+  which is fanout's shape. About 1.3k of the extra comes from `kio::log`'s
+  epoch reclamation, about 1.1k from allocations (the cells, log segments,
+  tasks, and lease boxes), and the rest from credit, the cell stacks, and the
+  extra wake hop.
+- **Threaded** (noisy host): with the relay's writes spread over 1–7 threads,
+  `Mutex` had the lower median wall time in 13 of 16 cases. Channel was ahead
+  only when two or four writers shared a single connection.
+
+What remains: the driver-level prototypes in moq-tokio and moq-uring, the
+fanout-bench sweep, and the recommendation. Whether they are still worth
+building is open on the PR.
+
 ## Related
 
 - [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md) - measures the lock this would remove; its staging queue is a partial form of the channel approach
