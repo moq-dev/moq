@@ -6197,8 +6197,8 @@ const LIVE_BATCH: usize = 16;
 impl Indexed {
 	/// Take in what arrived since the last call.
 	fn catch_up(&mut self, state: &TrackState, fixed: &Runs) {
-		let skip = self.taken.saturating_sub(state.offset);
-		for (sequence, stamp) in state.arrival.iter().skip(skip) {
+		let skip = self.taken.saturating_sub(state.offset).min(state.arrival.len());
+		for (sequence, stamp) in state.arrival.range(skip..) {
 			if fixed.contains(*sequence) {
 				self.groups.insert(*sequence, *stamp);
 			}

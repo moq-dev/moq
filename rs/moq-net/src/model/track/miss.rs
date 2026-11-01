@@ -20,7 +20,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet},
 	ops::{self, RangeInclusive},
 	sync::{Arc, Mutex, PoisonError},
-	task::Poll,
+	task::{Poll, Wake, Waker},
 	time::Duration,
 };
 
@@ -59,6 +59,12 @@ pub(super) struct Misses {
 	/// The join holding each sequence: a reader's joins hold disjoint groups, so a change
 	/// touches only the joins holding what it changes, never every fill the reader asked.
 	holders: RangeMap<u64, u64>,
+	/// What each join parks on, under its key: a waiter of its own, which records that its
+	/// fill answered before waking the reader, so [`Self::resolve`] looks only at the fills
+	/// that answered, never at every fill still out.
+	parked: BTreeMap<u64, kio::Waiter>,
+	/// The joins whose fills answered since the reader last looked.
+	answered: Arc<Answered>,
 	/// The key the next join takes.
 	next_join: u64,
 	/// What the reader asked its fills with last.
@@ -85,6 +91,45 @@ pub(super) struct Misses {
 
 /// A run of misses the reader gives up, for the drop cursor to name.
 pub(super) type GivenUp = Vec<ops::Range<u64>>;
+
+/// The joins whose fills changed their answer, recorded by each join's own waiter before it
+/// wakes the reader's task.
+///
+/// The task is the one the reader last resolved for. A reader polled by another task since
+/// still learns of every answer, since the joins' waiters stay registered and wake whichever
+/// task the reader resolved for last.
+#[derive(Default)]
+struct Answered {
+	keys: Mutex<BTreeSet<u64>>,
+	task: Mutex<Option<Waker>>,
+}
+
+/// Wakes the reader once join `key`'s fill answers, recording which join it was.
+struct JoinWake {
+	key: u64,
+	answered: Arc<Answered>,
+}
+
+impl Wake for JoinWake {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		// Recorded before the task wakes, so the resolve it triggers sees the change.
+		let answered = &self.answered;
+		answered
+			.keys
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.insert(self.key);
+		// Woken with no lock held: an executor may poll inline.
+		let task = answered.task.lock().unwrap_or_else(PoisonError::into_inner).clone();
+		if let Some(task) = task {
+			task.wake();
+		}
+	}
+}
 
 /// The current deferred runs, indexed by sequence and by their next judgement deadline.
 /// Splits remove the old age entry before publishing either piece; no stale timers remain.
@@ -286,6 +331,17 @@ impl Misses {
 			self.next_join += 1;
 			self.holders.insert(join.groups.clone(), key);
 			self.joins.insert(key, join);
+			let wake = Arc::new(JoinWake {
+				key,
+				answered: self.answered.clone(),
+			});
+			self.parked.insert(key, kio::Waiter::new(Waker::from(wake)));
+			// Looked at once, which parks it.
+			self.answered
+				.keys
+				.lock()
+				.unwrap_or_else(PoisonError::into_inner)
+				.insert(key);
 		}
 	}
 
@@ -302,6 +358,7 @@ impl Misses {
 				join.release(&RangeSet::from_iter([piece]));
 				if join.is_empty() {
 					self.joins.remove(&key);
+					self.parked.remove(&key);
 				}
 			}
 		}
@@ -382,8 +439,11 @@ impl Misses {
 		self.release(&lost);
 	}
 
-	/// Take in what the joined fills answered, parking `waiter` on the rest. Returns the
+	/// Take in what the joined fills answered, waking `waiter` once the rest do. Returns the
 	/// runs to ask again: refused as too old for a budget tighter than this reader's.
+	///
+	/// Looks only at the joins whose fills answered since the last call, and the joins new
+	/// since, so a reader waiting on thousands of fills costs the ones that answered.
 	pub fn resolve(
 		&mut self,
 		state: &kio::Consumer<TrackState>,
@@ -392,16 +452,17 @@ impl Misses {
 		waiter: &kio::Waiter,
 	) -> RangeSet<u64> {
 		let mut retry = RangeSet::new();
-		// Only the joins holding something unanswered: one holding only filled groups until
-		// they are taken has nothing to answer.
-		let keys: BTreeSet<u64> = self
-			.wanted
-			.iter()
-			.flat_map(|run| self.holders.overlapping(run).map(|(_, key)| *key))
-			.collect();
+		{
+			let mut task = self.answered.task.lock().unwrap_or_else(PoisonError::into_inner);
+			if !task.as_ref().is_some_and(|task| task.will_wake(waiter.waker())) {
+				*task = Some(waiter.waker().clone());
+			}
+		}
+		// Taken after the task is set: an answer landing since wakes the task set above.
+		let keys = std::mem::take(&mut *self.answered.keys.lock().unwrap_or_else(PoisonError::into_inner));
 		let mut keys = keys.into_iter().peekable();
 		while let Some(&key) = keys.peek() {
-			let Some(join) = self.joins.get(&key) else {
+			let (Some(join), Some(parked)) = (self.joins.get(&key), self.parked.get(&key)) else {
 				keys.next();
 				continue;
 			};
@@ -418,7 +479,9 @@ impl Misses {
 				keys.next();
 				continue;
 			}
-			let answers = match join.outcome().poll(waiter, |outcome| {
+			// Only what is unanswered: a join holding only filled groups until they are taken
+			// has nothing to answer.
+			let answers = match join.outcome().poll(parked, |outcome| {
 				let answered = outcome.within(&wanted);
 				match answered.is_empty() {
 					true => Poll::Pending,
@@ -711,8 +774,18 @@ impl Misses {
 		// Settled here rather than when read, since an ordered reader never looks at what a
 		// fill answered: it reads past a group gone from the cache. Still asked, its fill
 		// settles it; given up already, it was named.
-		for run in self.wanted.iter().chain(self.given_up.iter()) {
-			again.remove(run.clone());
+		// Only what overlaps it, so a reader still asking thousands of fills pays nothing here.
+		let settled: Vec<ops::Range<u64>> = again
+			.iter()
+			.flat_map(|run| {
+				let wanted = self.wanted.overlapping(run);
+				wanted
+					.chain(self.given_up.overlapping(run))
+					.map(move |settled| settled.start.max(run.start)..settled.end.min(run.end))
+			})
+			.collect();
+		for run in settled {
+			again.remove(run);
 		}
 		for (run, refill) in refills
 			.iter()
@@ -828,30 +901,19 @@ impl Misses {
 	/// as the reader skips a stale cached group, parking `waiter` on each run going stale.
 	/// A fill answers on its handler's time, so an ordered reader would otherwise wait out
 	/// a stalled one for good.
+	///
+	/// Each stretch of a wanted run between the groups the live feed cached inside it is
+	/// judged whole, from its start. Every stretch starting below the first group the live
+	/// feed has after a stretch shares its successors, so one check judges all of them:
+	/// thousands of runs a fill still owes below the live edge cost one, not one each.
 	pub fn expire(&mut self, state: &TrackState, drift: &Drift, given_up: &mut GivenUp, waiter: &kio::Waiter) {
 		let (mut stale, mut arrived) = (RangeSet::new(), RangeSet::new());
-		for run in self.wanted.iter() {
-			// Each stretch between the groups cached inside the run shares one successor, so
-			// one check judges it whole. Groups arrive out of order, so a fresh late group
-			// keeps the stretch below it owed while the ones around it go stale.
-			let mut from = run.start;
-			// Only the live feed's arrivals split the run: an aborted group is a hole, and a
-			// backfill is a fill's answer, reaching the reader once that fill publishes it.
-			let cached = state
-				.lookup
-				.range(run.clone())
-				.filter(|(_, slot)| slot.is_walked())
-				.map(|(&sequence, _)| sequence);
-			for at in cached.chain(std::iter::once(run.end)) {
-				if from < at && state.poll_drifted(from, &drift.edge.servable, drift.budget, None, waiter) {
-					stale.insert(from..at);
-				}
-				// What arrived live is the feed's to serve, as the reader serves any cached group.
-				if at < run.end {
-					arrived.insert(at..at + 1);
-				}
-				from = at.saturating_add(1);
-			}
+		let servable = &drift.edge.servable;
+		let mut next = self.wanted.iter().next().map(|run| run.start);
+		while let Some(from) = next {
+			let bound = state.arrival(from, servable).map(|slot| slot.group.sequence);
+			let drifted = state.poll_drifted(from, servable, drift.budget, None, waiter);
+			next = self.stretches(state, from, bound, drifted, &mut stale, &mut arrived);
 		}
 		if stale.is_empty() && arrived.is_empty() {
 			return;
@@ -866,6 +928,72 @@ impl Misses {
 		self.release(&released);
 		for run in stale.iter() {
 			self.give_up(run.clone(), given_up);
+		}
+	}
+
+	/// Visit the stretches of the wanted runs starting at `from` and below `bound`, all judged
+	/// `drifted`, putting them in `stale` if so, and the groups the live feed cached inside a
+	/// run in `arrived`. Returns where the next stretch starts, at or past `bound`.
+	///
+	/// Groups arrive out of order, so a fresh late group keeps the stretch below it owed while
+	/// the ones around it go stale. Only the live feed's arrivals split a run: an aborted
+	/// group is a hole, and a backfill is a fill's answer, reaching the reader once that fill
+	/// publishes it. A fresh stretch with no such group before the next live one is passed
+	/// in one step, however many runs lie between.
+	fn stretches(
+		&self,
+		state: &TrackState,
+		from: u64,
+		bound: Option<u64>,
+		drifted: bool,
+		stale: &mut RangeSet<u64>,
+		arrived: &mut RangeSet<u64>,
+	) -> Option<u64> {
+		let walked = |lo: u64, hi: u64| {
+			state
+				.visible
+				.range(lo..hi)
+				.copied()
+				.find(|sequence| state.lookup.get(sequence).is_some_and(|slot| slot.serves_end()))
+		};
+		// Where the visit is, and whether a stretch started below it is still running there.
+		let (mut at, mut within) = (from, false);
+		loop {
+			let run = self.wanted.overlapping(&(at..u64::MAX)).next()?.clone();
+			if run.start > at {
+				(at, within) = (run.start, false);
+			}
+			if !within && bound.is_some_and(|bound| at >= bound) {
+				return Some(at);
+			}
+			match walked(at, run.end) {
+				// What arrived live is the feed's to serve, as the reader serves any cached group.
+				Some(group) => {
+					if drifted && at < group {
+						stale.insert(at..group);
+					}
+					arrived.insert(group..group + 1);
+					(at, within) = (group.checked_add(1)?, false);
+				}
+				None if drifted => {
+					stale.insert(at..run.end);
+					(at, within) = (run.end, false);
+				}
+				// The stretch began below the bound and ran past it: the next starts past it too.
+				None if bound.is_some_and(|bound| bound <= run.end) => (at, within) = (run.end, false),
+				None => {
+					// Fresh up to the next group the live feed holds, or the bound: every stretch
+					// starting below either is fresh too, holding no arrival.
+					let next = state.visible.range(run.end..).next().copied();
+					let leap = match (next, bound) {
+						(Some(next), Some(bound)) => next.min(bound),
+						(next, bound) => next.or(bound)?,
+					};
+					// A run holding the leap from below it is a stretch already running there.
+					within = self.wanted.get(&leap).is_some_and(|held| held.start < leap);
+					at = leap;
+				}
+			}
 		}
 	}
 
