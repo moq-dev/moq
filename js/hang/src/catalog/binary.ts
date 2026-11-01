@@ -2,6 +2,7 @@ import * as z from "zod/mini";
 import { u53Schema } from "./integers";
 import { ModeSchema } from "./mode";
 import { EpochSchema, RelativeBroadcastSchema } from "./path";
+import { renditions } from "./section";
 
 /**
  * Schema for a single binary track: application data published as opaque payloads.
@@ -64,7 +65,7 @@ export const BinaryConfigSchema = z.looseObject({
  * key is the track name to subscribe to.
  */
 export const BinarySchema = z.object({
-	tracks: z.record(z.string(), BinaryConfigSchema),
+	tracks: renditions(BinaryConfigSchema),
 });
 
 /** The catalog binary section: data tracks keyed by track name. */

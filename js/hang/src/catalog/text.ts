@@ -2,6 +2,7 @@ import * as z from "zod/mini";
 import { ContainerSchema } from "./container";
 import { u53Schema } from "./integers";
 import { EpochSchema, RelativeBroadcastSchema } from "./path";
+import { renditions } from "./section";
 
 /**
  * The cue serialization format of a text track, mirroring the Rust `TextFormat`.
@@ -84,7 +85,7 @@ export const TextConfigSchema = z.object({
 export const TextSchema = z.object({
 	// A map of track name to rendition configuration.
 	// This is not an array so it will work with JSON Merge Patch.
-	renditions: z.record(z.string(), TextConfigSchema),
+	renditions: renditions(TextConfigSchema),
 });
 
 /** The catalog text section: renditions keyed by track name. */

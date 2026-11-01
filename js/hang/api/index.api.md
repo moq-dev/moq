@@ -7,13 +7,12 @@ import { $loose } from "zod/v4/core";
 import { $strip } from "zod/v4/core";
 import { Micro } from "@moq/clock";
 import { Window } from "@moq/json";
+import { ZodMiniCustom } from "@zod/mini";
 import { ZodMiniNullable } from "@zod/mini";
 import { ZodMiniNumber } from "@zod/mini";
 import { ZodMiniObject } from "@zod/mini";
 import { ZodMiniOptional } from "@zod/mini";
 import { ZodMiniPipe } from "@zod/mini";
-import { ZodMiniRecord } from "@zod/mini";
-import { ZodMiniString } from "@zod/mini";
 import { ZodMiniTransform } from "@zod/mini";
 import { infer } from "@zod/mini";
 
@@ -52,27 +51,21 @@ export namespace Echo {
 	export const SUFFIX: ".echo";
 	export type Snapshot = infer<typeof Echo.SnapshotSchema>;
 	export const SnapshotSchema: ZodMiniObject<{
-		renditions: ZodMiniOptional<ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			arrival: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<ZodMiniObject<{
-				timestamp: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			}, $strip>>, ZodMiniTransform<{
+		renditions: ZodMiniOptional<ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
+			arrival?: {
 				timestamp: number & $brand<"u53">;
 				wall: number & $brand<"u53">;
-			} | undefined, {
-				timestamp: number & $brand<"u53">;
-				wall: number & $brand<"u53">;
-			} | null>>>;
-			bytes: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			decoded: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			errors: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			frames: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			late: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			latency: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
-			stalled: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			stalls: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			underruns: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>>;
+			} | undefined;
+			bytes?: number & $brand<"u53"> | undefined;
+			decoded?: number & $brand<"u53"> | undefined;
+			errors?: number & $brand<"u53"> | undefined;
+			frames?: number & $brand<"u53"> | undefined;
+			late?: number & $brand<"u53"> | undefined;
+			latency?: number & $brand<"u53"> | undefined;
+			stalled?: number & $brand<"u53"> | undefined;
+			stalls?: number & $brand<"u53"> | undefined;
+			underruns?: number & $brand<"u53"> | undefined;
+		}>, Record<string, unknown>>>>;
 		transport: ZodMiniOptional<ZodMiniObject<{
 			age: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 			lostBytes: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
@@ -203,13 +196,13 @@ export namespace Stats {
 	}, $strip>;
 	export type Snapshot = infer<typeof Stats.SnapshotSchema>;
 	export const SnapshotSchema: ZodMiniObject<{
-		renditions: ZodMiniOptional<ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
-			bytes: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			frames: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			keyframes: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			skipped: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>>;
+		renditions: ZodMiniOptional<ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
+			bitrate?: number & $brand<"u53"> | undefined;
+			bytes?: number & $brand<"u53"> | undefined;
+			frames?: number & $brand<"u53"> | undefined;
+			keyframes?: number & $brand<"u53"> | undefined;
+			skipped?: number & $brand<"u53"> | undefined;
+		}>, Record<string, unknown>>>>;
 		transport: ZodMiniOptional<ZodMiniObject<{
 			age: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 			lostBytes: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;

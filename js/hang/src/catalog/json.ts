@@ -2,6 +2,7 @@ import * as z from "zod/mini";
 import { u53Schema } from "./integers";
 import { ModeSchema } from "./mode";
 import { EpochSchema, RelativeBroadcastSchema } from "./path";
+import { renditions } from "./section";
 
 /**
  * Schema for a single JSON track: application data published as a live JSON document or log.
@@ -63,7 +64,7 @@ export const JsonConfigSchema = z.looseObject({
  * key is the track name to subscribe to.
  */
 export const JsonSchema = z.object({
-	tracks: z.record(z.string(), JsonConfigSchema),
+	tracks: renditions(JsonConfigSchema),
 });
 
 /** The catalog JSON section: data tracks keyed by track name. */
