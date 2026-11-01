@@ -550,7 +550,7 @@ mod tests {
 						let mut resampler = Resampler::new(input_rate, output_rate, channels, chunk).unwrap();
 						let mut elapsed = std::time::Duration::ZERO;
 						for _ in 0..10 {
-							let start = moq_clock::now();
+							let start = kio::clock::now();
 							let mut count = 0;
 							for (index, samples) in input.chunks(packet * channels as usize).enumerate() {
 								let at = at((index * packet) as u64, input_rate as u64);
