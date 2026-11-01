@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_mux::container::Read as Encoded;
 use std::time::Duration;
 
@@ -943,6 +943,74 @@ mod tests {
 		.unwrap();
 		let frame = next_frame(&mut consumer).await.unwrap().unwrap();
 		assert_eq!(frame.timestamp.as_micros(), 80_000, "the backlog was replayed");
+	}
+
+	/// A latest join with a warmup loses no group the publisher bursts before its first
+	/// frame decodes. A join that put only the warmup on the wire, widening it once the
+	/// first packet was read, let the publisher skip every group of such a burst a warmup
+	/// behind its newest, a gap no later update recovers.
+	#[tokio::test(start_paused = true)]
+	async fn latest_loses_no_group_the_publisher_bursts_before_its_first_frame() {
+		let publisher = origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		// One 20 ms packet per group.
+		let mut write = |packet: u64| {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(packet * 20_000).unwrap(),
+					duration: None,
+					payload: vec![0; 960 * size_of::<f32>()].into(),
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		};
+		write(0);
+
+		let subscriber = origin(2);
+		let _link = link(&publisher, &subscriber).await;
+		let consumer = subscriber.consume();
+		let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
+
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		catalog.warmup = Some(Duration::from_millis(80));
+		let mut consumer = Consumer::new(
+			&remote,
+			&catalog,
+			"audio",
+			Options {
+				start: Start::Latest,
+				max_delay: Duration::from_secs(1),
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		// Written in one pass, before the publisher's session runs again.
+		for packet in 1..=20 {
+			write(packet);
+		}
+		producer.finish().unwrap();
+
+		let mut stamps = Vec::new();
+		while let Some(read) = consumer.read().await.unwrap() {
+			match read {
+				Read::Frame(frame) => stamps.push(frame.timestamp.as_micros()),
+				Read::Gap { timestamp, duration } => panic!("a gap of {duration:?} after {timestamp:?}"),
+				Read::End { .. } => {}
+			}
+		}
+		let expected: Vec<u128> = (4..=20).map(|packet| packet * 20_000).collect();
+		assert_eq!(stamps, expected, "the burst reached the decoder whole");
 	}
 
 	#[tokio::test(start_paused = true)]
