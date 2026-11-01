@@ -355,7 +355,7 @@ extra copy of every received stream chunk injected into `@moq/net`, the control
 that shows the suite can see a copy-heavy change), and `base` when a revision is
 given. Each variant resolves `@moq/*` from its own checkout. Variants alternate
 within each round, with the starting variant rotated, after one warmup round
-(`--rounds`, `--warmup`, `--scenarios transport,cmaf,media`).
+(`--rounds`, `--warmup`, `--scenarios transport,cmaf,media,stats`).
 
 - `transport`: a publisher page writes 160 B through 1 MiB frames, a consumer page
   subscribes and reads them all. Connection setup and fixture generation stay
@@ -371,6 +371,19 @@ within each round, with the starting variant rotated, after one warmup round
   window's edges, so decoded-but-unpainted can be off by a frame or two; decoder
   queue depth (mean, and maximum within the window) comes from a thin
   `VideoDecoder` wrapper present in every pass.
+- `stats`: one page holds `Moq.Connection` handles open while they do nothing
+  else, to measure local send-rate sampling. Distinct reconnect loops (1, 4, 16)
+  cross reservations held on each (0, 1, 4); receive-only playback of a 30 fps
+  track, pooled connections inside the linger window after their last handle
+  closed, four identical pooled handles (one connection, the control) and qmux
+  complete the sweep. After a settle, a 2 s window (1.2 s for linger) reports
+  `getStats` calls and `setTimeout` calls per second, main-thread and process
+  CPU, and how many reservations hold a send-rate slice. `stats resume` releases
+  and re-takes a reservation ten times, 500 ms apart, timing its first slice.
+  Shipping Chromium has no `WebTransport.getStats()`, so this scenario runs in a
+  second browser with `--enable-blink-features=WebTransportStats`; its `absent`
+  shapes delete the method again, as shipping Chromium and Safari present it. The
+  `copy` control does not run here: nothing receives stream chunks in bulk.
 
 Costs are split by where they run. Main-thread CPU is CDP `TaskDuration` in
 thread ticks; process CPU is each page's renderer (every thread, including
@@ -380,8 +393,10 @@ keep instrumentation out of timed samples: a traced pass retains a gzipped Chrom
 trace per workload and reports GC pauses and reclaimed JS heap; a counted pass
 wraps typed-array constructors, `set` and `slice` to report JS-visible bytes
 copied and allocated per payload byte during delivery, with connection setup
-subtracted; a probed pass reads each presented
-frame's painted id back to report frame delay percentiles. Native copies inside
+subtracted (for `stats`, V8's sampling heap profiler reports every byte the
+window allocated, collected or not); a probed pass reads each presented
+frame's painted id back to report frame delay percentiles. The `stats` call
+counters are one increment per call and run in every pass. Native copies inside
 WebTransport and WebCodecs are unavailable, and the report says so.
 
 Chromium runs headless with `--disable-gpu`, so decode and rendering are

@@ -13,7 +13,7 @@ import { basename, join, resolve } from "node:path";
 import type { BunPlugin } from "bun";
 import { workspace } from "./workspace.ts";
 
-const PAGES = ["transport", "cmaf", "media"].map((page) => join(import.meta.dir, "page", `${page}.ts`));
+const PAGES = ["transport", "cmaf", "media", "stats"].map((page) => join(import.meta.dir, "page", `${page}.ts`));
 
 // The one statement every received byte passes through; the control copies it.
 const CHUNK = "this.#chunks.push(result.value);";

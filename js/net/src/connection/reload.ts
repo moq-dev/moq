@@ -3,7 +3,7 @@ import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals
 import type * as Announce from "../announced.ts";
 import { Handle as AuthHandle } from "../auth.ts";
 import { ended } from "../auth_session.ts";
-import { Allocator } from "../bandwidth.ts";
+import { Allocator, reserved } from "../bandwidth.ts";
 import { error, reason, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -162,7 +162,7 @@ function pacing(delay: ReloadDelay) {
 	};
 }
 
-/** How often the send-rate estimate is sampled from the live transport. */
+/** How often the send-rate estimate is sampled from the live transport while a reservation reads it. */
 const BANDWIDTH_POLL = Nano.fromMilli(Milli(100));
 
 /** Current state of a reconnecting connection. */
@@ -219,7 +219,9 @@ export class Reload {
 	 *
 	 * The same instance across reconnects, so reservations survive a drop. The
 	 * estimate is `undefined` while disconnected, which tells a sender to hold
-	 * its rate rather than encode at zero.
+	 * its rate rather than encode at zero. It is sampled from the transport only
+	 * while a reservation reads it, so the first reservation after none waits one
+	 * snapshot for its slice.
 	 */
 	readonly allocator: Allocator;
 
@@ -410,8 +412,13 @@ export class Reload {
 
 		// The transport has no event for the send-rate estimate, so sample on our
 		// own schedule and skip a tick while the previous snapshot is outstanding.
+		// Only while a reservation reads it: a receive-only or lingering connection
+		// would otherwise snapshot the transport ten times a second for nobody. The
+		// estimate clears with the last reservation, so the next one never reads a
+		// stale figure.
 		this.#signals.run((effect) => {
 			effect.set(this.#estimate, undefined);
+			if (!effect.get(reserved(this.allocator))) return;
 			const connection = effect.get(this.established);
 			if (!connection) return;
 
