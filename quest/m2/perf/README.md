@@ -87,14 +87,17 @@ revisions on the same host and worker count, and profiles with
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
 - [Streaming frame read owners](/quest/m2/perf/frame-read-owners.md) - readers of a frame still arriving share one byte owner per publication instead of allocating one each per read
+- [kio waiter costs](/quest/m2/perf/kio-waiter-costs.md) - long-lived waiters stop being rebuilt every poll, IETF fetch keeps one close watch per stream, and a short `kio::log` costs less
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux
 - [Profile the io_uring clock read](/quest/m2/perf/uring-clock-profile.md) - a `perf` profile shows whether #5926's per-turn clock read cut the io_uring relay's `[vdso]` share and CPU
 - [io_uring buffer pool memory](/quest/m2/perf/uring-pool-memory.md) - measure reserved versus resident pool memory before any shrink policy
 - [An idle export poll is cheap](/quest/m2/perf/export-idle-poll.md) - an export poll nothing woke skips the track fill and catalog work it repeats today
 - [Mesh session cost](/quest/m2/perf/mesh-session-cost.md) - moq-net's per-session announce, route sync, and scope work drops, swept over sessions and announces
+- [Cluster route memory](/quest/m2/perf/cluster-route-memory.md) - a full-mesh cluster's ~3.7 KB per route per broadcast shrinks, the in-memory hop is profiled, and `bench-profile lock` tolerates lost records
 - [Adapter reads reuse their waker](/quest/m2/perf/adapter-waker-alloc.md) - a measured verdict on the per-read waker allocation moq-tokio and moq-uring reads pay since #7042, fixed if real
 - [Lite request allocations](/quest/m2/perf/lite-request-allocs.md) - `Path::concat` allocates once and the lite request handler keeps one track-name copy
 - [Coverage before START](/quest/m2/perf/covered-before-start.md) - the lite-07 publisher's coverage check costs O(1) per wake before SUBSCRIBE_START
 - [io_uring demux churn](/quest/m2/perf/uring-demux-churn.md) - the demux snapshots stats and builds its fed list once per completion, not per datagram
 - [Lock-free single-delivery writes](/quest/m2/perf/single-delivery-write.md) - a frame with one delivery writes without a lock, recovering #6922's remaining FETCH cost
 - [JS publisher per-frame cost](/quest/m2/perf/js-publisher-frame-cost.md) - fewer promise races per frame, and a per-frame cost that stays flat as streams grow
+- [Small hot-path waste](/quest/m2/perf/hot-path-waste.md) - one track-name copy per lite subscription, no full-history `#drift` walk, and one header buffer per JS object

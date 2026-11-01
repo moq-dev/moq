@@ -7,9 +7,9 @@ Before the next release cut, every benchmark where `main` is slower than
 is fixed. Cost that pays for a feature `main` deliberately added is accepted,
 and the reason is written here.
 
-This epic's own work: once its child has landed, re-pair the relay `fanout`
-workload against `release` and confirm main's relay CPU is no higher in every
-round. The sparse rows are accepted (2026-10-30). The browser frame path
+This epic's own work: once its children have landed, re-pair the relay
+`fanout` workload against `release` and confirm main's relay CPU is no higher
+in every round. The sparse rows are accepted (2026-10-30). The browser frame path
 needs no repeat; the [performance audit](/quest/m2/audit-perf.md) now pairs
 every later cut with `release`.
 
@@ -271,6 +271,7 @@ Decided 2026-10-30 (maintainer), in
 ## Required
 
 - [Fanout lock contention](/quest/m1/release-perf/fanout-lock.md) - relay fanout subscribers stop contending one track lock, so main's relay CPU matches release's in every round
+- [Relay CPU per frame since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the 25-56% rise in relay instructions per delivered frame is bisected, attributed, and its avoidable cost fixed
 
 ## Related
 
