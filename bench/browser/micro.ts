@@ -14,8 +14,9 @@ const { values, positionals } = parseArgs({
 	},
 });
 const benchmark = values.bench;
-if (benchmark !== "frames" && benchmark !== "drift" && benchmark !== "ledger")
-	throw new Error("--bench must be frames, drift, or ledger");
+const benchmarks = { frames: 26, drift: 36, ledger: 12, buffered: 36 } as const;
+if (!Object.hasOwn(benchmarks, benchmark)) throw new Error("--bench must be frames, drift, ledger, or buffered");
+const expected = benchmarks[benchmark as keyof typeof benchmarks];
 const rounds = Number(values.rounds);
 if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("--rounds must be a positive integer");
 const roots = new Map<string, string>();
@@ -30,7 +31,9 @@ for (const [name, root] of roots) {
 	const entry =
 		benchmark === "frames"
 			? resolve(root, "js/net/bench/frames.ts")
-			: resolve(import.meta.dir, `../../js/net/bench/${benchmark}.ts`);
+			: benchmark === "buffered"
+				? resolve(import.meta.dir, "../../js/hang/bench/buffered.ts")
+				: resolve(import.meta.dir, `../../js/net/bench/${benchmark}.ts`);
 	const result = await Bun.build({
 		entrypoints: [entry],
 		target: "browser",
@@ -43,7 +46,11 @@ for (const [name, root] of roots) {
 					build.onResolve({ filter: /^\.\.\/src\/ledger\.ts$/ }, () => ({
 						path: resolve(root, "js/net/src/ledger.ts"),
 					}));
-					build.onLoad({ filter: /\/bench\/(frames|drift|ledger)\.ts$/ }, async ({ path }) => {
+					// So is the container consumer, which the buffered fixture drives directly.
+					build.onResolve({ filter: /^\.\.\/src\/container\/(consumer|legacy)\.ts$/ }, ({ path }) => ({
+						path: resolve(root, "js/hang/src", path.slice("../src/".length)),
+					}));
+					build.onLoad({ filter: /\/bench\/(frames|drift|ledger|buffered)\.ts$/ }, async ({ path }) => {
 						const source = await Bun.file(path).text();
 						if (benchmark !== "frames")
 							return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
@@ -91,7 +98,7 @@ try {
 		pages.set(name, page);
 		rows.set(name, []);
 		page.on("console", (message) => {
-			if (/^(lite|ietf|\d+),/.test(message.text())) rows.get(name)?.push(message.text());
+			if (/^(lite|ietf|steady|lookahead|sparse|burst|\d+),/.test(message.text())) rows.get(name)?.push(message.text());
 		});
 		page.on("pageerror", (error) => {
 			console.error(error);
@@ -109,7 +116,7 @@ try {
 			rows.set(variant, []);
 			await pages.get(variant)?.evaluate("globalThis.measure()");
 			const measured = rows.get(variant);
-			if (measured?.length !== (benchmark === "frames" ? 26 : benchmark === "drift" ? 36 : 12))
+			if (measured?.length !== expected)
 				throw new Error(`incomplete rows: ${variant}`);
 			samples.push({ round, variant, rows: measured });
 			await Bun.write(

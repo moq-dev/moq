@@ -409,12 +409,13 @@ Crashes, wrong bytes, missing frames, a window that presents nothing, or an
 unavailable CPU clock fail the run; timing never does. The nightly runs
 `--smoke` and keeps its run directory as the `bench-browser` artifact.
 
-The in-memory frame, retained-history, and gap ledger paths also run directly in Chromium:
+The in-memory frame, retained-history, gap ledger, and buffered-group paths also run directly in Chromium:
 
 ```bash
 nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench drift --out .tmp/drift.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench ledger --out .tmp/ledger.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench buffered --out .tmp/buffered.json before=/path/to/main current=. aa=.
 ```
 
 Each variant uses its own workspace source and a persistent page, with one full
@@ -431,9 +432,17 @@ B-frames, independently varying publisher and reader counts and retained history
 Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
 for mixed millisecond/microsecond timestamps, which exercise exact cross-scale
 comparison.
+`buffered` drives every checkout's `@moq/hang` container consumer with one fixture,
+sweeping buffered groups against frames per group, then publishers against players.
+`steady` reads each frame as it lands (its `ns_per_op` is the frame delay);
+`lookahead` and `sparse` decode every group before draining them, in order or
+shuffled with a missing sequence between groups; `burst` times only the arrival
+that skips every buffered group once the max delay drops to zero, per skipped group.
+Each case checks its exact buffered ranges, timestamp order and payloads, and that
+skipped groups are closed; `gaps` and `warnings` must match between variants.
 
-The browser smoke lane preserves one measured round of all three fixtures, and drift
-and ledger also run in the nightly JS benchmark leg. Timing is
+The browser smoke lane preserves one measured round of all four fixtures, and drift,
+ledger and buffered also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
 ## Pattern and container coverage
