@@ -171,9 +171,6 @@
             cargo-semver-checks
             cargo-deny
             cargo-bloat
-            # Per-crate feature matrices (`just rs features`), where workspace
-            # unification would otherwise hide a broken single-crate build.
-            cargo-hack
             cargo-nextest
             cargo-codspeed
             # Source-based test coverage (`just rs coverage`).

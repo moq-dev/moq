@@ -18,10 +18,10 @@ no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz"
 default:
     just check
 
-# Default features for the selected packages. Selection also checks feature
-# extremes; `features` covers the full matrix nightly. No `cargo
-# check` pass: clippy is a superset of it, and the two use different rustc
-# wrappers, so running both compiles the workspace twice.
+# Default features for the selected packages; `features` covers the feature
+# matrix nightly and on release PRs. No `cargo check` pass: clippy is a
+# superset of it, and the two use different rustc wrappers, so running both
+# compiles the workspace twice.
 #
 # A bare `just rs check` is default-members, which skips moq-c, moq-ffi,
 # moq-gst, and moq-wasm; pass `--workspace` for all of it.
@@ -65,14 +65,9 @@ fix *args:
 check-changed $LIST:
     sh/rs/select.sh check "$LIST"
 
-# Like `lint`, with the feature and target checks for the selected crates.
+# Like `lint`, with the loom and Send-depth checks for the selected crates.
 lint-changed $LIST:
     sh/rs/select.sh lint "$LIST"
-
-# `feature-shapes` for the crates in a changed-file list plus their dependents,
-# or the changed crates alone under `RS_FEATURE_SCOPE=changed`.
-feature-shapes-changed $LIST:
-    sh/rs/select.sh feature-shapes "$LIST"
 
 # Like `check-test`, but only the crates in a changed-file list plus their dependents.
 check-test-changed $LIST:
@@ -241,15 +236,6 @@ relay-minimal:
 c-tests:
     sh/rs/c-tests.sh
 
-# Benchmarks and examples stay in Nightly; the gate compiles the same targets
-# it tests, with both extremes exercising feature-gated implementation arms.
-
-# Isolate selected packages so a dependent cannot enable a feature that hides a warning.
-[positional-arguments]
-feature-shapes *args:
-    bash sh/local.sh cargo hack clippy --locked --tests --no-default-features "$@" -- -D warnings
-    bash sh/local.sh cargo hack clippy --locked --tests --all-features "$@" -- -D warnings
-
 # Compile the full feature matrix, including isolated combinations and their tests.
 features:
     just rs net-features --all
@@ -257,7 +243,6 @@ features:
     just rs tokio-features --all
     just rs media-features --all
     bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
-    bash sh/local.sh cargo hack check --locked -p moq-tokio --each-feature --exclude-features _transport --features aws-lc-rs
     bash sh/local.sh cargo check --locked -p moq-relay --no-default-features
     just rs relay-minimal
     bash sh/local.sh cargo check --locked -p moq-cli --no-default-features

@@ -100,6 +100,19 @@ per merged PR today (PR and queue), at 13 minutes median and 26 minutes p90 of
 wall time per PR run. Superseded in part 2026-10-24: the PR gate checks
 feature shapes for the crates a branch changes; Nightly keeps the full matrix.
 
+Decided 2026-10-31 (maintainer), reversing 2026-10-24: "revert the moq-tokio
+features change. It's dumb to build all of the permutations. Maybe as a nightly
+but tbh I don't care, just test the default features (or all-features)." On
+the wasm32 pass: "nobody uses it and it's going to be replaced soon"; on
+io_uring: "keep testing uring in CI, but I guess add it to the default features
+on CI". The land gate's Rust lane is the default-feature test build (with the
+device features, and on Linux the relay's io_uring runtime) plus fmt, doc,
+shear, sort, and the loom and Send-depth compiles. It drops the isolated feature
+shapes (`rs_shapes`, cargo-hack), the net, QUIC, tokio, and media feature
+contracts, and the wasm32 and io_uring clippy passes; `just rs features` keeps
+the feature matrix in the Features workflow (nightly and release PRs). On a host land batch the Rust lane had taken about 1,340 s, 691 s
+of it `rs_shapes` and 238 s `tokio-features`.
+
 Decided 2026-10-25 (maintainer): across moq's many CI and release builds
 (targets, features, FFI languages, Nix packages), each crate configuration
 compiles once and is reused through the cache, and each run builds and tests
@@ -139,4 +152,3 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Release credentials off main](/quest/m0/ci/publish-release-only.md) - `publish` admits only `release` and release tags once its `workflow_run` publishers run on their tag
 - [Biome checks every file it can parse](/quest/m0/ci/biome-whole-repo.md) - Biome runs over the whole repository and main is clean under it
 - [workspace.test.py ignores the caller's gate filter](/quest/m0/ci/workspace-test-env.md) - the dispatcher test passes under any `just gate` module filter
-- [PRs build the feature shapes they can break](/quest/m0/ci/pr-feature-builds.md) - a PR touching a crate's source runs that crate's isolated feature builds

@@ -1,28 +1,26 @@
 #!/usr/bin/env bash
-# Run `just rs check|check-test|lint|feature-shapes|fix|test` on the crates a
-# diff touches, plus their dependents. `platform` is the Windows and macOS
-# compile.
+# Run `just rs check|check-test|lint|fix|test` on the crates a diff touches,
+# plus their dependents. `platform` is the Windows and macOS compile.
 #
-# Usage: sh/rs/select.sh check|check-test|lint|feature-shapes|fix|test|platform|uring LISTFILE|--all
+# Usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|uring LISTFILE|--all
 #
 # LISTFILE holds the changed paths, one per line. `--all` is the whole
 # workspace, as is a change to anything every crate is built or tested by.
 set -euo pipefail
 
-usage="usage: sh/rs/select.sh check|check-test|lint|feature-shapes|fix|test|platform|uring LISTFILE|--all"
+usage="usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|uring LISTFILE|--all"
 action=${1:?$usage}
 list=${2:?$usage}
 
 cd "$(git rev-parse --show-toplevel)"
 
-# Print `ALL`, nothing (no crate affected), or cargo package ids: the changed
-# crates and their dependents, or with `seeds`, the changed crates alone.
+# Print `ALL`, nothing (no crate affected), or cargo package ids.
 select_packages() {
     if [[ "$action" == uring && -f "$list" ]] && grep -qE '^(justfile|flake\.(nix|lock)|sh/changed\.sh|\.github/workflows/uring\.yml|\.cargo/.*|\.github/actions/.*)$' "$list"; then
         echo ALL
         return
     fi
-    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest|send-depth|(net|tokio|media)-features)\.sh|\.config/nextest\.toml)$' "$list"; then
+    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest|send-depth)\.sh|\.config/nextest\.toml)$' "$list"; then
         echo ALL
         return
     fi
@@ -84,8 +82,7 @@ select_packages() {
     # names that are not workspace crates, such as a seed from `rs/AGENTS.md`.
     # The seeds go through the environment because BSD awk (macOS) rejects a
     # newline in a `-v` value.
-    selected=$seeds
-    [[ "${1:-}" == seeds ]] || selected=$(SEEDS="$seeds" awk '
+    selected=$(SEEDS="$seeds" awk '
 		BEGIN { split(ENVIRON["SEEDS"], s, "\n"); for (i in s) want[s[i]] = 1 }
 		{ pkg[NR] = $1; dep[NR] = $2 }
 		END {
@@ -115,29 +112,11 @@ select_packages() {
 packages=$(select_packages)
 
 # Ids are `path+file://<dir>#<version>` for a directory named after its crate.
-crate_names() {
-    tr ' ' '\n' <<<"$1" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' '
-}
-names=$(crate_names "$packages")
-
-# The feature-contract checks lint each crate without the features workspace
-# unification adds, and a changed crate recompiles in every shape it is
-# checked in. `RS_FEATURE_SCOPE=changed`, which `just check` sets, checks only
-# the changed crates; the landing worker's `just ci` keeps their dependents too.
-shape_packages=$packages
-if [[ "${RS_FEATURE_SCOPE:-}" == changed && "$packages" != ALL && "$action" =~ ^(check|check-test|lint|feature-shapes)$ ]]; then
-    shape_packages=$(select_packages seeds)
-fi
-shape_names=$(crate_names "$shape_packages")
+names=$(tr ' ' '\n' <<<"$packages" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' ')
 
 # True when the selection includes a crate matching the pattern.
 wants() {
     [[ "$packages" == ALL ]] || grep -qwE "$1" <<<"$names"
-}
-
-# True when the feature-contract selection includes a crate matching the pattern.
-shapes_want() {
-    [[ "$shape_packages" == ALL ]] || grep -qwE "$1" <<<"$shape_names"
 }
 
 case "$packages" in
@@ -163,34 +142,18 @@ else
     # shellcheck disable=SC2206
     flags=($packages)
 fi
-shape_flags=("${flags[@]}")
-if [[ "$shape_packages" != "$packages" ]]; then
-    # shellcheck disable=SC2206
-    shape_flags=($shape_packages)
-fi
 
 case "$action" in
     uring)
         if wants '(moq-uring|moq-relay)'; then just rs uring; fi
         ;;
     check | check-test | lint)
+        # The isolated feature builds (`just rs features`) stay out of the
+        # gate; the Features workflow runs them nightly and on release PRs.
         just rs "$action" "${flags[@]}"
-        # Workspace feature unification can hide an individual crate's missing
-        # gates. Keep the boundary checks isolated and the full matrix nightly.
-        # The dispatcher runs them as a module of their own (rs_shapes), so a
-        # gate split across jobs can give them one.
-        [[ "$action" == lint || -z "$shape_packages" ]] || just rs feature-shapes "${shape_flags[@]}"
         if wants '(kio|moq-net)'; then just rs loom-check; fi
-        if shapes_want moq-net; then just rs net-features; fi
         # Native Send proofs at the default recursion limit, on the pinned nightly.
         if wants moq-net; then just rs send-depth; fi
-        if shapes_want moq-quic; then just rs quic-features; fi
-        if shapes_want moq-tokio; then just rs tokio-features; fi
-        if shapes_want '(moq-video|moq-audio|moq-transcode)'; then just rs media-features; fi
-        # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a
-        # wasm32 pass checks it. moq-mux, moq-ffi, and moq-clock ride along in that pass, and
-        # nothing depends on moq-ffi, so each has to reach it on its own.
-        if wants '(moq-wasm|moq-mux|moq-ffi|moq-clock)'; then just rs wasm; fi
         # Device code behind the off-by-default `capture` feature. check-test
         # lints it through the test build, as for the default features.
         if [[ "$action" != lint ]] && wants '(moq-video|moq-audio|moq-scene|moq-studio)'; then
@@ -198,11 +161,6 @@ case "$action" in
         fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.
         if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
-        # The relay's io_uring listener, off the default feature set.
-        if wants moq-relay; then just rs uring-check; fi
-        ;;
-    feature-shapes)
-        [[ -z "$shape_packages" ]] || just rs feature-shapes "${shape_flags[@]}"
         ;;
     fix)
         just rs fix "${flags[@]}"
@@ -215,7 +173,7 @@ case "$action" in
         # CI keeps Cargo's per-crate build timings, which check.yml uploads.
         timings=()
         [[ "${GITHUB_ACTIONS:-}" != true ]] || timings=(--timings)
-        # The tests behind the off-by-default device features join this build
+        # The tests behind the off-by-default device and runtime features join this build
         # rather than compiling the workspace again per feature set. Those
         # features only add code, so every test still runs. Cargo rejects a
         # feature of a package outside the selection, hence the explicit picks.
@@ -227,6 +185,9 @@ case "$action" in
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
         # The WebRTC module's hostile-input tests, such as mDNS backpressure.
         if wants moq-tokio; then features+=(moq-tokio/webrtc); fi
+        # The relay's io_uring listener, Linux-only. A moq-uring change selects
+        # the relay too, as its dependent.
+        if [[ "$(uname -s)" == Linux ]] && wants moq-relay; then features+=(moq-relay/io-uring); fi
         if ((${#features[@]})); then flags+=(--features "${features[*]}"); fi
         just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
         ;;
