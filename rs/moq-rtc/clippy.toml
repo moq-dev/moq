@@ -1,5 +1,5 @@
-# Production uses the ambient clock; legacy test-only clock cleanup is tracked separately.
-# str0m sender reports carry SystemTime; convert at that boundary.
+# The root clippy.toml without its SystemTime ban: str0m sender reports carry SystemTime,
+# converted at that boundary. Keep the rest in step with the root file.
 disallowed-methods = [
     { path = "std::time::Instant::now", reason = "read the ambient clock: moq_clock::now()" },
     { path = "std::time::Instant::elapsed", reason = "read the ambient clock: moq_clock::Instant::elapsed()" },

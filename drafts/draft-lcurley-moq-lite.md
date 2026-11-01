@@ -1503,6 +1503,7 @@ SUBSCRIBE_END Message {
   Type (i) = 0x1
   Message Length (i)
   Group (i)
+  Error Code (i)
 }
 ~~~
 
@@ -1513,6 +1514,10 @@ Set to 0x1 to indicate a SUBSCRIBE_END message.
 The exclusive end of the range: the absolute sequence number of the first group that will never be delivered.
 A value of 0 means the track ended before producing any groups.
 The subscriber MUST NOT wait for any group at or after this sequence.
+
+**Error Code**:
+0 if the track ended cleanly, otherwise the stream error code it ended with plus 1.
+Groups below the end stay deliverable either way; a subscriber reaching the end surfaces the error instead of a clean end, and a relay forwards it with the end.
 
 The publisher SHOULD send SUBSCRIBE_END as soon as the exclusive final group is known, even while lower groups are still in flight.
 
@@ -1858,6 +1863,7 @@ The `Message Length` describes the payload size on the wire.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
 - Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it.
+- Added `Error Code` to SUBSCRIBE_END: a track can end with an error while keeping the groups below its end.
 - Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_END. Every sequence is accounted for by a Group Stream, a datagram, or a drop; a publisher SHOULD send a drop as soon as it gives a sequence up.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving.
 - Refuse a SUBSCRIBE_DROP whose Group Start is greater than Group End plus one on every version that carries it.

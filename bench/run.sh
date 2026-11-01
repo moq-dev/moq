@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs every Criterion target plus two local relay workloads. With a base commit,
-# Criterion compares matching cases directly and the relay summary prints the
-# base/current delta. `--runtime` instead compares one multi-threaded Tokio
+# Runs every Criterion target plus the local relay workloads: video over QUIC, and
+# chat and fanout over each of BENCH_TRANSPORTS. With a base commit, Criterion
+# compares matching cases directly and the relay summary prints the base/current delta. `--runtime` instead compares one multi-threaded Tokio
 # runtime with the same number of independent Tokio/epoll and io_uring workers
 # on the current tree. The current load generator drives every relay so the
 # workloads stay identical. `--audio` isolates the audio grouping/load-shape matrix.
@@ -81,6 +81,11 @@ case $MODE in
         fi
         PROFILE_MODES=${BENCH_PROFILE_MODES:-}
         PROFILE_WORKLOAD=${BENCH_PROFILE_WORKLOAD:-fanout}
+        PROFILE_TRANSPORT=${BENCH_PROFILE_TRANSPORT:-quic}
+        if [[ ! $PROFILE_TRANSPORT =~ ^(quic|ws|wss|tcp|tls)$ ]]; then
+            printf 'profile transport must be quic, ws, wss, tcp, or tls, got %q\n' "$PROFILE_TRANSPORT" >&2
+            exit 1
+        fi
         PROFILE_WORKERS=${BENCH_PROFILE_WORKERS:-1 4 16}
         if [[ -z $PROFILE_MODES ]]; then
             printf 'BENCH_PROFILE_MODES must name one or more of: lock cpu heap\n' >&2
@@ -130,6 +135,15 @@ case $MODE in
         ;;
     *)
         BASE=$MODE
+        # Video stays on QUIC; chat (per-message cost) and fanout (per-byte cost) sweep the transports.
+        RELAY_CASES=(quic/video)
+        for value in ${BENCH_TRANSPORTS:-quic ws wss tcp tls}; do
+            if [[ ! $value =~ ^(quic|ws|wss|tcp|tls)$ ]]; then
+                printf 'unknown transport %q; expected quic, ws, wss, tcp, or tls\n' "$value" >&2
+                exit 1
+            fi
+            RELAY_CASES+=("$value/chat" "$value/fanout")
+        done
         ;;
 esac
 ROOT=$(git rev-parse --show-toplevel)
@@ -528,23 +542,26 @@ report_set_changes() {
 source "$ROOT/bench/relay.sh"
 
 print_current_relay() {
-    printf '\n%-10s %11s %11s %10s %10s %9s %9s %10s %10s\n' \
-        workload send-Mbps recv-Mbps send-fps recv-fps loss-% p99-ms CPU-cores RSS-MiB
-    for workload in video fanout; do
-        jq -r '[
-			.workload,
+    printf '\n%-12s %11s %11s %10s %10s %9s %9s %10s %11s %11s %10s\n' \
+        case send-Mbps recv-Mbps send-fps recv-fps loss-% p99-ms CPU-cores CPU-us/frame cores/Gbps RSS-MiB
+    for case in "${RELAY_CASES[@]}"; do
+        # Host CPU and RSS exist only where the sampler ran (Linux).
+        jq -r --arg case "$case" 'def fixed: if . == null then "n/a" else (. * 1000 | round / 1000 | tostring) end; [
+			$case,
 			(.send_mbps | tostring),
 			(.recv_mbps | tostring),
 			(.send_fps | tostring),
 			(.recv_fps | tostring),
 			(.loss_pct | tostring),
 			(.latency_p99_ms // "n/a" | tostring),
-			(.cpu_cores // "n/a" | tostring),
-			(if .rss_bytes then (.rss_bytes / 1048576 | tostring) else "n/a" end)
-		] | @tsv' "$RUN/relay/current/$workload/summary.json" |
-            while IFS=$'\t' read -r name send recv send_fps recv_fps loss p99 cpu rss; do
-                printf '%-10s %11.3f %11.3f %10.1f %10.1f %9.3f %9s %10s %10s\n' \
-                    "$name" "$send" "$recv" "$send_fps" "$recv_fps" "$loss" "$p99" "$cpu" "$rss"
+			(.cpu_cores | fixed),
+			(.cpu_us_per_frame | fixed),
+			(.cpu_cores_per_gbps | fixed),
+			(.rss_bytes | if . then . / 1048576 else null end | fixed)
+		] | @tsv' "$RUN/relay/current/$case/summary.json" |
+            while IFS=$'\t' read -r name send recv send_fps recv_fps loss p99 cpu per_frame per_gbps rss; do
+                printf '%-12s %11.3f %11.3f %10.1f %10.1f %9.3f %9s %10s %11s %11s %10s\n' \
+                    "$name" "$send" "$recv" "$send_fps" "$recv_fps" "$loss" "$p99" "$cpu" "$per_frame" "$per_gbps" "$rss"
             done
     done
 }
@@ -644,6 +661,7 @@ print_runtime_comparison() {
 }
 
 run_audio_comparison() {
+    generate_certificate
     printf 'Building relay and audio load generator...\n'
     CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
     LOAD_BIN=$CURRENT_TARGET/release/moq-bench
@@ -681,10 +699,10 @@ print_audio_sample() {
     ] | @tsv' "$RUN/relay/$label/$workload/summary.json"
 }
 
-# Worker runtimes read their certificate from disk instead of generating one.
+# Every relay reads its certificate from disk: worker runtimes and the wss listener need a file.
 generate_certificate() {
     if ! command -v openssl >/dev/null; then
-        printf 'worker runtimes need openssl to generate a temporary certificate\n' >&2
+        printf 'relay workloads need openssl to generate a temporary certificate\n' >&2
         return 1
     fi
 
@@ -855,19 +873,20 @@ run_profiles() {
 run_profile() {
     local mode=$1 label=$2 relay=$3
     local workers control profiled
+    TRANSPORT=$PROFILE_TRANSPORT
     case $mode in
         lock)
-            printf '\nLock wait: %s, %s, %s\n' "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$label"
+            printf '\nLock wait: %s over %s, %s, %s\n' "$PROFILE_WORKLOAD" "$TRANSPORT" "$PROFILE_RUNTIME" "$label"
             printf '%-8s %5s %8s %13s %13s %10s %10s %13s %9s\n' \
                 workers idle switches control-fps profiled-fps control-CPU profiled-CPU mutex-wait-ms wait/CPU
             ;;
         cpu)
-            printf '\nCPU stacks: %s, %s, %s, sampled at 999 Hz\n' "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$label"
+            printf '\nCPU stacks: %s over %s, %s, %s, sampled at 999 Hz\n' "$PROFILE_WORKLOAD" "$TRANSPORT" "$PROFILE_RUNTIME" "$label"
             printf '%-8s %13s %13s %10s %10s %9s %11s\n' \
                 workers control-fps profiled-fps control-CPU profiled-CPU samples sampled-CPU
             ;;
         heap)
-            printf '\nHeap: %s, %s, %s, jemalloc retained MiB and churn over the steady window\n' "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$label"
+            printf '\nHeap: %s over %s, %s, %s, jemalloc retained MiB and churn over the steady window\n' "$PROFILE_WORKLOAD" "$TRANSPORT" "$PROFILE_RUNTIME" "$label"
             printf '%-8s %13s %13s %10s %10s %10s %10s %9s %9s %9s %11s %10s\n' \
                 workers control-fps profiled-fps control-CPU profiled-CPU control-RSS profiled-RSS \
                 before steady teardown churn-MiB/s allocs/s
@@ -975,6 +994,7 @@ else
     run_criterion "$ROOT" --discard-baseline
     printf '\nBuilding relay binaries...\n'
 fi
+generate_certificate
 
 CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
 LOAD_BIN=$CURRENT_TARGET/release/moq-bench
@@ -985,10 +1005,10 @@ if [[ -n $BASE ]]; then
     for ((round = 1; round <= ROUNDS; round++)); do
         if ((round % 2)); then order=(base current); else order=(current base); fi
         printf '%s\t%s\n' "$round" "${order[*]}" >>"$RUN/execution-order.tsv"
-        for workload in video fanout; do
+        for case in "${RELAY_CASES[@]}"; do
             for label in "${order[@]}"; do
                 if [[ $label == base ]]; then relay=$RUN/moq-relay-base; else relay=$CURRENT_TARGET/release/moq-relay; fi
-                run_workload "$label/round-$round" "$relay" "$workload"
+                run_case "$label/round-$round" "$relay" "$case"
             done
         done
     done

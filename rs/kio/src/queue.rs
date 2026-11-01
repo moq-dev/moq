@@ -262,7 +262,7 @@ impl<T> Clone for Queue<T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use std::{
 		sync::{
