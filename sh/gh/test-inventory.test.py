@@ -212,6 +212,17 @@ class InventoryTest(unittest.TestCase):
         self.write("justfile", JUSTFILE.replace(caller, f"echo 'a # b' a#b && {caller}"))
         self.assertNotIn("ignore media::gpu::tests::renders", self.orphans())
 
+    def test_the_module_dispatcher_reaches_each_registered_module(self):
+        # sh/dispatch.sh runs `just <module> check` for each `module` registration.
+        self.write("sh/dispatch.sh", "module() { :; }\nmodule rs '^rs/' \\\n    tools='cargo' fix\n")
+        self.write("rs/justfile", RS + "\n    check:\n        just rs sweep\n")
+        self.assertIn("recipe rs::sweep", self.orphans())
+
+        self.write("justfile", JUSTFILE + "        bash sh/dispatch.sh check\n")
+        orphans = self.orphans()
+        self.assertNotIn("recipe rs::sweep", orphans)
+        self.assertNotIn("ignore media::probe::long_sweep", orphans)
+
     def test_a_dispatcher_runs_only_the_branch_its_caller_selects(self):
         self.write(
             "sh/group.sh",
