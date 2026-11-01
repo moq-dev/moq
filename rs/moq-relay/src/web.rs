@@ -366,7 +366,7 @@ impl Web {
 		let state = Arc::get_mut(&mut self.state).expect("with_timeout called after routes were built");
 		// hyper adds the header timeout to the clock unchecked, so an unreachable
 		// one would panic on every connection.
-		state.timeout = timeout.filter(|timeout| moq_clock::now().checked_add(*timeout).is_some());
+		state.timeout = timeout.filter(|timeout| kio::clock::now().checked_add(*timeout).is_some());
 		self
 	}
 
@@ -1012,7 +1012,7 @@ async fn admit_http(
 	// HTTP read has no handshake deadline to inherit, so the bound starts here.
 	let admit = state.auth.admit(request);
 	let lease = match state.timeout {
-		Some(timeout) => moq_clock::timeout(timeout, admit)
+		Some(timeout) => kio::clock::timeout(timeout, admit)
 			.await
 			.unwrap_or_else(|_| Err(auth::Error::Unavailable("the admission timed out".into()))),
 		None => admit.await,
@@ -1094,11 +1094,11 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let deadline = moq_clock::now() + tokio::time::Duration::from_secs(30);
+	let deadline = kio::clock::now() + tokio::time::Duration::from_secs(30);
 
 	// The lease outlives this handler: the body streams after it returns, so the
 	// response holds the lease and ends it when the last frame is served.
-	let result = moq_clock::timeout_at(deadline, async {
+	let result = kio::clock::timeout_at(deadline, async {
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until a route covers the broadcast (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before the announce arrives.
@@ -1154,7 +1154,7 @@ async fn serve_fetch(
 /// `end` event carries the outcome.
 struct ServeGroup {
 	group: moq_net::group::Consumer,
-	deadline: moq_clock::Instant,
+	deadline: kio::clock::Instant,
 	/// Taken when the body ends, so the reason is reported once.
 	lease: Option<auth::Lease>,
 }
@@ -1165,7 +1165,7 @@ impl ServeGroup {
 			return Ok(None);
 		};
 		tokio::select! {
-			res = moq_clock::timeout_at(self.deadline, self.group.read_frame()) => match res {
+			res = kio::clock::timeout_at(self.deadline, self.group.read_frame()) => match res {
 				Ok(res) => Ok(res?.map(|frame| frame.payload)),
 				Err(_) => Err(moq_net::Error::Timeout),
 			},
@@ -2095,11 +2095,11 @@ mod tests {
 		let serving = tokio::spawn(web.serve(Router::new()));
 
 		let mut tcp = tokio::net::TcpStream::connect(http).await.unwrap();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		tcp.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n").await.unwrap();
 
 		let mut rest = Vec::new();
-		moq_clock::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
+		kio::clock::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
 			.await
 			.expect("slow headers held the connection open")
 			.ok();
@@ -2133,13 +2133,13 @@ mod tests {
 		let serving = tokio::spawn(web.serve(routes));
 
 		let mut tcp = tokio::net::TcpStream::connect(http).await.unwrap();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		tcp.write_all(b"GET /announced HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
 			.await
 			.unwrap();
 
 		let mut response = Vec::new();
-		moq_clock::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut response))
+		kio::clock::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut response))
 			.await
 			.expect("the unanswered admission held the request open")
 			.ok();
@@ -2251,7 +2251,7 @@ mod tests {
 		tcp.write_all(&frame).await.unwrap();
 
 		let mut rest = Vec::new();
-		moq_clock::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
+		kio::clock::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
 			.await
 			.expect("the socket waited to buffer a frame larger than a record")
 			.ok();

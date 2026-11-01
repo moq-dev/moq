@@ -236,7 +236,7 @@ features:
 net-features *args:
     bash sh/rs/net-features.sh "$@"
 
-# Prove moq-quic leaves moq-clock's dev-only runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
+# Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
 [positional-arguments]
 quic-features *args:
     #!/usr/bin/env bash

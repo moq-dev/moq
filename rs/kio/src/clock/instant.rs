@@ -24,7 +24,7 @@ impl Instant {
 
 	/// The current instant on the ambient clock.
 	pub fn now() -> Self {
-		crate::now()
+		crate::clock::now()
 	}
 
 	/// The time elapsed since this instant on the ambient clock, zero if it is in the future.
@@ -90,14 +90,14 @@ impl Instant {
 	/// When std's clock cannot represent it, as with a simulated instant near zero
 	/// on a platform whose std clock starts at boot.
 	pub fn into_std(self) -> std::time::Instant {
-		crate::runtime::into_std(self).expect("instant outside std's clock range")
+		crate::clock::runtime::into_std(self).expect("instant outside std's clock range")
 	}
 
 	/// The instant `at` names on std's clock, the inverse of [`Instant::into_std`].
 	///
 	/// Saturates at the clock's range, like a deadline past it.
 	pub fn from_std(at: std::time::Instant) -> Self {
-		crate::runtime::from_std(at)
+		crate::clock::runtime::from_std(at)
 	}
 }
 

@@ -10,7 +10,7 @@ use std::{
 	time::Duration,
 };
 
-use crate::Instant;
+use crate::clock::Instant;
 
 thread_local! {
 	/// The queue [`Deadlines::enter`] made this thread's ambient clock.
@@ -41,16 +41,16 @@ struct Queue {
 	/// The clock installed where the queue was made, whose wall time it reads
 	/// while entered, so its wall and instants come from one clock.
 	#[cfg(feature = "manual")]
-	installed: Option<crate::Installed>,
+	installed: Option<crate::clock::Installed>,
 }
 
 struct State {
 	/// Orders deadlines armed for the same instant by when they were armed.
 	next: u64,
-	armed: BTreeMap<(Instant, u64), Arc<Mutex<kio::WaiterList>>>,
+	armed: BTreeMap<(Instant, u64), Arc<Mutex<crate::WaiterList>>>,
 	/// The owner's poll, woken when a deadline armed outside it becomes the earliest,
 	/// so the owner never sleeps past a deadline it did not see.
-	owner: kio::WaiterList,
+	owner: crate::WaiterList,
 }
 
 impl Queue {
@@ -67,10 +67,10 @@ impl Deadlines {
 			state: Mutex::new(State {
 				next: 0,
 				armed: BTreeMap::new(),
-				owner: kio::WaiterList::new(),
+				owner: crate::WaiterList::new(),
 			}),
 			#[cfg(feature = "manual")]
-			installed: crate::installed::current(),
+			installed: crate::clock::installed::current(),
 		}))
 	}
 
@@ -124,7 +124,7 @@ impl Deadlines {
 	/// The earliest armed deadline, registering `waiter` to be woken when an earlier
 	/// one is armed. Ends the poll [`Self::advance`] began: one lock, so a deadline
 	/// armed elsewhere is either reported here or wakes the owner.
-	pub fn park(&self, waiter: &kio::Waiter) -> Option<Instant> {
+	pub fn park(&self, waiter: &crate::Waiter) -> Option<Instant> {
 		let mut state = self.0.state.lock().unwrap();
 		waiter.register(&mut state.owner);
 		state.armed.first_key_value().map(|((at, _), _)| *at)
@@ -148,8 +148,8 @@ impl Deadlines {
 
 	/// Make this queue the calling thread's ambient clock until the guard drops.
 	///
-	/// While entered, [`now`](crate::now) reads the instant last handed to
-	/// [`advance`](Self::advance), and [`sleep`](crate::sleep) and the other ambient
+	/// While entered, [`now`](crate::clock::now) reads the instant last handed to
+	/// [`advance`](Self::advance), and [`sleep`](crate::clock::sleep) and the other ambient
 	/// timers arm [`Deadline`]s here. Wall time comes from the clock installed on the
 	/// runtime the queue was made in, if any, and otherwise from the clock the thread
 	/// would read. For a runtime that advances the queue from its own reading of the
@@ -214,7 +214,7 @@ pub(crate) fn now() -> Option<Instant> {
 
 /// The installed clock behind the queue entered on this thread, if any.
 #[cfg(feature = "manual")]
-pub(crate) fn installed() -> Option<crate::Installed> {
+pub(crate) fn installed() -> Option<crate::clock::Installed> {
 	ENTERED.with(|entered| entered.borrow().as_ref().and_then(|queue| queue.0.installed.clone()))
 }
 
@@ -238,11 +238,11 @@ impl WeakDeadlines {
 	}
 }
 
-/// The [`Deadline`] behind an ambient [`Sleep`](crate::Sleep) on an entered queue,
+/// The [`Deadline`] behind an ambient [`Sleep`](crate::clock::Sleep) on an entered queue,
 /// with the waiter its polls register.
 pub(crate) struct Timer {
 	deadline: Deadline,
-	park: kio::Park,
+	park: crate::Park,
 }
 
 impl Timer {
@@ -251,7 +251,7 @@ impl Timer {
 		deadline.set(at);
 		Self {
 			deadline,
-			park: kio::Park::default(),
+			park: crate::Park::default(),
 		}
 	}
 
@@ -275,7 +275,7 @@ pub struct Deadline {
 	deadlines: Deadlines,
 	key: Option<(Instant, u64)>,
 	at: Option<Instant>,
-	waiters: Arc<Mutex<kio::WaiterList>>,
+	waiters: Arc<Mutex<crate::WaiterList>>,
 }
 
 impl Deadline {
@@ -285,7 +285,7 @@ impl Deadline {
 			deadlines: deadlines.clone(),
 			key: None,
 			at: None,
-			waiters: Arc::new(Mutex::new(kio::WaiterList::new())),
+			waiters: Arc::new(Mutex::new(crate::WaiterList::new())),
 		}
 	}
 
@@ -341,7 +341,7 @@ impl Deadline {
 
 	/// `Ready` once the queue reaches the armed instant, registering `waiter`
 	/// otherwise. Fused until re-armed; a disarmed deadline never fires.
-	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+	pub fn poll(&mut self, waiter: &crate::Waiter) -> Poll<()> {
 		// Register under the queue's lock, so an `advance` past `at` either happened
 		// first (and we see it) or wakes this registration. A disarmed deadline
 		// registers too, so arming it for a reached instant wakes its poller.
@@ -354,10 +354,10 @@ impl Deadline {
 	}
 }
 
-impl kio::Task for Deadline {
+impl crate::Task for Deadline {
 	type Output = ();
 
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+	fn poll(&mut self, waiter: &crate::Waiter) -> Poll<()> {
 		self.poll(waiter)
 	}
 }
@@ -380,7 +380,7 @@ mod tests {
 	use std::sync::atomic::{AtomicUsize, Ordering};
 
 	use super::*;
-	use crate::Manual;
+	use crate::clock::Manual;
 
 	/// Counts wakes.
 	struct Wakes {
@@ -393,11 +393,11 @@ mod tests {
 		}
 	}
 
-	fn counter() -> (Arc<Wakes>, kio::Waiter) {
+	fn counter() -> (Arc<Wakes>, crate::Waiter) {
 		let wakes = Arc::new(Wakes {
 			count: AtomicUsize::new(0),
 		});
-		let waiter = kio::Waiter::new(std::task::Waker::from(wakes.clone()));
+		let waiter = crate::Waiter::new(std::task::Waker::from(wakes.clone()));
 		(wakes, waiter)
 	}
 
@@ -409,13 +409,13 @@ mod tests {
 		let mut deadline = Deadline::new(&deadlines);
 		deadline.set(Some(at));
 		assert_eq!(deadlines.next(), Some(at));
-		assert!(deadline.poll(&kio::Waiter::noop()).is_pending());
+		assert!(deadline.poll(&crate::Waiter::noop()).is_pending());
 
 		clock.advance(Duration::from_secs(3));
 		deadlines.advance(clock.now());
-		assert!(deadline.poll(&kio::Waiter::noop()).is_ready());
+		assert!(deadline.poll(&crate::Waiter::noop()).is_ready());
 		assert!(
-			deadline.poll(&kio::Waiter::noop()).is_ready(),
+			deadline.poll(&crate::Waiter::noop()).is_ready(),
 			"an elapsed deadline stays fused"
 		);
 		assert_eq!(deadlines.next(), None);
@@ -434,11 +434,11 @@ mod tests {
 
 		clock.advance(Duration::from_secs(3600));
 		deadlines.advance(clock.now());
-		assert!(disarmed.poll(&kio::Waiter::noop()).is_pending());
+		assert!(disarmed.poll(&crate::Waiter::noop()).is_pending());
 
 		let mut unrepresentable = Deadline::after(&deadlines, Duration::MAX);
 		assert_eq!(unrepresentable.deadline(), None);
-		assert!(unrepresentable.poll(&kio::Waiter::noop()).is_pending());
+		assert!(unrepresentable.poll(&crate::Waiter::noop()).is_pending());
 	}
 
 	#[test]
@@ -456,17 +456,17 @@ mod tests {
 		clock.advance(Duration::from_secs(1));
 		deadlines.advance(clock.now());
 		assert!(
-			deadline.poll(&kio::Waiter::noop()).is_pending(),
+			deadline.poll(&crate::Waiter::noop()).is_pending(),
 			"the old instant is gone"
 		);
 
 		clock.advance(Duration::from_secs(4));
 		deadlines.advance(clock.now());
-		assert!(deadline.poll(&kio::Waiter::noop()).is_ready());
+		assert!(deadline.poll(&crate::Waiter::noop()).is_ready());
 
 		deadline.set(Some(clock.now() + Duration::from_secs(1)));
 		assert!(
-			deadline.poll(&kio::Waiter::noop()).is_pending(),
+			deadline.poll(&crate::Waiter::noop()).is_pending(),
 			"an elapsed deadline re-arms"
 		);
 	}
@@ -479,9 +479,9 @@ mod tests {
 		let mut deadline = Deadline::new(&deadlines);
 
 		deadline.set(Some(clock.now() - Duration::from_secs(1)));
-		assert!(deadline.poll(&kio::Waiter::noop()).is_ready(), "in the past");
+		assert!(deadline.poll(&crate::Waiter::noop()).is_ready(), "in the past");
 		deadline.set(Some(clock.now()));
-		assert!(deadline.poll(&kio::Waiter::noop()).is_ready(), "exactly now");
+		assert!(deadline.poll(&crate::Waiter::noop()).is_ready(), "exactly now");
 		assert_eq!(deadlines.next(), None, "neither was queued");
 	}
 
@@ -548,7 +548,7 @@ mod tests {
 			}
 		}
 		// Kept alive: a list holds its waiters weakly.
-		let waiter = |name| kio::Waiter::new(std::task::Waker::from(Arc::new(Record(order.clone(), name))));
+		let waiter = |name| crate::Waiter::new(std::task::Waker::from(Arc::new(Record(order.clone(), name))));
 		let (first_waiter, second_waiter) = (waiter("first"), waiter("second"));
 		assert!(first.poll(&first_waiter).is_pending());
 		assert!(second.poll(&second_waiter).is_pending());
@@ -582,10 +582,10 @@ mod tests {
 		let deadlines = Deadlines::new(start);
 
 		// A child that re-arms its deadline every time it fires, like a periodic probe.
-		let mut tasks = kio::Tasks::new();
+		let mut tasks = crate::Tasks::new();
 		let mut tick = Deadline::after(&deadlines, PERIOD);
 		let ticking = deadlines.clone();
-		tasks.push(move |waiter: &kio::Waiter| {
+		tasks.push(move |waiter: &crate::Waiter| {
 			while tick.poll(waiter).is_ready() {
 				tick.set(Some(ticking.now() + PERIOD));
 			}
@@ -595,7 +595,7 @@ mod tests {
 		// `poll(now, waiter)`, minus the protocol.
 		let now = std::cell::Cell::new(start);
 		let next = std::cell::Cell::new(None);
-		let mut owner = std::pin::pin!(kio::wait(|waiter: &kio::Waiter| {
+		let mut owner = std::pin::pin!(crate::wait(|waiter: &crate::Waiter| {
 			waiter.batch(|| {
 				deadlines.advance(now.get());
 				let _ = tasks.poll(waiter);
@@ -649,9 +649,9 @@ mod tests {
 		let start = Instant::ZERO + Duration::from_secs(10);
 		let deadlines = Deadlines::new(start);
 		let entered = deadlines.enter();
-		assert_eq!(crate::now(), start);
+		assert_eq!(crate::clock::now(), start);
 
-		let mut sleep = std::pin::pin!(crate::sleep(Duration::from_secs(1)));
+		let mut sleep = std::pin::pin!(crate::clock::sleep(Duration::from_secs(1)));
 		assert_eq!(deadlines.next(), Some(start + Duration::from_secs(1)));
 		let (wakes, waiter) = counter();
 		let waker = waiter.waker().clone();
@@ -659,14 +659,17 @@ mod tests {
 		assert!(sleep.as_mut().poll(&mut cx).is_pending());
 
 		deadlines.advance(start + Duration::from_millis(999));
-		assert_eq!(crate::now(), start + Duration::from_millis(999));
+		assert_eq!(crate::clock::now(), start + Duration::from_millis(999));
 		assert_eq!(wakes.count.load(Ordering::SeqCst), 0);
 		deadlines.advance(start + Duration::from_secs(1));
 		assert_eq!(wakes.count.load(Ordering::SeqCst), 1, "the sleep was not woken");
 		assert!(sleep.as_mut().poll(&mut cx).is_ready());
 
 		drop(entered);
-		assert!(crate::now() > start + Duration::from_secs(1), "the host clock is back");
+		assert!(
+			crate::clock::now() > start + Duration::from_secs(1),
+			"the host clock is back"
+		);
 	}
 
 	/// A sleep that never fires leaves nothing armed for the queue's owner to park on.
@@ -674,7 +677,7 @@ mod tests {
 	fn a_never_firing_sleep_arms_nothing() {
 		let deadlines = Deadlines::new(Instant::ZERO);
 		let _entered = deadlines.enter();
-		let mut sleep = crate::sleep(Duration::MAX);
+		let mut sleep = crate::clock::sleep(Duration::MAX);
 		assert_eq!(deadlines.next(), None);
 		sleep.reset(Instant::ZERO + Duration::from_secs(1));
 		assert_eq!(deadlines.next(), Some(Instant::ZERO + Duration::from_secs(1)));
@@ -688,12 +691,12 @@ mod tests {
 		let _outer = outer.enter();
 		{
 			let _inner = inner.enter();
-			assert_eq!(crate::now(), Instant::ZERO + Duration::from_secs(2));
+			assert_eq!(crate::clock::now(), Instant::ZERO + Duration::from_secs(2));
 		}
-		assert_eq!(crate::now(), Instant::ZERO + Duration::from_secs(1));
+		assert_eq!(crate::clock::now(), Instant::ZERO + Duration::from_secs(1));
 		std::thread::spawn(|| {
 			assert!(
-				crate::now() > Instant::ZERO + Duration::from_secs(2),
+				crate::clock::now() > Instant::ZERO + Duration::from_secs(2),
 				"other threads keep their own clock"
 			)
 		})
@@ -727,7 +730,7 @@ mod tests {
 		assert!(result.is_err(), "the out-of-order drop did not panic");
 		assert!(super::entered().is_none(), "a dropped queue is still the ambient clock");
 		assert!(
-			crate::now() > Instant::ZERO + Duration::from_secs(2),
+			crate::clock::now() > Instant::ZERO + Duration::from_secs(2),
 			"the host clock is back"
 		);
 	}

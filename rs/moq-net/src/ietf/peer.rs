@@ -140,7 +140,7 @@ mod tests {
 	/// The announce loops read the peer's declaration once and hold it, while
 	/// subscription serving re-reads it. A second SETUP overwriting the identity would
 	/// split those two apart, so the first write is the one that counts.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn first_write_wins() {
 		let first = Peer {
 			cluster: cluster::Peer {
@@ -176,7 +176,7 @@ mod tests {
 	}
 
 	/// MoQ Epoch needs both sides: a peer declaring it to a side that declined leaves it off.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn epoch_needs_our_offer_too() {
 		let declared = Peer {
 			epoch: true,
