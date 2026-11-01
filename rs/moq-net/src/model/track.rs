@@ -13052,7 +13052,11 @@ mod test {
 				let reaching = || bounds.iter().filter(|&&(first, last)| first <= hi && last >= lo);
 				let expect = |run: Option<&(u64, u64)>| run.map(|&(first, last)| first..=last);
 				assert_eq!(runs.first(lo, hi).cloned(), expect(reaching().next()), "{lo}..={hi}");
-				assert_eq!(runs.last(lo, hi).cloned(), expect(reaching().last()), "{lo}..={hi}");
+				assert_eq!(
+					runs.last(lo, hi).cloned(),
+					expect(reaching().next_back()),
+					"{lo}..={hi}"
+				);
 			}
 		}
 	}
