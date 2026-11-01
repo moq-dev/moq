@@ -236,7 +236,7 @@ features:
 net-features *args:
     bash sh/rs/net-features.sh "$@"
 
-# Prove moq-quic leaves moq-clock's dev-only runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
+# Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
 [positional-arguments]
 quic-features *args:
     #!/usr/bin/env bash
@@ -292,7 +292,7 @@ play *args:
 doctest *args:
     bash sh/local.sh cargo test --locked --doc "$@"
 
-# Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite.
+# Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite and the receive-timestamps comparison.
 quic-sim:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -304,6 +304,9 @@ quic-sim:
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib -E 'test(/^tests::sim::/)'
     # The bandwidth probe's acceptance suite, over fixed seeds: the merge gate runs only its short cases.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only -E 'test(/^tests::probe::/)'
+    # Forward delay against RTT as a queue-growth signal: deterministic in the simulation, then over real sockets through each cellular moq-shaper preset, one at a time so they do not add to each other's noise.
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::receive_ts::/)'
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-tokio --test integration --run-ignored only --no-capture --test-threads 1 -E 'test(/^receive_ts::/)'
 
 # Prove downstream futures are Send at the default recursion limit on the
 # flake's pinned nightly. Nightly runs it; the land gate does not.
@@ -442,8 +445,10 @@ gst-smoke *args:
 # Build the Criterion benches CodSpeed simulates; CI runs them with `cargo codspeed run`.
 # Only single-threaded benches without I/O, whose instruction counts repeat. CodSpeed skips
 # `iter_custom`, so targets made only of it are left out too. Nightly still measures them all.
+# Valgrind runs ADX but hides it from CPUID (https://bugs.kde.org/show_bug.cgi?id=494162), so
+# rind is built to skip that one startup check, or it refuses the simulated CPU.
 codspeed:
-    cargo codspeed build --locked -m simulation \
+    VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation \
         -p kio -p moq-audio -p moq-e2ee -p moq-json -p moq-mux -p moq-net -p moq-pattern -p moq-quic -p moq-rtmp \
         --features moq-audio/bus,moq-net/fuzz,moq-quic/fuzz \
         --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
@@ -461,7 +466,7 @@ bench-feed-fetch *args:
 
 # Device-free mixer and resampler cost, swept over fanout, packetization, and layout.
 bench-playback:
-    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler)' --success-output immediate
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler) | test(benchmark_raw_audio)' --success-output immediate
 
 # Sweep retained RTMP chunk-stream IDs independently of message and chunk sizes.
 [positional-arguments]
