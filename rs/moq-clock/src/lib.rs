@@ -32,8 +32,6 @@ mod deadline;
 #[cfg(feature = "manual")]
 mod installed;
 mod instant;
-#[cfg(all(feature = "manual", target_arch = "wasm32", not(target_os = "wasi")))]
-compile_error!("the `manual` feature installs on a tokio runtime, which the browser has none of");
 mod manual;
 mod runtime;
 #[cfg(feature = "serde")]

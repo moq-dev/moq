@@ -1999,7 +1999,7 @@ impl RequestVerdict {
 /// Clones share the grant: the request's [`until`] watches it end while the request renews it.
 /// Ending a request grant never touches the session: only that one request ends.
 #[derive(Clone)]
-pub(crate) struct RequestGrant(std::sync::Arc<crate::sync::Mutex<Held>>);
+pub(crate) struct RequestGrant(std::sync::Arc<std::sync::Mutex<Held>>);
 
 struct Held {
 	verdict: RequestVerdict,
@@ -2147,7 +2147,7 @@ impl RequestGrant {
 		}
 		let mut deadline = crate::time::Deadline::new(clock);
 		deadline.set(grant.expires);
-		Ok(Self(std::sync::Arc::new(crate::sync::Mutex::new(Held {
+		Ok(Self(std::sync::Arc::new(std::sync::Mutex::new(Held {
 			verdict,
 			grant,
 			deadline,
@@ -2163,7 +2163,7 @@ impl RequestGrant {
 		}))))
 	}
 
-	fn held(&self) -> crate::sync::MutexGuard<'_, Held> {
+	fn held(&self) -> std::sync::MutexGuard<'_, Held> {
 		self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 	}
 
@@ -2289,10 +2289,10 @@ impl RequestGrant {
 
 	/// Run `body`, everything a request does once admitted, until it finishes or `grant`
 	/// (when its token admitted it) ends. See [`until`].
-	pub(crate) fn guard<F: std::future::Future + kio::MaybeSend>(
+	pub(crate) fn guard<F: std::future::Future + Send>(
 		grant: Option<&Self>,
 		body: F,
-	) -> impl std::future::Future<Output = std::result::Result<F::Output, Refusal>> + kio::MaybeSend {
+	) -> impl std::future::Future<Output = std::result::Result<F::Output, Refusal>> + Send {
 		crate::util::sendable(until(body, move |waiter| match grant {
 			Some(grant) => grant.poll_ended(waiter),
 			None => Poll::Pending,
