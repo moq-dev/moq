@@ -1,13 +1,14 @@
 //! Publish broadcasts, tracks, and groups.
 
 use std::sync::Arc;
+use std::task::{Poll, ready};
 
 use moq_mux::catalog::hang::Extra;
 
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqOrder, MoqSubscription, MoqTrackConsumer};
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
-use crate::ffi::{Background, Task};
+use crate::ffi::{Background, Polled};
 use crate::media::MoqFrame;
 
 /// A location within a track, mirroring [`moq_net::track::Position`].
@@ -226,46 +227,21 @@ pub struct MoqBroadcastProducer {
 /// A handler for requests for tracks in a broadcast.
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastRequests {
-	task: Task<RequestsProducer>,
+	reads: Polled<moq_net::broadcast::Requests>,
+	children: Children,
 }
 
 /// Serves on-demand fetches of uncached groups for one track.
 #[derive(uniffi::Object)]
 pub struct MoqTrackRequests {
-	task: Task<TrackDynamicProducer>,
+	reads: Polled<moq_net::track::Requests>,
 }
 
 impl MoqTrackRequests {
 	fn new(inner: moq_net::track::Requests) -> Self {
 		Self {
-			task: Task::new(TrackDynamicProducer { inner }),
+			reads: Polled::new(inner),
 		}
-	}
-}
-
-struct RequestsProducer {
-	inner: moq_net::broadcast::Requests,
-	children: Children,
-}
-
-struct TrackDynamicProducer {
-	inner: moq_net::track::Requests,
-}
-
-impl RequestsProducer {
-	async fn requested_track(&mut self) -> Result<Arc<MoqTrackRequest>, MoqError> {
-		// Hand back the un-accepted request, mirroring `moq_net::broadcast::Requests`: the caller
-		// accepts it (raw, at a chosen timescale) or publishes media onto it (importer accepts).
-		// The subscriber's subscribe stays pending until then.
-		let request = self.inner.requested_track().await?;
-		Ok(Arc::new(MoqTrackRequest::new(request, self.children.clone())))
-	}
-}
-
-impl TrackDynamicProducer {
-	async fn requested_fill(&mut self) -> Result<Arc<MoqFill>, MoqError> {
-		let fill = self.inner.requested_fill().await?;
-		Ok(Arc::new(MoqFill::new(fill)))
 	}
 }
 
@@ -334,11 +310,8 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
 			Ok(Arc::new(MoqBroadcastRequests {
-				task: Task::new(RequestsProducer {
-					inner: state.broadcast.requests(),
-					children: state.children.clone(),
-				})
-				.supervised(state.driver.clone()),
+				reads: Polled::new(state.broadcast.requests()).supervised(state.driver.clone()),
+				children: state.children.clone(),
 			}))
 		})
 	}
@@ -410,9 +383,14 @@ impl MoqBroadcastRequests {
 	///
 	/// Returns an error once the broadcast is closed or aborted.
 	pub async fn requested_track(&self) -> Result<Arc<MoqTrackRequest>, MoqError> {
-		self.task
-			.run(|mut state| async move { state.requested_track().await })
-			.await
+		// Hand back the un-accepted request, mirroring `moq_net::broadcast::Requests`: the caller
+		// accepts it (raw, at a chosen timescale) or publishes media onto it (importer accepts).
+		// The subscriber's subscribe stays pending until then.
+		let request = self
+			.reads
+			.wait(|requests, waiter| Poll::Ready(Ok(ready!(requests.poll_requested_track(waiter))?)))
+			.await?;
+		Ok(Arc::new(MoqTrackRequest::new(request, self.children.clone())))
 	}
 
 	/// Cancel all current and future `requested_track()` calls.
@@ -420,7 +398,7 @@ impl MoqBroadcastRequests {
 	/// Terminal: the dynamic broadcast is released here, not when the handle is, so any pending
 	/// request is rejected.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }
 
@@ -433,9 +411,11 @@ impl MoqTrackRequests {
 	///
 	/// Cached groups are served without reaching this method.
 	pub async fn requested_fill(&self) -> Result<Arc<MoqFill>, MoqError> {
-		self.task
-			.run(|mut state| async move { state.requested_fill().await })
-			.await
+		let fill = self
+			.reads
+			.wait(|requests, waiter| Poll::Ready(Ok(ready!(requests.poll_requested_fill(waiter))?)))
+			.await?;
+		Ok(Arc::new(MoqFill::new(fill)))
 	}
 
 	/// Cancel all current and future `requested_fill()` calls.
@@ -443,7 +423,7 @@ impl MoqTrackRequests {
 	/// Terminal: the dynamic track is released here, not when the handle is, so any pending
 	/// fetch is rejected.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }
 
@@ -457,13 +437,13 @@ impl MoqTrackRequests {
 #[derive(uniffi::Object)]
 pub struct MoqFill {
 	inner: moq_net::track::Fill,
-	// The watcher `wanted_changed` advances, kept apart so concurrent waits queue in turn.
-	changes: crate::ffi::Task<moq_net::track::Fill>,
+	/// The watcher `wanted_changed` advances, kept apart from `inner` so its cursor is its own.
+	changes: Polled<moq_net::track::Fill>,
 }
 
 impl MoqFill {
 	fn new(inner: moq_net::track::Fill) -> Self {
-		let changes = crate::ffi::Task::new(inner.clone());
+		let changes = Polled::new(inner.clone());
 		Self { inner, changes }
 	}
 }
@@ -509,10 +489,10 @@ impl MoqFill {
 
 	/// Wait for `wanted` to change and return the new value. The first call returns at once.
 	pub async fn wanted_changed(&self) -> Result<Option<u64>, MoqError> {
-		// Driven in place, not detached: a cancelled call left unfreed must not advance the
+		// Polled in place, not detached: a cancelled call left unfreed must not advance the
 		// watcher and swallow the change the next call waits for.
 		self.changes
-			.run(|mut fill| async move { Ok(fill.wanted_changed().await) })
+			.wait(|fill, waiter| Poll::Ready(Ok(ready!(fill.poll_wanted_changed(waiter)))))
 			.await
 	}
 
