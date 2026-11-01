@@ -8,7 +8,7 @@ description: Stream from OBS Studio to MoQ, or bring a broadcast into a scene
 The plugin adds a **MoQ** streaming service and a **MoQ Source** to a stock
 OBS Studio install.
 
-- **Publish**: Settings > Stream, choose "MoQ", enter the relay URL (with `?jwt=` if needed) and broadcast path, Start Streaming.
+- **Publish**: in the **MoQ** dock, enter the relay URL (with `?jwt=` if needed) and broadcast name, Go Live. OBS's own Start Streaming publishes over MoQ once obs-websocket sets the stream service, as [simulcast renditions](#simulcast-renditions) shows.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
 - **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (protocol, RTT, bandwidth, loss), and the reason while a stream connects or reconnects.
 
@@ -44,9 +44,32 @@ shows the current video target beside the configured rate. An encoder shared
 with a recording follows too, so record with a separate encoder to keep the
 recording at the full rate.
 
+## Simulcast renditions
+
+Every video encoder on OBS's stream output is its own rendition of the
+broadcast, with its size, codec, and (under CBR) configured bitrate in the
+catalog, so `<moq-watch>` picks between them. OBS adds encoders from its WHIP
+simulcast layer count, `Stream1` / `WHIPSimulcastTotalLayers` in the profile,
+whatever the service: `N` layers add `N - 1` copies of the stream encoder,
+layer `i` at `i/N` of the output size and bitrate. 3 layers on a 1080p
+6000 kbps stream add 720p at 4000 kbps and 360p at 2000 kbps.
+
+OBS's Settings window shows that count only for WHIP and cannot select the
+MoQ service, so set both over obs-websocket:
+
+1. `SetStreamServiceSettings` with `streamServiceType` `moq_service` and
+   `streamServiceSettings` `{"server": "<relay URL>", "key": "<broadcast path>"}`.
+2. `SetProfileParameter` with `Stream1`, `WHIPSimulcastTotalLayers`, and a
+   count such as `"3"`. OBS applies it on restart or a profile switch.
+3. `StartStream`.
+
+Saving Settings > Stream afterwards replaces the MoQ service. The dock's Go
+Live publishes one rendition. OBS's Enhanced Broadcasting (multitrack video)
+always streams through its RTMP output, so it cannot drive MoQ.
+
 ## Source quality and moq-transcode
 
-OBS publishes **one** rendition and does not encode a viewer ladder. When a
+Without simulcast layers, OBS publishes **one** rendition. When a
 relay or moq.pro runs [`moq-transcode`](/bin/cli#transcode), the ladder appears
 beside the source as `{broadcast}/transcode.hang`. For a good ladder, name the
 broadcast with a `.hang` suffix, use a canvas at least as tall as the top rung

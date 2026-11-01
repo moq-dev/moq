@@ -6,7 +6,7 @@ import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-/** A request to list every track under a namespace prefix. @internal */
+/** A request to list every track under a namespace prefix, which we refuse. @internal */
 export class SubscribeTracks {
 	static readonly id = 0x51;
 	readonly requestId: bigint;
@@ -36,31 +36,5 @@ export class SubscribeTracks {
 			if (parameters.fillParameters) Filter.decodeFill(parameters.fillParameters, version);
 			return new SubscribeTracks(requestId, prefix, parameters);
 		});
-	}
-}
-
-/** A listed track whose objects the peer may request with SUBSCRIBE. @internal */
-export class PublishSkipped {
-	static readonly id = 0x0f;
-	readonly suffix: Path.Valid;
-	readonly trackName: string;
-	constructor(suffix: Path.Valid, trackName: string) {
-		this.suffix = suffix;
-		this.trackName = trackName;
-	}
-
-	async encode(writer: Writer, version: IetfVersion): Promise<void> {
-		if (version < Version.DRAFT_18) throw new Error("PUBLISH_SKIPPED before draft-18");
-		await Message.encode(writer, async (body) => {
-			await Namespace.encode(body, this.suffix);
-			await body.string(this.trackName);
-		});
-	}
-
-	static async decode(reader: Reader, _version: IetfVersion): Promise<PublishSkipped> {
-		return Message.decode(
-			reader,
-			async (body) => new PublishSkipped(await Namespace.decode(body), await body.string()),
-		);
 	}
 }
