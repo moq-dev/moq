@@ -216,6 +216,10 @@ relay-minimal:
 c-tests:
     sh/rs/c-tests.sh
 
+# The workspace-hack would supply third-party features a crate forgets to
+# declare, so CI runs this after `cargo hakari disable && cargo update
+# --workspace`; do the same locally, then `git checkout Cargo.lock rs/workspace-hack`.
+
 # Compile the full feature matrix, including isolated combinations and their tests.
 features:
     just rs net-features --all
