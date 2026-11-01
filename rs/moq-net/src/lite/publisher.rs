@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicU64;
 use crate::{SessionError, announce, frame, group, origin, track};
 use rangemap::{RangeMap, RangeSet};
 use std::{
+	borrow::Cow,
 	collections::HashMap,
 	ops::{Bound, ControlFlow, Range},
 	sync::{
@@ -1547,11 +1548,21 @@ trait Request: Sized {
 	/// The broadcast and track the request names.
 	fn target(msg: &Self::Message) -> (&crate::Path, &str);
 
+	/// Move the track name out of the message as the request starts, so the log context
+	/// keeps the one copy.
+	fn take_track(msg: &mut Self::Message) -> Cow<'static, str>;
+
 	/// The publisher instance the request names, if any.
 	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch>;
 
-	/// Start answering, once the broadcast resolves.
-	fn start(shared: &Shared, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error>;
+	/// Start answering, once the broadcast resolves. `track` is the name [`Request::take_track`]
+	/// moved out of `msg`, which no longer holds it.
+	fn start(
+		shared: &Shared,
+		msg: Self::Message,
+		track: &str,
+		broadcast: crate::broadcast::Consumer,
+	) -> Result<Self, Error>;
 
 	/// Apply an update from the requester.
 	fn update(&mut self, update: Self::Update);
@@ -1601,7 +1612,9 @@ struct RequestServe<R: Request> {
 	// Log context, filled in after the decode. Relative to the origin's root, so a path
 	// too long under it is refused by the lookup, on this stream alone.
 	broadcast: crate::Path,
-	track: String,
+	// Moved out of the message as the request starts; until then, read from the message.
+	// See `RequestServe::track`.
+	track: Cow<'static, str>,
 	// A reply that always has another group ready still lets the session's other tasks run.
 	budget: kio::coop::Budget,
 	// The requester's update failed to decode: the peer's fault, unlike a failed reply.
@@ -1650,6 +1663,14 @@ impl<R: Request> RequestServe<R> {
 		}
 	}
 
+	/// The track name, for logs: one copy, held by the message until the request starts.
+	fn track(&self) -> &str {
+		match &self.state {
+			RequestState::Resolve { msg, .. } => R::target(msg).1,
+			_ => &self.track,
+		}
+	}
+
 	/// The reply no longer owes the peer anything a draining close should wait for.
 	fn settle(&mut self) {
 		if std::mem::take(&mut self.owing) {
@@ -1660,7 +1681,7 @@ impl<R: Request> RequestServe<R> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		match ready!(self.poll_serve(waiter)) {
 			Ok(()) => {
-				tracing::debug!(broadcast = %crate::path::Rooted(self.shared.origin.root(), &self.broadcast), track = %self.track, "{} complete", R::KIND);
+				tracing::debug!(broadcast = %crate::path::Rooted(self.shared.origin.root(), &self.broadcast), track = %self.track(), "{} complete", R::KIND);
 				Poll::Ready(Ok(()))
 			}
 			// The peer's own malformed bytes are a control violation, even after request setup.
@@ -1668,13 +1689,13 @@ impl<R: Request> RequestServe<R> {
 			Err(err) => {
 				match &err {
 					err if is_cancel(err) => {
-						tracing::debug!(broadcast = %crate::path::Rooted(self.shared.origin.root(), &self.broadcast), track = %self.track, "{} cancelled", R::KIND)
+						tracing::debug!(broadcast = %crate::path::Rooted(self.shared.origin.root(), &self.broadcast), track = %self.track(), "{} cancelled", R::KIND)
 					}
 					Error::Unauthorized | Error::Stream(crate::StreamError::Unauthorized) => {
-						tracing::info!(broadcast = %crate::path::Rooted(self.shared.origin.root(), &self.broadcast), track = %self.track, "{} unauthorized", R::KIND)
+						tracing::info!(broadcast = %crate::path::Rooted(self.shared.origin.root(), &self.broadcast), track = %self.track(), "{} unauthorized", R::KIND)
 					}
 					err => {
-						tracing::warn!(broadcast = %crate::path::Rooted(self.shared.origin.root(), &self.broadcast), track = %self.track, %err, "{} error", R::KIND)
+						tracing::warn!(broadcast = %crate::path::Rooted(self.shared.origin.root(), &self.broadcast), track = %self.track(), %err, "{} error", R::KIND)
 					}
 				}
 				self.stream.take().expect("stream present").writer.abort(&err);
@@ -1705,8 +1726,13 @@ impl<R: Request> RequestServe<R> {
 					return Poll::Ready(Err(Error::Cancel));
 				}
 				// Drop the reply mid-flight: anything half-sent is cancelled rather than
-				// completed for nobody.
-				self.state = RequestState::Finish { finished: false };
+				// completed for nobody. A request that never started moves its name into the log
+				// context, as `start` would.
+				if let RequestState::Resolve { mut msg, .. } =
+					std::mem::replace(&mut self.state, RequestState::Finish { finished: false })
+				{
+					self.track = R::take_track(&mut msg);
+				}
 			}
 
 			let stream = self.stream.as_mut().expect("stream present");
@@ -1716,11 +1742,10 @@ impl<R: Request> RequestServe<R> {
 					let msg = ready!(stream.reader.poll_decode_with(waiter, |r| R::decode(r, version)))?;
 					let (broadcast, track) = R::target(&msg);
 					self.broadcast = broadcast.clone();
-					self.track = track.to_string();
 					if R::SUBSCRIPTION {
 						self._subscription = Some(self.shared.subscriptions.hold());
 					}
-					tracing::debug!(broadcast = %crate::path::Rooted(self.shared.origin.root(), &self.broadcast), track = %self.track, request = ?msg, "{} started", R::KIND);
+					tracing::debug!(broadcast = %crate::path::Rooted(self.shared.origin.root(), &self.broadcast), track = %track, request = ?msg, "{} started", R::KIND);
 					// Checked before anything is resolved, so a broadcast the session does not
 					// allow is never served, not just cut off later.
 					let mut gate = self.shared.gate(R::target(&msg).0);
@@ -1743,12 +1768,13 @@ impl<R: Request> RequestServe<R> {
 					}
 					let broadcast = ready!(requesting.as_ref().expect("requesting").poll_ok(waiter))?;
 					// Any placeholder but `Decode`, so a failed start is answered on the stream.
-					let RequestState::Resolve { msg, .. } =
+					let RequestState::Resolve { mut msg, .. } =
 						std::mem::replace(&mut self.state, RequestState::Finish { finished: false })
 					else {
 						unreachable!()
 					};
-					let mut request = R::start(&self.shared, msg, broadcast)?;
+					self.track = R::take_track(&mut msg);
+					let mut request = R::start(&self.shared, msg, &self.track, broadcast)?;
 					if let Some(update) = self.update.take() {
 						request.update(update);
 					}
@@ -1880,12 +1906,16 @@ impl Request for TrackInfoServe {
 		(&msg.broadcast, &msg.track)
 	}
 
+	fn take_track(msg: &mut Self::Message) -> Cow<'static, str> {
+		std::mem::take(&mut msg.track)
+	}
+
 	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch> {
 		msg.epoch.as_ref()
 	}
 
-	fn start(_: &Shared, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
-		let querying = broadcast.track(&msg.track)?.info().into_inner();
+	fn start(_: &Shared, _: Self::Message, track: &str, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
+		let querying = broadcast.track(track)?.info().into_inner();
 		Ok(Self { querying })
 	}
 
@@ -1938,11 +1968,15 @@ impl Request for TracksServe {
 		(&msg.broadcast, "")
 	}
 
+	fn take_track(_: &mut Self::Message) -> Cow<'static, str> {
+		Cow::Borrowed("")
+	}
+
 	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch> {
 		msg.epoch.as_ref()
 	}
 
-	fn start(shared: &Shared, _: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
+	fn start(shared: &Shared, _: Self::Message, _: &str, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
 		Ok(Self {
 			tracks: broadcast.tracks_as(shared.lister)?,
 		})
@@ -2035,12 +2069,21 @@ impl Request for SubscribeServe {
 		(&msg.broadcast, &msg.track)
 	}
 
+	fn take_track(msg: &mut Self::Message) -> Cow<'static, str> {
+		std::mem::take(&mut msg.track)
+	}
+
 	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch> {
 		msg.epoch.as_ref()
 	}
 
-	fn start(shared: &Shared, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
-		let track = broadcast.track(&msg.track)?;
+	fn start(
+		shared: &Shared,
+		msg: Self::Message,
+		track: &str,
+		broadcast: crate::broadcast::Consumer,
+	) -> Result<Self, Error> {
+		let track = broadcast.track(track)?;
 		let latest = track.latest_sequence();
 		if Bounds::has_time(&msg.ranges) {
 			let querying = track.info().into_inner();
@@ -2279,13 +2322,22 @@ impl Request for FetchServe {
 		(&msg.broadcast, &msg.track)
 	}
 
+	fn take_track(msg: &mut Self::Message) -> Cow<'static, str> {
+		std::mem::take(&mut msg.track)
+	}
+
 	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch> {
 		msg.epoch.as_ref()
 	}
 
-	fn start(_: &Shared, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
+	fn start(
+		_: &Shared,
+		msg: Self::Message,
+		track: &str,
+		broadcast: crate::broadcast::Consumer,
+	) -> Result<Self, Error> {
 		let fetching = broadcast
-			.track(&msg.track)?
+			.track(track)?
 			.fetch_range(
 				msg.group,
 				track::FetchOptions {
@@ -8696,13 +8748,14 @@ mod tests {
 			lite::Fetch {
 				epoch: None,
 				broadcast: crate::Path::new("room").unwrap(),
-				track: "video".into(),
+				track: Default::default(),
 				priority: 0,
 				max_delay: None,
 				group: 0,
 				start_frame: 2,
 				end_frame: Some(3),
 			},
+			"video",
 			broadcast.consume(),
 		)
 		.unwrap();
