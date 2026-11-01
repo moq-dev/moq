@@ -8,7 +8,7 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-use crate::api::transport::BandwidthUsage;
+use crate::gcc::api::transport::BandwidthUsage;
 
 pub trait DelayIncreaseDetectorInterface {
     // Update the detector with a new sample. The deltas should represent deltas

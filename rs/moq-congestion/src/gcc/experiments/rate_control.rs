@@ -8,7 +8,7 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-use crate::{api::units::DataSize, experiments::FieldTrials};
+use crate::gcc::{api::units::DataSize, experiments::FieldTrials};
 
 /// WebRTC-CongestionWindow
 #[derive(Clone, Debug)]

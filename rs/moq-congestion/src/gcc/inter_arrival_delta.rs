@@ -8,7 +8,7 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-use crate::api::units::{TimeDelta, Timestamp};
+use crate::gcc::api::units::{TimeDelta, Timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SendTimeGroup {

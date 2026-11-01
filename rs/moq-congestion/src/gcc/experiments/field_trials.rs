@@ -1,6 +1,6 @@
 use super::{AlrExperimentSettings, CongestionWindowConfig, VideoRateControlConfig};
 
-use crate::{
+use crate::gcc::{
     AlrDetectorConfig, BitrateEstimatorConfig, BweLossExperiment,
     BweSeparateAudioPacketsSettings, LossBasedBweV2Config, LossBasedControlConfig,
     ProbeControllerConfig, RobustThroughputEstimatorSettings, RttBasedBackoffConfig,

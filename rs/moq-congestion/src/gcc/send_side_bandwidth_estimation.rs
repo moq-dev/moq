@@ -12,8 +12,8 @@
 
 use std::collections::VecDeque;
 
-use crate::remote_bitrate_estimator::CONGESTION_CONTROLLER_MIN_BITRATE;
-use crate::{
+use crate::gcc::remote_bitrate_estimator::CONGESTION_CONTROLLER_MIN_BITRATE;
+use crate::gcc::{
     api::{
         transport::{BandwidthUsage, SentPacket, TransportPacketsFeedback},
         units::{DataRate, TimeDelta, Timestamp},

@@ -8,7 +8,7 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-use crate::{
+use crate::gcc::{
     api::{
         transport::{BandwidthUsage, PacketResult, TransportPacketsFeedback},
         units::{DataRate, DataSize, TimeDelta, Timestamp},
@@ -392,14 +392,12 @@ impl DelayBasedBwe {
 
 #[cfg(test)]
 mod test {
-    use crate::api::transport::{PacedPacketInfo, SentPacket};
-    use crate::{
+    use crate::gcc::api::transport::{PacedPacketInfo, SentPacket};
+    use crate::gcc::{
         AcknowledgedBitrateEstimator, AcknowledgedBitrateEstimatorInterface, ProbeBitrateEstimator,
         RobustThroughputEstimatorSettings,
     };
-    use approx::assert_relative_eq;
 
-    use test_trace::test;
 
     pub use super::*;
 

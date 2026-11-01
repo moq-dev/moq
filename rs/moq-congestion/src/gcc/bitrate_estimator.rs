@@ -8,7 +8,7 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-use crate::api::units::{DataRate, DataSize, TimeDelta, Timestamp};
+use crate::gcc::api::units::{DataRate, DataSize, TimeDelta, Timestamp};
 
 // WebRTC-BweThroughputWindowConfig
 #[derive(Debug, Clone)]

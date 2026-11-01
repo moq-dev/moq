@@ -10,7 +10,7 @@
 
 use std::time::Instant;
 
-use crate::{experiments::AlrExperimentSettings, pacing::IntervalBudget};
+use crate::gcc::{experiments::AlrExperimentSettings, pacing::IntervalBudget};
 
 #[derive(Clone, Debug)]
 pub struct AlrDetectorConfig {

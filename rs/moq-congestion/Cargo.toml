@@ -15,6 +15,7 @@ testing = []
 kio = { workspace = true }
 rand = { workspace = true }
 rand_pcg = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 cpu-time = "1.0.0"

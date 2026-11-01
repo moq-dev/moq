@@ -178,7 +178,6 @@ impl fmt::Debug for DataRate {
 
 #[cfg(test)]
 mod test {
-    use approx::assert_relative_eq;
 
     use super::*;
 

@@ -16,6 +16,7 @@ mod cubic;
 mod pacer;
 mod rate;
 mod unlimited;
+mod gcc;
 
 pub use bbr3::{Bbr3, Bbr3Config};
 pub use cubic::{Cubic, CubicConfig};

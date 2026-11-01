@@ -174,7 +174,7 @@ macro_rules! unit_base {
 
 macro_rules! relative_unit {
     ($ty:ident) => {
-        crate::api::units::unit_base!($ty);
+        crate::gcc::api::units::unit_base!($ty);
 
         impl $ty {
             pub fn clamp_mut(&mut self, min_value: Self, max_value: Self) {
@@ -495,7 +495,6 @@ pub(crate) use unit_base;
 mod test {
     use std::fmt;
 
-    use approx::assert_relative_eq;
 
     use super::*;
 

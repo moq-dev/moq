@@ -8,7 +8,7 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-use crate::api::units::DataRate;
+use crate::gcc::api::units::DataRate;
 
 pub struct LinkCapacityEstimator {
     estimate_kbps: Option<f64>,

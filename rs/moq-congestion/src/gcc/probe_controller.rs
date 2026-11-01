@@ -8,7 +8,7 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-use crate::api::{
+use crate::gcc::api::{
     transport::{NetworkAvailability, NetworkStateEstimate, ProbeClusterConfig},
     units::{DataRate, TimeDelta, Timestamp},
 };

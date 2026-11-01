@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 
-use crate::{
+use crate::gcc::{
     api::{
         network_control::{NetworkControllerConfig, NetworkControllerInterface},
         transport::{
@@ -946,10 +946,8 @@ fn get_bandwidth_limited_cause(
 
 #[cfg(test)]
 mod test {
-    use approx::assert_relative_eq;
-    use test_trace::test;
 
-    use crate::api::transport::PacketResult;
+    use crate::gcc::api::transport::PacketResult;
 
     use super::*;
 

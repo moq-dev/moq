@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use crate::api::{
+use crate::gcc::api::{
     transport::{PacedPacketInfo, PacketResult},
     units::{DataRate, DataSize, TimeDelta, Timestamp},
 };
@@ -202,7 +202,6 @@ impl ProbeBitrateEstimator {
 #[cfg(test)]
 mod test {
     use super::*;
-    use approx::assert_relative_eq;
 
     const DEFAULT_MIN_PROBES: i64 = 5;
     const DEFAULT_MIN_BYTES: i64 = 5000;

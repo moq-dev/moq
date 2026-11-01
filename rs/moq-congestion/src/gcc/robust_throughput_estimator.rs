@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 
-use crate::{
+use crate::gcc::{
     api::{
         transport::PacketResult,
         units::{DataRate, DataSize, TimeDelta, Timestamp},
@@ -317,15 +317,14 @@ impl AcknowledgedBitrateEstimatorInterface for RobustThroughputEstimator {
         // noop
     }
 
-    fn set_alr_ended_time(&mut self, _alr_ended_time: crate::api::units::Timestamp) {
+    fn set_alr_ended_time(&mut self, _alr_ended_time: crate::gcc::api::units::Timestamp) {
         // noop
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::api::transport::SentPacket;
-    use approx::assert_relative_eq;
+    use crate::gcc::api::transport::SentPacket;
 
     use super::*;
 

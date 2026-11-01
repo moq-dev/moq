@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use crate::{
+use crate::gcc::{
     api::{
         transport::PacketResult,
         units::{DataRate, DataSize, TimeDelta, Timestamp},
@@ -1389,10 +1389,8 @@ fn get_loss_probability(
 
 #[cfg(test)]
 mod test {
-    use approx::assert_relative_eq;
-    use test_trace::test;
 
-    use crate::api::transport::SentPacket;
+    use crate::gcc::api::transport::SentPacket;
 
     use super::*;
 

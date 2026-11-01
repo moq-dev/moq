@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 
-use crate::{api::transport::BandwidthUsage, DelayIncreaseDetectorInterface};
+use crate::gcc::{api::transport::BandwidthUsage, DelayIncreaseDetectorInterface};
 
 // WebRTC-Bwe-TrendlineEstimatorSettings
 #[derive(Debug, Clone)]
