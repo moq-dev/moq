@@ -361,9 +361,9 @@ mod tests {
 	async fn a_capped_whip_publisher_is_steered_by_remb() {
 		/// Wait for the logs to contain `line`: the REMB is only visible in the client's.
 		async fn logged(line: &str) {
-			tokio::time::timeout(TIMEOUT, async {
+			kio::clock::timeout(TIMEOUT, async {
 				while !logs_contain(line) {
-					tokio::time::sleep(Duration::from_millis(20)).await;
+					kio::clock::sleep(Duration::from_millis(20)).await;
 				}
 			})
 			.await
@@ -387,7 +387,7 @@ mod tests {
 		let rate = crate::rate::Limit::new(crate::rate::Cap::new(moq_net::bandwidth::Rate::from_mbps(2)));
 		let (address, http, mut sessions) = serve_capped_whip(rate.clone()).await;
 		let pushed = push_whip(&origin, address).await;
-		let session = tokio::time::timeout(TIMEOUT, sessions.recv()).await.unwrap().unwrap();
+		let session = kio::clock::timeout(TIMEOUT, sessions.recv()).await.unwrap().unwrap();
 
 		logged("bps=1800000").await;
 		rate.set(crate::rate::Cap::new(moq_net::bandwidth::Rate::from_mbps(1)));
@@ -414,8 +414,8 @@ mod tests {
 		push(&mut *opus, 20_000, &[0xfc; 1000]);
 		let pushed = push_whip(&origin, address).await;
 
-		let session = tokio::time::timeout(TIMEOUT, sessions.recv()).await.unwrap().unwrap();
-		let ended = tokio::time::timeout(TIMEOUT, session)
+		let session = kio::clock::timeout(TIMEOUT, sessions.recv()).await.unwrap().unwrap();
+		let ended = kio::clock::timeout(TIMEOUT, session)
 			.await
 			.expect("the publisher past its cap stayed open")
 			.unwrap();
