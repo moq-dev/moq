@@ -36,11 +36,18 @@ idle connections, or arbitrary hold-down as a correctness substitute. Cancel
 checks with reader demand, terminal track state, epoch replacement, and session
 closure. A newer same-epoch connection is not automatically a healthier route.
 
+`rs/moq-net/tests/integration/route_health.rs` pins today's stalls: a silent
+kill loses about `detection - max_delay` of media, and a payload stall with live
+sessions is never recovered, even while `largest()` keeps pace. Flip both into
+resumes through the standby; detection under the reader's max delay loses no
+group.
+
 Mock-time tests cover all Health design counterexamples, including a preferred
 route whose metadata advances but media remains blocked, failed promotion,
 recovery that repeatedly degrades, a shared active/standby failure with a
 healthy third route, bounded exploration when every candidate is quiet,
-multi-hop simultaneous failover, and no
+a quiet publisher, receiver backpressure, stale or replayed reports, an epoch
+change, multi-hop simultaneous failover, and no
 standby for epochless broadcasts. Run through Rust/JS interop and existing CI.
 Measure tracks, routes, and readers on both axes; retain the idle-session
 poll-count regressions and report overlap, switch counts, and memory.

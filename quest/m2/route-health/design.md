@@ -9,65 +9,57 @@ do not add speculative production code or choose arbitrary timing thresholds.
 
 ## Plan
 
-The [line's decisions](/quest/m2/route-health/README.md) are settled. Start by
-reproducing a stall that transport failure and ordinary reconnect miss; if
-none exists, bring abandoning the line back to the maintainer. A killed relay
-in a same-epoch diamond qualifies until the idle timeout fires
-([#6062](https://github.com/moq-dev/moq/issues/6062)); measure the media it
-loses and how far a standby shortens that, starting from
-[#6183](https://github.com/moq-dev/moq/pull/6183)'s mock-time diamond in
-`rs/moq-net/tests/integration/route_change.rs`. Preserve
-application priorities, automatic health-driven switching and failback, a
-payload-free steady standby, and bounded payload overlap to verify delivery.
-The mechanism is entirely excluded for epochless broadcasts.
+The [line's decisions](/quest/m2/route-health/README.md) are settled. The
+stall the line needs is reproduced in `rs/moq-net/tests/integration/route_health.rs`
+on the same-epoch diamond `P -> O -> M1/M2 -> E`:
 
-Keep three facts separate: what the source reports, what payload the local
-reader can actually use, and what that reader is demanding. Existing
-`largest()` planning includes remote hints, so comparing two largest values
-alone can miss stalled media with healthy control traffic. Group/frame position
-also does not prove completion of an earlier frame or availability of a gap.
+- A silent kill of `M1` costs about `detection - max_delay` of media, by whole
+  groups. At the 10s default idle timeout a 2s budget loses 7 groups and a 4s
+  budget 5; detection under the budget loses none.
+- `M1` withholding payload while every session stays up (no upstream stream
+  credit, no downstream credit, or group headers without frames) starves `E`
+  for 30s with no error, no route change, and no recovery, while `W` reads
+  every frame through `M2`. With headers only, `E`'s `largest()` keeps pace with
+  `W`'s while every group fails as too old, so comparing largest positions
+  finds nothing wrong.
 
-Work through `Subscription.meta: true` over ordinary group/frame framing.
-Define when progress is emitted, frame completion, legitimately empty frames,
-mode updates racing group streams, and promotion resuming at a missing byte or
-frame rather than skipping payload represented only by metadata. Reconcile
-with planned ranges and SUBSCRIBE_DROP. Metadata must never satisfy a media
-read, populate a false payload cache, or advance a media resume cursor.
+Lowering the idle timeout shrinks only the first case; nothing transport-level
+recovers the second. Recovery turns these fixtures into resumes through `M2`.
 
-Prove end-to-end demand aggregation: metadata-only readers cause no upstream
-payload pull, mixed readers retain the payload demand they actually need, and
-metadata observers do not recursively create alternate monitoring branches.
-Standby observations must remain tied to the candidate being evaluated rather
-than silently following the active route through ordinary aggregation. Different
-first hops do not imply independent paths; include common upstreams and a
-candidate returning through the requester.
+The remaining counterexamples (quiet publishers, backpressure, exploration,
+requalification, metadata cost) need the metadata mode, so they belong to the
+implementation quests' tests. The proposals below are pending the maintainer;
+once settled, fold them into [Metadata subscriptions](/quest/m2/route-health/meta.md),
+[Track route selection](/quest/m2/route-health/selection.md), and
+[Automatic recovery](/quest/m2/route-health/recovery.md), then delete this quest.
 
-Prove bounded exploration beyond the initial next-best standby when active
-and standby share a failure. One standby is a concurrency bound, not a fixed
-choice: define how outstanding demand and insufficient evidence advance through
-other eligible candidates without treating silence as failure, opening every
-alternative, or polling quiet tracks forever. Test a healthy third route behind
-two stalled candidates, all candidates quiet, and candidate churn; measure
-observation cost and time to discover useful progress. Settle scheduling and
-budgets from these fixtures before implementation.
-
-Test quiet publishers, empty groups, partial frames, out-of-order delivery,
-receiver backpressure, metadata advancing while payload stalls, cached/stale
-reports, epoch changes, and simultaneous failure/recovery at several hops.
-Measure when evidence is sufficient to try a candidate, prove payload before
-retiring usable old copies, and prevent immediate bounce back to a preferred
-but still broken route. Recovery checks must be demand-driven and bounded;
-reusing a fixed idle PROBE loop would recreate #5382.
-
-Per-track selection is the target. Rust TrackIo/resume already splices a
-single track, while Front still chooses a broadcast-wide source. Share identity
-and candidate handles; do not allocate a full route table/front per track.
-If the authorized broadcast-level fallback is needed, record why and update
-the affected tests and public behavior consistently.
-
-Exact framing and thresholds follow this evidence. Bring consequential API or
-wire choices back to quest-plan before implementation. Publish synthetic
-fixtures and retained-state/control-work measurements in existing CI lanes.
+- Evidence: a stall is the active's lag behind the standby, measured on
+  payload the active delivered against positions the standby reported, growing
+  past its own healthy baseline by one frame interval of the track while the
+  reader demands it. The baseline matters: a standby that is normally faster
+  must not override application priority. Never compare largest values, and
+  never count source silence or a reader that stopped reading. A false trigger
+  costs one bounded payload trial, so evidence may be sensitive.
+- Framing: a metadata group stream says so in its own header, so a stream
+  opened before a mode update is read under the mode it was opened in.
+  Metadata FRAMEs keep timestamp and declared size and carry no bytes, so a
+  real empty frame stays distinguishable. Promotion re-requests payload from
+  the reader's first missing frame; observed metadata never fills a cache or
+  advances a resume cursor.
+- Aggregation: a relay pulls payload upstream only for payload demand, and
+  serves metadata from a payload copy it already holds. Only payload demand
+  creates a standby, so metadata observers never branch further. A standby is
+  pinned to its candidate's session, not routed through the front.
+- Exploration: the standby slot moves to the next eligible candidate only
+  while the reader's demand is outstanding and neither active nor standby has
+  shown progress for the reader's own max delay, doubling that wait per move
+  until real progress resets it. Without demand nothing explores; without a
+  max delay, fall back to the publisher's max age, or explore never.
+- Requalification: a demoted preferred route becomes the standby. Once its
+  metadata catches up, it trials payload from the next group boundary and wins
+  back the track after delivering that whole group within its old healthy
+  baseline. Each failed trial doubles the groups before the next one, and
+  metadata alone never requalifies it.
 
 ## Related
 
