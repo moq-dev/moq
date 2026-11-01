@@ -443,11 +443,6 @@ mod tests {
 		not(feature = "openh264"),
 		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
 	)]
-	#![expect(
-		clippy::disallowed_methods,
-		clippy::disallowed_types,
-		reason = "tests read the host clock directly"
-	)]
 
 	use bytes::Bytes;
 	use moq_net::Timestamp;
@@ -1016,15 +1011,15 @@ mod tests {
 		.unwrap();
 
 		let mut read = Box::pin(consumer.next_frame());
-		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+		let deadline = moq_clock::Instant::now() + std::time::Duration::from_secs(1);
 		loop {
 			tokio::select! {
 				_result = &mut read => panic!("flush returned before cancellation"),
-				_ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
+				_ = moq_clock::sleep(std::time::Duration::from_millis(1)) => {
 					if probe::flush_entered() {
 						break;
 					}
-					if tokio::time::Instant::now() >= deadline {
+					if moq_clock::Instant::now() >= deadline {
 						probe::release_flush();
 						panic!("flush never reached the codec thread");
 					}
@@ -1183,7 +1178,7 @@ mod tests {
 
 	/// Read one frame, as (seconds, the lane it was shown from).
 	async fn read(consumer: &mut Consumer) -> (u64, Lane) {
-		let frame = tokio::time::timeout(std::time::Duration::from_secs(10), consumer.next_frame())
+		let frame = moq_clock::timeout(std::time::Duration::from_secs(10), consumer.next_frame())
 			.await
 			.expect("a frame within ten seconds")
 			.unwrap()
@@ -1195,13 +1190,13 @@ mod tests {
 	/// Let the decoders run with nothing new to show until the max-delay one
 	/// has caught up, or fail after ten seconds of trying.
 	async fn catch_up(consumer: &mut Consumer) {
-		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+		let deadline = moq_clock::Instant::now() + std::time::Duration::from_secs(10);
 		while consumer.selector.source() != Lane::Max {
 			assert!(
-				tokio::time::Instant::now() < deadline,
+				moq_clock::Instant::now() < deadline,
 				"the max-delay decoder never caught up"
 			);
-			if let Ok(frame) = tokio::time::timeout(std::time::Duration::from_millis(20), consumer.next_frame()).await {
+			if let Ok(frame) = moq_clock::timeout(std::time::Duration::from_millis(20), consumer.next_frame()).await {
 				panic!(
 					"nothing new was published, yet read returned {:?}",
 					frame.map(|f| f.map(|f| f.timestamp))
@@ -1319,7 +1314,7 @@ mod tests {
 		let mut live = group(&mut track, 2, &[8]);
 		shown.push(read(&mut consumer).await);
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(100), consumer.next_frame())
+			moq_clock::timeout(std::time::Duration::from_millis(100), consumer.next_frame())
 				.await
 				.is_err()
 		);
@@ -1491,7 +1486,7 @@ mod tests {
 		)
 		.await;
 		for _ in 0..3 {
-			match tokio::time::timeout(std::time::Duration::from_secs(10), consumer.next_frame()).await {
+			match moq_clock::timeout(std::time::Duration::from_secs(10), consumer.next_frame()).await {
 				Ok(Ok(Some(_))) => continue,
 				Ok(Err(err)) => {
 					assert!(err.to_string().contains("corrupt"), "unexpected error: {err}");

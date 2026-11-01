@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, type Micro, Milli, Nano } from "@moq/clock";
+import { Elapsed, Manual, type Micro, Milli, Nano, timeout } from "@moq/clock";
 import { Time, Track } from "@moq/net";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
@@ -403,14 +403,11 @@ test("Consumer reads what a promoted head already holds before skipping it under
 
 // Settle `promise` within a second, so a reader that hangs fails the test instead of timing it out.
 async function within<T>(promise: Promise<T>): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const hung = new Promise<never>((_, reject) => {
-		timer = setTimeout(() => reject(new Error("the reader hung")), 1_000);
-	});
 	try {
-		return await Promise.race([promise, hung]);
-	} finally {
-		clearTimeout(timer);
+		return await timeout(Nano.fromMilli(Milli(1_000)), promise);
+	} catch (error) {
+		if (error instanceof Elapsed) throw new Error("the reader hung");
+		throw error;
 	}
 }
 

@@ -42,4 +42,3 @@ Public API: none. Wire: none.
 - [Firefox's player closes every VideoFrame](/quest/m0/nightly/firefox-videoframe.md) - the Media job's Firefox player stops leaking an unclosed VideoFrame
 - [moq-tokio's isolated feature builds pass](/quest/m0/nightly/tokio-features.md) - `Incoming::refuse` stops failing `tokio-features --all` on dead_code, so the rest of `rs features` runs
 - [moq-uring's tests build on macOS and Windows](/quest/m0/nightly/kio-e0433.md) - the platform jobs stop failing with E0433 on `kio` in moq-uring's integration tests
-- [@moq/hang's libav tests pass on main](/quest/m0/nightly/hang-libav-tests.md) - the two libav tests pass, or skip with a reason when the libav build is missing

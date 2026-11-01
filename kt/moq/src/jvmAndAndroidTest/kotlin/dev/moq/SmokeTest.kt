@@ -279,7 +279,7 @@ class SmokeTest {
     @Test
     fun `a default subscription skips superseded groups at once`() {
         assertEquals(java.time.Duration.ZERO, Subscription.default().maxDelay)
-        assertNull(Subscription().maxDelay)
+        assertNull(Subscription(maxDelay = null).maxDelay)
     }
 
     @Test

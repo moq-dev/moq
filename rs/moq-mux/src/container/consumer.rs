@@ -1497,7 +1497,7 @@ mod tests {
 	async fn read_all(consumer: &mut Consumer<Container>) -> Result<Vec<Frame>, crate::Error> {
 		let mut frames = Vec::new();
 		loop {
-			match tokio::time::timeout(Duration::from_millis(200), consumer.read_frame()).await {
+			match moq_clock::timeout(Duration::from_millis(200), consumer.read_frame()).await {
 				Ok(Ok(Some(frame))) => frames.push(frame),
 				Ok(Ok(None)) => break,
 				Ok(Err(e)) => return Err(e),
@@ -1610,7 +1610,7 @@ mod tests {
 		write_marker_group(&mut track, 16, ts(1_000_000));
 
 		let mut read = async || {
-			tokio::time::timeout(Duration::from_secs(1), reader.read())
+			moq_clock::timeout(Duration::from_secs(1), reader.read())
 				.await
 				.expect("the end is read while the track stays open")
 				.unwrap()
@@ -2198,7 +2198,7 @@ mod tests {
 
 		// Finish group 0 after consumer has had time to accumulate pending groups
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			moq_clock::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
 
@@ -2237,7 +2237,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			moq_clock::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
 
@@ -2273,7 +2273,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			moq_clock::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
 
@@ -2692,7 +2692,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(10)).await;
+			moq_clock::sleep(Duration::from_millis(10)).await;
 			group0.finish().unwrap();
 		});
 
@@ -2733,7 +2733,7 @@ mod tests {
 
 		track.finish().unwrap();
 
-		let result = tokio::time::timeout(Duration::from_millis(200), consumer.read()).await;
+		let result = moq_clock::timeout(Duration::from_millis(200), consumer.read()).await;
 		match result {
 			Ok(Ok(None)) => {} // expected: track ended
 			Ok(Ok(Some(_))) => panic!("expected None for empty track, got Some"),
@@ -2756,7 +2756,7 @@ mod tests {
 		// The groups already here drain before the track's error, as in JS.
 		let mut frames = Vec::new();
 		let end = loop {
-			let read = tokio::time::timeout(Duration::from_millis(500), consumer.read())
+			let read = moq_clock::timeout(Duration::from_millis(500), consumer.read())
 				.await
 				.expect("Consumer should not hang after track error");
 			match read {
@@ -2932,7 +2932,7 @@ mod tests {
 
 		// Must skip the evicted group + the gap and reach the live group, without
 		// hanging on a track that never finishes.
-		let next = tokio::time::timeout(Duration::from_secs(1), consumer.read())
+		let next = moq_clock::timeout(Duration::from_secs(1), consumer.read())
 			.await
 			.expect("consumer hung on an evicted group / gap")
 			.unwrap()
@@ -2977,7 +2977,7 @@ mod tests {
 
 		// The age budget alone closes the gap: the deadline sits short of the 100ms
 		// hole timer, so waiting it out fails the test.
-		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+		let frame = moq_clock::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
 			.expect("consumer hung on a missing sequence on a live track")
 			.unwrap()
@@ -3007,7 +3007,7 @@ mod tests {
 		// Group 0 is done; group 1's stream is still racing. Within the budget the
 		// consumer waits at the gap rather than skipping to group 2.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			moq_clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"the gap at sequence 1 is within budget and must be waited for"
@@ -3039,7 +3039,7 @@ mod tests {
 		// Group 1's stream wins the race, and the consumer polls before group 0 lands.
 		write_group(&mut track, 1, &[ts(100_000)]);
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			moq_clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"the requested head is within budget and must be waited for"
@@ -3070,7 +3070,7 @@ mod tests {
 
 		// Startup latches onto the lowest arrived sequence and waits under the budget.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			moq_clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"group 0's frames are within budget and must be waited for"
@@ -3548,7 +3548,7 @@ mod tests {
 		let first = consumer.read_frame().await;
 		assert!(matches!(first, Ok(Some(_))), "first frame should decode, got {first:?}");
 
-		let second = tokio::time::timeout(Duration::from_millis(200), consumer.read())
+		let second = moq_clock::timeout(Duration::from_millis(200), consumer.read())
 			.await
 			.expect("consumer hung on a decode error");
 		assert!(
@@ -3569,7 +3569,7 @@ mod tests {
 	/// Read until something other than a frame, failing if the reader stalls.
 	async fn read_past_frames(consumer: &mut Consumer<FailingDecode>) -> Result<Option<Read>, crate::Error> {
 		loop {
-			let read = tokio::time::timeout(Duration::from_millis(200), consumer.read())
+			let read = moq_clock::timeout(Duration::from_millis(200), consumer.read())
 				.await
 				.expect("consumer hung");
 			match read {
@@ -3664,7 +3664,7 @@ mod tests {
 		assert_eq!(first.timestamp, ts(0));
 		// Lookahead finds the error while the reader waits on the open group, which comes first.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			moq_clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err()
 		);
@@ -3672,10 +3672,10 @@ mod tests {
 		slow.finish().unwrap();
 		let frame = consumer.read_frame().await.unwrap().unwrap();
 		assert_eq!(frame.timestamp, ts(10_000));
-		let read = tokio::time::timeout(Duration::from_millis(50), consumer.read()).await;
+		let read = moq_clock::timeout(Duration::from_millis(50), consumer.read()).await;
 		assert!(matches!(read, Ok(Err(crate::Error::UnknownFormat(_)))), "{read:?}");
 		// The reader stays ended rather than resuming with the group's later frames.
-		let read = tokio::time::timeout(Duration::from_millis(50), consumer.read()).await;
+		let read = moq_clock::timeout(Duration::from_millis(50), consumer.read()).await;
 		assert!(matches!(read, Ok(Ok(None))), "{read:?}");
 	}
 
@@ -3733,7 +3733,7 @@ mod tests {
 		rewound.finish().unwrap();
 		// The reader looks ahead into both while it waits on the open group.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			moq_clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err()
 		);
@@ -3783,7 +3783,7 @@ mod tests {
 		write_failing(&mut later, None);
 		// The reader looks ahead into the later group while it waits on the open one.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			moq_clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err()
 		);
@@ -3816,7 +3816,7 @@ mod tests {
 
 		group.abort(moq_net::Error::Cancel).unwrap();
 		track.finish().unwrap();
-		let read = tokio::time::timeout(Duration::from_millis(50), consumer.read()).await;
+		let read = moq_clock::timeout(Duration::from_millis(50), consumer.read()).await;
 		assert!(matches!(read, Ok(Err(crate::Error::UnknownFormat(_)))), "{read:?}");
 	}
 
@@ -3912,15 +3912,15 @@ mod tests {
 		write_group(&mut track, 1, &[ts(100_000)]);
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			moq_clock::sleep(Duration::from_millis(20)).await;
 			// Write group 2: recv_group fires, drops current buffer_until for group 1
 			write_group(&mut track, 2, &[ts(200_000)]);
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			moq_clock::sleep(Duration::from_millis(20)).await;
 			group0.finish().unwrap();
 			track.finish().unwrap();
 		});
 
-		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+		let frames = moq_clock::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read_frame().await.unwrap() {
 				frames.push(frame);
@@ -4003,11 +4003,11 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			moq_clock::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
 
-		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+		let frames = moq_clock::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read_frame().await.unwrap() {
 				frames.push(frame);
@@ -4052,7 +4052,7 @@ mod tests {
 			.unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			moq_clock::sleep(Duration::from_millis(50)).await;
 			Container::Legacy(crate::container::Kind::Data)
 				.write(
 					&mut group7,
@@ -4068,7 +4068,7 @@ mod tests {
 			track.finish().unwrap();
 		});
 
-		let _frames = tokio::time::timeout(Duration::from_secs(2), async {
+		let _frames = moq_clock::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read_frame().await.unwrap() {
 				frames.push(frame);
@@ -4097,7 +4097,7 @@ mod tests {
 
 		// Group 5 is open and within budget: its frames may still arrive, so wait.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			moq_clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"an open frameless group within budget must be waited for"
@@ -4130,7 +4130,7 @@ mod tests {
 
 		// While group 1 is open its frames may still come, so the consumer waits.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			moq_clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"an open frameless group must be waited for"
@@ -4138,7 +4138,7 @@ mod tests {
 
 		// The abort (an eviction) settles it, and the finished track ends cleanly.
 		group1.abort(moq_net::Error::Old).unwrap();
-		let end = tokio::time::timeout(Duration::from_millis(200), consumer.read())
+		let end = moq_clock::timeout(Duration::from_millis(200), consumer.read())
 			.await
 			.expect("an aborted frameless group must not park the consumer");
 		assert!(end.unwrap().is_none(), "the track ends cleanly");
@@ -4162,7 +4162,7 @@ mod tests {
 		track.finish().unwrap();
 
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			moq_clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"the open head group is within budget and must be waited for"
@@ -4209,7 +4209,7 @@ mod tests {
 
 		let mut micros = Vec::new();
 		for _ in 0..2 {
-			let frame = tokio::time::timeout(Duration::from_millis(200), consumer.read_frame())
+			let frame = moq_clock::timeout(Duration::from_millis(200), consumer.read_frame())
 				.await
 				.expect("the open track still delivers the later range")
 				.unwrap()
@@ -4273,7 +4273,7 @@ mod tests {
 		// group is served, and nothing else arrives.
 		write_group(&mut track, 100, &[ts(3_000_000)]);
 
-		let frame = tokio::time::timeout(Duration::from_millis(200), consumer.read_frame())
+		let frame = moq_clock::timeout(Duration::from_millis(200), consumer.read_frame())
 			.await
 			.expect("an unfloored join must not wait out a gap below the served start")
 			.unwrap()
@@ -4309,7 +4309,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			moq_clock::sleep(Duration::from_millis(20)).await;
 			group0.finish().unwrap();
 		});
 
@@ -4344,7 +4344,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			moq_clock::sleep(Duration::from_millis(20)).await;
 			group0.finish().unwrap();
 		});
 
@@ -4383,7 +4383,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			moq_clock::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
 
@@ -4509,13 +4509,13 @@ mod tests {
 		write_group(&mut track, 0, &[ts(0)]);
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			moq_clock::sleep(Duration::from_millis(20)).await;
 			write_group(&mut track, 1, &[ts(30_000)]);
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			moq_clock::sleep(Duration::from_millis(20)).await;
 			track.finish().unwrap();
 		});
 
-		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+		let frames = moq_clock::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read_frame().await.unwrap() {
 				frames.push(frame);
@@ -4614,7 +4614,7 @@ mod tests {
 
 		track.finish().unwrap();
 
-		let frames = tokio::time::timeout(Duration::from_secs(2), async { continuous_frames(&mut consumer).await })
+		let frames = moq_clock::timeout(Duration::from_secs(2), async { continuous_frames(&mut consumer).await })
 			.await
 			.expect("consumer hung — duration skip regression");
 
@@ -4673,12 +4673,12 @@ mod tests {
 		// A second frame lands on group 0 and finishes it after the consumer has
 		// had a chance to (incorrectly) skip.
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			moq_clock::sleep(Duration::from_millis(20)).await;
 			write_duration_frame(&mut group0, ts(20_000), ts(10_000));
 			group0.finish().unwrap();
 		});
 
-		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+		let frames = moq_clock::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read_frame().await.unwrap() {
 				frames.push(frame);
@@ -4711,7 +4711,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		let frame = tokio::time::timeout(Duration::from_secs(1), consumer.read_frame())
+		let frame = moq_clock::timeout(Duration::from_secs(1), consumer.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
@@ -4751,7 +4751,7 @@ mod tests {
 		let slack = 4 * std::mem::size_of::<GroupBuffer<Container>>() + 1024;
 		let mut reads = Vec::new();
 		loop {
-			let read = tokio::time::timeout(Duration::from_secs(5), consumer.read())
+			let read = moq_clock::timeout(Duration::from_secs(5), consumer.read())
 				.await
 				.expect("consumer hung")
 				.unwrap();

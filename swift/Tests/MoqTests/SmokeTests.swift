@@ -11,7 +11,7 @@ private func nextRoute(_ announced: AnnounceConsumer) async throws -> AnnounceEv
 final class SmokeTests: XCTestCase {
     func testDefaultSubscriptionSkipsSupersededGroupsAtOnce() {
         XCTAssertEqual(Subscription.default.maxDelay, 0)
-        XCTAssertNil(Subscription().maxDelay)
+        XCTAssertNil(Subscription(maxDelay: nil).maxDelay)
     }
 
     func testContainerTimebaseBelongsToOneBroadcast() throws {

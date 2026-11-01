@@ -42,7 +42,9 @@ on:
         description: "Publish to Maven Local and check the POMs, as a PR does"
         type: boolean
         default: true
-  workflow_run:
+  # Publishes only a protected release tag at the run's commit; see
+  # "Require a release tag at the run's commit".
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: ["Release FFI", "Release Kotlin FFI"]
     types:
       - completed
@@ -147,18 +149,24 @@ jobs:
       - name: Check for unreleased FFI changes
         id: ffi-diff
         if: github.event_name != 'workflow_run'
-        run: just gh release ffi-unreleased "${{ steps.ffi.outputs.version }}"
+        env:
+          FFI_VERSION: ${{ steps.ffi.outputs.version }}
+        run: just gh release ffi-unreleased "$FFI_VERSION"
 
       - name: Check wrapper publication
         id: wrapper
-        run: just gh release maven-exists dev.moq moq "${{ steps.version.outputs.version }}"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: just gh release maven-exists dev.moq moq "$VERSION"
 
       # The bindings this checkout generates must be on Maven Central, or the
       # wrapper's POM range resolves to an older moq-ffi without them.
       - name: Check bindings publication
         id: bindings
         if: github.event_name != 'workflow_run' && steps.wrapper.outputs.exists != 'true' && steps.ffi-diff.outputs.unreleased != 'true'
-        run: just gh release maven-exists dev.moq moq-ffi "${{ steps.ffi.outputs.version }}"
+        env:
+          FFI_VERSION: ${{ steps.ffi.outputs.version }}
+        run: just gh release maven-exists dev.moq moq-ffi "$FFI_VERSION"
 
       - name: Decide publish
         id: decide
@@ -250,13 +258,18 @@ jobs:
           packages: platform-tools
 
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          # Like the Rust build above, the published artifacts build without a cache.
+          cache-disabled: true
 
       # check-version runs outside the serialized group, so an earlier run
       # holding it may have published this version since. Check again.
       - name: Recheck wrapper publication
         id: recheck
         if: github.event_name != 'pull_request' && !inputs.dry-run
-        run: just gh release maven-exists dev.moq moq "${{ needs.check-version.outputs.version }}"
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: just gh release maven-exists dev.moq moq "$VERSION"
 
       - name: Publish to Maven Central
         if: github.event_name != 'pull_request' && !inputs.dry-run && steps.recheck.outputs.exists != 'true'
