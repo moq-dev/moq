@@ -21,11 +21,7 @@
 //! iteration, a fixed cost that matters only at a few consumers per thread.
 //!
 //! Run with `cargo bench -p kio --bench contended`.
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "the bench measures real cross-core time on the host clock"
-)]
+#![expect(clippy::disallowed_methods, reason = "host time measures benchmark throughput")]
 
 use std::{
 	collections::VecDeque,

@@ -1140,7 +1140,7 @@ mod tests {
 		// is well past the drain window.
 		tokio::time::pause();
 		trigger.start();
-		moq_clock::timeout(window + std::time::Duration::from_secs(1), admission.abandoned())
+		kio::clock::timeout(window + std::time::Duration::from_secs(1), admission.abandoned())
 			.await
 			.expect("the admission outlived the drain deadline");
 		running.await.unwrap().unwrap();
@@ -1196,7 +1196,7 @@ mod tests {
 
 		// The handshake deadline is an io_uring timer, which a paused tokio clock cannot
 		// advance, so this waits out the real second with nobody answering.
-		moq_clock::timeout(timeout * 5, admission.abandoned())
+		kio::clock::timeout(timeout * 5, admission.abandoned())
 			.await
 			.expect("the admission outlived the handshake deadline");
 		trigger.start();

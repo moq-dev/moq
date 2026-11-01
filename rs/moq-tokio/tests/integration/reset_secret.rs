@@ -66,7 +66,7 @@ impl Fixture {
 				.expect("failed to listen");
 			let port = listener.local_addr().expect("no quic addr").port();
 			tokio::spawn(async move {
-				while let Some(request) = listener.accept().await {
+				while let Ok(request) = listener.accept().await {
 					tokio::spawn(async move {
 						let _session = request.ok().await;
 						std::future::pending::<()>().await;
@@ -81,7 +81,7 @@ impl Fixture {
 
 /// Connect, crash the server and restart it on the same port, then report how the
 /// client's connection ended once it next sent something.
-fn restart(reset_secret: bool) -> Result<driver::connection::Error, moq_clock::Elapsed> {
+fn restart(reset_secret: bool) -> Result<driver::connection::Error, kio::clock::Elapsed> {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let fixture = Fixture::new();
 	let client = tokio::runtime::Builder::new_current_thread()
@@ -123,7 +123,7 @@ fn restart(reset_secret: bool) -> Result<driver::connection::Error, moq_clock::E
 		send.finish();
 		// Far below the client's 30s idle timeout, and ample for a loopback round
 		// trip; the keyless arm waits all of it.
-		moq_clock::timeout(Duration::from_secs(1), conn.closed()).await
+		kio::clock::timeout(Duration::from_secs(1), conn.closed()).await
 	})
 }
 

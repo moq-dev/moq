@@ -22,7 +22,7 @@ use std::{
 use crate::quic::driver::runtime::{AsyncUdpSocket, wrap_udp_socket};
 use crate::quic::driver::{Duration, Instant};
 use bytes::{Buf, Bytes};
-use moq_clock::{sleep, timeout};
+use kio::clock::{sleep, timeout};
 use moq_quic::RandomConnectionIdGenerator;
 use moq_sock::udp::RecvMeta;
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -118,6 +118,32 @@ async fn close_endpoint() {
 			panic!("unexpected success");
 		}
 	}
+}
+
+/// A driver panic wakes the handshake it was driving instead of leaving it pending forever.
+///
+/// The waiter panics on the poisoned state, for its owner to isolate (as `Server` does per handshake).
+#[tokio::test]
+async fn driver_panic_fails_connecting() {
+	let _guard = subscribe();
+
+	// Avoid NoRootAnchors error
+	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+	let mut roots = RootCertStore::empty();
+	roots.add(cert.cert.into()).unwrap();
+
+	let endpoint = client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+	endpoint.set_default_client_config(client::Config::with_root_certificates(Arc::new(roots)).unwrap());
+
+	// Nothing answers here, and the dead driver can't time the handshake out.
+	let connecting = endpoint
+		.dial(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234), "localhost")
+		.unwrap();
+	connecting.poison();
+
+	// The waiter wakes into the poisoned state and panics there, and dropping it doesn't abort.
+	let woken = timeout(Duration::from_secs(5), crate::panic::isolate(connecting)).await;
+	assert!(matches!(woken, Ok(None)), "the handshake waiter hung");
 }
 
 #[test]
@@ -2314,7 +2340,7 @@ async fn close_during_handshake_does_not_wait_for_silent_peer() {
 	// Let the driver send the Initial.
 	tokio::task::yield_now().await;
 
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	client.close(0u32.into(), "closing").await;
 	let elapsed = start.elapsed();
 	assert!(connect.await.is_err());

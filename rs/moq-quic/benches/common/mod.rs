@@ -22,7 +22,7 @@ use criterion::{
 	Criterion,
 	measurement::{Measurement, ValueFormatter, WallTime},
 };
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_congestion::{Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent};
 use moq_quic::{
 	ConnectionId, ConnectionIdGenerator, Event, RandomConnectionIdGenerator, StreamEvent, VarInt, client,
@@ -152,6 +152,7 @@ impl Peer {
 					local_ip: None,
 					ecn: None,
 					data,
+					arrival: None,
 				},
 				&mut buf,
 			) {
@@ -577,6 +578,7 @@ pub(crate) fn deliver(pair: &mut Pair, datagram: BytesMut) {
 			local_ip: None,
 			ecn: None,
 			data: datagram,
+			arrival: None,
 		},
 		&mut server.buf,
 	) {
