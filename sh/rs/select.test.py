@@ -15,7 +15,7 @@ DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cl
 
 class SelectTest(unittest.TestCase):
     # CI runs target lints before its test build.
-    def selected(self, *paths, action="lint", github_actions=False):
+    def selected(self, *paths, action="lint", github_actions=False, feature_scope=None):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
             calls = scratch / "calls"
@@ -27,6 +27,9 @@ class SelectTest(unittest.TestCase):
             env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
                        SELECT_CALLS=str(calls), BASH_ENV=os.devnull,
                        GITHUB_ACTIONS=str(github_actions).lower())
+            env.pop("RS_FEATURE_SCOPE", None)
+            if feature_scope:
+                env["RS_FEATURE_SCOPE"] = feature_scope
             subprocess.run(["bash", "sh/rs/select.sh", action, str(changed)],
                            cwd=ROOT, env=env, check=True, capture_output=True, text=True)
             return calls.read_text().splitlines() if calls.exists() else []
@@ -82,15 +85,45 @@ class SelectTest(unittest.TestCase):
         calls = self.selected("rs/moq-stats/benches/producer_tick.rs")
         self.assertFalse(any(call.endswith("-features") for call in calls), calls)
 
+    def test_send_depth_follows_moq_net(self):
+        for action in ("check", "check-test", "lint"):
+            for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "sh/rs/send-depth.sh"):
+                with self.subTest(action=action, path=path):
+                    self.assertIn("rs send-depth", self.selected(path, action=action))
+            with self.subTest(action=action, path="rs/moq-tokio/src/lib.rs"):
+                self.assertNotIn("rs send-depth", self.selected("rs/moq-tokio/src/lib.rs", action=action))
+
+    def test_local_feature_contracts_skip_dependents(self):
+        # `just check` lints feature shapes for the changed crates alone; their
+        # dependents keep the default-feature lint and the landing worker's shapes.
+        for action in ("check", "feature-shapes"):
+            with self.subTest(action=action):
+                calls = self.selected("rs/kio/src/lib.rs", action=action, feature_scope="changed")
+                shapes = next(call for call in calls if call.startswith("rs feature-shapes "))
+                self.assertIn("/rs/kio#", shapes)
+                self.assertNotIn("/rs/moq-net#", shapes)
+        calls = self.selected("rs/kio/src/lib.rs", feature_scope="changed")
+        self.assertTrue(any("/rs/moq-net#" in call for call in calls if call.startswith("rs lint ")), calls)
+        self.assertIn("rs loom-check", calls)
+        self.assertFalse(any(call.endswith("-features") for call in calls), calls)
+        for path, owner in (("rs/moq-net/src/lib.rs", "net"), ("rs/moq-tokio/src/lib.rs", "tokio"),
+                            ("rs/moq-quic/src/lib.rs", "quic"), ("rs/moq-video/src/lib.rs", "media")):
+            with self.subTest(path=path):
+                calls = self.selected(path, feature_scope="changed")
+                self.assertEqual([call for call in calls if call.endswith("-features")], [f"rs {owner}-features"])
+        # Inputs every crate shares still select the workspace.
+        self.assertIn("rs feature-shapes --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz",
+                      self.selected("Cargo.lock", action="feature-shapes", feature_scope="changed"))
+
     def test_loom_compiles_only_when_its_model_changes(self):
         for action in ("check", "check-test", "lint"):
             for path in ("rs/kio/src/lib.rs", "rs/moq-net/tests/loom.rs", "Cargo.lock"):
                 with self.subTest(action=action, path=path):
-                    self.assertIn("rs loom --no-run", self.selected(path, action=action))
+                    self.assertIn("rs loom-check", self.selected(path, action=action))
             for path in ("rs/moq-tokio/src/lib.rs", "rs/moq-stats/benches/producer_tick.rs"):
                 with self.subTest(action=action, path=path):
-                    self.assertNotIn("rs loom --no-run", self.selected(path, action=action))
-        self.assertNotIn("rs loom --no-run", self.selected("rs/moq-net/src/lib.rs", action="test"))
+                    self.assertNotIn("rs loom-check", self.selected(path, action=action))
+        self.assertNotIn("rs loom-check", self.selected("rs/moq-net/src/lib.rs", action="test"))
 
     def test_device_features_join_the_one_test_build(self):
         for path, features in (("rs/moq-audio/src/lib.rs", DEVICE_FEATURES),
@@ -130,6 +163,13 @@ class SelectTest(unittest.TestCase):
                     self.assertTrue(any(call.startswith(f"rs {action} ") and "/rs/moq-cli#" in call
                                         for call in calls), calls)
         self.assertEqual(self.selected("test/interop/compat/container.rs"), [])
+
+    def test_relay_nixos_module_selects_the_relay(self):
+        # moq-relay's tests read the module.
+        calls = self.selected("nix/modules/moq-relay.nix", action="test")
+        self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
+        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        self.assertRegex("nix/modules/moq-relay.nix", scope)
 
     def test_dispatch_scope_covers_out_of_crate_targets(self):
         scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)

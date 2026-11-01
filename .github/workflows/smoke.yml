@@ -492,7 +492,7 @@ jobs:
       contents: read
       packages: read
     # The published client image and moq-dev relay both follow Git HEAD. Building
-    # the Rust relay is the long pole; the 12 protocol cases are bounded and quick.
+    # the Rust relay is the long pole; the protocol cases are bounded and quick.
     timeout-minutes: 45
 
     steps:
@@ -523,10 +523,6 @@ jobs:
           dirname "$shim" >> "$GITHUB_PATH"
 
       - name: Moxygen interoperability
-        # Current moq-dev HEAD negotiates successfully but fails moxygen's
-        # announce-subscribe case. Keep the full diagnostic visible without
-        # failing the job; remove this once that protocol mismatch is fixed.
-        continue-on-error: true
         run: just moxygen
 
   interop-runner:
