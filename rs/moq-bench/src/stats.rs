@@ -1,4 +1,4 @@
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -106,7 +106,7 @@ impl Stats {
 	/// Record one group keyframe's wall-clock delivery latency.
 	pub fn latency(&self, sent_ms: u128) {
 		// Read the clock before locking so contention is not measured as latency.
-		let now_ms = moq_clock::wall()
+		let now_ms = kio::clock::wall()
 			.saturating_duration_since(Wall::UNIX_EPOCH)
 			.as_millis();
 		self.latency.observe(sent_ms, now_ms);
@@ -130,7 +130,7 @@ impl Stats {
 	/// recorded stats are partial is invalid, so the caller must fail the run
 	/// rather than exit green.
 	pub async fn report(&self, interval: Duration, mut output: Option<std::fs::File>) -> anyhow::Result<()> {
-		let mut ticker = moq_clock::interval(interval);
+		let mut ticker = kio::clock::interval(interval);
 		// Skip the immediate first tick so the first report covers a full interval.
 		ticker.tick().await;
 
@@ -435,7 +435,7 @@ impl Latency {
 		// include only part of an observation. One that reads the clock before the
 		// boundary but locks after it counts in the next interval, unaltered.
 		let state = self.state.lock().expect("latency lock poisoned");
-		let captured_at = moq_clock::wall();
+		let captured_at = kio::clock::wall();
 		let LatencyState {
 			buckets,
 			max_ms,
@@ -497,11 +497,6 @@ fn highest_bucket(buckets: &[u64]) -> Option<u64> {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use std::sync::Arc;
 
@@ -578,9 +573,8 @@ mod tests {
 	async fn report_fails_on_output_error() {
 		tokio::time::pause();
 
-		let dir = std::env::temp_dir().join("moq-bench-stats-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("out.jsonl");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("out.jsonl");
 		std::fs::write(&path, b"").unwrap();
 		// A read-only handle: the first write fails.
 		let file = std::fs::File::open(&path).unwrap();
@@ -785,6 +779,11 @@ mod tests {
 	/// Sweep observation concurrency and report density without a network bottleneck.
 	#[test]
 	#[ignore = "performance measurement; run by the nightly stats benchmark"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures real observation throughput"
+	)]
 	fn benchmark_observation_contention() {
 		use std::sync::Barrier;
 		use std::time::Instant;

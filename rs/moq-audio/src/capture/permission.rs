@@ -67,7 +67,7 @@ async fn request_access(media: &objc2_av_foundation::AVMediaType) -> Result<(), 
 
 	unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &handler) };
 
-	match moq_clock::timeout(PROMPT_TIMEOUT, rx).await {
+	match kio::clock::timeout(PROMPT_TIMEOUT, rx).await {
 		Ok(Ok(true)) => Ok(()),
 		Ok(Ok(false)) => Err(denied()),
 		// Prompt dismissed without a decision, or the callback never fired within

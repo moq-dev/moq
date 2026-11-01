@@ -72,6 +72,11 @@ replaced SUBSCRIBE_ALL) landed in [#6158](https://github.com/moq-dev/moq/pull/61
 and [#6167](https://github.com/moq-dev/moq/pull/6167), and the padding stream
 type for the m2 browser [padding probes](/quest/m2/probe/padding.md) landed in
 [#6233](https://github.com/moq-dev/moq/pull/6233).
+Decided 2026-10-30 (maintainer, on
+[moq-dev/moq#7390](https://github.com/moq-dev/moq/pull/7390)): those probes
+pad with datagrams rather than streams, and padding datagrams are supported
+only on lite-07. Lite-07 now defines the padding datagram type and both receivers
+discard it.
 The `Time(pts)` range end rides in the subscribe-ranges children already Required.
 
 Decided 2026-10-27 (maintainer): of [Subscribe ranges](/quest/m1/subscribe-ranges/README.md),
@@ -103,12 +108,12 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
-- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - a relay fills a lite-07 upstream through the subscription, and moq-transport carries the anchors it can
+- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - a relay fills a lite-07 upstream through the subscription
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - JS speaks lite-07 ranges
 - [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - lite FETCH is gone from lite-07, in Rust and JS
 - [Lite-07 by start](/quest/m1/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m1/time-addressing/js.md) - JS speaks the same lite-07 wire
-- [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
+- [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - the job's route inherits the claim's identity, with no new wire message
 
 ## Related
 

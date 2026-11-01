@@ -65,8 +65,8 @@ relay bounds a sparse FETCH only if the model can request ranges:
   still caps every range, so `Absolute(0)..` means everything not stale.
   A relay that cannot resolve a relative end locally forwards it upstream as
   relative over lite-07; a moq-transport bridge resolves it to an absolute
-  Group ID first ([Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md),
-  decided 2026-10-27).
+  Group ID first, from its cache or the Largest Object of a live join
+  (decided 2026-10-27).
 - **Time ends** (maintainer, 2026-10-17, for DVR seek in the
   [archive line](/quest/m1/archive/README.md)). A range end may also be
   `Time(pts)`, in the track's timescale. Whoever holds the track resolves it:
