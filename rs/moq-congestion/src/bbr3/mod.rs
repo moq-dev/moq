@@ -1811,6 +1811,10 @@ impl Bbr3 {
     ///
     /// Startup, Drain, and ProbeRTT are BBR3's own: Startup ends on its plateau or on loss, and
     /// Drain and ProbeRTT already send below the estimate.
+    ///
+    /// A round that has measured no rate, as a zero-interval sample leaves it, bounds nothing,
+    /// as `update_max_bw` skips that sample: a zero bound would stop pacing until a probe the
+    /// path carries raised it.
     fn bound_queue_growth(&mut self, now: Instant) {
         let Some(rs) = self.rs else {
             return;
@@ -1819,6 +1823,9 @@ impl Bbr3 {
             return;
         }
         let delivery_rate = self.bw_latest.max(rs.delivery_rate);
+        if delivery_rate <= 0.0 {
+            return;
+        }
         match self.state {
             BbrState::ProbeBw(ProbeBwSubstate::Up) => {
                 self.bw_delay = self.bw_delay.min(delivery_rate);
@@ -8322,6 +8329,26 @@ mod test {
                 "phase {phase}: {bound_bytes:?} bytes delivered with the bound, {control_bytes:?} without"
             );
         }
+    }
+
+    /// Queue growth read on a round that measured no rate leaves the delay bound alone, rather
+    /// than bounding BBR.bw, and with it pacing, at zero.
+    #[test]
+    fn delay_bound_ignores_a_zero_rate() {
+        let mut sim = scripted();
+        sim.send(0, 1);
+        sim.ack(10 * MS, [0], false);
+        sim.send(10 * MS, 1);
+        // A zero interval, which carries no bandwidth
+        sim.ack(10 * MS, [1], false);
+        assert_eq!(sim.bbr.rs.unwrap().delivery_rate, 0.0);
+
+        sim.bbr.state = BbrState::ProbeBw(ProbeBwSubstate::Down);
+        sim.bbr.bw_latest = 0.0;
+        let now = sim.at(10 * MS);
+        sim.bbr.bound_queue_growth(now);
+        assert_eq!(sim.bbr.bw_delay, f64::INFINITY);
+        assert_eq!(sim.bbr.delay_round_delivered, 0);
     }
 
     /// The delay bound reads only receive timestamps: without them it changes nothing
