@@ -5908,6 +5908,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex-literal",
  "indexmap 2.14.2",
+ "kio 0.6.2",
  "lru-slab",
  "moq-clock",
  "moq-congestion",

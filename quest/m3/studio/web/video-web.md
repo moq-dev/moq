@@ -14,7 +14,8 @@ consumer, so it lands in the same PR as moq-video's browser backends:
 `hang` and `moq-mux` also build for `wasm32-unknown-unknown`. Their tokio
 `fs` feature and file IO sit behind a native-only cfg, which
 `rs/moq-wasm/Cargo.toml` names as the prerequisite for browser media muxing.
-A CI `cargo check` for wasm32 keeps them building.
+`just rs wasm` compiles `moq-mux` for wasm32, but no CI job runs it since the
+gate dropped it on 2026-10-31; this quest restores a wasm32 check if it needs one.
 
 ## Plan
 
