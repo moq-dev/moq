@@ -184,16 +184,24 @@ impl UdpSocketState {
 		};
 
 		let mut len = 0;
-		unsafe {
-			let rc = (self.wsa_recvmsg)(
+		let rc = unsafe {
+			(self.wsa_recvmsg)(
 				socket.0.as_raw_socket() as usize,
 				&mut wsa_msg,
 				&mut len,
 				ptr::null_mut(),
 				None,
-			);
-			if rc == -1 {
-				return Err(io::Error::last_os_error());
+			)
+		};
+		if rc == -1 {
+			let err = io::Error::last_os_error();
+			// Winsock fails the call with `WSAEMSGSIZE` when either the payload or the control data
+			// was truncated, and sets `MSG_TRUNC` / `MSG_CTRUNC` to say which. Only truncated
+			// control data is recoverable: the whole datagram arrived, so keep it below.
+			// https://learn.microsoft.com/en-us/windows/win32/api/ws2def/ns-ws2def-wsamsg#remarks
+			let truncated = wsa_msg.dwFlags & (WinSock::MSG_TRUNC | WinSock::MSG_CTRUNC);
+			if err.raw_os_error() != Some(WinSock::WSAEMSGSIZE) || truncated != WinSock::MSG_CTRUNC {
+				return Err(err);
 			}
 		}
 
