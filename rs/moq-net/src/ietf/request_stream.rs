@@ -265,7 +265,7 @@ impl Update {
 			0x10 => forward: Option<bool>,
 			0x20 => priority: Option<u8>,
 			0x21 => filter: Option<Filter>,
-			0x23 => fill: Option<Fill> where Filter::is_draft22(version),
+			0x23 => fill: Option<Fill> where Filter::is_draft20(version),
 			0x25 => subgroup_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x26 => object_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x27 => priority_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
@@ -329,11 +329,9 @@ impl<'a> Decode<'a, Version> for Update {
 	}
 }
 
-/// The namespace-only parameters of a REQUEST_UPDATE. `TRACKS` marks one on a
-/// SUBSCRIBE_TRACKS, which from draft-22 may also carry TRACK_PROPERTY_FILTER and
-/// FORWARD.
+/// The namespace-only parameters of a REQUEST_UPDATE.
 #[derive(Debug)]
-pub(crate) struct NamespaceUpdate<const TRACKS: bool = false> {
+pub(crate) struct NamespaceUpdate {
 	pub(super) request_id: super::RequestId,
 	pub(super) prefix: Option<crate::Path>,
 	pub(super) refused: Option<Error>,
@@ -351,7 +349,7 @@ impl super::parameters::Param for NamespacePrefix {
 	}
 }
 
-impl<'a, const TRACKS: bool> Decode<'a, Version> for NamespaceUpdate<TRACKS> {
+impl<'a> Decode<'a, Version> for NamespaceUpdate {
 	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if r.varint()? != super::SubscribeUpdate::ID {
 			return Err(DecodeError::InvalidValue);
@@ -363,8 +361,6 @@ impl<'a, const TRACKS: bool> Decode<'a, Version> for NamespaceUpdate<TRACKS> {
 			let request_id = super::RequestId::decode(&mut data, version)?;
 			decode_params!(&mut data, version,
 				0x03 => token: Vec<super::token::RequestToken>,
-				0x10 => _forward: Option<bool> where TRACKS && super::Filter::is_draft22(version),
-				0x29 => _track_filter: Vec<super::Opaque> where TRACKS && super::subscribe::has_range_filters(version),
 				0x34 => prefix: Option<NamespacePrefix>,
 			);
 			if !data.is_empty() {
@@ -390,7 +386,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn request_messages_keep_goaway_state_across_response_phases() {
 		use crate::lite::test_transport::ScriptedSession;
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			// GOAWAY, REQUEST_OK, then another GOAWAY on the same stream.
 			let script = vec![0x10, 0, 2, 0, 0, 0x07, 0, 0, 0x10, 0, 2, 0, 0];
 			let session = ScriptedSession::eof(script);
@@ -434,7 +430,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_goaway_does_not_cancel_a_pending_request() {
 		use crate::lite::test_transport::ScriptedSession;
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
 			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
 				.await
@@ -471,7 +467,7 @@ mod tests {
 
 	#[test]
 	fn delivery_timeouts_on_subscription_updates_are_accepted() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			// Request ID 2; OBJECT_DELIVERY_TIMEOUT=7, SUBGROUP_DELIVERY_TIMEOUT=9.
 			let mut buf = bytes::Bytes::from_static(&[2, 2, 0x02, 7, 0x04, 9]);
 			let update = crate::coding::decode_buf(&mut buf, version, Update::decode_body).unwrap();
@@ -490,24 +486,17 @@ mod tests {
 		);
 	}
 
-	/// From draft-22 a SUBSCRIBE_TRACKS update may carry TRACK_PROPERTY_FILTER (0x29), so it
-	/// decodes there, to be refused per request, while a SUBSCRIBE_NAMESPACE's still closes.
+	/// TRACK_PROPERTY_FILTER (0x29) belongs only to SUBSCRIBE_TRACKS updates, so on a
+	/// SUBSCRIBE_NAMESPACE's it closes the session.
 	#[test]
-	fn track_property_filter_on_listing_update_decodes() {
+	fn track_property_filter_on_namespace_update_closes() {
 		// REQUEST_UPDATE, 6 bytes: Request ID 2, one parameter: 0x29 with a two-byte value.
 		const FRAME: &[u8] = &[0x02, 0x00, 0x06, 2, 1, 0x29, 2, 0, 0];
-		let version = Version::Draft22;
-		let mut buf = bytes::Bytes::from_static(FRAME);
-		let update =
-			crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::<true>::decode(r, v)).unwrap();
-		assert!(update.refused.is_none(), "{version}: {:?}", update.refused);
-		let mut buf = bytes::Bytes::from_static(FRAME);
-		assert!(crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::<false>::decode(r, v)).is_err());
-		let mut buf = bytes::Bytes::from_static(FRAME);
-		assert!(
-			crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| NamespaceUpdate::<true>::decode(r, v))
-				.is_err()
-		);
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let mut buf = bytes::Bytes::from_static(FRAME);
+			let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::decode(r, v));
+			assert!(decoded.is_err(), "{version}");
+		}
 	}
 
 	/// TRACK_NAMESPACE_PREFIX (0x34) updates a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS only,

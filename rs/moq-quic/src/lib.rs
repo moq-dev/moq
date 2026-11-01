@@ -56,7 +56,7 @@ pub use rustls;
 mod config;
 mod limits;
 pub use config::{ConfigError, client, server, transport};
-pub use limits::{Limits, LimitsError};
+pub use limits::{Limits, LimitsError, Rate};
 
 pub mod crypto;
 

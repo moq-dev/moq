@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Milli, yieldNow } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer, type Tracks } from "../broadcast.ts";
@@ -29,7 +29,7 @@ afterEach(() => mock.restore());
 
 /** Lets queued microtasks, signal notifications, and mock stream deliveries run. */
 function settle(): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, 0));
+	return yieldNow();
 }
 
 async function bytes(f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
@@ -265,9 +265,9 @@ test("a flood of a peer's listing churn yields to the host's tasks", async () =>
 	// The receiver is mid-flood: a task queued now runs before it reaches the end.
 	let last = false;
 	let ranFirst: boolean | undefined;
-	setTimeout(() => {
+	void yieldNow().then(() => {
 		ranFirst = !last;
-	}, 0);
+	});
 	let event: string;
 	do event = await next(tracks);
 	while (event !== "+last");
