@@ -189,7 +189,8 @@ fn export_idle(c: &mut Criterion) {
 					let mut opened = open(format, source, stream);
 					// Take what the export lets go now, giving the origin's tasks a turn between polls.
 					while let Ok(chunk) =
-						tokio::time::timeout(Duration::from_millis(10), kio::wait(|waiter| opened.poll_next(waiter))).await
+						tokio::time::timeout(Duration::from_millis(10), kio::wait(|waiter| opened.poll_next(waiter)))
+							.await
 					{
 						assert!(chunk, "a live export ended");
 					}
