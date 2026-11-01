@@ -114,7 +114,12 @@ impl Live {
 		Self::on(self.clock.clone(), None, scale, audio_lag).await
 	}
 
-	async fn on(clock: kio::clock::Deadlines, entered: Option<kio::clock::Entered>, scale: f64, audio_lag: i64) -> Self {
+	async fn on(
+		clock: kio::clock::Deadlines,
+		entered: Option<kio::clock::Entered>,
+		scale: f64,
+		audio_lag: i64,
+	) -> Self {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
