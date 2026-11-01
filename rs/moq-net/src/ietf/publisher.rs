@@ -1984,7 +1984,8 @@ impl Publisher {
 			.until_withdrawn(stream, |waiter| subscribing.poll_ok(waiter))
 			.await?
 		{
-			Ok(subscribed) => subscribed,
+			// A peer reads the end of the subscription as the track's.
+			Ok(subscribed) => subscribed.parked(),
 			Err(err) => return Some(Err(err)),
 		};
 		drop(subscribing);

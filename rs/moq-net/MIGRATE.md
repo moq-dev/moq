@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A bounded subscription ends once its ranges are read
+
+When every one of a subscription's `ranges` has an end, `track::Subscriber::recv_group` and `track::Ordered::next_group` return `None` once each group in them was handed out, dropped, skipped as stale, or given up as unfillable, instead of waiting for an update to widen the ranges.
+A reader that wants to widen its ranges later keeps one open, such as `Range::groups(n..)`, and narrows its reads with `with_range`, whose cap never ends a read.
+A group another reader's fetch or fill cached is now handed to every subscriber whose ranges hold it, not only fetches.
+
 ### `broadcast::Demand` reads like `track::Demand`
 
 Replace `is_used()` with `wanted()`, and `used()`, `unused()`, `poll_used`, and `poll_unused` with a loop over `wanted_changed()` (or `poll_wanted_changed`), which returns the new value each time it changes and errors once the broadcast closes.

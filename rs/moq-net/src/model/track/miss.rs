@@ -682,16 +682,11 @@ impl Misses {
 		}
 		for run in candidates.iter() {
 			// Backfill another reader's fill cached is no hole, yet the arrival walk never
-			// reaches it: this reader takes it as filled where it would ask for a hole.
+			// reaches it: this reader takes it as filled, as it would its own fill's answer,
+			// even while the live feed may still deliver the group, so a warm cache serves
+			// what a cold one fills. A live copy landing later is the same group handed out.
 			for held in backfill(state, run.clone()).iter() {
-				let (unfed, awaited) = state.unfed(held.clone(), now);
-				for run in unfed.iter() {
-					self.filled.extend(run.clone());
-				}
-				for (run, folds) in awaited {
-					self.filled.extend(run.start..run.end.min(start));
-					self.deferred.insert(run.start.max(start)..run.end, folds);
-				}
+				self.filled.extend(held.clone());
 			}
 			for hole in holes(state, run.clone()) {
 				for hole in self.unclaimed(state, hole) {

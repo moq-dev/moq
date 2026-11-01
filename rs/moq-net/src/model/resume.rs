@@ -541,10 +541,13 @@ impl Copy {
 		if let Sub::Pending(pending) = &self.sub {
 			let sub = ready!(pending.poll_ok(waiter))?;
 			// An anchor the wire kept may resolve below where the reader got to.
-			let sub = sub.with_range((
-				Bound::Included(self.start(groups.0)),
-				groups.1.map_or(Bound::Unbounded, Bound::Excluded),
-			));
+			// The routes judge where the reader ends, not each copy.
+			let sub = sub
+				.with_range((
+					Bound::Included(self.start(groups.0)),
+					groups.1.map_or(Bound::Unbounded, Bound::Excluded),
+				))
+				.parked();
 			self.sub = Sub::Ready(Box::new(sub));
 		}
 		let Sub::Ready(sub) = &mut self.sub else { unreachable!() };
