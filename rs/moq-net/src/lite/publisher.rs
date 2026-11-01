@@ -1553,7 +1553,7 @@ trait Request: Sized {
 	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch>;
 
 	/// Start answering, once the broadcast resolves. `track` is the name [`Request::take_track`]
-	/// moved out of `msg`.
+	/// moved out of `msg`, which no longer holds it.
 	fn start(
 		shared: &Shared,
 		msg: Self::Message,
@@ -2319,7 +2319,12 @@ impl Request for FetchServe {
 		msg.epoch.as_ref()
 	}
 
-	fn start(_: &Shared, msg: Self::Message, track: &str, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
+	fn start(
+		_: &Shared,
+		msg: Self::Message,
+		track: &str,
+		broadcast: crate::broadcast::Consumer,
+	) -> Result<Self, Error> {
 		let fetching = broadcast
 			.track(track)?
 			.fetch_range(
