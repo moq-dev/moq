@@ -257,7 +257,9 @@ is local: the process was too slow to read. Loss on the path never reaches the
 socket and needs the transport's own counters. `udp_rcvbuf_errors`,
 `udp_sndbuf_errors` and `udp_in_errors` are the namespace's `/proc/net/snmp`
 counters, IPv4 and IPv6 summed, and count every socket in the namespace. The
-dump sees the sampler's network namespace, so run it in the target's.
+dump sees the sampler's network namespace, so run it in the target's. The
+fields are absent when the host refuses the dump, or for another user's process,
+whose `/proc/<pid>/fd` the sampler may not list; the other fields still sample.
 
 ## Measuring CPU cost
 

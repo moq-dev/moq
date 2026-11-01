@@ -22,7 +22,7 @@ mod udp;
 mod linux {
 	use super::udp;
 	use kio::clock::Wall;
-	use std::collections::HashMap;
+	use std::collections::{HashMap, HashSet};
 	use std::io::Write;
 	use std::time::Duration;
 
@@ -184,6 +184,20 @@ mod linux {
 		proc: Process,
 		ctx: CtxTotals,
 		drops: udp::Drops,
+		/// `/proc/<pid>/fd` refused us (another user's process), so this target
+		/// samples without the UDP fields rather than not at all.
+		udp_denied: bool,
+	}
+
+	impl Target {
+		fn new(proc: Process) -> Self {
+			Self {
+				proc,
+				ctx: CtxTotals::default(),
+				drops: udp::Drops::default(),
+				udp_denied: false,
+			}
+		}
 	}
 
 	/// Resolve the target processes from --pid or --name.
@@ -194,11 +208,7 @@ mod linux {
 				.iter()
 				.map(|&pid| {
 					let proc = Process::new(pid).with_context(|| format!("pid {pid}"))?;
-					Ok(Target {
-						proc,
-						ctx: CtxTotals::default(),
-						drops: udp::Drops::default(),
-					})
+					Ok(Target::new(proc))
 				})
 				.collect();
 		}
@@ -210,11 +220,7 @@ mod linux {
 			let Ok(proc) = proc else { continue };
 			let Ok(stat) = proc.stat() else { continue };
 			if stat.comm == args.name {
-				found.push(Target {
-					proc,
-					ctx: CtxTotals::default(),
-					drops: udp::Drops::default(),
-				});
+				found.push(Target::new(proc));
 			}
 		}
 		Ok(found)
@@ -245,22 +251,11 @@ mod linux {
 		let stat = target.proc.stat()?;
 		let (host_cpu_busy, host_cores) = host;
 		let udp = match sockets {
-			Some(all) => {
-				let owned = udp::inodes(&target.proc)?;
-				let sample = target.drops.observe(&owned, all);
-				let (rcvbuf_errors, sndbuf_errors, in_errors) = udp::snmp(&target.proc);
-				Some(UdpSample {
-					udp_sockets: sample.sockets,
-					udp_rcvbuf_min: sample.rcvbuf_min,
-					udp_sndbuf_min: sample.sndbuf_min,
-					udp_rx_queue_bytes: sample.queued,
-					udp_drops: sample.drops,
-					udp_rcvbuf_errors: rcvbuf_errors,
-					udp_sndbuf_errors: sndbuf_errors,
-					udp_in_errors: in_errors,
-				})
+			Some(all) if !target.udp_denied => {
+				let owned = udp::inodes(&target.proc);
+				udp_sample(target, all, owned)?
 			}
-			None => None,
+			_ => None,
 		};
 
 		// /proc/<pid>/status reports the context-switch counters of the thread group
@@ -309,6 +304,37 @@ mod linux {
 			udp,
 			per_thread,
 		})
+	}
+
+	/// Fold one target's sockets into its UDP fields. A target whose fd table we
+	/// may not list (another user's process) loses only these fields, once and
+	/// loudly, like a host that refuses the dump; any other error means it exited.
+	fn udp_sample(
+		target: &mut Target,
+		all: &HashMap<u64, udp::Socket>,
+		owned: std::io::Result<HashSet<u64>>,
+	) -> anyhow::Result<Option<UdpSample>> {
+		let owned = match owned {
+			Ok(owned) => owned,
+			Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+				eprintln!("pid {}: UDP socket accounting unavailable: {err}", target.proc.pid);
+				target.udp_denied = true;
+				return Ok(None);
+			}
+			Err(err) => return Err(err.into()),
+		};
+		let sample = target.drops.observe(&owned, all);
+		let (rcvbuf_errors, sndbuf_errors, in_errors) = udp::snmp(&target.proc);
+		Ok(Some(UdpSample {
+			udp_sockets: sample.sockets,
+			udp_rcvbuf_min: sample.rcvbuf_min,
+			udp_sndbuf_min: sample.sndbuf_min,
+			udp_rx_queue_bytes: sample.queued,
+			udp_drops: sample.drops,
+			udp_rcvbuf_errors: rcvbuf_errors,
+			udp_sndbuf_errors: sndbuf_errors,
+			udp_in_errors: in_errors,
+		}))
 	}
 
 	/// Resolve the targets, then sample them every interval until the duration
@@ -465,6 +491,27 @@ mod linux {
 			ctx.observe(1, 12, 1);
 			ctx.observe(2, 3, 1);
 			assert_eq!((ctx.voluntary, ctx.involuntary), (20, 4));
+		}
+
+		/// A target whose `/proc/<pid>/fd` belongs to another user keeps its CPU
+		/// and memory samples and loses only the UDP fields, for good; any other
+		/// fd error still reads as the target exiting.
+		#[test]
+		fn denied_fd_table_drops_only_udp() {
+			let all = HashMap::new();
+			let mut target = Target::new(Process::myself().unwrap());
+			let denied = Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+			assert!(udp_sample(&mut target, &all, denied).unwrap().is_none());
+			assert!(target.udp_denied);
+			let tps = procfs::ticks_per_second() as f64;
+			let record = sample(&mut target, tps, procfs::page_size(), false, (0.0, 1), Some(&all)).unwrap();
+			assert!(record.udp.is_none());
+
+			let mut target = Target::new(Process::myself().unwrap());
+			let gone = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+			assert!(udp_sample(&mut target, &all, gone).is_err());
+			assert!(!target.udp_denied);
+			assert!(udp_sample(&mut target, &all, Ok(HashSet::new())).unwrap().is_some());
 		}
 	}
 }

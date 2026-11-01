@@ -148,7 +148,12 @@ fn parse(mut data: &[u8], sockets: &mut HashMap<u64, Socket>) -> io::Result<bool
 		match kind as libc::c_int {
 			libc::NLMSG_DONE => return Ok(true),
 			libc::NLMSG_ERROR => {
-				let code = i32::from_ne_bytes(data[16..20].try_into().map_err(|_| invalid("short error"))?);
+				// Bounded by the message, so a malformed short error is rejected
+				// rather than read past the end of the datagram.
+				let code = data[..len]
+					.get(NLMSG_HDRLEN..NLMSG_HDRLEN + 4)
+					.ok_or_else(|| invalid("short error"))?;
+				let code = i32::from_ne_bytes(code.try_into().expect("4 bytes"));
 				return Err(io::Error::from_raw_os_error(-code));
 			}
 			_ => {}
@@ -199,9 +204,13 @@ fn meminfo(mut attrs: &[u8]) -> Option<impl Fn(usize) -> u32 + '_> {
 	None
 }
 
-/// The socket inodes `process` holds open.
+/// The socket inodes `process` holds open. Another user's process fails with
+/// `PermissionDenied`, which the caller tells apart from the process exiting.
 pub fn inodes(process: &Process) -> io::Result<HashSet<u64>> {
-	let fds = process.fd().map_err(io::Error::other)?;
+	let fds = process.fd().map_err(|err| match err {
+		procfs::ProcError::PermissionDenied(_) => io::Error::new(io::ErrorKind::PermissionDenied, err),
+		err => io::Error::other(err),
+	})?;
 	Ok(fds
 		.filter_map(Result::ok)
 		.filter_map(|fd| match fd.target {
@@ -230,6 +239,8 @@ pub struct Sample {
 /// `sk_drops` is a wrapping 32-bit counter per socket, and a closed socket's
 /// counter vanishes with it, so the total folds in each socket's wrapping
 /// delta and keeps a closed socket's share, like the context-switch totals.
+/// Keying by inode is exact: sockfs numbers inodes from the kernel's
+/// `get_next_ino()` counter, which reuses one only after 2^32 allocations.
 #[derive(Default)]
 pub struct Drops {
 	seen: HashMap<u64, u32>,
@@ -335,6 +346,25 @@ mod tests {
 		let sample = drops.observe(&HashSet::new(), &HashMap::new());
 		assert_eq!((sample.sockets, sample.rcvbuf_min), (0, 0));
 		assert_eq!(sample.drops, u64::from(u32::MAX - 1) + 7);
+	}
+
+	/// A malformed `NLMSG_ERROR` too short to carry its code is an error, not a
+	/// panic, even when it ends the datagram.
+	#[test]
+	fn short_error_is_rejected() {
+		let error = |len: u32| {
+			let mut data = vec![0u8; len as usize];
+			data[0..4].copy_from_slice(&len.to_ne_bytes());
+			data[4..6].copy_from_slice(&(libc::NLMSG_ERROR as u16).to_ne_bytes());
+			data
+		};
+		let err = parse(&error(16), &mut HashMap::new()).unwrap_err();
+		assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+		let mut data = error(20);
+		data[16..20].copy_from_slice(&(-libc::EPERM).to_ne_bytes());
+		let err = parse(&data, &mut HashMap::new()).unwrap_err();
+		assert_eq!(err.raw_os_error(), Some(libc::EPERM));
 	}
 
 	/// The dump reads this process's own socket, granted buffer included.
