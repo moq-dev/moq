@@ -14,7 +14,7 @@ use std::time::Duration;
 
 /// The current instant on the model's clock.
 pub(super) fn now() -> crate::time::Instant {
-	moq_clock::now()
+	kio::clock::now()
 }
 
 /// The instant a cache judges wall-clock staleness by, before the time its drivers
@@ -22,25 +22,18 @@ pub(super) fn now() -> crate::time::Instant {
 ///
 /// The ambient runtime's clock where there is one, so a paused test runtime pauses
 /// staleness along with the drivers it supplies time to.
-#[cfg(not(any(test, loom)))]
+#[cfg(not(test))]
 pub(super) fn wall() -> crate::time::Instant {
-	moq_clock::now()
-}
-
-/// Loom permutes handoffs without advancing time, so scheduling cannot age groups.
-#[cfg(all(loom, not(test)))]
-pub(super) fn wall() -> crate::time::Instant {
-	static FROZEN: LazyLock<crate::time::Instant> = LazyLock::new(moq_clock::now);
-	*FROZEN
+	kio::clock::now()
 }
 
 /// Unit tests freeze the wall clock, so only time a test supplies moves it: the
-/// simulated clock inside `moq_clock::sim`, or a pool stepped by hand outside it.
+/// simulated clock inside `kio::clock::sim`, or a pool stepped by hand outside it.
 #[cfg(test)]
 pub(super) fn wall() -> crate::time::Instant {
-	static FROZEN: LazyLock<crate::time::Instant> = LazyLock::new(moq_clock::now);
-	match moq_clock::sim::is_running() {
-		true => moq_clock::now(),
+	static FROZEN: LazyLock<crate::time::Instant> = LazyLock::new(kio::clock::now);
+	match kio::clock::sim::is_running() {
+		true => kio::clock::now(),
 		false => *FROZEN,
 	}
 }
@@ -57,9 +50,9 @@ pub(super) fn wall() -> crate::time::Instant {
 /// drawn, so it stays fixed for the clock without a cache that simulated runs, which
 /// all share one origin, would leak into each other.
 pub(super) fn anchor() -> (crate::time::Instant, Duration) {
-	let (instant, wall) = moq_clock::origin();
+	let (instant, wall) = kio::clock::origin();
 	let mut hasher = std::hash::DefaultHasher::new();
-	(moq_clock::seed(), instant, wall).hash(&mut hasher);
+	(kio::clock::seed(), instant, wall).hash(&mut hasher);
 	let jitter = Duration::from_millis(1 + hasher.finish() % 69_419);
 	(instant, offset(wall, jitter))
 }
@@ -69,9 +62,9 @@ pub(super) fn anchor() -> (crate::time::Instant, Duration) {
 /// Counting from 50 years after the Unix epoch keeps the value ~1.5e12 ms smaller,
 /// trimming a byte or two off the first frame's varint. Saturates to zero on a wall
 /// clock set before 2020 (an unsynced clock), since only a non-negative start matters.
-fn offset(wall: moq_clock::Wall, jitter: Duration) -> Duration {
+fn offset(wall: kio::clock::Wall, jitter: Duration) -> Duration {
 	const EPOCH: Duration = Duration::from_secs(1_577_836_800);
-	wall.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH)
+	wall.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH)
 		.saturating_sub(EPOCH)
 		.saturating_sub(jitter)
 }
@@ -85,7 +78,7 @@ mod tests {
 	#[test]
 	fn unit_tests_freeze_the_cache_clock() {
 		let frozen = wall();
-		while moq_clock::now() <= frozen {
+		while kio::clock::now() <= frozen {
 			std::hint::spin_loop();
 		}
 		assert_eq!(wall(), frozen);
@@ -93,11 +86,11 @@ mod tests {
 
 	#[test]
 	fn each_ambient_clock_owns_its_wall_anchor() {
-		let first = moq_clock::sim::run(async { anchor() });
-		let second = moq_clock::sim::run(async {
-			moq_clock::sim::step_wall(moq_clock::Manual::WALL_START + Duration::from_secs(86_400));
+		let first = kio::clock::sim::run(async { anchor() });
+		let second = kio::clock::sim::run(async {
+			kio::clock::sim::step_wall(kio::clock::Manual::WALL_START + Duration::from_secs(86_400));
 			let before = anchor();
-			moq_clock::sim::step_wall(moq_clock::Manual::WALL_START - Duration::from_secs(86_400));
+			kio::clock::sim::step_wall(kio::clock::Manual::WALL_START - Duration::from_secs(86_400));
 			assert_eq!(
 				anchor(),
 				before,
