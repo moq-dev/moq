@@ -16,6 +16,7 @@ import type { Cmaf, Phase } from "./page/cmaf.ts";
 import type { Media } from "./page/media.ts";
 import type { Delivery, Transport } from "./page/transport.ts";
 import { compare, type Row, summarize } from "./summary.ts";
+import { collections, GC_CATEGORIES, rendererPid, type TraceEvent, traceEvents } from "./trace.ts";
 
 const { values } = parseArgs({
 	options: {
@@ -228,52 +229,13 @@ async function open(variant: string, kind: string, counted = false): Promise<Ope
 	const cdp = await context.newCDPSession(page);
 	// Refuse an unavailable CPU clock rather than relabeling wall time as CPU.
 	await cdp.send("Performance.enable", { timeDomain: "threadTicks" });
-	return { page, cdp, pid: await rendererPid(page), errors, close: () => context.close() };
+	return { page, cdp, pid: await pagePid(page), errors, close: () => context.close() };
 }
 
 // The renderer process behind a page, from the frame list a trace starts with.
-async function rendererPid(page: Page): Promise<number> {
+async function pagePid(page: Page): Promise<number> {
 	await browser.startTracing(page, { categories: ["disabled-by-default-devtools.timeline"] });
-	const events = traceEvents(await browser.stopTracing());
-	const url = page.url();
-	for (const event of events) {
-		if (event.name !== "TracingStartedInBrowser") continue;
-		const frames = (event.args?.data?.frames ?? []) as { url: string; processId: number }[];
-		const frame = frames.find((frame) => frame.url === url);
-		if (frame) return frame.processId;
-	}
-	throw new Error(`no renderer process found for ${url}`);
-}
-
-interface TraceEvent {
-	name: string;
-	ph: string;
-	pid: number;
-	tid: number;
-	dur?: number;
-	args?: { data?: { frames?: unknown }; usedHeapSizeBefore?: number; usedHeapSizeAfter?: number };
-}
-
-function traceEvents(buffer: Buffer): TraceEvent[] {
-	const trace = JSON.parse(buffer.toString()) as { traceEvents?: TraceEvent[] } | TraceEvent[];
-	return Array.isArray(trace) ? trace : (trace.traceEvents ?? []);
-}
-
-// GC on one renderer's main thread: total pause, count, and the JS heap each collection reclaimed.
-function collections(events: TraceEvent[], pid: number) {
-	const gcs = events.filter(
-		(event) => event.pid === pid && event.tid === pid && (event.name === "MinorGC" || event.name === "MajorGC"),
-	);
-	const reclaimed = gcs.reduce(
-		(sum, event) => sum + Math.max(0, (event.args?.usedHeapSizeBefore ?? 0) - (event.args?.usedHeapSizeAfter ?? 0)),
-		0,
-	);
-	return {
-		count: gcs.length,
-		minor: gcs.filter((event) => event.name === "MinorGC").length,
-		pause_ms: gcs.reduce((sum, event) => sum + (event.dur ?? 0), 0) / 1000,
-		reclaimed_bytes: reclaimed,
-	};
+	return rendererPid(traceEvents(await browser.stopTracing()), page.url());
 }
 
 async function metrics(opened: Opened) {
@@ -350,9 +312,7 @@ async function trace(
 		await run();
 		return undefined;
 	}
-	await browser.startTracing(page, {
-		categories: ["devtools.timeline", "v8", "disabled-by-default-v8.gc", "disabled-by-default-devtools.timeline"],
-	});
+	await browser.startTracing(page, { categories: GC_CATEGORIES });
 	let buffer: Buffer | undefined;
 	try {
 		await run();

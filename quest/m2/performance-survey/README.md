@@ -111,6 +111,13 @@ reproduced the missing `moq-archive/producer` selection. The existing
 [CI audit PR](https://github.com/moq-dev/moq/pull/6266) already fixes it.
 No duplicate quest or workflow edit belongs here.
 
+Cached JS group joins mattered. In Chromium 156, a subscriber joining 2,048
+retained groups ran about 2.1M sort comparator visits and took 12-18 ms; an
+arrival into 8 subscribers' 2,048-group unread backlogs took about 100-113 µs.
+Ordered insertion removed every sort: the same join took 0.5-2 ms and the
+arrival 9-11 µs, with reclaimed heap down from 5.2 to 1.4-1.6 GB per run. The
+`js/replay` nightly series and the browser smoke's `replay.json` protect it.
+
 ### Kernel and placement assessment
 
 - Already implemented in [moq-uring](/rs/moq-uring/README.md): multishot
@@ -178,7 +185,6 @@ No duplicate quest or workflow edit belongs here.
 - [Cache metadata](/quest/m2/performance-survey/cache-metadata.md) - bookkeeping capacity after cached groups expire
 - [Cache backing amplification](/quest/m2/performance-survey/cache-backing.md) - small retained samples pinning large shared fragments
 - [Bandwidth grants](/quest/m2/performance-survey/bandwidth-grants.md) - repeated full allocation in Rust and JS
-- [Cached JS group joins](/quest/m2/performance-survey/js-cached-groups.md) - repeated sorting while replaying retained groups
 - [PCM batch processing](/quest/m2/performance-survey/audio-batches.md) - repeated tail movement during encoding and resampling
 - [Fragmented MKV import](/quest/m2/performance-survey/mkv-fragments.md) - accumulated-buffer copies and parser replay
 - [QUIC scheduling churn](/quest/m2/performance-survey/quic-schedule-churn.md) - priority and retirement work across unrelated groups
