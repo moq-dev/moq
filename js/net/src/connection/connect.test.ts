@@ -806,7 +806,8 @@ test("when the WebSocket wins, every WebTransport dial is closed", async () => {
 	};
 	const controller = new AbortController();
 	try {
-		const pending = connect(new URL("https://example.com/websocket-wins"), { signal: controller.signal });
+		// Its own host: a WebSocket win drops WebTransport's head start for that host and port afterwards.
+		const pending = connect(new URL("https://websocket-wins.example.com/"), { signal: controller.signal });
 		await clock.advance(Nano.fromMilli(Milli(700)));
 		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 500]);
 		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 1]);
@@ -849,8 +850,8 @@ test("when WebTransport and WebSocket open in the same turn, the one not chosen 
 	};
 	const controller = new AbortController();
 	try {
-		// Its own URL: a WebSocket win drops WebTransport's head start for that URL afterwards.
-		const pending = connect(new URL("https://example.com/same-turn"), {
+		// Its own host: a WebSocket win drops WebTransport's head start for that host and port afterwards.
+		const pending = connect(new URL("https://same-turn.example.com/"), {
 			websocket: { delay: Milli(0) },
 			signal: controller.signal,
 		});
@@ -959,8 +960,8 @@ test("an invalid timeout throws before touching the caller's signal", async () =
 
 type WebSocketDial = "hang" | "open" | { failAfter: Milli } | { openAfter: Milli };
 
-// Their own URL: a WebSocket that wins drops WebTransport's head start for its URL afterwards.
-const websocketUrl = new URL("https://example.com/websocket-only");
+// Their own host: a WebSocket that wins drops WebTransport's head start for its host and port afterwards.
+const websocketUrl = new URL("https://websocket-only.example.com/");
 
 // Stub a native WebSocketStream so each dial behaves as `plan` says, recording when it was
 // dialed (on the Manual clock) and how often it was closed. WebTransport is removed, as in
@@ -1101,6 +1102,81 @@ test("with the default timeout, a silent WebSocket is redialed once and the atte
 		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 1]);
 	} finally {
 		plan.restore();
+		installed.close();
+	}
+});
+
+// One race on the Manual clock: WebTransport dials as `webtransport` says and the WebSocket as
+// `websocket` says. Returns when each WebSocket dial started, relative to the connect.
+async function raceOnce(
+	clock: Manual,
+	target: URL,
+	webtransport: Dial,
+	websocket: WebSocketDial,
+	props: Omit<ConnectProps, "url"> = {},
+): Promise<number[]> {
+	// `webSocketPlan` removes WebTransport; `webTransportPlan` puts a stub back over it.
+	const sockets = webSocketPlan(clock, () => websocket);
+	const transports = webTransportPlan(clock, () => webtransport);
+	const start = Nano.toMilli(Nano(clock.now()));
+	const controller = new AbortController();
+	try {
+		const pending = connect(target, { signal: controller.signal, ...props });
+		await clock.advance(Nano.fromMilli(Milli(600)));
+		// A WebSocket winner is still in SETUP, which nothing answers; a WebTransport one connected.
+		controller.abort();
+		const connection = await pending.catch(() => undefined);
+		connection?.abort();
+		return sockets.dials.map((dial) => dial.at - start);
+	} finally {
+		transports.restore();
+		sockets.restore();
+	}
+}
+
+// Each test below uses its own hosts, since the preference outlives the test.
+test("a WebSocket win skips the head start for any path or query on that host and port", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		expect(await raceOnce(clock, new URL("https://preferred.example.com/a?jwt=one"), "hang", "open")).toEqual([500]);
+		// Another path and a rotated token reach the same server.
+		expect(await raceOnce(clock, new URL("https://preferred.example.com/b?jwt=two"), "hang", "open")).toEqual([0]);
+		expect(await raceOnce(clock, new URL("https://preferred.example.com:443/c"), "hang", "open")).toEqual([0]);
+		// Another port is another server.
+		expect(await raceOnce(clock, new URL("https://preferred.example.com:4443/a"), "hang", "open")).toEqual([500]);
+	} finally {
+		installed.close();
+	}
+});
+
+test("the WebSocket preference is keyed by the server the fallback dials", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const websocket = { url: new URL("https://fallback.example.com/ws") };
+	try {
+		const primary = new URL("https://primary.example.com/");
+		expect(await raceOnce(clock, primary, "hang", "open", { websocket })).toEqual([500]);
+		// Another WebTransport server with the same fallback skips the head start.
+		const secondary = new URL("https://secondary.example.com/");
+		expect(await raceOnce(clock, secondary, "hang", "open", { websocket })).toEqual([0]);
+		// Without the fallback URL, the WebSocket dials the primary, which never lost a race.
+		expect(await raceOnce(clock, primary, "hang", "open")).toEqual([500]);
+	} finally {
+		installed.close();
+	}
+});
+
+test("a WebTransport win restores the head start", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const target = new URL("https://recovered.example.com/");
+	try {
+		expect(await raceOnce(clock, target, "hang", "open")).toEqual([500]);
+		// WebSocket won last, so it dials at once, but WebTransport opens first and wins.
+		expect(await raceOnce(clock, target, { openWhen: sleep(Nano.fromMilli(Milli(100))) }, "hang")).toEqual([0]);
+		expect(await raceOnce(clock, target, "hang", "open")).toEqual([500]);
+	} finally {
 		installed.close();
 	}
 });

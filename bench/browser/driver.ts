@@ -675,7 +675,7 @@ async function racing(variant: string, shape: RacingShape, round: number) {
 				dial1_p50_ms: first.p50,
 				...attempts,
 				websocket_fraction: all.websocket,
-				key_chars: Math.max(...dials.map((dial) => dial.chars)),
+				url_chars: Math.max(...dials.map((dial) => dial.chars)),
 				retained_strings: kept.strings,
 				retained_v8_bytes: kept.bytes,
 				retained_chars: kept.chars,

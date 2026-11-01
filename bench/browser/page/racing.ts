@@ -46,7 +46,7 @@ export interface Dial {
 	attempt: number;
 	transport: string;
 	ms: number;
-	/** Characters in the dialed URL, the key a WebSocket win records. */
+	/** Characters in the dialed URL. */
 	chars: number;
 }
 
