@@ -5740,6 +5740,10 @@ pub(super) struct Unread<'a> {
 }
 
 /// How a [`Subscriber`] reads: its track's own cache, or a front's routes.
+#[expect(
+	clippy::large_enum_variant,
+	reason = "the plain cursor is the hot path, so it stays inline and the front's reader is boxed"
+)]
 enum Inner {
 	Plain(Cursor),
 	/// A front's logical track, read straight from its routes' copies; see
