@@ -108,7 +108,9 @@ const MEDIA_WINDOW_MS = smoke ? 3000 : 10000;
 /** A sampling shape; `absent` deletes WebTransport getStats(), as shipping Chromium lacks it. */
 type SamplingShape = Omit<Sampling, "url" | "path"> & { absent?: boolean };
 const grid = (mode: Sampling["mode"], connections: number[], reservations: number[], absent?: boolean) =>
-	connections.flatMap((c) => reservations.map((r): SamplingShape => ({ mode, connections: c, reservations: r, absent })));
+	connections.flatMap((c) =>
+		reservations.map((r): SamplingShape => ({ mode, connections: c, reservations: r, absent })),
+	);
 // Distinct connections crossed with reservations held on each, plus receive-only playback,
 // pool linger, identical pooled handles (one connection, the control), qmux, and private
 // loops on a WebTransport without getStats().
