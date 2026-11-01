@@ -1307,7 +1307,6 @@ pub(crate) fn h264_keyframe_au() -> Bytes {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1509,7 +1508,7 @@ mod tests {
 		let vp8 = gst::Caps::builder("video/x-vp8").build();
 		pad.observe_caps(&broadcast, &catalog, producer_options(&vp8, Some("camera")));
 		let drained = async { while records.recv_group().await.unwrap().is_some() {} };
-		let ended = tokio::time::timeout(Duration::from_secs(1), drained).await;
+		let ended = moq_clock::timeout(Duration::from_secs(1), drained).await;
 		assert!(ended.is_ok(), "the old track's records end");
 	}
 
@@ -2076,7 +2075,7 @@ mod tests {
 			subscriber,
 			moq_mux::catalog::hang::Container::Loc(moq_mux::container::Kind::Data),
 		);
-		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
+		let frame = moq_clock::timeout(std::time::Duration::from_secs(1), media.read())
 			.await
 			.expect("LOC media read timed out")
 			.unwrap();

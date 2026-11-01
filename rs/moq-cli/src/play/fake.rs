@@ -47,6 +47,11 @@ impl Recorder {
 
 	/// Present the newest due frame, just as the window does on a redraw.
 	pub fn present(&self, media: &super::media::Media<Self>) -> Option<hang::moq_net::Timestamp> {
+		self.present_frame(media).map(|frame| frame.timestamp)
+	}
+
+	/// [`present`](Self::present), returning the picture itself.
+	pub fn present_frame(&self, media: &super::media::Media<Self>) -> Option<moq_video::Frame> {
 		let mut video = media.video.lock().unwrap();
 		let presentation = media.presentation.lock().unwrap();
 		let now = moq_clock::now();
@@ -55,7 +60,7 @@ impl Recorder {
 			.front()
 			.is_some_and(|frame| presentation.due(frame.timestamp).is_none_or(|at| at <= now))
 		{
-			shown = video.pop_front().map(|frame| frame.timestamp);
+			shown = video.pop_front();
 		}
 		if shown.is_some() {
 			media.drained.notify_one();

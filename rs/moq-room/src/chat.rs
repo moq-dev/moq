@@ -21,7 +21,7 @@ pub const HISTORY: Duration = Duration::from_secs(10);
 pub type Event = moq_json::window::Event<String>;
 
 /// Poll-driven wall-clock deadline, the same shape kio::time used before that
-/// module left kio. Built on web-async so tokio::time::pause advances it in tests.
+/// module left kio. Built on moq-clock so tokio::time::pause advances it in tests.
 struct Deadline {
 	at: Option<Instant>,
 	sleep: Option<Pin<Box<moq_clock::Sleep>>>,
