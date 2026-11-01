@@ -101,8 +101,8 @@ public enum Audio {
             try await ffi.next()
         }
 
-        /// The playout delay to hold ahead of the playhead: the fixed `DecoderOutput.delay`,
-        /// or the estimate from every frame read so far.
+        /// The playout delay to hold ahead of the playhead: the fixed `DecoderOutput.delay.min`,
+        /// or with `DecoderOutput.estimate` the estimate from every frame read so far.
         public var delay: TimeInterval { ffi.delay() }
 
         /// Cancel all current and future reads.

@@ -26,6 +26,7 @@ import { groupBounds, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, 
 import { grace } from "../ledger.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
+import { receiveFrame } from "../payload.ts";
 import { sendOrder } from "../priority.ts";
 import { type OpenOptions, type Reader, Stream, Writer } from "../stream.ts";
 import { Tail } from "../tail.ts";
@@ -1461,7 +1462,12 @@ export class Subscriber {
 					if (!next) break;
 					frame = next;
 				}
-				hooks.writeGroupFrame(group, frame, frame.inflated);
+				if (frame.payload) hooks.writeGroupFrame(group, frame as netGroup.Frame, frame.inflated);
+				else if (!(await receiveFrame(stream.reader, group, frame))) {
+					const closed = group.closed.peek();
+					if (closed instanceof Error) throw closed;
+					break;
+				}
 			}
 
 			group.finish();

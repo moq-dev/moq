@@ -134,8 +134,8 @@ job runs, so an idle VM holds little more than its running services; the next jo
 reads its caches from disk.
 The guest has no swap, so earlyoom kills the largest process once available memory
 drops below 10%, rather than letting a job that fills memory thrash the disk.
-For MoQ, set `MOQ_QUEUE_RUNNER` to the runner label after a representative CI run
-passes; release pull requests use hosted runners and main pull requests skip cloud CI.
+MoQ's main pull requests land through the host's `quest land serve` gate, not a
+runner; release pull requests use hosted runners.
 
 The hosted workflow uses `just gh runner-vm-ci` to load a temporary AppArmor
 profile for the exact pinned `unshare` while building the image. The recipe
