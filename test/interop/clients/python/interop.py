@@ -82,6 +82,7 @@ async def _print_grant(client: moq.Client, timeout: float) -> None:
     """Wait for the relay's grant and print it, in the Rust client's `auth granted` shape."""
     session = client.session
     assert session is not None
+
     async def first() -> moq.Grant:
         async with session.grants() as grants:
             async for grant in grants:
@@ -256,7 +257,12 @@ async def _decode_audio(
     """
     out = f"{out}.{audio.codec.split('.')[0]}"
     decoder = await moq.audio.Consumer.subscribe(
-        consumer, id, audio, moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, delay=moq.media.Delay(min=timedelta(0), max=MAX_DELAY))
+        consumer,
+        id,
+        audio,
+        moq.audio.DecoderOutput(
+            format=moq.audio.SampleFormat.F32, delay=moq.media.Delay(min=timedelta(0), max=MAX_DELAY)
+        ),
     )
     frame_bytes = 4 * audio.channel_count
     decoded = 0

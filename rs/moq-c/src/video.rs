@@ -1020,8 +1020,10 @@ pub extern "C" fn moq_encode_video_reservation(producer: u32) -> i32 {
 	})
 }
 
-/// Watch whether the encoded video track has subscribers, so the camera and encoder
-/// run only while someone watches. See [`crate::moq_publish_media_demand`] for the
+/// Watch whether the encoded video track has subscribers. The encoder publishes every
+/// frame written, subscribed or not; opting in to run the camera and encoder only
+/// while someone watches saves that work but leaves a late subscriber nothing to
+/// fetch from before it arrived. See [`crate::moq_publish_media_demand`] for the
 /// callback contract.
 ///
 /// Returns a non-zero watcher handle on success, or a negative code on failure.

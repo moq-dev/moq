@@ -223,6 +223,8 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
+A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while `demand()->wanted()` is set is an opt-in that saves the encode but leaves nothing from before the first subscriber.
+
 ## Authorization
 
 On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `session->grants()` returns a `GrantConsumer`: `grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects, and `changed()` waits for the next one until `cancel()`.

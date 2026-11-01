@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
-import XCTest
 import Moq
+import XCTest
 
 private struct Case {
     let size: Int
@@ -37,8 +37,10 @@ final class FfiBench: XCTestCase {
             throw NSError(domain: "MOQ_BENCH_SECONDS must be positive and finite", code: 1)
         }
         var results = [Result]()
-        let cases = [(100, 1, 1), (1024, 1, 1), (65536, 1, 1), (1048576, 1, 1),
-                     (1024, 1, 4), (1024, 4, 1), (1024, 4, 4)]
+        let cases = [
+            (100, 1, 1), (1024, 1, 1), (65536, 1, 1), (1_048_576, 1, 1),
+            (1024, 1, 4), (1024, 4, 1), (1024, 4, 4),
+        ]
         for (size, publishers, subscribers) in cases {
             results += try await throughput(Case(size: size, publishers: publishers, subscribers: subscribers), budget)
         }
@@ -54,8 +56,9 @@ final class FfiBench: XCTestCase {
                 for _ in 0..<1000 { try fn() }
                 calls += 1000
             } while ProcessInfo.processInfo.systemUptime - start < budget
-            return Result(name: "call/\(name)", unit: "ns",
-                          value: (ProcessInfo.processInfo.systemUptime - start) * 1e9 / Double(calls))
+            return Result(
+                name: "call/\(name)", unit: "ns",
+                value: (ProcessInfo.processInfo.systemUptime - start) * 1e9 / Double(calls))
         }
         results.append(call("sequence") { _ = group.sequence })
         results.append(try call("info") { _ = consumer.info() })
@@ -110,7 +113,9 @@ final class FfiBench: XCTestCase {
         let cpuUsed = try cpu() - cpuStart
         let mb = Double((n - 3) * c.delivered) / 1e6
         try broadcast.close()
-        return [Result(name: "throughput/\(c.name)", unit: "MB/s", value: mb / wall),
-                Result(name: "cpu/\(c.name)", unit: "ms/MB", value: cpuUsed * 1e3 / mb)]
+        return [
+            Result(name: "throughput/\(c.name)", unit: "MB/s", value: mb / wall),
+            Result(name: "cpu/\(c.name)", unit: "ms/MB", value: cpuUsed * 1e3 / mb),
+        ]
     }
 }
