@@ -801,13 +801,11 @@ mod tests {
 	#[test]
 	fn a_pass_budget_bounds_a_wake_chain() {
 		type Gates = Vec<crate::Producer<bool>>;
+		type Set = Tasks<Box<dyn FnMut(&Waiter) -> Poll<()>>>;
 
 		/// A chain of parked tasks a word apart, each opening the next gate when its
 		/// own opens, with the first gate open.
-		fn chain(
-			tasks: &mut Tasks<Box<dyn FnMut(&Waiter) -> Poll<()>>>,
-			links: usize,
-		) -> (Gates, Vec<Arc<AtomicUsize>>) {
+		fn chain(tasks: &mut Set, links: usize) -> (Gates, Vec<Arc<AtomicUsize>>) {
 			let gates: Gates = (0..=links).map(|_| crate::Producer::new(false)).collect();
 			let mut polls = Vec::new();
 			for link in 0..links {
