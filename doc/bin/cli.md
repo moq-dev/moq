@@ -261,18 +261,22 @@ moq ... import capture --display --system-audio          # share a screen with i
 moq ... import capture --window 39193 --audio off        # one window (macOS, Windows, X11)
 moq ... import capture --window --audio off              # system window picker (Linux Portal)
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
-moq ... import capture --video demand --audio demand     # capture only while someone watches
+moq ... import capture --video demand                    # also gate video on demand
+moq ... import capture --audio on                        # encode audio continuously
 ```
 
 Video goes through the platform hardware encoder, with an H.264 software
 fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
-backends. The camera and microphone stay open and encode while publishing,
-so a late subscriber can fetch the recent past. Choose each medium with
-`--video <on|demand|off>` and `--audio <on|demand|off>`, both defaulting to `on`.
-`off` publishes no track of that medium. `demand` captures and encodes only
-while that track has a subscriber, and leaves nothing to fetch from before
-the first viewer; video still opens its source once at startup to probe the
-mode it negotiates. `--bitrate` is a ceiling that
+backends. The camera and microphone stay open while publishing, so a late
+subscriber can fetch the recent past. Choose each medium with
+`--video <on|demand|off>` (default `on`) and `--audio <on|demand|off>`
+(default `demand`). `on` encodes for the whole publish, and `off` publishes no
+track of that medium. Audio's `demand` keeps raw PCM, up to `--max-age` or 30
+seconds, while nobody listens, and encodes that retained history when a
+subscriber arrives. Video's `demand` captures and encodes only while the track
+has a subscriber, leaving nothing to fetch from before the first viewer; video
+still opens its source once at startup to probe the mode it negotiates.
+`--bitrate` is a ceiling that
 backends with live bitrate control lower to fit the connection.
 `moq devices` prints every source id. On Windows, `display:N` is an
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
