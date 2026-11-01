@@ -1222,7 +1222,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: Duration::from_secs(10),
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
