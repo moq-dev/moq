@@ -23,6 +23,7 @@ import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
 import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runGaps } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
@@ -97,17 +98,12 @@ interface Stamp {
 	timescale: Timescale;
 	/**
 	 * Whether each frame's own timestamp goes out. Lite-05/06 cannot encode an untimed track, so
-	 * one served untimed carries its send time instead, unchecked ones included.
+	 * an untimed one carries its send time instead.
 	 */
 	timed: boolean;
 }
 
-/** The timescale a moq-lite hop serves a track at: none for an {@link track.Info.ietf} one. */
-function liteTimescale(info: track.Info): Timescale | undefined {
-	return info.ietf === undefined ? (info.timescale ?? undefined) : undefined;
-}
-
-/** How `version` stamps a track served at `timescale` (see `liteTimescale`), or undefined when it carries none. */
+/** How `version` stamps a track with `timescale`, or undefined when it carries none. */
 function stamping(version: Version, timescale: Timescale | undefined): Stamp | undefined {
 	const wire = wireTimescale(version, timescale);
 	return wire === undefined ? undefined : { timescale: wire, timed: timescale !== undefined };
@@ -134,9 +130,8 @@ function trackInfoMessage(info: track.Info, version: Version): TrackInfoMessage 
 		// Publisher Max Age: the publisher's retention bound, advertised so relays re-serve
 		// with the same window.
 		maxAge: info.maxAge,
-		// `#serveGroup` emits each frame converted to it. Unchecked timestamps never enter
-		// moq-lite, whose receivers check them.
-		timescale: liteTimescale(info),
+		// `#serveGroup` emits each frame converted to it.
+		timescale: info.timescale ?? undefined,
 		// An older peer is served the frames inflated.
 		compress: hasCompression(version) && !!info.compress,
 	});
@@ -899,7 +894,8 @@ export class Publisher {
 			},
 		});
 		serving(track);
-		const floor = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
+		const latest = hooks.latestSequence(track);
+		let floor = cursorFloor(this.version, msg.startGroup, latest);
 		track.withRange({
 			start: { included: floor },
 			end: endGroup === undefined ? undefined : { excluded: endGroup },
@@ -933,6 +929,18 @@ export class Publisher {
 			// priority.
 			const info = await untilAborted(track.info(), left.signal);
 			const publisher = info.priority;
+			// A SUBSCRIBE can arrive before its track resolves, such as one a relay serves from a
+			// copy still fetching upstream, or on lite-05 one sent alongside its TRACK, when no
+			// group is known yet: the newest once it resolves stands in, as it would for one
+			// sent after.
+			const resolved = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
+			if (latest === undefined && resolved !== floor) {
+				floor = resolved;
+				track.withRange({
+					start: { included: floor },
+					end: endGroup === undefined ? undefined : { excluded: endGroup },
+				});
+			}
 			// Older drafts carry no timestamps.
 			let stamp: Stamp | undefined;
 			let compress = false;
@@ -945,7 +953,7 @@ export class Publisher {
 				// The timescale is an immutable property, so serving MUST use exactly
 				// what TRACK_INFO advertised. It comes from the producer's accept(), so
 				// they always agree.
-				stamp = stamping(this.version, liteTimescale(info));
+				stamp = stamping(this.version, info.timescale ?? undefined);
 				compress = hasCompression(this.version) && !!info.compress;
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
@@ -1533,8 +1541,11 @@ export class Publisher {
 		void stream.reader.done().then(
 			(fin) => {
 				hold.abort();
-				// TRACK is the requester's only message.
-				if (!fin) stream.abort(new ProtocolViolation("data after TRACK"));
+				if (fin) return;
+				// TRACK is the requester's only message, so more breaks the session, as in Rust.
+				const violation = new ProtocolViolation("data after TRACK");
+				closeViolation(this.#quic, violation);
+				stream.abort(violation);
 			},
 			() => hold.abort(),
 		);
@@ -1767,8 +1778,9 @@ export class Publisher {
 				prevTs = ts;
 			}
 
-			await stream.write(frameHeader(stream.version, delta, read.inflated, frame.payload.byteLength));
-			if (frame.payload.length > 0) await stream.write(frame.payload);
+			await stream.write(frameHeader(stream.version, delta, read.inflated, readSize(read)));
+			if (read.chunks) await sendPayload(read.chunks, (chunk) => stream.write(chunk), stream.closed);
+			else if (frame.payload.length > 0) await stream.write(frame.payload);
 		}
 	}
 
@@ -1880,12 +1892,14 @@ export class Publisher {
 					prevTs = ts;
 				}
 
-				const header = frameHeader(stream.version, delta, read.inflated, read.frame.payload.byteLength);
-				const payload = read.frame.payload;
+				const header = frameHeader(stream.version, delta, read.inflated, readSize(read));
+				const chunks = read.chunks;
+				const payload = chunks ? undefined : read.frame.payload;
 				// One budget race covers the frame's header and payload.
 				await write(async () => {
 					await stream.write(header);
-					if (payload.length > 0) await stream.write(payload);
+					if (chunks) await sendPayload(chunks, (chunk) => stream.write(chunk), stream.closed);
+					else if (payload && payload.length > 0) await stream.write(payload);
 				});
 			}
 

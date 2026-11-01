@@ -21,19 +21,19 @@ test-inventory.allow naming the quest that owns it.
 `--root DIR` checks another tree, for the tests.
 """
 
-from collections import Counter, defaultdict
-from collections.abc import Callable
-from dataclasses import dataclass, field
 import fnmatch
 import itertools
 import json
-from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
-import tomllib
+from collections import Counter, defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
 
+import tomllib
 import yaml
 
 SCRIPT = re.compile(r"[\w.$/{}-]*[\w-]\.(?:sh|py|ts|mts|js|mjs)\b")
@@ -50,10 +50,37 @@ DISPATCH = re.compile(r'case "\$\{?1(?::-)?\}?" in')
 LABEL = re.compile(r"(\s+)([^()\s#][^()#]*)\)(.*)")
 # Options whose next word is their value, so it is not a test-name filter.
 VALUED = {
-    "-p", "--package", "-E", "--filterset", "--filter-expr", "-F", "--features", "--test", "--bench", "--bin",
-    "--example", "--run-ignored", "--cargo-profile", "--profile", "--success-output", "--failure-output",
-    "--test-threads", "-j", "--jobs", "--manifest-path", "--exclude", "--target", "--retries", "--partition",
-    "--message-format", "--status-level", "--final-status-level", "--color", "--target-dir", "-m", "--config",
+    "-p",
+    "--package",
+    "-E",
+    "--filterset",
+    "--filter-expr",
+    "-F",
+    "--features",
+    "--test",
+    "--bench",
+    "--bin",
+    "--example",
+    "--run-ignored",
+    "--cargo-profile",
+    "--profile",
+    "--success-output",
+    "--failure-output",
+    "--test-threads",
+    "-j",
+    "--jobs",
+    "--manifest-path",
+    "--exclude",
+    "--target",
+    "--retries",
+    "--partition",
+    "--message-format",
+    "--status-level",
+    "--final-status-level",
+    "--color",
+    "--target-dir",
+    "-m",
+    "--config",
 }
 
 
@@ -138,15 +165,23 @@ def evaluate(expression, assignments: dict, directory: Path, root: Path) -> str:
             return str(directory)
         if name == "replace" and len(rest) == 3:
             return evaluate(rest[0], assignments, directory, root).replace(
-                evaluate(rest[1], assignments, directory, root), evaluate(rest[2], assignments, directory, root))
+                evaluate(rest[1], assignments, directory, root), evaluate(rest[2], assignments, directory, root)
+            )
         if name in ("quote", "absolute_path", "trim") and rest:
             return evaluate(rest[0], assignments, directory, root)
     return "{{}}"
 
 
 def load_justfile(root: Path, justfile: Path, name: str) -> Module:
-    dump = json.loads(subprocess.run(["just", "--justfile", str(justfile), "--dump", "--dump-format", "json"],
-                                     cwd=justfile.parent, check=True, capture_output=True, text=True).stdout)
+    dump = json.loads(
+        subprocess.run(
+            ["just", "--justfile", str(justfile), "--dump", "--dump-format", "json"],
+            cwd=justfile.parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
 
     def walk(node, name: str, top: Module | None) -> Module:
         source = Path(node["source"])
@@ -156,20 +191,31 @@ def load_justfile(root: Path, justfile: Path, name: str) -> Module:
         assignments = {key: value["value"] for key, value in node["assignments"].items()}
         module = Module(name, source, top, first=node.get("first"))
         for key, recipe in node["recipes"].items():
+
             def render(bound: dict[str, str], body=recipe["body"], source=source, assignments=assignments) -> str:
                 scope = {**assignments, **bound}
-                return "\n".join("".join(part if isinstance(part, str) else
-                                          evaluate(part[0], scope, source.parent, root) for part in line)
-                                  for line in body)
+                return "\n".join(
+                    "".join(
+                        part if isinstance(part, str) else evaluate(part[0], scope, source.parent, root)
+                        for part in line
+                    )
+                    for line in body
+                )
 
             parameters = []
             for parameter in recipe["parameters"]:
                 if parameter["kind"] != "singular":
                     break
                 parameters.append(parameter["name"])
-            module.recipes[key] = Recipe(key, module, directory, render({}),
-                                         [dependency["recipe"] for dependency in recipe["dependencies"]],
-                                         parameters, render)
+            module.recipes[key] = Recipe(
+                key,
+                module,
+                directory,
+                render({}),
+                [dependency["recipe"] for dependency in recipe["dependencies"]],
+                parameters,
+                render,
+            )
         for key, alias in node["aliases"].items():
             target = alias["target"] if isinstance(alias["target"], str) else alias["target"]["name"]
             if target in module.recipes:
@@ -322,7 +368,9 @@ class Graph:
         return self.recipes
 
     def resolve(self, words: list[str], cwd: Path) -> list[Recipe]:
-        """The recipes a `just` call's words name, from its justfile and then, as `set fallback` does, its tree's root."""
+        """The recipes a `just` call's words name, from its justfile and then,
+        as `set fallback` does, its tree's root.
+        """
         return [recipe for recipe, _ in self.calls(words, cwd)]
 
     def calls(self, words: list[str], cwd: Path) -> list[tuple[Recipe, list[str]]]:
@@ -335,7 +383,7 @@ class Graph:
                 node = node.modules[words[index]]
                 index += 1
             if index < len(words) and words[index] in node.recipes:
-                return [(node.recipes[words[index]], words[index + 1:])]
+                return [(node.recipes[words[index]], words[index + 1 :])]
             if index == len(words) and index > 0 and node.first:
                 return [(node.recipes[node.first], [])]
         return []
@@ -368,8 +416,14 @@ class Graph:
                     chosen = range(len(branches))
                 else:
                     # The first matching pattern wins, as in the shell.
-                    chosen = next(([index] for index, (patterns, _) in enumerate(branches)
-                                   if any(fnmatch.fnmatchcase(first, pattern) for pattern in patterns)), [])
+                    chosen = next(
+                        (
+                            [index]
+                            for index, (patterns, _) in enumerate(branches)
+                            if any(fnmatch.fnmatchcase(first, pattern) for pattern in patterns)
+                        ),
+                        [],
+                    )
                 for index in chosen:
                     if (path, block, index) not in self.branches:
                         self.branches.add((path, block, index))
@@ -427,10 +481,10 @@ class Graph:
                 self.runs.append(Run(words, where, cwd))
                 for index, word in enumerate(words):
                     if word == "just":
-                        for recipe, rest in self.calls(words[index + 1:], cwd):
+                        for recipe, rest in self.calls(words[index + 1 :], cwd):
                             self.visit_recipe(recipe, rest)
                     elif SCRIPT.fullmatch(word) and (path := self.script(word, bases)):
-                        arguments[path].append(words[index + 1:])
+                        arguments[path].append(words[index + 1 :])
                         self.execute(path)
             mentions = Counter(self.scripts(text, cwd, file))
             for path, count in mentions.items():
@@ -511,8 +565,13 @@ class Package:
 
 
 def tracked(root: Path, *patterns: str) -> list[Path]:
-    output = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", *patterns],
-                            cwd=root, check=True, capture_output=True, text=True).stdout
+    output = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", *patterns],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
     return [root / name for name in output.split("\0") if name]
 
 
@@ -534,8 +593,10 @@ def packages(root: Path) -> list[Package]:
             ("test", "tests", []),
             ("bench", "benches", []),
         ):
-            explicit = {entry["name"]: directory / entry.get("path", f"{auto}/{entry['name']}.rs")
-                        for entry in manifest.get(kind, [])}
+            explicit = {
+                entry["name"]: directory / entry.get("path", f"{auto}/{entry['name']}.rs")
+                for entry in manifest.get(kind, [])
+            }
             if kind == "bin" and (directory / "src/main.rs").is_file():
                 explicit.setdefault(package.name, directory / "src/main.rs")
             if package_settings.get(f"auto{kind}s" if kind != "test" else "autotests", True):
@@ -647,7 +708,7 @@ def selection(words: list[str], manifests: dict[Path, str], cwd: Path) -> Select
     passthrough = False
     # Parse from the last `just` or `cargo`, so a wrapper's own options stay out.
     heads = [position for position, word in enumerate(words) if word in ("just", "cargo")]
-    words = words[heads[-1]:] if heads else words
+    words = words[heads[-1] :] if heads else words
     index = 0
     while index < len(words):
         word = words[index]
@@ -687,7 +748,7 @@ def selection(words: list[str], manifests: dict[Path, str], cwd: Path) -> Select
         elif word.startswith("-") or "$" in word or "{{" in word or value is not None:
             continue
         # The recipe or subcommand names come before the first option.
-        elif passthrough or any(earlier.startswith("-") for earlier in words[:index - 1]):
+        elif passthrough or any(earlier.startswith("-") for earlier in words[: index - 1]):
             filters.append(word)
     if every or not packages:
         packages = None
@@ -760,19 +821,20 @@ class Filterset:
             end = self.position + 1
             while end < len(self.text) and self.text[end] != "/":
                 end += 2 if self.text[end] == "\\" else 1
-            argument = self.text[self.position:end + 1]
+            argument = self.text[self.position : end + 1]
             self.position = end + 1
             self.space()
         else:
             end = self.text.index(")", self.position)
-            argument = self.text[self.position:end].strip()
+            argument = self.text[self.position : end].strip()
             self.position = end
         if not self.take(")"):
             raise ValueError(f"unterminated {name}() in {self.text!r}")
         target = self.test.target
         binary = target.name.replace("-", "_") if target.kind == "lib" else target.name
         binary_id = {"lib": target.package, "test": f"{target.package}::{target.name}"}.get(
-            target.kind, f"{target.package}::{target.kind}/{target.name}")
+            target.kind, f"{target.package}::{target.kind}/{target.name}"
+        )
         subjects = {
             "test": (self.test.path, "contains"),
             "package": (target.package, "glob"),
@@ -811,8 +873,7 @@ def selects(chosen: Selection, test: Ignored) -> bool:
     target = test.target
     if chosen.packages is not None and target.package not in chosen.packages:
         return False
-    if chosen.targets and not any(kind == target.kind and name in (None, target.name)
-                                  for kind, name in chosen.targets):
+    if chosen.targets and not any(kind == target.kind and name in (None, target.name) for kind, name in chosen.targets):
         return False
     if chosen.filters and not any(word in test.path for word in chosen.filters):
         return False
@@ -921,8 +982,10 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
     errors: list[str] = []
     selections = []
     for run in graph.runs:
-        if any(word in ("--run-ignored", "--ignored", "--include-ignored", "--bench", "--benches", "bench")
-               for word in run.words):
+        if any(
+            word in ("--run-ignored", "--ignored", "--include-ignored", "--bench", "--benches", "bench")
+            for word in run.words
+        ):
             selections.append((selection(run.words, manifests, run.cwd), run))
 
     # #[ignore] tests.
@@ -940,17 +1003,23 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
                     orphans.append((f"ignore {target.package}::{test.path}", test.where))
 
     # Bench and fuzz targets.
-    fuzz_runners = {path for path, recipe in graph.reached.items()
-                    if re.search(r"\bcargo (?:\+\S+ )?fuzz\b", text_closure(graph, recipe))}
+    fuzz_runners = {
+        path
+        for path, recipe in graph.reached.items()
+        if re.search(r"\bcargo (?:\+\S+ )?fuzz\b", text_closure(graph, recipe))
+    }
     fuzz_words = set()
     for run in graph.runs:
         for index, word in enumerate(run.words):
-            if word == "just" and any(r.path in fuzz_runners for r in graph.resolve(run.words[index + 1:], run.cwd)):
-                fuzz_words.update(run.words[index + 1:])
+            if word == "just" and any(r.path in fuzz_runners for r in graph.resolve(run.words[index + 1 :], run.cwd)):
+                fuzz_words.update(run.words[index + 1 :])
             if word == "fuzz" and index and run.words[index - 1] == "cargo":
-                fuzz_words.update(run.words[index + 1:])
-    codspeed = any(run.words[index:index + 3] == ["cargo", "codspeed", "run"]
-                   for run in graph.runs for index in range(len(run.words)))
+                fuzz_words.update(run.words[index + 1 :])
+    codspeed = any(
+        run.words[index : index + 3] == ["cargo", "codspeed", "run"]
+        for run in graph.runs
+        for index in range(len(run.words))
+    )
     for package in cargo:
         fuzz = package.manifest.get("package", {}).get("metadata", {}).get("cargo-fuzz", False)
         for target, _ in package.targets:
@@ -973,8 +1042,11 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
     # Standalone test scripts.
     for path in tracked(root, "*.test.py", "*.test.sh", "*.test.ts", "*.test.js", "*.browser.ts"):
         relative = str(path.relative_to(root))
-        if path.suffix in (".ts", ".js") and not path.name.endswith(".browser.ts") and any(
-                path.resolve().is_relative_to(directory) for directory in found):
+        if (
+            path.suffix in (".ts", ".js")
+            and not path.name.endswith(".browser.ts")
+            and any(path.resolve().is_relative_to(directory) for directory in found)
+        ):
             continue
         if not graph.reaches(path.resolve()):
             orphans.append((f"script {relative}", relative))
@@ -1000,7 +1072,7 @@ def benched(chosen: Selection, run: Run, target: Target, codspeed: bool) -> bool
     if chosen.packages is not None and target.package not in chosen.packages:
         return False
     heads = [index for index, word in enumerate(run.words) if word == "cargo"]
-    command = [word for word in run.words[heads[-1] + 1:] if not word.startswith("+")][:2] if heads else []
+    command = [word for word in run.words[heads[-1] + 1 :] if not word.startswith("+")][:2] if heads else []
     if "--no-run" in run.words or command[:1] in (["build"], ["check"], ["clippy"], ["doc"]):
         return False
     if command == ["codspeed", "build"] and not codspeed:
@@ -1009,13 +1081,14 @@ def benched(chosen: Selection, run: Run, target: Target, codspeed: bool) -> bool
         return "*" in chosen.benches or target.name in chosen.benches
     # `cargo bench` with no --bench runs each of its packages' benches.
     words = run.words
-    return any(words[i] == "cargo" and words[i + 1] == "bench" for i in range(len(words) - 1)) and \
-        chosen.packages is not None
+    return (
+        any(words[i] == "cargo" and words[i + 1] == "bench" for i in range(len(words) - 1))
+        and chosen.packages is not None
+    )
 
 
 def main(argv: list[str]) -> int:
-    root = Path(argv[argv.index("--root") + 1]).resolve() if "--root" in argv else \
-        Path(__file__).resolve().parents[2]
+    root = Path(argv[argv.index("--root") + 1]).resolve() if "--root" in argv else Path(__file__).resolve().parents[2]
     allowed, errors = allowlist(root, root / "sh/gh/test-inventory.allow")
     orphans, problems = inventory(root)
     errors += problems
@@ -1027,8 +1100,11 @@ def main(argv: list[str]) -> int:
         if key not in keys:
             errors.append(f"{where}: {key} is not an orphan; drop the entry")
     if errors:
-        print("Every opt-in test target needs a CI caller, or an entry in sh/gh/test-inventory.allow"
-              " naming the quest that owns it:", file=sys.stderr)
+        print(
+            "Every opt-in test target needs a CI caller, or an entry in sh/gh/test-inventory.allow"
+            " naming the quest that owns it:",
+            file=sys.stderr,
+        )
         for error in errors:
             print(f"  {error}", file=sys.stderr)
         return 1

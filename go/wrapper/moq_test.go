@@ -288,7 +288,13 @@ func TestAudioConsumerDelay(t *testing.T) {
 	}
 
 	fixedDelay := 80 * time.Millisecond
-	fixed, err := moqaudio.Subscribe(ctx, bc, track, rendition, moqaudio.DecoderOutput{Format: moq.AudioSampleFormatF32, Delay: &fixedDelay})
+	noMax := time.Duration(0)
+	estimate := false
+	fixed, err := moqaudio.Subscribe(ctx, bc, track, rendition, moqaudio.DecoderOutput{
+		Format:   moq.AudioSampleFormatF32,
+		Delay:    &moqmedia.Delay{Min: fixedDelay, Max: &noMax},
+		Estimate: &estimate,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
