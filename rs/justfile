@@ -133,6 +133,8 @@ uring *args:
 [positional-arguments]
 uring-check *args:
     bash sh/local.sh cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets "$@" -- -D warnings
+    # Without the default `quic`, so moq-tokio's `driver` is off: the relay's io_uring path must not lean on it.
+    bash sh/local.sh cargo clippy --locked -p moq-relay --no-default-features --features io-uring --all-targets "$@" -- -D warnings
 
 # The Apple-gated code in moq-video, moq-audio, and moq-sock, which
 # platform.yml compiles on a Mac runner alongside `windows`.
