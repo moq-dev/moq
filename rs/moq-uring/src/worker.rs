@@ -1081,13 +1081,16 @@ mod tests {
 
 		/// Turns and enters over `ROUNDS` round trips under a pass budget.
 		fn per_round(passes: usize) -> Option<(u64, u64)> {
-			let mut config = Config::default();
-			config.passes = NonZeroUsize::new(passes).unwrap();
-			let mut worker = worker_with(config)?;
+			let mut worker = worker_with(Config {
+				passes: NonZeroUsize::new(passes).unwrap(),
+				..Config::default()
+			})?;
 			let handle = worker.handle();
-			let mut udp_config = udp::Config::default();
-			udp_config.gro = false;
-			udp_config.gso = false;
+			let udp_config = udp::Config {
+				gro: false,
+				gso: false,
+				..udp::Config::default()
+			};
 			let bind = || std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
 			let client = handle.udp(bind(), udp_config.clone()).expect("client");
 			let server = Rc::new(handle.udp(bind(), udp_config).expect("server"));
