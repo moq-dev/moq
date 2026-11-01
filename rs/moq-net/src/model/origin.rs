@@ -773,7 +773,10 @@ enum PendingUpdate {
 		stamp: u64,
 	},
 	Unannounce(AnnounceMeta),
-	UnannounceAnnounce { old: AnnounceMeta, new: AnnounceMeta },
+	UnannounceAnnounce {
+		old: AnnounceMeta,
+		new: AnnounceMeta,
+	},
 }
 
 // An update is taken only while collapsing it under the cursor state lock.
@@ -3543,7 +3546,11 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			Some(resolved) => resolved != asked,
 			// A winner that took over the identity asked continues it.
 			None => pick(&table, &path, horizon, front, pin.as_ref()).is_some_and(|best| {
-				best.identity != *asked && best.takeover.as_ref().is_none_or(|takeover| takeover.identity != *asked)
+				best.identity != *asked
+					&& best
+						.takeover
+						.as_ref()
+						.is_none_or(|takeover| takeover.identity != *asked)
 			}),
 		}
 	};
@@ -6028,11 +6035,7 @@ impl Lookup {
 			RequestState::Failed(error) => Poll::Ready(Err(error.clone())),
 			RequestState::Pending { front, broadcast } => Poll::Ready(
 				match ready!(front.poll(waiter, |state| match &state.resolved {
-					Some(result) => Poll::Ready(
-						result
-							.clone()
-							.map(|identity| (identity, state.first.clone())),
-					),
+					Some(result) => Poll::Ready(result.clone().map(|identity| (identity, state.first.clone())),),
 					None => Poll::Pending,
 				})) {
 					// Another identity than the one named, and not one continuing it: never hand
@@ -6802,10 +6805,7 @@ impl Consumer {
 		// over the named identity continues it, so the request is the winner's.
 		let pin = identity
 			.filter(|identity| {
-				**identity != winner
-					&& takeover
-						.as_ref()
-						.is_none_or(|takeover| takeover.identity != **identity)
+				**identity != winner && takeover.as_ref().is_none_or(|takeover| takeover.identity != **identity)
 			})
 			.cloned();
 		// Only the winner's takeover can continue a front this request would join.
@@ -8525,7 +8525,8 @@ mod tests {
 							Route::default()
 								.with_identity(format!("worker-{id}").parse().unwrap(), 0)
 								.with_hops(hops(&[id]))
-								.with_cost(3), None,
+								.with_cost(3),
+							None,
 						)
 						.unwrap()
 				})
@@ -8652,7 +8653,8 @@ mod tests {
 				"pool/job-0",
 				Route::default()
 					.with_identity("a".parse().unwrap(), 0)
-					.with_hops(hops(&[11])), None,
+					.with_hops(hops(&[11])),
+				None,
 			)
 			.unwrap();
 		announced.expect_next_active("pool/job-0").await;
@@ -8662,7 +8664,8 @@ mod tests {
 				"pool/job-0",
 				Route::default()
 					.with_identity("b".parse().unwrap(), 0)
-					.with_hops(hops(&[10])), None,
+					.with_hops(hops(&[10])),
+				None,
 			)
 			.unwrap();
 		announced.assert_next_wait();
@@ -9080,7 +9083,8 @@ mod tests {
 				Route::default()
 					.with_identity(epoch(), 0)
 					.with_hops(hops(&[10]))
-					.with_cost(1), None,
+					.with_cost(1),
+				None,
 			)
 			.unwrap();
 		let route = announced.expect_next_active("room/alice").await;
@@ -9135,7 +9139,8 @@ mod tests {
 				Route::default()
 					.with_identity(epoch(), 0)
 					.with_hops(hops(&[10]))
-					.with_cost(1), None,
+					.with_cost(1),
+				None,
 			)
 			.unwrap();
 		let request = queued(&server).await;
@@ -9255,7 +9260,8 @@ mod tests {
 				Route::default()
 					.with_identity(epoch(), 0)
 					.with_hops(hops(&[10]))
-					.with_cost(1), None,
+					.with_cost(1),
+				None,
 			)
 			.unwrap();
 		let upstream = broadcast::Info::new().produce();
@@ -9484,7 +9490,8 @@ mod tests {
 				Route::default()
 					.with_identity(epoch(), 0)
 					.with_hops(hops(&[10]))
-					.with_cost(2), None,
+					.with_cost(2),
+				None,
 			)
 			.unwrap();
 		announced.expect_next_active("room/alice").await;
@@ -9898,7 +9905,8 @@ mod tests {
 		let incumbent = producer
 			.requests_route(
 				"room",
-				Route::default().with_identity(epoch(), 0).with_hops(hops(&[10])), None,
+				Route::default().with_identity(epoch(), 0).with_hops(hops(&[10])),
+				None,
 			)
 			.unwrap();
 		view.expect_next_active("room").await;
@@ -9912,7 +9920,8 @@ mod tests {
 		let echo = producer
 			.requests_route(
 				"room",
-				Route::default().with_identity(epoch(), 0).with_hops(hops(&[10, 7])), None,
+				Route::default().with_identity(epoch(), 0).with_hops(hops(&[10, 7])),
+				None,
 			)
 			.unwrap();
 		drop(incumbent);
@@ -9947,7 +9956,8 @@ mod tests {
 				Route::default()
 					.with_identity(epoch(), 0)
 					.with_hops(hops(&[10]))
-					.with_cost(5), None,
+					.with_cost(5),
+				None,
 			)
 			.unwrap();
 		let pending = producer.consume().request("room/alice", None);
@@ -11315,12 +11325,7 @@ mod tests {
 
 		let answer = async |path: &str| {
 			let pending = consumer.request(path, None);
-			let published = queued(&claim)
-				.await
-				.prepare()
-				.unwrap()
-				.publish()
-				.unwrap();
+			let published = queued(&claim).await.prepare().unwrap().publish().unwrap();
 			pending.await.unwrap();
 			published
 		};
@@ -11802,7 +11807,8 @@ mod tests {
 			let server = producer
 				.requests_route(
 					"room",
-					Route::default().with_identity(epoch(), 0).with_hops(hops(first)), None,
+					Route::default().with_identity(epoch(), 0).with_hops(hops(first)),
+					None,
 				)
 				.unwrap();
 
@@ -11848,7 +11854,8 @@ mod tests {
 			self.producer
 				.requests_route(
 					"room",
-					Route::default().with_identity(epoch(), 0).with_hops(hops(first)), None,
+					Route::default().with_identity(epoch(), 0).with_hops(hops(first)),
+					None,
 				)
 				.unwrap()
 		}
@@ -11899,7 +11906,8 @@ mod tests {
 				Route::default()
 					.with_identity(epoch(), 1)
 					.with_hops(hops(&[11]))
-					.with_cost(9), None,
+					.with_cost(9),
+				None,
 			)
 			.unwrap();
 		assert_resumes(&mut rig, &newer).await;
@@ -11924,7 +11932,8 @@ mod tests {
 					"pool",
 					Route::default()
 						.with_identity(name.parse().unwrap(), 0)
-						.with_hops(hops(&[hop])), None,
+						.with_hops(hops(&[hop])),
+					None,
 				)
 				.unwrap()
 		};
@@ -12095,7 +12104,11 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let old = producer
-			.requests_route("room", Route::default().with_identity(crate::Identity::random(), 0), None)
+			.requests_route(
+				"room",
+				Route::default().with_identity(crate::Identity::random(), 0),
+				None,
+			)
 			.unwrap();
 		let pending = consumer.request("room/alice", None);
 		let request = queued(&old).await;
@@ -12188,7 +12201,11 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let dynamic = producer
-			.requests_route("room", Route::default().with_identity(crate::Identity::random(), 0), None)
+			.requests_route(
+				"room",
+				Route::default().with_identity(crate::Identity::random(), 0),
+				None,
+			)
 			.unwrap();
 		let pending = consumer.request("room/alice", None);
 		queued(&dynamic).await.reject(Error::NotFound);
@@ -12444,14 +12461,16 @@ mod tests {
 			let incumbent = producer
 				.requests_route(
 					"room",
-					Route::default().with_identity(epoch(), 0).with_hops(hops(&[10])), None,
+					Route::default().with_identity(epoch(), 0).with_hops(hops(&[10])),
+					None,
 				)
 				.unwrap();
 			// The same publisher, reached through the requesting peer.
 			let echo = producer
 				.requests_route(
 					"room",
-					Route::default().with_identity(epoch(), 0).with_hops(hops(&[10, 7])), None,
+					Route::default().with_identity(epoch(), 0).with_hops(hops(&[10, 7])),
+					None,
 				)
 				.unwrap();
 
@@ -13158,7 +13177,8 @@ mod tests {
 		let server = producer
 			.requests_route(
 				"room",
-				Route::default().with_identity(epoch(), 0).with_hops(hops(&[10])), None,
+				Route::default().with_identity(epoch(), 0).with_hops(hops(&[10])),
+				None,
 			)
 			.unwrap();
 		let pending = producer.consume().request("room/alice", None);
