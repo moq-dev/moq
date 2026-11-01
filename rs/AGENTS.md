@@ -22,7 +22,7 @@ Two ways to drive things, both backed by `kio`:
 - `poll_*` functions take a `&kio::Waiter` and return `Poll<...>`, drivable from any executor or synchronously. Like `Future`, but wakers are cleaned up on drop.
 - `async fn` wrappers, usually `kio::wait(|waiter| self.poll_x(waiter))`.
 
-Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way around. `pin!` then polling inside `kio::wait` is a code smell, as is `tokio::spawn` / `select!` inside a library; use `kio` primitives. Don't color APIs with `Send` bounds that native needs and wasm can't satisfy.
+Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way around. `pin!` then polling inside `kio::wait` is a code smell, as is `tokio::spawn` / `select!` inside a library; use `kio` primitives.
 
 - A `poll_*` that waits on several things in a fixed order is a `#[kio::machine]` (kio's `macros` feature): straight-line code with a `wait!` at each wait, from which it writes the state enum and its transitions. Hand-write the machine when a wait sits in a loop or branch, or when it yields more than once (a stream's `poll_next`). A conditional wait is one whose poll is ready at once.
 - Use `ready!(...)` instead of `Poll::Pending => return Poll::Pending`.
@@ -57,7 +57,7 @@ Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way a
 
 # Testing
 
-- Tests are inline `#[cfg(test)] mod tests`, except full Client/Server session tests over a crate's shared mock harness, which go in its `tests/integration/` module. Time-dependent async tests call `tokio::time::pause()` first (moq-net uses `#[moq_clock::test]` instead), unless they cross real networking that can't be mocked (sockets, smoke tests); those run on the wall clock and assert lower bounds.
+- Tests are inline `#[cfg(test)] mod tests`, except full Client/Server session tests over a crate's shared mock harness, which go in its `tests/integration/` module. Time-dependent async tests call `tokio::time::pause()` first (moq-net uses `#[kio::test]` instead), unless they cross real networking that can't be mocked (sockets, smoke tests); those run on the wall clock and assert lower bounds.
 - Run tests through `just` (nextest), not `cargo test`: nextest kills a wedged test as TIMEOUT, cargo hangs forever. A test flagged SLOW is a bug to fix, not a threshold to raise.
-- `just check` and CI compile the selected crates at default and extreme feature sets, with isolated boundary checks. `just rs features` (nightly) covers the full matrix. Keep a feature gate around the dependency, not the logic, so the logic's tests stay in the merge gate.
-- Local checks compile only the host platform; Nightly and release PRs run `just rs windows` / `macos` on those hosts, and `just rs wasm` covers `moq-wasm`.
+- `just check` and CI build and test the selected crates in one build at their default features, plus the off-by-default device features and, on Linux, the relay's `io-uring` feature. `just rs features` (nightly and release PRs) covers the feature matrix. Keep a feature gate around the dependency, not the logic, so the logic's tests stay in the merge gate.
+- Local checks compile only the host platform; Nightly and release PRs run `just rs windows` / `macos` on those hosts.

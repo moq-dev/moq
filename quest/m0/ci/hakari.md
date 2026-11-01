@@ -21,7 +21,8 @@ feature set in another job is a miss, however warm the cache.
 - moq publishes crates with release-plz, and a published crate cannot depend on
   an unpublished workspace-hack. Use hakari's supported setup for published
   workspaces, and prove a release-plz dry run still publishes.
-- Keep the feature-contract checks testing each crate's own declarations: the
+- Keep the feature-contract checks, which `just rs features` runs nightly and
+  on release PRs, testing each crate's own declarations: the
   `quic-features` recipe in `rs/justfile` (moq-quic has no native runtime),
   `sh/rs/media-features.sh` (minimal builds exclude codecs and rendering), and
   `sh/rs/net-features.sh` and `sh/rs/tokio-features.sh`. A workspace-hack would

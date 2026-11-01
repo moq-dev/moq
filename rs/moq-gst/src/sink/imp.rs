@@ -696,7 +696,7 @@ impl MoqSink {
 		});
 		let sample = super::wall::Sample {
 			running: reference_running_time,
-			wall: moq_clock::wall(),
+			wall: kio::clock::wall(),
 		};
 		let map = buffer.map_readable().map_err(|_| {
 			gst::error!(CAT, "failed to map buffer on pad {}", pad.name());
@@ -815,7 +815,7 @@ impl MoqSink {
 						if lifecycle.releasing {
 							return false;
 						}
-						Some(observe_caps(state, catalog, &mut lifecycle, &caps))
+						Some(observe_caps(state, catalog, sink_pad, &mut lifecycle, &caps))
 					} else {
 						None
 					}
@@ -851,6 +851,7 @@ impl MoqSink {
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
 			gst::EventView::Eos(_) => {
+				let mut retired = None;
 				let finished = {
 					let mut control = self.control.lock().unwrap();
 					if let Some(state) = control.live.as_ref().filter(|state| state.is_open()) {
@@ -858,6 +859,7 @@ impl MoqSink {
 						let mut lifecycle = sink_pad.lifecycle();
 						if !lifecycle.releasing {
 							lifecycle.ended = true;
+							retired = lifecycle.retire_bandwidth();
 							if let Some(catalog) = &state.catalog
 								&& let Err(err) = lifecycle.media.end_unresolved(catalog)
 							{
@@ -865,6 +867,9 @@ impl MoqSink {
 								let changes = lifecycle.fail(format!("{err:#}"));
 								drop(lifecycle);
 								drop(control);
+								if let Some(retired) = retired {
+									sink_pad.notify_changes(retired);
+								}
 								sink_pad.notify_changes(changes);
 								return false;
 							}
@@ -872,6 +877,9 @@ impl MoqSink {
 					}
 					self.maybe_finish_locked(&mut control)
 				};
+				if let Some(retired) = retired {
+					sink_pad.notify_changes(retired);
+				}
 				self.publish_finished(finished);
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
@@ -917,9 +925,10 @@ impl MoqSink {
 										lifecycle.media.reserve(catalog, state.wall.clone(), &state.names);
 									}
 									let caps = lifecycle.media.resumable_caps();
-									caps.zip(catalog).and_then(|(caps, catalog)| {
-										observe_caps(state, catalog, &mut lifecycle, &caps).0
-									})
+									let changes = caps.zip(catalog).and_then(|(caps, catalog)| {
+										observe_caps(state, catalog, sink_pad, &mut lifecycle, &caps).0
+									});
+									changes.or_else(|| lifecycle.restore_bandwidth(state.session.bandwidth(), sink_pad))
 								}
 							}
 						}
@@ -1142,8 +1151,35 @@ impl MoqSink {
 
 	/// Route a terminal reconnect error through the same session gate as finalization messages.
 	pub(super) fn post_session_error(&self, session: &CompletionHandle, error: String) {
+		let updates = {
+			let control = self.control.lock().unwrap();
+			let current = control
+				.live
+				.as_ref()
+				.is_some_and(|state| std::sync::Arc::ptr_eq(&state.session.completion(), session));
+			if !current {
+				Vec::new()
+			} else {
+				self.obj()
+					.sink_pads()
+					.into_iter()
+					.filter_map(|pad| pad.downcast::<MoqSinkPad>().ok())
+					.filter_map(|pad| {
+						let mut lifecycle = pad.lifecycle();
+						let belongs = lifecycle
+							.completion
+							.as_ref()
+							.is_some_and(|completion| std::sync::Arc::ptr_eq(completion, session));
+						(!lifecycle.releasing && belongs).then(|| PadUpdate {
+							pad: pad.clone(),
+							changes: lifecycle.fail(format!("session failed: {error}")),
+						})
+					})
+					.collect()
+			}
+		};
 		self.publish_finished(Finished {
-			updates: Vec::new(),
+			updates,
 			message: Posted::Message {
 				session: session.clone(),
 				kind: MessageKind::SessionError(error),
@@ -1206,6 +1242,7 @@ async fn linger_task<T>(
 fn observe_caps(
 	state: &State,
 	catalog: &moq_mux::catalog::Producer,
+	pad: &MoqSinkPad,
 	lifecycle: &mut PadLifecycle,
 	caps: &gst::Caps,
 ) -> (Option<Notifications>, bool) {
@@ -1218,7 +1255,7 @@ fn observe_caps(
 	let outcome = lifecycle.media.observe_caps(&state.broadcast, catalog, options);
 	lifecycle.completion = Some(state.session.completion());
 	match outcome {
-		CapsOutcome::Active(track) => (Some(lifecycle.commit(track)), true),
+		CapsOutcome::Active(track) => (Some(lifecycle.activate(track, state.session.bandwidth(), pad)), true),
 		CapsOutcome::Failed(reason) => (Some(lifecycle.fail(reason)), false),
 		CapsOutcome::Unchanged => (None, true),
 	}
@@ -1270,7 +1307,7 @@ mod tests {
 					Duration::ZERO,
 					super::super::wall::Sample {
 						running: Some(gst::ClockTime::ZERO),
-						wall: moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
+						wall: kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
 					},
 				)
 				.unwrap();
@@ -1597,6 +1634,194 @@ mod tests {
 		);
 		assert!(first.video.renditions.contains_key("pending"));
 		assert!(completion_of(&run.0).is_open());
+	}
+
+	#[test]
+	fn individual_eos_releases_and_resume_restores_its_bandwidth() {
+		let run = CatalogRun::new();
+		let first = run.pad("first");
+		let second = run.pad("second");
+		first.set_property("bandwidth-ceiling", 4_000_000u64);
+		second.set_property("bandwidth-ceiling", 4_000_000u64);
+		let _catalog = run.start();
+
+		let estimate = moq_net::bandwidth::Producer::new();
+		estimate
+			.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
+			.unwrap();
+		run.0
+			.imp()
+			.control
+			.lock()
+			.unwrap()
+			.live
+			.as_mut()
+			.unwrap()
+			.session
+			.replace_bandwidth(moq_net::bandwidth::Allocator::new(estimate.consume()));
+
+		assert!(negotiate(&first, &h264_caps()));
+		assert!(negotiate(&second, &h264_caps()));
+		let broadcast = run
+			.0
+			.imp()
+			.control
+			.lock()
+			.unwrap()
+			.live
+			.as_ref()
+			.unwrap()
+			.broadcast
+			.consume();
+		let _first_reader = broadcast.track("first").unwrap().subscribe(None);
+		let _second_reader = broadcast.track("second").unwrap().subscribe(None);
+		video_frame(&first);
+		video_frame(&second);
+		let grant = |pad: &gst::Pad| {
+			pad.property::<Option<gst::Structure>>("track-demand")
+				.expect("active demand")
+				.get::<u64>("grant-bps")
+				.expect("available grant")
+		};
+
+		assert_eq!(grant(&first), 2_000_000);
+		assert_eq!(grant(&second), 2_000_000);
+		assert!(first.send_event(gst::event::Eos::new()));
+		assert!(first.property::<Option<gst::Structure>>("track-demand").is_none());
+		assert_eq!(
+			grant(&second),
+			4_000_000,
+			"the live sibling receives the released share"
+		);
+
+		assert!(first.send_event(gst::event::StreamStart::new("first-resumed")));
+		video_frame(&first);
+		let resumed = first
+			.property::<Option<gst::Structure>>("track-demand")
+			.expect("the resumed track restores demand reporting");
+		assert_eq!(
+			resumed.get::<bool>("wanted"),
+			Ok(true),
+			"the retained producer keeps its subscriber across EOS and resume"
+		);
+		assert_eq!(
+			resumed.get::<u64>("grant-bps"),
+			Ok(2_000_000),
+			"the retained track reserves again when it resumes"
+		);
+		assert_eq!(
+			grant(&second),
+			2_000_000,
+			"the resumed watched track again shares the estimate with its sibling"
+		);
+	}
+
+	#[test]
+	fn codec_renegotiation_rebinds_bandwidth_to_the_new_track() {
+		let run = CatalogRun::new();
+		let video = run.pad("camera");
+		video.set_property("bandwidth-ceiling", 4_000_000u64);
+		let _catalog = run.start();
+
+		let estimate = moq_net::bandwidth::Producer::new();
+		estimate
+			.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
+			.unwrap();
+		run.0
+			.imp()
+			.control
+			.lock()
+			.unwrap()
+			.live
+			.as_mut()
+			.unwrap()
+			.session
+			.replace_bandwidth(moq_net::bandwidth::Allocator::new(estimate.consume()));
+
+		assert!(negotiate(&video, &h264_caps()));
+		let broadcast = run
+			.0
+			.imp()
+			.control
+			.lock()
+			.unwrap()
+			.live
+			.as_ref()
+			.unwrap()
+			.broadcast
+			.consume();
+		let _old_reader = broadcast.track("camera").unwrap().subscribe(None);
+		assert_eq!(
+			video
+				.property::<Option<gst::Structure>>("track-demand")
+				.unwrap()
+				.get::<bool>("wanted"),
+			Ok(true)
+		);
+
+		let vp8 = gst::Caps::builder("video/x-vp8").build();
+		assert!(video.send_event(gst::event::Caps::new(&vp8)));
+		let _new_reader = broadcast.track("camera/1").unwrap().subscribe(None);
+		let rebound = video
+			.property::<Option<gst::Structure>>("track-demand")
+			.expect("renegotiation keeps demand reporting active");
+		assert_eq!(rebound.get::<bool>("wanted"), Ok(true));
+		assert_eq!(rebound.get::<u64>("grant-bps"), Ok(4_000_000));
+	}
+
+	#[test]
+	fn terminal_session_failure_retires_active_pad_bandwidth() {
+		let run = CatalogRun::new();
+		let first = run.pad("first");
+		let second = run.pad("second");
+		first.set_property("bandwidth-ceiling", 4_000_000u64);
+		second.set_property("bandwidth-ceiling", 4_000_000u64);
+		let _catalog = run.start();
+
+		let estimate = moq_net::bandwidth::Producer::new();
+		estimate
+			.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
+			.unwrap();
+		let completion = {
+			let mut control = run.0.imp().control.lock().unwrap();
+			let state = control.live.as_mut().unwrap();
+			state
+				.session
+				.replace_bandwidth(moq_net::bandwidth::Allocator::new(estimate.consume()));
+			state.session.completion()
+		};
+
+		assert!(negotiate(&first, &h264_caps()));
+		assert!(negotiate(&second, &h264_caps()));
+		let broadcast = run
+			.0
+			.imp()
+			.control
+			.lock()
+			.unwrap()
+			.live
+			.as_ref()
+			.unwrap()
+			.broadcast
+			.consume();
+		let _first_reader = broadcast.track("first").unwrap().subscribe(None);
+		let _second_reader = broadcast.track("second").unwrap().subscribe(None);
+		assert!(first.property::<Option<gst::Structure>>("track-demand").is_some());
+		assert!(second.property::<Option<gst::Structure>>("track-demand").is_some());
+
+		assert!(completion.fail());
+		run.0
+			.imp()
+			.post_session_error(&completion, "authentication refused".to_string());
+
+		for pad in [&first, &second] {
+			assert!(pad.property::<Option<gst::Structure>>("track-demand").is_none());
+			assert_eq!(pad.property::<Status>("track-status"), Status::Error);
+			assert_eq!(
+				pad.property::<Option<String>>("track-error").as_deref(),
+				Some("session failed: authentication refused")
+			);
+		}
 	}
 
 	// GStreamer keeps CAPS sticky across a flush, so a resumed pad gets no new CAPS event. EOS ended its
@@ -2056,11 +2281,11 @@ mod tests {
 		while bus.pop().is_some() {}
 
 		let linger = Duration::from_secs(30);
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let finished = moq_mux::Linger::new([broadcast], track, linger);
 		let lingering = tokio::spawn(linger_task(finished, sink.downgrade(), session));
 
-		moq_clock::sleep(linger - Duration::from_secs(1)).await;
+		kio::clock::sleep(linger - Duration::from_secs(1)).await;
 		let mut late = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 		assert!(
 			late.recv_group().await.unwrap().is_some(),
@@ -2069,7 +2294,7 @@ mod tests {
 		assert!(bus.pop_filtered(&[gst::MessageType::Eos]).is_none(), "the EOS waits");
 
 		lingering.await.unwrap();
-		assert_eq!(moq_clock::now() - start, linger);
+		assert_eq!(kio::clock::now() - start, linger);
 		assert!(consumer.is_closed());
 		assert!(
 			bus.pop_filtered(&[gst::MessageType::Eos]).is_some(),
@@ -2087,6 +2312,7 @@ mod tests {
 		let element = sink.clone().upcast::<gst::Element>();
 		let bus = gst::Bus::new();
 		element.set_bus(Some(&bus));
+		let pad = element.request_pad_simple("sink_0").expect("request sink_0");
 		element.set_state(gst::State::Paused).expect("start first session");
 		let first = sink
 			.imp()
@@ -2113,6 +2339,7 @@ mod tests {
 			.expect("replacement session")
 			.session
 			.completion();
+		assert!(negotiate(&pad, &h264_caps()));
 		while bus.pop().is_some() {}
 		sink.imp().post_current(Posted::Message {
 			session: first.clone(),
@@ -2123,6 +2350,11 @@ mod tests {
 		assert!(
 			bus.pop_filtered(&[gst::MessageType::Error]).is_none(),
 			"the stopped session posted an error into its replacement"
+		);
+		assert_eq!(
+			pad.property::<Status>("track-status"),
+			Status::Active,
+			"the stopped session did not fail a replacement pad"
 		);
 
 		sink.imp()
@@ -2138,6 +2370,7 @@ mod tests {
 				.debug()
 				.is_some_and(|debug| debug.contains("current session failed"))
 		);
+		assert_eq!(pad.property::<Status>("track-status"), Status::Error);
 		let _ = element.set_state(gst::State::Null);
 	}
 
@@ -2211,7 +2444,7 @@ mod tests {
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let quic = super::super::session::quic_config(&resolved).resolve();
 		assert_eq!(quic.idle_timeout, Duration::ZERO);
-		assert_eq!(quic.keep_alive, None);
+		assert_eq!(quic.keep_alive, Some(Duration::ZERO));
 		assert!(quic.keylog.is_some());
 	}
 

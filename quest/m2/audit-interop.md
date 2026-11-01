@@ -164,5 +164,4 @@ cells of the 2026-10-31 nightly. Classify it.
 
 - [Runner client bump](/quest/m2/release/runner-client-bump.md) - the runner's Rust client moves to the cut and its API
 - [Runner teardown](/quest/m3/interop-runner-approval.md) - the runner's moq.dev clients move to the withdrawing `close()` once it ships
-- [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - Moxygen's filter type, waiting upstream
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the runner cases whose red cells this audit classifies
