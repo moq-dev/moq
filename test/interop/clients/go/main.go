@@ -432,8 +432,9 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	if err != nil {
 		return err
 	}
-	if frame == nil || string(frame.Payload) != "session-alive" || frame.Timestamp != nil {
-		return errors.New("unexpected session health payload or timestamp")
+	// Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+	if frame == nil || string(frame.Payload) != "session-alive" {
+		return errors.New("unexpected session health payload")
 	}
 	frame, err = group.ReadFrame(ctx)
 	if err != nil {

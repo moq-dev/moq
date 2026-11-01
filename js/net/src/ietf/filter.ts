@@ -35,13 +35,22 @@ const TAG_ABSOLUTE_START = 0x3n;
 const TAG_ABSOLUTE_RANGE = 0x4n;
 
 /**
- * Whether this is draft-22 or newer.
+ * Whether this is draft-20 or newer.
  *
- * Draft-22 replaced the Filter Type tag with a Location Filter Type that names the fields
- * that follow, so the value carries no Length, and added the parameters that ride with it.
+ * Draft-20 replaced the Filter Type tag with up to four optional varints, where the number
+ * present selects the meaning, and added the parameters that ride with it. Draft-22 names
+ * the meaning with a Location Filter Type instead, but keeps those parameters.
  */
-export function isDraft22(version: IetfVersion): boolean {
+export function isDraft20(version: IetfVersion): boolean {
 	return version !== Version.DRAFT_18;
+}
+
+/**
+ * Whether LOCATION_FILTER starts with a Location Filter Type, which says which fields follow,
+ * so the value carries no Length. Draft-22 replaced draft-20's field count with it.
+ */
+function isTyped(version: IetfVersion): boolean {
+	return isDraft20(version) && version !== Version.DRAFT_20;
 }
 
 /** The Location Filter Type of draft-22. */
@@ -54,7 +63,7 @@ const TYPE_NEXT_OBJECT = 0x5n;
 
 /** Whether the Range Filters exist on this draft. */
 export function hasRangeFilters(version: IetfVersion): boolean {
-	return isDraft22(version);
+	return isDraft20(version);
 }
 
 const varint = Varint.encodeLeadingOnes;
@@ -69,19 +78,20 @@ function endDelta(startGroup: bigint, endGroup: bigint): bigint {
 
 /** Encode a filter as its raw parameter value, without the Length that frames it before draft-22. */
 export function encode(filter: Filter, version: IetfVersion): Uint8Array {
-	return isDraft22(version) ? encodeTyped(filter) : encodeTag(filter);
+	if (isTyped(version)) return encodeTyped(filter);
+	return isDraft20(version) ? encodeFields(filter) : encodeTag(filter);
 }
 
 /** Encode LOCATION_FILTER's value as it follows the parameter type from draft-17 on. */
 export function encodeParam(filter: Filter, version: IetfVersion): Uint8Array {
 	const value = encode(filter, version);
 	// Draft-22's Location Filter Type says where the value ends, so it needs no Length.
-	return isDraft22(version) ? value : encodeLengthPrefixed(value);
+	return isTyped(version) ? value : encodeLengthPrefixed(value);
 }
 
 /** Read LOCATION_FILTER's value as it follows the parameter type from draft-17 on. */
 export async function decodeParam(r: Reader, version: IetfVersion): Promise<Filter> {
-	if (!isDraft22(version)) {
+	if (!isTyped(version)) {
 		return decode(await r.read(await r.u53()), version);
 	}
 	const type = await r.u62();
@@ -90,6 +100,32 @@ export async function decodeParam(r: Reader, version: IetfVersion): Promise<Filt
 		fields.push(await r.u62());
 	}
 	return fromTyped(type, fields);
+}
+
+/** Encode the draft-20 field list, where the number of fields selects the meaning. */
+function encodeFields(filter: Filter): Uint8Array {
+	switch (filter.kind) {
+		case "unfiltered":
+			return new Uint8Array();
+		case "nextObject":
+			return concat([varint(0n), varint(0n)]);
+		case "relative":
+			return varint(filter.groups);
+		case "absolute": {
+			// An open ended {0, 0} is defined as unfiltered, so it must not collide with Next Object.
+			if (filter.startGroup === 0n && filter.startObject === 0n && filter.endGroup === undefined) {
+				return new Uint8Array();
+			}
+			const parts = [varint(filter.startGroup), varint(filter.startObject)];
+			if (filter.endGroup !== undefined) {
+				parts.push(varint(endDelta(filter.startGroup, filter.endGroup)));
+				if (filter.endObject !== undefined) {
+					parts.push(varint(filter.endObject));
+				}
+			}
+			return concat(parts);
+		}
+	}
 }
 
 function encodeTyped(filter: Filter): Uint8Array {
@@ -205,12 +241,43 @@ function encodeTag(filter: Filter): Uint8Array {
 
 /** Decode a filter from its raw parameter value, which must be consumed whole. */
 export function decode(data: Uint8Array, version: IetfVersion): Filter {
-	if (isDraft22(version)) {
+	if (isTyped(version)) {
 		const [filter, rest] = readTyped(data);
 		expectEmpty(rest);
 		return filter;
 	}
-	return decodeTag(data);
+	return isDraft20(version) ? decodeFields(data) : decodeTag(data);
+}
+
+/** Decode the draft-20 field list, which the caller has already delimited. */
+function decodeFields(data: Uint8Array): Filter {
+	const fields: bigint[] = [];
+	let rest = data;
+	while (rest.length > 0) {
+		if (fields.length === 4) {
+			throw new Error("too many fields in LOCATION_FILTER");
+		}
+		const [value, next] = unvarint(rest);
+		fields.push(value);
+		rest = next;
+	}
+
+	switch (fields.length) {
+		case 0:
+			return { kind: "unfiltered" };
+		case 1:
+			return { kind: "relative", groups: fields[0] };
+		default: {
+			const [startGroup, startObject] = fields;
+			// Two zeroes is the Next Object spelling; anything else is an absolute start.
+			if (fields.length === 2 && startGroup === 0n && startObject === 0n) {
+				return { kind: "nextObject" };
+			}
+			const endGroup = fields.length >= 3 ? startGroup + fields[2] : undefined;
+			const endObject = fields.length === 4 ? fields[3] : undefined;
+			return { kind: "absolute", startGroup, startObject, endGroup, endObject };
+		}
+	}
 }
 
 function decodeTag(data: Uint8Array): Filter {
@@ -386,7 +453,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 			if (filter !== undefined) {
 				throw new Error("duplicate LOCATION_FILTER inside FILL_PARAMETERS");
 			}
-			if (isDraft22(version)) {
+			if (isTyped(version)) {
 				[filter, rest] = readTyped(rest);
 			} else {
 				let value: Uint8Array;
