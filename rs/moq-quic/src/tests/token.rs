@@ -82,7 +82,7 @@ fn oversized_retry_token() {
 			.unwrap();
 		let mut buf = Vec::new();
 		let _ = conn.poll_transmit(now, 1, &mut buf).unwrap();
-		let ProtectedHeader::Initial(initial) =
+		let Some(ProtectedHeader::Initial(initial)) =
 			ProtectedHeader::decode(&mut Cursor::new(&buf), &FixedLengthConnectionIdParser::new(0), false).unwrap()
 		else {
 			panic!("expected an Initial packet")

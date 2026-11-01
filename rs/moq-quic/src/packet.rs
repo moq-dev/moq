@@ -30,27 +30,41 @@ pub struct PartialDecode {
 
 impl PartialDecode {
 	/// Begin decoding a QUIC packet from `bytes`, returning any trailing data not part of that packet
+	///
+	/// 0-RTT packets are skipped unread, so the packet decoded is the first one after them. A
+	/// datagram holding nothing but 0-RTT packets is [`PacketDecodeError::ZeroRtt`].
 	pub fn new(
-		bytes: BytesMut,
+		mut bytes: BytesMut,
 		cid_parser: &(impl ConnectionIdParser + ?Sized),
 		grease_quic_bit: bool,
 	) -> Result<(Self, Option<BytesMut>), PacketDecodeError> {
-		let mut buf = io::Cursor::new(bytes);
-		let plain_header = ProtectedHeader::decode(&mut buf, cid_parser, grease_quic_bit)?;
-		let dgram_len = buf.get_ref().len();
-		let packet_len = plain_header
-			.payload_len()
-			.map(|len| (buf.position() + len) as usize)
-			.unwrap_or(dgram_len);
-		match dgram_len.cmp(&packet_len) {
-			Ordering::Equal => Ok((Self { plain_header, buf }, None)),
-			Ordering::Less => Err(PacketDecodeError::InvalidHeader(
-				"packet too short to contain payload length",
-			)),
-			Ordering::Greater => {
-				let rest = Some(buf.get_mut().split_off(packet_len));
-				Ok((Self { plain_header, buf }, rest))
-			}
+		loop {
+			let mut buf = io::Cursor::new(bytes);
+			let Some(plain_header) = ProtectedHeader::decode(&mut buf, cid_parser, grease_quic_bit)? else {
+				// `decode` consumed the whole 0-RTT packet; decode the one coalesced after it.
+				let skipped = buf.position() as usize;
+				bytes = buf.into_inner();
+				bytes.advance(skipped);
+				if bytes.is_empty() {
+					return Err(PacketDecodeError::ZeroRtt);
+				}
+				continue;
+			};
+			let dgram_len = buf.get_ref().len();
+			let packet_len = plain_header
+				.payload_len()
+				.map(|len| (buf.position() + len) as usize)
+				.unwrap_or(dgram_len);
+			return match dgram_len.cmp(&packet_len) {
+				Ordering::Equal => Ok((Self { plain_header, buf }, None)),
+				Ordering::Less => Err(PacketDecodeError::InvalidHeader(
+					"packet too short to contain payload length",
+				)),
+				Ordering::Greater => {
+					let rest = Some(buf.get_mut().split_off(packet_len));
+					Ok((Self { plain_header, buf }, rest))
+				}
+			};
 		}
 	}
 
@@ -71,7 +85,7 @@ impl PartialDecode {
 		self.space() == Some(SpaceId::Initial)
 	}
 
-	/// The space whose keys protect this packet, or `None` for an unprotected or 0-RTT packet
+	/// The space whose keys protect this packet, or `None` for an unprotected packet
 	pub(crate) fn space(&self) -> Option<SpaceId> {
 		use ProtectedHeader::*;
 		match self.plain_header {
@@ -82,14 +96,6 @@ impl PartialDecode {
 			} => Some(SpaceId::Handshake),
 			Short { .. } => Some(SpaceId::Data),
 			_ => None,
-		}
-	}
-
-	/// Whether this is a 0-RTT packet, which is dropped unprocessed
-	pub(crate) fn is_0rtt(&self) -> bool {
-		match self.plain_header {
-			ProtectedHeader::Long { ty, .. } => ty == LongType::ZeroRtt,
-			_ => false,
 		}
 	}
 
@@ -544,11 +550,13 @@ impl ProtectedHeader {
 	}
 
 	/// Decode a plain header from given buffer, with given [`ConnectionIdParser`].
+	///
+	/// A 0-RTT packet is `None`, with `buf` advanced past its payload: it is dropped unread.
 	pub fn decode(
 		buf: &mut io::Cursor<impl AsRef<[u8]>>,
 		cid_parser: &(impl ConnectionIdParser + ?Sized),
 		grease_quic_bit: bool,
-	) -> Result<Self, PacketDecodeError> {
+	) -> Result<Option<Self>, PacketDecodeError> {
 		let first = buf.get::<u8>()?;
 		if !grease_quic_bit && first & FIXED_BIT == 0 {
 			return Err(PacketDecodeError::InvalidHeader("fixed bit unset"));
@@ -556,10 +564,10 @@ impl ProtectedHeader {
 		if first & LONG_HEADER_FORM == 0 {
 			let spin = first & SPIN_BIT != 0;
 
-			Ok(Self::Short {
+			Ok(Some(Self::Short {
 				spin,
 				dst_cid: cid_parser.parse(buf)?,
-			})
+			}))
 		} else {
 			let version = buf.get::<u32>()?;
 
@@ -569,11 +577,11 @@ impl ProtectedHeader {
 			// TODO: Support long CIDs for compatibility with future QUIC versions
 			if version == 0 {
 				let random = first & !LONG_HEADER_FORM;
-				return Ok(Self::VersionNegotiate {
+				return Ok(Some(Self::VersionNegotiate {
 					random,
 					dst_cid,
 					src_cid,
-				});
+				}));
 			}
 
 			if crate::Version::from_wire(version).is_none() {
@@ -584,7 +592,7 @@ impl ProtectedHeader {
 				});
 			}
 
-			match LongHeaderType::from_byte(first)? {
+			Ok(Some(match LongHeaderType::from_byte(first)? {
 				LongHeaderType::Initial => {
 					let token_len = buf.get_var()? as usize;
 					let token_start = buf.position() as usize;
@@ -594,27 +602,37 @@ impl ProtectedHeader {
 					buf.advance(token_len);
 
 					let len = buf.get_var()?;
-					Ok(Self::Initial(ProtectedInitialHeader {
+					Self::Initial(ProtectedInitialHeader {
 						dst_cid,
 						src_cid,
 						token_pos: token_start..token_start + token_len,
 						len,
 						version,
-					}))
+					})
 				}
-				LongHeaderType::Retry => Ok(Self::Retry {
+				LongHeaderType::Retry => Self::Retry {
 					dst_cid,
 					src_cid,
 					version,
-				}),
-				LongHeaderType::Standard(ty) => Ok(Self::Long {
+				},
+				LongHeaderType::ZeroRtt => {
+					let len = buf.get_var()?;
+					if len > buf.remaining() as u64 {
+						return Err(PacketDecodeError::InvalidHeader(
+							"packet too short to contain payload length",
+						));
+					}
+					buf.advance(len as usize);
+					return Ok(None);
+				}
+				LongHeaderType::Standard(ty) => Self::Long {
 					ty,
 					dst_cid,
 					src_cid,
 					len: buf.get_var()?,
 					version,
-				}),
-			}
+				},
+			}))
 		}
 	}
 }
@@ -777,6 +795,8 @@ pub trait ConnectionIdParser {
 pub(crate) enum LongHeaderType {
 	Initial,
 	Retry,
+	/// Dropped as it is decoded, so no decoded header holds one
+	ZeroRtt,
 	Standard(LongType),
 }
 
@@ -786,7 +806,7 @@ impl LongHeaderType {
 		debug_assert!(b & LONG_HEADER_FORM != 0, "not a long packet");
 		Ok(match (b & 0x30) >> 4 {
 			0x0 => Initial,
-			0x1 => Standard(ZeroRtt),
+			0x1 => ZeroRtt,
 			0x2 => Standard(Handshake),
 			0x3 => Retry,
 			_ => unreachable!(),
@@ -799,7 +819,7 @@ impl From<LongHeaderType> for u8 {
 		use {LongHeaderType::*, LongType::*};
 		match ty {
 			Initial => LONG_HEADER_FORM | FIXED_BIT,
-			Standard(ZeroRtt) => LONG_HEADER_FORM | FIXED_BIT | (0x1 << 4),
+			ZeroRtt => LONG_HEADER_FORM | FIXED_BIT | (0x1 << 4),
 			Standard(Handshake) => LONG_HEADER_FORM | FIXED_BIT | (0x2 << 4),
 			Retry => LONG_HEADER_FORM | FIXED_BIT | (0x3 << 4),
 		}
@@ -811,8 +831,6 @@ impl From<LongHeaderType> for u8 {
 pub enum LongType {
 	/// Handshake packet
 	Handshake,
-	/// 0-RTT packet
-	ZeroRtt,
 }
 
 /// Packet decode error
@@ -831,6 +849,9 @@ pub enum PacketDecodeError {
 	/// The packet header is invalid
 	#[error("invalid header: {0}")]
 	InvalidHeader(&'static str),
+	/// The datagram held only 0-RTT packets, which are dropped unread
+	#[error("only 0-RTT packets, which are dropped")]
+	ZeroRtt,
 }
 
 impl From<coding::UnexpectedEnd> for PacketDecodeError {
@@ -892,6 +913,47 @@ mod tests {
 		check_pn(PacketNumber::new(0x10, 0), &hex!("10"));
 		check_pn(PacketNumber::new(0x100, 0), &hex!("0100"));
 		check_pn(PacketNumber::new(0x10000, 0), &hex!("010000"));
+	}
+
+	/// A 0-RTT packet with a two-byte payload, version 1, and empty connection IDs
+	const ZERO_RTT: [u8; 10] = hex!("d0 00000001 00 00 02 aabb");
+	const HANDSHAKE: [u8; 10] = hex!("e0 00000001 00 00 02 ccdd");
+	const SHORT: [u8; 3] = hex!("40 0102");
+
+	fn decode(bytes: &[u8]) -> Result<(PartialDecode, Option<BytesMut>), PacketDecodeError> {
+		PartialDecode::new(bytes.into(), &FixedLengthConnectionIdParser::new(0), false)
+	}
+
+	#[test]
+	fn zero_rtt_alone_is_dropped() {
+		assert_eq!(decode(&ZERO_RTT).unwrap_err(), PacketDecodeError::ZeroRtt);
+		assert_eq!(
+			decode(&[ZERO_RTT, ZERO_RTT].concat()).unwrap_err(),
+			PacketDecodeError::ZeroRtt
+		);
+		// A 0-RTT packet longer than the datagram is malformed, not skipped.
+		assert!(matches!(
+			decode(&ZERO_RTT[..9]).unwrap_err(),
+			PacketDecodeError::InvalidHeader(_)
+		));
+	}
+
+	#[test]
+	fn zero_rtt_coalesced_is_skipped() {
+		let datagram = [&ZERO_RTT[..], &HANDSHAKE, &ZERO_RTT, &ZERO_RTT, &SHORT].concat();
+		let (handshake, rest) = decode(&datagram).unwrap();
+		assert_eq!(handshake.data(), HANDSHAKE);
+		assert_eq!(handshake.space(), Some(SpaceId::Handshake));
+		let rest = rest.unwrap();
+		assert_eq!(rest[..], [&ZERO_RTT[..], &ZERO_RTT, &SHORT].concat()[..]);
+		let (short, rest) = decode(&rest).unwrap();
+		assert_eq!(short.data(), SHORT);
+		assert!(rest.is_none());
+
+		// A trailing 0-RTT packet is left in the remainder, which then decodes to nothing.
+		let (handshake, rest) = decode(&[HANDSHAKE, ZERO_RTT].concat()).unwrap();
+		assert_eq!(handshake.data(), HANDSHAKE);
+		assert_eq!(decode(&rest.unwrap()).unwrap_err(), PacketDecodeError::ZeroRtt);
 	}
 
 	#[test]

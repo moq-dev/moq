@@ -2972,9 +2972,6 @@ impl Connection {
 			Header::Short { .. } => {
 				unreachable!("short packets received during handshake are discarded in handle_packet")
 			}
-			Header::Long {
-				ty: LongType::ZeroRtt, ..
-			} => unreachable!("0-RTT packets are discarded in unprotect_header"),
 		}
 	}
 

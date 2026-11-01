@@ -35,11 +35,12 @@ fn client_answer(frames: Frames) -> Option<TransportErrorCode> {
 	}
 }
 
-/// A 0-RTT packet is dropped before decryption, so an ACK inside it for a packet the server
-/// never sent is not processed, and a coalesced Initial or 1-RTT packet is still read.
+/// A 0-RTT packet is dropped before decryption, alone or coalesced, so an ACK inside it for a
+/// packet the server never sent is not processed, and a coalesced Initial or 1-RTT packet is
+/// still read.
 #[test]
 fn zero_rtt_packets_are_dropped() {
-	use crate::packet::{FixedLengthConnectionIdParser, Header, LongType, PacketNumber, PartialDecode};
+	use crate::packet::{FixedLengthConnectionIdParser, Header, LongHeaderType, LongType, PacketNumber, PartialDecode};
 	for leading in [true, false] {
 		let _guard = subscribe();
 		let mut pair = pair_with(|_| {});
@@ -55,8 +56,9 @@ fn zero_rtt_packets_are_dropped() {
 		.unwrap();
 		let initial_header = decoded.initial_header().unwrap();
 		let mut zero_rtt = Vec::new();
+		// No header encodes as 0-RTT, so encode a Handshake one and retype it below.
 		let encoded = Header::Long {
-			ty: LongType::ZeroRtt,
+			ty: LongType::Handshake,
 			src_cid: initial_header.src_cid,
 			dst_cid: initial_header.dst_cid,
 			number: PacketNumber::U8(0),
@@ -75,6 +77,9 @@ fn zero_rtt_packets_are_dropped() {
 		// The keys don't matter: the drop precedes decryption.
 		zero_rtt.resize(zero_rtt.len() + 32 + keys.packet.local.tag_len(), 0);
 		encoded.finish(&mut zero_rtt, &*keys.header.local, Some((0, &*keys.packet.local)));
+		// The type bits are outside header protection.
+		const TYPE_BITS: u8 = 0x30;
+		zero_rtt[0] = zero_rtt[0] & !TYPE_BITS | u8::from(LongHeaderType::ZeroRtt) & TYPE_BITS;
 		let mut datagram = Vec::new();
 		if leading {
 			datagram.extend_from_slice(&zero_rtt);
@@ -89,6 +94,13 @@ fn zero_rtt_packets_are_dropped() {
 		assert_connected(pair.client_conn_mut(client_ch));
 		assert_connected(pair.server_conn_mut(server_ch));
 		assert!(pair.server_streams(server_ch).accept(Dir::Uni).is_none());
+
+		// Alone, the 0-RTT packet changes nothing.
+		let before = pair.server_conn_mut(server_ch).stats().frame_rx;
+		pair.server.inbound.push_back((now, ecn, zero_rtt.as_slice().into()));
+		pair.drive_server();
+		assert_eq!(pair.server_conn_mut(server_ch).stats().frame_rx.acks, before.acks);
+		assert!(lost(pair.server_conn_mut(server_ch)).is_none());
 
 		let stream = pair
 			.client_streams(client_ch)
