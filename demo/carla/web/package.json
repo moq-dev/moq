@@ -25,9 +25,9 @@
 		"zod": "^4.6.7"
 	},
 	"devDependencies": {
-		"@types/bun": "^1.4.3",
-		"rolldown": "^1.2.12",
+		"@types/bun": "^1.4.4",
+		"rolldown": "^1.2.15",
 		"typescript": "7.0.2",
-		"vite": "^8.3.2"
+		"vite": "^8.3.5"
 	}
 }
