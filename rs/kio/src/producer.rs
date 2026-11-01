@@ -123,7 +123,7 @@ impl<T> Producer<T> {
 	/// while pending.
 	///
 	/// Returns `Poll::Ready(Err(`[`Ref`]`))` if the channel is closed.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll<F>(&self, waiter: &Waiter, f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<()>,
@@ -150,7 +150,7 @@ impl<T> Producer<T> {
 	/// [`Mut`], so it never flags the state modified and never wakes consumers.
 	/// Use it to wait on a read condition from the producer side without creating
 	/// a [`Consumer`].
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_ref<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
@@ -176,6 +176,7 @@ impl<T> Producer<T> {
 	/// [`Poll::Ready`], or [`Closed`] if the channel closes first. The `Ok` guard is the
 	/// write access you asked for, so it's yours to hold; the `Err` case hands back no
 	/// guard at all. Call [`read`](Self::read) if you need the final state.
+	#[cfg(feature = "async")]
 	pub async fn wait<F>(&self, mut f: F) -> Result<Mut<'_, T>, Closed>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<()> + Unpin,
@@ -185,14 +186,9 @@ impl<T> Producer<T> {
 		crate::wait(move |waiter| self.poll(waiter, &mut f).map(|res| res.map_err(|_| Closed))).await
 	}
 
-	/// Wait until the channel is closed.
-	pub async fn closed(&self) {
-		crate::wait(move |waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll for channel closure (an explicit [`Mut::close`], e.g. an abort),
-	/// registering the waiter if still open.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	/// Resolves once the channel is closed (an explicit [`Mut::close`], e.g. an abort).
+	#[cfg_attr(feature = "async", kio_macros::wrapper)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
 		if state.closed {
@@ -211,15 +207,10 @@ impl<T> Producer<T> {
 		self.counts.consumers.load(Ordering::Relaxed) > 0
 	}
 
-	/// Wait until [`Self::wanted`] differs from `last`, returning the new value, or
-	/// [`Closed`] if the channel closes first.
-	pub async fn wanted_changed(&self, last: bool) -> Result<bool, Closed> {
-		crate::wait(move |waiter| self.poll_wanted_changed(waiter, last)).await
-	}
-
-	/// Poll for [`Self::wanted`] to differ from `last`: `Ready(Ok)` with the new value once
-	/// it does, [`Closed`] if the channel closed first, else `Pending`.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	/// Resolves to the new [`Self::wanted`] once it differs from `last`, or [`Closed`] if
+	/// the channel closes first.
+	#[cfg_attr(feature = "async", kio_macros::wrapper)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_wanted_changed(&self, waiter: &Waiter, last: bool) -> Poll<Result<bool, Closed>> {
 		// Closure is checked first, so a closed channel reports `Closed` from every handle
 		// rather than a consumer count that only dropped because it's dead.

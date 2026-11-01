@@ -15,6 +15,7 @@ let checksum = 0;
 /** A lite object: how the publisher writes it and how the subscriber reads it back. */
 interface Sample {
 	name: string;
+	versions?: Version[];
 	encode(w: Writer, version: Version): Promise<void>;
 	decode(r: Reader, version: Version): Promise<unknown>;
 }
@@ -82,6 +83,16 @@ const datagram: Sample = {
 	decode: (r, version) => r.readAll().then((data) => Datagram.decode(data, version, () => ({ timed: true }))),
 };
 
+const padding: Sample = {
+	name: "Padding Datagram",
+	versions: [Version.DRAFT_07],
+	async encode(w) {
+		await w.u53(1);
+		await w.write(new Uint8Array(1199));
+	},
+	decode: datagram.decode,
+};
+
 const hop = randomHop();
 const setup: Sample = {
 	name: "Setup",
@@ -128,8 +139,8 @@ const sink = () =>
 	});
 
 console.log("sample,version,bytes,encode_ns,decode_ns");
-for (const sample of [video, audio, group, subscribe, datagram, setup]) {
-	for (const version of versions) {
+for (const sample of [video, audio, group, subscribe, datagram, padding, setup]) {
+	for (const version of sample.versions ?? versions) {
 		const bytes = await wire(sample, version);
 		const encode = await time(async () => {
 			const w = new Writer(sink(), version);

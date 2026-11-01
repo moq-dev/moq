@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use hang::moq_net;
-use object_store::ObjectStore;
 use object_store::path::{Path, PathPart};
+use object_store::{ObjectStore, ObjectStoreScheme};
 use url::Url;
 
 use crate::moq::notify_ready;
@@ -271,12 +271,38 @@ pub async fn import(
 /// Open the object store `url` names, taking cloud credentials from the `AWS_*`, `GOOGLE_*`,
 /// and `AZURE_*` environment variables, with the prefix the URL names.
 fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
-	let credentials = std::env::vars_os()
-		.filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
-		.filter(|(key, _)| ["AWS_", "GOOGLE_", "AZURE_"].iter().any(|cloud| key.starts_with(cloud)));
-	let (store, prefix) =
-		object_store::parse_url_opts(url, credentials).with_context(|| format!("unsupported archive store {url}"))?;
-	Ok((Arc::from(store), prefix))
+	let unsupported = || format!("unsupported archive store {url}");
+	let (scheme, prefix) = ObjectStoreScheme::parse(url).with_context(unsupported)?;
+	// Each cloud builder signs through rind, which `parse_url_opts` has no way to pass.
+	let store: Arc<dyn ObjectStore> = match scheme {
+		ObjectStoreScheme::Local => Arc::new(object_store::local::LocalFileSystem::new()),
+		#[cfg(feature = "s3")]
+		ObjectStoreScheme::AmazonS3 => Arc::new(
+			object_store::aws::AmazonS3Builder::from_env()
+				.with_url(url.as_str())
+				.with_crypto_provider(rind_object_store::default_provider()?)
+				.build()
+				.with_context(unsupported)?,
+		),
+		#[cfg(feature = "gcs")]
+		ObjectStoreScheme::GoogleCloudStorage => Arc::new(
+			object_store::gcp::GoogleCloudStorageBuilder::from_env()
+				.with_url(url.as_str())
+				.with_crypto_provider(rind_object_store::default_provider()?)
+				.build()
+				.with_context(unsupported)?,
+		),
+		#[cfg(feature = "azure")]
+		ObjectStoreScheme::MicrosoftAzure => Arc::new(
+			object_store::azure::MicrosoftAzureBuilder::from_env()
+				.with_url(url.as_str())
+				.with_crypto_provider(rind_object_store::default_provider()?)
+				.build()
+				.with_context(unsupported)?,
+		),
+		_ => anyhow::bail!(unsupported()),
+	};
+	Ok((store, prefix))
 }
 
 /// [`open_store`] as one recorded broadcast.
@@ -345,7 +371,7 @@ mod tests {
 
 		// Each recording ends with its broadcast, once it subscribed.
 		for (broadcast, mut track) in broadcasts.drain(..2) {
-			moq_clock::timeout(Duration::from_secs(10), track.subscription_changed())
+			kio::clock::timeout(Duration::from_secs(10), track.subscription_changed())
 				.await
 				.expect("the export subscribes")
 				.unwrap();
@@ -356,9 +382,9 @@ mod tests {
 			format!("live/a/@{}/.end", epochs[0]),
 			format!("live/b/@{}/.end", epochs[1]),
 		];
-		moq_clock::timeout(Duration::from_secs(10), async {
+		kio::clock::timeout(Duration::from_secs(10), async {
 			while !complete.iter().all(|end| dir.path().join(end).exists()) {
-				moq_clock::sleep(Duration::from_millis(10)).await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
 		})
 		.await
@@ -400,9 +426,9 @@ mod tests {
 		let recording =
 			tokio::spawn(moq_archive::Producer::new(open(&url).unwrap(), source.consume(), Default::default()).run());
 		// Its objects, then the markers once the broadcast ends.
-		moq_clock::timeout(Duration::from_secs(10), async {
+		kio::clock::timeout(Duration::from_secs(10), async {
 			while files(dir.path()).len() < 2 {
-				moq_clock::sleep(Duration::from_millis(10)).await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
 		})
 		.await
@@ -418,7 +444,7 @@ mod tests {
 		let epoch = moq_net::Epoch::mint();
 		let _import = tokio::spawn(import(origin.clone(), "replay".into(), args, epoch.clone()));
 		let mut announced = origin.consume().announced();
-		moq_clock::timeout(Duration::from_secs(10), async {
+		kio::clock::timeout(Duration::from_secs(10), async {
 			loop {
 				if let Some(moq_net::announce::Event::Start(announce)) = announced.next().await {
 					assert_eq!(announce.prefix.as_str(), "replay");

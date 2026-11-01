@@ -577,6 +577,7 @@ impl Serve {
 			let listener = tokio::net::TcpListener::bind(addr)
 				.await
 				.with_context(|| format!("failed to bind {addr}"))?;
+			let addr = listener.local_addr().context("failed to read the bound address")?;
 			tracing::info!(%addr, url = ?self.mesh_url, "mesh coordinator listening");
 			mesh = Some((coordinator.clone(), listener));
 			server = server.with_mesh(coordinator);
@@ -593,6 +594,8 @@ impl Serve {
 					let listener = tokio::net::TcpListener::bind(addr)
 						.await
 						.with_context(|| format!("failed to bind {addr}"))?;
+					// Log the bound address, so `--listen 127.0.0.1:0` reports the port the OS picked.
+					let addr = listener.local_addr().context("failed to read the bound address")?;
 					tracing::info!(%addr, "auth server listening");
 					server.serve(listener).await?;
 				}
@@ -789,9 +792,9 @@ fn read_token(path: &std::path::Path) -> anyhow::Result<String> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct UnixTimestamp(moq_clock::Wall);
+struct UnixTimestamp(kio::clock::Wall);
 
-impl From<UnixTimestamp> for moq_clock::Wall {
+impl From<UnixTimestamp> for kio::clock::Wall {
 	fn from(value: UnixTimestamp) -> Self {
 		value.0
 	}
@@ -805,7 +808,7 @@ impl std::str::FromStr for UnixTimestamp {
 		let timestamp = timestamp.try_into().context("timestamp out of range")?;
 		// Past 2554 saturates, like a decoded token time.
 		Ok(Self(
-			moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::from_secs(timestamp)),
+			kio::clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::from_secs(timestamp)),
 		))
 	}
 }
@@ -1289,8 +1292,8 @@ mod tests {
 
 	#[test]
 	fn timestamp_past_the_wall_range_saturates() {
-		let last = moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
-		let parse = |text: &str| moq_clock::Wall::from(text.parse::<UnixTimestamp>().unwrap());
+		let last = kio::clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
+		let parse = |text: &str| kio::clock::Wall::from(text.parse::<UnixTimestamp>().unwrap());
 		assert_eq!(parse(&i64::MAX.to_string()), last);
 		assert!(parse("18446744073") < last);
 	}

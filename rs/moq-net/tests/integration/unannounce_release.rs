@@ -38,17 +38,17 @@ async fn release(version: Version) {
 	crate::support::wanted(track.demand()).await.unwrap();
 
 	broadcast.unannounce();
-	moq_clock::sleep(Duration::from_secs(1)).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	drop(sub);
 	drop(remote);
-	moq_clock::timeout(Duration::from_secs(600), crate::support::unwanted(track.demand()))
+	kio::clock::timeout(Duration::from_secs(600), crate::support::unwanted(track.demand()))
 		.await
 		.unwrap_or_else(|_| panic!("{version}: the relay kept its upstream subscription"))
 		.unwrap();
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn unannounced_remote_track_releases_demand() {
 	for version in support::every_version() {
 		release(version).await;

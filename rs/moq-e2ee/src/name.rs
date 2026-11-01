@@ -99,10 +99,6 @@ impl Keys {
 	///
 	/// [`Error::Authentication`] if `name` does not open, its nonce is not the HMAC of its
 	/// plaintext, or its padding or UTF-8 is not canonical: no generation issued it.
-	#[cfg_attr(
-		not(test),
-		allow(dead_code, reason = "undeclared names will serve requests through it")
-	)]
 	pub(crate) fn open(&self, name: &Name) -> Result<String> {
 		let mut material = name.material();
 		let (nonce, sealed) = material.split_at_mut(NAME_NONCE_LEN);

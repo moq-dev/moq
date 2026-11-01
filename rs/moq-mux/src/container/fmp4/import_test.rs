@@ -1078,9 +1078,8 @@ async fn unwrapped_samples_present_at_their_composition_time() {
 	);
 }
 
-/// bbb's init with `entries` as the edit list of track `track_id`.
-/// Once the video group is open, the keyframe scan for a segment boundary stops at the mdat
-/// rather than walking a forged moof's field-less runs of `u32::MAX` non-sync samples.
+/// Once the video group is open, a forged moof's field-less runs of `u32::MAX` non-sync samples
+/// are refused at the moof, before the keyframe scan or sample planning walks them.
 #[test]
 fn fieldless_runs_do_not_stall_the_segment_scan() {
 	let (_, (video_id, video_scale), _) = bbb_init();
@@ -1131,7 +1130,7 @@ fn fieldless_runs_do_not_stall_the_segment_scan() {
 			assert!(
 				matches!(
 					fmp4.decode(&forged),
-					Err(crate::Error::Cmaf(super::Error::SampleRangeOutOfBounds { .. }))
+					Err(crate::Error::Cmaf(super::Error::TooManySamples(_)))
 				),
 				"{trafs} trafs, passthrough {passthrough}"
 			);
@@ -2597,7 +2596,7 @@ struct Imported {
 	video: String,
 	/// The root clock the catalog advertised.
 	clock: hang::catalog::Clock,
-	arrival: std::ops::RangeInclusive<moq_clock::Wall>,
+	arrival: std::ops::RangeInclusive<kio::clock::Wall>,
 	/// Where the video's first HLS segment starts.
 	record: moq_net::Timestamp,
 	/// Why a chunk was refused, if one was.
@@ -2618,7 +2617,7 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 	let video = snapshot.video.renditions.keys().next().unwrap().clone();
 	let mut records = subscribe(&consumer, &video).await;
 
-	let before = moq_clock::wall();
+	let before = kio::clock::wall();
 	let mut after = before;
 	let mut refused = None;
 	for (i, chunk) in chunks.iter().enumerate() {
@@ -2627,7 +2626,7 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 			break;
 		}
 		if i == 0 {
-			after = moq_clock::wall();
+			after = kio::clock::wall();
 		}
 	}
 	fmp4.finish().unwrap();
@@ -3221,6 +3220,64 @@ fn empty_and_multiple_webvtt_cues_are_supported() {
 	}
 }
 
+/// A text sample is staged whole before it is rewritten, so one past the bound is refused before
+/// any of its bytes arrive, and the rest of its mdat is discarded.
+#[test]
+fn oversized_text_sample_is_refused_before_staging() {
+	let size = super::MAX_HELD_BYTES + 1;
+	let moof = mp4_atom::Moof {
+		mfhd: mp4_atom::Mfhd { sequence_number: 1 },
+		traf: vec![mp4_atom::Traf {
+			tfhd: mp4_atom::Tfhd {
+				track_id: 1,
+				default_sample_duration: Some(1000),
+				..Default::default()
+			},
+			tfdt: Some(mp4_atom::Tfdt {
+				base_media_decode_time: 0,
+			}),
+			trun: vec![mp4_atom::Trun {
+				data_offset: None,
+				samples: vec![mp4_atom::TrunEntry {
+					size: Some(size as u32),
+					..Default::default()
+				}]
+				.into(),
+			}],
+			..Default::default()
+		}],
+	};
+	let mut header = Vec::new();
+	moof.encode(&mut header).unwrap();
+	mp4_atom::Header {
+		kind: b"mdat".into(),
+		size: Some(size),
+	}
+	.encode(&mut header)
+	.unwrap();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&webvtt_init("WEBVTT")).unwrap();
+	let err = importer.decode(&header).unwrap_err();
+	assert!(
+		matches!(err, crate::Error::Cmaf(super::Error::TextSampleTooLarge(refused)) if refused == size),
+		"{err:?}"
+	);
+	let chunk = vec![0xA5; 1 << 20];
+	let mut remaining = size;
+	while remaining > 0 {
+		let count = remaining.min(chunk.len());
+		importer.decode(&chunk[..count]).unwrap();
+		remaining -= count;
+	}
+	let cue = subtitle_box(b"vttc", &subtitle_box(b"payl", b"hello"));
+	importer.decode(&webvtt_fragment(0, &[cue], 1000)).unwrap();
+	importer.finish().unwrap();
+	assert_eq!(catalog.snapshot().text.renditions.len(), 1);
+}
+
 /// The WebVTT `Kind` header sets the role, and lone CR line terminators are accepted.
 #[tokio::test(start_paused = true)]
 async fn webvtt_kind_and_lone_cr_terminators() {
@@ -3498,7 +3555,7 @@ async fn ttml_samples_become_timed_text_with_source_metadata() {
 /// The source joins a catalog clock another input already fixed, so its TTML times move with it.
 #[tokio::test(start_paused = true)]
 async fn ttml_follows_a_shifted_source_clock() {
-	let wall = moq_clock::wall();
+	let wall = kio::clock::wall();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
