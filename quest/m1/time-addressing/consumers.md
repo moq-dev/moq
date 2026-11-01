@@ -83,7 +83,8 @@ export reads media tracks directly, prove that an HLS-only viewer of an
 on-demand publisher starts capture and gets a playlist. Since
 [moq-dev/moq#7238](https://github.com/moq-dev/moq/pull/7238), Rust capture
 audio is on demand by default (raw PCM kept until subscribed), so until then
-an HLS-only viewer of a default `moq import capture` gets no audio rendition.
+an HLS-only viewer of a default `moq import capture` gets no audio rendition
+without `--audio on`.
 
 Public API: breaking where a consumer exposes group numbers (CLI
 `--group`, archive keys), `hang::hls` and the per-rendition `hls` field are

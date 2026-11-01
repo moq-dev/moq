@@ -93,11 +93,11 @@ pub enum Error {
 	InvalidRoot(String),
 
 	/// The path does not overlap the token's root.
-	#[error("path `{0}` does not overlap the token root")]
+	#[error("path {0:?} does not overlap the token root")]
 	RootMismatch(String),
 
 	/// The token grants no access to this path.
-	#[error("token grants no access to path `{0}`")]
+	#[error("token grants no access to path {0:?}")]
 	NoAccess(String),
 
 	/// The key scope allows neither publish nor subscribe.
@@ -147,6 +147,14 @@ pub enum Error {
 	/// The grant's revalidate interval is zero.
 	#[error("grant asks to be revalidated at no interval")]
 	ZeroRevalidate,
+
+	/// No ES256 or EdDSA key is available to sign or verify a peer grant.
+	#[error("peer grants need an ES256 or EdDSA key")]
+	NoPeerKey,
+
+	/// A peer grant's presenter key carries private material.
+	#[error("a peer grant's presenter key must be public")]
+	PrivatePresenter,
 
 	/// The grant's expiry has passed.
 	#[error("grant has already expired")]
@@ -203,6 +211,14 @@ pub enum Error {
 	/// Fetching a remote JWKS failed.
 	#[error("{0}")]
 	Other(String),
+
+	/// A mesh coordinator refused the request.
+	#[error("mesh coordinator refused: {0}")]
+	Mesh(#[from] crate::mesh::ErrorReply),
+
+	/// The mesh coordinator's state file could not be read, parsed, or written.
+	#[error("mesh state: {0}")]
+	MeshState(String),
 }
 
 // Dependency errors are flattened to their message so their crates stay out of this crate's
