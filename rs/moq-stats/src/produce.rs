@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use std::task::Poll;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Tier, Traffic, TrafficEntry};
 use moq_net::{Epoch, Path, broadcast, kio, origin, track};
 use serde::Serialize;
@@ -232,8 +232,8 @@ impl Task {
 			return;
 		};
 
-		let mut ticker = moq_clock::interval(interval);
-		ticker.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Delay);
+		let mut ticker = kio::clock::interval(interval);
+		ticker.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
 
 		loop {
 			// Scheduled instants are at least an interval apart, even after a late tick,
@@ -281,7 +281,7 @@ impl Drain {
 	/// `None` if the origin refused it.
 	fn new(task: Task) -> Option<Self> {
 		let node = NodePublisher::create(&task)?;
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		Some(Self {
 			task,
 			node,
@@ -1320,7 +1320,7 @@ mod tests {
 	/// A drain at the current instant, numbered `group`.
 	fn stamp(group: u64) -> Stamp {
 		Stamp {
-			at: moq_clock::now(),
+			at: kio::clock::now(),
 			group,
 		}
 	}
@@ -1404,12 +1404,12 @@ mod tests {
 			.with_versions(version.into())
 			.with_publisher(upstream.consume().with_hidden(true));
 		let client = async {
-			let (session, driver) = client.connect(moq_clock::now(), client_transport).await.unwrap();
+			let (session, driver) = client.connect(kio::clock::now(), client_transport).await.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
 			session
 		};
 		let server = async {
-			let (session, driver) = server.accept(moq_clock::now(), server_transport).await.unwrap();
+			let (session, driver) = server.accept(kio::clock::now(), server_transport).await.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
 			session
 		};
@@ -1840,7 +1840,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_late_drain_leaves_the_next_its_own_interval() {
 		// Schedule the drains a millisecond before an interval boundary.
-		let phase = Duration::from(Timestamp::from(moq_clock::now())).as_millis() % 1000;
+		let phase = Duration::from(Timestamp::from(kio::clock::now())).as_millis() % 1000;
 		tokio::time::advance(Duration::from_millis(((1999 - phase) % 1000) as u64)).await;
 
 		let origin = produce_origin();
@@ -1896,7 +1896,7 @@ mod tests {
 			interval,
 		})
 		.unwrap();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		for phase in (0..1500).step_by(100) {
 			let at = start + Duration::from_micros(phase);
 			assert_eq!(
@@ -2366,7 +2366,7 @@ mod tests {
 		.expect("drain");
 		let mut tick = || {
 			drain.collect();
-			drain.publish(moq_clock::now());
+			drain.publish(kio::clock::now());
 			drain.node.presence.len()
 		};
 		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
@@ -2621,7 +2621,7 @@ mod tests {
 		.expect("drain");
 		let mut tick = || {
 			drain.collect();
-			drain.publish(moq_clock::now());
+			drain.publish(kio::clock::now());
 			drain.node.prefixes.len()
 		};
 		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
@@ -2852,24 +2852,24 @@ mod tests {
 				// Warm up: create the groups and tracks and grow every buffer.
 				for _ in 0..3 {
 					drain.collect();
-					drain.publish(moq_clock::now());
+					drain.publish(kio::clock::now());
 				}
 				// Hold a prefix with a child per tier, as a reader would.
 				let _held = hold.then(|| {
 					let tick = drain.tick;
-					let stamp = drain.stamp(moq_clock::now());
+					let stamp = drain.stamp(kio::clock::now());
 					drain
 						.node
 						.adopt_prefix(&drain.report, Path::from_static("room0"), None, tick, stamp);
 					drain.node.prefixes["room0"].output.snapshot.track.subscribe(None)
 				});
 				drain.collect();
-				drain.publish(moq_clock::now());
+				drain.publish(kio::clock::now());
 
 				let before = counting::allocs();
 				drain.collect();
 				let allocs = counting::allocs() - before;
-				drain.publish(moq_clock::now());
+				drain.publish(kio::clock::now());
 
 				assert!(!drain.report.traffic.is_empty(), "the drain carried entries");
 				assert_eq!(

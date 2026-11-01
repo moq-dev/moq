@@ -1165,7 +1165,7 @@ mod tests {
 		let internal = Internal::new(Config::default(), moq_net::stats::Registry::disabled());
 		let app = internal.routes();
 
-		let elapsed = moq_clock::timeout(std::time::Duration::from_secs(60), internal.serve(app)).await;
+		let elapsed = kio::clock::timeout(std::time::Duration::from_secs(60), internal.serve(app)).await;
 		assert!(elapsed.is_err(), "serve resolved with no listen address configured");
 	}
 
@@ -1371,8 +1371,8 @@ mod tests {
 		sub_source.announce(Default::default()).unwrap();
 		let sub_track = sub_source.create_track("audio", timed()).unwrap();
 
-		moq_clock::sleep(std::time::Duration::from_millis(1)).await;
-		moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 
 		// Leave 46 bytes across two frames behind the live edge, then read 1234
 		// egress bytes out of the default-tier broadcast.

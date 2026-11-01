@@ -308,7 +308,8 @@ starts) is asked of the track's dynamic handler
 as a fill, which a relay serves by fetching upstream one group at a time, skipping
 a group once every subscriber that asked for it narrows past it; with
 no handler it is reported as dropped once the feed stops waiting for it. One
-evicted after the subscriber saw it cached, but before it read it, is skipped. A relay merges its subscribers' ranges into one upstream request, which
+evicted after the subscriber saw it cached, but before it read it, is asked the same
+way, once: evicted again before it is read, it is reported as dropped. A relay merges its subscribers' ranges into one upstream request, which
 moq-lite-07 carries range by range and older wire versions as the single span
 covering them. A relative or time anchor resolves on the hop that publishes the
 track, and over moq-lite-07, which carries a relative or time start upstream and

@@ -436,7 +436,7 @@ fn tokio_client_err(url: String) -> std::thread::JoinHandle<moq_tokio::quic::web
 			// that close. Waiting out the idle timeout would "fail" too, ten
 			// seconds later, which is what a peer sees when a close is
 			// published to the application before it reaches the wire.
-			moq_clock::timeout(
+			kio::clock::timeout(
 				std::time::Duration::from_secs(3),
 				crate::support::web_connect(request, Default::default()),
 			)
@@ -744,7 +744,7 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 			let mut filler = session.accept_uni().await.expect("accept_uni");
 			read_all(&mut filler).await;
 
-			let accept = moq_clock::timeout(std::time::Duration::from_secs(5), session.accept_uni());
+			let accept = kio::clock::timeout(std::time::Duration::from_secs(5), session.accept_uni());
 			let mut recv = accept.await.expect("the reset stream arrives").expect("accept_uni");
 			let err = recv.read_chunk(usize::MAX).await.expect_err("the server reset it");
 			assert!(matches!(err, moq_tokio::quic::web::ReadError::Reset(7)), "got {err:?}");

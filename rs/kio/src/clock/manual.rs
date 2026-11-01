@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{Instant, Wall};
+use crate::clock::{Instant, Wall};
 
 /// A clock that moves only when a test moves it.
 ///

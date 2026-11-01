@@ -117,7 +117,7 @@ where
 	let mut exporter = exporter.with_delay(RECORDING_MAX_AGE).with_replay();
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
-	while let Ok(res) = moq_clock::timeout(DRAIN, exporter.next()).await {
+	while let Ok(res) = kio::clock::timeout(DRAIN, exporter.next()).await {
 		let Some(frame) = res.expect("exporter error") else {
 			break;
 		};
@@ -247,7 +247,7 @@ async fn a_follower_keeps_msf_after_catalog_eof() {
 	assert!(export.next().await.unwrap().is_none());
 	assert_eq!(export.catalog_format(), CatalogFormat::Msf);
 	// The routed subscription is released when the origin driver observes the local drop.
-	moq_clock::timeout(Duration::from_secs(1), async {
+	kio::clock::timeout(Duration::from_secs(1), async {
 		while track.subscription().is_some() {
 			track.subscription_changed().await.unwrap();
 		}
@@ -260,7 +260,7 @@ async fn a_follower_keeps_msf_after_catalog_eof() {
 		.with_follow(Duration::from_secs(1));
 	let (broadcast, track) = publish();
 	// Only the MSF catalog exists, so falling back to the default encoding cannot subscribe.
-	moq_clock::timeout(
+	kio::clock::timeout(
 		Duration::from_secs(1),
 		kio::wait(|waiter| {
 			if let Poll::Ready(Err(err)) = follower.poll_next(waiter) {
@@ -1054,7 +1054,7 @@ async fn export_trims_leading_pictures_after_a_late_drop() {
 		.await
 		.unwrap()
 		.with_delay(Duration::from_millis(500));
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	let mut out = Vec::new();
 	// (arrival, PTS) in milliseconds, in decode order. The second group acquires the clock.
 	// Its 160 ms picture stalls past its deadline, before the next group exists for the
@@ -1073,7 +1073,7 @@ async fn export_trims_leading_pictures_after_a_late_drop() {
 		(2080, 2060, false),
 		(2120, 2120, false),
 	] {
-		moq_clock::sleep_until(start + Duration::from_millis(at)).await;
+		kio::clock::sleep_until(start + Duration::from_millis(at)).await;
 		// Finding the source empty dates the next frame's arrival.
 		out.extend(poll_frames(&mut export));
 		video
@@ -1153,12 +1153,12 @@ async fn export_resumes_whole_mpeg2_video_at_a_sequence_header() {
 		(2080, 2080, true),
 		(2120, 2120, false),
 	];
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	let (mut out, mut sample) = (Vec::new(), 0);
 	for (index, (at, pts, sequence)) in pictures.into_iter().enumerate() {
 		// The audio arrives on time throughout, so only the video is late.
 		while sample * AUDIO_US <= at * 1_000 {
-			moq_clock::sleep_until(start + Duration::from_micros(sample * AUDIO_US)).await;
+			kio::clock::sleep_until(start + Duration::from_micros(sample * AUDIO_US)).await;
 			out.extend(poll_frames(&mut export));
 			audio
 				.write(Frame {
@@ -1170,7 +1170,7 @@ async fn export_resumes_whole_mpeg2_video_at_a_sequence_header() {
 				.unwrap();
 			sample += 1;
 		}
-		moq_clock::sleep_until(start + Duration::from_millis(at)).await;
+		kio::clock::sleep_until(start + Duration::from_millis(at)).await;
 		out.extend(poll_frames(&mut export));
 		let mut payload = if sequence { vec![0, 0, 1, 0xb3] } else { Vec::new() };
 		payload.extend_from_slice(&[0, 0, 1, 0x00, index as u8]);
@@ -1402,7 +1402,7 @@ async fn export_declared_zero_reorder_decodes_at_presentation() {
 
 	let (mut export, _keep) = export_declared(0, &[&[0, 80, 40, 120]]).await;
 	let err = loop {
-		match moq_clock::timeout(DRAIN, export.next()).await {
+		match kio::clock::timeout(DRAIN, export.next()).await {
 			Ok(Ok(Some(_))) => {}
 			Ok(Ok(None)) | Err(_) => panic!("a frame reordered past the declared depth was exported"),
 			Ok(Err(err)) => break err,
@@ -1519,7 +1519,7 @@ async fn export_pcr_wraps_below_zero_at_start() {
 		.with_delay(RECORDING_MAX_AGE);
 	// Every slot up to the last decode time, the clock laying them out at theirs.
 	let mut frames = Vec::new();
-	while let Ok(Ok(Some(frame))) = moq_clock::timeout(DRAIN, exporter.next()).await {
+	while let Ok(Ok(Some(frame))) = kio::clock::timeout(DRAIN, exporter.next()).await {
 		frames.push(frame);
 	}
 
@@ -2263,7 +2263,7 @@ async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str, kind: 
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(kind));
 	let mut frames = Vec::new();
-	while let Ok(res) = moq_clock::timeout(Duration::from_millis(50), reader.read_frame()).await {
+	while let Ok(res) = kio::clock::timeout(Duration::from_millis(50), reader.read_frame()).await {
 		let Some(frame) = res.unwrap() else { break };
 		frames.push(frame.payload.to_vec());
 	}
@@ -2873,7 +2873,7 @@ async fn aac_export_refuses_what_adts_cannot_label() {
 
 		let mut exporter = open_export(crate::source::announced(&consumer).await).await.unwrap();
 		let err = loop {
-			match moq_clock::timeout(DRAIN, exporter.next()).await {
+			match kio::clock::timeout(DRAIN, exporter.next()).await {
 				Ok(Ok(Some(_))) => continue,
 				Ok(Ok(None)) => panic!("export completed; expected a refusal naming {refusal}"),
 				Ok(Err(e)) => break e,
@@ -3058,7 +3058,7 @@ async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let mut cues = Vec::new();
-	while let Ok(res) = moq_clock::timeout(Duration::from_millis(50), reader.read_frame()).await {
+	while let Ok(res) = kio::clock::timeout(Duration::from_millis(50), reader.read_frame()).await {
 		let Some(frame) = res.unwrap() else { break };
 		cues.push((frame.payload.to_vec(), frame.timestamp));
 	}
@@ -3676,7 +3676,7 @@ async fn a_reimport_keeps_the_first_si_across_a_gap() {
 			export = export.with_mux_rate(rate);
 		}
 		let mut ts = BytesMut::new();
-		while let Ok(frame) = moq_clock::timeout(DRAIN, export.next()).await {
+		while let Ok(frame) = kio::clock::timeout(DRAIN, export.next()).await {
 			let Some(frame) = frame.expect("exporter error") else {
 				break;
 			};
@@ -4389,7 +4389,7 @@ async fn discontinuity_flags_the_break_once_across_tracks() {
 	// generation, so it lapses twice.
 	let mut marked = drain_frames(&mut export).await;
 	for _ in 0..2 {
-		moq_clock::sleep(RECORDING_MAX_AGE).await;
+		kio::clock::sleep(RECORDING_MAX_AGE).await;
 		marked.extend(drain_frames(&mut export).await);
 	}
 	assert_eq!(export.discontinuity(), 1, "local marker counts are not program epochs");
@@ -5204,7 +5204,7 @@ async fn stale_si_entry_does_not_block_output() {
 	.unwrap();
 	// The timeout distinguishes "produced output promptly" from "held dark";
 	// under paused time a wedged exporter would hit it instantly.
-	let frame = moq_clock::timeout(DRAIN, exporter.next())
+	let frame = kio::clock::timeout(DRAIN, exporter.next())
 		.await
 		.expect("a stale SI entry must not hold output dark")
 		.unwrap()
@@ -5455,7 +5455,7 @@ async fn export_opus_track(channel_count: u32, description: Option<Bytes>) -> Re
 		.with_replay();
 	let mut out = BytesMut::new();
 	loop {
-		match moq_clock::timeout(DRAIN, exporter.next()).await {
+		match kio::clock::timeout(DRAIN, exporter.next()).await {
 			Ok(Ok(Some(frame))) => out.extend_from_slice(&frame.payload),
 			Ok(Ok(None)) => return Ok(out),
 			Ok(Err(err)) => return Err(err.to_string()),
@@ -5715,10 +5715,10 @@ where
 		// Run the paused clock only as far as the next frame due, so a test that writes
 		// more afterwards is still on time for it.
 		if let Some(deadline) = export.next_due() {
-			moq_clock::sleep_until(deadline).await;
+			kio::clock::sleep_until(deadline).await;
 			continue;
 		}
-		match moq_clock::timeout(Duration::from_millis(10), export.next()).await {
+		match kio::clock::timeout(Duration::from_millis(10), export.next()).await {
 			Ok(Ok(Some(frame))) => out.push(frame),
 			Ok(Ok(None)) => break,
 			Err(_) if export.next_due().is_none() => break,
@@ -5820,7 +5820,7 @@ struct Interleave {
 	/// Audio frames per group.
 	audio_group: u64,
 	/// The paused clock's instant at media time zero, set by the first [`Self::at`].
-	start: Option<moq_clock::Instant>,
+	start: Option<kio::clock::Instant>,
 }
 
 impl Interleave {
@@ -5889,8 +5889,8 @@ impl Interleave {
 
 	/// Run the paused clock to `micros` of media time, as a live source would.
 	async fn at(&mut self, micros: u64) {
-		let start = *self.start.get_or_insert_with(moq_clock::now);
-		moq_clock::sleep_until(start + Duration::from_micros(micros)).await;
+		let start = *self.start.get_or_insert_with(kio::clock::now);
+		kio::clock::sleep_until(start + Duration::from_micros(micros)).await;
 	}
 
 	fn video(&mut self, tick: u64) {
@@ -6492,7 +6492,7 @@ async fn repointed_si_entry_resubscribes() {
 	// that should carry the new sections, or the exporter drains them all first.
 	let mut after = BytesMut::new();
 	write_key(&mut producer, 2);
-	let frame = moq_clock::timeout(DRAIN, exporter.next())
+	let frame = kio::clock::timeout(DRAIN, exporter.next())
 		.await
 		.expect("a frame after the switch")
 		.unwrap()
@@ -6504,7 +6504,7 @@ async fn repointed_si_entry_resubscribes() {
 	write_key(&mut producer, 3);
 	write_key(&mut producer, 4);
 	producer.finish().unwrap();
-	while let Ok(res) = moq_clock::timeout(DRAIN, exporter.next()).await {
+	while let Ok(res) = kio::clock::timeout(DRAIN, exporter.next()).await {
 		let Some(frame) = res.unwrap() else { break };
 		after.extend_from_slice(&frame.payload);
 	}
@@ -6593,7 +6593,7 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 	// v1 goes out with the media frame's slices, once the export's PCR interval is out.
 	let contains = |haystack: &[u8], needle: &[u8]| haystack.windows(needle.len()).any(|w| w == needle);
 	loop {
-		let frame = moq_clock::timeout(DRAIN, exporter.next())
+		let frame = kio::clock::timeout(DRAIN, exporter.next())
 			.await
 			.expect("v1 goes out (control)")
 			.unwrap()
@@ -6610,7 +6610,7 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 		.unwrap();
 	catalog.finish().unwrap();
 
-	let tail = moq_clock::timeout(DRAIN, exporter.next())
+	let tail = kio::clock::timeout(DRAIN, exporter.next())
 		.await
 		.expect("a trailing SI frame rather than an immediate end")
 		.unwrap()
@@ -6620,7 +6620,7 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 		contains(&tail.payload, &sdt_v2),
 		"the trailing flush carries the revision"
 	);
-	let end = moq_clock::timeout(DRAIN, exporter.next())
+	let end = kio::clock::timeout(DRAIN, exporter.next())
 		.await
 		.expect("the stream ends after the flush")
 		.unwrap();
@@ -7337,14 +7337,14 @@ async fn slices_go_out_on_the_clock() {
 			for ms in (0..1_000).step_by(20) {
 				write_aac(&mut audio, second * 1_000 + ms);
 			}
-			moq_clock::sleep(Duration::from_secs(1)).await;
+			kio::clock::sleep(Duration::from_secs(1)).await;
 		}
 		audio.finish().unwrap();
 		(broadcast, catalog)
 	});
 	let mut handed = Vec::new();
-	while let Ok(Ok(Some(_))) = moq_clock::timeout(Duration::from_secs(5), export.next()).await {
-		handed.push(moq_clock::now());
+	while let Ok(Ok(Some(_))) = kio::clock::timeout(Duration::from_secs(5), export.next()).await {
+		handed.push(kio::clock::now());
 	}
 	writer.await.unwrap();
 	assert!(handed.len() > 100, "too few slices to judge: {}", handed.len());
@@ -7926,11 +7926,11 @@ async fn export_reordered(
 		None => export,
 	};
 	let mut a = padded(rig.export(delay).await);
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	let mut b = None;
 	let (mut out_a, mut out_b) = (Vec::new(), Vec::new());
 	for tick in 0..TICKS {
-		moq_clock::sleep_until(start + Duration::from_micros(tick * VIDEO_US)).await;
+		kio::clock::sleep_until(start + Duration::from_micros(tick * VIDEO_US)).await;
 		if let Some((at, jitter)) = jitter
 			&& at == tick
 		{
@@ -8082,10 +8082,10 @@ async fn reordered_video_loses_nothing_on_a_clean_path() {
 	let delay = Duration::from_millis(500);
 	let mut rig = Reordered::new(SPS, PPS, &[0, 1, 2, 3, 4]).await;
 	let mut export = rig.export(delay).await;
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	let mut out = Vec::new();
 	for tick in 0..TICKS / 2 {
-		moq_clock::sleep_until(start + Duration::from_micros(tick * VIDEO_US)).await;
+		kio::clock::sleep_until(start + Duration::from_micros(tick * VIDEO_US)).await;
 		rig.video(tick);
 		while rig.audio_before(tick + 1) {}
 		out.extend(poll_frames(&mut export));
@@ -8120,11 +8120,11 @@ async fn padded_video_needs_the_delay_its_hrd_declares() {
 	for (delay, refused) in [(Duration::from_millis(500), true), (Duration::from_secs(1), false)] {
 		let mut rig = Reordered::new(SPS_HRD, PPS, &[]).await;
 		let mut export = rig.export(delay).await.with_mux_rate(2_000_000);
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut out = Vec::new();
 		let mut failed = None;
 		'run: for tick in 0..TICKS / 2 {
-			moq_clock::sleep_until(start + Duration::from_micros(tick * VIDEO_US)).await;
+			kio::clock::sleep_until(start + Duration::from_micros(tick * VIDEO_US)).await;
 			rig.video(tick);
 			while rig.audio_before(tick + 1) {}
 			while let std::task::Poll::Ready(frame) = export.poll_next(&waiter) {
@@ -8253,11 +8253,11 @@ async fn a_skipped_group_keeps_the_clock() {
 		.await
 		.unwrap()
 		.with_delay(delay);
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	let mut out = Vec::new();
 	// 100 ms groups of five 20 ms frames, a minute in; group 20 never arrives.
 	for sequence in 0..60u64 {
-		moq_clock::sleep_until(start + Duration::from_millis(sequence * 100)).await;
+		kio::clock::sleep_until(start + Duration::from_millis(sequence * 100)).await;
 		if sequence != 20 {
 			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 			for k in 0..5u64 {
@@ -8316,11 +8316,11 @@ async fn a_timeline_restarting_at_zero_fails_the_export() {
 		.await
 		.unwrap()
 		.with_delay(Duration::from_millis(500));
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	// One-second groups of 20 ms frames for 10 s, then a group back at zero. The track refuses
 	// a group whose first frame rewinds, so that group opens at the previous start.
 	for sequence in 0..11u64 {
-		moq_clock::sleep_until(start + Duration::from_secs(sequence)).await;
+		kio::clock::sleep_until(start + Duration::from_secs(sequence)).await;
 		let base = if sequence < 10 { sequence * 1_000 } else { 0 };
 		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 		for k in 0..50u64 {
@@ -8356,12 +8356,12 @@ async fn a_late_join_starts_at_the_live_edge() {
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut audio = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	let mut export = None;
 	let mut out = Vec::new();
 	// One-second groups of 20 ms frames; the exporter joins 5.5 s in with a 2 s delay.
 	for k in 0..400u64 {
-		moq_clock::sleep_until(start + Duration::from_millis(k * 20)).await;
+		kio::clock::sleep_until(start + Duration::from_millis(k * 20)).await;
 		if k % 50 == 0 && k > 0 {
 			audio.cut(None).unwrap();
 		}
@@ -8443,7 +8443,10 @@ where
 {
 	let mut out = Vec::new();
 	loop {
-		match moq_clock::timeout(DRAIN, export.next()).await.expect("the export ends") {
+		match kio::clock::timeout(DRAIN, export.next())
+			.await
+			.expect("the export ends")
+		{
 			Ok(Some(frame)) => out.push(frame),
 			Ok(None) => return (out, Ok(())),
 			Err(err) => return (out, Err(err)),
@@ -8586,7 +8589,7 @@ async fn a_rendition_moved_to_another_aac_configuration_fails() {
 		config.sample_rate = 44_100;
 	}
 	write_aac(&mut next, 200);
-	let err = moq_clock::timeout(DRAIN, async {
+	let err = kio::clock::timeout(DRAIN, async {
 		loop {
 			if let Err(err) = export.next().await {
 				break err;
@@ -8750,7 +8753,7 @@ async fn same_instance_returns(finish: bool) {
 		.unwrap()
 		.with_delay(RECORDING_MAX_AGE)
 		.with_replay();
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut track, ms);
 	}
@@ -8766,7 +8769,7 @@ async fn same_instance_returns(finish: bool) {
 
 	// Back under the same epoch a second later, its media as far on as the wall clock, its
 	// catalog listing the track only in its second snapshot.
-	moq_clock::sleep(Duration::from_secs(1)).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route());
 	std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
 	let back = origin
@@ -8817,9 +8820,9 @@ async fn the_same_instance_continues_after_a_drop() {
 /// A returning route serves the same publisher's catalog and monotonically numbered groups.
 #[tokio::test(start_paused = true)]
 async fn a_return_keeps_catalog_and_group_history() {
-	let wall = moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 86_400_000);
+	let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 86_400_000);
 	crate::clock::fake_host_wall(wall);
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	let origin = crate::source::produce_origin();
 	let epoch = moq_net::Epoch::mint();
 	let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
@@ -9493,14 +9496,14 @@ async fn a_follower_fails_at_once_on_its_own_failure() {
 		let track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 		let mut follower = follower(&origin).await.with_follow(Duration::from_secs(10));
 		assert!(
-			moq_clock::timeout(Duration::from_secs(1), follower.next())
+			kio::clock::timeout(Duration::from_secs(1), follower.next())
 				.await
 				.is_err(),
 			"nothing to mux yet"
 		);
 
 		track.abort(cause.clone());
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let end = follower.next().await;
 		assert!(
 			matches!(&end, Err(crate::Error::Moq(err)) if err.to_string() == cause.to_string()),
@@ -9529,14 +9532,14 @@ async fn a_follower_waits_out_the_follow_on_a_lost_route() {
 		let follow = Duration::from_secs(10);
 		let mut follower = follower(&origin).await.with_follow(follow);
 		assert!(
-			moq_clock::timeout(Duration::from_secs(1), follower.next())
+			kio::clock::timeout(Duration::from_secs(1), follower.next())
 				.await
 				.is_err(),
 			"nothing to mux yet"
 		);
 
 		track.abort(cause.clone());
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let end = follower.next().await;
 		assert!(
 			matches!(&end, Err(crate::Error::Moq(err)) if err.to_string() == cause.to_string()),
@@ -9557,7 +9560,7 @@ async fn a_follower_awaits_a_replacement_catalog_past_the_follow() {
 	let mut follower = follower(&origin).await.with_follow(follow).with_stitch(true);
 	finish(first);
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"following"
@@ -9572,12 +9575,12 @@ async fn a_follower_awaits_a_replacement_catalog_past_the_follow() {
 		.unwrap();
 	let unanswered = second.requests();
 	assert!(
-		moq_clock::timeout(follow * 3, follower.next()).await.is_err(),
+		kio::clock::timeout(follow * 3, follower.next()).await.is_err(),
 		"awaiting the replacement's catalog past the follow"
 	);
 
 	drop((second, unanswered));
-	let end = moq_clock::timeout(Duration::from_secs(1), follower.next())
+	let end = kio::clock::timeout(Duration::from_secs(1), follower.next())
 		.await
 		.expect("the replacement going ends the wait");
 	assert!(matches!(end, Ok(None)), "the original clean end: {end:?}");
@@ -9595,7 +9598,7 @@ async fn a_follower_awaits_a_return_catalog_until_it_fails() {
 	let mut follower = follower(&origin).await.with_follow(follow);
 	finish(first);
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"following"
@@ -9606,12 +9609,12 @@ async fn a_follower_awaits_a_return_catalog_until_it_fails() {
 		.unwrap();
 	let silent = second.create_track(hang::Catalog::DEFAULT_NAME, None).unwrap();
 	assert!(
-		moq_clock::timeout(follow * 3, follower.next()).await.is_err(),
+		kio::clock::timeout(follow * 3, follower.next()).await.is_err(),
 		"awaiting the return's catalog past the follow"
 	);
 
 	silent.abort(moq_net::Error::Unroutable).unwrap();
-	let end = moq_clock::timeout(Duration::from_secs(1), follower.next())
+	let end = kio::clock::timeout(Duration::from_secs(1), follower.next())
 		.await
 		.expect("the failed return ends the wait");
 	assert!(matches!(end, Ok(None)), "the original clean end: {end:?}");
@@ -9627,10 +9630,10 @@ async fn a_follower_keeps_following_when_a_return_goes_before_it_resolves() {
 	let first = publish_bare(&origin, Some(&epoch));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow);
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	finish(first);
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"following"
@@ -9642,14 +9645,14 @@ async fn a_follower_keeps_following_when_a_return_goes_before_it_resolves() {
 		.unwrap();
 	let unanswered = second.requests();
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"resolving the return"
 	);
 	drop((second, unanswered));
 
-	let end = moq_clock::timeout(follow * 3, follower.next())
+	let end = kio::clock::timeout(follow * 3, follower.next())
 		.await
 		.expect("the follow bounds the wait");
 	assert!(matches!(end, Ok(None)), "the original clean end: {end:?}");
@@ -9679,10 +9682,10 @@ async fn a_follower_keeps_following_through_a_refused_return() {
 	let first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow).with_stitch(true);
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	finish(first);
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"following"
@@ -9691,7 +9694,7 @@ async fn a_follower_keeps_following_through_a_refused_return() {
 	// Replaced, but the replacement refuses its catalog request.
 	let refusing = publish_refusing(&origin, &moq_net::Epoch::mint());
 	assert!(
-		moq_clock::timeout(Duration::from_secs(2), follower.next())
+		kio::clock::timeout(Duration::from_secs(2), follower.next())
 			.await
 			.is_err(),
 		"the refusal keeps it following"
@@ -9701,7 +9704,7 @@ async fn a_follower_keeps_following_through_a_refused_return() {
 	let mut second = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
 	std::ops::DerefMut::deref_mut(&mut second.1.modify().unwrap());
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"following the next replacement"
@@ -9722,17 +9725,17 @@ async fn a_follower_reports_a_refused_return_at_the_follow() {
 	let first = publish_bare(&origin, Some(&epoch));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow);
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	finish(first);
 
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"following"
 	);
 	let _refusing = publish_refusing(&origin, &epoch);
-	let end = moq_clock::timeout(follow * 3, follower.next())
+	let end = kio::clock::timeout(follow * 3, follower.next())
 		.await
 		.expect("the follow bounds the wait");
 	assert!(
@@ -9758,7 +9761,7 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 	let second = origin.publish("live", route()).unwrap();
 	let unanswered = second.requests();
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"resolving the replacement"
@@ -9767,7 +9770,7 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 	let mut third = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
 	std::ops::DerefMut::deref_mut(&mut third.1.modify().unwrap());
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"following the next replacement"
@@ -9777,7 +9780,7 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 	// Once the first instance is gone too, the third one's end ends the export.
 	finish(first);
 	finish(third);
-	let end = moq_clock::timeout(Duration::from_secs(10), follower.next())
+	let end = kio::clock::timeout(Duration::from_secs(10), follower.next())
 		.await
 		.expect("the third instance's end ends the export");
 	assert!(matches!(end, Ok(None)), "{end:?}");
@@ -9793,10 +9796,10 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	let first = publish_bare(&origin, Some(&epoch));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow).with_stitch(true);
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	finish(first);
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"following"
@@ -9805,7 +9808,7 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	// Back, with a catalog yet to deliver its first snapshot.
 	let second = publish_bare(&origin, Some(&epoch));
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"awaiting the return's catalog"
@@ -9820,7 +9823,7 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 		.unwrap();
 	let unanswered = third.requests();
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"resolving the replacement"
@@ -9891,7 +9894,7 @@ async fn a_return_after_an_abandoned_switch_restores_priority() {
 
 	/// Take what the follower muxes until it idles for a second, well within the follow.
 	async fn pump(follower: &mut super::Follower) {
-		while let Ok(next) = moq_clock::timeout(Duration::from_secs(1), follower.next()).await {
+		while let Ok(next) = kio::clock::timeout(Duration::from_secs(1), follower.next()).await {
 			assert!(next.unwrap().is_some(), "the follower keeps waiting");
 		}
 	}
@@ -9907,7 +9910,7 @@ async fn a_follower_follows_a_return_after_a_lost_route() {
 	let track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let mut follower = follower(&origin).await.with_follow(Duration::from_secs(10));
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"nothing to mux yet"
@@ -9919,7 +9922,7 @@ async fn a_follower_follows_a_return_after_a_lost_route() {
 	let (broadcast, mut catalog) = publish_bare(&origin, Some(&epoch));
 	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	assert!(
-		moq_clock::timeout(Duration::from_secs(3), follower.next())
+		kio::clock::timeout(Duration::from_secs(3), follower.next())
 			.await
 			.is_err(),
 		"carried on into the return"
@@ -9946,7 +9949,7 @@ async fn a_follower_fails_a_stitch_onto_a_replacement_that_refuses_its_catalog()
 			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
 		)
 		.unwrap();
-	let end = moq_clock::timeout(Duration::from_secs(10), follower.next())
+	let end = kio::clock::timeout(Duration::from_secs(10), follower.next())
 		.await
 		.expect("the refusal ends the export");
 	assert!(end.is_err(), "the refusal fails the export: {end:?}");
@@ -9962,14 +9965,14 @@ async fn a_follower_built_after_its_route_went_follows_the_return() {
 	let export = open_export(crate::source::resolved(&origin, "live").await)
 		.await
 		.unwrap();
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	finish(first);
-	moq_clock::sleep(Duration::from_secs(1)).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	let follow = Duration::from_secs(10);
 	let mut follower = super::Follower::new(export).unwrap().with_follow(follow);
 	assert!(
-		moq_clock::timeout(Duration::from_secs(2), follower.next())
+		kio::clock::timeout(Duration::from_secs(2), follower.next())
 			.await
 			.is_err(),
 		"following"
@@ -9977,7 +9980,7 @@ async fn a_follower_built_after_its_route_went_follows_the_return() {
 	let mut second = publish_bare(&origin, Some(&epoch));
 	std::ops::DerefMut::deref_mut(&mut second.1.modify().unwrap());
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"carried on"
@@ -10012,21 +10015,21 @@ async fn a_follower_takes_its_own_instance_winning_back_for_no_replacement() {
 	// A cheaper route takes the path for a while, then goes.
 	let cheaper = origin.publish("pool/job", route(1)).unwrap();
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"still on its own instance"
 	);
 	drop(cheaper);
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"its own instance wins back"
 	);
 
 	catalog.finish().unwrap();
-	let end = moq_clock::timeout(Duration::from_secs(10), follower.next())
+	let end = kio::clock::timeout(Duration::from_secs(10), follower.next())
 		.await
 		.expect("its own end ends the export");
 	assert!(matches!(end, Ok(None)), "{end:?}");
@@ -10042,7 +10045,7 @@ async fn a_follower_fails_on_a_replacement_without_stitch() {
 	finish(first);
 	let _second = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
 
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	let err = follower.next().await.expect_err("a replacement fails the follower");
 	assert!(matches!(err, crate::Error::Replaced(_)), "{err}");
 	assert!(start.elapsed() < Duration::from_secs(1), "no wait for a return");
@@ -10073,10 +10076,10 @@ async fn a_follower_continues_on_the_same_instance_returning() {
 	let first = publish_bare(&origin, Some(&epoch));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow);
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	finish(first);
 	assert!(
-		moq_clock::timeout(Duration::from_secs(2), follower.next())
+		kio::clock::timeout(Duration::from_secs(2), follower.next())
 			.await
 			.is_err(),
 		"following"
@@ -10085,7 +10088,7 @@ async fn a_follower_continues_on_the_same_instance_returning() {
 	let mut second = publish_bare(&origin, Some(&epoch));
 	std::ops::DerefMut::deref_mut(&mut second.1.modify().unwrap());
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"carried on"
@@ -10101,7 +10104,7 @@ async fn a_follower_continues_on_the_same_instance_returning() {
 async fn drain_follower(follower: &mut super::Follower) -> (Vec<Frame>, Option<crate::Result<()>>) {
 	let mut out = Vec::new();
 	loop {
-		match moq_clock::timeout(DRAIN, follower.next()).await {
+		match kio::clock::timeout(DRAIN, follower.next()).await {
 			Ok(Ok(Some(frame))) => out.push(frame),
 			Ok(Ok(None)) => return (out, Some(Ok(()))),
 			Ok(Err(err)) => return (out, Some(Err(err))),
@@ -10131,7 +10134,7 @@ async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 	let mut follower = super::Follower::new(export)
 		.unwrap()
 		.with_follow(Duration::from_secs(10));
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut track, ms);
 	}
@@ -10143,7 +10146,7 @@ async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 	track.abort(moq_net::Error::Unroutable);
 	catalog.abort(moq_net::Error::Unroutable);
 	drop(exact);
-	moq_clock::sleep(Duration::from_secs(1)).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
 	let served = origin.create_broadcast("pool/job").unwrap();
 	let mut catalog = crate::catalog::Producer::<()>::new(&mut served.broadcast().clone(), Default::default()).unwrap();
 	let mut track = aac_rendition(&mut served.broadcast().clone(), &mut catalog, "a.aac");
@@ -10188,12 +10191,12 @@ async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 	let quiet = Duration::from_secs(1);
 
 	let pool = origin.requests("pool").unwrap();
-	assert!(moq_clock::timeout(quiet, follower.next()).await.is_err(), "a start");
+	assert!(kio::clock::timeout(quiet, follower.next()).await.is_err(), "a start");
 	drop(pool);
 	let pool = origin.requests("pool").unwrap();
-	assert!(moq_clock::timeout(quiet, follower.next()).await.is_err(), "a restart");
+	assert!(kio::clock::timeout(quiet, follower.next()).await.is_err(), "a restart");
 	drop(pool);
-	assert!(moq_clock::timeout(quiet, follower.next()).await.is_err(), "an end");
+	assert!(kio::clock::timeout(quiet, follower.next()).await.is_err(), "an end");
 
 	finish((exact, catalog));
 	let end = follower.next().await;
@@ -10211,7 +10214,7 @@ async fn a_midstream_stitch_awaits_the_replacement_catalog() {
 		let epoch = moq_net::Epoch::mint();
 		let (_second, mut catalog) = publish_bare(&origin, Some(&epoch));
 		assert!(
-			moq_clock::timeout(Duration::from_secs(60), follower.next())
+			kio::clock::timeout(Duration::from_secs(60), follower.next())
 				.await
 				.is_err(),
 			"awaiting the replacement's catalog, follow={follow:?}"
@@ -10220,7 +10223,7 @@ async fn a_midstream_stitch_awaits_the_replacement_catalog() {
 
 		std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
 		assert!(
-			moq_clock::timeout(Duration::from_secs(1), follower.next())
+			kio::clock::timeout(Duration::from_secs(1), follower.next())
 				.await
 				.is_err(),
 			"nothing to mux, follow={follow:?}"
@@ -10265,7 +10268,7 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 			.with_stitch(true)
 			.with_follow(follow);
 		assert!(
-			moq_clock::timeout(Duration::from_secs(1), follower.next())
+			kio::clock::timeout(Duration::from_secs(1), follower.next())
 				.await
 				.is_err(),
 			"the original catalog stays open"
@@ -10275,7 +10278,7 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 		let (second, mut catalog) = publish_live::<()>(&origin, route());
 		let audio = aac_rendition(&mut second.broadcast().clone(), &mut catalog, "a.aac");
 		assert!(
-			moq_clock::timeout(Duration::from_secs(1), follower.next())
+			kio::clock::timeout(Duration::from_secs(1), follower.next())
 				.await
 				.is_err(),
 			"the replacement has no media to commit"
@@ -10287,13 +10290,13 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 		);
 		tokio::time::advance(follow).await;
 		assert!(
-			moq_clock::timeout(Duration::from_secs(1), follower.next())
+			kio::clock::timeout(Duration::from_secs(1), follower.next())
 				.await
 				.is_err(),
 			"still awaiting replacement media after the follow"
 		);
 		// Observe the origin driver releasing the routed subscription before cancelling B.
-		moq_clock::timeout(Duration::from_secs(1), async {
+		kio::clock::timeout(Duration::from_secs(1), async {
 			while old_catalog.subscription().is_some() {
 				old_catalog.subscription_changed().await.unwrap();
 			}
@@ -10305,7 +10308,7 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 		catalog.abort(moq_net::Error::Unroutable);
 		drop(second);
 		assert!(
-			moq_clock::timeout(Duration::from_secs(1), follower.next())
+			kio::clock::timeout(Duration::from_secs(1), follower.next())
 				.await
 				.is_err(),
 			"following after the replacement left"
@@ -10315,7 +10318,7 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 		let (_third, mut catalog) = publish_bare(&origin, Some(&epoch));
 		std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
 		catalog.finish().unwrap();
-		let end = moq_clock::timeout(follow * 2, follower.next())
+		let end = kio::clock::timeout(follow * 2, follower.next())
 			.await
 			.expect("the final instance ends the export");
 		assert!(matches!(end, Ok(None)), "{format:?}: {end:?}");
@@ -10368,7 +10371,7 @@ async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 	let epoch = moq_net::Epoch::mint();
 	let (_second, mut catalog) = publish_bare(&origin, Some(&epoch));
 	assert!(
-		moq_clock::timeout(Duration::from_secs(2), follower.next())
+		kio::clock::timeout(Duration::from_secs(2), follower.next())
 			.await
 			.is_err(),
 		"awaiting the replacement's catalog"
@@ -10383,14 +10386,14 @@ async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 		.unwrap();
 	let unanswered = third.requests();
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"resolving the next replacement"
 	);
 	drop((third, unanswered));
 	assert!(
-		moq_clock::timeout(Duration::from_secs(30), follower.next())
+		kio::clock::timeout(Duration::from_secs(30), follower.next())
 			.await
 			.is_err(),
 		"awaiting the second replacement's catalog again"
@@ -10398,7 +10401,7 @@ async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 
 	std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"nothing to mux"
@@ -10423,7 +10426,7 @@ async fn a_midstream_stitch_catalog_closed_without_a_snapshot_fails() {
 
 	let (_second, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
 	assert!(
-		moq_clock::timeout(Duration::from_secs(1), follower.next())
+		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"awaiting the replacement's catalog"
@@ -10431,7 +10434,7 @@ async fn a_midstream_stitch_catalog_closed_without_a_snapshot_fails() {
 
 	catalog.finish().unwrap();
 	drop(catalog);
-	let end = moq_clock::timeout(Duration::from_secs(30), follower.next())
+	let end = kio::clock::timeout(Duration::from_secs(30), follower.next())
 		.await
 		.expect("the closed catalog ends the export");
 	let err = end.expect_err("a replacement without a catalog fails");
@@ -10601,7 +10604,7 @@ async fn a_backlog_stays_in_the_source_until_due() {
 		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 		let mut live = Live::audio(config);
 		let mut export = open_export(live.source().await).await.unwrap().with_delay(delay);
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		live.track.write(raw_frame(0, b"first", true)).unwrap();
 		// A zero-delay slot needs a later frame to prove it is complete.
 		live.track.write(raw_frame(40_000, b"warm", false)).unwrap();
@@ -10628,7 +10631,7 @@ async fn a_backlog_stays_in_the_source_until_due() {
 		tokio::time::advance(delay).await;
 		let mut frames = 0;
 		while frames < 50 {
-			let frame = moq_clock::timeout(DRAIN, export.next())
+			let frame = kio::clock::timeout(DRAIN, export.next())
 				.await
 				.unwrap_or_else(|_| {
 					panic!(
@@ -10842,7 +10845,7 @@ async fn export_placed(placed: Placed) -> crate::Result<Vec<Frame>> {
 		exporter = exporter.with_mux_rate(rate);
 	}
 	let mut out = Vec::new();
-	while let Ok(next) = moq_clock::timeout(DRAIN, exporter.next()).await {
+	while let Ok(next) = kio::clock::timeout(DRAIN, exporter.next()).await {
 		match next? {
 			Some(frame) => out.push(frame),
 			None => break,
@@ -11202,7 +11205,7 @@ async fn placed_sections_keep_their_source_positions() {
 	.with_replay()
 	.with_mux_rate(RATE);
 	let mut output = Vec::new();
-	while let Ok(Some(slice)) = moq_clock::timeout(DRAIN, exporter.next())
+	while let Ok(Some(slice)) = kio::clock::timeout(DRAIN, exporter.next())
 		.await
 		.map(|next| next.unwrap())
 	{
@@ -11259,7 +11262,7 @@ async fn a_track_renamed_on_its_pid_across_returns_retires_the_one_before() {
 		.unwrap()
 		.with_delay(RECORDING_MAX_AGE)
 		.with_replay();
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut track, ms);
 	}
@@ -11268,7 +11271,7 @@ async fn a_track_renamed_on_its_pid_across_returns_retires_the_one_before() {
 	let _ = drain_to_end(&mut export).await;
 
 	for round in 1..=4 {
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		let (broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
 		let back = origin
 			.consume()
@@ -11325,7 +11328,7 @@ async fn a_track_renamed_on_its_pid_across_a_return_is_quiet_from_its_listing() 
 		.unwrap()
 		.with_delay(Duration::from_secs(1))
 		.with_replay();
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut track, ms);
 	}
@@ -11334,7 +11337,7 @@ async fn a_track_renamed_on_its_pid_across_a_return_is_quiet_from_its_listing() 
 	let _ = drain_to_end(&mut export).await;
 	let (before, _) = export.liveness(0x101);
 
-	moq_clock::sleep(Duration::from_secs(10)).await;
+	kio::clock::sleep(Duration::from_secs(10)).await;
 	let (broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
 	let back = origin
 		.consume()
@@ -11356,7 +11359,7 @@ async fn a_track_renamed_on_its_pid_across_a_return_is_quiet_from_its_listing() 
 		if export.listed_on(0x101) == Some("1.aac") && units == before {
 			quiet.push(since);
 		}
-		moq_clock::sleep(Duration::from_millis(20)).await;
+		kio::clock::sleep(Duration::from_millis(20)).await;
 	}
 	assert!(!quiet.is_empty(), "the track was listed with none of its units out");
 	assert!(
@@ -11578,7 +11581,7 @@ async fn a_healthy_stitch_feeds_the_old_generation_until_the_new_clock_acquires(
 	let mut demoted = false;
 	let mut frames = Vec::new();
 	let step = Duration::from_millis(20);
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	for ms in (0..14_000).step_by(20) {
 		write_aac(&mut old_audio, ms);
 		if ms == 4000 {
@@ -11655,7 +11658,7 @@ async fn repeated_stitches_keep_the_delay() {
 		.with_stitch(true)
 		.with_follow(Duration::from_secs(10));
 	let step = Duration::from_millis(20);
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	// Each frame out: when, and its epoch.
 	let mut frames = Vec::new();
 	for ms in (0..4 * SWITCH).step_by(20) {
@@ -11735,7 +11738,7 @@ async fn an_expired_follow_stops_healthy_input_but_drains_its_buffered_tail() {
 		.with_delay(delay);
 	let mut replacement = None;
 	let mut frames = Vec::new();
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	for ms in (0..4000).step_by(20) {
 		let elapsed = Duration::from_millis(ms);
 		write_aac(&mut old_audio, ms);
@@ -11829,7 +11832,7 @@ async fn a_publisher_that_leaves_drains_its_buffered_tail_before_the_end() {
 		.await
 		.unwrap()
 		.with_delay(delay);
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	let mut frames = Vec::new();
 	let end = loop {
 		let elapsed = start.elapsed();
