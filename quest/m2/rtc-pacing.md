@@ -4,10 +4,11 @@
 
 An embedder can give a `moq-rtc` WHEP session a bitrate cap, and moq-rtc
 never sends that viewer more media payload than the cap plus a burst,
-retransmits included. The cap counts payload, like the
-[QUIC caps](/quest/m2/rate-quic.md). RTP, SRTP, and UDP overhead sits
-outside it: moq-rtc picks the packet sizes, so the overhead per payload
-byte is fixed, and the viewer can't inflate it. This backs moq.pro's
+retransmits included. The cap counts payload, unlike the
+[QUIC send cap](/quest/m2/rate-quic.md), which counts whole ack-eliciting
+packets, QUIC overhead included. RTP, SRTP, and UDP overhead sits outside
+it: moq-rtc picks the packet sizes, so the overhead per payload byte is
+fixed, and the viewer can't inflate it. This backs moq.pro's
 egress caps.
 
 ## Plan

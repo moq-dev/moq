@@ -1,9 +1,4 @@
-//! Send-agnostic future boxing and the driver-owned task set.
-//!
-//! Native transports (Quinn) are `Send`, so boxed futures and tasks carry the
-//! `Send` bound. Browser WebTransport is `!Send`, so on wasm we box without it.
-//! `MaybeSendBox` / `MaybeSendTask` resolve to the right form per target, and
-//! `.maybe_boxed()` / `future_task` pick the matching constructor.
+//! Future boxing and the driver-owned task set.
 
 use std::{collections::VecDeque, future::Future, pin::Pin, task::Poll};
 
@@ -12,42 +7,19 @@ mod wake;
 pub(crate) use cell::SendCell;
 pub(crate) use wake::QueueWake;
 
-/// Prove a future's native Send bound here rather than inside every caller's future.
-pub(crate) fn sendable<F: Future + kio::MaybeSend>(future: F) -> impl Future<Output = F::Output> + kio::MaybeSend {
+/// Prove a future's Send bound here rather than inside every caller's future.
+pub(crate) fn sendable<F: Future + Send>(future: F) -> impl Future<Output = F::Output> + Send {
 	future
 }
 
-#[cfg(not(target_family = "wasm"))]
-pub(crate) type MaybeSendBox<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-#[cfg(target_family = "wasm")]
-pub(crate) type MaybeSendBox<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+/// A boxed `Send` future, the same type as `futures::future::BoxFuture`.
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A boxed [`kio::Tasks`] task: hand-rolled machines and adapted futures alike.
-#[cfg(not(target_family = "wasm"))]
-pub(crate) type MaybeSendTask = Box<dyn FnMut(&kio::Waiter) -> Poll<()> + Send>;
-#[cfg(target_family = "wasm")]
-pub(crate) type MaybeSendTask = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
-
-#[cfg(not(target_family = "wasm"))]
-pub(crate) trait MaybeBoxedExt<'a>: Future + Send + Sized + 'a {
-	fn maybe_boxed(self) -> MaybeSendBox<'a, Self::Output> {
-		Box::pin(self)
-	}
-}
-#[cfg(not(target_family = "wasm"))]
-impl<'a, F: Future + Send + 'a> MaybeBoxedExt<'a> for F {}
-
-#[cfg(target_family = "wasm")]
-pub(crate) trait MaybeBoxedExt<'a>: Future + Sized + 'a {
-	fn maybe_boxed(self) -> MaybeSendBox<'a, Self::Output> {
-		Box::pin(self)
-	}
-}
-#[cfg(target_family = "wasm")]
-impl<'a, F: Future + 'a> MaybeBoxedExt<'a> for F {}
+pub(crate) type BoxTask = Box<dyn FnMut(&kio::Waiter) -> Poll<()> + Send>;
 
 /// Adapt a boxed future into a [`kio::Tasks`] task.
-fn future_task(mut task: MaybeSendBox<'static, ()>) -> MaybeSendTask {
+fn future_task(mut task: BoxFuture<'static, ()>) -> BoxTask {
 	Box::new(move |waiter| waiter.poll_future(task.as_mut()))
 }
 
@@ -56,9 +28,7 @@ fn future_task(mut task: MaybeSendBox<'static, ()>) -> MaybeSendTask {
 /// The building block for racing "watchdog" futures whose clean completion should
 /// not end the race (only their failure should).
 #[cfg(feature = "async")]
-pub(crate) fn err_only<E>(
-	fut: impl Future<Output = Result<(), E>> + kio::MaybeSend,
-) -> impl Future<Output = E> + kio::MaybeSend {
+pub(crate) fn err_only<E>(fut: impl Future<Output = Result<(), E>> + Send) -> impl Future<Output = E> + Send {
 	sendable(async move {
 		if let Err(err) = fut.await {
 			return err;
@@ -73,8 +43,7 @@ pub(crate) struct Tasks {
 	state: kio::Shared<Submissions>,
 	/// The set's lifetime: it finishes once every owning handle, [`Tasks`] or
 	/// [`Keepalive`], is gone. A kio token rather than a count under the queue's
-	/// lock, so a claim on the lifetime is `Send` even where the queued futures
-	/// are not (wasm).
+	/// lock.
 	alive: kio::Producer<()>,
 }
 
@@ -88,7 +57,7 @@ pub(crate) struct Keepalive {
 /// The submission queue between [`Tasks`] handles and their [`TaskSet`].
 #[derive(Default)]
 struct Submissions {
-	queued: VecDeque<MaybeSendBox<'static, ()>>,
+	queued: VecDeque<BoxFuture<'static, ()>>,
 	/// The set dropped: submissions are discarded, as the driver that would
 	/// have polled them has torn down.
 	closed: bool,
@@ -100,10 +69,10 @@ impl Tasks {
 	/// A task submitted after the set is gone is dropped: the driver has torn down,
 	/// so the task would have been cancelled anyway.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub fn push(&self, task: impl MaybeBoxedExt<'static, Output = ()>) {
+	pub fn push(&self, task: impl Future<Output = ()> + Send + 'static) {
 		let mut state = self.state.lock();
 		if !state.closed {
-			state.queued.push_back(task.maybe_boxed());
+			state.queued.push_back(Box::pin(task));
 		}
 	}
 }
@@ -138,10 +107,10 @@ pub(crate) struct TasksWeak {
 impl TasksWeak {
 	/// Queue a future for polling by the associated [`TaskSet`], dropped if the
 	/// set (or every owning handle) is already gone.
-	pub fn push(&self, task: impl MaybeBoxedExt<'static, Output = ()>) {
+	pub fn push(&self, task: impl Future<Output = ()> + Send + 'static) {
 		let mut state = self.state.lock();
 		if !state.closed && !self.alive.is_closed() {
-			state.queued.push_back(task.maybe_boxed());
+			state.queued.push_back(Box::pin(task));
 		}
 	}
 
@@ -160,7 +129,7 @@ impl TasksWeak {
 /// state can submit more work without choosing an async runtime.
 pub(crate) struct TaskSet {
 	state: kio::Shared<Submissions>,
-	active: kio::Tasks<MaybeSendTask>,
+	active: kio::Tasks<BoxTask>,
 	/// Closed once every owning handle is gone; see [`Tasks::alive`].
 	alive: kio::Consumer<()>,
 }
@@ -191,8 +160,8 @@ impl TaskSet {
 
 	/// Queue a future for polling by this set.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub fn push(&mut self, task: impl MaybeBoxedExt<'static, Output = ()>) {
-		self.active.push(future_task(task.maybe_boxed()));
+	pub fn push(&mut self, task: impl Future<Output = ()> + Send + 'static) {
+		self.active.push(future_task(Box::pin(task)));
 	}
 
 	/// Adopt every queued submission into the active set, then poll the children.

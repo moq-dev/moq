@@ -25,12 +25,11 @@ frame cap so a sample can be large. Since
 [8d2fa6653a](https://github.com/moq-dev/moq/commit/8d2fa6653a) a fragment can
 hold several GOPs, so a fragment-sized cap would also refuse legal input.
 
-Open, for the maintainer before building: `moov` and `moof` are parsed whole
-today, so a header declaring a huge one still pins input. Bring options with
-a recommendation, such as parsing them incrementally (a `moof` is a run of
-small child boxes) or bounding them by the work they describe; a plain byte
-cap is ruled out above. Settle this together with the same question in
-[MKV import streams blocks](/quest/m1/security-audit/mkv-stream-blocks.md).
+`moov` and `moof` are parsed whole today, so a header declaring a huge one
+still pins input. Decided 2026-10-28 (maintainer, for both importers): parse
+metadata children incrementally, keeping only the fields consumed, with no
+blanket byte cap. MKV import does so since
+[moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234).
 
 Keep `sample::Resolver`'s range checks and `Claimed`'s no-reuse rule. Tests
 feed a huge declared `moof`, `moov`, `mdat`, and skipped box in small chunks
@@ -40,5 +39,4 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [MKV import streams blocks](/quest/m1/security-audit/mkv-stream-blocks.md) - the same principle for MKV
 - [Media fuzz](/quest/m2/media-fuzz.md) - would catch this class of buffer lifetime bug

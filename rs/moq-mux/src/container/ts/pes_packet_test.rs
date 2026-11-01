@@ -246,7 +246,7 @@ async fn read_until(
 	);
 	let mut frames = Vec::new();
 	loop {
-		match tokio::time::timeout(Duration::from_millis(50), reader.read_frame()).await {
+		match moq_clock::timeout(Duration::from_millis(50), reader.read_frame()).await {
 			Ok(Ok(Some(frame))) => frames.push(frame),
 			Ok(Ok(None)) => return (frames, Ok(true)),
 			Err(_) => return (frames, Ok(false)),

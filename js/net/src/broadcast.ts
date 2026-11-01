@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { type GetPromise, Once, Signal } from "@moq/signals";
 import type * as Epoch from "./epoch.ts";
 import { NotFound, StreamCode, StreamError } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
@@ -30,19 +30,11 @@ export interface Announcer {
 let attachAnnouncer: (producer: Producer, announcer: Announcer) => void;
 let stampProducer: (producer: Producer, path: Path.Valid) => void;
 
-// Info lookups pending or held on a track. Each is demand, as a pending track request is in Rust,
-// though nobody subscribes.
+// Info lookups pending or held on a track.
 class Lookups {
 	pending = 0;
 	// Whether a lookup opened the request, so the last lookup to end closes it unless subscribed.
 	opened = false;
-	// Re-evaluates the track's demand at once; set by watchDemand.
-	changed = () => {};
-
-	add(delta: number): void {
-		this.pending += delta;
-		this.changed();
-	}
 }
 
 /** Reactive backing state shared by broadcast producers and consumers. */
@@ -67,52 +59,8 @@ class BroadcastState {
 	// A wire layer's broadcast, which has no producer: it ends once no consumer holds it, as a
 	// Rust session retires a source nothing holds. A produced broadcast ends only on its close.
 	unheld = false;
-	used = new Signal(false);
-	active = 0;
-	// The demand watcher of each open track, disposed when it closes or leaves the broadcast.
-	demands = new Map<track.Producer, Dispose>();
 	// Run synchronously once the broadcast closes, before `closed` notifies its observers.
 	closers = new Set<() => void>();
-}
-
-// Each track updates the aggregate on an edge, so a demand change touches only its track.
-// A track counts as demand while any `lookups` are pending, subscribed or not.
-function watchDemand(state: BroadcastState, producer: track.Producer, lookups?: Lookups): void {
-	if (state.demands.has(producer)) return;
-	const demand = producer.demand();
-	// A closed track is never demand, and its close already fired, so nothing would dispose a watcher.
-	if (hooks.demandReleased(demand).peek() !== undefined) return;
-	let active = false;
-	const update = () => {
-		const used =
-			state.closed.peek() === undefined &&
-			hooks.demandReleased(demand).peek() === undefined &&
-			((lookups?.pending ?? 0) > 0 || demand.wanted.peek() !== undefined);
-		if (active === used) return;
-		state.active += used ? 1 : -1;
-		active = used;
-		state.used.set(state.active > 0);
-	};
-	const disposeUsed = demand.wanted.subscribe(update);
-	if (lookups) lookups.changed = update;
-	const disposeClosed = hooks.demandReleased(demand).subscribe(() => {
-		if (hooks.demandReleased(demand).peek() === undefined) return;
-		cleanup();
-	});
-	const cleanup = () => {
-		disposeUsed();
-		disposeClosed();
-		// A removed track keeps its lookups, so a hold ending later must not count it again.
-		if (lookups?.changed === update) lookups.changed = () => {};
-		if (active) {
-			state.active--;
-			active = false;
-			state.used.set(state.active > 0);
-		}
-		state.demands.delete(producer);
-	};
-	state.demands.set(producer, cleanup);
-	update();
 }
 
 function dequeueRequest(state: BroadcastState): track.Request | undefined {
@@ -148,7 +96,6 @@ function closeState(state: BroadcastState) {
 	if (state.closed.peek() !== undefined) return;
 	state.closed.set(null);
 	state.listing.close();
-	for (const cleanup of state.demands.values()) cleanup();
 	for (const request of state.pending)
 		request.reject(
 			new StreamError(StreamCode.Internal, {
@@ -204,7 +151,6 @@ function logical(state: BroadcastState, name: string): { producer: track.Produce
 
 	const lookups = new Lookups();
 	state.lookups.set(producer, lookups);
-	watchDemand(state, producer, lookups);
 	state.requests.set(name, producer);
 	void hooks.trackReleased(producer).then(() => {
 		if (state.requests.get(name) === producer) state.requests.delete(name);
@@ -221,8 +167,7 @@ function subscribe(state: BroadcastState, name: string, options?: track.Subscrip
 	return logical(state, name).producer.subscribe(options);
 }
 
-// A pending lookup is demand, and so is a held one until `hold` aborts, which also abandons it before
-// the answer. A request a lookup opened is let go once it is answered and nobody holds or subscribes
+// A lookup is held until `hold` aborts, which also abandons it before the answer. A request a lookup opened is let go once it is answered and nobody holds or subscribes
 // to it; closing it sooner would hand its handler a closed producer.
 async function resolveTrackInfo(state: BroadcastState, name: string, hold?: AbortSignal): Promise<track.Info> {
 	hold?.throwIfAborted();
@@ -230,7 +175,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	const lookups = state.lookups.get(producer);
 	if (!lookups) return producer.info();
 	if (requested) lookups.opened = true;
-	lookups.add(1);
+	lookups.pending++;
 
 	const info = producer.info();
 	let answered = false;
@@ -248,7 +193,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	);
 	const end = () => {
 		ended = true;
-		lookups.add(-1);
+		lookups.pending--;
 		if (answered) release();
 	};
 
@@ -316,7 +261,6 @@ function takeQueued(state: BroadcastState, name: string): track.Request | undefi
 function adopt(state: BroadcastState, producer: track.Producer, info: track.Info): void {
 	const lookups = state.lookups.get(producer) ?? new Lookups();
 	state.lookups.set(producer, lookups);
-	watchDemand(state, producer, lookups);
 	state.tracks.set(producer.name, producer);
 	state.listing.listOwn(producer.name, producer, info);
 
@@ -328,42 +272,6 @@ function adopt(state: BroadcastState, producer: track.Producer, info: track.Info
 	});
 }
 
-let makeDemand: (state: BroadcastState) => Demand;
-
-/**
- * A watch-only view of demand for any track in a broadcast.
- *
- * @internal Tests only; nothing outside the package consumes it.
- */
-export class Demand {
-	#state: BroadcastState;
-	private constructor(state: BroadcastState) {
-		this.#state = state;
-	}
-	static {
-		makeDemand = (state) => new Demand(state);
-	}
-
-	/** Whether any track currently has subscribers, or a track info query is pending. */
-	get used(): Getter<boolean> {
-		return this.#state.used;
-	}
-
-	/** Wait until every track becomes unused. Throws once the broadcast closes. */
-	async unused(): Promise<void> {
-		for (;;) {
-			if (this.#state.closed.peek() !== undefined) throw new Error("broadcast is closed");
-			if (!this.#state.used.peek()) return;
-			await Signal.race(this.#state.used, this.#state.closed);
-		}
-	}
-
-	/** The broadcast's clean close. */
-	get closed(): GetPromise<null> {
-		return this.#state.closed;
-	}
-}
-
 /**
  * The write side of a broadcast.
  *
@@ -371,7 +279,6 @@ export class Demand {
  */
 export class Producer {
 	#state = new BroadcastState();
-	#demand = makeDemand(this.#state);
 	#announcer?: Announcer;
 	#path = Path.empty();
 
@@ -409,15 +316,6 @@ export class Producer {
 	 */
 	get closed(): GetPromise<null> {
 		return this.#state.closed;
-	}
-
-	/**
-	 * Watch demand for the broadcast's tracks.
-	 *
-	 * @internal Tests only; nothing outside the package consumes it.
-	 */
-	demand(): Demand {
-		return this.#demand;
 	}
 
 	/** A read handle for this broadcast, named by the path the origin created it at. */
@@ -463,14 +361,13 @@ export class Producer {
 	}
 
 	/**
-	 * Remove a statically inserted track, including a finished cached one: stop counting it
-	 * toward the broadcast's demand and listing it at once.
+	 * Remove a statically inserted track, including a finished cached one, and stop listing it
+	 * at once.
 	 */
 	removeTrack(name: string): void {
 		const track = this.#state.tracks.get(name);
 		if (!track) return;
 		this.#state.tracks.delete(name);
-		this.#state.demands.get(track)?.();
 		this.#state.listing.unlistOwn(name, track);
 	}
 
