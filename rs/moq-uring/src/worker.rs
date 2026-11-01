@@ -2,9 +2,9 @@
 
 use std::cell::RefCell;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::Ordering;
-use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -1150,7 +1150,11 @@ mod tests {
 		let Some(one) = per_round(1) else { return };
 		let Some(two) = per_round(2) else { return };
 		assert_eq!(two, (2 * ROUNDS, 2 * ROUNDS), "each hop is one turn and one enter");
-		assert_eq!(one, (3 * ROUNDS, 2 * ROUNDS), "a pass per turn spends a turn on the hand-off");
+		assert_eq!(
+			one,
+			(3 * ROUNDS, 2 * ROUNDS),
+			"a pass per turn spends a turn on the hand-off"
+		);
 	}
 
 	#[test]
