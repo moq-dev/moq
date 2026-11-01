@@ -2413,8 +2413,6 @@ export class Request {
 		};
 		publishPrepared = (request, publication, epoch) => {
 			if (!request.#server.has(request)) throw new Error("request is closed");
-			// The exact route usually settles the request on its own, resolving its waiters
-			// through the new epoch; answer it directly if it is still pending.
 			publication.announce({ epoch });
 			// Its exact route owns availability: never cache a published job under the
 			// prefix, which would keep serving it after that exact route is withdrawn.
