@@ -444,7 +444,7 @@ async fn webrtc_feed(mut config: Config) {
 		peers.push(peer);
 	}
 	let mut seen = std::collections::HashSet::new();
-	tokio::time::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		while seen.len() < peers.len() {
 			let datagram = feed.recv().await.expect("feed open");
 			assert_eq!(datagram.data[..3], [0x16, 0xfe, 0xfd]);
@@ -465,7 +465,7 @@ async fn webrtc_feed(mut config: Config) {
 	.await
 	.expect("send reply");
 	let mut buf = [0; 16];
-	let (len, from) = tokio::time::timeout(TIMEOUT, peer.recv_from(&mut buf))
+	let (len, from) = kio::clock::timeout(TIMEOUT, peer.recv_from(&mut buf))
 		.await
 		.expect("reply arrived")
 		.expect("recv reply");

@@ -984,7 +984,7 @@ mod tests {
 			let (len, from) = peer.recv_from(&mut buf).await.unwrap();
 			(received, buf[..len].to_vec(), from.port())
 		};
-		let (session, received) = tokio::time::timeout(Duration::from_secs(5), async {
+		let (session, received) = kio::clock::timeout(Duration::from_secs(5), async {
 			let (session, received) = tokio::join!(async { tokio::try_join!(dial, accept) }, webrtc);
 			(session, received)
 		})
@@ -999,7 +999,7 @@ mod tests {
 		assert_eq!(counters.get(crate::quic::demux::Discard::Stun), 1);
 
 		server.shutdown().await;
-		let end = tokio::time::timeout(Duration::from_secs(5), feed.recv()).await;
+		let end = kio::clock::timeout(Duration::from_secs(5), feed.recv()).await;
 		assert!(end.expect("the feed outlived the listener").is_none());
 	}
 

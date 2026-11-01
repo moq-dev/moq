@@ -20,6 +20,7 @@ use arc_swap::ArcSwap;
 
 /// What a datagram carries, judged by its first byte and, for STUN, its attributes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Class {
 	/// A QUIC packet: the fixed bit is set, in a long (192 to 255) or short (64 to 127) header.
 	Quic,
@@ -88,6 +89,7 @@ fn is_ice(datagram: &[u8]) -> bool {
 
 /// Where a datagram goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Route {
 	/// The QUIC endpoint.
 	Quic,
@@ -99,6 +101,7 @@ pub enum Route {
 
 /// Why a datagram was dropped instead of delivered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Discard {
 	/// STUN that is not ICE, such as a public Binding query; the public
 	/// responder binds its own port.

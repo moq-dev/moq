@@ -171,6 +171,10 @@ impl WebRtc {
 
 	/// Poll to send `transmit` from the shared port, with GSO and ECN as it asks.
 	///
+	/// Its `src_ip` is kept as given. On a wildcard bind with several local
+	/// addresses, set it to the [`Datagram::local`] being answered; `None` lets the
+	/// kernel pick the source address, which the peer may not accept.
+	///
 	/// A datagram sent once the listener has released its socket is lost, as UDP
 	/// allows. Errors are those of the endpoint's own sends: an unreachable destination
 	/// comes back, as [`AsyncUdpSocket::try_send`] describes, and anything else is logged.
@@ -295,6 +299,8 @@ impl Divert {
 				}
 				Route::WebRtc => self.push(meta, &buf[start..end]),
 				Route::Discard(reason) => self.shared.counters.discard(reason),
+				// A stack this listener does not serve yet.
+				_ => self.shared.counters.discard(Discard::Unknown),
 			}
 			start = end;
 		}
