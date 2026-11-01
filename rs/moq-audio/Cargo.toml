@@ -140,9 +140,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 
-# The batching bench reads its instruction counter through perf_event_open.
+# The batching bench counts the instructions each case retires.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-libc = { workspace = true }
+perf-event2 = "0.7.4"
 
 [[bench]]
 name = "batches"

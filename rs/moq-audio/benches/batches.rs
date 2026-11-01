@@ -69,91 +69,50 @@ unsafe impl GlobalAlloc for Counter {
 /// User-space instructions retired by this thread, for a count that repeats run to run.
 #[cfg(target_os = "linux")]
 mod instructions {
-	/// `struct perf_event_attr` up to `PERF_ATTR_SIZE_VER0`.
-	#[repr(C)]
-	struct Attr {
-		kind: u32,
-		size: u32,
-		config: u64,
-		sample_period: u64,
-		sample_type: u64,
-		read_format: u64,
-		flags: u64,
-		wakeup_events: u32,
-		bp_type: u32,
-		config1: u64,
-	}
+	use perf_event::events::Hardware;
 
-	const PERF_TYPE_HARDWARE: u32 = 0;
-	const PERF_COUNT_HW_INSTRUCTIONS: u64 = 1;
-	/// `disabled`, `exclude_kernel` and `exclude_hv`.
-	const FLAGS: u64 = 1 | (1 << 5) | (1 << 6);
-	const IOC_ENABLE: libc::c_ulong = 0x2400;
-	const IOC_DISABLE: libc::c_ulong = 0x2401;
-	const IOC_RESET: libc::c_ulong = 0x2403;
-
-	pub struct Counter(libc::c_int);
+	/// One counter per core PMU, because a hybrid CPU counts a generic event on one core
+	/// type only. Retired instructions are architectural, so the sum is exact wherever the
+	/// thread runs.
+	pub struct Counter(Vec<perf_event::Counter>);
 
 	impl Counter {
 		pub fn new() -> Option<Self> {
-			// A hybrid CPU counts a generic event on one core type only, so a thread migrating
-			// to the other type would stop counting. Pin to a performance core and name its PMU.
-			let mut pmu = 0;
-			if let Ok(kind) = std::fs::read_to_string("/sys/devices/cpu_core/type") {
-				let cpus = std::fs::read_to_string("/sys/devices/cpu_core/cpus").ok()?;
-				let cpu: usize = cpus.split(['-', ',', '\n']).next()?.parse().ok()?;
-				pmu = kind.trim().parse::<u64>().ok()?;
-				// SAFETY: the set is initialized before use and outlives the call.
-				unsafe {
-					let mut set: libc::cpu_set_t = std::mem::zeroed();
-					libc::CPU_SET(cpu, &mut set);
-					if libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &set) != 0 {
-						return None;
-					}
-				}
-			}
-			let attr = Attr {
-				kind: PERF_TYPE_HARDWARE,
-				size: size_of::<Attr>() as u32,
-				// The PMU type goes in the high bits, as `PERF_PMU_TYPE_SHIFT` describes.
-				config: (pmu << 32) | PERF_COUNT_HW_INSTRUCTIONS,
-				sample_period: 0,
-				sample_type: 0,
-				read_format: 0,
-				flags: FLAGS,
-				wakeup_events: 0,
-				bp_type: 0,
-				config1: 0,
+			let hybrid: Vec<u64> = ["cpu_core", "cpu_atom"]
+				.iter()
+				.filter_map(|pmu| std::fs::read_to_string(format!("/sys/devices/{pmu}/type")).ok())
+				.map(|kind| kind.trim().parse().ok())
+				.collect::<Option<_>>()?;
+			// The PMU type goes in the high bits, as `PERF_PMU_TYPE_SHIFT` describes.
+			let events = match hybrid.is_empty() {
+				true => vec![Hardware::INSTRUCTIONS],
+				false => hybrid
+					.into_iter()
+					.map(|pmu| Hardware(pmu << 32 | Hardware::INSTRUCTIONS.0))
+					.collect(),
 			};
-			// SAFETY: the attribute outlives the call, and its size field names its layout.
-			let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, 0, -1, -1, 0) };
-			(fd >= 0).then(|| Self(fd as libc::c_int))
+			let counters = events
+				.into_iter()
+				.map(|event| perf_event::Builder::new(event).build().ok())
+				.collect::<Option<_>>()?;
+			Some(Self(counters))
 		}
 
-		pub fn start(&self) {
-			// SAFETY: plain ioctls on a perf event descriptor this counter owns.
-			unsafe {
-				libc::ioctl(self.0, IOC_RESET, 0);
-				libc::ioctl(self.0, IOC_ENABLE, 0);
+		pub fn start(&mut self) {
+			for counter in &mut self.0 {
+				counter.reset().unwrap();
+				counter.enable().unwrap();
 			}
 		}
 
-		pub fn stop(&self) -> u64 {
-			let mut count = 0u64;
-			// SAFETY: the descriptor reads one u64 into a buffer of that size.
-			let read = unsafe {
-				libc::ioctl(self.0, IOC_DISABLE, 0);
-				libc::read(self.0, (&raw mut count).cast(), size_of::<u64>())
-			};
-			assert_eq!(read, size_of::<u64>() as isize, "perf counter read");
-			count
-		}
-	}
-
-	impl Drop for Counter {
-		fn drop(&mut self) {
-			// SAFETY: the descriptor is owned and closed once.
-			unsafe { libc::close(self.0) };
+		pub fn stop(&mut self) -> u64 {
+			self.0
+				.iter_mut()
+				.map(|counter| {
+					counter.disable().unwrap();
+					counter.read().unwrap()
+				})
+				.sum()
 		}
 	}
 }
@@ -166,8 +125,8 @@ mod instructions {
 		pub fn new() -> Option<Self> {
 			None
 		}
-		pub fn start(&self) {}
-		pub fn stop(&self) -> u64 {
+		pub fn start(&mut self) {}
+		pub fn stop(&mut self) -> u64 {
 			0
 		}
 	}
@@ -296,7 +255,7 @@ fn cases() -> Vec<Case> {
 }
 
 fn counts() {
-	let counter = instructions::Counter::new();
+	let mut counter = instructions::Counter::new();
 	println!(
 		"{:<44} {:>12} {:>10} {:>12} {:>12}",
 		"case", "insn/sample", "allocs", "alloc_bytes", "slowest_us"
@@ -307,11 +266,11 @@ fn counts() {
 		ALLOCATIONS.store(0, Ordering::Relaxed);
 		ALLOCATED.store(0, Ordering::Relaxed);
 		COUNTING.store(true, Ordering::Relaxed);
-		if let Some(counter) = &counter {
+		if let Some(counter) = &mut counter {
 			counter.start();
 		}
 		let slowest = run(&mut producers, &input);
-		let instructions = counter.as_ref().map(instructions::Counter::stop);
+		let instructions = counter.as_mut().map(instructions::Counter::stop);
 		COUNTING.store(false, Ordering::Relaxed);
 		drop((producers, broadcast));
 
