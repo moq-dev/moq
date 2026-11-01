@@ -1282,7 +1282,7 @@ mod tests {
 		drop(send);
 
 		// The write stays blocked forever: the reset must not wait behind it.
-		moq_clock::timeout(std::time::Duration::from_secs(1), async {
+		kio::clock::timeout(std::time::Duration::from_secs(1), async {
 			while fake.resets.lock().unwrap().is_empty() {
 				tokio::task::yield_now().await;
 			}
@@ -1331,7 +1331,7 @@ mod tests {
 		drop(recv);
 
 		// The read stays blocked forever: the stop must not wait behind it.
-		moq_clock::timeout(std::time::Duration::from_secs(1), async {
+		kio::clock::timeout(std::time::Duration::from_secs(1), async {
 			while stops.lock().unwrap().is_empty() {
 				tokio::task::yield_now().await;
 			}

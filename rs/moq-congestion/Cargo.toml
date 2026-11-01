@@ -12,13 +12,13 @@ license = "MIT OR Apache-2.0"
 testing = []
 
 [dependencies]
-moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
+kio = { workspace = true }
 rand = { workspace = true }
 rand_pcg = { workspace = true }
 
 [dev-dependencies]
 cpu-time = "1.0.0"
-moq-clock = { path = "../moq-clock" }
+kio = { path = "../kio", features = ["runtime"] }
 stats_alloc = "0.1.10"
 
 [lints]

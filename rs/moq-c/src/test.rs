@@ -36,7 +36,7 @@ fn publish_broadcast(origin: u32, path: &[u8]) -> u32 {
 /// asynchronously, so an early request can race the attach and fail as unroutable;
 /// retry until the deadline.
 fn request_broadcast(origin: u32, path: &[u8]) -> u32 {
-	let deadline = moq_clock::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	loop {
 		let cb = Callback::new();
 		let _task = id(unsafe {
@@ -56,7 +56,7 @@ fn request_broadcast(origin: u32, path: &[u8]) -> u32 {
 			return code as u32;
 		}
 		// A failed request already delivered its terminal code; back off and retry.
-		assert!(moq_clock::now() < deadline, "timed out requesting broadcast: {code}");
+		assert!(kio::clock::now() < deadline, "timed out requesting broadcast: {code}");
 		#[expect(
 			clippy::disallowed_methods,
 			reason = "the test thread has no runtime; it polls the C API's runtime between real retries"
@@ -5318,9 +5318,9 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 	// Wait until it has resolved the handle, so it is genuinely inside the stalled
 	// call rather than still on its way in: the slab holds one reference, this test
 	// a second, and the parked publish is the third.
-	let deadline = moq_clock::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	while handle.holders() < 3 {
-		assert!(moq_clock::now() < deadline, "the publish never reached the encoder");
+		assert!(kio::clock::now() < deadline, "the publish never reached the encoder");
 		std::thread::yield_now();
 	}
 
@@ -6347,14 +6347,14 @@ fn rate(reservation: u32) -> Option<u64> {
 /// Wait for `reservation`'s grant to reach `bps`, since a subscription reaches the
 /// allocator asynchronously and an unwatched track already reads a would-be share.
 fn wait_rate(reservation: u32, bps: u64) {
-	let deadline = moq_clock::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	loop {
 		let last = rate(reservation);
 		if last == Some(bps) {
 			return;
 		}
 		assert!(
-			moq_clock::now() < deadline,
+			kio::clock::now() < deadline,
 			"timed out waiting for a {bps} bps rate, last {last:?}"
 		);
 		#[expect(

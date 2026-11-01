@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use hang::moq_net::{self, Epoch, Timestamp, announce, origin, track};
 use moq_mux::catalog::Stream;
@@ -113,7 +113,7 @@ fn publish(origin: &origin::Producer, epoch: &Epoch, tag: &str) -> Published {
 /// Finish a route change within [`routing`] of `started`.
 async fn within<T>(started: Instant, change: impl Future<Output = T>) -> T {
 	let deadline = started + routing();
-	moq_clock::timeout_at(deadline, change)
+	kio::clock::timeout_at(deadline, change)
 		.await
 		.unwrap_or_else(|_| panic!("route change took longer than {:?}", routing()))
 }

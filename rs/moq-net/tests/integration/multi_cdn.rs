@@ -38,7 +38,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
 async fn settle() {
-	moq_clock::sleep(Duration::from_millis(500)).await;
+	kio::clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// `P` pushes everything it publishes to `cdn`.
@@ -83,7 +83,7 @@ type Delivery = (u64, moq_net::Result<(Option<Timestamp>, Vec<u8>)>);
 /// Read every group in full, reporting each frame as it arrives.
 fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 	let (tx, rx) = mpsc::unbounded();
-	moq_clock::sim::spawn(async move {
+	kio::clock::sim::spawn(async move {
 		loop {
 			let mut group = match sub.recv_group().await {
 				Ok(Some(group)) => group,
@@ -117,7 +117,7 @@ fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 
 /// The next frame the reader reports, failing on an error or a hang.
 async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timestamp>, Vec<u8>) {
-	let (group, frame) = moq_clock::timeout(Duration::from_secs(10), rx.next())
+	let (group, frame) = kio::clock::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
 		.expect("reader ended");
@@ -271,7 +271,7 @@ fn assert_continuous(seen: &[(u64, Vec<u8>, Option<Timestamp>)], groups: u64) {
 /// Two CDNs under one epoch, `B` over `secondary`: `S` reads through `A` although `B` is
 /// cheaper, resumes on `B` when `A` goes, and moves back once `A` returns, every frame once.
 async fn fails_over_and_back(secondary: &str) {
-	moq_clock::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut topology = Topology::new(secondary.parse().unwrap()).await;
 		let mut announced = topology.subscriber.consume().announced();
 		let start = announced.next().await.expect("announced");
@@ -308,14 +308,14 @@ async fn fails_over_and_back(secondary: &str) {
 	.expect("timed out");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn preferred_cdn_fails_over_and_back() {
 	fails_over_and_back("moq-lite-07-wip").await;
 }
 
 /// Losing the epoch-carrying route restarts onto the epochless moq-transport route.
 async fn restarts_across_protocols(secondary: &str) {
-	moq_clock::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut topology = Topology::new(secondary.parse().unwrap()).await;
 		let mut announced = topology.subscriber.consume().announced();
 		let start = announced.next().await.expect("announced");
@@ -351,13 +351,13 @@ async fn restarts_across_protocols(secondary: &str) {
 	.expect("timed out");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn transport_secondary_restarts() {
 	restarts_across_protocols("moq-transport-22").await;
 }
 
 /// The same over the oldest supported moq-transport draft.
-#[moq_clock::test]
+#[kio::test]
 async fn transport_18_secondary_restarts() {
 	restarts_across_protocols("moq-transport-18").await;
 }
