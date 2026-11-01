@@ -214,7 +214,7 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 	init.data = encoder.ExtraData();
 	auto track = TestOk(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, init), "audio track");
 
-	auto announced = TestOk(origin->consume()->announced_broadcast("room"), "announced_broadcast");
+	auto announced = TestOk(origin->consume()->follow("room", std::nullopt), "follow");
 	auto consumer = TestOk(announced->available().get(), "available");
 	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "catalog consumer");
 	std::optional<moq::Catalog> catalog;
@@ -236,7 +236,7 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 	moq::AudioDecoderOutput output{moq::AudioSampleFormat::kF32};
 	output.channels = static_cast<uint32_t>(channels);
 	// The packets are written faster than real time, so let none be skipped as stale.
-	output.max_delay = std::chrono::seconds(10);
+	output.delay = moq::Delay{std::chrono::seconds(0), std::chrono::seconds(10)};
 	auto audio = TestOk(moq::AudioConsumer::subscribe(consumer, name, rendition, output).get(), "audio consumer");
 
 	const int count = 50;

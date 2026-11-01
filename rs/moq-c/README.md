@@ -55,10 +55,10 @@ int32_t moq_session_request_free(uint32_t request);
 int32_t moq_origin_create(void);
 int32_t moq_origin_close(uint32_t origin);
 int32_t moq_origin_create_broadcast(uint32_t origin, const char *path, uintptr_t path_len, uint32_t *broadcast);
-int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, moq_status_callback on_broadcast, void *user_data);
+int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, const char *epoch, uintptr_t epoch_len, moq_status_callback on_broadcast, void *user_data);
 int32_t moq_origin_request_cancel(uint32_t task);
-int32_t moq_origin_announced_broadcast(uint32_t origin, const char *path, uintptr_t path_len, moq_status_callback on_broadcast, void *user_data);
-int32_t moq_origin_announced_broadcast_cancel(uint32_t task);
+int32_t moq_origin_follow(uint32_t origin, const char *path, uintptr_t path_len, const char *epoch, uintptr_t epoch_len, moq_status_callback on_broadcast, void *user_data);
+int32_t moq_origin_follow_cancel(uint32_t task);
 int32_t moq_origin_announced(uint32_t origin, const moq_announce_config *config, moq_status_callback on_announce, void *user_data);
 int32_t moq_origin_announced_info(uint32_t announced, moq_announce_event *dst);
 int32_t moq_origin_announced_free(uint32_t announced);
@@ -126,16 +126,17 @@ int32_t moq_consume_video_enabled(uint32_t catalog, uint32_t index, bool *dst);
 int32_t moq_consume_audio_config(uint32_t catalog, uint32_t index, moq_audio_config *dst);
 
 // Consuming: Video
-int32_t moq_consume_video(uint32_t catalog, uint32_t index, uint64_t max_delay_us, moq_status_callback on_frame, void *user_data);
+int32_t moq_consume_video(uint32_t catalog, uint32_t index, const moq_delay *delay, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_video_cancel(uint32_t track);
 
 // Consuming: Audio
-int32_t moq_consume_audio(uint32_t catalog, uint32_t index, uint64_t max_delay_us, moq_status_callback on_frame, void *user_data);
+int32_t moq_consume_audio(uint32_t catalog, uint32_t index, const moq_delay *delay, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_audio_cancel(uint32_t track);
 
 // Consuming: Frames
 int32_t moq_consume_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_frame_free(uint32_t frame);
+moq_subscription moq_subscription_defaults(void);
 int32_t moq_consume_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_subscription *subscription, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_track_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_track_frame_free(uint32_t frame);

@@ -31,14 +31,21 @@
 
 _Static_assert(MOQ_VIDEO_PIXEL_FORMAT_I420 == 0, "I420 discriminant moved");
 _Static_assert(MOQ_VIDEO_PIXEL_FORMAT_RGBA == 1, "RGBA discriminant moved");
-_Static_assert(offsetof(moq_video_decoder_output, max_delay_us) == 0, "max_delay_us moved");
-_Static_assert(offsetof(moq_video_decoder_output, format) == 8, "format moved");
-_Static_assert(offsetof(moq_video_decoder_output, width) == 12, "width moved");
-_Static_assert(offsetof(moq_video_decoder_output, height) == 16, "height moved");
-_Static_assert(sizeof(moq_video_decoder_output) == 24, "decoder output size changed");
+_Static_assert(offsetof(moq_delay, min_us) == 0, "min_us moved");
+_Static_assert(offsetof(moq_delay, max_us) == 8, "max_us moved");
+_Static_assert(offsetof(moq_delay, max_unlimited) == 16, "max_unlimited moved");
+_Static_assert(sizeof(moq_delay) == 24, "delay size changed");
+_Static_assert(offsetof(moq_video_decoder_output, delay) == 0, "delay moved");
+_Static_assert(offsetof(moq_video_decoder_output, format) == 24, "format moved");
+_Static_assert(offsetof(moq_video_decoder_output, width) == 28, "width moved");
+_Static_assert(offsetof(moq_video_decoder_output, height) == 32, "height moved");
+_Static_assert(offsetof(moq_video_decoder_output, start) == 36, "start moved");
+_Static_assert(sizeof(moq_video_decoder_output) == 40, "decoder output size changed");
 _Static_assert(MOQ_DECODE_READ_FRAME == 0, "frame read discriminant moved");
 _Static_assert(MOQ_DECODE_READ_GAP == 1, "gap read discriminant moved");
 _Static_assert(MOQ_DECODE_READ_END == 2, "end read discriminant moved");
+_Static_assert(MOQ_DECODE_START_OLDEST == 0, "oldest start discriminant moved");
+_Static_assert(MOQ_DECODE_START_LATEST == 1, "latest start discriminant moved");
 
 // Numeric codes from rs/moq-c/src/error.rs. They are the contract a C caller
 // matches on; if they drift, this fixture fails and the header is stale.
@@ -63,14 +70,14 @@ static void ignore_status(void *user_data, int32_t status) {
 
 static void check_refusals(void) {
     // Unknown pixel format.
-    moq_video_decoder_output bad_format = {0, 999, 0, 0};
+    moq_video_decoder_output bad_format = {{0}, 999, 0, 0};
     if (moq_decode_video(1, 0, &bad_format, NULL, NULL) != MOQ_ERR_INVALID_CODE)
         fail("error: unknown format was not refused with InvalidCode: %s\n", moq_error());
 
     // Half-set, odd, and unrepresentable sizes.
     const uint32_t bad_sizes[][2] = {{320, 0}, {0, 240}, {321, 240}, {320, 241}, {UINT32_MAX - 1, UINT32_MAX - 1}};
     for (size_t i = 0; i < sizeof(bad_sizes) / sizeof(bad_sizes[0]); i++) {
-        moq_video_decoder_output bad_size = {0, MOQ_VIDEO_PIXEL_FORMAT_I420, bad_sizes[i][0], bad_sizes[i][1]};
+        moq_video_decoder_output bad_size = {{0}, MOQ_VIDEO_PIXEL_FORMAT_I420, bad_sizes[i][0], bad_sizes[i][1]};
         if (moq_decode_video(1, 0, &bad_size, NULL, NULL) != MOQ_ERR_INVALID_CONFIG)
             fail("error: size %ux%u was not refused with InvalidConfig: %s\n", bad_sizes[i][0],
                  bad_sizes[i][1], moq_error());
@@ -81,7 +88,7 @@ static void check_refusals(void) {
         fail("error: null output was not refused with InvalidPointer: %s\n", moq_error());
 
     // A valid request gets past validation and fails on the bogus catalog.
-    moq_video_decoder_output valid = {0, MOQ_VIDEO_PIXEL_FORMAT_RGBA, 160, 120};
+    moq_video_decoder_output valid = {{0}, MOQ_VIDEO_PIXEL_FORMAT_RGBA, 160, 120};
     if (moq_decode_video(INT32_MAX, 0, &valid, ignore_status, NULL) != MOQ_ERR_CATALOG_NOT_FOUND)
         fail("error: valid request did not reach catalog lookup: %s\n", moq_error());
 
@@ -252,7 +259,7 @@ int main(void) {
         fail("error: moq_encode_video_cut failed (%s)\n", moq_error());
     publish_frames(producer, 5);
 
-    int32_t request = moq_origin_request((uint32_t)origin, path, strlen(path), on_broadcast, &c);
+    int32_t request = moq_origin_request((uint32_t)origin, path, strlen(path), NULL, 0, on_broadcast, &c);
     if (request <= 0) fail("error: moq_origin_request failed: %d\n", request);
 
     pthread_mutex_lock(&c.mu);
@@ -269,11 +276,11 @@ int main(void) {
     pthread_mutex_unlock(&c.mu);
 
     // The I420 native default, RGBA at native size, and a resized I420.
-    moq_video_decoder_output native_i420 = {10000000, MOQ_VIDEO_PIXEL_FORMAT_I420, 0, 0};
+    moq_video_decoder_output native_i420 = {{.max_us = 10000000}, MOQ_VIDEO_PIXEL_FORMAT_I420, 0, 0};
     decode_once(&c, catalog, &native_i420, WIDTH, HEIGHT, WIDTH * HEIGHT * 3 / 2, producer);
-    moq_video_decoder_output native_rgba = {10000000, MOQ_VIDEO_PIXEL_FORMAT_RGBA, 0, 0};
+    moq_video_decoder_output native_rgba = {{.max_us = 10000000}, MOQ_VIDEO_PIXEL_FORMAT_RGBA, 0, 0};
     decode_once(&c, catalog, &native_rgba, WIDTH, HEIGHT, WIDTH * HEIGHT * 4, producer);
-    moq_video_decoder_output small_i420 = {10000000, MOQ_VIDEO_PIXEL_FORMAT_I420, 160, 120};
+    moq_video_decoder_output small_i420 = {{.max_us = 10000000}, MOQ_VIDEO_PIXEL_FORMAT_I420, 160, 120};
     decode_once(&c, catalog, &small_i420, 160, 120, 160 * 120 * 3 / 2, producer);
 
     if (moq_consume_catalog_free((uint32_t)catalog) < 0)

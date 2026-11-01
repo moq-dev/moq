@@ -97,9 +97,10 @@ pub struct Endpoint {
 impl Endpoint {
 	/// Run an endpoint on `socket`, serving incoming connections if [`Config::server`] is set
 	///
-	/// The endpoint's tasks run on the caller's tokio runtime, else moq-tokio's fallback.
+	/// The endpoint's tasks run on the caller's tokio runtime, else moq-tokio's fallback. With
+	/// the `sim` feature, an endpoint made inside `kio::clock::sim::run` runs them on the simulator.
 	pub fn new(config: Config, socket: impl Into<Socket>) -> Result<Self, Error> {
-		let runtime = crate::runtime::handle();
+		let runtime = crate::runtime::Spawner::current();
 		let socket = socket.into().into_async()?;
 		let addr = socket.local_addr()?;
 		let allow_mtud = !socket.may_fragment();
@@ -408,7 +409,7 @@ pub(crate) struct EndpointInner {
 	/// The socket, which connections send through without keeping it open
 	pub(crate) slot: Arc<Slot>,
 	/// Where the endpoint's and its connections' tasks run
-	pub(crate) runtime: tokio::runtime::Handle,
+	pub(crate) runtime: crate::runtime::Spawner,
 	/// What [`Endpoint::dial`] connects with
 	#[cfg(test)]
 	default_client: Mutex<Option<client::Config>>,
@@ -677,7 +678,7 @@ impl ConnectionSet {
 		conn: moq_quic::connection::Connection,
 		slot: Arc<Slot>,
 		driver_lost: bool,
-		runtime: &tokio::runtime::Handle,
+		runtime: &crate::runtime::Spawner,
 	) -> Connecting {
 		let (send, recv) = mpsc::unbounded_channel();
 		if let Some((error_code, reason)) = &self.close {
@@ -767,7 +768,7 @@ impl EndpointRef {
 		local_addr: SocketAddr,
 		max_udp_payload_size: u16,
 		max_receive_segments: usize,
-		runtime: tokio::runtime::Handle,
+		runtime: crate::runtime::Spawner,
 	) -> Self {
 		let (sender, events) = mpsc::unbounded_channel();
 		let recv_state = RecvState::new(sender, max_receive_segments, max_udp_payload_size);
@@ -837,6 +838,8 @@ struct RecvState {
 	/// Reused buffer that received datagrams are copied into and split into owned slices.
 	datagrams: BytesMut,
 	recv_limiter: WorkLimiter,
+	/// Maps the kernel's receive timestamps, which count on the wall clock, onto `Instant`s
+	wall: kio::clock::WallMap,
 }
 
 impl RecvState {
@@ -858,6 +861,7 @@ impl RecvState {
 			recv_buf: recv_buf.into(),
 			datagrams: BytesMut::with_capacity(datagram_capacity),
 			recv_limiter: WorkLimiter::new(RECV_TIME_BOUND),
+			wall: kio::clock::WallMap::default(),
 		}
 	}
 
@@ -886,6 +890,8 @@ impl RecvState {
 			match recv(cx, &mut iovs, &mut metas) {
 				Poll::Ready(Ok(msgs)) => {
 					self.recv_limiter.record_work(msgs);
+					let received = Instant::now();
+					self.wall.sample(received, kio::clock::Wall::now());
 					// Copy the received batch into `datagrams` and split each datagram off as
 					// an owned slice. We can't read directly into `datagrams` and drop
 					// `recv_buf`: once a slice has been handed to a connection the allocation
@@ -901,6 +907,13 @@ impl RecvState {
 					}
 					for meta in metas.iter().take(msgs) {
 						let mut data = self.datagrams.split_to(meta.len);
+						// The kernel's stamp, or the receive's own instant without one. One stamp
+						// covers a GRO batch, so only its first datagram reports an arrival.
+						let mut arrival = Some(
+							meta.timestamp
+								.and_then(|ts| self.wall.map(kio::clock::Wall::UNIX_EPOCH.checked_add(ts)?))
+								.unwrap_or(received),
+						);
 						while !data.is_empty() {
 							let buf = data.split_to(meta.stride.min(data.len()));
 							let mut response_buffer = Vec::new();
@@ -909,6 +922,7 @@ impl RecvState {
 								local_ip: meta.dst_ip,
 								ecn: meta.ecn.map(proto_ecn),
 								data: buf,
+								arrival: arrival.take(),
 							};
 							match endpoint.handle(now, received, &mut response_buffer) {
 								Some(DatagramEvent::NewConnection(incoming)) => {
