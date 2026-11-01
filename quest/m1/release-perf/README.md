@@ -278,6 +278,12 @@ against release's 0.062 to 0.104, with mixed-sign paired deltas inside
 release's own spread, and 5 to 36% fewer user-space instructions than release
 in every round. The re-pair above, on a quieter host, is what remains.
 
+Decided 2026-11-01 (maintainer), in
+[moq-dev/moq#7493](https://github.com/moq-dev/moq/pull/7493): ✅ the new
+`session_fanout_threads` Criterion case joins the release pairing through a
+bench-only backport to `release`, which carries it once that PR lands. Bench-only
+backports are allowed from now on.
+
 ## Required
 
 - [Relay CPU per frame since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the 18-56% rise in relay instructions per delivered frame is bisected, attributed, and its avoidable cost fixed
