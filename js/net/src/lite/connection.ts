@@ -249,7 +249,7 @@ export class Connection implements Established {
 	 * Withdraw announcements and finish the requests this session serves, waiting up to one
 	 * second for delivery before closing.
 	 *
-	 * A served subscription first delivers its remaining group streams, and on lite-07 also
+	 * A served subscription first delivers its remaining group streams, and from lite-05 also
 	 * waits for the subscriber's FIN, which says it read the tail. A live track never ends on
 	 * its own, so it holds the close until the deadline.
 	 */
