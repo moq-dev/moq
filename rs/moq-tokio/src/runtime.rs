@@ -40,7 +40,8 @@ impl Spawner {
 	/// Run `future` in the background, with nobody to join it.
 	pub(crate) fn spawn<F>(&self, future: F)
 	where
-		F: Future<Output = ()> + Send + 'static,
+		F: Future + Send + 'static,
+		F::Output: Send + 'static,
 	{
 		match self {
 			Self::Tokio(handle) => drop(handle.spawn(future)),
@@ -54,7 +55,8 @@ impl Spawner {
 #[cfg(feature = "net")]
 pub(crate) fn detach<F>(future: F)
 where
-	F: Future<Output = ()> + Send + 'static,
+	F: Future + Send + 'static,
+	F::Output: Send + 'static,
 {
 	Spawner::current().spawn(future);
 }

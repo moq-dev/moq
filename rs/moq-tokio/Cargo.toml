@@ -47,7 +47,7 @@ mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["_transport", "dep:qmux", "watch", "dep:dns-lookup"]
 # Qmux over TCP: plaintext `tcp://`, and `tls://` once a crypto provider is on. Server-side and client-side.
-tcp = ["_transport", "dep:qmux", "dep:dns-lookup"]
+tcp = ["_transport", "dep:qmux", "dep:dns-lookup", "dep:tokio-rustls"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
 # inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
 uds = ["tcp", "qmux/uds"]
@@ -106,6 +106,8 @@ tikv-jemalloc-ctl = { version = "0.7", optional = true }
 tikv-jemallocator = { version = "0.7", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+# The TLS stream `tcp::TlsAcceptor` accepts from a listener sharing its port.
+tokio-rustls = { workspace = true, optional = true }
 tokio-util = { workspace = true, features = ["io"], optional = true }
 toml = { workspace = true }
 tracing = "0.1"

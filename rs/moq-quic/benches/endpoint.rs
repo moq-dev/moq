@@ -46,6 +46,7 @@ fn bench_route(c: &mut Criterion<ThreadCpu>) {
 										local_ip: None,
 										ecn: None,
 										data: datagram,
+										arrival: None,
 									},
 									&mut buf,
 								);
