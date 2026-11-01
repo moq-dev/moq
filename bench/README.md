@@ -7,7 +7,8 @@ microbenchmarks stay beside their crates under `rs/*/benches`, while the
 `run.sh` owns builds, comparison rounds, and reporting. `relay.sh` owns the
 temporary relay lifecycle and load execution shared by each comparison mode.
 A temporary relay is ready only once its PID owns both the TCP listener and UDP
-socket on its assigned port. `lsof`, included in the Nix shell, verifies
+socket on its assigned port, plus the stream listener a `wss`, `tcp`, or `tls`
+case dials. `lsof`, included in the Nix shell, verifies
 ownership. A collision uses the existing startup attempts; exhausted attempts
 fail with the relay log before any load starts.
 
@@ -74,6 +75,48 @@ Compare the current tree with another revision:
 nix develop --command just bench origin/main
 ```
 
+The relay workloads run `video` over QUIC, then `chat` (per-message cost) and
+`fanout` (per-byte cost) over each transport in turn: QUIC (`https://`), and qmux
+over `ws://`, `wss://`, `tcp://`, and `tls://`. The second argument narrows the
+transports, for example to compare only WebSocket against a base:
+
+```bash
+nix develop --command just bench origin/main ws
+```
+
+Every relay serves QUIC and plain WebSocket on its port; `wss://`, `tcp://`, and
+`tls://` get their own listener on the port two above it. A base revision must
+accept the listener a case needs, so pass the transports it has: a relay without
+`listen.tcp.tls` refuses the `tls` cases. Until a release includes
+`listen.tcp.tls`, compare against it without them:
+
+```bash
+nix develop --command just bench origin/release "quic ws wss tcp"
+```
+
+Beside relay CPU in cores, each case
+reports CPU microseconds per delivered frame and cores per delivered Gbps; base
+comparisons pair those too.
+
+The qmux micro-bench isolates the transport from the relay. It connects
+client/server pairs over loopback TCP, each echoing one message at a time on one
+stream so messages are never coalesced, swept over transport, session count, and
+message size. A message up to about 16 KB, qmux's default maximum record size,
+crosses as one record; a larger one is split. It reports process CPU per message
+and per Gbps, so it also runs under `perf`; build it with the profiling profile
+and frame pointers to attribute that CPU:
+
+```bash
+nix develop --command cargo run --release -p qmux@0.7.0 --example bench
+nix develop --command cargo run --release -p qmux@0.7.0 --example bench -- --transport ws,wss --sessions 1,256 --size 300
+RUSTFLAGS="-C force-frame-pointers=yes" nix develop --command cargo build --profile profiling -p qmux@0.7.0 --example bench
+perf record -F 999 --call-graph fp -- target/profiling/examples/bench --transport ws --sessions 16 --size 1024
+```
+
+Both ends share one current-thread runtime, so its CPU covers sending and
+receiving alike. It is a local profiling tool rather than a nightly series: the
+`moq-net` session bench owns qmux's series.
+
 Compare one multi-threaded Tokio runtime with the same number of independent
 Tokio/epoll and io\_uring workers:
 
@@ -120,10 +163,12 @@ nix develop --command just bench-profile lock
 nix develop --command just bench-profile "cpu heap" fanout-heavy "4 16"
 nix develop --command just bench-profile "cpu heap" audio "4 16" io-uring-workers
 nix develop --command just bench-profile cpu chat 4 io-uring-workers origin/main
+nix develop --command just bench-profile cpu chat 4 tokio-workers "" ws
 ```
 
 This builds the relay with `[profile.profiling]` and frame pointers, then runs
-the workload on the selected runtime (`tokio-workers` by default, or
+the workload over the selected transport (`quic` by default, or `ws`, `wss`,
+`tcp`, or `tls`) on the selected runtime (`tokio-workers` by default, or
 `io-uring-workers`) at each count twice per mode: an unprofiled control, then a
 profiled run, so the throughput and CPU difference shows the profiler's overhead. Each mode captures only the relay process, never the load
 generator, during the profiled run's 5 s steady window, the same window as the
