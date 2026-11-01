@@ -17,9 +17,9 @@ const UNJUDGED: u64 = u64::MAX;
 ///
 /// The skip is only sound while `f` would answer the same, so a watch serves one
 /// predicate, and that predicate may read only `T` and caller state that changes only
-/// after it returns [`Poll::Ready`]. A predicate that reads a clock, another channel, or
-/// an argument that moves while it is pending would be skipped past the change it is
-/// waiting for. Use [`Consumer::poll`] for those.
+/// after it returns [`Poll::Ready`], or that the caller [`reset`](Self::reset)s it after
+/// moving. A predicate that reads a clock or another channel would be skipped past the
+/// change it is waiting for. Use [`Consumer::poll`] for those.
 ///
 /// The version is stored only when `f` returns [`Poll::Pending`], so a ready predicate is
 /// judged again on every poll: being level-triggered, it stays ready. Cloning a watch
@@ -64,6 +64,12 @@ impl<T> Watch<T> {
 		F: FnMut(&Ref<'_, T>) -> Poll<R> + Unpin,
 	{
 		crate::wait(move |waiter| self.poll(waiter, &mut f).map(|res| res.map_err(|_| crate::Closed))).await
+	}
+
+	/// Forget the version the predicate was pending at, so the next poll judges it. Call it
+	/// whenever caller state the predicate reads moves before it returned ready.
+	pub fn reset(&mut self) {
+		self.judged = UNJUDGED;
 	}
 
 	/// The consumer being watched, for reads and polls of other predicates.
@@ -190,6 +196,21 @@ mod tests {
 			panic!("the close was skipped");
 		};
 		assert!(closed.is_closed());
+	}
+
+	/// A reset judges the predicate again, as caller state it reads moved.
+	#[test]
+	fn a_reset_judges_again() {
+		let producer = Producer::new(1u32);
+		let mut watch = Watch::new(producer.consume());
+		let waiter = Waiter::noop();
+		let mut calls = 0;
+
+		assert!(poll_at_least(&mut watch, &waiter, 2, &mut calls).is_pending());
+		// The target moved below the value with no write: a skipped poll would miss it.
+		watch.reset();
+		assert_eq!(poll_at_least(&mut watch, &waiter, 1, &mut calls), Poll::Ready(1));
+		assert_eq!(calls, 2);
 	}
 
 	/// A clone judges its own predicate, whatever the original last saw.

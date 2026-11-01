@@ -1919,7 +1919,8 @@ pub(super) struct Recover {
 	/// `None` leaves the publisher's retention alone; unused for a reader.
 	max_delay: Option<std::time::Duration>,
 	/// The route, watched for [`Self::wants`]: every read of the group that parks asks it
-	/// whether the route moved past [`Self::generation`], which moves only once it has.
+	/// whether the route moved past [`Self::generation`]. Moving that generation any other
+	/// way resets the watch, or a read would skip the move.
 	route: kio::Watch<Route>,
 	/// The route generation of the copy being read, and that copy.
 	generation: u64,
@@ -2218,6 +2219,8 @@ impl Recover {
 	/// Commit the replacement only once the caller has acquired its cursor or frame.
 	pub(super) fn adopt(&mut self, replacement: &Replacement) {
 		self.generation = replacement.generation;
+		// The generation moved without `wants` seeing it ready, so it judges the new one.
+		self.route.reset();
 		self.copy = replacement.copy.clone();
 		self.handoff = replacement.group.handoff();
 		// A later switch must keep this copy subscribed while the recovered group
