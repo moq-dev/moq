@@ -237,7 +237,7 @@ impl<D: Driver> Driver for Watched<D> {
 /// Counts the publisher's allocations sized exactly like the name across a whole
 /// subscription, so the name is an unusual length: a `String` copy of it is sized
 /// that way, while the model's shared `Arc<str>` copies carry a header.
-#[moq_clock::test]
+#[kio::test]
 async fn a_lite_request_keeps_one_copy_of_its_track_name() {
 	const TRACK: &str = "video/hd/a-track-name-of-an-odd-length";
 
