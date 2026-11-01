@@ -245,6 +245,8 @@ pub struct Server {
 		all(feature = "uds", unix)
 	))]
 	/// Pending handshakes, each isolated: one panicking (`None`) must not end the listener.
+	/// Each is boxed before `isolate` wraps it, so a debug build never holds a
+	/// handshake's large state twice on the accept loop's stack.
 	accept: FuturesUnordered<BoxFuture<'static, Option<crate::Result<Request>>>>,
 	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 	streams: StreamListeners,
@@ -777,7 +779,7 @@ impl Server {
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
 							Ok(Request { transport, url, identity, authority, link, handshake: Box::new(request), quic, deadline, active })
-						}).boxed());
+						}.boxed()).boxed());
 					}
 				}
 				Some(_conn) = iroh_accept => {
@@ -811,7 +813,7 @@ impl Server {
 								deadline,
 								active,
 							})
-						}).boxed());
+						}.boxed()).boxed());
 					}
 				}
 				Some(_pending) = ws_accept => {
@@ -832,7 +834,7 @@ impl Server {
 							let mut options = crate::websocket::Options::new(url, setup.server, active);
 							options.link = Link { remote: Some(accepted.remote), local, alpn: Some(accepted.protocol), ..Default::default() };
 							accept_websocket(session, options, deadline).await
-						}).boxed());
+						}.boxed()).boxed());
 					}
 				}
 				Some(res) = self.accept.next() => {
