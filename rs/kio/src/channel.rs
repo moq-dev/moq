@@ -17,6 +17,9 @@
 //! drain, is mirrored beside the version: a waiter that recorded the current tag, polled at
 //! an unchanged version, skips the lock. No publish since means none it could miss, and the
 //! next one's drain takes the entry the tag proves is there.
+//!
+//! A [`Watch`](crate::Watch) keeps the version its predicate was last pending at, so a
+//! re-poll at that version skips the value lock and the predicate too, and only parks.
 
 use std::{
 	fmt,
@@ -114,8 +117,20 @@ impl<T> Channel<T> {
 
 	/// Run a read-only predicate under the value lock, registering `waiter` for the next
 	/// change while it is pending, or handing back the guard once the channel closed.
+	#[inline]
 	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
+	where
+		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
+	{
+		self.poll_judged(waiter, f, &mut 0)
+	}
+
+	/// [`poll`](Self::poll), storing in `judged` the version `f` was pending at, an open
+	/// one, so [`repoll`](Self::repoll) can tell nothing changed since. Left alone when
+	/// `f` is ready or the channel closed.
+	#[cfg_attr(feature = "sim", track_caller)]
+	pub fn poll_judged<F, R>(&self, waiter: &Waiter, f: F, judged: &mut u64) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
 	{
@@ -131,8 +146,23 @@ impl<T> Channel<T> {
 		}
 
 		drop(guard);
+		*judged = seen;
 		self.park_value(waiter, seen);
 		Poll::Pending
+	}
+
+	/// Park `waiter` again without the value lock, if nothing published since `judged`,
+	/// the version a pending predicate was judged at. Returns `false`, parking nothing,
+	/// once something did: the predicate has to judge the new value.
+	///
+	/// A version that was open and is unchanged is still open, since closing bumps it.
+	#[inline]
+	pub fn repoll(&self, waiter: &Waiter, judged: u64) -> bool {
+		if self.version() != judged {
+			return false;
+		}
+		self.park_value(waiter, judged);
+		true
 	}
 
 	/// Register `waiter` for the next publish after `seen`, the version a pending predicate
@@ -426,7 +456,8 @@ mod tests {
 
 	/// Each publish waits for every reader to see the last, so the reader that saw it last
 	/// is parking again just as the next lands, the window a lost wake hangs in. Readers
-	/// keep their waiter across polls, as a task's [`Park`](crate::Park) does.
+	/// keep their waiter across polls, as a task's [`Park`](crate::Park) does, and half of
+	/// them poll through a [`Watch`](crate::Watch).
 	#[test]
 	fn racing_publishes_and_closes_wake_every_waiter() {
 		const READERS: usize = 4;
@@ -455,14 +486,20 @@ mod tests {
 		let producer = Producer::new(0u32);
 		let seen = Arc::new(AtomicUsize::new(0));
 		let closed = Arc::new(AtomicUsize::new(0));
-		for _ in 0..READERS {
+		for reader in 0..READERS {
+			// Half re-poll through a watch, which parks without judging an unchanged value.
+			let mut watch = (reader % 2 == 1).then(|| crate::Watch::new(producer.consume()));
 			let consumer = producer.consume();
 			let (seen, closed) = (seen.clone(), closed.clone());
 			std::thread::spawn(move || {
 				let waiter = Waiter::new(Waker::from(Arc::new(Unpark(std::thread::current()))));
 				for target in 1..=STEPS {
 					let reached = |v: &Ref<'_, u32>| if **v >= target { Poll::Ready(()) } else { Poll::Pending };
-					while consumer.poll(&waiter, reached).is_pending() {
+					let mut poll = || match &mut watch {
+						Some(watch) => watch.poll(&waiter, reached).is_pending(),
+						None => consumer.poll(&waiter, reached).is_pending(),
+					};
+					while poll() {
 						std::thread::park();
 					}
 					seen.fetch_add(1, Ordering::SeqCst);

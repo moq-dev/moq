@@ -9,6 +9,9 @@
 //! [`Shared`] is a role-less sibling: every handle can lock, read, or park on a
 //! predicate, with no liveness of its own.
 //!
+//! [`Watch`] wraps a [`Consumer`] for one predicate that reads only its value, so a
+//! re-poll the channel hasn't changed since skips the predicate and the lock.
+//!
 //! [`Queue`] is a poll-native FIFO queue built in the same style: role-less
 //! clone-able handles, bounded or unbounded, with separate wake lists for the
 //! push and pop sides.
@@ -50,6 +53,7 @@ mod producer;
 mod queue;
 mod shared;
 mod task;
+mod watch;
 mod weak;
 
 #[cfg(test)]
@@ -68,6 +72,7 @@ pub use queue::{PushError, Queue};
 pub use shared::Shared;
 pub use task::{Task, TaskKey, Tasks};
 pub use waiter::{Park, Waiter, WaiterList, wait};
+pub use watch::Watch;
 pub use weak::{ConsumerWeak, ProducerWeak, Weak};
 
 /// Run an `async fn` test to completion on [`clock::sim::run`].
