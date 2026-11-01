@@ -20,7 +20,7 @@
 
 use std::{
 	cmp::Reverse,
-	collections::{BTreeMap, BTreeSet, VecDeque},
+	collections::{BTreeMap, BTreeSet, btree_map},
 };
 
 use slab::Slab;
@@ -147,15 +147,23 @@ struct Group<K, D> {
 	/// Whether the group has queued items, or is being served a stream. It stays set between
 	/// [`Schedule::pop`] and [`Schedule::sent`], so requeueing the stream is not a new turn.
 	active: bool,
-	/// Whether an entry for this group sits in its level's round robin. Usually equal to
-	/// having queued items, but a group that runs dry away from the front of the round
-	/// robin keeps its entry until the round robin reaches it.
-	ringed: bool,
+	/// The group's neighbors in its level's round robin, if it is in one. Usually present
+	/// exactly when the group has queued items, but a group that runs dry away from the front
+	/// of the round robin keeps its place until the round robin reaches it.
+	ring: Option<Ring>,
 	/// Streams that name this group, queued or not.
 	members: usize,
 	/// Whether the owner released the group, which is freed once no stream names it and its
 	/// datagrams are gone.
 	closed: bool,
+}
+
+/// A group's neighbors in its level's round robin: a circular list threaded through the
+/// groups, so a group leaves it from anywhere without a search.
+#[derive(Debug, Clone, Copy)]
+struct Ring {
+	prev: usize,
+	next: usize,
 }
 
 /// A queue holding datagrams, keyed for eviction: whether it is the ungrouped queue, its
@@ -167,8 +175,9 @@ type Victim = (bool, i64, Reverse<u64>, Option<usize>);
 pub(super) struct Schedule<K, D> {
 	ungrouped: Queue<K, D>,
 	groups: Slab<Group<K, D>>,
-	/// Group round robins by priority, with only the highest backlogged level served.
-	levels: BTreeMap<i64, VecDeque<usize>>,
+	/// The group heading each priority's round robin, with only the highest backlogged level
+	/// served. A level goes with its last group.
+	levels: BTreeMap<i64, usize>,
 	/// Groups with queued items.
 	backlogged: usize,
 	/// Decreases with every push, so a requeued stream goes behind its equal-priority peers.
@@ -236,7 +245,7 @@ impl<K: Copy, D> Schedule<K, D> {
 			queue: Queue::new(),
 			deficit: 0,
 			active: false,
-			ringed: false,
+			ring: None,
 			members: 0,
 			closed: false,
 		})
@@ -259,15 +268,14 @@ impl<K: Copy, D> Schedule<K, D> {
 		}
 
 		self.unindex(Some(group));
+		let ringed = self.groups[group].ring.is_some();
+		if ringed {
+			self.unring(group);
+		}
 		let state = &mut self.groups[group];
-		let old = std::mem::replace(&mut state.priority, priority);
-		if state.ringed {
-			self.unring_group(group, old);
-			let state = &mut self.groups[group];
-			state.ringed = !state.queue.is_empty();
-			if state.ringed {
-				self.levels.entry(priority).or_default().push_back(group);
-			}
+		state.priority = priority;
+		if ringed && !state.queue.is_empty() {
+			self.ring(group);
 		}
 		self.index(Some(group));
 	}
@@ -478,19 +486,15 @@ impl<K: Copy, D> Schedule<K, D> {
 
 		loop {
 			let mut level = self.levels.last_entry()?;
-			let Some(&group) = level.get().front() else {
-				level.remove();
-				continue;
-			};
+			let group = *level.get();
 			let group_state = &mut self.groups[group];
 			if !group_state.active {
-				level.get_mut().pop_front();
-				group_state.ringed = false;
+				self.unring(group);
 				continue;
 			}
 			if group_state.deficit <= 0 {
 				group_state.deficit += QUANTUM;
-				level.get_mut().rotate_left(1);
+				*level.get_mut() = group_state.ring.expect("a level's head is ringed").next;
 				continue;
 			}
 
@@ -530,7 +534,7 @@ impl<K: Copy, D> Schedule<K, D> {
 		self.unindex(group);
 		let (datagram, frame) = self.queue(group).take_datagram(recency);
 		self.datagram_bytes -= frame;
-		if let std::collections::btree_map::Entry::Occupied(mut count) = self.frames.entry(frame) {
+		if let btree_map::Entry::Occupied(mut count) = self.frames.entry(frame) {
 			*count.get_mut() -= 1;
 			if *count.get() == 0 {
 				count.remove();
@@ -585,9 +589,8 @@ impl<K: Copy, D> Schedule<K, D> {
 
 		// Debt carries over, but unused credit does not, so going idle saves nothing up.
 		state.deficit = state.deficit.min(0) + QUANTUM;
-		if !state.ringed {
-			state.ringed = true;
-			self.levels.entry(state.priority).or_default().push_back(group);
+		if state.ring.is_none() {
+			self.ring(group);
 		}
 		self.backlogged += 1;
 	}
@@ -595,8 +598,8 @@ impl<K: Copy, D> Schedule<K, D> {
 	/// Account for a group whose queue may have run dry.
 	///
 	/// A group heading its round robin, as one just served does, leaves it now.
-	/// Anywhere else its entry stays until the round robin reaches it, since finding it
-	/// would mean a scan.
+	/// Anywhere else it keeps its place until the round robin reaches it, so a group that
+	/// refills before then is not sent to the back.
 	fn deactivate(&mut self, group: Option<usize>) {
 		let Some(group) = group else {
 			return;
@@ -606,18 +609,11 @@ impl<K: Copy, D> Schedule<K, D> {
 			return;
 		}
 		state.active = false;
-
-		if let Some(level) = self.levels.get_mut(&state.priority)
-			&& level.front() == Some(&group)
-		{
-			level.pop_front();
-			if level.is_empty() {
-				self.levels.remove(&state.priority);
-			}
-			state.ringed = false;
-		}
-
 		self.backlogged -= 1;
+
+		if self.levels.get(&state.priority) == Some(&group) {
+			self.unring(group);
+		}
 	}
 
 	/// Drop a stream's membership of its group.
@@ -634,20 +630,55 @@ impl<K: Copy, D> Schedule<K, D> {
 			return;
 		}
 
-		// Nothing names or fills the group, but a stale round-robin entry may remain.
-		let state = self.groups.remove(group);
-		if state.ringed {
-			self.unring_group(group, state.priority);
+		// Nothing names or fills the group, but it may still hold its round-robin place.
+		if state.ring.is_some() {
+			self.unring(group);
+		}
+		self.groups.remove(group);
+	}
+
+	/// Add a group to the back of its level's round robin.
+	fn ring(&mut self, group: usize) {
+		debug_assert!(self.groups[group].ring.is_none(), "group ringed twice");
+		let ring = match self.levels.entry(self.groups[group].priority) {
+			btree_map::Entry::Vacant(level) => {
+				level.insert(group);
+				Ring {
+					prev: group,
+					next: group,
+				}
+			}
+			btree_map::Entry::Occupied(level) => {
+				let head = *level.get();
+				let tail = self.link(head).prev;
+				self.link(tail).next = group;
+				self.link(head).prev = group;
+				Ring { prev: tail, next: head }
+			}
+		};
+		self.groups[group].ring = Some(ring);
+	}
+
+	/// Take a group out of its level's round robin, wherever it sits.
+	fn unring(&mut self, group: usize) {
+		let state = &mut self.groups[group];
+		let Ring { prev, next } = state.ring.take().expect("group is ringed");
+		let priority = state.priority;
+		if next == group {
+			self.levels.remove(&priority);
+			return;
+		}
+		self.link(prev).next = next;
+		self.link(next).prev = prev;
+		let head = self.levels.get_mut(&priority).expect("ringed group has a level");
+		if *head == group {
+			*head = next;
 		}
 	}
 
-	fn unring_group(&mut self, group: usize, priority: i64) {
-		let level = self.levels.get_mut(&priority).expect("ringed group has a level");
-		let index = level.iter().position(|&g| g == group);
-		level.remove(index.expect("ringed group is in its level"));
-		if level.is_empty() {
-			self.levels.remove(&priority);
-		}
+	/// The round-robin neighbors of a ringed group.
+	fn link(&mut self, group: usize) -> &mut Ring {
+		self.groups[group].ring.as_mut().expect("group is ringed")
 	}
 }
 
@@ -812,6 +843,25 @@ mod tests {
 		// Equal again, so the two alternate.
 		let ids: Vec<_> = (0..4).map(|_| sim.step(1000).unwrap()).collect();
 		assert!(ids.contains(&first) && ids.contains(&second), "{ids:?}");
+	}
+
+	#[test]
+	fn groups_leave_the_round_robin_from_anywhere() {
+		let mut sim = Sim::new();
+		let groups: Vec<_> = (0..4).map(|_| sim.schedule.open_group(0)).collect();
+		let ids: Vec<_> = groups.iter().map(|&g| sim.stream(Some(g), 0, 100_000)).collect();
+
+		// Retire the third group from the middle of the round robin.
+		let mut stream = sim.streams.remove(&ids[2]).unwrap();
+		sim.schedule.close_group(groups[2]);
+		sim.schedule.leave(&mut stream.slot);
+		// The second leaves for a level of its own, then returns behind the rest.
+		sim.schedule.set_group_priority(groups[1], 1);
+		sim.schedule.set_group_priority(groups[1], 0);
+
+		let order: Vec<_> = (0..6).map(|_| sim.step(QUANTUM as usize).unwrap()).collect();
+		assert_eq!(order, [ids[0], ids[3], ids[1], ids[0], ids[3], ids[1]]);
+		assert!(sim.schedule.is_clean());
 	}
 
 	#[test]
