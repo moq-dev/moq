@@ -23,6 +23,7 @@ import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
 import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runGaps } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
@@ -1521,8 +1522,11 @@ export class Publisher {
 		void stream.reader.done().then(
 			(fin) => {
 				hold.abort();
-				// TRACK is the requester's only message.
-				if (!fin) stream.abort(new ProtocolViolation("data after TRACK"));
+				if (fin) return;
+				// TRACK is the requester's only message, so more breaks the session, as in Rust.
+				const violation = new ProtocolViolation("data after TRACK");
+				closeViolation(this.#quic, violation);
+				stream.abort(violation);
 			},
 			() => hold.abort(),
 		);
@@ -1755,8 +1759,9 @@ export class Publisher {
 				prevTs = ts;
 			}
 
-			await stream.write(frameHeader(stream.version, delta, read.inflated, frame.payload.byteLength));
-			if (frame.payload.length > 0) await stream.write(frame.payload);
+			await stream.write(frameHeader(stream.version, delta, read.inflated, readSize(read)));
+			if (read.chunks) await sendPayload(read.chunks, (chunk) => stream.write(chunk), stream.closed);
+			else if (frame.payload.length > 0) await stream.write(frame.payload);
 		}
 	}
 
@@ -1866,9 +1871,11 @@ export class Publisher {
 					prevTs = ts;
 				}
 
-				const header = frameHeader(stream.version, delta, read.inflated, read.frame.payload.byteLength);
+				const header = frameHeader(stream.version, delta, read.inflated, readSize(read));
 				await write(() => stream.write(header));
-				if (read.frame.payload.length > 0) await write(() => stream.write(read.frame.payload));
+				const chunks = read.chunks;
+				if (chunks) await write(() => sendPayload(chunks, (chunk) => stream.write(chunk), stream.closed));
+				else if (read.frame.payload.length > 0) await write(() => stream.write(read.frame.payload));
 			}
 
 			stream.close();

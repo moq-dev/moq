@@ -220,9 +220,8 @@ const std::vector<Field> &Fields()
 		f.push_back(Number(QUIC_IDLE_TIMEOUT, "Idle timeout (ms)",
 				   Millis(d.quic.idle_timeout, QUIC_IDLE_TIMEOUT), 0, 600000, 1000,
 				   "How long an idle connection survives before it is dropped."));
-		f.push_back(Number(QUIC_KEEP_ALIVE, "Keep-alive interval (ms)",
-				   Millis(d.quic.keep_alive, QUIC_KEEP_ALIVE), 0, 60000, 100,
-				   "0 disables the keep-alive pings."));
+		f.push_back(Number(QUIC_KEEP_ALIVE, "Keep-alive interval (ms)", 0, 0, 60000, 100,
+				   "0 derives the interval from the negotiated idle timeout."));
 		f.push_back(Choose(QUIC_GSO, "UDP segmentation offload", AutoOnOff(), false,
 				   "Batches sends into one syscall. Turn it off if large sends vanish; some "
 				   "NICs and middleboxes mangle segmented packets."));

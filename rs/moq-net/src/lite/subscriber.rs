@@ -640,15 +640,16 @@ impl SubscriptionCleanup {
 	/// End every active subscription with the session's error. Group machines own
 	/// their cleanup independently; this records the track's terminal state.
 	///
-	/// A subscription the publisher already ended finishes instead: its track is over,
-	/// and what arrived stays servable to readers still behind rather than handed to
-	/// another route.
+	/// Even a subscription the publisher already ended aborts: finishing it before its tail
+	/// settled would report what arrived as the whole track. Once the declared end settled,
+	/// [`track::Producer::abort`] ends its readers cleanly instead. Before lite-05 the FIN
+	/// is that end, declared here at the live edge since nothing more can arrive.
 	fn abort(&self, err: &Error) {
 		for (_, entry) in self.0.lock().drain() {
-			let _ = match entry.tail.read().is_ended() {
-				true => entry.producer.finish(),
-				false => entry.producer.abort(err.clone()),
-			};
+			if entry.tail.read().is_ended() {
+				let _ = entry.producer.finish();
+			}
+			let _ = entry.producer.abort(err.clone());
 		}
 	}
 }
@@ -840,7 +841,11 @@ impl UniAccept {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let _ = self.children.poll(waiter);
 
-		loop {
+		// MAX_STREAMS credit alone lets one poll accept thousands of streams, so a peer
+		// opening them at once must not hold the session's other tasks. A yield has woken
+		// the task, and this always ends Pending, so the children below still run.
+		let mut budget = kio::coop::Budget::new(32);
+		while budget.poll_yield(waiter).is_ready() {
 			match self.accept.poll_accept_uni(waiter) {
 				Poll::Ready(Ok(stream)) => {
 					self.children.push(UniServe {
@@ -1213,15 +1218,18 @@ impl FrameIngest {
 		}
 	}
 
-	/// Read a frame header varint. Only a plain group may end in its place.
+	/// Read a frame header varint. EOF may end a plain group only at a frame's
+	/// first field (`boundary`); a truncated header is an error.
 	fn poll_header_varint<R: crate::transport::poll::RecvStream>(
 		&self,
 		reader: &mut Reader<R, Version>,
+		boundary: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<u64>, Error>> {
-		match self.records {
-			Some(_) => reader.poll_varint(waiter).map_ok(Some),
-			None => reader.poll_varint_maybe(waiter),
+		if boundary && self.records.is_none() {
+			reader.poll_varint_maybe(waiter)
+		} else {
+			reader.poll_varint(waiter).map_ok(Some)
 		}
 	}
 
@@ -1314,7 +1322,7 @@ impl FrameIngest {
 						continue;
 					};
 					// The timestamp delta doubles as the per-frame sentinel.
-					let Some(zz) = ready!(self.poll_header_varint(reader, waiter))? else {
+					let Some(zz) = ready!(self.poll_header_varint(reader, true, waiter))? else {
 						return Poll::Ready(Ok(()));
 					};
 					let next: u64 = (self.prev_ts as i128 + crate::coding::varint::unzigzag(zz) as i128)
@@ -1337,7 +1345,9 @@ impl FrameIngest {
 						};
 						continue;
 					}
-					let Some(inflated) = ready!(self.poll_header_varint(reader, waiter))? else {
+					let Some(inflated) =
+						ready!(self.poll_header_varint(reader, self.framing.timescale.is_none(), waiter))?
+					else {
 						return Poll::Ready(Ok(()));
 					};
 					self.phase = IngestPhase::Size {
@@ -1347,7 +1357,8 @@ impl FrameIngest {
 				}
 				IngestPhase::Size { timestamp, inflated } => {
 					let (timestamp, inflated) = (*timestamp, *inflated);
-					let Some(size) = ready!(self.poll_header_varint(reader, waiter))? else {
+					let boundary = self.framing.timescale.is_none() && !group.compressed();
+					let Some(size) = ready!(self.poll_header_varint(reader, boundary, waiter))? else {
 						return Poll::Ready(Ok(()));
 					};
 					// A frame that says nothing a plain frame would not keeps no fields.
@@ -2133,7 +2144,6 @@ mod tests {
 				.unwrap(),
 			id: 0,
 			max_delay: Duration::ZERO,
-			requested_max_delay: Duration::ZERO,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -2309,7 +2319,6 @@ mod tests {
 					.unwrap(),
 				id: 0,
 				max_delay: Duration::ZERO,
-				requested_max_delay: Duration::ZERO,
 				start: Some(floor),
 				priority: 0,
 				requested: Some(floor),
@@ -2766,7 +2775,6 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Duration::ZERO,
-			requested_max_delay: Duration::ZERO,
 			start: Some(2),
 			priority: 0,
 			requested: Some(2),
@@ -2860,6 +2868,39 @@ mod tests {
 			assert!(!log.stops().is_empty());
 		}
 		assert!(log.closes().is_empty());
+	}
+
+	/// A peer opening streams at once gets a budget of them accepted per poll, leaving the
+	/// rest for later so the session's other tasks run in between.
+	#[kio::test]
+	async fn a_flood_of_uni_streams_yields() {
+		use crate::transport::poll::Session as _;
+
+		let (local, peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(local.clone()),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: Version::Lite07,
+			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let mut accept = UniAccept::new(subscriber, Vec::new());
+		// Held open and empty, so each accepted stream waits on its type.
+		let mut opened = Vec::new();
+		for _ in 0..1024 {
+			opened.push(peer.open_uni(Default::default()).await.unwrap());
+		}
+
+		assert!(accept.poll(&kio::Waiter::noop()).is_pending());
+		assert!(
+			local.poll_accept_uni(&kio::Waiter::noop()).is_ready(),
+			"one poll accepted every stream"
+		);
 	}
 
 	/// A peer keeping datagrams ready gets a budget of them routed per poll, leaving the
@@ -3971,6 +4012,91 @@ mod tests {
 		}
 	}
 
+	/// SUBSCRIBE_START at group 0 and SUBSCRIBE_END at 1: the publisher ended the track
+	/// owing group 0.
+	fn owed_responses(version: Version) -> Vec<u8> {
+		let mut responses = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut responses, version.into());
+		lite::SubscribeResponse::Start(lite::SubscribeStart {
+			largest: None,
+			starts: vec![Some(0)],
+		})
+		.encode(&mut encoder, version)
+		.unwrap();
+		lite::SubscribeResponse::End(lite::SubscribeEnd { group: 1, error: None })
+			.encode(&mut encoder, version)
+			.unwrap();
+		responses
+	}
+
+	/// Drive the subscriber with a peer's response bytes and FIN, owing a group that never
+	/// arrives, then close the session: the track ends with the session's error.
+	async fn check_owed_tail_death(version: Version, responses: Vec<u8>) {
+		let session = crate::lite::test_transport::ScriptedSession::eof(responses);
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			subscriber,
+			path: Path::from_static("room"),
+			epoch: None,
+			name: "video".to_string(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
+		let mut reader = broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let gate = serve.gate();
+		let mut running = TrackServeRun {
+			serve,
+			state: TrackRunState::Serve(serving),
+			gate,
+		};
+		assert!(
+			kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending(),
+			"{version:?}: the tail still owes group 0"
+		);
+		crate::transport::poll::Session::close(&session, crate::SessionError::App(7).to_code(), "died");
+		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready());
+		let res = reader.recv_group().await.err();
+		assert!(matches!(res, Some(Error::Session(_))), "{version:?}: {res:?}");
+	}
+
+	#[kio::test]
+	async fn an_owed_tail_aborts_at_session_death() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			check_owed_tail_death(version, owed_responses(version)).await;
+		}
+	}
+
+	/// Both runtimes abort a track whose tail the other's publisher still owed when the
+	/// session died.
+	#[kio::test]
+	#[ignore = "requires Bun; run by just test bare-fin in interop CI"]
+	async fn owed_tail_death_interop() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let responses =
+				crate::test_interop::owed_tail(crate::Version::from(version).alpn(), owed_responses(version));
+			check_owed_tail_death(version, responses).await;
+		}
+	}
+
 	/// Removing a subscription both stops delivery and releases the session's handle
 	/// on the producer, so the track (its cached groups, its stats subscription) ends
 	/// rather than outliving the subscription it belonged to.
@@ -4733,19 +4859,27 @@ mod tests {
 		}
 	}
 
-	/// A session that dies hands a live track back with the session's error, but finishes one
-	/// whose subscription the publisher already ended, as the driver's cleanup does.
+	/// A session that dies before a tail settles hands the track back with the session's error,
+	/// even one the publisher ended, and the abort `TrackServeRun` commits then ends readers
+	/// cleanly only if the declared end settled: SUBSCRIBE_END on lite-05+, the FIN before it.
 	#[kio::test]
-	async fn internal_session_end_gives_back_live_and_finishes_ended() {
+	async fn internal_session_end_aborts_an_unsettled_tail() {
 		use crate::transport::poll::Session as _;
-		for ended in [false, true] {
+		// The publisher ended the track; whether its last group finished.
+		for (version, ended) in [
+			(Version::Lite04, None),
+			(Version::Lite04, Some(false)),
+			(Version::Lite04, Some(true)),
+			(Version::Lite05, Some(false)),
+			(Version::Lite05, Some(true)),
+		] {
 			let (session, peer) = crate::transport::memory::pair(Default::default());
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
 				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
-				version: VERSION,
+				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_hop: None,
 				cost: None,
@@ -4766,7 +4900,15 @@ mod tests {
 			assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
 			// Held for the whole round: a dropped tail settles at once.
 			let tail = kio::Producer::new(Tail::default());
-			if ended {
+			let mut group = serving.serving.append_group().unwrap();
+			if let Some(finished) = ended {
+				if finished {
+					group.finish().unwrap();
+				}
+				if version.has_track_stream() {
+					serving.serving.finish_at(Position::group(1), None).unwrap();
+				}
+				// The tail machine has not seen group 0 accounted for, so it never settles.
 				serving.mode = ServeMode::Tail {
 					settle: Settle::new(&serve.subscriber.runtime, tail.consume()),
 					owed: Some(std::iter::once(0..1).collect()),
@@ -4776,13 +4918,23 @@ mod tests {
 			}
 			peer.close(crate::SessionError::Unauthorized.to_code(), "revoked");
 			let end = serving.poll(&serve, &kio::Waiter::noop());
+			let Poll::Ready(ServeEnd::GiveBack(err @ Error::Session(crate::SessionError::Unauthorized))) = end else {
+				panic!("{version:?} {ended:?}: the tail must hand the track back");
+			};
+			let track = serving.serving.clone();
+			serving.serving.abort(err).unwrap();
+			let outcome = track.poll_closed(&kio::Waiter::noop());
 			match ended {
-				true => assert!(matches!(end, Poll::Ready(ServeEnd::Finished))),
-				false => assert!(matches!(
-					end,
-					Poll::Ready(ServeEnd::GiveBack(Error::Session(crate::SessionError::Unauthorized)))
-				)),
+				Some(true) => assert!(matches!(outcome, Poll::Ready(Ok(()))), "{version:?}: {outcome:?}"),
+				_ => assert!(
+					matches!(
+						outcome,
+						Poll::Ready(Err(Error::Session(crate::SessionError::Unauthorized)))
+					),
+					"{version:?} {ended:?}: {outcome:?}"
+				),
 			}
+			drop(group);
 		}
 	}
 
@@ -6623,9 +6775,6 @@ struct SubStream {
 	/// start sits elsewhere the request-tracked floor stands instead, and demand
 	/// returning here makes the declaration valid again.
 	requested: Option<u64>,
-	/// The max delay the SUBSCRIBE itself carried, fixed for the stream's life: a lite-06+
-	/// SUBSCRIBE_START resolves the start from it, skipping older groups as stale.
-	requested_max_delay: Duration,
 	/// The groups received for this subscription, shared with its [`TrackEntry`].
 	tail: kio::Producer<Tail>,
 	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
@@ -7398,7 +7547,6 @@ impl Establish {
 			stream,
 			id: self.id,
 			max_delay: wire_max_delay(self.subscription.max_delay),
-			requested_max_delay: wire_max_delay(self.subscription.max_delay),
 			start: self.subscription.start(),
 			ranges: self.ranges.clone(),
 			priority: self.subscription.priority,
@@ -8188,14 +8336,15 @@ impl ServeLoop {
 					if self.fetches.is_empty() && crate::util::poll_unwanted(&mut self.demand, waiter).is_ready() {
 						return Poll::Ready(ServeEnd::Idle);
 					}
-					// The publisher already ended the track, so a session that dies now
-					// finishes it, as `SubscriptionCleanup` does, rather than hand it to
-					// another route. A copy whose subscription alone ended is handed back.
+					// The tail is still unsettled, so a session that dies now cuts the track
+					// off, even one the publisher ended: the abort ends readers cleanly only
+					// once the declared end settled. Before lite-05 the FIN is that end, as in
+					// `SubscriptionCleanup`.
 					if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
-						return Poll::Ready(match track {
-							true => ServeEnd::Finished,
-							false => ServeEnd::GiveBack(crate::lite::error::from_transport(err)),
-						});
+						if *track && !serve.subscriber.version.has_track_stream() {
+							let _ = self.serving.finish();
+						}
+						return Poll::Ready(ServeEnd::GiveBack(crate::lite::error::from_transport(err)));
 					}
 					return Poll::Pending;
 				}
@@ -8398,9 +8547,7 @@ impl ServeLoop {
 										// request-tracked floor stands rather than a guess.
 										if active.start == active.requested {
 											let _ = match (serve.subscriber.version.resolves_start(), served) {
-												(true, Some(served)) => {
-													self.serving.start_resolved(served, active.requested_max_delay)
-												}
+												(true, Some(served)) => self.serving.start_resolved(served),
 												_ => self.serving.start_at(served),
 											};
 										}
@@ -8450,6 +8597,10 @@ impl ServeLoop {
 								tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "subscribe covered");
 								let budget = self.serving.subscription().map(|sub| sub.budget());
 								if let Ok(mut tail) = active.tail.write() {
+									// Lite-05+ declared the end with SUBSCRIBE_END instead.
+									if !serve.subscriber.version.has_track_stream() {
+										tail.end();
+									}
 									tail.set_grace(tail::grace(budget.unwrap_or_default()));
 									tail.expire(serve.subscriber.runtime.now());
 								}
@@ -8477,7 +8628,10 @@ impl ServeLoop {
 								// (it bounds presentation-time drift), but it is how long the
 								// subscriber was willing to wait for a late group anyway.
 								if let Ok(mut tail) = active.tail.write() {
-									tail.end();
+									// Lite-05+ declared the end with SUBSCRIBE_END instead.
+									if !serve.subscriber.version.has_track_stream() {
+										tail.end();
+									}
 									tail.set_grace(tail::grace(
 										subscription.map(|sub| sub.budget()).unwrap_or_default(),
 									));
