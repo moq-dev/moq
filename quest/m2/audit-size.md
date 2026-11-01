@@ -2,7 +2,7 @@
 
 ## Goal
 
-Growth in release binaries, the FFI library, WASM, and JS bundles since the
+Growth in release binaries, the FFI library, and JS bundles since the
 previous run is explained, fixed, or planned.
 
 ## Plan
@@ -38,8 +38,11 @@ The [2026-10-31 Nightly](https://github.com/moq-dev/moq/actions/runs/41204380716
 measured source `38566f5a84cb07bb756aae43f6dc902f1abacec2`. Its last retained
 comparison was 2026-10-24, source
 `0513c07369357ae0ecd6109d0f6afc61d16b597f`. These are a week's changes,
-not one night's. Counts below are the actual uploaded consumer artifacts,
-except the explicitly labeled minimal native libraries.
+not one night's. Native, Python, and Swift counts are the actual uploaded
+consumer artifacts, except the explicitly labeled minimal native libraries.
+JS rows are not uploaded artifacts: `sh/size/collect.sh` builds the packages
+and `sh/size/bundles.ts` measures synthetic first-load consumer bundles of
+them. Compare JS rows only with JS rows measured the same way.
 
 | Shipping artifact, bytes | October 24 | October 31 |
 |---|---:|---:|
@@ -129,9 +132,9 @@ extra build artifact in the package.
 largest text-symbol increases to `moq_net` (+335,565 bytes), `moq_mux`
 (+208,475), and `mp4_atom` (+200,070). This is approximate namespace
 attribution, not a compressed-byte decomposition. Cross-crate inlining,
-compiler-generated code, and metadata account for other bytes. The existing
-[catalog publish path quest](/quest/m2/catalog-publish-once.md) owns the
-serialization duplication lead. The [bindings size profile
+compiler-generated code, and metadata account for other bytes.
+[moq-dev/moq#7400](https://github.com/moq-dev/moq/pull/7400), merged after
+these measurements, addresses the catalog serialization duplication lead. The [bindings size profile
 quest](/quest/m2/ffi-size-profile.md) requires codec/crypto and FFI throughput
 measurements before adopting opt-level s; no compiler profile was changed.
 
@@ -141,14 +144,9 @@ bindings match the changed public API. `Package.swift` only changes the
 xcframework checksum, at the same length; licenses and README are identical.
 No packaging duplication was found.
 
-### Local WASM baseline
+### WASM
 
-With pinned Rust 1.98.1, `just js wasm` (`wasm-release`, wasm-bindgen web)
-produces 2,771,421 raw bytes and 940,444 bytes through `gzip -n -9`, versus
-2,611,008 / 885,186 at the previous local source
-`78e5b329458e5823415e0fe3f43678170b1df57b` on October 23. The scheduled
-history still has no WASM row. Compare future local builds by this method;
-adding a scheduled row needs an explicit artifact-set transition.
+moq's WASM build was removed on 2026-10-31, so there is no WASM row to repeat.
 
 ## Required
 
@@ -156,7 +154,6 @@ adding a scheduled row needs an explicit artifact-set transition.
 
 ## Related
 
-- [The catalog publish path compiles once](/quest/m2/catalog-publish-once.md)
 - [FFI size profile](/quest/m2/ffi-size-profile.md)
 - [Native synchronous codecs](/quest/m2/native-compression-sync.md)
 - [Native browser codecs](/quest/m2/native-compression-adopt.md)

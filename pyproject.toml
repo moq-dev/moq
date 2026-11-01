@@ -60,6 +60,8 @@ members = ["py/moq-rs"]
 [dependency-groups]
 dev = ["ruff", "maturin", "pyright", "pytest", "pytest-asyncio"]
 docs = ["furo>=2025.12.19", "myst-parser>=5.1.0", "sphinx>=9.1.0"]
+# `just py audit` checks the resolved lock against the advisory database.
+audit = ["pip-audit>=2.10.1"]
 
 [tool.uv]
 build-constraint-dependencies = ["hatchling==1.32.0", "maturin==1.14.1"]

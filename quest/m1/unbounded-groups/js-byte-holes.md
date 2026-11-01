@@ -20,7 +20,7 @@ on front eviction. This half mirrors
 - Test a frame several times the cache window through a relay, read as
   chunks, plus Rust/JS interop of a mid-frame refill. Run
   `just test interop --all`.
-- If [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) is adopted first,
+- If [JS-only @moq/net from Rust](/quest/m2/rs2ts-js.md) is adopted first,
   this shrinks to exposing the streaming read.
 
 Public API: adds a chunked frame read. Wire: the lite wip byte offset, as

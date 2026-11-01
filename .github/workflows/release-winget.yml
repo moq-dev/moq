@@ -21,7 +21,9 @@ name: release-winget
 # submit is a clean no-op (the dry run still works without it).
 
 on:
-  workflow_run:
+  # Publishes only a protected release tag at the run's commit; see
+  # "Require a release tag at the run's commit".
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows:
       - moq-cli
       - moq-relay
@@ -132,6 +134,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.parse.outputs.tag }}
+          IDENTIFIER: ${{ steps.parse.outputs.identifier }}
+          VERSION: ${{ steps.parse.outputs.version }}
         run: |
           names=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
           matched=$(echo "$names" | grep -E -e "$INSTALLERS_REGEX" || true)
@@ -141,7 +145,7 @@ jobs:
             echo "$names" >&2
             exit 1
           fi
-          echo "Dry run OK. Would submit ${{ steps.parse.outputs.identifier }} ${{ steps.parse.outputs.version }} with installer(s):"
+          echo "Dry run OK. Would submit $IDENTIFIER $VERSION with installer(s):"
           echo "$matched"
 
       - name: Check for WINGET_TOKEN

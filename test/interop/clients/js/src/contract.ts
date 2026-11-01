@@ -46,7 +46,20 @@ export type FixtureState = {
 	encodedFrames: number;
 	/** Whether the video rendition is published as enabled; false while {@link InteropControl.disableVideo} holds. */
 	videoEnabled: boolean;
+	/** The audio renditions the catalog advertises, by name, with the format each one encodes. */
+	audio: Record<string, { codec: string; sampleRate: number; numberOfChannels: number }>;
 };
+
+/** The codecs the fixture can encode its tone in, by the publisher's codec name. */
+export const AUDIO_CODECS = ["opus", "aac"] as const;
+/** One of {@link AUDIO_CODECS}. */
+export type AudioCodec = (typeof AUDIO_CODECS)[number];
+
+/** The rate {@link InteropControl.changeAudioRate} moves the capture to: one Opus carries, under the default. */
+export const CHANGED_SAMPLE_RATE = 24000;
+
+/** The name of the second audio rendition {@link InteropControl.addAudioRendition} publishes. */
+export const ALT_AUDIO = "audio-alt";
 
 /** The camera publisher state mirrored onto its element for Playwright. */
 export type CaptureState = {
@@ -170,6 +183,17 @@ export type Sample = {
 	audioCodec?: string;
 	/** The selected audio rendition's channel count. */
 	audioChannels?: number;
+	/** The selected audio rendition's sample rate. */
+	audioSampleRate?: number;
+	/** The selected audio rendition's catalog name. */
+	audioRendition?: string;
+	/** The track the selected audio rendition is served on, which a format change re-mints. */
+	audioTrack?: string;
+	/**
+	 * Root mean square of what reaches `AudioContext.destination`, after the player's volume and mute.
+	 * Absent until the graph exists; zero while nothing is connected to the speakers.
+	 */
+	speakerRms?: number;
 	/**
 	 * Per channel of the graph root, when the page was given the expected tones: the channel's RMS
 	 * and the share of its energy at its own tone, over the last ~170ms it played.
@@ -259,6 +283,16 @@ export type InteropControl = {
 	changeVideoCodec(): void;
 	/** Double the fixture's coded dimensions while keeping its VP8 identity. */
 	resizeVideo(): void;
+	/** Switch the fixture's audio rendition from Opus to AAC without replacing its broadcast. */
+	changeAudioCodec(): void;
+	/** Capture and encode the tone at {@link CHANGED_SAMPLE_RATE} instead of {@link SAMPLE_RATE}. */
+	changeAudioRate(): void;
+	/** Capture and encode the tone in stereo instead of mono. */
+	changeAudioChannels(): void;
+	/** Publish a second audio rendition, {@link ALT_AUDIO}, encoding the same capture. */
+	addAudioRendition(): void;
+	/** Stop publishing {@link ALT_AUDIO}. */
+	removeAudioRendition(): void;
 };
 
 /** The `window` property the commands are published on. */
