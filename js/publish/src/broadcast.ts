@@ -510,9 +510,16 @@ export class Broadcast {
 				if (error) {
 					inner.run((failure) => {
 						const cause = failure.get(error);
-						if (!cause) return;
-						served.abort(cause);
-						recorder?.abort(cause);
+						if (cause) served.abort(cause);
+					});
+				}
+				if (recorder) {
+					// The records end with their media, however it closes, so a reader of only the
+					// records sees the same finish or failure.
+					inner.run((ended) => {
+						const closed = ended.get(served.closed);
+						if (closed instanceof Error) recorder.abort(closed);
+						else if (closed === null) recorder.finish();
 					});
 				}
 				inner.run((gate) => {

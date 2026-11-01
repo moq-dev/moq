@@ -796,6 +796,26 @@ test("each video and audio track publishes HLS records and advertises them once 
 	expect(recorder?.track.closed.peek()).toBeNull();
 });
 
+test("records end with their media however it closes", async () => {
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("ended.hang") });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	await settle();
+
+	const track = video.track.peek();
+	if (!track) throw new Error("expected the video track");
+	const recorder = video.hls(track);
+	if (!recorder) throw new Error("expected HLS records");
+
+	// An application aborting the media directly, not through an encoder, still ends the records.
+	const cause = new Error("media failed");
+	track.abort(cause);
+	await settle();
+	expect(recorder.track.closed.peek()).toBe(cause);
+
+	broadcast.close();
+});
+
 test("hls: false publishes no records", async () => {
 	const broadcast = new Broadcast({
 		enabled: true,
