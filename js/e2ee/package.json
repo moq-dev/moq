@@ -15,7 +15,7 @@
 		".": "./src/index.ts"
 	},
 	"scripts": {
-		"build": "rimraf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
+		"build": "rimraf dist && tsc -b tsconfig.build.json && bun ../common/package.ts && tsc --project test-dts/tsconfig.json",
 		"check": "tsc --noEmit && tsc --noEmit --project bench/tsconfig.json",
 		"test": "bun test --only-failures"
 	},
