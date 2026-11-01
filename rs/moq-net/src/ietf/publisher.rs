@@ -653,6 +653,9 @@ struct Namespaces {
 	/// The update whose request token the acceptor is still verifying. It is answered once
 	/// the verdict lands, while the loop keeps advertising and withdrawing meanwhile.
 	verifying: Option<Verifying>,
+	/// An abandoned verification's credit, kept until the acceptor lets go of it, so a drain
+	/// the request's guard cancels is finished by the next.
+	abandoned: Option<kio::Producer<()>>,
 	/// The auth epoch last applied to `permit`.
 	epoch: u64,
 	/// Whether this discovery cursor includes hidden namespaces.
@@ -676,6 +679,7 @@ impl Namespaces {
 			gate: None,
 			token: None,
 			verifying: None,
+			abandoned: None,
 			epoch: 0,
 			hidden: false,
 			epochs: false,
@@ -4536,11 +4540,15 @@ impl Publisher {
 	}
 
 	/// Drop an unanswered verification, keeping the request's stream credit until the
-	/// acceptor lets go of it.
+	/// acceptor lets go of it. Cancelled, it leaves the credit in `ns` for the next call.
 	async fn abandon_verification(&self, ns: &mut Namespaces) {
 		if let Some(Verifying { verdict, credit, .. }) = ns.verifying.take() {
 			drop(verdict);
-			self.released(&credit).await;
+			ns.abandoned = Some(credit);
+		}
+		if let Some(credit) = &ns.abandoned {
+			self.released(credit).await;
+			ns.abandoned = None;
 		}
 	}
 
@@ -9112,6 +9120,48 @@ mod serve_tests {
 		assert!(
 			matches!(res, Poll::Ready(Err(_))),
 			"answered, the ended token ends the request: {res:?}"
+		);
+	}
+
+	/// The request's token ending while a withdrawn publisher waits for a renewal's
+	/// verification to let go still keeps the request's stream until the application answers.
+	#[kio::test]
+	async fn an_ended_token_does_not_cut_short_a_withdrawal_verification_drain() {
+		let version = Version::Draft22;
+		let (h, mut requests, session, mut running) = token_namespaces(version).await;
+		session.push(&update_with_tokens(&[TOKEN]));
+		let first = taken_token(&mut running, &mut requests).await;
+		let _issued = first.accept(crate::auth::Grant {
+			expires: Some(h.publisher.runtime.now() + Duration::from_secs(1)),
+			..crate::auth::Grant::all()
+		});
+		assert!(futures::poll!(running.as_mut()).is_pending());
+
+		let mut renewal = update_with_tokens(&[&[0x03, 0x00, 0xBB]]);
+		renewal[3] = 4;
+		session.push(&renewal);
+		let request = taken_token(&mut running, &mut requests).await;
+
+		h.publisher.withdrawal.begin();
+		for _ in 0..10 {
+			assert!(
+				futures::poll!(running.as_mut()).is_pending(),
+				"draining the verification"
+			);
+			settle().await;
+		}
+		kio::clock::sim::advance(Duration::from_secs(2)).await;
+		for _ in 0..10 {
+			assert!(
+				futures::poll!(running.as_mut()).is_pending(),
+				"the ended request let go of its stream before the application answered"
+			);
+			settle().await;
+		}
+		drop(request);
+		assert!(
+			futures::poll!(running.as_mut()).is_ready(),
+			"answered, the request ends"
 		);
 	}
 
