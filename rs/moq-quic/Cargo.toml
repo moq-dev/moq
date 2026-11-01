@@ -92,6 +92,11 @@ harness = false
 required-features = ["fuzz"]
 
 [[bench]]
+name = "receive_reuse"
+harness = false
+required-features = ["fuzz"]
+
+[[bench]]
 name = "endpoint"
 harness = false
 required-features = ["fuzz"]
