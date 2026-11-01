@@ -463,7 +463,11 @@ class DecoderTrack {
 	// Counts the timeline restarts this decoder read. A picture decoded before one is from the old
 	// timeline and never presents after it, even when its clock wait already resolved.
 	#generation = 0;
-	// The group each frame in the codec was read from, by timestamp.
+	// The group each frame in the codec was read from, by timestamp. Each output retires its entry and
+	// every one before it. A publisher that never outputs a picture grows this by one entry per chunk;
+	// the maintainer accepted that as an exception to the bounded-state rule (moq-dev/moq#7555,
+	// 2026-11-01), since WebCodecs bounds no codec's pending output, so any cap is a guess that can
+	// evict a picture the codec still owes.
 	#groups = new Map<number, number>();
 
 	// How far past the shared clock's budgets this decoder reaches.
