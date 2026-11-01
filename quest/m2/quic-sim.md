@@ -2,7 +2,7 @@
 
 ## Goal
 
-The `moq-clock` sim drives MoQ sessions and the relay over `moq-quic`, with
+The `kio::clock` sim drives MoQ sessions and the relay over `moq-quic`, with
 configurable latency, loss, reordering, and bandwidth, so MoQ over real QUIC
 (the transport race, relay hops, recovery) is tested deterministically with
 no sockets.

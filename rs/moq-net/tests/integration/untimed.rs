@@ -81,11 +81,11 @@ impl Chain {
 
 	async fn subscribe(&self, track: &str) -> track::Subscriber {
 		let consumer = self.nodes.last().unwrap().consume();
-		let broadcast = moq_clock::timeout(TIMEOUT, consumer.request("room", None))
+		let broadcast = kio::clock::timeout(TIMEOUT, consumer.request("room", None))
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");
-		moq_clock::timeout(TIMEOUT, broadcast.track(track).unwrap().subscribe(None))
+		kio::clock::timeout(TIMEOUT, broadcast.track(track).unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
 			.expect("subscribe")
@@ -94,7 +94,7 @@ impl Chain {
 
 /// The first frame's timestamp of the next group.
 async fn next_frame(subscriber: &mut track::Subscriber) -> Option<Timestamp> {
-	let mut group = moq_clock::timeout(TIMEOUT, subscriber.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.expect("group timeout")
 		.unwrap()
@@ -110,7 +110,7 @@ async fn frame_through(hops: &[&str], info: track::Info) -> (Option<Timestamp>, 
 	let broadcast = chain.nodes[0].create_broadcast("room").unwrap();
 	let mut producer = broadcast.create_track("data", info).unwrap();
 	broadcast.announce(Default::default()).unwrap();
-	moq_clock::sleep(Duration::from_secs(1)).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	let mut subscriber = chain.subscribe("data").await;
 	producer.write_frame(timestamp, &b"frame"[..]).unwrap();
@@ -119,7 +119,7 @@ async fn frame_through(hops: &[&str], info: track::Info) -> (Option<Timestamp>, 
 	(received, subscriber.info().clone())
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn frames_arrive_as_published() {
 	for version in VERSIONS {
 		let (timed, timed_info) = frame_through(&[version], timed()).await;
@@ -141,7 +141,7 @@ async fn frames_arrive_as_published() {
 
 /// A relay forwards an untimed track untimed, and a track it received without a timeline
 /// does not gain one downstream.
-#[moq_clock::test]
+#[kio::test]
 async fn a_relay_forwards_an_untimed_track_untimed() {
 	for hops in [
 		&["moq-transport-18", "moq-transport-22"][..],
@@ -164,7 +164,7 @@ async fn a_relay_forwards_an_untimed_track_untimed() {
 /// The subscription asks for history the way a resume does, with a budget covering it.
 /// moq-transport before draft 22 can only join a past group through a joining FETCH,
 /// which our publisher refuses for groups before the live one, so draft 22 stands in for it.
-#[moq_clock::test]
+#[kio::test]
 async fn an_explicit_start_holds_on_an_untimed_track() {
 	for version in ["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let chain = Chain::new(&[version]).await;
@@ -174,20 +174,20 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 		for _ in 0..5 {
 			producer.write_frame(None, &b"untimed"[..]).unwrap();
 		}
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 
 		let consumer = chain.nodes[1].consume().request("room", None).await.unwrap();
 		let subscription = track::Subscription::default()
 			.with_range(2..)
 			.with_max_delay(Duration::from_secs(30));
-		let mut subscriber = moq_clock::timeout(TIMEOUT, consumer.track("data").unwrap().subscribe(subscription))
+		let mut subscriber = kio::clock::timeout(TIMEOUT, consumer.track("data").unwrap().subscribe(subscription))
 			.await
 			.expect("subscribe timeout")
 			.expect("subscribe");
 
 		let mut got = Vec::new();
 		while got.len() < 3 {
-			let Ok(next) = moq_clock::timeout(TIMEOUT, subscriber.recv_group()).await else {
+			let Ok(next) = kio::clock::timeout(TIMEOUT, subscriber.recv_group()).await else {
 				break;
 			};
 			got.push(next.unwrap().expect("a group").sequence);
@@ -199,14 +199,14 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 
 /// An untimed track's datagram arrives untimed, though lite-05 and lite-06 carry a send
 /// time that the receiver drops.
-#[moq_clock::test]
+#[kio::test]
 async fn datagrams_arrive_as_published() {
 	for version in ["moq-lite-05", "moq-lite-07-wip", "moq-transport-22"] {
 		let chain = Chain::new(&[version]).await;
 		let broadcast = chain.nodes[0].create_broadcast("room").unwrap();
 		let mut producer = broadcast.create_track("data", untimed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 
 		let mut subscriber = chain.subscribe("data").await;
 		// A group first, so the subscription is bound before any datagram lands.
@@ -214,7 +214,7 @@ async fn datagrams_arrive_as_published() {
 		next_frame(&mut subscriber).await;
 
 		producer.append_datagram(None, &b"untimed"[..]).unwrap();
-		let datagram = moq_clock::timeout(TIMEOUT, subscriber.recv_datagram())
+		let datagram = kio::clock::timeout(TIMEOUT, subscriber.recv_datagram())
 			.await
 			.expect("datagram timeout")
 			.unwrap()
@@ -224,14 +224,14 @@ async fn datagrams_arrive_as_published() {
 }
 
 /// A standalone FETCH of an untimed track answers with untimed objects.
-#[moq_clock::test]
+#[kio::test]
 async fn a_fetched_untimed_frame_arrives_untimed() {
 	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18"] {
 		let chain = Chain::new(&[version]).await;
 		let broadcast = chain.nodes[0].create_broadcast("room").unwrap();
 		let mut dynamic = broadcast.requests();
 		broadcast.announce(Default::default()).unwrap();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 
 		let consumer = chain.nodes[1].consume().request("room", None).await.unwrap();
 		let mut waiting = Box::pin(consumer.track("video").unwrap().fetch_group(0, None));
