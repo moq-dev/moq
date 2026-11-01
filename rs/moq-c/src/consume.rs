@@ -495,7 +495,7 @@ impl Consume {
 		&mut self,
 		catalog: Id,
 		index: usize,
-		max_delay: std::time::Duration,
+		delay: moq_mux::container::Delay,
 		on_read: OnStatus,
 	) -> Result<Id, Error>
 	where
@@ -527,10 +527,10 @@ impl Consume {
 							.subscribe(
 								moq_net::track::Subscription::default()
 									.with_priority(C::PRIORITY)
-									.with_max_delay(max_delay),
+									.with_max_delay(delay.max),
 							)
 							.await?;
-						let track = moq_mux::container::Consumer::new(track, container);
+						let track = moq_mux::container::Consumer::new(track, container).with_delay(delay);
 						Self::run_track(on_read, track, close).await
 					})
 					.await

@@ -37,7 +37,7 @@ typedef EncoderInput = MoqVideoEncoderInput;
 /// The codec, bitrate, group mode, and backend preference.
 typedef EncoderOutput = MoqVideoEncoderOutput;
 
-/// What a [Consumer] delivers: an optional resize, a max delay, and whether to keep the decoder's surface (macOS and iOS).
+/// What a [Consumer] delivers: an optional resize, a delay, and whether to keep the decoder's surface (macOS and iOS).
 typedef DecoderOutput = MoqVideoDecoderOutput;
 
 /// One raw picture with its presentation timestamp.

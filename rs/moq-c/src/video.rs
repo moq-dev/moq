@@ -14,7 +14,6 @@
 
 use std::ffi::{c_char, c_void};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use tokio::sync::oneshot;
 
@@ -169,11 +168,12 @@ pub struct moq_video_encoder_frame {
 /// with the `libmoq.a` they link.
 #[repr(C)]
 pub struct moq_video_decoder_output {
-	/// Upper bound on buffering before skipping a stalled group, in
-	/// microseconds. Same congestion-control knob as
-	/// `moq_consume_video`'s `max_delay_us`. 0 = skip aggressively
-	/// (the moq-mux default); set to your playout buffer for a softer skip.
-	pub max_delay_us: u64,
+	/// How far behind the live edge to play: where a cold join starts and when
+	/// a stalled group is skipped. Same knob as `moq_consume_video`'s `delay`.
+	/// Zeroed: start at the newest group and skip aggressively (the moq-mux
+	/// default); set `min_us` to your playout delay and `max_us` at or past it
+	/// for a softer skip.
+	pub delay: crate::api::moq_delay,
 	/// `moq_video_pixel_format` discriminant. Unknown values fail
 	/// [`moq_decode_video`] rather than decoding into an assumed layout.
 	pub format: u32,
@@ -1203,7 +1203,7 @@ pub unsafe extern "C" fn moq_decode_video(
 
 		let mut options = moq_video::decode::Options::new();
 		options.start = start;
-		options.max_delay = Duration::from_micros(raw.max_delay_us);
+		options.delay = raw.delay.into();
 		// The C caller takes packed pixels, so let a backend that can decode
 		// straight to the CPU do that rather than downloading afterwards.
 		options.decoder.output = moq_video::Output::Cpu;
@@ -1505,7 +1505,7 @@ mod follow_tests {
 		});
 		assert_eq!(moved, Ok(None));
 
-		let retried = moq_clock::timeout(Duration::from_secs(60), follower.next())
+		let retried = kio::clock::timeout(Duration::from_secs(60), follower.next())
 			.await
 			.expect("the dropped target is asked for again");
 		assert_eq!(retried.unwrap(), Target::Enabled(Rate::from_mbps(2)));
@@ -1520,7 +1520,7 @@ mod follow_tests {
 
 	/// Retune at every target until the follower goes a minute without one.
 	async fn quiet(follower: &mut Follower, ceiling: Rate, mut set: impl FnMut(Rate) -> Result<(), moq_video::Error>) {
-		while let Ok(bitrate) = moq_clock::timeout(Duration::from_secs(60), follower.next()).await {
+		while let Ok(bitrate) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
 			rate(follower, ceiling, bitrate.unwrap(), &mut set).unwrap();
 		}
 	}

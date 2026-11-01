@@ -1533,7 +1533,7 @@ mod children_tests {
 		let (broadcast, track, media, readers) = children(&mut state).await;
 		state.publish_close(broadcast).unwrap().run().unwrap();
 		for mut reader in readers {
-			let read = moq_clock::timeout(TIMEOUT, reader.recv_group()).await;
+			let read = kio::clock::timeout(TIMEOUT, reader.recv_group()).await;
 			assert!(matches!(
 				read.expect("the track carried on"),
 				Err(moq_net::Error::Unroutable)
@@ -1566,7 +1566,7 @@ mod children_tests {
 
 		state.publish_close(broadcast).unwrap().run().unwrap();
 		for mut reader in readers {
-			let read = moq_clock::timeout(TIMEOUT, reader.recv_group()).await;
+			let read = kio::clock::timeout(TIMEOUT, reader.recv_group()).await;
 			assert!(matches!(
 				read.expect("the track carried on"),
 				Err(moq_net::Error::Unroutable)
@@ -1592,7 +1592,7 @@ mod children_tests {
 		state.publish.media_finish(media).unwrap();
 		state.publish_close(broadcast).unwrap().run().unwrap();
 		for mut reader in readers {
-			let read = moq_clock::timeout(TIMEOUT, reader.recv_group()).await;
+			let read = kio::clock::timeout(TIMEOUT, reader.recv_group()).await;
 			assert!(matches!(read.expect("the track carried on"), Ok(None)));
 		}
 	}

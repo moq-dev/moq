@@ -39,6 +39,7 @@ from moq_ffi import (
     MoqRendition,
 )
 from moq_ffi import MoqDecodeStart as DecodeStart
+from moq_ffi import MoqDelay as Delay
 from moq_ffi import MoqDimensions as Dimensions
 from moq_ffi import MoqVideo as Video
 from moq_ffi import MoqVideoFormat as VideoFormat
@@ -427,6 +428,7 @@ __all__ = [
     "Video",
     "Catalog",
     "Container",
+    "Delay",
     "Dimensions",
     "DecodeStart",
     "AudioFormat",
