@@ -600,6 +600,11 @@ struct Namespaces {
 	/// The gate's token, which the request's lifetime guard watches, so one a later update
 	/// names guards every await from then on.
 	token: Option<kio::Shared<Option<crate::auth::RequestGrant>>>,
+	/// The update whose request token the acceptor is still verifying. It is answered once
+	/// the verdict lands, while the loop keeps advertising and withdrawing meanwhile.
+	verifying: Option<Verifying>,
+	/// Updates that arrived behind [`Self::verifying`], answered in order once it is.
+	queued: VecDeque<super::request_stream::NamespaceUpdate>,
 	/// The auth epoch last applied to `permit`.
 	epoch: u64,
 	/// Whether this discovery cursor includes hidden namespaces.
@@ -622,6 +627,8 @@ impl Namespaces {
 			permit: Default::default(),
 			gate: None,
 			token: None,
+			verifying: None,
+			queued: VecDeque::new(),
 			epoch: 0,
 			hidden: false,
 			epochs: false,
@@ -640,6 +647,15 @@ impl Namespaces {
 	fn permitted(&self, path: &crate::Path) -> bool {
 		self.permit.matches(path.as_str())
 	}
+}
+
+/// A namespace update waiting on the acceptor's verdict for its request token.
+struct Verifying {
+	verdict: crate::auth::RequestVerdict,
+	/// Held by the verification, so the request keeps its stream credit until it ends.
+	credit: kio::Producer<()>,
+	/// The prefix the update moves to once admitted.
+	prefix: Option<crate::Path>,
 }
 
 /// How a subscription's serve loop ended, short of the peer cancelling it.
@@ -718,6 +734,10 @@ enum NamespaceEvent {
 	Closed(Result<(), Error>),
 	/// A requester changes the namespace prefix.
 	Request(super::request_stream::NamespaceUpdate),
+	/// The update at the front of the queue is next to answer.
+	Next,
+	/// The acceptor answered the token of the update being verified.
+	Verified(std::result::Result<crate::auth::Grant, crate::auth::Refusal>),
 	/// An origin-level route (un)announce: whether it is active and whether it
 	/// restarts, `None` once the announce stream ends.
 	Update(Option<(crate::announce::Announce, bool, bool)>),
@@ -4283,6 +4303,8 @@ impl Publisher {
 					woken,
 					updates,
 					gate,
+					verifying,
+					queued,
 					..
 				} = &mut ns;
 				kio::wait(|waiter| {
@@ -4305,6 +4327,16 @@ impl Publisher {
 					}
 					if let Poll::Ready(event) = target.poll_event(&mut finished, &mut goaways, self.version, waiter) {
 						return Poll::Ready(event);
+					}
+					// A token being verified holds up only the updates behind it.
+					match verifying {
+						Some(verifying) => {
+							if let Poll::Ready(answer) = verifying.verdict.poll_grant(waiter) {
+								return Poll::Ready(NamespaceEvent::Verified(answer));
+							}
+						}
+						None if !queued.is_empty() => return Poll::Ready(NamespaceEvent::Next),
+						None => {}
 					}
 					// Each update in flight is answered on its own stream, so many renew at
 					// once and none holds up the announcements behind it.
@@ -4360,6 +4392,10 @@ impl Publisher {
 							break Err(err);
 						}
 					}
+					ns.queued.push_back(update);
+				}
+				NamespaceEvent::Next => {
+					let update = ns.queued.pop_front().expect("an update is queued");
 					let refusal = update
 						.refused
 						.map(|error| ietf::RequestError {
@@ -4380,69 +4416,59 @@ impl Publisher {
 						stream.writer.finish()?;
 						break stream.writer.closed().await;
 					}
-					if update.authorization_token.is_some() {
-						let stream = ns.target.stream().expect("update has a stream");
-						let gate = ns.gate.as_mut().expect("update has a gate");
-						match self.admit_request(stream, gate, update.authorization_token).await {
-							Ok(true) => {
-								ns.epoch = 0;
-								// A first token now guards the request, as the one it named at the
-								// start would have. A renewal replaces the grant in place.
-								if let Some(token) = &ns.token
-									&& token.read().is_none()
-								{
-									*token.lock() = gate.token_guard();
-								}
-							}
-							Ok(false) => break Ok(()),
-							Err(refusal) => {
-								super::request_stream::write_error(
-									&mut stream.writer,
-									request::Kind::SubscribeNamespace,
-									&refusal.error,
-									&refusal.reason,
-									self.version,
-								)
-								.await?;
-								stream.writer.finish()?;
-								break stream.writer.closed().await;
+					let gate = ns.gate.as_ref().expect("update has a gate");
+					match update.authorization_token.filter(|_| gate.token_decides()) {
+						// Answered once the acceptor decides; the loop runs on meanwhile.
+						Some(token) => {
+							let credit = kio::Producer::<()>::default();
+							let hold: crate::auth::Hold = Arc::new(credit.consume());
+							ns.verifying = Some(Verifying {
+								verdict: gate.verify(token.0, Some(hold)),
+								credit,
+								prefix: update.prefix,
+							});
+						}
+						None => {
+							if self
+								.rescope(&mut ns, &mut prefix, &mut announced, update.prefix)
+								.await?
+							{
+								retry_at = None;
+								retry_delay = RETRY_BASE;
 							}
 						}
 					}
-					if let Some(next) = update.prefix.filter(|next| next != &prefix) {
-						// DONE still names the old prefix. After OK every suffix is relative
-						// to the new prefix, so replay the new cursor only after acknowledging.
-						let held: Vec<_> = ns
-							.watched
-							.iter()
-							.filter(|(_, watch)| watch.sent.wanted())
-							.map(|(suffix, _)| suffix.clone())
-							.collect();
-						for suffix in held {
-							self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix)
-								.await?;
-						}
-						ns.watched.clear();
-						prefix = next;
-						let scope = crate::Pattern::subtree(prefix.as_str())
-							.map(|p| p.rebase(prefix.as_str()))
-							.unwrap_or_default();
-						let origin = self
-							.origin
-							.scope(&prefix, &scope)
-							.unwrap_or_else(|_| self.origin.empty());
-						announced = self.advertising(origin, &ns.peer).discovery(ns.hidden).announced();
+				}
+				NamespaceEvent::Verified(answer) => {
+					let Verifying {
+						verdict, prefix: next, ..
+					} = ns.verifying.take().expect("a token is verifying");
+					let gate = ns.gate.as_mut().expect("update has a gate");
+					if let Err(refusal) = gate.admit(&self.runtime, (verdict, answer)) {
+						let stream = ns.target.stream().expect("update has a stream");
+						super::request_stream::write_error(
+							&mut stream.writer,
+							request::Kind::SubscribeNamespace,
+							&refusal.error,
+							&refusal.reason,
+							self.version,
+						)
+						.await?;
+						stream.writer.finish()?;
+						break stream.writer.closed().await;
+					}
+					ns.epoch = 0;
+					// A first token now guards the request, as the one it named at the start
+					// would have. A renewal replaces the grant in place.
+					if let Some(token) = &ns.token
+						&& token.read().is_none()
+					{
+						*token.lock() = gate.token_guard();
+					}
+					if self.rescope(&mut ns, &mut prefix, &mut announced, next).await? {
 						retry_at = None;
 						retry_delay = RETRY_BASE;
 					}
-					let stream = ns.target.stream().expect("update has a stream");
-					stream
-						.writer
-						.encode_message(&ietf::RequestOk {
-							largest: None,
-							active: None,
-						})
-						.await?;
 				}
 				NamespaceEvent::Retry => {
 					retry_at = None;
@@ -4477,6 +4503,7 @@ impl Publisher {
 					// The origin is gone: withdraw everything, then finish the
 					// stream and wait for delivery.
 					self.withdraw_requests(&mut ns.target, &mut ns.requests).await;
+					self.abandon_verification(&mut ns).await;
 					let Some(stream) = ns.target.stream() else {
 						return Ok(());
 					};
@@ -4498,8 +4525,66 @@ impl Publisher {
 
 		// This loop's advertisements die with it.
 		self.withdraw_requests(&mut ns.target, &mut ns.requests).await;
+		self.abandon_verification(&mut ns).await;
 
 		res
+	}
+
+	/// Drop an unanswered verification, keeping the request's stream credit until the
+	/// acceptor lets go of it.
+	async fn abandon_verification(&self, ns: &mut Namespaces) {
+		if let Some(Verifying { verdict, credit, .. }) = ns.verifying.take() {
+			drop(verdict);
+			self.released(&credit).await;
+		}
+	}
+
+	/// Answer an admitted namespace update: move to the prefix it names, if that is new,
+	/// then acknowledge it. Returns whether the prefix moved.
+	async fn rescope(
+		&self,
+		ns: &mut Namespaces,
+		prefix: &mut crate::Path,
+		announced: &mut crate::announce::Consumer,
+		next: Option<crate::Path>,
+	) -> Result<bool, Error> {
+		let moved = match next.filter(|next| next != prefix) {
+			Some(next) => {
+				// DONE still names the old prefix. After OK every suffix is relative to the
+				// new prefix, so replay the new cursor only after acknowledging.
+				let held: Vec<_> = ns
+					.watched
+					.iter()
+					.filter(|(_, watch)| watch.sent.wanted())
+					.map(|(suffix, _)| suffix.clone())
+					.collect();
+				for suffix in held {
+					self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix)
+						.await?;
+				}
+				ns.watched.clear();
+				*prefix = next;
+				let scope = crate::Pattern::subtree(prefix.as_str())
+					.map(|p| p.rebase(prefix.as_str()))
+					.unwrap_or_default();
+				let origin = self
+					.origin
+					.scope(&*prefix, &scope)
+					.unwrap_or_else(|_| self.origin.empty());
+				*announced = self.advertising(origin, &ns.peer).discovery(ns.hidden).announced();
+				true
+			}
+			None => false,
+		};
+		let stream = ns.target.stream().expect("update has a stream");
+		stream
+			.writer
+			.encode_message(&ietf::RequestOk {
+				largest: None,
+				active: None,
+			})
+			.await?;
+		Ok(moved)
 	}
 
 	/// Whether a restart onto `update` replaces one instance the peer holds by epoch with
@@ -8652,6 +8737,200 @@ mod serve_tests {
 			);
 			assert!(wire.is_empty());
 		}
+	}
+
+	/// A SUBSCRIBE_NAMESPACE on `version` for every namespace, served by a publisher whose
+	/// application verifies request tokens, with the requester's stream and the acceptor.
+	async fn token_namespaces(version: Version) -> (Serve, crate::auth::Requests, ScriptedSession, Running) {
+		let auth = crate::auth::Link::new(false);
+		let requests = auth.handle().requests();
+		let h = serve_with_auth(version, auth, Vec::new());
+		settle().await;
+		let session = ScriptedSession::new(Vec::new());
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			.await
+			.unwrap();
+		let msg = ietf::SubscribeNamespace {
+			authorization_token: None,
+			request_id: RequestId(0),
+			namespace: crate::Path::empty(),
+			hidden: false,
+		};
+		let mut running: Running = Box::pin(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
+		assert!(futures::poll!(running.as_mut()).is_pending());
+		assert_eq!(
+			written_since(&session, 0, version),
+			[
+				(ietf::RequestOk::ID, String::new()),
+				(ietf::Namespace::ID, "room".to_string()),
+			],
+			"{version}"
+		);
+		(h, requests, session, running)
+	}
+
+	type Running = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>>>>;
+
+	/// Poll `running` until the acceptor holds a token, which stays unanswered.
+	async fn taken_token(running: &mut Running, requests: &mut crate::auth::Requests) -> crate::auth::Request {
+		for _ in 0..10 {
+			assert!(futures::poll!(running.as_mut()).is_pending(), "verification is pending");
+			if let Poll::Ready(Some(request)) = requests.poll_next(&kio::Waiter::noop()) {
+				return request;
+			}
+			settle().await;
+		}
+		panic!("the acceptor never saw the token");
+	}
+
+	/// The messages written to `session` since `mark`, by type and, for a NAMESPACE or
+	/// NAMESPACE_DONE, suffix.
+	fn written_since(session: &ScriptedSession, mark: usize, version: Version) -> Vec<(u64, String)> {
+		let wire = session.log.writes.lock().unwrap().clone();
+		let mut wire = Decoder::new(&wire[mark..], version.into());
+		let mut messages = Vec::new();
+		while !wire.is_empty() {
+			let id = wire.varint().unwrap();
+			let suffix = match id {
+				ietf::RequestOk::ID => {
+					ietf::RequestOk::decode(&mut wire, version).unwrap();
+					String::new()
+				}
+				ietf::Namespace::ID => ietf::Namespace::decode(&mut wire, version).unwrap().suffix.to_string(),
+				ietf::NamespaceDone::ID => ietf::NamespaceDone::decode(&mut wire, version)
+					.unwrap()
+					.suffix
+					.to_string(),
+				other => panic!("{version}: unexpected message {other:#x}"),
+			};
+			messages.push((id, suffix));
+		}
+		messages
+	}
+
+	/// An update whose token the acceptor is still verifying holds up neither announcements
+	/// nor withdrawals on its stream; it is answered once the acceptor decides.
+	#[moq_clock::test]
+	async fn a_pending_update_token_does_not_hold_up_announcements() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let (h, mut requests, session, mut running) = token_namespaces(version).await;
+			let mark = session.log.writes.lock().unwrap().len();
+			session.push(&update_with_tokens(&[TOKEN]));
+			let request = taken_token(&mut running, &mut requests).await;
+
+			let other = h._origin.announce("other", crate::origin::Route::default()).unwrap();
+			settle().await;
+			assert!(futures::poll!(running.as_mut()).is_pending());
+			drop(other);
+			settle().await;
+			assert!(futures::poll!(running.as_mut()).is_pending());
+			assert_eq!(
+				written_since(&session, mark, version),
+				[
+					(ietf::Namespace::ID, "other".to_string()),
+					(ietf::NamespaceDone::ID, "other".to_string()),
+				],
+				"{version}: advertised while the token is pending, and not answered yet"
+			);
+
+			let _issued = request.accept(crate::auth::Grant::all());
+			assert!(futures::poll!(running.as_mut()).is_pending());
+			assert_eq!(
+				written_since(&session, mark, version)[2..],
+				[(ietf::RequestOk::ID, String::new())],
+				"{version}: answered once verified"
+			);
+		}
+	}
+
+	/// Updates behind one whose token is being verified wait their turn, so their answers
+	/// keep the order they were asked in.
+	#[moq_clock::test]
+	async fn updates_behind_a_pending_token_are_answered_in_order() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let (_h, mut requests, session, mut running) = token_namespaces(version).await;
+			let mark = session.log.writes.lock().unwrap().len();
+			session.push(&update_with_tokens(&[TOKEN]));
+			let request = taken_token(&mut running, &mut requests).await;
+			// Request ID 4; TRACK_NAMESPACE_PREFIX is the one-field tuple "room".
+			session.push(&[0x02, 0, 9, 4, 1, 0x34, 1, 4, b'r', b'o', b'o', b'm']);
+			for _ in 0..10 {
+				assert!(futures::poll!(running.as_mut()).is_pending());
+				settle().await;
+			}
+			assert!(
+				written_since(&session, mark, version).is_empty(),
+				"{version}: the later update was answered ahead of the pending one"
+			);
+
+			let _issued = request.accept(crate::auth::Grant::all());
+			assert!(futures::poll!(running.as_mut()).is_pending());
+			assert_eq!(
+				written_since(&session, mark, version),
+				[
+					(ietf::RequestOk::ID, String::new()),
+					(ietf::NamespaceDone::ID, "room".to_string()),
+					(ietf::RequestOk::ID, String::new()),
+					(ietf::Namespace::ID, String::new()),
+				],
+				"{version}: the token's answer, then the move to the new prefix"
+			);
+		}
+	}
+
+	/// A narrowed session scope withdraws what it no longer covers while an update's token
+	/// is still being verified; the token, once admitted, authorizes beyond that scope.
+	#[moq_clock::test]
+	async fn narrowing_withdraws_while_an_update_token_is_pending() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let (h, mut requests, session, mut running) = token_namespaces(version).await;
+			let mark = session.log.writes.lock().unwrap().len();
+			session.push(&update_with_tokens(&[TOKEN]));
+			let request = taken_token(&mut running, &mut requests).await;
+
+			h.publisher.auth.handle().authorize(&crate::auth::Grant::default());
+			assert!(futures::poll!(running.as_mut()).is_pending());
+			assert_eq!(
+				written_since(&session, mark, version),
+				[(ietf::NamespaceDone::ID, "room".to_string())],
+				"{version}: withdrawn while the token is pending"
+			);
+
+			let _issued = request.accept(crate::auth::Grant::all());
+			assert!(futures::poll!(running.as_mut()).is_pending());
+			assert_eq!(
+				written_since(&session, mark, version)[1..],
+				[
+					(ietf::RequestOk::ID, String::new()),
+					(ietf::Namespace::ID, "room".to_string()),
+				],
+				"{version}: the admitted token covers what the scope no longer does"
+			);
+		}
+	}
+
+	/// A requester that withdraws while an update's token is being verified keeps the
+	/// request's stream, and so its credit, until the application answers.
+	#[moq_clock::test]
+	async fn a_withdrawn_namespace_update_keeps_its_stream_until_the_application_answers() {
+		let version = Version::Draft22;
+		let (_h, mut requests, session, mut running) = token_namespaces(version).await;
+		session.push(&update_with_tokens(&[TOKEN]));
+		let request = taken_token(&mut running, &mut requests).await;
+
+		session.close(crate::lite::test_transport::Close::Reset);
+		for _ in 0..10 {
+			assert!(
+				futures::poll!(running.as_mut()).is_pending(),
+				"the withdrawn request let go of its stream before the application answered"
+			);
+			settle().await;
+		}
+		drop(request.accept(crate::auth::Grant::all()));
+		assert!(
+			futures::poll!(running.as_mut()).is_ready(),
+			"answered, the request ends"
+		);
 	}
 
 	#[moq_clock::test]
