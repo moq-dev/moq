@@ -104,6 +104,9 @@ def main():
     result = json.loads(args.summary.read_text())
     start, end = result['throughput_window_start_ms'], result['throughput_window_end_ms']
     result.update(cpu(groups[args.relay], start, end))
+    # The relay's cost per unit of delivered work: per frame for small messages, per Gbps for bytes.
+    result.update(cpu_us_per_frame=result['cpu_cores'] * 1e6 / result['recv_fps'],
+                  cpu_cores_per_gbps=result['cpu_cores'] * 1000 / result['recv_mbps'])
     result.update(host_window_start_ms=start, host_window_end_ms=end,
                   cpu_scope='cumulative counters linearly interpolated at load window boundaries')
     if args.generator is not None:
