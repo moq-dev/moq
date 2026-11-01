@@ -35,13 +35,13 @@ export function section<T extends z.ZodMiniType>(schema: T, map: string) {
 }
 
 /**
- * A media section's renditions, refusing the catalog if any one is malformed.
+ * A section's rendition or data track map, refusing the catalog if any entry is malformed.
  *
- * Each rendition must parse with `schema`; the issue names the rendition. An unknown container
+ * Each entry must parse with `schema`; the issue names the entry. An unknown container
  * or extension field is not malformed, so it never refuses the catalog. Mirrors the Rust
  * `deserialize_renditions`.
  *
- * @param schema - one rendition's schema.
+ * @param schema - one entry's schema.
  */
 export function renditions<T extends z.ZodMiniType>(schema: T) {
 	return z.pipe(
