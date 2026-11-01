@@ -2433,6 +2433,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
+name = "dtoa"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590"
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4790,10 +4796,12 @@ dependencies = [
  "futures",
  "kio 0.6.2",
  "kio-macros",
+ "rand 0.10.3",
  "serde",
  "serde_json",
  "serde_with",
  "smallvec",
+ "test-env",
  "tokio",
 ]
 
@@ -5547,6 +5555,8 @@ dependencies = [
  "percent-encoding",
  "pollster",
  "reqwest",
+ "rind-object-store",
+ "rind-rustls",
  "rustls",
  "sd-notify",
  "serde",
@@ -5555,6 +5565,7 @@ dependencies = [
  "terminal_size",
  "test-env",
  "tokio",
+ "tokio-util",
  "tower-http 0.7.1",
  "tracing",
  "url",
@@ -5659,9 +5670,10 @@ dependencies = [
  "percent-encoding",
  "rand 0.10.3",
  "reqwest",
+ "rind",
+ "rind-rustls",
  "serde",
  "serde_json",
- "sha2 0.11.1",
  "thiserror 2.0.21",
  "tokio",
  "tower",
@@ -5910,6 +5922,7 @@ dependencies = [
  "moq-stats",
  "moq-tokio",
  "moq-uring",
+ "prometheus-client",
  "qmux 0.7.0",
  "rand 0.10.3",
  "rcgen 0.14.10",
@@ -6198,6 +6211,7 @@ dependencies = [
  "moq-quic",
  "moq-shaper",
  "moq-sock",
+ "moq-tokio",
  "noq-proto",
  "notify",
  "pin-project-lite",
@@ -8439,6 +8453,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
+name = "prometheus-client"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1784dc11a05f5a8f57c4a62915686be140f24f70301290b997e317241fa9ffc2"
+dependencies = [
+ "dtoa",
+ "itoa",
+ "parking_lot",
+ "prometheus-client-derive-encode",
+]
+
+[[package]]
+name = "prometheus-client-derive-encode"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01e34894696ff94f64a20c2c373a6440903e9c2789a303d68ec6e6f953f890e4"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "proptest"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9029,9 +9066,9 @@ dependencies = [
 
 [[package]]
 name = "rind"
-version = "0.1.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdc0a91565c59d87e36dcb47a73b2c5fd252b3cd7017920aec393875f1c4c0df"
+checksum = "460a4041e5ae933ff4e2c11aad0d05a60ddf21a89eaea0806520b8c50f1d5727"
 dependencies = [
  "cfg-if",
  "curve25519-dalek",
@@ -9045,6 +9082,27 @@ dependencies = [
  "libcrux-p256",
  "libcrux-poly1305",
  "libcrux-traits",
+]
+
+[[package]]
+name = "rind-object-store"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd6733c2630ffae76432b1d1a9c4e43febf2a4959292e43c9a922978f11b550a"
+dependencies = [
+ "object_store",
+ "rind",
+ "rustls-pki-types",
+]
+
+[[package]]
+name = "rind-rustls"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10988f0bacd30c97c41510648647d97d68fdef593f737724dd05d5cdb72d948d"
+dependencies = [
+ "rind",
+ "rustls",
 ]
 
 [[package]]
