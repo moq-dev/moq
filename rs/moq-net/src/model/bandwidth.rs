@@ -879,8 +879,12 @@ impl Plan {
 	/// Tiers above its own are served first either way, so only its own tier is walked
 	/// again, with one more entry sharing it, as far as where it would be served.
 	fn rejoin(&self, want: Want) -> u64 {
-		let start = self.order.partition_point(|served| served.want.priority > want.priority);
-		let end = self.order.partition_point(|served| served.want.priority >= want.priority);
+		let start = self
+			.order
+			.partition_point(|served| served.want.priority > want.priority);
+		let end = self
+			.order
+			.partition_point(|served| served.want.priority >= want.priority);
 		let at = self.order.partition_point(|served| served.want.order() < want.order());
 		let mut budget = self.order.get(start).map_or(self.leftover, |served| served.budget);
 		let mut remaining = (end - start + 1) as u64;
@@ -1119,8 +1123,8 @@ mod tests {
 		assert_eq!(allocate(bps(1_000_000), &[want(0, VIDEO, 1_000)], 7), None);
 	}
 
-	/// One share's slice, re-dividing every tier for it alone: the allocator before
-	/// shares read one division, kept to check that division against.
+	/// One share's slice, dividing every tier again for it alone: the reference a shared
+	/// division is checked against.
 	fn sequential(estimate: Rate, wants: &[Want], id: u64) -> Option<Rate> {
 		let mut budget = estimate.as_bps();
 		let mut tier = wants.iter().map(|want| want.priority).max();
@@ -1164,7 +1168,11 @@ mod tests {
 				})
 				.collect();
 			let estimate = bps(next(count * 1_600));
-			let active: Vec<Want> = entries.iter().filter(|(_, active)| *active).map(|(want, _)| *want).collect();
+			let active: Vec<Want> = entries
+				.iter()
+				.filter(|(_, active)| *active)
+				.map(|(want, _)| *want)
+				.collect();
 
 			let plan = plan(
 				estimate,
@@ -1187,7 +1195,11 @@ mod tests {
 						sequential(estimate, &rejoined, want.id)
 					}
 				};
-				assert_eq!(plan.grant(want.id), expected, "{want:?} among {entries:?} sharing {estimate:?}");
+				assert_eq!(
+					plan.grant(want.id),
+					expected,
+					"{want:?} among {entries:?} sharing {estimate:?}"
+				);
 			}
 		}
 	}

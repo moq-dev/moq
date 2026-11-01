@@ -9,7 +9,7 @@
  */
 import { Signal } from "@moq/signals";
 import { Allocator, type Reservation } from "../src/bandwidth.ts";
-import { Producer as TrackProducer, type Subscriber } from "../src/track.ts";
+import { type Subscriber, Producer as TrackProducer } from "../src/track.ts";
 
 interface Shape {
 	connections: number;
@@ -107,8 +107,10 @@ class Connection {
 	check(): void {
 		for (const [index, slot] of this.slots.entries()) {
 			const expected = this.expected(index);
-			if (slot.reservation.peek() !== expected) throw new Error(`reservation ${index} peeked ${slot.reservation.peek()}, expected ${expected}`);
-			if (slot.reservation.rate.peek() !== expected) throw new Error(`reservation ${index} published ${slot.reservation.rate.peek()}, expected ${expected}`);
+			if (slot.reservation.peek() !== expected)
+				throw new Error(`reservation ${index} peeked ${slot.reservation.peek()}, expected ${expected}`);
+			if (slot.reservation.rate.peek() !== expected)
+				throw new Error(`reservation ${index} published ${slot.reservation.rate.peek()}, expected ${expected}`);
 		}
 	}
 

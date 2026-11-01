@@ -65,7 +65,7 @@ test("an unregistered share has no grant", () => {
 	expect(allocate(1_000_000, [want(0, VIDEO, 1_000)], 7)).toBeUndefined();
 });
 
-/** One share's slice, re-dividing every tier for it alone: the allocator before reservations read one division. */
+/** One share's slice, dividing every tier again for it alone: the reference a shared division is checked against. */
 function sequential(estimate: number, wants: readonly Want[], id: number): number | undefined {
 	let budget = estimate;
 	let tier: number | undefined = Math.max(...wants.map((want) => want.priority));
@@ -103,7 +103,9 @@ test("one division matches each share dividing alone", () => {
 
 		for (const { want, active: demanded } of entries) {
 			// An idle reservation reads what it would get were it added after the others.
-			const expected = demanded ? sequential(estimate, active, want.id) : sequential(estimate, [...active, want], want.id);
+			const expected = demanded
+				? sequential(estimate, active, want.id)
+				: sequential(estimate, [...active, want], want.id);
 			const actual = demanded ? plan.grant(want.id) : plan.rejoin(want.priority, want.max);
 			expect({ want, actual }).toEqual({ want, actual: expected });
 		}

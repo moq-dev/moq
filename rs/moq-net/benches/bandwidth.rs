@@ -178,7 +178,10 @@ const SHAPES: [Shape; 11] = [
 	Shape::new(64, 64),
 	Shape::new(256, 256),
 	Shape::new(64, 4),
-	Shape { idle: true, ..Shape::new(64, 1) },
+	Shape {
+		idle: true,
+		..Shape::new(64, 1)
+	},
 	Shape {
 		observers: 4,
 		..Shape::new(64, 1)
@@ -337,7 +340,11 @@ impl Connection {
 
 	fn toggle_estimate(&mut self) {
 		let per = self.kbps / self.slots.len() as u64;
-		let next = if per == ESTIMATES_KBPS[0] { ESTIMATES_KBPS[1] } else { ESTIMATES_KBPS[0] };
+		let next = if per == ESTIMATES_KBPS[0] {
+			ESTIMATES_KBPS[1]
+		} else {
+			ESTIMATES_KBPS[0]
+		};
 		self.kbps = next * self.slots.len() as u64;
 		self.estimate.set(Some(Rate::from_kbps(self.kbps))).unwrap();
 	}

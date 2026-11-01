@@ -111,8 +111,7 @@ try {
 			rows.set(variant, []);
 			await pages.get(variant)?.evaluate("globalThis.measure()");
 			const measured = rows.get(variant);
-			if (measured?.length !== ROWS[benchmark])
-				throw new Error(`incomplete rows: ${variant}`);
+			if (measured?.length !== ROWS[benchmark]) throw new Error(`incomplete rows: ${variant}`);
 			samples.push({ round, variant, rows: measured });
 			await Bun.write(
 				values.out,
