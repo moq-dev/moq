@@ -2388,7 +2388,7 @@ export class Requests {
  * Yielded by {@link Requests.requested}. {@link prepare} then {@link Prepared.publish}
  * resolves it with a new exact-path broadcast; {@link serve} answers with a held broadcast;
  * {@link reject} resolves it with an error.
- * Advancing the iterator or closing it without either rejects the request.
+ * Advancing the iterator or closing it without answering rejects the request.
  *
  * @public
  */

@@ -6173,8 +6173,8 @@ pub struct Request {
 	// broadcast for repeat requests.
 	home: kio::Shared<ServeState>,
 
-	// Applications publish answers into this origin; session-forwarded claims accept
-	// their peer's already-routed broadcast directly instead.
+	// Applications can prepare answers in this origin; a session-forwarded request
+	// can only serve its peer's already-routed broadcast.
 	publisher: Option<Producer>,
 }
 
