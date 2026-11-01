@@ -5743,10 +5743,32 @@ fn without_runtime() {
 
 #[tokio::test]
 async fn server_client_roundtrip() {
+	server_client_run_end("moq-lite-07-wip").await;
+}
+
+#[tokio::test]
+async fn server_client_run_end_draft18() {
+	server_client_run_end("moq-transport-18").await;
+}
+
+#[tokio::test]
+async fn server_client_run_end_draft20() {
+	server_client_run_end("moq-transport-20").await;
+}
+
+#[tokio::test]
+async fn server_client_run_end_draft22() {
+	server_client_run_end("moq-transport-22").await;
+}
+
+/// Finishing content and withdrawing a run are distinct from aborting an open track, and a
+/// follower picks up the next run by announcement over every protocol. The aborted track keeps
+/// the error its wire carries, so readers follow runs by lifecycle, not by error kind.
+async fn server_client_run_end(version: &str) {
 	// Server side: bind, set a publish origin, accept incoming sessions.
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let server = MoqServer::new(MoqServerConfig {
-		versions: vec!["moq-lite-07-wip".into()],
+		versions: vec![version.into()],
 		bind: Some("127.0.0.1:0".into()),
 		tls: localhost_tls(),
 		publish: Some(server_origin.clone()),
@@ -5777,7 +5799,7 @@ async fn server_client_roundtrip() {
 	// Client side: connect, subscribe via a consume origin.
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let client = MoqClient::new(MoqClientConfig {
-		versions: vec!["moq-lite-07-wip".into()],
+		versions: vec![version.into()],
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
 		consume: Some(client_origin.clone()),
@@ -5811,8 +5833,28 @@ async fn server_client_roundtrip() {
 	let announcement = next_announced(&announced).await;
 	assert_eq!(announcement.prefix, "hello");
 
-	// Subscribe to the audio track and verify a frame round-trips.
-	let bc = await_announced(&consumer, "hello").await;
+	// Follow the path as a player does, then subscribe and verify a frame round-trips.
+	let following = consumer.follow("hello".into(), None).unwrap();
+	let bc = kio::clock::timeout(TIMEOUT, following.available())
+		.await
+		.expect("timed out waiting for the first run")
+		.unwrap();
+	let unfinished = broadcast
+		.publish_track("unfinished".into(), Some(timed_info()))
+		.unwrap();
+	let unfinished_consumer = bc.subscribe_track("unfinished".into(), None).await.unwrap();
+	let group = unfinished.create_group(0).unwrap();
+	group.write_frame(group_frame(b"still live")).unwrap();
+	group.finish().unwrap();
+	assert_eq!(
+		kio::clock::timeout(TIMEOUT, unfinished_consumer.read_frame())
+			.await
+			.expect("unfinished track read timed out")
+			.unwrap()
+			.unwrap()
+			.payload,
+		b"still live"
+	);
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&bc).await.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -5849,10 +5891,65 @@ async fn server_client_roundtrip() {
 	assert_eq!(frame.payload, payload);
 	assert_eq!(frame.timestamp_us, 1_000_000);
 
-	// Clean up. Exercise `shutdown()` on the client side and the underlying
-	// `cancel(code)` on the server side, so both shutdown paths run.
 	media.finish().unwrap();
+	assert!(
+		kio::clock::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
+			.await
+			.expect("media end timed out")
+			.unwrap()
+			.is_none(),
+		"{version}: finished media did not end cleanly"
+	);
 	broadcast.close().unwrap();
+	let Err(error) = kio::clock::timeout(TIMEOUT, unfinished_consumer.read_frame())
+		.await
+		.expect("unfinished track end timed out")
+	else {
+		panic!("withdrawal falsely declared the unfinished track complete");
+	};
+	if version == "moq-lite-07-wip" {
+		assert_protocol(&error, crate::error::MoqErrorScope::Stream, MoqProtocolKind::Unroutable);
+	} else {
+		// The IETF PUBLISH_DONE registry has no Unroutable, so the publisher sends INTERNAL_ERROR
+		// and the reader keeps it. Neither TRACK_ENDED nor an EOF fits withdrawn content.
+		assert!(matches!(error, MoqError::Internal { .. }), "{version}: {error:?}");
+	}
+	while kio::clock::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("catalog end timed out")
+		.unwrap()
+		.is_some()
+	{}
+	kio::clock::timeout(TIMEOUT, bc.closed())
+		.await
+		.expect("broadcast end timed out")
+		.unwrap();
+
+	// The announcement, not the track's error, ends the run.
+	match next_event(&announced).await {
+		MoqAnnounceEvent::End { announce } => assert_eq!(announce.prefix, "hello"),
+		other => panic!("{version}: expected the run's end, got {other:?}"),
+	}
+
+	// A replacement run at the same path reaches the follower on its next `available()`.
+	let replacement = create_announced(&server_origin, "hello");
+	let replacement_media = MoqMediaTrackProducer::audio(
+		&replacement,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, opus_head()),
+	)
+	.unwrap();
+	let next = kio::clock::timeout(TIMEOUT, following.available())
+		.await
+		.unwrap_or_else(|_| panic!("{version}: the next run was never handed out"))
+		.unwrap();
+	let next_track = subscribe_audio(&next).await;
+	roundtrip(&replacement_media, &next_track, b"next run", 2_000_000).await;
+	replacement_media.finish().unwrap();
+	replacement.close().unwrap();
+	following.cancel();
+
+	// Exercise both shutdown paths after content ended with the session still open.
 	cs.shutdown();
 	cs.closed().await.unwrap();
 	server_session.cancel(0);

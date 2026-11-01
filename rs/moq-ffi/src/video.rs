@@ -498,7 +498,7 @@ impl VideoProducer {
 /// pixel format declared by the [`MoqVideoEncoderInput`] passed at publish time.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqVideoProducer {
 	inner: Arc<std::sync::Mutex<Option<VideoProducer>>>,

@@ -374,8 +374,8 @@ impl MoqBroadcastProducer {
 
 	/// End the broadcast for good: retract it, serve no new tracks, and finalize the catalog.
 	///
-	/// Every track handle still open on it ends with `Unroutable`, the way a reader sees a
-	/// publisher leave, and its later calls fail with `Closed`. Finish a track first to end it
+	/// Every track handle still open on it ends with `Unroutable` (`Internal` to a moq-transport
+	/// reader), and its later calls fail with `Closed`. Finish a track first to end it
 	/// cleanly. Every later call on this producer fails with `Closed`; closing again is a no-op.
 	pub fn close(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -632,7 +632,7 @@ impl MoqTrackRequest {
 /// A track to which groups, frames, or datagrams can be published.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
 	inner: std::sync::Mutex<Option<moq_net::track::Producer>>,

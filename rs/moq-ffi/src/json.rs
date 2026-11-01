@@ -87,7 +87,7 @@ mod tests {
 /// still reads the cached group first.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqJsonSnapshotProducer {
 	inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value>>>>,
@@ -280,7 +280,7 @@ impl MoqJsonSnapshotConsumer {
 /// Publishes an ordered log of JSON records, one record per append.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqJsonStreamProducer {
 	inner: std::sync::Mutex<Option<moq_mux::json::Stream<Value>>>,
@@ -407,7 +407,7 @@ impl MoqJsonStreamConsumer {
 /// restated in a fresh group, by a task this producer runs until it is finished or dropped.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqJsonWindowProducer {
 	inner: Arc<std::sync::Mutex<Option<moq_json::window::Producer<Value>>>>,
