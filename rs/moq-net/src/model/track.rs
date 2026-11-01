@@ -6169,9 +6169,6 @@ struct Cursor {
 	drops: Option<Box<DropCursor>>,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
-	/// Groups of a bounded window skipped as stale, which account for it as handed out
-	/// would, until a wider budget owes them again.
-	written_off: RangeSet<u64>,
 }
 
 /// A group a cursor found but has not moved past; see [`Cursor::take`].
@@ -6322,6 +6319,9 @@ struct Filter {
 	/// budget, scanned in the cache in the subscription's order and handed out ahead of the
 	/// walk: each cached group in them is visited once.
 	owed: RangeInclusiveSet<u64>,
+	/// Groups of a bounded window skipped as stale, which account for it as handed out
+	/// would, until a wider budget owes them again.
+	written_off: RangeSet<u64>,
 }
 
 impl Cursor {
@@ -6364,6 +6364,7 @@ impl Cursor {
 				admitted: RangeInclusiveSet::new(),
 				admitted_at: None,
 				owed: RangeInclusiveSet::new(),
+				written_off: RangeSet::new(),
 			};
 			(filter, state.datagram_offset + start, state.cache.clone())
 		};
@@ -6386,7 +6387,6 @@ impl Cursor {
 			skipped: Skipped::default(),
 			drops: None,
 			misses: None,
-			written_off: RangeSet::new(),
 		}
 	}
 
@@ -6542,7 +6542,7 @@ impl Cursor {
 		let accounted = |gap: ops::Range<u64>| {
 			let mut left = RangeSet::new();
 			left.insert(gap.clone());
-			for run in self.written_off.overlapping(&gap) {
+			for run in self.filter.written_off.overlapping(&gap) {
 				left.remove(run.clone());
 			}
 			if let Some(given_up) = given_up {
@@ -6682,7 +6682,9 @@ impl Cursor {
 	/// the cache, and nothing when the budget did not widen.
 	fn reoffer(&mut self, budget: Duration) {
 		for run in self.skipped.widened(budget) {
-			self.written_off.remove(*run.start()..run.end().saturating_add(1));
+			self.filter
+				.written_off
+				.remove(*run.start()..run.end().saturating_add(1));
 			// Judged again, so a drop not reported yet is withdrawn; a reported one stands.
 			if let Some(drops) = &mut self.drops {
 				let span = *run.start()..run.end().saturating_add(1);
@@ -7046,7 +7048,7 @@ impl Cursor {
 				if self.filter.window.end().is_some()
 					&& let Some(end) = consumer.sequence.checked_add(1)
 				{
-					self.written_off.insert(consumer.sequence..end);
+					self.filter.written_off.insert(consumer.sequence..end);
 				}
 				continue;
 			}
@@ -18063,11 +18065,11 @@ mod test {
 		assert!(pool.used() <= 3_000, "growth is reclaimed: {}", pool.used());
 	}
 
-	/// A stale arrival entry whose sequence was later re-served by fetched backfill
-	/// must not leak the replacement into arrival-order subscriptions.
+	/// A stale arrival entry whose sequence was later re-served by fetched backfill must
+	/// not put the replacement in the arrival walk, which a subscriber reads as backfill.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn refilled_sequence_stays_out_of_subscriptions() {
+	async fn a_refilled_sequence_stays_out_of_the_arrival_walk() {
 		let (producer, _pool) = pooled_producer(1 << 40);
 		let dynamic = producer.requests();
 		let consumer = producer.consume();
