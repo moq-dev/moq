@@ -6,7 +6,8 @@ A relay, or a binary embedding the gateway crates beside one, speaks
 everything it serves on one UDP port and one TCP port. UDP carries QUIC
 (WebTransport and raw moq), the WebRTC media path (STUN, DTLS, SRTP) for
 WHIP and WHEP, and SRT. TCP carries TLS-terminated
-HTTP (WebSocket qmux, WHIP and WHEP signaling, HLS, ops), RTMP, and RTMPS.
+HTTP (WebSocket qmux, WHIP and WHEP signaling, HLS, ops), `tls://` qmux,
+RTMP, and RTMPS.
 Upstream delivers the demux and stacks that accept a fed socket or stream;
 `moq-relay` itself serves QUIC and HTTP on them,
 and an embedder such as moq.pro's edge wires WebRTC, RTMP, and SRT, which the
@@ -81,22 +82,9 @@ and goes to WebRTC; any other is dropped and counted. Decided 2026-10-13:
 the responder binds its own port ([relay STUN](/doc/bin/relay/config.md#stun)),
 so the shared port never answers public Binding requests.
 
-### TCP
-
-The 1935 listener downstream already peeks one byte to split RTMPS from RTMP.
-The unified acceptor generalizes it: 0x16 is TLS, terminated here, then the
-first decrypted byte is peeked again; 0x03 is an RTMP handshake and anything
-else is HTTP, which goes to the axum router. A plaintext 0x03 is RTMP and a
-plaintext ASCII method is HTTP. RTMPS clients send no ALPN, so ALPN cannot do
-this. The acceptor yields classified connections; `moq-rtmp`'s
-`accept_stream` already takes any `AsyncRead + AsyncWrite`, and
-`axum_server::Server::from_listener` takes a listener that a channel of
-pre-accepted streams can stand behind.
-
 ## Required
 
 - [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md) - `moq-rtc` serves WHIP and WHEP media from the WebRTC hook and pins ICE tuples
-- [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - one listener carries TLS-terminated HTTP, RTMP, and RTMPS
 - [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - moq-srt drives `srt-protocol` on demuxed packets and the flow table pins its 4-tuples
 
 ## Related
