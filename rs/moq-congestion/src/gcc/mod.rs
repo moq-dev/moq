@@ -305,10 +305,16 @@ impl Gcc {
     }
 
     /// The bytes in flight up to which the current probe cluster may be filled.
+    ///
+    /// In whole packets: a cluster short of a packet's bytes still needs one more, and a sender
+    /// held to the bytes alone would leave it unfinished.
     fn probe_inflight(&self) -> Option<u64> {
         let (bytes, packets, _) = self.prober.remaining()?;
-        let packets = u64::try_from(packets).unwrap_or(0) * u64::from(self.mtu);
-        let bytes = u64::try_from(bytes.bytes()).unwrap_or(0);
+        let mtu = u64::from(self.mtu);
+        let packets = u64::try_from(packets).unwrap_or(0) * mtu;
+        let bytes = u64::try_from(bytes.bytes())
+            .unwrap_or(0)
+            .next_multiple_of(mtu);
         Some(self.in_flight + bytes.max(packets))
     }
 }
@@ -462,6 +468,12 @@ impl Controller for Gcc {
     }
 
     fn probes(&self) -> bool {
+        true
+    }
+
+    /// GoogCC reads a probe at the slower of its send and receive rates, so a cluster held below
+    /// its rate reads no higher, and its size bounds what the duplicates filling it cost.
+    fn paces_probe(&self) -> bool {
         true
     }
 

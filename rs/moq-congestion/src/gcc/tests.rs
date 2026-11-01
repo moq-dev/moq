@@ -343,6 +343,50 @@ fn filled_probes_raise_the_estimate() {
     );
 }
 
+/// A cluster short of a packet's bytes leaves room for a whole packet, which ends it, rather than
+/// holding the sender to the bytes and leaving it unfinished
+#[test]
+fn probe_inflight_rounds_up_to_a_packet() {
+    let now = Instant::ZERO + Duration::from_secs(1000);
+    let mut gcc = Gcc::new(Init {
+        now,
+        mtu: MTU,
+        rtt: Duration::from_millis(100),
+        max_pacing_rate: None,
+    });
+    // 3000 bytes, two and a half packets
+    gcc.prober
+        .create_probe_cluster(&api::transport::ProbeClusterConfig {
+            at_time: timestamp(now),
+            target_data_rate: DataRate::from_bytes_per_sec(200_000),
+            target_duration: TimeDelta::from_millis(15),
+            min_probe_delta: TimeDelta::from_millis(2),
+            target_probe_count: 1,
+            id: 1,
+        });
+    let mut in_flight = 0;
+    for _ in 0..2 {
+        in_flight += u64::from(MTU);
+        gcc.on_sent(Sent {
+            now,
+            bytes: MTU,
+            in_flight,
+        });
+    }
+    assert_eq!(
+        gcc.metrics().probe_inflight,
+        Some(in_flight + u64::from(MTU))
+    );
+
+    in_flight += u64::from(MTU);
+    gcc.on_sent(Sent {
+        now,
+        bytes: MTU,
+        in_flight,
+    });
+    assert_eq!(gcc.metrics().probe_inflight, None, "the cluster went on");
+}
+
 /// Receive times a peer controls, however far off, regressing, or unreported, never panic or
 /// leave the estimate outside GoogCC's bounds
 #[test]

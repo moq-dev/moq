@@ -5,7 +5,8 @@
 //! session that wants more than it sends, to resume a stopped rendition, would never find out
 //! the path has room. While the controller probes, this fills the pacing headroom it opens with
 //! duplicates of STREAM data already in flight, up to the session's target, so the probe's
-//! samples measure the path. A duplicate needs no wire change, and repairs a loss of its
+//! samples measure the path. A controller that paces its own probe cluster, as GoogCC does, gets
+//! it filled at its pace instead, since it reads the cluster at the rate it was sent. A duplicate needs no wire change, and repairs a loss of its
 //! original. It is never retransmitted, and a reset stream's data is never sent again, so a
 //! probe never sends past a group's expiry.
 //!
@@ -45,7 +46,8 @@ pub(super) struct BandwidthProbe {
 	/// Until when the probe sits out after a miss
 	resume: Option<Instant>,
 	/// Holds everything sent while probing to `target`, which the controller's probing gain
-	/// alone may reach past
+	/// alone may reach past, unless the controller paces its own probe
+	/// ([`Controller::paces_probe`](crate::congestion::Controller::paces_probe))
 	pacing: Bucket,
 	/// The packet number to resume taking in-flight data from, so the duplicates spread over the
 	/// whole flight, oldest first
@@ -194,8 +196,12 @@ impl Connection {
 			}
 			return Ready::Blocked(None);
 		}
+		// A controller that paces its own probe cluster reads it at the rate it was sent, so the
+		// target would cap the reading; the cluster's size bounds the duplicates instead
 		let mtu = self.path.current_mtu();
-		if let Some(at) = self.bandwidth_probe.pacing.delay(target, bytes, mtu, now) {
+		if !self.path.congestion.paces_probe()
+			&& let Some(at) = self.bandwidth_probe.pacing.delay(target, bytes, mtu, now)
+		{
 			return Ready::Blocked(Some(at));
 		}
 		let estimate = metrics.bandwidth_estimate.unwrap_or(0);

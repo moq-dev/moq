@@ -129,6 +129,18 @@ pub trait Controller: Send + Sync {
         false
     }
 
+    /// Whether each probe is a cluster the controller sizes and paces itself, so a transport
+    /// filling [`ControllerMetrics::probe_inflight`] sends at the controller's [`Controller::pace`]
+    /// rather than holding its duplicates to the session's probe target
+    ///
+    /// A controller that probes by a gain on its estimate for as long as its cycle allows, as
+    /// BBR3 does, leaves the target to bound what its probes cost. One that reads a probe at the
+    /// rate it was sent, as GoogCC does, learns only that rate from a probe held below it, and
+    /// bounds the cost by the cluster's size.
+    fn paces_probe(&self) -> bool {
+        false
+    }
+
     /// Duplicate the controller's state
     fn clone_box(&self) -> Box<dyn Controller>;
 

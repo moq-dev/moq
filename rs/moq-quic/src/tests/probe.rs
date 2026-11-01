@@ -695,11 +695,12 @@ fn rises_to_target() {
 	rises(&compare("rises", scenario, GATE), Duration::from_secs(5));
 }
 
-/// The same under GCC, which probes every five seconds from the application-limited region at
-/// twice its estimate, and reads a probe at the slower of its send and receive rates. The
-/// duplicates filling a probe leave no faster than the target in all, so past a frame's media
-/// they trail the cluster and the reading falls short of the target. This measures how far the
-/// estimate gets, holding the probe's own budgets, until GCC can raise it to the target.
+/// The same under GCC, which probes five seconds after it last probed or entered the
+/// application-limited region, at twice its estimate but no more than 5 Mbit/s, and reads a probe
+/// at the slower of its send and receive rates, so the duplicates fill each cluster at its pace.
+/// The estimate reaches the target only once GCC next probes, later than [`RISE`] here, and never
+/// past its 5 Mbit/s cap, so this measures the rise, holding the probe's own budgets, rather than
+/// asserting it.
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn rises_toward_target_under_gcc() {
@@ -887,6 +888,104 @@ fn probe_inflight_limits_only_an_attempt() {
 	assert!(
 		!conn.app_limited(),
 		"an attempt held back by the bound was application-limited"
+	);
+}
+
+/// A controller that always probes, allowing [`Cluster::INFLIGHT`] in flight, and never limits
+/// the window or the pace
+#[derive(Clone)]
+struct Cluster {
+	paces_probe: bool,
+}
+
+impl Cluster {
+	const INFLIGHT: u64 = 20_000;
+}
+
+impl Controller for Cluster {
+	fn on_sent(&mut self, _sent: congestion::Sent) -> congestion::Packet {
+		Default::default()
+	}
+
+	fn on_ack(&mut self, _ack: congestion::Ack<'_>) {}
+
+	fn on_loss(&mut self, _loss: congestion::Loss<'_>) {}
+
+	fn on_ce(&mut self, _ce: congestion::Ce) {}
+
+	fn on_mtu_update(&mut self, _new_mtu: u16) {}
+
+	fn window(&self) -> u64 {
+		u64::MAX / 2
+	}
+
+	fn pace(&mut self, _now: Instant, _bytes: u64) -> Option<Instant> {
+		None
+	}
+
+	fn metrics(&self) -> congestion::ControllerMetrics {
+		congestion::ControllerMetrics {
+			congestion_window: self.window(),
+			probe_inflight: Some(Self::INFLIGHT),
+			..Default::default()
+		}
+	}
+
+	fn probes(&self) -> bool {
+		true
+	}
+
+	fn paces_probe(&self) -> bool {
+		self.paces_probe
+	}
+
+	fn clone_box(&self) -> Box<dyn Controller> {
+		Box::new(self.clone())
+	}
+
+	fn into_any(self: Box<Self>) -> Box<dyn Any> {
+		self
+	}
+}
+
+impl ControllerFactory for Cluster {
+	fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
+		Box::new((*self).clone())
+	}
+}
+
+/// A controller that paces its own probe gets the inflight it allows filled at its pace, past
+/// what the target's pace would let leave at once; any other is held to the target
+#[test]
+fn paced_probe_fills_past_the_target() {
+	let _guard = subscribe();
+	let sent = |paces_probe| {
+		let mut pair = Pair::default();
+		pair.latency = Duration::from_millis(20);
+		let mut config = client_config();
+		config.transport.congestion = Arc::new(Cluster { paces_probe });
+		let (client_ch, _) = pair.connect_with(config);
+		pair.client_conn_mut(client_ch).set_probe_target(TARGET);
+		let id = pair
+			.client_streams(client_ch)
+			.open(Dir::Uni, Default::default())
+			.unwrap();
+		pair.client_send(client_ch, id).write(&mut &[0; 1400][..]).unwrap();
+		pair.drive_client();
+		let conn = pair.client_conn_mut(client_ch);
+		(conn.stats().path.sent_bandwidth_probe_bytes, conn.bytes_in_flight())
+	};
+
+	let (paced, in_flight) = sent(true);
+	assert!(
+		in_flight + DEFAULT_MTU as u64 > Cluster::INFLIGHT,
+		"{in_flight} bytes in flight, short of the probe's {}",
+		Cluster::INFLIGHT
+	);
+	let (held, _) = sent(false);
+	assert!(
+		held < paced,
+		"{held} probe bytes held to the target, {paced} paced by the controller"
 	);
 }
 
