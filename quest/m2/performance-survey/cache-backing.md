@@ -1,34 +1,33 @@
-# [M] Measure shared cache backing amplification
+# [S] Copy small received frames out of shared receive buffers
 
 ## Goal
 
-Small retained media samples do not pin disproportionately large backing
-allocations when a measured alternative earns its copying cost.
+A small frame a session receives whole is not cached as a slice of the
+transport's receive allocation, so the live heap behind cached received frames
+stays close to what `Pool::used()` bills. Large frames crossing the in-memory
+transport still arrive without a copy.
 
 ## Plan
 
-[Group storage](/rs/moq-net/src/model/group.rs) bills `Bytes::len()` and stores
-the supplied view. [fMP4 import](/rs/moq-mux/src/container/fmp4/import.rs)
-slices samples from a fragment. Selective expiry across groups or tracks can
-leave a small sample holding a large fragment after most logical charges
-disappear. Cache capacity is not a promised hard RSS limit; this is a backing
-amplification hypothesis, not proof of a broken capacity contract.
+[`backing`](/rs/moq-net/benches/backing.rs) measured this in
+[moq-dev/moq#7522](https://github.com/moq-dev/moq/pull/7522). Run it with
+`BACKING_ALLOCS=1 cargo bench -p moq-net --features fuzz --bench backing`.
+[`Reader::poll_read_frame`](/rs/moq-net/src/coding/reader.rs) caches a frame
+that arrives in one transport chunk as that chunk. Under QUIC, that is a slice
+of a datagram. `moq-tokio` copies datagrams into shared 64 KiB receive
+allocations, and a `moq-uring` GRO completion is a single allocation as well.
+With 64 KiB receive allocations, 4 Mbps video and 64 kbps audio retained 1.9x
+the pool's bill with nothing evicted. With the video groups evicted and the
+audio kept, it retained 33x. Copying such frames brought every case back to
+the control (1.01-1.19x). The copy cost 880-1,120 user instructions per frame
+copied, adding 7-16% to ingest.
 
-Benchmark the actual importer and cache, sweeping fragment size × retained
-sample fraction × tracks. Include mixed audio/video, several keyframe groups
-in a fragment, selective expiry and independently allocated samples as a
-control. Measure uniquely owned backing bytes versus `Pool::used()`, copy
-volume, allocations, CPU and delivery latency. Do not double count shared
-backing or assume each slice owns a fresh allocation. Compare continued
-sharing with copying/compaction only where the workload warrants it.
+Pick the copy rule in moq-dev/moq#7522, then land it with the bench as its
+evidence. The size threshold decides how far the copy reaches into
+in-memory transport frames, which currently cross as the publisher's
+allocation.
 
-This covers completed reliable groups. Coordinate with
-receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878))
-and [browser media copies](/quest/m2/performance-survey/browser-media-copies.md).
-Decoded datagrams are already billed to the cache pool
-([moq-dev/moq#6413](https://github.com/moq-dev/moq/pull/6413)) and the media
-reorder queues are bounded ([moq-dev/moq#6453](https://github.com/moq-dev/moq/pull/6453)).
-
-Follow the [survey benchmark contract](/quest/m2/performance-survey/README.md):
-baseline first, paired evidence, equivalent work and nightly coverage. A
-measured no-win is valid. No API or wire change is expected; report actual impact.
+The fMP4 importer is not affected: every sample is copied into its own frame,
+so its retained heap beyond the bill is a constant ~0.3 MB of importer state.
+Its passthrough fragments do keep up to 2x capacity slack, but
+[moq-dev/moq#7232](https://github.com/moq-dev/moq/pull/7232) removes it.
