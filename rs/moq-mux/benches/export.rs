@@ -1,5 +1,10 @@
 //! Container export cost swept over independently varied tracks and queued frames, and the
 //! cost of a live export's poll that nothing new woke.
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "`iter_custom` timings measure the host clock on purpose"
+)]
 use std::task::Poll;
 use std::time::Duration;
 
@@ -189,7 +194,7 @@ fn export_idle(c: &mut Criterion) {
 					let mut opened = open(format, source, stream);
 					// Take what the export lets go now, giving the origin's tasks a turn between polls.
 					while let Ok(chunk) =
-						tokio::time::timeout(Duration::from_millis(10), kio::wait(|waiter| opened.poll_next(waiter)))
+						kio::clock::timeout(Duration::from_millis(10), kio::wait(|waiter| opened.poll_next(waiter)))
 							.await
 					{
 						assert!(chunk, "a live export ended");

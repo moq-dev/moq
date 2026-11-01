@@ -1,14 +1,19 @@
-//! The shared early exit for a group read that found nothing.
+//! The shared early exit for a read that found nothing.
 //!
-//! A read that parks registers on everything that can change its answer: the track, the
-//! subscription, the fills it waits on, and the wall deadlines it judged against. Each of
-//! those notifies on every change, so until one fires, the answer stays the same. [`Idle`]
-//! parks reads through a waiter of its own that records any wake before passing it on to
-//! the task, and answers a read repeated before that wake with the same `Pending`, rather
-//! than walking the whole read path again to reach it.
+//! A read that parks registers on everything that can change its answer: for a group read,
+//! the track, the subscription, the fills it waits on, the route, and the wall deadlines it
+//! judged against; for a frame read, the group and its expiry. Each of those notifies on
+//! every change, so until one fires, the answer stays the same. [`Idle`] parks reads
+//! through a waiter of its own that records any wake before passing it on to the task, and
+//! answers a read repeated before that wake with the same `Pending`, rather than walking
+//! the whole read path again to reach it.
 //!
-//! Only what notifies can be trusted this way. A change the reader makes to its own cursor,
+//! Only what notifies can be trusted this way. A change the reader makes to its own state,
 //! such as moving its range, notifies nothing, so it disarms the gate itself.
+//!
+//! Gates nest: a read through a gate that polls another gated reader passes it the outer
+//! gate's waiter, whose waker stays the same across reads, so the inner gate keeps its arm
+//! and its wake reaches the outer gate on the way to the task.
 
 use std::{
 	sync::{
@@ -18,7 +23,7 @@ use std::{
 	task::{Wake, Waker},
 };
 
-/// Which read parked: a [`Cursor`](super::Cursor) parks the arrival and sequence walks
+/// Which group read parked: a track reader parks the arrival and sequence walks
 /// separately, since one finding nothing says nothing about the other.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Walk {
@@ -36,10 +41,11 @@ impl Walk {
 	}
 }
 
-/// A cursor's parked read, and the waiter it parked on.
-pub(super) struct Idle {
+/// A reader's parked read, and the waiter it parked on. `K` tells apart reads that park
+/// separately, such as a [`Walk`].
+pub(super) struct Idle<K> {
 	/// The read that parked, or `None` while nothing is parked.
-	parked: Option<Walk>,
+	parked: Option<K>,
 	woken: Arc<Woken>,
 	/// Wakes [`Self::woken`].
 	wake: Waker,
@@ -68,7 +74,7 @@ impl Wake for Woken {
 	}
 }
 
-impl Idle {
+impl<K: Copy + Eq> Idle<K> {
 	fn new(task: &Waker) -> Self {
 		let woken = Arc::new(Woken {
 			woken: AtomicBool::new(false),
@@ -84,7 +90,7 @@ impl Idle {
 
 	/// Whether `walk`, read again for `task`, would park exactly as it last did: it parked,
 	/// nothing it parked on has fired since, and it still wakes the same task.
-	pub(super) fn parked(this: &Option<Box<Self>>, walk: Walk, task: &kio::Waiter) -> bool {
+	pub(super) fn parked(this: &Option<Box<Self>>, walk: K, task: &kio::Waiter) -> bool {
 		this.as_ref().is_some_and(|idle| {
 			idle.parked == Some(walk)
 				&& !idle.woken.woken.load(Ordering::Acquire)
@@ -114,12 +120,12 @@ impl Idle {
 	}
 
 	/// Put the gate back after a full read of `walk`, armed if it parked.
-	pub(super) fn finish(mut self: Box<Self>, this: &mut Option<Box<Self>>, walk: Walk, pending: bool) {
+	pub(super) fn finish(mut self: Box<Self>, this: &mut Option<Box<Self>>, walk: K, pending: bool) {
 		self.parked = pending.then_some(walk);
 		*this = Some(self);
 	}
 
-	/// Forget the parked read: the cursor moved in a way nothing notifies.
+	/// Forget the parked read: the reader moved in a way nothing notifies.
 	pub(super) fn disarm(this: &mut Option<Box<Self>>) {
 		if let Some(idle) = this {
 			idle.parked = None;

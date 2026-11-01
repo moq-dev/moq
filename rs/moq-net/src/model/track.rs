@@ -19,6 +19,7 @@ use std::sync::Mutex;
 
 use super::Datagram;
 use super::delivered::Delivered;
+use super::idle;
 use super::skipped::Skipped;
 use crate::ledger::{self, Ledger};
 
@@ -31,7 +32,6 @@ pub(super) use demand::Preferences;
 use demand::Subscriptions;
 
 mod fill;
-mod idle;
 mod miss;
 pub use fill::Fill;
 use fill::FillState;
@@ -6194,7 +6194,7 @@ struct Cursor {
 	misses: Option<Box<miss::Misses>>,
 	/// The group read that last parked, answered again without the walk until something
 	/// it parked on fires, once it first parks.
-	idle: Option<Box<idle::Idle>>,
+	idle: Option<Box<idle::Idle<idle::Walk>>>,
 }
 
 /// A group a cursor found but has not moved past; see [`Cursor::take`].
@@ -7456,13 +7456,17 @@ impl Subscriber {
 	/// already handed out.
 	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		// Ahead of the meter: a read that parks again counts only what a peek skipped.
-		if let Inner::Plain(cursor) = &self.inner
-			&& cursor.parked(idle::Walk::new(ordered), waiter)
-		{
-			if cursor.stale != stats::Content::default() && self.stats.is_tagged() {
-				self.count_stale(&self.stats.meter());
+		let walk = idle::Walk::new(ordered);
+		match &self.inner {
+			Inner::Plain(cursor) if cursor.parked(walk, waiter) => {
+				if cursor.stale != stats::Content::default() && self.stats.is_tagged() {
+					self.count_stale(&self.stats.meter());
+				}
+				return Poll::Pending;
 			}
-			return Poll::Pending;
+			// A resumed read takes its copies' skips only on a full read, which counts them.
+			Inner::Resume(resume, _) if resume.parked(walk, waiter) => return Poll::Pending,
+			_ => {}
 		}
 		match self.poll_peek_group(ordered, waiter) {
 			Poll::Ready(Ok(Some(reserved))) => Poll::Ready(self.take(reserved).map(Some)),
@@ -7553,7 +7557,12 @@ impl Subscriber {
 	pub(super) fn skip_ordered(&mut self, floor: Option<u64>) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.skip_ordered(floor),
-			Inner::Resume(..) => {
+			Inner::Resume(resume, _) => {
+				// What it handed out moves, which nothing it parked on notifies.
+				let end = floor.unwrap_or(u64::MAX);
+				if !self.delivered.covers(0..end) || (floor.is_none() && !self.delivered.contains(u64::MAX)) {
+					resume.disarm();
+				}
 				// Its retention decisions also need the containing reader's past prefix.
 				// This records what is no longer owed, without handing a group out.
 				self.delivered.forget_below(floor.unwrap_or(u64::MAX));
