@@ -92,8 +92,10 @@ and waits up to one second for them to be delivered. An abort skips that.
 
 A broadcast has no finished state. Online means announced, and offline means
 no route is left. The end of content is a track FIN: the publisher finishes
-each track, and a hang broadcast also finishes its catalog. A finished track
-stays servable to the subscribers it already has, including through a relay
+each track, and a hang broadcast also finishes its catalog. A track can also
+finish with an error, such as a replayed recording whose source failed: readers
+get its groups, then the error. Only moq-lite-07 carries that error across a
+hop; older versions reset instead. A finished track stays servable to the subscribers it already has, including through a relay
 whose upstream session has since gone. How long a finished broadcast stays
 announced for late readers is the application's retention policy, such as the
 `--linger` of [`moq import`](/bin/cli), not a protocol state.

@@ -22,7 +22,7 @@ use crate::{
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
-	util::{MaybeBoxedExt, MaybeSendBox},
+	util::BoxFuture,
 };
 
 use super::{Message, Version, cluster, error::request, peer, request_update};
@@ -1000,7 +1000,7 @@ impl Publisher {
 		id: u64,
 		body: ietf::Body,
 		stream: Stream<Transport, Version>,
-	) -> Result<MaybeSendBox<'static, ()>, Error> {
+	) -> Result<BoxFuture<'static, ()>, Error> {
 		let this = self.clone();
 		let mut data = body.decoder(this.version);
 		// Count at dispatch so close cannot pass a request waiting for its first poll.
@@ -1036,7 +1036,7 @@ impl Publisher {
 						tracing::debug!(%err, "subscribe stream error");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			ietf::Fetch::ID => {
 				let msg = match ietf::Fetch::decode_msg(&mut data, this.version) {
@@ -1062,7 +1062,7 @@ impl Publisher {
 						tracing::debug!(%err, "fetch stream error");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			ietf::SubscribeNamespace::ID => {
 				let msg = match ietf::SubscribeNamespace::decode_msg(&mut data, this.version) {
@@ -1097,7 +1097,7 @@ impl Publisher {
 						Ok(()) => {}
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			ietf::SubscribeTracks::ID => {
 				let msg = match ietf::SubscribeTracks::decode_msg(&mut data, this.version) {
@@ -1120,7 +1120,7 @@ impl Publisher {
 						tracing::debug!(%err, "subscribe_tracks stream error");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			ietf::TrackStatus::ID => {
 				let msg = match ietf::TrackStatus::decode_msg(&mut data, this.version) {
@@ -1149,7 +1149,7 @@ impl Publisher {
 						tracing::debug!(%err, "track_status stream error");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type for publisher");
@@ -1167,7 +1167,7 @@ impl Publisher {
 		kind: request::Kind,
 		err: DecodeError,
 		serve: Option<Serve>,
-	) -> MaybeSendBox<'static, ()> {
+	) -> BoxFuture<'static, ()> {
 		let version = self.version;
 		async move {
 			let _serve = serve;
@@ -1175,7 +1175,7 @@ impl Publisher {
 				tracing::debug!(%err, "token refusal failed");
 			}
 		}
-		.maybe_boxed()
+		.boxed()
 	}
 
 	/// Handle a SUBSCRIBE on its bidi stream.
@@ -5788,7 +5788,7 @@ mod group_priority_test {
 					assert!(serve.poll(&kio::Waiter::noop()).is_pending());
 					assert!(log.trail().iter().any(|(_, event)| matches!(event, Sent::Finish)));
 				}
-				track.finish_at(track::Position { group: 5, frame: 5 }).unwrap();
+				track.finish_at(track::Position { group: 5, frame: 5 }, None).unwrap();
 				if !finished {
 					group.finish().unwrap();
 				}
@@ -10581,7 +10581,7 @@ mod serve_tests {
 			}
 			Largest::IdleEnded => {
 				h.track.set_idle();
-				h.track.finish_at(track::Position::group(10)).unwrap();
+				h.track.finish_at(track::Position::group(10), None).unwrap();
 				None
 			}
 			Largest::IdleFinished => {

@@ -28,7 +28,8 @@ pub struct Subscription {
 	/// giving up. This never *adds* delay, since the bound is only reached once newer data
 	/// is already that far ahead. `None` is the publisher's
 	/// [`Info::max_age`](crate::track::Info::max_age) alone, what a reader reaching back
-	/// for history wants.
+	/// for history wants. Read in order, `None` waits at a missing group until it resolves;
+	/// see [`track::Ordered`](crate::track::Ordered) for where that can block.
 	///
 	/// This is the `Subscriber Max Age` on the wire, and it is stored here verbatim so
 	/// what was asked for stays readable. Encoded as milliseconds in a QUIC varint, so
