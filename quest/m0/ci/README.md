@@ -15,12 +15,12 @@ or nightly run; measured low-value redundancy may be retired.
 Measured 2026-10-13 from the org billing API (Oct 1-13, all moq) and a 1-in-4
 sample of job timings:
 
-| Runner | Minutes | List price |
-|---|---|---|
-| macOS | 33k | $2,066 |
-| ARM Linux | 98k | $492 |
-| Windows | 34k | $344 |
-| x86 Linux | 30k | $178 |
+| Runner    | Minutes | List price |
+| --------- | ------- | ---------- |
+| macOS     | 33k     | $2,066     |
+| ARM Linux | 98k     | $492       |
+| Windows   | 34k     | $344       |
+| x86 Linux | 30k     | $178       |
 
 Public repositories are not billed, but the org is capped at 60 concurrent
 hosted jobs and 5 macOS jobs (Team plan), and that macOS cap is the queue.
