@@ -20,8 +20,8 @@ Placed elsewhere (decided 2026-10-27, maintainer):
 
 - Credential leaks also in `release`:
   [m0 security audit](/quest/m0/security-audit/README.md).
-- lite-07 range-list scan (NET-1): owned by
-  [fill-linear](/quest/m1/subscribe-ranges/fill-linear.md).
+- lite-07 range-list scan (NET-1): fixed in
+  [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542).
 - qmux buffering a peer-declared size (NET-3): owned by
   [qmux receive lease](/quest/m2/qmux-receive-lease.md).
 - Media parser fuzzing: owned by [media fuzz](/quest/m2/media-fuzz.md).
