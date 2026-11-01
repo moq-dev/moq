@@ -838,7 +838,7 @@ struct RecvState {
 	datagrams: BytesMut,
 	recv_limiter: WorkLimiter,
 	/// Maps the kernel's receive timestamps, which count on the wall clock, onto `Instant`s
-	wall: moq_clock::WallMap,
+	wall: kio::clock::WallMap,
 }
 
 impl RecvState {
@@ -860,7 +860,7 @@ impl RecvState {
 			recv_buf: recv_buf.into(),
 			datagrams: BytesMut::with_capacity(datagram_capacity),
 			recv_limiter: WorkLimiter::new(RECV_TIME_BOUND),
-			wall: moq_clock::WallMap::default(),
+			wall: kio::clock::WallMap::default(),
 		}
 	}
 
@@ -890,7 +890,7 @@ impl RecvState {
 				Poll::Ready(Ok(msgs)) => {
 					self.recv_limiter.record_work(msgs);
 					let received = Instant::now();
-					self.wall.sample(received, moq_clock::Wall::now());
+					self.wall.sample(received, kio::clock::Wall::now());
 					// Copy the received batch into `datagrams` and split each datagram off as
 					// an owned slice. We can't read directly into `datagrams` and drop
 					// `recv_buf`: once a slice has been handed to a connection the allocation
@@ -910,7 +910,7 @@ impl RecvState {
 						// covers a GRO batch, so only its first datagram reports an arrival.
 						let mut arrival = Some(
 							meta.timestamp
-								.and_then(|ts| self.wall.map(moq_clock::Wall::UNIX_EPOCH.checked_add(ts)?))
+								.and_then(|ts| self.wall.map(kio::clock::Wall::UNIX_EPOCH.checked_add(ts)?))
 								.unwrap_or(received),
 						);
 						while !data.is_empty() {

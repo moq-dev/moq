@@ -92,8 +92,10 @@ and waits up to one second for them to be delivered. An abort skips that.
 
 A broadcast has no finished state. Online means announced, and offline means
 no route is left. The end of content is a track FIN: the publisher finishes
-each track, and a hang broadcast also finishes its catalog. A finished track
-stays servable to the subscribers it already has, including through a relay
+each track, and a hang broadcast also finishes its catalog. A track can also
+finish with an error, such as a replayed recording whose source failed: readers
+get its groups, then the error. Only moq-lite-07 carries that error across a
+hop; older versions reset instead. A finished track stays servable to the subscribers it already has, including through a relay
 whose upstream session has since gone. How long a finished broadcast stays
 announced for late readers is the application's retention policy, such as the
 `--linger` of [`moq import`](/bin/cli), not a protocol state.
@@ -109,7 +111,10 @@ authorization and hidden names work exactly as without one.
   its worker answers each requested path by announcing that exact path under
   the output's own epoch. Restarting one output is then a new epoch every hop
   sees, so a viewer returning within a relay's cache window never gets the old
-  output's groups.
+  output's groups. On moq-lite 07 that announcement is a takeover of the claim:
+  what a viewer already resolved through the claim keeps playing from the
+  output rather than being reset to the new route. A different worker, or a
+  replacement output, never inherits those viewers.
 - **Newest wins.** Among routes at the same prefix, the newest epoch ranks
   first, ahead of cost, and a route without an epoch ranks last. Newest means
   the latest UUIDv7 timestamp, so hosts with skewed clocks can lose a restart
@@ -137,7 +142,9 @@ authorization and hidden names work exactly as without one.
   name instead of stalling viewers on the old sequence. A relay drops its copy
   of the old instance, so a new subscriber never sees its cached groups.
 
-The epoch and the restart message travel on moq-lite 07, which is opt-in.
+The epoch and the restart and takeover messages travel on moq-lite 07, which is
+opt-in. Older versions carry a takeover as an ordinary announcement, so the
+first subscription through a claim is reset once the output's route arrives.
 moq-transport carries the epoch when both sides offer the [epoch
 extension](/draft/moq-epoch), on by default. A restart onto another epoch is
 advertised before the old one is withdrawn, so the path is never absent, and one
@@ -301,13 +308,15 @@ starts) is asked of the track's dynamic handler
 as a fill, which a relay serves by fetching upstream one group at a time, skipping
 a group once every subscriber that asked for it narrows past it; with
 no handler it is reported as dropped once the feed stops waiting for it. One
-evicted after the subscriber saw it cached, but before it read it, is skipped. A relay merges its subscribers' ranges into one upstream request, which
+evicted after the subscriber saw it cached, but before it read it, is asked the same
+way, once: evicted again before it is read, it is reported as dropped. A relay merges its subscribers' ranges into one upstream request, which
 moq-lite-07 carries range by range and older wire versions as the single span
 covering them. A relative or time anchor resolves on the hop that publishes the
 track, and over moq-lite-07, which carries a relative or time start upstream and
 reports the live edge and media time, so a copy resolves the ends itself. A Rust
-moq-transport copy accepts anchors its cache can already
-resolve and sends group bounds upstream; it refuses an unknown time end. Older
+moq-transport copy resolves a relative anchor from the Largest Object its live join
+reports, accepts time anchors its cache can already resolve, and sends group bounds
+upstream; it refuses any other time anchor. Older
 moq-lite versions accept absolute anchors but refuse time anchors and relative anchors other
 than the live and default starts. An untimed track refuses a time anchor. At the live
 edge, a time end
@@ -340,13 +349,13 @@ frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
 
 A publisher refuses a group that starts before a lower one, and so does a
-moq-lite 07 receiver. Since moq-lite 05 and 06 send times look like media time,
-a receiver drops every timestamp it gets over them and the track arrives
-untimed.
-Timestamps received over moq-transport, whose peers may stamp arrival times,
-are not checked. Rust relays preserve them across moq-lite 07 when both peers
-negotiate the [ietf extension](/draft/moq-ietf), which carries their origin and
-keeps them unchecked. A moq-lite peer without it receives that track untimed.
+moq-lite 07 receiver. A receiver passes on the timestamps it gets over moq-lite
+05 and 06 without checking them, since their send times look like media time and
+an older group fetched later would look like a rewind. Timestamps received over
+moq-transport, whose peers may stamp arrival times, are not checked either. A
+relay serves both on over every version. Over moq-lite 07 the
+[ietf extension](/draft/moq-ietf) keeps moq-transport ones unchecked; without
+it, the receiver checks them and may refuse a group that rewinds.
 
 A publisher may [compress](/concept/compression) a track, which pays off for
 repetitive data such as JSON and not for media. Each group's frames become one

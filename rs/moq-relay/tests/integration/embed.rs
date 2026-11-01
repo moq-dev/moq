@@ -56,7 +56,7 @@ async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
 	// listener answers a loopback handshake well inside it, and on Linux the
 	// socket check before this is what proves the port closed.
 	let url: url::Url = format!("https://{quic}/").parse().expect("parse url");
-	let after = tokio::time::timeout(
+	let after = kio::clock::timeout(
 		Duration::from_millis(500),
 		client().with_reconnect(false).connect(url).established(),
 	)
@@ -139,7 +139,7 @@ fn open_sockets() -> std::collections::HashSet<u64> {
 /// worker thread and listener goes through, as opposed to aborting the task.
 async fn stop(trigger: moq_relay::shutdown::Trigger, running: tokio::task::JoinHandle<anyhow::Result<()>>) {
 	trigger.start();
-	tokio::time::timeout(TIMEOUT, running)
+	kio::clock::timeout(TIMEOUT, running)
 		.await
 		.expect("run did not return after the shutdown trigger")
 		.expect("run panicked")
@@ -275,7 +275,7 @@ async fn embed_and_stop(mut config: Config) {
 	let subscriber_origin = moq_tokio::origin::spawn();
 	let consumer = subscriber_origin.consume();
 	let mut announced = consumer.announced();
-	let subscriber = tokio::time::timeout(
+	let subscriber = kio::clock::timeout(
 		TIMEOUT,
 		client()
 			.with_reconnect(false)
@@ -287,13 +287,13 @@ async fn embed_and_stop(mut config: Config) {
 	.expect("connect timeout")
 	.expect("connect failed");
 
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let announced = tokio::time::timeout(TIMEOUT, consumer.request("test", None))
+	let announced = kio::clock::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");
@@ -303,12 +303,12 @@ async fn embed_and_stop(mut config: Config) {
 		.subscribe(None)
 		.await
 		.expect("subscribe");
-	let mut group = tokio::time::timeout(TIMEOUT, subscription.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, subscription.recv_group())
 		.await
 		.expect("recv_group timeout")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
-	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("read_frame timeout")
 		.expect("read_frame failed")
@@ -401,8 +401,9 @@ async fn worker_tokio_custom_route_and_quic() {
 	embed_and_stop(config).await;
 }
 
-/// io_uring workers. Off the default feature set; `just rs uring` and nightly
-/// `--all-features` compile it. Skips below the 6.12 floor unless CI_STRICT.
+/// io_uring workers. Off the default feature set; the Linux gate's test build,
+/// `just rs uring`, and nightly `--all-features` compile it. Skips below the
+/// 6.12 floor unless CI_STRICT.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 #[tokio::test]
 async fn uring_custom_route_and_quic() {
@@ -512,7 +513,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

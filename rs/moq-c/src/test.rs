@@ -36,7 +36,7 @@ fn publish_broadcast(origin: u32, path: &[u8]) -> u32 {
 /// asynchronously, so an early request can race the attach and fail as unroutable;
 /// retry until the deadline.
 fn request_broadcast(origin: u32, path: &[u8]) -> u32 {
-	let deadline = std::time::Instant::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	loop {
 		let cb = Callback::new();
 		let _task = id(unsafe {
@@ -56,10 +56,11 @@ fn request_broadcast(origin: u32, path: &[u8]) -> u32 {
 			return code as u32;
 		}
 		// A failed request already delivered its terminal code; back off and retry.
-		assert!(
-			std::time::Instant::now() < deadline,
-			"timed out requesting broadcast: {code}"
-		);
+		assert!(kio::clock::now() < deadline, "timed out requesting broadcast: {code}");
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the test thread has no runtime; it polls the C API's runtime between real retries"
+		)]
 		std::thread::sleep(Duration::from_millis(10));
 	}
 }
@@ -174,6 +175,8 @@ fn announce_info(announced: u32) -> moq_announce_event {
 				len: 0,
 			},
 		},
+		predecessor: std::ptr::null(),
+		predecessor_len: 0,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
 	info
@@ -3353,21 +3356,21 @@ fn track_demand_follows_subscribers() {
 	// Nobody is subscribed yet; the watcher seeds with the current state.
 	let demand_cb = Callback::new();
 	let watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
 
 	let consume = consume_local(broadcast);
 	let frame_cb = Callback::new();
 	let consumer = consume_track(consume, name, &frame_cb);
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_USED as i32);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
 
 	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
 
 	// A watcher registered after the last subscriber left is told so first, not left waiting.
 	let late_cb = Callback::new();
 	let late = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), late_cb.ptr) });
-	assert_eq!(late_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(late_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
 	assert_eq!(moq_publish_demand_cancel(late), 0);
 	assert_eq!(late_cb.recv_terminal(), 0);
 	assert!(moq_publish_demand_cancel(late) < 0, "double-close should fail");
@@ -3428,14 +3431,14 @@ fn track_demand_reports_the_wanted_group() {
 
 	let demand_cb = Callback::new();
 	let watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
 	assert_eq!(demand_wanted(watcher), None);
 
 	// The first subscriber of a track with no group wants group 0.
 	let consume = consume_local(broadcast);
 	let first_cb = Callback::new();
 	let first = consume_track(consume, name, &first_cb);
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_USED as i32);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
 	assert_eq!(demand_wanted(watcher), Some(0));
 
 	// A delta after the first frame puts the group past a `refresh` of 0.
@@ -3450,12 +3453,12 @@ fn track_demand_reports_the_wanted_group() {
 	// A joiner asks for the next group, and the callback repeats USED to say so.
 	let second_cb = Callback::new();
 	let second = consume_track(consume, name, &second_cb);
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_USED as i32);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
 	assert_eq!(demand_wanted(watcher), Some(1));
 
 	cancel_track(first, &first_cb);
 	cancel_track(second, &second_cb);
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
 	assert_eq!(demand_wanted(watcher), None);
 
 	assert_eq!(moq_publish_track_finish(track), 0);
@@ -3493,7 +3496,7 @@ fn track_demand_reports_current_state_before_close() {
 	crate::ffi::RUNTIME
 		.block_on(crate::publish::Publish::run_demand(on_demand, demand, closed))
 		.unwrap();
-	assert_eq!(cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
 	assert!(
 		cb.rx.recv_timeout(Duration::from_millis(50)).is_err(),
 		"the terminal is the spawner's to deliver"
@@ -3514,7 +3517,7 @@ fn track_demand_reports_an_abort() {
 
 	let demand_cb = ProtocolCallback::new();
 	let _watcher = id(unsafe { moq_publish_track_demand(track, Some(protocol_callback), demand_cb.ptr) });
-	assert_eq!(demand_cb.recv().0, moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(demand_cb.recv().0, moq_demand::MOQ_DEMAND_UNWANTED as i32);
 
 	assert_eq!(moq_publish_track_abort(track, 7), 0);
 	let (code, protocol) = demand_cb.recv();
@@ -3555,7 +3558,7 @@ fn media_demand_refuses_a_container() {
 	);
 
 	let _watcher = id(unsafe { moq_publish_media_demand(media, Some(channel_callback), cb.ptr) });
-	assert_eq!(cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
 	assert_eq!(moq_publish_media_finish(media), 0);
 	assert_eq!(moq_publish_container_finish(container), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -3597,7 +3600,7 @@ fn dynamic_serves_track_requests() {
 	);
 	let demand_cb = Callback::new();
 	let _watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_USED as i32);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
 
 	let payload = b"hello dynamic track";
 	assert_eq!(
@@ -3659,7 +3662,7 @@ fn dynamic_serves_track_requests() {
 
 	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -3693,7 +3696,7 @@ fn dynamic_track_request_publishes_media() {
 	// The media handle is the one moq_publish_audio returns: frames and demand work unchanged.
 	let demand_cb = Callback::new();
 	let _watcher = id(unsafe { moq_publish_media_demand(media, Some(channel_callback), demand_cb.ptr) });
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_USED as i32);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
 
 	let payload = b"opus frame";
 	assert_eq!(
@@ -3705,7 +3708,7 @@ fn dynamic_track_request_publishes_media() {
 
 	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
 	assert_eq!(moq_publish_media_finish(media), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(demand_cb.recv_terminal(), 0);
@@ -4575,6 +4578,10 @@ fn follow_delivers_a_gap_while_resolving_once() {
 		let _runtime = crate::ffi::RUNTIME.enter();
 		drop(dynamic);
 	}
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "the test thread has no runtime; it waits out the hold on the C API's real runtime"
+	)]
 	std::thread::sleep(moq_net::origin::Config::default().update_hold * 2);
 	let arrival = publish(origin, "live", moq_net::origin::Route::default());
 	let delivered = id(cb.recv());
@@ -5311,12 +5318,9 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 	// Wait until it has resolved the handle, so it is genuinely inside the stalled
 	// call rather than still on its way in: the slab holds one reference, this test
 	// a second, and the parked publish is the third.
-	let deadline = std::time::Instant::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	while handle.holders() < 3 {
-		assert!(
-			std::time::Instant::now() < deadline,
-			"the publish never reached the encoder"
-		);
+		assert!(kio::clock::now() < deadline, "the publish never reached the encoder");
 		std::thread::yield_now();
 	}
 
@@ -6087,10 +6091,7 @@ fn zero_with_a_flag_set_is_a_real_value() {
 		defaults.connect.backoff.timeout,
 		Some((std::time::Duration::ZERO).into())
 	);
-	assert_eq!(
-		defaults.quic.resolve().keep_alive,
-		Some(std::time::Duration::from_secs(3))
-	);
+	assert_eq!(defaults.quic.resolve().keep_alive, None);
 }
 
 #[test]
@@ -6346,16 +6347,20 @@ fn rate(reservation: u32) -> Option<u64> {
 /// Wait for `reservation`'s grant to reach `bps`, since a subscription reaches the
 /// allocator asynchronously and an unwatched track already reads a would-be share.
 fn wait_rate(reservation: u32, bps: u64) {
-	let deadline = std::time::Instant::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	loop {
 		let last = rate(reservation);
 		if last == Some(bps) {
 			return;
 		}
 		assert!(
-			std::time::Instant::now() < deadline,
+			kio::clock::now() < deadline,
 			"timed out waiting for a {bps} bps rate, last {last:?}"
 		);
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the test thread has no runtime; it polls the C API's runtime between real retries"
+		)]
 		std::thread::sleep(Duration::from_millis(10));
 	}
 }

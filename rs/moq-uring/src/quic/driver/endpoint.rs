@@ -68,7 +68,7 @@ pub(crate) struct Inner {
 	task_waiters: RefCell<kio::WaiterList>,
 	accept_waiters: RefCell<kio::WaiterList>,
 	/// Maps the kernel's receive timestamps, which count on the wall clock, onto `Instant`s.
-	wall: Cell<moq_clock::WallMap>,
+	wall: Cell<kio::clock::WallMap>,
 }
 
 /// A QUIC endpoint on one worker socket: accept, dial, or both.
@@ -293,7 +293,7 @@ impl Inner {
 		// The clocks read together, since the turn's instant may be well behind the wall clock
 		let read = self.owner.read_clock();
 		let mut wall = self.wall.get();
-		wall.sample(read, moq_clock::Wall::now());
+		wall.sample(read, kio::clock::Wall::now());
 		self.wall.set(wall);
 		// The kernel's stamp, or the receive's own instant without one. One stamp covers a GRO
 		// coalesce, so only its first datagram reports an arrival.

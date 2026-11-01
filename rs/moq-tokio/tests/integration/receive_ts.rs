@@ -19,7 +19,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_congestion::{self as congestion, Controller};
 use moq_tokio::quic::driver;
 

@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Elapsed, Manual, Milli, Nano, timeout, yieldNow } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
@@ -16,11 +16,13 @@ import {
 	StreamError,
 	TimestampMismatch,
 } from "../error.ts";
+import type { Consumer as GroupConsumer } from "../group.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
+import { Timescale } from "../time.ts";
 import type { Producer } from "../track.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -119,27 +121,21 @@ function announceHarness(version: Version, origin = 1n) {
 	// A peer that is not told about its own violation should fail the test visibly rather
 	// than hang it out to the suite timeout.
 	const abortReason = async () => {
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const timeout = new Promise<never>((_, reject) => {
-			timer = setTimeout(() => reject(new Error("stream was never aborted")), 250);
-		});
 		try {
-			return reason(error(await Promise.race([aborted, timeout])));
-		} finally {
-			clearTimeout(timer);
+			return reason(error(await timeout(Nano.fromMilli(Milli(250)), aborted)));
+		} catch (error) {
+			if (error instanceof Elapsed) throw new Error("stream was never aborted");
+			throw error;
 		}
 	};
 
 	// Rejects promptly if the session outlives the violation, rather than hanging the test.
 	const sessionEnded = async () => {
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const timeout = new Promise<never>((_, reject) => {
-			timer = setTimeout(() => reject(new Error("session was never closed")), 250);
-		});
 		try {
-			return await Promise.race([sessionClosed, timeout]);
-		} finally {
-			clearTimeout(timer);
+			return await timeout(Nano.fromMilli(Milli(250)), sessionClosed);
+		} catch (error) {
+			if (error instanceof Elapsed) throw new Error("session was never closed");
+			throw error;
 		}
 	};
 
@@ -150,7 +146,7 @@ function announceHarness(version: Version, origin = 1n) {
 		finish: () => inbound.close(),
 		abortReason,
 		sessionEnded,
-		settle: () => new Promise((resolve) => setTimeout(resolve, 0)),
+		settle: () => yieldNow(),
 	};
 }
 
@@ -183,7 +179,7 @@ test("an announce consumer closed while its stream opens sends nothing on it", a
 	announced.close();
 	// The slot frees up only after the consumer left.
 	opening.resolve();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	expect(written).toBe(0);
 	expect(closed).toBe(true);
 });
@@ -371,6 +367,80 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 
 	held.close();
 	announced.close();
+	subscriber.close();
+});
+
+test("a lite-07 takeover surfaces as a start beneath its predecessor, or a restart of it", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07);
+	const announced = subscriber.announced();
+	await settle();
+	const pool = Path.from("pool");
+	const job = Path.from("pool/job");
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
+	await send((w) =>
+		encodeAnnounceBroadcast(w, { status: "active", suffix: pool, hops: [PUBLISHER_A] }, Version.DRAFT_07),
+	);
+	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start" });
+
+	// Beneath the claim: a start with the next id (1), and the claim stays live.
+	const epoch = Epoch.mint();
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "takeover", predecessor: 0n, suffix: job, epoch, hops: [PUBLISHER_A] },
+			Version.DRAFT_07,
+		),
+	);
+	expect(await announced.next()).toMatchObject({ prefix: job, kind: "start", route: { epoch } });
+
+	// At the job's own path: a restart that retires id 1 and assigns id 2.
+	const next = Epoch.mint();
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "takeover", predecessor: 1n, suffix: job, epoch: next, hops: [PUBLISHER_A] },
+			Version.DRAFT_07,
+		),
+	);
+	expect(await announced.next()).toMatchObject({ prefix: job, kind: "restart", route: { epoch: next } });
+
+	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 2n }, Version.DRAFT_07));
+	expect(await announced.next()).toMatchObject({ prefix: job, kind: "end" });
+	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_07));
+	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "end" });
+
+	announced.close();
+	subscriber.close();
+});
+
+// A takeover must name a live predecessor whose path covers its own.
+test.each([
+	["a retired predecessor", 1n, "pool/job"],
+	["a predecessor not covering it", 0n, "other"],
+] as const)("a lite-07 takeover of %s ends the stream", async (_, predecessor, suffix) => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07);
+	const announced = subscriber.announced();
+	await settle();
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("pool"), hops: [PUBLISHER_A] },
+			Version.DRAFT_07,
+		),
+	);
+	expect(await announced.next()).toMatchObject({ kind: "start" });
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "takeover", predecessor, suffix: Path.from(suffix), hops: [PUBLISHER_A] },
+			Version.DRAFT_07,
+		),
+	);
+	await expect(announced.next()).rejects.toThrow();
+
 	subscriber.close();
 });
 
@@ -1022,8 +1092,13 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 			await request.reading;
 			await respond(request, version, [{ start: new SubscribeStart([0]) }]);
 			const received = track.recvDatagram();
-			await writer.write(new DatagramMessage(0n, 0, 0, new Uint8Array(1198)).encode(version));
-			await writer.write(new DatagramMessage(0n, 1, 1, new Uint8Array(1197)).encode(version));
+			if (version === Version.DRAFT_07) {
+				await writer.write(new Uint8Array([1]));
+				await writer.write(new Uint8Array([1, ...new Uint8Array(1199).fill(0xff)]));
+			}
+			const size = version === Version.DRAFT_07 ? 1196 : 1197;
+			await writer.write(new DatagramMessage(0n, 0, 0, new Uint8Array(size + 1)).encode(version));
+			await writer.write(new DatagramMessage(0n, 1, 1, new Uint8Array(size)).encode(version));
 			expect((await received)?.sequence).toBe(1);
 		} finally {
 			await writer.close();
@@ -1241,6 +1316,48 @@ test("an already-aborted fetch rejects without opening a stream", async () => {
 	expect(streams.length).toBe(0);
 });
 
+// A fetch-only reader's FETCH goes out alongside the TRACK stream, not a round trip after it,
+// and its response is read only once TRACK_INFO says the timescale.
+test("the first FETCH goes out before TRACK_INFO answers", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+
+	let fetched: GroupConsumer | undefined;
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).then((group) => {
+		fetched = group;
+		return group;
+	});
+	await opened(0);
+	await opened(1);
+	await streams[1].reading;
+
+	// An empty-group FIN accepts the fetch, but nothing is handed out before the info.
+	streams[1].inbound.close();
+	for (let i = 0; i < 64; i++) await Promise.resolve();
+	expect(fetched).toBeUndefined();
+
+	await answerTrackInfo(streams[0]);
+	expect(await (await fetch).readFrame()).toBeUndefined();
+
+	subscriber.close();
+});
+
+test("a failed TRACK_INFO fails the FETCH sent alongside it", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => err);
+	await opened(0);
+	await opened(1);
+	await streams[1].reading;
+
+	streams[0].inbound.error(new StreamError(StreamCode.NotFound, { message: "no such track" }));
+	expect(await fetch).toBeInstanceOf(Error);
+	await streams[1].aborted;
+
+	subscriber.close();
+});
+
 // Coalesced fetches share one FETCH stream. An abort releases only that caller's share; the
 // stream is cancelled once the last sharer leaves, before its FETCH is sent if it can be.
 test("one of two fetch sharers aborting leaves the other's fetch", async () => {
@@ -1299,10 +1416,12 @@ test.each([
 	expect(((await b.catch((err: unknown) => err)) as Error).message).toBe("second");
 
 	if (stage === "track") {
-		// The abandoned TRACK exchange is reset promptly; no FETCH is sent.
-		const err = fromTransport(await streams[0].aborted) as StreamError;
-		expect(err.code).toBe(StreamCode.Cancel);
-		expect(streams.length).toBe(1);
+		// The abandoned TRACK exchange is reset promptly, with the FETCH sent alongside it.
+		for (const stream of streams) {
+			const err = fromTransport(await stream.aborted) as StreamError;
+			expect(err.code).toBe(StreamCode.Cancel);
+		}
+		expect(streams.length).toBe(2);
 	} else {
 		const err = fromTransport(await streams[1].aborted) as StreamError;
 		expect(err.code).toBe(StreamCode.Cancel);
@@ -1742,7 +1861,7 @@ test("a listing whose readers leave as its token settles never reaches the wire"
 	await asked;
 	release();
 	tracks.close();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	expect(streams.length).toBe(0);
 	held.close();
 	subscriber.close();
@@ -2141,9 +2260,9 @@ async function groupStream(timestamp: number, version: Version = Version.DRAFT_0
 }
 
 // Lite-05/06 stamp an untimed track's frames with their send time, which a receiver cannot tell
-// from media time, so it drops every timestamp there: a group that rewinds or lands out of order is
-// accepted untimed.
-test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p drops received timestamps", async (version) => {
+// from media time, so it keeps every timestamp there unchecked: a group that rewinds or lands out
+// of order is accepted with its timestamp.
+test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received timestamps through", async (version) => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
@@ -2162,14 +2281,14 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p drops received times
 		for (let i = 0; i < 3; i++) {
 			const group = await track.recvGroup();
 			const frame = await group?.readFrame();
-			got.push([group?.sequence, frame?.payload.length, frame?.timestamp]);
+			got.push([group?.sequence, frame?.payload.length, frame?.timestamp?.value]);
 		}
 		expect(got).toEqual([
-			[3, 1, undefined],
-			[4, 1, undefined],
-			[5, 1, undefined],
+			[3, 1, 2000],
+			[4, 1, 1000],
+			[5, 1, 500],
 		]);
-		expect((await track.info()).timescale).toBeUndefined();
+		expect((await track.info()).timescale).toBe(Timescale.MILLI);
 		expect(track.closed.peek()).toBeUndefined();
 	} finally {
 		track.close();

@@ -128,9 +128,18 @@ impl std::fmt::Debug for Token {
 }
 
 /// The unified SETUP message, with the same encoding for both client and server.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Setup {
 	pub parameters: Bytes,
+}
+
+impl std::fmt::Debug for Setup {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		// Opaque parameters can contain credentials, even before we recognize an option.
+		f.debug_struct("Setup")
+			.field("parameters_len", &self.parameters.len())
+			.finish()
+	}
 }
 
 impl Encode<Version> for Setup {
@@ -172,13 +181,22 @@ fn framed(v: Version) -> bool {
 ///
 /// The framing is moq-transport draft-14's CLIENT_SETUP, which moq-lite borrowed: a
 /// u16 size, the offered versions, then parameters.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Client {
 	/// The list of supported versions in preferred order.
 	pub versions: coding::Versions,
 
 	/// Parameters, unparsed: moq-lite defines none here, so neither side reads them.
 	pub parameters: Bytes,
+}
+
+impl std::fmt::Debug for Client {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Client")
+			.field("versions", &self.versions)
+			.field("parameters_len", &self.parameters.len())
+			.finish()
+	}
 }
 
 impl<'a> Decode<'a, Version> for Client {
@@ -230,13 +248,22 @@ fn fill_body(w: &mut Encoder<'_>, prefix: coding::Prefix) -> Result<(), EncodeEr
 ///
 /// The framing is moq-transport draft-14's SERVER_SETUP: a u16 size, the selected version,
 /// then parameters.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Server {
 	/// The selected version.
 	pub version: coding::Version,
 
 	/// Parameters, unparsed: moq-lite defines none here, so neither side reads them.
 	pub parameters: Bytes,
+}
+
+impl std::fmt::Debug for Server {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Server")
+			.field("version", &self.version)
+			.field("parameters_len", &self.parameters.len())
+			.finish()
+	}
 }
 
 impl Encode<Version> for Server {
@@ -278,6 +305,76 @@ impl<'a> Decode<'a, Version> for Server {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	#[tracing_test::traced_test]
+	fn credentials_stay_out_of_traces() {
+		let secret = "credential-that-must-not-be-logged";
+		let token = Token {
+			kind: Token::OUT_OF_BAND,
+			value: secret.as_bytes().to_vec(),
+		};
+		let setup = lite::Setup {
+			path: Some(format!("/room?jwt={secret}")),
+			token: Some(token.clone()),
+			..Default::default()
+		};
+		let wire = setup.encode_bytes(lite::Version::Lite07).unwrap();
+		assert_eq!(
+			lite::Setup::decode_slice(&wire, lite::Version::Lite07).unwrap().0,
+			setup
+		);
+		let auth = lite::Auth {
+			token: Bytes::copy_from_slice(secret.as_bytes()),
+		};
+		let wire = auth.encode_bytes(lite::Version::Lite07).unwrap();
+		assert_eq!(lite::Auth::decode_slice(&wire, lite::Version::Lite07).unwrap().0, auth);
+
+		let version = crate::ietf::Version::Draft22;
+		let auth = crate::ietf::auth::Auth {
+			request_id: crate::ietf::RequestId(0),
+			token: Bytes::copy_from_slice(secret.as_bytes()),
+		};
+		let wire = auth.encode_bytes(version).unwrap();
+		assert_eq!(crate::ietf::auth::Auth::decode_slice(&wire, version).unwrap().0, auth);
+		let mut params = crate::ietf::Parameters::default();
+		crate::ietf::token::into_setup(&mut params, &token, version).unwrap();
+		params.set_bytes(
+			crate::ietf::ParameterBytes::Path,
+			format!("/room?jwt={secret}").into_bytes(),
+		);
+		let setup = Setup {
+			parameters: params.encode_bytes(version).unwrap(),
+		};
+		let wire = setup.encode_bytes(crate::Version::Ietf(version)).unwrap();
+		let decoded = Setup::decode_slice(&wire, crate::Version::Ietf(version)).unwrap().0;
+		let (params, _) = crate::ietf::Parameters::decode_slice(&decoded.parameters, version).unwrap();
+		assert_eq!(crate::ietf::token::from_setup(&params, version).unwrap(), Some(token));
+		tracing::trace!(?setup, ?decoded, ?params, "SETUP diagnostics");
+
+		let uri = format!("https://relay.example/room?jwt={secret}");
+		let goaway = lite::Goaway {
+			uri: uri.as_str().into(),
+		};
+		let wire = goaway.encode_bytes(lite::Version::Lite07).unwrap();
+		lite::Goaway::decode_slice(&wire, lite::Version::Lite07).unwrap();
+		let goaway = crate::ietf::GoAway {
+			new_session_uri: uri.as_str().into(),
+			timeout: 0,
+			request_id: Some(crate::ietf::RequestId(0)),
+		};
+		let wire = goaway.encode_bytes(version).unwrap();
+		crate::ietf::GoAway::decode_slice(&wire, version).unwrap();
+		tracing::trace!(goaway = ?crate::goaway::Goaway::redirect(uri), "GOAWAY diagnostics");
+
+		assert!(logs_contain("encoding"));
+		assert!(logs_contain("decoded"));
+		assert!(logs_contain("SETUP diagnostics"));
+		assert!(logs_contain("GOAWAY diagnostics"));
+		assert!(!logs_contain(secret));
+		let decimal = format!("{:?}", secret.as_bytes());
+		assert!(!logs_contain(&decimal[1..decimal.len() - 1]));
+	}
 
 	/// Deployed lite-01/02 peers frame both halves with draft-14's u16 size, not a varint.
 	#[test]

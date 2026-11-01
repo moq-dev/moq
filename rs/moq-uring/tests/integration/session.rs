@@ -8,7 +8,7 @@
 //! Origin drivers run through Tokio's explicit-time adapter while session
 //! drivers use the worker's clock and timer.
 
-#![cfg(all(target_os = "linux", feature = "quic"))]
+#![cfg(feature = "quic")]
 
 use crate::support;
 
