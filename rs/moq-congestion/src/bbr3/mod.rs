@@ -1920,11 +1920,9 @@ impl Controller for Bbr3 {
         for acked in ack.packets {
             self.check_recovery_done(acked.sent);
             newly_acked += u64::from(acked.bytes);
-            if let Some(delay) = &mut self.delay
-                && let Some(received) = acked.received
-            {
-                delay.on_packet(acked.sent, received, ack.now);
-            }
+        }
+        if let Some(delay) = &mut self.delay {
+            delay.on_ack(ack.packets, ack.now);
         }
         self.inflight = ack.in_flight;
         // An ACK that delivered no packet has no sample, and a finished one is never folded

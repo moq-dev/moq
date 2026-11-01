@@ -18,7 +18,7 @@
 
 use std::collections::VecDeque;
 
-use crate::{Duration, Instant};
+use crate::{Acked, Duration, Instant};
 
 /// Packets sent within this of a group's first belong to it.
 const GROUP_LENGTH: Duration = Duration::from_millis(5);
@@ -106,6 +106,8 @@ pub(super) struct Detector {
     usage: Usage,
     /// Whether the trend has asserted growth since [`Self::take_signal`] last ran.
     signaled: bool,
+    /// One ACK's arrivals and send times, sorted by arrival, kept to reuse its allocation.
+    batch: Vec<(Duration, Instant)>,
 }
 
 impl Default for Detector {
@@ -126,6 +128,7 @@ impl Default for Detector {
             threshold_updated: None,
             usage: Usage::Normal,
             signaled: false,
+            batch: Vec::new(),
         }
     }
 }
@@ -147,11 +150,32 @@ impl Detector {
         std::mem::take(&mut self.signaled)
     }
 
+    /// The packets an ACK arriving at `acked` newly acknowledged, skipping any without a receive
+    /// timestamp.
+    ///
+    /// They are fed in the order they arrived, as `DelayBasedBwe` sorts each feedback by
+    /// receive time. Fed in send order, a reordered packet would show a negative arrival delta,
+    /// which is discarded, while the rebound after it counts as delay, so reordering would
+    /// accumulate into false queue growth. In arrival order, a packet sent before the group in
+    /// progress is skipped instead.
+    pub(super) fn on_ack(&mut self, packets: &[Acked], acked: Instant) {
+        // Taken, since a reset in `on_packet` replaces the whole detector.
+        let mut batch = std::mem::take(&mut self.batch);
+        batch.extend(packets.iter().filter_map(|p| Some((p.received?, p.sent))));
+        // Stable, so arrivals a grant released together stay in send order.
+        batch.sort_by_key(|&(received, _)| received);
+        for &(received, sent) in &batch {
+            self.on_packet(sent, received, acked);
+        }
+        batch.clear();
+        self.batch = batch;
+    }
+
     /// A packet sent at `sent` arrived at `received` on the peer's clock, as an ACK arriving at
-    /// `acked` reported. Packets are fed in the order they were sent within each ACK.
+    /// `acked` reported. Packets are fed in the order they arrived.
     ///
     /// equivalent to `InterArrivalDelta::ComputeDeltas`, then `TrendlineEstimator::Update`
-    pub(super) fn on_packet(&mut self, sent: Instant, received: Duration, acked: Instant) {
+    fn on_packet(&mut self, sent: Instant, received: Duration, acked: Instant) {
         let Some(mut current) = self.current else {
             self.current = Some(Group {
                 first_send: sent,
@@ -432,6 +456,51 @@ mod test {
             usage.push(detector.usage());
         }
         assert!(!usage.contains(&Usage::Overusing));
+    }
+
+    /// Packets reordered within an ACK, with no queue behind them, never read as growth. Fed in
+    /// send order, each reordered group's negative delta was discarded while the rebound after
+    /// it counted, adding 30ms of delay every two packets.
+    #[test]
+    fn reordered_within_an_ack_is_not_growth() {
+        let mut detector = Detector::default();
+        let base = Instant::now();
+        let spacing = Duration::from_millis(10);
+        let interval = Duration::from_millis(40);
+        // Every other packet is 30ms slower than its neighbors
+        let packets: Vec<Acked> = (0..1000u32)
+            .map(|i| {
+                let sent = base + spacing * i;
+                let delay = Duration::from_millis(if i % 2 == 0 { 20 } else { 50 });
+                Acked {
+                    sent,
+                    bytes: 1200,
+                    packet: Default::default(),
+                    received: Some(sent - base + delay),
+                }
+            })
+            .collect();
+        let mut usage = Vec::new();
+        let mut signaled = false;
+        // Each ACK reports, in send order, whatever arrived in the 40ms before it
+        for ack in 1..250u32 {
+            let (from, to) = (interval * (ack - 1), interval * ack);
+            let acked: Vec<Acked> = packets
+                .iter()
+                .filter(|p| p.received.is_some_and(|r| r >= from && r < to))
+                .copied()
+                .collect();
+            detector.on_ack(&acked, base + to + Duration::from_millis(20));
+            usage.push(detector.usage());
+            signaled |= detector.take_signal();
+        }
+        assert!(!usage.contains(&Usage::Overusing));
+        assert!(!signaled);
+        assert!(
+            detector.accumulated.abs() < 50.0,
+            "accumulated {}ms",
+            detector.accumulated
+        );
     }
 
     /// Packets sent before the group in progress, from a late ACK, are skipped
