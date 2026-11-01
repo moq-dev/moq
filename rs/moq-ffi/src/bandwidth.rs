@@ -162,7 +162,7 @@ impl MoqRateControl {
 		let grant = reservation.inner.consume();
 		let mut control = self.inner.lock().unwrap();
 		control.set_probed(grant.probed());
-		control.update(grant.peek(), moq_clock::now()).map(Into::into)
+		control.update(grant.peek(), kio::clock::now()).map(Into::into)
 	}
 }
 
