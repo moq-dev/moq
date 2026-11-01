@@ -2909,9 +2909,6 @@ impl Connection {
 				}
 				Ok(())
 			}
-			Header::Long {
-				ty: LongType::ZeroRtt, ..
-			} => Ok(()),
 			Header::VersionNegotiate { .. } => {
 				// RFC 9000 6.2: discard once any other packet was processed
 				if processed_server_packet {
@@ -2930,6 +2927,9 @@ impl Connection {
 			Header::Short { .. } => {
 				unreachable!("short packets received during handshake are discarded in handle_packet")
 			}
+			Header::Long {
+				ty: LongType::ZeroRtt, ..
+			} => unreachable!("0-RTT packets are discarded in unprotect_header"),
 		}
 	}
 

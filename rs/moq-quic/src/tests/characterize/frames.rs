@@ -35,10 +35,10 @@ fn client_answer(frames: Frames) -> Option<TransportErrorCode> {
 	}
 }
 
-/// Early data is discarded without decryption, without losing a coalesced
-/// Initial or a later 1-RTT stream on the same connection.
+/// A 0-RTT packet is dropped before decryption, so an ACK inside it for a packet the server
+/// never sent is not processed, and a coalesced Initial or 1-RTT packet is still read.
 #[test]
-fn early_packets_leave_handshake_and_application_data_usable() {
+fn zero_rtt_packets_are_dropped() {
 	use crate::packet::{FixedLengthConnectionIdParser, Header, LongType, PacketNumber, PartialDecode};
 	for leading in [true, false] {
 		let _guard = subscribe();
@@ -54,7 +54,7 @@ fn early_packets_leave_handshake_and_application_data_usable() {
 		)
 		.unwrap();
 		let initial_header = decoded.initial_header().unwrap();
-		let mut early = Vec::new();
+		let mut zero_rtt = Vec::new();
 		let encoded = Header::Long {
 			ty: LongType::ZeroRtt,
 			src_cid: initial_header.src_cid,
@@ -62,24 +62,26 @@ fn early_packets_leave_handshake_and_application_data_usable() {
 			number: PacketNumber::U8(0),
 			version: 1,
 		}
-		.encode(&mut early);
+		.encode(&mut zero_rtt);
+		// Processing this ACK would be a PROTOCOL_VIOLATION: the server never sent packet 1000.
+		let ack = Frames::default().var(FrameType::ACK, &[1000, 0, 0, 0]);
+		zero_rtt.extend_from_slice(&ack.0);
 		let keys = config
 			.crypto
 			.clone()
 			.start_session(Version::V1, "localhost", &TransportParameters::default())
 			.unwrap()
 			.initial_keys(initial_header.dst_cid, Side::Client);
-		// The ciphertext is deliberately opaque: early-data rejection precedes decryption,
-		// regardless of which ticket or keys the sender used.
-		early.resize(early.len() + 32 + keys.packet.local.tag_len(), 0xff);
-		encoded.finish(&mut early, &*keys.header.local, Some((0, &*keys.packet.local)));
+		// The keys don't matter: the drop precedes decryption.
+		zero_rtt.resize(zero_rtt.len() + 32 + keys.packet.local.tag_len(), 0);
+		encoded.finish(&mut zero_rtt, &*keys.header.local, Some((0, &*keys.packet.local)));
 		let mut datagram = Vec::new();
 		if leading {
-			datagram.extend_from_slice(&early);
+			datagram.extend_from_slice(&zero_rtt);
 		}
 		datagram.extend_from_slice(&initial);
 		if !leading {
-			datagram.extend_from_slice(&early);
+			datagram.extend_from_slice(&zero_rtt);
 		}
 		pair.server.inbound.push_front((now, ecn, datagram.as_slice().into()));
 		pair.drive();
@@ -92,7 +94,7 @@ fn early_packets_leave_handshake_and_application_data_usable() {
 			.client_streams(client_ch)
 			.open(Dir::Uni, Default::default())
 			.unwrap();
-		const DATA: &[u8] = b"after early data";
+		const DATA: &[u8] = b"after 0-RTT";
 		client_sends(
 			&mut pair,
 			client_ch,
@@ -100,8 +102,13 @@ fn early_packets_leave_handshake_and_application_data_usable() {
 			Frames::default().stream(stream.into(), 0, DATA, true),
 		);
 		let (now, ecn, application) = pair.server.inbound.pop_back().unwrap();
-		early.extend_from_slice(&application);
-		pair.server.inbound.push_back((now, ecn, early.as_slice().into()));
+		zero_rtt.extend_from_slice(&application);
+		pair.server.inbound.push_back((now, ecn, zero_rtt.as_slice().into()));
+		let before = pair.server_conn_mut(server_ch).stats().frame_rx;
+		pair.drive_server();
+		let after = pair.server_conn_mut(server_ch).stats().frame_rx;
+		assert_eq!(after.acks, before.acks);
+		assert_eq!(after.stream, before.stream + 1);
 		pair.drive();
 		assert!(lost(pair.client_conn_mut(client_ch)).is_none());
 		assert!(lost(pair.server_conn_mut(server_ch)).is_none());

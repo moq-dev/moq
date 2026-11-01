@@ -286,8 +286,9 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 			}
 			sock.set_read_timeout(Some(Duration::from_secs(5)))?;
 
-			// The long-header type bits are version-specific. Use bits that mean
-			// 0-RTT in v1 to prove we negotiate before interpreting them.
+			// The long-header type bits are version-specific. These bits mean
+			// 0-RTT in v1, which moq-quic drops unanswered, so a reply proves we
+			// negotiate the version before interpreting them.
 			let mut packet = Vec::new();
 			packet.push(0xD0); // long header, fixed bit, unknown-version type
 			packet.extend_from_slice(&0x0a0a_0a0au32.to_be_bytes());

@@ -265,8 +265,8 @@ pub struct HandshakeData {
 /// Alternatively, `QuicClientConfig`'s [`TryFrom`] implementation can be used to wrap around a
 /// custom [`rustls::ClientConfig`], in which case care should be taken around certain points:
 ///
-/// TLS 1.3 is required. Early data is disabled, while the inner config's resumption
-/// cache still enables resumed 1-RTT handshakes.
+/// TLS 1.3 is required. Leave `enable_early_data` off, its default: the transport discards
+/// 0-RTT packets. The inner config's resumption cache still enables resumed 1-RTT handshakes.
 ///
 /// [root_certs]: crate::client::Config::with_root_certificates()
 pub struct QuicClientConfig {
@@ -291,10 +291,7 @@ impl QuicClientConfig {
 	/// Initialize a QUIC-compatible TLS client configuration with a separate initial cipher suite
 	///
 	/// This is useful if you want to avoid the initial cipher suite for traffic encryption.
-	pub fn with_initial(mut inner: Arc<rustls::ClientConfig>, initial: Suite) -> Result<Self, NoInitialCipherSuite> {
-		if inner.enable_early_data {
-			Arc::make_mut(&mut inner).enable_early_data = false;
-		}
+	pub fn with_initial(inner: Arc<rustls::ClientConfig>, initial: Suite) -> Result<Self, NoInitialCipherSuite> {
 		match initial.suite.common.suite {
 			CipherSuite::TLS13_AES_128_GCM_SHA256 => Ok(Self { inner, initial }),
 			_ => Err(NoInitialCipherSuite { specific: true }),
@@ -351,10 +348,7 @@ impl TryFrom<rustls::ClientConfig> for QuicClientConfig {
 impl TryFrom<Arc<rustls::ClientConfig>> for QuicClientConfig {
 	type Error = NoInitialCipherSuite;
 
-	fn try_from(mut inner: Arc<rustls::ClientConfig>) -> Result<Self, Self::Error> {
-		if inner.enable_early_data {
-			Arc::make_mut(&mut inner).enable_early_data = false;
-		}
+	fn try_from(inner: Arc<rustls::ClientConfig>) -> Result<Self, Self::Error> {
 		Ok(Self {
 			initial: initial_suite_from_provider(inner.crypto_provider())
 				.ok_or(NoInitialCipherSuite { specific: false })?,
@@ -394,8 +388,8 @@ impl std::error::Error for NoInitialCipherSuite {}
 /// implementation or `with_initial` method can be used to wrap around a custom
 /// [`rustls::ServerConfig`], in which case care should be taken around certain points:
 ///
-/// TLS 1.3 is required. Early data is disabled, while session tickets still enable
-/// resumed 1-RTT handshakes.
+/// TLS 1.3 is required. Leave `max_early_data_size` at 0, its default: the transport discards
+/// 0-RTT packets. Session tickets still enable resumed 1-RTT handshakes.
 ///
 /// [single]: crate::server::Config::with_single_cert()
 pub struct QuicServerConfig {
@@ -416,10 +410,7 @@ impl QuicServerConfig {
 	/// Initialize a QUIC-compatible TLS client configuration with a separate initial cipher suite
 	///
 	/// This is useful if you want to avoid the initial cipher suite for traffic encryption.
-	pub fn with_initial(mut inner: Arc<rustls::ServerConfig>, initial: Suite) -> Result<Self, NoInitialCipherSuite> {
-		if inner.max_early_data_size != 0 {
-			Arc::make_mut(&mut inner).max_early_data_size = 0;
-		}
+	pub fn with_initial(inner: Arc<rustls::ServerConfig>, initial: Suite) -> Result<Self, NoInitialCipherSuite> {
 		match initial.suite.common.suite {
 			CipherSuite::TLS13_AES_128_GCM_SHA256 => Ok(Self { inner, initial }),
 			_ => Err(NoInitialCipherSuite { specific: true }),
@@ -428,7 +419,7 @@ impl QuicServerConfig {
 
 	/// Initialize a sane QUIC-compatible TLS server configuration
 	///
-	/// TLS 1.3 is required and early data stays disabled.
+	/// TLS 1.3 is required, and rustls leaves early data disabled by default.
 	pub(crate) fn inner(
 		cert_chain: Vec<CertificateDer<'static>>,
 		key: PrivateKeyDer<'static>,
@@ -454,10 +445,7 @@ impl TryFrom<rustls::ServerConfig> for QuicServerConfig {
 impl TryFrom<Arc<rustls::ServerConfig>> for QuicServerConfig {
 	type Error = NoInitialCipherSuite;
 
-	fn try_from(mut inner: Arc<rustls::ServerConfig>) -> Result<Self, Self::Error> {
-		if inner.max_early_data_size != 0 {
-			Arc::make_mut(&mut inner).max_early_data_size = 0;
-		}
+	fn try_from(inner: Arc<rustls::ServerConfig>) -> Result<Self, Self::Error> {
 		Ok(Self {
 			initial: initial_suite_from_provider(inner.crypto_provider())
 				.ok_or(NoInitialCipherSuite { specific: false })?,
@@ -583,106 +571,5 @@ impl crypto::PacketKey for Box<dyn PacketKey> {
 fn rustls_version(version: crate::Version) -> Version {
 	match version {
 		crate::Version::V1 => Version::V1,
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	fn handshake(
-		client: Arc<rustls::ClientConfig>,
-		server: Arc<rustls::ServerConfig>,
-	) -> (rustls::HandshakeKind, bool, bool) {
-		let mut client = rustls::quic::ClientConnection::new(
-			client,
-			Version::V1,
-			ServerName::try_from("localhost").unwrap(),
-			Vec::new(),
-		)
-		.unwrap();
-		let mut server = rustls::quic::ServerConnection::new(server, Version::V1, Vec::new()).unwrap();
-		let early_keys = client.zero_rtt_keys().is_some();
-		loop {
-			let mut to_server = Vec::new();
-			let _ = client.write_hs(&mut to_server);
-			if !to_server.is_empty() {
-				server.read_hs(&to_server).unwrap();
-			}
-			let mut to_client = Vec::new();
-			let _ = server.write_hs(&mut to_client);
-			if !to_client.is_empty() {
-				client.read_hs(&to_client).unwrap();
-			}
-			if to_server.is_empty() && to_client.is_empty() {
-				break;
-			}
-		}
-		assert!(!client.is_handshaking());
-		assert!(!server.is_handshaking());
-		(
-			client.handshake_kind().unwrap(),
-			early_keys,
-			client.is_early_data_accepted(),
-		)
-	}
-
-	/// A ticket issued with early data still resumes after either public config entry point
-	/// disables it, and a caller's shared configs retain their original policy.
-	#[test]
-	fn supplied_configs_reject_early_data_and_keep_resumption() {
-		for explicit_suite in [false, true] {
-			let identity = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-			let cert = identity.cert.der().clone();
-			let mut roots = rustls::RootCertStore::empty();
-			roots.add(cert.clone()).unwrap();
-			let mut client = rustls::ClientConfig::builder_with_provider(configured_provider())
-				.with_protocol_versions(&[&rustls::version::TLS13])
-				.unwrap()
-				.with_root_certificates(roots)
-				.with_no_client_auth();
-			client.enable_early_data = true;
-			let mut server = QuicServerConfig::inner(
-				vec![cert],
-				PrivateKeyDer::Pkcs8(identity.signing_key.serialize_der().into()),
-			)
-			.unwrap();
-			server.max_early_data_size = u32::MAX;
-			let client = Arc::new(client);
-			let server = Arc::new(server);
-			assert_eq!(
-				handshake(client.clone(), server.clone()),
-				(rustls::HandshakeKind::Full, false, false)
-			);
-			let wrapped_server = if explicit_suite {
-				QuicServerConfig::with_initial(
-					server.clone(),
-					initial_suite_from_provider(server.crypto_provider()).unwrap(),
-				)
-				.unwrap()
-			} else {
-				QuicServerConfig::try_from(server.clone()).unwrap()
-			};
-			assert_eq!(server.max_early_data_size, u32::MAX);
-			// A third-party client holds an older ticket and really offers early data.
-			assert_eq!(
-				handshake(client.clone(), wrapped_server.inner.clone()),
-				(rustls::HandshakeKind::Resumed, true, false)
-			);
-			let wrapped_client = if explicit_suite {
-				QuicClientConfig::with_initial(
-					client.clone(),
-					initial_suite_from_provider(client.crypto_provider()).unwrap(),
-				)
-				.unwrap()
-			} else {
-				QuicClientConfig::try_from(client.clone()).unwrap()
-			};
-			assert!(client.enable_early_data);
-			assert_eq!(
-				handshake(wrapped_client.inner, wrapped_server.inner),
-				(rustls::HandshakeKind::Resumed, false, false)
-			);
-		}
 	}
 }

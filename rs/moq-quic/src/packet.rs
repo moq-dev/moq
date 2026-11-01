@@ -71,6 +71,7 @@ impl PartialDecode {
 		self.space() == Some(SpaceId::Initial)
 	}
 
+	/// The space whose keys protect this packet, or `None` for an unprotected or 0-RTT packet
 	pub(crate) fn space(&self) -> Option<SpaceId> {
 		use ProtectedHeader::*;
 		match self.plain_header {
@@ -79,14 +80,12 @@ impl PartialDecode {
 				ty: LongType::Handshake,
 				..
 			} => Some(SpaceId::Handshake),
-			Long {
-				ty: LongType::ZeroRtt, ..
-			} => Some(SpaceId::Data),
 			Short { .. } => Some(SpaceId::Data),
 			_ => None,
 		}
 	}
 
+	/// Whether this is a 0-RTT packet, which is dropped unprocessed
 	pub(crate) fn is_0rtt(&self) -> bool {
 		match self.plain_header {
 			ProtectedHeader::Long { ty, .. } => ty == LongType::ZeroRtt,
@@ -388,9 +387,6 @@ impl Header {
 		use Header::*;
 		match *self {
 			Short { .. } => SpaceId::Data,
-			Long {
-				ty: LongType::ZeroRtt, ..
-			} => SpaceId::Data,
 			Long {
 				ty: LongType::Handshake,
 				..
