@@ -18,6 +18,10 @@
 //! hands each reader the group through its own track subscription, as a relay does, so
 //! every read that parks at the edge also judges the group's expiry.
 //!
+//! `group_stream_read` reads one frame while it arrives from readers spread over worker
+//! threads, swept over arrival chunks, threads, and readers, so contention on the bytes
+//! the readers share shows up as a slope across cores.
+//!
 //! `group_shed` writes one live group far past what it holds, swept over the frames it
 //! holds (a small pool's debt, or the 32 MiB live tail) and the frames it sheds, so
 //! shedding the front stays a flat cost per frame.
@@ -705,6 +709,122 @@ fn contended(
 	});
 }
 
+/// Bytes each round of [`bench_streaming`] adds to the frame in flight.
+const STREAM_CHUNK: usize = 1024;
+
+/// Chunks a streamed frame arrives in.
+const STREAM_ARRIVALS: [usize; 2] = [4, 16];
+
+/// Readers of the one streamed frame.
+const STREAM_READERS: [usize; 2] = [16, 256];
+
+/// Read one frame while it arrives from readers on several threads, as a relay forwards
+/// a large frame to its subscribers.
+///
+/// Each round the driver writes one chunk of the frame in flight, and every reader reads
+/// it with [`frame::Consumer::poll_read_chunk`] and parks again. Readers at the same
+/// published length share one owner of its bytes, so contention on that owner shows up
+/// as a slope across cores. A finished frame is followed by the next in the same group,
+/// rolling to a new group every [`ROLL`] frames.
+fn bench_streaming(c: &mut Criterion) {
+	let chunk = Bytes::from(vec![0u8; STREAM_CHUNK]);
+	let mut g = c.benchmark_group("group_stream_read");
+	g.warm_up_time(Duration::from_secs(1));
+	g.measurement_time(Duration::from_secs(3));
+	for arrivals in STREAM_ARRIVALS {
+		for threads in THREADS {
+			for readers in STREAM_READERS {
+				g.throughput(Throughput::Elements(readers as u64));
+				let id = BenchmarkId::new(format!("arrivals_{arrivals}/threads_{threads}"), readers);
+				g.bench_function(id, |b| streaming(b, &chunk, arrivals, threads, readers));
+			}
+		}
+	}
+	g.finish();
+}
+
+/// One [`bench_streaming`] case.
+fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads: usize, readers: usize) {
+	let broadcast = broadcast::Producer::new(broadcast::Info::default());
+	let track = broadcast.create_track("bench", track::Info::default()).unwrap();
+	let info = frame::Info {
+		size: (arrivals * chunk.len()) as u64,
+		timestamp: None,
+	};
+	let group = track.append_group().unwrap();
+	// The group readers move to once theirs ends.
+	let next = Arc::new(Mutex::new(group.consume()));
+	let mut sets: Vec<Vec<(group::Consumer, Option<frame::Consumer>)>> = (0..threads).map(|_| Vec::new()).collect();
+	for i in 0..readers {
+		sets[i % threads].push((group.consume(), None));
+	}
+	let work = sets
+		.into_iter()
+		.map(|mut set| -> Work {
+			let next = next.clone();
+			let waiter = kio::Waiter::noop();
+			Box::new(move || {
+				for (group, frame) in &mut set {
+					let mut read = 0;
+					loop {
+						let reading = match frame {
+							Some(frame) => frame,
+							None => match group.poll_next_frame(&waiter) {
+								Poll::Ready(Ok(Some(next))) => frame.insert(next),
+								Poll::Ready(Ok(None)) => {
+									*group = next.lock().unwrap().clone();
+									continue;
+								}
+								Poll::Ready(Err(err)) => panic!("next frame failed: {err}"),
+								Poll::Pending => break,
+							},
+						};
+						match reading.poll_read_chunk(&waiter) {
+							Poll::Ready(Ok(Some(chunk))) => {
+								black_box(chunk);
+								read += 1;
+							}
+							Poll::Ready(Ok(None)) => *frame = None,
+							Poll::Ready(Err(err)) => panic!("read failed: {err}"),
+							Poll::Pending => break,
+						}
+					}
+					assert_eq!(read, 1, "every written chunk is ready");
+				}
+			})
+		})
+		.collect();
+	let crew = Crew::new(work);
+
+	let mut frames = 0;
+	let mut writing = Some(group.create_frame(info).unwrap());
+	b.iter_custom(|iters| {
+		let start = Instant::now();
+		for _ in 0..iters {
+			let mut frame = writing.take().unwrap();
+			frame.write(chunk.clone()).unwrap();
+			writing = Some(match frame.remaining() {
+				0 => {
+					let mut group = frame.finish().unwrap();
+					frames += 1;
+					if frames == ROLL {
+						let rolled = track.append_group().unwrap();
+						*next.lock().unwrap() = rolled.consume();
+						group.finish().unwrap();
+						frames = 0;
+						rolled.create_frame(info).unwrap()
+					} else {
+						group.create_frame(info).unwrap()
+					}
+				}
+				_ => frame,
+			});
+			crew.run();
+		}
+		start.elapsed()
+	});
+}
+
 /// A frame for the shedding benchmark: large enough that a group outgrows a small pool
 /// in a few hundred frames.
 const SHED_PAYLOAD: usize = 16 * 1024;
@@ -768,6 +888,7 @@ criterion_group!(
 	bench_relay_frames,
 	bench_inflate,
 	bench_contended,
+	bench_streaming,
 	bench_shed
 );
 criterion_main!(benches);

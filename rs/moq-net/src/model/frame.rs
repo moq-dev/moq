@@ -5,6 +5,7 @@
 //! through [`Producer`], which borrows its parent [`group::Producer`] exclusively so
 //! the borrow checker enforces that only one frame is open at a time. A [`Consumer`]
 //! reads one frame, sharing the group's channel rather than a per-frame one.
+use std::mem::MaybeUninit;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -621,29 +622,40 @@ impl FrameContent {
 		if start >= end {
 			return Bytes::new();
 		}
-		let (segment, base) = match self.storage.get() {
+		// Loaded only to build a new owner. The Acquire pairs with `store_written`'s
+		// Release, so every byte it covers is initialized. `Growing`/`Chain` also load it
+		// under the lock that holds their segment steady, so those bytes are in the
+		// segment being sliced; a `Fixed` segment never moves, and its writers never take
+		// the `shared` lock.
+		let published = || self.written.load(Ordering::Acquire);
+		match self.storage.get() {
 			Some(FrameStorage::Shared(payload)) => {
 				let chunk = payload.chunk_at(start);
-				return chunk.slice(..chunk.len().min(end - start));
+				chunk.slice(..chunk.len().min(end - start))
 			}
-			Some(FrameStorage::Fixed(segment)) => (segment.clone(), 0),
-			Some(FrameStorage::Growing(current)) => (current.lock().unwrap_or_else(PoisonError::into_inner).clone(), 0),
+			Some(FrameStorage::Fixed { segment, shared }) => {
+				let mut shared = shared.lock().unwrap_or_else(PoisonError::into_inner);
+				share(&mut shared, segment, start..end, published)
+			}
+			Some(FrameStorage::Growing(open)) => {
+				let mut open = open.lock().unwrap_or_else(PoisonError::into_inner);
+				let Open { segment, shared } = &mut *open;
+				share(shared, segment, start..end, published)
+			}
 			Some(FrameStorage::Chain(segments)) => {
-				let segments = segments.lock().unwrap_or_else(PoisonError::into_inner);
+				let mut segments = segments.lock().unwrap_or_else(PoisonError::into_inner);
 				let index = start / SEGMENT;
 				let base = index * SEGMENT;
+				let range = start - base..end.min(base + SEGMENT) - base;
 				if let Some(sealed) = segments.sealed.get(index) {
-					return sealed.slice(start - base..end.min(base + SEGMENT) - base);
+					return sealed.slice(range);
 				}
-				let open = segments.open.clone().expect("written bytes are sealed or open");
-				(open, base)
+				let Open { segment, shared } = segments.open.as_mut().expect("written bytes are sealed or open");
+				share(shared, segment, range, || published().min(base + SEGMENT) - base)
 			}
 			// Nothing written, so the range is empty.
-			None => return Bytes::new(),
-		};
-		let len = end.min(base + SEGMENT) - base;
-		debug_assert!(len <= segment.capacity);
-		Bytes::from_owner(Filled { segment, len }).slice(start - base..)
+			None => Bytes::new(),
+		}
 	}
 }
 
@@ -690,12 +702,77 @@ impl Drop for Admission {
 
 enum FrameStorage {
 	Shared(Payload),
-	Fixed(Arc<Segment>),
-	// Replaced by a larger copy whenever a write outgrows it. A reader clones the current
-	// segment under the lock, so a slice it already handed out keeps the old one alive.
-	Growing(Mutex<Arc<Segment>>),
-	// A frame larger than one segment.
-	Chain(Mutex<Segments>),
+	// Allocated at the frame's size, so a write never takes the lock; only readers share
+	// the owner through it.
+	Fixed {
+		segment: Arc<Segment>,
+		shared: Mutex<Option<Bytes>>,
+	},
+	// Replaced by a larger copy whenever a write outgrows it.
+	Growing(Mutex<Open>),
+	// A frame larger than one segment. Boxed: it is rare, and every frame's content
+	// otherwise pays for its size.
+	Chain(Box<Mutex<Segments>>),
+}
+
+/// A segment that is still being written, and may still grow.
+struct Open {
+	segment: Arc<Segment>,
+	// The readers' owner of its published bytes; see [`share`].
+	shared: Option<Bytes>,
+}
+
+impl Open {
+	fn new(capacity: usize) -> Self {
+		Self {
+			segment: Arc::new(Segment::new(capacity)),
+			shared: None,
+		}
+	}
+
+	/// Replace the segment with a larger copy of its first `filled` bytes if it holds fewer
+	/// than `needed` of the `len` it grows to.
+	///
+	/// Doubling keeps the copies linear in `len`, and the cap makes the last copy exactly
+	/// `len`, so it seals without another. The readers' owner goes with the old segment,
+	/// which then lives only as long as the slices already cut from it.
+	fn reserve(&mut self, filled: usize, needed: usize, len: usize) {
+		if self.segment.capacity >= needed {
+			return;
+		}
+		let next = Segment::new(needed.max(self.segment.capacity * 2).min(len));
+		let filled = Filled {
+			segment: self.segment.clone(),
+			len: filled,
+		};
+		// Safety: `next` is new, so nothing reads it yet.
+		unsafe { next.write(0, filled.as_ref()) };
+		self.segment = Arc::new(next);
+		self.shared = None;
+	}
+}
+
+/// Slice `range` of `segment`, from the owner in `shared` if it covers the range, or else
+/// from a new one over the segment's first `published()` bytes that replaces it.
+///
+/// Readers reading up to the same published length share one owner, so reading a frame
+/// still arriving allocates once per publication rather than once per reader per read. An
+/// owner covers only published bytes, since the writer is still filling the rest.
+fn share(
+	shared: &mut Option<Bytes>,
+	segment: &Arc<Segment>,
+	range: Range<usize>,
+	published: impl FnOnce() -> usize,
+) -> Bytes {
+	if shared.as_ref().is_none_or(|owner| owner.len() < range.end) {
+		let len = published();
+		debug_assert!(range.end <= len && len <= segment.capacity);
+		*shared = Some(Bytes::from_owner(Filled {
+			segment: segment.clone(),
+			len,
+		}));
+	}
+	shared.as_ref().expect("covers the range").slice(range)
 }
 
 /// A frame larger than one [`SEGMENT`], as it streams in.
@@ -705,7 +782,7 @@ struct Segments {
 	sealed: Vec<Bytes>,
 	// The segment being written, allocated by its first byte and grown like
 	// [`FrameStorage::Growing`].
-	open: Option<Arc<Segment>>,
+	open: Option<Open>,
 }
 
 impl Segments {
@@ -716,14 +793,12 @@ impl Segments {
 			let len = (size - base).min(SEGMENT);
 			let within = offset - base;
 			let take = src.len().min(len - within);
-			let open = self
-				.open
-				.get_or_insert_with(|| Arc::new(Segment::new(if grow { 0 } else { len })));
-			Segment::reserve(open, within, within + take, len);
+			let open = self.open.get_or_insert_with(|| Open::new(if grow { 0 } else { len }));
+			open.reserve(within, within + take, len);
 			// Safety: sole writer, within the segment's length, past every byte handed out.
-			unsafe { open.write(within, &src[..take]) };
+			unsafe { open.segment.write(within, &src[..take]) };
 			if within + take == len {
-				let segment = self.open.take().expect("written above");
+				let Open { segment, .. } = self.open.take().expect("written above");
 				self.sealed.push(Bytes::from_owner(Filled { segment, len }));
 			}
 			offset += take;
@@ -732,7 +807,11 @@ impl Segments {
 	}
 }
 
-/// An owned, zero-initialized heap allocation that chunked writes are copied into.
+/// An owned heap allocation that chunked writes are copied into.
+///
+/// Left uninitialized, since only its published prefix is ever read, and every byte of
+/// that was written before it was published. Reading past it would already race the
+/// writer filling those bytes.
 struct Segment {
 	data: *mut u8,
 	capacity: usize,
@@ -745,10 +824,10 @@ unsafe impl Sync for Segment {}
 
 impl Drop for Segment {
 	fn drop(&mut self) {
-		// Safety: data was obtained from `Box::into_raw` of a `Box<[u8]>` of length
-		// `capacity` and is not aliased at drop (Arc refcount hit 0).
+		// Safety: data was obtained from `Box::into_raw` of a `Box<[MaybeUninit<u8>]>` of
+		// length `capacity` and is not aliased at drop (Arc refcount hit 0).
 		unsafe {
-			let slice = std::ptr::slice_from_raw_parts_mut(self.data, self.capacity);
+			let slice = std::ptr::slice_from_raw_parts_mut(self.data.cast::<MaybeUninit<u8>>(), self.capacity);
 			drop(Box::from_raw(slice));
 		}
 	}
@@ -756,9 +835,9 @@ impl Drop for Segment {
 
 impl Segment {
 	fn new(capacity: usize) -> Self {
-		let boxed: Box<[u8]> = vec![0u8; capacity].into_boxed_slice();
+		let boxed = Box::<[u8]>::new_uninit_slice(capacity);
 		let capacity = boxed.len();
-		let data = Box::into_raw(boxed) as *mut u8;
+		let data = Box::into_raw(boxed).cast::<u8>();
 		Self { data, capacity }
 	}
 
@@ -769,25 +848,6 @@ impl Segment {
 	unsafe fn write(&self, offset: usize, src: &[u8]) {
 		debug_assert!(offset + src.len() <= self.capacity);
 		unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), self.data.add(offset), src.len()) };
-	}
-
-	/// Replace `current` with a larger copy of its first `filled` bytes if it holds fewer
-	/// than `needed` of the `len` it grows to.
-	///
-	/// Doubling keeps the copies linear in `len`, and the cap makes the last copy exactly
-	/// `len`, so it seals without another.
-	fn reserve(current: &mut Arc<Segment>, filled: usize, needed: usize, len: usize) {
-		if current.capacity >= needed {
-			return;
-		}
-		let next = Segment::new(needed.max(current.capacity * 2).min(len));
-		let filled = Filled {
-			segment: current.clone(),
-			len: filled,
-		};
-		// Safety: `next` is new, so nothing reads it yet.
-		unsafe { next.write(0, filled.as_ref()) };
-		*current = Arc::new(next);
 	}
 }
 
@@ -1013,9 +1073,12 @@ impl FrameBuf {
 		let content = &self.content;
 		let grow = content.grow.load(Ordering::Relaxed);
 		let storage = content.storage.get_or_init(|| match grow {
-			_ if size > SEGMENT => FrameStorage::Chain(Mutex::default()),
-			true => FrameStorage::Growing(Mutex::new(Arc::new(Segment::new(0)))),
-			false => FrameStorage::Fixed(Arc::new(Segment::new(size))),
+			_ if size > SEGMENT => FrameStorage::Chain(Box::default()),
+			true => FrameStorage::Growing(Mutex::new(Open::new(0))),
+			false => FrameStorage::Fixed {
+				segment: Arc::new(Segment::new(size)),
+				shared: Mutex::default(),
+			},
 		});
 		// Safety (every write below): the publication mutex makes this the sole writer;
 		// the caller checked the remaining size, and consumers only read `[..written]`.
@@ -1023,11 +1086,11 @@ impl FrameBuf {
 			// Only reachable if the frame is already complete via shared storage, which
 			// `Producer::write` rejects for a non-empty chunk. Nothing to copy.
 			FrameStorage::Shared(_) => return,
-			FrameStorage::Fixed(segment) => unsafe { segment.write(prev, src) },
-			FrameStorage::Growing(current) => {
-				let mut current = current.lock().unwrap_or_else(PoisonError::into_inner);
-				Segment::reserve(&mut current, prev, prev + src.len(), size);
-				unsafe { current.write(prev, src) };
+			FrameStorage::Fixed { segment, .. } => unsafe { segment.write(prev, src) },
+			FrameStorage::Growing(open) => {
+				let mut open = open.lock().unwrap_or_else(PoisonError::into_inner);
+				open.reserve(prev, prev + src.len(), size);
+				unsafe { open.segment.write(prev, src) };
 			}
 			FrameStorage::Chain(segments) => {
 				let mut segments = segments.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1059,12 +1122,12 @@ impl FrameBuf {
 	pub(super) fn allocated(&self) -> usize {
 		match self.content.storage.get() {
 			Some(FrameStorage::Shared(payload)) => payload.len(),
-			Some(FrameStorage::Fixed(segment)) => segment.capacity,
-			Some(FrameStorage::Growing(current)) => current.lock().unwrap_or_else(PoisonError::into_inner).capacity,
+			Some(FrameStorage::Fixed { segment, .. }) => segment.capacity,
+			Some(FrameStorage::Growing(open)) => open.lock().unwrap_or_else(PoisonError::into_inner).segment.capacity,
 			Some(FrameStorage::Chain(segments)) => {
 				let segments = segments.lock().unwrap_or_else(PoisonError::into_inner);
 				let sealed: usize = segments.sealed.iter().map(Bytes::len).sum();
-				sealed + segments.open.as_ref().map_or(0, |open| open.capacity)
+				sealed + segments.open.as_ref().map_or(0, |open| open.segment.capacity)
 			}
 			None => 0,
 		}
@@ -1490,21 +1553,21 @@ impl Consumer {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
-		let buf = match &self.source {
-			Source::Complete(payload) => {
-				if self.read_idx >= payload.len() {
-					return Poll::Ready(Ok(None));
-				}
-				let out = payload.chunk_at(self.read_idx);
-				self.read_idx += out.len();
-				self.stats.bytes(out.len() as u64);
-				return Poll::Ready(Ok(Some(out)));
-			}
-			Source::Partial(buf) => buf.clone(),
-		};
-
 		let size = self.info.size as usize;
 		loop {
+			// Borrowed rather than cloned: every reader of the frame shares its count.
+			let buf = match &self.source {
+				Source::Complete(payload) => {
+					if self.read_idx >= payload.len() {
+						return Poll::Ready(Ok(None));
+					}
+					let out = payload.chunk_at(self.read_idx);
+					self.read_idx += out.len();
+					self.stats.bytes(out.len() as u64);
+					return Poll::Ready(Ok(Some(out)));
+				}
+				Source::Partial(buf) => buf,
+			};
 			let written = buf.written(Ordering::Acquire);
 			if written > self.read_idx {
 				let out = buf.slice(self.read_idx, written);
@@ -1520,6 +1583,9 @@ impl Consumer {
 			if self.poll_expired(waiter) {
 				return Poll::Ready(Err(Error::Old));
 			}
+			let Source::Partial(buf) = &self.source else {
+				unreachable!("only a partial frame waits for its bytes");
+			};
 			let read_idx = self.read_idx;
 			// Park on the group's channel; the producer notifies it on each write and
 			// on abort. Re-check the atomic on wake.
@@ -1950,6 +2016,50 @@ mod tests {
 		}
 		reader.join().unwrap();
 		assert_eq!(buf.freeze().contiguous(0), payload);
+	}
+
+	/// The segment a buffer is writing into, wherever its storage keeps it.
+	fn open_segment(buf: &FrameBuf) -> Weak<Segment> {
+		let segment = match buf.content.storage.get() {
+			Some(FrameStorage::Fixed { segment, .. }) => segment.clone(),
+			Some(FrameStorage::Growing(open)) => open.lock().unwrap().segment.clone(),
+			Some(FrameStorage::Chain(segments)) => segments.lock().unwrap().open.as_ref().unwrap().segment.clone(),
+			_ => panic!("no segment is being written"),
+		};
+		Arc::downgrade(&segment)
+	}
+
+	/// Readers reading up to the same published length share one owner of its segment, so
+	/// a read allocates per publication rather than per reader. Growth drops that owner,
+	/// so the old segment lives only as long as the slices already cut from it.
+	#[test]
+	fn readers_share_one_owner_per_publication() {
+		for (size, grow) in [(16, false), (16, true), (SEGMENT + 16, false), (SEGMENT + 16, true)] {
+			let case = format!("size={size} grow={grow}");
+			let buf = FrameBuf::with_growth(size, grow);
+			buf.append(b"abcd").unwrap();
+			let segment = open_segment(&buf);
+			let first: Vec<Bytes> = (0..8).map(|_| buf.slice(0, 4)).collect();
+			assert!(first.iter().all(|slice| slice == &b"abcd"[..]), "{case}");
+			// A reader behind the published length shares the owner too.
+			assert_eq!(buf.slice(1, 3), &b"bc"[..], "{case}");
+			// The storage's reference and the readers' one owner.
+			assert_eq!(segment.strong_count(), 2, "{case}");
+
+			buf.append(b"efgh").unwrap();
+			let second: Vec<Bytes> = (0..8).map(|_| buf.slice(4, 8)).collect();
+			assert!(second.iter().all(|slice| slice == &b"efgh"[..]), "{case}");
+			if grow {
+				assert!(!open_segment(&buf).ptr_eq(&segment), "{case}: outgrew its segment");
+				// Only the owner the first readers hold.
+				assert_eq!(segment.strong_count(), 1, "{case}");
+				drop(first);
+				assert_eq!(segment.strong_count(), 0, "{case}");
+			} else {
+				// The storage's, the first readers' owner, and the second readers' owner.
+				assert_eq!(segment.strong_count(), 3, "{case}");
+			}
+		}
 	}
 
 	/// A frame larger than a segment allocates only the segment being written, whatever it
