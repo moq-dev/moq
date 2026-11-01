@@ -326,6 +326,14 @@ final class SmokeTests: XCTestCase {
         XCTAssertThrowsError(try catalog.finish())
     }
 
+    func testBroadcastConsumerClosedReturnsOnClose() async throws {
+        let broadcast = try BroadcastProducer()
+        let consumer = try broadcast.consume()
+        let closed = Task { try await consumer.closed() }
+        try broadcast.close()
+        try await closed.value
+    }
+
     func testVideoHintsReachMediaPublishApi() throws {
         let broadcast = try BroadcastProducer()
         let hint = Media.VideoHint(

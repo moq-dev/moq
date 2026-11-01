@@ -251,6 +251,17 @@ class SmokeTest {
     }
 
     @Test
+    fun `a broadcast consumer's closed returns once the broadcast ends`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            broadcast.consume().use { consumer ->
+                val closed = async { consumer.closed() }
+                broadcast.end()
+                closed.await()
+            }
+        }
+    }
+
+    @Test
     fun `broadcast updates shared video properties`() {
         BroadcastProducer().use { broadcast ->
             CatalogProducer(broadcast).setVideoProperties(VideoProperties(rotation = 315.0))
