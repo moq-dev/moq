@@ -24,9 +24,10 @@ See the [epic](/quest/m2/socket/README.md) for the layout and the reply split.
 - The anonymous publish grant covers `demo/carla/*/.dial/*`. Whichever of
   this and [moq-boy on sockets](/quest/m2/socket/boy.md) lands second removes
   `demo/viewer/**` from `demo/relay/prod.toml` and its documented
-  `moq auth serve` line. A truck's token for `carla/**` already
-  covers the dial paths, so the worker needs no separate `viewer/carla/**`
-  scope; say so in `demo/carla/README.md`.
+  `moq auth serve` line. The worker's token keeps publish on `carla/**`
+  and swaps its subscribe scope from `viewer/carla/**` to `carla/*/.dial/*`,
+  because publish and subscribe are granted separately; say so in
+  `demo/carla/README.md`.
 - Update `demo/carla/README.md` (paths, lease) and `doc/bin/demo.md`.
 
 ## Required
