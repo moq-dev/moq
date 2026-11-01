@@ -63,9 +63,16 @@ the reverse (decided 2026-10-20, maintainer):
   `MAX_DATAGRAM_HEADER` (`rs/moq-e2ee/src/limits.rs`,
   `js/e2ee/src/limits.ts`; 28 after #7435, lite-07's Type plus three 9-byte
   varints) also counts the optional lite datagram fields: the relayed fields
-  the lite `ietf` extension adds, and the Inflated Size a compressed track's
-  datagram carries. Without them a maximum-size protected datagram can
-  encode past the 1200-byte body and be dropped. Sealing and opening share
+  the lite `ietf` extension adds, and moq-net's Inflated Size header field,
+  which a compressed physical track's datagram carries outside the AEAD
+  (`rs/moq-net/src/lite/datagram.rs`). Without them a maximum-size protected
+  datagram can encode past the 1200-byte body and be dropped. That header
+  field is not the wrapper's own inflated size above, which sits inside the
+  authenticated payload and counts against the plaintext budget instead.
+  Today a caller's `track::Info` reaches the physical track unchanged, so it
+  can be compressed. Once the wrapper creates the physical track
+  uncompressed, the header field never appears and the allowance needs only
+  the `ietf` fields. Sealing and opening share
   `MAX_DATAGRAM_PAYLOAD` today (`rs/moq-e2ee/src/track.rs`,
   `js/e2ee/src/track.ts`), so a wider allowance would also make `open`
   refuse a datagram an older sender sealed under the narrower one. Split

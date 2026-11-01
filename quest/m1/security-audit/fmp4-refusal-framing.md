@@ -2,11 +2,13 @@
 
 ## Goal
 
-A box the fMP4 importer refuses at its header no longer drops the rest of
-the input handed to that decode call, so a caller feeding arbitrary chunks
-keeps framing as a box-aligned caller does. The 4-track interleaved import
-benchmark is no slower than before the streaming change, or the cost is
-measured and accepted.
+A box the fMP4 importer refuses at its header no longer leaves a caller
+feeding arbitrary chunks out of frame. Either the importer reads the rest of
+that decode call's input past the refused box, so the caller keeps framing
+as a box-aligned caller does, or the refusal is terminal and every later
+call fails, so no input is silently dropped mid-stream. The 4-track
+interleaved import benchmark is no slower than before the streaming change,
+or the cost is measured and accepted.
 
 ## Plan
 
