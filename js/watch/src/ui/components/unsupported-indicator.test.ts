@@ -41,6 +41,12 @@ test("reports unsupported audio only when the broadcast has no video", async () 
 		expect(container.style.display).toBe("");
 		expect(text.textContent).toBe("This audio codec is not supported by your browser: opus");
 
+		// A video section the reachability filter emptied is no video, so audio still reports.
+		video.catalog.set({ renditions: {} });
+		await yieldNow();
+		expect(container.style.display).toBe("");
+		expect(text.textContent).toBe("This audio codec is not supported by your browser: opus");
+
 		// Playable video carries the broadcast, so unsupported audio alone is not reported.
 		video.catalog.set({ renditions: { hd: { codec: "avc1.640028" } } });
 		await yieldNow();
