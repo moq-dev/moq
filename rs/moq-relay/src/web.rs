@@ -2148,7 +2148,7 @@ mod tests {
 				.unwrap()
 				.with_reconnect(false)
 				.connect(url.clone());
-			tokio::time::timeout(std::time::Duration::from_secs(10), connection.established())
+			kio::clock::timeout(std::time::Duration::from_secs(10), connection.established())
 		};
 		let mut https_ca = moq_tokio::tls::Connect::default();
 		https_ca.root = vec![ca.clone()];
@@ -2221,7 +2221,7 @@ mod tests {
 			.unwrap()
 			.with_reconnect(false)
 			.connect(url);
-		let refused = tokio::time::timeout(std::time::Duration::from_secs(10), connection.established())
+		let refused = kio::clock::timeout(std::time::Duration::from_secs(10), connection.established())
 			.await
 			.expect("the tls:// dial timed out");
 		assert!(refused.is_err(), "tls:// accepted a dial without a pinned certificate");
@@ -2325,7 +2325,7 @@ mod tests {
 		for (addr, alpn) in [(http, None), (https, None), (https, Some(&[][..]))] {
 			let mut client = connect(addr, alpn).await;
 			client.write_all(&[3, 1, 2, 3]).await.unwrap();
-			let mut rtmp = tokio::time::timeout(std::time::Duration::from_secs(10), incoming.accept())
+			let mut rtmp = kio::clock::timeout(std::time::Duration::from_secs(10), incoming.accept())
 				.await
 				.expect("RTMP reached its consumer")
 				.unwrap();
@@ -2360,7 +2360,7 @@ mod tests {
 		// The connection still classifying does not keep the consumer open past serving.
 		serving.abort();
 		let _ = serving.await;
-		let ended = tokio::time::timeout(std::time::Duration::from_secs(10), incoming.accept()).await;
+		let ended = kio::clock::timeout(std::time::Duration::from_secs(10), incoming.accept()).await;
 		assert!(matches!(ended, Ok(None)), "the consumer ends with serving");
 
 		let (serving, http, https, _) = serve(false);
@@ -2368,7 +2368,7 @@ mod tests {
 			let mut client = connect(addr, alpn).await;
 			client.write_all(&[3]).await.unwrap();
 			let mut rest = Vec::new();
-			let read = tokio::time::timeout(std::time::Duration::from_secs(10), client.read_to_end(&mut rest))
+			let read = kio::clock::timeout(std::time::Duration::from_secs(10), client.read_to_end(&mut rest))
 				.await
 				.expect("an unserved RTMP connection is closed");
 			assert!(rest.is_empty(), "{read:?}");
