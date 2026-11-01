@@ -1254,7 +1254,13 @@ mod tests {
 		let mut window = Window::new(&ranges, Some(9), &groups).unwrap();
 		groups.held.insert(2, Held::Started(at(2000)));
 		assert!(window.settle(Some(9), &groups));
-		assert_eq!(window.resolved()[0], Some(Resolved { start: 2, end: Some(10) }));
+		assert_eq!(
+			window.resolved()[0],
+			Some(Resolved {
+				start: 2,
+				end: Some(10)
+			})
+		);
 		assert!(window.admits_datagram(9, Some(at(3000))));
 		assert!(!window.admits_datagram(15, Some(at(3000))), "past the relative end");
 	}
