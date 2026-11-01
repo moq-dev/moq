@@ -5082,6 +5082,9 @@ enum IngestPhase {
 	Size { timestamp: Option<crate::Timestamp> },
 	/// Reading the status of an empty object.
 	Status { timestamp: Option<crate::Timestamp> },
+	/// Waiting to admit the object, or an empty one's properties, until the group's
+	/// fastest reader leaves room for it.
+	Admit { header: frame::Header },
 	/// Streaming the object payload.
 	Payload { frame: frame::Producer },
 	/// An explicit end-of-group or end-of-track status arrived.
@@ -5999,11 +6002,12 @@ impl FetchPayloadRecv {
 				properties: decoded.properties,
 			})
 		});
-		let header = frame::Header {
+		let header: frame::Header = frame::Header {
 			info: frame::Info { size, timestamp },
 			fields,
 			inflated: super::object::inflated(decoded.inflated, producer.compressed())?,
 		};
+		wait!(Admit => stream.poll_admit(waiter, producer, header))?;
 		let mut frame: crate::frame::Producer = producer.create_object(header)?;
 		let read: Result<(), Error> = wait!(Read => stream.poll_read_frame(waiter, frame));
 		if let Err(err) = read {
@@ -6159,7 +6163,7 @@ impl GroupIngest {
 	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
 	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
 	/// group; an object cut short mid-payload was already aborted here with the reason.
-	pub(crate) fn poll<R: crate::transport::poll::RecvStream>(
+	pub(crate) fn poll<R: crate::transport::poll::RecvStream + crate::coding::Pause>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut crate::recv::Group,
@@ -6209,22 +6213,32 @@ impl GroupIngest {
 						self.phase = IngestPhase::Status { timestamp: *timestamp };
 						continue;
 					}
+					let timestamp = object_time(self.timescale, *timestamp)?;
+					let header = self.header(group, frame::Info { size, timestamp })?;
+					self.phase = IngestPhase::Admit { header };
+				}
+				IngestPhase::Admit { header } => {
+					ready!(reader.poll_admit(waiter, group, header))?;
+					let IngestPhase::Admit { header } = std::mem::replace(&mut self.phase, IngestPhase::Delta) else {
+						unreachable!()
+					};
 					// `create_object` is the allocation chokepoint: it rejects an oversized
 					// `size` and allocates up front only within the origin's budget, so no
 					// pre-check is needed.
-					let timestamp = object_time(self.timescale, *timestamp)?;
-					let header = self.header(group, frame::Info { size, timestamp })?;
+					let empty = header.info.size == 0;
 					let frame = group.create_object(header)?;
-					self.phase = IngestPhase::Payload { frame };
+					match empty {
+						// An empty object has no payload to read, only properties to admit.
+						true => group.restore(frame.finish()?),
+						false => self.phase = IngestPhase::Payload { frame },
+					}
 				}
 				IngestPhase::Status { timestamp } => {
 					let status = ready!(reader.poll_varint(waiter))?;
 					if status == 0 {
 						let timestamp = object_time(self.timescale, *timestamp)?;
 						let header = self.header(group, frame::Info { size: 0, timestamp })?;
-						let frame = group.create_object(header)?;
-						group.restore(frame.finish()?);
-						self.phase = IngestPhase::Delta;
+						self.phase = IngestPhase::Admit { header };
 						continue;
 					}
 					// A status object has no frame to hold its time, so its block keeps it.

@@ -138,6 +138,30 @@ pub trait Metrics {
 struct Untracked;
 impl Metrics for Untracked {}
 
+/// The receive credit a transport grants its peer, which bounds what a stream the session
+/// stops reading still holds.
+///
+/// A session's ingest stops reading a group's stream while the group's fastest reader is far
+/// behind, so flow control pushes back to the publisher. Such a paused stream keeps up to
+/// `stream` bytes counted against the shared `connection` window, so the session pauses only
+/// as many streams as fit in half of it; the rest keep reading. See
+/// [`poll::Session::receive_window`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReceiveWindow {
+	/// The connection-wide receive window, in bytes, or [`u64::MAX`] when streams share none.
+	pub connection: u64,
+	/// The most receive credit one stream may hold, in bytes.
+	pub stream: u64,
+}
+
+impl ReceiveWindow {
+	/// A connection-wide window of `connection` bytes, of which one stream holds at most `stream`.
+	pub fn new(connection: u64, stream: u64) -> Self {
+		Self { connection, stream }
+	}
+}
+
 /// The smallest connection receive window a transport that leases may offer.
 ///
 /// A session keeps each unit it is still assembling leased, and a unit larger than the
@@ -324,6 +348,16 @@ pub mod poll {
 		/// The session sets the target; see [`super::Probe`]. Without a sender nothing probes,
 		/// so the congestion estimate stops rising while the connection is app-limited.
 		fn probe(&self) -> Option<super::Probe> {
+			None
+		}
+
+		/// Return the receive windows now in force, or `None` when the transport cannot say.
+		///
+		/// Read whenever the session considers pausing a stream, so a window changed on a live
+		/// connection is followed. Without one, the session cannot bound the credit a paused
+		/// stream holds, so it never pauses one: ingest reads every stream as it arrives and
+		/// sheds what its readers fall behind on.
+		fn receive_window(&self) -> Option<super::ReceiveWindow> {
 			None
 		}
 
@@ -534,6 +568,10 @@ pub mod poll {
 
 		fn probe(&self) -> Option<super::Probe> {
 			(**self).probe()
+		}
+
+		fn receive_window(&self) -> Option<super::ReceiveWindow> {
+			(**self).receive_window()
 		}
 	}
 
@@ -814,6 +852,18 @@ pub mod poll {
 		/// Call this method manually if you want to specify a code yourself.
 		fn stop(&mut self, code: u32);
 
+		/// Poll until the stream fails without reading it: the peer resets it, or the
+		/// connection closes. Pending for good once the peer finished it.
+		///
+		/// A session that stops reading a stream to pace it (see
+		/// [`Session::receive_window`]) watches this instead, so a reset still ends the group
+		/// it carries. It takes no bytes and grants no credit. The default never completes,
+		/// which suits a transport reporting no receive window, since none of its streams pause.
+		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+			let _ = waiter;
+			Poll::Pending
+		}
+
 		/// Poll for the next chunk, up to `max` bytes, or `None` once the peer finished the
 		/// stream. Its credit returns as it is read.
 		///
@@ -891,6 +941,12 @@ pub mod poll {
 		/// An implementation MUST also do this on Drop: [`Buffered`] forwards an explicit stop
 		/// but leaves the drop to the wrapped stream.
 		fn stop(&mut self, code: u32);
+
+		/// Poll until the stream fails without reading it. See [`RecvStream::poll_reset`].
+		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+			let _ = waiter;
+			Poll::Pending
+		}
 	}
 
 	/// Leases over a transport that cannot keep bytes unconsumed, buffering what it reads.
@@ -960,6 +1016,14 @@ pub mod poll {
 			self.chunks.clear();
 			self.len = 0;
 			self.inner.stop(code);
+		}
+
+		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<S::Error> {
+			// Every byte arrived, so nothing is left to reset.
+			match self.fin {
+				true => Poll::Pending,
+				false => self.inner.poll_reset(waiter),
+			}
 		}
 	}
 

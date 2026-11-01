@@ -404,6 +404,14 @@ impl poll::Session for Session {
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		poll_close(&self.side.conn.close, waiter)
 	}
+
+	/// Streams share no connection window, and one holds at most its buffer.
+	fn receive_window(&self) -> Option<super::ReceiveWindow> {
+		Some(super::ReceiveWindow::new(
+			u64::MAX,
+			self.conn().config.stream_buffer as u64,
+		))
+	}
 }
 
 /// One direction of a stream: the messages its writer queued for its reader.
@@ -646,6 +654,23 @@ impl poll::Chunks for Chunks {
 		}
 		drop(channel);
 		self.release();
+	}
+
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		if self.stopped {
+			return Poll::Ready(Error::Closed);
+		}
+		if let Poll::Ready(err) = poll_close(&self.close, waiter) {
+			return Poll::Ready(err);
+		}
+		let channel = ready!(self.channel.poll(waiter, |channel| match channel.end {
+			Some(End::Reset(_)) => Poll::Ready(()),
+			_ => Poll::Pending,
+		}));
+		let Some(End::Reset(code)) = channel.end else {
+			unreachable!("checked above")
+		};
+		Poll::Ready(Error::Reset(code))
 	}
 }
 

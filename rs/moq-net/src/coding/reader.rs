@@ -40,6 +40,31 @@ pub struct Reader<S: RecvStream, V> {
 /// enough that an ordinary burst is still one wake.
 const WAKE_BUDGET: usize = 64 * 1024;
 
+/// A stream ingest may stop reading to pace a group's writer, which holds its receive
+/// credit meanwhile.
+pub(crate) trait Pause {
+	/// Reserve the credit this stream may hold while paused, returning whether it may pause.
+	/// A stream outside any session always may.
+	fn pause(&mut self) -> bool {
+		true
+	}
+
+	/// Return what [`Self::pause`] reserved, as the stream is read again.
+	fn resume(&mut self) {}
+}
+
+impl Pause for crate::transport::boxed::RecvStream {
+	fn pause(&mut self) -> bool {
+		crate::transport::boxed::RecvStream::pause(self)
+	}
+
+	fn resume(&mut self) {
+		crate::transport::boxed::RecvStream::resume(self)
+	}
+}
+
+impl<T> Pause for crate::transport::poll::Buffered<T> {}
+
 /// The largest [`Reader::scratch`] kept between decodes; one past this is freed.
 const SCRATCH_KEEP: usize = 64 * 1024;
 
@@ -359,7 +384,9 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		}
 	}
 
-	/// Fill a frame's payload from the stream, returning `Pending` once it would block.
+	/// Fill a frame's payload from the stream, returning `Pending` once it would block or
+	/// the group's writer is paced by its fastest reader (see
+	/// [`crate::frame::Producer::poll_ready`]) and the stream may pause (see [`Pause`]).
 	///
 	/// The payload reaches the frame as it arrives, but keeps its receive credit until the
 	/// segment it lands in seals, so an incomplete frame holds at most one segment of the
@@ -381,12 +408,22 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		&mut self,
 		waiter: &kio::Waiter,
 		frame: &mut crate::frame::Producer,
-	) -> Poll<Result<(), Error>> {
+	) -> Poll<Result<(), Error>>
+	where
+		S: Pause,
+	{
 		self.want = 0;
 		let mut owed = 0;
 
 		let result = loop {
-			let mut lease = match self.poll_lease(waiter, frame.remaining().min(1)) {
+			// A writer too far ahead of the group's fastest reader leaves the rest in the
+			// stream, so flow control pushes back upstream.
+			let lease = match self.poll_pace(waiter, frame.poll_ready(waiter)) {
+				Poll::Ready(Ok(())) => self.poll_lease(waiter, frame.remaining().min(1)),
+				Poll::Ready(Err(err)) => break Err(err),
+				Poll::Pending => Poll::Pending,
+			};
+			let mut lease = match lease {
 				Poll::Pending => {
 					if owed > 0 {
 						frame.notify();
@@ -436,6 +473,46 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		};
 
 		Poll::Ready(result)
+	}
+
+	/// Poll until `group`'s writer may admit the frame `header` opens from this stream: until
+	/// that leaves no byte its fastest reader has yet to take for the live tail to shed.
+	///
+	/// Pacing before the frame exists matters because admitting it trims the tail to fit
+	/// its declared size, so a large frame would otherwise shed what that reader still wants.
+	/// An error means the stream failed while paused.
+	pub(crate) fn poll_admit(
+		&mut self,
+		waiter: &kio::Waiter,
+		group: &crate::recv::Group,
+		header: &crate::frame::Header,
+	) -> Poll<Result<(), Error>>
+	where
+		S: Pause,
+	{
+		self.poll_pace(waiter, group.poll_admit(waiter, header))
+	}
+
+	/// Wait out `paced`, the group's pace gate, if the session has room for the credit this
+	/// stream holds while paused (see [`Pause`]); otherwise read on, and the group sheds.
+	///
+	/// A paused stream is not read, so it is watched for a reset instead, which fails the
+	/// wait rather than leaving it to the group's reader to notice.
+	fn poll_pace(&mut self, waiter: &kio::Waiter, paced: Poll<()>) -> Poll<Result<(), Error>>
+	where
+		S: Pause,
+	{
+		match paced {
+			Poll::Ready(()) => {
+				self.stream.resume();
+				Poll::Ready(Ok(()))
+			}
+			Poll::Pending if self.stream.pause() => {
+				let err = ready!(self.stream.poll_reset(waiter));
+				Poll::Ready(Err(self.version.transport_error(err)))
+			}
+			Poll::Pending => Poll::Ready(Ok(())),
+		}
 	}
 
 	/// Poll for exactly `size` bytes.
@@ -672,11 +749,12 @@ mod tests {
 
 	/// Hands back one queued chunk per poll, then blocks: a stream whose socket has
 	/// delivered a burst and has nothing more for this turn. Finishes once `fin` is set and
-	/// the queue is empty.
+	/// the queue is empty, and reports a reset once `reset` is set.
 	#[derive(Default)]
 	struct Queue {
 		chunks: VecDeque<&'static [u8]>,
 		fin: bool,
+		reset: bool,
 	}
 
 	impl Chunks for Queue {
@@ -700,13 +778,20 @@ mod tests {
 		}
 
 		fn stop(&mut self, _code: u32) {}
+
+		fn poll_reset(&mut self, _: &kio::Waiter) -> Poll<Self::Error> {
+			match self.reset {
+				true => Poll::Ready(Default::default()),
+				false => Poll::Pending,
+			}
+		}
 	}
 
 	fn queue<V: StreamCodes>(chunks: &[&'static [u8]], version: V) -> Reader<Buffered<Queue>, V> {
 		Reader::new(
 			Buffered::new(Queue {
 				chunks: chunks.iter().copied().collect(),
-				fin: false,
+				..Default::default()
 			}),
 			version,
 		)
@@ -887,6 +972,48 @@ mod tests {
 		));
 	}
 
+	/// A group 17 MB past an idle reader, so its writer is paced.
+	fn paced_group() -> (crate::group::Producer, crate::group::Consumer) {
+		let mut group = crate::group::Info { sequence: 0 }.produce();
+		let idle = group.consume();
+		let payload = Bytes::from(vec![0u8; 1 << 20]);
+		for _ in 0..17 {
+			group.write_frame(crate::Timestamp::ZERO, payload.clone()).unwrap();
+		}
+		(group, idle)
+	}
+
+	/// A paused stream is not read, so it is watched for a reset instead: one ends the wait
+	/// at once, whether a frame waits to be admitted or to fill, rather than once the
+	/// group's reader moves.
+	#[test]
+	fn a_reset_ends_a_paused_stream() {
+		let noop = &kio::Waiter::noop();
+
+		let (group, _idle) = paced_group();
+		let group = crate::recv::Group::new(group);
+		let header = crate::frame::Header::from(crate::frame::Info {
+			size: 1,
+			timestamp: Some(crate::Timestamp::ZERO),
+		});
+		let mut reader = queue(&[], crate::lite::Version::Lite05);
+		assert!(reader.poll_admit(noop, &group, &header).is_pending(), "paused to admit");
+		reader.stream.get_mut().reset = true;
+		assert!(matches!(reader.poll_admit(noop, &group, &header), Poll::Ready(Err(_))));
+
+		let (group, _idle) = paced_group();
+		let mut frame = group
+			.create_frame(crate::frame::Info {
+				size: 1,
+				timestamp: Some(crate::Timestamp::ZERO),
+			})
+			.unwrap();
+		let mut reader = queue(&[b"x"], crate::lite::Version::Lite05);
+		assert!(reader.poll_read_frame(noop, &mut frame).is_pending(), "paused to fill");
+		reader.stream.get_mut().reset = true;
+		assert!(matches!(reader.poll_read_frame(noop, &mut frame), Poll::Ready(Err(_))));
+	}
+
 	/// A consumer parked on the group cannot run until this task yields, so a burst of
 	/// chunks owes exactly one wake: at the boundary, from whoever wrote them. Every
 	/// other exit hands the wake to the caller's `finish` or `abort`.
@@ -959,7 +1086,7 @@ mod tests {
 			Buffered::new(Burst {
 				chunks: Queue {
 					chunks: std::iter::repeat_n(CHUNK, chunks).collect(),
-					fin: false,
+					..Default::default()
 				},
 				payload,
 				waiter,
@@ -983,6 +1110,8 @@ mod tests {
 	}
 
 	struct CreditedLease<'a>(&'a mut Credited);
+
+	impl Pause for Credited {}
 
 	impl RecvStream for Credited {
 		type Error = crate::lite::test_transport::SinkError;

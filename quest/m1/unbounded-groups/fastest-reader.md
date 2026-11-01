@@ -65,6 +65,18 @@ Decided 2026-10-28 (maintainer, after an audit of the plan):
   lossless. Bring the mechanism to the maintainer before coding, and align it
   with the [receive pool](/quest/m2/receive-pool.md).
 
+Decided 2026-10-30 (maintainer, in the
+[moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388) iteration):
+
+- moq-net caps the receive credit paused groups hold per session at about half
+  the connection window, read live from the transport
+  (`poll::Session::receive_window`). A group that would push the total past
+  the cap keeps reading and shedding instead of pausing. This stands until the
+  [receive pool](/quest/m2/receive-pool.md) folds paused credit into its
+  per-worker budget.
+- The readiness future is `group::Producer::poll_ready` and `async fn ready()`,
+  pending until a reader exists and the 16 MB window has room.
+
 Prior art splits the same way (2026-10-28 survey): Varnish streaming, ATS
 read-while-writer, and WHATWG `tee()` fan out at the writer's pace and buffer
 everything; Varnish `transit_buffer`, nginx unbuffered proxying, and ATS flow
@@ -72,15 +84,48 @@ control pace a single client; Node `pipe()` to several destinations paces the
 slowest. This is `tee()` with a bounded buffer that drops the branch that
 falls off it ([whatwg/streams#1235](https://github.com/whatwg/streams/issues/1235)).
 
-Open, for the implementer to measure and record: the readiness API's shape,
-which is an API decision to bring to the maintainer before coding. qmux transports carry the same rule through their
-own stream credit ([qmux receive lease](/quest/m2/qmux-receive-lease.md)).
+Landed in [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388) (Rust,
+session ingest only): readers report the byte end of each frame they take
+(`Pace` in `rs/moq-net/src/model/pace.rs`), and the shared transport reader's
+payload loop (`coding::Reader::poll_read_frame`) waits on
+`group::Producer::poll_paced` before taking more, and admits a frame only once
+its declared size fits the window (`coding::Reader::poll_admit`), so moq-lite
+and moq-transport ingest both pause past the 16 MB window. A reader that took every
+committed frame counts as waiting on the writer, so a frame larger than the
+window never stalls it. A paused stream is not read, so it is watched for a
+reset instead (`poll::RecvStream::poll_reset`, which moq-quic answers through
+moq-tokio and moq-uring without taking bytes). Tests cover one hop on lite-06,
+lite-07-wip, and moq-transport-22: an idle reader holds the relay copy near the
+window and then receives every frame, a slow reader ends `Evicted` while the
+fast one keeps up, a session past its credit cap reads on, and a publisher's
+reset ends a paused relay copy. The same PR landed the credit
+cap (each paused stream reserves its stream window from a per-session budget
+in `rs/moq-net/src/transport/boxed.rs`; moq-quic reports its windows through
+moq-tokio and moq-uring, and a transport that reports none never pauses) and
+the public readiness future.
 
-Tests: a relay chain where a fast reader paces a publisher that writes faster
-than the link, with memory held near the window; a second, slower reader ending
-`Evicted` without slowing the fast one; a track with no readers never blocking
-its publisher; Rust and JS parity. Benchmark the hot path in `group.rs` and
-record any regression.
+What remains:
 
-Docs: the moq-lite concept page's congestion section and the relay cache docs
-change inline.
+- Receive-window reporting for the transports that report none yet (quinn,
+  iroh, qmux, WebTransport in the browser, and the FFI adapters), whose ingest
+  never pauses until they do. Each must also answer
+  `poll::RecvStream::poll_reset`, or a reset goes unseen while paused.
+- A sized readiness check for local writers: `group::Producer::ready()`
+  waits for room but not for the next frame's size, so a local frame larger
+  than the room left still sheds what the egress has yet to send.
+- JS parity.
+- A two-relay chain test with memory measured near the window.
+- A quiet-host comparison against the base of `group_read_frames`,
+  `group_contended`, and `group_relay_frames`, plus `group_paced` (a writer
+  parked at the window, over 1, 8, and 64 readers), which the first slice
+  added. The cursor's report is one relaxed load per frame or batch, and a
+  `fetch_max` only for the fastest reader. On the busy host that landed it,
+  runs swung by up to 50% either way between repeats.
+- Fills that write a whole batch of groups at once evict their own earlier
+  groups before the reader takes them (the follow-up from
+  [moq-dev/moq#7339](https://github.com/moq-dev/moq/pull/7339)). Pacing within
+  a group does not cover this; decide whether it belongs here or with
+  [flights](/quest/m1/unbounded-groups/flights.md).
+
+qmux transports carry the same rule through their own stream credit
+([qmux receive lease](/quest/m2/qmux-receive-lease.md)).

@@ -1662,6 +1662,17 @@ impl Connection {
 		}
 	}
 
+	/// The connection-wide receive window now in force; see [`Limits::receive_window`]
+	pub fn receive_window(&self) -> u64 {
+		self.streams.receive_window()
+	}
+
+	/// The most receive credit one stream may hold: the largest per-stream window ever in force,
+	/// since credit already granted outlives a shrink; see [`Limits::stream_receive_window`]
+	pub fn stream_receive_window(&self) -> u64 {
+		self.streams.peak_stream_receive_window()
+	}
+
 	/// Change every limit `limits` sets, leaving the others as they are
 	///
 	/// Errors, changing nothing, on limits [`Limits::validate`] refuses.

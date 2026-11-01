@@ -22,6 +22,10 @@
 //! holds (a small pool's debt, or the 32 MiB live tail) and the frames it sheds, so
 //! shedding the front stays a flat cost per frame.
 //!
+//! `group_paced` keeps a writer one frame past the 16 MiB window ahead of its fastest
+//! reader, as a paced ingest runs, swept over readers: each frame read reports progress,
+//! and the fastest reader's read wakes the parked writer.
+//!
 //! Run with `cargo bench -p moq-net`.
 
 #![expect(
@@ -758,6 +762,57 @@ fn bench_shed(c: &mut Criterion) {
 	g.finish();
 }
 
+/// Counts wakes, so a bench can check that reads let a parked writer on.
+#[derive(Default)]
+struct Wakes(AtomicU64);
+
+impl std::task::Wake for Wakes {
+	fn wake(self: Arc<Self>) {
+		self.0.fetch_add(1, Ordering::Relaxed);
+	}
+}
+
+/// A writer held at the pacing window: each round it polls [`group::Producer::poll_ready`],
+/// parking whenever it is past the window, every reader takes one frame, and the writer
+/// writes the next. A reader reports a prefetched batch at once, so the fastest one's batch
+/// read wakes the parked writer. Throughput counts frames read, so the per-read progress
+/// report and the park and wake show up together, and the readers trailing the fastest one
+/// as a slope across readers.
+fn bench_paced(c: &mut Criterion) {
+	// Payloads are shared clones, so a megabyte costs a refcount and the window is 16 frames.
+	let payload = Bytes::from(vec![0u8; 1 << 20]);
+	let mut g = c.benchmark_group("group_paced");
+	for readers in [1, 8, 64] {
+		g.throughput(Throughput::Elements(readers as u64));
+		g.bench_function(BenchmarkId::from_parameter(readers), |b| {
+			let mut ctx = fresh_group();
+			let mut consumers: Vec<_> = (0..readers).map(|_| ctx.group.consume()).collect();
+			// One frame past the window, so the writer is paced from the first round.
+			for _ in 0..17 {
+				ctx.group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+			}
+			let wakes = Arc::new(Wakes::default());
+			let writer = kio::Waiter::new(wakes.clone().into());
+			let reader = kio::Waiter::noop();
+			let mut parked = 0u64;
+			b.iter(|| {
+				parked += ctx.group.poll_ready(&writer).is_pending() as u64;
+				for consumer in &mut consumers {
+					let Poll::Ready(Ok(Some(frame))) = consumer.poll_read_frame(&reader) else {
+						panic!("a frame is ready");
+					};
+					black_box(frame);
+				}
+				ctx.group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+			});
+			// A writer still paced parks again on the next round, so wakes trail parks.
+			assert!(parked > 0, "the writer never parked");
+			assert!(wakes.0.load(Ordering::Relaxed) > 0, "no read woke the writer");
+		});
+	}
+	g.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_write,
@@ -768,6 +823,7 @@ criterion_group!(
 	bench_relay_frames,
 	bench_inflate,
 	bench_contended,
-	bench_shed
+	bench_shed,
+	bench_paced
 );
 criterion_main!(benches);

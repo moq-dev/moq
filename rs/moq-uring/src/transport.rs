@@ -37,6 +37,10 @@ impl Grouped for quic::web::Session {
 		Some(quic::web::Session::streams_evicted(self))
 	}
 
+	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
+		Some(quic::web::Session::receive_window(self))
+	}
+
 	fn send_group(&mut self, priority: i64) -> Option<quic::send::Group> {
 		Some(quic::web::Session::send_group(self, priority))
 	}
@@ -91,6 +95,9 @@ impl moq_net::transport::poll::RecvStream for quic::web::RecvStream {
 	}
 	fn stop(&mut self, code: u32) {
 		web_transport_trait::poll::RecvStream::stop(self, code)
+	}
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> std::task::Poll<Self::Error> {
+		quic::web::RecvStream::poll_reset(self, &mut waiter.context()).map(adapter::Error)
 	}
 }
 
