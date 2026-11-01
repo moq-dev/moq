@@ -373,7 +373,12 @@ impl Instructions {
 		let mut value = 0u64;
 		// SAFETY: reads one u64 count into `value`, which outlives the call.
 		let read = unsafe { libc::read(self.fd.as_raw_fd(), (&raw mut value).cast(), size_of::<u64>()) };
-		assert_eq!(read, size_of::<u64>() as isize, "perf read: {}", std::io::Error::last_os_error());
+		assert_eq!(
+			read,
+			size_of::<u64>() as isize,
+			"perf read: {}",
+			std::io::Error::last_os_error()
+		);
 		value
 	}
 

@@ -69,7 +69,10 @@ fn payload(index: u64) -> Bytes {
 fn decode(payload: &[u8]) -> u64 {
 	assert_eq!(payload.len(), PAYLOAD, "datagram truncated");
 	let index = u64::from_le_bytes(payload[..8].try_into().unwrap());
-	assert!(payload[8..].iter().all(|byte| *byte == index as u8), "datagram corrupted");
+	assert!(
+		payload[8..].iter().all(|byte| *byte == index as u8),
+		"datagram corrupted"
+	);
 	index
 }
 
@@ -309,7 +312,10 @@ async fn measure(version: &str, cell: Cell) {
 		);
 		if viewer.name == "loopback" {
 			// The slow viewer's queue and drops must not reach the other session.
-			assert_eq!(report.received as u64, offered, "{version}: the loopback viewer lost datagrams");
+			assert_eq!(
+				report.received as u64, offered,
+				"{version}: the loopback viewer lost datagrams"
+			);
 		}
 	}
 	accept.abort();
