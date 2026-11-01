@@ -69,8 +69,8 @@ http-body = "1.0.1"
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
 humantime = { workspace = true }
 hyper-util = { workspace = true }
+kio = { workspace = true, features = ["runtime", "serde"] }
 moq-auth = { workspace = true, features = ["client"] }
-moq-clock = { workspace = true, features = ["serde"] }
 moq-net = { workspace = true }
 # The flow-control limits both QUIC runtimes take, for widening a peer's connection.
 moq-quic = { workspace = true }
@@ -109,10 +109,9 @@ sd-notify = { workspace = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
 # An HTTP/2 client, so the admission bench can hold many requests on one connection.
 h2 = { workspace = true }
-kio = { path = "../kio" }
-moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 # Clocks only the test moves, wall time included, so a grant's life is exact.
-moq-clock = { path = "../moq-clock", features = ["manual", "sim"] }
+kio = { path = "../kio", features = ["manual", "sim"] }
+moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 moq-congestion = { path = "../moq-congestion" }
 # The shared session bench fills FETCH runs through the hidden `fuzz` module.
 moq-net = { path = "../moq-net", features = ["fuzz"] }

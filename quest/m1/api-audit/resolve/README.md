@@ -13,6 +13,10 @@ Rust, JS, and every binding:
 - `follow(path, epoch)` follows the path across publisher instances (today's
   `announced_broadcast`), pinned to `epoch` when given.
 
+[Identity and epoch](/quest/m1/api-audit/route/identity.md) later changes the
+pin from `epoch` to an `identity` in both; the two
+resolutions stay as they are.
+
 No caller can assemble a racy two-step resolve, and no crate hand-rolls
 "resolve once discovery synced".
 
@@ -53,6 +57,8 @@ Wire: none.
 ## Required
 
 - [The player takes any read-side origin](/quest/m1/api-audit/resolve/watch-origin.md) - `@moq/watch`'s `Player` and `Broadcast` accept a read-only `Origin.Consumer` as well as a `Table`
+- [JS follow returns a Following](/quest/m1/api-audit/resolve/js-following.md) - `follow` and `request` get their own JS types, matching Rust and the bindings
+- [JS follow takes FollowOptions](/quest/m1/api-audit/resolve/follow-options.md) - `follow` and `request` get their own JS options types
 
 ## Related
 
