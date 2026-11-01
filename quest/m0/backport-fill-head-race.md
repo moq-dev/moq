@@ -6,16 +6,17 @@ A relay on `release` no longer FETCHes the head of a group that its own
 SUBSCRIBE is already bringing. In that race the fetched objects can land first,
 so the relay caches the group as fetched, refuses the live tail stream that ends
 it as `duplicate`, and leaves live readers waiting on the group until they time
-out. This ports fix 2 of
+out. This ports the relay fix of
 [moq-dev/moq#7135](https://github.com/moq-dev/moq/pull/7135) and ships it in a
 `moq-net` patch release.
 
 ## Plan
 
 Decided 2026-10-30 (maintainer): port only the relay fix. Why: #7135's other
-fix, the JS publisher answering an `INCLUDE_PROPERTIES=0` FETCH without
+bug, the JS publisher answering an `INCLUDE_PROPERTIES=0` FETCH without
 timestamps, cannot happen on `release`, whose `js/net/src/ietf/publisher.ts`
-`runFetch` refuses every FETCH.
+`runFetch` refuses every FETCH. Decided 2026-11-01 (maintainer): #7135 itself
+ships only the relay fix; `main` fixed that bug from the relay side instead.
 
 Decided 2026-10-30 (maintainer): m0, beside the other `release` backports.
 Why: it is an intermittent relay hang on the shipped line.
@@ -34,7 +35,3 @@ Start by reproducing the race on `release` with one of those tests. If
 `release` cannot hit it, delete this quest and say why in the PR.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - lands the fix this quest ports, on main
