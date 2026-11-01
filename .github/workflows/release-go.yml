@@ -27,7 +27,9 @@ on:
   push:
     branches:
       - release
-  workflow_run:
+  # Publishes only a protected release tag at the run's commit; see
+  # "Require a release tag at the run's commit".
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: ["Release FFI", "Release Go FFI"]
     types:
       - completed
@@ -112,6 +114,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.23"
+          # A release reads nothing from a cache another branch could have written.
+          cache: false
 
       - name: Read wrapper version line
         id: line

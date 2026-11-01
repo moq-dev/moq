@@ -401,8 +401,9 @@ async fn worker_tokio_custom_route_and_quic() {
 	embed_and_stop(config).await;
 }
 
-/// io_uring workers. Off the default feature set; `just rs uring` and nightly
-/// `--all-features` compile it. Skips below the 6.12 floor unless CI_STRICT.
+/// io_uring workers. Off the default feature set; the Linux gate's test build,
+/// `just rs uring`, and nightly `--all-features` compile it. Skips below the
+/// 6.12 floor unless CI_STRICT.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 #[tokio::test]
 async fn uring_custom_route_and_quic() {
@@ -512,7 +513,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }
