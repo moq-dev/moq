@@ -14,7 +14,7 @@ name: Dependabot
 permissions: {}
 
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] justified above.
     types: [opened, reopened, synchronize]
 
 jobs:
@@ -45,7 +45,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/nix
       - name: Install trusted quest
-        run: |
+        run: | # zizmor: ignore[github-env] the path is a build of main's flake, not of the PR.
           mkdir -p .tmp
           nix build --out-link .tmp/quest-cli .#quest
           echo "$PWD/.tmp/quest-cli/bin" >> "$GITHUB_PATH"
