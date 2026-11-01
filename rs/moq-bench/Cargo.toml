@@ -59,6 +59,8 @@ usage-rs = { workspace = true, features = ["completions", "config"] }
 
 # The host sampler reads /proc, so it is Linux-only (production relays are Linux).
 [target.'cfg(target_os = "linux")'.dependencies]
+# The sampler's sock_diag dump.
+libc = { workspace = true }
 moq-uring = { workspace = true, optional = true }
 procfs = "0.18"
 

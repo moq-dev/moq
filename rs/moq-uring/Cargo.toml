@@ -64,6 +64,8 @@ libc = { workspace = true }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs"] }
 # Tests run workers on a manual clock.
 moq-uring = { path = ".", features = ["_manual"] }
+# The socket-queue benchmark's rate-limited path.
+moq-shaper = { path = "../moq-shaper" }
 nix = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 rustls = "0.23"

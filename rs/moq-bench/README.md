@@ -244,6 +244,21 @@ process's share of the machine is computable. `--threads` adds a per-thread
 breakdown including the core each thread last ran on, which is how to verify
 pinning once the relay grows a thread-per-core mode.
 
+The `udp_*` fields come from the kernel's own socket accounting (a `sock_diag`
+dump, what `ss -uam` reads) for the process's UDP sockets: how many it holds
+(`udp_sockets`), the smallest receive and send buffer the kernel granted
+(`udp_rcvbuf_min`, `udp_sndbuf_min`, in kernel units, which on Linux are twice
+the honored `SO_RCVBUF` request), the bytes queued for receive right now
+(`udp_rx_queue_bytes`), and `udp_drops`, the datagrams dropped at those sockets
+because a receive queue was full. `udp_drops` is cumulative across every socket
+the sampler saw, closed ones included. One drop is one queued skb, so a
+coalesced GRO train counts once however many datagrams it carried. A drop here
+is local: the process was too slow to read. Loss on the path never reaches the
+socket and needs the transport's own counters. `udp_rcvbuf_errors`,
+`udp_sndbuf_errors` and `udp_in_errors` are the namespace's `/proc/net/snmp`
+counters, IPv4 and IPv6 summed, and count every socket in the namespace. The
+dump sees the sampler's network namespace, so run it in the target's.
+
 ## Measuring CPU cost
 
 Run the load from one machine and the sampler on the relay's host, then join

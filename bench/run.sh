@@ -809,18 +809,21 @@ run_shard_sweep() {
     done
 
     printf '\nShard sweep (0 shards is the shared runtime on %d threads)\n' "$cpus"
-    printf '%-8s %11s %7s %10s %10s %8s %7s %8s %9s %9s\n' \
-        workload connections shards recv-Mbps recv-fps p99-ms loss-% CPU CPU/conn RSS-MiB
+    # sock-drops: datagrams the kernel dropped at the relay's own UDP sockets
+    # (full receive queues), and gen-drops at the load generator's; see the README.
+    printf '%-8s %11s %7s %10s %10s %8s %7s %8s %9s %9s %10s %9s\n' \
+        workload connections shards recv-Mbps recv-fps p99-ms loss-% CPU CPU/conn RSS-MiB sock-drops gen-drops
     for workload in video fanout; do
         for connections in $SHARD_CONNECTIONS; do
             for shards in $SHARD_COUNTS; do
                 jq -r --arg connections "$connections" --arg shards "$shards" '[
                     .workload, $connections, $shards, .recv_mbps, .recv_fps, .latency_p99_ms, .loss_pct,
-                    .cpu_cores, (.cpu_cores / ($connections | tonumber)), (.rss_bytes / 1048576)
+                    .cpu_cores, (.cpu_cores / ($connections | tonumber)), (.rss_bytes / 1048576),
+                    (.udp_drops // "n/a"), (.generator.udp_drops // "n/a")
                 ] | @tsv' "$RUN/relay/shard-$shards-$connections/$workload/summary.json" |
-                    while IFS=$'\t' read -r name conns count recv fps p99 loss cpu per rss; do
-                        printf '%-8s %11s %7s %10.3f %10.1f %8.1f %7.3f %8.3f %9.5f %9.1f\n' \
-                            "$name" "$conns" "$count" "$recv" "$fps" "$p99" "$loss" "$cpu" "$per" "$rss"
+                    while IFS=$'\t' read -r name conns count recv fps p99 loss cpu per rss drops gen_drops; do
+                        printf '%-8s %11s %7s %10.3f %10.1f %8.1f %7.3f %8.3f %9.5f %9.1f %10s %9s\n' \
+                            "$name" "$conns" "$count" "$recv" "$fps" "$p99" "$loss" "$cpu" "$per" "$rss" "$drops" "$gen_drops"
                     done
             done
         done
