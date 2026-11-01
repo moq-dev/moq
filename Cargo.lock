@@ -5550,6 +5550,8 @@ dependencies = [
  "percent-encoding",
  "pollster",
  "reqwest",
+ "rind-object-store",
+ "rind-rustls",
  "rustls",
  "sd-notify",
  "serde",
@@ -5663,9 +5665,10 @@ dependencies = [
  "percent-encoding",
  "rand 0.10.3",
  "reqwest",
+ "rind",
+ "rind-rustls",
  "serde",
  "serde_json",
- "sha2 0.11.1",
  "thiserror 2.0.21",
  "tokio",
  "tower",
@@ -9059,6 +9062,17 @@ dependencies = [
  "jsonwebtoken",
  "pkcs1",
  "rind",
+]
+
+[[package]]
+name = "rind-object-store"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd6733c2630ffae76432b1d1a9c4e43febf2a4959292e43c9a922978f11b550a"
+dependencies = [
+ "object_store",
+ "rind",
+ "rustls-pki-types",
 ]
 
 [[package]]

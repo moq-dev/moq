@@ -3,7 +3,7 @@
 ///
 /// rind panics on such a CPU instead, so every key runs this before its first operation.
 pub(crate) fn init() -> crate::Result<()> {
-	rind::cpu::check().map_err(crate::Error::crypto)?;
+	rind::cpu::check().map_err(crate::Error::unsupported_cpu)?;
 	// An error means the process already picked a provider, which it is entitled to.
 	let _ = rind_jsonwebtoken::DEFAULT_PROVIDER.install_default();
 	Ok(())
@@ -16,7 +16,7 @@ pub(crate) fn init() -> crate::Result<()> {
 #[cfg(feature = "client")]
 pub(crate) fn tls() -> crate::Result<rustls::ClientConfig> {
 	use rustls_platform_verifier::BuilderVerifierExt;
-	let provider = rind_rustls::default_provider().map_err(crate::Error::crypto)?;
+	let provider = rind_rustls::default_provider().map_err(crate::Error::unsupported_cpu)?;
 	Ok(
 		rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
 			.with_safe_default_protocol_versions()

@@ -196,8 +196,7 @@ pub enum Error {
 	#[error("{0}")]
 	Jwt(String),
 
-	/// A key couldn't be parsed, imported, or used by the crypto backend, or this CPU
-	/// lacks a feature the backend requires.
+	/// A key couldn't be parsed, imported, or used by the crypto backend.
 	#[error("{0}")]
 	Crypto(String),
 
@@ -212,6 +211,10 @@ pub enum Error {
 	/// The mesh coordinator's state file could not be read, parsed, or written.
 	#[error("mesh state: {0}")]
 	MeshState(String),
+
+	/// This CPU lacks a feature the crate's cryptography requires, named in rind's message.
+	#[error("unsupported CPU: {0}")]
+	UnsupportedCpu(String),
 }
 
 // Dependency errors are flattened to their message so their crates stay out of this crate's
@@ -239,6 +242,11 @@ impl Error {
 	/// A crypto backend's error, converted by hand so its crate stays out of this crate's API.
 	pub(crate) fn crypto(err: impl std::error::Error) -> Self {
 		Self::Crypto(message(err))
+	}
+
+	/// Carries rind's message rather than its type, so rind stays out of this crate's API.
+	pub(crate) fn unsupported_cpu(err: rind::cpu::MissingFeature) -> Self {
+		Self::UnsupportedCpu(err.to_string())
 	}
 }
 
