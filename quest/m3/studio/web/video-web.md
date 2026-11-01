@@ -35,4 +35,4 @@ target; confirm the web studio still wants it before starting.
 
 ## Required
 
-- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md) - library work polled by its owner, with no runtime to spawn on
+- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn/README.md) - library work polled by its owner, with no runtime to spawn on

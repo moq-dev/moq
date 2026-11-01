@@ -75,4 +75,4 @@ and their alternatives:
 ## Required
 
 - [Generated async wrappers behind a feature](/quest/m1/poll-first/async-feature.md) - each library's `async fn` wrappers are generated from its `poll_*` signatures and compile only with its `async` feature
-- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md) - moq-ffi, moq-stats, and moq-relay's cluster and auth run as polled `kio::Tasks` children instead of spawned tasks
+- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn/README.md) - moq-ffi, moq-stats, and moq-relay's cluster and auth run as polled `kio::Tasks` children instead of spawned tasks
