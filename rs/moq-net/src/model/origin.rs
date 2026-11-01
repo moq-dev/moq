@@ -3541,7 +3541,10 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 		}
 		match resolved {
 			Some(resolved) => resolved != asked,
-			None => pick(&table, &path, horizon, front, pin.as_ref()).is_some_and(|best| best.identity != *asked),
+			// A winner that took over the identity asked continues it.
+			None => pick(&table, &path, horizon, front, pin.as_ref()).is_some_and(|best| {
+				best.identity != *asked && best.takeover.as_ref().is_none_or(|takeover| takeover.identity != *asked)
+			}),
 		}
 	};
 
@@ -3715,6 +3718,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						if let Ok(mut pending) = request.write()
 							&& pending.resolved.is_none()
 						{
+							pending.first = Some(identity.clone());
 							pending.resolved = Some(Ok(identity));
 							pending.via = Some((route, asked));
 						}
@@ -5519,6 +5523,9 @@ struct PendingFront {
 	/// asked: only a [`Takeover`] after that continues it. Each route that takes the
 	/// front over carries this forward; see [`Self::continue_with`].
 	via: Option<(u64, u64)>,
+	/// The identity the front resolved first, which each [`Takeover`] since carried on
+	/// as `resolved`: a request naming it reads what continues it.
+	first: Option<Identity>,
 	/// The identity the front resolves on unless the table moves first: the winner it
 	/// was minted for, then each one it selects. Written under the table's lock, so a
 	/// request never joins a front that picked an identity the request saw beaten.
@@ -6021,14 +6028,24 @@ impl Lookup {
 			RequestState::Failed(error) => Poll::Ready(Err(error.clone())),
 			RequestState::Pending { front, broadcast } => Poll::Ready(
 				match ready!(front.poll(waiter, |state| match &state.resolved {
-					Some(result) => Poll::Ready(result.clone()),
+					Some(result) => Poll::Ready(
+						result
+							.clone()
+							.map(|identity| (identity, state.first.clone())),
+					),
 					None => Poll::Pending,
 				})) {
-					// Another identity than the one named: never hand it out.
-					Ok(Ok(identity)) if self.identity.as_ref().is_some_and(|named| *named != identity) => {
+					// Another identity than the one named, and not one continuing it: never hand
+					// it out.
+					Ok(Ok((identity, first)))
+						if self
+							.identity
+							.as_ref()
+							.is_some_and(|named| *named != identity && Some(named) != first.as_ref()) =>
+					{
 						Err(Error::Unroutable)
 					}
-					Ok(Ok(identity)) => Ok(self.hand_out(broadcast.clone(), identity)),
+					Ok(Ok((identity, _))) => Ok(self.hand_out(broadcast.clone(), identity)),
 					Ok(Err(err)) => Err(err),
 					// The front's driver went away without a verdict: nobody could route it.
 					Err(_closed) => Err(Error::Unroutable),
@@ -6781,8 +6798,16 @@ impl Consumer {
 			return kio::Pending::new(Lookup::failed(Error::Unroutable));
 		};
 		// A request naming another identity than the winner follows that identity's own
-		// routes: every hop resolves the identity the first one chose.
-		let pin = identity.filter(|identity| **identity != winner).cloned();
+		// routes: every hop resolves the identity the first one chose. A winner that took
+		// over the named identity continues it, so the request is the winner's.
+		let pin = identity
+			.filter(|identity| {
+				**identity != winner
+					&& takeover
+						.as_ref()
+						.is_none_or(|takeover| takeover.identity != **identity)
+			})
+			.cloned();
 		// Only the winner's takeover can continue a front this request would join.
 		let takeover = takeover.filter(|_| pin.is_none());
 		let best = match &pin {
@@ -6847,6 +6872,7 @@ impl Consumer {
 		let request = kio::Producer::new(PendingFront {
 			resolved: None,
 			via: None,
+			first: None,
 			selected: best,
 			refused: false,
 		});
@@ -9806,6 +9832,7 @@ mod tests {
 			request: kio::Producer::new(PendingFront {
 				resolved: None,
 				via: None,
+				first: None,
 				selected: epoch(),
 				refused: false,
 			}),
