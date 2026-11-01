@@ -68,6 +68,13 @@ struct Route {
 	parked: Option<track::Consumer>,
 	/// Whether the front may replace the copy, or how it finished.
 	phase: Phase,
+	/// The copy the front asked for while its info is in flight, by stage id: a fetch goes
+	/// to it at once, and hands its group out only once that copy is spliced.
+	staged: Option<(u64, track::Consumer)>,
+	/// The stage the serving copy was spliced from, if any.
+	spliced: Option<u64>,
+	/// The id the next stage takes.
+	next_stage: u64,
 }
 
 #[derive(Default)]
@@ -152,12 +159,45 @@ impl Producer {
 		demand
 	}
 
+	/// Stage `copy`, whose info is still in flight, for fetches until the returned
+	/// [`Staged`] is spliced with [`Self::splice`] or dropped.
+	pub(super) fn stage(&self, copy: track::Consumer) -> Staged {
+		let id = match self.state.write() {
+			Ok(mut route) => {
+				let id = route.next_stage;
+				route.next_stage += 1;
+				route.staged = Some((id, copy));
+				id
+			}
+			Err(_) => u64::MAX,
+		};
+		Staged {
+			id,
+			state: self.state.clone(),
+		}
+	}
+
 	/// Serve the track from `copy` from now on, subscribing every reader to it.
+	#[cfg(test)]
 	pub(super) fn serve(&self, copy: track::Consumer) {
+		self.serve_from(copy, None);
+	}
+
+	/// Serve the track from `copy`, the one `staged` was made for, subscribing every reader
+	/// to it: what was fetched from it is handed out from here on.
+	pub(super) fn splice(&self, copy: track::Consumer, staged: Staged) {
+		self.serve_from(copy, Some(staged.id));
+	}
+
+	fn serve_from(&self, copy: track::Consumer, stage: Option<u64>) {
 		if let Ok(mut route) = self.state.write() {
 			route.generation += 1;
 			route.copy = Some(copy);
 			route.parked = None;
+			route.spliced = stage;
+			if stage.is_some() && route.staged.as_ref().map(|(id, _)| *id) == stage {
+				route.staged = None;
+			}
 		}
 		let readers = {
 			let mut readers = self.readers.lock().unwrap_or_else(PoisonError::into_inner);
@@ -179,6 +219,7 @@ impl Producer {
 		{
 			route.generation += 1;
 			route.parked = route.copy.take();
+			route.spliced = None;
 		}
 	}
 
@@ -215,6 +256,7 @@ impl Producer {
 		if let Ok(mut route) = self.state.write() {
 			route.copy = None;
 			route.parked = None;
+			route.spliced = None;
 		}
 	}
 
@@ -229,6 +271,24 @@ impl Producer {
 impl Drop for Producer {
 	fn drop(&mut self) {
 		self.conclude();
+	}
+}
+
+/// A copy staged with [`Producer::stage`]. Dropping it unspliced (its info was refused, its
+/// source left, or nobody reads the track) withdraws it, so a fetch sent to it asks the
+/// next route instead.
+pub(super) struct Staged {
+	id: u64,
+	state: kio::Producer<Route>,
+}
+
+impl Drop for Staged {
+	fn drop(&mut self) {
+		if let Ok(mut route) = self.state.write()
+			&& route.staged.as_ref().is_some_and(|(id, _)| *id == self.id)
+		{
+			route.staged = None;
+		}
 	}
 }
 
@@ -2226,8 +2286,57 @@ pub(super) struct Fetching {
 	sequence: u64,
 	options: track::FetchOptions,
 	logical: kio::Consumer<track::TrackState>,
-	/// The fetch in flight, and the route generation it went to.
-	pending: Option<(u64, kio::Pending<track::Fetching>)>,
+	/// The fetch in flight, and the copy it went to.
+	pending: Option<Asked>,
+}
+
+/// Which copy a fetch went to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Target {
+	/// The serving copy of a route generation.
+	Serving(u64),
+	/// A staged copy, by stage id: its info is still in flight.
+	Staged(u64),
+}
+
+struct Asked {
+	target: Target,
+	fetch: kio::Pending<track::Fetching>,
+	/// What a staged copy answered, held until that copy is spliced.
+	answer: Option<Result<group::Consumer>>,
+}
+
+impl Fetching {
+	/// How the staged copy last asked failed the fetch, if it did.
+	fn staged_failure(&mut self, waiter: &kio::Waiter) -> Option<Error> {
+		let asked = self.pending.as_mut()?;
+		if !matches!(asked.target, Target::Staged(_)) {
+			return None;
+		}
+		if asked.answer.is_none()
+			&& let Poll::Ready(result) = kio::Task::poll(&mut *asked.fetch, waiter)
+		{
+			asked.answer = Some(result);
+		}
+		match &asked.answer {
+			Some(Err(err)) => Some(err.clone()),
+			_ => None,
+		}
+	}
+
+	/// Poll for the serving copy or the staged one to change, or the track to end.
+	fn poll_moved(&self, generation: u64, staged: Option<u64>, waiter: &kio::Waiter) -> Poll<()> {
+		match self.route.state.poll(waiter, |route| {
+			let moved = route.generation != generation || route.staged.as_ref().map(|(id, _)| *id) != staged;
+			match moved || route.phase.terminal() {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}
+		}) {
+			Poll::Pending => Poll::Pending,
+			Poll::Ready(_) => Poll::Ready(()),
+		}
+	}
 }
 
 impl kio::Task for Fetching {
@@ -2235,36 +2344,80 @@ impl kio::Task for Fetching {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		loop {
-			let (generation, serving) = {
+			let (generation, serving, staged, spliced) = {
 				let route = self.route.state.read();
-				(route.generation, route.copy.clone())
+				(
+					route.generation,
+					route.copy.clone(),
+					route.staged.clone(),
+					route.spliced,
+				)
 			};
-			let Some(serving) = serving else {
-				return match self.route.end() {
-					Some(Some(Err(err))) => Poll::Ready(Err(err)),
-					Some(_) => Poll::Ready(Err(Error::NotFound)),
-					None => {
-						ready!(self.route.poll_changed(generation, waiter));
-						continue;
+			let staged_id = staged.as_ref().map(|(id, _)| *id);
+			// A fetch sent to a staged copy carries on once that copy is spliced.
+			if let Some(asked) = &mut self.pending
+				&& serving.is_some()
+				&& let Target::Staged(id) = asked.target
+				&& spliced == Some(id)
+			{
+				asked.target = Target::Serving(generation);
+			}
+			// The serving copy answers; with none, the copy whose info is in flight is asked
+			// at once rather than a round trip later, and judged once it is spliced.
+			let (target, copy) = match (serving, staged) {
+				(Some(serving), _) => (Target::Serving(generation), serving),
+				(None, Some((id, copy))) if self.route.end().is_none() => (Target::Staged(id), copy),
+				(None, _) => {
+					let end = self.route.end();
+					// A fetch whose staged copy failed reports that failure once no route
+					// follows, as one the serving copy failed does.
+					if end.is_some()
+						&& let Some(err) = self.staged_failure(waiter)
+					{
+						return Poll::Ready(Err(err));
 					}
-				};
-			};
-			if self.route.poll_changed(generation, waiter).is_ready() && self.route.end().is_none() {
-				continue;
-			}
-			if self.pending.as_ref().is_none_or(|(asked, _)| *asked != generation) {
-				self.pending = Some((generation, serving.fetch_range(self.sequence, self.options.clone())));
-			}
-			let (_, pending) = self.pending.as_mut().expect("asked above");
-			let result = match kio::Task::poll(&mut **pending, waiter) {
-				Poll::Ready(result) => result,
-				Poll::Pending => {
-					return match self.route.end() {
+					return match end {
 						Some(Some(Err(err))) => Poll::Ready(Err(err)),
-						_ => Poll::Pending,
+						Some(_) => Poll::Ready(Err(Error::NotFound)),
+						None => {
+							ready!(self.poll_moved(generation, staged_id, waiter));
+							continue;
+						}
 					};
 				}
 			};
+			if self.poll_moved(generation, staged_id, waiter).is_ready() && self.route.end().is_none() {
+				continue;
+			}
+			if self.pending.as_ref().is_none_or(|asked| asked.target != target) {
+				self.pending = Some(Asked {
+					target,
+					fetch: copy.fetch_range(self.sequence, self.options.clone()),
+					answer: None,
+				});
+			}
+			let asked = self.pending.as_mut().expect("asked above");
+			let result = match asked.answer.take() {
+				Some(result) => result,
+				None => match kio::Task::poll(&mut *asked.fetch, waiter) {
+					Poll::Ready(result) => result,
+					Poll::Pending => {
+						return match self.route.end() {
+							Some(Some(Err(err))) => Poll::Ready(Err(err)),
+							_ => Poll::Pending,
+						};
+					}
+				},
+			};
+			// Never handed out before its copy's info passes the front's check.
+			if let Target::Staged(_) = target {
+				asked.answer = Some(result);
+				return match self.route.end() {
+					Some(Some(Err(err))) => Poll::Ready(Err(err)),
+					_ => Poll::Pending,
+				};
+			}
+			let serving = copy;
 			return match result {
 				Ok(group) => {
 					// The copy may have widened its fill; the caller still reads only its range.
@@ -2286,9 +2439,13 @@ impl kio::Task for Fetching {
 						fetch: None,
 					})))
 				}
-				// The route failed: ask the next one, unless none will come.
+				// The route failed: ask the next one, unless none will come. Kept as the answer,
+				// since the same copy is never asked twice.
 				Err(err) if (route_failed(&err) || copy_failed(&serving)) && self.route.end().is_none() => {
-					ready!(self.route.poll_changed(generation, waiter));
+					if let Some(asked) = &mut self.pending {
+						asked.answer = Some(Err(err));
+					}
+					ready!(self.poll_moved(generation, staged_id, waiter));
 					continue;
 				}
 				Err(err) => Poll::Ready(Err(err)),
@@ -3187,6 +3344,102 @@ mod test {
 		assert!(fetched.read_frame().now_or_never().is_none());
 		let _pending = dynamic.requested_fill().now_or_never().unwrap().unwrap();
 		assert!(fetched.read_frame().now_or_never().is_none());
+	}
+
+	/// A session's copy whose info is still in flight, and its fetch handler.
+	fn pending_copy() -> (track::Request, track::Requests) {
+		let request = track::Request::new(Arc::new(broadcast::Info::default()), "video");
+		let dynamic = request.requests();
+		(request, dynamic)
+	}
+
+	/// The logical track `routes` serves, before any copy is spliced.
+	fn unaccepted(routes: &Producer) -> track::Request {
+		track::Request::new(Arc::new(broadcast::Info::default()), "video").routes(routes.consume())
+	}
+
+	/// A fetch reaches the copy whose info is in flight at once, but its group is handed out
+	/// only once the front splices that copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fetch_goes_to_a_staged_copy_before_its_info() {
+		let routes = Producer::new();
+		let logical = unaccepted(&routes);
+		let (request, dynamic) = pending_copy();
+		let staged = routes.stage(request.consume());
+		let mut fetching = logical.consume().fetch_group(0, None);
+		assert!((&mut fetching).now_or_never().is_none());
+		let fill = dynamic
+			.requested_fill()
+			.now_or_never()
+			.expect("the fetch reached the staged copy")
+			.unwrap();
+
+		let copy = request.accept(crate::track::Info::timed());
+		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap();
+		group.write_frame(ts(0), b"early".as_ref()).unwrap();
+		group.finish().unwrap();
+		assert!(
+			(&mut fetching).now_or_never().is_none(),
+			"a group is never handed out before its copy's info passes"
+		);
+
+		let _logical = logical.accept(crate::track::Info::timed());
+		routes.splice(copy.consume(), staged);
+		let mut fetched = fetching.now_or_never().expect("spliced").unwrap();
+		assert_eq!(read(&mut fetched), Some(b"early".to_vec()));
+	}
+
+	/// A staged copy withdrawn before it is spliced (its info refused) answers nothing: the
+	/// fetch asks the next route.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_withdrawn_stage_refetches_from_the_next_route() {
+		let routes = Producer::new();
+		let logical = unaccepted(&routes);
+		let (refused, refused_dynamic) = pending_copy();
+		let staged = routes.stage(refused.consume());
+		let mut fetching = logical.consume().fetch_group(0, None);
+		assert!((&mut fetching).now_or_never().is_none());
+		let fill = refused_dynamic.requested_fill().now_or_never().unwrap().unwrap();
+		let wrong = refused.accept(crate::track::Info::timed());
+		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap();
+		group.write_frame(ts(0), b"wrong".as_ref()).unwrap();
+		group.finish().unwrap();
+		drop(staged);
+		drop(wrong);
+
+		let (request, dynamic) = pending_copy();
+		let staged = routes.stage(request.consume());
+		assert!((&mut fetching).now_or_never().is_none());
+		let fill = dynamic
+			.requested_fill()
+			.now_or_never()
+			.expect("asked again of the next route")
+			.unwrap();
+		let copy = request.accept(crate::track::Info::timed());
+		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap();
+		group.write_frame(ts(0), b"right".as_ref()).unwrap();
+		group.finish().unwrap();
+		let _logical = logical.accept(crate::track::Info::timed());
+		routes.splice(copy.consume(), staged);
+		let mut fetched = fetching.now_or_never().expect("spliced").unwrap();
+		assert_eq!(read(&mut fetched), Some(b"right".to_vec()));
+	}
+
+	/// A logical track that ends before any copy is spliced fails a fetch waiting on it with
+	/// the front's error.
+	#[test]
+	fn an_unserved_track_fails_its_fetch_with_the_fronts_error() {
+		let routes = Producer::new();
+		let logical = unaccepted(&routes);
+		let (request, _dynamic) = pending_copy();
+		let staged = routes.stage(request.consume());
+		let mut fetching = logical.consume().fetch_group(0, None);
+		assert!((&mut fetching).now_or_never().is_none());
+		drop(staged);
+		routes.end(Err(Error::Unauthorized));
+		assert!(matches!(fetching.now_or_never(), Some(Err(Error::Unauthorized))));
 	}
 
 	/// Every run the reader gives up right now.
