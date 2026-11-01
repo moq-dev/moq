@@ -31,7 +31,7 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
 | `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `source` | `camera`, `screen`, or `file`. |
-| `muted`, `invisible` | Disable audio or video capture. |
+| `muted`, `invisible` | Stop publishing audio or video. The microphone and camera stay open, so unmuting or unhiding is instant and the browser's capture indicators stay lit; clear `source` or remove the element to release them. `source` covers both devices, so releasing one while keeping the other takes the library: toggle `Source.Microphone` or `Source.Camera` `enabled`. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
@@ -51,14 +51,16 @@ for a permission, device, or settings change instead of prompting again.
 
 ## Encoding
 
-An enabled encoder encodes whether or not anyone is subscribed, so its recent
-groups wait in the track's cache: a viewer who subscribes late with a
-`maxDelay`, or fetches, reaches back as far as `maxAge` keeps. Pass
-`onDemand: true` to `Publish.Broadcast` to encode every rendition only while
-someone is subscribed instead. That saves the encode while nobody watches, but
-a viewer then starts at the keyframe its arrival forces, with no past to reach.
-Bandwidth is reserved only while someone is subscribed, so an unwatched
-rendition encodes at its configured bitrate.
+Video encodes while enabled, so its recent groups wait in the track's cache for
+a late subscription's `maxDelay` or a fetch. Audio keeps raw PCM while nobody
+listens, then encodes that history ahead of live audio when a subscriber arrives.
+Both retain up to `maxAge`; raw audio without a declared retention keeps at most
+30 seconds (about 11.5 MB for 48 kHz stereo f32). Capture stays open.
+
+Pass `onDemand: false` to `Publish.Broadcast` to encode audio continuously too.
+`onDemand: true` also gates video, which then loses its unsubscribed past.
+Bandwidth reservations still follow subscriptions; unwatched video uses its
+configured bitrate.
 
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
@@ -151,9 +153,8 @@ const broadcast = new Publish.Broadcast({
     rotation: capture.out.rotation,
 });
 
-// Each encoder registers a rendition on the broadcast (`broadcast.video(name)`) and
-// encodes while enabled, subscribed or not. Pass `onDemand: true` to the broadcast
-// to encode only while someone is subscribed.
+// Video encodes while enabled. Audio buffers raw PCM until someone subscribes.
+// Pass `onDemand: false` to the broadcast to encode both continuously.
 new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
 const audioSource = new Publish.Signals.Computed((effect) => effect.get(microphone.out.source)?.audio);
@@ -170,7 +171,7 @@ browsers suspend Web Audio until then. Every input and output is a signal from
 `out.error` and disables only its rendition; siblings and the broadcast keep
 running. It does not retry on demand or bandwidth changes, and enable cycles
 that keep the same capture do not retry. A new capture source (such as the
-track a camera or microphone reopens on unmute), changed encoder settings, or
+track a camera or microphone reopens after a device swap), changed encoder settings, or
 a replacement encoder recovers it. Recovery keeps the catalog ID and uses a
 fresh `track` name.
 

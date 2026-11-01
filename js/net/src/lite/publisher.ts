@@ -7,13 +7,23 @@ import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import * as DatagramStream from "../datagram_stream.ts";
-import { error, NotFound, ProtocolViolation, reason, StreamCode, StreamError, unauthorized } from "../error.ts";
+import {
+	error,
+	NotFound,
+	ProtocolViolation,
+	reason,
+	StreamCode,
+	StreamError,
+	toStreamCode,
+	unauthorized,
+} from "../error.ts";
 import { stored } from "../flate/group.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
 import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runGaps } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
@@ -47,6 +57,7 @@ import {
 	hasAnnounceRestart,
 	hasCompression,
 	hasDatagrams,
+	hasEndError,
 	hasLargest,
 	hasProbeRtt,
 	hasRouteCost,
@@ -87,17 +98,12 @@ interface Stamp {
 	timescale: Timescale;
 	/**
 	 * Whether each frame's own timestamp goes out. Lite-05/06 cannot encode an untimed track, so
-	 * one served untimed carries its send time instead, unchecked ones included.
+	 * an untimed one carries its send time instead.
 	 */
 	timed: boolean;
 }
 
-/** The timescale a moq-lite hop serves a track at: none for an {@link track.Info.ietf} one. */
-function liteTimescale(info: track.Info): Timescale | undefined {
-	return info.ietf === undefined ? (info.timescale ?? undefined) : undefined;
-}
-
-/** How `version` stamps a track served at `timescale` (see `liteTimescale`), or undefined when it carries none. */
+/** How `version` stamps a track with `timescale`, or undefined when it carries none. */
 function stamping(version: Version, timescale: Timescale | undefined): Stamp | undefined {
 	const wire = wireTimescale(version, timescale);
 	return wire === undefined ? undefined : { timescale: wire, timed: timescale !== undefined };
@@ -124,9 +130,8 @@ function trackInfoMessage(info: track.Info, version: Version): TrackInfoMessage 
 		// Publisher Max Age: the publisher's retention bound, advertised so relays re-serve
 		// with the same window.
 		maxAge: info.maxAge,
-		// `#serveGroup` emits each frame converted to it. Unchecked timestamps never enter
-		// moq-lite, whose receivers check them.
-		timescale: liteTimescale(info),
+		// `#serveGroup` emits each frame converted to it.
+		timescale: info.timescale ?? undefined,
 		// An older peer is served the frames inflated.
 		compress: hasCompression(version) && !!info.compress,
 	});
@@ -933,7 +938,7 @@ export class Publisher {
 				// The timescale is an immutable property, so serving MUST use exactly
 				// what TRACK_INFO advertised. It comes from the producer's accept(), so
 				// they always agree.
-				stamp = stamping(this.version, liteTimescale(info));
+				stamp = stamping(this.version, info.timescale ?? undefined);
 				compress = hasCompression(this.version) && !!info.compress;
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
@@ -1216,14 +1221,25 @@ export class Publisher {
 			return end ? finalSequence(end) : (hooks.latestSequence(track) ?? -1) + 1;
 		};
 
-		// Declare the boundary immediately; groups below it can still be in flight.
+		// Declare the boundary immediately; groups below it can still be in flight. Lite-07 carries
+		// an errored end's error with it, which older versions reset with once the end is reached.
 		const sendEnd = async (): Promise<boolean> => {
 			endSent = true;
 			if (!emitRange) return true;
+			const endError = hooks.subscriberEndError(track);
+			const code = endError && hasEndError(this.version) ? toStreamCode(endError) : undefined;
 			return controls.response(
-				encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary()) }, this.version),
+				encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary(), code) }, this.version),
 			);
 		};
+
+		// Before lite-07 an errored end is only the reset at that end: a clean SUBSCRIBE_END sent
+		// early could let the subscriber settle before the reset arrives. A subscription capped
+		// short of the end is owed no error, so its boundary goes out.
+		const declareEarly = () =>
+			hasEndError(this.version) ||
+			!hooks.subscriberEndError(track) ||
+			(bounds.endGroup !== undefined && bounds.endGroup + 1 < boundary());
 
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track, publisher);
@@ -1360,7 +1376,7 @@ export class Publisher {
 							}
 						}
 						// A declared end goes out while lower groups are still being produced.
-						if (!endSent && hooks.subscriberEnd(track) !== undefined) {
+						if (!endSent && hooks.subscriberEnd(track) !== undefined && declareEarly()) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
@@ -1369,13 +1385,20 @@ export class Publisher {
 					case "boundary":
 						// The producer finished but is still holding groups above the cap.
 						// Declare the boundary, then wait for an update to release them.
-						if (!endSent) {
+						if (!endSent && declareEarly()) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
 						await waitForSubscription(controls, track, drops);
 						continue;
 					case "done": {
+						const endError = hooks.subscriberEndError(track);
+						if (
+							endError &&
+							!hasEndError(this.version) &&
+							(bounds.endGroup === undefined || bounds.endGroup + 1 >= boundary())
+						)
+							throw endError;
 						// Name every sequence from the start to the end this subscription never
 						// got. A cap below the end bounds what the subscriber is owed, as on its side.
 						if (startSequence !== undefined) {
@@ -1499,8 +1522,11 @@ export class Publisher {
 		void stream.reader.done().then(
 			(fin) => {
 				hold.abort();
-				// TRACK is the requester's only message.
-				if (!fin) stream.abort(new ProtocolViolation("data after TRACK"));
+				if (fin) return;
+				// TRACK is the requester's only message, so more breaks the session, as in Rust.
+				const violation = new ProtocolViolation("data after TRACK");
+				closeViolation(this.#quic, violation);
+				stream.abort(violation);
 			},
 			() => hold.abort(),
 		);
@@ -1733,8 +1759,9 @@ export class Publisher {
 				prevTs = ts;
 			}
 
-			await stream.write(frameHeader(stream.version, delta, read.inflated, frame.payload.byteLength));
-			if (frame.payload.length > 0) await stream.write(frame.payload);
+			await stream.write(frameHeader(stream.version, delta, read.inflated, readSize(read)));
+			if (read.chunks) await sendPayload(read.chunks, (chunk) => stream.write(chunk), stream.closed);
+			else if (frame.payload.length > 0) await stream.write(frame.payload);
 		}
 	}
 
@@ -1844,9 +1871,11 @@ export class Publisher {
 					prevTs = ts;
 				}
 
-				const header = frameHeader(stream.version, delta, read.inflated, read.frame.payload.byteLength);
+				const header = frameHeader(stream.version, delta, read.inflated, readSize(read));
 				await write(() => stream.write(header));
-				if (read.frame.payload.length > 0) await write(() => stream.write(read.frame.payload));
+				const chunks = read.chunks;
+				if (chunks) await write(() => sendPayload(chunks, (chunk) => stream.write(chunk), stream.closed));
+				else if (read.frame.payload.length > 0) await write(() => stream.write(read.frame.payload));
 			}
 
 			stream.close();

@@ -21,7 +21,7 @@ impl MoqAllocator {
 		Self { allocator }
 	}
 
-	#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+	#[cfg(feature = "audio")]
 	pub(crate) fn inner(&self) -> &moq_net::bandwidth::Allocator {
 		&self.allocator
 	}
@@ -63,7 +63,7 @@ impl MoqReservation {
 		Self { inner }
 	}
 
-	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+	#[cfg(feature = "video")]
 	pub(crate) fn consume(&self) -> moq_net::bandwidth::Consumer {
 		self.inner.consume()
 	}
@@ -203,7 +203,7 @@ mod tests {
 		assert_eq!(reserved.rate(), Some(1_000_000));
 	}
 
-	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+	#[cfg(feature = "video")]
 	#[test]
 	fn a_share_wakes_a_parked_thread() {
 		use std::sync::atomic::Ordering;
@@ -232,6 +232,10 @@ mod tests {
 			std::thread::yield_now();
 		}
 		// The inner changed() may not have parked yet; give it a turn.
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the test thread has no runtime; it gives the follower's runtime thread a real turn"
+		)]
 		std::thread::sleep(std::time::Duration::from_millis(50));
 		let _sub = track.consume(None).unwrap();
 		estimate
@@ -309,7 +313,7 @@ mod consumer_tests {
 		tokio::time::pause();
 		let producer = moq_net::bandwidth::Producer::new();
 		let consumer = MoqBandwidthConsumer::new(producer.consume());
-		assert!(producer.is_used());
+		assert!(producer.demand().wanted());
 		let mut changed = std::pin::pin!(consumer.rate_changed());
 		assert!(
 			changed
@@ -328,7 +332,7 @@ mod consumer_tests {
 				.is_pending()
 		);
 		consumer.cancel();
-		assert!(!producer.is_used());
+		assert!(!producer.demand().wanted());
 		assert_eq!(consumer.rate(), None);
 		assert!(matches!(changed.await, Err(MoqError::Cancelled)));
 	}
@@ -337,9 +341,9 @@ mod consumer_tests {
 	fn dropping_the_owned_consumer_releases_demand() {
 		let producer = moq_net::bandwidth::Producer::new();
 		let consumer = MoqBandwidthConsumer::new(producer.consume());
-		assert!(producer.is_used());
+		assert!(producer.demand().wanted());
 		drop(consumer);
-		assert!(!producer.is_used());
+		assert!(!producer.demand().wanted());
 	}
 
 	#[tokio::test]

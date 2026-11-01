@@ -1,6 +1,8 @@
-import { expect, test } from "bun:test";
-import { ProtocolViolation, SessionCode } from "../error.ts";
+import { expect, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
+import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { Reader, Stream } from "../stream.ts";
+import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import * as Varint from "../varint.ts";
 import { RequestError } from "./request.ts";
 import { namespaceUpdate, nextMessage, RequestStream, refuse } from "./request_stream.ts";
@@ -39,7 +41,7 @@ const GOAWAY = [0x10, 0, 2, 0, 0];
 
 test("an oversized or truncated request stream message type is a protocol violation", async () => {
 	// Both drafts use leading-ones varints.
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const oversized = Varint.encodeLeadingOnes(2n ** 53n);
 		// A two-byte varint prefix with its second byte missing.
 		const truncated = Uint8Array.of(0x80);
@@ -52,7 +54,7 @@ test("an oversized or truncated request stream message type is a protocol violat
 });
 
 test("namespace update framing refuses duplicate prefix parameters", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const body = [2, 2, 0x34, 1, 1, 97, 0, 1, 1, 98];
 		const reader = new Reader(undefined, Uint8Array.from([0, body.length, ...body]), version);
 		await expect(namespaceUpdate({ type: 2, reader }, version)).rejects.toBeInstanceOf(ProtocolViolation);
@@ -60,7 +62,7 @@ test("namespace update framing refuses duplicate prefix parameters", async () =>
 });
 
 test("a repeated namespace update token is a request refusal", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const body = [2, 2, 3, 3, 3, 0, 170, 0, 3, 3, 0, 170];
 		const reader = new Reader(undefined, Uint8Array.from([0, body.length, ...body]), version);
 		expect(await namespaceUpdate({ type: 2, reader }, version)).toEqual({
@@ -70,7 +72,7 @@ test("a repeated namespace update token is a request refusal", async () => {
 	}
 });
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 	test(`${versionName(version)} a request nobody reads yet still refuses a second GOAWAY`, async () => {
 		const { request, closes } = requested(version, Uint8Array.of(...GOAWAY, ...GOAWAY));
 		await request.ended;
@@ -109,7 +111,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 	});
 }
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 	test(`${versionName(version)} keeps GOAWAY state across request response phases`, async () => {
 		// GOAWAY, an empty REQUEST_OK, and another GOAWAY on the same stream.
 		const reader = new Reader(undefined, Uint8Array.of(0x10, 0, 2, 0, 0, 7, 0, 0, 0x10, 0, 2, 0, 0), version);
@@ -162,5 +164,35 @@ test("a refusal carries its reason", async () => {
 		expect(await r.u53()).toBe(RequestError.id);
 		const err = await RequestError.decode(r, version);
 		expect(err.reasonPhrase).toBe("no");
+	}
+});
+
+test("a request's deadline ends it through the request, so later ends do nothing", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const stream = new Stream({
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>(),
+			version: Version.DRAFT_18,
+		});
+		const aborts = spyOn(stream, "abort");
+		const session = { version: Version.DRAFT_18, client: true, openBi: () => stream } as unknown as Session;
+		const deadline = new Deadline();
+		const request = await RequestStream.open(session, deadline);
+		const answer = deadline.wait(new Promise<never>(() => {})).catch((e: unknown) => e);
+		await clock.advance(Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS)));
+		const err = await answer;
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(StreamCode.ControlTimeout);
+		await request.ended;
+
+		// The caller's own cleanup after the deadline.
+		request.abort(new Error("abandoned"));
+		request.close();
+		expect(aborts).toHaveBeenCalledTimes(1);
+		expect(aborts.mock.calls[0]?.[0]).toBe(err as StreamError);
+	} finally {
+		installed.close();
 	}
 });

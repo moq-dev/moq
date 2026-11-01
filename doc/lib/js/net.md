@@ -51,7 +51,7 @@ publication.announce();
 - **One track per name.** Concurrent subscriptions share one request and producer. `createTrack` on a name with a request still queued answers it. The application owns sequence numbers: the broadcast keeps nothing of an ended track, so a track that replaces it, created or requested, starts at 0. A name always means the same content, so the replacement continues past its predecessor's groups by writing its first group with an explicit sequence.
 - **Timing is per track, with no default.** A track that declares a `timescale` carries a `timestamp` on every frame; one without is [untimed](/concept/moq-lite#subscriptions) and its frames carry none. Omitting it means untimed, as in Rust. Nothing stamps a frame for you: the publisher passes the timestamp, and the `Timed` type (`{ value, at }`) carries one into the `@moq/json` producers.
 - **Subscriber staleness is `maxDelay`.** It counts from a group's successor, by media time and by wall clock, whichever reaches it first. Passing the old `maxAge` key throws a `TypeError` naming `maxDelay`. Publisher retention is the separate `Track.Info.maxAge`.
-- **Subscription defaults.** `Track.Subscription.default()` returns the default subscription, whose zero `maxDelay` skips a superseded group at once; calling `subscribe()` with no options means the same. Spread it to change a field (`{ ...Track.Subscription.default(), priority: 2 }`) rather than passing a bare options object, whose omitted `maxDelay` sets no subscriber limit.
+- **Subscription defaults.** `Track.Subscription.default()` returns the default subscription, whose zero `maxDelay` skips a superseded group at once; calling `subscribe()` with no options means the same. An omitted `maxDelay` means the same zero; `null` sets no subscriber limit.
 - **Hidden paths** stay out of discovery unless the announce request opts in. See [hidden broadcasts](/concept/moq-lite#hidden-broadcasts).
 - **Authorization is in band.** On moq-lite 07 (opt in with `versions: ["moq-lite-07-wip", "moq-lite-06"]`, listing every fallback you still want) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `auth.grant` watches what the relay lets this side publish and subscribe to, and `auth.add(token)` presents another token without reconnecting. Publishing outside the grant closes the connection with `SessionCode.Unauthorized`, naming the path. On moq-lite, a subscription or track listing the grant stops covering resets with `StreamCode.Unauthorized` and the session stays up. On moq-transport, `auth.add(token)` keeps the token even without the extension, and a broadcast announced with the `Auth.Credential` it returns (`publication.announce({ auth })`) carries it on that announcement's `PUBLISH_NAMESPACE`; announcing again with another renews the request. A `Connection`'s `auth` handle (a getter on a pooled connection, following its URL) outlives its sessions: a token added there is presented on every reconnect and keeps riding the announcements that name it, with no re-add or re-announce. A one-shot session's `auth` ends with it, unless `Connection.connect` was given a `new Auth.Handle()` as `auth`.
 - **A graceful close waits.** `await connection.close()` withdraws announcements and drains for up to one second. Application delivery requires explicit `moq-lite-07-wip`; older Lite versions wait only for transport ACKs. IETF media streams are not drained. `abort()` ends immediately.
@@ -61,3 +61,26 @@ Examples:
 Runs in the browser and, over WebSocket, in Node, Bun, and Deno; see
 [server-side](/lib/js/#server-side). Path patterns are on the
 [concept page](/concept/moq-lite#path-patterns).
+
+Groups retain a 32 MiB live tail without limiting their lifetime or frame count.
+Readers that fall behind the shed front receive `Evicted`; tracks with a
+`refresh` ratio also request a fresh group. A join never starts at an arbitrary
+frame in the retained tail.
+
+Frames have no size cap either. `group.createFrame({ size })` writes one in
+pieces, and `group.nextFrame()` reads it as it arrives with `readChunk()`, so a
+file-sized frame passes through holding only the tail. The tail sheds a large
+frame's oldest 1 MiB segments while it is written, so a chunk reader more than
+the tail behind gets `Evicted`. `readFrame()` still works for any size, but it
+collects the frame into one buffer. A compressed track keeps a 32 MiB frame
+limit, because its header declares each compressed slice's size before the
+bytes:
+
+```ts
+const frame = group.createFrame({ size: file.size });
+for await (const chunk of file.stream()) frame.write(chunk);
+frame.finish();
+
+const reader = await consumer.nextFrame();
+for (let chunk = await reader?.readChunk(); chunk; chunk = await reader?.readChunk()) save(chunk);
+```

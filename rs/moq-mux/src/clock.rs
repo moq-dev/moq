@@ -17,11 +17,11 @@
 //! anything fixes the clock places the mapping so that frame is live on arrival; any other shifts
 //! onto the clock (see [`catalog::Timebase`](crate::catalog::Timebase)).
 
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::time::Duration;
 
 use hang::catalog::{MAX_SAFE_INTEGER, MOQ_EPOCH_UNIX_MILLIS};
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 /// Microseconds from the moq epoch (2020) to `wall`, negative before it.
 fn moq_micros(wall: Wall) -> i128 {
@@ -31,7 +31,7 @@ fn moq_micros(wall: Wall) -> i128 {
 
 /// The host's wall clock, or `None` while it reads before the moq epoch (2020): unset.
 pub(crate) fn host_wall() -> Option<Wall> {
-	let now = moq_clock::wall();
+	let now = kio::clock::wall();
 	#[cfg(test)]
 	let now = HOST_WALL.get().unwrap_or(now);
 	(moq_micros(now) >= 0).then_some(now)
@@ -98,7 +98,7 @@ impl Clock {
 	/// name: media needs only the monotonic timeline.
 	pub fn new() -> Self {
 		Self {
-			instant: moq_clock::now(),
+			instant: kio::clock::now(),
 			reading: Self::LEAD.as_micros() as u64,
 			wall: host_wall().and_then(|now| wall_clock(now.checked_sub(Self::LEAD)?).ok()),
 		}
@@ -121,7 +121,7 @@ impl Clock {
 	/// Refuses a `since` so large that PTS zero lands before the moq epoch (2020), which the wall
 	/// mapping cannot name. On a host whose wall clock is unset, the clock has no wall mapping.
 	pub(crate) fn arrival(since: Duration) -> crate::Result<Self> {
-		let instant = moq_clock::now();
+		let instant = kio::clock::now();
 		let unmappable = || crate::Error::UnmappableTimestamp(format!("{since:?} puts PTS zero before 2020"));
 		let wall = match host_wall() {
 			Some(now) => {
@@ -183,7 +183,7 @@ impl Clock {
 	///
 	/// No `Instant` arithmetic, so a PTS zero before this host booted still maps.
 	fn mapped(zero: hang::catalog::Clock, unmappable: impl Fn(&str) -> crate::Error) -> crate::Result<Self> {
-		let instant = moq_clock::now();
+		let instant = kio::clock::now();
 		let now = host_wall().ok_or_else(|| unmappable("needs the host wall clock, which is unset"))?;
 		// Saturating would stamp everything early by the skew without saying so.
 		let reading = u64::try_from(moq_micros(now) - zero.wall.as_micros() as i128)
@@ -221,7 +221,7 @@ impl Clock {
 	/// Refuses an instant ahead of now, which would claim the payload reached the transport before
 	/// it existed, and one before PTS zero, which no timestamp can name.
 	pub fn capture(&self, at: Instant) -> crate::Result<moq_net::Timestamp> {
-		if at > moq_clock::now() {
+		if at > kio::clock::now() {
 			return Err(crate::Error::InvalidCapture);
 		}
 		let micros = match at.checked_duration_since(self.instant) {
@@ -265,7 +265,7 @@ mod tests {
 	use super::*;
 
 	fn epoch() -> Instant {
-		moq_clock::now()
+		kio::clock::now()
 	}
 
 	fn moq_epoch() -> Wall {
@@ -278,15 +278,15 @@ mod tests {
 
 	/// A capture maps onto the clock's own timeline, and one ahead of now or before the epoch is
 	/// refused rather than clamped.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_capture_maps_onto_the_clock() {
-		moq_clock::sleep(Duration::from_secs(6)).await;
-		let now = moq_clock::now();
+		kio::clock::sleep(Duration::from_secs(6)).await;
+		let now = kio::clock::now();
 		let clock = Clock::at(now - Duration::from_secs(5), moq_epoch()).unwrap();
 		assert_eq!(clock.capture(now - Duration::from_secs(2)).unwrap(), us(3_000_000));
 
 		assert!(matches!(
-			clock.capture(moq_clock::now() + Duration::from_secs(1)),
+			clock.capture(kio::clock::now() + Duration::from_secs(1)),
 			Err(crate::Error::InvalidCapture)
 		));
 		assert!(matches!(
@@ -295,16 +295,16 @@ mod tests {
 		));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn simulated_clock_preserves_logical_boundaries() {
-		moq_clock::sleep(Duration::from_secs(10)).await;
-		let epoch = moq_clock::now();
+		kio::clock::sleep(Duration::from_secs(10)).await;
+		let epoch = kio::clock::now();
 		let clock = Clock::at(epoch, moq_epoch()).unwrap();
 		let fresh = Clock::new();
 		let before = fresh.now();
 		let wall = clock.wall();
 
-		moq_clock::sleep(Duration::from_secs(3)).await;
+		kio::clock::sleep(Duration::from_secs(3)).await;
 		assert_eq!(clock.now(), us(3_000_000));
 		assert_eq!(fresh.now().as_micros() - before.as_micros(), 3_000_000);
 		assert_eq!(clock.wall(), wall);
@@ -313,8 +313,8 @@ mod tests {
 			moq_epoch() + Duration::from_secs(3)
 		);
 
-		let stepped = moq_clock::Manual::WALL_START + Duration::from_secs(3600);
-		moq_clock::sim::step_wall(stepped);
+		let stepped = kio::clock::Manual::WALL_START + Duration::from_secs(3600);
+		kio::clock::sim::step_wall(stepped);
 		assert_eq!(clock.wall(), wall, "a wall correction does not retime archived media");
 		assert_eq!(
 			Clock::new().wall(),
@@ -366,26 +366,26 @@ mod tests {
 		// and the mapping still names the current wall time.
 		assert!(clock.now().as_micros() >= Clock::LEAD.as_micros());
 		let now = clock.wall_clock(clock.now()).unwrap();
-		let host = moq_clock::wall();
+		let host = kio::clock::wall();
 		let drift = now.max(host).saturating_duration_since(now.min(host));
 		assert!(drift < Duration::from_secs(1), "wall + now is the current wall time");
 	}
 
 	/// A source whose first timestamp is ten hours in reads that timestamp now, mapped to now.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn arrival_maps_the_first_timestamp_to_now() {
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		let since = Duration::from_secs(10 * 3600);
 		let clock = Clock::arrival(since).unwrap();
 		let now = clock.now();
 		assert!(now.as_micros() >= since.as_micros());
 		let actual = clock.wall_clock(now).unwrap();
-		let host = moq_clock::wall();
+		let host = kio::clock::wall();
 		let drift = actual.max(host).saturating_duration_since(actual.min(host));
 		assert!(drift < Duration::from_secs(1), "the first timestamp is live on arrival");
 
 		// A capture from before the arrival still maps, down to PTS zero.
-		let earlier = clock.capture(moq_clock::now() - Duration::from_secs(1)).unwrap();
+		let earlier = clock.capture(kio::clock::now() - Duration::from_secs(1)).unwrap();
 		assert!(earlier.as_micros() < now.as_micros());
 
 		// PTS zero before 2020 cannot be named on the wire.

@@ -118,8 +118,12 @@ Theirs, reported or waiting on others:
   fixed upstream; imquic's cells against `cdn.moq.dev` wait for the runner
   to rebuild its image.
   [meetecho/imquic#43](https://github.com/meetecho/imquic/issues/43)
-  (drops a data stream whose header spans reads) is owned by
-  [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md).
+  (drops a data stream whose header spans reads) is closed, and the
+  runner's moq-dev-js client writes the header in one write since
+  `@moq/net` 0.4.7
+  ([englishm/moq-interop-runner#179](https://github.com/englishm/moq-interop-runner/pull/179)):
+  `data-subgroup-basic` against imquic passes in all three cells of the
+  2026-10-31 nightly.
   [Eyevinn/moqlivemock#157](https://github.com/Eyevinn/moqlivemock/issues/157)
   is fixed and green.
 - Drafted in this run, posted only if the maintainer approved: MOQtail draft-18 never forwards
@@ -152,11 +156,12 @@ and moqtopus and xquic-draft-18 over WebTransport (raw QUIC only).
 
 From the 2026-10-25 run: the runner's moq-dev-js `announce-subscribe` case times
 out against imquic on both 0.4.4 and the [moq-dev/moq#6769](https://github.com/moq-dev/moq/pull/6769)
-backport, so it predates that fix. Classify it.
+backport, so it predates that fix. It still times out on 0.4.6 and 0.4.7
+(2026-10-28, 3 runs each), and fails in all three moq-dev-js → imquic
+cells of the 2026-10-31 nightly. Classify it.
 
 ## Related
 
 - [Runner client bump](/quest/m2/release/runner-client-bump.md) - the runner's Rust client moves to the cut and its API
 - [Runner teardown](/quest/m3/interop-runner-approval.md) - the runner's moq.dev clients move to the withdrawing `close()` once it ships
-- [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - Moxygen's filter type, waiting upstream
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the runner cases whose red cells this audit classifies
