@@ -407,11 +407,6 @@ pub fn update_route(dynamic: &crate::origin::Requests, route: crate::origin::Rou
 	dynamic.update_route(route)
 }
 
-/// Answer a peer claim's request with the broadcast its session already holds.
-pub fn accept(request: crate::origin::Request, broadcast: impl crate::Consume<broadcast::Consumer>) {
-	request.serve(broadcast)
-}
-
 /// A session's snapshot of its peer's initial announcements, for the synced bench.
 /// Drop it to land the snapshot.
 pub struct Snapshot(#[allow(dead_code, reason = "held for its drop, which lands the snapshot")] crate::model::Snapshot);

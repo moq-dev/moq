@@ -876,7 +876,7 @@ fn pool(members: usize, paths: usize, cursors: usize) -> Pool {
 	for member in &members {
 		while let Poll::Ready(request) = member.poll_requested_broadcast(&waiter) {
 			let broadcast = broadcast::Info::new().produce();
-			moq_net::fuzz::accept(request.unwrap(), &broadcast);
+			request.unwrap().serve(&broadcast);
 			producers.push(broadcast);
 		}
 	}
