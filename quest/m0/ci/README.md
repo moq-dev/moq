@@ -100,6 +100,30 @@ per merged PR today (PR and queue), at 13 minutes median and 26 minutes p90 of
 wall time per PR run. Superseded in part 2026-10-24: the PR gate checks
 feature shapes for the crates a branch changes; Nightly keeps the full matrix.
 
+Decided 2026-10-31 (maintainer), reversing 2026-10-24: "revert the moq-tokio
+features change. It's dumb to build all of the permutations. Maybe as a nightly
+but tbh I don't care, just test the default features (or all-features)." On
+the wasm32 pass: "nobody uses it and it's going to be replaced soon"; on
+io_uring: "keep testing uring in CI, but I guess add it to the default features
+on CI". The land gate's Rust lane is the default-feature test build (with the
+device features, and on Linux the relay's io_uring runtime) plus fmt, doc,
+shear, and sort. It drops the isolated feature
+shapes (`rs_shapes`, cargo-hack), the net, QUIC, tokio, and media feature
+contracts, and the wasm32 and io_uring clippy passes; `just rs features` keeps
+the feature matrix in the Features workflow (nightly and release PRs). On a host land batch the Rust lane had taken about 1,340 s, 691 s
+of it `rs_shapes` and 238 s `tokio-features`.
+
+Decided 2026-10-31 (maintainer), on the gate's remaining lint compiles: "Remove
+loom entirely": moq's history holds only upkeep of the loom models
+([moq-dev/moq#2543](https://github.com/moq-dev/moq/pull/2543) added them, later
+PRs bounded them so Nightly finishes, fixed them after code changes, and
+restored their gate compile checks) and no commit where loom found a race. The
+gate drops `loom-check` and Nightly its loom job; a separate PR deletes the
+models. On Send-depth: "Move it to Nightly." It guards a real downstream
+breakage (moq-net futures not Send at the default recursion limit), so
+`just rs send-depth` keeps its pinned nightly and runs as its own Nightly job
+instead of in the land gate.
+
 Decided 2026-10-25 (maintainer): across moq's many CI and release builds
 (targets, features, FFI languages, Nix packages), each crate configuration
 compiles once and is reused through the cache, and each run builds and tests
@@ -136,9 +160,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs
 - [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
 - [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the slowest 1% of tests take under half their 289 CPU-seconds, with coverage kept
-- [Gate send-depth](/quest/m0/ci/send-depth-gate.md) - the merge gate runs send-depth on a pinned nightly when moq-net changes, after #6890 fixes main
 - [Release credentials off main](/quest/m0/ci/publish-release-only.md) - `publish` admits only `release` and release tags once its `workflow_run` publishers run on their tag
 - [Biome checks every file it can parse](/quest/m0/ci/biome-whole-repo.md) - Biome runs over the whole repository and main is clean under it
-- [workspace.test.py ignores the caller's gate filter](/quest/m0/ci/workspace-test-env.md) - the dispatcher test passes under any `just gate` module filter
 - [Dispatcher tool changes run the dispatcher tests](/quest/m0/ci/dispatch-selection-gaps.md) - a tool-list change runs `sh/dispatch-query.test.py` in CI, and `sh/rs/uring.test.py` stops printing jq errors
-- [PRs build the feature shapes they can break](/quest/m0/ci/pr-feature-builds.md) - a PR touching a crate's source runs that crate's isolated feature builds

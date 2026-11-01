@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import {
 	Computed,
 	Derived,
@@ -13,7 +14,7 @@ import {
 } from "./index.ts";
 
 // Lets the microtask flush and any timer-based follow-up run.
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+const settle = () => yieldNow();
 
 // A conforming Getter this package did not create: no brand, just the three methods.
 function adapter<T>(source: Getter<T>): Getter<T> {

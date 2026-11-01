@@ -134,7 +134,7 @@ struct Reader {
 	expected: Vec<String>,
 	seen: Vec<String>,
 	/// Owns the subscription, so dropping the reader leaves the track.
-	task: moq_clock::sim::JoinHandle<()>,
+	task: kio::clock::sim::JoinHandle<()>,
 }
 
 impl Drop for Reader {
@@ -146,7 +146,7 @@ impl Drop for Reader {
 impl Reader {
 	fn new(id: usize, mut sub: track::Subscriber, expected: Vec<String>) -> Self {
 		let (tx, rx) = mpsc::unbounded();
-		let task = moq_clock::sim::spawn(async move {
+		let task = kio::clock::sim::spawn(async move {
 			loop {
 				let mut group = match sub.recv_group().await {
 					Ok(Some(group)) => group,
@@ -266,7 +266,7 @@ impl Topology {
 	/// A fresh request for the broadcast; `None` when refused, as with no route right now.
 	async fn request(&self, step: usize) -> Result<Option<moq_net::broadcast::Consumer>, Failure> {
 		let request = self.subscriber.consume().request("live", None);
-		match moq_clock::timeout(READ_TIMEOUT, request).await {
+		match kio::clock::timeout(READ_TIMEOUT, request).await {
 			Ok(result) => Ok(result.ok()),
 			Err(_) => Err(stuck(format!("{step}: request hung"))),
 		}
@@ -331,14 +331,14 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 				written.clear();
 				write(&mut group, &mut written, &mut readers, "snapshot");
 				// Let it reach `R`, so the newest group at the next join is unambiguous.
-				moq_clock::sleep(Duration::from_millis(500)).await;
+				kio::clock::sleep(Duration::from_millis(500)).await;
 			}
 			Op::Join => {
 				let Some(remote) = topology.request(step).await? else {
 					continue;
 				};
 				let subscribe = remote.track("catalog.json").unwrap().subscribe(None);
-				match moq_clock::timeout(READ_TIMEOUT, subscribe).await {
+				match kio::clock::timeout(READ_TIMEOUT, subscribe).await {
 					Ok(Ok(sub)) => readers.push(Reader::new(joined, sub, written.clone())),
 					Ok(Err(_)) => {}
 					Err(_) => return Err(stuck(format!("{step}: subscribe hung"))),
@@ -350,14 +350,14 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 					continue;
 				};
 				let fetch = remote.track("catalog.json").unwrap().fetch_group(group.sequence, None);
-				let mut fetched = match moq_clock::timeout(READ_TIMEOUT, fetch).await {
+				let mut fetched = match kio::clock::timeout(READ_TIMEOUT, fetch).await {
 					Ok(Ok(fetched)) => fetched,
 					Ok(Err(_)) => continue,
 					Err(_) => return Err(stuck(format!("{step}: fetch hung"))),
 				};
 				let mut got = Vec::new();
 				while got.len() < written.len() {
-					match moq_clock::timeout(READ_TIMEOUT, fetched.read_frame()).await {
+					match kio::clock::timeout(READ_TIMEOUT, fetched.read_frame()).await {
 						Ok(Ok(Some(frame))) => got.push(format!(
 							"{}:{}",
 							fetched.sequence,
@@ -380,9 +380,9 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 			Op::ToggleA => topology.toggle(0).await,
 			Op::ToggleB => topology.toggle(1).await,
 			Op::ToggleDirect => topology.toggle(2).await,
-			Op::Sleep(pause) => moq_clock::sleep(pause).await,
+			Op::Sleep(pause) => kio::clock::sleep(pause).await,
 			Op::Check => {
-				moq_clock::sleep(Duration::from_millis(500)).await;
+				kio::clock::sleep(Duration::from_millis(500)).await;
 				let mut failed = Vec::new();
 				for (index, reader) in readers.iter_mut().enumerate() {
 					let open = reader.drain();
@@ -392,7 +392,7 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 						_ if !open => failed.push(index),
 						Verdict::Done => {}
 						Verdict::Short => {
-							let _ = moq_clock::timeout(STUCK_AFTER, async {
+							let _ = kio::clock::timeout(STUCK_AFTER, async {
 								while reader.judge() == Verdict::Short {
 									match reader.rx.next().await {
 										Some(Ok(frame)) => reader.seen.push(frame),
@@ -448,13 +448,13 @@ async fn churn(version: &str) {
 }
 
 /// Routes carry the publisher's epoch, so subscriptions resume across them.
-#[moq_clock::test]
+#[kio::test]
 async fn catalog_churn_lite_07() {
 	churn("moq-lite-07-wip").await;
 }
 
 /// No epoch on the wire: a route change ends subscriptions, which must fail loudly.
-#[moq_clock::test]
+#[kio::test]
 async fn catalog_churn_lite_06() {
 	churn("moq-lite-06").await;
 }

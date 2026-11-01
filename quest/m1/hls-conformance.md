@@ -41,7 +41,6 @@ own quest below.
 ## Required
 
 - [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - the conformance test's same-codec switch fails until it lands
-- [The last AAC segment advertises its full duration](/quest/m1/hls-final-aac-segment.md) - the conformance test's audio check fails until it lands
 - [A reconfigure keeps the published jitter and delay floor](/quest/m1/catalog-jitter-floor.md) - the conformance test's TS import aborts with `JitterDecreased` at its reconfigure until it lands
 
 ## Related
