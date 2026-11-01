@@ -4794,6 +4794,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "smallvec",
+ "test-env",
  "tokio",
 ]
 
@@ -5555,6 +5556,7 @@ dependencies = [
  "terminal_size",
  "test-env",
  "tokio",
+ "tokio-util",
  "tower-http 0.7.1",
  "tracing",
  "url",

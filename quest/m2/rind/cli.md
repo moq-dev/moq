@@ -31,7 +31,3 @@ Decided 2026-10-31 (maintainer):
 
 Public API: moq-hls constructors that need rind become fallible (breaking;
 handle the new error). Wire: none.
-
-## Required
-
-- [rind runs on CPUs without the crypto extensions](/quest/m2/rind/older-cpus.md) - the rind release this switches to
