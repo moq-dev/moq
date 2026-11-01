@@ -34,8 +34,7 @@ if leaked=$(grep -E '^(moq-net|reqwest|notify|quinn[a-z-]*|noq[a-z-]*|web-transp
     sort -u <<<"$leaked" >&2
     exit 1
 fi
-# Only a feature-owner edit needs every isolated permutation on a PR. Shared
-# dependencies still compile at both extremes; Nightly runs every permutation.
+# Every isolated permutation, which `just rs features` asks for.
 if ((all)); then
     cargo clippy --locked -p moq-tokio --no-default-features --features quic,aws-lc-rs -- -D warnings
     cargo clippy --locked -p moq-tokio --no-default-features --features quic,ring -- -D warnings

@@ -1,7 +1,6 @@
 #![cfg(feature = "async")]
 
-//! A SUBSCRIBE_TRACKS asking for every track's objects is answered on its own stream, and
-//! the session keeps delivering.
+//! A SUBSCRIBE_TRACKS is refused on its own stream, and the session keeps delivering.
 //!
 //! Deterministic: paused time and a single-threaded runtime over the mock transport.
 
@@ -100,9 +99,9 @@ async fn deliver(setup: &mut Setup, payload: &'static [u8]) {
 	assert_eq!(got, payload);
 }
 
-/// Send SUBSCRIBE_TRACKS from the server to the publishing client, returning the first
-/// `len` bytes of the reply, or all of it if the client ends the stream first.
-async fn subscribe_tracks(pair: &MockPair, len: usize) -> Vec<u8> {
+/// Send SUBSCRIBE_TRACKS from the server to the publishing client, returning every byte
+/// of the reply once the client ends the stream.
+async fn subscribe_tracks(pair: &MockPair) -> Vec<u8> {
 	let (mut send, mut recv) = pair
 		.server_transport
 		.clone()
@@ -112,50 +111,29 @@ async fn subscribe_tracks(pair: &MockPair, len: usize) -> Vec<u8> {
 	send.write(SUBSCRIBE_TRACKS).await.expect("write");
 
 	let mut reply = Vec::new();
-	while reply.len() < len
-		&& let Some(chunk) = moq_clock::timeout(TIMEOUT, recv.read_chunk(len - reply.len()))
-			.await
-			.expect("reply timed out")
-			.expect("read")
+	while let Some(chunk) = moq_clock::timeout(TIMEOUT, recv.read_chunk(usize::MAX))
+		.await
+		.expect("reply timed out")
+		.expect("read")
 	{
 		reply.extend_from_slice(&chunk);
 	}
 	reply
 }
 
-/// An omitted FORWARD asks for every track's objects, which we never push unasked: on
-/// draft-22 each track is answered with PUBLISH_SKIPPED, and the subscription already on
-/// the session keeps going.
+/// We list no tracks by PUBLISH, so a SUBSCRIBE_TRACKS gets NOT_SUPPORTED on its own
+/// stream, and the subscription already on the session keeps going.
 #[moq_clock::test]
-async fn subscribe_tracks_skips_every_track() {
-	let version = "moq-transport-22";
-	let mut setup = setup(version.parse().unwrap()).await;
-	deliver(&mut setup, b"before").await;
+async fn subscribe_tracks_is_refused_per_request() {
+	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
+		let mut setup = setup(version.parse().unwrap()).await;
+		deliver(&mut setup, b"before").await;
 
-	#[rustfmt::skip]
-	let expected = [
-		0x07, 0x00, 0x01, 0x00, // REQUEST_OK, no parameters
-		0x0f, 0x00, 0x07, // PUBLISH_SKIPPED
-		0x00, // The broadcast is the prefix itself: an empty suffix.
-		0x05, b'v', b'i', b'd', b'e', b'o',
-	];
-	let reply = subscribe_tracks(&setup.pair, expected.len()).await;
-	assert_eq!(reply, expected, "{version}");
+		let reply = subscribe_tracks(&setup.pair).await;
+		// REQUEST_ERROR (0x05), a two-byte length, then the error code: NOT_SUPPORTED (0x3).
+		assert_eq!(reply.first(), Some(&0x05), "{version}: not a REQUEST_ERROR: {reply:?}");
+		assert_eq!(reply.get(3), Some(&0x03), "{version}: not NOT_SUPPORTED: {reply:?}");
 
-	deliver(&mut setup, b"after").await;
-}
-
-/// Draft-18 has no PUBLISH_SKIPPED, so a listing that must forward is refused on its own
-/// stream with NOT_SUPPORTED, and the session keeps delivering.
-#[moq_clock::test]
-async fn subscribe_tracks_needs_forward_0_on_draft_18() {
-	let mut setup = setup("moq-transport-18".parse().unwrap()).await;
-	deliver(&mut setup, b"before").await;
-
-	let reply = subscribe_tracks(&setup.pair, usize::MAX).await;
-	// REQUEST_ERROR (0x05), a two-byte length, then the error code: NOT_SUPPORTED (0x3).
-	assert_eq!(reply.first(), Some(&0x05), "not a REQUEST_ERROR: {reply:?}");
-	assert_eq!(reply.get(3), Some(&0x03), "not NOT_SUPPORTED: {reply:?}");
-
-	deliver(&mut setup, b"after").await;
+		deliver(&mut setup, b"after").await;
+	}
 }

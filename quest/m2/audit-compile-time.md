@@ -117,8 +117,10 @@ instantiating the whole map.
   deserializer are inherent to TOML config. moq-rtmp, moq-srt and moq-rtc
   entry points generic over `impl Into<Path>` instantiate their async bodies in
   the `moq` bin (20,327 lines with drop glue, 1.8%); a non-generic inner
-  function would move them, but adds code for little. The catalog JSON diff instantiated
-  per crate is [catalog publish once](/quest/m2/catalog-publish-once.md).
+  function would move them, but adds code for little. The catalog JSON diff
+  no longer instantiates per crate since
+  [moq-dev/moq#7400](https://github.com/moq-dev/moq/pull/7400): the encoder
+  diffs `serde_json`'s bytes, compiled once in `moq-json`.
 - Not run this time: `-Z time-passes` on the `moq` unit (m0: fat LTO 74%,
   LLVM passes 23%); the release share did not move enough to warrant it.
 

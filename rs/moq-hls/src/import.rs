@@ -1187,7 +1187,6 @@ fn moq_sequence(discontinuity_sequence: u64, media_sequence: u64) -> Result<u64>
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::path::{Path, PathBuf};
@@ -1973,7 +1972,7 @@ mod tests {
 		assert!(import.video[0].importer.is_none(), "nothing was imported");
 		assert!(catalog.snapshot().video.renditions.is_empty());
 
-		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+		let run = moq_clock::timeout(Duration::from_secs(5), import.run())
 			.await
 			.expect("a settled refusal skips the retry budget");
 		assert!(matches!(run, Err(Error::PlaylistEnded)));
@@ -2000,7 +1999,7 @@ mod tests {
 		let cfg = Config::new(Url::from_file_path(dir.join("master.m3u8")).unwrap());
 		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
 
-		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+		let run = moq_clock::timeout(Duration::from_secs(5), import.run())
 			.await
 			.expect("the ended rendition ends the import");
 		assert!(matches!(run, Err(Error::PlaylistEnded)), "{run:?}");
@@ -2033,7 +2032,7 @@ mod tests {
 
 		let (_, ended) = recording(4, true);
 		std::fs::write(dir.join("media.m3u8"), ended).unwrap();
-		tokio::time::timeout(Duration::from_secs(10), import.run())
+		moq_clock::timeout(Duration::from_secs(10), import.run())
 			.await
 			.expect("an ended playlist ends the import")
 			.unwrap();
@@ -2427,7 +2426,7 @@ mod tests {
 			"audio",
 			"#EXTINF:1,\naudio0.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\naudio1.m4s\n",
 		);
-		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+		let run = moq_clock::timeout(Duration::from_secs(5), import.run())
 			.await
 			.expect("a rewind is not retried");
 		assert!(
@@ -2463,8 +2462,8 @@ mod tests {
 		let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
 		let wait = std::time::Duration::from_millis(100);
 		let mut out = Vec::new();
-		while let Ok(Ok(Some(mut group))) = tokio::time::timeout(wait, track.recv_group()).await {
-			while let Ok(Ok(Some(frame))) = tokio::time::timeout(wait, group.read_frame()).await {
+		while let Ok(Ok(Some(mut group))) = moq_clock::timeout(wait, track.recv_group()).await {
+			while let Ok(Ok(Some(frame))) = moq_clock::timeout(wait, group.read_frame()).await {
 				out.push(frame.timestamp.unwrap().as_micros());
 			}
 		}
@@ -2514,7 +2513,7 @@ mod tests {
 		let before = published(&consumer, &catalog).await;
 
 		// Let the clock run on, so a fresh offset could not land back on the source's timestamps.
-		tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+		moq_clock::sleep(std::time::Duration::from_millis(50)).await;
 		let mut second = sink.importer(&select_muxed());
 		second.decode(&init).unwrap();
 		drop(first);
