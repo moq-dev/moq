@@ -15,7 +15,7 @@ use crate::{
 /// Consumers have read-only access to the shared value and are notified when
 /// a producer modifies it. Cloning a consumer increments the consumer reference
 /// count. When the last consumer is dropped, the consumer-count waiters
-/// (e.g. [`Producer::wanted_changed`](crate::Producer::wanted_changed)) are notified.
+/// (e.g. [`Producer::poll_wanted_changed`](crate::Producer::poll_wanted_changed)) are notified.
 #[derive(Debug)]
 pub struct Consumer<T> {
 	pub(crate) state: Arc<Channel<T>>,
@@ -119,7 +119,8 @@ impl<T> Consumer<T> {
 		self.state.poll(waiter, f)
 	}
 
-	/// Poll for channel closure, registering the waiter if still open.
+	/// Resolves once the channel is closed.
+	#[cfg_attr(feature = "async", kio_macros::wrapper)]
 	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		self.state.poll_closed(waiter)
@@ -131,6 +132,7 @@ impl<T> Consumer<T> {
 	/// channel closes first. Unlike [`poll`](Self::poll) this hands back no [`Ref`], so
 	/// no lock guard can be held across a later `.await`; call [`read`](Self::read) if
 	/// you need the final state.
+	#[cfg(feature = "async")]
 	pub async fn wait<F, R>(&self, mut f: F) -> Result<R, Closed>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<R> + Unpin,
@@ -138,11 +140,6 @@ impl<T> Consumer<T> {
 		// The `Ref` is dropped here inside the closure, releasing the lock before the
 		// caller ever sees the result.
 		crate::wait(move |waiter| self.poll(waiter, &mut f).map(|res| res.map_err(|_| Closed))).await
-	}
-
-	/// Wait until the channel is closed.
-	pub async fn closed(&self) {
-		crate::wait(move |waiter| self.poll_closed(waiter)).await
 	}
 
 	/// Get read-only access to the shared state.

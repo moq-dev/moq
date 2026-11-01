@@ -166,6 +166,7 @@ impl<T> Producer<T> {
 	/// [`Poll::Ready`], or [`Closed`] if the channel closes first. The `Ok` guard is the
 	/// write access you asked for, so it's yours to hold; the `Err` case hands back no
 	/// guard at all. Call [`read`](Self::read) if you need the final state.
+	#[cfg(feature = "async")]
 	pub async fn wait<F>(&self, mut f: F) -> Result<Mut<'_, T>, Closed>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<()> + Unpin,
@@ -175,13 +176,8 @@ impl<T> Producer<T> {
 		crate::wait(move |waiter| self.poll(waiter, &mut f).map(|res| res.map_err(|_| Closed))).await
 	}
 
-	/// Wait until the channel is closed.
-	pub async fn closed(&self) {
-		crate::wait(move |waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll for channel closure (an explicit [`Mut::close`], e.g. an abort),
-	/// registering the waiter if still open.
+	/// Resolves once the channel is closed (an explicit [`Mut::close`], e.g. an abort).
+	#[cfg_attr(feature = "async", kio_macros::wrapper)]
 	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		self.state.poll_closed(waiter)
@@ -195,14 +191,9 @@ impl<T> Producer<T> {
 		self.counts.consumers.load(Ordering::Relaxed) > 0
 	}
 
-	/// Wait until [`Self::wanted`] differs from `last`, returning the new value, or
-	/// [`Closed`] if the channel closes first.
-	pub async fn wanted_changed(&self, last: bool) -> Result<bool, Closed> {
-		crate::wait(move |waiter| self.poll_wanted_changed(waiter, last)).await
-	}
-
-	/// Poll for [`Self::wanted`] to differ from `last`: `Ready(Ok)` with the new value once
-	/// it does, [`Closed`] if the channel closed first, else `Pending`.
+	/// Resolves to the new [`Self::wanted`] once it differs from `last`, or [`Closed`] if
+	/// the channel closes first.
+	#[cfg_attr(feature = "async", kio_macros::wrapper)]
 	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_wanted_changed(&self, waiter: &Waiter, last: bool) -> Poll<Result<bool, Closed>> {
 		crate::consumer::poll_wanted_changed(&self.state, &self.counts, waiter, last)

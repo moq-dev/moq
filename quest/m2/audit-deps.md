@@ -2,9 +2,11 @@
 
 ## Goal
 
-Dependencies are current, deduplicated, needed, and the best maintained option,
-and hand-rolled non-core code that a maintained library covers is planned for
-replacement.
+Every dependency, vendored ones included, earns its weight: the fewest that
+do the job, each current, deduplicated, and the best maintained option. A
+dependency whose use is trivial, that another already covers, or that serves a
+feature not worth keeping is removed. Only hand-rolled nontrivial non-core code
+that a maintained library covers is planned for replacement.
 
 ## Plan
 
@@ -19,6 +21,13 @@ recurrence. Fixes land in the run's PR, one commit each, rather than as follow-u
 Only a change that needs a maintainer decision (public API, scope) or is
 independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
+
+Default to removing (decided 2026-11-01, maintainer): whatever doesn't earn its
+cost is deleted inline, and the PR body lists each deletion with its measured
+cost and why it wasn't worth it. Only what earns its keep is refactored to be
+cheaper instead. Prefer fewer dependencies, and count each one's
+compile time and transitive tree in its cost. Removing a public API or a user-facing feature stays a
+follow-up.
 
 Research the state of the art for each candidate: compare maintenance,
 performance, and API fit before planning a swap. Respect Dependabot's 7-day
