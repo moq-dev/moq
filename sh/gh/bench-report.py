@@ -13,10 +13,11 @@ import re
 import statistics
 import time
 from urllib.parse import quote
+import xml.etree.ElementTree as ElementTree
 
 
 BIGGER = {'MB/s', 'MiB/s', 'B/s', 'ops/s', 'frames/s'}
-SMALLER = {'ns', 'us', 'µs', 'ms', 's', 'ms/MB', 'x', 'bytes', 'B', 'MiB'}
+SMALLER = {'ns', 'us', 'µs', 'ms', 's', 'ms/MB', 'x', 'bytes', 'B', 'MiB', 'packets'}
 
 
 def value(number):
@@ -123,41 +124,75 @@ def gate(directory):
 
 
 def measurement_unit(column):
-    if column == 'size_bytes':
+    """The unit a benchmark CSV column measures, or None for a workload dimension."""
+    if column in ('size_bytes', 'peak_bytes'):
         return 'bytes'
+    if column == 'mib_per_s' or column.endswith('_mib_per_s'):
+        return 'MiB/s'
+    if column.endswith('_packets'):
+        return 'packets'
     for unit in ('ns', 'us', 'ms'):
-        if column == unit or column.endswith(f'_{unit}') or column.startswith(f'{unit}_per_'):
+        if re.search(f'(^|_){unit}($|_per_)', column):
             return unit
     return None
 
 
-def javascript_file(path):
+def printed(text, name, where):
+    """Read the CSV tables a benchmark printed: a header naming measured columns, then its rows."""
     entries, headers = [], None
-    for line_number, line in enumerate(path.read_text().splitlines(), 1):
+    for line_number, line in enumerate(text.splitlines(), 1):
         row = [field.strip() for field in next(csv.reader([line]))]
         if len(row) > 1 and any(measurement_unit(field) for field in row):
             if len(set(row)) != len(row):
-                raise ValueError(f'duplicate CSV headers: {path}:{line_number}')
+                raise ValueError(f'duplicate CSV headers: {where}:{line_number}')
             headers = row
             continue
         if not headers or not line.strip():
             continue
         if len(row) != len(headers):
-            raise ValueError(f'malformed benchmark CSV: {path}:{line_number}')
+            raise ValueError(f'malformed benchmark CSV: {where}:{line_number}')
         dimensions = '/'.join(f'{key}={quote(field, safe="-_.~")}' for key, field in zip(headers, row)
                               if measurement_unit(key) is None)
         for key, field in zip(headers, row):
             if unit := measurement_unit(key):
-                entries.append({'name': f'js/{path.stem}/{dimensions}/{key}',
-                                'unit': unit, 'value': value(float(field))})
+                entries.append({'name': f'{name}/{dimensions}/{key}', 'unit': unit, 'value': value(float(field))})
     if not entries:
-        raise ValueError(f'JS benchmark produced no measurements: {path}')
-    return checked(entries)
+        raise ValueError(f'benchmark produced no measurements: {where}')
+    return entries
 
 
 def javascript(directory):
-    entries = [entry for path in sorted((directory / 'raw').glob('*.csv')) for entry in javascript_file(path)]
+    entries = [entry for path in sorted((directory / 'raw').glob('*.csv'))
+               for entry in printed(path.read_text(), f'js/{path.stem}', path)]
     return checked(entries)
+
+
+# The lines libtest's harness frames each test's output with.
+LIBTEST = re.compile(r'running \d+ tests?|test \S+ \.\.\. \w+|test result: .*')
+
+
+def rust_tests(directory):
+    """Read each benchmark test's tables from the JUnit reports of nextest's bench profile."""
+    reports = sorted((directory / 'raw').glob('*.xml'))
+    if not reports:
+        raise ValueError(f'no nextest JUnit reports in {directory / "raw"}')
+    entries = []
+    for path in reports:
+        for case in ElementTree.parse(path).getroot().iter('testcase'):
+            # A test binary is named `package` or `package::kind/target`.
+            package = case.get('classname').split('::', 1)[0]
+            test = case.get('name').rsplit('::', 1)[-1]
+            output = case.findtext('system-out') or ''
+            text = '\n'.join(line for line in output.splitlines() if not LIBTEST.fullmatch(line))
+            entries += printed(text, f'rust-test/{package}/{test}', f'{path.name} {package} {test}')
+    return checked(entries)
+
+
+def sizes(directory):
+    """Record the nightly size report's shipping artifact bytes; its build times stay out, being noise."""
+    report = json.loads((directory / 'sizes.json').read_text())
+    return checked([{'name': f'size/{key}', 'unit': 'bytes', 'value': value(size)}
+                    for key, size in sorted(report['bytes'].items())])
 
 
 def prepare(directory, output):
@@ -442,7 +477,7 @@ def index(directory, commit=None, paired_path=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    for command in ('rust', 'js', 'prepare'):
+    for command in ('rust', 'rust-test', 'js', 'size', 'prepare'):
         sub = commands.add_parser(command)
         sub.add_argument('directory', type=Path)
         sub.add_argument('output', type=Path)
@@ -462,8 +497,12 @@ def main():
             args.output.with_name('paired.json').write_text(json.dumps(comparison, indent=2) + '\n')
     elif args.command == 'gate':
         raise SystemExit(gate(args.directory))
+    elif args.command == 'rust-test':
+        write(args.output, rust_tests(args.directory))
     elif args.command == 'js':
         write(args.output, javascript(args.directory))
+    elif args.command == 'size':
+        write(args.output, sizes(args.directory))
     elif args.command == 'prepare':
         prepare(args.directory, args.output)
     elif args.command == 'status':

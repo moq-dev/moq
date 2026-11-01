@@ -26,6 +26,11 @@ class NightlyTest(unittest.TestCase):
                     '#!/usr/bin/env bash\n'
                     'printf "%s %s\n" "${0##*/}" "$*" >> "$NIGHTLY_CALLS"\n'
                     'printf "%s\n" "${BENCH_BASE:-}" >> "$NIGHTLY_CALLS.base"\n'
+                    # Nextest's bench profile writes a JUnit report, unless the test withholds it.
+                    'if [[ ${NEXTEST_PROFILE:-} == bench && "$*" != "$NIGHTLY_NO_JUNIT" ]]; then\n'
+                    '    mkdir -p "$CARGO_TARGET_DIR/nextest/bench"\n'
+                    '    printf "<testsuites/>" > "$CARGO_TARGET_DIR/nextest/bench/junit.xml"\n'
+                    'fi\n'
                     '[[ "$*" != "$NIGHTLY_FAIL" ]]\n'
                 )
                 stub.chmod(0o755)
@@ -35,11 +40,15 @@ class NightlyTest(unittest.TestCase):
                           'printf "%s" "$NIGHTLY_RUNS" | jq -r "$2"\n')
             gh.chmod(0o755)
             env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
-                       BENCH_RESULTS=str(scratch / "results"), NIGHTLY_CALLS=str(calls), NIGHTLY_FAIL=fail, BASH_ENV="/dev/null")
-            env.pop("BENCH_BASE", None)
+                       BENCH_RESULTS=str(scratch / "results"), NIGHTLY_CALLS=str(calls), NIGHTLY_FAIL=fail, BASH_ENV="/dev/null",
+                       CARGO_TARGET_DIR=str(scratch / "target"))
+            for name in ("BENCH_BASE", "NEXTEST_PROFILE", "NIGHTLY_NO_JUNIT"):
+                env.pop(name, None)
             env.update(environment)
             result = subprocess.run(["bash", ROOT / "sh/gh/nightly.sh", group], cwd=cwd,
                                     env=env, capture_output=True, text=True)
+            raw = scratch / "results" / "raw"
+            self.raw = sorted(path.name for path in raw.iterdir()) if raw.exists() else []
             self.bases = set(Path(f"{calls}.base").read_text().splitlines()) if calls.exists() else set()
             return result, calls.read_text().splitlines() if calls.exists() else []
 
@@ -179,12 +188,34 @@ class NightlyTest(unittest.TestCase):
     def test_benchmark_tests_stay_out_of_cargo_bench(self):
         result, calls = self.run_group("rust-test")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(any(call.startswith(("cargo bench", "just gh")) for call in calls))
-        # Release builds run before the test-profile ones.
-        profiles = ["--release" in call or " bench-" in call for call in calls]
-        self.assertEqual(profiles, sorted(profiles, reverse=True))
+        *runs, publish = calls
+        self.assertFalse(any(call.startswith(("cargo bench", "just gh")) for call in runs))
+        # Every benchmark measures a release build, and each run keeps its JUnit report.
+        self.assertTrue(all("--release" in call or " bench-" in call for call in runs), runs)
+        self.assertIn("just rs bench-feed-fetch", runs)
+        self.assertEqual(self.raw, [f"nextest-{index}.xml" for index in range(1, len(runs) + 1)])
+        self.assertTrue(publish.startswith("just gh benchmark-report rust-test "), publish)
+
+    def test_benchmark_test_without_its_report_fails(self):
+        result, calls = self.run_group("rust-test", NIGHTLY_NO_JUNIT="rs bench-latency")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no JUnit report from: just rs bench-latency", result.stderr)
         self.assertIn("just rs bench-feed-fetch", calls)
-        self.assertTrue(calls[-1].startswith("just rs test -p moq-cli"))
+        self.assertFalse(any(call.startswith("just gh") for call in calls))
+
+    def test_every_nightly_benchmark_test_exists(self):
+        # A filter naming a removed test matches nothing, and nextest still passes.
+        recipes = (ROOT / "rs/justfile").read_text()
+        _, calls = self.run_group("rust-test")
+        named = set()
+        for call in calls:
+            if match := re.fullmatch(r"just rs (bench-[\w-]+)", call):
+                call = re.search(rf"^{match[1]}\b.*:\n    (.+)$", recipes, re.M)[1]
+            named |= set(re.findall(r"test\((\w+)\)", call))
+        self.assertTrue(named)
+        sources = "".join(path.read_text() for path in (ROOT / "rs").glob("*/**/*.rs") if "/target/" not in str(path))
+        missing = {name for name in named if not re.search(rf"\bfn {name}\b", sources)}
+        self.assertEqual(missing, set(), "Nightly benchmark tests that no longer exist")
 
     def test_failed_release_build_does_not_hide_later_work(self):
         _, calls = self.run_group("rust-bench")

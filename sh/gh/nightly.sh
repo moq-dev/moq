@@ -7,10 +7,12 @@ if [[ $# != 1 ]]; then
     echo "$usage" >&2
     exit 2
 fi
-# The measured groups write a report for the benchmark site; rust-test and bindings only run.
+# The measured groups write a report for the benchmark site; bindings only run, since
+# rust2 measures them (see bench/README.md).
 case "$1" in
-    rust-test | bindings) report= ;;
+    bindings) report= ;;
     rust-bench | rust-shared | rust-relay | rust-extra | rust-uring) report=rust ;;
+    rust-test) report=rust-test ;;
     js) report=js ;;
     *)
         echo "$usage" >&2
@@ -48,7 +50,8 @@ if [[ -n $report ]]; then
     mkdir -p "$out"
     export BENCH_RUNS="$out/criterion-runs.txt"
     : >"$BENCH_RUNS"
-    rm -f "$out/report.json" "$out/paired.json"
+    rm -rf "$out/report.json" "$out/paired.json" "$out/raw"
+    mkdir -p "$out/raw"
 fi
 
 failed=()
@@ -66,32 +69,46 @@ criterion() {
 javascript() {
     local label=$1
     shift
-    mkdir -p "$out/raw"
     echo "nightly: $*"
     if ! "$@" | tee "$out/raw/$label.csv"; then failed+=("$*"); fi
 }
 
+# The bench nextest profile stores each test's printed tables in its JUnit report,
+# which every run overwrites; keep each run's copy.
+nextest() {
+    local junit=${CARGO_TARGET_DIR:-$root/target}/nextest/bench/junit.xml
+    rm -f "$junit"
+    run "$@"
+    if [[ -s $junit ]]; then
+        mv "$junit" "$out/raw/nextest-$((++nextest_runs)).xml"
+    else
+        failed+=("no JUnit report from: $*")
+    fi
+}
+nextest_runs=0
+
 case "$1" in
-    # Ignored benchmark tests under nextest: the release builds first, then the test-profile ones.
+    # Ignored benchmark tests under nextest, all in release builds and one at a time, so
+    # none measures beside another. Each prints CSV tables whose unit-suffixed columns
+    # the report records (see bench/README.md).
     rust-test)
-        run just rs bench-latency
-        run just rs test -p moq-bench --release --run-ignored only \
+        export NEXTEST_PROFILE=bench NEXTEST_TEST_THREADS=1
+        nextest just rs bench-latency
+        nextest just rs test -p moq-bench --release --run-ignored only \
             -E 'test(benchmark_readiness_establishment)' --success-output immediate
-        run just rs bench-playback
-        run just rs test --release -p moq-congestion -E 'test(benchmark_per_packet)' \
+        nextest just rs bench-playback
+        nextest just rs test --release -p moq-congestion -E 'test(benchmark_per_packet)' \
             --run-ignored only --success-output immediate
-        run just rs bench-feed-fetch
-        run just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
-        run just rs test -p moq-tokio --release -E 'test(benchmark_receive_windows)' --run-ignored only --success-output immediate
-        run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
-        run just rs test -p moq-c -E 'test(benchmark_handles)' --run-ignored only --success-output immediate
-        run just rs test -p moq-archive -p moq-mux -p moq-hls --no-fail-fast \
-            -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_reference_handoff_fanout)' \
+        nextest just rs bench-feed-fetch
+        nextest just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
+        nextest just rs test -p moq-tokio --release -E 'test(benchmark_receive_windows)' --run-ignored only --success-output immediate
+        # One build for the crates whose benchmarks need no features of their own.
+        nextest just rs test --release --no-fail-fast -p moq-relay -p moq-c -p moq-mux -p moq-cli \
+            -E 'test(benchmark_stun_sources) | test(benchmark_handles) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_stream_import)' \
             --run-ignored only --success-output immediate
         # Codecs are irrelevant to timebase reservation, so skip building them.
-        run just rs test -p moq-ffi --no-default-features -E 'test(benchmark_timebase_reservation_fanout)' \
+        nextest just rs test -p moq-ffi --release --no-default-features -E 'test(benchmark_timebase_reservation_fanout)' \
             --run-ignored only --success-output immediate
-        run just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
         ;;
     # Measured Cargo bench targets, all in the bench profile. A paired run builds and
     # measures each group twice, so the groups split across jobs to fit an hour each.

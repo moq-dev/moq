@@ -29,4 +29,6 @@ gh api --paginate 'repos/{owner}/{repo}/actions/artifacts?name=nightly-size-hist
 
 A regression fails Nightly and reaches its existing alert workflow. The job
 summary carries the byte counts, build times and FFI crate attribution, the
-latter from the symbol-preserving `profiling` profile.
+latter from the symbol-preserving `profiling` profile. Each night's byte counts
+also join the [benchmark table](https://git.moq.dev/bench/), whose history
+outlives the 45-day artifacts.

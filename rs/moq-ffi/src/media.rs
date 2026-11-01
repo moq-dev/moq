@@ -2016,7 +2016,7 @@ mod timebase_tests {
 	#[test]
 	#[ignore = "benchmark, runs in Nightly"]
 	fn benchmark_timebase_reservation_fanout() {
-		eprintln!("timebases,containers,ns_per_container");
+		println!("timebases,containers,ns_per_container");
 		for entries in [1, 32, 1024] {
 			let owner = MoqBroadcastProducer::new().unwrap();
 			let timebases: Vec<_> = (0..entries)
@@ -2045,7 +2045,7 @@ mod timebase_tests {
 					}
 				}
 				let nanos = start.elapsed().as_nanos() as f64 / (1000 * touched) as f64;
-				eprintln!("{entries},{touched},{nanos:.1}");
+				println!("{entries},{touched},{nanos:.1}");
 			}
 			owner.close().unwrap();
 		}

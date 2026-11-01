@@ -900,7 +900,7 @@ async fn benchmark_receive_windows() {
 		("loopback", None, BENCH_BYTES),
 		("bufferbloat", Some(bufferbloat(BENCH_BLOAT.0)), BENCH_BLOAT.1),
 	];
-	println!("path,axis,streams,frame,window_mib,stream_window,peak_mib,mib_per_s,p50_ms,p99_ms,overflowed");
+	println!("path,axis,streams,frame,window_mib,stream_window,peak_bytes,mib_per_s,p50_ms,p99_ms,overflowed_packets");
 	for (cell, (path, profile, bytes)) in cells.flat_map(|cell| paths.clone().map(|path| (cell, path))) {
 		let mut runs = Vec::with_capacity(RUNS);
 		for _ in 0..RUNS {
@@ -921,13 +921,12 @@ async fn benchmark_receive_windows() {
 		let throughput = median(runs.iter().map(|run| run.throughput).collect());
 		let overflowed = median(runs.iter().map(|run| run.overflowed as f64).collect());
 		println!(
-			"{path},{},{},{},{},{},{:.1},{:.0},{:.2},{:.2},{overflowed}",
+			"{path},{},{},{},{},{},{peak:.0},{:.0},{:.2},{:.2},{overflowed}",
 			cell.axis,
 			cell.streams,
 			cell.frame,
 			cell.window >> 20,
 			if cell.follow { "follow" } else { "finite" },
-			peak / (1 << 20) as f64,
 			throughput / (1 << 20) as f64,
 			percentile(50),
 			percentile(99),

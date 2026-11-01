@@ -35,29 +35,87 @@ class ReportTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 report.checked(entries)
 
+    def javascript(self, name, text):
+        source = self.root / 'raw' / f'{name}.csv'
+        source.parent.mkdir(exist_ok=True)
+        source.write_text(text)
+        return report.javascript(self.root)
+
     def test_js_multiple_schemas(self):
-        source = self.root / 'requests.csv'
-        source.write_text('bun install v1.3\npaths,active_us,settled_us\n4,1.25,2.5\noperation,ns_per_op\nclose,0\n')
-        entries = report.javascript_file(source)
+        entries = self.javascript('requests', 'bun install v1.3\npaths,active_us,settled_us\n4,1.25,2.5\n'
+                                              'operation,ns_per_op\nclose,0\n')
         self.assertEqual([entry['value'] for entry in entries], [1.25, 2.5, 0])
         self.assertEqual(entries[0]['name'], 'js/requests/paths=4/active_us')
         for text in ('Testing case\nSuccess\n', 'paths,time_us\n4\n', 'paths,time_us\n4,nan\n'):
-            source.write_text(text)
             with self.assertRaises(ValueError):
-                report.javascript_file(source)
+                self.javascript('requests', text)
+
+    def test_measured_columns(self):
+        units = {column: report.measurement_unit(column) for column in (
+            'us', 'elapsed_ms', 'ns_per_frame', 'plain_ns_per_read', 'size_bytes', 'peak_bytes', 'mib_per_s',
+            'overflowed_packets', 'payload_bytes', 'bytes', 'frames_per_chunk', 'nsamples', 'runs')}
+        self.assertEqual(units, {
+            'us': 'us', 'elapsed_ms': 'ms', 'ns_per_frame': 'ns', 'plain_ns_per_read': 'ns', 'size_bytes': 'bytes',
+            'peak_bytes': 'bytes', 'mib_per_s': 'MiB/s', 'overflowed_packets': 'packets',
+            # Workload dimensions, as the JS benchmarks name them.
+            'payload_bytes': None, 'bytes': None, 'frames_per_chunk': None, 'nsamples': None, 'runs': None})
 
     def test_js_byte_measurements_do_not_become_dimensions(self):
-        source = self.root / 'compression.csv'
-        source.write_text('bytes,us,size_bytes\n4,1.5,64\nmeasurement,size_bytes\nbundle,512\n')
-        entries = report.javascript_file(source)
+        entries = self.javascript('compression', 'bytes,us,size_bytes\n4,1.5,64\nmeasurement,size_bytes\nbundle,512\n')
         self.assertEqual([(entry['name'], entry['unit'], entry['value']) for entry in entries], [
             ('js/compression/bytes=4/us', 'us', 1.5),
             ('js/compression/bytes=4/size_bytes', 'bytes', 64),
             ('js/compression/measurement=bundle/size_bytes', 'bytes', 512),
         ])
-        source.write_text('bytes,us,size_bytes\n4,2.5,128\nmeasurement,size_bytes\nbundle,1024\n')
-        self.assertEqual([entry['name'] for entry in report.javascript_file(source)],
-                         [entry['name'] for entry in entries])
+        later = self.javascript('compression', 'bytes,us,size_bytes\n4,2.5,128\nmeasurement,size_bytes\nbundle,1024\n')
+        self.assertEqual([entry['name'] for entry in later], [entry['name'] for entry in entries])
+
+    def junit(self, name, cases):
+        """Write a nextest JUnit report of (binary, test, stdout) cases."""
+        raw = self.root / 'raw'
+        raw.mkdir(exist_ok=True)
+        body = ''.join(f'<testcase name="{test}" classname="{binary}"><system-out>{stdout}</system-out>'
+                       '<system-err></system-err></testcase>' for binary, test, stdout in cases)
+        (raw / name).write_text(f'<?xml version="1.0"?><testsuites><testsuite>{body}</testsuite></testsuites>')
+
+    def test_rust_tests_record_each_benchmark_by_package_and_test(self):
+        with self.assertRaises(ValueError):
+            report.rust_tests(self.root)
+        self.junit('nextest-1.xml', [
+            ('moq-congestion', 'bbr3::bench::benchmark_per_packet',
+             '\nrunning 1 test\nstate,size_bytes\npacket,40\nsteady,flight,cpu_ns,peak_bytes\nfalse,16,3170,1336\n'
+             'test bbr3::bench::benchmark_per_packet ... ok\n\n'
+             'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 97 filtered out; finished in 0.05s\n'),
+        ])
+        self.junit('nextest-2.xml', [
+            ('moq-tokio::integration', 'receive_credit::benchmark_receive_windows',
+             'path,mib_per_s,overflowed_packets\nloopback,812,0\n'),
+            ('moq-bench::bin/moq-bench', 'stats::tests::benchmark_observation_contention',
+             'writers,snapshots,ns_per_sample\n1,0,57.39\n'),
+        ])
+        entries = report.rust_tests(self.root)
+        self.assertEqual([(entry['name'], entry['unit'], entry['value']) for entry in entries], [
+            ('rust-test/moq-congestion/benchmark_per_packet/state=packet/size_bytes', 'bytes', 40),
+            ('rust-test/moq-congestion/benchmark_per_packet/steady=false/flight=16/cpu_ns', 'ns', 3170),
+            ('rust-test/moq-congestion/benchmark_per_packet/steady=false/flight=16/peak_bytes', 'bytes', 1336),
+            ('rust-test/moq-tokio/benchmark_receive_windows/path=loopback/mib_per_s', 'MiB/s', 812),
+            ('rust-test/moq-tokio/benchmark_receive_windows/path=loopback/overflowed_packets', 'packets', 0),
+            ('rust-test/moq-bench/benchmark_observation_contention/writers=1/snapshots=0/ns_per_sample', 'ns', 57.39),
+        ])
+        # A benchmark that prints no table, or a line its table cannot read, is refused.
+        for stdout in ('\nrunning 1 test\nwriters=1 elapsed_ns=5\n', 'writers,ns_per_sample\n1,2\nwarming up\n'):
+            self.junit('nextest-2.xml', [('moq-bench', 'benchmark_observation_contention', stdout)])
+            with self.assertRaises(ValueError):
+                report.rust_tests(self.root)
+
+    def test_sizes_record_shipping_bytes(self):
+        (self.root / 'sizes.json').write_text(json.dumps({
+            'version': 1, 'bytes': {'release/moq-relay/moq-relay.tar.gz': 900, 'js/net/gzip': 120},
+            'seconds': {'release-moq-relay': 300}}))
+        self.assertEqual(report.sizes(self.root), [
+            {'name': 'size/js/net/gzip', 'unit': 'bytes', 'value': 120},
+            {'name': 'size/release/moq-relay/moq-relay.tar.gz', 'unit': 'bytes', 'value': 900},
+        ])
 
     def test_criterion_requires_fresh_measured_estimates(self):
         run = self.root / 'runs' / 'one'

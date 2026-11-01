@@ -789,6 +789,7 @@ mod tests {
 		use std::sync::Barrier;
 		use std::time::Instant;
 
+		println!("writers,snapshots,ns_per_sample");
 		for writers in [1, 4, 16] {
 			for snapshots in [0, 10, 100] {
 				let stats = Stats::default();
@@ -822,10 +823,8 @@ mod tests {
 				let elapsed = elapsed.elapsed();
 				assert_eq!(Snapshot::take(&stats).latency_samples, (writers * samples) as u64);
 				println!(
-					"writers={writers} snapshots={snapshots} samples={} elapsed_ns={} samples_per_second={:.0}",
-					writers * samples,
-					elapsed.as_nanos(),
-					(writers * samples) as f64 / elapsed.as_secs_f64()
+					"{writers},{snapshots},{:.2}",
+					elapsed.as_nanos() as f64 / (writers * samples) as f64
 				);
 			}
 		}

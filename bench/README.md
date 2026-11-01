@@ -480,16 +480,26 @@ The table includes these measurements:
   time elapsed time. The Rust bench target jobs measure them with a short warmup
   and Criterion's quick mode. Per-group benchmark settings can override the default warmup. Quick estimates
   trade precision for nightly runtime; the paired comparison below assesses a change.
-- JS benchmark CSV time columns (`ns`, `us`, `ms`, and their per-operation
-  variants) and `size_bytes` columns, retaining every other column as a workload
-  dimension in each series name.
+- The CSV tables the JS benchmarks and the Rust benchmark tests print. A header
+  line names the columns; the time columns (`ns`, `us`, `ms`, and their
+  per-operation variants such as `ns_per_frame` or `plain_ns_per_read`),
+  `size_bytes` and `peak_bytes`, `mib_per_s`, and `*_packets` columns are
+  measurements, and every other column is a workload dimension in each series
+  name, so print outcomes only in measured columns. The Rust benchmark tests
+  (`just gh nightly rust-test`) run in release builds, one at a time, under
+  nextest's `bench` profile, which keeps each test's output in a JUnit report;
+  their series are named by package and test function.
+- Shipping sizes, in bytes: the release artifacts, minimal FFI build, and JS
+  bundles the [size report](../sh/size/README.md) measures, recorded even on a
+  night its growth check fails. Release build times stay out.
 
 Hosted runners vary across nights, so a trend flag prompts a look at the paired
 comparison rather than proving a regression.
 Malformed, empty, nonfinite, or duplicate measurements fail validation. The
-nightly artifacts retain the reports, raw JS output, and each Criterion run's
-metadata and estimates for 45 days. Relay load, audio quality, and the Rust
-benchmark tests job's nextest output do not enter the table.
+nightly artifacts retain the reports, raw JS output, nextest JUnit reports, and
+each Criterion run's metadata and estimates for 45 days. Relay load, audio
+quality, and the binding runners (measured in rust2, above) do not enter the
+table.
 
 Render the table from the published history:
 
