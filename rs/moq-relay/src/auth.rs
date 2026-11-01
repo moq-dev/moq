@@ -806,7 +806,7 @@ impl Decider {
 					// Nothing here can verify a token, so one is refused rather than ignored:
 					// its holder expects it to count, and the public grant is not what it says.
 					Self::Public(_) if presents_token(&admission.request) => {
-						tracing::debug!(path = %admission.request.path, "a token was presented to public rules");
+						tracing::debug!(path = ?admission.request.path, "a token was presented to public rules");
 						admission.refuse(Error::Refused(Default::default()));
 					}
 					Self::Public(rules) => match rules.authorize(&admission.request.path) {
@@ -817,7 +817,7 @@ impl Decider {
 						// A path the rules don't reach is a refusal, never an outage a
 						// client would retry.
 						Err(err) => {
-							tracing::debug!(path = %admission.request.path, %err, "public rules refused");
+							tracing::debug!(path = ?admission.request.path, ?err, "public rules refused");
 							admission.refuse(Error::Refused(Default::default()));
 						}
 					},

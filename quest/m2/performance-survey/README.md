@@ -79,8 +79,8 @@ Include idle connections and stalled
 readers as well as high-bandwidth, high-RTT relay links before recommending
 smaller windows. Receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)) own budget
 correctness; settings must preserve useful bandwidth-delay product and
-failover behavior. [Keepalive](/quest/m2/quic-keep-alive.md) already owns timer
-policy. Do not add a generic tuning surface without a measured consumer.
+failover behavior. The keep-alive already derives from the negotiated idle
+timeout, so leave timer policy alone. Do not add a generic tuning surface without a measured consumer.
 
 Reuse [the benchmark harness](/bench/README.md). Criterion's
 [timing-loop guidance](https://bheisler.github.io/criterion.rs/book/user_guide/timing_loops.html)
@@ -160,8 +160,7 @@ No duplicate quest or workflow edit belongs here.
   [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md),
   [NVENC pooling](/quest/m2/nvenc-pool.md), and
   [watch worker planning](/quest/m2/plan-watch-worker.md) retain their scopes.
-- [Route wakes](/quest/m2/route-wakes.md),
-  [keyed prefix polling](/quest/m2/keyed-prefix-polling.md), and
+- [Route wakes](/quest/m2/route-wakes.md) and
   [front parking](/quest/m2/origin-front-parks.md) own discovery scans/wakes.
 - The [recurring audit](/quest/m2/audit-perf.md) retains real congestion-
   controller/loss-recovery coverage, broader importer/container coverage,

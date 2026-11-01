@@ -31,10 +31,11 @@ class QueryTests(unittest.TestCase):
         self.env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
                         GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
         # The runner's own Actions variables would move the run's error
-        # annotations to stdout and append to the real job summary, and a
-        # gate's CHECK_MODULES split would skip the modules these tests expect.
+        # annotations to stdout and append to the real job summary, a gate's
+        # CHECK_MODULES split would skip the modules these tests expect, and the
+        # land gate's CHECK_FAIL_FAST would cancel the lanes they expect to finish.
         for key in ("IN_MOQ_DEV_SHELL", "ALLOW_HOST_TOOLCHAIN", "CHECK_JOBS", "CHECK_MODULES",
-                    "GITHUB_BASE_REF", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY"):
+                    "CHECK_FAIL_FAST", "GITHUB_BASE_REF", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY"):
             self.env.pop(key, None)
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "test")
@@ -219,6 +220,20 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
 
+    def test_only_the_local_check_narrows_feature_contracts(self):
+        # The landing worker's `just ci` keeps the dependents' feature shapes.
+        self.change("rs/moq-net/src/lib.rs")
+        for action, scope in (("check", "changed"), ("ci", "")):
+            with self.subTest(action=action):
+                self.stub_ci('[[ "$1" != "rs" || "$2" != *-changed ]] || '
+                             'printf "%s scope=%s\\n" "$2" "${RS_FEATURE_SCOPE:-}" >>"$CALLS"\n')
+                result = subprocess.run(["bash", "sh/dispatch.sh", action, "origin/main"],
+                                        cwd=self.repo, env=self.env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = (self.root / "calls").read_text().splitlines()
+                for recipe in ("lint-changed", "feature-shapes-changed"):
+                    self.assertIn(f"{recipe} scope={scope}", calls)
+
     def test_failure_keeps_running_lanes_and_starts_remaining_modules(self):
         # The failed lane finishes before go releases the two parked lanes.
         # No timing assumption can make cancellation look like completion.
@@ -247,6 +262,45 @@ class QueryTests(unittest.TestCase):
         self.assertIn("go check", calls)
         self.assertIn("obs compile", calls)
         self.assertIn("dart check", calls)
+
+    def test_fail_fast_cancels_running_lanes_and_starts_no_more(self):
+        # The land gate opts in: the parked lanes never finish on their own, so
+        # only the cancellation can end the run.
+        blocked = {}
+        for name, call in (("rs", '"rs test-changed "*'), ("cpp", '"cpp check"')):
+            started = self.root / f"{name}.started"
+            released = self.root / f"{name}.released"
+            os.mkfifo(started)
+            os.mkfifo(released)
+            blocked[name] = (call, started, released)
+        stub = "".join(f'    {call}) echo >"{started}"; read -r <"{released}" ;;\n'
+                       for call, started, released in blocked.values())
+        reads = "; ".join(f'read -r <"{started}"' for _, started, _ in blocked.values())
+        self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\nesac\n')
+        self.change("rs/moq-ffi/src/lib.rs")
+        self.change("js/net/src/index.ts")
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
+                                env=dict(self.env, CHECK_FAIL_FAST="1"), text=True, capture_output=True,
+                                timeout=60)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("ci: test gh failed", result.stderr)
+        self.assertRegex(result.stderr, r"\d+  test rs \(cancelled\)")
+        self.assertRegex(result.stderr, r"\d+  check cpp \(cancelled\)")
+        self.assertNotIn("ci: test rs failed", result.stderr)
+        calls = (self.root / "calls").read_text().splitlines()
+        self.assertNotIn("go check", calls)
+        self.assertNotIn("obs compile", calls)
+
+    def test_fail_fast_stops_a_serial_run_at_the_first_failure(self):
+        self.stub_ci('case "$*" in "js check-changed "*) exit 3 ;; "gh check") exit 4 ;; esac\n')
+        self.change("js/net/src/index.ts")
+        self.change("dart/example.dart")
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
+                                env=dict(self.env, CHECK_JOBS="1", CHECK_FAIL_FAST="1"), text=True,
+                                capture_output=True)
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        failures = [line for line in result.stderr.splitlines() if line.startswith("ci: ") and line.endswith(" failed")]
+        self.assertEqual(len(failures), 1, result.stderr)
 
     def test_failure_continues_independent_modules_in_the_same_lane(self):
         for jobs in ("1", "3"):

@@ -78,6 +78,11 @@ qmux-record-bench:
     bun install --frozen-lockfile
     bun qmux/bench/record.ts
 
+# Sweep QMux datagram receive-queue draining over backlog size (median of 7 runs).
+qmux-datagrams-bench:
+    bun install --frozen-lockfile
+    bun qmux/bench/datagrams.ts
+
 # Sweep CMAF fragment decode over mdat bytes x declared sample count, including a hostile count.
 cmaf-bench:
     bun install --frozen-lockfile
