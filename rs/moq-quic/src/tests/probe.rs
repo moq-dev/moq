@@ -243,6 +243,9 @@ struct Reading {
 }
 
 fn run(scenario: &Scenario) -> Outcome {
+	// Each run's packet trace is about 30 MB, so `RUST_LOG=trace` is slow here; what it measured
+	// is reported once it returns
+	let _guard = subscribe();
 	entropy::reseed(scenario.seed);
 	let mut server_transport = transport::Config::default();
 	if let Some(window) = scenario.receive_window {

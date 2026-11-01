@@ -409,13 +409,15 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
 	server_config.transport = transport.clone();
 	let mut pair = Pair::new(Default::default(), server_config);
 	pair.latency = case.latency;
-	pair.to_server = case.to_server.clone();
-	pair.to_client = case.to_client.clone();
-	let start = pair.time;
 
 	let mut client_config = client_config();
 	client_config.transport = transport;
 	let (client_ch, server_ch) = pair.connect_with(client_config);
+
+	// Workloads start connected; deterministic handshake tests own flight loss.
+	pair.to_server = case.to_server.clone();
+	pair.to_client = case.to_client.clone();
+	let start = pair.time;
 
 	let sends = |from_client: bool| {
 		case.streams

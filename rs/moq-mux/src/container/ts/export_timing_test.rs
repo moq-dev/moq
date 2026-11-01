@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::Timestamp;
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 
@@ -70,9 +70,9 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 struct Live {
 	/// The receivers' clock: every timer the broadcast and its legs arm waits here, and only
 	/// [`Self::advance`] moves it.
-	clock: moq_clock::Deadlines,
+	clock: kio::clock::Deadlines,
 	/// Keeps [`Self::clock`] the thread's clock, unless another broadcast's is: see [`Self::beside`].
-	_entered: Option<moq_clock::Entered>,
+	_entered: Option<kio::clock::Entered>,
 	_broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer,
 	/// Written group by group, so a group can be left open: see [`Self::run`].
@@ -104,7 +104,7 @@ struct Live {
 
 impl Live {
 	async fn new(scale: f64, audio_lag: i64) -> Self {
-		let clock = moq_clock::Deadlines::new(moq_clock::now());
+		let clock = kio::clock::Deadlines::new(kio::clock::now());
 		let entered = clock.enter();
 		Self::on(clock, Some(entered), scale, audio_lag).await
 	}
@@ -114,7 +114,7 @@ impl Live {
 		Self::on(self.clock.clone(), None, scale, audio_lag).await
 	}
 
-	async fn on(clock: moq_clock::Deadlines, entered: Option<moq_clock::Entered>, scale: f64, audio_lag: i64) -> Self {
+	async fn on(clock: kio::clock::Deadlines, entered: Option<kio::clock::Entered>, scale: f64, audio_lag: i64) -> Self {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -149,6 +149,7 @@ impl Live {
 			)
 			.unwrap();
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog
 			.modify()
@@ -175,7 +176,7 @@ impl Live {
 			reorder: false,
 			delta_size: 400,
 			offset: 0,
-			start: moq_clock::now(),
+			start: kio::clock::now(),
 			tick: 0,
 			audio_index: 0,
 		}
@@ -227,7 +228,7 @@ impl Live {
 	/// same timeline from the next group, as its replacement or the other half of a 1+1 pair
 	/// would.
 	fn fall_silent(&mut self, gap: Duration, legs: &mut [&mut Leg]) {
-		let resume = moq_clock::now() + gap;
+		let resume = kio::clock::now() + gap;
 		self.advance(resume, legs);
 		let media = (resume.duration_since(self.start).as_secs_f64() * self.scale * 1e6) as u64;
 		self.tick = media.div_ceil(VIDEO_US * GOP) * GOP;
@@ -245,7 +246,7 @@ impl Live {
 		Leg {
 			export,
 			every,
-			next_poll: moq_clock::now(),
+			next_poll: kio::clock::now(),
 			waiter: kio::Waiter::new(Waker::from(woken.clone())),
 			woken,
 			out: Vec::new(),
@@ -361,7 +362,7 @@ impl Live {
 			.min()
 		{
 			self.clock.advance(wake.max(self.clock.now()));
-			let now = moq_clock::now();
+			let now = kio::clock::now();
 			for leg in legs.iter_mut() {
 				if leg.wake().is_some_and(|wake| wake <= now) {
 					leg.poll();
@@ -427,7 +428,7 @@ impl Leg {
 	/// Read everything ready now, returning whether the broadcast ended.
 	fn poll(&mut self) -> bool {
 		self.woken.0.store(false, Ordering::Relaxed);
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		while let std::task::Poll::Ready(frame) = self.export.poll_next(&self.waiter) {
 			match frame.expect("exporter error") {
 				Some(frame) => self.out.push((now, frame)),
@@ -438,7 +439,7 @@ impl Leg {
 	}
 
 	/// Read to the end of the broadcast.
-	async fn drain(&mut self, clock: &moq_clock::Deadlines) {
+	async fn drain(&mut self, clock: &kio::clock::Deadlines) {
 		loop {
 			if self.poll() {
 				break;
@@ -447,8 +448,8 @@ impl Leg {
 				clock.advance(deadline.max(clock.now()));
 				continue;
 			}
-			match moq_clock::timeout(Duration::from_millis(10), self.export.next()).await {
-				Ok(Ok(Some(frame))) => self.out.push((moq_clock::now(), frame)),
+			match kio::clock::timeout(Duration::from_millis(10), self.export.next()).await {
+				Ok(Ok(Some(frame))) => self.out.push((kio::clock::now(), frame)),
 				Ok(Ok(None)) => break,
 				Err(_) if self.export.next_due().is_none() => break,
 				Err(_) => {}
@@ -688,7 +689,7 @@ async fn an_unmarked_step_keeps_the_export_rendering() {
 			let mut leg = live.join(Duration::ZERO).await;
 			live.run(8 * GOP + GOP / 2, &mut [&mut leg], |_| false);
 			live.offset += step;
-			let stepped = moq_clock::now();
+			let stepped = kio::clock::now();
 			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false);
 
 			let case = format!("{} s step, lag {lag}", step as f64 / 1e6);
@@ -730,7 +731,7 @@ async fn frames_held_through_a_silence_drop_as_late() {
 			let tail = if declared { 2 } else { 5 };
 			live.run(8 * GOP + tail, &mut [&mut leg], |_| false);
 			live.fall_silent(Duration::from_secs(3), &mut [&mut leg]);
-			let resumed = moq_clock::now();
+			let resumed = kio::clock::now();
 			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false);
 
 			let dropped = leg.export.dropped();
@@ -776,7 +777,7 @@ async fn a_cut_judges_held_video_when_the_loss_is_observed() {
 			let tail = if declared { 2 } else { 8 };
 			live.run(8 * GOP + tail, &mut [&mut leg], |_| false);
 			live.fall_silent(silence, &mut [&mut leg]);
-			let observed = moq_clock::now();
+			let observed = kio::clock::now();
 			live.group.take().unwrap().abort(moq_net::Error::Unroutable).unwrap();
 			leg.poll_now();
 			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false);

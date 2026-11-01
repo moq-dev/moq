@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use anyhow::Context;
 use hang::moq_net;
@@ -334,7 +334,7 @@ impl ApplicationHandler<Event> for App {
 			return;
 		}
 
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		match self.next_redraw {
 			Some(deadline) if deadline <= now => {
 				self.next_redraw = None;
