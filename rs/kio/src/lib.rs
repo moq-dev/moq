@@ -20,18 +20,19 @@
 //!
 //! [`coop`] bounds the passes a loop makes per poll, so one that always finds
 //! work ready still yields.
+//!
+//! With the `macros` feature, `#[kio::machine]` writes a `poll_*` state machine from
+//! straight-line code with explicit waits.
 
 #![warn(missing_docs)]
 
 use std::{
 	fmt,
 	ops::{Deref, DerefMut},
+	sync::atomic::AtomicUsize,
 };
 
-use crate::sync::AtomicUsize;
-
 mod lock;
-mod sync;
 mod waiter;
 
 pub mod coop;
@@ -42,25 +43,24 @@ mod consumer;
 mod pending;
 mod producer;
 mod queue;
-mod send;
 mod shared;
 mod task;
 mod weak;
 
-#[cfg(all(test, loom))]
-mod loom;
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests;
+
+#[cfg(feature = "macros")]
+pub use kio_macros::machine;
 
 pub use bridge::Bridge;
 pub use consumer::Consumer;
 pub use lock::{Lock, LockGuard};
 pub use pending::Pending;
-pub use producer::{Mut, Producer, Ref, Unused};
+pub use producer::{Mut, Producer, Ref, Unwanted};
 pub use queue::{PushError, Queue};
-pub use send::MaybeSend;
 pub use shared::Shared;
-pub use task::{Task, Tasks};
+pub use task::{Task, TaskKey, Tasks};
 pub use waiter::{Park, Waiter, WaiterList, wait};
 pub use weak::{ConsumerWeak, ProducerWeak, Weak};
 
@@ -104,7 +104,10 @@ mod heap {
 
 		assert_eq!(arc_heap::<u8>(), layout::<u8>());
 		assert_eq!(arc_heap::<Overaligned>(), layout::<Overaligned>());
-		assert_eq!(arc_heap::<sync::Mutex<State<()>>>(), layout::<sync::Mutex<State<()>>>());
+		assert_eq!(
+			arc_heap::<std::sync::Mutex<State<()>>>(),
+			layout::<std::sync::Mutex<State<()>>>()
+		);
 	}
 }
 
@@ -138,8 +141,7 @@ pub(crate) struct State<T> {
 	pub waiters_value: waiter::WaiterList,
 	/// Closure (`closed`). Woken only when the channel closes.
 	pub waiters_closed: waiter::WaiterList,
-	/// Consumer-count changes (`used`/`unused`). `used`/`unused` are used
-	/// sequentially in practice, so they share one list.
+	/// Consumer-count changes (`wanted_changed`), in either direction.
 	pub waiters_consumer: waiter::WaiterList,
 	pub closed: bool,
 }

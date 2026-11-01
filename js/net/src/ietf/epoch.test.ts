@@ -20,7 +20,7 @@ const VERSION = Version.DRAFT_18;
 const EPOCH_PARAM = 0x40b69n;
 const EPOCH = Epoch.mint();
 
-const ALL = [Version.DRAFT_18, Version.DRAFT_22] as const;
+const ALL = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
 
 async function encode(
 	message: { encode(w: Writer, v: IetfVersion): Promise<void> },

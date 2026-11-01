@@ -1,13 +1,8 @@
-//! The runtime backend: tokio's clock on native (paused tokio included), and
-//! `performance.now()` with `setTimeout` in the browser, both through
-//! `web_async::time`. The only module, with the simulator, that reads a host clock.
+//! The runtime backend: tokio's clock, paused tokio included. The only module, with
+//! the simulator, that reads a host clock.
 //!
-//! Without the `runtime` feature there are no timers, and reads fall back to std,
-//! except in the browser, where std has no clock and `web_async::time` still reads.
-#![cfg_attr(
-	not(target_arch = "wasm32"),
-	expect(clippy::disallowed_methods, reason = "this backend is where the host clock is read")
-)]
+//! Without the `runtime` feature there are no timers, and reads fall back to std.
+#![expect(clippy::disallowed_methods, reason = "this backend is where the host clock is read")]
 
 #[cfg(feature = "runtime")]
 use std::{future::Future, pin::Pin};
@@ -16,8 +11,8 @@ use std::{
 	task::{Context, Poll},
 };
 
-#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
-use web_async::time as host;
+#[cfg(feature = "runtime")]
+use tokio::time as host;
 
 use crate::{Instant, Wall};
 
@@ -30,9 +25,9 @@ const LEAD: std::time::Duration = std::time::Duration::from_secs(1 << 32);
 
 /// Where every unpaused clock counts from, so instants read on any thread, in any
 /// runtime or none, stay comparable.
-#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
+#[cfg(feature = "runtime")]
 static ORIGIN: OnceLock<host::Instant> = OnceLock::new();
-#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
+#[cfg(feature = "runtime")]
 static ANCHOR: OnceLock<(Instant, Wall)> = OnceLock::new();
 
 /// The origin this context counts from, and a reading of its clock.
@@ -41,37 +36,29 @@ static ANCHOR: OnceLock<(Instant, Wall)> = OnceLock::new();
 /// never reads below it. A paused tokio runtime's clock starts at the runtime's
 /// build, which can precede the origin; that runtime counts from its own first
 /// reading instead (see [`paused`]).
-#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
+#[cfg(feature = "runtime")]
 fn read() -> (host::Instant, host::Instant) {
-	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 	let origin = *ORIGIN.get_or_init(|| host::Instant::from_std(std::time::Instant::now()));
 	let reading = host::Instant::now();
-	// The browser has one clock and no paused runtimes.
-	#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
-	let origin = *ORIGIN.get_or_init(|| reading);
-
-	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 	let origin = paused::origin(origin, reading);
 	(origin, reading)
 }
 
-#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
+#[cfg(feature = "runtime")]
 pub(crate) fn now() -> Instant {
 	let (origin, reading) = read();
 	Instant::from_origin(LEAD + reading.duration_since(origin))
 }
 
-#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
 pub(crate) fn wall() -> Wall {
-	let since = host::SystemTime::now()
-		.duration_since(host::UNIX_EPOCH)
+	let since = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
 		.expect("the host wall clock reads before 1970");
 	Wall::UNIX_EPOCH + since
 }
 
-#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
+#[cfg(feature = "runtime")]
 pub(crate) fn anchor() -> (Instant, Wall) {
-	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 	if let Some(anchor) = paused::anchor() {
 		return anchor;
 	}
@@ -80,31 +67,24 @@ pub(crate) fn anchor() -> (Instant, Wall) {
 
 /// [`now`] from the host's real clock, so an advanced paused runtime sharing the
 /// origin cannot skew the anchor every unpaused caller maps through.
-#[cfg(all(feature = "runtime", any(not(target_arch = "wasm32"), target_os = "wasi")))]
+#[cfg(feature = "runtime")]
 fn real_now() -> Instant {
 	let origin = ORIGIN.get_or_init(|| host::Instant::from_std(std::time::Instant::now()));
 	Instant::from_origin(LEAD + std::time::Instant::now().saturating_duration_since(origin.into_std()))
 }
 
-/// The browser has one clock and no paused runtimes.
-#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
-fn real_now() -> Instant {
-	now()
-}
-
 /// The std instant the runtime clock counts from, as [`read`] picks it.
-#[cfg(all(feature = "runtime", any(not(target_arch = "wasm32"), target_os = "wasi")))]
+#[cfg(feature = "runtime")]
 fn std_base() -> std::time::Instant {
 	read().0.into_std()
 }
 
-#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
+#[cfg(not(feature = "runtime"))]
 fn std_base() -> std::time::Instant {
 	std_origin().0
 }
 
 /// `at` on std's clock, through the origin the runtime clock counts from.
-#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 pub(crate) fn into_std(at: Instant) -> Option<std::time::Instant> {
 	let base = std_base();
 	match at.since_origin().checked_sub(LEAD) {
@@ -114,7 +94,6 @@ pub(crate) fn into_std(at: Instant) -> Option<std::time::Instant> {
 }
 
 /// The inverse of [`into_std`], saturating at the clock's range.
-#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 pub(crate) fn from_std(at: std::time::Instant) -> Instant {
 	let base = std_base();
 	let lead = Instant::from_origin(LEAD);
@@ -157,33 +136,20 @@ impl Timer {
 	}
 }
 
-#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
+#[cfg(not(feature = "runtime"))]
 static STD_ORIGIN: OnceLock<(std::time::Instant, Wall)> = OnceLock::new();
 
-#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
+#[cfg(not(feature = "runtime"))]
 fn std_origin() -> (std::time::Instant, Wall) {
-	*STD_ORIGIN.get_or_init(|| (std::time::Instant::now(), system_wall()))
+	*STD_ORIGIN.get_or_init(|| (std::time::Instant::now(), wall()))
 }
 
-#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
-fn system_wall() -> Wall {
-	let since = std::time::SystemTime::now()
-		.duration_since(std::time::UNIX_EPOCH)
-		.expect("the host wall clock reads before 1970");
-	Wall::UNIX_EPOCH + since
-}
-
-#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
+#[cfg(not(feature = "runtime"))]
 pub(crate) fn now() -> Instant {
 	Instant::from_origin(LEAD + std_origin().0.elapsed())
 }
 
-#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
-pub(crate) fn wall() -> Wall {
-	system_wall()
-}
-
-#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
+#[cfg(not(feature = "runtime"))]
 pub(crate) fn anchor() -> (Instant, Wall) {
 	(Instant::from_origin(LEAD), std_origin().1)
 }
@@ -206,7 +172,7 @@ impl Timer {
 	}
 }
 
-#[cfg(all(feature = "runtime", any(not(target_arch = "wasm32"), target_os = "wasi")))]
+#[cfg(feature = "runtime")]
 mod paused {
 	use std::{
 		collections::HashMap,
@@ -274,7 +240,7 @@ mod paused {
 	}
 }
 
-#[cfg(all(test, feature = "runtime", any(not(target_arch = "wasm32"), target_os = "wasi")))]
+#[cfg(all(test, feature = "runtime"))]
 mod tests {
 	use std::time::Duration;
 
@@ -431,84 +397,5 @@ mod tests {
 		for read in reads {
 			assert!(before <= read && read <= after, "{before:?} <= {read:?} <= {after:?}");
 		}
-	}
-}
-
-#[cfg(all(test, feature = "runtime", target_arch = "wasm32", not(target_os = "wasi")))]
-mod browser_tests {
-	use std::{future::pending, time::Duration};
-
-	use futures::FutureExt;
-	use wasm_bindgen::prelude::*;
-	use wasm_bindgen_test::*;
-
-	wasm_bindgen_test_configure!(run_in_browser);
-
-	#[wasm_bindgen(inline_js = "
-const originalNow = Date.now;
-export function setWall() { Date.now = () => 1700000000123; }
-export function restoreWall() { Date.now = originalNow; }
-")]
-	extern "C" {
-		#[wasm_bindgen(js_name = setWall)]
-		fn set_wall();
-		#[wasm_bindgen(js_name = restoreWall)]
-		fn restore_wall();
-	}
-
-	#[wasm_bindgen_test]
-	async fn sleep_advances_now_past_its_deadline() {
-		let start = crate::now();
-		let sleep = crate::sleep(Duration::from_millis(20));
-		let deadline = sleep.deadline();
-		sleep.await;
-		assert!(crate::now() >= deadline);
-		assert!(crate::now() > start);
-	}
-
-	#[wasm_bindgen_test]
-	async fn sleep_until_does_not_fire_early() {
-		let deadline = crate::now() + Duration::from_millis(20);
-		crate::sleep_until(deadline).await;
-		assert!(crate::now() >= deadline);
-	}
-
-	#[wasm_bindgen_test]
-	async fn timeout_elapses() {
-		let duration = Duration::from_millis(20);
-		let deadline = crate::now() + duration;
-		assert!(crate::timeout(duration, pending::<()>()).await.is_err());
-		assert!(crate::now() >= deadline);
-	}
-
-	#[wasm_bindgen_test]
-	fn interval_first_tick_is_immediate() {
-		let mut interval = crate::interval(Duration::from_secs(1));
-		assert!(interval.tick().now_or_never().is_some());
-	}
-
-	#[wasm_bindgen_test]
-	fn wall_reads_date_now() {
-		set_wall();
-		let wall = crate::wall();
-		restore_wall();
-		assert_eq!(wall, crate::Wall::UNIX_EPOCH + Duration::from_millis(1_700_000_000_123));
-	}
-}
-
-#[cfg(all(test, not(feature = "runtime"), target_arch = "wasm32", not(target_os = "wasi")))]
-mod browser_read_tests {
-	use wasm_bindgen_test::*;
-
-	wasm_bindgen_test_configure!(run_in_browser);
-
-	/// Reads work without the runtime, since std has no clock in the browser.
-	#[wasm_bindgen_test]
-	fn reads_without_runtime() {
-		let start = crate::now();
-		assert!(crate::now() >= start);
-		assert!(crate::wall() > crate::Wall::UNIX_EPOCH);
-		let (instant, _) = crate::origin();
-		assert!(instant <= crate::now());
 	}
 }

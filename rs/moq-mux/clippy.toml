@@ -1,12 +1,11 @@
-# The wasm32 lint builds tokio without `time`, where these tokio paths do not resolve.
 disallowed-methods = [
     { path = "std::time::Instant::now", reason = "read the ambient clock: moq_clock::now()" },
     { path = "std::time::SystemTime::now", reason = "read the ambient clock: moq_clock::wall()" },
-    { path = "tokio::time::Instant::now", reason = "read the ambient clock: moq_clock::now()", allow-invalid = true },
-    { path = "tokio::time::sleep", reason = "sleep on the ambient clock: moq_clock::sleep()", allow-invalid = true },
-    { path = "tokio::time::sleep_until", reason = "sleep on the ambient clock: moq_clock::sleep_until()", allow-invalid = true },
-    { path = "tokio::time::timeout", reason = "use the ambient clock: moq_clock::timeout()", allow-invalid = true },
-    { path = "tokio::time::interval", reason = "use the ambient clock: moq_clock::interval()", allow-invalid = true },
+    { path = "tokio::time::Instant::now", reason = "read the ambient clock: moq_clock::now()" },
+    { path = "tokio::time::sleep", reason = "sleep on the ambient clock: moq_clock::sleep()" },
+    { path = "tokio::time::sleep_until", reason = "sleep on the ambient clock: moq_clock::sleep_until()" },
+    { path = "tokio::time::timeout", reason = "use the ambient clock: moq_clock::timeout()" },
+    { path = "tokio::time::interval", reason = "use the ambient clock: moq_clock::interval()" },
 ]
 
 disallowed-types = [{ path = "std::time::SystemTime", reason = "use moq_clock::Wall" }]

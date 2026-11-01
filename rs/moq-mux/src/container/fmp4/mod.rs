@@ -143,6 +143,10 @@ pub enum Error {
 	#[error("invalid colr code point: {0}")]
 	InvalidColr(u16),
 
+	/// A Spherical Video V2 `sv3d` or `st3d` box the catalog cannot describe, or a malformed one.
+	#[error("unsupported spherical video: {0}")]
+	UnsupportedSpatial(&'static str),
+
 	/// The sample entry declares an unsupported codec.
 	#[error("unsupported codec: {0:?}")]
 	UnsupportedCodec(Box<mp4_atom::Codec>),
@@ -693,7 +697,7 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 				duration,
 				size: Some(f.payload.len() as u32),
 				flags: Some(flags),
-				cts: (cts != 0).then_some(cts),
+				cts: (cts != 0).then_some(cts.into()),
 			})
 		})
 		.collect::<Result<_>>()?;
@@ -712,7 +716,7 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 			}),
 			trun: vec![mp4_atom::Trun {
 				data_offset: Some(data_offset),
-				entries: entries.clone(),
+				samples: entries.clone().into(),
 			}],
 			..Default::default()
 		}],
@@ -786,6 +790,67 @@ pub(crate) fn colr_color(colr: &mp4_atom::Colr) -> Result<Option<hang::catalog::
 		code(matrix)?,
 		full_range,
 	))
+}
+
+/// The projection and stereo packing Spherical Video V2's `sv3d` and `st3d` boxes signal, each
+/// `None` for flat or mono video. Apple's `vexu` and `hfov` are not read.
+///
+/// The catalog has no cubemap, mesh, pose, or eye order beyond left-right and top-bottom, and an
+/// absent field claims flat, mono video, so those are refused rather than dropped. So is a box the
+/// sample entry repeats or could not decode, since it may say any of them.
+pub(crate) fn spatial(
+	spatial: Option<&mp4_atom::Spatial>,
+) -> Result<(Option<hang::catalog::Projection>, Option<hang::catalog::Stereo>)> {
+	use mp4_atom::{Atom, Cbmp, Equi, Mshp, Prhd, Proj, ProjKind, St3d, Sv3d};
+
+	let Some(spatial) = spatial else {
+		return Ok((None, None));
+	};
+	let unsupported = |reason| Err(Error::UnsupportedSpatial(reason));
+	let kept =
+		|unknown: &[mp4_atom::Any], kinds: &[mp4_atom::FourCC]| unknown.iter().any(|atom| kinds.contains(&atom.kind()));
+	if kept(&spatial.unknown, &[St3d::KIND, Sv3d::KIND]) {
+		return unsupported("repeated or malformed st3d or sv3d");
+	}
+
+	let stereo = match spatial.st3d.map(|st3d| st3d.stereo_mode) {
+		None | Some(St3d::MONO) => None,
+		Some(St3d::LEFT_RIGHT) => Some(hang::catalog::Stereo::LeftRight),
+		Some(St3d::TOP_BOTTOM) => Some(hang::catalog::Stereo::TopBottom),
+		Some(_) => return unsupported("stereo mode"),
+	};
+
+	let Some(sv3d) = &spatial.sv3d else {
+		return Ok((None, stereo));
+	};
+	if kept(&sv3d.unknown, &[Proj::KIND]) {
+		return unsupported("repeated or malformed proj");
+	}
+	let proj = sv3d
+		.proj
+		.as_ref()
+		.ok_or(Error::UnsupportedSpatial("sv3d without proj"))?;
+	if kept(&proj.unknown, &[Prhd::KIND, Equi::KIND, Cbmp::KIND, Mshp::KIND]) {
+		return unsupported("repeated or malformed projection");
+	}
+	if let Some(prhd) = proj.prhd
+		&& (prhd.pose_yaw_degrees, prhd.pose_pitch_degrees, prhd.pose_roll_degrees) != (0, 0, 0)
+	{
+		return unsupported("nonzero pose");
+	}
+	let projection = match &proj.kind {
+		Some(ProjKind::Equi(equi)) => crate::codec::spatial::equirectangular(
+			equi.projection_bounds_top,
+			equi.projection_bounds_bottom,
+			equi.projection_bounds_left,
+			equi.projection_bounds_right,
+		)
+		.map_err(Error::UnsupportedSpatial)?,
+		Some(ProjKind::Cbmp(_)) => return unsupported("cubemap projection"),
+		Some(ProjKind::Mshp(_)) => return unsupported("mesh projection"),
+		_ => return unsupported("unknown projection"),
+	};
+	Ok((Some(projection), stereo))
 }
 
 /// The `nclx` box for a catalog colour, or `None` when it has no code point or range to carry.
@@ -928,6 +993,36 @@ pub(crate) fn synthesize_video_trak(
 	))
 }
 
+/// The OpusHead mapping for a `dOps` channel mapping table, checked by [`crate::codec::opus::Mapping::new`].
+///
+/// Family 3 is refused: its OpusHead carries a demixing matrix (RFC 8486 §3.2) where
+/// `dOps` has a table, so neither side can describe the other.
+pub(crate) fn opus_mapping(mapping: &mp4_atom::OpusChannelMapping) -> Result<crate::codec::opus::Mapping> {
+	if mapping.family == 3 {
+		return Err(crate::codec::opus::Error::UnsupportedMappingFamily(3).into());
+	}
+	Ok(crate::codec::opus::Mapping::new(crate::codec::opus::mapping::Config {
+		family: mapping.family,
+		streams: mapping.stream_count,
+		coupled: mapping.coupled_count,
+		table: &mapping.channel_mapping,
+	})?)
+}
+
+/// The `dOps` channel mapping table for an OpusHead mapping, refusing family 3 as
+/// [`opus_mapping`] does.
+fn dops_mapping(mapping: &crate::codec::opus::Mapping) -> Result<mp4_atom::OpusChannelMapping> {
+	if mapping.family() == 3 {
+		return Err(crate::codec::opus::Error::UnsupportedMappingFamily(3).into());
+	}
+	Ok(mp4_atom::OpusChannelMapping {
+		family: mapping.family(),
+		stream_count: mapping.streams(),
+		coupled_count: mapping.coupled(),
+		channel_mapping: mapping.table().to_vec(),
+	})
+}
+
 /// Synthesize a CMAF `Trak` for an audio rendition that has no init segment.
 pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &AudioConfig) -> Result<mp4_atom::Trak> {
 	use mp4_atom::Decode;
@@ -944,10 +1039,6 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 			let head = match &config.description {
 				Some(description) => {
 					let head = crate::codec::opus::Config::parse(&mut description.as_ref())?;
-					// dOps shares OpusHead's family 0 layout; a mapping table would need writing too.
-					if let Some(mapping) = head.mapping {
-						return Err(crate::codec::opus::Error::UnsupportedMappingFamily(mapping.family()).into());
-					}
 					if head.channel_count != config.channel_count {
 						return Err(Error::OpusChannelCount {
 							catalog: config.channel_count,
@@ -965,6 +1056,7 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 					pre_skip: head.pre_skip,
 					input_sample_rate: head.sample_rate,
 					output_gain: head.output_gain,
+					channel_mapping: head.mapping.as_ref().map(dops_mapping).transpose()?,
 				},
 				btrt: None,
 			})
@@ -1009,7 +1101,7 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 							avg_bitrate,
 							dec_specific: Some(dec_specific),
 						},
-						sl_config: Default::default(),
+						..Default::default()
 					},
 				},
 				btrt: None,
@@ -1186,7 +1278,7 @@ fn build_mdia(timescale: u32, handler: &[u8; 4], is_video: bool, sample_entry: m
 			smhd: (!is_video).then(mp4_atom::Smhd::default),
 			dinf: mp4_atom::Dinf {
 				dref: mp4_atom::Dref {
-					urls: vec![mp4_atom::Url::default()],
+					entries: vec![mp4_atom::DrefEntry::Url(mp4_atom::Url::default())],
 				},
 			},
 			stbl: mp4_atom::Stbl {
@@ -1320,9 +1412,9 @@ fn gcd(mut a: u128, mut b: u128) -> u128 {
 /// The decode timeline a fragment actually carries: its `tfdt` and each sample's composition
 /// offset. This is what a player reads, as opposed to the PTS [`decode`] reconstructs from it.
 #[cfg(test)]
-pub(crate) fn timeline(fragment: &Bytes) -> (u64, Vec<i32>) {
+pub(crate) fn timeline(fragment: &Bytes) -> (u64, Vec<i64>) {
 	let traf = first_traf(fragment);
-	let cts = traf.trun[0].entries.iter().map(|e| e.cts.unwrap_or_default()).collect();
+	let cts = traf.trun[0].samples.iter().map(|e| e.cts.unwrap_or_default()).collect();
 	(traf.tfdt.as_ref().unwrap().base_media_decode_time, cts)
 }
 
@@ -1330,7 +1422,7 @@ pub(crate) fn timeline(fragment: &Bytes) -> (u64, Vec<i32>) {
 #[cfg(test)]
 pub(crate) fn sample_durations(fragment: &Bytes) -> Vec<Option<u32>> {
 	first_traf(fragment).trun[0]
-		.entries
+		.samples
 		.iter()
 		.map(|e| e.duration)
 		.collect()
@@ -1640,7 +1732,7 @@ mod tests {
 				}),
 				trun: vec![mp4_atom::Trun {
 					data_offset: None,
-					entries: vec![
+					samples: vec![
 						mp4_atom::TrunEntry {
 							size: Some(2),
 							duration: Some(33_333),
@@ -1651,7 +1743,8 @@ mod tests {
 							duration: Some(33_333),
 							..Default::default()
 						},
-					],
+					]
+					.into(),
 				}],
 				..Default::default()
 			}],
@@ -1835,7 +1928,7 @@ mod tests {
 
 		// On the wire every sample is a sync sample, whatever the keyframe bit said.
 		let flags: Vec<u32> = first_traf(&fragment).trun[0]
-			.entries
+			.samples
 			.iter()
 			.map(|entry| entry.flags.unwrap())
 			.collect();
@@ -2064,11 +2157,12 @@ mod tests {
 				}),
 				trun: vec![mp4_atom::Trun {
 					data_offset: None,
-					entries: vec![mp4_atom::TrunEntry {
+					samples: vec![mp4_atom::TrunEntry {
 						size: None,
 						duration: None,
 						..Default::default()
-					}],
+					}]
+					.into(),
 				}],
 				..Default::default()
 			}],

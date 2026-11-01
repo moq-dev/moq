@@ -27,7 +27,3 @@ channel count from 3 to 8 in the caps unit test, since every one maps
 through the same family-1 table.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) - the same mapping table through fMP4 `dOps`, independent of this caps path

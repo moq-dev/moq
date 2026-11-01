@@ -9,9 +9,10 @@
 # session is gone, so a cancelled reader's broadcast parks forever instead of
 # closing. Leaking only one is not a leak: the other still closes the front.
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
+index 94175c3ec6..8f07d4f860 100644
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -1593,7 +1593,8 @@
+@@ -1512,7 +1512,8 @@ struct PrefixRun {
  	/// it comes from the connect config or the peer's SETUP, neither of which
  	/// changes for the life of the session.
  	link_cost: u64,
@@ -21,16 +22,16 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	// Lite06+: announce ids. Each received `active` implicitly assigns the next
  	// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
  	// path, and lite-07 bases name it too. Tracked even for announces we drop
-@@ -1706,7 +1707,7 @@
- 					let run = PrefixRun {
- 						responder_origin,
- 						link_cost,
--						announced: Announced::new(self.subscriber.announces.clone()),
-+						announced: std::mem::ManuallyDrop::new(Announced::new(self.subscriber.announces.clone())),
- 						decoder: lite::AnnounceDecoder::default(),
- 						auth_epoch: 0,
- 						initial,
-@@ -1842,7 +1843,8 @@
+@@ -1600,7 +1601,7 @@ impl AnnouncePrefix {
+ 		let mut run: PrefixRun = PrefixRun {
+ 			responder_origin,
+ 			link_cost,
+-			announced: Announced::new(self.subscriber.announces.clone()),
++			announced: std::mem::ManuallyDrop::new(Announced::new(self.subscriber.announces.clone())),
+ 			decoder: lite::AnnounceDecoder::default(),
+ 			auth_epoch: 0,
+ 			initial,
+@@ -1728,7 +1729,8 @@ struct SourceServe {
  	subscriber: Subscriber,
  	path: Path,
  	epoch: Option<crate::Epoch>,
@@ -40,7 +41,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	dynamic: crate::broadcast::Requests,
  	route: kio::Consumer<()>,
  	// A dedicated close-watch handle, since each pending operation needs its own.
-@@ -1985,7 +1987,7 @@
+@@ -1871,7 +1873,7 @@ impl SourceServe {
  			subscriber,
  			path: minted.path,
  			epoch: minted.epoch,

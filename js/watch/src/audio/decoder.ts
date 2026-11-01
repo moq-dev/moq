@@ -183,7 +183,9 @@ export class Decoder {
 		const startup = this.#signals.computed((effect) => {
 			if (!effect.get(this.in.enabled)) return undefined;
 			if (effect.get(this.source.pending)) return null;
-			if (!effect.get(this.source.out.config)) return undefined;
+			// A held disabled rendition has no frames coming, so startup does not wait on it.
+			const config = effect.get(this.source.out.config);
+			if (!config || config.enabled === false) return undefined;
 			const span = effect.get(this.#decodeBuffered)[0];
 			if (!span) return null;
 			// Deep targets stay encoded, so count the audio queued past the decoded span. Sum it across
@@ -200,9 +202,11 @@ export class Decoder {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
 		});
-		this.#idle = this.#signals.computed(
-			(effect) => effect.get(this.source.out.config) === undefined && effect.get(this.#out.stalled),
-		);
+		// A held disabled rendition idles too, so a muted tile suspends its AudioContext.
+		this.#idle = this.#signals.computed((effect) => {
+			const config = effect.get(this.source.out.config);
+			return (!config || config.enabled === false) && effect.get(this.#out.stalled);
+		});
 
 		this.#signals.run(this.#runSubscribeMaxDelay.bind(this));
 		this.#signals.run(this.#runShape.bind(this));

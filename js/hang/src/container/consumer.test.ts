@@ -728,10 +728,10 @@ test("Consumer releases its open groups when an error ends it", async () => {
 	const later = track.createGroup(1);
 	later.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() });
 	await open;
-	expect(later.demand().used.peek()).toBe(true);
+	expect(later.demand().wanted.peek()).toBe(true);
 
 	await expect(consumer.next()).rejects.toThrow("malformed");
-	expect(later.demand().used.peek()).toBe(false);
+	expect(later.demand().wanted.peek()).toBe(false);
 	consumer.close();
 });
 

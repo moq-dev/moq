@@ -241,6 +241,102 @@ describe("Source disabled rendition selection", () => {
 		source.close();
 	});
 
+	it("holds the selected rendition while every rendition is disabled", async () => {
+		const state = mutableBroadcast({
+			low: config("avc1.64001e", { bitrate: 1_000_000 }),
+			high: config("avc1.640028", { bitrate: 2_000_000 }),
+		});
+		const source = new Source({ broadcast: state.broadcast, supported: async () => true });
+
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+
+		state.catalog.set({
+			video: {
+				renditions: {
+					low: config("avc1.64001e", { bitrate: 1_000_000, enabled: false }),
+					high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }),
+				},
+			},
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+		expect(source.out.config.peek()?.enabled).toBe(false);
+
+		// An enabled alternative takes over from the held rendition.
+		state.catalog.set({
+			video: {
+				renditions: {
+					low: config("avc1.64001e", { bitrate: 1_000_000 }),
+					high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }),
+				},
+			},
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("low");
+		source.close();
+	});
+
+	it("drops a held rendition once it is removed", async () => {
+		const state = mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) });
+		const source = new Source({ broadcast: state.broadcast, supported: async () => true });
+
+		await settle();
+		state.catalog.set({
+			video: { renditions: { high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }) } },
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+
+		state.catalog.set({
+			video: { renditions: { low: config("avc1.64001e", { bitrate: 1_000_000, enabled: false }) } },
+		});
+		await settle();
+		expect(source.out.track.peek()).toBeUndefined();
+		expect(source.out.config.peek()).toBeUndefined();
+		source.close();
+	});
+
+	it("does not hold an enabled selection into another broadcast's disabled rendition", async () => {
+		const current = new Signal<Broadcast | undefined>(
+			mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) }).broadcast,
+		);
+		const source = new Source({ broadcast: current, supported: async () => true });
+
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+
+		current.set(
+			mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }) }).broadcast,
+		);
+		await settle();
+		expect(source.out.track.peek()).toBeUndefined();
+		expect(source.out.config.peek()).toBeUndefined();
+		source.close();
+	});
+
+	it("holds on a broadcast whose renditions match the previous one", async () => {
+		const current = new Signal<Broadcast | undefined>(
+			mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) }).broadcast,
+		);
+		const source = new Source({ broadcast: current, supported: async () => true });
+		await settle();
+
+		// The new probe publishes an equal `available`, so only its broadcast tag changes.
+		const next = mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) });
+		current.set(next.broadcast);
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+
+		next.catalog.set({
+			video: { renditions: { high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }) } },
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+		expect(source.out.config.peek()?.enabled).toBe(false);
+		source.close();
+	});
+
 	it("ignores a legacy stalled flag", async () => {
 		const source = new Source({
 			broadcast: mockBroadcast({
