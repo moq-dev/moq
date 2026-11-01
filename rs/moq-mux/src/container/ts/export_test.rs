@@ -5549,8 +5549,8 @@ async fn opus_export_refuses_a_head_it_cannot_label() {
 	let family_255 = opus_mapping(255, 2, 0, &[0, 1]);
 	let wide = opus_mapping(255, 9, 0, &[0, 1, 2, 3, 4, 5, 6, 7, 8]);
 
-	let refused: [(u32, Option<Bytes>, &str); 9] = [
-		(0, None, "no OpusHead"),
+	// A zero channel count never reaches the exporter: the catalog refuses it.
+	let refused: [(u32, Option<Bytes>, &str); 8] = [
 		(6, None, "no OpusHead"),
 		(9, None, "no OpusHead"),
 		(6, Some(opus_head(6, Some(swapped))), "not the Vorbis layout"),

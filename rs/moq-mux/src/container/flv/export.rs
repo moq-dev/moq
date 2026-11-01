@@ -965,7 +965,7 @@ fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Resul
 		Container::Cmaf { .. } => anyhow::bail!("FLV export does not support CMAF {kind} track '{name}'"),
 		Container::Unknown(unknown) => anyhow::bail!(
 			"FLV export does not support container '{}' on {kind} track '{name}'",
-			unknown.kind().unwrap_or("<missing>")
+			unknown.kind()
 		),
 	}
 }
