@@ -135,7 +135,16 @@ impl Drop for Guard {
 impl Broadcaster {
 	/// Start tracking the renditions of `source`'s catalog broadcast, once the returned
 	/// [`Driver`] runs.
-	pub fn new(source: moq_mux::Source, config: Config) -> (Self, Driver) {
+	///
+	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU its
+	/// cryptography cannot run on.
+	pub fn new(source: moq_mux::Source, config: Config) -> crate::Result<(Self, Driver)> {
+		rind::cpu::check().map_err(crate::Error::unsupported_cpu)?;
+		Ok(Self::start(source, config))
+	}
+
+	/// [`new`](Self::new) for a caller that already checked the CPU.
+	pub(crate) fn start(source: moq_mux::Source, config: Config) -> (Self, Driver) {
 		let broadcast = source.broadcast();
 		// An epoch names the instance on every edge, so each serves it under the same URLs.
 		let instance = broadcast.info().epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
@@ -159,7 +168,7 @@ impl Broadcaster {
 	/// [`new`](Self::new), with its driver spawned on the ambient runtime.
 	#[cfg(test)]
 	pub(crate) fn spawned(source: moq_mux::Source, config: Config) -> Self {
-		let (broadcaster, driver) = Self::new(source, config);
+		let (broadcaster, driver) = Self::new(source, config).unwrap();
 		tokio::spawn(driver.run());
 		broadcaster
 	}
@@ -1693,7 +1702,8 @@ mod tests {
 		settle().await;
 		let (_catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
-		let (broadcaster, driver) = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let (broadcaster, driver) =
+			Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let driving = tokio::spawn(driver.run());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let old = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
@@ -2495,7 +2505,8 @@ mod tests {
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(3_000_000, false)).unwrap();
 
-		let (broadcaster, driver) = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let (broadcaster, driver) =
+			Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let driving = tokio::spawn(driver.run());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster

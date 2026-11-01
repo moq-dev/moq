@@ -841,7 +841,11 @@ impl UniAccept {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let _ = self.children.poll(waiter);
 
-		loop {
+		// MAX_STREAMS credit alone lets one poll accept thousands of streams, so a peer
+		// opening them at once must not hold the session's other tasks. A yield has woken
+		// the task, and this always ends Pending, so the children below still run.
+		let mut budget = kio::coop::Budget::new(32);
+		while budget.poll_yield(waiter).is_ready() {
 			match self.accept.poll_accept_uni(waiter) {
 				Poll::Ready(Ok(stream)) => {
 					self.children.push(UniServe {
@@ -2140,7 +2144,6 @@ mod tests {
 				.unwrap(),
 			id: 0,
 			max_delay: Duration::ZERO,
-			requested_max_delay: Duration::ZERO,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -2316,7 +2319,6 @@ mod tests {
 					.unwrap(),
 				id: 0,
 				max_delay: Duration::ZERO,
-				requested_max_delay: Duration::ZERO,
 				start: Some(floor),
 				priority: 0,
 				requested: Some(floor),
@@ -2773,7 +2775,6 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Duration::ZERO,
-			requested_max_delay: Duration::ZERO,
 			start: Some(2),
 			priority: 0,
 			requested: Some(2),
@@ -2867,6 +2868,39 @@ mod tests {
 			assert!(!log.stops().is_empty());
 		}
 		assert!(log.closes().is_empty());
+	}
+
+	/// A peer opening streams at once gets a budget of them accepted per poll, leaving the
+	/// rest for later so the session's other tasks run in between.
+	#[kio::test]
+	async fn a_flood_of_uni_streams_yields() {
+		use crate::transport::poll::Session as _;
+
+		let (local, peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(local.clone()),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: Version::Lite07,
+			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let mut accept = UniAccept::new(subscriber, Vec::new());
+		// Held open and empty, so each accepted stream waits on its type.
+		let mut opened = Vec::new();
+		for _ in 0..1024 {
+			opened.push(peer.open_uni(Default::default()).await.unwrap());
+		}
+
+		assert!(accept.poll(&kio::Waiter::noop()).is_pending());
+		assert!(
+			local.poll_accept_uni(&kio::Waiter::noop()).is_ready(),
+			"one poll accepted every stream"
+		);
 	}
 
 	/// A peer keeping datagrams ready gets a budget of them routed per poll, leaving the
@@ -6741,9 +6775,6 @@ struct SubStream {
 	/// start sits elsewhere the request-tracked floor stands instead, and demand
 	/// returning here makes the declaration valid again.
 	requested: Option<u64>,
-	/// The max delay the SUBSCRIBE itself carried, fixed for the stream's life: a lite-06+
-	/// SUBSCRIBE_START resolves the start from it, skipping older groups as stale.
-	requested_max_delay: Duration,
 	/// The groups received for this subscription, shared with its [`TrackEntry`].
 	tail: kio::Producer<Tail>,
 	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
@@ -7516,7 +7547,6 @@ impl Establish {
 			stream,
 			id: self.id,
 			max_delay: wire_max_delay(self.subscription.max_delay),
-			requested_max_delay: wire_max_delay(self.subscription.max_delay),
 			start: self.subscription.start(),
 			ranges: self.ranges.clone(),
 			priority: self.subscription.priority,
@@ -8517,9 +8547,7 @@ impl ServeLoop {
 										// request-tracked floor stands rather than a guess.
 										if active.start == active.requested {
 											let _ = match (serve.subscriber.version.resolves_start(), served) {
-												(true, Some(served)) => {
-													self.serving.start_resolved(served, active.requested_max_delay)
-												}
+												(true, Some(served)) => self.serving.start_resolved(served),
 												_ => self.serving.start_at(served),
 											};
 										}
