@@ -503,6 +503,15 @@ pub struct moq_json_snapshot_config {
 	pub deltas: bool,
 }
 
+/// Options for a JSON window producer (a sliding run of records).
+#[repr(C)]
+pub struct moq_json_window_config {
+	/// Maximum records retained and restated when a group rolls, or 0 to restate the whole window.
+	/// Bounds the producer's memory for a window that is never popped: a reader that keeps up
+	/// still sees every record, while one joining later gets a skip event for the older ones.
+	pub checkpoint_records: u64,
+}
+
 /// A JSON value delivered by a consumer callback.
 #[repr(C)]
 pub struct moq_json_value {
@@ -517,6 +526,48 @@ pub struct moq_json_value {
 	pub timestamp_us: u64,
 
 	/// Whether the frame carries a timestamp. A value read from an untimed track does not.
+	pub timestamp_present: bool,
+}
+
+/// Which change a [moq_json_window_event] reports.
+#[repr(C)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum moq_json_window_kind {
+	/// A record joined the window, at index `start`.
+	MOQ_JSON_WINDOW_KIND_PUSH = 0,
+	/// The records `[start, end)` left the window.
+	MOQ_JSON_WINDOW_KIND_POP = 1,
+	/// The records `[start, end)` existed but will never be delivered: they were pushed and
+	/// dropped while this consumer was behind, or fell outside the producer's checkpoint when it
+	/// joined.
+	MOQ_JSON_WINDOW_KIND_SKIP = 2,
+}
+
+/// One change to a JSON window, delivered by a [moq_consume_json_window] callback.
+///
+/// Indices are absolute record indices. A push covers the one record `[start, start + 1)`.
+#[repr(C)]
+pub struct moq_json_window_event {
+	/// Which change this is.
+	pub kind: moq_json_window_kind,
+
+	/// The first index the change covers.
+	pub start: u64,
+	/// One past the last index the change covers.
+	pub end: u64,
+
+	/// The pushed record as UTF-8 JSON, NOT NULL terminated, or NULL unless `kind` is a push.
+	pub json: *const c_char,
+	/// The length in bytes of `json`.
+	pub json_len: usize,
+
+	/// The timestamp of the frame that carried the change in microseconds, or 0 when
+	/// `timestamp_present` is false. A record first learned of from a group's restatement (after
+	/// a join, or while behind) carries that frame's time, not its original push time.
+	pub timestamp_us: u64,
+
+	/// Whether the frame carries a timestamp. A change read from an untimed track does not.
 	pub timestamp_present: bool,
 }
 
@@ -637,16 +688,18 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_demand {
-	/// At least one subscriber is active. Repeats when the wanted group moves.
-	MOQ_DEMAND_USED = 1,
-	/// No subscriber is active.
-	MOQ_DEMAND_UNUSED = 2,
+	/// At least one subscriber wants the track. Repeats when the wanted group moves.
+	MOQ_DEMAND_WANTED = 1,
+	/// No subscriber wants the track.
+	MOQ_DEMAND_UNWANTED = 2,
 }
 
 /// Subscriber-side raw track delivery preferences.
 ///
 /// A null [moq_consume_track] or [moq_consume_track_update] `subscription`
-/// pointer uses the moq-net defaults, and so does a zeroed struct.
+/// pointer uses the moq-net defaults, which [moq_subscription_defaults] returns as a
+/// struct to change. A zeroed struct differs only in `max_delay_present`: it sets no
+/// subscriber limit.
 #[repr(C)]
 pub struct moq_subscription {
 	/// Delivery priority. Higher values preempt lower ones under contention; the default 0 is
@@ -657,7 +710,8 @@ pub struct moq_subscription {
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
 	/// It caps every range.
 	pub max_delay_us: u64,
-	/// Whether `max_delay_us` is set. When false, moq-net's default applies: zero.
+	/// Whether `max_delay_us` is set. When false, there is no subscriber limit, leaving the
+	/// publisher's max age alone to bound it.
 	pub max_delay_present: bool,
 
 	/// The spans of the track to deliver, or NULL for everything `max_delay_us` still
@@ -749,9 +803,8 @@ pub(crate) unsafe fn parse_subscription(
 	let mut out = moq_net::track::Subscription::default()
 		.with_priority(subscription.priority)
 		.with_order(order);
-	if subscription.max_delay_present {
-		out = out.with_max_delay(std::time::Duration::from_micros(subscription.max_delay_us));
-	}
+	let max_delay = std::time::Duration::from_micros(subscription.max_delay_us);
+	out = out.with_max_delay(subscription.max_delay_present.then_some(max_delay));
 	if !subscription.ranges.is_null() {
 		let ranges = unsafe { std::slice::from_raw_parts(subscription.ranges, subscription.ranges_len) };
 		let ranges = ranges
@@ -903,9 +956,13 @@ pub enum moq_announce_kind {
 	/// Another publisher instance now serves the prefix: drop what was resolved under
 	/// it and request afresh.
 	MOQ_ANNOUNCE_KIND_RESTART = 3,
+	/// A route now covers the prefix and continues what the route at
+	/// [moq_announce_event::predecessor] served beneath it: keep what was resolved through it.
+	MOQ_ANNOUNCE_KIND_TAKEOVER = 4,
 }
 
-/// An announce event from an origin: a route starting, updating, ending, or restarting.
+/// An announce event from an origin: a route starting, updating, ending, restarting, or
+/// taking over.
 #[repr(C)]
 pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
@@ -928,6 +985,11 @@ pub struct moq_announce_event {
 	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_END` it carries the last
 	/// advertised route.
 	pub route: moq_route,
+	/// For [moq_announce_kind::MOQ_ANNOUNCE_KIND_TAKEOVER], the prefix of the route continued,
+	/// relative to the origin, NOT NULL terminated. Empty for every other kind.
+	pub predecessor: *const c_char,
+	/// The length in bytes of `predecessor`.
+	pub predecessor_len: usize,
 }
 
 /// Where a session is in its lifecycle, reported by [moq_connection_state].
@@ -1201,6 +1263,28 @@ pub extern "C" fn moq_qlog_supported() -> bool {
 	moq_tokio::qlog_supported()
 }
 
+/// A [moq_subscription] with moq-net's defaults, whose zero `max_delay_us` skips a
+/// superseded group at once. A NULL subscription pointer means the same; start from
+/// this struct to change a field.
+///
+/// Returned by value because there is nothing to fail.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_subscription_defaults() -> moq_subscription {
+	let defaults = moq_net::track::Subscription::default();
+	let order = match defaults.order {
+		moq_net::track::Order::Descending => moq_order::MOQ_ORDER_DESCENDING,
+		moq_net::track::Order::Ascending => moq_order::MOQ_ORDER_ASCENDING,
+	};
+	moq_subscription {
+		priority: defaults.priority,
+		max_delay_us: defaults.max_delay.map(micros).unwrap_or_default(),
+		max_delay_present: defaults.max_delay.is_some(),
+		ranges: std::ptr::null(),
+		ranges_len: 0,
+		order: order as u32,
+	}
+}
+
 /// A duration as microseconds, saturating rather than wrapping.
 fn micros(duration: std::time::Duration) -> u64 {
 	duration.as_micros().min(u64::MAX as u128) as u64
@@ -1318,7 +1402,8 @@ pub struct moq_client_config {
 	pub quic_idle_timeout_us: u64,
 	/// Whether `quic_idle_timeout_us` is present.
 	pub has_quic_idle_timeout: bool,
-	/// The QUIC keep-alive interval in microseconds.
+	/// The QUIC keep-alive interval in microseconds, 0 to disable. Absent derives it
+	/// from the idle timeout both ends negotiate, so the defaults leave it absent.
 	pub quic_keep_alive_us: u64,
 	/// Whether `quic_keep_alive_us` is present.
 	pub has_quic_keep_alive: bool,
@@ -3533,6 +3618,98 @@ pub extern "C" fn moq_publish_json_stream_finish(stream: u32) -> i32 {
 	})
 }
 
+/// Create a JSON window track (a sliding run of records) on a broadcast.
+///
+/// Records are pushed at the back with [moq_publish_json_window_push] and popped from the front
+/// with [moq_publish_json_window_pop]. Unlike a stream, which keeps every record in one group
+/// forever, a window rolls to a new group that restates the retained records, so a reader can join
+/// at any point and the producer's memory stays bounded by what it pops or by
+/// `config.checkpoint_records`. A join after more than eight headers' worth of edits asks for the
+/// window restated in a fresh group, which a task answers until the track is finished.
+///
+/// Not advertised in the broadcast's catalog, which has no window mode; a reader names the track
+/// itself.
+///
+/// Returns a non-zero handle to the JSON window producer on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `name` is a valid pointer to `name_len` bytes and `config` a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_json_window(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	config: *const moq_json_window_config,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let mut producer = moq_json::window::ProducerConfig::default();
+		if config.checkpoint_records > 0 {
+			let records = usize::try_from(config.checkpoint_records)
+				.map_err(|_| Error::InvalidConfig(format!("checkpoint_records {}", config.checkpoint_records)))?;
+			producer = producer.with_checkpoint_records(records);
+		}
+		State::lock().publish.json_window(broadcast, name, producer)
+	})
+}
+
+/// Append one record to the back of a JSON window. `value` is a UTF-8 JSON document.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `value` is a valid pointer to `value_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_json_window_push(window: u32, value: *const c_char, value_len: usize) -> i32 {
+	ffi::enter(move || {
+		let window = ffi::parse_id(window)?;
+		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
+		let value = serde_json::from_slice(value)?;
+		State::lock().publish.json_window_push(window, value)
+	})
+}
+
+/// Drop `count` records from the front of a JSON window, clamped to what it holds.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_json_window_pop(window: u32, count: u64) -> i32 {
+	ffi::enter(move || {
+		let window = ffi::parse_id(window)?;
+		State::lock().publish.json_window_pop(window, count)
+	})
+}
+
+/// Close a JSON window's open group, so the next push or pop opens a new one whose header
+/// restates the retained window. A no-op when no group is open.
+///
+/// Cut at a natural boundary (the end of an utterance, say) so every edit so far sits in a group
+/// no later frame extends.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_json_window_cut(window: u32) -> i32 {
+	ffi::enter(move || {
+		let window = ffi::parse_id(window)?;
+		State::lock().publish.json_window_cut(window)
+	})
+}
+
+/// Finish a JSON window track, closing any open group. No more records can be pushed or popped.
+///
+/// The broadcast keeps serving the finished track until [moq_publish_close].
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_json_window_finish(window: u32) -> i32 {
+	ffi::enter(move || {
+		let window = ffi::parse_id(window)?;
+		State::lock().publish.json_window_finish(window)
+	})
+}
+
 /// Create a catalog consumer for a broadcast.
 ///
 /// `on_catalog` is invoked with a positive catalog ID for each catalog update
@@ -4104,6 +4281,64 @@ pub unsafe extern "C" fn moq_consume_json_stream(
 	})
 }
 
+/// Subscribe to a JSON window track (a sliding run of records) by name.
+///
+/// `on_event` is called with a positive event ID for each push, pop, and skip, in order, then once
+/// more with a terminal `0` or negative error where `user_data` should be released. Group rolls
+/// never surface: a restated record this reader already has yields nothing. Read each event with
+/// [moq_consume_json_window_event] and release it with [moq_consume_json_window_event_free]. Stop
+/// with [moq_consume_json_cancel].
+///
+/// Returns a non-zero handle to the task on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `name` is a valid pointer to `name_len` bytes.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_event` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_json_window(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	on_event: ffi::moq_status_callback,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let on_event = unsafe { ffi::OnStatus::new(user_data, on_event)? };
+		State::lock().consume.json_window(broadcast, name, on_event)
+	})
+}
+
+/// Read a JSON window event delivered via a [moq_consume_json_window] callback.
+///
+/// Fills `dst` with the change and its frame timestamp; `dst.json` is valid until the event is
+/// released with [moq_consume_json_window_event_free].
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `dst` is a valid pointer to a [moq_json_window_event] struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_json_window_event(event: u32, dst: *mut moq_json_window_event) -> i32 {
+	ffi::enter(move || {
+		let event = ffi::parse_id(event)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().consume.json_window_event(event, dst)
+	})
+}
+
+/// Release a JSON window event delivered via a [moq_consume_json_window] callback.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_json_window_event_free(event: u32) -> i32 {
+	ffi::enter(move || {
+		let event = ffi::parse_id(event)?;
+		State::lock().consume.json_window_event_close(event)
+	})
+}
+
 /// Read a JSON value delivered via a [moq_consume_json_snapshot] or [moq_consume_json_stream] callback.
 ///
 /// Fills `dst.json` / `dst.json_len` and the frame timestamp; the pointer is valid until the value is released with
@@ -4133,12 +4368,13 @@ pub extern "C" fn moq_consume_json_value_free(value: u32) -> i32 {
 	})
 }
 
-/// Stop a JSON consumer's background task (snapshot or stream).
+/// Stop a JSON consumer's background task (snapshot, stream, or window).
 ///
 /// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
-/// `user_data`; the `on_value` callback still fires once more with a terminal `0` (or a negative
-/// error), which is where `user_data` should be released. Values already delivered remain valid
-/// until released with [moq_consume_json_value_free].
+/// `user_data`; the callback still fires once more with a terminal `0` (or a negative error),
+/// which is where `user_data` should be released. Values and window events already delivered
+/// remain valid until released with [moq_consume_json_value_free] or
+/// [moq_consume_json_window_event_free].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_json_cancel(task: u32) -> i32 {
 	ffi::enter(move || {

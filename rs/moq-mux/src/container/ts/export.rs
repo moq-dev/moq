@@ -352,6 +352,13 @@ struct Track {
 	settle: bool,
 	/// The PTS of the last keyframe queued, which leading pictures present before.
 	keyframe: Option<Timestamp>,
+	/// The `temporal_reference` of the I-picture the last MPEG-1/2 video group opened on, when
+	/// its GOP is open: the B-pictures presented before it reference the group before.
+	open_gop: Option<u16>,
+	/// The last MPEG-1/2 video PES read holds only pictures of the group before's: B-pictures
+	/// presented before the open GOP's I-picture, or the tail of one. The next PES's tail of
+	/// its last picture is one too.
+	orphan: bool,
 	/// What the catalog and the SPS declare about the video's reordering.
 	timing: Timing,
 	/// The receiver's buffers for an audio or verbatim track; video's come from [`Timing`].
@@ -398,6 +405,8 @@ impl Track {
 			held: None,
 			settle: false,
 			keyframe: None,
+			open_gop: None,
+			orphan: false,
 			timing: Timing::default(),
 			buffer: None,
 			pack: None,
@@ -423,8 +432,13 @@ impl Track {
 			self.clock = DecodeClock::default();
 			self.declared = None;
 		}
-		let Kind::Video(stream_type) = self.kind else {
-			return self.push(name, pending, None, None, jitter);
+		// MPEG-1/2 video is placed, so its pictures rather than its timestamps say what leads.
+		let stream_type = match self.kind {
+			Kind::Video(stream_type) => Some(stream_type),
+			Kind::PesPacket {
+				stream_type: 0x01 | 0x02,
+			} => None,
+			_ => return self.push(name, pending, None, None, jitter),
 		};
 		// A declared endpoint increments both counters; only delivery loss arms recovery.
 		let gap = pending.skip.saturating_sub(pending.restart);
@@ -433,9 +447,32 @@ impl Track {
 			let ahead = self.held == Some(pending.cut);
 			self.leading_floor = recover.then_some((pending.frame.timestamp, ahead));
 		}
-		if let Some((floor, ahead)) = self.leading_floor
-			&& pending.frame.timestamp < floor
-			&& !radl(stream_type, self.source.description(), &pending.frame)
+		let leading = match stream_type {
+			Some(stream_type) => {
+				self.leading_floor
+					.is_some_and(|(floor, _)| pending.frame.timestamp < floor)
+					&& !radl(stream_type, self.source.description(), &pending.frame)
+			}
+			None => {
+				let (payload, after) = (&pending.frame.payload, self.orphan);
+				let pictures = Mpeg2Picture::read(payload);
+				if pending.frame.keyframe {
+					self.open_gop = (pictures.first())
+						.filter(|picture| picture.gop == Some(false))
+						.map(|picture| picture.temporal_reference);
+				} else if pictures.iter().any(|picture| picture.gop.is_some()) {
+					// A GOP inside the group: its leading pictures reference only the group's own.
+					self.open_gop = None;
+				}
+				// A PES that also holds a picture others reference goes out whole, its orphans
+				// with it.
+				self.orphan = !pending.frame.keyframe
+					&& (self.open_gop).is_some_and(|opened| Mpeg2Picture::orphaned(payload, opened, after));
+				self.orphan
+			}
+		};
+		if let Some((_, ahead)) = self.leading_floor
+			&& leading
 		{
 			jitter.lose(&self.key, ahead);
 			// It still takes its slot, so the group's other frames decode where they do on an
@@ -449,6 +486,9 @@ impl Track {
 			};
 		}
 		self.held = Some(pending.cut);
+		let Some(stream_type) = stream_type else {
+			return self.push(name, pending, None, None, jitter);
+		};
 		if pending.frame.keyframe {
 			self.timing.describe(stream_type, self.source.description(), name);
 			// A group decodes on its own clock at the depth its rendition declares now. The
@@ -460,16 +500,16 @@ impl Track {
 			self.declared = depth.map(DeclaredClock::new);
 		}
 		let pts = to_ticks(pending.frame.timestamp);
-		let arrived = pending.arrived;
+		let (arrived, bytes) = (pending.arrived, pending.frame.payload.len());
 		let item = (pending, self.source.description().cloned());
 		match &mut self.declared {
 			Some(clock) => clock.push(Some(item), pts)?,
-			None => self.clock.push(item, pts, arrived),
+			None => self.clock.push(item, pts, arrived, bytes),
 		}
 		self.release(name, jitter, false)
 	}
 
-	/// Read until a frame is due, or hold the first frame until the program tables are built.
+	/// Read within the jitter window, or hold the first frame until the program tables are built.
 	fn fill(&mut self, name: &str, waiter: &kio::Waiter, input: &mut Input<'_>) -> crate::Result<()> {
 		if self.key.name.is_empty() {
 			self.key.name = name.to_string();
@@ -481,11 +521,15 @@ impl Track {
 		// A placed frame is judged at release, against the keyframe's departure ([`Export::leads_video`]).
 		let aligned = !is_video && !self.kind.placed();
 		loop {
-			if !input.waiting_for_header && input.jitter.full(&self.key) {
+			if !input.waiting_for_header && input.jitter.full(&self.key, waiter) {
+				let _ = self.source.poll_received(waiter);
 				break;
 			}
 			match self.source.poll_event(waiter)? {
 				Poll::Ready(Some(Event::Frame { frame, arrived })) => {
+					if is_video && frame.keyframe && input.waiting_for_header {
+						tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "keyframe", now = ?moq_clock::now(), program = self.key.program, ?arrived);
+					}
 					let arrived = arrived.max(self.subscribed);
 					// The frame settles what its group's end left held, so they are ready as it lands.
 					self.latest = self.latest.max(arrived);
@@ -706,7 +750,9 @@ impl Track {
 		loop {
 			let settle = match flush {
 				true => Settle::All,
-				false => self.clock.settle(lookahead, self.latest, jitter.delay()),
+				false => self
+					.clock
+					.settle(lookahead, self.latest, jitter.delay(), jitter::MAX_BYTES),
 			};
 			let Some(((mut pending, description), dts)) = self.clock.pop(lookahead, delay, settle) else {
 				break;
@@ -748,10 +794,15 @@ impl Track {
 		let dts = dts.map(|ticks| ticks as u64);
 		let (key, pes) = self.release_key(decode, jitter.delay(), &frame)?;
 		let video = matches!(self.kind, Kind::Video(_));
-		let leading = video
-			&& !frame.keyframe
-			&& self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe)
-			&& !matches!(self.kind, Kind::Video(stream_type) if radl(stream_type, description.as_ref(), &frame));
+		let leading = match self.kind {
+			Kind::Video(stream_type) => {
+				!frame.keyframe
+					&& self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe)
+					&& !radl(stream_type, description.as_ref(), &frame)
+			}
+			// Read by [`Self::queue`] just before, for MPEG-1/2 video carried whole.
+			_ => self.orphan,
+		};
 		if video && frame.keyframe {
 			self.keyframe = Some(frame.timestamp);
 		}
@@ -777,6 +828,7 @@ impl Track {
 			skip,
 			sync,
 			leading,
+			bytes: frame.payload.len() + self.key.name.len(),
 			item: Queued {
 				frame,
 				decode,
@@ -1145,6 +1197,7 @@ impl Pack {
 /// reduces its newest complete group into the current section set, and remembers
 /// when it last hit the wire so it re-emits on its own cadence.
 struct SiTrack {
+	source: crate::Source,
 	/// The catalog's track name for this entry, so a catalog update that repoints
 	/// the entry at a different track (a restarted publisher) is detected and the
 	/// subscription rebuilt rather than left repeating the old track's sections.
@@ -1181,7 +1234,10 @@ enum SiState {
 	Subscribing(kio::Pending<moq_net::track::Subscribing>),
 	/// The resolved subscription, reading snapshot groups. Boxed: a reader is far larger
 	/// than the other states.
-	Active(Box<moq_net::track::Ordered>),
+	Active {
+		track: Box<moq_net::track::Ordered>,
+		_priority: crate::source::Priority,
+	},
 	/// The track ended or failed; the last complete snapshot keeps re-emitting,
 	/// mirroring how a real mux repeats its tables between (absent) revisions.
 	Done,
@@ -1201,6 +1257,7 @@ impl SiTrack {
 			(SiState::Done, Self::inline(entry))
 		};
 		Self {
+			source: source.clone(),
 			track: entry.track.clone(),
 			interval: entry.interval,
 			state,
@@ -1242,7 +1299,10 @@ impl SiTrack {
 			self.state = match resolved {
 				Ok((broadcast, name)) => match broadcast.track(&name) {
 					Ok(track) => SiState::Subscribing(
-						track.subscribe(moq_net::track::Subscription::default().with_max_delay(self.max_age)),
+						track.subscribe(
+							self.source
+								.subscription(moq_net::track::Subscription::default().with_max_delay(self.max_age)),
+						),
 					),
 					Err(err) => {
 						tracing::warn!(%err, track = %name, "SI track unavailable; carrying the last snapshot");
@@ -1262,12 +1322,18 @@ impl SiTrack {
 					unreachable!("just matched Subscribing");
 				};
 				match pending.poll_ok(waiter) {
-					Poll::Ready(result) => result,
+					Poll::Ready(result) => result.and_then(|track| {
+						let priority = self.source.control(track.control())?;
+						Ok((track, priority))
+					}),
 					Poll::Pending => return,
 				}
 			};
 			self.state = match resolved {
-				Ok(track) => SiState::Active(Box::new(track.ordered())),
+				Ok((track, priority)) => SiState::Active {
+					track: Box::new(track.ordered()),
+					_priority: priority,
+				},
 				Err(err) => {
 					tracing::warn!(%err, "SI subscription failed; carrying the last snapshot");
 					SiState::Done
@@ -1276,7 +1342,7 @@ impl SiTrack {
 		}
 
 		let mut ended = false;
-		if let SiState::Active(track) = &mut self.state {
+		if let SiState::Active { track, .. } = &mut self.state {
 			loop {
 				// Drain to the newest group first: a snapshot obsoletes every older
 				// one, including a partially-read pending group.
@@ -1335,7 +1401,8 @@ impl<S: Stream> Program<S>
 where
 	S::Ext: catalog::Catalog,
 {
-	fn new(source: crate::Source, catalog: S) -> Self {
+	fn new(mut source: crate::Source, catalog: S) -> Self {
+		source.isolate();
 		let instance = source.broadcast().info().epoch.clone();
 		Self {
 			id: 0,
@@ -1505,6 +1572,7 @@ where
 					}
 					tracing::warn!(%err, "replacement left before it went out, keeping the old program");
 					self.cancel_pending();
+					self.program.source.priority(0)?;
 					self.follow_until = None;
 					self.follow_timer = None;
 					break;
@@ -1569,9 +1637,14 @@ where
 
 		// Once every source has ended, the tail goes out late if it must: the end of the
 		// stream is not a missed deadline.
-		self.program
-			.schedule
-			.set_ended(!self.program.tracks.is_empty() && self.program.tracks.values().all(|track| track.finished));
+		self.program.schedule.set_ended(
+			!self.program.tracks.is_empty()
+				&& self
+					.program
+					.tracks
+					.values_mut()
+					.all(|track| track.finished || track.source.poll_received(waiter).is_ready()),
+		);
 
 		// 4. Mux each frame the jitter buffer lets go (the first carries the buffered
 		// PAT/PMT), then lay out every grid slot whose time has come ([`Self::lay_due`]).
@@ -1680,9 +1753,12 @@ where
 					self.leave(err)?;
 				}
 				if ended || self.program.retired {
-					self.program
-						.schedule
-						.set_ended(self.program.tracks.values().all(|track| track.finished));
+					self.program.schedule.set_ended(
+						self.program
+							.tracks
+							.values_mut()
+							.all(|track| track.finished || track.source.poll_received(waiter).is_ready()),
+					);
 				}
 			}
 		}
@@ -1876,7 +1952,7 @@ where
 			}
 		}
 
-		// 2. Read each source until it has a frame due, or before the program tables
+		// 2. Read each source within its jitter window, or before the program tables
 		// are built, hold one per track.
 		self.fill(waiter)?;
 
@@ -2049,7 +2125,7 @@ where
 		Ok(())
 	}
 
-	/// Read each source until it has a frame due.
+	/// Read each source within its jitter window.
 	///
 	/// Before the program tables are built, each track holds its first frame instead,
 	/// and slices that arrive before their codec config resolves are dropped: a receiver
@@ -2324,7 +2400,11 @@ where
 			let mut track = match old.remove(name) {
 				Some(track) => track,
 				None => Track::new(
-					ExportSource::for_stream(&self.program.source, name, self.budget())?,
+					stream_edge(
+						ExportSource::for_stream(&self.program.source, name, self.budget())?,
+						&kind,
+						self.program.replay,
+					),
 					kind.clone(),
 				),
 			};
@@ -2379,7 +2459,8 @@ where
 				.get(name)
 				.is_some_and(|t| t.verbatim.is_some() || t.pes_packet.is_some())
 			{
-				Some(ExportSource::for_stream(&self.program.source, name, budget)?)
+				let source = ExportSource::for_stream(&self.program.source, name, budget)?;
+				Some(stream_edge(source, &track.kind, self.program.replay))
 			} else {
 				None
 			};
@@ -2606,6 +2687,7 @@ where
 		if self.pending.is_some() && self.program.instance.is_some() && broadcast.info().epoch == self.program.instance
 		{
 			self.cancel_pending();
+			self.program.source.priority(0)?;
 			self.follow_until = None;
 			self.follow_timer = None;
 		}
@@ -3251,12 +3333,12 @@ where
 			pes,
 			..
 		} = queued;
-		let is_video = matches!(
-			self.program.tracks.get(name).context("missing track")?.kind,
-			Kind::Video(_)
-		);
-		// Refresh PSI at keyframes or after the interval lapses, and lead with a revision.
-		let cadence = (is_video && frame.keyframe) || due(frame.timestamp, self.program.last_psi, PSI_INTERVAL);
+		let kind = &self.program.tracks.get(name).context("missing track")?.kind;
+		let is_video = matches!(kind, Kind::Video(_));
+		// Refresh PSI at keyframes, MPEG-1/2 video's carried whole among them, or after the
+		// interval lapses, and lead with a revision.
+		let tune_in = frame.keyframe && kind.class() == super::stats::Class::Video;
+		let cadence = tune_in || due(frame.timestamp, self.program.last_psi, PSI_INTERVAL);
 		let psi = std::mem::take(&mut self.program.revised) || cadence;
 		if psi {
 			// A receiver tunes in at the tables, so each AAC PID's next frame repeats its program
@@ -4204,6 +4286,15 @@ fn at_edge(source: ExportSource, replay: bool) -> ExportSource {
 	}
 }
 
+/// Start an `mpegts` section track's source as [`at_edge`] would, if it is MPEG-1/2 video
+/// carried whole: video, not sparse, whose groups older than the edge would only be trimmed.
+fn stream_edge(source: ExportSource, kind: &Kind, replay: bool) -> ExportSource {
+	match kind.class() {
+		super::stats::Class::Video => at_edge(source, replay),
+		_ => source,
+	}
+}
+
 /// A video level's T-STD limits (H.222.0 2.14.3.1, 2.17.2), in bits per second and bits.
 #[derive(Clone, Copy, Debug)]
 struct Level {
@@ -4481,6 +4572,76 @@ fn stream_id(kind: &Kind) -> Option<u8> {
 	matches!(kind, Kind::Opus { .. }).then_some(StreamId::PRIVATE_STREAM_1)
 }
 
+/// Where a picture of an MPEG-1/2 video PES sits in its GOP (ISO 13818-2 6.2.2.6, 6.2.3).
+#[derive(Clone, Copy)]
+struct Mpeg2Picture {
+	/// Whether a GOP header leads the picture, and if so whether it sets `closed_gop`. A leading
+	/// B-picture of a closed GOP references only the pictures after it.
+	gop: Option<bool>,
+	/// Its place in display order within the GOP.
+	temporal_reference: u16,
+	/// A B-picture (`picture_coding_type` 3).
+	bidirectional: bool,
+}
+
+impl Mpeg2Picture {
+	/// Read every picture header of the whole PES `pes`, in order. `broken_link` is the
+	/// encoder's own mark of an edit, so an open GOP is judged by `closed_gop` alone.
+	fn read(pes: &[u8]) -> Vec<Self> {
+		psi::PesStart::parse(pes).map_or_else(|_| Vec::new(), |start| Self::scan(start.data))
+	}
+
+	/// Read every picture header of the elementary stream `es`, in order.
+	fn scan(es: &[u8]) -> Vec<Self> {
+		let (mut pictures, mut gop) = (Vec::new(), None);
+		for at in memchr::memmem::find_iter(es, &[0, 0, 1]) {
+			match &es[at + 3..] {
+				// time_code is 25 bits, then closed_gop.
+				[0xb8, _, _, _, flags, ..] => gop = Some(flags & 0x40 != 0),
+				[0x00, high, low, ..] => pictures.push(Self {
+					gop: gop.take(),
+					temporal_reference: u16::from(*high) << 2 | u16::from(low >> 6),
+					bidirectional: (low >> 3) & 0x07 == 3,
+				}),
+				_ => {}
+			}
+		}
+		pictures
+	}
+
+	/// Whether the PES `pes` holds only B-pictures presented before the I-picture at temporal
+	/// reference `opened`, or the tail of one.
+	///
+	/// A PES need not start a picture. One opening on bytes outside any start code, or on a
+	/// slice before its first picture header, carries the tail of the last picture of the PES
+	/// before, an orphan only when that PES was one (`after`). A PES that may end inside a start
+	/// code or the header after it is kept, since the next PES holds the rest of a picture it
+	/// cannot read. Trailing zero bytes are kept too: usually stuffing, but trimming half a
+	/// reference picture's start code would lose it, while an orphan kept is only skipped.
+	fn orphaned(pes: &[u8], opened: u16, after: bool) -> bool {
+		let Ok(start) = psi::PesStart::parse(pes) else {
+			return false;
+		};
+		let es = start.data;
+		let mut codes = memchr::memmem::find_iter(es, &[0, 0, 1]).peekable();
+		let first = codes.peek().copied().unwrap_or(es.len());
+		let opens = es[..first].iter().all(|&byte| byte == 0);
+		let continues = !opens
+			|| codes
+				.map(|at| es.get(at + 3).copied())
+				.take_while(|&code| code != Some(0x00))
+				.any(|code| matches!(code, Some(0x01..=0xaf)));
+		// A GOP header, the longest read, ends 8 bytes after its start code begins.
+		let cut = es.last() == Some(&0) || memchr::memmem::rfind(es, &[0, 0, 1]).is_some_and(|at| es.len() - at < 8);
+		let pictures = Self::scan(es);
+		let tail = match continues {
+			true => after,
+			false => !pictures.is_empty(),
+		};
+		tail && !cut && (pictures.iter()).all(|picture| picture.bidirectional && picture.temporal_reference < opened)
+	}
+}
+
 /// Whether a video frame is an HEVC RADL picture, which leads its keyframe but references only
 /// it, so it goes out wherever that keyframe does rather than being trimmed as an orphan.
 fn radl(stream_type: StreamType, description: Option<&Bytes>, frame: &Frame) -> bool {
@@ -4740,8 +4901,8 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::{
-		Buffer, DecodeClock, Dolby, Kind, Laid, PSI_INTERVAL, PesPacket, Psi, Settle, dolby_removals, due,
-		is_complete_section, si_due, slot, unwrap_pts, verbatim_buffer,
+		Buffer, DecodeClock, Dolby, Kind, Laid, Mpeg2Picture, PSI_INTERVAL, PesPacket, Psi, Settle, dolby_removals,
+		due, is_complete_section, si_due, slot, unwrap_pts, verbatim_buffer,
 	};
 
 	/// The tables as they stand take the version after the last laid, whatever was set on the
@@ -5011,7 +5172,7 @@ mod tests {
 		let mut clock = DecodeClock::default();
 		let mut dts = vec![0; pts.len()];
 		for (i, &p) in pts.iter().enumerate() {
-			clock.push(i, p, moq_clock::Instant::ZERO);
+			clock.push(i, p, moq_clock::Instant::ZERO, 0);
 			while let Some((i, d)) = clock.pop(jitter, floor, Settle::Due) {
 				dts[i] = d;
 			}
@@ -5020,6 +5181,77 @@ mod tests {
 			dts[i] = d;
 		}
 		dts
+	}
+
+	/// A burst sharing one PTS, read at once, never settles by time or by a later PTS, so the
+	/// byte budget settles it.
+	#[test]
+	fn a_decode_clock_burst_sharing_a_pts_settles_at_the_byte_budget() {
+		const MAX_BYTES: usize = 10_000;
+		let start = moq_clock::Instant::ZERO;
+		let delay = Duration::from_millis(500);
+		let mut clock = DecodeClock::default();
+		let (mut held, mut most) = (0, 0);
+		for index in 0..1_000u32 {
+			clock.push(index, 0, start, 1_000);
+			held += 1;
+			while clock
+				.pop(90_000, 0, clock.settle(90_000, start, delay, MAX_BYTES))
+				.is_some()
+			{
+				held -= 1;
+			}
+			most = most.max(held);
+		}
+		assert!(
+			most <= 17,
+			"held {most} frames of 1,000 bytes past a {MAX_BYTES} byte budget"
+		);
+	}
+
+	/// One frame alone filling the byte budget does not settle the B-frames reordered around it:
+	/// fewer frames are held than any codec reorders.
+	#[test]
+	fn a_frame_filling_the_byte_budget_keeps_the_reorder() {
+		const MAX_BYTES: usize = 1_000_000;
+		let start = moq_clock::Instant::ZERO;
+		let delay = Duration::from_millis(500);
+		let mut clock = DecodeClock::default();
+		let mut dts = vec![0; 5];
+		let frames = [(0, 16), (4, MAX_BYTES - 8), (2, 8), (1, 8), (3, 8)];
+		for (i, (rank, bytes)) in frames.into_iter().enumerate() {
+			clock.push(i, 900_000 + rank * 18_000, start, bytes);
+			while let Some((i, d)) = clock.pop(90_000, 36_000, clock.settle(90_000, start, delay, MAX_BYTES)) {
+				dts[i] = d;
+			}
+		}
+		while let Some((i, d)) = clock.pop(90_000, 36_000, Settle::All) {
+			dts[i] = d;
+		}
+		assert_eq!(dts, [864_000, 882_000, 900_000, 918_000, 936_000]);
+	}
+
+	/// A budget filled by one frame and the reordered frames around it still counts the B-frames
+	/// already read in the reorder delay, so none decodes after it is presented.
+	#[test]
+	fn a_budget_filled_past_the_reorder_depth_keeps_the_delay() {
+		const MAX_BYTES: usize = 1_000_000;
+		let start = moq_clock::Instant::ZERO;
+		let delay = Duration::from_millis(500);
+		let ranks = [0, 4, 2, 1, 3].into_iter().chain(5..=40);
+		let mut clock = DecodeClock::default();
+		let mut dts = Vec::new();
+		for (i, rank) in ranks.enumerate() {
+			let bytes = if i == 1 { MAX_BYTES - 512 } else { 16 };
+			clock.push(i, 900_000 + rank * 3_000, start, bytes);
+			while let Some((i, d)) = clock.pop(90_000, 0, clock.settle(90_000, start, delay, MAX_BYTES)) {
+				dts.push((i, d));
+			}
+		}
+		assert_eq!(
+			dts[..5],
+			[(0, 894_000), (1, 897_000), (2, 900_000), (3, 903_000), (4, 906_000)]
+		);
 	}
 
 	/// Decode-order PTS for a constant-frame-rate display timeline with `b` B-frames between
@@ -5297,6 +5529,59 @@ mod tests {
 		pes.extend_from_slice(fields);
 		pes.extend_from_slice(payload);
 		pes
+	}
+
+	#[test]
+	fn mpeg2_orphans_are_whole_pes_of_leading_b_pictures() {
+		// A picture header: temporal_reference, then picture_coding_type (1 I, 2 P, 3 B).
+		let picture = |reference: u16, coding: u8| {
+			[
+				0,
+				0,
+				1,
+				0,
+				(reference >> 2) as u8,
+				((reference & 3) as u8) << 6 | coding << 3,
+				0xff,
+				0xf8,
+			]
+		};
+		let slice = [0, 0, 1, 1, 0x12, 0x34, 0x56, 0x78];
+		let video = |pictures: &[&[u8]]| pes(0xe0, 0x00, &[], &pictures.concat());
+		for after in [false, true] {
+			assert!(Mpeg2Picture::orphaned(
+				&video(&[&picture(0, 3), &picture(1, 3)]),
+				2,
+				after
+			));
+			// A B-picture presented after the I-picture references only its own GOP.
+			assert!(!Mpeg2Picture::orphaned(&video(&[&picture(3, 3)]), 2, after));
+			// The P-picture later pictures reference keeps its PES, orphans and all.
+			assert!(!Mpeg2Picture::orphaned(
+				&video(&[&picture(0, 3), &picture(1, 3), &picture(5, 2)]),
+				2,
+				after
+			));
+			assert!(!Mpeg2Picture::orphaned(&video(&[]), 2, after));
+			// Zero stuffing before the first start code opens no tail.
+			assert!(Mpeg2Picture::orphaned(&video(&[&[0], &picture(0, 3)]), 2, after));
+			// Half a start code or picture header: the next PES holds a picture this one cannot
+			// read.
+			assert!(!Mpeg2Picture::orphaned(&video(&[&picture(0, 3), &[0, 0]]), 2, after));
+			assert!(!Mpeg2Picture::orphaned(
+				&video(&[&picture(0, 3), &[0, 0, 1, 0, 0]]),
+				2,
+				after
+			));
+		}
+		// The tail of a picture the PES before began, as slices or mid-slice bytes, is an orphan
+		// only when that PES was: it may finish the I-picture its group opened on.
+		for tail in [&slice[..], &slice[4..]] {
+			assert!(!Mpeg2Picture::orphaned(&video(&[tail, &picture(0, 3)]), 2, false));
+			assert!(Mpeg2Picture::orphaned(&video(&[tail, &picture(0, 3)]), 2, true));
+			assert!(!Mpeg2Picture::orphaned(&video(&[tail]), 2, false));
+			assert!(Mpeg2Picture::orphaned(&video(&[tail]), 2, true));
+		}
 	}
 
 	#[test]

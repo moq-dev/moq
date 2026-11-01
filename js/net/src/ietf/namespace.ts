@@ -119,7 +119,7 @@ async function decodeFields(r: Reader): Promise<{ namespace: Path.Valid; size: n
 
 /** Whether a request names an unimplemented session namespace or the forbidden period field. */
 export function reserved(namespace: Path.Valid, version: IetfVersion): boolean {
-	if (version < Version.DRAFT_22) return false;
+	if (version < Version.DRAFT_20) return false;
 	const first = toTuple(namespace)[0];
 	return first === "." || first === ".session";
 }

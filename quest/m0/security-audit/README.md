@@ -22,4 +22,4 @@ separate `backport-*` quest.
 
 ## Required
 
-- [Tokens stay out of logs](/quest/m0/security-audit/log-secrets.md) - no JWT or `?jwt=` query reaches a log line at any level, on `main` and `release`
+- [Tokens stay out of logs on release](/quest/m0/security-audit/log-secrets.md) - backport the main-branch credential log redaction to `release`

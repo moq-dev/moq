@@ -26,6 +26,7 @@ import {
 	groupBounds,
 	hiddenBelow,
 	hooks,
+	maxDelayOf,
 	scopeCaptures,
 	scopeHead,
 	scopeOverlaps,
@@ -47,7 +48,7 @@ import * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { requestReason } from "./error.ts";
 import { Fetch, FetchHeader, FetchOk } from "./fetch.ts";
-import { isDraft22 } from "./filter.ts";
+import { isDraft20 } from "./filter.ts";
 import { Join } from "./join.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
@@ -135,14 +136,17 @@ type SubscribeSetupState = {
 type Announced = { adverts: { id: number; route: Route }[]; route: Route };
 
 /** A local announce reader's filter: its scope, the prefix it asked for, and its hidden opt-in. */
-type Filter = { scope: Path.Pattern; prefix: Path.Valid; hidden: boolean };
+type Filter = { scope: Path.Pattern; prefix: Path.Valid; hidden: boolean; covering: boolean };
 
 /** A local announce reader: its filter, and what settles once its request is off the wire. */
 type Asking = Filter & { gone?: Promise<void> };
 
 /** Whether a reader with `filter` sees an announcement at `path`. */
 function sees(filter: Filter, path: Path.Valid): boolean {
-	return scopeOverlaps(filter.scope, path) && (filter.hidden || !hiddenBelow(filter.prefix, path));
+	return (
+		(filter.covering ? scopeOverlaps(filter.scope, path) : filter.scope.matches(path)) &&
+		(filter.hidden || !hiddenBelow(filter.prefix, path))
+	);
 }
 
 /**
@@ -153,7 +157,6 @@ function sees(filter: Filter, path: Path.Valid): boolean {
  */
 export class Subscriber {
 	#session: Session;
-	#localClose = false;
 
 	// The transport, so a request cut off by the session's close ends with the session's
 	// error. Optional for tests that drive a bare session.
@@ -217,11 +220,6 @@ export class Subscriber {
 	// the peer answers, which allows everything.
 	#grant?: Getter<Grant | undefined>;
 	#auth?: AuthSession;
-
-	/** Marks this subscriber's deliberate local session close. @internal */
-	close() {
-		this.#localClose = true;
-	}
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -340,13 +338,21 @@ export class Subscriber {
 	 * understands it (MoQ Hidden); the rule is also applied here, since an unsolicited
 	 * PUBLISH_NAMESPACE or a peer that never heard of it hides nothing.
 	 *
+	 * Only routes whose literal name matches `scope` are reported, unless `options.covering`
+	 * also asks for those whose subtree overlaps it.
+	 *
 	 * The request goes out once every overlapping request already closed here is off the
 	 * wire, so a peer that refuses overlapping requests never sees this one beside them.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		// The wire speaks announce interest by prefix.
 		const prefix = scopeHead(scope);
-		const filter: Asking = { scope, prefix, hidden: options?.hidden ?? false };
+		const filter: Asking = {
+			scope,
+			prefix,
+			hidden: options?.hidden ?? false,
+			covering: options?.covering ?? false,
+		};
 
 		// The overlapping requests on their way out, such as the narrower ones an exclusive
 		// discovery just closed for this one. Those still open overlap it only where the
@@ -741,9 +747,9 @@ export class Subscriber {
 	async #refuseListing(lister: Lister): Promise<void> {
 		try {
 			for (;;) {
-				while (!lister.used.peek()) {
+				while (!lister.wanted.peek()) {
 					if (lister.closed.peek() !== undefined) return;
-					await race([Signal.race(lister.used, lister.closed)]);
+					await race([Signal.race(lister.wanted, lister.closed)]);
 				}
 				lister.abort(new Error("track listing requires moq-lite-07 or newer"));
 			}
@@ -908,7 +914,7 @@ export class Subscriber {
 		// Ends the joining FETCH with the subscription.
 		const joining = new AbortController();
 		try {
-			if (subscription.join && !isDraft22(this.#session.version)) {
+			if (subscription.join && !isDraft20(this.#session.version)) {
 				void this.#runJoiningFetch(subscription, requestId, priority, joining.signal);
 			}
 
@@ -979,8 +985,7 @@ export class Subscriber {
 		} catch (err) {
 			stream.abort(err);
 			const e = await sessionCause(this.#quic, err);
-			if (this.#localClose) hooks.releaseTrack(producer);
-			else producer.abort(e);
+			producer.abort(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
@@ -1083,7 +1088,7 @@ export class Subscriber {
 			// keeps what it last asked for until one returns, as on lite and in Rust.
 			const subscription = producer.subscription.peek();
 			const wanted = toWire(subscription?.priority ?? 0);
-			const wantedMaxAge = this.#maxAge ? subscription?.maxDelay : undefined;
+			const wantedMaxAge = this.#maxAge && subscription ? maxDelayOf(subscription) : undefined;
 			if (!subscription || (wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
 				const disposes: Dispose[] = [];
 				const wake = new Promise<void>((resolve) => {
@@ -1733,7 +1738,7 @@ export class Subscriber {
 		const { join, track, tail, timescale } = subscription;
 		// A draft-22 fill is one of the subscription's own data streams, which PUBLISH_DONE
 		// counts. A draft-18 joining FETCH is a request of its own; the join holds the end for it.
-		const read = isDraft22(version) ? tail.open(join.sequence) : undefined;
+		const read = isDraft20(version) ? tail.open(join.sequence) : undefined;
 
 		let producer: netGroup.Producer | undefined;
 		// A whole group took the sequence first, or the join gave up: read the rest away.

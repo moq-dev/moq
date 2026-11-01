@@ -266,11 +266,11 @@ impl Pair {
 		self.client_conn_mut(ch).streams()
 	}
 
-	pub(super) fn client_send(&mut self, ch: ConnectionHandle, s: StreamId) -> SendStream<'_> {
+	pub(super) fn client_send(&mut self, ch: ConnectionHandle, s: StreamId) -> send::Stream<'_> {
 		self.client_conn_mut(ch).send_stream(s)
 	}
 
-	pub(super) fn client_recv(&mut self, ch: ConnectionHandle, s: StreamId) -> RecvStream<'_> {
+	pub(super) fn client_recv(&mut self, ch: ConnectionHandle, s: StreamId) -> recv::Stream<'_> {
 		self.client_conn_mut(ch).recv_stream(s)
 	}
 
@@ -286,11 +286,11 @@ impl Pair {
 		self.server_conn_mut(ch).streams()
 	}
 
-	pub(super) fn server_send(&mut self, ch: ConnectionHandle, s: StreamId) -> SendStream<'_> {
+	pub(super) fn server_send(&mut self, ch: ConnectionHandle, s: StreamId) -> send::Stream<'_> {
 		self.server_conn_mut(ch).send_stream(s)
 	}
 
-	pub(super) fn server_recv(&mut self, ch: ConnectionHandle, s: StreamId) -> RecvStream<'_> {
+	pub(super) fn server_recv(&mut self, ch: ConnectionHandle, s: StreamId) -> recv::Stream<'_> {
 		self.server_conn_mut(ch).recv_stream(s)
 	}
 
@@ -763,9 +763,6 @@ pub(super) fn subscribe() -> tracing::subscriber::DefaultGuard {
 	let builder = tracing_subscriber::FmtSubscriber::builder()
 		.with_max_level(tracing::Level::TRACE)
 		.with_writer(|| TestWriter);
-	// tracing uses std::time to trace time, which panics in wasm.
-	#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-	let builder = builder.without_time();
 	tracing::subscriber::set_default(builder.finish())
 }
 
