@@ -70,15 +70,21 @@ impl<T> DeclaredClock<T> {
 		self.held.len()
 	}
 
+	/// Whether a frame presented at `pts` would follow more than the depth frames read before it
+	/// in presentation order, which [`Self::push`] refuses.
+	pub(crate) fn reorders_past(&self, pts: u64) -> bool {
+		self.highest.len() - self.highest.partition_point(|&prior| prior <= pts) > self.depth
+	}
+
 	/// Hold the group's next frame in decode order, presented at `pts`.
 	pub(crate) fn push(&mut self, item: T, pts: u64) -> crate::Result<()> {
 		if self.held.len() > self.depth {
 			return Err(ClockError::Undrained.into());
 		}
-		let at = self.highest.partition_point(|&prior| prior <= pts);
-		if self.highest.len() - at > self.depth {
+		if self.reorders_past(pts) {
 			return Err(ClockError::Reordered(self.depth).into());
 		}
+		let at = self.highest.partition_point(|&prior| prior <= pts);
 		self.highest.insert(at, pts);
 		if self.highest.len() > self.depth + 1 {
 			self.highest.remove(0);

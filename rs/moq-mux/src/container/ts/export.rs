@@ -314,6 +314,11 @@ struct Track {
 	/// The marker, skip and cut counts of the sources the track read before this one, so the
 	/// counts keep rising across a resubscription.
 	base: (u64, u64, u64),
+	/// How many unmarked steps back the track's timeline took ([`Self::steps_back`]), each
+	/// counted as a marker of its own.
+	steps: u64,
+	/// The highest PTS read on the track's timeline, and the marker count it was read under.
+	high: Option<(u64, Timestamp)>,
 	finished: bool,
 	pid: u16,
 	/// The PMT lists it: from its first frame out until its last has gone and the catalog has
@@ -391,6 +396,8 @@ impl Track {
 			latest: kio::clock::Instant::ZERO,
 			restart: 0,
 			base: (0, 0, 0),
+			steps: 0,
+			high: None,
 			finished: false,
 			pid: 0,
 			listed: false,
@@ -427,11 +434,15 @@ impl Track {
 		jitter: &mut jitter::Buffer<TrackKey, Queued>,
 	) -> anyhow::Result<()> {
 		if pending.restart != self.restart {
-			// A marker declared a break in the timeline, so the decode clock restarts too.
+			// A marker declared a break in the timeline, or it stepped back unmarked
+			// ([`Self::steps_back`]), so the decode clock restarts too, and the last keyframe,
+			// on the timeline left behind, no longer marks what leads it.
 			self.release(name, jitter, true)?;
 			self.restart = pending.restart;
 			self.clock = DecodeClock::default();
 			self.declared = None;
+			self.keyframe = None;
+			self.leading_floor = None;
 		}
 		// MPEG-1/2 video is placed, so its pictures rather than its timestamps say what leads.
 		let stream_type = match self.kind {
@@ -510,6 +521,44 @@ impl Track {
 		self.release(name, jitter, false)
 	}
 
+	/// Count a frame that steps the track's timeline back with no marker as a marker of its own:
+	/// presented further below the highest PTS read on the timeline than the export's `delay`,
+	/// and than any reordering a video rendition declares or its decode clock has seen. A
+	/// rendition that declares its catalog `reorder` bounds it by frames rather than time, so
+	/// there the frame must also follow more frames than that in presentation order.
+	///
+	/// No reordering the export carries explains that, and the jitter buffer would not see it
+	/// as a step. A video decode clock that went on would hold the frame as reordered and clamp
+	/// its DTS, and every later frame's, onto the old timeline, so they would only arrive late
+	/// until it caught up. Audio with slack left would decode before the frames ahead of it on
+	/// the same clock, which the output's buffers cannot carry. As a marker, the step restarts
+	/// the decode clock and opens a new generation, as one the source declared would. A placed
+	/// frame's timestamp is its arrival rather than its decode time, so it never steps. Without
+	/// a delay nothing is late, so a step costs nothing there.
+	fn steps_back(&mut self, pending: &mut Pending, delay: Duration) {
+		if self.kind.placed() {
+			return;
+		}
+		let pts = pending.frame.timestamp;
+		let high = (self.high).and_then(|(restart, high)| (restart == pending.restart).then_some(high));
+		let (_, lookahead) = self.timing.inferred();
+		let delay = u64::try_from(delay.as_micros() * 90_000 / 1_000_000).unwrap_or(u64::MAX);
+		let bound = delay.max(lookahead).max(self.timing.jitter).max(self.clock.reach());
+		let reordered = (self.declared)
+			.as_ref()
+			.is_none_or(|clock| clock.reorders_past(to_ticks(pts)));
+		let stepped =
+			delay > 0 && reordered && high.is_some_and(|high| to_ticks(pts).saturating_add(bound) < to_ticks(high));
+		if stepped {
+			tracing::debug!(track = %self.key.name, ?pts, ?high, "unmarked step back; restarting the timeline");
+			self.steps += 1;
+			pending.restart += 1;
+			pending.skip += 1;
+		}
+		let high = high.filter(|_| !stepped).map_or(pts, |high| high.max(pts));
+		self.high = Some((pending.restart, high));
+	}
+
 	/// Read within the jitter window, or hold the first frame until the program tables are built.
 	fn fill(&mut self, name: &str, waiter: &kio::Waiter, input: &mut Input<'_>) -> crate::Result<()> {
 		if self.key.name.is_empty() {
@@ -542,14 +591,15 @@ impl Track {
 						*input.trimmed += 1;
 						continue;
 					}
-					let pending = Pending {
+					let mut pending = Pending {
 						frame,
-						restart: self.base.0 + self.source.markers(),
-						skip: self.base.1 + self.source.skips(),
+						restart: self.base.0 + self.source.markers() + self.steps,
+						skip: self.base.1 + self.source.skips() + self.steps,
 						cut: self.base.2 + self.source.cuts(),
 						arrived,
 						read: kio::clock::now(),
 					};
+					self.steps_back(&mut pending, input.jitter.delay());
 					// A new timeline must reach the reset before tune-in alignment can drop it.
 					if let Some(start) = input.video_start
 						&& aligned && pending.restart == self.restart
