@@ -304,7 +304,7 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 			.await
 			.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
 		let source = moq_mux::Source::new(scoped.clone(), broadcast);
-		let (broadcaster, driver) = moq_hls::export::Broadcaster::new(source, config);
+		let (broadcaster, driver) = moq_hls::export::Broadcaster::new(source, config)?;
 		tokio::spawn(driver.run());
 		tracing::info!(%name, "recording HLS");
 		recording.run(&broadcaster).await
@@ -323,7 +323,7 @@ fn serve(
 	tls: moq_tokio::tls::Listen,
 	cors: &crate::web::Cors,
 ) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + use<>> {
-	let server = moq_hls::Server::new(origin, config);
+	let server = moq_hls::Server::new(origin, config)?;
 	let app = server.router().layer(cors.layer([Method::GET])?);
 	let tls = if tls.cert.is_empty() && tls.generate.is_empty() {
 		None
