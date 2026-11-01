@@ -8542,15 +8542,20 @@ mod serve_tests {
 		}
 
 		h.track.finish().unwrap();
-		// A draft-18 subscription whose track ended keeps its join until the subscriber
-		// closes the request, so close it once PUBLISH_DONE is out.
-		while futures::poll!(serve.as_mut()).map(Result::unwrap).is_pending() {
+		served(h, serve).await;
+		h.session.reopen();
+	}
+
+	/// Drive `serving` to a clean end once its track has finished. A draft-18 subscription
+	/// whose track ended keeps its join until the subscriber closes the request, so close it
+	/// once PUBLISH_DONE is out.
+	async fn served(h: &Serve, mut serving: std::pin::Pin<&mut impl Future<Output = Result<(), Error>>>) {
+		while futures::poll!(serving.as_mut()).map(Result::unwrap).is_pending() {
 			if publish_done_sent(h) {
 				h.session.close(Close::Fin);
 			}
 			kio::clock::sim::yield_now().await;
 		}
-		h.session.reopen();
 	}
 
 	/// Whether the subscription's request stream carries PUBLISH_DONE yet.
@@ -9925,7 +9930,7 @@ mod serve_tests {
 				}
 				frame.finish().unwrap().finish().unwrap();
 				h.track.finish().unwrap();
-				serving.await.unwrap();
+				served(&h, serving.as_mut()).await;
 				assert_eq!(occurrences(&h.log, payload), 1, "{version} streamed={streamed}");
 				assert!(h.log.resets().is_empty(), "{version} streamed={streamed}");
 
