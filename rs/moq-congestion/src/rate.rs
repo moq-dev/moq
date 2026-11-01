@@ -6,6 +6,7 @@
 //! <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1>
 
 use kio::clock::Instant;
+use std::num::NonZeroU16;
 use std::time::Duration;
 
 use crate::{Ack, Sent};
@@ -30,6 +31,10 @@ pub struct Packet {
     pub(crate) tx_in_flight: u32,
     /// equivalent to P.is_app_limited: whether C.app_limited was set when the packet was sent.
     pub(crate) is_app_limited: bool,
+    /// The GCC probe cluster it was sent in, if any. Sixteen bits fit the padding after the
+    /// fields above. GoogCC's clusters and the prober's restarts each wrap within half of them,
+    /// far more than either starts in the two seconds a cluster is kept.
+    pub(crate) probe_cluster: Option<NonZeroU16>,
 }
 
 /// An empty state, for a controller that keeps none.
@@ -42,6 +47,7 @@ impl Default for Packet {
             lost: 0,
             tx_in_flight: 0,
             is_app_limited: false,
+            probe_cluster: None,
         }
     }
 }
@@ -115,6 +121,7 @@ impl Sampler {
             lost: self.lost,
             tx_in_flight: sent.in_flight.try_into().unwrap_or(u32::MAX),
             is_app_limited: self.app_limited != 0,
+            probe_cluster: None,
         }
     }
 
