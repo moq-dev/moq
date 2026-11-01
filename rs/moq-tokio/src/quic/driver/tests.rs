@@ -1749,14 +1749,16 @@ async fn dropped_stream_resolves_stopped() {
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
 	send.write_all(&b"truncated"[..]).await.unwrap();
+	let id = send.id();
 	let stopped = send.stopped();
 	drop(send);
+	assert!(!conn.send_released(id), "the stopped future keeps the stream's end");
 	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(None)));
-	assert_eq!(conn.stopped_waiters(), 0);
+	assert!(conn.send_released(id), "the last stopped future releases the stream");
 }
 
-/// A reset releases the stream's `stopped` waiters, even one dropped while pending
+/// A `stopped` future dropped while pending leaves the stream to release itself
 #[tokio::test]
 async fn stream_reset_releases_stopped() {
 	let _guard = subscribe();
@@ -1764,18 +1766,21 @@ async fn stream_reset_releases_stopped() {
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
 	send.write_all(&b"hello"[..]).await.unwrap();
+	let id = send.id();
 	{
 		let mut stopped = pin!(send.stopped());
 		let poll = std::future::poll_fn(|cx| Poll::Ready(stopped.as_mut().poll(cx))).await;
 		assert!(poll.is_pending());
 	}
-	assert_eq!(conn.stopped_waiters(), 1);
+	assert!(!conn.send_released(id));
 	send.reset(7u32.into());
-	assert_eq!(conn.stopped_waiters(), 0);
+	assert!(conn.send_released(id));
 }
 
+/// A blocked read wakes when the connection closes, and one dropped with its stream leaves no
+/// waiter behind
 #[tokio::test]
-async fn stream_drop_removes_blocked_reader() {
+async fn dropped_read_leaves_no_waiter() {
 	let _guard = subscribe();
 
 	for drop_stream in [false, true] {
@@ -1794,24 +1799,20 @@ async fn stream_drop_removes_blocked_reader() {
 
 			let (waker, wake_counter) = new_count_waker();
 			let mut cx = Context::from_waker(&waker);
-			// do a blocking read which will add the stream in conn.blocked_readers
-			{
-				let mut buf = [0u8; 64];
-				let mut buf = &mut buf[..];
-				let read_fut = stream.read(&mut buf);
-				tokio::pin!(read_fut);
-				assert!(matches!(read_fut.as_mut().poll(&mut cx), Poll::Pending));
-			}
+			// A blocking read registers its waiter with moq-quic.
+			let mut buf = [0u8; 64];
+			let mut buf = &mut buf[..];
+			let mut read_fut = Box::pin(stream.read(&mut buf));
+			assert!(matches!(read_fut.as_mut().poll(&mut cx), Poll::Pending));
 
 			if !drop_stream {
 				assert_eq!(wake_counter.wakes(), 0);
-				// We have a blocked reader, closing the connection should wake it. We use this as
-				// a proxy to assert that the stream is in conn.blocked_readers.
+				// Closing the connection wakes the blocked reader.
 				conn.close(0u32.into(), "done");
 				assert_eq!(wake_counter.wakes(), 1);
 			} else {
-				// dropping the stream should remove it from conn.blocked_readers, so we don't
-				// expect any wakeups
+				// The dropped read took its waiter with it, so nothing is left to wake.
+				drop(read_fut);
 				drop(stream);
 				assert_eq!(wake_counter.wakes(), 0, "no wakeups should have occurred");
 				conn.close(0u32.into(), "done");

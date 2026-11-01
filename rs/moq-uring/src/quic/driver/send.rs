@@ -1,12 +1,12 @@
 //! Outgoing streams and datagrams: their handles, scheduling, and errors.
 //!
 //! Single-threaded sans-IO means a write goes straight into moq-quic's send queue (no staging
-//! copy); the handles just kick the driver so egress reaches the wire and park on the
-//! per-stream waiter lists the driver wakes.
+//! copy); the handles just kick the driver so egress reaches the wire, and wait through
+//! moq-quic's poll forms, which wake them.
 
 use std::future::poll_fn;
 use std::rc::Rc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use bytes::Buf;
 use moq_quic::send::End;
@@ -87,18 +87,15 @@ impl Stream {
 		if let Some(err) = shared.closed() {
 			return Poll::Ready(Err(Error::Connection(err)));
 		}
-		let written = shared.conn.borrow_mut().send_stream(id).write(buf);
-		match written {
+		// moq-quic wakes us once the stream is writable again, or stopped.
+		let written = shared.conn.borrow_mut().send_stream(id).poll_write(waiter, buf);
+		match ready!(written) {
 			Ok(written) => {
 				shared.kick();
 				Poll::Ready(Ok(written))
 			}
-			// The driver wakes us when moq-quic reports the stream writable, or stopped.
-			Err(moq_quic::send::Error::Blocked) => {
-				shared.park_writable(id, waiter);
-				Poll::Pending
-			}
 			Err(moq_quic::send::Error::Stopped(code)) => Poll::Ready(Err(Error::Stopped(code))),
+			Err(moq_quic::send::Error::ConnectionLost) => Poll::Ready(Err(Error::Connection(shared.lost()))),
 			Err(err) => unreachable!("an open stream failed to write: {err:?}"),
 		}
 	}
@@ -288,23 +285,18 @@ impl Half {
 
 /// Wait for send stream `id` to end: moq-quic keeps how it ended until its handle releases it.
 fn poll_stopped(shared: &Shared, id: stream::Id, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
-	let end = shared.conn.borrow_mut().send_stream(id).end();
-	match end {
-		Ok(Some(End::Stopped(code))) => Poll::Ready(Ok(Some(code))),
-		Ok(Some(_)) => Poll::Ready(Ok(None)),
-		Ok(None) | Err(_) => match shared.closed() {
-			Some(err) => Poll::Ready(Err(Error::Connection(err))),
-			None => {
-				shared.park_finishing(id, waiter);
-				Poll::Pending
-			}
-		},
+	let end = shared.conn.borrow_mut().send_stream(id).poll_end(waiter);
+	match ready!(end) {
+		Ok(End::Stopped(code)) => Poll::Ready(Ok(Some(code))),
+		Ok(_) => Poll::Ready(Ok(None)),
+		Err(moq_quic::send::Error::ConnectionLost) => Poll::Ready(Err(Error::Connection(shared.lost()))),
+		// Only a released ID has no end, and the handle releases it only on drop.
+		Err(err) => unreachable!("a held send stream has no end: {err:?}"),
 	}
 }
 
 impl Drop for Half {
 	fn drop(&mut self) {
-		self.shared.forget_send(self.id);
 		let mut conn = self.shared.conn.borrow_mut();
 		let mut stream = conn.send_stream(self.id);
 		let stopped = match stream.end() {

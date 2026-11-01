@@ -432,6 +432,25 @@ async fn a_close_ends_an_unfinished_read_after_its_data() {
 	drop(send);
 }
 
+/// Waits parked on the closing side end with its close instead of hanging.
+#[tokio::test(start_paused = true)]
+async fn a_local_close_ends_parked_waits() {
+	let (_client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
+	let (_send, mut recv) = server.open_bi(SendOptions::default()).await.unwrap();
+	let mut accepting = std::pin::pin!(server.accept_uni());
+	let mut reading = std::pin::pin!(recv.read_chunk(usize::MAX));
+	assert!(futures_poll_once(&mut accepting).await.is_none());
+	assert!(futures_poll_once(&mut reading).await.is_none());
+
+	server.close(42, "bye");
+	assert!(matches!(accepting.await, Err(Error::ConnectionClosed { code: 42, .. })));
+	let read = reading.await;
+	assert!(
+		matches!(read, Err(Error::ConnectionClosed { code: 42, .. })),
+		"got {read:?}"
+	);
+}
+
 #[tokio::test(start_paused = true)]
 async fn dropping_the_last_handle_closes_the_session() {
 	let (client, server) = pair(config(Version::QMux01), config(Version::QMux01)).await;

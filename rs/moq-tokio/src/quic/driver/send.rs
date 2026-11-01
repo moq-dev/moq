@@ -1,11 +1,11 @@
 //! Outgoing streams and datagrams: their handles, scheduling, and errors.
 
 use std::{
-	future::{Future, poll_fn},
+	future::Future,
 	io,
 	pin::Pin,
-	sync::Arc,
-	task::{Context, Poll},
+	sync::{Arc, OnceLock},
+	task::{Context, Poll, ready},
 };
 
 use bytes::Buf;
@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::quic::driver::{
 	VarInt,
-	connection::{ConnectionInner, ConnectionRef, State},
+	connection::{ConnectionInner, ConnectionRef},
 	stream,
 };
 
@@ -32,7 +32,11 @@ use crate::quic::driver::{
 /// perform multiple writes internally before succeeding. Each `write` method documents whether it is
 /// cancel-safe.
 #[derive(Debug)]
-pub struct Stream(Half);
+pub struct Stream {
+	half: Half,
+	/// Holds the waiter of an [`AsyncWrite`](tokio::io::AsyncWrite) write across polls
+	park: kio::Park,
+}
 
 /// A stream [`Stream::finish`]ed, which keeps (re)transmitting its data until the peer
 /// acknowledges all of it or the connection closes
@@ -45,8 +49,7 @@ pub struct Finished(Half);
 /// What [`Stream`] and [`Finished`] share.
 #[derive(Debug)]
 struct Half {
-	conn: ConnectionRef,
-	id: stream::Id,
+	stream: Arc<StreamRef>,
 	state: HalfState,
 }
 
@@ -59,13 +62,32 @@ enum HalfState {
 	Reset,
 }
 
+/// The stream's ID, shared by its [`Half`] and the `stopped` futures, which may outlive it
+///
+/// moq-quic forgets how a stream ended once its ID is released, so the last of them to drop
+/// releases it.
+#[derive(Debug)]
+struct StreamRef {
+	conn: ConnectionRef,
+	id: stream::Id,
+	/// What a local reset settled for `stopped`: the peer's code if its stop arrived first, or
+	/// `None`. moq-quic still records a stop that arrives after the reset, which no longer counts.
+	reset: OnceLock<Option<VarInt>>,
+}
+
 impl Stream {
 	pub(crate) fn new(conn: ConnectionRef, id: stream::Id) -> Self {
-		Self(Half {
-			conn,
-			id,
-			state: HalfState::Open(None, VarInt::from_u32(0)),
-		})
+		Self {
+			half: Half {
+				stream: Arc::new(StreamRef {
+					conn,
+					id,
+					reset: OnceLock::new(),
+				}),
+				state: HalfState::Open(None, VarInt::from_u32(0)),
+			},
+			park: kio::Park::default(),
+		}
 	}
 
 	/// Write from `buf` into this stream, returning how many bytes were written
@@ -79,7 +101,7 @@ impl Stream {
 	///
 	/// This method is cancellation safe. If this does not resolve, no bytes were written.
 	pub async fn write(&mut self, buf: &mut impl Buf) -> Result<usize, Error> {
-		poll_fn(|cx| self.poll_write(cx, buf)).await
+		kio::wait(|waiter| self.half.poll_write(waiter, buf)).await
 	}
 
 	/// Write all of `buf` into this stream
@@ -95,36 +117,13 @@ impl Stream {
 		Ok(())
 	}
 
-	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &mut impl Buf) -> Poll<Result<usize, Error>> {
-		assert!(
-			matches!(self.0.state, HalfState::Open(..)),
-			"wrote to a stream after shutting it down"
-		);
-		let mut conn = self.0.conn.state.lock();
-		if let Some(x) = &conn.error {
-			return Poll::Ready(Err(Error::Connection(x.clone())));
-		}
-		match conn.inner.send_stream(self.0.id).write(buf) {
-			Ok(written) => {
-				conn.wake();
-				Poll::Ready(Ok(written))
-			}
-			Err(moq_quic::send::Error::Blocked) => {
-				conn.blocked_writers.insert(self.0.id, cx.waker().clone());
-				Poll::Pending
-			}
-			Err(moq_quic::send::Error::Stopped(code)) => Poll::Ready(Err(Error::Stopped(code))),
-			Err(err) => unreachable!("an open stream failed to write: {err:?}"),
-		}
-	}
-
 	/// Notify the peer that no more data will ever be written to this stream
 	///
 	/// [`Finished::stopped()`] waits for the peer to receive all of it, or learns that it
 	/// stopped the stream first.
 	pub fn finish(mut self) -> Finished {
-		self.0.finish();
-		Finished(self.0)
+		self.half.finish();
+		Finished(self.half)
 	}
 
 	/// Close the send stream immediately
@@ -132,7 +131,7 @@ impl Stream {
 	/// Locally buffered data is dropped, and previously transmitted data will no longer be
 	/// retransmitted if lost.
 	pub fn reset(mut self, error_code: VarInt) {
-		self.0.reset(None, error_code);
+		self.half.reset(None, error_code);
 	}
 
 	/// Close the send stream immediately, but still deliver the data before `offset`
@@ -145,16 +144,17 @@ impl Stream {
 	/// # Panics
 	/// - when `offset` came from another stream
 	pub fn reset_at(mut self, offset: Offset, error_code: VarInt) {
-		self.0.reset(Some(offset), error_code);
+		self.half.reset(Some(offset), error_code);
 	}
 
 	/// The offset just past the data written so far
 	pub fn offset(&self) -> Offset {
-		let mut conn = self.0.conn.state.lock();
+		let stream = &self.half.stream;
+		let mut conn = stream.conn.state.lock();
 		Offset {
-			inner: conn.inner.send_stream(self.0.id).offset(),
-			conn: self.0.conn.stable_id(),
-			id: self.0.id,
+			inner: conn.inner.send_stream(stream.id).offset(),
+			conn: stream.conn.stable_id(),
+			id: stream.id,
 		}
 	}
 
@@ -162,9 +162,9 @@ impl Stream {
 	#[cfg(feature = "quic")]
 	pub(crate) fn set_drop_reset(&mut self, offset: Option<Offset>, code: VarInt) {
 		if let Some(offset) = &offset {
-			self.0.own(offset);
+			self.half.own(offset);
 		}
-		self.0.state = HalfState::Open(offset, code);
+		self.half.state = HalfState::Open(offset, code);
 	}
 
 	/// Set the priority within the stream's send group, or session-wide when ungrouped
@@ -175,12 +175,12 @@ impl Stream {
 	/// transmitted. Using many different priority levels per connection may have a negative
 	/// impact on performance.
 	pub fn set_priority(&mut self, priority: i64) {
-		self.0.set_priority(priority);
+		self.half.set_priority(priority);
 	}
 
 	/// The priority of the send stream
 	pub fn priority(&self) -> i64 {
-		self.0.priority()
+		self.half.priority()
 	}
 
 	/// Move the stream into a send group, or with `None` back to the ungrouped streams, which
@@ -189,7 +189,7 @@ impl Stream {
 	/// # Panics
 	/// - when `group` belongs to another connection
 	pub fn set_group(&mut self, group: Option<&Group>) {
-		self.0.set_group(group);
+		self.half.set_group(group);
 	}
 
 	/// Completes when the peer stops the stream, or the stream ends otherwise
@@ -197,12 +197,12 @@ impl Stream {
 	/// See [`Finished::stopped()`]. A stream reset or dropped before the peer stopped it
 	/// resolves with `None`.
 	pub fn stopped(&self) -> impl Future<Output = Result<Option<VarInt>, Error>> + Send + Sync + 'static {
-		self.0.stopped()
+		self.half.stopped()
 	}
 
 	/// The identity of this stream
 	pub fn id(&self) -> stream::Id {
-		self.0.id
+		self.half.stream.id
 	}
 }
 
@@ -255,7 +255,7 @@ impl Finished {
 
 	/// The identity of this stream
 	pub fn id(&self) -> stream::Id {
-		self.0.id
+		self.0.stream.id
 	}
 }
 
@@ -264,15 +264,37 @@ impl Half {
 	/// there poisons the lock, so every handle's drop panics again and aborts the process.
 	fn own(&self, offset: &Offset) {
 		assert!(
-			offset.conn == self.conn.stable_id() && offset.id == self.id,
+			offset.conn == self.stream.conn.stable_id() && offset.id == self.stream.id,
 			"offset used on another stream"
 		);
 	}
 
+	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &mut impl Buf) -> Poll<Result<usize, Error>> {
+		assert!(
+			matches!(self.state, HalfState::Open(..)),
+			"wrote to a stream after shutting it down"
+		);
+		let mut conn = self.stream.conn.state.lock();
+		if let Some(x) = conn.error() {
+			return Poll::Ready(Err(Error::Connection(x)));
+		}
+		Poll::Ready(
+			match ready!(conn.inner.send_stream(self.stream.id).poll_write(waiter, buf)) {
+				Ok(written) => {
+					conn.wake();
+					Ok(written)
+				}
+				Err(moq_quic::send::Error::Stopped(code)) => Err(Error::Stopped(code)),
+				Err(moq_quic::send::Error::ConnectionLost) => Err(Error::Connection(conn.lost())),
+				Err(err) => unreachable!("an open stream failed to write: {err:?}"),
+			},
+		)
+	}
+
 	fn finish(&mut self) {
-		let mut conn = self.conn.state.lock();
+		let mut conn = self.stream.conn.state.lock();
 		// A STOP_SENDING may have beaten us here, which `stopped` reports.
-		if conn.inner.send_stream(self.id).finish().is_ok() {
+		if conn.inner.send_stream(self.stream.id).finish().is_ok() {
 			conn.wake();
 		}
 		self.state = HalfState::Finished;
@@ -283,8 +305,8 @@ impl Half {
 			self.own(offset);
 		}
 		self.state = HalfState::Reset;
-		let mut conn = self.conn.state.lock();
-		let mut stream = conn.inner.send_stream(self.id);
+		let mut conn = self.stream.conn.state.lock();
+		let mut stream = conn.inner.send_stream(self.stream.id);
 		let stopped = match stream.end() {
 			Ok(Some(End::Stopped(code))) => Some(code),
 			_ => None,
@@ -295,121 +317,97 @@ impl Half {
 		};
 		// Fails harmlessly once the connection is gone.
 		if reset.is_ok() {
-			conn.resolve_stopped(self.id, stopped);
+			let _ = self.stream.reset.set(stopped);
 			conn.wake();
 		}
 	}
 
 	fn set_priority(&mut self, priority: i64) {
-		let mut conn = self.conn.state.lock();
-		let _ = conn.inner.send_stream(self.id).set_priority(priority);
+		let mut conn = self.stream.conn.state.lock();
+		let _ = conn.inner.send_stream(self.stream.id).set_priority(priority);
 	}
 
 	fn priority(&self) -> i64 {
-		let mut conn = self.conn.state.lock();
-		conn.inner.send_stream(self.id).priority().unwrap_or_default()
+		let mut conn = self.stream.conn.state.lock();
+		conn.inner.send_stream(self.stream.id).priority().unwrap_or_default()
 	}
 
 	fn set_group(&mut self, group: Option<&Group>) {
-		let group = group.map(|group| group.id_on(&self.conn.0));
-		let mut conn = self.conn.state.lock();
-		let _ = conn.inner.send_stream(self.id).set_group(group);
+		let group = group.map(|group| group.id_on(&self.stream.conn.0));
+		let mut conn = self.stream.conn.state.lock();
+		let _ = conn.inner.send_stream(self.stream.id).set_group(group);
 	}
 
 	fn stopped(&self) -> impl Future<Output = Result<Option<VarInt>, Error>> + Send + Sync + 'static {
-		let conn = self.conn.clone();
-		let id = self.id;
-		// Join the waiters now rather than on the first poll, so a reset in between, which no
-		// stream event reports, still reaches this future.
-		let waiters = {
-			let mut conn = conn.state.lock();
-			match ended(&mut conn, id) {
-				Some(output) => Err(output),
-				None => Ok(conn.stopped.entry(id).or_default().clone()),
-			}
-		};
-		async move {
-			let mut waiters = match waiters {
-				Ok(waiters) => waiters,
-				Err(output) => return output,
-			};
-			loop {
-				// The `Notify::notified` future needs to be created while the lock is being held,
-				// otherwise a wakeup could be missed if triggered inbetween releasing the lock
-				// and creating the future.
-				// The lock may only be held in a block without `await`s, otherwise the future
-				// becomes `!Send`. `Notify::notified` is lifetime-bound to `Notify`, therefore
-				// we need to declare `waiters` outside of the block, and update it inside.
-				{
-					let mut conn = conn.state.lock();
-					if let Some(&stopped) = waiters.outcome.get() {
-						return Ok(stopped);
-					}
-					if let Some(output) = ended(&mut conn, id) {
-						return output;
-					}
-
-					// A wakeup that resolved nothing removed the waiters; join the current ones
-					waiters = conn.stopped.entry(id).or_default().clone();
-					waiters.notify.notified()
-				}
-				.await
-			}
-		}
+		// Holding the stream keeps its ID, and so how it ended, until this future drops.
+		let stream = self.stream.clone();
+		kio::wait(move |waiter| stream.poll_stopped(waiter))
 	}
 }
 
-/// How a send stream ended, or `None` while it goes on
-///
-/// A released stream's end is gone, but its handle settled the waiters when it let go.
-fn ended(conn: &mut State, id: stream::Id) -> Option<Result<Option<VarInt>, Error>> {
-	match conn.inner.send_stream(id).end() {
-		Ok(Some(End::Stopped(code))) => Some(Ok(Some(code))),
-		Ok(Some(_)) => Some(Ok(None)),
-		Ok(None) | Err(_) => conn.error.clone().map(|error| Err(error.into())),
+impl StreamRef {
+	/// Wait for the peer to stop the stream, or for it to end otherwise
+	fn poll_stopped(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
+		let mut conn = self.conn.state.lock();
+		if let Some(&stopped) = self.reset.get() {
+			return Poll::Ready(Ok(stopped));
+		}
+		Poll::Ready(match ready!(conn.inner.send_stream(self.id).poll_end(waiter)) {
+			Ok(End::Stopped(code)) => Ok(Some(code)),
+			Ok(_) => Ok(None),
+			Err(moq_quic::send::Error::ConnectionLost) => Err(Error::Connection(conn.lost())),
+			// Only a released ID fails otherwise, which this stream holds until it drops.
+			Err(err) => unreachable!("a held send stream failed to end: {err:?}"),
+		})
+	}
+}
+
+impl Drop for StreamRef {
+	fn drop(&mut self) {
+		let mut conn = self.conn.state.lock();
+		conn.inner.send_stream(self.id).release();
 	}
 }
 
 impl Drop for Half {
 	fn drop(&mut self) {
-		let mut conn = self.conn.state.lock();
-
-		// clean up any previously registered wakers
-		conn.blocked_writers.remove(&self.id);
-
-		if conn.error.is_none() {
-			let mut stream = conn.inner.send_stream(self.id);
-			let stopped = match stream.end() {
-				Ok(Some(End::Stopped(code))) => Some(code),
-				_ => None,
-			};
-			let reset = match (&self.state, stopped) {
-				(HalfState::Reset, _) => None,
-				// Echo the code, as RFC 9000 section 3.5 asks, even after `finish`: the peer reads
-				// nothing more, so retransmitting the rest is wasted.
-				(_, Some(code)) => Some(stream.reset(code)),
-				(HalfState::Finished, None) => None,
-				(HalfState::Open(offset, code), None) => Some(match offset {
-					Some(offset) => stream.reset_at(offset.inner, *code),
-					None => stream.reset(*code),
-				}),
-			};
-			if reset.is_some_and(|reset| reset.is_ok()) {
-				conn.resolve_stopped(self.id, stopped);
-				conn.wake();
-			}
+		let mut conn = self.stream.conn.state.lock();
+		if conn.is_lost() {
+			return;
 		}
-		conn.inner.send_stream(self.id).release();
+		let mut stream = conn.inner.send_stream(self.stream.id);
+		let stopped = match stream.end() {
+			Ok(Some(End::Stopped(code))) => Some(code),
+			_ => None,
+		};
+		let reset = match (&self.state, stopped) {
+			(HalfState::Reset, _) => None,
+			// Echo the code, as RFC 9000 section 3.5 asks, even after `finish`: the peer reads
+			// nothing more, so retransmitting the rest is wasted.
+			(_, Some(code)) => Some(stream.reset(code)),
+			(HalfState::Finished, None) => None,
+			(HalfState::Open(offset, code), None) => Some(match offset {
+				Some(offset) => stream.reset_at(offset.inner, *code),
+				None => stream.reset(*code),
+			}),
+		};
+		if reset.is_some_and(|reset| reset.is_ok()) {
+			let _ = self.stream.reset.set(stopped);
+			conn.wake();
+		}
+		// `stream` releases the ID once this and every `stopped` future dropped it, after the
+		// lock here is let go.
 	}
 }
 
 impl tokio::io::AsyncWrite for Stream {
 	fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, mut buf: &[u8]) -> Poll<io::Result<usize>> {
 		let this = self.get_mut();
-		if !matches!(this.0.state, HalfState::Open(..)) {
+		if !matches!(this.half.state, HalfState::Open(..)) {
 			return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
 		}
-		this.poll_write(cx, &mut buf).map_err(Into::into)
+		let waiter = this.park.hold(cx);
+		this.half.poll_write(waiter, &mut buf).map_err(Into::into)
 	}
 
 	fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -418,8 +416,8 @@ impl tokio::io::AsyncWrite for Stream {
 
 	fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
 		let this = self.get_mut();
-		if matches!(this.0.state, HalfState::Open(..)) {
-			this.0.finish();
+		if matches!(this.half.state, HalfState::Open(..)) {
+			this.half.finish();
 		}
 		Poll::Ready(Ok(()))
 	}

@@ -4,11 +4,11 @@
 //! records over the transport. A writer task drains [`mux::Connection::poll_transmit`]
 //! into the transport and runs the timers, and a reader task feeds each received record
 //! back in. The handles call straight into the connection under its lock and park on the
-//! per-stream waiter lists the tasks wake, the way the QUIC drivers do.
+//! connection's own waiter lists, which it wakes as the tasks feed it.
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::Poll;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 use bytes::{Buf, Bytes};
@@ -18,7 +18,6 @@ use moq_quic::stream::{Dir, Id as StreamId};
 use moq_quic::{
 	Side, TransportError, TransportErrorCode, VarInt, connection::Error as ConnectionError, mux, recv, send,
 };
-use rustc_hash::FxHashMap;
 
 use crate::transport::{Reader, Transport, Writer};
 use crate::{Config, Error, SharedSocketStats};
@@ -45,25 +44,13 @@ struct State {
 	/// Wakes the writer; handles kick it after mutating the connection so fresh egress
 	/// reaches the transport.
 	driver: kio::WaiterList,
-	/// Wakes the reader once the connection ends, so it stops reading.
-	reader: kio::WaiterList,
 
-	established: bool,
-	establish_waiters: kio::WaiterList,
-	accept_bi_waiters: kio::WaiterList,
-	accept_uni_waiters: kio::WaiterList,
-	/// Whoever is blocked on the peer's MAX_STREAMS credit.
-	open_waiters: kio::WaiterList,
-
-	/// Per-stream read/write parking, keyed by stream id.
-	readable: FxHashMap<StreamId, kio::WaiterList>,
-	writable: FxHashMap<StreamId, kio::WaiterList>,
-	/// Send streams waiting for their end: a FIN serialized, or a `STOP_SENDING`.
-	finishing: FxHashMap<StreamId, kio::WaiterList>,
-
-	datagram_waiters: kio::WaiterList,
-
-	/// The terminal error, set exactly once; everything fails with it after.
+	/// The terminal error, set exactly once. Handles report it in place of the connection's
+	/// own reason once it is set, since it can say more (the transport's I/O error, say).
+	///
+	/// The connection's `poll_closed` resolves the moment it is closed, but a close this side
+	/// asked for is published here only once the writer delivered it (see `local_close`), so
+	/// [`Session`]'s `poll_closed` keeps this latch and its own list.
 	closed: Option<Error>,
 	closed_waiters: kio::WaiterList,
 	/// The error for a close this side asked for, published once the writer has delivered
@@ -76,88 +63,48 @@ struct State {
 }
 
 impl State {
-	/// Terminate with `err` (the first one wins) and wake absolutely everyone.
+	/// Terminate with `err` (the first one wins), waking the writer and whoever waits on the
+	/// session's `poll_closed`.
+	///
+	/// Every caller loses the connection under the same lock, which wakes everyone parked on
+	/// it.
 	fn fail(&mut self, err: Error) {
 		if self.closed.is_some() {
 			return;
 		}
 		self.closed = Some(err);
 		self.driver.wake();
-		self.reader.wake();
 		self.closed_waiters.wake();
-		self.establish_waiters.wake();
-		self.accept_bi_waiters.wake();
-		self.accept_uni_waiters.wake();
-		self.open_waiters.wake();
-		self.datagram_waiters.wake();
-		for waiters in self.readable.values_mut() {
-			waiters.wake();
+	}
+
+	/// Publish a loss the connection recorded since the last check: a remote close or a
+	/// violation fails the session now, while a close this side asked for waits for the writer
+	/// to deliver its frame.
+	///
+	/// Called after every call that can lose the connection: a record, a timeout, a close.
+	fn check_lost(&mut self) {
+		if self.closed.is_some() || self.local_close.is_some() {
+			return;
 		}
-		for waiters in self.writable.values_mut() {
-			waiters.wake();
-		}
-		for waiters in self.finishing.values_mut() {
-			waiters.wake();
+		let Some(reason) = self.conn.error() else {
+			return;
+		};
+		let local = matches!(reason, ConnectionError::LocallyClosed { .. });
+		let err = Error::lost(reason.clone());
+		match local {
+			// The writer publishes a local close once its frame is out.
+			true => self.local_close = Some(err),
+			false => self.fail(err),
 		}
 	}
 
-	/// Apply every pending connection event to the parking tables.
-	fn sweep(&mut self) {
-		while let Some(event) = self.conn.poll() {
-			match event {
-				mux::Event::Connected => {
-					self.established = true;
-					self.establish_waiters.wake();
-				}
-				mux::Event::Stream(event) => self.sweep_stream(event),
-				mux::Event::DatagramReceived => self.datagram_waiters.wake(),
-				mux::Event::ConnectionLost { reason } => {
-					self.reader.wake();
-					let local = matches!(reason, ConnectionError::LocallyClosed { .. });
-					let err = Error::lost(reason);
-					match local {
-						// The writer publishes a local close once its frame is out.
-						true => self.local_close = Some(err),
-						false => self.fail(err),
-					}
-				}
-			}
+	/// What a handle reports once the connection is lost: the session's terminal error, or
+	/// why the connection ended while a local close is still being delivered.
+	fn lost(&self) -> Error {
+		if let Some(err) = &self.closed {
+			return err.clone();
 		}
-	}
-
-	fn sweep_stream(&mut self, event: moq_quic::StreamEvent) {
-		use moq_quic::StreamEvent;
-
-		// Waking removes the entry: a still-interested poller re-registers on its next poll,
-		// so the maps only hold streams somebody is parked on.
-		match event {
-			StreamEvent::Opened { dir: Dir::Bi } => self.accept_bi_waiters.wake(),
-			StreamEvent::Opened { dir: Dir::Uni } => self.accept_uni_waiters.wake(),
-			StreamEvent::Available { .. } => self.open_waiters.wake(),
-			StreamEvent::Readable { id } => wake(&mut self.readable, id),
-			StreamEvent::Writable { id } => wake(&mut self.writable, id),
-			StreamEvent::Finished { id } => wake(&mut self.finishing, id),
-			StreamEvent::Stopped { id, .. } => {
-				wake(&mut self.finishing, id);
-				// A writer blocked on capacity has to learn it will never come.
-				wake(&mut self.writable, id);
-			}
-			// Nothing waits on a send stream's acknowledgment yet.
-			StreamEvent::Acked { .. } => {}
-		}
-	}
-
-	/// Drop send stream `id`'s bookkeeping, parking and its end included.
-	fn forget_send(&mut self, id: StreamId) {
-		self.finishing.remove(&id);
-		self.writable.remove(&id);
-		self.conn.send_stream(id).release();
-	}
-}
-
-fn wake(lists: &mut FxHashMap<StreamId, kio::WaiterList>, id: StreamId) {
-	if let Some(mut waiters) = lists.remove(&id) {
-		waiters.wake();
+		self.conn.error().cloned().map_or(Error::Closed, Error::lost)
 	}
 }
 
@@ -172,13 +119,14 @@ impl Inner {
 		if state.closed.is_some() || state.conn.is_closed() {
 			return;
 		}
+		// Closing wakes everyone parked on the connection, the reader included: a closing
+		// connection ignores whatever else the peer sends.
 		state
 			.conn
 			.close(VarInt::from_u64(code).unwrap_or(VarInt::MAX), reason.to_string());
-		state.sweep();
+		state.check_lost();
+		// The writer delivers the close, and a stalled one starts its close bound.
 		state.driver.wake();
-		// A closing connection ignores whatever else the peer sends.
-		state.reader.wake();
 	}
 
 	/// Gather the next records to write, running the timers while there are none, or `None`
@@ -202,7 +150,7 @@ impl Inner {
 				size += record.len();
 				batch.push(record);
 			}
-			state.sweep();
+			state.check_lost();
 			if !batch.is_empty() {
 				return Poll::Ready(Some(batch));
 			}
@@ -235,7 +183,7 @@ impl Inner {
 			}
 			if state.conn.poll_timeout().is_some_and(|at| now >= at) {
 				state.conn.handle_timeout(now);
-				state.sweep();
+				state.check_lost();
 			}
 			let deadline = match (state.conn.poll_timeout(), timer.closing) {
 				(Some(a), Some(b)) => Some(a.min(b)),
@@ -249,17 +197,14 @@ impl Inner {
 
 	/// Resolve once the connection ended, which is when the reader stops.
 	fn poll_ended(&self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut state = self.lock();
-		if state.conn.is_closed() || state.closed.is_some() {
-			return Poll::Ready(());
-		}
-		waiter.register(&mut state.reader);
-		Poll::Pending
+		// The session only fails once the connection is lost, so this covers that too.
+		self.lock().conn.poll_closed(waiter).map(drop)
 	}
 
 	/// The writer stopped: publish a local close, or the failure that stopped it.
 	fn writer_done(&self, result: Result<(), Error>) {
 		let mut state = self.lock();
+		state.check_lost();
 		if let Some(err) = state.local_close.take() {
 			state.fail(err);
 		}
@@ -267,7 +212,6 @@ impl Inner {
 			state.fail(err);
 		}
 		state.conn.transport_closed();
-		state.sweep();
 		// A drained connection ended with a close from either side, already published; this
 		// only lands when the transport died under a live one.
 		state.fail(Error::Closed);
@@ -406,7 +350,7 @@ async fn run_reader<R: Reader>(inner: Arc<Inner>, mut reader: R) {
 				state.conn.transport_closed();
 			}
 		}
-		state.sweep();
+		state.check_lost();
 		state.driver.wake();
 	}
 }
@@ -464,16 +408,6 @@ impl Session {
 			state: Mutex::new(State {
 				conn,
 				driver: kio::WaiterList::new(),
-				reader: kio::WaiterList::new(),
-				established: false,
-				establish_waiters: kio::WaiterList::new(),
-				accept_bi_waiters: kio::WaiterList::new(),
-				accept_uni_waiters: kio::WaiterList::new(),
-				open_waiters: kio::WaiterList::new(),
-				readable: FxHashMap::default(),
-				writable: FxHashMap::default(),
-				finishing: FxHashMap::default(),
-				datagram_waiters: kio::WaiterList::new(),
 				closed: None,
 				closed_waiters: kio::WaiterList::new(),
 				local_close: None,
@@ -503,14 +437,7 @@ impl Session {
 		let inner = self.inner.clone();
 		kio::wait(|waiter| {
 			let mut state = inner.lock();
-			if state.established {
-				return Poll::Ready(Ok(()));
-			}
-			if let Some(err) = &state.closed {
-				return Poll::Ready(Err(err.clone()));
-			}
-			waiter.register(&mut state.establish_waiters);
-			Poll::Pending
+			state.conn.poll_connected(waiter).map_err(|_| state.lost())
 		})
 		.await?;
 		if self.protocol.is_none() {
@@ -543,17 +470,7 @@ impl Session {
 
 	fn poll_accept_dir(&self, waiter: &kio::Waiter, dir: Dir) -> Poll<Result<StreamId, Error>> {
 		let mut state = self.inner.lock();
-		if let Some(id) = state.conn.streams().accept(dir) {
-			return Poll::Ready(Ok(id));
-		}
-		if let Some(err) = &state.closed {
-			return Poll::Ready(Err(err.clone()));
-		}
-		match dir {
-			Dir::Bi => waiter.register(&mut state.accept_bi_waiters),
-			Dir::Uni => waiter.register(&mut state.accept_uni_waiters),
-		}
-		Poll::Pending
+		state.conn.streams().poll_accept(waiter, dir).map_err(|_| state.lost())
 	}
 
 	fn poll_open_dir(
@@ -563,17 +480,10 @@ impl Session {
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<StreamId, Error>> {
 		let mut state = self.inner.lock();
-		if let Some(err) = &state.closed {
-			return Poll::Ready(Err(err.clone()));
-		}
-		// The peer's MAX_STREAMS credit is what gates us: `open` hands back nothing while it
-		// is spent.
-		if let Some(id) = state.conn.streams().open(dir, to_quic(options)) {
-			state.driver.wake();
-			return Poll::Ready(Ok(id));
-		}
-		waiter.register(&mut state.open_waiters);
-		Poll::Pending
+		// The peer's MAX_STREAMS credit is what gates us: this parks while it is spent.
+		let id = ready!(state.conn.streams().poll_open(waiter, dir, to_quic(options))).map_err(|_| state.lost())?;
+		state.driver.wake();
+		Poll::Ready(Ok(id))
 	}
 }
 
@@ -640,15 +550,12 @@ impl poll::Session for Session {
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
 		let mut state = self.inner.lock();
-		if let Some(err) = &state.closed {
-			return Poll::Ready(Err(err.clone()));
+		if state.conn.is_closed() {
+			return Poll::Ready(Err(state.lost()));
 		}
 		// A session started on an out-of-band protocol (a WebSocket subprotocol) runs before
 		// the peer's transport parameters arrive. Until then its credit is unknown, not spent.
-		if !state.established {
-			waiter.register(&mut state.establish_waiters);
-			return Poll::Pending;
-		}
+		ready!(state.conn.poll_connected(waiter)).map_err(|_| state.lost())?;
 		let id = state.conn.streams().open(Dir::Bi, to_quic(options));
 		if id.is_some() {
 			state.driver.wake();
@@ -682,14 +589,7 @@ impl poll::Session for Session {
 
 	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
 		let mut state = self.inner.lock();
-		if let Some(datagram) = state.conn.datagrams().recv() {
-			return Poll::Ready(Ok(datagram));
-		}
-		if let Some(err) = &state.closed {
-			return Poll::Ready(Err(err.clone()));
-		}
-		waiter.register(&mut state.datagram_waiters);
-		Poll::Pending
+		state.conn.datagrams().poll_recv(waiter).map_err(|_| state.lost())
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -839,20 +739,14 @@ impl poll::SendStream for SendStream {
 			return Poll::Ready(Err(Error::StreamClosed));
 		}
 		let mut state = self.inner.lock();
-		if let Some(err) = &state.closed {
-			return Poll::Ready(Err(err.clone()));
-		}
 		// Takes only what the connection accepts, which for a `Bytes` source is no copy at all.
-		match state.conn.send_stream(self.id).write(buf) {
+		match ready!(state.conn.send_stream(self.id).poll_write(waiter, buf)) {
 			Ok(n) => {
 				state.driver.wake();
 				Poll::Ready(Ok(n))
 			}
-			Err(send::Error::Blocked) => {
-				waiter.register(state.writable.entry(self.id).or_default());
-				Poll::Pending
-			}
 			Err(send::Error::Stopped(code)) => Poll::Ready(Err(Error::StreamStop(code.into_inner()))),
+			Err(send::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
 			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
 		}
 	}
@@ -875,7 +769,7 @@ impl poll::SendStream for SendStream {
 		match state.conn.send_stream(self.id).finish() {
 			Ok(()) => {}
 			// A STOP_SENDING beat us here; carry its code like `poll_write` does. The stream is
-			// over without our reset, so `poll_closed` reports the stop the sweep recorded.
+			// over without our reset, so `poll_closed` reports the stop the connection recorded.
 			Err(send::Error::Stopped(code)) => {
 				self.fin = true;
 				return Err(Error::StreamStop(code.into_inner()));
@@ -899,18 +793,14 @@ impl poll::SendStream for SendStream {
 		let mut state = self.inner.lock();
 		// A finish is acknowledged once its FIN goes to the transport, which on a reliable
 		// transport is delivery.
-		match state.conn.send_stream(self.id).end() {
-			Ok(Some(send::End::Stopped(code))) => Poll::Ready(Err(Error::StreamStop(code.into_inner()))),
-			Ok(Some(_)) => Poll::Ready(Ok(())),
+		match ready!(state.conn.send_stream(self.id).poll_end(waiter)) {
+			Ok(send::End::Stopped(code)) => Poll::Ready(Err(Error::StreamStop(code.into_inner()))),
+			Ok(_) => Poll::Ready(Ok(())),
 			// The end never came. If the session died first, the caller cannot read success
 			// as "every byte arrived".
-			Ok(None) | Err(_) => match &state.closed {
-				Some(err) => Poll::Ready(Err(err.clone())),
-				None => {
-					waiter.register(state.finishing.entry(self.id).or_default());
-					Poll::Pending
-				}
-			},
+			Err(send::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
+			// The ID is only released on drop, so this does not happen.
+			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
 		}
 	}
 }
@@ -923,7 +813,7 @@ impl Drop for SendStream {
 			let _ = state.conn.send_stream(self.id).reset(VarInt::from_u32(0));
 			state.driver.wake();
 		}
-		state.forget_send(self.id);
+		state.conn.send_stream(self.id).release();
 	}
 }
 
@@ -931,18 +821,6 @@ impl std::fmt::Debug for SendStream {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("SendStream").field("id", &self.id).finish()
 	}
-}
-
-/// One read out of the connection's reassembly buffer.
-enum Read {
-	/// Bytes, at most as many as were asked for.
-	Chunk(Bytes),
-	/// Every byte up to the FIN has been handed over.
-	Finished,
-	/// Nothing buffered; the reader wakes us when that changes.
-	Blocked,
-	/// The peer reset the stream with this code.
-	Reset(u64),
 }
 
 /// An incoming stream. Dropping it unfinished sends STOP_SENDING with code 0.
@@ -1013,23 +891,20 @@ impl poll::Chunks for RecvChunks {
 			return Poll::Ready(Ok(None));
 		}
 		let mut state = self.inner.lock();
-		match read(&mut state, self.id, max) {
-			Read::Chunk(bytes) => Poll::Ready(Ok(Some(bytes))),
-			Read::Finished => {
+		match ready!(poll_read(&mut state, waiter, self.id, max)) {
+			Ok(Some(bytes)) => Poll::Ready(Ok(Some(bytes))),
+			Ok(None) => {
 				self.finished = true;
 				Poll::Ready(Ok(None))
 			}
-			Read::Blocked => {
-				if let Some(err) = &state.closed {
-					return Poll::Ready(Err(err.clone()));
-				}
-				waiter.register(state.readable.entry(self.id).or_default());
-				Poll::Pending
-			}
-			Read::Reset(code) => {
+			Err(recv::Error::Reset(code)) => {
+				let code = code.into_inner();
 				self.reset = Some(code);
 				Poll::Ready(Err(Error::StreamReset(code)))
 			}
+			// Only once everything that arrived before the loss was read.
+			Err(recv::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
+			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
 		}
 	}
 
@@ -1045,34 +920,32 @@ impl poll::Chunks for RecvChunks {
 	}
 }
 
-/// Take up to `max` bytes out of the reassembly buffer.
+/// Take up to `max` bytes out of the reassembly buffer, or wait for more, returning `None`
+/// once every byte up to the FIN has been handed over.
 ///
 /// Reading is what returns the peer's flow control credit, so a read that owes it a frame
 /// kicks the writer.
-fn read(state: &mut State, id: StreamId, max: usize) -> Read {
+fn poll_read(
+	state: &mut State,
+	waiter: &kio::Waiter,
+	id: StreamId,
+	max: usize,
+) -> Poll<Result<Option<Bytes>, recv::Error>> {
 	let mut recv = state.conn.recv_stream(id);
-	let mut chunks = match recv.read() {
-		Ok(chunks) => chunks,
+	let Ok(mut chunks) = recv.read() else {
 		// The stream is gone, so everything it held is already ours.
-		Err(_) => return Read::Finished,
+		return Poll::Ready(Ok(None));
 	};
-	let read = match chunks.next(max) {
-		Ok(Some(chunk)) => Read::Chunk(chunk.bytes),
-		Ok(None) => Read::Finished,
-		Err(recv::Error::Reset(code)) => Read::Reset(code.into_inner()),
-		// Blocked, or the connection closed, which the caller reports.
-		Err(_) => Read::Blocked,
-	};
+	let read = chunks.poll_next(waiter, max);
 	if chunks.finalize().should_transmit() {
 		state.driver.wake();
 	}
-	read
+	read.map_ok(|chunk| chunk.map(|chunk| chunk.bytes))
 }
 
 impl Drop for RecvChunks {
 	fn drop(&mut self) {
 		let mut state = self.inner.lock();
-		state.readable.remove(&self.id);
 		if !self.finished && !self.stopped && self.reset.is_none() {
 			let _ = state.conn.recv_stream(self.id).stop(VarInt::from_u32(0));
 			state.driver.wake();
