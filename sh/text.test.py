@@ -21,7 +21,7 @@ class TextTests(unittest.TestCase):
         self.repo = Path(self.temp.name)
         (self.repo / "sh").mkdir()
         shutil.copy(ROOT / "sh/text.sh", self.repo / "sh/text.sh")
-        self.env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        self.env = dict(os.environ, LC_ALL="C", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "test")
         self.git("config", "user.email", "test@example.com")
