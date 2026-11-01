@@ -1,6 +1,6 @@
 /** Sweep cached-group replay to joining subscribers, and arrivals into unread backlogs. */
 import { Manual } from "@moq/clock";
-import { type Group, Track } from "@moq/net";
+import { Track } from "@moq/net";
 
 type Order = "monotonic" | "reverse" | "mixed";
 const ORDERS: Order[] = ["monotonic", "reverse", "mixed"];
@@ -39,7 +39,7 @@ function publish(track: Track.Producer, sequence: number): void {
 // Read everything a subscriber buffered, requiring every sequence exactly once, ascending.
 function drain(subscriber: Track.Subscriber, count: number): void {
 	let next = 0;
-	for (let group: Group.Consumer | undefined; (group = subscriber.tryRecvGroup()); next++) {
+	for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup(), next++) {
 		if (group.sequence !== next) throw new Error(`group ${group.sequence} delivered, expected ${next}`);
 		const payload = group.tryReadFrame()?.payload;
 		if (payload?.byteLength !== PAYLOAD || new DataView(payload.buffer, payload.byteOffset).getUint32(0) !== next)
@@ -124,7 +124,9 @@ export function run(): void {
 				counts = counted(() => ops((op) => op()));
 			});
 			if (!counts) throw new Error("shape was not counted");
-			console.log(`${groups},${kind},${order},${subscribers},${counts.sorts},${counts.elements},${counts.compares}`);
+			console.log(
+				`${groups},${kind},${order},${subscribers},${counts.sorts},${counts.elements},${counts.compares}`,
+			);
 		}
 
 		console.log("groups,kind,order,subscribers,us_per_op,max_us");
