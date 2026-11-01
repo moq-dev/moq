@@ -15,6 +15,7 @@ mod reconnect;
 mod reset_secret;
 mod runtime;
 mod scream;
+mod sim;
 mod stream_code;
 mod subscription_end_integrity;
 mod tokens;
