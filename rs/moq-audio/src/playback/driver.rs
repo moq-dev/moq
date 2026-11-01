@@ -5,7 +5,7 @@
 //! the hot path; they register themselves in [`Shared`] and hand their consumer
 //! straight to the mixer.
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 #[cfg(feature = "aec")]
@@ -955,7 +955,7 @@ impl Driver {
 	/// Jittered so a host running many streams doesn't reopen the device in lockstep after a
 	/// suspend or a driver reload.
 	fn schedule(&mut self) -> Instant {
-		let wait = self.retry.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+		let wait = self.retry.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
 		self.retry = (self.retry * 2).min(RETRY_MAX);
 		Instant::now() + wait
 	}

@@ -17,10 +17,11 @@ Decided with the maintainer on 2026-10-25, replacing the m2 runtime trait
 - **Poll everywhere, no spawn.** A spawn trait keeps `'static` detached tasks
   in the library, which poll-first rejects; `kio::Tasks` already gives a
   library structured children with no runtime. Time is
-  [kio::clock](/quest/m1/kio-clock.md), so nothing is left for a runtime trait.
+  `kio::clock`, so nothing is left for a runtime trait.
   `rs/AGENTS.md` already treats `tokio::spawn` in a library as a smell.
 - **No I/O seam.** I/O stays at moq-net's `transport::poll` traits and
-  moq-sock (see kio::clock's Plan).
+  moq-sock: tokio's readiness model and io_uring's completion model (the
+  kernel owns the buffer) can't share a zero-cost API.
 - **Blocking work is out of scope.** OS threads for blocking capture, encode,
   or file I/O are not async tasks and stay.
 
@@ -31,10 +32,6 @@ the PR.
 Public API: constructors that spawned return a handle to poll or await
 instead. The PR's Impact section describes migration for the published crates whose API changes. Wire:
 none.
-
-## Required
-
-- [moq-clock moves into kio::clock](/quest/m1/kio-clock.md) - the clock backend this rewrites, in its final place
 
 ## Related
 
