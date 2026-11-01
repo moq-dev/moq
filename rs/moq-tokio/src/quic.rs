@@ -176,7 +176,7 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub idle_timeout: Option<crate::cli::Duration>,
 
-	/// Keep-alive ping interval; set `0s` to disable. Defaults to under a third of
+	/// Keep-alive ping interval; `0s` uses the default. Defaults to under a third of
 	/// the idle timeout both ends settle on (3s against the 10s default), so changing
 	/// the idle timeout needs no matching change here.
 	///
@@ -184,7 +184,7 @@ pub struct Config {
 	/// shorter than the negotiated idle timeout could never keep the connection up,
 	/// so it is capped at the derived interval.
 	///
-	/// `None` uses the default; zero disables this duration.
+	/// `None` and zero both use the default.
 	#[usage(
 		name = "quic-keep-alive",
 		long = "quic-keep-alive",
@@ -631,8 +631,7 @@ pub struct Resolved {
 	pub gso: Option<bool>,
 	/// Idle timeout.
 	pub idle_timeout: Duration,
-	/// Keep-alive interval, `None` to derive it from the negotiated idle timeout, or
-	/// zero when disabled.
+	/// Keep-alive interval, `None` or zero to derive it from the negotiated idle timeout.
 	///
 	/// Unset by default, since the interval depends on the peer's idle timeout;
 	/// [`keep_alive_interval`](Self::keep_alive_interval) is what it comes to
@@ -679,9 +678,9 @@ impl Resolved {
 	}
 
 	/// The keep-alive interval against a peer whose idle timeout is no shorter than
-	/// ours, or `None` when there is none.
+	/// ours, using moq-quic's 30s default (a 9s interval) when neither peer sets one.
 	#[cfg(feature = "_transport")]
-	pub fn keep_alive_interval(&self) -> Option<Duration> {
+	pub fn keep_alive_interval(&self) -> Duration {
 		let idle_timeout = (!self.idle_timeout.is_zero()).then_some(self.idle_timeout);
 		moq_quic::transport::keep_alive_interval(self.keep_alive, idle_timeout)
 	}
@@ -758,19 +757,13 @@ mod tests {
 			.resolve()
 			.keep_alive_interval()
 		};
-		assert_eq!(Resolved::default().keep_alive_interval(), Some(Duration::from_secs(3)));
-		assert_eq!(interval(30, None), Some(Duration::from_secs(9)));
-		assert_eq!(interval(0, None), None);
-		assert_eq!(interval(10, Some(Duration::ZERO)), None);
-		assert_eq!(interval(10, Some(Duration::from_secs(5))), Some(Duration::from_secs(5)));
-		assert_eq!(
-			interval(10, Some(Duration::from_secs(20))),
-			Some(Duration::from_secs(3))
-		);
-		assert_eq!(
-			interval(0, Some(Duration::from_secs(20))),
-			Some(Duration::from_secs(20))
-		);
+		assert_eq!(Resolved::default().keep_alive_interval(), Duration::from_secs(3));
+		assert_eq!(interval(30, None), Duration::from_secs(9));
+		assert_eq!(interval(0, None), Duration::from_secs(9));
+		assert_eq!(interval(10, Some(Duration::ZERO)), Duration::from_secs(3));
+		assert_eq!(interval(10, Some(Duration::from_secs(5))), Duration::from_secs(5));
+		assert_eq!(interval(10, Some(Duration::from_secs(20))), Duration::from_secs(3));
+		assert_eq!(interval(0, Some(Duration::from_secs(20))), Duration::from_secs(20));
 	}
 
 	#[test]

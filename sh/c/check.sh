@@ -25,6 +25,12 @@ fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../../c"
 
+# A source build checks formatting first; the release jobs that pass an input
+# check a build of sources already gated.
+if [[ -z "$archive" && -z "$ffi_dir" ]]; then
+    bash ../sh/clang-format.sh --check c
+fi
+
 # Single-config generators build Debug. Visual Studio ignores CMAKE_BUILD_TYPE and builds the
 # package with --config Release, since the Rust staticlib links the release CRT (/MD) either way.
 build=moq/build

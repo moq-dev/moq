@@ -220,9 +220,15 @@ pub struct Server {
 	/// From [`crate::listen::Config::resolved_timeout`].
 	timeout: Option<std::time::Duration>,
 	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
-	accept: FuturesUnordered<BoxFuture<'static, crate::Result<Request>>>,
+	/// Pending handshakes, each isolated: one panicking (`None`) must not end the listener.
+	/// Each is boxed before `isolate` wraps it, so a debug build never holds a
+	/// handshake's large state twice on the accept loop's stack.
+	accept: FuturesUnordered<BoxFuture<'static, Option<crate::Result<Request>>>>,
 	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 	streams: StreamListeners,
+	/// The `tls://` config another listener can serve, when a listen identity is loaded.
+	#[cfg(all(feature = "tcp", feature = "_certs"))]
+	tls_stream: Option<std::sync::Arc<rustls::ServerConfig>>,
 	#[cfg(feature = "quic")]
 	quic: Option<crate::quic::Server>,
 	#[cfg(feature = "websocket")]
@@ -386,6 +392,12 @@ impl Server {
 			unix_allow,
 		);
 
+		#[cfg(all(feature = "tcp", feature = "_certs"))]
+		let tls_stream = tls
+			.map(|tls| TcpTls::new(&config, &versions, tls))
+			.transpose()?
+			.map(|tls| tls.config);
+
 		let mut moq = moq_net::Server::new()
 			.with_versions(versions.clone())
 			.with_extensions(config.extensions)
@@ -409,6 +421,8 @@ impl Server {
 			timeout,
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			streams,
+			#[cfg(all(feature = "tcp", feature = "_certs"))]
+			tls_stream,
 			#[cfg(feature = "quic")]
 			quic,
 			#[cfg(feature = "websocket")]
@@ -419,9 +433,10 @@ impl Server {
 	/// Accept sessions until the listener stops, serving `origin` to each subscriber.
 	///
 	/// Spawns a task per session and logs (rather than propagates) per-session
-	/// errors, so one bad peer never tears down the listener. Returns on a fatal
-	/// bind failure, or once every listener has stopped; no process signal ends it,
-	/// so race it against your own ctrl-C future to stop on one. For per-session
+	/// errors, so one bad peer never tears down the listener. Only fails: on a bind
+	/// failure, or with the error [`Listener::accept`] reports once a listener dies.
+	/// No process signal ends it, so race it against your own ctrl-C future to stop
+	/// on one. For per-session
 	/// auth or routing, [`listen`](Self::listen) and drive [`Listener::accept`]
 	/// yourself instead.
 	pub async fn serve_publish(self, origin: moq_net::origin::Consumer) -> crate::Result<()> {
@@ -463,14 +478,26 @@ impl Server {
 		if let Ok(addr) = listener.local_addr() {
 			tracing::info!(%addr, "listening");
 		}
-		while let Some(request) = listener.accept().await {
+		loop {
+			let request = listener.accept().await?;
 			crate::runtime::spawn(crate::panic::isolate(async move {
 				if let Err(err) = serve_session(request).await {
 					tracing::warn!(%err, "session ended with error");
 				}
 			}));
 		}
-		Ok(())
+	}
+
+	/// Serve `tls://` on connections another listener accepts, such as an HTTPS
+	/// server that shares its port with it (see [`crate::tcp::TlsAcceptor`]).
+	///
+	/// `None` when this server loaded no listen TLS identity, as a stream-only
+	/// server without `--listen-tcp-tls` does not.
+	#[cfg(all(feature = "tcp", feature = "_certs"))]
+	pub fn tls_acceptor(&self) -> Option<crate::tcp::TlsAcceptor> {
+		let config = self.tls_stream.clone()?;
+		let server = self.moq.clone().with_versions(self.streams.versions.clone());
+		Some(crate::tcp::TlsAcceptor::new(config, server, self.timeout))
 	}
 
 	/// A live handle to the certificates this server is serving.
@@ -491,11 +518,10 @@ impl Server {
 	}
 
 	#[cfg(not(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix))))]
-	/// Returns the next partially established session: none, since no compiled
-	/// transport is one this server listens on (WebRTC sessions arrive through
-	/// [`Listener::accept_webrtc`]).
-	async fn accept_next(&mut self) -> Option<Request> {
-		None
+	/// Fails, since no compiled transport is one this server listens on (WebRTC
+	/// sessions arrive through [`Listener::accept_webrtc`]).
+	async fn accept_next(&mut self) -> crate::Result<Request> {
+		Err(Error::NoBackend("no listener to accept from"))
 	}
 
 	/// The accept-loop health of every listener this server owns that performs a real
@@ -582,7 +608,7 @@ impl Server {
 	/// The body of [`Listener::accept`]. Stream accept loops start here if
 	/// [`Server::bind`] left them stopped; [`Server::listen`] already started them.
 	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
-	async fn accept_next(&mut self) -> Option<Request> {
+	async fn accept_next(&mut self) -> crate::Result<Request> {
 		// A `bind` (rather than `listen`) leaves the stream loops stopped so an
 		// embedder can read the port before it is willing to take sessions.
 		// Starting them here, on the first accept, is that moment.
@@ -638,20 +664,21 @@ impl Server {
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			let stream_accept = self.streams.recv();
 			#[cfg(not(any(feature = "tcp", all(feature = "uds", unix))))]
-			let stream_accept = std::future::ready(None::<Result<Request, tokio::task::JoinError>>);
+			let stream_accept = std::future::ready(None::<std::result::Result<Request, tokio::task::JoinError>>);
 
 			tokio::select! {
 				Some(request) = stream_accept => {
 					#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 					match request {
-						Ok(request) => return Some(request),
+						Ok(request) => return Ok(request),
 						// The process would keep its other listeners and silently drop
 						// this one, so stop accepting at all and let the owner fail loudly.
 						Err(err) => {
 							tracing::error!(%err, "a stream accept loop died");
 							self.shutdown().await;
 							if err.is_panic() { std::panic::resume_unwind(err.into_panic()); }
-							return None;
+							// Only an abort cancels a loop, and `shutdown` is the one that aborts.
+							return Err(Error::Stopped);
 						}
 					}
 					#[cfg(not(any(feature = "tcp", all(feature = "uds", unix))))]
@@ -663,8 +690,8 @@ impl Server {
 						// The process would keep its other listeners and silently drop
 						// QUIC, so stop accepting at all and let the owner fail loudly.
 						let Some(_conn) = _conn else {
-							tracing::error!("QUIC endpoint stopped accepting");
-							return None;
+							self.shutdown().await;
+							return Err(Error::Accept(Transport::Quic));
 						};
 						let alpns = versions.alpns();
 						let deadline = setup.deadline();
@@ -673,7 +700,7 @@ impl Server {
 							_conn.refuse();
 							continue;
 						};
-						self.accept.push(async move {
+						self.accept.push(crate::panic::isolate(async move {
 							// Accept the transport (capturing url + mTLS identity) and exchange the
 							// MoQ SETUP up front, so path/role are known before the caller authorizes
 							// (like the stream bindings).
@@ -686,7 +713,7 @@ impl Server {
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
 							Ok(Request { transport, url, identity, authority, link, handshake: Box::new(request), quic, deadline, active })
-						}.boxed());
+						}.boxed()).boxed());
 					}
 				}
 				Some(_pending) = ws_accept => {
@@ -702,25 +729,27 @@ impl Server {
 						let Some(active) = setup.activity.enter() else {
 							continue;
 						};
-						self.accept.push(async move {
+						self.accept.push(crate::panic::isolate(async move {
 							let (session, url, accepted) = within(deadline, _pending).await?;
 							let mut options = crate::websocket::Options::new(url, setup.server, active);
 							options.link = Link { remote: Some(accepted.remote), local, alpn: Some(accepted.protocol), ..Default::default() };
 							accept_websocket(session, options, deadline).await
-						}.boxed());
+						}.boxed()).boxed());
 					}
 				}
 				Some(res) = self.accept.next() => {
 					match res {
-						Ok(session) => return Some(session),
-						Err(err) => tracing::debug!(%err, "failed to accept session"),
+						Some(Ok(session)) => return Ok(session),
+						Some(Err(err)) => tracing::debug!(%err, "failed to accept session"),
+						// `isolate` logged and counted the panic; only this handshake is lost.
+						None => {}
 					}
 				}
-				// Nothing is left that could accept: every configured listener has stopped
-				// and no handshake is still in flight. Process signals are the owner's; an
-				// accept loop that consumes a global ctrl-C leaves no way to sequence
-				// shutdown around it (moq-relay drains sessions first).
-				else => return None,
+				// Nothing is configured that could accept: a dead listener returned above.
+				// Process signals are the owner's; an accept loop that consumes a global
+				// ctrl-C leaves no way to sequence shutdown around it (moq-relay drains
+				// sessions first).
+				else => return Err(Error::NoBackend("no listener to accept from")),
 			}
 		}
 	}
@@ -791,13 +820,14 @@ impl Listener {
 	/// rejected early on an invalid path or missing auth. Call [Request::ok] or
 	/// [Request::reject] to complete the handshake.
 	///
-	/// `None` means nothing can arrive again: every configured listener has stopped
-	/// with no handshake in flight. An accept-loop panic closes every listener before
-	/// resuming the panic in this call. Everything is already
-	/// bound, so a bind failure cannot arrive here. No process signal is watched:
-	/// race this against your own ctrl-C future and drop the listener if you want
-	/// one to stop the loop.
-	pub async fn accept(&mut self) -> Option<Request> {
+	/// An error means nothing can arrive again: [`Error::Accept`] once a listener's
+	/// endpoint stops, or [`Error::NoBackend`] when no listener is configured. Either
+	/// closes every listener first, so a process never keeps serving with one
+	/// transport silently gone. An accept-loop panic closes every listener before
+	/// resuming the panic in this call. Everything is already bound, so a bind
+	/// failure cannot arrive here. No process signal is watched: race this against
+	/// your own ctrl-C future and drop the listener if you want one to stop the loop.
+	pub async fn accept(&mut self) -> crate::Result<Request> {
 		crate::runtime::scope(self.server.accept_next()).await
 	}
 
@@ -1038,7 +1068,7 @@ impl Deadline {
 	all(feature = "uds", unix),
 	feature = "webrtc"
 ))]
-async fn within<T, E>(
+pub(crate) async fn within<T, E>(
 	deadline: Option<kio::clock::Instant>,
 	handshake: impl Future<Output = Result<T, E>>,
 ) -> crate::Result<T>
@@ -1349,33 +1379,8 @@ fn spawn_tcp_loop(
 			handshakes.spawn(crate::panic::isolate(async move {
 				match within(deadline, pending).await {
 					Ok((session, remote)) => {
-						// Set only on `tls://`: the SNI, and the client certificate its
-						// verifier already accepted.
-						let server_name = session.server_name().map(str::to_owned);
-						let identity = session
-							.peer_certificates()
-							.map(|chain| crate::tls::PeerIdentity::from_chain(chain.to_vec()));
-						let link = Link {
-							remote: Some(remote),
-							local,
-							server_name: server_name.clone(),
-							..Default::default()
-						};
-						stream_request(
-							session,
-							&setup,
-							tx,
-							Incoming {
-								transport: Transport::Tcp,
-								link,
-								// Like raw QUIC, the SNI is the only authority a `tls://` client offers.
-								authority: server_name,
-								identity,
-								deadline,
-								active,
-							},
-						)
-						.await
+						let incoming = Incoming::tcp(&session, Some(remote), local, deadline, active);
+						stream_request(session, &setup, tx, incoming).await;
 					}
 					// Per-connection: a failed `accept(2)` is the listener's own to
 					// classify and pace, and never surfaces here.
@@ -1435,13 +1440,52 @@ fn spawn_unix_loop(
 }
 
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-struct Incoming {
+pub(crate) struct Incoming {
 	transport: Transport,
 	link: Link,
 	authority: Option<String>,
 	identity: Option<crate::tls::PeerIdentity>,
 	deadline: Option<kio::clock::Instant>,
 	active: moq_net::server::Active,
+}
+
+#[cfg(feature = "tcp")]
+impl Incoming {
+	/// A TCP session's facts. On `tls://` these are the SNI, and the client
+	/// certificate its verifier already accepted.
+	pub(crate) fn tcp(
+		session: &qmux::Session,
+		remote: Option<std::net::SocketAddr>,
+		local: Option<std::net::SocketAddr>,
+		deadline: Option<kio::clock::Instant>,
+		active: moq_net::server::Active,
+	) -> Self {
+		let server_name = session.server_name().map(str::to_owned);
+		let identity = session
+			.peer_certificates()
+			.map(|chain| crate::tls::PeerIdentity::from_chain(chain.to_vec()));
+		Self {
+			transport: Transport::Tcp,
+			link: Link {
+				remote,
+				local,
+				server_name: server_name.clone(),
+				..Default::default()
+			},
+			// Like raw QUIC, the SNI is the only authority a `tls://` client offers.
+			authority: server_name,
+			identity,
+			deadline,
+			active,
+		}
+	}
+
+	/// Report the ALPN the connection's TLS handshake negotiated.
+	#[cfg(feature = "_certs")]
+	pub(crate) fn with_alpn(mut self, alpn: Option<String>) -> Self {
+		self.link.alpn = alpn;
+		self
+	}
 }
 
 /// Read SETUP in the connection task and forward the resulting request.
@@ -1452,6 +1496,21 @@ async fn stream_request(
 	tx: tokio::sync::mpsc::Sender<Request>,
 	incoming: Incoming,
 ) {
+	match accept_stream(&setup.server, session, incoming).await {
+		Ok(request) => {
+			let _ = tx.send(request).await;
+		}
+		Err(err) => tracing::debug!(%err, "stream SETUP handshake failed"),
+	}
+}
+
+/// Read SETUP on a stream session, which carries its path in SETUP rather than a URL.
+#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+pub(crate) async fn accept_stream(
+	server: &moq_net::Server,
+	session: qmux::Session,
+	incoming: Incoming,
+) -> crate::Result<Request> {
 	let Incoming {
 		transport,
 		link,
@@ -1460,24 +1519,19 @@ async fn stream_request(
 		deadline,
 		active,
 	} = incoming;
-	match accept_request(&setup.server, session, deadline).await {
-		Ok((request, deadline)) => {
-			let request = Request {
-				transport,
-				url: None,
-				authority,
-				identity,
-				link,
-				handshake: Box::new(request),
-				#[cfg(feature = "quic")]
-				quic: None,
-				deadline,
-				active,
-			};
-			let _ = tx.send(request).await;
-		}
-		Err(err) => tracing::debug!(%err, "stream SETUP handshake failed"),
-	}
+	let (request, deadline) = accept_request(server, session, deadline).await?;
+	Ok(Request {
+		transport,
+		url: None,
+		authority,
+		identity,
+		link,
+		handshake: Box::new(request),
+		#[cfg(feature = "quic")]
+		quic: None,
+		deadline,
+		active,
+	})
 }
 
 /// The transport-level facts a backend captures while accepting a connection, before the
@@ -2529,7 +2583,7 @@ mod tests {
 		let request = kio::clock::timeout(std::time::Duration::from_secs(5), listener.accept())
 			.await
 			.expect("a stalled upgrade blocked the accept loop");
-		assert!(request.is_some());
+		assert!(request.is_ok());
 		client.abort();
 	}
 
@@ -2740,7 +2794,10 @@ mod tests {
 			.streams
 			.tasks
 			.push(tokio::spawn(async { panic!("injected accept loop panic") }));
-		assert!(crate::panic::isolate(listener.accept()).await.is_none());
+		assert!(
+			crate::panic::isolate(listener.accept()).await.is_none(),
+			"the panic resumes in accept"
+		);
 		assert!(
 			tokio::net::TcpListener::bind(address).await.is_ok(),
 			"a dead accept loop left its listener bound"
@@ -2802,6 +2859,47 @@ mod tests {
 		listener.close().await;
 		std::net::UdpSocket::bind(addr).expect("close must release the QUIC socket");
 		drop((session, connection));
+	}
+
+	/// A QUIC endpoint that stops under a live listener fails `accept` and the
+	/// `serve_*` loop built on it, instead of reading as a clean stop.
+	#[cfg(feature = "quic")]
+	#[tokio::test]
+	async fn a_stopped_quic_endpoint_fails_accept() {
+		let config = crate::listen::Config {
+			bind: Some("[::]:0".parse().unwrap()),
+			tls: crate::tls::Listen {
+				generate: vec!["localhost".into()],
+				..Default::default()
+			},
+			..Default::default()
+		};
+		let mut listener = config
+			.init(Default::default())
+			.expect("server")
+			.listen()
+			.await
+			.expect("listen");
+		// What the endpoint's driver dying looks like from `accept`.
+		listener.server.close();
+		let err = listener
+			.accept()
+			.await
+			.err()
+			.expect("a stopped endpoint yields no session");
+		assert!(matches!(err, Error::Accept(Transport::Quic)), "{err}");
+	}
+
+	/// A server with nothing to accept from fails `serve_*` at once rather than
+	/// returning as if it had served and stopped.
+	#[tokio::test]
+	async fn serving_nothing_is_an_error() {
+		let server = Config::default().init_streams().expect("server");
+		let err = server
+			.serve_publish(crate::origin::spawn().consume())
+			.await
+			.unwrap_err();
+		assert!(matches!(err, Error::NoBackend(_)), "{err}");
 	}
 
 	/// A client CA or pinned peers on a stream-only server are refused unless a

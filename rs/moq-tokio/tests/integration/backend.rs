@@ -277,7 +277,7 @@ async fn sni_test() {
 	// Keep accepting so the client handshakes complete, then drop the server.
 	let server_handle = tokio::spawn(async move {
 		let mut server = server;
-		while server.accept().await.is_some() {}
+		while server.accept().await.is_ok() {}
 	});
 
 	let dial = |host_name: &str, fingerprint: &str| {
