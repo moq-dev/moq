@@ -165,14 +165,11 @@ async fn run(preset: &str) -> Run {
 		.expect("handshake");
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
 	let chunk = Bytes::from(vec![0; 64 * 1024]);
-	let _ = tokio::time::timeout_at(
-		(std::time::Instant::now() + duration.saturating_sub(start.elapsed())).into(),
-		async {
-			loop {
-				send.write_all(chunk.clone()).await.unwrap();
-			}
-		},
-	)
+	let _ = kio::clock::timeout_at(Instant::now() + duration.saturating_sub(start.elapsed()), async {
+		loop {
+			send.write_all(chunk.clone()).await.unwrap();
+		}
+	})
 	.await;
 	conn.close(0u32.into(), "done");
 	shaper.verify().expect("the shaper acted");
