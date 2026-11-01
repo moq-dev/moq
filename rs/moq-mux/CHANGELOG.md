@@ -19,7 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `container::Consumer` no longer plays a backlog that landed before its first read from the oldest group: until the first item, the start moves past every group whose first frame trails the newest content by more than the max delay, as `@moq/hang`'s consumer does, so a join starts at the same group in Rust and the browser. Once reading begins, only a blocking group is skipped, as before.
 - fMP4 import applies each track's edit list to its frame timestamps and drops the samples before the edit, such as AAC priming, along with the video samples decoding from a dropped sync sample, and a passthrough init no longer carries the `edts`. A consumer that offsets AAC priming itself must stop, or it shifts the track twice. An edit list it can't reduce to one shift (several media edits, or a rate other than 1) is refused with `Error::UnsupportedEditList`.
 
 ## [0.10.11](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.10...moq-mux-v0.10.11) - 2026-10-05

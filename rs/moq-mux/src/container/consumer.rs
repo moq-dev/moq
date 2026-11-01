@@ -73,10 +73,7 @@ pub(crate) enum Item {
 ///
 /// Delivery starts at the lowest absolute start among the
 /// [`Subscription::ranges`](moq_net::track::Subscription::ranges) when every range names one, waiting for that group under the budget; without one it
-/// starts wherever the publisher does, adopted from the first served groups. Until the first
-/// item is read, the start also moves past every group whose first frame trails the newest
-/// content by more than the budget, as `@moq/hang`'s consumer measures: a backlog that landed
-/// whole would otherwise play from its oldest group, since nothing blocks. From there
+/// starts wherever the publisher does, adopted from the first served groups. From there
 /// the same budget is the one rule that catches the consumer up to the live edge, and
 /// history the publisher no longer serves expires like any other gap, since its reach
 /// sits a full budget behind the newest content.
@@ -469,23 +466,6 @@ impl<F: Container> Consumer<F> {
 				self.hole_timer = None;
 			}
 
-			// Until the first item, the start is still open: a backlog that already landed would
-			// otherwise play from its oldest group, since nothing blocks, and stay that far behind
-			// for good. So the start moves past every group whose first frame trails the newest
-			// content by more than the budget, as `js/hang`'s consumer measures, keeping the join
-			// within the budget. Once reading begins, only a blocking group is skipped, below.
-			if self.edge.is_none()
-				&& self.pending.len() > 1
-				&& self.pending[0].sequence <= self.current
-				&& let Some(first) = self.poll_first_unread(waiter)
-				&& self.poll_newest(waiter).saturating_sub(first) > self.max_delay
-			{
-				let next_start = self.pending[1].min_timestamp.map(std::time::Duration::from);
-				let current_end = self.pending[0].max_end;
-				self.skip_to(1, next_start, current_end)?;
-				continue;
-			}
-
 			// Return the next frame from the current group if possible.
 			// If the current group is finished or errored, advance to the next group.
 			if let Some(group) = self.pending.front_mut()
@@ -601,9 +581,31 @@ impl<F: Container> Consumer<F> {
 				None
 			};
 
-			// The first newer group with data (our skip target) and where it starts.
-			let next_group = self.poll_next_group(waiter);
-			let max_timestamp = self.poll_newest(waiter);
+			// Find the first newer group with data (our skip target) and where it starts.
+			let mut next_group = None;
+			for (i, group) in self.pending.iter_mut().enumerate() {
+				if group.sequence <= self.current {
+					continue;
+				}
+
+				if let Poll::Ready(Some(ts)) = group.poll_min_timestamp(waiter, &self.format, false) {
+					next_group = Some((i, std::time::Duration::from(ts)));
+					break;
+				}
+			}
+
+			// Find the max timestamp across all newer groups.
+			let mut max_timestamp = std::time::Duration::ZERO;
+			for group in self.pending.iter_mut().rev() {
+				if group.sequence <= self.current {
+					break;
+				}
+
+				if let Poll::Ready(Some(ts)) = group.poll_max_timestamp(waiter, &self.format) {
+					max_timestamp = max_timestamp.max(ts.into());
+					break; // We know older groups won't be newer than this.
+				}
+			}
 
 			// Walk the cursor over missing sequences below the first arrived group.
 			// Groups race on independent QUIC streams (newer ones at higher priority),
@@ -683,7 +685,26 @@ impl<F: Container> Consumer<F> {
 			};
 
 			if let Some((new_idx, next_start)) = target {
-				self.skip_to(new_idx, next_start, current_end)?;
+				// Without a start read yet, nothing proves the timeline continues.
+				let hole = next_start.is_none_or(|start| !pts_contiguous(current_end.or(self.presented_end), start));
+				let had_marker = self.pending.iter().take(new_idx).any(GroupBuffer::marker);
+				// Buffered frames are thrown away, and `current_end` counts them, so contiguity alone would hide them.
+				let discarded = self
+					.pending
+					.iter()
+					.take(new_idx)
+					.any(|group| !group.buffered.is_empty());
+				let target = self.pending[new_idx].sequence;
+				self.discard(|group| group.sequence < target)?;
+				if hole || had_marker || discarded {
+					self.lose();
+				}
+				let new_current = self.pending.front().map(|g| g.sequence).unwrap();
+
+				tracing::debug!(old = self.current, new = new_current, "skipping slow groups");
+
+				self.current = new_current;
+				self.note_group_edge();
 				continue;
 			}
 
@@ -698,74 +719,6 @@ impl<F: Container> Consumer<F> {
 
 			return Poll::Pending;
 		}
-	}
-
-	// The timestamp of the current group's first unread frame, buffering one if it can.
-	fn poll_first_unread(&mut self, waiter: &kio::Waiter) -> Option<std::time::Duration> {
-		let group = self.pending.front_mut()?;
-		let _ = group.poll_min_timestamp(waiter, &self.format, true);
-		let (frame, ..) = group.buffered.front()?;
-		Some(frame.timestamp.into())
-	}
-
-	// The first group past the cursor with a timestamp, the skip target, and where it starts.
-	fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Option<(usize, std::time::Duration)> {
-		for (i, group) in self.pending.iter_mut().enumerate() {
-			if group.sequence <= self.current {
-				continue;
-			}
-
-			if let Poll::Ready(Some(ts)) = group.poll_min_timestamp(waiter, &self.format, false) {
-				return Some((i, ts.into()));
-			}
-		}
-		None
-	}
-
-	// The max timestamp across the groups past the cursor, or zero without one.
-	fn poll_newest(&mut self, waiter: &kio::Waiter) -> std::time::Duration {
-		for group in self.pending.iter_mut().rev() {
-			if group.sequence <= self.current {
-				break;
-			}
-
-			// Older groups won't be newer than this.
-			if let Poll::Ready(Some(ts)) = group.poll_max_timestamp(waiter, &self.format) {
-				return ts.into();
-			}
-		}
-		std::time::Duration::ZERO
-	}
-
-	// Move the cursor to the pending group at `new_idx`, dropping what lies below it. `next_start` is
-	// where that group begins, if read, and `current_end` how far the group left behind presented.
-	fn skip_to(
-		&mut self,
-		new_idx: usize,
-		next_start: Option<std::time::Duration>,
-		current_end: Option<std::time::Duration>,
-	) -> Result<(), F::Error> {
-		// Without a start read yet, nothing proves the timeline continues.
-		let hole = next_start.is_none_or(|start| !pts_contiguous(current_end.or(self.presented_end), start));
-		let had_marker = self.pending.iter().take(new_idx).any(GroupBuffer::marker);
-		// Buffered frames are thrown away, and `current_end` counts them, so contiguity alone would hide them.
-		let discarded = self
-			.pending
-			.iter()
-			.take(new_idx)
-			.any(|group| !group.buffered.is_empty());
-		let target = self.pending[new_idx].sequence;
-		self.discard(|group| group.sequence < target)?;
-		if hole || had_marker || discarded {
-			self.lose();
-		}
-		let new_current = self.pending.front().map(|g| g.sequence).unwrap();
-
-		tracing::debug!(old = self.current, new = new_current, "skipping slow groups");
-
-		self.current = new_current;
-		self.note_group_edge();
-		Ok(())
 	}
 
 	// The subscription, which only an error ending the reader drops.
@@ -1834,23 +1787,10 @@ mod tests {
 			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10)));
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
 		reader.max_delay = Duration::ZERO;
-		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		Container::Legacy(crate::container::Kind::Audio)
-			.write(
-				&mut group,
-				&[Frame {
-					timestamp: ts(0),
-					payload: Bytes::from_static(&[0xDE, 0xAD]),
-					keyframe: false,
-					duration: None,
-				}],
-			)
-			.unwrap();
-		// Read before the newer group lands, so the skip comes after the start.
-		assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
+		write_group(&mut track, 0, &[ts(0)]);
 		write_group(&mut track, 3, &[ts(1_000_000)]);
 		track.finish().unwrap();
-		assert_eq!(items(&mut reader).await, ["gap 0+1000000", "1000000"]);
+		assert_eq!(items(&mut reader).await, ["0", "gap 0+1000000", "1000000"]);
 	}
 
 	/// A video group's trailing duration marker is that frame's end, not a declared stop.
@@ -1997,24 +1937,11 @@ mod tests {
 		// Keep transport filtering out of this test so it isolates the mux skip logic.
 		consumer.max_delay = Duration::ZERO;
 
-		// Group 0 stays open, and is read before the newer group lands: the skip comes after the start.
-		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		Container::Legacy(crate::container::Kind::Audio)
-			.write(
-				&mut group,
-				&[Frame {
-					timestamp: ts(0),
-					payload: Bytes::from_static(&[0xDE, 0xAD]),
-					keyframe: false,
-					duration: None,
-				}],
-			)
-			.unwrap();
-		assert!(matches!(consumer.read().await.unwrap(), Some(Read::Frame { .. })));
+		write_group(&mut track, 0, &[ts(0)]);
 		write_group(&mut track, 3, &[ts(1_000_000)]);
 		track.finish().unwrap();
 
-		assert_eq!(items(&mut consumer).await, ["gap 0+1000000", "1000000"]);
+		assert_eq!(items(&mut consumer).await, ["0", "gap 0+1000000", "1000000"]);
 	}
 
 	#[tokio::test]
@@ -2120,11 +2047,6 @@ mod tests {
 			)
 			.unwrap();
 
-		// Read group 0's frame before the later groups land, so they skip a stalled group rather
-		// than move the start.
-		let first = consumer.read_frame().await.unwrap().unwrap();
-		assert_eq!(first.timestamp, ts(0));
-
 		for g in 1..10u64 {
 			let timestamps: Vec<_> = (0..3).map(|f| ts(g * 50_000 + f * 5_000)).collect();
 			write_group(&mut track, g, &timestamps);
@@ -2137,7 +2059,7 @@ mod tests {
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		assert_eq!(frames.len(), 27, "Expected groups 1-9 after group 0's frame");
+		assert_eq!(frames.len(), 28, "Expected group 0 frame + groups 1-9");
 		assert!(!frames.is_empty(), "Expected at least some frames");
 		finisher.await.expect("finisher task panicked");
 	}
@@ -2162,11 +2084,6 @@ mod tests {
 			)
 			.unwrap();
 
-		// Read group 0's frame before the later groups land, so they skip a stalled group rather
-		// than move the start.
-		let first = consumer.read_frame().await.unwrap().unwrap();
-		assert_eq!(first.timestamp, ts(0));
-
 		for g in 1..10u64 {
 			write_group(&mut track, g, &[ts(g * 30_000)]);
 		}
@@ -2178,17 +2095,20 @@ mod tests {
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		assert_eq!(frames.len(), 9, "Expected groups 1-9 after group 0's frame");
-		for (i, frame) in (1..10u64).zip(&frames) {
-			assert_eq!(frame.timestamp, ts(i * 30_000));
+		assert!(!frames.is_empty(), "Expected at least some frames");
+		assert_eq!(frames.len(), 10, "Expected group 0 frame + groups 1-9");
+		assert_eq!(frames[0].timestamp, ts(0));
+
+		for i in 1..10u64 {
+			assert_eq!(frames[i as usize].timestamp, ts(i * 30_000));
 		}
 		finisher.await.expect("finisher task panicked");
 	}
 
 	/// A group longer than the budget that blocks for a moment behind a newer group is
 	/// not cut short while what it could still present (up to where the newer group
-	/// begins) is within the budget: the newer group races ahead on its own stream while
-	/// the older one is still arriving.
+	/// begins) is within the budget. A join's backlog does exactly this: the newer group
+	/// races ahead on its own stream while the older one is still arriving.
 	#[test]
 	fn a_long_group_blocked_behind_a_newer_one_is_not_cut_short() {
 		let waiter = kio::Waiter::noop();
@@ -2214,16 +2134,15 @@ mod tests {
 			}
 		};
 
-		// A 2.5 s group, half arrived, and the next one already 0.5 s in. The reader started
-		// before the next one landed, so this is a stall, not a join's backlog.
+		// A 2.5 s group, half arrived, and the next one already 0.5 s in.
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		write(&mut group0, ts(0));
 		write(&mut group0, ts(500_000));
-		assert_eq!(read(&mut consumer), Some(ts(0)));
 		let mut group1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 		write(&mut group1, ts(2_500_000));
 		write(&mut group1, ts(3_000_000));
 
+		assert_eq!(read(&mut consumer), Some(ts(0)));
 		assert_eq!(read(&mut consumer), Some(ts(500_000)));
 		// Group 0's reach (2.5 s) is 0.5 s behind the newest frame: wait for it.
 		assert_eq!(read(&mut consumer), None, "cut group 0 short");
@@ -2240,52 +2159,6 @@ mod tests {
 		assert_eq!(read(&mut consumer), Some(ts(5_000_000)));
 		group1.finish().unwrap();
 		group2.finish().unwrap();
-	}
-
-	/// A backlog that lands whole before the first read starts at the first group whose first
-	/// frame is within the budget of the newest one, though nothing blocks. Five one-second
-	/// groups of ten frames and a one-frame sixth at 5 s, with a 1.5 s budget, start at the 4 s
-	/// group, whether the sixth is open or finished. `js/hang`'s `consumer.skips.test.ts` pairs
-	/// this case.
-	#[test]
-	fn a_buffered_backlog_starts_within_the_budget() {
-		for open in [true, false] {
-			let waiter = kio::Waiter::noop();
-			let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-			let mut consumer = container_max_delay_only(track.subscribe(None), Duration::from_millis(1500));
-			for g in 0..5u64 {
-				let timestamps: Vec<_> = (0..10).map(|f| ts(g * 1_000_000 + f * 100_000)).collect();
-				write_group(&mut track, g, &timestamps);
-			}
-			let mut last = track.create_group(moq_net::group::Info { sequence: 5 }).unwrap();
-			Container::Legacy(crate::container::Kind::Data)
-				.write(
-					&mut last,
-					&[Frame {
-						timestamp: ts(5_000_000),
-						payload: Bytes::from_static(&[0xDE, 0xAD]),
-						keyframe: false,
-						duration: None,
-					}],
-				)
-				.unwrap();
-			if !open {
-				last.finish().unwrap();
-			}
-
-			let mut read = Vec::new();
-			while let Poll::Ready(Ok(Some(item))) = consumer.poll_read(&waiter) {
-				match item {
-					Read::Frame { frame, .. } => read.push(frame.timestamp),
-					other => panic!("unexpected read: {other:?}"),
-				}
-			}
-			let expected: Vec<_> = (0..10)
-				.map(|f| ts(4_000_000 + f * 100_000))
-				.chain([ts(5_000_000)])
-				.collect();
-			assert_eq!(read, expected, "sixth group open: {open}");
-		}
 	}
 
 	// ---- Malformed rewind ----
@@ -3650,14 +3523,13 @@ mod tests {
 		);
 
 		// Group 9 pushes the newest content a full budget past what group 5 could still
-		// present (bounded by group 7's start), expiring it. Exactly a budget, so group 7's
-		// first frame is not past it and the start stays there.
-		write_group(&mut track, 9, &[ts(710_000)]);
+		// present (bounded by group 7's start), expiring it.
+		write_group(&mut track, 9, &[ts(800_000)]);
 		track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
-		assert_eq!(micros, vec![210_000, 710_000], "the expired frameless group is skipped");
+		assert_eq!(micros, vec![210_000, 800_000], "the expired frameless group is skipped");
 	}
 
 	/// An aborted frameless group beyond a sequence gap is reaped rather than parked on
@@ -3925,9 +3797,6 @@ mod tests {
 			)
 			.unwrap();
 
-		// Read before group 1 lands, so the skip comes after the start.
-		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
-
 		// Group 1: finished, 200ms ahead (well beyond the 100ms max delay)
 		write_group(&mut track, 1, &[ts(200_000)]);
 		track.finish().unwrap();
@@ -3938,7 +3807,7 @@ mod tests {
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		assert_eq!(frames.len(), 1, "Expected group 1's frame after group 0's");
+		assert_eq!(frames.len(), 2, "Expected group 0 frame + group 1 frame");
 		finisher.await.unwrap();
 	}
 
@@ -3952,15 +3821,14 @@ mod tests {
 		let consumer_track = track.subscribe(None);
 		let mut consumer = container_max_delay_only(consumer_track, Duration::from_millis(100));
 
-		// Group 0: finished normally, its first frame read before group 2 lands.
+		// Group 0: finished normally
 		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
-		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
 		// Group 2: finished (group 1 is missing — sequence gap)
 		write_group(&mut track, 2, &[ts(200_000)]);
 		track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		assert_eq!(frames.len(), 2, "Expected group 0's second frame + group 2 (1 frame)");
+		assert_eq!(frames.len(), 3, "Expected group 0 (2 frames) + group 2 (1 frame)");
 	}
 
 	#[tokio::test]
