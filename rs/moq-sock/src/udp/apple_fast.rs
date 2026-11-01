@@ -48,6 +48,7 @@ fn send_via_sendmsg_x(state: &UdpSocketState, io: SockRef<'_>, transmit: &Transm
 			&mut hdrs[i],
 			&mut iovs[i],
 			&mut ctrls[i],
+			true,
 			state.sendmsg_einval(),
 		);
 		hdrs[i].msg_datalen = chunk.len();
@@ -68,6 +69,7 @@ fn prepare_msg_x(
 	hdr: &mut msghdr_x,
 	iov: &mut libc::iovec,
 	ctrl: &mut cmsg::Aligned<[u8; cmsg::LEN]>,
+	#[allow(unused_variables, reason = "kept for parity with the unix `prepare_msg` signature")] encode_src_ip: bool,
 	sendmsg_einval: bool,
 ) {
 	iov.iov_base = transmit.contents.as_ptr() as *const _ as *mut _;
@@ -97,6 +99,7 @@ fn prepare_msg_x(
 	if let Some(ip) = &transmit.src_ip {
 		match ip {
 			IpAddr::V4(v4) => {
+				// Darwin ignores IP_RECVDSTADDR as a send-side source override; only IP_PKTINFO is honored.
 				let pktinfo = libc::in_pktinfo {
 					ipi_ifindex: 0,
 					ipi_spec_dst: libc::in_addr {

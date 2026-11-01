@@ -1,4 +1,4 @@
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
 mod bench;
 mod max_filter;
 

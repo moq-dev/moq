@@ -31,7 +31,3 @@ refused.
 ## Required
 
 - [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - settles the bound this reuses
-
-## Related
-
-- [Headless moq-transport groups](/quest/m2/ietf-headless-group.md) - what a subscriber does with a tail whose head never comes
