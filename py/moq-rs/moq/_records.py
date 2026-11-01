@@ -117,12 +117,11 @@ class Subscription:
     to deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which
     pending group the publisher sends first, ``None`` for newest first.
 
-    Start from :meth:`default` for moq-net's defaults; a bare ``Subscription()`` sets no
-    max delay.
+    A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
     """
 
     priority: int = 0
-    max_delay: timedelta | None = None
+    max_delay: timedelta | None = timedelta(0)
     ranges: Sequence[MoqRange] | None = None
     order: MoqOrder | None = None
 

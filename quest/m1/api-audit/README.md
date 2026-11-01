@@ -74,8 +74,7 @@ Rejected in planning:
 ## Required
 
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve/README.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
-- [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
-- [QMux datagrams obey or refuse their policy](/quest/m1/api-audit/qmux-datagrams.md) - `Session.datagrams` is the DOM interface, its high-water mark is live, and the inert settings throw
+- [Routes are the origin API](/quest/m1/api-audit/route/README.md) - apps announce exact or prefix routes through one `Route` handle that owns its broadcast and carries an `identity`, prefix routes can serve a held broadcast, and readers get a listing plus `follow`
 - [No constructible internal handles](/quest/m1/api-audit/internal-constructors.md) - `Rendition`, `Lister`, `Arrivals`, and e2ee's generations get private constructors, and a lint rule stops new ones
 - [moq-congestion's first-publish names](/quest/m1/api-audit/congestion-names.md) - `bbr3::Config`, `cubic::Config`, `Metrics`, `Factory`, and no `into_any`
 

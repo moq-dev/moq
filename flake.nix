@@ -71,16 +71,6 @@
           overlays = [ (import rust-overlay) ];
         };
 
-        wasm-bindgen-version =
-          (pkgs.lib.findSingle (package: package.name == "wasm-bindgen")
-            (throw "Cargo.lock has no wasm-bindgen package")
-            (throw "Cargo.lock has multiple wasm-bindgen versions")
-            (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package
-          ).version;
-        wasm-bindgen-cli =
-          pkgs.${"wasm-bindgen-cli_${builtins.replaceStrings [ "." ] [ "_" ] wasm-bindgen-version}"}
-            or (throw "nixpkgs does not package wasm-bindgen-cli ${wasm-bindgen-version} locked in Cargo.lock");
-
         # Pinned build toolchain (not latest stable) so `nix develop` and CI
         # compile against a fixed rustc and the relay's MSRV can't creep up
         # unnoticed. The floor is 1.98, not the 1.95 relay MSRV: earlier rustc
@@ -100,10 +90,7 @@
             # match rustc's LLVM. cargo-llvm-cov finds them in the sysroot.
             "llvm-tools"
           ];
-          targets = [
-            "wasm32-unknown-unknown"
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+          targets = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             "aarch64-apple-darwin"
           ];
         };
@@ -171,9 +158,6 @@
             cargo-semver-checks
             cargo-deny
             cargo-bloat
-            # Per-crate feature matrices (`just rs features`), where workspace
-            # unification would otherwise hide a broken single-crate build.
-            cargo-hack
             cargo-nextest
             cargo-codspeed
             # Source-based test coverage (`just rs coverage`).
@@ -184,10 +168,6 @@
                 rustc = rust-toolchain;
               };
             })
-            # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
-            # Cargo.lock selects the matching schema version, independently of
-            # nixpkgs' default wasm-bindgen-cli.
-            wasm-bindgen-cli
           ]
           ++ gstreamerDeps
           ++ pkgs.lib.optionals (!pkgs.stdenv.hostPlatform.isDarwin) [
@@ -311,6 +291,7 @@
           shellcheck
           shfmt
           actionlint
+          zizmor
           taplo
           nixfmt
         ];
@@ -374,6 +355,8 @@
         goDeps = [
           pkgs.go
           uniffi-bindgen-go
+          # `just go audit`, nightly.
+          pkgs.govulncheck
         ];
 
         # uniffi-bindgen-dart renders rs/moq-ffi into dart/moq_ffi. The fork
@@ -603,6 +586,12 @@
           moxygen = pkgs.callPackage ./nix/moxygen.nix { };
 
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
+
+          # Nightly's `just rs send-depth` proves native Send futures on it.
+          # Pinned so a toolchain release alone never fails that job;
+          # bump it on purpose, like the stable toolchain above. Kept out of
+          # the dev shell, which every CI job downloads.
+          rust-nightly = pkgs.rust-bin.nightly."2026-10-18".minimal;
 
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
           # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out

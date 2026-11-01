@@ -1,5 +1,4 @@
 //! Grouped tracks and datagrams on moq-lite and MoQ Transport.
-#![expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 
 mod support;
 
@@ -90,7 +89,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 
 #[tokio::test]
 async fn grouped_over_lite() {
-	tokio::time::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_protected("moq-lite-07-wip".parse().unwrap(), "video").await;
 		let mut group = fixture.producer.append_group().unwrap();
 		group
@@ -107,7 +106,7 @@ async fn grouped_over_lite() {
 
 #[tokio::test]
 async fn grouped_over_ietf() {
-	tokio::time::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_protected("moq-transport-22".parse().unwrap(), "video").await;
 		let mut group = fixture.producer.append_group().unwrap();
 		group
@@ -123,7 +122,7 @@ async fn grouped_over_ietf() {
 }
 
 async fn datagram_roundtrip(version: &str) {
-	tokio::time::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_protected(version.parse().unwrap(), "audio").await;
 		fixture
 			.producer
