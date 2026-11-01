@@ -1717,7 +1717,10 @@ impl Producer {
 			arrived: super::clock::now(),
 		};
 		let mut entry = Entry::plain(frame, inflated);
-		if let Err(err) = state.canonicalize(state.next_index, &mut entry) {
+		// Checked here too, so a group without shared content skips the call.
+		if state.content.is_some()
+			&& let Err(err) = state.canonicalize(state.next_index, &mut entry)
+		{
 			return Err(self.abort_conflict(state, err));
 		}
 		let now = state.commit(entry);
@@ -1895,15 +1898,14 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn create_object(mut self, frame: frame::Header) -> Result<frame::Producer> {
 		let meter = self.chunk_meter(frame.inflated);
-		let (info, buf) = match self.open_frame(frame) {
+		let (info, buf, admission) = match self.open_frame(frame) {
 			Ok(opened) => opened,
 			Err(err) => {
 				let _ = self.handle.abort(err.clone());
 				return Err(err);
 			}
 		};
-		let reserved = buf.admit(self.handle.cache.frames());
-		Ok(frame::Producer::new(self, buf, info, reserved).with_meter(meter))
+		Ok(frame::Producer::new(self, buf, info, admission).with_meter(meter))
 	}
 
 	/// The meter a streamed frame's chunks bump: none for a plain frame a compressed group
@@ -1920,7 +1922,7 @@ impl Producer {
 	///
 	/// Its bytes are charged to the cache as they are written, not here: the declared
 	/// size is only a promise until they arrive.
-	fn open_frame(&mut self, header: frame::Header) -> Result<(frame::Info, FrameBuf)> {
+	fn open_frame(&mut self, header: frame::Header) -> Result<(frame::Info, FrameBuf, Option<frame::Admission>)> {
 		let frame = header.info;
 		let timestamp = on_track(frame.timestamp, self.handle.track.timescale)?;
 		if frame.size > MAX_CACHE_BYTES || header.inflated.is_some_and(|inflated| inflated > MAX_CACHE_BYTES) {
@@ -1955,7 +1957,7 @@ impl Producer {
 		if !state.trim(frame.size.saturating_add(metadata_bytes)) {
 			return Err(self.abort_too_large(state));
 		}
-		let buf = match state.content.as_ref().filter(|_| !scratch) {
+		let (buf, admission) = match state.content.as_ref().filter(|_| !scratch) {
 			Some(content) => {
 				let key = Content::key(state.next_index, header.fields.as_deref(), state.wire().is_some());
 				let row = content.row(
@@ -1970,9 +1972,10 @@ impl Producer {
 				)?;
 				let buf = row.fork();
 				buf.bill_view(state.charge.extra());
-				buf
+				let admission = buf.admit(self.handle.cache.frames());
+				(buf, admission)
 			}
-			None => FrameBuf::new(frame.size as usize),
+			None => FrameBuf::admitted(frame.size as usize, self.handle.cache.frames()),
 		};
 		let now = state.charge.record_write();
 		state.partial = Some(Partial {
@@ -2028,6 +2031,7 @@ impl Producer {
 				timestamp,
 			},
 			buf,
+			admission,
 		))
 	}
 
@@ -2091,7 +2095,7 @@ impl Producer {
 			fields,
 			inflated,
 		};
-		if !owned {
+		if !owned && state.content.is_some() {
 			state.canonicalize(state.next_index - 1, &mut entry)?;
 		}
 		// The slot was reserved and charged by `charge_partial` above.

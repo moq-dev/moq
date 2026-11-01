@@ -447,7 +447,9 @@ impl Drop for Reservation {
 ///
 /// The delivery that creates the content keeps its progress in the content itself, so
 /// a frame with one delivery, nearly every frame, costs one allocation. Only a fork
-/// allocates a [`View`] of its own.
+/// allocates a [`View`] of its own. Until anything else attaches to the content, that
+/// delivery is its only writer, so it publishes without the publication lock or an
+/// overlap check (see [`FrameContent::attach`]).
 #[derive(Clone)]
 pub(super) struct FrameBuf {
 	content: Arc<FrameContent>,
@@ -472,6 +474,13 @@ struct FrameContent {
 	// freezes as itself and leaves this empty.
 	frozen: OnceLock<Payload>,
 	publication: Mutex<Publication>,
+	// Set by the creating delivery around each write it makes without the publication
+	// lock, and by `attach`, after which every write takes the lock.
+	writing: AtomicBool,
+	attached: AtomicBool,
+	// Whether the creating delivery still holds the admission it took with the content,
+	// so attaching counts it among the publication's producers.
+	creator_admitted: AtomicBool,
 	bill: OnceLock<cache::Extra>,
 	identity: OnceLock<Identity>,
 }
@@ -519,6 +528,9 @@ impl Shared {
 			storage: OnceLock::from(FrameStorage::Shared(payload)),
 			frozen: OnceLock::new(),
 			publication: Mutex::default(),
+			writing: AtomicBool::new(false),
+			attached: AtomicBool::new(false),
+			creator_admitted: AtomicBool::new(false),
 			bill: OnceLock::new(),
 			identity: OnceLock::new(),
 		}))
@@ -527,6 +539,10 @@ impl Shared {
 		SharedWeak(Arc::downgrade(&self.0))
 	}
 	pub(super) fn fork(&self) -> FrameBuf {
+		if !self.0.attached.load(Ordering::Acquire) {
+			self.0
+				.attach(&mut self.0.publication.lock().unwrap_or_else(PoisonError::into_inner));
+		}
 		FrameBuf {
 			content: self.0.clone(),
 			fork: Some(Arc::default()),
@@ -550,7 +566,8 @@ impl Shared {
 		self.0.bill.get().map_or(0, cache::Extra::size)
 	}
 	pub(super) fn identify(&self, owner: Arc<group::Content>, key: group::ContentKey) -> bool {
-		let _publication = self.0.publication.lock().unwrap_or_else(PoisonError::into_inner);
+		let mut publication = self.0.publication.lock().unwrap_or_else(PoisonError::into_inner);
+		self.0.attach(&mut publication);
 		if self
 			.0
 			.identity
@@ -570,7 +587,9 @@ impl Shared {
 impl FrameContent {
 	fn bill_content(&self, bill: cache::Extra) {
 		let content = self;
-		let _publication = content.publication.lock().unwrap_or_else(PoisonError::into_inner);
+		let mut publication = content.publication.lock().unwrap_or_else(PoisonError::into_inner);
+		// Billing reads the published bytes, which the creator's lock-free writes would race.
+		content.attach(&mut publication);
 		content.bill.get_or_init(|| {
 			let written = self.written.load(Ordering::Relaxed) as u64;
 			// A lazy owner may take already-billed payload from the original delivery.
@@ -583,6 +602,29 @@ impl FrameContent {
 			}
 			bill
 		});
+	}
+
+	/// Let anything besides the creating delivery reach the content: another delivery, its
+	/// cache bill, or an admission taken through the publication. The creator's write in
+	/// flight finishes first, and every later one publishes under the lock.
+	///
+	/// Caller holds `publication`, so attachers are serialized.
+	fn attach(&self, publication: &mut Publication) {
+		if self.attached.load(Ordering::Relaxed) {
+			return;
+		}
+		// With the creator's SeqCst store to `writing` and load of `attached`, at least one
+		// side sees the other's store: either the creator takes the lock, or this waits.
+		self.attached.store(true, Ordering::SeqCst);
+		// A lock-free write is a bounded copy that never waits on anything.
+		while self.writing.load(Ordering::SeqCst) {
+			std::hint::spin_loop();
+		}
+		// The creator's admission joins the shared count; its reservation stays with it
+		// until it ends, and passes to any producer still active then.
+		if self.creator_admitted.load(Ordering::Relaxed) {
+			publication.producers += 1;
+		}
 	}
 
 	/// Caller holds publication so attachment and growth update one aggregate.
@@ -658,34 +700,17 @@ struct Publication {
 	reserved: Option<Reservation>,
 }
 
-/// One producer's hold on its canonical frame's admission. The reservation returns to
-/// the budget once no producer of the frame remains active.
+/// One producer's hold on its frame's admission, ended by [`FrameBuf::release`]. The
+/// reservation returns to the budget once no producer of the frame remains active.
 ///
-/// The admission lives in the frame's [`Publication`] rather than an allocation of its
-/// own: every streamed frame takes one, and nearly all have a single producer.
-pub(super) struct Admission(Arc<FrameContent>);
-
-impl Admission {
-	/// Whether the frame holds a share of the budget.
-	#[cfg(test)]
-	fn reserved(&self) -> bool {
-		self.0
-			.publication
-			.lock()
-			.unwrap_or_else(PoisonError::into_inner)
-			.reserved
-			.is_some()
-	}
-}
-
-impl Drop for Admission {
-	fn drop(&mut self) {
-		let mut publication = self.0.publication.lock().unwrap_or_else(PoisonError::into_inner);
-		publication.producers -= 1;
-		if publication.producers == 0 {
-			publication.reserved = None;
-		}
-	}
+/// No admission allocates: every streamed frame takes one, and nearly all have a single
+/// producer.
+pub(super) enum Admission {
+	/// The creating delivery's, taken with its content. It keeps its reservation, and
+	/// counts among the publication's producers only once something attaches.
+	Creator(Option<Reservation>),
+	/// Counted in the [`Publication`], which holds the reservation.
+	Shared,
 }
 
 enum FrameStorage {
@@ -825,6 +850,20 @@ impl FrameBuf {
 		Self::with_growth(size, true)
 	}
 
+	/// A buffer for a frame of `size` bytes with its creating delivery's admission,
+	/// allocated at that size on the first write while `budget` covers it, and grown as
+	/// bytes arrive otherwise.
+	pub(super) fn admitted(size: usize, budget: &Budget) -> (Self, Option<Admission>) {
+		if size == 0 {
+			return (Self::new(0), None);
+		}
+		let reserved = budget.reserve(size.min(SEGMENT));
+		let buf = Self::with_growth(size, reserved.is_none());
+		// Nothing else holds the content yet.
+		buf.content.creator_admitted.store(true, Ordering::Relaxed);
+		(buf, Some(Admission::Creator(reserved)))
+	}
+
 	fn with_growth(size: usize, grow: bool) -> Self {
 		Self {
 			content: Arc::new(FrameContent {
@@ -835,6 +874,9 @@ impl FrameBuf {
 				storage: OnceLock::new(),
 				frozen: OnceLock::new(),
 				publication: Mutex::default(),
+				writing: AtomicBool::new(false),
+				attached: AtomicBool::new(false),
+				creator_admitted: AtomicBool::new(false),
 				bill: OnceLock::new(),
 				identity: OnceLock::new(),
 			}),
@@ -906,6 +948,7 @@ impl FrameBuf {
 	pub(super) fn admit(&self, budget: &Budget) -> Option<Admission> {
 		let content = &self.content;
 		let mut publication = content.publication.lock().unwrap_or_else(PoisonError::into_inner);
+		content.attach(&mut publication);
 		if self.shared_written(Ordering::Acquire) == self.size() {
 			return None;
 		}
@@ -919,8 +962,45 @@ impl FrameBuf {
 			publication.reserved = reserved;
 		}
 		publication.producers += 1;
-		drop(publication);
-		Some(Admission(content.clone()))
+		Some(Admission::Shared)
+	}
+
+	/// End `admission`, which this delivery took.
+	pub(super) fn release(&self, admission: Admission) {
+		let content = &self.content;
+		let reserved = match admission {
+			Admission::Creator(reserved) => {
+				// Alone, the creator's reservation is the frame's; see `write_chunk`.
+				content.writing.store(true, Ordering::SeqCst);
+				if !content.attached.load(Ordering::SeqCst) {
+					content.creator_admitted.store(false, Ordering::Relaxed);
+					content.writing.store(false, Ordering::Release);
+					return;
+				}
+				content.writing.store(false, Ordering::Release);
+				reserved
+			}
+			Admission::Shared => None,
+		};
+		let mut publication = content.publication.lock().unwrap_or_else(PoisonError::into_inner);
+		publication.producers -= 1;
+		if publication.producers == 0 {
+			publication.reserved = None;
+		} else if publication.reserved.is_none() {
+			// Producers still active keep the creator's reservation.
+			publication.reserved = reserved;
+		}
+	}
+
+	/// Whether the frame's active producers hold a share of the budget.
+	#[cfg(test)]
+	fn reserved(&self) -> bool {
+		self.content
+			.publication
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.reserved
+			.is_some()
 	}
 
 	/// The frame's declared size.
@@ -951,7 +1031,8 @@ impl FrameBuf {
 			})
 	}
 
-	/// Safety: caller holds the publication mutex and `new_written` is `<= size`.
+	/// Safety: caller is the only publisher, holding the publication mutex or writing
+	/// alone as the creator, and `new_written` is `<= size`.
 	unsafe fn store_written(&self, new_written: usize) {
 		let content = &self.content;
 		let before = content.written.load(Ordering::Relaxed);
@@ -967,6 +1048,17 @@ impl FrameBuf {
 
 	fn write_chunk<B: IntoBytes>(&self, chunk: B) -> Result<()> {
 		let content = &self.content;
+		if self.fork.is_none() {
+			// The SeqCst store then load pairs with `FrameContent::attach`'s: a write that
+			// misses the attachment finishes before the attacher continues.
+			content.writing.store(true, Ordering::SeqCst);
+			if !content.attached.load(Ordering::SeqCst) {
+				let written = self.write_alone(chunk);
+				content.writing.store(false, Ordering::Release);
+				return written;
+			}
+			content.writing.store(false, Ordering::Release);
+		}
 		let _publication = content.publication.lock().unwrap_or_else(PoisonError::into_inner);
 		let start = self.written(Ordering::Relaxed);
 		let end = start
@@ -1003,7 +1095,32 @@ impl FrameBuf {
 		Ok(())
 	}
 
-	/// Append after the shared prefix while holding the publication mutex.
+	/// Publish the creating delivery's chunk while nothing else can reach the content: its
+	/// progress is the content's, so no published byte overlaps the chunk.
+	fn write_alone<B: IntoBytes>(&self, chunk: B) -> Result<()> {
+		let content = &self.content;
+		let start = content.written.load(Ordering::Relaxed);
+		let end = start
+			.checked_add(chunk.as_ref().len())
+			.filter(|end| *end <= self.size())
+			.ok_or(Error::WrongSize)?;
+		if end == start {
+			return Ok(());
+		}
+		match start == 0 && end == self.size() {
+			true => match self.try_set_bytes(chunk.into_bytes()) {
+				// Safety: the creator writes alone; the full size was checked.
+				Ok(()) => unsafe { self.store_written(end) },
+				Err(chunk) => self.append_suffix(&chunk),
+			},
+			false => self.append_suffix(chunk.as_ref()),
+		}
+		content.received.store(end, Ordering::Release);
+		Ok(())
+	}
+
+	/// Append after the shared prefix as its only publisher: holding the publication
+	/// mutex, or the creator writing alone.
 	fn append_suffix(&self, src: &[u8]) {
 		if src.is_empty() {
 			return;
@@ -1017,8 +1134,8 @@ impl FrameBuf {
 			true => FrameStorage::Growing(Mutex::new(Arc::new(Segment::new(0)))),
 			false => FrameStorage::Fixed(Arc::new(Segment::new(size))),
 		});
-		// Safety (every write below): the publication mutex makes this the sole writer;
-		// the caller checked the remaining size, and consumers only read `[..written]`.
+		// Safety (every write below): the caller is the sole writer, checked the remaining
+		// size, and consumers only read `[..written]`.
 		match storage {
 			// Only reachable if the frame is already complete via shared storage, which
 			// `Producer::write` rejects for a non-empty chunk. Nothing to copy.
@@ -1034,7 +1151,7 @@ impl FrameBuf {
 				segments.append(prev, src, size, grow);
 			}
 		}
-		// Safety: the publication mutex excludes other writers, and the caller checked the size.
+		// Safety: the caller is the sole writer, and checked the size.
 		unsafe { self.store_written(prev + src.len()) };
 	}
 
@@ -1099,7 +1216,7 @@ pub struct Producer {
 	// chunk's bytes. Empty (no-op) for an untagged group.
 	stats: stats::Meter,
 	// The frame's share of the origin's [`Budget`], if it got one, held until it ends.
-	_reserved: Option<Admission>,
+	admission: Option<Admission>,
 }
 
 impl std::ops::Deref for Producer {
@@ -1111,7 +1228,7 @@ impl std::ops::Deref for Producer {
 }
 
 impl Producer {
-	pub(super) fn new(group: group::Producer, buf: FrameBuf, info: Info, reserved: Option<Admission>) -> Self {
+	pub(super) fn new(group: group::Producer, buf: FrameBuf, info: Info, admission: Option<Admission>) -> Self {
 		Self {
 			group: Some(group),
 			buf,
@@ -1119,7 +1236,7 @@ impl Producer {
 			done: false,
 			cancel_on_drop: false,
 			stats: stats::Meter::default(),
-			_reserved: reserved,
+			admission,
 		}
 	}
 
@@ -1181,11 +1298,7 @@ impl Producer {
 		}
 		// Ingress payload: count the chunk's bytes as they're written.
 		self.stats.bytes(len as u64);
-		if len == self.buf.size() && self.buf.written(Ordering::Acquire) == 0 {
-			self.buf.write_chunk(chunk)
-		} else {
-			self.buf.append(chunk.as_ref())
-		}
+		self.buf.write_chunk(chunk)
 	}
 
 	/// Publish what has been written so far, waking consumers parked on the group.
@@ -1231,27 +1344,28 @@ impl Producer {
 
 impl Drop for Producer {
 	fn drop(&mut self) {
-		if self.done {
-			return;
-		}
 		// An unfinished frame leaves the group stream broken; fail the group so
 		// consumers surface an error instead of hanging on the partial forever.
 		// A group already aborted (superseded, evicted, cancelled) carries its own
 		// reason, so cutting its in-flight frame short is expected.
-		let Some(group) = self.group.as_mut() else {
-			return;
-		};
-		if !group.is_aborted() && !self.cancel_on_drop {
-			tracing::warn!(
-				group = group.sequence,
-				"frame::Producer dropped before writing all bytes"
-			);
+		if !self.done
+			&& let Some(group) = self.group.as_mut()
+		{
+			if !group.is_aborted() && !self.cancel_on_drop {
+				tracing::warn!(
+					group = group.sequence,
+					"frame::Producer dropped before writing all bytes"
+				);
+			}
+			group.frame_abort(if self.cancel_on_drop {
+				Error::Cancel
+			} else {
+				Error::Dropped
+			});
 		}
-		group.frame_abort(if self.cancel_on_drop {
-			Error::Cancel
-		} else {
-			Error::Dropped
-		});
+		if let Some(admission) = self.admission.take() {
+			self.buf.release(admission);
+		}
 	}
 }
 
@@ -1761,11 +1875,9 @@ mod tests {
 	#[test]
 	fn admission_ends_with_active_producers_not_cached_views() {
 		let budget = Budget::new(SEGMENT);
-		let a = FrameBuf::new(SEGMENT + 1);
+		let (a, a_active) = FrameBuf::admitted(SEGMENT + 1, &budget);
 		let b = a.fork();
-		let a_active = a.admit(&budget).unwrap();
 		let b_active = b.admit(&budget).unwrap();
-		assert!(Arc::ptr_eq(&a_active.0, &b_active.0));
 		assert!(
 			budget.reserve(1).is_none(),
 			"the second producer shares the first's reservation"
@@ -1776,16 +1888,77 @@ mod tests {
 			replay.admit(&budget).is_none(),
 			"complete content reserves nothing on replay"
 		);
-		drop(a_active);
+		a.release(a_active.unwrap());
 		assert!(
 			budget.reserve(1).is_none(),
 			"another active delivery owns the same reservation"
 		);
-		drop(b_active);
+		b.release(b_active);
 		let returned = budget.reserve(SEGMENT).expect("cached views keep no admission alive");
 		assert_eq!(b.written(Ordering::Acquire), 0);
 		assert_eq!(replay.written(Ordering::Acquire), 0);
 		drop(returned);
+	}
+
+	/// The creator writes and ends alone without the publication, and a delivery that
+	/// attaches later still shares its reservation.
+	#[test]
+	fn a_creator_alone_publishes_and_releases_without_attaching() {
+		let budget = Budget::new(8);
+		let (a, active) = FrameBuf::admitted(8, &budget);
+		assert!(budget.reserve(1).is_none(), "the creator reserved its frame");
+		a.append(b"abcd").unwrap();
+		assert_eq!(a.shared_written(Ordering::Acquire), 4);
+		a.release(active.unwrap());
+		assert!(!a.content.attached.load(Ordering::Relaxed));
+		drop(budget.reserve(8).expect("the creator's reservation returned"));
+
+		let (a, active) = FrameBuf::admitted(8, &budget);
+		a.append(b"abcd").unwrap();
+		let b = a.fork();
+		let copy = b.admit(&budget).unwrap();
+		assert!(budget.reserve(1).is_none(), "the attached copy shares the reservation");
+		b.release(copy);
+		assert!(
+			budget.reserve(1).is_none(),
+			"the attached creator still holds its reservation"
+		);
+		a.append(b"efgh").unwrap();
+		assert!(matches!(b.append(b"abcdefgx"), Err(Error::ProtocolViolation)));
+		a.release(active.unwrap());
+		drop(budget.reserve(8).expect("the last producer returned it"));
+	}
+
+	/// A delivery attaching while the creator streams without the lock never overlaps a
+	/// write in flight: both see one payload, and a mismatch is still caught.
+	#[test]
+	fn a_delivery_attaching_mid_write_publishes_one_payload() {
+		const SIZE: usize = SEGMENT + 4093;
+		let payload: Vec<_> = (0..SIZE).map(|i| (i % 251) as u8).collect();
+		for grow in [false, true] {
+			let budget = Budget::new(if grow { 0 } else { SEGMENT });
+			let (a, active) = FrameBuf::admitted(SIZE, &budget);
+			let attached = std::sync::Barrier::new(2);
+			std::thread::scope(|scope| {
+				scope.spawn(|| {
+					for chunk in payload.chunks(97) {
+						a.append(chunk).unwrap();
+						if a.written(Ordering::Relaxed) == 97 * 64 {
+							attached.wait();
+						}
+					}
+				});
+				attached.wait();
+				let b = a.fork();
+				for chunk in payload.chunks(1021) {
+					b.append(chunk).unwrap();
+				}
+				assert_eq!(b.written(Ordering::Acquire), SIZE);
+			});
+			a.release(active.unwrap());
+			assert_eq!(a.freeze().contiguous(0), payload);
+			assert_eq!(a.allocated(), SIZE);
+		}
 	}
 
 	#[test]
@@ -1793,10 +1966,9 @@ mod tests {
 		let budget = Budget::new(0);
 		let a = FrameBuf::new(SEGMENT);
 		let b = a.fork();
-		let left = a.admit(&budget).unwrap();
-		let right = b.admit(&budget).unwrap();
-		assert!(Arc::ptr_eq(&left.0, &right.0));
-		assert!(!left.reserved());
+		let _left = a.admit(&budget).unwrap();
+		let _right = b.admit(&budget).unwrap();
+		assert!(!a.reserved());
 		a.append(b"a").unwrap();
 		assert_eq!(a.allocated(), 1, "failed admission grows only with received bytes");
 		b.append(b"ab").unwrap();
@@ -1840,7 +2012,7 @@ mod tests {
 		);
 		a.append(b"efgh").unwrap();
 		assert_eq!(pool.used(), baseline + metadata + 8);
-		drop(active);
+		a.release(active);
 		drop(a);
 		assert_eq!(pool.used(), baseline + metadata + 8, "the fork still holds the content");
 		drop(b);
@@ -1868,14 +2040,13 @@ mod tests {
 		let first = a.admit(&budget).unwrap();
 		let copy = a.fork();
 		let second = copy.admit(&budget).unwrap();
-		assert!(Arc::ptr_eq(&first.0, &second.0));
 		assert_eq!(
 			pool.used(),
 			baseline + metadata,
 			"an admission lives in its content, allocating nothing"
 		);
-		drop(first);
-		drop(second);
+		a.release(first);
+		copy.release(second);
 		let resumed = a.admit(&budget).unwrap();
 		assert_eq!(
 			pool.used(),
@@ -1886,7 +2057,7 @@ mod tests {
 		assert_eq!(a.content_size(), (FrameBuf::CONTENT_HEAP + 8) as u64);
 		assert_eq!(a.view_size(), 0, "the creating delivery's view is part of its content");
 		assert_eq!(copy.view_size(), 0, "a fork starts without a delivery charge");
-		drop(resumed);
+		a.release(resumed);
 		drop(a);
 		drop(copy);
 		assert_eq!(pool.used(), baseline);
