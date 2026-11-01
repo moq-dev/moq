@@ -136,11 +136,12 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts requests fills forward reader frames drift ledger varint lite-varint track resume priority subscribe-drop subscribe-tracks refresh observed compression; do
+        for benchmark in broadcasts requests fills forward reader frames drift ledger varint lite-varint track resume priority subscribe-drop refresh observed compression; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
         javascript qmux-record just js qmux-record-bench
+        javascript qmux-datagrams just js qmux-datagrams-bench
         javascript cmaf just js cmaf-bench
         javascript arrivals just js arrivals-bench
         javascript p2p just js p2p-bench

@@ -23,8 +23,7 @@ full HTML support counts Vue template reads as uses; its HTML formatter stays op
 Unrelated paths are filtered by the dispatcher first.
 `just js check`, `just js test` and `just js build` explicitly select all packages.
 
-Checks generate WASM only when a selected package or one of its transitive
-dependencies is `@moq/wasm`; `just js build` leaves it to `just js wasm`. Harness type-checking uses the shared test
+Harness type-checking uses the shared test
 configuration, excluding unselected workspace packages. Harnesses outside every
 workspace remain checked because they have no dependency metadata; the all-package
 fallback keeps the whole harness check. Shared dependency validation, environment scanning and

@@ -15,6 +15,7 @@
 
 #![expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "custom timings measure the real time the work took, not the ambient clock"
 )]
 
@@ -94,7 +95,7 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn now() -> moq_net::time::Instant {
-	moq_clock::now()
+	kio::clock::now()
 }
 
 /// One publisher and one subscriber session over an in-memory pair.
