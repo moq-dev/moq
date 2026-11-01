@@ -6692,6 +6692,28 @@ impl Cursor {
 		self.filter.admitted_at = Some(at);
 	}
 
+	/// Move each group written off as stale that nothing can offer again, since its group
+	/// left the cache or was judged at the bound, into `taken`, which compacts what it
+	/// accounts for below its floor. Only a group a wider budget may still offer stays
+	/// written off, so the write-offs never outnumber the stale skips the cache holds.
+	fn retire_written_off(&mut self, taken: &mut Delivered) {
+		// Most cursors never write a group off, and this runs on every hand-out.
+		if self.filter.written_off.is_empty() {
+			return;
+		}
+		let settled: Vec<u64> = self
+			.filter
+			.written_off
+			.iter()
+			.flat_map(|run| run.clone())
+			.filter(|&sequence| !self.skipped.contains(sequence))
+			.collect();
+		for sequence in settled {
+			self.filter.written_off.remove(sequence..sequence + 1);
+			taken.insert(sequence);
+		}
+	}
+
 	/// The next cached group still owed in the subscription's order, newest first unless
 	/// ascending, consuming the spans scanned on the way: only one the walk could have read,
 	/// never fetched backfill or a withheld group. The group itself stays owed until
@@ -7598,8 +7620,13 @@ impl Subscriber {
 		match &mut self.inner {
 			Inner::Plain(cursor) => loop {
 				let peeked = match cursor.poll_peek(ordered, &self.delivered, waiter) {
-					Poll::Pending if !self.parks && cursor.is_exhausted(&self.delivered) => {
-						return Poll::Ready(Ok(None));
+					Poll::Pending => {
+						// A read that only skipped since its last hand-out settles its write-offs too.
+						cursor.retire_written_off(&mut self.delivered);
+						if !self.parks && cursor.is_exhausted(&self.delivered) {
+							return Poll::Ready(Ok(None));
+						}
+						return Poll::Pending;
 					}
 					polled => ready!(polled)?,
 				};
@@ -7699,6 +7726,9 @@ impl Subscriber {
 		let mut delivered = std::mem::take(&mut self.delivered);
 		self.forget_past_budget(&mut delivered);
 		self.delivered = delivered;
+		if let Inner::Plain(cursor) = &mut self.inner {
+			cursor.retire_written_off(&mut self.delivered);
+		}
 	}
 
 	/// Forget the gaps in `delivered` below each group past this subscriber's budget now:
@@ -7714,6 +7744,15 @@ impl Subscriber {
 	#[cfg(test)]
 	pub(super) fn delivered_runs(&self) -> usize {
 		self.delivered.runs()
+	}
+
+	/// How many runs of groups written off as stale this subscriber remembers.
+	#[cfg(test)]
+	fn written_off_runs(&self) -> usize {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.filter.written_off.iter().count(),
+			Inner::Resume(..) => 0,
+		}
 	}
 
 	/// Whether an unread cached group needs this subscription, without moving its cursor.
@@ -22649,5 +22688,40 @@ mod test {
 
 		let mut open = producer.subscribe(replay().with_range(1..));
 		assert_eq!(read_now(&mut open, false), None, "the cache is not the live edge");
+	}
+
+	/// A long bounded read that writes a group off as stale between each it hands out
+	/// remembers a write-off only while its group is cached, since only then can a wider
+	/// budget offer it again, and still ends.
+	#[test]
+	fn a_bounded_read_retires_its_write_offs_as_it_advances() {
+		// Small enough that each round evicts the groups before it.
+		let (producer, _pool) = pooled_producer(1);
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_max_delay(Duration::from_millis(10))
+				.with_order(Order::Ascending)
+				.with_range(0..16),
+		);
+		for round in 0..8u64 {
+			// Group 2k+1 runs on past where group 2k could still present, so 2k is stale.
+			let at = 2_000 * round;
+			for (sequence, frames) in [(2 * round, vec![at]), (2 * round + 1, vec![at + 1_000, at + 1_100])] {
+				let mut group = producer.create_group(sequence.into()).unwrap();
+				for at in frames {
+					group
+						.write_frame(Timestamp::from_millis(at).unwrap(), bytes::Bytes::from_static(b"f"))
+						.unwrap();
+				}
+				group.finish().unwrap();
+			}
+			assert_eq!(read_now(&mut reader, false), Some(Some(2 * round + 1)), "round {round}");
+			assert!(
+				reader.written_off_runs() <= 1,
+				"round {round}: {}",
+				reader.written_off_runs()
+			);
+		}
+		assert_eq!(read_now(&mut reader, false), Some(None));
 	}
 }

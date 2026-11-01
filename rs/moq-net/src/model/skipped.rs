@@ -72,6 +72,13 @@ impl Skipped {
 		self.0.as_ref().is_none_or(|skipped| skipped.runs.is_empty())
 	}
 
+	/// Whether `sequence` is skipped, so a wider budget may offer it again.
+	pub fn contains(&self, sequence: u64) -> bool {
+		self.0
+			.as_ref()
+			.is_some_and(|skipped| skipped.runs.contains_key(&sequence))
+	}
+
 	/// The lowest sequence skipped.
 	pub fn lowest(&self) -> Option<u64> {
 		let skipped = self.0.as_ref()?;
