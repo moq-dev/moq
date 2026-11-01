@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `peer_chain` is `peer_identity` ([#7028](https://github.com/moq-dev/moq/pull/7028))
+
+`quic::driver::Connection::peer_chain()` is now `peer_identity()` and returns `Option<Vec<CertificateDer<'static>>>`, mirroring moq-tokio.
+Use `cert.to_vec()` for raw DER.
+
 ### QUIC early data is disabled
 
 The shared moq-quic core no longer sends or accepts early data, including with caller-supplied rustls server configs.

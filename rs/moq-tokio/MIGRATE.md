@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### QUIC handshake data needs no downcast ([#7028](https://github.com/moq-dev/moq/pull/7028))
+
+`quic::driver::Connecting::handshake_data` returns `crypto::HandshakeData` and `Connection::handshake_data` returns `Option<crypto::HandshakeData>`, so drop the `downcast`.
+`Connection::peer_identity` returns `Option<Vec<CertificateDer<'static>>>`.
+Pass a rustls config straight to `quic::driver::client::Config::new` or `server::Config::new` instead of wrapping it in `crypto::rustls::QuicClientConfig::try_from` or `QuicServerConfig::try_from`.
+`quic::Error::NoInitialCipherSuite` is removed.
+
 ### `tls://` listeners verify client certificates ([#7358](https://github.com/moq-dev/moq/pull/7358))
 
 A `listen.tcp.tls` listener serves the listen policy's client-certificate verifier, so `--listen-tls-root` and pinned `tls.peers` apply to it as they do to QUIC, and a stream-only server with that listener accepts them instead of returning `Error::MtlsUnsupported`.
