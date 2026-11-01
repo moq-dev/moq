@@ -13,7 +13,7 @@ use std::task::Poll;
 use bytes::{Buf, Bytes};
 
 use super::poll::{self, SendOptions};
-use super::{Address, CloseKind, MaybeSend, MaybeSync, Probe, ReceiveWindow, Wire};
+use super::{Address, CloseKind, Probe, ReceiveWindow, Wire};
 
 /// A boxed [`poll::Boxable`] session, shared by every task that uses it.
 #[derive(Clone)]
@@ -136,7 +136,7 @@ pub(crate) struct SendStream(Box<dyn ErasedSend>);
 impl SendStream {
 	/// Box a stream, keeping its own send-group type behind the boundary.
 	#[cfg(test)]
-	pub(crate) fn new(stream: impl poll::SendStream<Group: MaybeSend + MaybeSync> + MaybeSend + MaybeSync) -> Self {
+	pub(crate) fn new(stream: impl poll::SendStream<Group: Send + Sync> + Send + Sync) -> Self {
 		Self(Box::new(stream))
 	}
 }
@@ -147,11 +147,11 @@ pub(crate) struct RecvStream(Box<dyn ErasedRecv>);
 impl RecvStream {
 	/// Box a stream outside any session, which therefore never pauses.
 	#[cfg(test)]
-	pub(crate) fn new(stream: impl poll::RecvStream + MaybeSend + MaybeSync) -> Self {
+	pub(crate) fn new(stream: impl poll::RecvStream + Send + Sync) -> Self {
 		Self::budgeted(stream, Weak::<Shared<super::memory::Session>>::new())
 	}
 
-	fn budgeted(stream: impl poll::RecvStream + MaybeSend + MaybeSync, session: Budget) -> Self {
+	fn budgeted(stream: impl poll::RecvStream + Send + Sync, session: Budget) -> Self {
 		Self(Box::new(Budgeted {
 			stream,
 			session,
@@ -251,7 +251,7 @@ impl super::Metrics for Metrics {
 	}
 }
 
-trait ErasedSession: MaybeSend + MaybeSync {
+trait ErasedSession: Send + Sync {
 	fn poll_accept_uni(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<RecvStream, Error>>;
 	fn poll_accept_bi(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<(SendStream, RecvStream), Error>>;
 	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>>;
@@ -281,13 +281,13 @@ trait ErasedSession: MaybeSend + MaybeSync {
 	fn receive_window(&self) -> Option<ReceiveWindow>;
 }
 
-trait ErasedGroup: MaybeSend + MaybeSync {
+trait ErasedGroup: Send + Sync {
 	fn clone_box(&self) -> Box<dyn ErasedGroup>;
 	fn set_priority(&mut self, priority: i64);
 	fn as_any(&self) -> &dyn Any;
 }
 
-trait ErasedSend: MaybeSend + MaybeSync {
+trait ErasedSend: Send + Sync {
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>>;
 	fn poll_write_buf(&mut self, waiter: &kio::Waiter, buf: &mut dyn Buf) -> Poll<Result<usize, Error>>;
 	fn set_priority(&mut self, priority: i64);
@@ -297,7 +297,7 @@ trait ErasedSend: MaybeSend + MaybeSync {
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>>;
 }
 
-trait ErasedRecv: MaybeSend + MaybeSync {
+trait ErasedRecv: Send + Sync {
 	fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Lease<'_>, Error>>;
 	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Error>>;
 	fn set_priority(&mut self, priority: i64);
@@ -307,7 +307,7 @@ trait ErasedRecv: MaybeSend + MaybeSync {
 	fn resume(&mut self);
 }
 
-// Not `MaybeSend`: a lease may hold its transport's lock, and never outlives a poll.
+// Not `Send`: a lease may hold its transport's lock, and never outlives a poll.
 trait ErasedLease: Buf {
 	fn chunks(&self) -> Box<dyn Iterator<Item = &[u8]> + '_>;
 	fn is_fin(&self) -> bool;
@@ -420,7 +420,7 @@ impl<S: poll::Boxable> ErasedSession for S {
 	}
 }
 
-impl<G: poll::SendGroup + MaybeSend + MaybeSync> ErasedGroup for G {
+impl<G: poll::SendGroup + Send + Sync> ErasedGroup for G {
 	fn clone_box(&self) -> Box<dyn ErasedGroup> {
 		Box::new(self.clone())
 	}
@@ -434,7 +434,7 @@ impl<G: poll::SendGroup + MaybeSend + MaybeSync> ErasedGroup for G {
 	}
 }
 
-impl<T: poll::SendStream<Group: MaybeSend + MaybeSync> + MaybeSend + MaybeSync> ErasedSend for T {
+impl<T: poll::SendStream<Group: Send + Sync> + Send + Sync> ErasedSend for T {
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
 		poll::SendStream::poll_write(self, waiter, buf).map_err(Error::new)
 	}
@@ -470,7 +470,7 @@ impl<T: poll::SendStream<Group: MaybeSend + MaybeSync> + MaybeSend + MaybeSync> 
 	}
 }
 
-impl<T: poll::RecvStream + MaybeSend + MaybeSync> ErasedRecv for Budgeted<T> {
+impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 	fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Lease<'_>, Error>> {
 		poll::RecvStream::poll_lease(&mut self.stream, waiter, want)
 			.map(|res| res.map(|lease| Lease(Box::new(lease))).map_err(Error::new))

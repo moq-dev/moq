@@ -1,6 +1,6 @@
 # Native headless playback
 
-`just test native-play` runs the shipped `moq play --no-video` against a local
+`just test native-play` runs the shipped `moq play --video off` against a local
 relay and two overlapping Opus tone publishers on Linux. A private PulseAudio
 null sink clocks the production ALSA/cpal output. One player process must decode
 440 Hz from A, 880 Hz after B takes the same path while A stays live, then 440 Hz

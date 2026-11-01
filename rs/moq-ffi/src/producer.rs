@@ -10,6 +10,24 @@ use crate::error::MoqError;
 use crate::ffi::{Background, Task};
 use crate::media::MoqFrame;
 
+/// A location within a track, mirroring [`moq_net::track::Position`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MoqPosition {
+	/// The group sequence.
+	pub group: u64,
+	/// The frame index within the group, numbered from 0 in write order.
+	pub frame: u64,
+}
+
+impl From<moq_net::track::Position> for MoqPosition {
+	fn from(position: moq_net::track::Position) -> Self {
+		Self {
+			group: position.group,
+			frame: position.frame,
+		}
+	}
+}
+
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
@@ -99,18 +117,10 @@ impl Drop for BroadcastProducer {
 	}
 }
 
-/// `Send + Sync` natively, where any thread may close a broadcast; nothing on single-threaded wasm.
-#[cfg(not(target_family = "wasm"))]
-pub(crate) trait Shared: Send + Sync {}
-#[cfg(not(target_family = "wasm"))]
-impl<T: Send + Sync + ?Sized> Shared for T {}
-#[cfg(target_family = "wasm")]
-pub(crate) trait Shared {}
-#[cfg(target_family = "wasm")]
-impl<T: ?Sized> Shared for T {}
-
 /// A handle publishing tracks on a broadcast, which its broadcast ends on close.
-pub(crate) trait Child: Shared {
+///
+/// `Send + Sync`, since any thread may close a broadcast.
+pub(crate) trait Child: Send + Sync {
 	/// End whatever this handle still publishes with `err`, so later calls fail with `Closed`.
 	///
 	/// A track that already finished ends cleanly instead.
@@ -123,7 +133,7 @@ enum Family {
 		/// Handles that may still publish, ended on close.
 		open: Vec<std::sync::Weak<dyn Child>>,
 		/// Finished producers, kept so a late subscriber still finds their tracks.
-		kept: Vec<Box<dyn kio::MaybeSend>>,
+		kept: Vec<Box<dyn Send>>,
 	},
 	/// The broadcast handle was dropped without a close: each child ends on its own.
 	Released,
@@ -177,8 +187,8 @@ impl Children {
 	}
 
 	/// Keep a finished producer until the broadcast ends, or drop it now if it already has.
-	pub(crate) fn keep(&self, producer: impl kio::MaybeSend + 'static) {
-		let producer: Box<dyn kio::MaybeSend> = Box::new(producer);
+	pub(crate) fn keep(&self, producer: impl Send + 'static) {
+		let producer: Box<dyn Send> = Box::new(producer);
 		if let Family::Open { kept, .. } = &mut *self.0.lock().unwrap() {
 			kept.push(producer);
 		}
@@ -255,7 +265,7 @@ impl RequestsProducer {
 impl TrackDynamicProducer {
 	async fn requested_fill(&mut self) -> Result<Arc<MoqFill>, MoqError> {
 		let fill = self.inner.requested_fill().await?;
-		Ok(Arc::new(MoqFill { inner: Arc::new(fill) }))
+		Ok(Arc::new(MoqFill::new(fill)))
 	}
 }
 
@@ -440,13 +450,22 @@ impl MoqTrackRequests {
 /// A run of groups readers miss, mirroring [`moq_net::track::Fill`].
 ///
 /// Call [`accept`](Self::accept) for each group you have and [`drop_groups`](Self::drop_groups)
-/// for the rest; [`next`](Self::next) names what is still owed, in the fill's order. Releasing
+/// for the rest; [`wanted`](Self::wanted) names what is still owed, in the fill's order. Releasing
 /// it names whatever is left as dropped while a reader still wants it; once nobody does, it is
-/// withdrawn, so stop serving it when [`unused`](Self::unused) resolves. Stop serving a single
+/// withdrawn, so stop serving it once [`wanted`](Self::wanted) is null. Stop serving a single
 /// group when [`unwanted`](Self::unwanted) resolves for it, and move on to the next.
 #[derive(uniffi::Object)]
 pub struct MoqFill {
-	inner: Arc<moq_net::track::Fill>,
+	inner: moq_net::track::Fill,
+	// The watcher `wanted_changed` advances, kept apart so concurrent waits queue in turn.
+	changes: crate::ffi::Task<moq_net::track::Fill>,
+}
+
+impl MoqFill {
+	fn new(inner: moq_net::track::Fill) -> Self {
+		let changes = crate::ffi::Task::new(inner.clone());
+		Self { inner, changes }
+	}
 }
 
 #[uniffi::export]
@@ -482,9 +501,19 @@ impl MoqFill {
 		self.inner.order().into()
 	}
 
-	/// The next group still owed in the fill's order, or null once every group is answered.
-	pub fn next(&self) -> Option<u64> {
-		self.inner.next()
+	/// The next group still owed in the fill's order, or null once every group is answered or
+	/// no reader waits on the fill.
+	pub fn wanted(&self) -> Option<u64> {
+		self.inner.wanted()
+	}
+
+	/// Wait for `wanted` to change and return the new value. The first call returns at once.
+	pub async fn wanted_changed(&self) -> Result<Option<u64>, MoqError> {
+		// Driven in place, not detached: a cancelled call left unfreed must not advance the
+		// watcher and swallow the change the next call waits for.
+		self.changes
+			.run(|mut fill| async move { Ok(fill.wanted_changed().await) })
+			.await
 	}
 
 	/// Insert group `sequence` and return a producer for filling it. The first group starts
@@ -502,21 +531,6 @@ impl MoqFill {
 	pub fn drop_groups(&self, start: u64, end: u64) {
 		let _guard = crate::ffi::enter();
 		self.inner.drop_groups(start..end);
-	}
-
-	/// Whether a reader still waits on this fill.
-	pub fn is_used(&self) -> bool {
-		self.inner.is_used()
-	}
-
-	/// Wait until no reader waits on this fill.
-	pub async fn unused(&self) -> Result<(), MoqError> {
-		let fill = self.inner.clone();
-		crate::ffi::detached(async move {
-			fill.unused().await;
-			Ok::<_, MoqError>(())
-		})
-		.await
 	}
 
 	/// Whether a reader still waits for group `sequence` from this fill: false once every
@@ -781,6 +795,32 @@ impl MoqTrackProducer {
 		Ok(track.append_datagram(timestamp, frame.payload)?)
 	}
 
+	/// Send `frame` as a best-effort datagram at an explicit `sequence`.
+	///
+	/// [`append_datagram`](Self::append_datagram) assigns the next sequence; this is for a
+	/// caller that allocates its own, such as an encryption layer binding the sequence into
+	/// its nonce. The same payload, transport, and timedness rules apply, and a sequence at or
+	/// past a [`finish_at`](Self::finish_at) boundary is refused with `Closed`.
+	pub fn insert_datagram(&self, sequence: u64, frame: MoqFrame) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let timestamp = frame.timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
+		let mut guard = self.inner.lock().unwrap();
+		let track = guard.as_mut().ok_or(MoqError::Closed)?;
+		Ok(track.insert_datagram(sequence, timestamp, frame.payload)?)
+	}
+
+	/// The newest content this track holds: its newest group or datagram, at that group's
+	/// newest frame (0 while it is empty), or null before anything was written.
+	///
+	/// A publisher compares it with [`MoqTrackDemand`]'s wanted group to tell whether a join
+	/// is already served by a group it wrote.
+	pub fn largest(&self) -> Result<Option<MoqPosition>, MoqError> {
+		let _guard = crate::ffi::enter();
+		let guard = self.inner.lock().unwrap();
+		let track = guard.as_ref().ok_or(MoqError::Closed)?;
+		Ok(track.largest().map(MoqPosition::from))
+	}
+
 	/// Abort this track with an application error code.
 	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -817,7 +857,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
-		track.finish_at(moq_net::track::Position::group(final_sequence))?;
+		track.finish_at(moq_net::track::Position::group(final_sequence), None)?;
 		Ok(())
 	}
 }

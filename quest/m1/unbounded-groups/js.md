@@ -31,7 +31,7 @@ holes. The chunked frame read and the byte-offset wire mirror moved to
 - Update `js/json` and its tests, which lean on the removed constants, and
   the compression paths now in `js/net`. The
   [m1 compression migration](https://github.com/moq-dev/moq/pull/7046) deleted `js/flate`.
-- If [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) is adopted first,
+- If [JS-only @moq/net from Rust](/quest/m2/rs2ts-js.md) is adopted first,
   Rust's caps and eviction apply and this quest is done.
 
 Public API: removes the JS cap constants. Wire: none.

@@ -325,15 +325,10 @@ impl Subscriber {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
+	use moq_clock::timeout;
 	use moq_mux::catalog::hang::Container;
 	use moq_mux::catalog::{CatalogFormat, Stream};
-	use tokio::time::timeout;
 
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
@@ -681,7 +676,7 @@ mod tests {
 			.unwrap();
 
 		let _fresh = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
-		let stale_viewer = tokio::time::timeout(Duration::from_secs(1), async {
+		let stale_viewer = moq_clock::timeout(Duration::from_secs(1), async {
 			loop {
 				match catalog.recv_group().await {
 					Ok(Some(_)) => continue,
@@ -733,9 +728,9 @@ mod tests {
 
 		let consumer = origin.consume();
 		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let wait = tokio::spawn(publisher.finish(linger).unwrap().wait());
-		tokio::time::sleep(linger / 2).await;
+		moq_clock::sleep(linger / 2).await;
 		let mut catalog = broadcast.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 		assert!(
 			catalog.recv_group().await.unwrap().is_some(),
