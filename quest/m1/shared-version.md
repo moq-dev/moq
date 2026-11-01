@@ -40,11 +40,16 @@ across the whole project.
   - Join the group
   - Exempt by name ✅ (Rust); npm: exempt `@moq/qmux` only ✅
 - New packages start at `0.0.x`. A `0.0.x` package that a published `0.x.y`
-  package depends on (normal or build dependency, same ecosystem) must join
-  the shared version. Today that promotes `moq-archive` (moq-cli depends on it)
-  and `moq-uring` (moq-relay's optional dependency). Every other `0.1+` crate
-  already has a `0.x.y` dependent. Unpublished packages (`publish = false`,
-  npm `private`) are exempt from both rules.
+  library depends on (normal or build dependency, same ecosystem) must join
+  the shared version. Only library dependents count, because a binary-only
+  package exposes no API downstream (decided 2026-11-01). Today that promotes
+  `moq-uring` (the `moq_relay` library's optional dependency). `moq-archive`
+  stays `0.0.x`: its only dependents are the binary-only moq-cli and a moq-hls
+  dev-dependency. Every other `0.1+` crate already has a `0.x.y` dependent.
+  Unpublished packages (`publish = false`, npm `private`) are exempt from
+  both rules.
+  - Only library deps count ✅
+  - Any dependent counts
 - Enforcement: a CI check in `just check`.
   - CI check ✅
   - Docs only
@@ -68,7 +73,7 @@ Implementation guidance:
   root file, for the check to read.
 - The check reads Cargo metadata and the JS workspace, along with the other
   version files. It fails when an eligible package's minor differs from the
-  recorded one, when a `0.0.x` package has a published `0.x.y` dependent, or
+  recorded one, when a `0.0.x` package has a published `0.x.y` library dependent, or
   when an exemption names a package that no longer exists. Until the cut
   records the shared minor, the check passes without enforcing (the bump
   waits for the cut). Add a regression test for each failure.
