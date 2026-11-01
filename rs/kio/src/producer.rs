@@ -1,13 +1,12 @@
 use std::{
-	ops::{Deref, DerefMut},
 	sync::{Arc, atomic::Ordering},
 	task::Poll,
 };
 
 use crate::{
-	Closed, Counts, State,
+	Closed, Counts,
+	channel::{Channel, Mut, Ref},
 	consumer::{self, Consumer},
-	lock::*,
 	waiter::*,
 	weak::{ProducerWeak, Weak},
 };
@@ -20,14 +19,14 @@ use crate::{
 /// producer is dropped, the channel is closed.
 #[derive(Debug)]
 pub struct Producer<T> {
-	pub(crate) state: Lock<State<T>>,
+	pub(crate) state: Arc<Channel<T>>,
 	pub(crate) counts: Arc<Counts>,
 }
 
 impl<T: Default> Default for Producer<T> {
 	fn default() -> Self {
 		Self {
-			state: Lock::new(State::default()),
+			state: Arc::default(),
 			counts: Arc::new(Counts::default()),
 		}
 	}
@@ -37,7 +36,8 @@ impl<T> Producer<T> {
 	/// Heap bytes this channel occupies, for callers budgeting memory per channel.
 	///
 	/// A channel owns two allocations regardless of how it is used: the state cell
-	/// holding `T`, its mutex and the three waiter lists, plus the reference counts
+	/// holding `T` and its mutex, the version, and the three waiter lists under their own
+	/// mutex, plus the reference counts
 	/// beside it. Both are sized at compile time, so a caller charging per channel can
 	/// derive its constant from this rather than measuring a process and pasting the
 	/// number.
@@ -47,12 +47,12 @@ impl<T> Producer<T> {
 	/// channel costs this whether it has one consumer or a thousand.
 	///
 	/// Excludes whatever `T` allocates on its own.
-	pub const HEAP: usize = crate::arc_heap::<std::sync::Mutex<State<T>>>() + crate::arc_heap::<Counts>();
+	pub const HEAP: usize = crate::arc_heap::<Channel<T>>() + crate::arc_heap::<Counts>();
 
 	/// Create a new producer with the given initial value.
 	pub fn new(value: T) -> Self {
 		Self {
-			state: Lock::new(State::new(value)),
+			state: Arc::new(Channel::new(value)),
 			counts: Arc::new(Counts::default()),
 		}
 	}
@@ -75,8 +75,8 @@ impl<T> Producer<T> {
 	/// a closed channel: between the two, a consumer either exists in time to
 	/// decline the teardown or is never handed out at all.
 	pub fn write_unwanted(&self) -> Unwanted<'_, T> {
-		let state = self.state.lock();
-		if state.closed {
+		let state = self.state.read();
+		if state.is_closed() {
 			return Unwanted::Closed;
 		}
 
@@ -102,9 +102,9 @@ impl<T> Producer<T> {
 	/// Returns `Ok(Mut)` if the channel is open, or `Err(Ref)` with
 	/// read-only access if closed. Only locks once.
 	pub fn write(&self) -> Result<Mut<'_, T>, Ref<'_, T>> {
-		let state = self.state.lock();
-		if state.closed {
-			Err(Ref { state })
+		let state = self.state.read();
+		if state.is_closed() {
+			Err(state)
 		} else {
 			Ok(Mut::new(state))
 		}
@@ -128,17 +128,19 @@ impl<T> Producer<T> {
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<()>,
 	{
-		let state = self.state.lock();
-		if state.closed {
-			return crate::coop::ready(Err(Ref { state }));
+		let guard = self.state.read();
+		// Read under the lock, so it is the version of the value `f` judges.
+		let seen = self.state.version();
+		if guard.is_closed() {
+			return crate::coop::ready(Err(guard));
 		}
 
-		let mut guard = Ref { state };
 		match f(&guard) {
 			// Upgrade the Ref to a Mut, keeping the same lock guard.
-			Poll::Ready(()) => crate::coop::ready(Ok(Mut::new(guard.state))),
+			Poll::Ready(()) => crate::coop::ready(Ok(Mut::new(guard))),
 			Poll::Pending => {
-				waiter.register(&mut guard.state.waiters_value);
+				drop(guard);
+				self.state.park_value(waiter, seen);
 				Poll::Pending
 			}
 		}
@@ -155,19 +157,7 @@ impl<T> Producer<T> {
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
 	{
-		let state = self.state.lock();
-		let mut guard = Ref { state };
-
-		if let Poll::Ready(res) = f(&guard) {
-			return crate::coop::ready(Ok(res));
-		}
-
-		if guard.state.closed {
-			return crate::coop::ready(Err(guard));
-		}
-
-		waiter.register(&mut guard.state.waiters_value);
-		Poll::Pending
+		self.state.poll(waiter, f)
 	}
 
 	/// Wait until the read-only predicate holds, then acquire write access.
@@ -194,13 +184,7 @@ impl<T> Producer<T> {
 	/// registering the waiter if still open.
 	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
-		let mut state = self.state.lock();
-		if state.closed {
-			return crate::coop::ready(());
-		}
-
-		waiter.register(&mut state.waiters_closed);
-		Poll::Pending
+		self.state.poll_closed(waiter)
 	}
 
 	/// Whether any consumer handle exists right now.
@@ -221,38 +205,17 @@ impl<T> Producer<T> {
 	/// it does, [`Closed`] if the channel closed first, else `Pending`.
 	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_wanted_changed(&self, waiter: &Waiter, last: bool) -> Poll<Result<bool, Closed>> {
-		// Closure is checked first, so a closed channel reports `Closed` from every handle
-		// rather than a consumer count that only dropped because it's dead.
-		let mut state = self.state.lock();
-		if state.closed {
-			return crate::coop::ready(Err(Closed));
-		}
-
-		if self.wanted() != last {
-			return crate::coop::ready(Ok(!last));
-		}
-
-		waiter.register(&mut state.waiters_consumer);
-
-		// Re-check after registration to avoid a TOCTOU race where the count moves
-		// between the initial check and waiter registration.
-		if self.wanted() != last {
-			return crate::coop::ready(Ok(!last));
-		}
-
-		Poll::Pending
+		crate::consumer::poll_wanted_changed(&self.state, &self.counts, waiter, last)
 	}
 
 	/// Get read-only access to the shared state.
 	pub fn read(&self) -> Ref<'_, T> {
-		Ref {
-			state: self.state.lock(),
-		}
+		self.state.read()
 	}
 
 	/// Returns `true` if both producers share the same underlying state.
 	pub fn same_channel(&self, other: &Self) -> bool {
-		self.state.is_clone(&other.state)
+		Arc::ptr_eq(&self.state, &other.state)
 	}
 
 	/// Create a [`ProducerWeak`] reference that doesn't affect the producer/consumer ref counts.
@@ -269,7 +232,7 @@ impl<T> Producer<T> {
 	/// where a [`ProducerWeak`] would keep the allocation alive through its own value.
 	pub fn downgrade(&self) -> Weak<T> {
 		Weak {
-			state: self.state.downgrade(),
+			state: Arc::downgrade(&self.state),
 			counts: self.counts.clone(),
 		}
 	}
@@ -288,29 +251,26 @@ impl<T> Clone for Producer<T> {
 
 impl<T> Drop for Producer<T> {
 	fn drop(&mut self) {
-		let mut waiters = {
+		{
 			// The count moves under the state lock, in step with the closed flag it
 			// decides. Decrementing outside it would let `ProducerWeak::produce` slip
 			// between the decrement and the close, handing back a producer for a
 			// channel that is about to close.
-			let mut state = self.state.lock();
+			let state = self.state.read();
 			if self.counts.producers.fetch_sub(1, Ordering::AcqRel) > 1 {
 				return;
 			}
-			if state.closed {
+			if state.is_closed() {
 				return;
 			}
 
-			// We were the last producer, so close. Every waiter reacts to closure
-			// (value/closed resolve, `wanted_changed` resolves to `Closed`), so drain
-			// every list and wake them once the lock is released.
-			state.closed = true;
-			state.take_close_waiters()
-		};
-
-		for list in &mut waiters {
-			list.wake();
+			// We were the last producer, so close.
+			self.state.close(&state);
 		}
+
+		// Every waiter reacts to closure (value/closed resolve, `wanted_changed` resolves
+		// to `Closed`), so wake every list now the lock is released.
+		self.state.wake(true);
 	}
 }
 
@@ -326,106 +286,6 @@ pub enum Unwanted<'a, T> {
 	Wanted,
 	/// The channel is already closed, so there is nothing left to write.
 	Closed,
-}
-
-/// A mutable guard over the shared state.
-///
-/// Derefs to `T` for direct access. Automatically notifies all waiting consumers
-/// when dropped if the state was accessed mutably.
-#[derive(Debug)]
-pub struct Mut<'a, T> {
-	// Its an option so we can drop it before notifying consumers.
-	pub(crate) state: Option<LockGuard<'a, State<T>>>,
-	pub(crate) modified: bool,
-}
-
-impl<'a, T> Mut<'a, T> {
-	pub(crate) fn new(state: LockGuard<'a, State<T>>) -> Self {
-		Self {
-			state: Some(state),
-			modified: false,
-		}
-	}
-
-	/// NOTE: This takes self so it's impossible to be in a closed state.
-	pub fn close(mut self) {
-		let state = self.state.as_mut().unwrap();
-		// We don't need to check for state.closed because we checked when making Mut
-		state.closed = true;
-		self.modified = true;
-	}
-}
-
-impl<T> Deref for Mut<'_, T> {
-	type Target = T;
-
-	fn deref(&self) -> &Self::Target {
-		&self.state.as_ref().unwrap().value
-	}
-}
-
-impl<T> DerefMut for Mut<'_, T> {
-	fn deref_mut(&mut self) -> &mut Self::Target {
-		// If we use the &mut then notify on Drop.
-		self.modified = true;
-		&mut self.state.as_mut().unwrap().value
-	}
-}
-
-impl<T> Drop for Mut<'_, T> {
-	fn drop(&mut self) {
-		let mut state = self.state.take().unwrap();
-
-		if !self.modified {
-			return;
-		}
-
-		if !state.closed && state.waiters_value.is_empty() {
-			// A write nobody is parked on wakes nobody, so skip moving the list out. Drop
-			// any dead entries in place, or every later write would rescan them.
-			state.waiters_value.clear();
-			return;
-		}
-
-		// Drain wakers while holding lock, then wake after releasing.
-		// A modification that also closed the channel (e.g. `close()`) must
-		// wake the closed and consumer-count waiters too, since they resolve
-		// on closure. A plain modification touches only the value waiters.
-		let mut waiters_value = state.waiters_value.take();
-		let extra = state
-			.closed
-			.then(|| [state.waiters_closed.take(), state.waiters_consumer.take()]);
-		drop(state); // Release Mutex BEFORE waking
-
-		waiters_value.wake();
-		if let Some(mut extra) = extra {
-			for list in &mut extra {
-				list.wake();
-			}
-		}
-	}
-}
-
-/// A read-only guard over the shared state.
-///
-/// Derefs to `T` for direct access. Does not notify consumers when dropped.
-pub struct Ref<'a, T> {
-	pub(crate) state: LockGuard<'a, State<T>>,
-}
-
-impl<T> Ref<'_, T> {
-	/// Returns `true` if the channel has been closed.
-	pub fn is_closed(&self) -> bool {
-		self.state.closed
-	}
-}
-
-impl<T> Deref for Ref<'_, T> {
-	type Target = T;
-
-	fn deref(&self) -> &Self::Target {
-		&self.state.value
-	}
 }
 
 #[cfg(test)]

@@ -122,6 +122,12 @@ impl Waiter {
 		true
 	}
 
+	/// Whether a registration under `tag` is recorded, which proves the list carrying
+	/// `tag` still holds this waiter. Zero, a list never registered on, matches nothing.
+	pub(crate) fn holds(&self, tag: u64) -> bool {
+		tag != 0 && self.parked.iter().any(|slot| slot.load(Ordering::Relaxed) == tag)
+	}
+
 	/// Whether every list holding this waiter is recorded, so registering it again
 	/// cannot stack a duplicate.
 	fn reusable(&self) -> bool {
@@ -274,6 +280,12 @@ impl WaiterList {
 			self.cursor = 0;
 		}
 		self.entries.push(new_weak);
+	}
+
+	/// The tag a registration records right now. It changes on every drain, so a waiter
+	/// that [holds](Waiter::holds) it is still here.
+	pub(crate) fn tag(&self) -> u64 {
+		self.tag
 	}
 
 	/// Start a new round, so no record of an entry made in the last one matches.
@@ -474,9 +486,11 @@ mod tests {
 	#[cfg(target_pointer_width = "64")]
 	fn the_list_stays_small() {
 		let list = std::mem::size_of::<WaiterList>();
-		let state = std::mem::size_of::<crate::State<()>>();
+		let state = std::mem::size_of::<crate::channel::Channel<()>>();
 		assert!(list <= 56, "WaiterList grew to {list} B");
-		assert!(state <= 176, "State<()> grew to {state} B");
+		// 184 B before the version counter, the value list's tag mirror (8 B each), and the
+		// waiter lists' own mutex moved the parking off the value's lock.
+		assert!(state <= 200, "Channel<()> grew to {state} B");
 	}
 
 	#[test]

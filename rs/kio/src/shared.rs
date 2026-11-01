@@ -1,9 +1,7 @@
-use std::task::Poll;
+use std::{sync::Arc, task::Poll};
 
 use crate::{
-	State,
-	lock::Lock,
-	producer::{Mut, Ref},
+	channel::{Channel, Mut, Ref},
 	waiter::*,
 };
 
@@ -21,7 +19,7 @@ use crate::{
 /// flag inside `T`, maintained by the owning handles' `Clone`/`Drop` under the same lock).
 #[derive(Debug)]
 pub struct Shared<T> {
-	state: Lock<State<T>>,
+	state: Arc<Channel<T>>,
 }
 
 impl<T: Default> Default for Shared<T> {
@@ -34,7 +32,7 @@ impl<T> Shared<T> {
 	/// Create a new shared value.
 	pub fn new(value: T) -> Self {
 		Self {
-			state: Lock::new(State::new(value)),
+			state: Arc::new(Channel::new(value)),
 		}
 	}
 
@@ -44,14 +42,12 @@ impl<T> Shared<T> {
 	/// [`Mut`] wakes every parked [`poll`](Self::poll) on drop; a guard that was only
 	/// read from wakes nobody.
 	pub fn lock(&self) -> Mut<'_, T> {
-		Mut::new(self.state.lock())
+		Mut::new(self.state.read())
 	}
 
 	/// Lock the value for reading only, never waking anyone.
 	pub fn read(&self) -> Ref<'_, T> {
-		Ref {
-			state: self.state.lock(),
-		}
+		self.state.read()
 	}
 
 	/// Poll a read-only predicate; once it holds, hand back a [`Mut`] with the lock
@@ -66,14 +62,15 @@ impl<T> Shared<T> {
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<()>,
 	{
-		let mut guard = Ref {
-			state: self.state.lock(),
-		};
+		let guard = self.state.read();
+		// Read under the lock, so it is the version of the value `f` judges.
+		let seen = self.state.version();
 		match f(&guard) {
 			// Upgrade the Ref to a Mut, keeping the same lock guard.
-			Poll::Ready(()) => crate::coop::ready(Mut::new(guard.state)),
+			Poll::Ready(()) => crate::coop::ready(Mut::new(guard)),
 			Poll::Pending => {
-				waiter.register(&mut guard.state.waiters_value);
+				drop(guard);
+				self.state.park_value(waiter, seen);
 				Poll::Pending
 			}
 		}
@@ -96,7 +93,7 @@ impl<T> Shared<T> {
 
 	/// Returns `true` if both handles share the same underlying state.
 	pub fn same_channel(&self, other: &Self) -> bool {
-		self.state.is_clone(&other.state)
+		Arc::ptr_eq(&self.state, &other.state)
 	}
 }
 

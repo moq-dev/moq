@@ -29,12 +29,9 @@
 
 #![warn(missing_docs)]
 
-use std::{
-	fmt,
-	ops::{Deref, DerefMut},
-	sync::atomic::AtomicUsize,
-};
+use std::{fmt, sync::atomic::AtomicUsize};
 
+mod channel;
 mod lock;
 mod waiter;
 
@@ -58,10 +55,11 @@ mod tests;
 pub use kio_macros::machine;
 
 pub use bridge::Bridge;
+pub use channel::{Mut, Ref};
 pub use consumer::Consumer;
 pub use lock::{Lock, LockGuard};
 pub use pending::Pending;
-pub use producer::{Mut, Producer, Ref, Unwanted};
+pub use producer::{Producer, Unwanted};
 pub use queue::{PushError, Queue};
 pub use shared::Shared;
 pub use task::{Task, TaskKey, Tasks};
@@ -97,7 +95,7 @@ mod heap {
 	use std::alloc::Layout;
 
 	// Not a glob: it would import `test`, kio's attribute, over the built-in one.
-	use super::{State, arc_heap};
+	use super::{arc_heap, channel::Channel};
 
 	/// [`arc_heap`] hand-rolls what `Layout` does, because `Layout` isn't `const`. Hold
 	/// it to the real thing, including a `T` aligned past the reference counts.
@@ -117,10 +115,7 @@ mod heap {
 
 		assert_eq!(arc_heap::<u8>(), layout::<u8>());
 		assert_eq!(arc_heap::<Overaligned>(), layout::<Overaligned>());
-		assert_eq!(
-			arc_heap::<std::sync::Mutex<State<()>>>(),
-			layout::<std::sync::Mutex<State<()>>>()
-		);
+		assert_eq!(arc_heap::<Channel<()>>(), layout::<Channel<()>>());
 	}
 }
 
@@ -142,64 +137,6 @@ impl fmt::Display for Closed {
 }
 
 impl std::error::Error for Closed {}
-
-/// Waiters split by what they're waiting on, so an event only wakes the
-/// waiters that care about it. The big win is per-modification writes (the hot
-/// path) waking only `value`, leaving the long-lived `closed` and `consumer`
-/// waiters untouched.
-#[derive(Debug)]
-pub(crate) struct State<T> {
-	pub value: T,
-	/// Value changes (`poll`/`wait`). Woken on every modification.
-	pub waiters_value: waiter::WaiterList,
-	/// Closure (`closed`). Woken only when the channel closes.
-	pub waiters_closed: waiter::WaiterList,
-	/// Consumer-count changes (`wanted_changed`), in either direction.
-	pub waiters_consumer: waiter::WaiterList,
-	pub closed: bool,
-}
-
-impl<T: Default> Default for State<T> {
-	fn default() -> Self {
-		Self::new(Default::default())
-	}
-}
-
-impl<T> State<T> {
-	pub fn new(value: T) -> Self {
-		Self {
-			value,
-			closed: false,
-			waiters_value: waiter::WaiterList::new(),
-			waiters_closed: waiter::WaiterList::new(),
-			waiters_consumer: waiter::WaiterList::new(),
-		}
-	}
-
-	/// Drain every waiter list. Used on close, which all waiters react to.
-	/// Caller wakes the returned lists after releasing the lock.
-	pub fn take_close_waiters(&mut self) -> [waiter::WaiterList; 3] {
-		[
-			self.waiters_value.take(),
-			self.waiters_closed.take(),
-			self.waiters_consumer.take(),
-		]
-	}
-}
-
-impl<T> Deref for State<T> {
-	type Target = T;
-
-	fn deref(&self) -> &Self::Target {
-		&self.value
-	}
-}
-
-impl<T> DerefMut for State<T> {
-	fn deref_mut(&mut self) -> &mut Self::Target {
-		&mut self.value
-	}
-}
 
 #[derive(Debug)]
 pub(crate) struct Counts {
