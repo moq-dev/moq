@@ -1337,20 +1337,46 @@ impl Drop for AuthClose {
 /// Judges the publisher's serving origin rather than the raw one: an origin that also
 /// consumes holds what the peer sent us, which is not ours to publish back.
 async fn enforce_grant(auth: crate::auth::Link, publisher: Publisher, session: Transport) -> Result<(), Error> {
-	let origin = publisher.serving_origin().await;
-	// Checking what we publish is not a local reader asking to discover anything.
-	let mut announced = origin.clone().serving().announced();
-	let mut check = crate::auth::Enforce::default();
-	let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {
-		return Ok(());
-	};
-	tracing::error!(broadcast = %crate::path::Rooted(origin.root(), &path), "publishing outside our grant; closing the session");
-	let err = Error::Unauthorized;
-	session.close(
-		super::error::to_session_code(&SessionError::from(&err)),
-		&crate::auth::unauthorized_reason(&path),
-	);
-	Err(err)
+	let mut enforce = EnforceGrant::new(auth, publisher, session);
+	kio::wait(|waiter| enforce.poll(waiter)).await
+}
+
+/// See [`enforce_grant`].
+struct EnforceGrant {
+	auth: crate::auth::Link,
+	publisher: Publisher,
+	session: Transport,
+	state: EnforceGrantState,
+}
+
+#[kio::machine(self.state: EnforceGrantState)]
+impl EnforceGrant {
+	fn new(auth: crate::auth::Link, publisher: Publisher, session: Transport) -> Self {
+		Self {
+			auth,
+			publisher,
+			session,
+			state: EnforceGrantState::Start,
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> std::task::Poll<Result<(), Error>> {
+		let origin: origin::Consumer = wait!(Origin => self.publisher.poll_serving_origin(waiter));
+		// Checking what we publish is not a local reader asking to discover anything.
+		let mut announced: crate::announce::Consumer = origin.clone().serving().announced();
+		let mut check: crate::auth::Enforce = crate::auth::Enforce::default();
+		let path = wait!(Check => check.poll(&self.auth, announced, waiter));
+		let Some(path) = path else {
+			return std::task::Poll::Ready(Ok(()));
+		};
+		tracing::error!(broadcast = %crate::path::Rooted(origin.root(), &path), "publishing outside our grant; closing the session");
+		let err = Error::Unauthorized;
+		self.session.close(
+			super::error::to_session_code(&SessionError::from(&err)),
+			&crate::auth::unauthorized_reason(&path),
+		);
+		std::task::Poll::Ready(Err(err))
+	}
 }
 
 #[cfg(test)]
