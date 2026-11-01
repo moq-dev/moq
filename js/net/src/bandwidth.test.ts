@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Signal } from "@moq/signals";
-import { Allocator, allocate, type Want } from "./bandwidth.ts";
+import { Allocator, allocate, Plan, type Want } from "./bandwidth.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
 /** Priorities matching hang's, which is what the allocator sees in practice. */
@@ -63,6 +63,51 @@ test("surplus is left unclaimed", () => {
 test("an unregistered share has no grant", () => {
 	expect(allocate(1_000_000, [], 0)).toBeUndefined();
 	expect(allocate(1_000_000, [want(0, VIDEO, 1_000)], 7)).toBeUndefined();
+});
+
+/** One share's slice, re-dividing every tier for it alone: the allocator before reservations read one division. */
+function sequential(estimate: number, wants: readonly Want[], id: number): number | undefined {
+	let budget = estimate;
+	let tier: number | undefined = Math.max(...wants.map((want) => want.priority));
+	while (tier !== undefined && Number.isFinite(tier)) {
+		const members = wants.filter((want) => want.priority === tier).sort((a, b) => a.max - b.max);
+		let remaining = members.length;
+		for (const want of members) {
+			const grant = Math.min(want.max, Math.floor(budget / remaining));
+			if (want.id === id) return grant;
+			budget -= grant;
+			remaining -= 1;
+		}
+		const lower = wants.filter((want) => want.priority < (tier as number)).map((want) => want.priority);
+		tier = lower.length ? Math.max(...lower) : undefined;
+	}
+	return undefined;
+}
+
+test("one division matches each share dividing alone", () => {
+	let seed = 42;
+	const next = (bound: number) => {
+		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+		return seed % bound;
+	};
+	for (let round = 0; round < 2_000; round++) {
+		const count = next(12) + 1;
+		const tiers = next(4) + 1;
+		const entries = Array.from({ length: count }, (_, id) => ({
+			want: want(id, next(tiers) - 1, next(5) * 300 + next(3)),
+			active: next(3) > 0,
+		}));
+		const estimate = next(count * 1_600);
+		const active = entries.filter((entry) => entry.active).map((entry) => entry.want);
+		const plan = new Plan(estimate, active);
+
+		for (const { want, active: demanded } of entries) {
+			// An idle reservation reads what it would get were it added after the others.
+			const expected = demanded ? sequential(estimate, active, want.id) : sequential(estimate, [...active, want], want.id);
+			const actual = demanded ? plan.grant(want.id) : plan.rejoin(want.priority, want.max);
+			expect({ want, actual }).toEqual({ want, actual: expected });
+		}
+	}
 });
 
 test("concurrent tracks split the estimate", () => {
