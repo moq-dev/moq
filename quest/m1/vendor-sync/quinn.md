@@ -22,27 +22,30 @@ the open BBR3 PR moq-congestion carries from
 for fixes to port, and records the PR commit checked in the README's BBR3
 entry. It was force-pushed to `01b8848d` on 2026-10-20.
 
-Last checked: the fork point
-[`7616e6b2`](https://github.com/quinn-rs/quinn/commit/7616e6b2782722f3ce4a1b181ef08817d7f545e4)
-(2026-10-05), plus the commits the README lists as ported. Upstream `main` was
-at [`a2c55b36`](https://github.com/quinn-rs/quinn/commit/a2c55b36817ccaac1c39c6db92de8294f281819f)
-(2026-10-30), 18 commits later. Record the newest upstream commit checked in
-`rs/moq-quic/README.md`'s `Upstream` section.
+Last checked: quinn `main` through
+[`2697de1e`](https://github.com/quinn-rs/quinn/commit/2697de1e1314cb9f98502b7323acd5bdd836b582)
+(2026-10-28) and `0.11.x` through
+[`4b84837d`](https://github.com/quinn-rs/quinn/commit/4b84837df1d25424bc37b0ed990e7b376d40a9c0),
+recorded in `rs/moq-quic/README.md`'s `Upstream` section
+([moq-dev/moq#7287](https://github.com/moq-dev/moq/pull/7287) checked
+`f233510c`, `6c69f9f4`, and `623a0369`). Record the newest upstream commit
+checked there.
 
-First run: four fixes on quinn `main` are not in the ledger yet. Check each
-against the fork's code before porting, since a missing ledger entry does not
-prove the bug remains:
-[`f233510c`](https://github.com/quinn-rs/quinn/commit/f233510c) (honor a
-disabled idle timeout when accepting),
-[`6c69f9f4`](https://github.com/quinn-rs/quinn/commit/6c69f9f4) (don't
-credit a reset stream's unread data twice on stop; the fork rewrote `stop`
-under the README's "Stream credit on stop", so it may already hold),
-[`623a0369`](https://github.com/quinn-rs/quinn/commit/623a0369) (don't make
-specific IPv6 endpoints dual-stack), and
-[`a2c55b36`](https://github.com/quinn-rs/quinn/commit/a2c55b36) (IPv4 source
-address on Apple, in `moq_sock::udp`). Also judge the new `read_datagrams`
-API ([`2697de1e`](https://github.com/quinn-rs/quinn/commit/2697de1e)), a
-feature: plan it with `/quest-plan` if moq-tokio's driver would use it.
+Remaining this run:
+[`a2c55b36`](https://github.com/quinn-rs/quinn/commit/a2c55b36817ccaac1c39c6db92de8294f281819f)
+(honor IPv4 source addresses on Apple: send `IP_PKTINFO` rather than
+`IP_RECVDSTADDR`, in `moq_sock::udp`), the quinn#2481 check above, and judging
+the new `read_datagrams` API
+([`2697de1e`](https://github.com/quinn-rs/quinn/commit/2697de1e)), a feature:
+plan it with `/quest-plan` if moq-tokio's driver would use it.
+
+Learned so far: a fix missing from the ledger is often already held, since the
+fork reworked the same code (`stop` under `RESET_STREAM_AT`, the stale-accept
+check under `handshake_timeout`, and socket setup in `moq_sock::bind`), so
+check the fork's code before porting. A fix to quinn's `Endpoint::client` or
+`server` lands in `moq_sock::bind`, which the driver's test helpers bind
+through. Most of `0.11.x` is backports of `main`; compare its commits by
+subject.
 
 Public API: none expected; a ported fix that changes one says so. Wire:
 QUIC behavior follows upstream's fixes.
