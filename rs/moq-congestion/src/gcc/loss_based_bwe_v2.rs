@@ -717,34 +717,35 @@ impl LossBasedBweV2 {
                 /*new_estimate=*/ best_candidate.loss_limited_bandwidth,
             );
             // Bound the best candidate by the acked bitrate.
-            if let Some(acknowledged_bitrate) = self.acknowledged_bitrate {
-                if increasing_when_loss_limited && acknowledged_bitrate.is_finite() {
-                    let mut rampup_factor: f64 = self.config.bw_rampup_upper_bound_factor;
-                    if self.last_hold_info.rate.is_finite()
-                        && acknowledged_bitrate
-                            < self.config.bw_rampup_upper_bound_hold_threshold
-                                * self.last_hold_info.rate
-                    {
-                        rampup_factor = self.config.bw_rampup_upper_bound_in_hold_factor;
-                    }
+            if let Some(acknowledged_bitrate) = self.acknowledged_bitrate
+                && increasing_when_loss_limited
+                && acknowledged_bitrate.is_finite()
+            {
+                let mut rampup_factor: f64 = self.config.bw_rampup_upper_bound_factor;
+                if self.last_hold_info.rate.is_finite()
+                    && acknowledged_bitrate
+                        < self.config.bw_rampup_upper_bound_hold_threshold
+                            * self.last_hold_info.rate
+                {
+                    rampup_factor = self.config.bw_rampup_upper_bound_in_hold_factor;
+                }
 
-                    best_candidate.loss_limited_bandwidth = std::cmp::max(
-                        self.current_best_estimate.loss_limited_bandwidth,
-                        std::cmp::min(
-                            best_candidate.loss_limited_bandwidth,
-                            rampup_factor * (acknowledged_bitrate),
-                        ),
-                    );
-                    // Increase current estimate by at least 1kbps to make sure that the state
-                    // will be switched to Increasing, thus padding is triggered.
-                    if self.loss_based_result.state == LossBasedState::Decreasing
-                        && best_candidate.loss_limited_bandwidth
-                            == self.current_best_estimate.loss_limited_bandwidth
-                    {
-                        best_candidate.loss_limited_bandwidth =
-                            self.current_best_estimate.loss_limited_bandwidth
-                                + DataRate::from_bits_per_sec(1);
-                    }
+                best_candidate.loss_limited_bandwidth = std::cmp::max(
+                    self.current_best_estimate.loss_limited_bandwidth,
+                    std::cmp::min(
+                        best_candidate.loss_limited_bandwidth,
+                        rampup_factor * (acknowledged_bitrate),
+                    ),
+                );
+                // Increase current estimate by at least 1kbps to make sure that the state
+                // will be switched to Increasing, thus padding is triggered.
+                if self.loss_based_result.state == LossBasedState::Decreasing
+                    && best_candidate.loss_limited_bandwidth
+                        == self.current_best_estimate.loss_limited_bandwidth
+                {
+                    best_candidate.loss_limited_bandwidth =
+                        self.current_best_estimate.loss_limited_bandwidth
+                            + DataRate::from_bits_per_sec(1);
                 }
             }
         }
@@ -992,15 +993,14 @@ impl LossBasedBweV2 {
             bandwidths.push(*candidate_factor * best_estimate.loss_limited_bandwidth);
         }
 
-        if let Some(acknowledged_bitrate) = self.acknowledged_bitrate {
-            if self.config.acked_rate_candidate
-                && (!(self.config.not_use_acked_rate_in_alr && in_alr)
-                    || (self.config.padding_duration > TimeDelta::zero()
-                        && self.last_padding_info.padding_timestamp + self.config.padding_duration
-                            >= self.last_send_time_most_recent_observation))
-            {
-                bandwidths.push(acknowledged_bitrate * self.config.bw_backoff_lower_bound_factor);
-            }
+        if let Some(acknowledged_bitrate) = self.acknowledged_bitrate
+            && self.config.acked_rate_candidate
+            && (!(self.config.not_use_acked_rate_in_alr && in_alr)
+                || (self.config.padding_duration > TimeDelta::zero()
+                    && self.last_padding_info.padding_timestamp + self.config.padding_duration
+                        >= self.last_send_time_most_recent_observation))
+        {
+            bandwidths.push(acknowledged_bitrate * self.config.bw_backoff_lower_bound_factor);
         }
 
         if self.delay_based_estimate.is_finite()
@@ -1220,11 +1220,11 @@ impl LossBasedBweV2 {
     fn calculate_instant_lower_bound(&mut self) {
         let mut instance_lower_bound: DataRate = DataRate::zero();
 
-        if let Some(acknowledged_bitrate) = self.acknowledged_bitrate {
-            if self.config.lower_bound_by_acked_rate_factor > 0.0 {
-                instance_lower_bound =
-                    self.config.lower_bound_by_acked_rate_factor * acknowledged_bitrate;
-            }
+        if let Some(acknowledged_bitrate) = self.acknowledged_bitrate
+            && self.config.lower_bound_by_acked_rate_factor > 0.0
+        {
+            instance_lower_bound =
+                self.config.lower_bound_by_acked_rate_factor * acknowledged_bitrate;
         }
 
         if self.min_bitrate.is_finite() {
@@ -1348,7 +1348,7 @@ impl LossBasedBweV2 {
             return DataRate::zero();
         }
         sending_rates.sort();
-        if sending_rates.len() % 2 == 0 {
+        if sending_rates.len().is_multiple_of(2) {
             return (sending_rates[sending_rates.len() / 2 - 1]
                 + sending_rates[sending_rates.len() / 2])
                 / 2;
@@ -1507,7 +1507,6 @@ mod test {
                         ..Default::default()
                     },
                     receive_time: Timestamp::plus_infinity(),
-                    ..Default::default()
                 });
             }
 
@@ -1518,7 +1517,6 @@ mod test {
                     ..Default::default()
                 },
                 receive_time: Timestamp::plus_infinity(),
-                ..Default::default()
             });
 
             enough_feedback

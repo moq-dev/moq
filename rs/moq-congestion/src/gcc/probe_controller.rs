@@ -574,13 +574,13 @@ impl ProbeController {
         pending_probes
     }
     fn time_for_alr_probe(&self, at_time: Timestamp) -> bool {
-        if let Some(alr_start_time) = self.alr_start_time {
-            if self.enable_periodic_alr_probing {
-                let next_probe_time: Timestamp =
-                    std::cmp::max(alr_start_time, self.time_last_probing_initiated)
-                        + self.config.alr_interval;
-                return at_time >= next_probe_time;
-            }
+        if let Some(alr_start_time) = self.alr_start_time
+            && self.enable_periodic_alr_probing
+        {
+            let next_probe_time: Timestamp =
+                std::cmp::max(alr_start_time, self.time_last_probing_initiated)
+                    + self.config.alr_interval;
+            return at_time >= next_probe_time;
         }
         false
     }

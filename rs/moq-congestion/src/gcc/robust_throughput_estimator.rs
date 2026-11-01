@@ -319,7 +319,6 @@ mod test {
                         ..Default::default()
                     },
                     receive_time: self.recv_clock,
-                    ..Default::default()
                 });
                 self.send_clock += packet_size / send_rate;
             }

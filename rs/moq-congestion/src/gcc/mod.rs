@@ -12,7 +12,7 @@
 //! for is gone, and each file's own docs say what: RTCP receiver reports and REMB, route changes,
 //! the network state estimate, separate audio detection, RTP sequence numbers, ECN feedback,
 //! padding, and the `AcknowledgedBitrateEstimator` that a disabled-by-default field trial selects.
-//! Field trials are typed settings with upstream's defaults ([`experiments::FieldTrials`]).
+//! Field trials are typed settings with upstream's defaults (`FieldTrials`).
 //!
 //! [`Gcc`] adapts it to [`Controller`]: each ACK becomes transport feedback carrying the peer's
 //! receive times and each loss a feedback of lost packets, GoogCC's process timer runs from the

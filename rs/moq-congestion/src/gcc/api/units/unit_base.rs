@@ -5,6 +5,10 @@ macro_rules! unit_base {
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
         pub struct $ty(i64);
 
+        #[allow(
+            dead_code,
+            reason = "WebRTC's unit API, kept whole so a refresh diffs cleanly"
+        )]
         impl $ty {
             pub const fn zero() -> Self {
                 Self(0)
@@ -59,18 +63,18 @@ macro_rules! unit_base {
                 Self::from_value((self.0 / resolution.0) * resolution.0)
             }
 
-            #[allow(dead_code)]
+            #[allow(dead_code, reason = "each unit takes the conversions it needs")]
             const fn from_fraction(denominator: i64, value: i64) -> Self {
                 assert!(denominator >= 0);
                 Self::from_value(value * denominator)
             }
 
-            #[allow(dead_code)]
+            #[allow(dead_code, reason = "each unit takes the conversions it needs")]
             fn from_fraction_float(denominator: f64, value: f64) -> Self {
                 Self::from_value_float(value * denominator)
             }
 
-            #[allow(dead_code)]
+            #[allow(dead_code, reason = "each unit takes the conversions it needs")]
             const fn to_fraction(self, denominator: i64) -> i64 {
                 self.divide_round_to_nearest(denominator)
             }
@@ -92,13 +96,13 @@ macro_rules! unit_base {
                 result
             }
 
-            #[allow(dead_code)]
+            #[allow(dead_code, reason = "each unit takes the conversions it needs")]
             fn to_fraction_float(self, denominator: f64) -> f64 {
                 assert!(denominator >= 0.0);
                 self.to_value_float() / denominator
             }
 
-            #[allow(dead_code)]
+            #[allow(dead_code, reason = "each unit takes the conversions it needs")]
             const fn to_fraction_or(self, denominator: i64, fallback_value: i64) -> i64 {
                 assert!(denominator >= 0);
                 if self.is_finite() {
@@ -150,7 +154,7 @@ macro_rules! unit_base {
                 self.0
             }
 
-            #[allow(dead_code)]
+            #[allow(dead_code, reason = "each unit takes the conversions it needs")]
             const fn to_value_or(self, fallback_value: i64) -> i64 {
                 if self.is_finite() {
                     self.0
@@ -698,7 +702,7 @@ mod test {
     #[test]
     #[should_panic]
     fn crashes_when_created_from_nan2() {
-        #[allow(clippy::zero_divided_by_zero)]
+        #[allow(clippy::zero_divided_by_zero, reason = "builds a NaN")]
         TestUnit::from_value_float(0.0 / 0.0);
     }
 

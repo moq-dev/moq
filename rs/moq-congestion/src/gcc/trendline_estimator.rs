@@ -291,10 +291,11 @@ impl TrendlineEstimator {
                 let cap = compute_slope_cap(&self.delay_hist, &self.settings);
                 // We only use the cap to filter out overuse detections, not
                 // to detect additional underuses.
-                if let Some(cap) = cap {
-                    if trend >= 0.0 && trend > cap {
-                        trend = cap;
-                    }
+                if let Some(cap) = cap
+                    && trend >= 0.0
+                    && trend > cap
+                {
+                    trend = cap;
                 }
             }
         }

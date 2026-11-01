@@ -322,10 +322,9 @@ mod test {
         const MIN_PROBES: i64 = 30;
         const MIN_BYTES: i64 = 312500;
 
-        let mut receive_time: i64 = 5;
         for send_time in 0..25 {
+            let receive_time = send_time + 5;
             test.add_packet_feedback(0, 12500, send_time, receive_time, MIN_PROBES, MIN_BYTES);
-            receive_time += 1;
         }
         assert_relative_eq!(
             test.measured_data_rate.unwrap().bps_float(),
