@@ -1006,7 +1006,11 @@ mod tests {
 		let (mut other, _other_recv) = uni(&a, &b);
 		ready(write(&mut other, &Bytes::from_static(b"two"))).unwrap();
 		let (parked_write, parked_write_count) = counted();
-		assert!(other.poll_write_buf(&parked_write, &mut Bytes::from_static(b"x")).is_pending());
+		assert!(
+			other
+				.poll_write_buf(&parked_write, &mut Bytes::from_static(b"x"))
+				.is_pending()
+		);
 
 		a.close(4, "bye");
 		assert_eq!(ready_write_count.0.load(Ordering::Relaxed), 0);
