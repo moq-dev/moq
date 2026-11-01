@@ -6,9 +6,9 @@
 //! are held to the budgets below, which were set before the probe was tuned. The merge gate runs
 //! the short cases on one seed; the `#[ignore]`d acceptance suite runs nightly in release with
 //! `just rs quic-sim`, holding each budget on the mean across [`SEEDS`], since one seed's outcome
-//! beside a competing upload is a coin flip. Each seed also draws when the media starts within
-//! a frame interval of the handshake and any competing upload, so that mean averages over their
-//! alignment rather than carrying one alignment's bias.
+//! beside a competing upload is a coin flip. Each seed also draws when its media starts, up to a
+//! frame interval after the handshake, any warmup, and the competing upload's start, so that mean
+//! carries no bias from one timing alignment shared by every seed.
 //!
 //! The same media trace without a target also checks when BBR3 skips ProbeRTT.
 
@@ -294,8 +294,8 @@ fn run(scenario: &Scenario) -> Outcome {
 		super::upload(&mut pair, client_ch, server_ch, scenario.warmup, |_| {});
 	}
 
-	// The media starts up to a frame interval after the handshake and any competing upload, drawn
-	// apart from the run's entropy so that a seed's other draws stay as they were
+	// The seed delays the media up to a frame interval past the handshake, any warmup, and the
+	// competing upload's start. Its own generator leaves the run's other draws as they were.
 	let offset = Pcg32::seed_from_u64(scenario.seed).random_range(Duration::ZERO..Duration::from_secs(1) / FPS as u32);
 	let start = pair.time + offset;
 	let end = start + scenario.duration;
