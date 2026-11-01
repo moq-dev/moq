@@ -387,19 +387,24 @@ where
 
 /// A handle's state for async calls that only poll it, which UniFFI's `RustFuture` polls directly.
 ///
-/// The state sits behind a std mutex held across one poll, never across a wait. Concurrent
-/// calls on one handle all park, and each poll takes the next item atomically, so between
-/// them they take every item once, though not in call order. Unlike [`Task`], nothing queues:
-/// a call the foreign side cancelled but has not freed yet stops polling and holds nothing
-/// the next call needs.
+/// The state sits behind a [`kio::Bridge`], locked across one poll, never across a wait.
+/// Concurrent calls on one handle all park, and each poll takes the next item atomically, so
+/// between them they take every item once, though not in call order. Unlike [`Task`], nothing
+/// queues: a call the foreign side cancelled but has not freed yet stops polling and holds
+/// nothing the next call needs.
+///
+/// The bridge is what lets calls park together: the state always polls with the bridge's one
+/// waiter, which wakes every parked call, since a handle may keep one waker per wait (moq-net's
+/// track cursor does) and would otherwise wake only its latest caller. It also holds a wake the
+/// state sends while locked until the lock is released, since UniFFI runs the foreign
+/// continuation on the waking thread and a binding may poll the woken call right there.
 ///
 /// Each poll runs inside [`shutdown`]'s in-flight accounting and the runtime context, so a poll
 /// that missed the shutdown finishes before the drivers stop, and a tokio timer in the state
 /// stays pollable. [`Self::cancel`] closes a channel every poll checks, then drops the state.
 /// A call that awaits tokio channels, codecs, or I/O uses [`Task`] instead.
 pub(crate) struct Polled<T> {
-	/// `None` once cancelled or taken.
-	state: std::sync::Mutex<Option<T>>,
+	state: kio::Bridge<Slot<T>>,
 	/// Closed by [`Self::cancel`] and [`Self::take`], waking every parked call.
 	cancel: kio::Producer<()>,
 	driver: Background,
@@ -409,10 +414,23 @@ pub(crate) struct Polled<T> {
 	cleanup: std::sync::OnceLock<MoqError>,
 }
 
+/// What a [`Polled`] bridges.
+struct Slot<T> {
+	/// `None` once cancelled or taken.
+	state: Option<T>,
+	/// The waiter every poll hands the state, made from the bridge's waker on the first poll.
+	/// Kept across calls, so the state's registrations stay live and its one-waker waits always
+	/// see the same waker.
+	waiter: Option<kio::Waiter>,
+}
+
 impl<T> Polled<T> {
 	pub fn new(inner: T) -> Self {
 		Self {
-			state: std::sync::Mutex::new(Some(inner)),
+			state: kio::Bridge::new(Slot {
+				state: Some(inner),
+				waiter: None,
+			}),
 			cancel: kio::Producer::new(()),
 			driver: Background::default(),
 			calls: AtomicUsize::new(0),
@@ -468,11 +486,13 @@ impl<T> Polled<T> {
 		if self.cancel.poll_closed(waiter).is_ready() {
 			return Poll::Ready(Err(MoqError::Cancelled));
 		}
-		let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-		match state.as_mut() {
-			Some(state) => poll(state, waiter),
-			None => Poll::Ready(Err(MoqError::Cancelled)),
-		}
+		self.state.poll(waiter, |slot, cx| {
+			let waiter = slot.waiter.get_or_insert_with(|| kio::Waiter::new(cx.waker().clone()));
+			match slot.state.as_mut() {
+				Some(state) => poll(state, waiter),
+				None => Poll::Ready(Err(MoqError::Cancelled)),
+			}
+		})
 	}
 
 	/// Whether a call is in flight: polled at least once and not yet dropped.
@@ -482,19 +502,12 @@ impl<T> Polled<T> {
 
 	/// Read the state synchronously, or `None` once it is gone.
 	pub fn peek<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
-		self.state
-			.lock()
-			.unwrap_or_else(std::sync::PoisonError::into_inner)
-			.as_ref()
-			.map(f)
+		self.state.lock().state.as_ref().map(f)
 	}
 
 	/// Whether [Self::cancel] or [Self::take] has run.
 	pub fn is_cancelled(&self) -> bool {
-		self.state
-			.lock()
-			.unwrap_or_else(std::sync::PoisonError::into_inner)
-			.is_none()
+		self.state.lock().state.is_none()
 	}
 
 	/// Move the state to a new owner, ending this handle as [Self::cancel] would.
@@ -503,10 +516,10 @@ impl<T> Polled<T> {
 	/// [`MoqError::Cancelled`] once the state is gone.
 	pub fn take(&self, check: impl FnOnce(&T) -> Result<(), MoqError>) -> Result<T, MoqError> {
 		self.check()?;
-		let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-		check(state.as_ref().ok_or(MoqError::Cancelled)?)?;
-		let inner = state.take().ok_or(MoqError::Cancelled)?;
-		drop(state);
+		let mut slot = self.state.lock();
+		check(slot.state.as_ref().ok_or(MoqError::Cancelled)?)?;
+		let inner = slot.state.take().ok_or(MoqError::Cancelled)?;
+		drop(slot);
 		let _ = self.cancel.close();
 		Ok(inner)
 	}
@@ -517,11 +530,7 @@ impl<T> Polled<T> {
 	/// Terminal: there is no way back from here, and the state is gone rather than idle.
 	pub fn cancel(&self) {
 		let _ = self.cancel.close();
-		let state = self
-			.state
-			.lock()
-			.unwrap_or_else(std::sync::PoisonError::into_inner)
-			.take();
+		let state = self.state.lock().state.take();
 		self.release(state);
 	}
 
@@ -541,11 +550,7 @@ impl<T> Polled<T> {
 
 impl<T> Drop for Polled<T> {
 	fn drop(&mut self) {
-		let state = self
-			.state
-			.get_mut()
-			.unwrap_or_else(std::sync::PoisonError::into_inner)
-			.take();
+		let state = self.state.get_mut().state.take();
 		self.release(state);
 	}
 }
@@ -1120,6 +1125,49 @@ mod tests {
 		let mut all: Vec<u32> = first.iter().chain(&second).copied().collect();
 		all.sort_unstable();
 		assert_eq!(all, (0..100).collect::<Vec<_>>());
+	}
+
+	/// A state that keeps one waker, as moq-net's track cursor does, still wakes every call
+	/// parked on it, not only the one that polled last.
+	#[tokio::test]
+	async fn polled_one_waker_state_wakes_every_parked_call() {
+		#[derive(Default)]
+		struct OneWaker {
+			ready: bool,
+			waker: Option<std::task::Waker>,
+		}
+		let shared = Arc::new(std::sync::Mutex::new(OneWaker::default()));
+		let polled = Arc::new(Polled::new(shared.clone()));
+		let call = |polled: Arc<Polled<Arc<std::sync::Mutex<OneWaker>>>>| {
+			tokio::spawn(async move {
+				polled
+					.wait(|state, waiter| {
+						let mut state = state.lock().unwrap();
+						if state.ready {
+							return Poll::Ready(Ok(()));
+						}
+						// Replaces the last caller's waker.
+						state.waker = Some(waiter.waker().clone());
+						Poll::Pending
+					})
+					.await
+			})
+		};
+		let first = call(polled.clone());
+		let second = call(polled.clone());
+		for _ in 0..4 {
+			tokio::task::yield_now().await;
+		}
+		assert!(!first.is_finished() && !second.is_finished());
+
+		let waker = {
+			let mut state = shared.lock().unwrap();
+			state.ready = true;
+			state.waker.take().expect("a call parked")
+		};
+		waker.wake();
+		soon(first).await.unwrap().unwrap();
+		soon(second).await.unwrap().unwrap();
 	}
 
 	#[test]

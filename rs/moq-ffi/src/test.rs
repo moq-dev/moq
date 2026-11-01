@@ -8688,6 +8688,66 @@ async fn raw_read_frame_moves_on_when_next_group_takes_its_group() {
 	drop(open);
 }
 
+/// UniFFI's waker runs the foreign continuation on the waking thread, and a binding may poll
+/// the woken call right there. `next_group` taking a parked `read_frame`'s group wakes that
+/// read, so it must have released the track's state by then, or the inline poll deadlocks.
+#[tokio::test]
+async fn raw_next_group_wakes_read_frame_after_unlocking() {
+	type Read = std::pin::Pin<Box<dyn Future<Output = Result<Option<MoqFrame>, MoqError>> + Send>>;
+
+	/// Polls its read inline on every wake, as an unconfined coroutine would.
+	struct Inline {
+		read: std::sync::Mutex<Read>,
+		polls: std::sync::atomic::AtomicUsize,
+	}
+	impl Inline {
+		fn poll(self: &Arc<Self>) -> std::task::Poll<Result<Option<MoqFrame>, MoqError>> {
+			// The read wakes itself while it ends; that wake has nothing left to poll.
+			let Ok(mut read) = self.read.try_lock() else {
+				return std::task::Poll::Pending;
+			};
+			self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			let waker = std::task::Waker::from(self.clone());
+			read.as_mut().poll(&mut std::task::Context::from_waker(&waker))
+		}
+	}
+	impl std::task::Wake for Inline {
+		fn wake(self: Arc<Self>) {
+			let _ = self.poll();
+		}
+	}
+
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let consumer = track
+		.consume(Some(MoqSubscription {
+			max_delay: None,
+			..moq_subscription_defaults()
+		}))
+		.unwrap();
+	let open = track.create_group(0).unwrap();
+
+	let reader = consumer.clone();
+	let inline = Arc::new(Inline {
+		read: std::sync::Mutex::new(Box::pin(async move { reader.read_frame().await })),
+		polls: Default::default(),
+	});
+	assert!(inline.poll().is_pending(), "the open group has no frame yet");
+
+	let taken = kio::clock::timeout(TIMEOUT, consumer.next_group())
+		.await
+		.expect("next_group timed out")
+		.unwrap()
+		.expect("expected the open group");
+	assert_eq!(taken.sequence(), 0);
+	assert_eq!(
+		inline.polls.load(std::sync::atomic::Ordering::SeqCst),
+		2,
+		"next_group should wake the parked read once"
+	);
+	drop(open);
+}
+
 /// Reads parked together on one track each wake, and between them take every group once,
 /// whether they go through `read_frame` or `next_group`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
