@@ -3,7 +3,7 @@ import { type Micro, Milli, Nano, now, yieldNow } from "@moq/clock";
 import { Container } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Derived, Effect, Signal } from "@moq/signals";
 import { nextMedia, subscribeMedia } from "./media";
 import { Sync } from "./sync";
 
@@ -94,7 +94,10 @@ test("a long subscription through the player path leaves nothing behind", async 
 		maxDelay: sync.out.maxDelay,
 	});
 	if (!sub) throw new Error("no subscription");
-	const consumer = new Container.Consumer(sub, { format, maxDelay: sync.out.maxDelay });
+	const consumer = new Container.Consumer(sub, {
+		format,
+		delay: new Derived([sync.out.maxDelay], (max) => ({ max })),
+	});
 
 	// Presentations overlap, as a decoder's outputs do, so the clock's sleeps are shared.
 	const presenting = new Set<Promise<unknown>>();
