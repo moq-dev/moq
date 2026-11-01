@@ -4313,7 +4313,11 @@ mod tests {
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
-			let serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), crate::track::Info::timed());
+			let serving = ServeLoop::new(
+				&serve,
+				broadcast.reserve_track("video").unwrap(),
+				crate::track::Info::timed(),
+			);
 			let mut reader = broadcast
 				.consume()
 				.track("video")
@@ -9044,8 +9048,7 @@ impl ServeLoop {
 					if !drained {
 						// The groups are drained only for a reader: once nobody holds the
 						// copy, a stream the publisher never finishes must not hold it.
-						if self.fetches.is_empty() && crate::util::poll_unwanted(&mut self.demand, waiter).is_ready()
-						{
+						if self.fetches.is_empty() && crate::util::poll_unwanted(&mut self.demand, waiter).is_ready() {
 							return Poll::Ready(ServeEnd::Idle);
 						}
 						return Poll::Pending;
