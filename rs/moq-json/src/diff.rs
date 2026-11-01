@@ -32,10 +32,6 @@ pub struct Diff {
 /// Only object roots produce a recursive patch; any other root forces a snapshot. A merge patch that
 /// would delete a key it shouldn't (a value genuinely set to null) also forces a snapshot.
 pub fn diff<T: Serialize>(old: &Value, new: &T) -> Diff {
-	erased(old, new)
-}
-
-fn erased(old: &Value, new: &dyn erased_serde::Serialize) -> Diff {
 	let result = bytes(old, new, &RefCell::new(Scratch::default())).unwrap_or(PatchBytes {
 		patch: Vec::new(),
 		forced_snapshot: true,
@@ -58,6 +54,8 @@ pub(crate) struct Scratch {
 	last_capacity: usize,
 	/// `None` for a one-off diff, where nothing would ever read it back.
 	memo: Option<Memo>,
+	/// What [`Scratch::next_buffer`] hands out without a memo.
+	unmemoized: Vec<u8>,
 }
 
 impl Scratch {
@@ -69,12 +67,17 @@ impl Scratch {
 		}
 	}
 
-	/// The emptied buffer a memoized encoder writes its next value into before calling
-	/// [`serialized`], or `None` without a memo.
-	pub(crate) fn next_buffer(&mut self) -> Option<&mut Vec<u8>> {
-		let next = &mut self.memo.as_mut()?.next;
-		next.clear();
-		Some(&mut next.doc)
+	/// The emptied buffer an encoder writes its next value into before calling [`serialized`].
+	pub(crate) fn next_buffer(&mut self) -> &mut Vec<u8> {
+		let buffer = match self.memo.as_mut() {
+			Some(memo) => {
+				memo.next.clear();
+				&mut memo.next.doc
+			}
+			None => &mut self.unmemoized,
+		};
+		buffer.clear();
+		buffer
 	}
 
 	fn buffer(&mut self, depth: usize) -> &mut Vec<u8> {
@@ -199,55 +202,60 @@ pub(crate) struct PatchBytes {
 }
 
 /// Diff directly into JSON bytes, reusing child buffers across updates. This never reads or
-/// records the [`Memo`]; a memoized encoder diffs through [`serialized`] instead.
-///
-/// `new` is type-erased so the diff serializer compiles once here, rather than once per value type
-/// in every crate that publishes one. Only the value's own `Serialize` impl stays generic.
-pub(crate) fn bytes(
-	old: &Value,
-	new: &dyn erased_serde::Serialize,
-	scratch: &RefCell<Scratch>,
-) -> Result<PatchBytes, String> {
+/// records the [`Memo`]; an encoder diffs through [`serialized`] instead.
+fn bytes<T: Serialize + ?Sized>(old: &Value, new: &T, scratch: &RefCell<Scratch>) -> Result<PatchBytes, String> {
 	let forced = Cell::new(false);
-	let node = erased_serde::serialize(
-		new,
-		Differ {
-			baseline: old,
-			present: true,
-			forced: &forced,
-			scratch,
-			depth: 0,
-		},
-	);
-	patch(old, node, &forced, scratch)
-}
-
-/// Diff the value a memoized encoder wrote to [`Scratch::next_buffer`], and record its root entries,
-/// which the caller commits with [`Scratch::commit_memo`] once `old` has been brought up to it.
-///
-/// The caller writes the value with the concrete `serde_json` writer its snapshots already compile,
-/// so a table's rows are serialized once and monomorphically, and an unchanged row costs a byte
-/// compare. Only a changed root entry is parsed and diffed as a `Value`.
-pub(crate) fn serialized(old: &Value, scratch: &RefCell<Scratch>) -> Result<PatchBytes, String> {
-	// Taken for the walk, so the diff below can borrow the rest of the scratch.
-	let mut memo = scratch.borrow_mut().memo.take().expect("a memoized scratch");
-	let forced = Cell::new(false);
-	let differ = Differ {
+	let node = new.serialize(Differ {
 		baseline: old,
 		present: true,
 		forced: &forced,
 		scratch,
 		depth: 0,
-	};
-	let node = match memo.next.doc.first() {
-		Some(b'{') => entries(differ, &mut memo),
-		// Any other root forces a snapshot; the diff only says whether it changed.
-		_ => serde_json::from_slice::<Value>(&memo.next.doc)
-			.map_err(|err| Error(err.to_string()))
-			.and_then(|new| new.serialize(differ)),
-	};
-	scratch.borrow_mut().memo = Some(memo);
+	});
 	patch(old, node, &forced, scratch)
+}
+
+/// Diff the value an encoder wrote to [`Scratch::next_buffer`]. With a memo, this also records its
+/// root entries, which the caller commits with [`Scratch::commit_memo`] once `old` has been brought
+/// up to it.
+///
+/// The caller writes the value with the `serde_json` writer its snapshots already compile, so
+/// nothing here is generic over the value's type: the diff serializer compiles once, in this crate,
+/// rather than once per type in every crate that publishes one. A table's rows are serialized once,
+/// an unchanged row costs a byte compare, and only a changed root entry is scanned, or parsed and
+/// diffed as a `Value`. Without a memo, the whole value is parsed and diffed that way.
+pub(crate) fn serialized(old: &Value, scratch: &RefCell<Scratch>) -> Result<PatchBytes, String> {
+	// Taken for the walk, so the diff below can borrow the rest of the scratch.
+	let (memo, unmemoized) = {
+		let mut scratch = scratch.borrow_mut();
+		(scratch.memo.take(), std::mem::take(&mut scratch.unmemoized))
+	};
+	let result = match memo {
+		Some(mut memo) => {
+			let forced = Cell::new(false);
+			let differ = Differ {
+				baseline: old,
+				present: true,
+				forced: &forced,
+				scratch,
+				depth: 0,
+			};
+			let node = match memo.next.doc.first() {
+				Some(b'{') => entries(differ, &mut memo),
+				// Any other root forces a snapshot; the diff only says whether it changed.
+				_ => serde_json::from_slice::<Value>(&memo.next.doc)
+					.map_err(|err| Error(err.to_string()))
+					.and_then(|new| new.serialize(differ)),
+			};
+			scratch.borrow_mut().memo = Some(memo);
+			patch(old, node, &forced, scratch)
+		}
+		None => serde_json::from_slice::<Value>(&unmemoized)
+			.map_err(|err| err.to_string())
+			.and_then(|new| bytes(old, &new, scratch)),
+	};
+	scratch.borrow_mut().unmemoized = unmemoized;
+	result
 }
 
 /// Diff each root entry of the compact object in `memo.next` against the baseline, recording where
@@ -268,11 +276,15 @@ fn entries(differ: Differ<'_>, memo: &mut Memo) -> Result<Node, Error> {
 			None => {
 				let key_end = skip(new, start).filter(|&end| new.get(end) == Some(&b':'));
 				let key_end = key_end.ok_or_else(malformed)?;
-				let end = skip(new, key_end + 1).ok_or_else(malformed)?;
+				// Settling the value finds where it ends, so only a value left to the value diff is
+				// scanned on its own.
 				let settled = current
 					.find(&new[start..key_end], &mut cursor)
-					.and_then(|index| settle(current.value(index), &new[key_end + 1..end], differ, check));
-				(key_end, end, settled)
+					.and_then(|index| settle(current.value(index), &new[key_end + 1..], differ, check));
+				match settled {
+					Some((node, len)) => (key_end, key_end + 1 + len, Some(node)),
+					None => (key_end, skip(new, key_end + 1).ok_or_else(malformed)?, None),
+				}
 			}
 		};
 		if let Some(&(last, last_key_end, _)) = next.spans.last()
@@ -305,24 +317,31 @@ fn entries(differ: Differ<'_>, memo: &mut Memo) -> Result<Node, Error> {
 	map.finish()
 }
 
-/// Settle a root entry against the bytes it had in the last diff, or `None` to diff it as a value.
+/// Settle a root entry against the bytes it had in the last diff, with the length of its value at
+/// the start of `new`, or `None` to diff it as a value.
 ///
 /// Equal bytes mean the baseline holds exactly the value they parse to, so the entry is unchanged
 /// without walking its subtree. Unequal bytes of the same shape are diffed by [`lockstep`], with
 /// the patch left in the child buffer like any other [`Node::Diff`].
-fn settle(old: &[u8], new: &[u8], differ: Differ<'_>, check: &RefCell<crate::strict::Scratch>) -> Option<Node> {
-	if old == new {
-		return Some(Node::Same);
+fn settle(
+	old: &[u8],
+	new: &[u8],
+	differ: Differ<'_>,
+	check: &RefCell<crate::strict::Scratch>,
+) -> Option<(Node, usize)> {
+	// A complete value followed by a delimiter ends where the old one did.
+	if new.get(..old.len()) == Some(old) && matches!(new.get(old.len()), Some(b',' | b'}')) {
+		return Some((Node::Same, old.len()));
 	}
 	let mut scratch = differ.scratch.borrow_mut();
 	let patch = scratch.buffer(differ.depth + 1);
 	patch.clear();
 	let mut forced = false;
-	lockstep(old, new, patch, &mut forced, check)?;
+	let len = lockstep(old, new, patch, &mut forced, check)?;
 	if forced {
 		differ.forced.set(true);
 	}
-	Some(Node::Diff)
+	Some((Node::Diff, len))
 }
 
 /// A key as `serde_json` quoted it, unescaped only when it has to be.
@@ -421,7 +440,8 @@ impl<'a> Differ<'a> {
 	}
 }
 
-/// Diff two serializations of one root entry into its merge patch, when they share a shape.
+/// Diff two serializations of one root entry into its merge patch, when they share a shape, and
+/// return the length of the new value at the start of `new`, which may run on past it.
 ///
 /// Both sides come from `serde_json`'s compact writer, so equal bytes mean equal values and a key's
 /// bytes are canonical. Objects with the same keys in the same order recurse, and any other value
@@ -434,9 +454,11 @@ fn lockstep(
 	patch: &mut Vec<u8>,
 	forced: &mut bool,
 	check: &RefCell<crate::strict::Scratch>,
-) -> Option<()> {
+) -> Option<usize> {
 	if old.first() != Some(&b'{') || new.first() != Some(&b'{') {
-		return replace(new, patch, forced, check);
+		let end = skip(new, 0)?;
+		replace(&new[..end], patch, forced, check)?;
+		return Some(end);
 	}
 	// An empty object on either side means the keys changed.
 	if old.get(1) == Some(&b'}') || new.get(1) == Some(&b'}') {
@@ -444,7 +466,7 @@ fn lockstep(
 	}
 	let (mut i, mut j) = (1, 1);
 	let mut first = true;
-	loop {
+	let end = loop {
 		let (old_key, new_key) = (skip(old, i)?, skip(new, j)?);
 		if old[i..old_key] != new[j..new_key] {
 			return None;
@@ -460,13 +482,13 @@ fn lockstep(
 		}
 		match (old.get(old_end), new.get(new_end)) {
 			(Some(b','), Some(b',')) => (i, j) = (old_end + 1, new_end + 1),
-			(Some(b'}'), Some(b'}')) => break,
+			(Some(b'}'), Some(b'}')) => break new_end + 1,
 			_ => return None,
 		}
-	}
+	};
 	debug_assert!(!first, "differing bytes under the same keys leave a changed value");
 	patch.push(b'}');
-	Some(())
+	Some(end)
 }
 
 /// Write `new` wholesale, as the value diff does for a value that changed type or is not an object.
