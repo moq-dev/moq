@@ -2230,7 +2230,7 @@ impl Producer {
 	pub fn poll_ready(&self, waiter: &kio::Waiter) -> Poll<()> {
 		ready!(self.poll_paced(waiter, 0));
 		// A closed group reports `Closed`, which is ready too.
-		self.handle.state.poll_used(waiter).map(|_| ())
+		self.handle.state.poll_wanted_changed(waiter, false).map(|_| ())
 	}
 
 	/// Wait until a reader holds the group and the writer has room; see [`Self::poll_ready`].
@@ -2255,7 +2255,7 @@ impl Producer {
 			return Poll::Ready(());
 		}
 		// Either wakes the writer: the last reader leaving, or the group closing.
-		if self.handle.poll_unused(waiter).is_ready() || self.handle.state.poll_closed(waiter).is_ready() {
+		if self.handle.poll_unwanted(waiter).is_ready() || self.handle.state.poll_closed(waiter).is_ready() {
 			return Poll::Ready(());
 		}
 		match pace.paced(pace.park(waiter), partial) {
