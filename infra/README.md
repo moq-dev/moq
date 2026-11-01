@@ -318,6 +318,12 @@ after upload; the next warm re-uploads what it still needs. `flake.nix`
 sets `fallback = true` because that expiry can remove a path before one that
 depends on it.
 
+The Worker logs R2 internal errors (10001) and service-unavailable errors
+(10043), then returns a non-cacheable 404 so Nix can build from source.
+Other errors, including invalid object names, permissions, and bucket
+configuration, still fail the request. A failure after the archive body
+starts streaming remains a failed download, covered by `fallback`.
+
 Nix only trusts paths signed by the key in `flake.nix`, so the signing key is
 the trust boundary, not the bucket keys. It lives in the `cache-write`
 Environment beside one R2 token for both buckets. Only `main` and the five

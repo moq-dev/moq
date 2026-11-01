@@ -57,7 +57,18 @@ export default {
 		// Releases first, since they never expire. A NAR is named by its hash, so
 		// whichever bucket holds it serves the same bytes.
 		for (const bucket of [env.RELEASE, env.CI]) {
-			const object = await bucket.get(key);
+			let object: R2ObjectBody | null;
+			try {
+				object = await bucket.get(key);
+			} catch (error) {
+				// R2 exposes its error code in the message, not as a typed field:
+				// https://developers.cloudflare.com/r2/api/error-codes/
+				if (!(error instanceof Error && /^get: .* \((10001|10043)\)$/.test(error.message))) throw error;
+				// A cache miss lets Nix build from source without a failed lookup.
+				// Keep intermediaries from caching a transient failure as missing.
+				console.error(`Nix cache read unavailable: ${key}`, error);
+				return new Response("Not Found", { status: 404, headers: { "Cache-Control": "no-store" } });
+			}
 			if (!object) continue;
 
 			const headers = {
