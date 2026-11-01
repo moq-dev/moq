@@ -50,6 +50,7 @@ enum HalfState {
 
 impl Stream {
 	pub(crate) fn new(shared: Shared, id: stream::Id) -> Self {
+		shared.hold();
 		Self(Half {
 			shared,
 			id,
@@ -307,6 +308,8 @@ impl Drop for Half {
 			},
 		};
 		stream.release();
+		drop(conn);
+		self.shared.release();
 	}
 }
 

@@ -358,14 +358,17 @@ impl StreamRef {
 
 impl Drop for StreamRef {
 	fn drop(&mut self) {
-		let mut conn = self.conn.state.lock();
-		conn.inner.send_stream(self.id).release();
+		if let Some(mut conn) = self.conn.state.lock_for_drop() {
+			conn.inner.send_stream(self.id).release();
+		}
 	}
 }
 
 impl Drop for Half {
 	fn drop(&mut self) {
-		let mut conn = self.stream.conn.state.lock();
+		let Some(mut conn) = self.stream.conn.state.lock_for_drop() else {
+			return;
+		};
 		if conn.is_lost() {
 			return;
 		}
@@ -518,8 +521,9 @@ impl Group {
 
 impl Drop for GroupInner {
 	fn drop(&mut self) {
-		if let Some(group) = self.group.take() {
-			let mut conn = self.conn.state.lock();
+		if let Some(group) = self.group.take()
+			&& let Some(mut conn) = self.conn.state.lock_for_drop()
+		{
 			conn.inner.send_groups().close(group);
 		}
 	}

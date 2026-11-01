@@ -50,7 +50,7 @@ impl Connecting {
 		endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
 		conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
 		slot: Arc<Slot>,
-		runtime: &tokio::runtime::Handle,
+		runtime: &crate::runtime::Spawner,
 	) -> Self {
 		let shared = Shared {
 			#[cfg(feature = "net")]
@@ -66,7 +66,7 @@ impl Connecting {
 		let driver = ConnectionDriver::new(conn.clone());
 		runtime.spawn(
 			async {
-				if let Err(e) = driver.await {
+				if let Some(Err(e)) = crate::panic::isolate(driver).await {
 					tracing::error!("I/O error: {e}");
 				}
 			}
@@ -108,6 +108,18 @@ impl Connecting {
 	pub fn remote_address(&self) -> SocketAddr {
 		let conn_ref: &ConnectionRef = self.conn.as_ref().expect("used after yielding Ready");
 		conn_ref.state.lock().inner.remote_address()
+	}
+
+	/// Panic while holding the state, as a driver bug would.
+	///
+	/// The driver reaches it on its next poll: its first, as it has not run yet, or its timer.
+	#[cfg(test)]
+	pub(super) fn poison(&self) {
+		let conn = self.conn.as_ref().expect("used after yielding Ready");
+		let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			let _guard = conn.state.lock();
+			panic!("injected");
+		}));
 	}
 }
 
@@ -215,6 +227,20 @@ impl Future for ConnectionDriver {
 			unreachable!("drained connections always have an error");
 		}
 		Poll::Ready(Ok(()))
+	}
+}
+
+impl Drop for ConnectionDriver {
+	fn drop(&mut self) {
+		// A panic poisoned the state, and without a driver nothing will time the connection out:
+		// fail every waiter now, so it reaches the poisoned lock instead of hanging.
+		if let Some(mut conn) = self.conn.state.poisoned() {
+			let reason = TransportError::new(
+				TransportErrorCode::INTERNAL_ERROR,
+				"connection driver panicked".to_string(),
+			);
+			conn.terminate(Error::TransportError(reason));
+		}
 	}
 }
 
@@ -601,7 +627,9 @@ impl Drop for ConnectionRef {
 			return;
 		}
 
-		let conn = &mut *self.state.lock();
+		let Some(mut conn) = self.state.lock_for_drop() else {
+			return;
+		};
 
 		if !conn.inner.is_closed() {
 			// If the driver is alive, it's just it and us, so we'd better shut it down. If it's
