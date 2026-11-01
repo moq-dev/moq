@@ -528,17 +528,34 @@ impl Connection {
 		}
 	}
 
-	/// Returns packets to transmit
+	/// Returns packets to transmit, or waits for something to send
 	///
-	/// Connections should be polled for transmit after:
-	/// - the application performed some I/O on the connection
-	/// - a call was made to `handle_event`
-	/// - a call was made to `handle_timeout`
+	/// Pending registers `waiter` until the application queues something: a write, a finish, a
+	/// reset or stop, a refused open, returned credit, a datagram, new limits, or a close. Only
+	/// the application's calls wake it. Poll again after a call to `handle_event` or
+	/// `handle_timeout`, and at [`Self::poll_timeout`], which covers pacing and loss recovery.
 	///
 	/// `max_datagrams` specifies how many datagrams can be returned inside a
 	/// single Transmit using GSO. This must be at least 1.
+	pub fn poll_transmit(
+		&mut self,
+		waiter: &kio::Waiter,
+		now: Instant,
+		max_datagrams: usize,
+		buf: &mut Vec<u8>,
+	) -> Poll<Transmit> {
+		match self.transmit(now, max_datagrams, buf) {
+			Some(transmit) => Poll::Ready(transmit),
+			None => {
+				self.streams.waits.register_transmit(waiter);
+				Poll::Pending
+			}
+		}
+	}
+
+	/// The packets to transmit now, if any, as [`Self::poll_transmit`] without the wait
 	#[must_use]
-	pub fn poll_transmit(&mut self, now: Instant, max_datagrams: usize, buf: &mut Vec<u8>) -> Option<Transmit> {
+	pub(crate) fn transmit(&mut self, now: Instant, max_datagrams: usize, buf: &mut Vec<u8>) -> Option<Transmit> {
 		assert!(max_datagrams != 0);
 		let max_datagrams = match self.config.segmentation_offload {
 			false => 1,
@@ -1666,6 +1683,8 @@ impl Connection {
 			self.set_max_concurrent_streams(Dir::Bi, streams);
 			self.set_max_concurrent_streams(Dir::Uni, streams);
 		}
+		// MAX_DATA or MAX_STREAMS may be due, and a new rate moves the pacing deadline.
+		self.streams.waits.wake_transmit();
 		Ok(())
 	}
 
@@ -4412,7 +4431,7 @@ mod tests {
 			}
 			conn.close(now, 0u32.into(), String::new());
 			let mut buf = Vec::new();
-			assert!(conn.poll_transmit(now, 1, &mut buf).is_some());
+			assert!(conn.transmit(now, 1, &mut buf).is_some());
 			assert!(buf.len() <= 1200);
 			assert!(!conn.close);
 

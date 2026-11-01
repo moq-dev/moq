@@ -311,8 +311,23 @@ impl Connection {
 		});
 	}
 
-	/// The next record to write, without its Size field, or the next frame on draft-00
-	pub fn poll_transmit(&mut self, now: Instant) -> Option<Bytes> {
+	/// The next record to write, without its Size field, or the next frame on draft-00, or wait
+	/// for one
+	///
+	/// Pending registers `waiter` until the application queues something, as on QUIC. Poll
+	/// again after [`Self::handle_record`] and at [`Self::poll_timeout`].
+	pub fn poll_transmit(&mut self, waiter: &kio::Waiter, now: Instant) -> Poll<Bytes> {
+		match self.transmit(now) {
+			Some(record) => Poll::Ready(record),
+			None => {
+				self.streams.waits.register_transmit(waiter);
+				Poll::Pending
+			}
+		}
+	}
+
+	/// The next record to write, if any, as [`Self::poll_transmit`] without the wait
+	pub(crate) fn transmit(&mut self, now: Instant) -> Option<Bytes> {
 		if let Some(frame) = self.queued.pop_front() {
 			return Some(frame);
 		}

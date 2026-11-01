@@ -376,7 +376,7 @@ fn close_before_a_client_certificate_leaves_ends() {
 		let mut transmits = Vec::new();
 		let mut buf = Vec::new();
 		while transmits.len() <= 2
-			&& let Some(transmit) = client.poll_transmit(now, 1, &mut buf)
+			&& let Some(transmit) = client.transmit(now, 1, &mut buf)
 		{
 			let datagram = Bytes::copy_from_slice(&buf[..transmit.size]);
 			transmits.push((transmit, datagram));
@@ -5199,7 +5199,7 @@ fn min_mtu_limits_application_loss_probes() {
 	let stream = client.streams().open(Dir::Uni, Default::default()).unwrap();
 	client.send_stream(stream).write(&mut &[42; 3000][..]).unwrap();
 	let mut buf = Vec::new();
-	let transmit = client.poll_transmit(now, 1, &mut buf).unwrap();
+	let transmit = client.transmit(now, 1, &mut buf).unwrap();
 	assert_eq!(transmit.size, usize::from(MIN_MTU));
 	assert_eq!(buf.len(), usize::from(MIN_MTU));
 	pair.drive();
@@ -5681,7 +5681,7 @@ fn application_close_in_initial_is_rejected() {
 	// Grab the client's Initial packet so we can learn the connection IDs and version it chose.
 	let mut buf = Vec::new();
 	let transmit = conn
-		.poll_transmit(now, 1, &mut buf)
+		.transmit(now, 1, &mut buf)
 		.expect("client should send an Initial packet");
 	let initial = &buf[..transmit.size];
 	// Long header: flags(1) version(4) dcid_len(1) dcid scid_len(1) scid ...
@@ -6039,7 +6039,7 @@ fn send_quantum_bounds_the_gso_batch() {
 	let mut buf = Vec::new();
 	let transmit = pair
 		.client_conn_mut(client_ch)
-		.poll_transmit(now, MAX_DATAGRAMS, &mut buf)
+		.transmit(now, MAX_DATAGRAMS, &mut buf)
 		.expect("a stream write must produce a transmit");
 
 	let datagrams = match transmit.segment_size {
@@ -6504,7 +6504,7 @@ fn partial_poll_reports_starvation() {
 	log.lock().unwrap().clear();
 	let now = pair.time;
 	let mut buf = Vec::new();
-	assert!(pair.client_conn_mut(ch).poll_transmit(now, 10, &mut buf).is_some());
+	assert!(pair.client_conn_mut(ch).transmit(now, 10, &mut buf).is_some());
 	assert!(matches!(log.lock().unwrap().last(), Some(PacketEvent::AppLimited { in_flight }) if *in_flight > 0));
 }
 

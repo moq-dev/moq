@@ -48,6 +48,8 @@ impl<'a> Streams<'a> {
 		if self.state.next[dir as usize] >= self.state.max[dir as usize] {
 			self.state.streams_blocked[dir as usize] = true;
 			self.state.open_refused[dir as usize] = true;
+			// STREAMS_BLOCKED
+			self.state.waits.wake_transmit();
 			return None;
 		}
 
@@ -155,6 +157,7 @@ impl StreamsState {
 	) -> bool {
 		let group = options.group.map(|g| g.index(self.tag));
 		let frame = datagram.size();
+		self.waits.wake_transmit();
 		self.pending
 			.push_datagram(group, options.priority, datagram, frame, budget)
 	}

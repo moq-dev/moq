@@ -288,6 +288,11 @@ impl Stream<'_> {
 	/// - when the last lease of the stream was not handed back
 	#[must_use = "a lease may need a transmit"]
 	pub fn lease(&mut self, want: usize) -> (Result<Lease, Error>, ShouldTransmit) {
+		let (result, transmit) = self.lease_inner(want);
+		(result, self.transmit(transmit))
+	}
+
+	fn lease_inner(&mut self, want: usize) -> (Result<Lease, Error>, ShouldTransmit) {
 		// Bytes out in a lease do not count: a unit that outgrows the window with them is one
 		// the stuck window evicts by rank, so it gives way like any other rather than failing
 		// alone.
@@ -368,7 +373,8 @@ impl Stream<'_> {
 		self.put_back(lease);
 		// Only a stuck pass that waited reruns: a reader handing back what it looked at is not
 		// stuck itself, and one that is waits for more with its next lease.
-		ShouldTransmit(self.state.stuck_waiting && self.unstick())
+		let transmit = ShouldTransmit(self.state.stuck_waiting && self.unstick());
+		self.transmit(transmit)
 	}
 
 	/// Hand a lease back, returning the connection credit of every byte read from it or from an
@@ -378,7 +384,16 @@ impl Stream<'_> {
 	/// of the larger window.
 	pub fn release(&mut self, lease: Lease) -> ShouldTransmit {
 		self.put_back(lease);
-		self.release_credit()
+		let transmit = self.release_credit();
+		self.transmit(transmit)
+	}
+
+	/// Wake the driver when `transmit` says a frame is due, passing it on
+	fn transmit(&mut self, transmit: ShouldTransmit) -> ShouldTransmit {
+		if transmit.should_transmit() {
+			self.state.waits.wake_transmit();
+		}
+		transmit
 	}
 
 	/// Return the credit of every byte read out of a lease.
@@ -425,7 +440,8 @@ impl Stream<'_> {
 	/// Return the credit of every byte read out, as [`Self::release()`] does.
 	#[cfg(test)]
 	pub(crate) fn release_taken(&mut self) -> ShouldTransmit {
-		self.release_credit()
+		let transmit = self.release_credit();
+		self.transmit(transmit)
 	}
 
 	/// Put the bytes `lease` did not read back in front of the stream's lease.

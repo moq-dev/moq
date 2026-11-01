@@ -75,6 +75,8 @@ pub(crate) struct Waits {
 	open: [WaiterList; 2],
 	/// For a received datagram
 	datagram: WaiterList,
+	/// For something to transmit: the driver, woken by whatever the application queues
+	transmit: WaiterList,
 	handshake_data: Latch,
 	connected: Latch,
 	confirmed: Latch,
@@ -140,6 +142,18 @@ impl Waits {
 	/// A datagram arrived
 	pub(crate) fn wake_datagram(&mut self) {
 		self.datagram.wake();
+	}
+
+	/// Register `waiter` for something to transmit
+	pub(crate) fn register_transmit(&mut self, waiter: &Waiter) {
+		waiter.register(&mut self.transmit);
+	}
+
+	/// The application queued something to transmit
+	///
+	/// Cheap once woken: the list stays empty until the driver finds nothing to send again.
+	pub(crate) fn wake_transmit(&mut self) {
+		self.transmit.wake();
 	}
 
 	/// The handshake's negotiated parameters became available
@@ -217,6 +231,8 @@ impl Waits {
 			list.wake();
 		}
 		self.datagram.wake();
+		// A close still owes the peer its CONNECTION_CLOSE.
+		self.transmit.wake();
 		self.handshake_data.waiters.wake();
 		self.connected.waiters.wake();
 		self.confirmed.waiters.wake();

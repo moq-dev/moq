@@ -484,7 +484,7 @@ impl Pair {
 					conn.handle_event(event);
 				}
 			}
-			while let Some(transmit) = conn.poll_transmit(now, MAX_DATAGRAMS, &mut buf) {
+			while let Some(transmit) = conn.transmit(now, MAX_DATAGRAMS, &mut buf) {
 				progress = true;
 				send(
 					&mut other.inbound,

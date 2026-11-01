@@ -253,6 +253,9 @@ impl Peer {
 			}
 		}
 
+		// The bench loop is the driver: it polls every connection each round anyway, so its
+		// transmit wait never needs to wake.
+		let driver = kio::Waiter::noop();
 		for (&ch, conn) in self.conns.iter_mut() {
 			if conn.poll_timeout().is_some_and(|at| at <= now) {
 				conn.handle_timeout(now);
@@ -286,7 +289,7 @@ impl Peer {
 				}
 			}
 			buf.clear();
-			while let Some(transmit) = conn.poll_transmit(now, MAX_DATAGRAMS, &mut buf) {
+			while let Poll::Ready(transmit) = conn.poll_transmit(&driver, now, MAX_DATAGRAMS, &mut buf) {
 				split(&mut self.outbound, &transmit, &buf);
 				buf.clear();
 			}
@@ -715,9 +718,10 @@ pub(crate) fn flush(pair: &mut Pair, empty: usize) -> Vec<BytesMut> {
 	let mut out = Vec::new();
 	let server = &mut pair.server;
 	let conn = server.conns.values_mut().next().unwrap();
+	let driver = kio::Waiter::noop();
 	loop {
 		server.buf.clear();
-		while let Some(transmit) = conn.poll_transmit(pair.now, MAX_DATAGRAMS, &mut server.buf) {
+		while let Poll::Ready(transmit) = conn.poll_transmit(&driver, pair.now, MAX_DATAGRAMS, &mut server.buf) {
 			split(&mut out, &transmit, &server.buf);
 			server.buf.clear();
 		}

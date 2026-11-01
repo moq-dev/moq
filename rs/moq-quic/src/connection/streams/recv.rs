@@ -77,6 +77,8 @@ impl Stream<'_> {
 		self.unstick();
 		// A reader parked on the stream learns it is closed.
 		self.state.waits.wake(self.id, Wait::Read);
+		// STOP_SENDING, or the credit the stop returned.
+		self.state.waits.wake_transmit();
 
 		Ok(())
 	}
@@ -110,6 +112,7 @@ impl Stream<'_> {
 		self.state.queue_max_stream_id(self.pending);
 		// The credit returned may only have paid a shrunk window's debt.
 		self.unstick();
+		self.state.waits.wake_transmit();
 
 		Ok(Some(code))
 	}
@@ -574,6 +577,9 @@ impl<'a> Chunks<'a> {
 		let max_data = self.streams.add_read_credits(self.read);
 		self.pending.max_data |= max_data.0;
 		should_transmit |= max_data.0;
+		if should_transmit {
+			self.streams.waits.wake_transmit();
+		}
 		ShouldTransmit(should_transmit)
 	}
 }

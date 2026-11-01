@@ -381,10 +381,12 @@ impl<'a> Stream<'a> {
 					{
 						self.state.data_blocked_limit = Some(self.state.max_data);
 						self.pending.data_blocked = true;
+						self.state.waits.wake_transmit();
 					}
 				} else if stream.data_blocked_limit != Some(stream.max_data) {
 					stream.data_blocked_limit = Some(stream.max_data);
 					self.pending.stream_data_blocked.insert(self.id);
+					self.state.waits.wake_transmit();
 				}
 				return Err(Error::Blocked);
 			}
@@ -396,6 +398,7 @@ impl<'a> Stream<'a> {
 		if !was_pending {
 			self.state.pending.push(self.id, &mut stream.slot, stream.priority);
 		}
+		self.state.waits.wake_transmit();
 		Ok(written)
 	}
 
@@ -478,6 +481,7 @@ impl<'a> Stream<'a> {
 		}
 		// A writer waiting on it learns it is closed.
 		self.state.waits.wake(self.id, Wait::Write);
+		self.state.waits.wake_transmit();
 
 		Ok(())
 	}
@@ -613,6 +617,7 @@ impl<'a> Stream<'a> {
 		}
 		if let Some(reliable_size) = send {
 			self.pending.reset_stream.push((self.id, reliable_size));
+			self.state.waits.wake_transmit();
 		}
 		if waiting {
 			self.state.waits.wake(self.id, Wait::Acked);
