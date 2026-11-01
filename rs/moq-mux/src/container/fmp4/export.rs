@@ -90,6 +90,9 @@ pub struct Export<S: Stream> {
 	/// that declares it elsewhere. Its fragments carry a track id the init never declared.
 	late: bool,
 
+	/// Set by [`stop`](Self::stop): each track ends once it has read what it received.
+	stopped: bool,
+
 	/// The `tkhd.track_id` the next new rendition gets.
 	next_track_id: u32,
 
@@ -498,6 +501,7 @@ impl<S: Stream> Export<S> {
 			queued: VecDeque::new(),
 			init_emitted: false,
 			late: false,
+			stopped: false,
 			next_track_id: 1,
 			sequence_number: 1,
 		}
@@ -536,6 +540,15 @@ impl<S: Stream> Export<S> {
 	pub(crate) fn with_late_tracks(mut self) -> Self {
 		self.late = true;
 		self
+	}
+
+	/// Stop reading the broadcast. The export still writes out the media its tracks
+	/// received, including the fragments they were buffering, then ends.
+	///
+	/// Stopping before the init segment could be written ends the export without writing.
+	pub(crate) fn stop(&mut self) {
+		self.catalog = None;
+		self.stopped = true;
 	}
 
 	/// The `trak` and `trex` declaring `track_id`, once the track could be described.
@@ -610,6 +623,9 @@ impl<S: Stream> Export<S> {
 			//
 			// A track that can't be described yet drops its frames, so the source keeps
 			// polling for the SPS/PPS-bearing keyframe instead of parking.
+			//
+			// Once stopped, a track ends when it has nothing more ready to read.
+			let stopped = self.stopped;
 			for (name, track) in &mut self.tracks {
 				if track.pending.is_some() || track.finished || track.group_finished {
 					continue;
@@ -652,6 +668,11 @@ impl<S: Stream> Export<S> {
 							track.finished = true;
 							break;
 						}
+						Poll::Pending if stopped => {
+							track.source = None;
+							track.finished = true;
+							break;
+						}
 						Poll::Pending => break,
 					}
 				}
@@ -668,7 +689,7 @@ impl<S: Stream> Export<S> {
 				}
 				if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
 					// Media was read but can't be written without every track's description.
-					if !self.queued.is_empty() {
+					if !self.queued.is_empty() && !self.stopped {
 						return Poll::Ready(Err(Error::TrackUndescribed(self.undescribed()).into()));
 					}
 					return Poll::Ready(Ok(None));

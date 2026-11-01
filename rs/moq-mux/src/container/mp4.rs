@@ -124,7 +124,8 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	/// The next bytes to append to the file, or `None` once the broadcast ends.
+	/// The next bytes to append to the file, or `None` once the broadcast ends or the export
+	/// [stops](Self::stop).
 	pub async fn next(&mut self) -> Result<Option<Bytes>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
@@ -142,9 +143,16 @@ impl<S: Stream> Export<S> {
 		Poll::Ready(Ok(Some(data)))
 	}
 
+	/// Stop recording before the broadcast ends. [`next`](Self::next) still returns the media
+	/// already received, the fragment each track was buffering included, then `None`.
+	pub fn stop(&mut self) {
+		self.fmp4.stop();
+	}
+
 	/// The writes that turn the file into a regular MP4, or `None` when nothing was written.
 	///
-	/// Media still buffered for a fragment that has not closed is left out.
+	/// Media still buffered for a fragment that has not closed is left out, unless
+	/// [`stop`](Self::stop) wrote it first.
 	pub fn finish(self) -> Result<Option<Finish>> {
 		let Some(header) = &self.header else {
 			return Ok(None);
@@ -847,6 +855,69 @@ mod tests {
 		let timescale = i64::from(video.mdia.mdhd.timescale);
 		let expected: Vec<i64> = presentations.iter().map(|&us| us * timescale / 1_000_000).collect();
 		assert_eq!(presented, expected);
+	}
+
+	/// Stopping writes out the fragment each track was still buffering, so the finished file
+	/// holds every frame received, and ends the export without waiting for more.
+	#[tokio::test(start_paused = true)]
+	async fn stopping_writes_the_buffered_fragments() {
+		let mut live = Live::avc3();
+		let mut audio = add_opus(&mut live, 0);
+		let video: Vec<_> = (0..5u64).map(|i| video_frame(i * 33_000, i % 3 == 0)).collect();
+		for frame in &video {
+			live.track.write(frame.clone()).unwrap();
+		}
+		for i in 0..8u64 {
+			audio.write(raw_frame(i * 20_000, OPUS, i % 5 == 0)).unwrap();
+		}
+
+		let mut export = export(&live).await;
+		let mut file = Vec::new();
+		record(&mut export, &mut file).await;
+		let written =
+			|export: &super::Export<_>| export.tracks.values().map(|track| track.samples.len()).sum::<usize>();
+		assert_eq!(written(&export), 3 + 5, "only the closed groups");
+
+		export.stop();
+		while let Some(data) = export.next().await.expect("export failed") {
+			file.extend_from_slice(&data);
+		}
+		assert_eq!(written(&export), 5 + 8);
+
+		finish(export, &mut file);
+		let moov = moov(atoms(&file));
+		let expected: Vec<Vec<u8>> = video.iter().map(length_prefixed).collect();
+		assert_eq!(samples(&file, trak(&moov, b"vide")), expected);
+		assert_eq!(samples(&file, trak(&moov, b"soun")), vec![OPUS; 8]);
+	}
+
+	/// Stopping before every track can be described ends the export without a header, rather
+	/// than failing on the media it could not write.
+	#[tokio::test(start_paused = true)]
+	async fn stopping_before_the_header_writes_nothing() {
+		/// An IDR without the SPS a High profile track waits for.
+		const IDR_ONLY: &[u8] = &[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21];
+
+		let mut live = Live::avc3();
+		let mut audio = add_opus(&mut live, 0);
+		if let Some(config) = live.catalog.modify().unwrap().video.renditions.values_mut().next()
+			&& let hang::catalog::VideoCodec::H264(h264) = &mut config.codec
+		{
+			h264.profile = 110;
+		}
+		live.track.write(raw_frame(0, IDR_ONLY, true)).unwrap();
+		for i in 0..10u64 {
+			audio.write(raw_frame(i * 20_000, OPUS, i % 5 == 0)).unwrap();
+		}
+
+		let mut export = export(&live).await;
+		let mut file = Vec::new();
+		record(&mut export, &mut file).await;
+		assert!(file.is_empty(), "the video holds the header back");
+
+		export.stop();
+		assert!(export.next().await.expect("stopping is not a failure").is_none());
+		assert!(export.finish().unwrap().is_none());
 	}
 
 	/// Nothing to finish before the header is written.
