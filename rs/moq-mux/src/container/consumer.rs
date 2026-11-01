@@ -887,8 +887,8 @@ impl<F: Container> Consumer<F> {
 			.iter()
 			.take(new_idx)
 			.any(|group| !group.buffered.is_empty());
-		let target = self.pending[new_idx].sequence;
-		self.discard(|group| group.sequence < target)?;
+		// `pending` is in sequence order, so what lies below the target is its prefix.
+		self.discard_front(new_idx)?;
 		if hole || had_marker || discarded {
 			self.lose();
 		}
@@ -1097,17 +1097,37 @@ impl<F: Container> Consumer<F> {
 				return true;
 			}
 			if fault.is_none() {
-				fault = match (start, group.min_timestamp) {
-					(Some((prev, floor)), Some(min))
-						if group.sequence > prev && min.as_micros() < floor.as_micros() =>
-					{
-						Some(TimestampRewind { timestamp: min, floor }.into())
-					}
-					_ => group.fault.take(),
-				};
+				fault = Self::discard_fault(start, group);
 			}
 			false
 		});
+		self.discarded(fault)
+	}
+
+	// `discard` of the lowest `count` pending groups, in time proportional to them rather than to every
+	// pending group, so a start that skips a long backlog one group at a time stays linear.
+	fn discard_front(&mut self, count: usize) -> Result<(), F::Error> {
+		let start = self.start;
+		let mut fault = None;
+		for mut group in self.pending.drain(..count) {
+			if fault.is_none() {
+				fault = Self::discard_fault(start, &mut group);
+			}
+		}
+		self.discarded(fault)
+	}
+
+	// The fault a discarded group would hide: its own, or frames below the latest delivered start.
+	fn discard_fault(start: Option<(u64, Timestamp)>, group: &mut GroupBuffer<F>) -> Option<F::Error> {
+		match (start, group.min_timestamp) {
+			(Some((prev, floor)), Some(min)) if group.sequence > prev && min.as_micros() < floor.as_micros() => {
+				Some(TimestampRewind { timestamp: min, floor }.into())
+			}
+			_ => group.fault.take(),
+		}
+	}
+
+	fn discarded(&self, fault: Option<F::Error>) -> Result<(), F::Error> {
 		match fault {
 			Some(err) => {
 				tracing::warn!(track = &*self.name, error = ?err, "discarded a malformed group; ending the reader");
