@@ -2,20 +2,20 @@
 #
 # Shared release helpers for GitHub Actions workflows.
 # Usage:
-#   release.sh parse-version <prefix>          — extract SemVer from GITHUB_REF given a tag prefix
-#   release.sh prev-tag <prefix>               — find the tag immediately before the current one
-#   release.sh create <artifacts_dir>          — create or update a GitHub release with artifacts + SHA256SUMS
-#   release.sh git-tag-exists <repo> <tag>     — check whether a tag exists on a remote repo
-#   release.sh read-version <pyproject.toml>   — read `version = "x.y.z"` from a manifest
-#   release.sh pypi-exists <dist> <version>    — check whether <dist>==<version> is already on PyPI
+#   release.sh parse-version <prefix>          - extract SemVer from GITHUB_REF given a tag prefix
+#   release.sh prev-tag <prefix>               - find the tag immediately before the current one
+#   release.sh create <artifacts_dir>          - create or update a GitHub release with artifacts + SHA256SUMS
+#   release.sh git-tag-exists <repo> <tag>     - check whether a tag exists on a remote repo
+#   release.sh read-version <pyproject.toml>   - read `version = "x.y.z"` from a manifest
+#   release.sh pypi-exists <dist> <version>    - check whether <dist>==<version> is already on PyPI
 #   release.sh maven-exists <group> <artifact> <version>
 #   release.sh ffi-unreleased <version>
 #
 # Environment:
-#   GITHUB_REF        — set by GitHub Actions (e.g. refs/tags/moq-relay-v1.2.3)
-#   GITHUB_OUTPUT     — set by GitHub Actions (for writing step outputs)
-#   GH_TOKEN          — required for `create` subcommand
-#   RELEASE_CHECKSUMS — manifest filename for `create` (default SHA256SUMS). Set
+#   GITHUB_REF        - set by GitHub Actions (e.g. refs/tags/moq-relay-v1.2.3)
+#   GITHUB_OUTPUT     - set by GitHub Actions (for writing step outputs)
+#   GH_TOKEN          - required for `create` subcommand
+#   RELEASE_CHECKSUMS - manifest filename for `create` (default SHA256SUMS). Set
 #                       it when more than one workflow publishes into the same
 #                       release, so each writes its own manifest.
 

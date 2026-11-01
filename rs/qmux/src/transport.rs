@@ -71,7 +71,7 @@ pub trait Writer: Send + 'static {
 	/// session's writer loop selects on this alongside outbound frames, so a
 	/// transport can piggy-back periodic maintenance (e.g. a WebSocket keep-alive
 	/// Ping) on the same task that owns the send half. The default never
-	/// resolves — transports with nothing to do (TCP, Unix sockets) use it as-is.
+	/// resolves - transports with nothing to do (TCP, Unix sockets) use it as-is.
 	fn maintain(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send {
 		std::future::pending()
 	}
@@ -88,7 +88,7 @@ pub trait Reader: Send + 'static {
 //
 // Cancel safety: a dedicated reader task owns the read half and pushes complete
 // frames into an `mpsc` channel. `recv()` is just `rx.recv().await`, which is
-// cancel safe — if the future is dropped (e.g. a sibling `tokio::select!` branch
+// cancel safe - if the future is dropped (e.g. a sibling `tokio::select!` branch
 // wins), the buffered frame stays in the channel for the next call. The reader
 // task itself never gets cancelled mid-parse, so the multi-step async reads in
 // `recv_record`/`recv_qmux00_frame` are safe to keep as-is.
@@ -116,7 +116,7 @@ mod stream_transport {
 	/// Handles QMux frame/record delimiting so [`Session`](crate::Session) sees
 	/// complete frames. Pair it with [`Session::connect`](crate::Session::connect)
 	/// or [`Session::accept`](crate::Session::accept) to run QMux over a transport
-	/// the built-in `tcp`/`tls`/`ws` helpers don't cover — a Unix socket, a pipe,
+	/// the built-in `tcp`/`tls`/`ws` helpers don't cover - a Unix socket, a pipe,
 	/// an in-memory duplex, a custom tunnel, etc.:
 	///
 	/// ```no_run
@@ -259,7 +259,7 @@ mod stream_transport {
 		async fn recv(&mut self) -> Result<Bytes, Error> {
 			// mpsc::Receiver::recv is cancel safe, so dropping this future never
 			// loses a buffered frame. `None` means the reader task exited without
-			// sending — treat as a clean close.
+			// sending - treat as a clean close.
 			self.rx.recv().await.unwrap_or(Err(Error::Closed))
 		}
 	}
@@ -391,7 +391,7 @@ mod stream_transport {
 				let len = peer_len(read_varint_into(reader, &mut buf).await?)?;
 				// draft-00 §5.2: `max_frame_size` bounds the whole frame, so the
 				// header bytes read so far count against it. A byte stream cannot
-				// resynchronize past an oversized frame, so this stays fatal — as
+				// resynchronize past an oversized frame, so this stays fatal - as
 				// the draft requires (FRAME_ENCODING_ERROR).
 				if buf.len().saturating_add(len) > MAX_FRAME_SIZE {
 					return Err(Error::FrameTooLarge);
@@ -940,7 +940,7 @@ mod ws_transport {
 	/// A dedicated pump task owns the socket and the idle deadline; `recv` is just a
 	/// hand-off from its channel. Reading on its own task is what makes the keep-alive
 	/// deadline robust: it advances (and resets on the peer's Pong replies) regardless
-	/// of where the *session* is parked — in particular while the session is wedged
+	/// of where the *session* is parked - in particular while the session is wedged
 	/// handing a stream to a slow `accept_*`, which would otherwise starve a deadline
 	/// polled inline in `recv` and fire a spurious timeout. Mirrors [`StreamReader`].
 	pub(crate) struct WsReader {
@@ -1041,7 +1041,7 @@ mod ws_transport {
 	impl Reader for WsReader {
 		async fn recv(&mut self) -> Result<Bytes, Error> {
 			// The pump task pushes complete Binary frames (or a terminal error)
-			// here; `None` means it exited without sending — treat as a clean close.
+			// here; `None` means it exited without sending - treat as a clean close.
 			self.rx.recv().await.unwrap_or(Err(Error::Closed))
 		}
 	}
@@ -1056,7 +1056,7 @@ mod ws_transport {
 	/// advancing even while the session is parked (e.g. handing a stream to a slow
 	/// `accept_*`), and the peer's liveness must not be judged while we're merely
 	/// backpressured. So the deadline is reset both when a message arrives *and*
-	/// after each delivery to the session — a long delivery park (session
+	/// after each delivery to the session - a long delivery park (session
 	/// backpressure) therefore isn't charged against the peer.
 	async fn ws_pump<S>(
 		mut stream: S,
@@ -1084,7 +1084,7 @@ mod ws_transport {
 				None => stream.next().await,
 			};
 
-			// Any read — data or control — proves the peer is alive; reset the deadline.
+			// Any read - data or control - proves the peer is alive; reset the deadline.
 			if let Some(d) = deadline.as_mut() {
 				d.observe_recv();
 			}
@@ -1123,7 +1123,7 @@ mod ws_transport {
 					}
 					// Delivered. Reset the deadline again so a long delivery park
 					// (the session backpressured on `accept_*`) isn't charged
-					// against the peer — we only judge liveness while actively
+					// against the peer - we only judge liveness while actively
 					// reading, not while wedged handing data to the app.
 					if let Some(d) = deadline.as_mut() {
 						d.observe_recv();
@@ -1172,13 +1172,13 @@ mod ws_transport {
 		}
 
 		/// The pump must not spuriously time out a *healthy* peer just because the
-		/// session is too busy to drain it — the exact failure the split reader had,
+		/// session is too busy to drain it - the exact failure the split reader had,
 		/// where the keep-alive deadline was only polled inside `recv` and went stale
 		/// while the session parked handing a stream to a full `accept_*` channel.
 		///
 		/// Here a capacity-1 channel stands in for that full `accept_*`: the pump
 		/// parks delivering the second frame while we sit idle well past the
-		/// keep-alive `timeout`, then we drain — and both frames must arrive intact,
+		/// keep-alive `timeout`, then we drain - and both frames must arrive intact,
 		/// with no `Error::Closed` from a phantom timeout.
 		#[tokio::test(start_paused = true)]
 		async fn survives_a_slow_consumer() {
@@ -1215,7 +1215,7 @@ mod ws_transport {
 		/// dead peer, surfaced as `Error::Closed`.
 		#[tokio::test(start_paused = true)]
 		async fn times_out_a_silent_peer() {
-			// Held open but never fed — `stream.next()` pends forever.
+			// Held open but never fed - `stream.next()` pends forever.
 			let (_feed, stream) = mock_stream();
 
 			let ka = KeepAlive::new(Duration::from_millis(10), Duration::from_millis(50));

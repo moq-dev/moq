@@ -64,7 +64,7 @@ class SelectionTest(unittest.TestCase):
         calls = self.root / "calls"
         env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", ALLOW_HOST_TOOLCHAIN="1",
                    SELECT_CALLS=str(calls))
-        for script in ("markdown.sh", "shell.sh", "large-files.sh"):
+        for script in ("markdown.sh", "shell.sh", "large-files.sh", "text.sh"):
             path = sh / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)

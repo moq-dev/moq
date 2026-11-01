@@ -520,7 +520,7 @@ A subscriber opens a Fetch Stream (0x3) to request a single Group from a Track.
 
 The subscriber sends a FETCH message containing the broadcast path, track name, priority, group sequence, and the frame range within that group.
 Unlike SUBSCRIBE, FETCH works on both live and ended broadcasts; it is the only way to read an ended one.
-The publisher responds with FRAME messages directly on the same bidirectional stream — there is no response header.
+The publisher responds with FRAME messages directly on the same bidirectional stream - there is no response header.
 The Group Sequence and index of the first returned frame are implicit, taken from the original FETCH request.
 Because there is no response header, a publisher that cannot serve the requested frame range in full MUST reset the stream rather than return a shorter run; the subscriber has no way to learn where a truncated response actually started.
 As with a subscription, the subscriber MUST already have the track's [TRACK_INFO](#track-info) to parse the returned frames; because the properties are immutable, a single Track Stream lookup is reused across every FETCH of that track (group-by-group fetches do not re-fetch it).
@@ -1589,10 +1589,10 @@ The last frame to return (inclusive), encoded as the absolute frame index + 1.
 A value of 0 means through the end of the group (default).
 A `Frame End` below `Frame Start` once decoded is a protocol violation; equal bounds are a legal single-frame range.
 
-The publisher responds with FRAME messages directly on the same stream — there is no response header.
+The publisher responds with FRAME messages directly on the same stream - there is no response header.
 The subscriber parses them using the track's [TRACK_INFO](#track-info), which it MUST already have (see the [Track Stream](#track-stream)); the group sequence and the index of the first frame are implicit from the FETCH request.
 The publisher FINs the stream after the last frame, or resets on error.
-There is no FETCH_ERROR message — the publisher signals failure by resetting the stream.
+There is no FETCH_ERROR message - the publisher signals failure by resetting the stream.
 A publisher holding fewer frames than requested MUST reset rather than truncate, since a short response is indistinguishable from one that started elsewhere.
 A group that ends before `Frame End` is not a truncation: the publisher FINs after the last frame it has, provided the group is complete and it served everything from `Frame Start` onward.
 

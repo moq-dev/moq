@@ -34,7 +34,7 @@ function trackActive(parent: Effect, status: HTMLElement, active: Getter<boolean
 
 function line(grid: HTMLElement, label: string): HTMLSpanElement {
 	const row = DOM.create("div", { className: "stat-line" });
-	const value = DOM.create("span", { className: "stat-value" }, "—");
+	const value = DOM.create("span", { className: "stat-value" }, "-");
 	row.append(DOM.create("span", { className: "stat-key" }, label), value);
 	grid.appendChild(row);
 	return value;
@@ -75,18 +75,18 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		const display = capture ? effect.get(capture.out.display) : undefined;
 		const cfg = effect.get(publish.video.out.catalog);
 		videoCard.el.style.display = display ? "" : "none";
-		vRes.textContent = display ? `${display.width}×${display.height}` : "—";
-		vCodec.textContent = cfg?.codec ?? "—";
+		vRes.textContent = display ? `${display.width}×${display.height}` : "-";
+		vCodec.textContent = cfg?.codec ?? "-";
 	});
 
 	parent.run((effect) => {
 		const cfg = effect.get(publish.audio.out.catalog);
 		audioCard.el.style.display = cfg ? "" : "none";
 		if (!cfg) return;
-		aCodec.textContent = cfg.codec ?? "—";
-		aRate.textContent = cfg.sampleRate ? formatHz(cfg.sampleRate) : "—";
-		aChannels.textContent = cfg.numberOfChannels ? `${cfg.numberOfChannels}` : "—";
-		aBitrate.textContent = cfg.bitrate ? formatBitrate(cfg.bitrate) : "—";
+		aCodec.textContent = cfg.codec ?? "-";
+		aRate.textContent = cfg.sampleRate ? formatHz(cfg.sampleRate) : "-";
+		aChannels.textContent = cfg.numberOfChannels ? `${cfg.numberOfChannels}` : "-";
+		aBitrate.textContent = cfg.bitrate ? formatBitrate(cfg.bitrate) : "-";
 	});
 
 	parent.run((effect) => {
@@ -94,8 +94,8 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		const status = effect.get(publish.connection.status);
 		const name = effect.get(publish.broadcast.in.name);
 		nStatus.textContent = status;
-		nServer.textContent = url?.host ?? "—";
-		nName.textContent = name?.toString() || "—";
+		nServer.textContent = url?.host ?? "-";
+		nName.textContent = name?.toString() || "-";
 	});
 
 	// Live graphs: frame rate from captured frames, bitrate measured from the bytes we encoded.

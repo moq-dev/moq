@@ -399,7 +399,7 @@ export interface SessionOptions extends WebTransportOptions {
  *
  * The handshake is done by the time [[Session.accept]] is called, so the
  * subprotocol options ({@link SessionOptions.protocols}, `versions`,
- * `requireProtocol`) don't apply — see [[selectSubprotocol]], which consumes
+ * `requireProtocol`) don't apply - see [[selectSubprotocol]], which consumes
  * them during the upgrade instead.
  */
 export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBufferSize"> {
@@ -408,7 +408,7 @@ export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBuff
 	 *
 	 *  [[Session.accept]] reads `socket.protocol` by default, which is where the
 	 *  wire-format version comes from. Set this when the socket reports an empty
-	 *  protocol despite one having been negotiated — otherwise the session refuses the socket. Pass the full wire value (e.g. `"qmux-02.moq-lite-04"`), not
+	 *  protocol despite one having been negotiated - otherwise the session refuses the socket. Pass the full wire value (e.g. `"qmux-02.moq-lite-04"`), not
 	 *  the bare app protocol. */
 	protocol?: string;
 }
@@ -512,7 +512,7 @@ export function resolveSubprotocols(
 /** Choose the `Sec-WebSocket-Protocol` value to accept from a client's offer.
  *
  * The server role performs the WebSocket handshake itself (`Deno.upgradeWebSocket`,
- * `ws`, `Bun.serve`, ...), so it — not this library — picks the subprotocol. This
+ * `ws`, `Bun.serve`, ...), so it - not this library - picks the subprotocol. This
  * is the server-side mirror of [[resolveSubprotocols]]: it expands the same
  * `protocols` + `versions` pair into the wire forms this session supports, in
  * preference order, and returns the first one the client offered. Pass the result
@@ -524,7 +524,7 @@ export function resolveSubprotocols(
  * caller should turn into a failed upgrade rather than accepting the socket:
  * completing the handshake with no supported subprotocol is refused.
  *
- * Preference is ours, not the client's — the first entry in `protocols` that the
+ * Preference is ours, not the client's - the first entry in `protocols` that the
  * client also offered wins, matching the Rust `qmux::ws::Server`.
  *
  * @example
@@ -676,7 +676,7 @@ export default class Session implements WebTransport {
 	#bidiStreamCredit = new Credit(0n);
 	#uniStreamCredit = new Credit(0n);
 
-	// Stream count tracking via Credit (for receiving — our limits)
+	// Stream count tracking via Credit (for receiving - our limits)
 	#recvBiCredit: Credit;
 	#recvUniCredit: Credit;
 
@@ -707,7 +707,7 @@ export default class Session implements WebTransport {
 	 * application protocol with the QMux prefix stripped.
 	 *
 	 * Pass an already-connected `WebSocket` (or `WebSocketStream`) instead of a
-	 * URL to run the client role over a socket you opened yourself — the
+	 * URL to run the client role over a socket you opened yourself - the
 	 * subprotocol was chosen when you created it, so `options.protocols` and
 	 * `options.versions` are ignored. See [[Session.accept]] for the server role.
 	 */
@@ -762,7 +762,7 @@ export default class Session implements WebTransport {
 
 		this.#attach(
 			dial
-				? // Open the transport via `WebSocketStream` — native when present (real
+				? // Open the transport via `WebSocketStream` - native when present (real
 					// backpressure), else the ponyfill over a plain `WebSocket`. One code
 					// path for both, so the path exercised in tests is the one Chromium
 					// runs natively.
@@ -783,7 +783,7 @@ export default class Session implements WebTransport {
 	 * advertised. Use [[selectSubprotocol]] to pick that value during the upgrade.
 	 *
 	 * The returned session is a `WebTransport`, identical to a client session
-	 * apart from the stream-id role — so it accepts peer-initiated streams and
+	 * apart from the stream-id role - so it accepts peer-initiated streams and
 	 * opens server-initiated ones.
 	 *
 	 * @example
@@ -839,13 +839,13 @@ export default class Session implements WebTransport {
 			(info) => {
 				// The socket went away without a CONNECTION_CLOSE. A peer close or a
 				// local close() would already have transitioned us (and #close is
-				// idempotent), so reaching here settled means the session dropped —
+				// idempotent), so reaching here settled means the session dropped -
 				// even if the WebSocket itself closed with a "clean" status code.
 				this.#closeReason ??= new Error(`Connection closed: ${info.closeCode ?? 0} ${info.reason ?? ""}`);
 				this.#abort(info.closeCode ?? 1006, info.reason ?? "");
 			},
 			(err: unknown) => {
-				// Keep the socket failure itself — it becomes the SessionError's cause, and
+				// Keep the socket failure itself - it becomes the SessionError's cause, and
 				// it's the only description of *why* the transport died.
 				this.#closeReason ??= err instanceof Error ? err : new Error("WebSocketStream closed");
 				this.#abort(1006, "WebSocketStream error");
@@ -867,7 +867,7 @@ export default class Session implements WebTransport {
 				}
 				// `openWebSocketStream` normalizes the native API's ArrayBuffer chunks,
 				// but a transport handed straight to the constructor or [[accept]]
-				// hasn't been through it — and Chromium's WebSocketStream yields
+				// hasn't been through it - and Chromium's WebSocketStream yields
 				// ArrayBuffer. Normalize here so every inbound path reaches the decoder
 				// as a Uint8Array.
 				this.#onData(value instanceof ArrayBuffer ? new Uint8Array(value) : value);
@@ -886,7 +886,7 @@ export default class Session implements WebTransport {
 		this.#protocol = parseProtocol(rawProtocol, version);
 
 		// Datagrams rely on the record layer for framing, so don't advertise the
-		// parameter — or accept datagrams — on any non-record wire format. The recv
+		// parameter - or accept datagrams - on any non-record wire format. The recv
 		// path gates on #ourParams.maxDatagramFrameSize. RESET_STREAM_AT is only
 		// permitted on draft-02, so advertise `reset_stream_at` there and nowhere
 		// else; the recv path gates on #ourParams.resetStreamAt.
@@ -946,7 +946,7 @@ export default class Session implements WebTransport {
 				}
 			} else {
 				// draft-00 §5.2: `max_frame_size` bounds the whole frame, header
-				// included, and may only be raised from its initial value — which we
+				// included, and may only be raised from its initial value - which we
 				// never do, so the initial value is what a peer may send. Each message
 				// is one frame here.
 				if (this.#version === "qmux-00" && data.byteLength > Frame.MAX_FRAME_SIZE) {
@@ -985,7 +985,7 @@ export default class Session implements WebTransport {
 		} else if (frame.type === "application_close" || frame.type === "connection_close") {
 			this.#closeReason ??= new Error(`Connection closed: ${frame.code.value} ${frame.reason}`);
 			if (frame.type === "application_close") {
-				// APPLICATION_CLOSE (0x1d): the peer closed the session deliberately —
+				// APPLICATION_CLOSE (0x1d): the peer closed the session deliberately -
 				// graceful, so `closed` fulfills with its code/reason.
 				this.#close(Number(frame.code.value), frame.reason);
 			} else {
@@ -1009,7 +1009,7 @@ export default class Session implements WebTransport {
 		} else if (frame.type === "datagram") {
 			// `max_datagram_frame_size` is negotiated: we advertised the largest
 			// DATAGRAM frame we're willing to receive, so a peer that sends one we
-			// never accepted — or one larger than we advertised — has violated the
+			// never accepted - or one larger than we advertised - has violated the
 			// contract. Per RFC 9221 that's a fatal PROTOCOL_VIOLATION, not a
 			// droppable frame; throwing here closes the session via #onData (matching
 			// the Rust implementation's DatagramsUnsupported / FrameTooLarge).
@@ -1126,7 +1126,7 @@ export default class Session implements WebTransport {
 		this.#idleTimer = undefined;
 		const timeoutMs = this.#effectiveIdleTimeoutMs();
 		if (timeoutMs === 0n) return;
-		// Poll at a fraction of the timeout — frequent enough to trigger pings on time
+		// Poll at a fraction of the timeout - frequent enough to trigger pings on time
 		// but not so frequent it burns CPU on otherwise-quiet sessions.
 		const timeout = Nano.fromMilli(Milli(Number(timeoutMs)));
 		const timer = interval(Nano.fromMilli(Milli(Math.max(50, Number(timeoutMs) / 6))));
@@ -1164,7 +1164,7 @@ export default class Session implements WebTransport {
 	 * while its socket still accepts our writes would never be reclaimed.
 	 *
 	 * Crediting the first send after each receive is what still lets a mostly
-	 * one-way sender stay open — its peer answers the keep-alive, and each answer
+	 * one-way sender stay open - its peer answers the keep-alive, and each answer
 	 * re-arms the credit.
 	 */
 	#idleActivityAt(): Instant {
@@ -1203,7 +1203,7 @@ export default class Session implements WebTransport {
 			try {
 				this.#sendPriorityFrame({ type: "ping_request", sequence: BigInt(seq) });
 			} catch (e) {
-				// Best effort — if the send fails, the close path will fire shortly.
+				// Best effort - if the send fails, the close path will fire shortly.
 				// Log a breadcrumb so a never-fire encoder bug doesn't vanish silently.
 				console.warn("qmux: keep-alive ping failed", e);
 			}
@@ -1511,7 +1511,7 @@ export default class Session implements WebTransport {
 				}
 			}
 		} else {
-			// Existing stream — validate recv flow control
+			// Existing stream - validate recv flow control
 			if (!this.#accountRecv(frame)) {
 				this.#sendClose("connection_close", 1002, "flow control error");
 				this.#abort(1002, "flow control error");
@@ -1536,7 +1536,7 @@ export default class Session implements WebTransport {
 	#handleResetStream(frame: Frame.ResetStream) {
 		// A RESET_STREAM_AT frame (reliableSize present, draft-02) is only legal if
 		// we advertised the `reset_stream_at` transport parameter. Receiving it
-		// otherwise — or on an earlier draft, which never advertises it — is a
+		// otherwise - or on an earlier draft, which never advertises it - is a
 		// PROTOCOL_VIOLATION. Plain RESET_STREAM is always allowed.
 		if (frame.reliableSize !== undefined && !this.#ourParams.resetStreamAt) {
 			throw new Error("RESET_STREAM_AT received without advertising reset_stream_at");
@@ -1663,7 +1663,7 @@ export default class Session implements WebTransport {
 		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		const max = peerMax < compatibilityMax ? peerMax : compatibilityMax;
 		// Unreachable with a conforming peer: max_record_size is validated against
-		// the draft-01 minimum on arrival. Guard anyway — a zero budget would make
+		// the draft-01 minimum on arrival. Guard anyway - a zero budget would make
 		// the chunking loops below spin forever instead of failing.
 		if (max === 0n) throw new Error("peer frame limit leaves no room for stream data");
 		return max;
@@ -1749,7 +1749,7 @@ export default class Session implements WebTransport {
 		await this.#enqueueStreamFrame(streamId, { type: "stream", id, offset, data: new Uint8Array(), fin: true });
 	}
 
-	/** Enqueue a DATAGRAM frame on the scheduler's bounded, lossy datagram lane —
+	/** Enqueue a DATAGRAM frame on the scheduler's bounded, lossy datagram lane -
 	 *  dropped under transport backpressure or once closed, rather than piling up
 	 *  on the (lossless, unbounded) control lane. Size/support checks happen in
 	 *  {@link Datagrams} before we get here. */
@@ -1947,7 +1947,7 @@ export default class Session implements WebTransport {
 
 	/** Shared teardown for both terminal transitions: tears down streams,
 	 *  credits, and the scheduler. The caller has already marked the session
-	 *  closed and settled `ready`/`closed` — the only thing that differs between
+	 *  closed and settled `ready`/`closed` - the only thing that differs between
 	 *  a clean shutdown and a dropped session is which way `closed` settled, and
 	 *  {@link #close} vs {@link #abort} own that choice. */
 	#teardown() {
@@ -2004,7 +2004,7 @@ export default class Session implements WebTransport {
 	}
 
 	/** Graceful terminal transition: `closed` **fulfills** with the close code
-	 *  and reason. Per the WebTransport contract this is the only clean outcome —
+	 *  and reason. Per the WebTransport contract this is the only clean outcome -
 	 *  reached by a local {@link close} (which first puts an APPLICATION_CLOSE on
 	 *  the wire) or by receiving a peer's APPLICATION_CLOSE (0x1d). A peer's
 	 *  CONNECTION_CLOSE (0x1c) routes to {@link #abort} instead. Idempotent. */
@@ -2021,7 +2021,7 @@ export default class Session implements WebTransport {
 	}
 
 	/** Abnormal terminal transition: `closed` **rejects** with a
-	 *  `WebTransportError`. Reached on everything that is not a clean shutdown —
+	 *  `WebTransportError`. Reached on everything that is not a clean shutdown -
 	 *  socket failure, read error, idle timeout, a protocol violation we detected
 	 *  locally, or a peer's CONNECTION_CLOSE (0x1c). Close codes cannot carry this
 	 *  distinction, since they are

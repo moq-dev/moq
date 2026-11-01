@@ -2322,7 +2322,7 @@ fn connection_close_while_congestion_blocked() {
         ApplicationClose { error_code: VarInt(42), reason }
     ) if reason == REASON);
 	// Close packets aren't congestion controlled and the test link has no latency, so the close
-	// should arrive the moment it was issued — any delay means a timer had to rescue it
+	// should arrive the moment it was issued - any delay means a timer had to rescue it
 	assert_eq!(delivered_at, close_time);
 }
 

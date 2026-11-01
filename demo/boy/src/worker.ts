@@ -1,4 +1,4 @@
-// Cloudflare Worker for rom.moq.dev — serves Game Boy ROMs from R2.
+// Cloudflare Worker for rom.moq.dev - serves Game Boy ROMs from R2.
 
 interface Env {
 	ROM: R2Bucket;

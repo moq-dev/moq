@@ -207,7 +207,7 @@ class QueryTests(unittest.TestCase):
         self.env.update(IN_MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
         self.env["PATH"] = f"{self.bin}:{os.environ['PATH']}"
-        for script in ("markdown.sh", "shell.sh", "large-files.sh"):
+        for script in ("markdown.sh", "shell.sh", "large-files.sh", "text.sh"):
             path = self.repo / "sh" / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
@@ -218,6 +218,23 @@ class QueryTests(unittest.TestCase):
                                 cwd=self.repo, env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
+
+    def test_check_and_ci_reject_em_dashes_outside_the_diff(self):
+        self.stub_ci()
+        shutil.copy(ROOT / "sh/text.sh", self.repo / "sh/text.sh")
+        self.change("doc/unchanged.md")
+        (self.repo / "doc/unchanged.md").write_text("old text \u2014 still checked\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "existing text")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.change("quest/m1/example.md")
+        for action in ("check", "ci"):
+            with self.subTest(action=action):
+                result = subprocess.run(["bash", "sh/dispatch.sh", action, "origin/main"], cwd=self.repo,
+                                        env=self.env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("doc/unchanged.md:1:", result.stdout)
+                self.assertIn(f"{action}: check text failed", result.stderr)
 
     def test_failure_keeps_running_lanes_and_starts_remaining_modules(self):
         # The failed lane finishes before go releases the two parked lanes.
