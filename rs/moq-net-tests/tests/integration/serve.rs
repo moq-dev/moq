@@ -31,7 +31,12 @@ async fn first_subscribe(version: &str, publish: bool) {
 	};
 	// A held broadcast needs no origin or announcement of its own.
 	let held = broadcast::Info::new().produce();
-	let held_track = held.create_track("video", track::Info::default().with_timescale(moq_net::Timescale::MILLI)).unwrap();
+	let held_track = held
+		.create_track(
+			"video",
+			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+		)
+		.unwrap();
 	let mut group = held_track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
 	group.finish().unwrap();
@@ -45,7 +50,10 @@ async fn first_subscribe(version: &str, publish: bool) {
 				.unwrap();
 			let track = prepared
 				.broadcast()
-				.create_track("video", track::Info::default().with_timescale(moq_net::Timescale::MILLI))
+				.create_track(
+					"video",
+					track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+				)
 				.unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
