@@ -24,9 +24,9 @@ proposed 119020105728-byte limit. These are failed refresh calculations,
 not evidence that those limits were successfully installed.
 
 The live `ci-storage.py` computes the allowance as current project usage
-plus physical free space minus 32 GiB. It has no reserved CI floor; a
-periodic refresh cannot prevent other writers consuming space between
-refreshes. A fixed CI quota alone would still not reserve physical blocks.
+plus physical free space minus 32 GiB. CI therefore fails once free space
+falls under that 32 GiB reserve, whoever consumed it. Nothing bounds the
+other writers, so today an agent can take the space CI needs.
 
 The consumer of the original 480 GB remains unknown. The first retained
 `agent-storage-gc` journal entry is 2026-10-30 08:21:49 PDT, after both
@@ -48,7 +48,7 @@ repository's `infra/`. Existing work is owned by the maintainer's host PRs:
   2026-11-01; the restart commit is still not active there. Do not recreate
   either fix in MoQ.
 - [kixelated/nixos#16](https://github.com/kixelated/nixos/pull/16), open at
-  `eb007f8bc296b9782f0a479d53c5bd7d10565a20`, owns the newer host landing
+  `27700296eb7357001a1c44257cb6c140236b5925`, owns the newer host landing
   daemons and ephemeral check/fixer containers. The live
   `quest-land-moq.service` is active with `Restart=on-failure`. Storage work
   must cover this gate as well as the retained Actions runner. A deployment
@@ -94,8 +94,8 @@ Sources: the per-minute `ci-storage-refresh` journal since 2026-10-26
   their per-instance caches. A one-off root `systemd-run` purge of those
   caches at 22:24 dropped it from 834 to 384 GiB within three minutes.
   Since then it has stayed between 380 and 476 GiB. Completed instance
-  directories now measure 0 MiB. That leak is a CI writer and a gate
-  cleanup concern; a CI floor must not be sized to absorb it.
+  directories now measure 0 MiB. That leak is CI's own growth, which the
+  gate's cleanup must prevent (below); no storage cap absorbs it.
 - Gate runs since the purge (286 runs): `quest-land-moq-check` wrote a
   p50 7.0, p90 10.1, and maximum 21.4 GiB per run; rust2 9.6, moq-pro 1.2,
   rind 2.0, quest 0.6, and the fixer up to 25.1 GiB. Over the whole window,
@@ -116,27 +116,27 @@ Sources: the per-minute `ci-storage-refresh` journal since 2026-10-26
 ### Storage separation
 
 Implementation stays in the host repository, extending the existing owners'
-work above. Reuse its XFS policy and VM tests:
+work above. Reuse its XFS policy and VM tests. Everything stays on the one
+shared XFS filesystem; the only new limit is a cap on agents.
 
-- Give agent-writable trees a separate enforced project with block and inode
-  budgets, covering home caches, rootless container storage, and agent
-  temporary/benchmark outputs. Put CI private temporary files and daemon
-  state in CI-owned trees before tagging the shared temporary roots. Check
-  existing files and inheritance, including rename/hard-link boundaries;
-  tagging only a directory does not account for its existing descendants.
-- Establish an explicit CI allowance and a bounded budget for every other
-  writer on the filesystem, including host services and metadata headroom.
-  Their worst-case allocations must fit together with the existing host
-  reserve. Never derive the promised floor from a free-space sample or
-  silently shrink it when agents grow. Refuse an infeasible plan before
-  enabling writers; preserve existing data during any migration.
+- Give agent-writable trees one enforced project with a 340 GiB block limit
+  and a 6M inode limit, in charged bytes. It covers home caches, rootless
+  container storage, agent temporary/benchmark outputs, and the agent Nix
+  store below. Put CI private temporary files and daemon state in CI-owned
+  trees before tagging the shared temporary roots. Check existing files and
+  inheritance, including rename/hard-link boundaries; tagging only a
+  directory does not account for its existing descendants. Preserve
+  existing data during any migration.
 - Separate the writable Nix storage first. Agent `nix develop` and CI use
   the host daemon and `/nix` in project 42000, so a home/tmp cap cannot stop
-  agents exhausting that shared allowance. Give agents and CI separate
-  writable Nix stores and temporary build trees, each inside its own
-  project, rather than tagging only their checkouts. Agents lose today's
-  shared-store cache reuse with CI; their store counts against the agent
-  budget.
+  agents exhausting the space CI uses. Give agents and CI separate writable
+  Nix stores and temporary build trees, rather than tagging only their
+  checkouts. The agent store and its build trees are inside the agent
+  project and count against its 340 GiB. Agents lose today's shared-store
+  cache reuse with CI.
+- CI and the rest of the host share whatever the agent cap leaves, with no
+  CI floor and no separate host budget. `ci-storage.py` keeps its existing
+  free-space allowance and 32 GiB reserve.
 - Add bounded allocation evidence to the host's existing logging: physical
   free space, per-project blocks/inodes, and sizes of the identified mutable
   storage roots. Record timestamps and failures. Avoid recursive whole-disk
@@ -146,38 +146,64 @@ The [XFS project-quota documentation](https://man7.org/linux/man-pages/man8/xfs_
 describes recursive initialization, inheritance, and project boundaries.
 Project limits bound allocations; they do not provision a separate volume.
 
-Decided 2026-11-01 (maintainer, /quest-complete iteration of
+The agent limit is sized from the measured peaks: 222 GiB of agent trees
+plus at most 102 GiB for an agent store sized like today's shared `/nix`,
+324 GiB together, leaving agents 16 GiB of headroom. The agent store's real
+size can only be measured after the separation deploys; resize the limit
+from that measurement. The 6M inode limit is above all of project 0 today
+(3.27M).
+
+The cap keeps the Goal with a 58 GiB margin. CI fails once free space
+falls under its 32 GiB reserve, so writers can use 920.4 GiB before CI
+fails. Agents at their cap hold 340 GiB plus uncharged inode metadata,
+under 3 GiB at 6M inodes of 512 bytes. That leaves about 577 GiB for CI and
+other host state. Their measured peak together is 519 GiB (CI 476, other
+host state 43), so 58 GiB remains, more than the 45.9 GiB largest
+concurrent gate write. Charged bytes overstate physical use under reflinks,
+so the margin is conservative.
+
+The cap covers only agent writes inside the agent project. By design it
+does not stop CI or other host state growing past 577 GiB on its own: the
+842 GiB cache leak plus 43 GiB of host state would exceed that even with
+agents idle. The unattributed 2026-10-30 burst left 6 GiB free with CI
+under 250 GiB, so non-CI writers then held about 696 GiB. If agents wrote
+it in covered trees, the cap would have stopped them at 340 GiB. If a host
+service or an agent path outside the project wrote it, the cap would not.
+Attribute it where evidence permits, and after migration verify that no
+agent-owned data remains outside the agent project.
+
+The gate's owner, [kixelated/nixos#16](https://github.com/kixelated/nixos/pull/16),
+must make every finished check and fixer instance release its caches, so
+CI's resident use stays near its 380-476 GiB post-purge range. Its current
+head adds no such cleanup, and the 2026-10-31 purge was a one-off. Confirm
+the cleanup holds across the gate's run history.
+
+Decided 2026-11-01 (maintainer, /quest-complete iterations of
 [moq-dev/moq#7548](https://github.com/moq-dev/moq/pull/7548)):
 
 1. **Owner:** ✅ extend the existing host owner's work / a separate host PR.
 2. **Isolation:** ✅ keep the full Goal, with separate writable Nix storage
    for agents and for CI / narrow the guarantee / a dedicated CI filesystem.
-3. **Capacity:** ✅ measure representative gate peaks, then approve the CI
-   floor, agent block/inode limits, and residual host budget together. No
-   value is selected without that approval.
-
-Capacity proposal, awaiting the maintainer's approval. All four fit the
-952.4 GiB filesystem together (952 GiB), in charged bytes:
-
-| Budget | Proposed | Measured basis |
-| --- | --- | --- |
-| CI floor (project 42000) | 520 GiB, 8M inodes | 476 GiB peak since the leak purge, leaving 44 GiB, near the 45.9 GiB largest concurrent-run write; 5.81M inodes used |
-| Agent limit (new project) | 340 GiB, 6M inodes | 222 GiB of agent trees plus at most the 102 GiB of today's shared `/nix` for a separate agent store |
-| Residual host budget | 60 GiB | about 43 GiB of other project 0 state, plus uncharged inode and log metadata |
-| Existing host reserve | 32 GiB | unchanged |
-
-The historical 300 GiB CI cap is not a safe default: CI has been charged
-380-476 GiB since the purge.
+3. **Capacity measurement:** ✅ measure representative gate peaks before
+   approving any values / pick values without measuring.
+4. **Capacity shape:** ✅ cap agents only: one agent quota of about 340 GiB
+   plus an inode limit, sized from the measured agent peak and the agent
+   Nix store; CI and the rest of the host share what is left, with no CI
+   floor or host budget, and gate cleanup handles CI's cache leak / A: CI
+   floor 520 GiB, agents 340 GiB, host budget 60 GiB / B: CI floor
+   560 GiB, agents 300 GiB, host budget 60 GiB. The maintainer first asked
+   why CI and the host could not share the disk; it already is one shared
+   filesystem, and the limits are only caps on it. This drops the CI floor
+   and host budget that decision 3 had planned to approve.
 
 Remaining work is attribution of the original growth where evidence permits,
-the approved host source change, and verification in the host's XFS VM tests:
-agent block/inode exhaustion must leave CI writable; cover private temporary
-files, shared-store policy, existing-file migration, concurrent writers,
-disabled enforcement, and restart recovery for the services still in use.
-Confirm with the gate's owner that finished check and fixer instances now
-release their caches, so the CI floor never absorbs that leak again.
-Live migration, deployment, cleanup, and quota changes remain separate
-maintainer actions. This checkpoint changes none of them.
+the host source change, the gate's cache cleanup, and verification in the
+host's XFS VM tests: agent block/inode exhaustion must leave CI writable;
+cover private temporary files, the separate Nix stores, existing-file
+migration, concurrent writers, disabled enforcement, and restart recovery
+for the services still in use. Live migration, deployment, cleanup, and
+quota changes remain separate maintainer actions. This checkpoint changes
+none of them.
 
 Decided 2026-10-30 (maintainer, /quest-plan of the 2026-10-30 /quest-complete follow-ups): ✅ new m0 quest / note in the host configuration only / drop.
 
