@@ -153,6 +153,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
 - [Land main through quest land](/quest/m0/ci/land.md) - a host daemon tests small batches of queued PRs once and lands each as its tested squash commit
+- [Pin a quest that re-pins a queued PR](/quest/m0/ci/quest-pin.md) - `quest merge --land` moves an already-queued PR's pin to its new head
 - [A cache error is a miss](/quest/m0/ci/nix-cache-5xx.md) - a transient `nix.moq.dev` 5xx no longer fails `just ci`
 - [Every io_uring test in the io-uring group](/quest/m0/ci/io-uring-test-group.md) - the parallel tests of one `just ci` stop exhausting the shared `RLIMIT_MEMLOCK`, and a too-low limit fails clearly
 - [Cheap checks skip the queue](/quest/m0/ci/gate-quick.md) - condition: quest ships `quest gate --quick`; then cheap modules wait at most a minute
