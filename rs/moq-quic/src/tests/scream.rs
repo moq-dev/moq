@@ -367,7 +367,9 @@ impl Outcome {
 			};
 			let phase: Vec<&Snapshot> = self.samples.iter().filter(|s| s.at >= from && s.at < until).collect();
 			if rate < before {
-				report.fall.push(phase.iter().find(|s| s.estimate <= rate).map(|s| s.at - from));
+				report
+					.fall
+					.push(phase.iter().find(|s| s.estimate <= rate).map(|s| s.at - from));
 				let built = phase.iter().position(|s| s.queue >= DRAINED).unwrap_or(0);
 				report
 					.drain
@@ -451,7 +453,11 @@ fn probe_recovers_a_stopped_rung() {
 	};
 	let reached = |outcome: &Outcome| outcome.samples.iter().find(|s| s.estimate >= TARGET).map(|s| s.at);
 	let baseline = run(&scenario(0));
-	assert_eq!(reached(&baseline), None, "the estimate reached the target with no probe");
+	assert_eq!(
+		reached(&baseline),
+		None,
+		"the estimate reached the target with no probe"
+	);
 	let probing = run(&scenario(TARGET));
 	let rise = reached(&probing).expect("the probe never raised the estimate to the target");
 	info!(?rise, redundant = probing.redundant, unique = probing.unique, "probe");
@@ -569,8 +575,12 @@ fn compare() {
 					.map(|s| s.at - opened)
 			});
 			let queue = |o: &Outcome, range: ops::Range<Duration>| {
-				let mut queue: Vec<Duration> =
-					o.samples.iter().filter(|s| range.contains(&s.at)).map(|s| s.queue).collect();
+				let mut queue: Vec<Duration> = o
+					.samples
+					.iter()
+					.filter(|s| range.contains(&s.at))
+					.map(|s| s.queue)
+					.collect();
 				queue.sort();
 				ms(percentile(&queue, 0.95))
 			};

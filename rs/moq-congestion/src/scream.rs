@@ -18,9 +18,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use crate::pacer::{Pacer, Rate};
-use crate::{
-    Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent,
-};
+use crate::{Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent};
 use crate::{Duration, Instant};
 
 /// equivalent to MIN_REF_WND: the smallest reference window, in bytes
@@ -238,11 +236,6 @@ impl Scream {
         scream
     }
 
-    /// The queue delay the controller last measured
-    pub fn queue_delay(&self) -> Duration {
-        self.qdelay
-    }
-
     /// The bytes per second the media should be encoded at
     fn target_rate(&self) -> u64 {
         self.target_rate as u64
@@ -357,7 +350,8 @@ impl Scream {
             let alpha = ((qdelay_avg - target / 2.0) / (target / 2.0)).clamp(0.0, 1.0);
             // Reactions come every min(VIRTUAL_RTT, s_rtt), so several a round trip on a long
             // path: each takes its share
-            let backoff = alpha / 2.0 / (self.srtt.as_secs_f64() / VIRTUAL_RTT.as_secs_f64()).max(1.0);
+            let backoff =
+                alpha / 2.0 / (self.srtt.as_secs_f64() / VIRTUAL_RTT.as_secs_f64()).max(1.0);
             1.0 - backoff
         } else {
             return;
@@ -436,8 +430,10 @@ impl Controller for Scream {
             let qdelay = delay.saturating_sub(self.base.get());
             self.qdelay = Duration::from_nanos(qdelay.max(0) as u64);
             if self.config.reduce_jitter {
-                self.qdelay_max_avg =
-                    Ord::min(self.config.qdelay_target, Ord::max(self.qdelay, self.qdelay_max_avg));
+                self.qdelay_max_avg = Ord::min(
+                    self.config.qdelay_target,
+                    Ord::max(self.qdelay, self.qdelay_max_avg),
+                );
                 self.qdelay_min_avg = Ord::min(self.qdelay, self.qdelay_min_avg);
             }
         }
@@ -492,7 +488,8 @@ impl Controller for Scream {
             window: self.window(),
             pacing_rate: Some(self.pacing_rate()),
         };
-        self.pacer.delay(self.srtt, bytes, self.mss as u16, now, rate)
+        self.pacer
+            .delay(self.srtt, bytes, self.mss as u16, now, rate)
     }
 
     fn metrics(&self) -> ControllerMetrics {
@@ -720,7 +717,10 @@ mod tests {
         let (delivered, mut queue) = path.run(Duration::from_secs(10));
         let throughput = delivered as f64 / 10.0;
         let p95 = percentile(&mut queue, 0.95);
-        assert!(throughput > 250_000.0 * 0.8, "carried {throughput:.0} B/s of 250000");
+        assert!(
+            throughput > 250_000.0 * 0.8,
+            "carried {throughput:.0} B/s of 250000"
+        );
         assert!(p95 < Duration::from_millis(60), "queue p95 {p95:?}");
     }
 
@@ -739,10 +739,16 @@ mod tests {
             }
         }
         let fell = fell.expect("the target rate never fell to the path's");
-        assert!(fell < 1_000, "the target rate fell to the path's after {fell}ms");
+        assert!(
+            fell < 1_000,
+            "the target rate fell to the path's after {fell}ms"
+        );
         let (_, mut queue) = path.run(Duration::from_secs(5));
         let p95 = percentile(&mut queue, 0.95);
-        assert!(p95 < Duration::from_millis(60), "queue p95 {p95:?} after the drop");
+        assert!(
+            p95 < Duration::from_millis(60),
+            "queue p95 {p95:?} after the drop"
+        );
     }
 
     /// The peer's clock basis is unknown and cancels out: any basis gives the same run
@@ -774,7 +780,10 @@ mod tests {
                 path.scream.qdelay
             );
         }
-        assert_eq!(path.scream.last_reaction, reacted, "backed off an empty queue");
+        assert_eq!(
+            path.scream.last_reaction, reacted,
+            "backed off an empty queue"
+        );
     }
 
     /// An application-limited sender's window stops growing once it covers what it sends, short
@@ -786,13 +795,19 @@ mod tests {
         let window = path.scream.ref_wnd;
         path.run(Duration::from_secs(10));
         let scream = &path.scream;
-        assert_eq!(scream.ref_wnd, window, "the window grew past what the media needs");
+        assert_eq!(
+            scream.ref_wnd, window,
+            "the window grew past what the media needs"
+        );
         let estimate = scream.metrics().bandwidth_estimate.unwrap();
         assert!(
             (100_000..500_000).contains(&estimate),
             "estimate {estimate} for 100000 B/s of media on a 1000000 B/s path"
         );
-        assert!(scream.metrics().probe_inflight.is_some(), "not probing an idle path");
+        assert!(
+            scream.metrics().probe_inflight.is_some(),
+            "not probing an idle path"
+        );
     }
 
     /// Probing stops once a queue builds, and the controller backs off
@@ -833,7 +848,11 @@ mod tests {
         assert_eq!(scream.ref_wnd, 100_000.0 * BETA_LOSS);
 
         lose(&mut scream, now + ms(200), now + ms(40));
-        assert_eq!(scream.ref_wnd, 100_000.0 * BETA_LOSS, "reacted to a loss it answered");
+        assert_eq!(
+            scream.ref_wnd,
+            100_000.0 * BETA_LOSS,
+            "reacted to a loss it answered"
+        );
 
         lose(&mut scream, now + ms(300), now + ms(100));
         assert_eq!(scream.ref_wnd, 100_000.0 * BETA_LOSS * BETA_LOSS);

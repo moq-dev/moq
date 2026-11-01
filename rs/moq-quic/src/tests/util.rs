@@ -345,7 +345,8 @@ impl Bottleneck {
 
 	/// The queueing delay a packet arriving at `now` would meet
 	pub(super) fn delay(&self, now: Instant) -> Duration {
-		self.busy_until.map_or(Duration::ZERO, |busy| busy.saturating_duration_since(now))
+		self.busy_until
+			.map_or(Duration::ZERO, |busy| busy.saturating_duration_since(now))
 	}
 
 	/// Queues `bytes` arriving at `now`, returning when they leave the link and whether they
