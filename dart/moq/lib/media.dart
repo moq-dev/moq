@@ -75,6 +75,9 @@ typedef ContainerInit = MoqContainerInit;
 /// A width and height pair, in pixels.
 typedef Dimensions = MoqDimensions;
 
+/// Where an audio or video decoder starts on a track that already holds groups: `latest` for a live player.
+typedef DecodeStart = MoqDecodeStart;
+
 /// A weak catalog handle that closes with its broadcast.
 typedef CatalogProducer = MoqMediaCatalogProducer;
 

@@ -34,6 +34,8 @@ for (const job of [check.jobs.check]) {
 // Release's selector and execution share one job-wide base; Land uses its
 // resolved main SHA for every checked prefix, never the preceding PR's head.
 assert.equal(check.jobs.check.env.CI_BASE, "--all");
+// Check runs the whole gate in one job.
+assert.equal(check.jobs.check.env.CHECK_MODULES, undefined);
 for (const step of check.jobs.check.steps) assert.equal(step.env?.CI_BASE, undefined, `${step.name} overrides CI_BASE`);
 // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
 assert.equal(check.concurrency.group, "check-${{ github.ref }}");
@@ -127,6 +129,8 @@ try {
 							"land",
 							"check",
 							".tmp/land/plan.json",
+							"--budget",
+							"150",
 							"--",
 							"nix",
 							"develop",
@@ -218,7 +222,6 @@ assert.deepEqual(calls.map(([id]) => id).sort(), [
 	"ts",
 	"uring",
 	"video",
-	"wasm",
 	"x11",
 ]);
 
@@ -286,7 +289,7 @@ assert.equal(nightly.jobs.platform.uses, "./.github/workflows/platform.yml");
 assert.deepEqual(platform.on.push.branches, ["release"]);
 
 // Nightly covers what main PRs skip.
-for (const name of ["x11", "android", "cpp", "wasm", "audio-quality", "oss-scanner", "runner-vm", "features"]) {
+for (const name of ["x11", "android", "cpp", "audio-quality", "oss-scanner", "runner-vm", "features"]) {
 	assert.ok(
 		Object.values(nightly.jobs).some(
 			(job) => (job as { uses?: string }).uses === `./.github/workflows/${name}.yml`,
@@ -305,8 +308,10 @@ const targets = JSON.parse(dart.jobs.ffi.with.targets);
 assert.ok(targets.some((target: string) => target.includes("-apple-")));
 assert.ok(targets.some((target: string) => target.includes("-windows-")));
 
-// Neither the feature matrix nor the optimized WASM build shares the queue's
-// default-feature test artifacts, but both must block a release.
+// The feature matrix shares none of the queue's default-feature test artifacts, but
+// it must block a release.
 const features = await workflow("features");
-assert.deepEqual(features.jobs.features.strategy.matrix.recipe, ["rs features", "js wasm"]);
+assert.deepEqual(features.jobs.features.strategy.matrix.recipe, ["rs features"]);
+// Nightly runs the whole gate over every package in one Tests job.
+assert.ok(nightly.jobs.tests.strategy.matrix.recipe.includes("gate"));
 console.log("queue event policy passed");

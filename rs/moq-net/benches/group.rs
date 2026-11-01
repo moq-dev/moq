@@ -14,7 +14,9 @@
 //!
 //! `group_contended` reads one live multi-frame group from readers spread over worker
 //! threads, swept over threads, readers, and frames appended per round, so contention
-//! on the group's shared state shows up as a slope across cores.
+//! on the group's shared state shows up as a slope across cores. Its `subscribed` arm
+//! hands each reader the group through its own track subscription, as a relay does, so
+//! every read that parks at the edge also judges the group's expiry.
 //!
 //! `group_shed` writes one live group far past what it holds, swept over the frames it
 //! holds (a small pool's debt, or the 32 MiB live tail) and the frames it sheds, so
@@ -24,6 +26,7 @@
 
 #![expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "`iter_custom` timings measure the host clock on purpose"
 )]
 
@@ -597,76 +600,109 @@ fn spin<R>(mut f: impl FnMut() -> Option<R>) -> R {
 /// [`group::Consumer::poll_read_frame`] and parks at the edge again. Every [`ROLL`]
 /// frames the driver publishes the next group and finishes the current one, and each
 /// reader moves on once it reads the end, so the group stays under its frame cap.
+///
+/// A `subscribed` reader receives each group from its own [`track::Subscriber`], so the
+/// group carries the subscription's expiry and every park judges it.
 fn bench_contended(c: &mut Criterion) {
 	let payload = Bytes::from(vec![0u8; PAYLOAD]);
 	let mut g = c.benchmark_group("group_contended");
 	g.warm_up_time(Duration::from_secs(1));
 	g.measurement_time(Duration::from_secs(3));
-	for burst in BURSTS {
-		for threads in THREADS {
-			for readers in READERS {
-				g.throughput(Throughput::Elements((readers * burst) as u64));
-				let id = BenchmarkId::new(format!("burst_{burst}/threads_{threads}"), readers);
-				g.bench_function(id, |b| {
-					let broadcast = broadcast::Producer::new(broadcast::Info::default());
-					let track = broadcast.create_track("bench", track::Info::default()).unwrap();
-					let mut group = track.append_group().unwrap();
-					// The group readers move to once theirs ends.
-					let next = Arc::new(Mutex::new(group.consume()));
-					let mut sets: Vec<Vec<group::Consumer>> = (0..threads).map(|_| Vec::new()).collect();
-					for i in 0..readers {
-						sets[i % threads].push(group.consume());
-					}
-					let work = sets
-						.into_iter()
-						.map(|mut set| -> Work {
-							let next = next.clone();
-							let waiter = kio::Waiter::noop();
-							Box::new(move || {
-								for reader in &mut set {
-									let mut read = 0;
-									loop {
-										match reader.poll_read_frame(&waiter) {
-											Poll::Ready(Ok(Some(frame))) => {
-												black_box(frame);
-												read += 1;
-											}
-											Poll::Ready(Ok(None)) => *reader = next.lock().unwrap().clone(),
-											Poll::Ready(Err(err)) => panic!("read failed: {err}"),
-											Poll::Pending => break,
-										}
-									}
-									assert_eq!(read, burst, "every appended frame is ready");
-								}
-							})
-						})
-						.collect();
-					let crew = Crew::new(work);
-
-					let mut written = 0;
-					b.iter_custom(|iters| {
-						let start = Instant::now();
-						for _ in 0..iters {
-							if written + burst > ROLL {
-								let rolled = track.append_group().unwrap();
-								*next.lock().unwrap() = rolled.consume();
-								let mut done = std::mem::replace(&mut group, rolled);
-								done.finish().unwrap();
-								written = 0;
-							}
-							for _ in 0..burst {
-								group.write_frame(None, payload.clone()).unwrap();
-							}
-							written += burst;
-							crew.run();
-						}
-						start.elapsed()
-					});
-				});
+	for subscribed in [false, true] {
+		for burst in BURSTS {
+			for threads in THREADS {
+				for readers in READERS {
+					g.throughput(Throughput::Elements((readers * burst) as u64));
+					let source = if subscribed { "subscribed/" } else { "" };
+					let id = BenchmarkId::new(format!("{source}burst_{burst}/threads_{threads}"), readers);
+					g.bench_function(id, |b| contended(b, &payload, subscribed, burst, threads, readers));
+				}
 			}
 		}
 	}
 	g.finish();
+}
+
+/// One [`bench_contended`] case.
+fn contended(
+	b: &mut criterion::Bencher,
+	payload: &Bytes,
+	subscribed: bool,
+	burst: usize,
+	threads: usize,
+	readers: usize,
+) {
+	let broadcast = broadcast::Producer::new(broadcast::Info::default());
+	let track = broadcast.create_track("bench", track::Info::default()).unwrap();
+	let mut group = track.append_group().unwrap();
+	// The group readers move to once theirs ends.
+	let next = Arc::new(Mutex::new(group.consume()));
+	let mut sets: Vec<Vec<(Option<track::Subscriber>, group::Consumer)>> = (0..threads).map(|_| Vec::new()).collect();
+	for i in 0..readers {
+		let reader = match subscribed {
+			true => {
+				let mut subscriber = track.subscribe(None);
+				let group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
+				assert_eq!(group.sequence, 0, "the subscriber starts at the live group");
+				(Some(subscriber), group)
+			}
+			false => (None, group.consume()),
+		};
+		sets[i % threads].push(reader);
+	}
+	let work = sets
+		.into_iter()
+		.map(|mut set| -> Work {
+			let next = next.clone();
+			let waiter = kio::Waiter::noop();
+			Box::new(move || {
+				for (subscriber, reader) in &mut set {
+					let mut read = 0;
+					loop {
+						match reader.poll_read_frame(&waiter) {
+							Poll::Ready(Ok(Some(frame))) => {
+								black_box(frame);
+								read += 1;
+							}
+							Poll::Ready(Ok(None)) => {
+								*reader = match subscriber {
+									Some(subscriber) => {
+										let next = subscriber.recv_group().now_or_never();
+										next.unwrap().unwrap().expect("the next group is live")
+									}
+									None => next.lock().unwrap().clone(),
+								}
+							}
+							Poll::Ready(Err(err)) => panic!("read failed: {err}"),
+							Poll::Pending => break,
+						}
+					}
+					assert_eq!(read, burst, "every appended frame is ready");
+				}
+			})
+		})
+		.collect();
+	let crew = Crew::new(work);
+
+	let mut written = 0;
+	b.iter_custom(|iters| {
+		let start = Instant::now();
+		for _ in 0..iters {
+			if written + burst > ROLL {
+				let rolled = track.append_group().unwrap();
+				*next.lock().unwrap() = rolled.consume();
+				let mut done = std::mem::replace(&mut group, rolled);
+				done.finish().unwrap();
+				written = 0;
+			}
+			for _ in 0..burst {
+				group.write_frame(None, payload.clone()).unwrap();
+			}
+			written += burst;
+			crew.run();
+		}
+		start.elapsed()
+	});
 }
 
 /// A frame for the shedding benchmark: large enough that a group outgrows a small pool
