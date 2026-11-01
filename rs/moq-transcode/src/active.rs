@@ -358,7 +358,6 @@ fn next_update(state: &State, seen: &BTreeMap<String, bool>) -> Option<Update> {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::time::Duration;
 
@@ -374,7 +373,7 @@ mod tests {
 		}
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn reports_the_ladder_then_each_edge() {
 		let active = Producer::default();
 		let rung = resolved("video/360p", 360);
@@ -402,7 +401,7 @@ mod tests {
 	/// A pipeline is billable when it produces, not when it attaches: a viewer
 	/// subscribing to a rung whose source never sends a frame costs nothing, and
 	/// a transcoder that encodes nothing must not look like one saturating a GPU.
-	#[tokio::test]
+	#[kio::test]
 	async fn attaching_without_producing_is_not_encoding() {
 		let active = Producer::default();
 		let rung = resolved("video/360p", 360);
@@ -412,7 +411,7 @@ mod tests {
 		let rendition = cursor.next().await.unwrap().rendition;
 
 		let guard = active.attach(&rung);
-		tokio::time::sleep(Duration::from_millis(20)).await;
+		kio::clock::sleep(Duration::from_millis(20)).await;
 		assert!(cursor.try_next().is_none(), "attaching reported an edge");
 		assert_eq!(rendition.frames(), 0);
 
@@ -428,7 +427,7 @@ mod tests {
 	/// A fetch overlapping the live session is one rendition, not two: a second
 	/// pipeline is not an edge. Its output still counts, because it really did
 	/// encode those frames.
-	#[tokio::test]
+	#[kio::test]
 	async fn concurrent_pipelines_are_one_rendition() {
 		let active = Producer::default();
 		let low = resolved("video/240p", 240);
@@ -467,7 +466,7 @@ mod tests {
 
 	/// A fresh cursor must report what is already encoding, or a caller that only
 	/// ever awaits `next` never learns about a rendition that started first.
-	#[tokio::test]
+	#[kio::test]
 	async fn a_fresh_cursor_reports_the_current_set() {
 		let active = Producer::default();
 		let rung = resolved("video/480p", 480);
@@ -481,7 +480,7 @@ mod tests {
 		// Caught up: it waits for a real change rather than spinning.
 		assert!(cursor.try_next().is_none());
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), cursor.next())
+			kio::clock::timeout(Duration::from_millis(50), cursor.next())
 				.await
 				.is_err()
 		);
@@ -492,7 +491,7 @@ mod tests {
 	/// encoded, so it still bills. This is the group-fetch path, which lives for
 	/// milliseconds. The caller can only bill it because the ladder handed it the
 	/// handle up front.
-	#[tokio::test]
+	#[kio::test]
 	async fn a_transient_pipeline_is_metered_without_an_edge() {
 		let active = Producer::default();
 		let rung = resolved("video/360p", 360);
@@ -516,7 +515,7 @@ mod tests {
 	/// A caller bills by subtracting two reads, so the counters have to keep
 	/// their totals across an idle gap rather than restarting with the next
 	/// pipeline.
-	#[tokio::test]
+	#[kio::test]
 	async fn the_counters_survive_an_idle_gap() {
 		let active = Producer::default();
 		let rung = resolved("video/360p", 360);
@@ -541,7 +540,7 @@ mod tests {
 
 	/// A cursor has to be able to tell "nothing is encoding" from "the transcoder
 	/// is gone", or a metering loop parks forever on a dead transcode.
-	#[tokio::test]
+	#[kio::test]
 	async fn the_cursor_closes_with_the_producer() {
 		let active = Producer::default();
 		let mut cursor = active.consume();

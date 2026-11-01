@@ -124,8 +124,6 @@ locks have none. Most duplicates are ecosystem transitions owned upstream:
 
 ### Kept on purpose
 
-- tracing-wasm: its repository is gone, but the maintained `wasm-tracing`
-  fork added 2.9 KB gzipped to `moq_wasm.wasm` for the same behavior.
 - tracing-android: `tracing-logcat` would add rustix 0.38.
 - humantime-serde, hex, send_wrapper, byteorder: unreleased for years but
   complete, with no advisory.
@@ -137,9 +135,9 @@ locks have none. Most duplicates are ecosystem transitions owned upstream:
 
 ### Hand-rolled code
 
-Planned: [H.264 parsing](/quest/m2/h264-reader.md),
-[avcC and hvcC](/quest/m2/mp4-atom-config.md), and
-[relay metrics](/quest/m2/relay-prometheus-client.md). Reviewed and kept,
+Planned: [H.264 parsing](/quest/m2/h264-reader.md) and
+[relay metrics](/quest/m2/relay-prometheus-client.md); moq-mux's avcC and
+hvcC records go through mp4-atom. Reviewed and kept,
 each small or cold: about eleven `(d * 2).min(max)` backoff loops (moq-tokio
 already has a `Backoff` that moq-relay's cluster loop could reuse), per-byte
 hex formatting in moq-auth and moq-hls, the STUN token bucket, the JS

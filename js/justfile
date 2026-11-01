@@ -57,7 +57,7 @@ test-changed list:
 coverage package="":
     python3 ../sh/js/coverage.py '{{ package }}'
 
-# Run one net benchmark: broadcasts, forward, requests, fills, reader, frames, track, resume, observed, drift, ledger, varint, lite-varint, priority, subscribe-drop, subscribe-tracks, refresh, or compression.
+# Run one net benchmark: broadcasts, forward, requests, fills, reader, frames, track, resume, observed, drift, ledger, varint, lite-varint, priority, subscribe-drop, refresh, or compression.
 bench name:
     bun install --frozen-lockfile
     bun net/bench/{{ name }}.ts
@@ -78,6 +78,11 @@ qmux-record-bench:
     bun install --frozen-lockfile
     bun qmux/bench/record.ts
 
+# Sweep QMux datagram receive-queue draining over backlog size (median of 7 runs).
+qmux-datagrams-bench:
+    bun install --frozen-lockfile
+    bun qmux/bench/datagrams.ts
+
 # Sweep CMAF fragment decode over mdat bytes x declared sample count, including a hostile count.
 cmaf-bench:
     bun install --frozen-lockfile
@@ -96,11 +101,6 @@ worklet-matrix:
 # Build all packages.
 build:
     python3 ../sh/js/workspace.py build --all
-
-# Build browser/WASM bindings into @moq/wasm using the pinned wasm-bindgen toolchain.
-wasm PROFILE="wasm-release":
-    bash ../sh/local.sh cargo build --locked -p moq-wasm --target wasm32-unknown-unknown --profile {{ PROFILE }}
-    wasm-bindgen --target web --out-name moq --out-dir wasm/dist "${CARGO_TARGET_DIR:-../target}/wasm32-unknown-unknown/{{ if PROFILE == "dev" { "debug" } else { PROFILE } }}/moq_wasm.wasm"
 
 # Ensure the built public libraries can load without browser globals.
 dist-imports:
