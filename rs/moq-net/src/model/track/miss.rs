@@ -5,7 +5,8 @@
 //! fill is bounded by construction. Below it, a hole is a miss once the feed is past it:
 //! under where the feed starts, or accounted for by the arrival ledger without being cached
 //! (evicted, or a gap the feed skipped). A hole the ledger still waits for is deferred and
-//! judged again as the feed moves.
+//! judged again as the feed moves, or once its wait ends: the arrival grace, bounded by
+//! [`ledger::GRACE`] when nothing else bounds it, so every hole is asked in finite time.
 //!
 //! Each sequence is judged once, except a group evicted after the reader judged it cached
 //! and before it took it: judged again as a miss, once. A refill evicted again before it is
@@ -30,7 +31,7 @@ use super::super::delivered::Delivered;
 pub(super) use super::fill::Asking;
 use super::fill::{Ask, FillState, Join};
 use super::{Drift, Order, Position, TrackState};
-use crate::Error;
+use crate::{Error, ledger};
 
 /// What a probe judges against: the span read, the feed's newest group, where the feed
 /// and readers start, and the drops revision.
@@ -350,6 +351,7 @@ impl Misses {
 		waiter: &kio::Waiter,
 	) -> RangeSet<u64> {
 		let mut retry = RangeSet::new();
+		let deadline = self.deferred.deadline();
 		// Only the joins holding something unanswered: one holding only filled groups until
 		// they are taken has nothing to answer.
 		let keys: BTreeSet<u64> = self
@@ -433,6 +435,13 @@ impl Misses {
 			self.release(&taken);
 			// Judged again: the same join may have more to answer, or park the waiter now.
 		}
+		// A refusal held while the feed may still deliver its groups is judged again once
+		// the feed gives up on them, which nothing else wakes this reader for.
+		if let Some(at) = self.deferred.deadline()
+			&& Some(at) != deadline
+		{
+			state.read().cache.watch_wall(at, waiter);
+		}
 		retry
 	}
 
@@ -489,7 +498,7 @@ impl Misses {
 		if unchanged && self.deferred.runs.is_empty() {
 			return asks;
 		}
-		let grace = state.arrival_grace();
+		let grace = state.miss_grace();
 		let unchanged = unchanged && self.grace == Some(grace);
 		let deadline = self.deferred.deadline();
 		if unchanged && deadline.is_none() {
@@ -848,7 +857,7 @@ impl Misses {
 			for run in left.iter() {
 				self.refused.insert(run.clone());
 				self.deferred
-					.insert(run.clone(), state.arrivals.folds_at(run.start, state.arrival_grace()));
+					.insert(run.clone(), state.arrivals.folds_at(run.start, state.miss_grace()));
 			}
 		}
 	}
@@ -953,6 +962,17 @@ impl Inboxes {
 }
 
 impl TrackState {
+	/// How long a hole the live feed may still deliver is waited for before it is a miss:
+	/// the arrival grace, or [`ledger::GRACE`] when nothing bounds that, so every hole is
+	/// asked or given up in finite time. A reader with no budget on a track with no max age
+	/// would otherwise wait out an unbounded grace, and a read of the hole would never end.
+	pub(super) fn miss_grace(&self) -> Duration {
+		match self.arrival_grace() {
+			Duration::MAX => ledger::GRACE,
+			grace => grace,
+		}
+	}
+
 	/// Split `hole`, which the cache holds nothing for, into what the live feed will never
 	/// deliver and the gaps it still waits for, with when each stops being waited for.
 	///
@@ -977,7 +997,7 @@ impl TrackState {
 			return (unfed, awaited);
 		}
 		let mut from = hole.start;
-		let grace = self.arrival_grace();
+		let grace = self.miss_grace();
 		let mut gap =
 			|groups: ops::Range<u64>, unfed: &mut RangeSet<u64>| match self.arrivals.folds_at(groups.start, grace) {
 				Some(at) if at <= now => unfed.insert(groups),

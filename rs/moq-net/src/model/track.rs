@@ -22482,4 +22482,70 @@ mod test {
 		assert_eq!(read_now(&mut reader, false), Some(Some(1)));
 		assert_eq!(read_now(&mut reader, false), Some(None));
 	}
+
+	/// A hole the live feed may still deliver is waited for over the arrival grace before
+	/// it is asked as a miss. With no budget and no publisher max age nothing bounds that
+	/// grace, so the wait is [`ledger::GRACE`]: a bounded read of a hole below where a live
+	/// feed started, with no start declared, ends rather than parking for good.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_hole_below_an_undeclared_start_is_asked_after_a_bounded_grace() {
+		let (producer, _pool) = pooled_producer(1 << 40);
+		let dynamic = producer.requests();
+		producer.create_group(10u64.into()).unwrap().finish().unwrap();
+		let mut reader = producer.subscribe(Subscription::default().with_max_delay(None).with_range(5..6));
+		assert_eq!(read_now(&mut reader, false), None, "group 5 may still arrive");
+		assert!(dynamic.requested_fill_group().now_or_never().is_none());
+		elapse(&producer, ledger::GRACE);
+		assert_eq!(read_now(&mut reader, false), None, "the fill is out");
+		let fill = dynamic
+			.requested_fill_group()
+			.now_or_never()
+			.expect("the hole is asked once the grace passed")
+			.unwrap();
+		assert_eq!(fill.sequence(), 5);
+		fill.reject(Error::NotFound);
+		assert_eq!(read_now(&mut reader, false), Some(None), "the refusal is final");
+
+		// With no fill handler, the hole is given up once the grace passed.
+		let (producer, _pool) = pooled_producer(1 << 40);
+		producer.create_group(10u64.into()).unwrap().finish().unwrap();
+		let mut reader = producer.subscribe(Subscription::default().with_max_delay(None).with_range(5..6));
+		assert_eq!(read_now(&mut reader, false), None);
+		elapse(&producer, ledger::GRACE);
+		assert_eq!(read_now(&mut reader, false), Some(None));
+	}
+
+	/// A hole below a declared start is asked at once, and a refusal there is held while the
+	/// live feed may still deliver the group late. With nothing bounding the arrival grace the
+	/// hold lasts [`ledger::GRACE`], on a received copy as on a local track, so the read ends.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_refusal_below_the_start_is_held_for_a_bounded_grace() {
+		for received in [false, true] {
+			let (mut producer, _pool) = pooled_producer(1 << 40);
+			if received {
+				producer.received();
+			}
+			let dynamic = producer.requests();
+			producer.start_at(10).unwrap();
+			producer.create_group(10u64.into()).unwrap().finish().unwrap();
+			let mut reader = producer.subscribe(Subscription::default().with_max_delay(None).with_range(5..6));
+			assert_eq!(read_now(&mut reader, false), None, "received: {received}");
+			let fill = dynamic
+				.requested_fill_group()
+				.now_or_never()
+				.expect("a hole below the start is asked at once")
+				.unwrap();
+			assert_eq!(fill.sequence(), 5, "received: {received}");
+			fill.reject(Error::NotFound);
+			assert_eq!(
+				read_now(&mut reader, false),
+				None,
+				"received: {received}: may still arrive"
+			);
+			elapse(&producer, ledger::GRACE);
+			assert_eq!(read_now(&mut reader, false), Some(None), "received: {received}");
+		}
+	}
 }

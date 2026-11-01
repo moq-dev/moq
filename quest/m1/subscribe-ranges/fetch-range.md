@@ -16,8 +16,8 @@ breaks one API once. Resized from [M] to [L] on 2026-10-24, when the first
 attempt ([moq-dev/moq#6722](https://github.com/moq-dev/moq/pull/6722)) found
 the questions decided below and landed only the `track_range_filling` benchmark.
 The second attempt ([moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545))
-landed the bounded-read end on a plain cursor, the parking wire publishers, and
-the cached-backfill rule; what remains is below.
+landed the bounded-read end on a plain cursor, the parking wire publishers,
+the cached-backfill rule, and the bounded miss grace; what remains is below.
 
 - **Ending a bounded read** (decided 2026-10-20). `recv_group` returns `None`
   once every sequence in a bounded window is delivered, dropped, stale, or
@@ -51,7 +51,7 @@ the cached-backfill rule; what remains is below.
   SUBSCRIBE rather than FIN it, and a lite-07 publisher FINs a covered bounded
   subscription without SUBSCRIBE_END
   ([moq-dev/moq#6807](https://github.com/moq-dev/moq/pull/6807)) until the
-  explicit end below replaces that FIN.
+  explicit end below removes that FIN.
 - **Route recovery keeps a frame start.** `resume::Recover` fetches the rest of
   a group from frame N on the new route (`group::Fetch::frame_start`), which a
   whole-group range cannot say, so a crate-private fetch stays for it.
@@ -59,40 +59,72 @@ the cached-backfill rule; what remains is below.
   [moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545)): "we should
   have a SUBSCRIBE_END message or something to signal the last group of a
   track? we were using QUIC FIN to signal that but that prevents updates in the
-  future, so we should have a signal instead". Two FINs end a lite
-  subscription today: the one after SUBSCRIBE_END on lite-05 and later, and
-  lite-07's covered bounded FIN without SUBSCRIBE_END. Either way, a later
-  SUBSCRIBE_UPDATE can no longer widen the subscription. The direction is an
-  explicit signal that names the end and leaves the stream open. It does not
-  yet say which message carries a covered subscription's end, or whether
-  SUBSCRIBE_END stops closing the stream. Both are open on
-  [moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545), and the wire
-  half belongs to [lite-07 ranges](/quest/m1/subscribe-ranges/lite.md).
-- **A miss with no frontier** (maintainer, 2026-10-25). A reader asks fills
-  only below the newest group the live feed produced (decision 2 on
-  [moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123)), and
-  `Misses::judge` asks nothing while `newest_produced` is unset. So on a relay
-  copy that no subscription feeds, `Range::groups(5..6)` asks no fill and
-  parks forever. While the track has no live feed, holes in a bounded range
-  are misses up to its end. The rejected options were treating every bounded
-  range's holes as misses, which asks fills for groups a live feed has yet to
-  produce, and keeping a by-sequence read beside subscriptions. Treating "no
-  group produced" as "no feed" asks too early: on lite-06,
-  `subscribe_ranges::sparse_ranges_reach_the_publisher_on_lite07` then reads
-  `[0]`. moq-archive needs no new signal. Its consumer creates a track in the
-  same refresh that pushes the newest stored sequence and declares it with
-  `start_at`, so only an empty index has no frontier there. Which explicit
-  signal stands in for the frontier is open on
-  [moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545).
-- **Holes below where the feed started.** On a live track with no declared
-  start, a hole below the feed's first arrival is waited for over the arrival
-  grace (`Ledger::folds_at`) before it is asked, where `fetch_group` asks at
-  once. With no budget and no publisher max age the grace is unbounded, so the
-  read parks for good (the `rejoin` failures on
-  [moq-dev/moq#7487](https://github.com/moq-dev/moq/pull/7487)). A hole under a
-  declared start is asked at once, but a refusal there is final only once the
-  ledger gives up on it. Open on
-  [moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545).
+  future, so we should have a signal instead". The follow-up answers, the same
+  day:
+  - "do we need a SUBSCRIBE_COVERED? We have SUBSCRIBE_DROP so the peer can
+    determine that the bounded range has been received? SUBSCRIBE_END (rename
+    to FINISH?) would signal the final group of the track maybe, but would be
+    independent of the bounded range?" No new message: a subscriber judges a
+    bounded range complete from the groups it received, SUBSCRIBE_DROP, the
+    Range Starts in SUBSCRIBE_OK, and SUBSCRIBE_END. Drops and groups name
+    absolute sequences, so the subscriber judges against its latest ranges and
+    an update in flight changes nothing it has counted; the FIN's race with an
+    unread update goes away. One gap: before SUBSCRIBE_OK a lite-07 publisher
+    holds back what it gave up (`TrackRun::skipped`) and answers only once a
+    group stream resolves the start, so a bounded subscription none of whose
+    groups it can serve gets neither, and only the covered FIN ends it today.
+    Fix: once such a subscription is covered, the publisher sends SUBSCRIBE_OK
+    and then the drops it held. Datagrams are left out: they become their own
+    track kind, which takes no ranges (maintainer, 2026-11-01).
+  - "Keep stream open": SUBSCRIBE_END (or FINISH) names the track's final group
+    and no longer FINs the Subscribe Stream, so an update can still reach an
+    ended track's history. The subscriber FINs once it wants nothing more, and
+    the publisher FINs in reply. The covered FIN goes too.
+  - Whether SUBSCRIBE_END is renamed SUBSCRIBE_FINISH is open on
+    [moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545).
+
+  This wire half belongs to [lite-07 ranges](/quest/m1/subscribe-ranges/lite.md)
+  (Rust and the draft) and [JS ranges](/quest/m1/subscribe-ranges/js.md). It is
+  recorded here while [moq-dev/moq#7487](https://github.com/moq-dev/moq/pull/7487)
+  rewrites that quest, and moves there once it lands.
+- **The live edge is told, never inferred** (maintainer, 2026-11-01, on
+  [moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545)): "If the relay
+  doesn't know the live edge, it shouldn't say anything. It should be a
+  separate message if it's async or the OK should block. NEVER use the cache
+  as the live edge." The OK blocks, since the wire already works that way:
+  lite-07 SUBSCRIBE_OK carries Largest Group and waits until each Range's
+  start resolves, a relay's `TrackRun` waits on its source's start
+  (`track::Subscriber::poll_start`) before answering, and an idle copy reads
+  nothing until its route answers. The draft's exception for a start past the
+  publisher's largest position should say that a relay knows that position
+  only from its upstream's answer (lite-07 ranges' draft change). A reader
+  asks fills only below the newest group the live feed produced (decision 2
+  on [moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123)), so with
+  nothing produced it waits for the answer that its own demand's upstream
+  subscription brings. Earlier (maintainer, 2026-10-25): while a track has no
+  live feed, holes in a bounded range are misses up to its end, and treating
+  "no group produced" as "no feed" asks too early
+  (`subscribe_ranges::sparse_ranges_reach_the_publisher_on_lite07` reads
+  `[0]` on lite-06). How a copy that no subscription feeds, such as a
+  moq-transport fetch's, learns that it has no feed is open on
+  [moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545). moq-archive
+  needs nothing new: its consumer declares the newest stored sequence with
+  `start_at`.
+- **Every hole ends** (maintainer, 2026-11-01, on
+  [moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545)): "uhh the
+  publisher is supposed to emit the start/end bounds if the subscriber didn't
+  ask for one? I don't understand, but parking forever is terrible?" A hole is
+  asked as a miss, refused, or covered by the publisher's bounds, and a
+  bounded read never parks for good. A hole under the start the publisher
+  resolved is asked at once, and a refusal there is held while the feed may
+  still deliver the group late (maintainer, 2026-10-21, on
+  [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171)). Nothing is
+  inferred from the first arrival, since a local producer may still write a
+  lower group (`late_lower_group`). Landed: that hold, and the wait before a
+  hole with no start under it is asked, last the arrival grace, or
+  `ledger::GRACE` when neither a budget nor a max age bounds it
+  (`TrackState::miss_grace`), and a held refusal wakes its reader at its
+  deadline.
 - **Cached backfill is owed** (maintainer, 2026-10-25; landed). A cached
   backfill group inside a reader's window is taken as filled, whether or not
   the live feed may still deliver it, so a relay behaves the same warm or

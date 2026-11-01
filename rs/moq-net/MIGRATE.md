@@ -9,6 +9,7 @@ How to update your code for each breaking change, newest first.
 When every one of a subscription's `ranges` has an end, `track::Subscriber::recv_group` and `track::Ordered::next_group` return `None` once each group in them was handed out, dropped, skipped as stale, or given up as unfillable, instead of waiting for an update to widen the ranges.
 A reader that wants to widen its ranges later keeps one open, such as `Range::groups(n..)`, and narrows its reads with `with_range`, whose cap never ends a read.
 A group another reader's fetch or fill cached is now handed to every subscriber whose ranges hold it, not only fetches.
+A missing group the live feed may still deliver is waited for at most one second before it is asked of a fill or named dropped, when neither the readers' `max_delay` nor the track's max age bounds the wait. Before, a reader with `max_delay: None` on a track with no max age waited for it until the track ended.
 
 ### `broadcast::Demand` reads like `track::Demand`
 
