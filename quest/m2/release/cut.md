@@ -9,9 +9,12 @@ package versions, and the release-triggered publication jobs complete.
 
 Follow CONTRIBUTING.md's release procedure: merge release into main first,
 then main into release using merge commits. Confirm the maintainer's cut
-instruction before executing it. Prepare the package-specific semver changes
-at that time; Rust publication remains owned by release-plz. `moq-rs` is
-already 0.6.0 on main and unpublished, so keep it rather than bumping again. Run candidate
+instruction before executing it. Right after merging release into main, set
+every eligible package to the next shared minor with the recipe from
+[one minor version](/quest/m1/shared-version.md) (`0.22.0` for this cut, then
+one minor up per cut), including packages that did not change. Rust
+publication remains owned by release-plz. This supersedes keeping `moq-rs` at
+its unpublished 0.6.0 (decided 2026-11-01). Run candidate
 compatibility, draft, package, and all-language interop checks, and verify
 publication outcomes. Separate artifact install proofs and package-specific
 tags follow this cut. This planning PR cuts and publishes nothing.
@@ -44,6 +47,19 @@ From the 2026-10-25 pre-cut run:
 - Raise each wrapper's moq-ffi version floor (for example Kotlin's
   `MOQ_FFI_RANGE`) to the release that ships the `implementation` field from
   [moq-dev/moq#6775](https://github.com/moq-dev/moq/pull/6775).
+
+The [2026-10-22 release audit](https://github.com/moq-dev/moq/pull/7176)
+closed with its fixes rechecked together. At source candidate
+[main 487759f62a](https://github.com/moq-dev/moq/commit/487759f62a9ef39d916fe5b92df06dcff83478ce),
+the focused native suites (7,697 passes), JS checks, draft checks, OBS sanitizer
+suite, and all 176 configured all-language interop cells passed. At
+[main 1ea4b1a2c3](https://github.com/moq-dev/moq/commit/1ea4b1a2c333527e25c8c29ee827290ed6e7d410),
+`just test wire-compat` against moq-cli 0.14.10, moq-relay 0.17.10, and
+`@moq/net` 0.4.7 passed every stable lite-01 through lite-06 session cell,
+token, and catalog/container lane, with lite-07-wip skipped as its accepted
+planned break. Dart's tests and both staged publish dry-runs passed with no
+warnings. Neither main is the cut tree, and the full Linux gate was not run:
+repeat these checks after the documented release-to-main merge.
 
 ## Required
 

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
-import { Group, Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
+import { Milli, yieldNow } from "@moq/clock";
+import { Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
 
@@ -42,10 +42,7 @@ class Live {
 		for (;;) {
 			const idle = Symbol("idle");
 			this.#next ??= this.consumer.next();
-			const event = await Promise.race([
-				this.#next,
-				new Promise<typeof idle>((resolve) => setTimeout(() => resolve(idle), 0)),
-			]);
+			const event = await Promise.race([this.#next, yieldNow().then((): typeof idle => idle)]);
 			if (event === idle || event === undefined) return;
 			this.#next = undefined;
 			this.events.push(event.value);
@@ -498,8 +495,9 @@ test("pop counts are nonnegative safe integers", () => {
 
 test("an op that would evict the header rolls first", () => {
 	const encoder = new Encoder<string>({ ops: true });
-	const first = "a".repeat(16 * 1024 * 1024);
-	const next = "b".repeat(15 * 1024 * 1024);
+	// Charged about twice their size, for the compressed slice a track may keep beside each.
+	const first = "a".repeat(8 * 1024 * 1024);
+	const next = "b".repeat(7 * 1024 * 1024);
 
 	let frame = encoder.push(first);
 	expect(frame.keyframe).toBeTrue();
@@ -523,7 +521,7 @@ test("an op that would evict the header rolls first", () => {
 test("a header larger than the group cache is rejected", () => {
 	const encoder = new Encoder<string>();
 
-	expect(() => encoder.push("x".repeat(Group.MAX_GROUP_CACHE_BYTES))).toThrow("group cache limit");
+	expect(() => encoder.push("x".repeat(32 * 1024 * 1024))).toThrow("group cache limit");
 	expect(encoder.window).toEqual([]);
 
 	const frame = encoder.push("ok");
