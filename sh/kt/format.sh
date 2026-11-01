@@ -21,8 +21,13 @@ if ! command -v ktfmt >/dev/null 2>&1; then
     exit 1
 fi
 
-# --dry-run names each file it would change.
-git ls-files -z --cached --others --exclude-standard -- '*.kt' '*.kts' | xargs -0 ktfmt "${args[@]}" || {
+# --dry-run names each file it would change. Tracked files deleted from the
+# working tree are skipped, since ktfmt cannot read them.
+git ls-files -z --cached --others --exclude-standard -- '*.kt' '*.kts' |
+    while IFS= read -r -d '' file; do
+        [[ ! -e "$file" ]] || printf '%s\0' "$file"
+    done |
+    xargs -0 -r ktfmt "${args[@]}" || {
     [[ "${1:-}" != --check ]] || echo "kt format: run 'just kt fix' on the files above" >&2
     exit 1
 }

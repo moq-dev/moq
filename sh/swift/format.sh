@@ -26,7 +26,8 @@ fi
 
 files=()
 while IFS= read -r -d '' file; do
-    files+=("$file")
+    # Tracked files deleted from the working tree have nothing to format.
+    [[ ! -e "$file" ]] || files+=("$file")
 done < <(git ls-files -z --cached --others --exclude-standard -- '*.swift')
 
 if [[ -z "$check" ]]; then

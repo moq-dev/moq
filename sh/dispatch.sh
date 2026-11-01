@@ -302,9 +302,13 @@ if [[ -z "$all" ]]; then
     js_list=$js_changed
 fi
 
-# Tracked and new files, skipping whatever .gitignore does (node_modules, target).
+# Tracked and new files, skipping whatever .gitignore does (node_modules, target)
+# and tracked files deleted from the working tree, which no formatter can read.
 files() {
-    git ls-files -z --cached --others --exclude-standard -- "$@"
+    git ls-files -z --cached --others --exclude-standard -- "$@" |
+        while IFS= read -r -d '' file; do
+            [[ ! -e "$file" ]] || printf '%s\0' "$file"
+        done
 }
 
 # One phase of one module. The bindings run their tests in their check; rs,

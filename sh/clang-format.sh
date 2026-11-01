@@ -31,5 +31,9 @@ for dir in "$@"; do
         patterns+=("$dir/*.$extension")
     done
 done
+# Skip tracked files deleted from the working tree, which clang-format cannot read.
 git ls-files -z --cached --others --exclude-standard -- "${patterns[@]}" |
-    xargs -0 clang-format --style=file:cpp/obs/.clang-format "${args[@]}"
+    while IFS= read -r -d '' file; do
+        [[ ! -e "$file" ]] || printf '%s\0' "$file"
+    done |
+    xargs -0 -r clang-format --style=file:cpp/obs/.clang-format "${args[@]}"
