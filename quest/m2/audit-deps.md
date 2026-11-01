@@ -124,8 +124,6 @@ locks have none. Most duplicates are ecosystem transitions owned upstream:
 
 ### Kept on purpose
 
-- tracing-wasm: its repository is gone, but the maintained `wasm-tracing`
-  fork added 2.9 KB gzipped to `moq_wasm.wasm` for the same behavior.
 - tracing-android: `tracing-logcat` would add rustix 0.38.
 - humantime-serde, hex, send_wrapper, byteorder: unreleased for years but
   complete, with no advisory.
