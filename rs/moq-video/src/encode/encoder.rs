@@ -1579,21 +1579,23 @@ mod tests {
 		};
 		let rate = crate::FrameRate::new(30, 1).unwrap();
 		let red = [255u8, 0, 0];
+		// Only the height picks the guess, so the frames are narrow to keep the codec and the
+		// scaler cheap.
 		for (source, rung, color) in [
 			// The source's own guess, scaled across 576 lines.
-			(Size::new(1280, 720), Size::new(640, 480), Color::BT709),
+			(Size::new(160, 720), Size::new(80, 480), Color::BT709),
 			// Spaces neither size would guess.
-			(Size::new(1280, 720), Size::new(1920, 1080), Color::BT601),
+			(Size::new(160, 720), Size::new(240, 1080), Color::BT601),
 			(
-				Size::new(640, 480),
-				Size::new(1280, 720),
+				Size::new(80, 480),
+				Size::new(160, 720),
 				Color::BT709.with_range(Range::Full),
 			),
 			// HDR survives the round trip with its primaries and curve.
-			(Size::new(1280, 720), Size::new(640, 480), hdr(Transfer::Pq)),
+			(Size::new(160, 720), Size::new(80, 480), hdr(Transfer::Pq)),
 			(
-				Size::new(640, 480),
-				Size::new(1280, 720),
+				Size::new(80, 480),
+				Size::new(160, 720),
 				hdr(Transfer::Hlg).with_range(Range::Full),
 			),
 		] {

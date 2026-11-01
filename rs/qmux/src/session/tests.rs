@@ -374,10 +374,11 @@ async fn websocket_keep_alive_runs_during_continuous_output() {
 	}
 
 	// Far past the 500ms deadline, queueing more each tick than one batch carries
+	let datagrams: Vec<_> = (0..100).map(|seed| payload(1000, seed)).collect();
 	for _ in 0..2000 {
-		for seed in 0..100 {
+		for datagram in &datagrams {
 			sender
-				.send_datagram(payload(1000, seed), SendOptions::default())
+				.send_datagram(datagram.clone(), SendOptions::default())
 				.expect("the sender's keep-alive kept it open");
 		}
 		tokio::time::advance(Duration::from_millis(1)).await;

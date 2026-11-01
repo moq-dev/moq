@@ -48,13 +48,20 @@ impl<T> Pending<'_, T> {
 ///
 /// Payloads must reach the wire in order. A group has no size cap, so the encoder keeps no budget.
 pub struct Encoder<T> {
+	/// The most bytes one record may hold. A field rather than the constant so a test can shrink it
+	/// to a size it can reach.
+	pub(super) max_frame_bytes: u64,
+
 	_marker: PhantomData<fn(T)>,
 }
 
 impl<T> Encoder<T> {
 	/// Create an encoder.
 	pub fn new(_config: Config) -> Self {
-		Self { _marker: PhantomData }
+		Self {
+			max_frame_bytes: moq_net::group::MAX_CACHE_BYTES,
+			_marker: PhantomData,
+		}
 	}
 }
 
@@ -68,7 +75,7 @@ impl<T: Serialize> Encoder<T> {
 	/// ([`moq_net::group::MAX_CACHE_BYTES`]). The refused record leaves the encoder untouched.
 	pub fn encode(&mut self, value: &T) -> Result<Pending<'_, T>> {
 		let payload = Bytes::from(serde_json::to_vec(value)?);
-		if payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
+		if payload.len() as u64 > self.max_frame_bytes {
 			return Err(moq_net::Error::FrameTooLarge.into());
 		}
 

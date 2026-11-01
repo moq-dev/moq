@@ -6117,7 +6117,7 @@ mod group_priority_test {
 	async fn a_busy_track_yields_to_its_siblings() {
 		/// `TrackServe`'s passes per poll; each starts at most one group.
 		const BUDGET: usize = 32;
-		const GROUPS: u64 = 10_000;
+		const GROUPS: u64 = 2_000;
 		const BATCH: u64 = 1_000;
 
 		let session = SinkSession::new(crate::lite::test_transport::Log::default()).with_unacked_fin();

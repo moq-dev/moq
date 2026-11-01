@@ -67,8 +67,8 @@ What remains for a moq-net edit, largest first:
   lever was measured at about 30 ms of CPU per build and dropped), or running the rs lint beside the
   test build in a second target directory, which trades CPU for wall time
   against the epic's CPU measure. Decided 2026-10-30 (user): defer that
-  parallel lint; measure it after the slow-tests and hakari quests land.
-- The test run is the [slow tests](/quest/m0/ci/slow-tests.md) quest's.
+  parallel lint; measure it after the hakari quest lands (slow-tests landed in
+  [moq-dev/moq#6987](https://github.com/moq-dev/moq/pull/6987)).
 - The lint's remaining 230 s: the dev loom compile and `cargo doc`. Decided
   2026-10-31 (maintainer, see the [epic](/quest/m0/ci/README.md)): the gate
   drops the loom compile, the Send-depth check (now its own Nightly job), the
@@ -80,14 +80,13 @@ What remains for a moq-net edit, largest first:
 - `just test` has no root recipe: bare `just test` lists the cross-language
   suites. Name which command the `just test` baseline above counts before
   measuring it.
-- Prefer the epic's levers, such as [slow tests](/quest/m0/ci/slow-tests.md),
-  [hakari](/quest/m0/ci/hakari.md), and cache hits, and tighter diff selection,
+- Prefer the epic's levers, such as [hakari](/quest/m0/ci/hakari.md) and cache
+  hits, and tighter diff selection,
   over moving coverage. Move a check to the queue or nightly only under the
   epic's rule: evidence and an explicit coverage tradeoff for each.
 - Split any large single lever into its own quest.
 
 ## Related
 
-- [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the largest test-time lever
 - [Unify dependency features](/quest/m0/ci/hakari.md) - cache hits across feature shapes
 - [Land main through quest land](/quest/m0/ci/land.md) - the queue gate that keeps checks moved out of the local gate

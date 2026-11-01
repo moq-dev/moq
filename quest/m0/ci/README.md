@@ -160,7 +160,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm releases use `nix.moq.dev`, check its bucket sizes, and retire Cachix
 - [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs
-- [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the slowest 1% of tests take under half their 289 CPU-seconds, with coverage kept
 - [Release credentials off main](/quest/m0/ci/publish-release-only.md) - `publish` admits only `release` and release tags once its `workflow_run` publishers run on their tag
 - [The queue host keeps the queue's disk](/quest/m0/ci/queue-host-disk.md) - agent sessions can't starve the queue runner of disk, and a crashed runner restarts
 - [The next test-CPU cuts](/quest/m0/ci/test-cost-followups.md) - the slow-test leftovers from #6987, cut at their source

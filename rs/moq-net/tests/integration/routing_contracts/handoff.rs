@@ -1420,7 +1420,7 @@ fn churn(rng: &mut XorShift, freshness: Freshness) -> Net {
 		if freshness == FLOORS {
 			net.check().unwrap();
 		}
-		loop_free(&net);
+		loop_free(&net, ids);
 	}
 
 	for &(a, b) in &links {
@@ -1436,8 +1436,9 @@ fn churn(rng: &mut XorShift, freshness: Freshness) -> Net {
 
 /// A node drops a feasibility distance only once every neighbor echoed its
 /// ROUTE_END, so an older advertisement of its own never returns as a loop.
-fn loop_free(net: &Net) {
-	for id in (100..110).chain(200..210) {
+/// `ids` are the origins' current identities; none past them exists yet.
+fn loop_free(net: &Net, ids: [Id; 2]) {
+	for id in (100..110.min(ids[0] + 1)).chain(200..210.min(ids[1] + 1)) {
 		for node in 0..RELAYS + 3 {
 			let mut at = node;
 			for hop in 0.. {
