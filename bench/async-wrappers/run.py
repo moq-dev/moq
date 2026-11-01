@@ -180,6 +180,8 @@ def main():
         "jobs": 2, "incremental": True, "rounds": args.rounds, "toolchain": str(TOOLCHAIN),
         "system": {key: getattr(os.uname(), key) for key in ("sysname", "release", "machine")},
     }
+    for tree in trees.values():
+        verify(tree)
     if not args.verify_only:
         for round_number in range(args.rounds):
             order = VARIANTS[round_number % 3:] + VARIANTS[:round_number % 3]
@@ -206,8 +208,6 @@ def main():
         (OUT / "results.json").write_text(json.dumps({"metadata": metadata, "seconds": results}, indent=2) + "\n")
         for variant, metrics in results.items():
             print(variant, {key: statistics.median(values) for key, values in metrics.items()}, flush=True)
-    for tree in trees.values():
-        verify(tree)
 
 
 if __name__ == "__main__":
