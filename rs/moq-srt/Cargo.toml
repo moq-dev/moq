@@ -28,7 +28,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 # Builds the synthetic broadcasts the egress tests mux back to TS.
 hang = { path = "../hang" }
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 srt-protocol = "0.4"
 tracing-subscriber = { workspace = true }
 
