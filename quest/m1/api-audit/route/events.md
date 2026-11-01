@@ -26,7 +26,7 @@ moves to `follow`.
   read-only facts. A path that changes identity stays present. To see an
   identity change, hold a `follow`.
 - `follow` yields a new broadcast when the path's identity changes, as the
-  read side of [Identity and epoch](https://github.com/moq-dev/moq/pull/7489)
+  read side of [Instance and epoch](https://github.com/moq-dev/moq/pull/7489)
   defines (an epoch change within one identity is invisible). It also needs an `End`
   signal for when the path goes absent, so that `moq_mux::follow::Instances`
   can fold into it: delete the wrapper's duplicate epoch filter and keep

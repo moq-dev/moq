@@ -72,17 +72,17 @@ if (publication < 0)
 // Fill tracks on broadcast here; announce on the publication.
 
 moq_announce_route route;
-memset(&route, 0, sizeof(route));     // zeroed means cost 0 and the minted identity
+memset(&route, 0, sizeof(route));     // zeroed means cost 0 and the minted instance
 if (moq_publication_announce((uint32_t)publication, &route) < 0)
     return fail(moq_error());
 ```
 
-A route carries only a cost and the stream's identity; relays add the hops. Each
-publication mints a fresh identity and keeps it across re-announcing, so a restarted
+A route carries only a cost and the stream's instance; relays add the hops. Each
+publication mints a fresh instance and keeps it across re-announcing, so a restarted
 publisher is a new stream viewers restart onto (`MOQ_ANNOUNCE_KIND_RESTART`) instead of a
-stalled broadcast. Set `identity` only for a publisher that continues its group sequences
-across restarts, and raise `epoch` on each: readers stitch every route of one identity
-together, so restarting the sequences under an old identity splices unrelated groups into
+stalled broadcast. Set `instance` only for a publisher that continues its group sequences
+across restarts, and raise `epoch` on each: readers stitch every route of one instance
+together, so restarting the sequences under an old instance splices unrelated groups into
 their tracks.
 
 Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as the `lower` handle in its `moq_video_encode_options`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.

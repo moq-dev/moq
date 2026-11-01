@@ -80,7 +80,7 @@ export namespace Broadcast {
 		clone(): Broadcast.Consumer;
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
-		get identity(): Identity.Valid | undefined;
+		get instance(): Instance.Valid | undefined;
 		get path(): Path.Valid;
 		protected shareState(): never;
 		track(name: string): Track.Consumer;
@@ -369,13 +369,13 @@ export namespace Group {
 
 export const IMPLEMENTATION: string;
 
-export namespace Identity {
+export namespace Instance {
 	export type Valid = string & {
-		readonly _brand: "identity";
+		readonly _brand: "instance";
 	};
-	export function isMinted(identity: Identity.Valid): boolean;
-	export function parse(text: string): Identity.Valid;
-	export function random(): Identity.Valid;
+	export function isMinted(instance: Instance.Valid): boolean;
+	export function parse(text: string): Instance.Valid;
+	export function random(): Instance.Valid;
 }
 
 export namespace Origin {
@@ -414,7 +414,7 @@ export namespace Origin {
 			cost?: Origin.Route["cost"];
 			epoch?: Origin.Route["epoch"];
 			hops?: Origin.Route["hops"];
-			identity?: Origin.Route["identity"];
+			instance?: Origin.Route["instance"];
 		}): void;
 		readonly broadcast: Broadcast.Producer;
 		get route(): Origin.Route | undefined;
@@ -426,7 +426,7 @@ export namespace Origin {
 		reject(err: Error): void;
 	}
 	export interface RequestOptions {
-		identity?: Identity.Valid;
+		instance?: Instance.Valid;
 	}
 	export class Requesting {
 		readonly active: Signals.Getter<Broadcast.Consumer | undefined>;
@@ -445,7 +445,7 @@ export namespace Origin {
 		cost: Origin.Cost;
 		epoch?: bigint;
 		hops: Origin.Hop[];
-		identity?: Identity.Valid;
+		instance?: Instance.Valid;
 	}
 	export interface Table {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;

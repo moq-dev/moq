@@ -33,13 +33,13 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// AnnounceRoute is how a broadcast advertises its exact path: its static production Cost (lower wins) and, optionally, a stable Identity.
-	// A nil Identity keeps the one the broadcast minted, which it keeps across re-announcing, so a restarted
+	// AnnounceRoute is how a broadcast advertises its exact path: its static production Cost (lower wins) and, optionally, a stable Instance.
+	// A nil Instance keeps the one the broadcast minted, which it keeps across re-announcing, so a restarted
 	// publisher is a new stream viewers restart onto. Set one only for a publisher that continues its group
-	// sequences across restarts and raises Epoch on each: readers stitch every route of one identity together,
-	// so restarting the sequences under an old identity splices unrelated groups into their tracks.
+	// sequences across restarts and raises Epoch on each: readers stitch every route of one instance together,
+	// so restarting the sequences under an old instance splices unrelated groups into their tracks.
 	AnnounceRoute = ffi.MoqAnnounceRoute
-	// Route is an observed route: the Identity of the stream it serves (routes with one identity are one continuous stream), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
+	// Route is an observed route: the Instance of the stream it serves (routes with one instance are one continuous stream), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
 	Route = ffi.MoqRoute
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (Captures), and the Route serving it. It carries no broadcast;

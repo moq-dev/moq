@@ -120,7 +120,7 @@ class BroadcastRequest:
         return self._inner.path()
 
     def prepare(self) -> BroadcastPrepared:
-        """Start answering as a new stream under a fresh identity, hidden until published."""
+        """Start answering as a new stream under a fresh instance, hidden until published."""
         return BroadcastPrepared(self._inner.prepare())
 
     def reject(self, error_code: int) -> None:
@@ -215,17 +215,17 @@ class OriginConsumer:
         """
         return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter, hidden=hidden)))
 
-    def follow(self, path: str, *, identity: str | None = None) -> Following:
+    def follow(self, path: str, *, instance: str | None = None) -> Following:
         """Follow the broadcast at ``path``, resolving each publisher instance that serves it.
 
         A broadcast created on this origin resolves once it is announced, like a
-        remote one. Pass an ``identity`` to follow only that stream: another one
+        remote one. Pass an ``instance`` to follow only that stream: another one
         taking over is never handed out, and the stream is handed out again if it
         returns after an end.
         """
-        return Following(self._inner.follow(path, identity))
+        return Following(self._inner.follow(path, instance))
 
-    async def request(self, path: str, *, identity: str | None = None) -> BroadcastConsumer:
+    async def request(self, path: str, *, instance: str | None = None) -> BroadcastConsumer:
         """Request the broadcast at ``path``, resolving one publisher instance as soon as it can be served.
 
         Resolves through the best announced route covering the path: an
@@ -233,9 +233,9 @@ class OriginConsumer:
         on demand by that session), or a dynamic handler on the origin. An
         unannounced broadcast is unroutable. Unlike :meth:`follow`, this
         answers for what is reachable now and raises if nothing can serve the
-        path. Pass an ``identity`` to refuse any other stream.
+        path. Pass an ``instance`` to refuse any other stream.
         """
-        return BroadcastConsumer(await self._inner.request(path, identity))
+        return BroadcastConsumer(await self._inner.request(path, instance))
 
 
 class OriginProducer:

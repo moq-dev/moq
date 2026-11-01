@@ -48,7 +48,7 @@ async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadc
 	}
 }
 
-// Whether the wire carries the route's identity, and the track's timestamps. Neither is
+// Whether the wire carries the route's instance, and the track's timestamps. Neither is
 // authenticated, so the frames open either way.
 const transports = [
 	["moq-lite-07", "moq-lite-07-wip", true, true],
@@ -67,7 +67,7 @@ for (const [name, protocol, routed, timed] of transports) {
 		const video = await new Protected.Producer(broadcast, generation).createTrack("video", {
 			timescale: Time.Timescale.MILLI,
 		});
-		broadcastPublication.announce({ identity: Epoch.identity(generation.epoch) });
+		broadcastPublication.announce({ instance: Epoch.instance(generation.epoch) });
 
 		const group = video.appendGroup();
 		await group.writeFrame(ms(1), encoder.encode("keyframe"));
@@ -124,7 +124,7 @@ for (const [name, protocol] of [
 		const audio = await new Protected.Producer(broadcast, generation).createTrack("audio", {
 			timescale: Time.Timescale.MILLI,
 		});
-		broadcastPublication.announce({ identity: Epoch.identity(generation.epoch) });
+		broadcastPublication.announce({ instance: Epoch.instance(generation.epoch) });
 
 		// A group first, so the subscription is serving before datagrams, which are never cached.
 		const group = audio.appendGroup();

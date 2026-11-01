@@ -21,7 +21,7 @@ enum Serving {
 	Gone,
 	/// The instance being exported, handed out again since: it came back after a gap.
 	Return(moq_net::broadcast::Consumer),
-	/// Another stream: a broadcast of another identity.
+	/// Another stream: a broadcast of another instance.
 	Other(moq_net::broadcast::Consumer),
 }
 
@@ -62,8 +62,8 @@ enum State<E: catalog::Catalog> {
 /// Carries an [`Export`] across its broadcast's returns, following the publisher instances
 /// serving its path through [`Instances`].
 ///
-/// The same stream (the same identity) returning within the [follow](Self::with_follow)
-/// continues the export. Another identity taking the path fails with
+/// The same stream (the same instance) returning within the [follow](Self::with_follow)
+/// continues the export. Another instance taking the path fails with
 /// [`Error::Replaced`](crate::Error::Replaced), unless [stitching](Self::with_stitch), which
 /// switches the program to it at once. Subscriptions are sticky, so without stitching a
 /// replaced publisher that stays up keeps the export until it ends.
@@ -334,7 +334,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 		self.failed = None;
 		tracing::info!(
 			path = %self.path,
-			identity = self.export.instance().map(tracing::field::display),
+			instance = self.export.instance().map(tracing::field::display),
 			"exporting broadcast"
 		);
 		Ok(())
@@ -347,12 +347,12 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			match self.instances.poll_next(waiter) {
 				Poll::Ready(Ok(Event::Start(broadcast))) => {
 					self.serving = match self.export.instance() {
-						// A broadcast not resolved through an origin has no identity to match,
+						// A broadcast not resolved through an origin has no instance to match,
 						// so only the broadcast being exported is its own.
 						None if broadcast.is_clone(&self.export.source().broadcast()) => Serving::Ours,
 						// Even the same broadcast handed out again is a return: the origin hands
 						// one out only for an announcement that brings it.
-						Some(identity) if broadcast.info().identity.as_ref() == Some(identity) => match self.priming {
+						Some(instance) if broadcast.info().instance.as_ref() == Some(instance) => match self.priming {
 							true => Serving::Ours,
 							false => Serving::Return(broadcast),
 						},

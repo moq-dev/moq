@@ -1,9 +1,9 @@
 import { ProtocolViolation } from "../error.ts";
-import type * as Identity from "../identity.ts";
+import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import { decodePin, encodePin } from "./identity.ts";
+import { decodePin, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { hasCompression, hasGroupOrder, hasRefresh, hasTrackStream, Version, wireTimescale } from "./version.ts";
@@ -36,25 +36,25 @@ export class Track {
 	broadcast: Path.Valid;
 	track: string;
 	/** The publisher instance the subscriber expects. Lite-07+. */
-	identity?: Identity.Valid;
+	instance?: Instance.Valid;
 
-	constructor(broadcast: Path.Valid, track: string, identity?: Identity.Valid) {
+	constructor(broadcast: Path.Valid, track: string, instance?: Instance.Valid) {
 		this.broadcast = broadcast;
 		this.track = track;
-		this.identity = identity;
+		this.instance = instance;
 	}
 
 	async #encode(w: Writer, version: Version) {
 		await w.string(Path.encode(this.broadcast));
-		await encodePin(w, version, this.identity);
+		await encodePin(w, version, this.instance);
 		await w.string(this.track);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Track> {
 		const broadcast = Path.decode(await r.string());
-		const identity = await decodePin(r, version);
+		const instance = await decodePin(r, version);
 		const track = await r.string();
-		return new Track(broadcast, track, identity);
+		return new Track(broadcast, track, instance);
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

@@ -1,7 +1,7 @@
 #![cfg(feature = "async")]
 
 //! A worker claiming a prefix answers each request by publishing the exact path under a
-//! fresh identity. On moq-lite-07 that announcement is a takeover of the claim, so the first
+//! fresh instance. On moq-lite-07 that announcement is a takeover of the claim, so the first
 //! subscription through the claim keeps reading, across relays. Older wires carry it as
 //! a start, and a takeover that another worker could have served is a start too.
 

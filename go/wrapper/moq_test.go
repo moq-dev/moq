@@ -1662,9 +1662,9 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	}
 }
 
-// A broadcast mints its own identity and keeps it across re-announcing; another
-// identity is another stream and restarts announce consumers.
-func TestAnnouncedIdentityRestarts(t *testing.T) {
+// A broadcast mints its own instance and keeps it across re-announcing; another
+// instance is another stream and restarts announce consumers.
+func TestAnnouncedInstanceRestarts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
@@ -1675,38 +1675,38 @@ func TestAnnouncedIdentityRestarts(t *testing.T) {
 	}
 	defer announced.Cancel()
 
-	publication, err := origin.CreateBroadcast("identity")
+	publication, err := origin.CreateBroadcast("instance")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
-	minted := nextAnnounced(t, ctx, announced).Route.Identity
+	minted := nextAnnounced(t, ctx, announced).Route.Instance
 	if minted == "" {
-		t.Fatal("start identity is empty, want a minted one")
+		t.Fatal("start instance is empty, want a minted one")
 	}
 
 	if err := publication.Announce(moq.AnnounceRoute{Cost: 1}); err != nil {
 		t.Fatal(err)
 	}
 	update, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventUpdate)
-	if !ok || update.Announce.Route.Identity != minted {
-		t.Fatalf("update = %+v, want identity %s", update, minted)
+	if !ok || update.Announce.Route.Instance != minted {
+		t.Fatalf("update = %+v, want instance %s", update, minted)
 	}
 
 	stable := "cam"
-	if err := publication.Announce(moq.AnnounceRoute{Identity: &stable, Epoch: 1}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{Instance: &stable, Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 	restart, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventRestart)
-	if !ok || restart.Announce.Route.Identity != stable {
-		t.Fatalf("restart = %+v, want identity %s", restart, stable)
+	if !ok || restart.Announce.Route.Instance != stable {
+		t.Fatalf("restart = %+v, want instance %s", restart, stable)
 	}
 
 	empty := ""
-	if err := publication.Announce(moq.AnnounceRoute{Identity: &empty}); !errors.Is(err, moq.ErrInvalidIdentity) {
-		t.Fatalf("Announce(empty identity) = %v, want ErrInvalidIdentity", err)
+	if err := publication.Announce(moq.AnnounceRoute{Instance: &empty}); !errors.Is(err, moq.ErrInvalidInstance) {
+		t.Fatalf("Announce(empty instance) = %v, want ErrInvalidInstance", err)
 	}
 }
 

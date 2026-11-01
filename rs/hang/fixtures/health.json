@@ -5,7 +5,7 @@
 		"previous": {
 			"observer": {
 				"path": "room/live",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -43,7 +43,7 @@
 		"current": {
 			"observer": {
 				"path": "room/live",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -84,7 +84,7 @@
 		"health": {
 			"interval": 4998,
 			"observer": {
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
 				"path": "room/live"
 			},
 			"renditions": {
@@ -160,7 +160,7 @@
 		"previous": {
 			"observer": {
 				"path": "room/live",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -189,7 +189,7 @@
 		"current": {
 			"observer": {
 				"path": "room/live",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -220,7 +220,7 @@
 		"health": {
 			"interval": 4521,
 			"observer": {
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
 				"path": "room/live"
 			},
 			"renditions": {
@@ -296,7 +296,7 @@
 		"previous": {
 			"observer": {
 				"path": "room/viewers/alice.echo",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -335,7 +335,7 @@
 		"current": {
 			"observer": {
 				"path": "room/viewers/alice.echo",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -376,7 +376,7 @@
 		"health": {
 			"interval": 5004,
 			"observer": {
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
 				"path": "room/viewers/alice.echo"
 			},
 			"renditions": {
@@ -472,7 +472,7 @@
 		"previous": {
 			"observer": {
 				"path": "room/viewers/alice.echo",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -514,7 +514,7 @@
 		"current": {
 			"observer": {
 				"path": "room/viewers/alice.echo",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -558,7 +558,7 @@
 		"health": {
 			"interval": 5000,
 			"observer": {
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
 				"path": "room/viewers/alice.echo"
 			},
 			"renditions": {
@@ -654,7 +654,7 @@
 		"previous": {
 			"observer": {
 				"path": "room/viewers/alice.echo",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -696,7 +696,7 @@
 		"current": {
 			"observer": {
 				"path": "room/viewers/alice.echo",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -740,7 +740,7 @@
 		"health": {
 			"interval": 5000,
 			"observer": {
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
 				"path": "room/viewers/alice.echo"
 			},
 			"renditions": {
@@ -836,7 +836,7 @@
 		"previous": {
 			"observer": {
 				"path": "room/live",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -865,7 +865,7 @@
 		"current": {
 			"observer": {
 				"path": "room/live",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -896,7 +896,7 @@
 		"health": {
 			"interval": 4998,
 			"observer": {
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
 				"path": "room/live"
 			},
 			"renditions": {
@@ -1085,12 +1085,12 @@
 		}
 	},
 	{
-		"name": "reset by an identity change",
+		"name": "reset by an instance change",
 		"role": "publisher",
 		"previous": {
 			"observer": {
 				"path": "room/live",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -1119,7 +1119,7 @@
 		"current": {
 			"observer": {
 				"path": "room/live",
-				"identity": "019a1774-02b9-7c18-a4e7-1d9f6b2c8e05"
+				"instance": "019a1774-02b9-7c18-a4e7-1d9f6b2c8e05"
 			},
 			"snapshot": {
 				"transport": {
@@ -1149,7 +1149,7 @@
 		"age": 250,
 		"health": {
 			"observer": {
-				"identity": "019a1774-02b9-7c18-a4e7-1d9f6b2c8e05",
+				"instance": "019a1774-02b9-7c18-a4e7-1d9f6b2c8e05",
 				"path": "room/live"
 			},
 			"renditions": {
@@ -1210,7 +1210,7 @@
 		"current": {
 			"observer": {
 				"path": "room/cam",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -1230,7 +1230,7 @@
 		"age": 250,
 		"health": {
 			"observer": {
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
 				"path": "room/cam"
 			},
 			"renditions": {
@@ -1272,7 +1272,7 @@
 		"current": {
 			"observer": {
 				"path": "room/cam",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -1292,7 +1292,7 @@
 		"age": 3000,
 		"health": {
 			"observer": {
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
 				"path": "room/cam"
 			},
 			"renditions": {
@@ -1335,7 +1335,7 @@
 		"previous": {
 			"observer": {
 				"path": "room/live",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -1365,7 +1365,7 @@
 		"current": {
 			"observer": {
 				"path": "room/live",
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
 			},
 			"snapshot": {
 				"transport": {
@@ -1396,7 +1396,7 @@
 		"health": {
 			"interval": 4521,
 			"observer": {
-				"identity": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"instance": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
 				"path": "room/live"
 			},
 			"renditions": {

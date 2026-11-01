@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast";
 import { StreamCode, StreamError } from "./error";
 import { Route } from "./hop";
-import * as Identity from "./identity.ts";
+import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import { Producer, type Publication, type Request } from "./origin";
 import * as Path from "./path";
@@ -17,12 +17,12 @@ test("a follower moves through restart, end and a later start", async () => {
 	const first = firstPublication.broadcast;
 	firstPublication.announce();
 	const request = origin.follow(path);
-	expect(request.active.peek()?.identity).toBe(firstPublication.route?.identity);
+	expect(request.active.peek()?.instance).toBe(firstPublication.route?.instance);
 	const secondPublication = origin.createBroadcast(path);
 	const second = secondPublication.broadcast;
 	secondPublication.announce();
 	await settle();
-	expect(request.active.peek()?.identity).toBe(secondPublication.route?.identity);
+	expect(request.active.peek()?.instance).toBe(secondPublication.route?.instance);
 	second.close();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
@@ -31,45 +31,45 @@ test("a follower moves through restart, end and a later start", async () => {
 	const third = thirdPublication.broadcast;
 	thirdPublication.announce();
 	await settle();
-	expect(request.active.peek()?.identity).toBe(thirdPublication.route?.identity);
+	expect(request.active.peek()?.instance).toBe(thirdPublication.route?.instance);
 	request.close();
 	third.close();
 	first.close();
 	origin.close();
 });
 
-test("an identity-pinned follower refuses another instance", async () => {
+test("an instance-pinned follower refuses another instance", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const identity = Identity.random();
+	const instance = Instance.random();
 	const firstPublication = origin.createBroadcast(path);
 	const first = firstPublication.broadcast;
-	firstPublication.announce({ identity });
-	const request = origin.follow(path, { identity });
+	firstPublication.announce({ instance });
+	const request = origin.follow(path, { instance });
 	const secondPublication = origin.createBroadcast(path);
 	const second = secondPublication.broadcast;
-	secondPublication.announce({ identity: Identity.random() });
+	secondPublication.announce({ instance: Instance.random() });
 	await settle();
-	expect(request.active.peek()?.identity).not.toBe(secondPublication.route?.identity);
+	expect(request.active.peek()?.instance).not.toBe(secondPublication.route?.instance);
 	request.close();
 	first.close();
 	second.close();
 	origin.close();
 });
 
-test("a follower changes its handle on an in-place identity restart", async () => {
+test("a follower changes its handle on an in-place instance restart", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
 	const broadcastPublication = origin.createBroadcast(path);
 	const broadcast = broadcastPublication.broadcast;
-	const before = Identity.random();
-	broadcastPublication.announce({ identity: before });
+	const before = Instance.random();
+	broadcastPublication.announce({ instance: before });
 	const request = origin.follow(path);
 	const old = request.active.peek();
-	const after = Identity.random();
-	broadcastPublication.announce({ identity: after });
+	const after = Instance.random();
+	broadcastPublication.announce({ instance: after });
 	await settle();
-	expect(request.active.peek()?.identity).toBe(after);
+	expect(request.active.peek()?.instance).toBe(after);
 	expect(request.active.peek()).not.toBe(old);
 	request.close();
 	broadcast.close();
@@ -174,23 +174,23 @@ test("followers track the serving prefix, ignoring descendants and re-prices", a
 	})();
 	const request = origin.follow(Path.from("pool/job"));
 	await settle();
-	expect(request.active.peek()?.identity).toBe(prefix.route.identity);
+	expect(request.active.peek()?.instance).toBe(prefix.route.instance);
 	const belowPublication = origin.createBroadcast(Path.from("pool/job/thumb"));
 	const below = belowPublication.broadcast;
 	belowPublication.announce();
 	await settle();
-	expect(request.active.peek()?.identity).toBe(prefix.route.identity);
+	expect(request.active.peek()?.instance).toBe(prefix.route.instance);
 	const exactPublication = origin.createBroadcast(Path.from("pool/job"));
 	const exact = exactPublication.broadcast;
 	exactPublication.announce();
 	await settle();
-	expect(request.active.peek()?.identity).toBe(exactPublication.route?.identity);
+	expect(request.active.peek()?.instance).toBe(exactPublication.route?.instance);
 	prefix.updateRoute({ cost: 5n });
 	await settle();
-	expect(request.active.peek()?.identity).toBe(exactPublication.route?.identity);
+	expect(request.active.peek()?.instance).toBe(exactPublication.route?.instance);
 	exact.close();
 	await settle();
-	expect(request.active.peek()?.identity).toBe(prefix.route.identity);
+	expect(request.active.peek()?.instance).toBe(prefix.route.instance);
 	prefix.close();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
@@ -211,7 +211,7 @@ test("a follower ignores a covering route whose scope excludes its path", async 
 	const exact = exactPublication.broadcast;
 	exactPublication.announce({ cost: 5n });
 	const request = origin.follow(Path.from("room/alice"));
-	expect(request.active.peek()?.identity).toBe(exactPublication.route?.identity);
+	expect(request.active.peek()?.instance).toBe(exactPublication.route?.instance);
 	exact.close();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
@@ -234,15 +234,15 @@ test("a follower tracks a route replaced by an identical one", async () => {
 	const first = serve(firstSource);
 	const request = origin.follow(path);
 	await settle();
-	expect(request.active.peek()?.identity).toBe(first.route.identity);
+	expect(request.active.peek()?.instance).toBe(first.route.instance);
 
-	// Same (default) route metadata: only the identity each claim minted differs.
+	// Same (default) route metadata: only the instance each claim minted differs.
 	const secondSource = new BroadcastProducer();
 	const second = serve(secondSource);
 	await settle();
 	first.close();
 	await settle();
-	expect(request.active.peek()?.identity).toBe(second.route.identity);
+	expect(request.active.peek()?.instance).toBe(second.route.instance);
 
 	request.close();
 	second.close();
@@ -326,7 +326,7 @@ for (const received of [false, true]) {
 	});
 }
 
-test("a claim answer is hidden until published under its own identity", async () => {
+test("a claim answer is hidden until published under its own instance", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
 	const claim = origin.requests(Path.from("room"));
@@ -340,8 +340,8 @@ test("a claim answer is hidden until published under its own identity", async ()
 	expect(request.active.peek()).toBeUndefined();
 	const published = prepared.publish();
 	await settle();
-	expect(published.route?.identity).toBeDefined();
-	expect(request.active.peek()?.identity).toBe(published.route?.identity);
+	expect(published.route?.instance).toBeDefined();
+	expect(request.active.peek()?.instance).toBe(published.route?.instance);
 	request.close();
 	published.broadcast.close();
 	claim.close();
@@ -362,10 +362,10 @@ test("a prepared answer cannot announce itself before publish", async () => {
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
 	const published = prepared.publish();
-	const identity = published.route?.identity;
-	expect(identity).toBeDefined();
+	const instance = published.route?.instance;
+	expect(instance).toBeDefined();
 	await settle();
-	expect(request.active.peek()?.identity).toBe(identity);
+	expect(request.active.peek()?.instance).toBe(instance);
 	request.close();
 	published.broadcast.close();
 	claim.close();
@@ -507,7 +507,7 @@ test("using transfers a published answer without closing it on disposal", async 
 	}
 	await settle();
 	expect(published.broadcast.closed.peek()).toBeUndefined();
-	expect(request.active.peek()?.identity).toBe(published.route?.identity);
+	expect(request.active.peek()?.instance).toBe(published.route?.instance);
 	const reader = request.active.peek()?.track("data").subscribe().ordered();
 	expect(await reader?.readString()).toBe("published");
 	reader?.close();
@@ -542,7 +542,7 @@ for (const cleanup of ["close", "dispose", "broadcast", "publish"] as const) {
 		prepared.broadcast.createTrack("data").writeFrame({ payload: new TextEncoder().encode(cleanup) });
 		const published = prepared.publish();
 		await settle();
-		expect(later.active.peek()?.identity).toBe(published.route?.identity);
+		expect(later.active.peek()?.instance).toBe(published.route?.instance);
 		const reader = later.active.peek()?.track("data").subscribe().ordered();
 		expect(await reader?.readString()).toBe(cleanup);
 		reader?.close();
@@ -569,37 +569,37 @@ test("a forwarded request cannot be prepared by setting a publisher property", a
 	origin.close();
 });
 
-test("an identity-pinned follower resumes when its instance returns after a gap", async () => {
+test("an instance-pinned follower resumes when its instance returns after a gap", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const identity = Identity.random();
+	const instance = Instance.random();
 	const source = new BroadcastProducer();
 	const keeper = source.consume();
-	const serve = (instance: Identity.Valid, broadcast: BroadcastProducer) => {
-		const route = origin.requestsRoute(path, { identity: instance });
+	const serve = (instance: Instance.Valid, broadcast: BroadcastProducer) => {
+		const route = origin.requestsRoute(path, { instance: instance });
 		void (async () => {
 			for await (const request of route.requested()) hooks.acceptRequest(request, broadcast.consume());
 		})();
 		return route;
 	};
-	const first = serve(identity, source);
-	const request = origin.follow(path, { identity });
+	const first = serve(instance, source);
+	const request = origin.follow(path, { instance });
 	await settle();
-	expect(request.active.peek()?.identity).toBe(identity);
+	expect(request.active.peek()?.instance).toBe(instance);
 	first.close();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
 	expect(request.closed.peek()).toBeUndefined();
 	const otherSource = new BroadcastProducer();
-	const other = serve(Identity.random(), otherSource);
+	const other = serve(Instance.random(), otherSource);
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
 	other.close();
 	await settle();
 	expect(request.closed.peek()).toBeUndefined();
-	const back = serve(identity, source);
+	const back = serve(instance, source);
 	await settle();
-	expect(request.active.peek()?.identity).toBe(identity);
+	expect(request.active.peek()?.instance).toBe(instance);
 	request.close();
 	back.close();
 	keeper.close();
@@ -649,7 +649,7 @@ test("a follower keeps its scoped discovery across instances until closed", asyn
 	const publication = origin.createBroadcast(path);
 	publication.announce();
 	await settle();
-	expect(follower.active.peek()?.identity).toBe(publication.route?.identity);
+	expect(follower.active.peek()?.instance).toBe(publication.route?.instance);
 	publication.broadcast.close();
 	await settle();
 	// The instance ending keeps the follower and its discovery open for the next one.
@@ -673,11 +673,11 @@ test("a pending request fails Unroutable once its discovery syncs without a rout
 	});
 	const missing = origin.request(Path.from("room/missing"));
 	const found = origin.request(Path.from("room/found"));
-	const pinned = origin.request(Path.from("room/pinned"), { identity: Identity.random() });
+	const pinned = origin.request(Path.from("room/pinned"), { instance: Instance.random() });
 	const follower = origin.follow(Path.from("room/followed"));
 	// The initial set reports these before it lands, and nothing at all for the rest.
 	const route = wire.receive(Path.from("room/found"));
-	const other = wire.receive(Path.from("room/pinned"), { identity: Identity.random() });
+	const other = wire.receive(Path.from("room/pinned"), { instance: Instance.random() });
 	await settle();
 	for (const request of [missing, found, pinned, follower]) expect(request.closed.peek()).toBeUndefined();
 
@@ -733,11 +733,11 @@ test("a pending request retries a route gap and never retargets after resolving"
 	const keeper = source.consume();
 	hooks.acceptRequest(pending, source.consume());
 	await settle();
-	expect(requested.active.peek()?.identity).toBe(second.route.identity);
+	expect(requested.active.peek()?.instance).toBe(second.route.instance);
 	const replacement = origin.createBroadcast(path);
 	replacement.announce();
 	await settle();
-	expect(requested.active.peek()?.identity).toBe(second.route.identity);
+	expect(requested.active.peek()?.instance).toBe(second.route.instance);
 	second.close();
 	await settle();
 	expect(requested.closed.peek()).toBeInstanceOf(StreamError);
@@ -749,12 +749,12 @@ test("a pending request retries a route gap and never retargets after resolving"
 	origin.close();
 });
 
-test("a plain identity pin never takes an answer without that identity", () => {
+test("a plain instance pin never takes an answer without that instance", () => {
 	const origin = new Producer();
 	const wire = wireOf(origin);
 	const detach = wire.attach(false);
 	const path = Path.from("room/audio");
-	const requested = origin.request(path, { identity: Identity.random() });
+	const requested = origin.request(path, { instance: Instance.random() });
 	expect(requested.closed.peek()).toBeUndefined();
 	const source = new BroadcastProducer();
 	const withdraw = wire.answer(path, source.consume());

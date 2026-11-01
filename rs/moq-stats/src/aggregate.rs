@@ -15,7 +15,7 @@ use kio::clock::Instant;
 use moq_net::kio::{self, Pending, Waiter};
 use moq_net::stats::{Presence, Traffic};
 use moq_net::track::Subscribing;
-use moq_net::{Identity, Path, broadcast, origin};
+use moq_net::{Instance, Path, broadcast, origin};
 
 use crate::{
 	Group, GroupFrame, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage, group_track,
@@ -37,7 +37,7 @@ pub struct Config {
 	pub prefix: Path,
 	/// How long a departed node's traffic waits for its path to return before
 	/// folding into the retired total (default 10 minutes). A return within it
-	/// under the same identity resumes the node's own counters; a return after it with counters intact counts its earlier
+	/// under the same instance resumes the node's own counters; a return after it with counters intact counts its earlier
 	/// traffic twice, so size this above reconnect times.
 	pub grace: Duration,
 }
@@ -87,12 +87,12 @@ impl Default for Config {
 /// within [`Config::grace`] with its counters intact never looks like new
 /// traffic. After the grace, a departed node's contribution folds into one
 /// retired total and the node is forgotten, so memory follows live nodes and
-/// the keys ever reported, not every node ever seen. Each route identity is its
-/// own node: a restarted producer announces a new identity whose counters add to
+/// the keys ever reported, not every node ever seen. Each route instance is its
+/// own node: a restarted producer announces a new instance whose counters add to
 /// the old one's kept contribution instead of regressing it, and a group
 /// track's new instance, under a new [`GroupFrame::epoch`], adds to the old
-/// instance's the same way. A reader stays pinned to its identity, so a
-/// replacement never feeds it. A wire that carries no identity has its relay
+/// instance's the same way. A reader stays pinned to its instance, so a
+/// replacement never feeds it. A wire that carries no instance has its relay
 /// mint one per announcement, so a node reached through one announces anew each
 /// time it is announced again.
 ///
@@ -622,7 +622,7 @@ impl<V: Mergeable> Shape for Keyed<V> {
 #[derive(Default)]
 struct Grouped {
 	/// The track instance the last frame came from.
-	epoch: Option<Identity>,
+	epoch: Option<Instance>,
 	totals: Keyed<Totals>,
 	paths: Keyed<Usage, (String, String)>,
 	labels: Keyed<Gauge, (String, String)>,
@@ -718,8 +718,8 @@ struct Node<S: Shape> {
 	/// The announced path, relative to the announce cursor: what a re-resolve
 	/// after the reader ends requests again.
 	path: Path,
-	/// The identity every initial and retry resolution must serve.
-	identity: Identity,
+	/// The instance every initial and retry resolution must serve.
+	instance: Instance,
 	shape: S,
 	/// When the path unannounced, starting its grace; cleared by a reannounce.
 	/// Only an unannounced node folds, so a still-announced node whose reader
@@ -769,10 +769,10 @@ struct Merged<S: Shape> {
 	name: String,
 	config: moq_json::snapshot::consumer::Config,
 	/// One entry per live or recently departed node broadcast, keyed by
-	/// absolute announced path and route identity, so each identity is its own entry.
-	nodes: HashMap<(Path, Identity), Node<S>>,
-	/// The identity last announced at each path, including while it remains in grace.
-	last_announced: HashMap<Path, Identity>,
+	/// absolute announced path and route instance, so each instance is its own entry.
+	nodes: HashMap<(Path, Instance), Node<S>>,
+	/// The instance last announced at each path, including while it remains in grace.
+	last_announced: HashMap<Path, Instance>,
 	/// How long a departed node waits before folding into `retired`.
 	grace: Duration,
 	/// The summed last frames of every node whose grace elapsed.
@@ -815,14 +815,14 @@ impl<S: Shape> Merged<S> {
 				Poll::Ready(Some(moq_net::announce::Event::End(update))) => {
 					changed |= self.apply_announce(update, false)
 				}
-				// Another identity: the one tracked at the path ends, then the new one
+				// Another instance: the one tracked at the path ends, then the new one
 				// starts, so its reader resolves afresh.
 				Poll::Ready(Some(moq_net::announce::Event::Restart(update))) => {
 					// An announced prefix is a path beneath the root, so rooting it fits.
 					let absolute = self.announce.absolute(&update.prefix).ok();
 					if let Some(previous) = absolute.and_then(|absolute| self.last_announced.get(&absolute).cloned()) {
 						let mut ended = update.clone();
-						ended.route.identity = Some(previous);
+						ended.route.instance = Some(previous);
 						changed |= self.apply_announce(ended, false);
 					}
 					changed |= self.apply_announce(update, true);
@@ -843,10 +843,10 @@ impl<S: Shape> Merged<S> {
 		let grace = self.grace;
 		let retired = &mut self.retired;
 		let last_announced = &mut self.last_announced;
-		self.nodes.retain(|(path, identity), node| {
+		self.nodes.retain(|(path, instance), node| {
 			changed |= advance(node, origin, config, name, waiter);
 			if node.fold_expired(retired, grace, now) {
-				if last_announced.get(path) == Some(identity) {
+				if last_announced.get(path) == Some(instance) {
 					last_announced.remove(path);
 				}
 				false
@@ -887,7 +887,7 @@ impl<S: Shape> Merged<S> {
 		// reader pins the identity it contributes to, independent of announce order.
 		let key = (
 			absolute,
-			update.route.identity.expect("a delivered route has an identity"),
+			update.route.instance.expect("a delivered route has an instance"),
 		);
 
 		if !active {
@@ -919,16 +919,16 @@ impl<S: Shape> Merged<S> {
 				node.fold_expired(&mut self.retired, self.grace, kio::clock::now());
 				node.departed = None;
 				if matches!(node.reader, Reader::Ended) {
-					node.reader = resolve(&self.origin, &node.path, node.identity.clone());
+					node.reader = resolve(&self.origin, &node.path, node.instance.clone());
 				}
 			}
 			Entry::Vacant(entry) => {
-				let identity = entry.key().1.clone();
+				let instance = entry.key().1.clone();
 				entry.insert(Node {
-					reader: resolve(&self.origin, &path, identity.clone()),
+					reader: resolve(&self.origin, &path, instance.clone()),
 					listing: None,
 					offered: false,
-					identity,
+					instance,
 					path,
 					shape: S::default(),
 					departed: None,
@@ -1022,7 +1022,7 @@ fn advance<S: Shape>(
 						return changed;
 					}
 					rearmed = true;
-					node.reader = resolve(origin, &node.path, node.identity.clone());
+					node.reader = resolve(origin, &node.path, node.instance.clone());
 					continue;
 				};
 				if !node.offered {
@@ -1085,7 +1085,7 @@ fn advance<S: Shape>(
 						return changed;
 					}
 					rearmed = true;
-					node.reader = resolve(origin, &node.path, node.identity.clone());
+					node.reader = resolve(origin, &node.path, node.instance.clone());
 				}
 				Poll::Pending => return changed,
 			},
@@ -1094,9 +1094,9 @@ fn advance<S: Shape>(
 	}
 }
 
-/// Start resolving `path` (relative to the announce cursor) into a broadcast of `identity`.
-fn resolve<F>(origin: &origin::Consumer, path: &Path, identity: Identity) -> Reader<F> {
-	let pending = origin.request(path, identity);
+/// Start resolving `path` (relative to the announce cursor) into a broadcast of `instance`.
+fn resolve<F>(origin: &origin::Consumer, path: &Path, instance: Instance) -> Reader<F> {
+	let pending = origin.request(path, instance);
 	Reader::Resolving(Box::new(pending))
 }
 
@@ -1212,7 +1212,7 @@ mod tests {
 
 	/// The group epoch every hand-published group frame carries, so a new
 	/// [`NodeBroadcast`] at the same path is the same track instance returning.
-	fn group_epoch() -> Identity {
+	fn group_epoch() -> Instance {
 		"01900000-0000-7000-8000-0000000000ff".parse().unwrap()
 	}
 
@@ -1312,7 +1312,7 @@ mod tests {
 	/// group track carrying default-tier egress per path, so a test controls
 	/// the exact frames and can fail one node's reader alone (the
 	/// registry-driven producer only publishes whole broadcasts). Its route
-	/// carries one identity per node name, so a new one at the same path is that
+	/// carries one instance per node name, so a new one at the same path is that
 	/// node returning.
 	/// Dropping it unannounces the node.
 	#[allow(dead_code, reason = "held for their drop, never read")]
@@ -1327,9 +1327,9 @@ mod tests {
 		fn new(origin: &origin::Producer, group: &str, node: &str) -> Self {
 			let path = format!(".stats/node/{node}");
 			let source = origin.create_broadcast(path.as_str()).expect("create broadcast");
-			let identity = format!("node-{node}").parse().unwrap();
+			let instance = format!("node-{node}").parse().unwrap();
 			source
-				.announce(origin::Route::default().with_identity(identity, 0))
+				.announce(origin::Route::default().with_instance(instance, 0))
 				.expect("announce");
 			let track = source
 				.create_track(group_track(moq_net::Path::new(group).unwrap()), timed())
@@ -1966,7 +1966,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn totals_never_regress_on_a_restart() {
-		// A node returning under a new identity with a lower counter: its old
+		// A node returning under a new instance with a lower counter: its old
 		// readout stays as its own contribution, so the merged totals keep growing.
 		let origin = produce_origin();
 		let mut node_a = TotalsNode::new(&origin, "a");
@@ -1990,20 +1990,20 @@ mod tests {
 	}
 
 	/// A node announced at `.stats/node/a`, ready to observe frames by hand.
-	fn hand_merged<V: Mergeable>() -> (Merged<Keyed<V>>, (Path, Identity)) {
+	fn hand_merged<V: Mergeable>() -> (Merged<Keyed<V>>, (Path, Instance)) {
 		let origin = produce_origin();
 		let path = Path::from_static(".stats/node/a");
-		let identity: Identity = "a".parse().unwrap();
+		let instance: Instance = "a".parse().unwrap();
 		let mut merged = Merged::<Keyed<V>>::new(origin.consume(), &Config::new(), "p".into());
 		merged.apply_announce(
 			moq_net::announce::Announce {
 				prefix: path.clone(),
 				captures: None,
-				route: origin::Route::default().with_identity(identity.clone(), 0),
+				route: origin::Route::default().with_instance(instance.clone(), 0),
 			},
 			true,
 		);
-		(merged, (path, identity))
+		(merged, (path, instance))
 	}
 
 	#[test]
@@ -2020,7 +2020,7 @@ mod tests {
 			moq_net::announce::Announce {
 				prefix: path.clone(),
 				captures: None,
-				route: origin::Route::default().with_identity("b".parse().unwrap(), 0),
+				route: origin::Route::default().with_instance("b".parse().unwrap(), 0),
 			},
 			true,
 		);
@@ -2182,8 +2182,8 @@ mod tests {
 	async fn traffic_resume_reopens_closed_pairs_without_going_down() {
 		let origin = produce_origin();
 		let mut node = NodeBroadcast::new(&origin, "acme", "a");
-		let route = origin::Route::default().with_identity("01900000-0000-7000-8000-000000000001".parse().unwrap(), 0);
-		node.source.announce(route.clone()).expect("announce identity");
+		let route = origin::Route::default().with_instance("01900000-0000-7000-8000-000000000001".parse().unwrap(), 0);
+		node.source.announce(route.clone()).expect("announce instance");
 		let mut raw = Traffic::default();
 		raw.announces_started = 5;
 		raw.announces_ended = 3;

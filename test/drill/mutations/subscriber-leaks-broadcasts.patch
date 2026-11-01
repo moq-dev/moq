@@ -37,7 +37,7 @@ index a3f03296c7..3046b3af8f 100644
 @@ -1756,7 +1760,8 @@ struct SourceServe {
  	subscriber: Subscriber,
  	path: Path,
- 	identity: Option<crate::Identity>,
+ 	instance: Option<crate::Instance>,
 -	source: crate::model::broadcast::SourceGuard,
 +	// MUTATION: never dropped, so a session that ends keeps every source it minted alive.
 +	source: std::mem::ManuallyDrop<crate::model::broadcast::SourceGuard>,
@@ -47,7 +47,7 @@ index a3f03296c7..3046b3af8f 100644
 @@ -1899,7 +1904,7 @@ impl SourceServe {
  			subscriber,
  			path: minted.path,
- 			identity: minted.identity,
+ 			instance: minted.instance,
 -			source: minted.source,
 +			source: std::mem::ManuallyDrop::new(minted.source),
  			dynamic: minted.dynamic,

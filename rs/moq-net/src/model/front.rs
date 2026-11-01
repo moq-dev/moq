@@ -10,12 +10,12 @@
 //! `origin::run_front`.
 //!
 //! The driver only offers a front routes that serve its broadcast: those of the
-//! identity it first resolved, at its newest epoch, whose tracks resume where they
-//! stopped since the identity promises one continuous sequence space. An identity a
+//! instance it first resolved, at its newest epoch, whose tracks resume where they
+//! stopped since the instance promises one continuous sequence space. An instance a
 //! session minted, for a wire that carries none, promises nothing past its route:
 //! that route can answer a re-request with another stream, so a track whose copy
 //! fails there ends with the error instead of re-splicing. Another
-//! identity winning the path leaves the front alone: its readers stay until they
+//! instance winning the path leaves the front alone: its readers stay until they
 //! leave or its routes go, and new requests get a fresh front for the winner.
 //!
 //! A front nothing needs retires: once every track is forgotten (after the linger,
@@ -35,14 +35,14 @@ use std::{
 use crate::{Error, time::Instant, track};
 
 /// A route the table selected for the front: the entry id, whether it is a
-/// broadcast published on this origin, and whether its identity was carried rather
+/// broadcast published on this origin, and whether its instance was carried rather
 /// than minted by a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Candidate {
 	pub route: u64,
 	pub local: bool,
 	/// Whether a track whose copy failed may be asked for again through the route:
-	/// a carried identity says the answer is the same stream. A minted one names the
+	/// a carried instance says the answer is the same stream. A minted one names the
 	/// announcement, and the route could answer with whatever stream now wins upstream.
 	pub carried: bool,
 }
@@ -495,7 +495,7 @@ impl Front {
 			return;
 		}
 		let verdict = match result {
-			// A copy of the same identity claims identical content, so any difference
+			// A copy of the same instance claims identical content, so any difference
 			// in its metadata is refused rather than reinterpreted.
 			Ok(info) => match self.info.get(&name) {
 				Some(expected) if *expected != info => Err(Error::Unsupported),
@@ -559,7 +559,7 @@ impl Front {
 				track.ended = true;
 				actions.push(Action::Finish { track: name });
 			}
-			// Died mid-serve after delivering from the same identity: normal
+			// Died mid-serve after delivering from the same instance: normal
 			// failover, re-splice from the serving source at the first missing group.
 			Err(err)
 				if delivered
@@ -569,7 +569,7 @@ impl Front {
 				track.state = TrackState::Idle;
 				self.redispatch(name, actions);
 			}
-			// A content verdict survives every copy. Under a minted identity, even a route
+			// A content verdict survives every copy. Under a minted instance, even a route
 			// failure cannot be retried against the same content.
 			Err(err) if delivered => {
 				track.state = TrackState::Idle;
@@ -1119,10 +1119,10 @@ mod tests {
 		}
 	}
 
-	/// Under a minted identity a re-request could reach another stream, so the track ends
+	/// Under a minted instance a re-request could reach another stream, so the track ends
 	/// with the error instead, whether the route is a peer's or a local broadcast.
 	#[test]
-	fn a_copy_dying_under_a_minted_identity_ends_the_track() {
+	fn a_copy_dying_under_a_minted_instance_ends_the_track() {
 		for (local, closing) in [(false, false), (false, true), (true, false)] {
 			let mut front = serving(
 				Candidate {
@@ -1185,7 +1185,7 @@ mod tests {
 
 	#[test]
 	fn incompatible_copy_is_refused() {
-		// A copy of the same identity claims identical content, so every field counts, `refresh` too.
+		// A copy of the same instance claims identical content, so every field counts, `refresh` too.
 		let differing = [
 			track::Info {
 				max_age: Some(Duration::from_secs(1)),

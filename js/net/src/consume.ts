@@ -1,10 +1,10 @@
 import type * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import type { Route } from "./hop.ts";
-import * as Identity from "./identity.ts";
+import * as Instance from "./instance.ts";
 import { compareRouteCandidates, coveringPrefixes, superseded } from "./internal.ts";
 import type * as Path from "./path.ts";
-import { type Instance, sameInstance } from "./wire.ts";
+import { type Served, sameInstance } from "./wire.ts";
 
 // Unroutable, as in Rust: the instance going away is an end, not a failure.
 function retired(): StreamError {
@@ -38,7 +38,7 @@ class Validity {
 	}
 }
 
-type Selection = Instance & { readonly validity?: Validity };
+type Selection = Served & { readonly validity?: Validity };
 
 class Blind implements Selection {
 	readonly identity = {};
@@ -50,7 +50,7 @@ class Blind implements Selection {
 export class BroadcastCache {
 	#cache = new Map<
 		Path.Valid,
-		Map<Identity.Valid | object, { consumer: broadcast.Consumer; selection: Selection }>
+		Map<Instance.Valid | object, { consumer: broadcast.Consumer; selection: Selection }>
 	>();
 	#announced = new Map<Path.Valid, Map<object, { identity: object; route: Route }>>();
 	#blind = new Map<Path.Valid, Blind>();
@@ -91,10 +91,10 @@ export class BroadcastCache {
 				if (!best || compareRouteCandidates(path, prefix, entry.route, best.route) < 0) best = entry;
 			}
 			if (best) {
-				const cached = this.#cache.get(path)?.get(best.route.identity ?? best.identity);
-				// A minted identity names the announcement, not the publisher's stream, so a
+				const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
+				// A minted instance names the announcement, not the publisher's stream, so a
 				// request for it can only name the path: it holds while this route is selected.
-				const named = best.route.identity !== undefined && !Identity.isMinted(best.route.identity);
+				const named = best.route.instance !== undefined && !Instance.isMinted(best.route.instance);
 				return {
 					...best,
 					validity: !named
@@ -108,8 +108,8 @@ export class BroadcastCache {
 	}
 
 	/** Clone the live cached consumer only when it serves the selected instance. */
-	get(path: Path.Valid, instance: Instance): broadcast.Consumer | undefined {
-		const cached = this.#cache.get(path)?.get(instance.route.identity ?? instance.identity);
+	get(path: Path.Valid, instance: Served): broadcast.Consumer | undefined {
+		const cached = this.#cache.get(path)?.get(instance.route.instance ?? instance.identity);
 		return cached?.consumer.closed.peek() === undefined ? cached?.consumer.clone() : undefined;
 	}
 
@@ -120,7 +120,7 @@ export class BroadcastCache {
 			entries = new Map();
 			this.#cache.set(path, entries);
 		}
-		const key = instance.route.identity ?? instance.identity;
+		const key = instance.route.instance ?? instance.identity;
 		const entry = { consumer, selection: instance };
 		entries.set(key, entry);
 		for (const prefix of coveringPrefixes(path)) {

@@ -1002,16 +1002,16 @@ struct Advertised {
 	/// wire cannot carry (the route's source, servability), which must not restart.
 	hops: Hops,
 	cost: crate::origin::Cost,
-	/// The identity and epoch last put on the wire (lite-07); see [`served`].
+	/// The instance and epoch last put on the wire (lite-07); see [`served`].
 	served: Served,
 }
 
-/// The identity and epoch a route serves, as an advertisement carries them.
-type Served = (Option<crate::Identity>, u64);
+/// The instance and epoch a route serves, as an advertisement carries them.
+type Served = (Option<crate::Instance>, u64);
 
 /// What `route` serves; see [`Served`].
 fn served(route: &crate::origin::Route) -> Served {
-	(route.identity.clone(), route.epoch)
+	(route.instance.clone(), route.epoch)
 }
 
 enum AnnouncePhase {
@@ -1130,8 +1130,8 @@ impl AnnounceRun {
 		absolute: &crate::Path,
 	) -> Result<(), Error> {
 		match self.live.get_mut(&suffix) {
-			// A newer epoch of the same identity is no new stream, but the peer must rank it.
-			Some(advertised) if self.version.has_identity() && advertised.served != route => {
+			// A newer epoch of the same instance is no new stream, but the peer must rank it.
+			Some(advertised) if self.version.has_instance() && advertised.served != route => {
 				self.restart(stream, suffix, hops, cost, route, absolute)?;
 			}
 			// The peer would decode what it already holds.
@@ -1151,7 +1151,7 @@ impl AnnounceRun {
 					}
 					// lite-05: a duplicate ANNOUNCE, which assigns no id.
 					None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
-						identity: None,
+						instance: None,
 						epoch: 0,
 						suffix: lite::PathRef::literal(suffix),
 						hops: lite::HopsRef::literal(hops),
@@ -1220,9 +1220,9 @@ impl AnnounceRun {
 				served: route.clone(),
 			},
 		);
-		let (identity, epoch) = route;
+		let (instance, epoch) = route;
 		stream.writer.buffer(&lite::AnnounceBroadcast::Active {
-			identity,
+			instance,
 			epoch,
 			suffix: wire,
 			hops: chain,
@@ -1256,11 +1256,11 @@ impl AnnounceRun {
 				served: route.clone(),
 			},
 		);
-		let (identity, epoch) = route;
+		let (instance, epoch) = route;
 		stream.writer.buffer(&lite::AnnounceBroadcast::Takeover {
 			predecessor: predecessor.1,
 			suffix: wire,
-			identity,
+			instance,
 			epoch,
 			hops: chain,
 			cost,
@@ -1269,7 +1269,7 @@ impl AnnounceRun {
 		Ok(())
 	}
 
-	/// Replace the peer's advertisement for `suffix` with another identity or epoch:
+	/// Replace the peer's advertisement for `suffix` with another instance or epoch:
 	/// ANNOUNCE_RESTART on lite-07, an end and a fresh start before it.
 	fn restart(
 		&mut self,
@@ -1294,10 +1294,10 @@ impl AnnounceRun {
 					},
 				);
 				let hops = self.encoder.update(id, hops);
-				let (identity, epoch) = route;
+				let (instance, epoch) = route;
 				stream.writer.buffer(&lite::AnnounceBroadcast::Restart {
 					id,
-					identity,
+					instance,
 					epoch,
 					hops,
 					cost,
@@ -1593,8 +1593,8 @@ trait Request: Sized {
 	/// The broadcast and track the request names.
 	fn target(msg: &Self::Message) -> (&crate::Path, &str);
 
-	/// The identity the request pins, if any.
-	fn identity(msg: &Self::Message) -> Option<&crate::Identity>;
+	/// The instance the request pins, if any.
+	fn instance(msg: &Self::Message) -> Option<&crate::Instance>;
 
 	/// Start answering, once the broadcast resolves.
 	fn start(shared: &Shared, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error>;
@@ -1785,7 +1785,7 @@ impl<R: Request> RequestServe<R> {
 						// errors when there is none.
 						let origin = ready!(self.shared.poll_serving_origin(waiter));
 						let path = R::target(msg).0.clone();
-						*requesting = Some(origin.lookup(path, R::identity(msg)).into_inner());
+						*requesting = Some(origin.lookup(path, R::instance(msg)).into_inner());
 					}
 					let broadcast = ready!(requesting.as_ref().expect("requesting").poll_ok(waiter))?;
 					// Any placeholder but `Decode`, so a failed start is answered on the stream.
@@ -1926,8 +1926,8 @@ impl Request for TrackInfoServe {
 		(&msg.broadcast, &msg.track)
 	}
 
-	fn identity(msg: &Self::Message) -> Option<&crate::Identity> {
-		msg.identity.as_ref()
+	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
+		msg.instance.as_ref()
 	}
 
 	fn start(_: &Shared, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
@@ -1986,8 +1986,8 @@ impl Request for TracksServe {
 		(&msg.broadcast, "")
 	}
 
-	fn identity(msg: &Self::Message) -> Option<&crate::Identity> {
-		msg.identity.as_ref()
+	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
+		msg.instance.as_ref()
 	}
 
 	fn start(shared: &Shared, _: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
@@ -2083,8 +2083,8 @@ impl Request for SubscribeServe {
 		(&msg.broadcast, &msg.track)
 	}
 
-	fn identity(msg: &Self::Message) -> Option<&crate::Identity> {
-		msg.identity.as_ref()
+	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
+		msg.instance.as_ref()
 	}
 
 	fn start(shared: &Shared, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
@@ -2331,8 +2331,8 @@ impl Request for FetchServe {
 		(&msg.broadcast, &msg.track)
 	}
 
-	fn identity(msg: &Self::Message) -> Option<&crate::Identity> {
-		msg.identity.as_ref()
+	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
+		msg.instance.as_ref()
 	}
 
 	fn start(_: &Shared, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
@@ -3248,8 +3248,8 @@ mod announce_test {
 	}
 
 	/// A new best route the wire cannot tell apart (another session, same chain and
-	/// cost) under another identity is another source, in either direction: an
-	/// ANNOUNCE_RESTART on lite-07, carrying the identity, and an end and a fresh
+	/// cost) under another instance is another source, in either direction: an
+	/// ANNOUNCE_RESTART on lite-07, carrying the instance, and an end and a fresh
 	/// start before it.
 	#[kio::test]
 	async fn source_flip_restarts() {
@@ -3266,7 +3266,7 @@ mod announce_test {
 					[
 						lite::AnnounceBroadcast::Restart {
 							id: 0,
-							identity: Some(_),
+							instance: Some(_),
 							cost,
 							..
 						},
@@ -3295,15 +3295,15 @@ mod announce_test {
 		}
 	}
 
-	/// Another identity restarts the advertisement, and so does a newer epoch of the same
+	/// Another instance restarts the advertisement, and so does a newer epoch of the same
 	/// one, which the peer must rank: lite-07 carries both.
 	#[kio::test]
-	async fn a_new_identity_or_epoch_restarts_with_it() {
+	async fn a_new_instance_or_epoch_restarts_with_it() {
 		let mut h = harness_on(Version::Lite07).await;
-		let identity = crate::Identity::random();
+		let instance = crate::Instance::random();
 		let route = |epoch| {
 			crate::origin::Route::default()
-				.with_identity(identity.clone(), epoch)
+				.with_instance(instance.clone(), epoch)
 				.with_hops(pub_hops())
 				.with_cost(7)
 		};
@@ -3315,18 +3315,18 @@ mod announce_test {
 			[
 				lite::AnnounceBroadcast::Restart {
 					id: 0,
-					identity: Some(sent),
+					instance: Some(sent),
 					epoch: 2,
 					..
 				},
-			] => assert_eq!(*sent, identity),
+			] => assert_eq!(*sent, instance),
 			other => panic!("expected a restart, got {other:?}"),
 		}
 		h.assert_idle();
 	}
 
-	/// A grant that grows while another identity replaces an advertised one still restarts it,
-	/// whether the identity is named or minted: the regrant takes in what the old cursor had
+	/// A grant that grows while another instance replaces an advertised one still restarts it,
+	/// whether the instance is named or minted: the regrant takes in what the old cursor had
 	/// pending rather than dropping it.
 	#[kio::test]
 	async fn a_restart_pending_when_the_grant_grows_still_restarts() {
@@ -3346,23 +3346,23 @@ mod announce_test {
 
 			// Same chain and cost, so only the instance changed. Both land before the loop polls.
 			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
-			let named = (!anonymous).then(crate::Identity::random);
+			let named = (!anonymous).then(crate::Instance::random);
 			let route = match &named {
-				Some(identity) => route.with_identity(identity.clone(), 0),
+				Some(instance) => route.with_instance(instance.clone(), 0),
 				None => route,
 			};
 			let newer = h.origin.announce("cam", route).unwrap();
-			let identity = newer.route().and_then(|route| route.identity);
+			let instance = newer.route().and_then(|route| route.instance);
 			auth.handle().authorize(&grant(&["cam", "other"]));
 			kio::clock::sleep(crate::origin::Config::default().update_hold).await;
 			settle().await;
 			match h.wire.take_announces().as_slice() {
 				[
 					lite::AnnounceBroadcast::Restart {
-						id: 0, identity: sent, ..
+						id: 0, instance: sent, ..
 					},
 				] => {
-					assert_eq!(*sent, identity, "anonymous={anonymous}")
+					assert_eq!(*sent, instance, "anonymous={anonymous}")
 				}
 				other => panic!("expected a restart (anonymous={anonymous}), got {other:?}"),
 			}
@@ -8189,7 +8189,7 @@ mod tests {
 			for wait in [Wait::Broadcast, Wait::Track] {
 				for close in [Close::Fin, Close::Reset] {
 					let track = lite::Track {
-						identity: None,
+						instance: None,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 					};
@@ -8197,7 +8197,7 @@ mod tests {
 
 					let subscribe = lite::Subscribe {
 						order: crate::track::Order::Descending,
-						identity: None,
+						instance: None,
 						id: 0,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
@@ -8208,7 +8208,7 @@ mod tests {
 					leave_request::<SubscribeServe>(version, &subscribe, wait, close).await;
 
 					let fetch = lite::Fetch {
-						identity: None,
+						instance: None,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 						priority: 0,
@@ -8256,7 +8256,7 @@ mod tests {
 			let mut script = Vec::new();
 			lite::Subscribe {
 				order: crate::track::Order::Descending,
-				identity: None,
+				instance: None,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -8317,7 +8317,7 @@ mod tests {
 
 		let mut script = Vec::new();
 		lite::Track {
-			identity: None,
+			instance: None,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 		}
@@ -8375,7 +8375,7 @@ mod tests {
 
 					let mut script = Vec::new();
 					lite::Track {
-						identity: None,
+						instance: None,
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
 					}
@@ -8471,7 +8471,7 @@ mod tests {
 		let mut script = Vec::new();
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
-			identity: None,
+			instance: None,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -8590,7 +8590,7 @@ mod tests {
 		let mut script = Vec::new();
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
-			identity: None,
+			instance: None,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -8839,7 +8839,7 @@ mod tests {
 		let run = FetchServe::start(
 			&publisher.shared,
 			lite::Fetch {
-				identity: None,
+				instance: None,
 				broadcast: crate::Path::new("room").unwrap(),
 				track: "video".into(),
 				priority: 0,
@@ -8887,7 +8887,7 @@ mod tests {
 		});
 		let mut script = Vec::new();
 		lite::Fetch {
-			identity: None,
+			instance: None,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 			priority: 0,
@@ -9010,7 +9010,7 @@ mod tests {
 			broadcast.announce(Default::default()).unwrap();
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
-				identity: None,
+				instance: None,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -9067,7 +9067,7 @@ mod tests {
 		broadcast.announce(Default::default()).unwrap();
 		let request = lite::Tracks {
 			broadcast: crate::Path::from_static("room"),
-			identity: None,
+			instance: None,
 		};
 		let request = request.encode_bytes(version).unwrap().to_vec();
 		let session = ScriptedSession::per_stream(vec![request.clone(), request]);
@@ -9121,7 +9121,7 @@ mod tests {
 			broadcast.announce(Default::default()).unwrap();
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
-				identity: None,
+				instance: None,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -9258,7 +9258,7 @@ mod tests {
 		let version = Version::Lite07;
 		let msg = lite::Subscribe {
 			order: crate::track::Order::Descending,
-			identity: None,
+			instance: None,
 			id: 0,
 			broadcast: crate::Path::new(broadcast).unwrap(),
 			track: track.into(),

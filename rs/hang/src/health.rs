@@ -41,16 +41,16 @@ pub enum Role {
 pub struct Observer {
 	/// The publisher's media broadcast, or the viewer's echo broadcast.
 	pub path: moq_net::Path,
-	/// The reporting broadcast's identity, when it was resolved through an origin.
+	/// The reporting broadcast's instance, when it was resolved through an origin.
 	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
 	#[serde(skip_serializing_if = "Option::is_none")]
-	pub identity: Option<moq_net::Identity>,
+	pub instance: Option<moq_net::Instance>,
 }
 
 impl Observer {
 	/// Name the broadcast a report was read from.
-	pub fn new(path: moq_net::Path, identity: Option<moq_net::Identity>) -> Self {
-		Self { path, identity }
+	pub fn new(path: moq_net::Path, instance: Option<moq_net::Instance>) -> Self {
+		Self { path, instance }
 	}
 }
 
@@ -207,7 +207,7 @@ impl Default for Thresholds {
 pub enum Reset {
 	/// A cumulative counter went down.
 	Decrease,
-	/// The reporting broadcast's path or identity changed.
+	/// The reporting broadcast's path or instance changed.
 	Replaced,
 }
 
@@ -633,7 +633,7 @@ mod tests {
 	#[derive(Deserialize)]
 	struct Named {
 		path: String,
-		identity: Option<String>,
+		instance: Option<String>,
 	}
 
 	fn cases() -> Vec<Case> {
@@ -641,12 +641,12 @@ mod tests {
 	}
 
 	fn report<S: DeserializeOwned>(fixture: &Fixture) -> Report<S> {
-		let identity = fixture
+		let instance = fixture
 			.observer
-			.identity
+			.instance
 			.as_deref()
-			.map(|identity| identity.parse().unwrap());
-		let observer = Observer::new(moq_net::Path::new(&fixture.observer.path).unwrap(), identity);
+			.map(|instance| instance.parse().unwrap());
+		let observer = Observer::new(moq_net::Path::new(&fixture.observer.path).unwrap(), instance);
 		Report::new(observer, serde_json::from_value(fixture.snapshot.clone()).unwrap())
 	}
 

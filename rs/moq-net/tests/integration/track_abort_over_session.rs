@@ -71,14 +71,14 @@ abort_test!(abort_05_two, "moq-lite-05", 2);
 abort_test!(abort_06_one, "moq-lite-06", 1);
 abort_test!(abort_06_two, "moq-lite-06", 2);
 
-/// The publisher replaces an aborted track. The identity lets the front resume onto the
+/// The publisher replaces an aborted track. The instance lets the front resume onto the
 /// replacement, and a group reader alone must drive that, without polling the next
 /// group.
 async fn recreate(finish: bool) {
 	let origin = produce_origin(1);
 	let broadcast = origin.create_broadcast("bench").unwrap();
 	broadcast
-		.announce(moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0))
+		.announce(moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0))
 		.unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
 	let remote = origin.consume().request("bench", None).await.unwrap();

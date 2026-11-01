@@ -98,7 +98,7 @@ async def main():
         status = moq.json.SnapshotProducer(broadcast, status_track)
         status.update({"state": "live", "viewers": 42})
 
-        publication.announce()  # each broadcast mints a fresh identity
+        publication.announce()  # each broadcast mints a fresh instance
         audio.finish()
         video.finish()
         events.finish()

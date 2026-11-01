@@ -932,7 +932,7 @@ static bool moq_source_same_video(const Track *track, const std::string &id, con
 	const bool same_coded =
 		old.coded.has_value() == config.coded.has_value() &&
 		(!old.coded || (old.coded->width == config.coded->width && old.coded->height == config.coded->height));
-	return old.broadcast == config.broadcast && old.identity == config.identity && old.codec == config.codec &&
+	return old.broadcast == config.broadcast && old.instance == config.instance && old.codec == config.codec &&
 	       old.description == config.description && same_coded &&
 	       moq_source_same_container(old.container, config.container);
 }
@@ -945,7 +945,7 @@ static bool moq_source_same_audio(const Track *track, const std::string &id, con
 	// The same track under a new catalog ID is the same rendition.
 	if (old.track.value_or(track->id) != config.track.value_or(id))
 		return false;
-	return old.broadcast == config.broadcast && old.identity == config.identity && old.codec == config.codec &&
+	return old.broadcast == config.broadcast && old.instance == config.instance && old.codec == config.codec &&
 	       old.description == config.description && old.sample_rate == config.sample_rate &&
 	       old.channel_count == config.channel_count && moq_source_same_container(old.container, config.container);
 }

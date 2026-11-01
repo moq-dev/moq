@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Identity, Error as NetError, Path, StreamCode, Track } from "@moq/net";
+import { Instance, Error as NetError, Path, StreamCode, Track } from "@moq/net";
 import {
 	Derived,
 	Effect,
@@ -19,11 +19,11 @@ import { toHang } from "./msf";
 
 type ReferencedRendition = {
 	broadcast?: Path.Relative;
-	identity?: Catalog.ReferenceIdentity;
+	instance?: Catalog.ReferenceInstance;
 };
 
 // Whether a rendition's reference names something this consumer can play.
-type Usable = (rel: Path.Relative | undefined, identity: Moq.Identity.Valid | undefined) => boolean;
+type Usable = (rel: Path.Relative | undefined, instance: Moq.Instance.Valid | undefined) => boolean;
 
 // Either the catalog's own broadcast, or a sibling to consume by path.
 type RelativeTarget = { local: true } | { local: false; path: Moq.Path.Valid };
@@ -33,16 +33,16 @@ function filterRenditions<T extends ReferencedRendition>(
 	usable: Usable,
 ): Record<string, T> {
 	return Object.fromEntries(
-		Object.entries(renditions).filter(([, config]) => usable(config.broadcast, config.identity)),
+		Object.entries(renditions).filter(([, config]) => usable(config.broadcast, config.instance)),
 	);
 }
 
-// Whether `active` is proven to be another stream than `identity` names. A route over a wire
-// that carries no identity has one its session minted, which proves nothing, so only a known
+// Whether `active` is proven to be another stream than `instance` names. A route over a wire
+// that carries no instance has one its session minted, which proves nothing, so only a known
 // mismatch counts.
-function provesOther(active: Moq.Broadcast.Consumer | undefined, identity: Moq.Identity.Valid | undefined): boolean {
-	if (identity === undefined || active?.identity === undefined) return false;
-	return !Identity.isMinted(active.identity) && active.identity !== identity;
+function provesOther(active: Moq.Broadcast.Consumer | undefined, instance: Moq.Instance.Valid | undefined): boolean {
+	if (instance === undefined || active?.instance === undefined) return false;
+	return !Instance.isMinted(active.instance) && active.instance !== instance;
 }
 
 // Whether an announced route covers `path`, until closed. Hidden routes count: a service claim
@@ -209,16 +209,16 @@ export class Broadcast {
 	}
 
 	// Publish the catalog minus every rendition this consumer cannot use: one naming a
-	// broadcast that isn't announced to us, or one whose broadcast proves another identity than it
+	// broadcast that isn't announced to us, or one whose broadcast proves another instance than it
 	// names. Selecting one of those would render nothing, since `relativeBroadcast` resolves it to
 	// no broadcast at all. Reruns as announcements arrive, so a rendition appears once its
-	// broadcast does. Only a rendition naming an identity resolves its broadcast here, sharing the
+	// broadcast does. Only a rendition naming an instance resolves its broadcast here, sharing the
 	// request playback uses.
 	#runFiltered(effect: Effect): void {
 		const raw = effect.get(this.#raw);
-		const usable: Usable = (rel, identity) =>
+		const usable: Usable = (rel, instance) =>
 			this.#relativeTarget(effect, rel) !== undefined &&
-			(identity === undefined || !provesOther(this.#relativeActive(effect, rel), identity));
+			(instance === undefined || !provesOther(this.#relativeActive(effect, rel), instance));
 		effect.set(this.#out.catalog, raw ? filterCatalog(raw, usable) : undefined);
 	}
 
@@ -482,9 +482,9 @@ export class Broadcast {
 	 * reference resolves lazily and reacts to `enabled` / connection / announcement
 	 * changes exactly like the catalog broadcast.
 	 *
-	 * `identity` is the rendition's `identity` field, the stream the reference names. Returns
+	 * `instance` is the rendition's `instance` field, the stream the reference names. Returns
 	 * `undefined` while the followed broadcast is proven to be another stream, rather than
-	 * reading it. A route over a wire that carries no identity cannot prove one, so there it is
+	 * reading it. A route over a wire that carries no instance cannot prove one, so there it is
 	 * best effort.
 	 *
 	 * @internal
@@ -492,15 +492,15 @@ export class Broadcast {
 	relativeBroadcast(
 		effect: Effect,
 		rel: Path.Relative | undefined,
-		identity?: Moq.Identity.Valid,
+		instance?: Moq.Instance.Valid,
 	): Moq.Broadcast.Consumer | undefined {
 		const active = this.#relativeActive(effect, rel);
-		if (!active || !provesOther(active, identity)) return active;
+		if (!active || !provesOther(active, instance)) return active;
 		console.warn(
-			"ignoring rendition: its broadcast serves another identity",
+			"ignoring rendition: its broadcast serves another instance",
 			active.path,
-			active.identity,
-			identity,
+			active.instance,
+			instance,
 		);
 		return undefined;
 	}
@@ -524,7 +524,7 @@ export class Broadcast {
 	 * Listing a contribution in the catalog opens nothing; this is the demand. The child tracks
 	 * the catalog entry and resolves through this broadcast's `relativeBroadcast`, sharing
 	 * its request: while following announcements it follows the contribution's restarts, and
-	 * otherwise it requests the first instance once. With an `identity` it is offline while its
+	 * otherwise it requests the first instance once. With an `instance` it is offline while its
 	 * broadcast resolves another stream. An absent entry leaves the child disabled, and an
 	 * unavailable contribution reads as offline. Its rendition IDs stay local to the child, so
 	 * they never shadow this catalog's IDs.
@@ -540,7 +540,7 @@ export class Broadcast {
 	 */
 	contribution(effect: Effect, id: string): Broadcast {
 		// Each computed notifies only on a real change, so an update that leaves the child's path
-		// alone (such as a new `identity`) never restarts its catalog.
+		// alone (such as a new `instance`) never restarts its catalog.
 		const entry = effect.computed((run) => {
 			const contributions = run.get(this.out.catalog)?.contributions;
 			return contributions && Object.hasOwn(contributions, id) ? contributions[id] : undefined;
@@ -559,7 +559,7 @@ export class Broadcast {
 		});
 		child.#resolve.set((run) => {
 			const selected = run.get(entry);
-			return selected && this.relativeBroadcast(run, selected.broadcast, selected.identity);
+			return selected && this.relativeBroadcast(run, selected.broadcast, selected.instance);
 		});
 		effect.cleanup(() => child.close());
 		return child;

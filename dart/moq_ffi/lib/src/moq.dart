@@ -1163,7 +1163,7 @@ class FfiConverterMoqJsonWindowTimed {
 class MoqAudio {
   final String? label;
   final String? broadcast;
-  final String? identity;
+  final String? instance;
   final String? track;
   final String codec;
   final Uint8List? description;
@@ -1176,7 +1176,7 @@ class MoqAudio {
   MoqAudio({
     this.label = null,
     this.broadcast = null,
-    this.identity = null,
+    this.instance = null,
     this.track = null,
     required this.codec,
     this.description,
@@ -1206,11 +1206,11 @@ class FfiConverterMoqAudio {
     );
     final broadcast = broadcast_lifted.value;
     new_offset += broadcast_lifted.bytesRead;
-    final identity_lifted = FfiConverterOptionalString.read(
+    final instance_lifted = FfiConverterOptionalString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final identity = identity_lifted.value;
-    new_offset += identity_lifted.bytesRead;
+    final instance = instance_lifted.value;
+    new_offset += instance_lifted.bytesRead;
     final track_lifted = FfiConverterOptionalString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -1260,7 +1260,7 @@ class FfiConverterMoqAudio {
       MoqAudio(
         label: label,
         broadcast: broadcast,
-        identity: identity,
+        instance: instance,
         track: track,
         codec: codec,
         description: description,
@@ -1279,7 +1279,7 @@ class FfiConverterMoqAudio {
     final total_length =
         FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalString.allocationSize(value.broadcast) +
-        FfiConverterOptionalString.allocationSize(value.identity) +
+        FfiConverterOptionalString.allocationSize(value.instance) +
         FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterString.allocationSize(value.codec) +
         FfiConverterOptionalUint8List.allocationSize(value.description) +
@@ -1306,7 +1306,7 @@ class FfiConverterMoqAudio {
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalString.write(
-      value.identity,
+      value.instance,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalString.write(
@@ -1351,7 +1351,7 @@ class FfiConverterMoqAudio {
   static int allocationSize(MoqAudio value) {
     return FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalString.allocationSize(value.broadcast) +
-        FfiConverterOptionalString.allocationSize(value.identity) +
+        FfiConverterOptionalString.allocationSize(value.instance) +
         FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterString.allocationSize(value.codec) +
         FfiConverterOptionalUint8List.allocationSize(value.description) +
@@ -2108,7 +2108,7 @@ class FfiConverterMoqMediaTrackConfig {
 class MoqVideo {
   final String? label;
   final String? broadcast;
-  final String? identity;
+  final String? instance;
   final String? track;
   final String codec;
   final Uint8List? description;
@@ -2122,7 +2122,7 @@ class MoqVideo {
   MoqVideo({
     this.label = null,
     this.broadcast = null,
-    this.identity = null,
+    this.instance = null,
     this.track = null,
     required this.codec,
     this.description,
@@ -2153,11 +2153,11 @@ class FfiConverterMoqVideo {
     );
     final broadcast = broadcast_lifted.value;
     new_offset += broadcast_lifted.bytesRead;
-    final identity_lifted = FfiConverterOptionalString.read(
+    final instance_lifted = FfiConverterOptionalString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final identity = identity_lifted.value;
-    new_offset += identity_lifted.bytesRead;
+    final instance = instance_lifted.value;
+    new_offset += instance_lifted.bytesRead;
     final track_lifted = FfiConverterOptionalString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -2212,7 +2212,7 @@ class FfiConverterMoqVideo {
       MoqVideo(
         label: label,
         broadcast: broadcast,
-        identity: identity,
+        instance: instance,
         track: track,
         codec: codec,
         description: description,
@@ -2232,7 +2232,7 @@ class FfiConverterMoqVideo {
     final total_length =
         FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalString.allocationSize(value.broadcast) +
-        FfiConverterOptionalString.allocationSize(value.identity) +
+        FfiConverterOptionalString.allocationSize(value.instance) +
         FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterString.allocationSize(value.codec) +
         FfiConverterOptionalUint8List.allocationSize(value.description) +
@@ -2260,7 +2260,7 @@ class FfiConverterMoqVideo {
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalString.write(
-      value.identity,
+      value.instance,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalString.write(
@@ -2309,7 +2309,7 @@ class FfiConverterMoqVideo {
   static int allocationSize(MoqVideo value) {
     return FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalString.allocationSize(value.broadcast) +
-        FfiConverterOptionalString.allocationSize(value.identity) +
+        FfiConverterOptionalString.allocationSize(value.instance) +
         FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterString.allocationSize(value.codec) +
         FfiConverterOptionalUint8List.allocationSize(value.description) +
@@ -2742,9 +2742,9 @@ class FfiConverterMoqAnnounceConfig {
 
 class MoqAnnounceRoute {
   final int cost;
-  final String? identity;
+  final String? instance;
   final int epoch;
-  MoqAnnounceRoute({this.cost = 0, this.identity = null, this.epoch = 0});
+  MoqAnnounceRoute({this.cost = 0, this.instance = null, this.epoch = 0});
 }
 
 class FfiConverterMoqAnnounceRoute {
@@ -2759,18 +2759,18 @@ class FfiConverterMoqAnnounceRoute {
     );
     final cost = cost_lifted.value;
     new_offset += cost_lifted.bytesRead;
-    final identity_lifted = FfiConverterOptionalString.read(
+    final instance_lifted = FfiConverterOptionalString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final identity = identity_lifted.value;
-    new_offset += identity_lifted.bytesRead;
+    final instance = instance_lifted.value;
+    new_offset += instance_lifted.bytesRead;
     final epoch_lifted = FfiConverterUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final epoch = epoch_lifted.value;
     new_offset += epoch_lifted.bytesRead;
     return LiftRetVal(
-      MoqAnnounceRoute(cost: cost, identity: identity, epoch: epoch),
+      MoqAnnounceRoute(cost: cost, instance: instance, epoch: epoch),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -2778,7 +2778,7 @@ class FfiConverterMoqAnnounceRoute {
   static RustBuffer lower(MoqAnnounceRoute value) {
     final total_length =
         FfiConverterUInt64.allocationSize(value.cost) +
-        FfiConverterOptionalString.allocationSize(value.identity) +
+        FfiConverterOptionalString.allocationSize(value.instance) +
         FfiConverterUInt64.allocationSize(value.epoch) +
         0;
     final buf = Uint8List(total_length);
@@ -2793,7 +2793,7 @@ class FfiConverterMoqAnnounceRoute {
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalString.write(
-      value.identity,
+      value.instance,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterUInt64.write(
@@ -2805,7 +2805,7 @@ class FfiConverterMoqAnnounceRoute {
 
   static int allocationSize(MoqAnnounceRoute value) {
     return FfiConverterUInt64.allocationSize(value.cost) +
-        FfiConverterOptionalString.allocationSize(value.identity) +
+        FfiConverterOptionalString.allocationSize(value.instance) +
         FfiConverterUInt64.allocationSize(value.epoch) +
         0;
   }
@@ -2861,12 +2861,12 @@ class MoqRoute {
   final List<int> hops;
   final int cost;
   final bool anonymous;
-  final String identity;
+  final String instance;
   MoqRoute({
     required this.hops,
     required this.cost,
     required this.anonymous,
-    required this.identity,
+    required this.instance,
   });
 }
 
@@ -2892,17 +2892,17 @@ class FfiConverterMoqRoute {
     );
     final anonymous = anonymous_lifted.value;
     new_offset += anonymous_lifted.bytesRead;
-    final identity_lifted = FfiConverterString.read(
+    final instance_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final identity = identity_lifted.value;
-    new_offset += identity_lifted.bytesRead;
+    final instance = instance_lifted.value;
+    new_offset += instance_lifted.bytesRead;
     return LiftRetVal(
       MoqRoute(
         hops: hops,
         cost: cost,
         anonymous: anonymous,
-        identity: identity,
+        instance: instance,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -2913,7 +2913,7 @@ class FfiConverterMoqRoute {
         FfiConverterSequenceUInt64.allocationSize(value.hops) +
         FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterBool.allocationSize(value.anonymous) +
-        FfiConverterString.allocationSize(value.identity) +
+        FfiConverterString.allocationSize(value.instance) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -2935,7 +2935,7 @@ class FfiConverterMoqRoute {
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterString.write(
-      value.identity,
+      value.instance,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset - buf.offsetInBytes;
@@ -2945,7 +2945,7 @@ class FfiConverterMoqRoute {
     return FfiConverterSequenceUInt64.allocationSize(value.hops) +
         FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterBool.allocationSize(value.anonymous) +
-        FfiConverterString.allocationSize(value.identity) +
+        FfiConverterString.allocationSize(value.instance) +
         0;
   }
 }
@@ -5487,7 +5487,7 @@ class FfiConverterMoqException {
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 29:
-        final lifted = InvalidIdentityMoqException.read(subview);
+        final lifted = InvalidInstanceMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
@@ -6491,18 +6491,18 @@ class InvalidPatternMoqException extends MoqException {
   }
 }
 
-class InvalidIdentityMoqException extends MoqException {
+class InvalidInstanceMoqException extends MoqException {
   final String reason;
-  InvalidIdentityMoqException(String this.reason);
-  InvalidIdentityMoqException._(String this.reason);
-  static LiftRetVal<InvalidIdentityMoqException> read(Uint8List buf) {
+  InvalidInstanceMoqException(String this.reason);
+  InvalidInstanceMoqException._(String this.reason);
+  static LiftRetVal<InvalidInstanceMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
     final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final reason = reason_lifted.value;
     new_offset += reason_lifted.bytesRead;
-    return LiftRetVal(InvalidIdentityMoqException._(reason), new_offset);
+    return LiftRetVal(InvalidInstanceMoqException._(reason), new_offset);
   }
 
   @override
@@ -12134,10 +12134,10 @@ class FfiConverterMoqFollowing {
 
 abstract class MoqOriginConsumerInterface {
   MoqAnnounceConsumer announced({required MoqAnnounceConfig config});
-  MoqFollowing follow({required String path, String? identity = null});
+  MoqFollowing follow({required String path, String? instance = null});
   UniffiRustFuture<MoqBroadcastConsumer> request({
     required String path,
-    String? identity = null,
+    String? instance = null,
   });
 }
 
@@ -12186,12 +12186,12 @@ class MoqOriginConsumer implements MoqOriginConsumerInterface {
     );
   }
 
-  MoqFollowing follow({required String path, String? identity = null}) {
+  MoqFollowing follow({required String path, String? instance = null}) {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqoriginconsumer_follow(
         uniffiClonePointer(),
         FfiConverterString.lower(path),
-        FfiConverterOptionalString.lower(identity),
+        FfiConverterOptionalString.lower(instance),
         status,
       ),
       FfiConverterMoqFollowing.lift,
@@ -12201,13 +12201,13 @@ class MoqOriginConsumer implements MoqOriginConsumerInterface {
 
   UniffiRustFuture<MoqBroadcastConsumer> request({
     required String path,
-    String? identity = null,
+    String? instance = null,
   }) {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqoriginconsumer_request(
         uniffiClonePointer(),
         FfiConverterString.lower(path),
-        FfiConverterOptionalString.lower(identity),
+        FfiConverterOptionalString.lower(instance),
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
@@ -18812,7 +18812,7 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqoriginconsumer_announced(
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqoriginconsumer_follow(
   Pointer<Void> ptr,
   RustBuffer path,
-  RustBuffer identity,
+  RustBuffer instance,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -18822,7 +18822,7 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqoriginconsumer_follow(
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqoriginconsumer_request(
   Pointer<Void> ptr,
   RustBuffer path,
-  RustBuffer identity,
+  RustBuffer instance,
 );
 
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(

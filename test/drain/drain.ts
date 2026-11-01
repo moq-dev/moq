@@ -11,7 +11,7 @@
  *     bun drain.ts --a-port 4470 --b-port 4471 --proxy-port 4472 --a-pid 1234 --timeout 60
  *
  * The viewer subscribes once, at no latency budget, and reads the same subscription throughout:
- * the publisher's identity reaches A through B, so both routes serve one stream and the origin resumes the
+ * the publisher's instance reaches A through B, so both routes serve one stream and the origin resumes the
  * track there from the first group the viewer lacks.
  *
  * Exits 0 once the viewer has migrated, read groups through both relays with none missing in
@@ -54,7 +54,7 @@ const GROUP_INTERVAL_MS = 100;
 const HANDOVER = Milli(2000);
 
 const path = Moq.Path.from("drain");
-// Publisher identities travel on the work-in-progress moq-lite-07 only, which nothing offers by default.
+// Publisher instances travel on the work-in-progress moq-lite-07 only, which nothing offers by default.
 const versions = ["moq-lite-07-wip"];
 const trackName = "seq";
 
@@ -112,7 +112,7 @@ const published = new Moq.Origin.Producer();
 const broadcastPublication = published.createBroadcast(path);
 const broadcast = broadcastPublication.broadcast;
 const track = broadcast.createTrack(trackName, { timescale: Moq.Time.Timescale.MILLI });
-// The identity the publication mints is what says B's route serves the same stream as A's.
+// The instance the publication mints is what says B's route serves the same stream as A's.
 broadcastPublication.announce();
 const publisher = new Moq.Connection({
 	url: new URL(`http://127.0.0.1:${bPort}/`),

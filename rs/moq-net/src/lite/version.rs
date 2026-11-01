@@ -290,10 +290,10 @@ impl Version {
 		)
 	}
 
-	/// Whether announcements carry their identity and epoch, and track requests the
-	/// identity they pin. Added in lite-07. Older versions carry nothing, so the
-	/// receiving session mints an identity for each announcement.
-	pub fn has_identity(self) -> bool {
+	/// Whether announcements carry their instance and epoch, and track requests the
+	/// instance they pin. Added in lite-07. Older versions carry nothing, so the
+	/// receiving session mints an instance for each announcement.
+	pub fn has_instance(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06

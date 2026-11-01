@@ -17,7 +17,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 test-support = ["dep:base64", "dep:tokio", "tokio/io-util", "tokio/macros", "tokio/net", "tokio/rt", "tokio/sync"]
 
 # Pure library: pulls one RTSP session into a caller's broadcast. The CLI lives in
-# `moq-cli` (`moq import rtsp`), which owns reconnect and identities.
+# `moq-cli` (`moq import rtsp`), which owns reconnect and instances.
 [dependencies]
 base64 = { workspace = true, optional = true }
 futures = { workspace = true }

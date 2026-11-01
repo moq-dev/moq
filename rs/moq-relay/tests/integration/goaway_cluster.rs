@@ -74,7 +74,7 @@ const LITE_07: &str = "moq-lite-07-wip";
 async fn listen_tcp() -> (u16, moq_tokio::Listener) {
 	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
-	// lite-07 alongside the defaults, so a dialer that opts in carries route identities.
+	// lite-07 alongside the defaults, so a dialer that opts in carries route instances.
 	config.version = std::iter::once(LITE_07.parse().unwrap())
 		.chain(moq_net::Versions::all().iter().copied())
 		.collect();
@@ -213,7 +213,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	within("routed via B", async {
 		loop {
 			let event = announced.next().await.expect("announce update");
-			// Under another identity, B's route is another source: a restart.
+			// Under another instance, B's route is another source: a restart.
 			if let moq_net::announce::Event::Start(update)
 			| moq_net::announce::Event::Update(update)
 			| moq_net::announce::Event::Restart(update)
@@ -423,7 +423,7 @@ async fn spawn_relay_with_upstream(
 	client_config.tls.insecure = Some(true);
 	client_config.goaway.handover = Some((HANDOVER).into());
 	client_config.backoff.initial = Some((BACKOFF).into());
-	// Only lite-07 carries the identity that lets a failover resume the subscription.
+	// Only lite-07 carries the instance that lets a failover resume the subscription.
 	client_config.version = vec![LITE_07.parse().unwrap()];
 
 	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
@@ -474,7 +474,7 @@ async fn spawn_relay_with_upstream(
 /// 3. The draining MID-A leg keeps serving through the handover window, so
 ///    every group published across the swap arrives exactly once.
 /// 4. Once the old leg closes, the SAME subscription keeps flowing: both legs'
-///    routes carry TOP's identity on lite-07, so BOTTOM's front re-splices onto
+///    routes carry TOP's instance on lite-07, so BOTTOM's front re-splices onto
 ///    the MID-B leg instead of ending the subscription.
 /// 5. No GOAWAY leaks to the subscriber's own session, and the path never
 ///    retracts under the subscriber.
@@ -655,7 +655,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	drop(mid_a_upstream);
 
 	// The subscription was served through the MID-A leg, but its close does not
-	// end it: both legs' routes carry TOP's identity, so BOTTOM's front re-splices
+	// end it: both legs' routes carry TOP's instance, so BOTTOM's front re-splices
 	// onto the MID-B leg and the subscription rides through. Keep publishing and keep reading the SAME subscription.
 	const POST_DRAIN_LAST: u64 = LAST_GROUP + 40;
 	let post_publisher = tokio::spawn(async move {

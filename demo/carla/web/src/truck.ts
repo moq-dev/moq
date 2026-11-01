@@ -428,8 +428,8 @@ export class Truck {
 		const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
 		effect.cleanup(() => producer.finish());
 		effect.run(this.#runControlTrack.bind(this, track, producer));
-		// A fresh identity per lease, which each publication mints: the truck binds its single
-		// driver to this path and identity.
+		// A fresh instance per lease, which each publication mints: the truck binds its single
+		// driver to this path and instance.
 		driverBroadcastPublication.announce();
 	}
 

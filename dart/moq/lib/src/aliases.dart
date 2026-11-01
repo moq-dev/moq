@@ -64,7 +64,7 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// Follows a specific broadcast path across the publisher instances that serve it.
 typedef Following = MoqFollowing;
 
-/// How a broadcast advertises its exact path: its static production cost and stream identity.
+/// How a broadcast advertises its exact path: its static production cost and stream instance.
 typedef AnnounceRoute = MoqAnnounceRoute;
 
 /// A route over a prefix: its origin-relative path, wildcard captures, and route metadata.

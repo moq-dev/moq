@@ -16,7 +16,7 @@ import type * as Track from "./track.ts";
  * The publishing side of a protected broadcast.
  *
  * Wraps the `@moq/net` broadcast at `Credential.path`. Announce that broadcast with
- * `generation.epoch` as its route's identity ({@link Epoch.identity}) once the tracks a
+ * `generation.epoch` as its route's instance ({@link Epoch.instance}) once the tracks a
  * subscriber needs first exist.
  */
 export class Producer {

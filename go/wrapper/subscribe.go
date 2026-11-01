@@ -60,8 +60,8 @@ func (b *BroadcastConsumer) FetchGroup(
 // Resolve returns the broadcast serving a catalog rendition, built with
 // media.VideoRendition or media.AudioRendition. The rendition's Broadcast reference, nil or
 // empty, names this broadcast; anything else names a sibling relative to it (e.g. "./source").
-// Its Identity is the stream the reference names: a broadcast proven to serve another one
-// errors instead of resolving, while a route over a wire that carries no identity cannot prove
+// Its Instance is the stream the reference names: a broadcast proven to serve another one
+// errors instead of resolving, while a route over a wire that carries no instance cannot prove
 // one, so there it is best effort. Call it on a rendition that carries a reference before SubscribeTrack or
 // FetchGroup, which take a track name rather than a rendition: the rendition's Track, or its ID
 // when nil. The rendition-based media.NewTrackConsumer, media.FetchGroup, audio.Subscribe, and

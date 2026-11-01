@@ -20,7 +20,7 @@ export interface Sequences {
  * Every write on the track and its groups runs through one serial pump, so net writes land in
  * call order.
  *
- * Group sequences only rise under an identity, even across a replacement of the track, so no two
+ * Group sequences only rise under an instance, even across a replacement of the track, so no two
  * groups are signed at the same coordinates. A relay holding an aborted group and a new group at
  * its sequence could otherwise splice their frames into a group that was never published.
  */

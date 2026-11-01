@@ -59,12 +59,12 @@ pub struct Info {
 	/// root: any `..` reference escapes.
 	pub path: crate::Path,
 
-	/// The identity of the route a [`Consumer`] was resolved through, naming the stream
+	/// The instance of the route a [`Consumer`] was resolved through, naming the stream
 	/// it reads.
 	///
 	/// Stamped on every [`Consumer`] an origin resolves, like [`Self::path`]. `None` for a
 	/// handle not resolved through an origin.
-	pub identity: Option<crate::Identity>,
+	pub instance: Option<crate::Instance>,
 
 	// What the frames this broadcast's groups are still receiving may allocate up front,
 	// inherited from the origin handle that created it.
@@ -77,7 +77,7 @@ impl Default for Info {
 			pool: cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)),
 			cache_duration: std::time::Duration::MAX,
 			path: crate::Path::default(),
-			identity: None,
+			instance: None,
 			frames: Default::default(),
 		}
 	}
@@ -278,9 +278,9 @@ impl Producer {
 	}
 
 	/// Advertise this broadcast's exact path as a route, or replace the standing
-	/// advertisement's route. A route naming no identity keeps the broadcast's, so
+	/// advertisement's route. A route naming no instance keeps the broadcast's, so
 	/// `broadcast.announce(Route::default().with_cost(cost))` re-prices it; one naming
-	/// another identity announces a new stream.
+	/// another instance announces a new stream.
 	///
 	/// Until this is called the broadcast exists for nobody: announce cursors do
 	/// not list it and requests for its path fail with [`Error::Unroutable`], for
@@ -652,7 +652,7 @@ impl RequestValidity {
 	}
 
 	/// [`Self::check`] for a request already sent but not yet answered: only another
-	/// identity taking the path refuses it. A withdrawal leaves it to its answer, as
+	/// instance taking the path refuses it. A withdrawal leaves it to its answer, as
 	/// moq-lite has the publisher conclude in-flight requests.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn check_unanswered(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
@@ -922,12 +922,12 @@ impl Consumer {
 		self
 	}
 
-	/// Stamp the identity of the route this handle was resolved through, overriding
-	/// [`Info::identity`].
-	pub(super) fn with_identity(mut self, identity: Option<crate::Identity>) -> Self {
-		if self.info.identity != identity {
+	/// Stamp the instance of the route this handle was resolved through, overriding
+	/// [`Info::instance`].
+	pub(super) fn with_instance(mut self, instance: Option<crate::Instance>) -> Self {
+		if self.info.instance != instance {
 			let mut info = (*self.info).clone();
-			info.identity = identity;
+			info.instance = instance;
 			self.info = Arc::new(info);
 		}
 		self

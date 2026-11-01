@@ -4,7 +4,7 @@
 //! reader joins and leaves drive an origin's fronts on the simulated clock. Every reader's
 //! groups, frames, drops, and end are checked against what one plain cursor on the logical
 //! track would see: every group its range and budget allow, each once, in its order. A
-//! second identity, priced below the first, wins the path while older readers stay on
+//! second instance, priced below the first, wins the path while older readers stay on
 //! theirs until it has no route left, then end with an error.
 //!
 //! `MOQ_RESUME_SEED` and `MOQ_RESUME_CASES` pick the cases; nightly sweeps a fresh seed.
@@ -20,14 +20,14 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed, TestCaseError, TestRunner};
 
 use super::origin::{Producer, Route};
-use crate::{Error, Hop, Hops, Identity, SessionError, StreamError, Timestamp, broadcast, group, origin, track};
+use crate::{Error, Hop, Hops, Instance, SessionError, StreamError, Timestamp, broadcast, group, origin, track};
 
 /// Groups in the logical track; group `g` has `1 + g % 3` frames.
 const GROUPS: u64 = 12;
-/// Routes per identity, cheaper the higher the slot.
+/// Routes per instance, cheaper the higher the slot.
 const SLOTS: usize = 3;
-/// The first identity, then one whose routes all undercut it.
-const IDENTITIES: usize = 2;
+/// The first instance, then one whose routes all undercut it.
+const INSTANCES: usize = 2;
 const READERS: usize = 4;
 const PATH: &str = "room/alice";
 /// A budget nothing in a case outlives.
@@ -39,12 +39,12 @@ fn frames(group: u64) -> usize {
 	1 + (group % 3) as usize
 }
 
-/// Frame `frame` of `group` as identity number `identity` publishes it: every route of one identity carries it.
-fn payload(identity: usize, group: u64, frame: usize) -> Vec<u8> {
-	format!("i{identity}:{group}.{frame}").into_bytes()
+/// Frame `frame` of `group` as instance number `instance` publishes it: every route of one instance carries it.
+fn payload(instance: usize, group: u64, frame: usize) -> Vec<u8> {
+	format!("i{instance}:{group}.{frame}").into_bytes()
 }
 
-fn identity(index: usize) -> Identity {
+fn instance(index: usize) -> Instance {
 	["first", "second"][index].parse().unwrap()
 }
 
@@ -86,31 +86,31 @@ struct Spec {
 enum Op {
 	/// The route announces itself to the origin.
 	Up {
-		identity: usize,
+		instance: usize,
 		slot: usize,
 	},
 	/// The route's session fails, failing its copy.
 	Down {
-		identity: usize,
+		instance: usize,
 		slot: usize,
 	},
 	/// The route's copy gets up to `frames` more frames of `group`, or of the lowest group
 	/// it lacks, finishing the group once complete.
 	Write {
-		identity: usize,
+		instance: usize,
 		slot: usize,
 		group: Option<u64>,
 		frames: usize,
 	},
 	/// The route gives up `group` with a verdict on its content.
 	GiveUp {
-		identity: usize,
+		instance: usize,
 		slot: usize,
 		group: u64,
 	},
 	/// The route's copy declares the track's end, once it holds the last group.
 	End {
-		identity: usize,
+		instance: usize,
 		slot: usize,
 	},
 	Advance {
@@ -153,7 +153,7 @@ fn range() -> impl Strategy<Value = Option<(u64, u64)>> {
 }
 
 fn op() -> impl Strategy<Value = Op> {
-	let route = (0..IDENTITIES, 0..SLOTS);
+	let route = (0..INSTANCES, 0..SLOTS);
 	let spec = (
 		any::<bool>(),
 		prop_oneof![3 => Just(Budget::Hour), 1 => Just(Budget::Short)],
@@ -168,11 +168,11 @@ fn op() -> impl Strategy<Value = Op> {
 		});
 	prop_oneof![
 		30 => (route.clone(), proptest::option::weighted(0.3, 0..GROUPS), 1..=3usize)
-			.prop_map(|((identity, slot), group, frames)| Op::Write { identity, slot, group, frames }),
-		8 => route.clone().prop_map(|(identity, slot)| Op::Up { identity, slot }),
-		6 => route.clone().prop_map(|(identity, slot)| Op::Down { identity, slot }),
-		4 => (route.clone(), 0..GROUPS - 1).prop_map(|((identity, slot), group)| Op::GiveUp { identity, slot, group }),
-		2 => route.prop_map(|(identity, slot)| Op::End { identity, slot }),
+			.prop_map(|((instance, slot), group, frames)| Op::Write { instance, slot, group, frames }),
+		8 => route.clone().prop_map(|(instance, slot)| Op::Up { instance, slot }),
+		6 => route.clone().prop_map(|(instance, slot)| Op::Down { instance, slot }),
+		4 => (route.clone(), 0..GROUPS - 1).prop_map(|((instance, slot), group)| Op::GiveUp { instance, slot, group }),
+		2 => route.prop_map(|(instance, slot)| Op::End { instance, slot }),
 		6 => (1..=200u64).prop_map(|ms| Op::Advance { ms }),
 		1 => Just(Op::Expire),
 		10 => (0..READERS, spec).prop_map(|(reader, spec)| Op::Join { reader, spec }),
@@ -220,7 +220,7 @@ impl Copy {
 
 /// One publisher instance: its routes, and what any of them ever carried.
 #[derive(Default)]
-struct Instance {
+struct Publisher {
 	routes: [Option<Copy>; SLOTS],
 	/// Most frames of each group any route carried.
 	written: BTreeMap<u64, usize>,
@@ -232,7 +232,7 @@ struct Instance {
 	ended: bool,
 }
 
-impl Instance {
+impl Publisher {
 	fn live(&self) -> impl Iterator<Item = &Copy> {
 		self.routes.iter().flatten()
 	}
@@ -320,7 +320,7 @@ fn fail(reader: usize, what: impl std::fmt::Display) -> TestCaseError {
 struct Model {
 	origin: Producer,
 	consumer: origin::Consumer,
-	instances: [Instance; IDENTITIES],
+	instances: [Publisher; INSTANCES],
 	readers: [Option<Reader>; READERS],
 }
 
@@ -343,10 +343,10 @@ impl Model {
 
 	async fn apply(&mut self, op: &Op) -> Result<(), TestCaseError> {
 		match *op {
-			Op::Up { identity, slot } => self.up(identity, slot),
-			Op::Down { identity, slot } => {
-				let instance = &mut self.instances[identity];
-				let Some(copy) = instance.routes[slot].take() else {
+			Op::Up { instance, slot } => self.up(instance, slot),
+			Op::Down { instance, slot } => {
+				let publisher = &mut self.instances[instance];
+				let Some(copy) = publisher.routes[slot].take() else {
 					return Ok(());
 				};
 				copy.serving.abort();
@@ -356,32 +356,32 @@ impl Model {
 					}
 				}
 				let _ = copy.track.abort(route_failure());
-				if instance.live().next().is_none() {
+				if publisher.live().next().is_none() {
 					for reader in self.readers.iter_mut().flatten() {
-						if reader.instance == identity {
+						if reader.instance == instance {
 							reader.doomed = true;
 						}
 					}
 				}
 			}
 			Op::Write {
-				identity,
+				instance,
 				slot,
 				group,
 				frames,
 			} => {
-				let Some(copy) = &self.instances[identity].routes[slot] else {
+				let Some(copy) = &self.instances[instance].routes[slot] else {
 					return Ok(());
 				};
 				let group = group
 					.or_else(|| (0..GROUPS).find(|group| !copy.complete(*group) && !copy.given_up.contains(group)));
 				if let Some(group) = group {
-					self.write(identity, slot, group, frames);
+					self.write(instance, slot, group, frames);
 				}
 			}
-			Op::GiveUp { identity, slot, group } => {
-				let instance = &mut self.instances[identity];
-				let Some(copy) = &mut instance.routes[slot] else {
+			Op::GiveUp { instance, slot, group } => {
+				let publisher = &mut self.instances[instance];
+				let Some(copy) = &mut publisher.routes[slot] else {
 					return Ok(());
 				};
 				if copy.complete(group) || !copy.given_up.insert(group) {
@@ -395,9 +395,9 @@ impl Model {
 					}
 					None => copy.track.drop_groups(group..group + 1, GIVE_UP),
 				}
-				instance.given_up.insert(group);
+				publisher.given_up.insert(group);
 			}
-			Op::End { identity, slot } => self.end(identity, slot),
+			Op::End { instance, slot } => self.end(instance, slot),
 			Op::Advance { ms } => kio::clock::sim::advance(Duration::from_millis(ms)).await,
 			Op::Expire => {
 				kio::clock::sim::advance(Duration::from_secs(60)).await;
@@ -436,18 +436,18 @@ impl Model {
 		Ok(())
 	}
 
-	fn up(&mut self, identity: usize, slot: usize) {
-		if self.instances[identity].routes[slot].is_some() {
+	fn up(&mut self, instance: usize, slot: usize) {
+		if self.instances[instance].routes[slot].is_some() {
 			return;
 		}
 		let mut hops = Hops::new();
-		hops.push(Hop::new(10 * (identity as u64 + 1) + slot as u64).unwrap())
+		hops.push(Hop::new(10 * (instance as u64 + 1) + slot as u64).unwrap())
 			.unwrap();
 		let route = Route::default()
-			.with_identity(self::identity(identity), 0)
+			.with_instance(self::instance(instance), 0)
 			.with_hops(hops)
-			// The second identity's routes all undercut the first's.
-			.with_cost(((IDENTITIES - identity) * SLOTS - slot) as u64);
+			// The second instance's routes all undercut the first's.
+			.with_cost(((INSTANCES - instance) * SLOTS - slot) as u64);
 		let requests = self.origin.requests_route(PATH, route, None).unwrap();
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
@@ -457,7 +457,7 @@ impl Model {
 				request.accept(&upstream);
 			}
 		});
-		self.instances[identity].routes[slot] = Some(Copy {
+		self.instances[instance].routes[slot] = Some(Copy {
 			fills: track.requests(),
 			track,
 			serving,
@@ -468,8 +468,8 @@ impl Model {
 	}
 
 	/// The route's live feed brings up to `more` frames of `group` past what it holds.
-	fn write(&mut self, identity: usize, slot: usize, group: u64, more: usize) {
-		let Some(copy) = &mut self.instances[identity].routes[slot] else {
+	fn write(&mut self, instance: usize, slot: usize, group: u64, more: usize) {
+		let Some(copy) = &mut self.instances[instance].routes[slot] else {
 			return;
 		};
 		if copy.given_up.contains(&group) {
@@ -486,13 +486,13 @@ impl Model {
 			});
 		}
 		let held = parts.iter().map(|part| part.written).max().unwrap_or(0);
-		self.catch_up(identity, slot, group, held.saturating_add(more));
+		self.catch_up(instance, slot, group, held.saturating_add(more));
 	}
 
 	/// Write every open copy of `group` on the route up to frame `until`.
-	fn catch_up(&mut self, identity: usize, slot: usize, group: u64, until: usize) {
-		let instance = &mut self.instances[identity];
-		let Some(parts) = instance.routes[slot]
+	fn catch_up(&mut self, instance: usize, slot: usize, group: u64, until: usize) {
+		let publisher = &mut self.instances[instance];
+		let Some(parts) = publisher.routes[slot]
 			.as_mut()
 			.and_then(|copy| copy.groups.get_mut(&group))
 		else {
@@ -503,14 +503,14 @@ impl Model {
 			let Some(writer) = &mut part.writer else { continue };
 			while part.written < until {
 				let at = Timestamp::from_millis(group * 10 + part.written as u64).unwrap();
-				writer.write_frame(at, payload(identity, group, part.written)).unwrap();
+				writer.write_frame(at, payload(instance, group, part.written)).unwrap();
 				part.written += 1;
 			}
 			if part.written == frames(group) {
 				part.writer.take().unwrap().finish().unwrap();
-				instance.complete.insert(group);
+				publisher.complete.insert(group);
 			}
-			let most = instance.written.entry(group).or_default();
+			let most = publisher.written.entry(group).or_default();
 			*most = (*most).max(part.written);
 		}
 	}
@@ -519,19 +519,19 @@ impl Model {
 	/// so far, which later writes continue, or not found when no route has it yet.
 	fn fill(&mut self) -> bool {
 		let mut filled = false;
-		for identity in 0..IDENTITIES {
+		for instance in 0..INSTANCES {
 			for slot in 0..SLOTS {
-				while let Some(Poll::Ready(Ok(fill))) = self.instances[identity].routes[slot]
+				while let Some(Poll::Ready(Ok(fill))) = self.instances[instance].routes[slot]
 					.as_ref()
 					.map(|copy| copy.fills.poll_requested_fill(&kio::Waiter::noop()))
 				{
 					filled = true;
 					let (start, end) = (fill.start().group, fill.end());
 					for group in start..end.min(GROUPS) {
-						let instance = &mut self.instances[identity];
-						let copy = instance.routes[slot].as_mut().expect("polled above");
+						let publisher = &mut self.instances[instance];
+						let copy = publisher.routes[slot].as_mut().expect("polled above");
 						let from = fill.frame_start(group) as usize;
-						let written = instance.written.get(&group).copied().unwrap_or(0);
+						let written = publisher.written.get(&group).copied().unwrap_or(0);
 						let held = copy.groups.get(&group).into_iter().flatten();
 						if copy.given_up.contains(&group) {
 							fill.refuse_groups(group..group + 1, Error::Stream(GIVE_UP));
@@ -544,7 +544,7 @@ impl Model {
 								written: from,
 								writer: Some(writer),
 							});
-							self.catch_up(identity, slot, group, written);
+							self.catch_up(instance, slot, group, written);
 						}
 					}
 					if end > GROUPS {
@@ -556,13 +556,13 @@ impl Model {
 		filled
 	}
 
-	fn end(&mut self, identity: usize, slot: usize) {
-		let instance = &mut self.instances[identity];
-		let Some(copy) = &instance.routes[slot] else {
+	fn end(&mut self, instance: usize, slot: usize) {
+		let publisher = &mut self.instances[instance];
+		let Some(copy) = &publisher.routes[slot] else {
 			return;
 		};
 		if copy.groups.contains_key(&(GROUPS - 1)) && copy.track.finish().is_ok() {
-			instance.ended = true;
+			publisher.ended = true;
 		}
 	}
 
@@ -571,9 +571,9 @@ impl Model {
 			return Ok(());
 		}
 		// The newest instance with a route wins the path.
-		let Some(expected) = (0..IDENTITIES)
+		let Some(expected) = (0..INSTANCES)
 			.rev()
-			.find(|identity| self.instances[*identity].live().next().is_some())
+			.find(|instance| self.instances[*instance].live().next().is_some())
 		else {
 			return Ok(());
 		};
@@ -582,8 +582,8 @@ impl Model {
 			.request(PATH, None)
 			.await
 			.map_err(|err| fail(index, format!("request failed: {err}")))?;
-		let instance = (0..IDENTITIES)
-			.find(|identity| broadcast.info().identity.as_ref() == Some(&self::identity(*identity)))
+		let instance = (0..INSTANCES)
+			.find(|instance| broadcast.info().instance.as_ref() == Some(&self::instance(*instance)))
 			.ok_or_else(|| fail(index, "resolved no known instance"))?;
 		if instance != expected {
 			return Err(fail(
@@ -793,13 +793,13 @@ impl Model {
 			.iter()
 			.map(|reader| reader.as_ref().and_then(|reader| reader.handed.iter().max().copied()))
 			.collect();
-		for identity in 0..IDENTITIES {
+		for instance in 0..INSTANCES {
 			for slot in 0..SLOTS {
 				for group in 0..GROUPS {
-					self.write(identity, slot, group, usize::MAX);
+					self.write(instance, slot, group, usize::MAX);
 				}
 				if finish {
-					self.end(identity, slot);
+					self.end(instance, slot);
 				}
 			}
 		}
@@ -934,7 +934,7 @@ fn unchanged_routes_keep_groups_owed() {
 		let mut model = Model::new();
 		model.up(0, 0);
 		let ops = [
-			Op::Up { identity: 0, slot: 2 },
+			Op::Up { instance: 0, slot: 2 },
 			Op::Join {
 				reader: 0,
 				spec: Spec {
@@ -945,17 +945,17 @@ fn unchanged_routes_keep_groups_owed() {
 				},
 			},
 			Op::Write {
-				identity: 0,
+				instance: 0,
 				slot: 2,
 				group: Some(8),
 				frames: 1,
 			},
 			// Repeated, absent, and standby routes.
-			Op::Up { identity: 0, slot: 2 },
-			Op::Down { identity: 0, slot: 1 },
-			Op::Up { identity: 0, slot: 1 },
-			Op::Down { identity: 0, slot: 1 },
-			Op::Down { identity: 0, slot: 0 },
+			Op::Up { instance: 0, slot: 2 },
+			Op::Down { instance: 0, slot: 1 },
+			Op::Up { instance: 0, slot: 1 },
+			Op::Down { instance: 0, slot: 1 },
+			Op::Down { instance: 0, slot: 0 },
 		];
 		for op in &ops {
 			model.apply(op).await.unwrap();
@@ -987,13 +987,13 @@ fn regressions() {
 		// An ordered reader ends once the rest of its range was given up.
 		Case {
 			ops: vec![
-				Op::Up { identity: 1, slot: 2 },
+				Op::Up { instance: 1, slot: 2 },
 				Op::Join {
 					reader: 0,
 					spec: spec(true, Budget::Hour, Some((0, 8)), false),
 				},
 				Op::GiveUp {
-					identity: 1,
+					instance: 1,
 					slot: 2,
 					group: 7,
 				},
@@ -1008,7 +1008,7 @@ fn regressions() {
 					spec: spec(false, Budget::Hour, Some((11, 12)), true),
 				},
 				Op::Write {
-					identity: 0,
+					instance: 0,
 					slot: 0,
 					group: None,
 					frames: 1,
@@ -1028,14 +1028,14 @@ fn regressions() {
 					spec: spec(false, Budget::Short, None, true),
 				},
 				Op::Write {
-					identity: 0,
+					instance: 0,
 					slot: 0,
 					group: None,
 					frames: 1,
 				},
-				Op::Up { identity: 0, slot: 2 },
+				Op::Up { instance: 0, slot: 2 },
 				Op::Write {
-					identity: 0,
+					instance: 0,
 					slot: 2,
 					group: Some(6),
 					frames: 1,
@@ -1051,13 +1051,13 @@ fn regressions() {
 					spec: spec(false, Budget::Hour, None, false),
 				},
 				Op::Write {
-					identity: 0,
+					instance: 0,
 					slot: 0,
 					group: Some(1),
 					frames: 1,
 				},
-				Op::Up { identity: 0, slot: 1 },
-				Op::Down { identity: 0, slot: 1 },
+				Op::Up { instance: 0, slot: 1 },
+				Op::Down { instance: 0, slot: 1 },
 			],
 			finish: false,
 		},
@@ -1069,14 +1069,14 @@ fn regressions() {
 					spec: spec(false, Budget::Hour, Some((4, 10)), false),
 				},
 				Op::Write {
-					identity: 0,
+					instance: 0,
 					slot: 0,
 					group: Some(4),
 					frames: 1,
 				},
-				Op::Up { identity: 0, slot: 1 },
+				Op::Up { instance: 0, slot: 1 },
 				Op::Ranges { reader: 1, range: None },
-				Op::Down { identity: 0, slot: 0 },
+				Op::Down { instance: 0, slot: 0 },
 			],
 			finish: false,
 		},

@@ -48,14 +48,14 @@ async function publish(key: SecretKey, path: Path.Valid) {
 	const net = await session();
 	const publication = net.publisher.createBroadcast(path);
 	const signed = new Signed.Producer(publication.broadcast, key, path);
-	publication.announce({ identity: signed.identity });
+	publication.announce({ instance: signed.instance });
 	return {
 		...net,
 		signed,
 		/** A signed track over a net track the test can also write forged frames to. */
 		track(name: string) {
 			const raw = publication.broadcast.createTrack(name);
-			return { signed: Track.Producer.make(raw, key, new Scope(path, signed.identity, name), { next: 0 }), raw };
+			return { signed: Track.Producer.make(raw, key, new Scope(path, signed.instance, name), { next: 0 }), raw };
 		},
 		async consume(expected: PublicKey): Promise<Signed.Consumer> {
 			return new Signed.Consumer(await active(net.subscriber, path), expected, path);
@@ -80,7 +80,7 @@ test("frames roundtrip signed, timestamps included", async () => {
 	await group.writeFrame(Time.Timestamp.fromMicros(2_400), new Uint8Array());
 
 	const consumer = await published.consume(key.public);
-	expect(consumer.identity).toBe(published.signed.identity);
+	expect(consumer.instance).toBe(published.signed.instance);
 	const track = consumer.subscribe("video", subscription);
 	const received = await track.recvGroup();
 	const first = await received?.readFrame();
@@ -180,7 +180,7 @@ test("a group sequence is never signed twice", async () => {
 	expect(track.createGroup(5).sequence).toBe(5);
 	expect(() => track.createGroup(3)).toThrow("duplicate group");
 
-	// A replacement track continues past its predecessor's sequences under the same identity.
+	// A replacement track continues past its predecessor's sequences under the same instance.
 	track.abort(new Error("replaced"));
 	const replacement = published.signed.createTrack("stream");
 	expect(() => replacement.createGroup(0)).toThrow("duplicate group");

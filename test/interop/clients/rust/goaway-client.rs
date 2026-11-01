@@ -1,4 +1,4 @@
-//! Follow a real JS QMux server's redirect, on a wire without identities, through its replacement announcement.
+//! Follow a real JS QMux server's redirect, on a wire without instances, through its replacement announcement.
 use std::process::Stdio;
 
 use anyhow::{Context, ensure};

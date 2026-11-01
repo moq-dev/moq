@@ -53,7 +53,7 @@ its `peek()` or `changed()` methods; session statistics do not request PROBE.
 Both libraries offer solicit and auth unless a side's
 `extensions` setting declines one, which connects it as a peer that does not
 speak that extension. The pooled JavaScript `Connection` has no such setting yet.
-moq-transport carries no [stream identity](/concept/moq-lite#stream-identities),
+moq-transport carries no [stream instance](/concept/moq-lite#stream-instances),
 so the receiving session mints one per announcement; the
 [epoch draft](/draft/moq-epoch) remains an unimplemented proposal.
 [ietf](/draft/moq-ietf) goes the other way: it extends moq-lite-07 to carry this
@@ -77,7 +77,7 @@ choices. They follow the product model.
   [Draft 16 §8.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-16.html#section-8.5)
   requires the relay to send that `SUBSCRIBE` to all matching publishers. See
   [choosing a route](/concept/identity#choosing-a-route) for how that one
-  route is chosen. moq-transport carries no stream identity, so a relay mints
+  route is chosen. moq-transport carries no stream instance, so a relay mints
   one for each namespace it receives.
 
 - **Plain readers leave object and track properties out.**

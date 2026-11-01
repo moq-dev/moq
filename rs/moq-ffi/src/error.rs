@@ -366,9 +366,9 @@ pub enum MoqError {
 		reason: String,
 	},
 
-	/// An identity was empty.
+	/// An instance was empty.
 	#[error("{reason}")]
-	InvalidIdentity {
+	InvalidInstance {
 		/// A diagnostic message describing the failure.
 		reason: String,
 	},
@@ -533,7 +533,7 @@ from_message! {
 	tracing::metadata::ParseLevelError => LogLevel,
 	serde_json::Error => Json,
 	moq_net::InvalidPattern => InvalidPattern,
-	moq_net::InvalidIdentity => InvalidIdentity,
+	moq_net::InvalidInstance => InvalidInstance,
 }
 
 from_message! {

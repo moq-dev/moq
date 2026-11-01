@@ -8,7 +8,7 @@ use std::task::Poll;
 
 use kio::clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Tier, Traffic, TrafficEntry};
-use moq_net::{Identity, Path, broadcast, kio, origin, track};
+use moq_net::{Instance, Path, broadcast, kio, origin, track};
 use serde::Serialize;
 use tracing::Instrument as _;
 
@@ -32,7 +32,7 @@ pub struct Config {
 	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
 	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
-	/// `node` is unset), announced under a fresh [`Identity`] each time. Also the
+	/// `node` is unset), announced under a fresh [`Instance`] each time. Also the
 	/// registry's exclude prefix, so serving a stats broadcast doesn't generate
 	/// more stats.
 	pub prefix: Path,
@@ -797,7 +797,7 @@ struct GroupTrack {
 #[derive(Serialize)]
 struct GroupBody {
 	#[serde_as(as = "serde_with::DisplayFromStr")]
-	epoch: Identity,
+	epoch: Instance,
 	tiers: Frame<GroupTier>,
 }
 
@@ -956,7 +956,7 @@ impl NodePublisher {
 		let advertised = advertised_path(&task.prefix, task.node.as_ref())
 			.inspect_err(|err| tracing::warn!(%err, "stats: node path too long"))
 			.ok()?;
-		// A fresh identity per announcement: a restart is a new broadcast, so no relay
+		// A fresh instance per announcement: a restart is a new broadcast, so no relay
 		// resumes it from groups cached under the old one.
 		let route = origin::Route::default();
 		let broadcast = match task.origin.publish(&advertised, route) {
@@ -1944,7 +1944,7 @@ mod tests {
 	/// A producer restarted on the same origin ends its old epoch and announces
 	/// the same path under a new one.
 	#[tokio::test(start_paused = true)]
-	async fn restarted_producer_announces_a_new_identity() {
+	async fn restarted_producer_announces_a_new_instance() {
 		let origin = produce_origin();
 		let mut events = origin.consume().with_hidden(true).announced();
 
@@ -1965,7 +1965,7 @@ mod tests {
 			panic!("expected one announce");
 		};
 		assert_eq!(after_path, path);
-		assert_ne!(after, before, "a restart mints a new identity");
+		assert_ne!(after, before, "a restart mints a new instance");
 	}
 
 	/// A restart while the old instance is still announced (a route the mesh
@@ -2229,11 +2229,11 @@ mod tests {
 
 	/// The announce events buffered so far in delivery order, as
 	/// `(path, active, epoch)`. Every stats route carries an epoch.
-	fn take_epochs(events: &mut announce::Consumer) -> Vec<(String, bool, Identity)> {
+	fn take_epochs(events: &mut announce::Consumer) -> Vec<(String, bool, Instance)> {
 		use futures::FutureExt;
 		let mut out = Vec::new();
 		while let Some(Some((update, active))) = next_update(events).now_or_never() {
-			let epoch = update.route.identity.expect("a stats route carries an identity");
+			let epoch = update.route.instance.expect("a stats route carries an instance");
 			out.push((update.prefix.as_str().to_string(), active, epoch));
 		}
 		out

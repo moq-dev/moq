@@ -114,7 +114,7 @@ export namespace Health {
 		unhealthy: number;
 	}
 	export interface Observer {
-		identity?: Net.Identity.Valid;
+		instance?: Net.Instance.Valid;
 		path: Net.Path.Valid;
 	}
 	export interface Rendition {

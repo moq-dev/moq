@@ -96,7 +96,7 @@ instead when an MPEG-TS clock steps onto another timeline: the PCR and every
 stream stepping back, flagged or not, or more than 10 s forward without a
 `discontinuity_indicator`. The broadcast finishes there, and the rest of the
 input publishes as a new stream under a new
-[identity](/concept/moq-lite#stream-identities), on the same SRT connection, which
+[instance](/concept/moq-lite#stream-instances), on the same SRT connection, which
 `export ts --stitch --follow` carries on into. The new stream keeps the mux
 rate the old one measured, so its catalog goes out with its first media rather
 than after a fresh two-second measurement. An unflagged step usually means
@@ -254,7 +254,7 @@ closes. Playback starts when the name is announced. A
 [restarted publisher](#publisher-runs) starts it over on the new run, with a
 fresh catalog, decoders, and clock. When the announcement ends, what is playing
 finishes and the player waits for the name to return. The log names each run's
-identity. A refused broadcast request or a catalog with nothing this build can
+instance. A refused broadcast request or a catalog with nothing this build can
 play ends the player.
 
 Playback is behind the `play` feature, since it pulls in windowing and
@@ -368,25 +368,25 @@ equivalents.
 moq --connect https://relay.example.com/anon --broadcast event export archive s3://recordings
 
 # Replay one recorded broadcast under another name
-moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<identity>
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<instance>
 ```
 
 `export archive` records every broadcast announced at or under `--broadcast`
 with [moq-archive](https://docs.rs/moq-archive), each stream under
-`<broadcast>/@<identity>` in the store, until the connection ends. Like
+`<broadcast>/@<instance>` in the store, until the connection ends. Like
 `announced`, it leaves out a broadcast whose name starts with `.` unless
 `--broadcast` names it. A broadcast path segment that starts with `@` is
 stored as `%40`, so no recording lands inside another. Every track is stored as its own objects, cut about every 2 s
 of media (or wall clock for an [untimed](/concept/moq-lite#subscriptions)
 track) and at least every 4 s, splitting a long group between frames. A broadcast restarted under a new
-[identity](/concept/moq-lite#stream-identities) records under its own key; a route
-over an older wire gets a fresh identity each time it announces, so it never
+[instance](/concept/moq-lite#stream-instances) records under its own key; a route
+over an older wire gets a fresh instance each time it announces, so it never
 resumes or stitches into an older recording. Any recording that fails ends the export.
 `--retention 1h` keeps only the last hour, a DVR, deleting older objects
 `--retention-grace` (default 30 s) after they leave the window.
 
-`import archive` republishes one recorded broadcast, the `<broadcast>/@<identity>`
-prefix `export archive` wrote, as an ordinary broadcast under a new identity: every
+`import archive` republishes one recorded broadcast, the `<broadcast>/@<instance>`
+prefix `export archive` wrote, as an ordinary broadcast under a new instance: every
 track, the catalog included, with its original groups, frames, timescale, and
 priority. Each track is live from its newest stored group and serves older
 groups from the store on request, with no max age, so the whole recording stays
@@ -414,20 +414,20 @@ moq --connect https://relay.example.com/anon \
 ## Publisher runs
 
 Each run of `moq` announces under a fresh random
-[identity](/concept/moq-lite#stream-identities), kept across reconnects.
+[instance](/concept/moq-lite#stream-instances), kept across reconnects.
 The RTMP, SRT, and WHIP ingests mint one per connection instead, `import
 rtsp` one per RTSP session, and `import ts --program all` one per program.
 No importer continues its group sequences across a restart, so none takes a
-stable identity.
+stable instance.
 
 A restarted process takes the name at once: viewers see the broadcast restart,
 and their next subscribe reaches the new run instead of waiting for its group
 numbers to catch up. A relay ranks the route that entered it for exactly the
 path newest first at an equal cost, so the restart wins over the old run's
-lingering session. Identities cross a connection only on moq-lite 07, which is
+lingering session. Instances cross a connection only on moq-lite 07, which is
 opt-in; over other versions the receiving session mints one per announcement.
 
-Each independent importer publishes its own identity, even when two importers
+Each independent importer publishes its own instance, even when two importers
 read one stream and publish one path. See [Redundant ingest](/setup/redundancy) for
 same-path switching, subscriber-controlled selection on separate paths, and
 several routes to one publisher.
@@ -489,7 +489,7 @@ import does the same at a clean end: an RTMP unpublish (`deleteStream`) or
 completed play, the end of an SRT stream, a WHIP `DELETE`, or an HLS playlist
 ending with `EXT-X-ENDLIST`. A dropped connection or an error closes the
 broadcast at once. A reconnect publishes a new
-[identity](/concept/moq-lite#stream-identities) at the same path, which takes over
+[instance](/concept/moq-lite#stream-instances) at the same path, which takes over
 the path while the old broadcast finishes its linger. `import rtsp` redials
 after every session, so it closes each run at once and refuses `--linger`, as
 do `import archive`, `import capture`, and a WHEP pull (`import rtc --connect`).
@@ -529,7 +529,7 @@ on with the same stream. A return that refuses its catalog keeps it waiting
 for the next announcement; if the follow runs out first, it exits 1 with that
 refusal. One that goes before serving, such as one still routed through a dead
 session, is no return. A replacement (a restarted publisher, under a new
-[identity](/concept/moq-lite#stream-identities)) exits 1 unless `--stitch` follows
+[instance](/concept/moq-lite#stream-instances)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
 the break. A stitch waits for the replacement's first catalog snapshot until it
 arrives or the replacement goes, keeping the old publisher playing meanwhile,
@@ -541,9 +541,9 @@ congested link. The marked switch drops the old instance's buffered tail, so
 the replacement plays at `--delay` rather than behind it. An unimpaired switch
 usable within that window adds no gap. Congestion can starve the old instance
 sooner or leave the replacement acquiring past the window, causing a gap.
-Timestamps across identities are not aligned. Without `--stitch` the export
+Timestamps across instances are not aligned. Without `--stitch` the export
 stays on the old publisher while it is up. Only lite-07 sessions carry
-identities, so on the default version every return is a replacement. A failure other than the
+instances, so on the default version every return is a replacement. A failure other than the
 publisher leaving, such as a codec TS cannot carry, exits 1 at once. Only `ts`
 can mark a break, so the other formats refuse `--linger`, the released spelling
 of `--follow`.

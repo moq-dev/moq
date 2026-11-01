@@ -398,7 +398,7 @@ fn overflow_is_unreachable() {
 
 // Forwarding progress: path-only requests reselect the origin at every hop.
 
-/// Three relays in a ring, each next to its own importer of one identity, and each
+/// Three relays in a ring, each next to its own importer of one instance, and each
 /// giving its clockwise link `priority`.
 fn priority_ring(priority: i8) -> Net {
 	let mut net = Net::new(Config::default(), 6);
@@ -459,7 +459,7 @@ fn aggregation_cycles_starve_without_a_forwarding_constraint() {
 	}
 }
 
-/// Under another identity, the serving identity is the instance. A relay that picks
+/// Under another instance, the serving identity is the instance. A relay that picks
 /// another unnamed origin within the requester's bound splices a different
 /// publisher under the requester's announced one, with no Restart. Only a
 /// request naming the identity keeps the instance the requester announced.

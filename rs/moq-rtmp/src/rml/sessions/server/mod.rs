@@ -708,7 +708,7 @@ impl ServerSession {
 			_ => Vec::new(),
 		};
 
-		// A connection carries one publisher identity or one playback, never a replacement.
+		// A connection carries one publisher instance or one playback, never a replacement.
 		stream.current_state = StreamState::Completed;
 		self.current_state = SessionState::Completed;
 		self.request = None;

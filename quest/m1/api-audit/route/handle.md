@@ -32,14 +32,14 @@ lifetime, across withdraw, re-announce and reconnects, because it owns the
 same broadcast and its sequences continue. A new run is a new `Route`. Apps
 pass only options: visibility at creation, `cost`, `auth`, and a stable
 `identity` for a publisher that keeps its sequence space across restarts
-(see [Identity and epoch](https://github.com/moq-dev/moq/pull/7489)). Setting
+(see [Instance and epoch](https://github.com/moq-dev/moq/pull/7489)). Setting
 an identity grants no more than a minted one does: publishing still
 requires the path's grant. A route exposes its own identity (`route.identity()`), so the OBS dock can
 show it again. Hops, via, source and the anonymous mark become
 read-only facts on a received announcement, and `Hop`, `Hops` and
 `HopLimit` leave the public API.
 
-Non-goals: the identity model ([Identity and epoch](https://github.com/moq-dev/moq/pull/7489)),
+Non-goals: the instance model ([Instance and epoch](https://github.com/moq-dev/moq/pull/7489)),
 announce events ([Listing and follow](/quest/m1/api-audit/route/events.md)),
 the read side, which identity owns, and the route layer's wire metric
 ([Routes and announces](/quest/m1/cluster-routing/routes.md)).

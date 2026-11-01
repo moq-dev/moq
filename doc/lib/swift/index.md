@@ -83,7 +83,7 @@ let video = try Video.Producer(
     track: "camera"
 )
 try video.write(VideoFrame(timestampUs: pts, data: rgba))
-try publication.announce(route: AnnounceRoute()) // the broadcast mints its own identity
+try publication.announce(route: AnnounceRoute()) // the broadcast mints its own instance
 try audio.finish()
 try video.finish()
 try broadcast.close()

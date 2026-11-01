@@ -260,11 +260,11 @@ async fn run(config: &Config) -> Result<()> {
 	let broadcast = publish_origin
 		.create_broadcast(&broadcast_path)
 		.context("failed to create broadcast")?;
-	let identity = moq_net::Identity::random();
+	let instance = moq_net::Instance::random();
 	broadcast
-		.announce(moq_net::origin::Route::default().with_identity(identity.clone(), 0))
+		.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
 		.context("failed to announce broadcast")?;
-	tracing::info!(broadcast = %broadcast_path, %identity, "announced");
+	tracing::info!(broadcast = %broadcast_path, %instance, "announced");
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
 	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"

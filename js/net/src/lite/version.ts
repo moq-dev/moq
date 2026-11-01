@@ -12,7 +12,7 @@ export const Version = {
 	/// Also adds frame-precise subscribe/fetch bounds and a GROUP frame offset.
 	DRAFT_06: 0xff0dad06,
 	/// Work-in-progress lite-07, only negotiated when explicitly offered.
-	/// Adds the ANNOUNCE_REQUEST hidden opt-in, the stream identity, and the Auth Stream.
+	/// Adds the ANNOUNCE_REQUEST hidden opt-in, the stream instance, and the Auth Stream.
 	DRAFT_07: 0xff0dad07,
 } as const;
 
@@ -411,10 +411,10 @@ export function hasAnnounceTakeover(version: Version): boolean {
 	return hasAnnounceRestart(version);
 }
 
-/** Whether announcements carry their identity and epoch, and TRACK, TRACKS, SUBSCRIBE, and FETCH
- * the identity they pin. Added in lite-07. Older versions carry nothing, so the receiving session
- * mints an identity for each announcement. */
-export function hasIdentity(version: Version): boolean {
+/** Whether announcements carry their instance and epoch, and TRACK, TRACKS, SUBSCRIBE, and FETCH
+ * the instance they pin. Added in lite-07. Older versions carry nothing, so the receiving session
+ * mints an instance for each announcement. */
+export function hasInstance(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:

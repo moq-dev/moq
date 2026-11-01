@@ -161,7 +161,7 @@ async fn custom_selected_catalog_drives_export_and_follow() {
 	for payload in [b"first".as_slice(), b"next".as_slice()] {
 		let broadcast = origin.create_broadcast("live").unwrap();
 		broadcast
-			.announce(moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0))
+			.announce(moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0))
 			.unwrap();
 		let mut snapshot = Catalog::default();
 		let mut producers = Vec::new();
@@ -225,7 +225,7 @@ async fn a_follower_keeps_msf_after_catalog_eof() {
 	use std::task::Poll;
 
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
+	let instance = moq_net::Instance::random();
 	let publish = || {
 		let broadcast = origin.create_broadcast("live").unwrap();
 		let track = broadcast
@@ -236,7 +236,7 @@ async fn a_follower_keeps_msf_after_catalog_eof() {
 		group.write_frame(moq_net::Timestamp::now(), msf).unwrap();
 		group.finish().unwrap();
 		broadcast
-			.announce(moq_net::origin::Route::default().with_identity(identity.clone(), 0))
+			.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
 			.unwrap();
 		(broadcast, track)
 	};
@@ -8762,8 +8762,8 @@ fn unflagged(frames: &[Frame]) -> Vec<u16> {
 /// gap the clock spans. Both ways a broadcast ends, a clean finish and a drop, continue alike.
 async fn same_instance_returns(finish: bool) {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let route = || moq_net::origin::Route::default().with_identity(identity.clone(), 0);
+	let instance = moq_net::Instance::random();
+	let route = || moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route());
 	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
@@ -8786,7 +8786,7 @@ async fn same_instance_returns(finish: bool) {
 	frames.extend(rest);
 	assert_eq!(end.is_ok(), finish, "a finish ends cleanly and a drop fails: {end:?}");
 
-	// Back under the same identity a second later, its media as far on as the wall clock, its
+	// Back under the same instance a second later, its media as far on as the wall clock, its
 	// catalog listing the track only in its second snapshot.
 	kio::clock::sleep(Duration::from_secs(1)).await;
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route());
@@ -8843,8 +8843,8 @@ async fn a_return_keeps_catalog_and_group_history() {
 	crate::clock::fake_host_wall(wall);
 	let start = kio::clock::now();
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let route = moq_net::origin::Route::default().with_identity(identity.clone(), 0);
+	let instance = moq_net::Instance::random();
+	let route = moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route.clone());
 	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let mut groups = track.consume();
@@ -8876,7 +8876,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 		.available()
 		.await
 		.unwrap();
-	assert_eq!(back.info().identity.as_ref(), Some(&identity));
+	assert_eq!(back.info().instance.as_ref(), Some(&instance));
 	assert!(!back.is_clone(&old), "the withdrawn front is replaced");
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
@@ -8906,7 +8906,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 #[tokio::test(start_paused = true)]
 async fn a_switch_carries_through_an_instance_that_never_built_its_tables() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
@@ -8964,7 +8964,7 @@ async fn a_switch_carries_through_an_instance_that_never_built_its_tables() {
 #[tokio::test(start_paused = true)]
 async fn another_instance_is_a_full_program_switch() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
@@ -9068,7 +9068,7 @@ async fn another_instance_is_a_full_program_switch() {
 #[tokio::test(start_paused = true)]
 async fn a_switch_moving_the_pmt_advances_the_pat() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let publish = |pmt_pid: u16| {
 		let (broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
 		let track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
@@ -9122,8 +9122,8 @@ async fn a_switch_moving_the_pmt_advances_the_pat() {
 #[tokio::test(start_paused = true)]
 async fn export_stats_count_only_returned_output() {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let route = || moq_net::origin::Route::default().with_identity(identity.clone(), 0);
+	let instance = moq_net::Instance::random();
+	let route = || moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 	let units = |stats: stats::Export| stats.streams.values().map(|row| row.units).sum::<u64>() as usize;
 
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route());
@@ -9479,12 +9479,12 @@ async fn large_pmt(streams: u16, mux_rate: Option<u64>) -> usize {
 /// Publish a catalog-only broadcast at `live`, for a test of what follows its end.
 fn publish_bare(
 	origin: &moq_net::origin::Producer,
-	identity: Option<&moq_net::Identity>,
+	instance: Option<&moq_net::Instance>,
 ) -> (moq_net::origin::Publication, crate::catalog::Producer<()>) {
 	let route = moq_net::origin::Route::default();
 	publish_live::<()>(
 		origin,
-		identity.map_or(route.clone(), |identity| route.with_identity(identity.clone(), 0)),
+		instance.map_or(route.clone(), |instance| route.with_instance(instance.clone(), 0)),
 	)
 }
 
@@ -9511,7 +9511,7 @@ async fn a_follower_fails_at_once_on_its_own_failure() {
 	];
 	for cause in causes {
 		let origin = crate::source::produce_origin();
-		let (broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Identity::random()));
+		let (broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Instance::random()));
 		let track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 		let mut follower = follower(&origin).await.with_follow(Duration::from_secs(10));
 		assert!(
@@ -9546,7 +9546,7 @@ async fn a_follower_waits_out_the_follow_on_a_lost_route() {
 	];
 	for cause in causes {
 		let origin = crate::source::produce_origin();
-		let (broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Identity::random()));
+		let (broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Instance::random()));
 		let track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 		let follow = Duration::from_secs(10);
 		let mut follower = follower(&origin).await.with_follow(follow);
@@ -9574,7 +9574,7 @@ async fn a_follower_waits_out_the_follow_on_a_lost_route() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_awaits_a_replacement_catalog_past_the_follow() {
 	let origin = crate::source::produce_origin();
-	let first = publish_bare(&origin, Some(&moq_net::Identity::random()));
+	let first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow).with_stitch(true);
 	finish(first);
@@ -9589,7 +9589,7 @@ async fn a_follower_awaits_a_replacement_catalog_past_the_follow() {
 	let second = origin
 		.publish(
 			"live",
-			moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0),
+			moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0),
 		)
 		.unwrap();
 	let unanswered = second.requests();
@@ -9611,8 +9611,8 @@ async fn a_follower_awaits_a_replacement_catalog_past_the_follow() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_awaits_a_return_catalog_until_it_fails() {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let first = publish_bare(&origin, Some(&identity));
+	let instance = moq_net::Instance::random();
+	let first = publish_bare(&origin, Some(&instance));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow);
 	finish(first);
@@ -9624,7 +9624,7 @@ async fn a_follower_awaits_a_return_catalog_until_it_fails() {
 	);
 
 	let second = origin
-		.publish("live", moq_net::origin::Route::default().with_identity(identity, 0))
+		.publish("live", moq_net::origin::Route::default().with_instance(instance, 0))
 		.unwrap();
 	let silent = second.create_track(hang::Catalog::DEFAULT_NAME, None).unwrap();
 	assert!(
@@ -9645,8 +9645,8 @@ async fn a_follower_awaits_a_return_catalog_until_it_fails() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_keeps_following_when_a_return_goes_before_it_resolves() {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let first = publish_bare(&origin, Some(&identity));
+	let instance = moq_net::Instance::random();
+	let first = publish_bare(&origin, Some(&instance));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow);
 	let start = kio::clock::now();
@@ -9660,7 +9660,7 @@ async fn a_follower_keeps_following_when_a_return_goes_before_it_resolves() {
 
 	// Back, but its catalog request is never answered before it goes again.
 	let second = origin
-		.publish("live", moq_net::origin::Route::default().with_identity(identity, 0))
+		.publish("live", moq_net::origin::Route::default().with_instance(instance, 0))
 		.unwrap();
 	let unanswered = second.requests();
 	assert!(
@@ -9678,13 +9678,13 @@ async fn a_follower_keeps_following_when_a_return_goes_before_it_resolves() {
 	assert_eq!(start.elapsed(), follow);
 }
 
-/// Announce `identity` at `live`, refusing every track request with `NotFound` until the
+/// Announce `instance` at `live`, refusing every track request with `NotFound` until the
 /// returned task is aborted, which ends the broadcast.
-fn publish_refusing(origin: &moq_net::origin::Producer, identity: &moq_net::Identity) -> tokio::task::JoinHandle<()> {
+fn publish_refusing(origin: &moq_net::origin::Producer, instance: &moq_net::Instance) -> tokio::task::JoinHandle<()> {
 	let broadcast = origin
 		.publish(
 			"live",
-			moq_net::origin::Route::default().with_identity(identity.clone(), 0),
+			moq_net::origin::Route::default().with_instance(instance.clone(), 0),
 		)
 		.unwrap();
 	let mut dynamic = broadcast.requests();
@@ -9701,7 +9701,7 @@ fn publish_refusing(origin: &moq_net::origin::Producer, identity: &moq_net::Iden
 #[tokio::test(start_paused = true)]
 async fn a_follower_keeps_following_through_a_refused_return() {
 	let origin = crate::source::produce_origin();
-	let first = publish_bare(&origin, Some(&moq_net::Identity::random()));
+	let first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow).with_stitch(true);
 	let start = kio::clock::now();
@@ -9714,7 +9714,7 @@ async fn a_follower_keeps_following_through_a_refused_return() {
 	);
 
 	// Replaced, but the replacement refuses its catalog request.
-	let refusing = publish_refusing(&origin, &moq_net::Identity::random());
+	let refusing = publish_refusing(&origin, &moq_net::Instance::random());
 	assert!(
 		kio::clock::timeout(Duration::from_secs(2), follower.next())
 			.await
@@ -9723,7 +9723,7 @@ async fn a_follower_keeps_following_through_a_refused_return() {
 	);
 	refusing.abort();
 
-	let mut second = publish_bare(&origin, Some(&moq_net::Identity::random()));
+	let mut second = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	std::ops::DerefMut::deref_mut(&mut second.1.modify().unwrap());
 	assert!(
 		kio::clock::timeout(Duration::from_secs(1), follower.next())
@@ -9743,8 +9743,8 @@ async fn a_follower_keeps_following_through_a_refused_return() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_reports_a_refused_return_at_the_follow() {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let first = publish_bare(&origin, Some(&identity));
+	let instance = moq_net::Instance::random();
+	let first = publish_bare(&origin, Some(&instance));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow);
 	let start = kio::clock::now();
@@ -9756,7 +9756,7 @@ async fn a_follower_reports_a_refused_return_at_the_follow() {
 			.is_err(),
 		"following"
 	);
-	let _refusing = publish_refusing(&origin, &identity);
+	let _refusing = publish_refusing(&origin, &instance);
 	let end = kio::clock::timeout(follow * 3, follower.next())
 		.await
 		.expect("the follow bounds the wait");
@@ -9772,8 +9772,8 @@ async fn a_follower_reports_a_refused_return_at_the_follow() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_resolves() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
-	let first = publish_bare(&origin, Some(&moq_net::Identity::random()));
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
+	let first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let mut follower = follower(&origin)
 		.await
 		.with_stitch(true)
@@ -9789,7 +9789,7 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 		"resolving the replacement"
 	);
 	drop((second, unanswered));
-	let mut third = publish_bare(&origin, Some(&moq_net::Identity::random()));
+	let mut third = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	std::ops::DerefMut::deref_mut(&mut third.1.modify().unwrap());
 	assert!(
 		kio::clock::timeout(Duration::from_secs(1), follower.next())
@@ -9814,8 +9814,8 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 #[tokio::test(start_paused = true)]
 async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let first = publish_bare(&origin, Some(&identity));
+	let instance = moq_net::Instance::random();
+	let first = publish_bare(&origin, Some(&instance));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow).with_stitch(true);
 	let start = kio::clock::now();
@@ -9828,7 +9828,7 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	);
 
 	// Back, with a catalog yet to deliver its first snapshot.
-	let second = publish_bare(&origin, Some(&identity));
+	let second = publish_bare(&origin, Some(&instance));
 	assert!(
 		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
@@ -9840,7 +9840,7 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	let third = origin
 		.publish(
 			"live",
-			moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0),
+			moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0),
 		)
 		.unwrap();
 	let unanswered = third.requests();
@@ -9863,8 +9863,8 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 #[tokio::test(start_paused = true)]
 async fn a_return_after_an_abandoned_switch_restores_priority() {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let (old, mut old_catalog) = publish_bare(&origin, Some(&identity));
+	let instance = moq_net::Instance::random();
+	let (old, mut old_catalog) = publish_bare(&origin, Some(&instance));
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
 	write_aac(&mut old_audio, 0);
 	let export = open_export(crate::source::resolved(&origin, "live").await)
@@ -9886,7 +9886,7 @@ async fn a_return_after_an_abandoned_switch_restores_priority() {
 	let replacement = origin
 		.publish(
 			"live",
-			moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0),
+			moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0),
 		)
 		.unwrap();
 	let unanswered = replacement.requests();
@@ -9898,12 +9898,12 @@ async fn a_return_after_an_abandoned_switch_restores_priority() {
 	);
 
 	// The old program ends mid-switch. The replacement goes without serving its catalog,
-	// allowing the older identity to serve again.
+	// allowing the older instance to serve again.
 	old_audio.finish().unwrap();
 	finish((old, old_catalog));
 	pump(&mut follower).await;
 	drop((replacement, unanswered));
-	let (back, mut back_catalog) = publish_bare(&origin, Some(&identity));
+	let (back, mut back_catalog) = publish_bare(&origin, Some(&instance));
 	let mut back_audio = aac_rendition(&mut back.broadcast().clone(), &mut back_catalog, "a.aac");
 	write_aac(&mut back_audio, 1000);
 	pump(&mut follower).await;
@@ -9927,8 +9927,8 @@ async fn a_return_after_an_abandoned_switch_restores_priority() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_follows_a_return_after_a_lost_route() {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let (broadcast, mut catalog) = publish_bare(&origin, Some(&identity));
+	let instance = moq_net::Instance::random();
+	let (broadcast, mut catalog) = publish_bare(&origin, Some(&instance));
 	let track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let mut follower = follower(&origin).await.with_follow(Duration::from_secs(10));
 	assert!(
@@ -9941,7 +9941,7 @@ async fn a_follower_follows_a_return_after_a_lost_route() {
 	track.abort(moq_net::Error::Unroutable);
 	catalog.abort(moq_net::Error::Unroutable);
 	drop(broadcast);
-	let (broadcast, mut catalog) = publish_bare(&origin, Some(&identity));
+	let (broadcast, mut catalog) = publish_bare(&origin, Some(&instance));
 	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	assert!(
 		kio::clock::timeout(Duration::from_secs(3), follower.next())
@@ -9962,13 +9962,13 @@ async fn a_follower_follows_a_return_after_a_lost_route() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_fails_a_stitch_onto_a_replacement_that_refuses_its_catalog() {
 	let origin = crate::source::produce_origin();
-	let _first = publish_bare(&origin, Some(&moq_net::Identity::random()));
+	let _first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let mut follower = follower(&origin).await.with_stitch(true);
 
 	let _second = origin
 		.publish(
 			"live",
-			moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0),
+			moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0),
 		)
 		.unwrap();
 	let end = kio::clock::timeout(Duration::from_secs(10), follower.next())
@@ -9982,8 +9982,8 @@ async fn a_follower_fails_a_stitch_onto_a_replacement_that_refuses_its_catalog()
 #[tokio::test(start_paused = true)]
 async fn a_follower_built_after_its_route_went_follows_the_return() {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let first = publish_bare(&origin, Some(&identity));
+	let instance = moq_net::Instance::random();
+	let first = publish_bare(&origin, Some(&instance));
 	let export = open_export(crate::source::resolved(&origin, "live").await)
 		.await
 		.unwrap();
@@ -9999,7 +9999,7 @@ async fn a_follower_built_after_its_route_went_follows_the_return() {
 			.is_err(),
 		"following"
 	);
-	let mut second = publish_bare(&origin, Some(&identity));
+	let mut second = publish_bare(&origin, Some(&instance));
 	std::ops::DerefMut::deref_mut(&mut second.1.modify().unwrap());
 	assert!(
 		kio::clock::timeout(Duration::from_secs(1), follower.next())
@@ -10023,7 +10023,7 @@ async fn a_follower_takes_its_own_instance_winning_back_for_no_replacement() {
 	let origin = crate::source::produce_origin();
 	let route = |cost: u64| {
 		moq_net::origin::Route::default()
-			.with_identity(moq_net::Identity::random(), 0)
+			.with_instance(moq_net::Instance::random(), 0)
 			.with_cost(cost)
 	};
 
@@ -10062,10 +10062,10 @@ async fn a_follower_takes_its_own_instance_winning_back_for_no_replacement() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_fails_on_a_replacement_without_stitch() {
 	let origin = crate::source::produce_origin();
-	let first = publish_bare(&origin, Some(&moq_net::Identity::random()));
+	let first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let mut follower = follower(&origin).await.with_follow(Duration::from_secs(10));
 	finish(first);
-	let _second = publish_bare(&origin, Some(&moq_net::Identity::random()));
+	let _second = publish_bare(&origin, Some(&moq_net::Instance::random()));
 
 	let start = kio::clock::now();
 	let err = follower.next().await.expect_err("a replacement fails the follower");
@@ -10091,8 +10091,8 @@ async fn a_follower_takes_an_unnamed_return_as_a_replacement() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_continues_on_the_same_instance_returning() {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let first = publish_bare(&origin, Some(&identity));
+	let instance = moq_net::Instance::random();
+	let first = publish_bare(&origin, Some(&instance));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow);
 	let start = kio::clock::now();
@@ -10104,7 +10104,7 @@ async fn a_follower_continues_on_the_same_instance_returning() {
 		"following"
 	);
 
-	let mut second = publish_bare(&origin, Some(&identity));
+	let mut second = publish_bare(&origin, Some(&instance));
 	std::ops::DerefMut::deref_mut(&mut second.1.modify().unwrap());
 	assert!(
 		kio::clock::timeout(Duration::from_secs(1), follower.next())
@@ -10132,15 +10132,15 @@ async fn drain_follower(follower: &mut super::Follower) -> (Vec<Frame>, Option<c
 	}
 }
 
-/// The route going and another of the same identity taking over after a gap that ended the
+/// The route going and another of the same instance taking over after a gap that ended the
 /// export's request, with the follower unpolled across it, is its own instance returning: the
 /// export carries on through the new route under the program already announced, with no break
 /// flagged.
 #[tokio::test(start_paused = true)]
-async fn a_follower_continues_through_a_same_identity_handoff_after_a_gap() {
+async fn a_follower_continues_through_a_same_instance_handoff_after_a_gap() {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let route = moq_net::origin::Route::default().with_identity(identity.clone(), 0);
+	let instance = moq_net::Instance::random();
+	let route = moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 	let exact = origin.publish("pool/job", route.clone()).unwrap();
 	let mut catalog = crate::catalog::Producer::<()>::new(&mut exact.broadcast().clone(), Default::default()).unwrap();
 	let mut track = aac_rendition(&mut exact.broadcast().clone(), &mut catalog, "a.aac");
@@ -10202,8 +10202,8 @@ async fn a_follower_continues_through_a_same_identity_handoff_after_a_gap() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 	let origin = crate::source::produce_origin();
-	let route = |identity| moq_net::origin::Route::default().with_identity(identity, 0);
-	let exact = origin.publish("pool/job", route(moq_net::Identity::random())).unwrap();
+	let route = |instance| moq_net::origin::Route::default().with_instance(instance, 0);
+	let exact = origin.publish("pool/job", route(moq_net::Instance::random())).unwrap();
 	let catalog = crate::catalog::Producer::<()>::new(&mut exact.broadcast().clone(), Default::default()).unwrap();
 	let source = crate::source::resolved(&origin, "pool/job").await;
 	let mut follower = super::Follower::new(open_export(source).await.unwrap()).unwrap();
@@ -10228,10 +10228,10 @@ async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 async fn a_midstream_stitch_awaits_the_replacement_catalog() {
 	for follow in [Duration::ZERO, Duration::from_secs(10)] {
 		let origin = crate::source::produce_origin();
-		let _first = publish_bare(&origin, Some(&moq_net::Identity::random()));
+		let _first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 		let mut follower = follower(&origin).await.with_stitch(true).with_follow(follow);
-		let identity = moq_net::Identity::random();
-		let (_second, mut catalog) = publish_bare(&origin, Some(&identity));
+		let instance = moq_net::Instance::random();
+		let (_second, mut catalog) = publish_bare(&origin, Some(&instance));
 		assert!(
 			kio::clock::timeout(Duration::from_secs(60), follower.next())
 				.await
@@ -10251,7 +10251,7 @@ async fn a_midstream_stitch_awaits_the_replacement_catalog() {
 			follower.export().cataloged(),
 			"the late snapshot switches, follow={follow:?}"
 		);
-		assert_eq!(follower.export().instance(), Some(&identity));
+		assert_eq!(follower.export().instance(), Some(&instance));
 	}
 }
 
@@ -10263,7 +10263,7 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 
 	for format in [CatalogFormat::Hang, CatalogFormat::Msf] {
 		let origin = crate::source::produce_origin();
-		let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+		let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 		let first = origin.publish("live", route()).unwrap();
 		let (name, snapshot) = match format {
 			CatalogFormat::Hang => (
@@ -10333,15 +10333,15 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 			"following after the replacement left"
 		);
 
-		let identity = moq_net::Identity::random();
-		let (_third, mut catalog) = publish_bare(&origin, Some(&identity));
+		let instance = moq_net::Instance::random();
+		let (_third, mut catalog) = publish_bare(&origin, Some(&instance));
 		std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
 		catalog.finish().unwrap();
 		let end = kio::clock::timeout(follow * 2, follower.next())
 			.await
 			.expect("the final instance ends the export");
 		assert!(matches!(end, Ok(None)), "{format:?}: {end:?}");
-		assert_eq!(follower.export().instance(), Some(&identity));
+		assert_eq!(follower.export().instance(), Some(&instance));
 		assert_eq!(follower.export().catalog_format(), format);
 	}
 }
@@ -10351,7 +10351,7 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 #[tokio::test(start_paused = true)]
 async fn a_midstream_stitch_keeps_the_old_instance_playing_until_it_switches() {
 	let origin = crate::source::produce_origin();
-	let (broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Identity::random()));
+	let (broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let export = open_export(crate::source::resolved(&origin, "live").await)
 		.await
@@ -10363,7 +10363,7 @@ async fn a_midstream_stitch_keeps_the_old_instance_playing_until_it_switches() {
 	let second = origin
 		.publish(
 			"live",
-			moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0),
+			moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0),
 		)
 		.unwrap();
 	let _unanswered = second.requests();
@@ -10380,15 +10380,15 @@ async fn a_midstream_stitch_keeps_the_old_instance_playing_until_it_switches() {
 #[tokio::test(start_paused = true)]
 async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 	let origin = crate::source::produce_origin();
-	let _first = publish_bare(&origin, Some(&moq_net::Identity::random()));
+	let _first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let mut follower = follower(&origin)
 		.await
 		.with_stitch(true)
 		.with_follow(Duration::from_secs(10));
 
 	// Switched onto a replacement whose catalog has no snapshot yet.
-	let identity = moq_net::Identity::random();
-	let (_second, mut catalog) = publish_bare(&origin, Some(&identity));
+	let instance = moq_net::Instance::random();
+	let (_second, mut catalog) = publish_bare(&origin, Some(&instance));
 	assert!(
 		kio::clock::timeout(Duration::from_secs(2), follower.next())
 			.await
@@ -10400,7 +10400,7 @@ async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 	let third = origin
 		.publish(
 			"live",
-			moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0),
+			moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0),
 		)
 		.unwrap();
 	let unanswered = third.requests();
@@ -10429,7 +10429,7 @@ async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 		follower.export().cataloged(),
 		"the second replacement served its catalog"
 	);
-	assert_eq!(follower.export().instance(), Some(&identity));
+	assert_eq!(follower.export().instance(), Some(&instance));
 }
 
 /// A replacement whose catalog closes before its first snapshot fails the stitch, rather than
@@ -10437,13 +10437,13 @@ async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 #[tokio::test(start_paused = true)]
 async fn a_midstream_stitch_catalog_closed_without_a_snapshot_fails() {
 	let origin = crate::source::produce_origin();
-	let _first = publish_bare(&origin, Some(&moq_net::Identity::random()));
+	let _first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let mut follower = follower(&origin)
 		.await
 		.with_stitch(true)
 		.with_follow(Duration::from_secs(10));
 
-	let (_second, mut catalog) = publish_bare(&origin, Some(&moq_net::Identity::random()));
+	let (_second, mut catalog) = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	assert!(
 		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
@@ -11259,8 +11259,8 @@ async fn placed_sections_keep_their_source_positions() {
 #[tokio::test(start_paused = true)]
 async fn a_track_renamed_on_its_pid_across_returns_retires_the_one_before() {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let route = || moq_net::origin::Route::default().with_identity(identity.clone(), 0);
+	let instance = moq_net::Instance::random();
+	let route = || moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 	let rendition = |broadcast: &mut moq_net::broadcast::Producer,
 	                 catalog: &mut crate::catalog::Producer<tscat::Ext>,
 	                 name: &str| {
@@ -11325,8 +11325,8 @@ async fn a_track_renamed_on_its_pid_across_returns_retires_the_one_before() {
 #[tokio::test(start_paused = true)]
 async fn a_track_renamed_on_its_pid_across_a_return_is_quiet_from_its_listing() {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let route = || moq_net::origin::Route::default().with_identity(identity.clone(), 0);
+	let instance = moq_net::Instance::random();
+	let route = || moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 	let rendition = |broadcast: &mut moq_net::broadcast::Producer,
 	                 catalog: &mut crate::catalog::Producer<tscat::Ext>,
 	                 name: &str| {
@@ -11397,7 +11397,7 @@ async fn a_track_renamed_on_its_pid_across_a_return_is_quiet_from_its_listing() 
 #[tokio::test(start_paused = true)]
 async fn a_switch_follows_the_last_pmt_out() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 
 	let (old, mut old_catalog) = publish_live::<tscat::Ext>(&origin, route());
 	let mut audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
@@ -11445,7 +11445,7 @@ async fn a_switch_follows_the_last_pmt_out() {
 #[tokio::test(start_paused = true)]
 async fn a_switch_follows_the_last_pat_out() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 
 	let (old, mut old_catalog) = publish_live::<tscat::Ext>(&origin, route());
 	let mut audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
@@ -11494,7 +11494,7 @@ async fn a_switch_follows_the_last_pat_out() {
 #[tokio::test(start_paused = true)]
 async fn a_switch_past_an_instance_that_laid_no_tables_follows_the_last_pmt_out() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let follow = async |export: Export<_>| {
 		let replacement = origin.consume().request("live", None).await.unwrap();
 		let stream = crate::catalog::Consumer::new(&replacement, Default::default())
@@ -11549,7 +11549,7 @@ async fn a_switch_past_an_instance_that_laid_no_tables_follows_the_last_pmt_out(
 #[tokio::test(start_paused = true)]
 async fn a_stitched_switch_keeps_the_healthy_legs_held_frames() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
 	let mut export = open_export(crate::source::resolved(&origin, "live").await)
@@ -11576,7 +11576,7 @@ async fn a_stitched_switch_keeps_the_healthy_legs_held_frames() {
 	let export = export.follow(replacement, stream).unwrap();
 	assert!(
 		export.buffered() >= held,
-		"a new identity discarded the healthy old leg before the replacement clock acquired: before={held}, after={}",
+		"a new instance discarded the healthy old leg before the replacement clock acquired: before={held}, after={}",
 		export.buffered()
 	);
 }
@@ -11587,7 +11587,7 @@ async fn a_stitched_switch_keeps_the_healthy_legs_held_frames() {
 async fn a_healthy_stitch_feeds_the_old_generation_until_the_new_clock_acquires() {
 	use std::task::Poll;
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
 	let export = open_export(crate::source::resolved(&origin, "live").await)
@@ -11649,7 +11649,7 @@ async fn a_healthy_stitch_feeds_the_old_generation_until_the_new_clock_acquires(
 	let next: Vec<_> = frames[switch..].iter().map(|(_, _, frame)| frame.clone()).collect();
 	assert!(
 		audio_pts(&next).iter().all(|pts| *pts >= 160_000 * 90),
-		"each identity has its own timestamps"
+		"each instance has its own timestamps"
 	);
 	assert_eq!(unflagged(&next), Vec::<u16>::new());
 	assert_eq!(follower.export().discontinuity(), 1);
@@ -11662,7 +11662,7 @@ async fn a_healthy_stitch_feeds_the_old_generation_until_the_new_clock_acquires(
 async fn repeated_stitches_keep_the_delay() {
 	use std::task::Poll;
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	// Publisher `k` stamps its media `k * 100 s` on, so each one has its own timeline.
 	const SPACING: u64 = 100_000;
 	const SWITCH: u64 = 4_000;
@@ -11744,7 +11744,7 @@ async fn repeated_stitches_keep_the_delay() {
 #[tokio::test(start_paused = true)]
 async fn an_expired_follow_stops_healthy_input_but_drains_its_buffered_tail() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
 	let delay = Duration::from_millis(500);
@@ -11909,7 +11909,7 @@ async fn a_publisher_that_leaves_drains_its_buffered_tail_before_the_end() {
 #[tokio::test(start_paused = true)]
 async fn a_replacement_leaving_before_it_commits_keeps_the_old_program() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
 	let mut export = open_export(crate::source::resolved(&origin, "live").await)
@@ -11971,7 +11971,7 @@ async fn a_replacement_leaving_before_it_commits_keeps_the_old_program() {
 #[tokio::test(start_paused = true)]
 async fn a_newer_pending_instance_discards_the_unemitted_held_replacement() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let (a, mut a_catalog) = publish_live::<()>(&origin, route());
 	let mut a_audio = aac_rendition(&mut a.broadcast().clone(), &mut a_catalog, "a.aac");
 	let mut export = open_export(crate::source::resolved(&origin, "live").await)
@@ -12033,7 +12033,7 @@ async fn a_newer_pending_instance_discards_the_unemitted_held_replacement() {
 #[tokio::test(start_paused = true)]
 async fn an_empty_finished_replacement_drains_the_old_program() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let (old, mut catalog) = publish_live::<()>(&origin, route());
 	let mut audio = aac_rendition(&mut old.broadcast().clone(), &mut catalog, "a.aac");
 	let mut export = open_export(crate::source::resolved(&origin, "live").await)
@@ -12079,11 +12079,11 @@ async fn an_empty_finished_replacement_drains_the_old_program() {
 	);
 }
 
-/// Before any PSI, no layout or failed reader should survive a same-identity return.
-async fn cold_same_identity_return(pending: bool) {
+/// Before any PSI, no layout or failed reader should survive a same-instance return.
+async fn cold_same_instance_return(pending: bool) {
 	let origin = crate::source::produce_origin();
-	let identity = moq_net::Identity::random();
-	let route = || moq_net::origin::Route::default().with_identity(identity.clone(), 0);
+	let instance = moq_net::Instance::random();
+	let route = || moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_video = h264_rendition(&mut old.broadcast().clone(), &mut old_catalog, "v.avc1");
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
@@ -12093,7 +12093,7 @@ async fn cold_same_identity_return(pending: bool) {
 		.with_delay(Duration::from_secs(3))
 		.with_replay();
 	let mut prefix = Vec::new();
-	let returned_identity = if pending {
+	let returned_instance = if pending {
 		for ms in (0..400).step_by(40) {
 			write_h264(&mut old_video, ms);
 		}
@@ -12101,10 +12101,10 @@ async fn cold_same_identity_return(pending: bool) {
 			write_aac(&mut old_audio, ms);
 		}
 		prefix.push(export.next().await.unwrap().unwrap());
-		let next_identity = moq_net::Identity::random();
+		let next_instance = moq_net::Instance::random();
 		let (cold, mut catalog) = publish_live::<()>(
 			&origin,
-			moq_net::origin::Route::default().with_identity(next_identity.clone(), 0),
+			moq_net::origin::Route::default().with_instance(next_instance.clone(), 0),
 		);
 		let mut video = h264_rendition(&mut cold.broadcast().clone(), &mut catalog, "v.avc1");
 		let mut audio = aac_rendition(&mut cold.broadcast().clone(), &mut catalog, "a.aac");
@@ -12126,18 +12126,18 @@ async fn cold_same_identity_return(pending: bool) {
 			prefix.push(frame);
 		}
 		cold.unannounce();
-		next_identity
+		next_instance
 	} else {
 		old_video.finish().unwrap();
 		old_audio.finish().unwrap();
 		old_catalog.finish().unwrap();
 		assert!(export.next().await.unwrap().is_none());
 		old.unannounce();
-		identity
+		instance
 	};
 	let (back, mut catalog) = publish_live::<()>(
 		&origin,
-		moq_net::origin::Route::default().with_identity(returned_identity, 0),
+		moq_net::origin::Route::default().with_instance(returned_instance, 0),
 	);
 	let mut video = h264_rendition(&mut back.broadcast().clone(), &mut catalog, "v.avc1");
 	let mut audio = aac_rendition(&mut back.broadcast().clone(), &mut catalog, "a.aac");
@@ -12177,11 +12177,11 @@ async fn cold_same_identity_return(pending: bool) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_same_identity_return_before_psi_rebuilds_cold_readers() {
-	cold_same_identity_return(false).await;
+async fn a_same_instance_return_before_psi_rebuilds_cold_readers() {
+	cold_same_instance_return(false).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_pending_same_identity_return_rebuilds_cold_readers() {
-	cold_same_identity_return(true).await;
+async fn a_pending_same_instance_return_rebuilds_cold_readers() {
+	cold_same_instance_return(true).await;
 }

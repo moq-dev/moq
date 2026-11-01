@@ -1,14 +1,14 @@
 /**
  * One publisher instance's generation epoch, the lowercase hyphenated text of a UUIDv7. The
- * instance announces it as its route's identity, so a subscriber reads it back from the
- * broadcast it resolved ({@link of}). A wire that carries no identity hands the subscriber one
+ * instance announces it as its route's instance, so a subscriber reads it back from the
+ * broadcast it resolved ({@link of}). A wire that carries no instance hands the subscriber one
  * its relay minted, which is no epoch: the application supplies the epoch over its own
  * authenticated channel then. Mirrors `Epoch` in rs/moq-e2ee.
  *
  * @module
  */
 
-import type { Broadcast, Identity } from "@moq/net";
+import type { Broadcast, Instance } from "@moq/net";
 import { v7 } from "uuid";
 
 /** A validated UUIDv7, ordered newest last by ordinary string comparison. */
@@ -28,17 +28,17 @@ export function mint(): Valid {
 	return parse(v7());
 }
 
-/** The route identity that announces `epoch`. */
-export function identity(epoch: Valid): Identity.Valid {
-	return epoch as string as Identity.Valid;
+/** The route instance that announces `epoch`. */
+export function instance(epoch: Valid): Instance.Valid {
+	return epoch as string as Instance.Valid;
 }
 
-/** The epoch a resolved broadcast's route announced, if its identity is one. */
+/** The epoch a resolved broadcast's route announced, if its instance is one. */
 export function of(broadcast: Broadcast.Consumer): Valid | undefined {
-	const identity = broadcast.identity;
-	if (identity === undefined) return undefined;
+	const instance = broadcast.instance;
+	if (instance === undefined) return undefined;
 	try {
-		return parse(identity);
+		return parse(instance);
 	} catch {
 		return undefined;
 	}

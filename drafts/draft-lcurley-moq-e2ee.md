@@ -137,12 +137,12 @@ Clones of a producing generation MUST share permanent track claims so reopening 
 Its leading 48-bit timestamp makes epochs sort by creation time and its random bits make collisions negligible.
 
 A protected broadcast is published at `<opaque>`, the 22-character base64url segment derived from the credential and the application's semantic broadcast name according to {{derive}}.
-Each instance announces its epoch text as the route's moq-lite Identity; the HKDF `bytes(epoch)` input is the UUID text.
+Each instance announces its epoch text as the route's moq-lite Instance; the HKDF `bytes(epoch)` input is the UUID text.
 The opaque derivation does not include the epoch, so every instance of the same semantic broadcast shares one path.
 The path carries no format or protection marker; for example, the semantic name `meeting.hang` appears only as an input to the opaque derivation.
 A plaintext consumer that opens the protected broadcast fails because it cannot find the plaintext catalog it expects, not because of a path naming rule.
-Subscribers resolve `<opaque>` and take the epoch from its route's Identity, which relays rank like any other Identity rather than newest first.
-On a wire that cannot carry the route's Identity, where a relay mints one of its own, the application supplies the epoch over its own authenticated channel.
+Subscribers resolve `<opaque>` and take the epoch from its route's Instance, which relays rank like any other Instance rather than newest first.
+On a wire that cannot carry the route's Instance, where a relay mints one of its own, the application supplies the epoch over its own authenticated channel.
 
 The epoch and the path are not secret and are not authenticated.
 A relay that presents a wrong epoch causes authentication failure; a relay that withholds a newer instance denies service.
@@ -387,7 +387,7 @@ This document requests no registrations.
 {:numbered="false"}
 
 - Require internally minted producing epochs and consume-only bindings for discovered epochs.
-- Require canonical UUIDv7 epochs, carried as the route's Identity rather than in the path, leaving HKDF UUID inputs unchanged. Relays no longer rank the newest epoch first.
+- Require canonical UUIDv7 epochs, carried as the route's Instance rather than in the path, leaving HKDF UUID inputs unchanged. Relays no longer rank the newest epoch first.
 - Keep semantic track names in the decrypted catalog; subscribers derive physical names from them.
 - Forbid applications from relying on group completeness, which is unauthenticated.
 - Derive physical track names by AES-128-GCM encryption of the padded semantic name under an HMAC-SHA-256 nonce, so a publisher recovers any requested name, and bind AEAD keys to the semantic name.

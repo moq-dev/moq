@@ -4,7 +4,7 @@
 //! timestamp at once without `discontinuity_indicator`. Splicing the two would put two sources
 //! on one timeline, and a step back would break the rule that group starts never go
 //! backwards within an instance, so the import ends its instance at the step and hands the
-//! input from there to a caller that republishes it under a new identity.
+//! input from there to a caller that republishes it under a new instance.
 //!
 //! The step is judged the way ffmpeg infers an unflagged one: the program clock and every
 //! elementary stream that keeps a timestamp cadence step together, forward by more than
@@ -35,7 +35,7 @@ const PTS_WRAP: u64 = 1 << 33;
 /// instance there.
 ///
 /// What follows is another broadcast. A caller that carries on finishes this import and
-/// publishes [`remainder`](Self::remainder) into a new one, as a new instance under a new identity.
+/// publishes [`remainder`](Self::remainder) into a new one, as a new instance under a new instance.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 #[error("the source's clock {step}; what follows is a new broadcast")]

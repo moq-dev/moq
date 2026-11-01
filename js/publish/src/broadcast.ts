@@ -355,7 +355,7 @@ export class Broadcast {
 		// broadcast and new subscriptions land on the same producer.
 		const broadcastPublication = origin.createBroadcast(name);
 		const broadcast = broadcastPublication.broadcast;
-		// The publication mints one identity, kept across unannounce and announce, so a restart
+		// The publication mints one instance, kept across unannounce and announce, so a restart
 		// is a new stream rather than a resume into the old one.
 		effect.cleanup(() => broadcast.close());
 
@@ -367,7 +367,7 @@ export class Broadcast {
 
 		// Each track lives as long as the broadcast: a track name always means the same content,
 		// so a re-announce or a rendition change keeps writing to it instead of restarting its
-		// group sequence under the same identity. Rendition tracks by name, so registering a name
+		// group sequence under the same instance. Rendition tracks by name, so registering a name
 		// again finds its track; the catalog's stay out of reach of a colliding rendition.
 		const tracks = new Map<string, { track: Moq.Track.Producer; owner: Rendition<unknown> }>();
 		this.#names.set({});

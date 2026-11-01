@@ -37,21 +37,21 @@ internal constructor(
      * Follow exactly [path], resolving each stream that serves it.
      *
      * Unlike [request] this waits indefinitely for a future announcement, and each later
-     * `available()` waits for the next stream, such as a restarted publisher. Pass an [identity] to
+     * `available()` waits for the next stream, such as a restarted publisher. Pass an [instance] to
      * follow only that stream. Cancel the returned handle to stop waiting.
      */
-    fun follow(path: String, identity: String? = null): Following =
-        session.consume().follow(path, identity)
+    fun follow(path: String, instance: String? = null): Following =
+        session.consume().follow(path, instance)
 
     /**
      * Resolve one stream of the broadcast at [path] as soon as it can be served: a local broadcast
      * at the exact path, the best announced route covering it, or a dynamic fallback on the origin.
      *
      * Unlike [follow] this does not wait for a future announcement; it throws when neither can
-     * serve the path. Pass an [identity] to refuse any other stream.
+     * serve the path. Pass an [instance] to refuse any other stream.
      */
-    suspend fun request(path: String, identity: String? = null): BroadcastConsumer =
-        session.consume().request(path, identity)
+    suspend fun request(path: String, instance: String? = null): BroadcastConsumer =
+        session.consume().request(path, instance)
 
     /**
      * The session's bandwidth allocator.

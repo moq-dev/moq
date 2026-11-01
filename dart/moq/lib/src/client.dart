@@ -230,15 +230,15 @@ final class Moq {
   }) => session.consume().announced(config: options._ffi);
 
   /// Follow the broadcast at exactly [path]: each `available()` resolves the
-  /// next identity serving it, such as a restarted publisher. Pass an
-  /// [identity] to follow only that stream.
-  Following follow(String path, {String? identity}) =>
-      session.consume().follow(path: path, identity: identity);
+  /// next instance serving it, such as a restarted publisher. Pass an
+  /// [instance] to follow only that stream.
+  Following follow(String path, {String? instance}) =>
+      session.consume().follow(path: path, instance: instance);
 
   /// Resolve one publisher instance of the broadcast at [path]. Pass an
-  /// [identity] to refuse any other stream.
-  Future<BroadcastConsumer> request(String path, {String? identity}) =>
-      session.consume().request(path: path, identity: identity);
+  /// [instance] to refuse any other stream.
+  Future<BroadcastConsumer> request(String path, {String? instance}) =>
+      session.consume().request(path: path, instance: instance);
 
   /// The session's bandwidth allocator.
   ///

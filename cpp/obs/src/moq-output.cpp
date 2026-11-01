@@ -169,7 +169,7 @@ bool MoQOutput::Start()
 
 	// Create the broadcast on an origin of our own, then announce it so subscribers
 	// can discover it. Stop() finishes it, so each Start creates a fresh one, under a
-	// fresh identity the broadcast mints and keeps across reconnects. Only the
+	// fresh instance the broadcast mints and keeps across reconnects. Only the
 	// broadcast is kept: the route outlives the publication until the broadcast closes.
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
 	auto next_origin = moq::OriginProducer::init(moq::OriginConfig{});

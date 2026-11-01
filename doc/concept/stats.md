@@ -113,7 +113,7 @@ source's. `export ts --passthrough` reports it without `mpegts`.
 `hang::health` and `Hang.Health` in `@moq/hang` grade a client from two
 consecutive reports: `publisher` takes a pair of `stats` snapshots, `viewer` a
 pair of `.echo` snapshots. Each report names the broadcast it was read from
-(its path and identity), which observed every number in it; the caller states the
+(its path and instance), which observed every number in it; the caller states the
 interval between the two and how long ago the newer one arrived. Both
 languages compute the same result from the shared fixtures in
 `rs/hang/fixtures/health.json`.
@@ -127,7 +127,7 @@ listed as `unknown`, and a verdict with nothing graded is `unknown`: a browser
 publisher that knows only its PROBE RTT grades on RTT alone. A report older
 than the stale limit is `unknown` throughout, as is a transport sample whose
 `age` plus the report's exceeds it, and a client with no report has no sample at all. A changed
-path or identity (`replaced`) or a decreasing counter (`decrease`) is a reset:
+path or instance (`replaced`) or a decreasing counter (`decrease`) is a reset:
 the deltas start over, so only gauges are graded until the next pair.
 Container sections such as `mpegts` are not read.
 
@@ -170,13 +170,13 @@ generate more stats.
   prefix, so a consumer skips any path without `node` where it expects one.
 
 The broadcast stays announced for the producer's life. Each announcement
-carries a fresh [identity](/concept/moq-lite#stream-identities) on its
+carries a fresh [instance](/concept/moq-lite#stream-instances) on its
 route, so a restarted node is a new broadcast at the same path: it replaces the
-old one, and no relay serves it groups cached under the old identity. A reader
-treats each identity as its own set of counters. The identity rides moq-lite 07
+old one, and no relay serves it groups cached under the old instance. A reader
+treats each instance as its own set of counters. The instance rides moq-lite 07
 announcements; over anything else the receiving session mints one per
 announcement, so a reader sees the same change as an end and a start at the path.
-An aggregating reader pins each node's subscription to its identity.
+An aggregating reader pins each node's subscription to its instance.
 
 Every group shares the node's broadcast, so a token scoped to the stats prefix
 reads every group's tracks; scope by group with an aggregating reader instead.
@@ -283,7 +283,7 @@ node stays announced. Billing reads this track.
 ```
 
 `epoch` is a UUIDv7 minted for each instance of the group's track, and a
-reader keeps each epoch's counters apart, as it does for a broadcast's identities.
+reader keeps each epoch's counters apart, as it does for a broadcast's instances.
 `tiers` maps each tier the group recorded on since then. Its top-level
 `publisher`, `subscriber`, and `sessions` are the group's [totals](#totals), so
 a totals reader parses them unchanged, and like the node's totals they keep
@@ -469,12 +469,12 @@ Every counter is a cumulative, monotonic unsigned integer. A rate is the
 difference between two frames divided by the time between them, and a live
 count is started minus ended. A frame never shows ended above started.
 
-A new identity starts every counter from zero, so a reader summing a node over
-time adds each identity's counters rather than diffing across them. Within one
-identity the totals never go down. A group's path or label counter going **down**
+A new instance starts every counter from zero, so a reader summing a node over
+time adds each instance's counters rather than diffing across them. Within one
+instance the totals never go down. A group's path or label counter going **down**
 means the entry was dropped and re-created, and a presence or prefix counter going down
 means the track was held again. Treat it as the start of a fresh segment
-rather than a negative rate. On a route whose identity a session minted (an older relay, or
+rather than a negative rate. On a route whose instance a session minted (an older relay, or
 a session older than moq-lite 07), a counter going down also means the node restarted.
 
 A reader ignores unknown fields, so a newer relay can add counters, and

@@ -54,7 +54,7 @@ public final class BroadcastRequest: Sendable {
         get throws { try ffi.path() }
     }
 
-    /// Start answering as a new stream under a fresh identity, hidden until published.
+    /// Start answering as a new stream under a fresh instance, hidden until published.
     public func prepare() throws -> BroadcastPrepared {
         BroadcastPrepared(try ffi.prepare())
     }
@@ -153,18 +153,18 @@ public final class OriginConsumer: Sendable {
     }
 
     /// Follow an exact path, resolving each stream that serves it.
-    /// Pass an `identity` to follow only that stream.
-    public func follow(path: String, identity: String? = nil) throws -> Following {
-        Following(try ffi.follow(path: path, identity: identity))
+    /// Pass an `instance` to follow only that stream.
+    public func follow(path: String, instance: String? = nil) throws -> Following {
+        Following(try ffi.follow(path: path, instance: instance))
     }
 
     /// Request a broadcast by path, resolving one stream as soon as it can be
     /// served through the best announced route covering it: an announced broadcast on this
     /// origin, a route a session announced (served on demand by that session), or a dynamic
     /// handler on the origin, or an error if nothing can serve it. Unlike `follow`, this
-    /// does not wait for a future announcement. Pass an `identity` to refuse any other stream.
-    public func request(path: String, identity: String? = nil) async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.request(path: path, identity: identity))
+    /// does not wait for a future announcement. Pass an `instance` to refuse any other stream.
+    public func request(path: String, instance: String? = nil) async throws -> BroadcastConsumer {
+        BroadcastConsumer(try await ffi.request(path: path, instance: instance))
     }
 }
 

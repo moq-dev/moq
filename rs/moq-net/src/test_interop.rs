@@ -565,7 +565,7 @@ fn lite_tracks_interop() {
 	let version = lite::Version::Lite07;
 	let request = lite::Tracks {
 		broadcast: crate::Path::from_static("room"),
-		identity: None,
+		instance: None,
 	}
 	.encode_bytes(version)
 	.unwrap();

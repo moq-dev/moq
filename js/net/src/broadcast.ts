@@ -7,7 +7,7 @@ import { type GetPromise, Once, Signal } from "@moq/signals";
 import { NotFound, StreamCode, StreamError } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
-import type * as Identity from "./identity.ts";
+import type * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import { Listing, listTracks, makeLister, type Tracks } from "./listing.ts";
 import * as Path from "./path.ts";
@@ -388,7 +388,7 @@ export class Producer {
 interface Shared {
 	state: BroadcastState;
 	path: Path.Valid;
-	identity?: Identity.Valid;
+	instance?: Instance.Valid;
 	unlisted?: boolean;
 }
 
@@ -407,7 +407,7 @@ let makeConsumer: (shared: Shared) => Consumer;
 export class Consumer {
 	#state: BroadcastState;
 	#path: Path.Valid;
-	#identity?: Identity.Valid;
+	#instance?: Instance.Valid;
 	// Served on request through a route claiming a shorter prefix, which names no broadcast to list.
 	#unlisted: boolean;
 
@@ -417,7 +417,7 @@ export class Consumer {
 	protected constructor(shared?: never);
 	protected constructor(shared?: Shared) {
 		this.#path = shared?.path ?? Path.empty();
-		this.#identity = shared?.identity;
+		this.#instance = shared?.instance;
 		this.#unlisted = shared?.unlisted ?? false;
 		if (shared) {
 			this.#state = shared.state;
@@ -445,8 +445,8 @@ export class Consumer {
 			if (target instanceof Consumer) target.#path = path;
 			else stampProducer(target, path);
 		};
-		hooks.stampIdentity = (target, identity) => {
-			target.#identity = identity;
+		hooks.stampInstance = (target, instance) => {
+			target.#instance = instance;
 		};
 		hooks.stampUnlisted = (target) => {
 			target.#unlisted = true;
@@ -467,14 +467,14 @@ export class Consumer {
 	}
 
 	/**
-	 * The identity of the route an origin resolved this handle through: the stream it reads.
+	 * The instance of the route an origin resolved this handle through: the stream it reads.
 	 *
 	 * An origin stamps it with each request's result, so it names the stream actually serving
 	 * this handle even when the request named none. `undefined` for a handle not handed out by
 	 * an origin.
 	 */
-	get identity(): Identity.Valid | undefined {
-		return this.#identity;
+	get instance(): Instance.Valid | undefined {
+		return this.#instance;
 	}
 
 	/**
@@ -509,7 +509,7 @@ export class Consumer {
 		return {
 			state: this.#state,
 			path: this.#path,
-			identity: this.#identity,
+			instance: this.#instance,
 			unlisted: this.#unlisted,
 		} satisfies Shared as never;
 	}

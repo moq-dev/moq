@@ -426,7 +426,7 @@ struct Shape {
 	container: hang::catalog::Container,
 	track: String,
 	broadcast: Option<moq_net::path::Relative>,
-	identity: Option<moq_net::Identity>,
+	instance: Option<moq_net::Instance>,
 }
 
 /// A rendition by kind and moq track name: what a pad is kept by.
@@ -826,7 +826,7 @@ async fn follow_path(
 			err = &mut lost => break Err(err),
 			event = follow.next() => match event {
 				Ok(Event::Start(broadcast)) => {
-					tracing::info!(%path, identity = broadcast.info().identity.as_ref().map(tracing::field::display), "online");
+					tracing::info!(%path, instance = broadcast.info().instance.as_ref().map(tracing::field::display), "online");
 					Some(broadcast)
 				}
 				Ok(Event::End) => {
@@ -1071,7 +1071,7 @@ fn reconcile(
 				container: container.clone(),
 				track: reference.track(name).to_string(),
 				broadcast: reference.broadcast().cloned(),
-				identity: reference.identity().cloned(),
+				instance: reference.instance().cloned(),
 			};
 			desired.insert((kind, name.clone()), shape);
 		}
@@ -1152,7 +1152,7 @@ fn reconcile(
 	for (path, plan) in plans {
 		// Follow without waiting: an unavailable sibling must not park the catalog loop and hold
 		// up every other rendition. The follower resolves its instances under the run. Every
-		// instance is followed, and each rendition checks the identity it names.
+		// instance is followed, and each rendition checks the instance it names.
 		let shape = plan.renditions.values().next().expect("a plan names a rendition");
 		let instances = match source.follow(shape.broadcast.as_ref(), None) {
 			Ok(instances) => instances,
@@ -1254,8 +1254,8 @@ struct Follower {
 	/// The instance last started.
 	current: Option<Current>,
 	/// The number and timeline of each instance a return would resume: the current one and each
-	/// a rendition pins, by identity.
-	resumable: HashMap<moq_net::Identity, (u64, Arc<Timeline>)>,
+	/// a rendition pins, by instance.
+	resumable: HashMap<moq_net::Instance, (u64, Arc<Timeline>)>,
 	/// Shared with the readers.
 	finished: Finished,
 	/// How many instances started, numbering each.
@@ -1271,8 +1271,8 @@ struct Follower {
 struct Current {
 	/// Released at its end, so an offline sibling holds none of its state.
 	instance: Option<moq_net::broadcast::Consumer>,
-	/// Its route's, which [`Follower::resumable`] keeps it by.
-	identity: Option<moq_net::Identity>,
+	/// Its route's instance, which [`Follower::resumable`] keeps it by.
+	id: Option<moq_net::Instance>,
 	/// Shared by every rendition reading the instance, so their first frames fix one mapping for
 	/// all of them.
 	timeline: Arc<Timeline>,
@@ -1455,8 +1455,8 @@ impl Follower {
 		}
 
 		// An instance served again keeps its timeline and the tracks it finished.
-		let identity = instance.info().identity.clone();
-		let (serial, timeline) = match identity.as_ref().and_then(|identity| self.resumable.get(identity)) {
+		let id = instance.info().instance.clone();
+		let (serial, timeline) = match id.as_ref().and_then(|id| self.resumable.get(id)) {
 			Some((serial, timeline)) => (*serial, timeline.clone()),
 			None => {
 				self.started += 1;
@@ -1469,12 +1469,12 @@ impl Follower {
 				(self.started, timeline)
 			}
 		};
-		if let Some(identity) = &identity {
-			self.resumable.insert(identity.clone(), (serial, timeline.clone()));
+		if let Some(id) = &id {
+			self.resumable.insert(id.clone(), (serial, timeline.clone()));
 		}
 		self.current = Some(Current {
 			instance: Some(instance),
-			identity,
+			id,
 			timeline,
 			serial,
 		});
@@ -1486,13 +1486,13 @@ impl Follower {
 	/// Drop the state no return can resume: an instance neither current nor pinned by a rendition,
 	/// and the records of a retired pad. A disabled rendition keeps its pad, and its records.
 	fn forget(&mut self) {
-		let pinned: HashSet<&moq_net::Identity> = self
+		let pinned: HashSet<&moq_net::Instance> = self
 			.renditions
 			.values()
-			.filter_map(|entry| entry.shape.identity.as_ref())
-			.chain(self.current.as_ref().and_then(|current| current.identity.as_ref()))
+			.filter_map(|entry| entry.shape.instance.as_ref())
+			.chain(self.current.as_ref().and_then(|current| current.id.as_ref()))
 			.collect();
-		self.resumable.retain(|identity, _| pinned.contains(identity));
+		self.resumable.retain(|instance, _| pinned.contains(instance));
 		let serials: HashSet<u64> = self
 			.resumable
 			.values()
@@ -1534,7 +1534,7 @@ impl Follower {
 			return;
 		};
 		for (rendition, entry) in &mut self.renditions {
-			if entry.reader.is_none() && only(rendition) && serves(instance, entry.shape.identity.as_ref()) {
+			if entry.reader.is_none() && only(rendition) && serves(instance, entry.shape.instance.as_ref()) {
 				self.next_id += 1;
 				let (cancel, cancelled) = watch::channel(false);
 				let live = Arc::new(AtomicBool::new(false));
@@ -1582,11 +1582,11 @@ impl Follower {
 	}
 }
 
-/// Whether `instance` may serve a rendition naming `identity`. A broadcast not
+/// Whether `instance` may serve a rendition naming `id`. A broadcast not
 /// resolved through an origin has none to compare, and a minted one proves nothing, so only a
 /// known mismatch refuses it.
-fn serves(instance: &moq_net::broadcast::Consumer, identity: Option<&moq_net::Identity>) -> bool {
-	match (identity, &instance.info().identity) {
+fn serves(instance: &moq_net::broadcast::Consumer, id: Option<&moq_net::Instance>) -> bool {
+	match (id, &instance.info().instance) {
 		(Some(expected), Some(actual)) if !actual.is_minted() => expected == actual,
 		_ => true,
 	}
@@ -3661,7 +3661,7 @@ mod session_tests {
 				container: Container::Legacy,
 				track: "video".into(),
 				broadcast: None,
-				identity: None,
+				instance: None,
 			},
 			instance,
 			serial: 1,
@@ -3982,11 +3982,11 @@ mod session_tests {
 		recorder.assert_one_pad_held();
 	}
 
-	/// A `room` whose video rendition references the `cam` sibling, naming `identity` when given.
-	fn referencing(origin: &moq_net::origin::Producer, identity: Option<moq_net::Identity>) -> Publisher {
+	/// A `room` whose video rendition references the `cam` sibling, naming `instance` when given.
+	fn referencing(origin: &moq_net::origin::Producer, instance: Option<moq_net::Instance>) -> Publisher {
 		let mut config = video_rendition();
 		config.broadcast = Some(moq_net::path::Relative::new("./cam").unwrap());
-		config.identity = identity;
+		config.instance = instance;
 		Publisher::new(origin, Default::default(), config)
 	}
 
@@ -4382,23 +4382,23 @@ mod session_tests {
 	}
 
 	/// A publisher handoff after a sibling track finished, the catalog naming the new instance's
-	/// identity, plays that instance on the same pad.
+	/// instance, plays that instance on the same pad.
 	#[test]
-	fn an_identity_handoff_after_a_sibling_finish_plays_the_new_instance() {
+	fn an_instance_handoff_after_a_sibling_finish_plays_the_new_instance() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let (old, new) = (moq_net::Identity::random(), moq_net::Identity::random());
+		let (old, new) = (moq_net::Instance::random(), moq_net::Instance::random());
 		let mut room = referencing(&origin, Some(old.clone()));
 		let session = follow(&element, &origin);
 
-		let mut first = Publisher::sibling(&origin, moq_net::origin::Route::default().with_identity(old, 0));
+		let mut first = Publisher::sibling(&origin, moq_net::origin::Route::default().with_instance(old, 0));
 		let pad = recorder.written(&mut first, 1);
 		first.video.finish().unwrap();
 		await_finished(&first);
 
-		let mut second = Publisher::sibling(&origin, moq_net::origin::Route::default().with_identity(new.clone(), 0));
+		let mut second = Publisher::sibling(&origin, moq_net::origin::Route::default().with_instance(new.clone(), 0));
 		room.catalog
 			.modify()
 			.unwrap()
@@ -4406,7 +4406,7 @@ mod session_tests {
 			.renditions
 			.get_mut("video")
 			.unwrap()
-			.identity = Some(new);
+			.instance = Some(new);
 		assert_eq!(
 			recorder.written(&mut second, 2),
 			pad,
@@ -4427,23 +4427,23 @@ mod session_tests {
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 		let (pinned, other, next) = (
-			moq_net::Identity::random(),
-			moq_net::Identity::random(),
-			moq_net::Identity::random(),
+			moq_net::Instance::random(),
+			moq_net::Instance::random(),
+			moq_net::Instance::random(),
 		);
 		let mut room = referencing(&origin, Some(pinned.clone()));
 		{
 			let mut guard = room.catalog.modify().unwrap();
 			let mut again = guard.video.renditions["video"].clone();
 			again.track = Some("video".into());
-			again.identity = None;
+			again.instance = None;
 			guard.video.renditions.insert("again".into(), again);
 		}
 		let session = follow(&element, &origin);
 
 		// Each rendition plays the first instance on a pad of its own. Written once, so a second
 		// copy on either pad can only be a replay.
-		let mut first = Publisher::sibling(&origin, moq_net::origin::Route::default().with_identity(pinned, 0));
+		let mut first = Publisher::sibling(&origin, moq_net::origin::Route::default().with_instance(pinned, 0));
 		first.write(1);
 		let played = recorder.wait("1 never reached both renditions", |seen| {
 			let pads = reached(seen, 1);
@@ -4454,7 +4454,7 @@ mod session_tests {
 
 		// Another instance wins the path, which only the unpinned rendition plays, then leaves it
 		// to the pinned one.
-		let mut second = Publisher::sibling(&origin, moq_net::origin::Route::default().with_identity(other, 0));
+		let mut second = Publisher::sibling(&origin, moq_net::origin::Route::default().with_instance(other, 0));
 		let unpinned = recorder.written(&mut second, 2);
 		let pad = played.into_iter().find(|pad| *pad != unpinned).unwrap();
 		let mut follow = watch(&origin, "cam");
@@ -4471,7 +4471,7 @@ mod session_tests {
 
 		let mut third = Publisher::sibling(
 			&origin,
-			moq_net::origin::Route::default().with_identity(next.clone(), 0),
+			moq_net::origin::Route::default().with_instance(next.clone(), 0),
 		);
 		room.catalog
 			.modify()
@@ -4480,7 +4480,7 @@ mod session_tests {
 			.renditions
 			.get_mut("video")
 			.unwrap()
-			.identity = Some(next);
+			.instance = Some(next);
 		third.write(3);
 		recorder.wait("the next instance never reached the pinned pad", |seen| {
 			reached(seen, 3).contains(&pad).then_some(())
@@ -4578,7 +4578,7 @@ mod session_tests {
 		stop(session);
 	}
 
-	/// A sibling replaced while the old one stays up restarts a reference that names no identity, on
+	/// A sibling replaced while the old one stays up restarts a reference that names no instance, on
 	/// the same pad, and nothing more from the old instance gets through.
 	fn sibling_restart(route: impl Fn() -> moq_net::origin::Route) {
 		let _pad_ids = pad_ids();
@@ -4613,17 +4613,17 @@ mod session_tests {
 		sibling_restart(moq_net::origin::Route::default);
 	}
 
-	/// A reference naming its sibling's identity never reads the instance replacing it: the pad
+	/// A reference naming its sibling's instance never reads the instance replacing it: the pad
 	/// idles, and plays again once the named instance serves the path again.
 	#[test]
-	fn a_sibling_restart_idles_a_reference_naming_the_old_identity() {
+	fn a_sibling_restart_idles_a_reference_naming_the_old_instance() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let named = moq_net::Identity::random();
+		let named = moq_net::Instance::random();
 		let _room = referencing(&origin, Some(named.clone()));
-		let mut old = Publisher::sibling(&origin, moq_net::origin::Route::default().with_identity(named, 0));
+		let mut old = Publisher::sibling(&origin, moq_net::origin::Route::default().with_instance(named, 0));
 		let session = follow(&element, &origin);
 		await_demand(&old, true);
 		let pad = recorder.written(&mut old, 1);
@@ -4652,7 +4652,7 @@ mod session_tests {
 		stop(session);
 		assert!(
 			!recorder.seen().contains(&Seen::Buffer(pad, 2)),
-			"another identity played: {:?}",
+			"another instance played: {:?}",
 			recorder.seen()
 		);
 		recorder.assert_one_pad_held();
@@ -5257,7 +5257,7 @@ mod session_tests {
 		assert!(error.debug().unwrap().contains("protocol violation"), "{error:?}");
 	}
 
-	/// End to end through a relay: a publisher restarted under a new identity, the old one still up.
+	/// End to end through a relay: a publisher restarted under a new instance, the old one still up.
 	/// The pad linked by name keeps flowing into a synced sink, which renders the new broadcast on
 	/// time even though its timestamps start over.
 	#[test]

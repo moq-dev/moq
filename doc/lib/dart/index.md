@@ -129,7 +129,7 @@ final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup();
 group.writeFrame(frame: Frame(payload: bytes, timestampUs: null));
 group.finish();
-publication.announce(route: AnnounceRoute()); // the broadcast mints its own identity
+publication.announce(route: AnnounceRoute()); // the broadcast mints its own instance
 track.finish();
 mine.close();
 

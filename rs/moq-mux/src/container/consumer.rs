@@ -2811,12 +2811,12 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn truncated_resumed_group_skips_to_the_next_clean_group() {
 		// One publisher instance behind every route, so each may resume the others.
-		let identity = moq_net::Identity::random();
+		let instance = moq_net::Instance::random();
 		let origin = crate::source::produce_origin();
 		let hops = moq_net::Hops::try_from(vec![moq_net::Hop::new(10).unwrap()]).unwrap();
 		let route = |cost: u64| {
 			moq_net::origin::Route::default()
-				.with_identity(identity.clone(), 0)
+				.with_instance(instance.clone(), 0)
 				.with_hops(hops.clone())
 				.with_cost(cost)
 		};

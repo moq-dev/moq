@@ -266,26 +266,26 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(update.captures, ["alice"])
     }
 
-    func testAnnouncedIdentityRestarts() async throws {
+    func testAnnouncedInstanceRestarts() async throws {
         let origin = OriginProducer()
         let announced = try origin.consume().announced(prefix: "")
-        let publication = try origin.createBroadcast(path: "identity")
+        let publication = try origin.createBroadcast(path: "instance")
 
         try publication.announce(route: AnnounceRoute())
         guard case .start(let start) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
-        XCTAssertFalse(start.route.identity.isEmpty)
+        XCTAssertFalse(start.route.instance.isEmpty)
 
-        try publication.announce(route: AnnounceRoute(identity: "camera", epoch: 1))
+        try publication.announce(route: AnnounceRoute(instance: "camera", epoch: 1))
         guard case .restart(let restart) = try await nextRoute(announced) else {
             return XCTFail("expected a restart")
         }
-        XCTAssertEqual(restart.route.identity, "camera")
+        XCTAssertEqual(restart.route.instance, "camera")
 
-        XCTAssertThrowsError(try publication.announce(route: AnnounceRoute(identity: ""))) { error in
-            guard case MoqError.InvalidIdentity = error else {
-                return XCTFail("expected InvalidIdentity, got \(error)")
+        XCTAssertThrowsError(try publication.announce(route: AnnounceRoute(instance: ""))) { error in
+            guard case MoqError.InvalidInstance = error else {
+                return XCTFail("expected InvalidInstance, got \(error)")
             }
         }
     }

@@ -307,7 +307,7 @@ async fn retracted_relay_ignores_a_stale_path() {
 ///
 /// The watching client holds nothing, so it reports every toggle its relay
 /// sends, as a browser's announce stream does. The relays speak lite-07, which
-/// carries the broadcast's identity, so a relay moving to another path updates it.
+/// carries the broadcast's instance, so a relay moving to another path updates it.
 /// Older versions carry none, so every relay mints its own and a move between
 /// neighbors is a restart the update hold does not absorb.
 struct Cluster {

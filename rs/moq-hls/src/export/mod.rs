@@ -107,7 +107,7 @@ pub struct Broadcaster {
 	)]
 	broadcast: moq_net::broadcast::Consumer,
 	/// The stream served, which every URL the master playlist and manifest list starts with:
-	/// its identity, or an id minted for a broadcast that came through no route.
+	/// its instance, or an id minted for a broadcast that came through no route.
 	instance: Arc<str>,
 	/// The current rendition set, reconciled from the catalog by the watcher task.
 	renditions: renditions::Producer,
@@ -146,12 +146,12 @@ impl Broadcaster {
 	/// [`new`](Self::new) for a caller that already checked the CPU.
 	pub(crate) fn start(source: moq_mux::Source, config: Config) -> (Self, Driver) {
 		let broadcast = source.broadcast();
-		// An identity names the stream on every edge, so each serves it under the same URLs.
+		// An instance names the stream on every edge, so each serves it under the same URLs.
 		let instance = broadcast
 			.info()
-			.identity
+			.instance
 			.clone()
-			.unwrap_or_else(moq_net::Identity::random);
+			.unwrap_or_else(moq_net::Instance::random);
 		let (spawner, mut driver) = driver::Spawner::new();
 		let renditions = renditions::Producer::new(config.window, spawner);
 		// The watcher owns its own producer clone; dropping the `Broadcaster` ends it so the
@@ -2830,7 +2830,7 @@ mod tests {
 		);
 
 		// Control: an export started after the takeover does serve the new publisher's media, so
-		// the assertion above is about which identity a rendition is bound to, not about a broadcast
+		// the assertion above is about which instance a rendition is bound to, not about a broadcast
 		// that happens to be unreadable.
 		let fresh = crate::resolved(&origin, "live").await;
 		let (_renditions, rendition) = export(&fresh, &video_config());
@@ -3097,7 +3097,7 @@ mod tests {
 	}
 
 	// A replacement already present when the export starts is the sibling the request
-	// resolves to: it is served, not treated as a stale identity.
+	// resolves to: it is served, not treated as a stale instance.
 	#[tokio::test]
 	async fn a_sibling_present_at_export_start_is_served() {
 		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";

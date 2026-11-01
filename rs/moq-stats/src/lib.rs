@@ -18,10 +18,10 @@
 //!
 //! A [`Producer`] publishes one broadcast per node at `<prefix>/node/<node>`
 //! (default prefix `.stats`); parse announce paths back with
-//! [`parse_node_path`]. Each announcement carries a fresh [`Identity`] on its
+//! [`parse_node_path`]. Each announcement carries a fresh [`Instance`] on its
 //! route, so a restarted node is a new broadcast at the same path; a reader
-//! tells them apart by the announced route's identity. The broadcast carries a
-//! `totals.json` track of each [`Tier`]'s [`Totals`] for the identity, and a
+//! tells them apart by the announced route's instance. The broadcast carries a
+//! `totals.json` track of each [`Tier`]'s [`Totals`] for the instance, and a
 //! reader may request any stats label's `<label>/presence.json` track and any
 //! broadcast prefix's `<path>/prefix.json` track of [`Prefix`] counters. Each
 //! is a compressed [`moq_json::snapshot`] track; compute names with
@@ -48,7 +48,7 @@ use std::collections::BTreeMap;
 /// can depend on this crate alone.
 pub use moq_net::stats::{Failure, Failures, Handle, Presence, RefusalKind, Refusals, Registry, Role, Tier, Traffic};
 
-use moq_net::{Identity, Path};
+use moq_net::{Instance, Path};
 
 /// One frame off the totals track: each tier's [`Totals`], keyed by tier label
 /// (`""` for the default tier).
@@ -132,7 +132,7 @@ pub struct GroupFrame {
 	/// counter in a frame with a new epoch starts from zero, so a reader keeps each
 	/// epoch's counters apart rather than diffing across them.
 	#[serde_as(as = "serde_with::DisplayFromStr")]
-	pub epoch: Identity,
+	pub epoch: Instance,
 	/// Each tier's [`Group`] counters, keyed by tier label (`""` for the default
 	/// tier).
 	#[serde(default)]
@@ -271,7 +271,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// A fresh [`GroupFrame::epoch`]: the text of a UUIDv7, so epochs sort by creation.
-pub(crate) fn mint_epoch() -> Identity {
+pub(crate) fn mint_epoch() -> Instance {
 	uuid::Uuid::now_v7()
 		.hyphenated()
 		.to_string()

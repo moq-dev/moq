@@ -66,7 +66,7 @@ just carla                            # relay + trucks + player
 What it demonstrates:
 
 - **GPU to wire.** Camera images never leave the GPU: `moq-video` encodes them on the device that rendered them, and a camera renders only while someone subscribes.
-- **Control with a lease.** A driver publishes a JSON `control` track under `viewer/carla/{truck}/`; the truck accepts one driver at a time, bound to the identity it announced with, and returns to autonomy when the lease lapses.
+- **Control with a lease.** A driver publishes a JSON `control` track under `viewer/carla/{truck}/`; the truck accepts one driver at a time, bound to the instance it announced with, and returns to autonomy when the lease lapses.
 - **Measured feedback.** Each truck's `status` track carries what the gate accepted and what the vehicle did, so the player draws requested against measured steering.
 
 Code: [`demo/carla`](https://github.com/moq-dev/moq/tree/main/demo/carla).

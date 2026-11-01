@@ -56,7 +56,7 @@
 //!
 //! ## Driving and time
 //! Session and origin drivers never spawn tasks or read the clock.
-//! Minting an [`Identity`] uses secure randomness. `Client::connect` and
+//! Minting an [`Instance`] uses secure randomness. `Client::connect` and
 //! `Server::accept` take an initial [`time::Instant`] and return
 //! `(Session, Driver)`. Poll the `Driver` with the current instant and a
 //! [`kio::Waiter`], then wake on external activity or at the deadline it
@@ -108,8 +108,8 @@ mod goaway;
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 #[doc(hidden)]
 pub mod fuzz;
-mod identity;
 mod ietf;
+mod instance;
 mod ledger;
 mod lite;
 mod model;
@@ -144,7 +144,7 @@ pub use coding::{BoundsExceeded, DecodeError, EncodeError, varint};
 #[cfg(feature = "async")]
 pub use driver::Driver;
 pub use error::*;
-pub use identity::{Identity, InvalidIdentity};
+pub use instance::{Instance, InvalidInstance};
 pub use model::*;
 pub use path::{InvalidPattern, Path, Pattern, Patterns};
 #[cfg(feature = "async")]

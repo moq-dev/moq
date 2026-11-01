@@ -1142,7 +1142,7 @@ mod tests {
 		// A message carrying the longest path still fits the lite message limit.
 		let tracks = crate::lite::Tracks {
 			broadcast: Path::new(&longest).unwrap(),
-			identity: None,
+			instance: None,
 		};
 		let buf = tracks.encode_bytes(Version::Lite07).unwrap();
 		let (decoded, _) = crate::lite::Tracks::decode_slice(&buf, Version::Lite07).unwrap();

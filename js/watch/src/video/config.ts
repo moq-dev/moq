@@ -15,7 +15,7 @@ export type DecoderConfig = Pick<
 /** The routing and decoder state whose changes require a new playback pipeline. */
 export type PlaybackIdentity = {
 	broadcast: Catalog.VideoConfig["broadcast"];
-	identity: Catalog.VideoConfig["identity"];
+	instance: Catalog.VideoConfig["instance"];
 	track: Catalog.VideoConfig["track"];
 	decoder: DecoderConfig;
 };
@@ -24,7 +24,7 @@ export type PlaybackIdentity = {
 export function playbackIdentity(config: Catalog.VideoConfig): PlaybackIdentity {
 	return {
 		broadcast: config.broadcast,
-		identity: config.identity,
+		instance: config.instance,
 		track: config.track,
 		decoder: {
 			codec: config.codec,

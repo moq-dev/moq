@@ -277,11 +277,11 @@ impl Session {
 		let _rt = RUNTIME.enter();
 
 		let origin = moq_tokio::origin::spawn();
-		// Each run is a new stream under a fresh identity, which the publication mints: a restarted
+		// Each run is a new stream under a fresh instance, which the publication mints: a restarted
 		// pipeline never resumes viewers into the old run's group sequence. Reconnects keep it.
 		let broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default())?;
-		if let Some(identity) = broadcast.route().and_then(|route| route.identity) {
-			gst::info!(CAT, "publishing {} under identity {identity}", settings.broadcast);
+		if let Some(instance) = broadcast.route().and_then(|route| route.instance) {
+			gst::info!(CAT, "publishing {} under instance {instance}", settings.broadcast);
 		}
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())?;
@@ -569,19 +569,19 @@ mod tests {
 		(session, connection)
 	}
 
-	fn announced_identity(broadcast: &moq_net::origin::Publication) -> moq_net::Identity {
-		broadcast.route().expect("announced").identity.expect("an identity")
+	fn announced_instance(broadcast: &moq_net::origin::Publication) -> moq_net::Instance {
+		broadcast.route().expect("announced").instance.expect("an instance")
 	}
 
-	// Under one identity, a restart whose old route lingers would resume viewers into the old run's groups.
+	// Under one instance, a restart whose old route lingers would resume viewers into the old run's groups.
 	#[test]
-	fn each_run_announces_a_new_identity() {
+	fn each_run_announces_a_new_instance() {
 		let (first, first_broadcast) = started_with_broadcast();
-		let first_identity = announced_identity(&first_broadcast);
+		let first_instance = announced_instance(&first_broadcast);
 		first.stop();
 
 		let (second, second_broadcast) = started_with_broadcast();
-		assert_ne!(announced_identity(&second_broadcast), first_identity);
+		assert_ne!(announced_instance(&second_broadcast), first_instance);
 		second.stop();
 	}
 

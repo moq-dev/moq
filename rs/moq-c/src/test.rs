@@ -177,7 +177,7 @@ fn announce_info(announced: u32) -> moq_announce_event {
 			hops: std::ptr::null(),
 			hops_len: 0,
 			cost: 0,
-			identity: moq_string {
+			instance: moq_string {
 				data: std::ptr::null(),
 				len: 0,
 			},
@@ -189,27 +189,27 @@ fn announce_info(announced: u32) -> moq_announce_event {
 	info
 }
 
-/// A fresh stable identity, as an application would name one.
-fn fresh_identity() -> String {
-	moq_net::Identity::random().to_string()
+/// A fresh stable instance, as an application would name one.
+fn fresh_instance() -> String {
+	moq_net::Instance::random().to_string()
 }
 
-/// An announce route at `cost` under the stable `identity`, borrowing it.
-fn announce_route(cost: u64, identity: &str) -> moq_announce_route {
+/// An announce route at `cost` under the stable `instance`, borrowing it.
+fn announce_route(cost: u64, instance: &str) -> moq_announce_route {
 	moq_announce_route {
 		cost,
-		identity: identity.as_ptr().cast(),
-		identity_len: identity.len(),
+		instance: instance.as_ptr().cast(),
+		instance_len: instance.len(),
 		epoch: 0,
 	}
 }
 
-/// The identity a received route carries.
-fn route_identity(route: &moq_route) -> Option<String> {
-	(route.identity.len > 0).then(|| unsafe {
+/// The instance a received route carries.
+fn route_instance(route: &moq_route) -> Option<String> {
+	(route.instance.len > 0).then(|| unsafe {
 		std::str::from_utf8(std::slice::from_raw_parts(
-			route.identity.data.cast::<u8>(),
-			route.identity.len,
+			route.instance.data.cast::<u8>(),
+			route.instance.len,
 		))
 		.unwrap()
 		.to_string()
@@ -3106,38 +3106,38 @@ fn create_broadcast_is_unroutable_until_announced() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A locally announced route carries its cost and identity, and no hops: the hop chain is
+/// A locally announced route carries its cost and instance, and no hops: the hop chain is
 /// the origin's to build.
 #[test]
-fn announce_route_carries_cost_and_identity_without_hops() {
+fn announce_route_carries_cost_and_instance_without_hops() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 	let (publication, broadcast) = create_broadcast(origin, b"routed");
 
-	let identity = fresh_identity();
-	let route = announce_route(7, &identity);
+	let instance = fresh_instance();
+	let route = announce_route(7, &instance);
 	assert_eq!(unsafe { moq_publication_announce(publication, &route) }, 0);
 
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
 	assert_eq!(info.route.hops_len, 0, "a local route claims no hops");
 	assert_eq!(info.route.cost, 7);
-	assert_eq!(route_identity(&info.route).as_ref(), Some(&identity));
+	assert_eq!(route_instance(&info.route).as_ref(), Some(&instance));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
-	// A zeroed route is the default: cost 0 and the identity the publication minted.
+	// A zeroed route is the default: cost 0 and the instance the publication minted.
 	let zeroed = moq_announce_route {
 		cost: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
 		epoch: 0,
 	};
 	let (publication2, broadcast2) = create_broadcast(origin, b"plain");
 	assert_eq!(unsafe { moq_publication_announce(publication2, &zeroed) }, 0);
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.route.cost, 0);
-	assert!(route_identity(&info.route).is_some_and(|minted| minted != identity));
+	assert!(route_instance(&info.route).is_some_and(|minted| minted != instance));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
@@ -3149,33 +3149,33 @@ fn announce_route_carries_cost_and_identity_without_hops() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Announcing under another identity is another stream: subscribers see a restart rather
+/// Announcing under another instance is another stream: subscribers see a restart rather
 /// than a stalled broadcast.
 #[test]
-fn announce_under_a_new_identity_restarts() {
+fn announce_under_a_new_instance_restarts() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 	let (publication, broadcast) = create_broadcast(origin, b"restarted");
 
-	let first = fresh_identity();
+	let first = fresh_instance();
 	assert_eq!(
 		unsafe { moq_publication_announce(publication, &announce_route(0, &first)) },
 		0
 	);
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
-	assert_eq!(route_identity(&info.route), Some(first));
+	assert_eq!(route_instance(&info.route), Some(first));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
-	let second = fresh_identity();
+	let second = fresh_instance();
 	assert_eq!(
 		unsafe { moq_publication_announce(publication, &announce_route(0, &second)) },
 		0
 	);
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_RESTART);
-	assert_eq!(route_identity(&info.route), Some(second));
+	assert_eq!(route_instance(&info.route), Some(second));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
@@ -4257,7 +4257,7 @@ fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::o
 	State::lock().origin.get(origin).unwrap().publish(path, route).unwrap()
 }
 
-/// Publish `path` on `origin` under a fresh identity, as each run of a publisher does.
+/// Publish `path` on `origin` under a fresh instance, as each run of a publisher does.
 fn publish_run(origin: u32, path: &str) -> moq_net::origin::Publication {
 	publish(origin, path, moq_net::origin::Route::default())
 }
@@ -4319,7 +4319,7 @@ fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 		)
 	});
 
-	// The wait is on the dynamic route's answer when the exact path takes over under another identity.
+	// The wait is on the dynamic route's answer when the exact path takes over under another instance.
 	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
 	let takeover = publish(origin, "live", moq_net::origin::Route::default());
 	let delivered = id(cb.recv());
@@ -4358,57 +4358,57 @@ type Resolve = unsafe extern "C" fn(
 	*mut c_void,
 ) -> i32;
 
-/// Resolve `live` on `origin` through `call`, pinned to `identity`.
-fn resolve_pinned(call: Resolve, origin: u32, identity: &str, cb: &Callback) -> i32 {
+/// Resolve `live` on `origin` through `call`, pinned to `instance`.
+fn resolve_pinned(call: Resolve, origin: u32, instance: &str, cb: &Callback) -> i32 {
 	let path = b"live";
 	unsafe {
 		call(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			identity.as_ptr() as *const c_char,
-			identity.len(),
+			instance.as_ptr() as *const c_char,
+			instance.len(),
 			Some(channel_callback),
 			cb.ptr,
 		)
 	}
 }
 
-/// An identity pins both resolutions to one stream: a request for another one fails, and a
+/// An instance pins both resolutions to one stream: a request for another one fails, and a
 /// follower never delivers another one taking over but delivers its own once it serves again.
 #[test]
-fn an_identity_pins_request_and_follow() {
+fn an_instance_pins_request_and_follow() {
 	let origin = id(moq_origin_create());
-	let identity = moq_net::Identity::random();
+	let instance = moq_net::Instance::random();
 	let first = publish(
 		origin,
 		"live",
-		moq_net::origin::Route::default().with_identity(identity.clone(), 0),
+		moq_net::origin::Route::default().with_instance(instance.clone(), 0),
 	);
-	let identity = identity.to_string();
+	let instance = instance.to_string();
 
 	let cb = Callback::new();
-	id(resolve_pinned(moq_origin_request, origin, &identity, &cb));
+	id(resolve_pinned(moq_origin_request, origin, &instance, &cb));
 	assert_eq!(moq_consume_close(id(cb.recv())), 0);
 	assert_eq!(cb.recv_terminal(), 0);
 	let cb = Callback::new();
 	id(resolve_pinned(
 		moq_origin_request,
 		origin,
-		moq_net::Identity::random().as_ref(),
+		moq_net::Instance::random().as_ref(),
 		&cb,
 	));
-	assert!(cb.recv() < 0, "another identity resolved");
+	assert!(cb.recv() < 0, "another instance resolved");
 
-	// Another identity winning the path leaves the pinned stream to its own routes: the
+	// Another instance winning the path leaves the pinned stream to its own routes: the
 	// follower delivers it while it still serves, and nothing for the winner.
 	let second = publish_run(origin, "live");
 	let cb = Callback::new();
-	let task = id(resolve_pinned(moq_origin_follow, origin, &identity, &cb));
+	let task = id(resolve_pinned(moq_origin_follow, origin, &instance, &cb));
 	let delivered = id(cb.recv());
 	let tx = unsafe { &*(cb.ptr as *const mpsc::Sender<i32>) }.clone();
 	crate::ffi::RUNTIME.spawn(async move { tx.send(i32::MAX).unwrap() });
-	assert_eq!(cb.recv(), i32::MAX, "the follower delivered another identity");
+	assert_eq!(cb.recv(), i32::MAX, "the follower delivered another instance");
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
@@ -4480,7 +4480,7 @@ fn follow_delivers_the_instance_again_after_an_end() {
 	});
 	let recv = || rx.recv_timeout(TIMEOUT).expect("callback timed out");
 
-	let route = moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0);
+	let route = moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let run = publish(origin, "live", route.clone());
 	let first = id(recv());
 
@@ -4511,7 +4511,7 @@ fn follow_delivers_a_freed_takeover_again() {
 	let cb = Callback::new();
 	let task = follow(origin, b"live", &cb);
 
-	// Under another identity, the origin holds the takeover's restart past its resolution.
+	// Under another instance, the origin holds the takeover's restart past its resolution.
 	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
 	let takeover = publish(origin, "live", moq_net::origin::Route::default());
 	assert_eq!(moq_consume_close(id(cb.recv())), 0);

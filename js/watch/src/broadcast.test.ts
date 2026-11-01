@@ -333,23 +333,23 @@ describe("relativeBroadcast", () => {
 		}
 	});
 
-	it("reads a reference only from the identity it names, best effort against a minted one", async () => {
+	it("reads a reference only from the instance it names, best effort against a minted one", async () => {
 		const owner = new Origin.Producer();
-		const [catalogIdentity, siblingIdentity, other] = [
-			Moq.Identity.random(),
-			Moq.Identity.random(),
-			Moq.Identity.random(),
+		const [catalogInstance, siblingInstance, other] = [
+			Moq.Instance.random(),
+			Moq.Instance.random(),
+			Moq.Instance.random(),
 		];
 		const catalogPublication = owner.createBroadcast(Path.from("a/b"));
 		const catalog = catalogPublication.broadcast;
-		catalogPublication.announce({ identity: catalogIdentity });
+		catalogPublication.announce({ instance: catalogInstance });
 		const siblingPublication = owner.createBroadcast(Path.from("a/source"));
 		const sibling = siblingPublication.broadcast;
-		siblingPublication.announce({ identity: siblingIdentity });
-		// A route over a wire that carries no identity has one its session minted.
+		siblingPublication.announce({ instance: siblingInstance });
+		// A route over a wire that carries no instance has one its session minted.
 		const plainPublication = owner.createBroadcast(Path.from("a/plain"));
 		const plain = plainPublication.broadcast;
-		plainPublication.announce({ identity: Moq.Identity.minted() });
+		plainPublication.announce({ instance: Moq.Instance.minted() });
 		const source = new Broadcast({
 			origin: owner,
 			name: Path.from("a/b"),
@@ -361,17 +361,17 @@ describe("relativeBroadcast", () => {
 		try {
 			await settle();
 			const rel = Path.normalizeRelative("./source");
-			expect(source.relativeBroadcast(effect, rel)?.identity).toBe(siblingIdentity);
-			expect(source.relativeBroadcast(effect, rel, siblingIdentity)?.identity).toBe(siblingIdentity);
+			expect(source.relativeBroadcast(effect, rel)?.instance).toBe(siblingInstance);
+			expect(source.relativeBroadcast(effect, rel, siblingInstance)?.instance).toBe(siblingInstance);
 			const own = source.out.active.peek();
-			expect(own?.identity).toBe(catalogIdentity);
-			expect(source.relativeBroadcast(effect, undefined, catalogIdentity)).toBe(own);
+			expect(own?.instance).toBe(catalogInstance);
+			expect(source.relativeBroadcast(effect, undefined, catalogInstance)).toBe(own);
 			withoutWarnings(() => {
 				expect(source.relativeBroadcast(effect, rel, other)).toBeUndefined();
 				expect(source.relativeBroadcast(effect, undefined, other)).toBeUndefined();
 				expect(source.relativeBroadcast(effect, Path.normalizeRelative("./b"), other)).toBeUndefined();
 			});
-			// A minted identity cannot prove the stream, so the named identity cannot refuse it.
+			// A minted instance cannot prove the stream, so the named instance cannot refuse it.
 			expect(source.relativeBroadcast(effect, Path.normalizeRelative("./plain"), other)).toBeDefined();
 		} finally {
 			effect.close();
@@ -383,13 +383,13 @@ describe("relativeBroadcast", () => {
 		}
 	});
 
-	it("follows a replaced sibling only for a reference that names no identity", async () => {
+	it("follows a replaced sibling only for a reference that names no instance", async () => {
 		const owner = new Origin.Producer();
 		const main = publish(owner, Path.from("a/b"));
-		const [oldIdentity, newIdentity] = [Moq.Identity.random(), Moq.Identity.random()];
+		const [oldInstance, newInstance] = [Moq.Instance.random(), Moq.Instance.random()];
 		const oldPublication = owner.createBroadcast(Path.from("a/source"));
 		const old = oldPublication.broadcast;
-		oldPublication.announce({ identity: oldIdentity });
+		oldPublication.announce({ instance: oldInstance });
 		const source = new Broadcast({
 			origin: owner,
 			name: Path.from("a/b"),
@@ -404,20 +404,20 @@ describe("relativeBroadcast", () => {
 			following = source.relativeBroadcast(nested, rel);
 		});
 		effect.run((nested) => {
-			pinned = withoutWarnings(() => source.relativeBroadcast(nested, rel, oldIdentity));
+			pinned = withoutWarnings(() => source.relativeBroadcast(nested, rel, oldInstance));
 		});
 		try {
 			await settle();
-			expect(following?.identity).toBe(oldIdentity);
-			expect(pinned?.identity).toBe(oldIdentity);
+			expect(following?.instance).toBe(oldInstance);
+			expect(pinned?.instance).toBe(oldInstance);
 
 			// The announcement is the online signal: the plain reference follows the restart,
 			// while one naming the old instance never reads the new one.
 			const replacementPublication = owner.createBroadcast(Path.from("a/source"));
 			const replacement = replacementPublication.broadcast;
-			replacementPublication.announce({ identity: newIdentity });
+			replacementPublication.announce({ instance: newInstance });
 			await settle();
-			expect(following?.identity).toBe(newIdentity);
+			expect(following?.instance).toBe(newInstance);
 			expect(pinned).toBeUndefined();
 			replacement.close();
 		} finally {
@@ -429,14 +429,14 @@ describe("relativeBroadcast", () => {
 		}
 	});
 
-	it("drops a rendition from the catalog while its broadcast proves another identity", async () => {
+	it("drops a rendition from the catalog while its broadcast proves another instance", async () => {
 		const owner = new Origin.Producer();
 		const main = publish(owner, Path.from("a/b"));
-		const [oldIdentity, newIdentity] = [Moq.Identity.random(), Moq.Identity.random()];
+		const [oldInstance, newInstance] = [Moq.Instance.random(), Moq.Instance.random()];
 		const oldPublication = owner.createBroadcast(Path.from("a/source"));
 		const old = oldPublication.broadcast;
-		oldPublication.announce({ identity: oldIdentity });
-		const named = { ...video("avc1.64001f", "./source"), identity: oldIdentity } as Catalog.VideoConfig;
+		oldPublication.announce({ instance: oldInstance });
+		const named = { ...video("avc1.64001f", "./source"), instance: oldInstance } as Catalog.VideoConfig;
 		const source = new Broadcast({
 			origin: owner,
 			name: Path.from("a/b"),
@@ -450,7 +450,7 @@ describe("relativeBroadcast", () => {
 
 			const replacementPublication = owner.createBroadcast(Path.from("a/source"));
 			const replacement = replacementPublication.broadcast;
-			replacementPublication.announce({ identity: newIdentity });
+			replacementPublication.announce({ instance: newInstance });
 			await withoutWarnings(settle);
 			expect(videoRenditions(source)).toEqual(["plain"]);
 			replacement.close();
@@ -502,7 +502,7 @@ describe("blind resolution", () => {
 		const requests = route.requested();
 		const next = await requests.next();
 		if (!next.value) throw new Error("expected a request");
-		const upstream = next.value.prepare(Moq.Identity.random()).publish().broadcast;
+		const upstream = next.value.prepare(Moq.Instance.random()).publish().broadcast;
 
 		await settle();
 		const active = source.out.active.peek();
@@ -1046,7 +1046,7 @@ describe("wildcard renditions", () => {
 			expect(active).toBeUndefined();
 
 			if (!request) throw new Error("expected a request");
-			const prepared = request.prepare(Moq.Identity.random());
+			const prepared = request.prepare(Moq.Instance.random());
 			prepared.broadcast
 				.createTrack("video", { timescale: Moq.Time.Timescale.MILLI })
 				.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Moq.Time.Timestamp.now() });

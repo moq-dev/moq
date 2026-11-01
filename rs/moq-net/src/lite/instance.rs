@@ -1,26 +1,26 @@
 use crate::{
-	Identity,
+	Instance,
 	coding::{DecodeError, Decoder, EncodeError, Encoder},
 };
 
 use super::Version;
 
-/// Encode the identity a request pins as its UTF-8 bytes, or empty for none. Older
-/// versions carry nothing, so the peer resolves whichever identity wins the path.
+/// Encode the instance a request pins as its UTF-8 bytes, or empty for none. Older
+/// versions carry nothing, so the peer resolves whichever instance wins the path.
 pub(super) fn encode_pin(
 	w: &mut Encoder<'_>,
 	version: Version,
-	identity: Option<&Identity>,
+	instance: Option<&Instance>,
 ) -> Result<(), EncodeError> {
-	if !version.has_identity() {
+	if !version.has_instance() {
 		return Ok(());
 	}
-	w.bytes(identity.map_or(&[][..], |identity| identity.as_str().as_bytes()))
+	w.bytes(instance.map_or(&[][..], |instance| instance.as_str().as_bytes()))
 }
 
-/// Decode the identity a request pins: empty is none, and anything but UTF-8 is refused.
-pub(super) fn decode_pin(r: &mut Decoder<'_>, version: Version) -> Result<Option<Identity>, DecodeError> {
-	if !version.has_identity() {
+/// Decode the instance a request pins: empty is none, and anything but UTF-8 is refused.
+pub(super) fn decode_pin(r: &mut Decoder<'_>, version: Version) -> Result<Option<Instance>, DecodeError> {
+	if !version.has_instance() {
 		return Ok(None);
 	}
 	match r.bytes()? {
@@ -29,33 +29,33 @@ pub(super) fn decode_pin(r: &mut Decoder<'_>, version: Version) -> Result<Option
 	}
 }
 
-/// Encode the identity and epoch an announcement serves. Every route carries an identity,
+/// Encode the instance and epoch an announcement serves. Every route carries an instance,
 /// so lite-07 refuses to announce one without. Older versions carry neither, so the
-/// receiving session mints an identity of its own.
+/// receiving session mints an instance of its own.
 pub(super) fn encode_route(
 	w: &mut Encoder<'_>,
 	version: Version,
-	identity: Option<&Identity>,
+	instance: Option<&Instance>,
 	epoch: u64,
 ) -> Result<(), EncodeError> {
-	if !version.has_identity() {
+	if !version.has_instance() {
 		return Ok(());
 	}
-	let identity = identity.ok_or(EncodeError::InvalidState)?;
-	w.bytes(identity.as_str().as_bytes())?;
+	let instance = instance.ok_or(EncodeError::InvalidState)?;
+	w.bytes(instance.as_str().as_bytes())?;
 	w.varint(epoch)
 }
 
-/// Decode the identity and epoch an announcement serves; see [`encode_route`].
-pub(super) fn decode_route(r: &mut Decoder<'_>, version: Version) -> Result<(Option<Identity>, u64), DecodeError> {
-	if !version.has_identity() {
+/// Decode the instance and epoch an announcement serves; see [`encode_route`].
+pub(super) fn decode_route(r: &mut Decoder<'_>, version: Version) -> Result<(Option<Instance>, u64), DecodeError> {
+	if !version.has_instance() {
 		return Ok((None, 0));
 	}
-	let identity = decode(r.bytes()?)?;
-	Ok((Some(identity), r.varint()?))
+	let instance = decode(r.bytes()?)?;
+	Ok((Some(instance), r.varint()?))
 }
 
-fn decode(bytes: &[u8]) -> Result<Identity, DecodeError> {
+fn decode(bytes: &[u8]) -> Result<Instance, DecodeError> {
 	std::str::from_utf8(bytes)
 		.map_err(|_| DecodeError::InvalidValue)?
 		.parse()
@@ -66,9 +66,9 @@ fn decode(bytes: &[u8]) -> Result<Identity, DecodeError> {
 mod test {
 	use super::*;
 
-	fn pin(version: Version, identity: Option<&Identity>) -> Option<Identity> {
+	fn pin(version: Version, instance: Option<&Instance>) -> Option<Instance> {
 		let mut buf = Vec::new();
-		encode_pin(&mut Encoder::new(&mut buf, version.into()), version, identity).unwrap();
+		encode_pin(&mut Encoder::new(&mut buf, version.into()), version, instance).unwrap();
 		let mut decoder = Decoder::new(&buf, version.into());
 		let decoded = decode_pin(&mut decoder, version).unwrap();
 		assert!(decoder.is_empty());
@@ -77,31 +77,31 @@ mod test {
 
 	#[test]
 	fn lite07_carries_the_pin() {
-		let identity = Identity::random();
-		assert_eq!(pin(Version::Lite07, Some(&identity)), Some(identity));
+		let instance = Instance::random();
+		assert_eq!(pin(Version::Lite07, Some(&instance)), Some(instance));
 		assert_eq!(pin(Version::Lite07, None), None);
 	}
 
 	#[test]
 	fn older_versions_drop_it() {
-		assert_eq!(pin(Version::Lite06, Some(&Identity::random())), None);
+		assert_eq!(pin(Version::Lite06, Some(&Instance::random())), None);
 	}
 
 	#[test]
-	fn a_route_carries_its_identity_and_epoch() {
-		let identity = Identity::random();
+	fn a_route_carries_its_instance_and_epoch() {
+		let instance = Instance::random();
 		let mut buf = Vec::new();
 		encode_route(
 			&mut Encoder::new(&mut buf, Version::Lite07.into()),
 			Version::Lite07,
-			Some(&identity),
+			Some(&instance),
 			7,
 		)
 		.unwrap();
 		let mut decoder = Decoder::new(&buf, Version::Lite07.into());
 		assert_eq!(
 			decode_route(&mut decoder, Version::Lite07).unwrap(),
-			(Some(identity), 7)
+			(Some(instance), 7)
 		);
 		assert!(decoder.is_empty());
 

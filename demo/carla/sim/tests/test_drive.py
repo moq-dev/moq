@@ -29,23 +29,23 @@ def test_first_driver_keeps_control() -> None:
 
 
 def test_the_lease_belongs_to_one_run_of_a_driver() -> None:
-    """A driver id announced under another identity is another driver: it cannot
+    """A driver id announced under another instance is another driver: it cannot
     steer while the first run holds the lease, nor release it."""
     state = Drive()
     first = Command(
-        kind="drive", driver_id="abc", identity="run-1", sequence=1, state=DriveState(throttle=0.5, brake=0.0)
+        kind="drive", driver_id="abc", instance="run-1", sequence=1, state=DriveState(throttle=0.5, brake=0.0)
     )
     second = Command(
-        kind="drive", driver_id="abc", identity="run-2", sequence=1, state=DriveState(throttle=1.0, brake=0.0)
+        kind="drive", driver_id="abc", instance="run-2", sequence=1, state=DriveState(throttle=1.0, brake=0.0)
     )
     assert state.apply(first)
     assert not state.apply(second)
     assert state.state.throttle == 0.5
-    assert not state.apply(Command(kind="driver_left", driver_id="abc", identity="run-2"))
+    assert not state.apply(Command(kind="driver_left", driver_id="abc", instance="run-2"))
     assert state.driver == "abc"
 
     # The first run leaving frees the lease for the second.
-    assert state.apply(Command(kind="driver_left", driver_id="abc", identity="run-1"))
+    assert state.apply(Command(kind="driver_left", driver_id="abc", instance="run-1"))
     assert state.driver is None
     assert state.apply(second)
     assert state.holds(second)

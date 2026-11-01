@@ -283,7 +283,7 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 	let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 	let track = broadcast.create_track("catalog.json", info).unwrap();
 	broadcast
-		.announce(origin::Route::default().with_identity(moq_net::Identity::random(), 0))
+		.announce(origin::Route::default().with_instance(moq_net::Instance::random(), 0))
 		.unwrap();
 
 	let upstream = vec![
@@ -447,13 +447,13 @@ async fn churn(version: &str) {
 	assert!(failures.is_empty(), "{version}:\n{}", failures.join("\n"));
 }
 
-/// Routes carry the publisher's identity, so subscriptions resume across them.
+/// Routes carry the publisher's instance, so subscriptions resume across them.
 #[kio::test]
 async fn catalog_churn_lite_07() {
 	churn("moq-lite-07-wip").await;
 }
 
-/// No identity on the wire: a route change ends subscriptions, which must fail loudly.
+/// No instance on the wire: a route change ends subscriptions, which must fail loudly.
 #[kio::test]
 async fn catalog_churn_lite_06() {
 	churn("moq-lite-06").await;

@@ -11,7 +11,7 @@ surface proves it.
 ## Plan
 
 Planned 2026-10-31 (`/quest-plan`, maintainer), a follow-up reported by the
-[Identity and epoch](https://github.com/moq-dev/moq/pull/7489) implementation.
+[Instance and epoch](https://github.com/moq-dev/moq/pull/7489) implementation.
 Minted identities (`~` plus random bits) are URL-safe, so only a stable
 identity set by a publisher can break these paths today. Reuse the
 percent-encoding the archive already applies to track names (see

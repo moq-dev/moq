@@ -5,7 +5,7 @@ import { announcedView } from "./announced.test-util";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { HopSchema, Route } from "./hop.ts";
-import * as Identity from "./identity.ts";
+import * as Instance from "./instance.ts";
 import { chainHash, hooks, presented, spreadHash } from "./internal.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
@@ -25,7 +25,7 @@ function publish(origin: Producer, path: Path.Valid) {
 /** A peer's hop, for a route that is not local. */
 const PEER = HopSchema.parse(10n);
 // One publisher instance, so a local broadcast and a remote route compete on cost alone.
-const IDENTITY = Identity.parse("01900000-0000-7000-8000-000000000001");
+const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");
 
 /** Land a received prefix, served from `consume`, the way a session does. */
 function serve(origin: Producer, prefix: Path.Valid, consume: () => BroadcastConsumer, route: Route = Route.default) {
@@ -86,10 +86,10 @@ test("a borrowed table exposes dynamic serving and a live scoped broadcast map",
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().has(Path.from("other"))).toBe(false);
 
-	localPublication.announce({ identity: IDENTITY, cost: 4n });
+	localPublication.announce({ instance: INSTANCE, cost: 4n });
 	await settle();
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(localPath)).toEqual(Route.normalize({ identity: IDENTITY, cost: 4n }));
+	expect(live.peek().get(localPath)).toEqual(Route.normalize({ instance: INSTANCE, cost: 4n }));
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(changes.some((value) => value.get(localPath)?.cost === 4n)).toBe(true);
 
@@ -116,29 +116,29 @@ test("an announced local path competes with a received route on cost", async () 
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("room/alice");
-	const remote = wireOf(origin).receive(path, { identity: IDENTITY, hops: [PEER], cost: 5n });
+	const remote = wireOf(origin).receive(path, { instance: INSTANCE, hops: [PEER], cost: 5n });
 	const live = await announcedView(consumer);
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(Route.normalize({ identity: IDENTITY, hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(Route.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
 
 	// Unannounced, it competes for nothing.
 	const localPublication = origin.createBroadcast(path);
 	const local = localPublication.broadcast;
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(Route.normalize({ identity: IDENTITY, hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(Route.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
 
 	// Cheaper wins; a tie falls to the local broadcast.
-	localPublication.announce({ identity: IDENTITY, cost: 9n });
+	localPublication.announce({ instance: INSTANCE, cost: 9n });
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(Route.normalize({ identity: IDENTITY, hops: [PEER], cost: 5n }));
-	localPublication.announce({ identity: IDENTITY, cost: 5n });
+	expect(live.peek().get(path)).toEqual(Route.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
+	localPublication.announce({ instance: INSTANCE, cost: 5n });
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(Route.normalize({ identity: IDENTITY, cost: 5n }));
+	expect(live.peek().get(path)).toEqual(Route.normalize({ instance: INSTANCE, cost: 5n }));
 
 	local.close();
 	await settle();
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(Route.normalize({ identity: IDENTITY, hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(Route.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
 
 	remote.close();
 	await settle();
@@ -274,7 +274,7 @@ test("a superseded broadcast closes, and its subscribers keep reading", async ()
 	// The origin closes the old producer itself, whoever still holds a handle on it.
 	expect(first.closed.peek()).toBeNull();
 	// Its stale publication never displaces or retracts the replacement.
-	expect(() => publication.announce({ identity: IDENTITY })).toThrow("broadcast is closed");
+	expect(() => publication.announce({ instance: INSTANCE })).toThrow("broadcast is closed");
 	publication.unannounce();
 	const current = await routed(consumer, path);
 	expect(readsFrom(current, replacement.broadcast)).toBe(true);
@@ -568,7 +568,7 @@ test("disposing the newest remote route promotes the fallback", async () => {
 	const announced = consumer.announced();
 	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start" });
 
-	// The newer session dies: without an identity the promoted fallback is another source.
+	// The newer session dies: without an instance the promoted fallback is another source.
 	disposeNewer();
 	expect(await announced.next()).toMatchObject({ prefix: path, kind: "restart" });
 
@@ -665,20 +665,20 @@ test("a republish restarts the path", async () => {
 	origin.close();
 });
 
-test("an identical reconnect restarts without an identity and is quiet with one", async () => {
-	for (const identity of [undefined, IDENTITY]) {
+test("an identical reconnect restarts without an instance and is quiet with one", async () => {
+	for (const instance of [undefined, INSTANCE]) {
 		const origin = new Producer();
 		const consumer = origin.consume();
 		const path = Path.from("room");
 		const announced = consumer.announced();
-		const route = Route.normalize({ identity, hops: [PEER] });
+		const route = Route.normalize({ instance, hops: [PEER] });
 
 		const old = wireOf(origin).receive(path, route);
 		expect(await announced.next()).toMatchObject({ prefix: path, kind: "start" });
 
-		// The fresh session wins the tie: another source unless the identity says otherwise.
+		// The fresh session wins the tie: another source unless the instance says otherwise.
 		const fresh = wireOf(origin).receive(path, route);
-		if (identity === undefined) expect(await announced.next()).toMatchObject({ prefix: path, kind: "restart" });
+		if (instance === undefined) expect(await announced.next()).toMatchObject({ prefix: path, kind: "restart" });
 
 		// Retracting the stale twin is quiet, and a re-price of the winner is an update.
 		old.close();
@@ -1033,11 +1033,11 @@ test("a request prefers a cheaper received route over an announced local broadca
 		origin,
 		path,
 		provider(upstream),
-		Route.normalize({ identity: IDENTITY, hops: [PEER], cost: 1n }),
+		Route.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
 	);
 	const localPublication = origin.createBroadcast(path);
 	const local = localPublication.broadcast;
-	localPublication.announce({ identity: IDENTITY, cost: 3n });
+	localPublication.announce({ instance: INSTANCE, cost: 3n });
 
 	// The cheaper route is served on demand, so it resolves only once its handler answers.
 	const request = consumer.request(path);
@@ -1050,11 +1050,11 @@ test("a request prefers a cheaper received route over an announced local broadca
 
 	// Re-priced below it, the local broadcast of the same instance wins at once: the request's
 	// broadcast stays, and its tracks read the local one.
-	localPublication.announce({ identity: IDENTITY, cost: 0n });
+	localPublication.announce({ instance: INSTANCE, cost: 0n });
 	expect(await announced.next()).toMatchObject({
 		prefix: path,
 		kind: "update",
-		route: { identity: IDENTITY, hops: [] },
+		route: { instance: INSTANCE, hops: [] },
 	});
 	expect(request.active.peek()).toBe(remote);
 	expect(readsFrom(remote, local)).toBe(true);
@@ -1077,16 +1077,16 @@ test("the cheapest received route competes with the local broadcast, not the new
 		served.push(name);
 		return upstream.consume();
 	};
-	const cheap = serve(origin, path, via("cheap"), Route.normalize({ identity: IDENTITY, hops: [PEER], cost: 1n }));
-	const pricey = serve(origin, path, via("pricey"), Route.normalize({ identity: IDENTITY, hops: [PEER], cost: 10n }));
+	const cheap = serve(origin, path, via("cheap"), Route.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }));
+	const pricey = serve(origin, path, via("pricey"), Route.normalize({ instance: INSTANCE, hops: [PEER], cost: 10n }));
 	const localPublication = origin.createBroadcast(path);
 	const local = localPublication.broadcast;
-	localPublication.announce({ identity: IDENTITY, cost: 5n });
+	localPublication.announce({ instance: INSTANCE, cost: 5n });
 
 	await new Promise<void>((resolve) => setImmediate(resolve));
 
 	expect((await announcedView(consumer)).peek().get(path)).toEqual(
-		Route.normalize({ identity: IDENTITY, hops: [PEER], cost: 1n }),
+		Route.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
 	);
 	const request = consumer.request(path);
 	await settle();
@@ -1202,7 +1202,7 @@ test("an accepted dynamic broadcast is retired when it closes, and its handle re
 	const held = request.active.peek();
 	expect(held?.track("video").subscribe()).toBeDefined();
 
-	// The claim is asked again, and its next answer serves the same identity, so the handle
+	// The claim is asked again, and its next answer serves the same instance, so the handle
 	// the request holds continues on it.
 	produced.close();
 	await settle();
@@ -1240,11 +1240,11 @@ test("a peer is offered and served the cheapest originated route", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const prefix = Path.from("live");
-	const cheap = origin.requestsRoute(prefix, { identity: IDENTITY, cost: 1n });
-	const pricey = origin.requestsRoute(prefix, { identity: IDENTITY, cost: 10n });
+	const cheap = origin.requestsRoute(prefix, { instance: INSTANCE, cost: 1n });
+	const pricey = origin.requestsRoute(prefix, { instance: INSTANCE, cost: 10n });
 
 	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
-		Route.normalize({ identity: IDENTITY, cost: 1n }),
+		Route.normalize({ instance: INSTANCE, cost: 1n }),
 	);
 	const pending = wireOf(consumer).demand(Path.from("live/cam"));
 	const { value: req } = await cheap.requested().next();
@@ -1255,13 +1255,13 @@ test("a peer is offered and served the cheapest originated route", async () => {
 	// An exact-path local broadcast competes with them on cost too.
 	const localPublication = origin.createBroadcast(prefix);
 	const local = localPublication.broadcast;
-	localPublication.announce({ identity: IDENTITY, cost: 5n });
+	localPublication.announce({ instance: INSTANCE, cost: 5n });
 	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
-		Route.normalize({ identity: IDENTITY, cost: 1n }),
+		Route.normalize({ instance: INSTANCE, cost: 1n }),
 	);
-	localPublication.announce({ identity: IDENTITY, cost: 0n });
+	localPublication.announce({ instance: INSTANCE, cost: 0n });
 	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
-		Route.normalize({ identity: IDENTITY, cost: 0n }),
+		Route.normalize({ instance: INSTANCE, cost: 0n }),
 	);
 
 	local.close();
@@ -1370,7 +1370,7 @@ test("a rejected request is not asked of the same route again", async () => {
 });
 
 // A relay migration lands the replacement session's route next to the draining one's. Under
-// one identity the request must hand over to it, not drop to nothing while the new session answers.
+// one instance the request must hand over to it, not drop to nothing while the new session answers.
 test("an outranked route keeps serving until its replacement answers", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
@@ -1378,7 +1378,7 @@ test("an outranked route keeps serving until its replacement answers", async () 
 
 	const older = new BroadcastProducer();
 	const keepOlder = older.consume();
-	const disposeOlder = serve(origin, path, () => keepOlder.clone(), Route.normalize({ identity: IDENTITY }));
+	const disposeOlder = serve(origin, path, () => keepOlder.clone(), Route.normalize({ instance: INSTANCE }));
 
 	const request = consumer.request(path);
 	await settle();
@@ -1391,7 +1391,7 @@ test("an outranked route keeps serving until its replacement answers", async () 
 	});
 
 	// The newer route wins the tie but has not answered yet.
-	const newer = wireOf(origin).receive(path, { identity: IDENTITY });
+	const newer = wireOf(origin).receive(path, { instance: INSTANCE });
 	const asked = newer.requested().next();
 	await settle();
 	expect(request.active.peek()).toBe(first);
@@ -1415,7 +1415,7 @@ test("an outranked route keeps serving until its replacement answers", async () 
 	origin.close();
 });
 
-// Without an identity nothing says the newer route serves the same bytes: the request already open
+// Without an instance nothing says the newer route serves the same bytes: the request already open
 // stays on its source, while a new one resolves the newer route on a fresh front.
 test("a request stays on its source when another instance wins", async () => {
 	const origin = new Producer();
@@ -1485,29 +1485,29 @@ test("a request on a replaced instance ends once its source goes", async () => {
 	origin.close();
 });
 
-// Without an identity nothing says a standby serves the winner's bytes: the winner going ends the
+// Without an instance nothing says a standby serves the winner's bytes: the winner going ends the
 // request instead of handing it to the standby.
 // A request left on a replaced instance still fails over within that instance: another route
-// of its identity serves the same bytes, so the request moves there rather than ending, while
-// fresh requests resolve the newer identity.
-test("a request on a replaced identity fails over to another route of it", async () => {
+// of its instance serves the same bytes, so the request moves there rather than ending, while
+// fresh requests resolve the newer instance.
+test("a request on a replaced instance fails over to another route of it", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("replicated");
-	const newer = Identity.parse("01900000-0000-7000-8000-000000000002");
+	const newer = Instance.parse("01900000-0000-7000-8000-000000000002");
 
 	const primary = new BroadcastProducer();
 	const keepPrimary = primary.consume();
-	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), Route.normalize({ identity: IDENTITY }));
+	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), Route.normalize({ instance: INSTANCE }));
 	const replica = new BroadcastProducer();
-	const disposeReplica = serve(origin, path, provider(replica), Route.normalize({ identity: IDENTITY, cost: 5n }));
+	const disposeReplica = serve(origin, path, provider(replica), Route.normalize({ instance: INSTANCE, cost: 5n }));
 	const request = consumer.request(path);
 	await settle();
 	const first = request.active.peek();
 	expect(first).toBeDefined();
 
 	const restarted = new BroadcastProducer();
-	const disposeRestarted = serve(origin, path, provider(restarted), Route.normalize({ identity: newer }));
+	const disposeRestarted = serve(origin, path, provider(restarted), Route.normalize({ instance: newer }));
 	await settle();
 	expect(request.active.peek()).toBe(first);
 
@@ -1515,14 +1515,14 @@ test("a request on a replaced identity fails over to another route of it", async
 	await settle();
 	expect(request.closed.peek()).toBeUndefined();
 	expect(request.active.peek()).toBe(first);
-	expect(first?.identity).toBe(IDENTITY);
+	expect(first?.instance).toBe(INSTANCE);
 	expect(readsFrom(first, replica)).toBe(true);
 
 	const fresh = consumer.request(path);
 	await settle();
-	expect(fresh.active.peek()?.identity).toBe(newer);
+	expect(fresh.active.peek()?.instance).toBe(newer);
 
-	// The replica going too ends it: nothing else serves its identity.
+	// The replica going too ends it: nothing else serves its instance.
 	disposeReplica();
 	await settle();
 	expect(request.closed.peek()).toBeInstanceOf(StreamError);
@@ -1537,26 +1537,26 @@ test("a request on a replaced identity fails over to another route of it", async
 	origin.close();
 });
 
-// A local broadcast announced under the held identity is a replica too.
-test("a request on a replaced identity fails over to a local replica of it", async () => {
+// A local broadcast announced under the held instance is a replica too.
+test("a request on a replaced instance fails over to a local replica of it", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("replicated");
-	const newer = Identity.parse("01900000-0000-7000-8000-000000000002");
+	const newer = Instance.parse("01900000-0000-7000-8000-000000000002");
 
 	const primary = new BroadcastProducer();
 	const keepPrimary = primary.consume();
-	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), Route.normalize({ identity: IDENTITY }));
+	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), Route.normalize({ instance: INSTANCE }));
 	const localPublication = origin.createBroadcast(path);
 	const local = localPublication.broadcast;
-	localPublication.announce({ identity: IDENTITY, cost: 5n });
+	localPublication.announce({ instance: INSTANCE, cost: 5n });
 	const request = consumer.request(path);
 	await settle();
 	const first = request.active.peek();
 	expect(first).toBeDefined();
 
 	const restarted = new BroadcastProducer();
-	const disposeRestarted = serve(origin, path, provider(restarted), Route.normalize({ identity: newer }));
+	const disposeRestarted = serve(origin, path, provider(restarted), Route.normalize({ instance: newer }));
 	await settle();
 	expect(request.active.peek()).toBe(first);
 
@@ -1564,12 +1564,12 @@ test("a request on a replaced identity fails over to a local replica of it", asy
 	await settle();
 	expect(request.closed.peek()).toBeUndefined();
 	expect(request.active.peek()).toBe(first);
-	expect(first?.identity).toBe(IDENTITY);
+	expect(first?.instance).toBe(INSTANCE);
 	expect(readsFrom(first, local)).toBe(true);
 
 	const fresh = consumer.request(path);
 	await settle();
-	expect(fresh.active.peek()?.identity).toBe(newer);
+	expect(fresh.active.peek()?.instance).toBe(newer);
 
 	fresh.close();
 	request.close();
@@ -1587,12 +1587,12 @@ test("a stale takeover's refusal leaves a request whose source came back", async
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("resumed");
-	const newer = Identity.parse("01900000-0000-7000-8000-000000000002");
+	const newer = Instance.parse("01900000-0000-7000-8000-000000000002");
 
 	const localPublication = origin.createBroadcast(path);
 	const local = localPublication.broadcast;
-	localPublication.announce({ identity: IDENTITY, cost: 2n });
-	const standby = wireOf(origin).receive(path, Route.normalize({ identity: IDENTITY, cost: 5n }));
+	localPublication.announce({ instance: INSTANCE, cost: 2n });
+	const standby = wireOf(origin).receive(path, Route.normalize({ instance: INSTANCE, cost: 5n }));
 	const asked = standby.requested();
 	const request = consumer.request(path);
 	await settle();
@@ -1600,15 +1600,15 @@ test("a stale takeover's refusal leaves a request whose source came back", async
 	expect(first).toBeDefined();
 
 	const restarted = new BroadcastProducer();
-	// Another identity, cheaper, wins new requests.
-	const disposeRestarted = serve(origin, path, provider(restarted), Route.normalize({ identity: newer, cost: 1n }));
+	// Another instance, cheaper, wins new requests.
+	const disposeRestarted = serve(origin, path, provider(restarted), Route.normalize({ instance: newer, cost: 1n }));
 	await settle();
 	expect(request.active.peek()).toBe(first);
 
 	// The local broadcast steps away, so the standby is asked to take over; it comes back first.
 	localPublication.unannounce();
 	const takeover = await asked.next();
-	localPublication.announce({ identity: IDENTITY, cost: 2n });
+	localPublication.announce({ instance: INSTANCE, cost: 2n });
 	await settle();
 	takeover.value?.reject(new Error("too late"));
 	await settle();
@@ -1686,8 +1686,8 @@ test("a better route's refusal ends a served request", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const served = new BroadcastProducer();
-	// One identity, so the narrower route serves the same instance and the request follows it.
-	const disposeWide = serve(origin, Path.from(""), provider(served), Route.normalize({ identity: IDENTITY }));
+	// One instance, so the narrower route serves the same instance and the request follows it.
+	const disposeWide = serve(origin, Path.from(""), provider(served), Route.normalize({ instance: INSTANCE }));
 
 	const request = consumer.request(Path.from("live/cam"));
 	await settle();
@@ -1696,8 +1696,8 @@ test("a better route's refusal ends a served request", async () => {
 
 	// The narrower route is asked while the broad one keeps serving, then says no. A
 	// costlier sibling at the same prefix could serve, but is never asked.
-	const narrow = origin.requestsRoute(Path.from("live"), { identity: IDENTITY, cost: 1n });
-	const sibling = origin.requestsRoute(Path.from("live"), { identity: IDENTITY, cost: 2n });
+	const narrow = origin.requestsRoute(Path.from("live"), { instance: INSTANCE, cost: 1n });
+	const sibling = origin.requestsRoute(Path.from("live"), { instance: INSTANCE, cost: 2n });
 	const siblingRequests = sibling.requested();
 	const siblingAsked = siblingRequests.next();
 	const { value: req } = await narrow.requested().next();
@@ -1863,13 +1863,13 @@ test("announced filters before rooting and retains lifecycle, routing and watch 
 	expect(request.active.peek()).toBeDefined();
 	request.close();
 
-	const exact = origin.requestsRoute(root, { identity: IDENTITY });
+	const exact = origin.requestsRoute(root, { instance: INSTANCE });
 	expect(await events.next()).toMatchObject({
 		value: { kind: "start", prefix: Path.empty(), captures: expect.any(Array) },
 	});
-	exact.updateRoute({ identity: IDENTITY, cost: 2n });
+	exact.updateRoute({ instance: INSTANCE, cost: 2n });
 	expect(await events.next()).toMatchObject({ value: { kind: "update", route: { cost: 2n } } });
-	exact.updateRoute({ identity: Identity.random() });
+	exact.updateRoute({ instance: Instance.random() });
 	expect(await events.next()).toMatchObject({ value: { kind: "restart" } });
 	exact.close();
 	expect(await events.next()).toMatchObject({ value: { kind: "end" } });
@@ -1903,8 +1903,8 @@ test("an equal-cost pool spreads its paths the same way on every node", async ()
 		const served = new Map<Path.Valid, bigint>();
 		const handles = order.map((hop) => {
 			// Each worker is its own stream, named the same on every node.
-			const identity = Identity.parse(`worker-${hop}`);
-			const handle = wireOf(origin).receive(Path.from("pool"), { identity, hops: [hop], cost: 3n });
+			const instance = Instance.parse(`worker-${hop}`);
+			const handle = wireOf(origin).receive(Path.from("pool"), { instance, hops: [hop], cost: 3n });
 			void (async () => {
 				for await (const request of handle.requested()) {
 					served.set(request.path, hop);
@@ -2268,10 +2268,10 @@ test("a scoped reader sees a local broadcast that only loses to a route outside 
 	const origin = new Producer();
 	const chat = origin
 		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*/chat")]))
-		.requestsRoute(Path.from("room/alice"), { identity: IDENTITY, cost: 0n });
+		.requestsRoute(Path.from("room/alice"), { instance: INSTANCE, cost: 0n });
 	const localPublication = origin.createBroadcast(Path.from("room/alice"));
 	const local = localPublication.broadcast;
-	localPublication.announce({ identity: IDENTITY, cost: 5n });
+	localPublication.announce({ instance: INSTANCE, cost: 5n });
 	const reader = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*")]));
 
 	await new Promise<void>((resolve) => setImmediate(resolve));
@@ -2320,13 +2320,13 @@ test("broadcast handles carry the path they were created or requested at", async
 	origin.close();
 });
 
-test("a higher epoch of a dynamic route supersedes a cheaper local broadcast of its identity", async () => {
+test("a higher epoch of a dynamic route supersedes a cheaper local broadcast of its instance", async () => {
 	const origin = new Producer();
 	const path = Path.from("camera");
-	const identity = Identity.random();
+	const instance = Instance.random();
 	const localPublication = origin.createBroadcast(path);
-	localPublication.announce({ identity, epoch: 1n, cost: 0n });
-	const dynamic = origin.requestsRoute(path, { identity, epoch: 2n, cost: 10n });
+	localPublication.announce({ instance, epoch: 1n, cost: 0n });
+	const dynamic = origin.requestsRoute(path, { instance, epoch: 2n, cost: 10n });
 	const served = new BroadcastProducer();
 	const requests = dynamic.requested();
 	const request = origin.consume().request(path);
@@ -2346,11 +2346,11 @@ test("a higher epoch of a dynamic route supersedes a cheaper local broadcast of 
 test("a higher epoch that is not the best route still supersedes a local broadcast", async () => {
 	const origin = new Producer();
 	const path = Path.from("camera");
-	const stale = Identity.random();
+	const stale = Instance.random();
 	const localPublication = origin.createBroadcast(path);
-	localPublication.announce({ identity: stale, epoch: 1n, cost: 0n });
-	const newer = origin.requestsRoute(path, { identity: stale, epoch: 2n, cost: 10n });
-	const other = origin.requestsRoute(path, { identity: Identity.random(), cost: 5n });
+	localPublication.announce({ instance: stale, epoch: 1n, cost: 0n });
+	const newer = origin.requestsRoute(path, { instance: stale, epoch: 2n, cost: 10n });
+	const other = origin.requestsRoute(path, { instance: Instance.random(), cost: 5n });
 	const served = new BroadcastProducer();
 	const requests = other.requested();
 	const request = origin.consume().request(path);
@@ -2371,13 +2371,13 @@ test("a higher epoch that is not the best route still supersedes a local broadca
 test("a publisher weighs a local broadcast against the routes it may forward only", () => {
 	const origin = new Producer();
 	const path = Path.from("camera");
-	const identity = Identity.random();
+	const instance = Instance.random();
 	const localPublication = origin.createBroadcast(path);
-	localPublication.announce({ identity, epoch: 1n, cost: 0n });
+	localPublication.announce({ instance, epoch: 1n, cost: 0n });
 	const originated = origin.requestsRoute(path, { cost: 5n });
 	// A session delivered the higher epoch, which a publisher never forwards back out.
-	const received = wireOf(origin).receive(path, { identity, epoch: 2n, cost: 10n, hops: [PEER] });
-	expect(wireOf(origin.consume()).local(path, identity)).toBeDefined();
+	const received = wireOf(origin).receive(path, { instance, epoch: 2n, cost: 10n, hops: [PEER] });
+	expect(wireOf(origin.consume()).local(path, instance)).toBeDefined();
 	received.close();
 	originated.close();
 	localPublication.broadcast.close();
@@ -2386,9 +2386,9 @@ test("a publisher weighs a local broadcast against the routes it may forward onl
 
 test("a scope's merged covering prefixes never supersede across prefixes", async () => {
 	const origin = new Producer();
-	const identity = Identity.random();
-	const room = origin.requestsRoute(Path.from("room"), { identity, epoch: 2n });
-	const video = origin.requestsRoute(Path.from("room/video"), { identity, epoch: 1n });
+	const instance = Instance.random();
+	const room = origin.requestsRoute(Path.from("room"), { instance, epoch: 2n });
+	const video = origin.requestsRoute(Path.from("room/video"), { instance, epoch: 1n });
 	const reader = origin.scope(Path.from("room/video"), new Path.Patterns([Path.Pattern.all()])).consume();
 	await settle();
 	const table = wireOf(reader).advertised.peek();
@@ -2402,17 +2402,17 @@ test("a scope's merged covering prefixes never supersede across prefixes", async
 
 test("supersession only counts routes the reader can see", async () => {
 	const origin = new Producer();
-	const identity = Identity.random();
+	const instance = Instance.random();
 	const video = origin
 		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/video")]))
-		.requestsRoute(Path.empty(), { identity, epoch: 1n });
+		.requestsRoute(Path.empty(), { instance, epoch: 1n });
 	const live = await announcedView(origin, Path.Pattern.parse("room/video"), { covering: true });
 	await settle();
 	expect(live.peek().size).toBe(1);
 	// A higher epoch the reader cannot see never hides the route it can.
 	const chat = origin
 		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/chat")]))
-		.requestsRoute(Path.empty(), { identity, epoch: 2n });
+		.requestsRoute(Path.empty(), { instance, epoch: 2n });
 	await settle();
 	expect([...live.peek().values()].map((route) => route.epoch)).toEqual([1n]);
 	chat.close();
@@ -2420,49 +2420,49 @@ test("supersession only counts routes the reader can see", async () => {
 	origin.close();
 });
 
-test("the newest epoch of an identity is announced in place over a cheaper one", async () => {
+test("the newest epoch of an instance is announced in place over a cheaper one", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("room/alice");
 	const announced = consumer.announced();
-	const identity = Identity.random();
+	const instance = Instance.random();
 
 	const oldPublication = origin.createBroadcast(path);
 	const old = oldPublication.broadcast;
-	oldPublication.announce({ identity, epoch: 1n, cost: 1n });
+	oldPublication.announce({ instance, epoch: 1n, cost: 1n });
 	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start" });
 
-	// A higher epoch of the same identity supersedes it despite the cost: the same stream.
-	const newer = wireOf(origin).receive(path, { identity, epoch: 2n, hops: [PEER], cost: 9n });
+	// A higher epoch of the same instance supersedes it despite the cost: the same stream.
+	const newer = wireOf(origin).receive(path, { instance, epoch: 2n, hops: [PEER], cost: 9n });
 	expect(await announced.next()).toMatchObject({
 		prefix: path,
 		kind: "update",
-		route: { identity, epoch: 2n, hops: [PEER] },
+		route: { instance, epoch: 2n, hops: [PEER] },
 	});
 
 	// The older one still stands, so it comes back once the newer one goes.
 	newer.close();
-	expect(await announced.next()).toMatchObject({ prefix: path, kind: "update", route: { identity, epoch: 1n } });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "update", route: { instance, epoch: 1n } });
 
 	old.close();
 	announced.close();
 	origin.close();
 });
 
-const NEWER = Identity.parse("01900000-0000-7000-8000-000000000002");
+const NEWER = Instance.parse("01900000-0000-7000-8000-000000000002");
 
-test("demand held across an identity change asks again, unless it named the old identity", async () => {
+test("demand held across an instance change asks again, unless it named the old instance", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("live/cam");
-	const handle = origin.requestsRoute(Path.from("live"), { identity: IDENTITY });
+	const handle = origin.requestsRoute(Path.from("live"), { instance: INSTANCE });
 	const it = handle.requested();
-	const pinned = wireOf(consumer).demand(path, IDENTITY);
+	const pinned = wireOf(consumer).demand(path, INSTANCE);
 	const unpinned = wireOf(consumer).demand(path);
 	const { value: req } = await it.next();
 
 	// Another instance now serves the route: the old handler's answer is for the old one.
-	handle.updateRoute({ ...handle.route, identity: NEWER });
+	handle.updateRoute({ ...handle.route, instance: NEWER });
 	hooks.acceptRequest(req, new BroadcastProducer().consume());
 	await expect(pinned).rejects.toThrow("unroutable");
 
@@ -2480,17 +2480,17 @@ test("demand held across an identity change asks again, unless it named the old 
 	origin.close();
 });
 
-test("a demand refused across an identity change does not lose the carried demand's answer", async () => {
+test("a demand refused across an instance change does not lose the carried demand's answer", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("live/cam");
-	const handle = origin.requestsRoute(Path.from("live"), { identity: IDENTITY });
+	const handle = origin.requestsRoute(Path.from("live"), { instance: INSTANCE });
 	const it = handle.requested();
 	const unpinned = wireOf(consumer).demand(path);
-	const pinned = wireOf(consumer).demand(path, IDENTITY);
+	const pinned = wireOf(consumer).demand(path, INSTANCE);
 	await it.next();
 
-	handle.updateRoute({ ...handle.route, identity: NEWER });
+	handle.updateRoute({ ...handle.route, instance: NEWER });
 	await expect(pinned).rejects.toThrow("unroutable");
 	// The replacement's refusal reaches the demand that carried over.
 	(await it.next()).value?.reject(new Error("gone"));
@@ -2501,17 +2501,17 @@ test("a demand refused across an identity change does not lose the carried deman
 	origin.close();
 });
 
-test("demand held across an identity round trip still asks again", async () => {
+test("demand held across an instance round trip still asks again", async () => {
 	const origin = new Producer();
 	const path = Path.from("live/cam");
-	const handle = origin.requestsRoute(Path.from("live"), { identity: IDENTITY });
+	const handle = origin.requestsRoute(Path.from("live"), { instance: INSTANCE });
 	const it = handle.requested();
 	const demanded = wireOf(origin.consume()).demand(path);
 	const { value: req } = await it.next();
 
-	// Released by the first change; the identity coming back does not undo that.
-	handle.updateRoute({ ...handle.route, identity: NEWER });
-	handle.updateRoute({ ...handle.route, identity: IDENTITY });
+	// Released by the first change; the instance coming back does not undo that.
+	handle.updateRoute({ ...handle.route, instance: NEWER });
+	handle.updateRoute({ ...handle.route, instance: INSTANCE });
 	hooks.acceptRequest(req, new BroadcastProducer().consume());
 
 	const next = new BroadcastProducer();
@@ -2528,18 +2528,18 @@ test("demand held across an identity round trip still asks again", async () => {
 	origin.close();
 });
 
-test("re-pricing from the current route keeps the identity", () => {
+test("re-pricing from the current route keeps the instance", () => {
 	const origin = new Producer();
-	const handle = origin.requestsRoute(Path.from("live"), { identity: IDENTITY, cost: 5n });
+	const handle = origin.requestsRoute(Path.from("live"), { instance: INSTANCE, cost: 5n });
 	handle.updateRoute({ ...handle.route, cost: 1n });
-	expect(handle.route).toEqual(Route.normalize({ identity: IDENTITY, cost: 1n }));
+	expect(handle.route).toEqual(Route.normalize({ instance: INSTANCE, cost: 1n }));
 
 	const broadcastPublication = origin.createBroadcast(Path.from("room"));
 	const broadcast = broadcastPublication.broadcast;
 	expect(broadcastPublication.route).toBeUndefined();
-	broadcastPublication.announce({ identity: IDENTITY, cost: 5n });
+	broadcastPublication.announce({ instance: INSTANCE, cost: 5n });
 	broadcastPublication.announce({ ...broadcastPublication.route, cost: 1n });
-	expect(broadcastPublication.route).toEqual(Route.normalize({ identity: IDENTITY, cost: 1n }));
+	expect(broadcastPublication.route).toEqual(Route.normalize({ instance: INSTANCE, cost: 1n }));
 	broadcastPublication.unannounce();
 	expect(broadcastPublication.route).toBeUndefined();
 
@@ -2548,16 +2548,16 @@ test("re-pricing from the current route keeps the identity", () => {
 	origin.close();
 });
 
-test("a peer naming another identity is refused rather than served a different instance", async () => {
+test("a peer naming another instance is refused rather than served a different instance", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("room");
 	const localPublication = origin.createBroadcast(path);
 	const local = localPublication.broadcast;
-	localPublication.announce({ identity: IDENTITY });
+	localPublication.announce({ instance: INSTANCE });
 
-	expect(wireOf(consumer).local(path, IDENTITY)).toBeDefined();
-	const other = Identity.parse("01900000-0000-7000-8000-000000000002");
+	expect(wireOf(consumer).local(path, INSTANCE)).toBeDefined();
+	const other = Instance.parse("01900000-0000-7000-8000-000000000002");
 	expect(wireOf(consumer).local(path, other)).toBeUndefined();
 	await expect(wireOf(consumer).demand(path, other)).rejects.toThrow("unroutable");
 
@@ -2565,29 +2565,29 @@ test("a peer naming another identity is refused rather than served a different i
 	origin.close();
 });
 
-test("a newer identity ends pinned and unpinned requests on the replaced publisher alike", () => {
+test("a newer instance ends pinned and unpinned requests on the replaced publisher alike", () => {
 	const origin = new Producer();
 	const path = Path.from("room");
 	const first = origin.createBroadcast(path);
-	first.announce({ identity: IDENTITY });
+	first.announce({ instance: INSTANCE });
 	const reader = origin.consume();
-	const pinned = reader.request(path, { identity: IDENTITY });
+	const pinned = reader.request(path, { instance: INSTANCE });
 	const unpinned = reader.request(path);
-	expect(pinned.active.peek()?.identity).toBe(IDENTITY);
-	expect(unpinned.active.peek()?.identity).toBe(IDENTITY);
-	const replacement = Identity.parse("01900000-0000-7000-8000-000000000002");
+	expect(pinned.active.peek()?.instance).toBe(INSTANCE);
+	expect(unpinned.active.peek()?.instance).toBe(INSTANCE);
+	const replacement = Instance.parse("01900000-0000-7000-8000-000000000002");
 	const second = origin.createBroadcast(path);
-	second.announce({ identity: replacement });
-	expect(() => first.announce({ identity: IDENTITY })).toThrow("broadcast is closed");
+	second.announce({ instance: replacement });
+	expect(() => first.announce({ instance: INSTANCE })).toThrow("broadcast is closed");
 	first.unannounce();
 	expect(pinned.active.peek()).toBeUndefined();
 	// The replaced publisher closed: the unpinned request ends rather than move to the newer one.
 	expect(unpinned.active.peek()).toBeUndefined();
 	// A fresh unpinned request names the publisher it actually resolved.
 	const fresh = reader.request(path);
-	expect(fresh.active.peek()?.identity).toBe(replacement);
+	expect(fresh.active.peek()?.instance).toBe(replacement);
 	fresh.close();
-	const stale = reader.request(path, { identity: IDENTITY });
+	const stale = reader.request(path, { instance: INSTANCE });
 	expect(stale.active.peek()).toBeUndefined();
 	stale.close();
 	pinned.close();
@@ -2595,17 +2595,17 @@ test("a newer identity ends pinned and unpinned requests on the replaced publish
 	origin.close();
 });
 
-test("a request held across an identity change asks again and never takes the old handler's answer", async () => {
+test("a request held across an instance change asks again and never takes the old handler's answer", async () => {
 	const origin = new Producer();
 	const prefix = Path.from("room");
 	const path = Path.from("room/cam");
-	const dynamic = origin.requestsRoute(prefix, { identity: IDENTITY });
+	const dynamic = origin.requestsRoute(prefix, { instance: INSTANCE });
 	const unpinned = origin.consume().request(path);
-	const pinned = origin.consume().request(path, { identity: IDENTITY });
+	const pinned = origin.consume().request(path, { instance: INSTANCE });
 	const requests = dynamic.requested();
 	const old = (await requests.next()).value;
-	dynamic.updateRoute({ ...dynamic.route, identity: NEWER });
-	const current = origin.consume().request(path, { identity: NEWER });
+	dynamic.updateRoute({ ...dynamic.route, instance: NEWER });
+	const current = origin.consume().request(path, { instance: NEWER });
 	hooks.acceptRequest(old, new BroadcastProducer().consume());
 	await settle();
 	expect(pinned.active.peek()).toBeUndefined();
@@ -2614,8 +2614,8 @@ test("a request held across an identity change asks again and never takes the ol
 	const next = (await requests.next()).value;
 	hooks.acceptRequest(next, new BroadcastProducer().consume());
 	await settle();
-	expect(unpinned.active.peek()?.identity).toBe(NEWER);
-	expect(current.active.peek()?.identity).toBe(NEWER);
+	expect(unpinned.active.peek()?.instance).toBe(NEWER);
+	expect(current.active.peek()?.instance).toBe(NEWER);
 	expect(pinned.active.peek()).toBeUndefined();
 	await requests.return?.();
 	unpinned.close();
@@ -2626,15 +2626,15 @@ test("a request held across an identity change asks again and never takes the ol
 });
 
 test.each([
-	["named", IDENTITY],
+	["named", INSTANCE],
 	["minted", undefined],
-])("an identity update from a %s one restarts the claim, while a re-price keeps every handle", async (_, named) => {
+])("an instance update from a %s one restarts the claim, while a re-price keeps every handle", async (_, named) => {
 	const origin = new Producer();
 	const prefix = Path.from("live");
 	const path = Path.from("live/cam");
-	const dynamic = origin.requestsRoute(prefix, { identity: named });
-	// A claim naming no identity serves one of its own.
-	const from = dynamic.route.identity;
+	const dynamic = origin.requestsRoute(prefix, { instance: named });
+	// A claim naming no instance serves one of its own.
+	const from = dynamic.route.instance;
 	expect(from).toBeDefined();
 	if (named !== undefined) expect(from).toBe(named);
 	const to = NEWER;
@@ -2648,29 +2648,29 @@ test.each([
 	hooks.acceptRequest((await requests.next()).value, old);
 	await settle();
 	const resolved = held.active.peek();
-	expect(resolved?.identity).toBe(from);
+	expect(resolved?.instance).toBe(from);
 
 	const sticky = resolved?.track("video").subscribe();
 	oldTrack.appendGroup().finish();
 	expect((await sticky?.recvGroup())?.sequence).toBe(0);
 
-	// A re-price at the same identity keeps every handle, and the handler is not asked again.
+	// A re-price at the same instance keeps every handle, and the handler is not asked again.
 	dynamic.updateRoute({ ...dynamic.route, cost: 5n });
 	expect(await announced.next()).toMatchObject({ prefix, kind: "update" });
 	expect(held.active.peek()).toBe(resolved);
 	const same = origin.consume().request(path);
 	await settle();
-	expect(same.active.peek()?.identity).toBe(from);
-	const pinned = origin.consume().request(path, { identity: from });
+	expect(same.active.peek()?.instance).toBe(from);
+	const pinned = origin.consume().request(path, { instance: from });
 
-	// Another identity is another stream: resolved requests keep the old one.
-	dynamic.updateRoute({ ...dynamic.route, identity: to });
+	// Another instance is another stream: resolved requests keep the old one.
+	dynamic.updateRoute({ ...dynamic.route, instance: to });
 	expect(await announced.next()).toMatchObject({ prefix, kind: "restart" });
 	await settle();
 	expect(held.active.peek()).toBe(resolved);
 	expect(held.closed.peek()).toBeUndefined();
-	expect(same.active.peek()?.identity).toBe(from);
-	expect(pinned.active.peek()?.identity).toBe(from);
+	expect(same.active.peek()?.instance).toBe(from);
+	expect(pinned.active.peek()?.instance).toBe(from);
 
 	// The subscription already open stays on the old answer.
 	oldTrack.appendGroup().finish();
@@ -2684,7 +2684,7 @@ test.each([
 	const nextTrack = next.createTrack("video");
 	hooks.acceptRequest((await requests.next()).value, next);
 	await settle();
-	expect(fresh.active.peek()?.identity).toBe(to);
+	expect(fresh.active.peek()?.instance).toBe(to);
 	const subscription = fresh.active.peek()?.track("video").subscribe();
 	const forwarded = (await demanded)?.track("video").subscribe();
 	nextTrack.createGroup(7);
@@ -2716,24 +2716,24 @@ test.each([
 	origin.close();
 });
 
-test("an identity update does not retain an answer that already closed", async () => {
+test("an instance update does not retain an answer that already closed", async () => {
 	const origin = new Producer();
 	const path = Path.from("live/cam");
-	const dynamic = origin.requestsRoute(Path.from("live"), { identity: IDENTITY });
+	const dynamic = origin.requestsRoute(Path.from("live"), { instance: INSTANCE });
 	const requests = dynamic.requested();
 	const held = origin.consume().request(path);
 	const old = new BroadcastProducer();
 	hooks.acceptRequest((await requests.next()).value, old);
 	old.close();
 	// The server's closure callback has not removed the answer yet.
-	dynamic.updateRoute({ identity: NEWER });
+	dynamic.updateRoute({ instance: NEWER });
 	try {
 		expect(held.closed.peek()).toBeInstanceOf(Error);
 		expect(held.active.peek()).toBeUndefined();
 		const fresh = origin.consume().request(path);
 		const next = new BroadcastProducer();
 		hooks.acceptRequest((await requests.next()).value, next);
-		expect(fresh.active.peek()?.identity).toBe(NEWER);
+		expect(fresh.active.peek()?.instance).toBe(NEWER);
 		fresh.close();
 		next.close();
 	} finally {
@@ -2747,15 +2747,15 @@ test("an identity update does not retain an answer that already closed", async (
 test("an unread resolved request retains its broadcast until its last handle closes", async () => {
 	const origin = new Producer();
 	const path = Path.from("live/cam");
-	const dynamic = origin.requestsRoute(Path.from("live"), { identity: IDENTITY });
+	const dynamic = origin.requestsRoute(Path.from("live"), { instance: INSTANCE });
 	const requests = dynamic.requested();
 	const held = origin.consume().request(path);
 	const old = new SessionBroadcast();
 	hooks.acceptRequest((await requests.next()).value, old);
-	// Change identities before the active getter or its subscription can clone the answer.
-	dynamic.updateRoute({ identity: NEWER });
+	// Change instances before the active getter or its subscription can clone the answer.
+	dynamic.updateRoute({ instance: NEWER });
 	expect(old.closed.peek()).toBeUndefined();
-	expect(held.active.peek()?.identity).toBe(IDENTITY);
+	expect(held.active.peek()?.instance).toBe(INSTANCE);
 	held.close();
 	await old.closed;
 	expect(held.active.peek()).toBeUndefined();
@@ -2764,10 +2764,10 @@ test("an unread resolved request retains its broadcast until its last handle clo
 	origin.close();
 });
 
-test("a session's re-request after an identity update asks the handler again", async () => {
+test("a session's re-request after an instance update asks the handler again", async () => {
 	const origin = new Producer();
 	const path = Path.from("live/cam");
-	const dynamic = origin.requestsRoute(Path.from("live"), { identity: IDENTITY });
+	const dynamic = origin.requestsRoute(Path.from("live"), { instance: INSTANCE });
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 
@@ -2776,7 +2776,7 @@ test("a session's re-request after an identity update asks the handler again", a
 	hooks.acceptRequest((await requests.next()).value, old);
 	expect(await before).toBeDefined();
 
-	dynamic.updateRoute({ ...dynamic.route, identity: NEWER });
+	dynamic.updateRoute({ ...dynamic.route, instance: NEWER });
 	const after = wire.demand(path);
 	const next = new BroadcastProducer();
 	const track = next.createTrack("video");
@@ -2793,12 +2793,12 @@ test("a session's re-request after an identity update asks the handler again", a
 	origin.close();
 });
 
-test("an update does not override route selection: another claim at the identity keeps it", async () => {
+test("an update does not override route selection: another claim at the instance keeps it", async () => {
 	const origin = new Producer();
 	const prefix = Path.from("live");
 	const path = Path.from("live/cam");
-	const first = origin.requestsRoute(prefix, { identity: IDENTITY, cost: 1n });
-	const second = origin.requestsRoute(prefix, { identity: IDENTITY, cost: 5n });
+	const first = origin.requestsRoute(prefix, { instance: INSTANCE, cost: 1n });
+	const second = origin.requestsRoute(prefix, { instance: INSTANCE, cost: 5n });
 	const firstRequests = first.requested();
 	const secondRequests = second.requested();
 
@@ -2806,19 +2806,19 @@ test("an update does not override route selection: another claim at the identity
 	const answer = new BroadcastProducer();
 	hooks.acceptRequest((await firstRequests.next()).value, answer);
 	await settle();
-	expect(held.active.peek()?.identity).toBe(IDENTITY);
+	expect(held.active.peek()?.instance).toBe(INSTANCE);
 
-	// The first claim moves to another identity priced above the second, which still serves
+	// The first claim moves to another instance priced above the second, which still serves
 	// the old one: the resolved request keeps its answer, and new requests go through the
 	// second claim.
-	first.updateRoute({ ...first.route, identity: NEWER, cost: 9n });
+	first.updateRoute({ ...first.route, instance: NEWER, cost: 9n });
 	const fresh = origin.consume().request(path);
 	const replacement = new BroadcastProducer();
 	const track = replacement.createTrack("video");
 	hooks.acceptRequest((await secondRequests.next()).value, replacement);
 	await settle();
-	expect(held.active.peek()?.identity).toBe(IDENTITY);
-	expect(fresh.active.peek()?.identity).toBe(IDENTITY);
+	expect(held.active.peek()?.instance).toBe(INSTANCE);
+	expect(fresh.active.peek()?.instance).toBe(INSTANCE);
 	const subscription = fresh.active.peek()?.track("video").subscribe();
 	track.createGroup(7);
 	expect((await subscription?.recvGroup())?.sequence).toBe(7);
@@ -2835,14 +2835,14 @@ test("an update does not override route selection: another claim at the identity
 	origin.close();
 });
 
-test("a route naming no identity resolves a handle under the one its publication minted", () => {
+test("a route naming no instance resolves a handle under the one its publication minted", () => {
 	const origin = new Producer();
 	const path = Path.from("room");
 	const broadcast = origin.createBroadcast(path);
 	broadcast.announce();
 	const request = origin.consume().request(path);
-	expect(broadcast.route?.identity).toBeDefined();
-	expect(request.active.peek()?.identity).toBe(broadcast.route?.identity);
+	expect(broadcast.route?.instance).toBeDefined();
+	expect(request.active.peek()?.instance).toBe(broadcast.route?.instance);
 	request.close();
 	origin.close();
 });

@@ -1,5 +1,5 @@
 // The signed message: what a frame's signature binds besides its payload.
-import type { Identity, Path, Time } from "@moq/net";
+import type { Instance, Path, Time } from "@moq/net";
 import { Failure } from "./failure.ts";
 import type { PublicKey, SecretKey } from "./key.ts";
 
@@ -12,11 +12,11 @@ const LABEL = encoder.encode("moq-sign-00");
 
 /** One track of one publisher instance: the identity every frame on it is signed under. */
 export class Scope {
-	// The canonical prefix: label, path, identity, and track, each length-prefixed.
+	// The canonical prefix: label, path, instance, and track, each length-prefixed.
 	#prefix: Uint8Array<ArrayBuffer>;
 
-	constructor(path: Path.Valid, identity: Identity.Valid, track: string) {
-		const fields = [path, identity, track].map((field) => encoder.encode(field));
+	constructor(path: Path.Valid, instance: Instance.Valid, track: string) {
+		const fields = [path, instance, track].map((field) => encoder.encode(field));
 		this.#prefix = new Uint8Array(LABEL.byteLength + fields.reduce((sum, field) => sum + 8 + field.byteLength, 0));
 		const view = new DataView(this.#prefix.buffer);
 		this.#prefix.set(LABEL);

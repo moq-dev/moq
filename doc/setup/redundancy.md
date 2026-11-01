@@ -16,9 +16,9 @@ publisher's broadcast can resume the same stream.
 | Independent publishers, separate paths | Leaves selection to the subscriber. |
 | One publisher, several routes | Resumes the same broadcast on another route. |
 
-A path and an [identity](/concept/moq-lite#stream-identities) name one
-stream, so a redundant pair is two identities. Every independent publisher
-mints its own identity, even if both read the same source. Sharing one would
+A path and an [instance](/concept/moq-lite#stream-instances) name one
+stream, so a redundant pair is two instances. Every independent publisher
+mints its own instance, even if both read the same source. Sharing one would
 claim that their group and frame numbers name the same content, which
 independently running importers cannot promise. See [identity and recovery](/concept/identity) for the whole contract.
 
@@ -28,7 +28,7 @@ independently running importers cannot promise. See [identity and recovery](/con
    relays into a [cluster](/bin/relay/cluster) so the viewer's relay can reach
    both. Give both publishers permission to announce the same full path.
 2. Publish the same broadcast name under the same auth path. Each publisher
-   keeps its own identity; `moq` creates one automatically.
+   keeps its own instance; `moq` creates one automatically.
 
 For example, two HLS importers can publish `event.hang` through different
 relays. Run each command on its publisher host, with its own source URL:
@@ -48,14 +48,14 @@ two disconnected relays does not make one a fallback for the other. The same
 setup applies to other publishers, including browser capture and ingest
 gateways. See [Production](/setup/prod) for TLS and authentication.
 
-At the same path, the two identities rank like any others: the cheaper route,
-then the shorter hop chain, then a hash of the identity and the path, which
+At the same path, the two instances rank like any others: the cheaper route,
+then the shorter hop chain, then a hash of the instance and the path, which
 every relay agrees on. One of them wins new requests while both are healthy.
 When its route goes, followers switch to the other as a new broadcast: the
 old one ends and `follow` yields the next. When it returns, it wins again,
 again as a new broadcast. This is not a fixed primary/standby priority unless
 the routes' costs make it one, and a restarted publisher takes a fresh
-identity, so it may rank either way.
+instance, so it may rank either way.
 
 The switch is announced as a `Restart`. Players that follow announcements
 request the path again and begin the replacement broadcast. Existing
@@ -87,8 +87,8 @@ instance while it is up, then fails on a replacement. Other stdout export
 formats end with their broadcast; they do not follow a replacement. TS
 passthrough also cannot stitch. See [CLI retention and latency](/bin/cli#retention-and-latency).
 
-A connection that carries no identity (moq-lite 06 and older, or
-moq-transport) cannot prove continuity: the receiving relay mints an identity
+A connection that carries no instance (moq-lite 06 and older, or
+moq-transport) cannot prove continuity: the receiving relay mints an instance
 per announcement, so even a reconnect of one publisher through it is another
 stream. Do not rely on same-path continuity through such a hop.
 
@@ -100,14 +100,14 @@ switch between them, combine them, or keep them separate. This is useful when
 selection should depend on the media or operator policy rather than which
 publisher started last.
 
-Each publisher produces its own stream with its own identity. The relay routes
+Each publisher produces its own stream with its own instance. The relay routes
 the two paths independently; it does not align their frames or stitch their
 output. The subscriber owns any transition between them.
 
 ## One publisher through several routes
 
 Keep a single publisher instance and distribute copies of its broadcast
-through multiple relays or CDNs. All copies retain its path, identity, group
+through multiple relays or CDNs. All copies retain its path, instance, group
 numbers, and frame content.
 
 Connect the publisher's relay to multiple peers, then make those routes
@@ -115,9 +115,9 @@ reachable from the subscriber's relay. An application can also hold sessions
 to [multiple CDNs](/concept/moq-lite#multiple-cdns) feeding one shared origin
 and rank its links. Do not start a second importer to create the second copy.
 
-When the serving route fails or another route with the same identity wins, the
+When the serving route fails or another route with the same instance wins, the
 subscription resumes from the first frame it lacks. This needs an explicit
-matching identity across every hop (moq-lite 07 on every link), routes whose copies report identical track
+matching instance across every hop (moq-lite 07 on every link), routes whose copies report identical track
 info (so the same protocol and draft on each), and a surviving route that can still serve
 those frames within the broadcast's retention. It preserves broadcast
 continuity, but a late recovery can still miss playback deadlines. Losing the

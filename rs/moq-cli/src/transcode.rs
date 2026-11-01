@@ -214,11 +214,11 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn a_source_restart_under_the_handle_identity_also_creates_a_new_derivative() {
+	async fn a_source_restart_under_the_handle_instance_also_creates_a_new_derivative() {
 		restart(false).await;
 	}
 
-	/// `named` announces each source under an identity the route names, rather than the one its
+	/// `named` announces each source under an instance the route names, rather than the one its
 	/// handle mints.
 	async fn restart(named: bool) {
 		let origin = moq_tokio::origin::spawn();
@@ -226,7 +226,7 @@ mod tests {
 		let route = || {
 			let route = moq_net::origin::Route::default();
 			if named {
-				route.with_identity(moq_net::Identity::random(), 0)
+				route.with_instance(moq_net::Instance::random(), 0)
 			} else {
 				route
 			}
@@ -253,7 +253,7 @@ mod tests {
 		let _new_dynamic = new.requests();
 		let second = next(&mut derivatives).await;
 		assert!(!first.is_clone(&second));
-		assert_ne!(first.info().identity, second.info().identity);
+		assert_ne!(first.info().instance, second.info().instance);
 		assert!(first.is_closed(), "the superseded ladder is retired");
 		loop {
 			match old_catalog.recv_group().await {

@@ -169,19 +169,19 @@ class Client:
         """
         return self._require_consumer().announced(prefix, filter=filter, hidden=hidden)
 
-    def follow(self, path: str, *, identity: str | None = None) -> Following:
+    def follow(self, path: str, *, instance: str | None = None) -> Following:
         """Follow the broadcast at exactly ``path`` across its publisher instances.
 
         See :meth:`OriginConsumer.follow`.
         """
-        return self._require_consumer().follow(path, identity=identity)
+        return self._require_consumer().follow(path, instance=instance)
 
-    async def request(self, path: str, *, identity: str | None = None) -> BroadcastConsumer:
+    async def request(self, path: str, *, instance: str | None = None) -> BroadcastConsumer:
         """Request the broadcast at ``path``, resolving one publisher instance as soon as it can be served.
 
         See :meth:`OriginConsumer.request`.
         """
-        return await self._require_consumer().request(path, identity=identity)
+        return await self._require_consumer().request(path, instance=instance)
 
     def _require_publisher(self) -> OriginProducer:
         if self._publisher is None:

@@ -33,7 +33,7 @@ export class ProfileError extends Error {
 /** One signed frame's identity. An untimed frame has timescale and timestamp 0. */
 export type Identity = {
 	path: string;
-	identity: string;
+	instance: string;
 	track: string;
 	group: bigint;
 	frame: bigint;
@@ -99,7 +99,7 @@ export function message(identity: Identity, payload: Uint8Array): Uint8Array<Arr
 	return concat(
 		LABEL,
 		bytes(identity.path),
-		bytes(identity.identity),
+		bytes(identity.instance),
 		bytes(identity.track),
 		u64(identity.group),
 		u64(identity.frame),
@@ -177,12 +177,12 @@ const RFC8032_SEED = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031c
 const RFC8032_PUBLIC = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 const SEED = toHex(utf8("moq-sign-00 test seed!!!!!!!!!!!"));
 const OTHER_SEED = toHex(utf8("moq-sign-00 other seed!!!!!!!!!!"));
-const IDENTITY = "019a2b3c-4d5e-7f60-8a1b-2c3d4e5f6a7b";
-const OTHER_IDENTITY = "019a2b3c-4d5e-7f60-8a1b-2c3d4e5f6a7c";
+const INSTANCE = "019a2b3c-4d5e-7f60-8a1b-2c3d4e5f6a7b";
+const OTHER_INSTANCE = "019a2b3c-4d5e-7f60-8a1b-2c3d4e5f6a7c";
 
 type IdentityJson = {
 	path: string;
-	identity: string;
+	instance: string;
 	track: string;
 	group: number;
 	frame: number;
@@ -225,7 +225,7 @@ async function frameVector(id: string, seed: string, identity: Identity, payload
 async function generate() {
 	const base: Identity = {
 		path: "mesh/node/ssh",
-		identity: IDENTITY,
+		instance: INSTANCE,
 		track: "stream",
 		group: 3n,
 		frame: 1n,
@@ -286,7 +286,7 @@ async function generate() {
 		],
 		negative: [
 			negative("relocated-path", { ...base, path: "mesh/node/http" }, body),
-			negative("relocated-identity", { ...base, identity: OTHER_IDENTITY }, body),
+			negative("relocated-instance", { ...base, instance: OTHER_INSTANCE }, body),
 			negative("relocated-track", { ...base, track: "stream2" }, body),
 			negative("relocated-group", { ...base, group: 4n }, body),
 			negative("relocated-frame", { ...base, frame: 0n }, body),

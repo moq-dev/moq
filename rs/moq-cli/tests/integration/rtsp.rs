@@ -1,5 +1,5 @@
 //! `moq import rtsp` over a real relay: every RTSP session is its own broadcast under a fresh
-//! identity, so a camera whose RTP time restarts never splices onto the broadcast before it.
+//! instance, so a camera whose RTP time restarts never splices onto the broadcast before it.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -174,14 +174,14 @@ async fn every_rtsp_session_is_a_fresh_broadcast() {
 
 	child.kill().await.expect("kill moq");
 	let log = log.await.expect("stderr task");
-	let mut identities: Vec<&str> = log
+	let mut instances: Vec<&str> = log
 		.lines()
 		.filter(|line| line.contains("publishing RTSP broadcast"))
-		.filter_map(|line| line.split("identity=").nth(1))
+		.filter_map(|line| line.split("instance=").nth(1))
 		.map(|rest| rest.split_whitespace().next().unwrap())
 		.collect();
-	assert_eq!(identities.len(), 3, "one broadcast per session:\n{log}");
-	identities.sort_unstable();
-	identities.dedup();
-	assert_eq!(identities.len(), 3, "every session mints its own identity:\n{log}");
+	assert_eq!(instances.len(), 3, "one broadcast per session:\n{log}");
+	instances.sort_unstable();
+	instances.dedup();
+	assert_eq!(instances.len(), 3, "every session mints its own instance:\n{log}");
 }

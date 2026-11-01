@@ -3,7 +3,7 @@ import { Producer } from "./broadcast.ts";
 import { BroadcastCache } from "./consume.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { Route } from "./hop.ts";
-import * as Identity from "./identity.ts";
+import * as Instance from "./instance.ts";
 import * as Path from "./path.ts";
 
 test("cache identity follows the serving announcement, preserving held tracks", async () => {
@@ -12,18 +12,18 @@ test("cache identity follows the serving announcement, preserving held tracks", 
 	const job = Path.from("pool/job");
 	const broad = {};
 	const specific = {};
-	const identity = Identity.random();
-	cache.announce(pool, broad, { ...Route.default, identity });
+	const instance = Instance.random();
+	cache.announce(pool, broad, { ...Route.default, instance });
 	const source = new Producer();
 	const track = source.createTrack("video");
 	const held = cache.insert(job, cache.instance(job), source.consume());
 	const ordered = held.track("video").subscribe().ordered();
-	cache.announce(job, specific, { ...Route.default, identity });
+	cache.announce(job, specific, { ...Route.default, instance });
 	const same = cache.get(job, cache.instance(job));
 	expect(same?.closed).toBe(held.closed);
 
 	cache.announce(job, specific, Route.default, true);
-	expect(cache.instance(job).route.identity).toBeUndefined();
+	expect(cache.instance(job).route.instance).toBeUndefined();
 	expect(cache.get(job, cache.instance(job))).toBeUndefined();
 	const replacement = new Producer();
 	const fresh = cache.insert(job, cache.instance(job), replacement.consume());
@@ -46,7 +46,7 @@ test("withdrawing one interest keeps another interest's explicit identity", () =
 	const path = Path.from("room");
 	const first = {};
 	const second = {};
-	const route = { ...Route.default, identity: Identity.random() };
+	const route = { ...Route.default, instance: Instance.random() };
 	cache.announce(path, first, route);
 	cache.announce(path, second, route);
 	const source = new Producer();
@@ -81,16 +81,16 @@ test("an announcement lifecycle retires a blind cache without disturbing unrelat
 	unrelated.close();
 });
 
-test.each([false, true])("route alternation reuses every held instance (identity: %s)", (explicit) => {
+test.each([false, true])("route alternation reuses every held instance (instance: %s)", (explicit) => {
 	const cache = new BroadcastCache();
 	const path = Path.from("pool/job");
 	const broad = Path.from("pool");
 	const ownerA = {};
 	const ownerB = {};
-	cache.announce(broad, ownerA, { ...Route.default, identity: explicit ? Identity.random() : undefined });
+	cache.announce(broad, ownerA, { ...Route.default, instance: explicit ? Instance.random() : undefined });
 	const a = new Producer();
 	const heldA = cache.insert(path, cache.instance(path), a.consume());
-	cache.announce(path, ownerB, { ...Route.default, identity: explicit ? Identity.random() : undefined });
+	cache.announce(path, ownerB, { ...Route.default, instance: explicit ? Instance.random() : undefined });
 	const b = new Producer();
 	const heldB = cache.insert(path, cache.instance(path), b.consume());
 	cache.withdraw(path, ownerB);
@@ -160,14 +160,14 @@ test("request validity follows the selected interest and ignores unrelated withd
 	source.close();
 });
 
-test("a blind selection retires on discovery while explicit identities need no path gate", () => {
+test("a blind selection retires on discovery while explicit instances need no path gate", () => {
 	const cache = new BroadcastCache();
 	const path = Path.from("pool/job");
 	const blind = cache.instance(path);
 	const source = new Producer();
 	const held = cache.insert(path, blind, source.consume());
 	const owner = {};
-	cache.announce(Path.from("pool"), owner, { ...Route.default, identity: Identity.random() });
+	cache.announce(Path.from("pool"), owner, { ...Route.default, instance: Instance.random() });
 	expect(blind.validity?.signal.aborted).toBe(true);
 	expect(cache.instance(path).validity).toBeUndefined();
 	cache.withdraw(Path.from("pool"), owner);

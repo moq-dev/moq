@@ -1,9 +1,9 @@
 import { ProtocolViolation } from "../error.ts";
 import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP, wireHop } from "../hop.ts";
-import type * as Identity from "../identity.ts";
+import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { decodeRoute, encodeRoute } from "./identity.ts";
+import { decodeRoute, encodeRoute } from "./instance.ts";
 import * as Message from "./message.ts";
 import {
 	hasAnnounceCompression,
@@ -57,12 +57,12 @@ export type AnnounceBroadcast =
 	/** A broadcast is now available, carrying the path suffix, the hop chain, and
 	 * (lite-06+) the route cost. An absent cost encodes as zero; it decodes as
 	 * `undefined` on a wire with no room for one. On lite-07, `suffix` follows the
-	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. The identity
+	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. The instance
 	 * and epoch (lite-07+) change only with a `restart`. */
 	| {
 			status: "active";
 			suffix: Path.Valid;
-			identity?: Identity.Valid;
+			instance?: Instance.Valid;
 			epoch?: bigint;
 			hops: Hop[];
 			cost?: Cost;
@@ -77,13 +77,13 @@ export type AnnounceBroadcast =
 	/** Lite06+: atomically replace the metadata of the announcement with this id (e.g. a
 	 * new hop chain after a relay failover, or a route whose cost moved). The id stays live. */
 	| { status: "update"; id: bigint; hops: Hop[]; cost?: Cost; hopBase?: Base }
-	/** Lite07+: the announcement with this id now serves the identity and epoch given. Another
-	 * identity is another stream, so what the receiver resolved under its prefix is stale; a
+	/** Lite07+: the announcement with this id now serves the instance and epoch given. Another
+	 * instance is another stream, so what the receiver resolved under its prefix is stale; a
 	 * higher epoch of the same one continues it. The id stays live. */
 	| {
 			status: "restart";
 			id: bigint;
-			identity?: Identity.Valid;
+			instance?: Instance.Valid;
 			epoch?: bigint;
 			hops: Hop[];
 			cost?: Cost;
@@ -96,7 +96,7 @@ export type AnnounceBroadcast =
 			status: "takeover";
 			predecessor: bigint;
 			suffix: Path.Valid;
-			identity?: Identity.Valid;
+			instance?: Instance.Valid;
 			epoch?: bigint;
 			hops: Hop[];
 			cost?: Cost;
@@ -246,7 +246,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 	switch (msg.status) {
 		case "active":
 			await encodePath(w, version, msg.suffix, msg.pathBase);
-			await encodeRoute(w, version, msg.identity, msg.epoch);
+			await encodeRoute(w, version, msg.instance, msg.epoch);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
@@ -260,14 +260,14 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			break;
 		case "restart":
 			await w.u62(msg.id);
-			await encodeRoute(w, version, msg.identity, msg.epoch);
+			await encodeRoute(w, version, msg.instance, msg.epoch);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
 		case "takeover":
 			await w.u62(msg.predecessor);
 			await encodePath(w, version, msg.suffix, msg.pathBase);
-			await encodeRoute(w, version, msg.identity, msg.epoch);
+			await encodeRoute(w, version, msg.instance, msg.epoch);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
 			break;

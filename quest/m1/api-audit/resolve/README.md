@@ -13,7 +13,7 @@ Rust, JS, and every binding:
 - `follow(path, epoch)` follows the path across publisher instances (today's
   `announced_broadcast`), pinned to `epoch` when given.
 
-[Identity and epoch](https://github.com/moq-dev/moq/pull/7489) later changes the
+[Instance and epoch](https://github.com/moq-dev/moq/pull/7489) later changes the
 pin from `epoch` to an `identity` in both; the two
 resolutions stay as they are.
 

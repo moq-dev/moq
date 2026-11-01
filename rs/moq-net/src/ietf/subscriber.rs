@@ -2441,7 +2441,7 @@ impl Subscriber {
 			Entry::Occupied(entry) => {
 				let entry = entry.into_mut();
 				// Another advertisement of a namespace the peer holds is the same stream.
-				route.identity = entry.route.identity.clone();
+				route.instance = entry.route.instance.clone();
 				match entry.adverts.iter().position(|(advert, _)| *advert == id) {
 					Some(index) => entry.adverts[index].1 = route,
 					None => entry.adverts.push((id, route)),
@@ -2459,9 +2459,9 @@ impl Subscriber {
 				Ok(())
 			}
 			Entry::Vacant(entry) => {
-				// moq-transport carries no identity, so each namespace the peer advertises anew
+				// moq-transport carries no instance, so each namespace the peer advertises anew
 				// is a stream of its own, even one it advertised before on this session.
-				route.identity = Some(crate::Identity::minted());
+				route.instance = Some(crate::Instance::minted());
 				// A peer past its limits loses the session, not just this namespace.
 				let slot = match slot {
 					Some(slot) => slot,
@@ -8768,7 +8768,7 @@ mod tests {
 	}
 
 	/// Two sessions assigned the same identity announce the same anonymous chain.
-	/// Under another identity the fresh session is another source, so consumers restart
+	/// Under another instance the fresh session is another source, so consumers restart
 	/// once, and retracting the stale session leaves the fresh route standing quietly.
 	#[kio::test]
 	async fn reconnecting_peer_restarts_the_route() {

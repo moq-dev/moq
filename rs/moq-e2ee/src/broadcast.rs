@@ -13,7 +13,7 @@ use crate::{Name, generation, track};
 ///
 /// Wraps the `moq-net` broadcast at [`Credential::path`](crate::Credential::path). Announce that
 /// broadcast with [`generation().epoch()`](generation::Producer::epoch)'s
-/// [`identity`](crate::Epoch::identity) on its route once the tracks a subscriber needs first
+/// [`instance`](crate::Epoch::instance) on its route once the tracks a subscriber needs first
 /// exist.
 #[derive(Clone)]
 pub struct Producer {

@@ -106,7 +106,7 @@ The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
 - **One driver at a time.** The first driver to send a command holds the
   lease until its broadcast ends or its 1 s watchdog expires; the player
   heartbeats every 250 ms. The lease is bound to the driver's path and the
-  route identity it announced with, so a driver that reconnects at the same
+  route instance it announced with, so a driver that reconnects at the same
   path is a new claimant rather than a continuation.
 - **E-stop latches** until an explicit reset, from any viewer: the player
   latches and resets it through a short-lived safety broadcast without taking

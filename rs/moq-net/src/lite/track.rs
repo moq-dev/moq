@@ -17,9 +17,9 @@ const LEGACY_UNLIMITED: u64 = (1u64 << 53) - 1;
 #[derive(Clone, Debug)]
 pub struct Track<'a> {
 	pub broadcast: Path,
-	/// The identity the subscriber expects; see [`crate::origin::Route::identity`].
+	/// The instance the subscriber expects; see [`crate::origin::Route::instance`].
 	/// Lite07+ only.
-	pub identity: Option<crate::Identity>,
+	pub instance: Option<crate::Instance>,
 	pub track: Cow<'a, str>,
 }
 
@@ -28,7 +28,7 @@ impl Track<'_> {
 	pub fn into_owned(self) -> Track<'static> {
 		Track {
 			broadcast: self.broadcast,
-			identity: self.identity,
+			instance: self.instance,
 			track: Cow::Owned(self.track.into_owned()),
 		}
 	}
@@ -42,12 +42,12 @@ impl<'a> Message<'a> for Track<'a> {
 		}
 
 		let broadcast = Path::decode(r, version)?;
-		let identity = super::identity::decode_pin(r, version)?;
+		let instance = super::instance::decode_pin(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 
 		Ok(Self {
 			broadcast,
-			identity,
+			instance,
 			track,
 		})
 	}
@@ -58,7 +58,7 @@ impl<'a> Message<'a> for Track<'a> {
 		}
 
 		self.broadcast.encode(w, version)?;
-		super::identity::encode_pin(w, version, self.identity.as_ref())?;
+		super::instance::encode_pin(w, version, self.instance.as_ref())?;
 		w.string(&self.track)?;
 		Ok(())
 	}
@@ -492,7 +492,7 @@ mod test {
 	#[test]
 	fn track_request_roundtrips_on_lite05() {
 		let msg = Track {
-			identity: None,
+			instance: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};
@@ -508,7 +508,7 @@ mod test {
 	#[test]
 	fn track_request_errors_before_lite05() {
 		let msg = Track {
-			identity: None,
+			instance: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};

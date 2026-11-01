@@ -682,7 +682,7 @@ impl<S: Stream> Publish<S> {
 			.map_err(|e| anyhow::anyhow!("rtmp accept publish: {e:?}"))?;
 		self.work.extend(results);
 
-		tracing::info!(peer = %self.peer, %path, identity = %publisher.identity, "rtmp publish accepted");
+		tracing::info!(peer = %self.peer, %path, instance = %publisher.instance, "rtmp publish accepted");
 
 		let result = pump(
 			&mut self.stream,
@@ -1513,17 +1513,17 @@ struct Publisher {
 	broadcast: moq_net::origin::Publication,
 	// This connection's publisher instance, so an encoder reconnecting under the
 	// same key replaces this broadcast at once instead of resuming into it.
-	identity: moq_net::Identity,
+	instance: moq_net::Instance,
 }
 
 impl Publisher {
-	/// Open a broadcast at `path` under a fresh identity and prime the importer with
+	/// Open a broadcast at `path` under a fresh instance and prime the importer with
 	/// the FLV file header, so subsequent tags decode against an initialized demuxer.
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
-		let identity = moq_net::Identity::random();
+		let instance = moq_net::Instance::random();
 		let broadcast = origin.publish(
 			path,
-			moq_net::origin::Route::default().with_identity(identity.clone(), 0),
+			moq_net::origin::Route::default().with_instance(instance.clone(), 0),
 		)?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let handle = broadcast.clone();
@@ -1537,7 +1537,7 @@ impl Publisher {
 			catalog,
 			metadata: crate::metadata::Dropped::new(path),
 			broadcast: handle,
-			identity,
+			instance,
 		})
 	}
 
@@ -2284,11 +2284,11 @@ mod tests {
 		server_task.abort();
 	}
 
-	/// Publish an AVC broadcast at `live/cam0` under `identity`, starting with a keyframe carrying
+	/// Publish an AVC broadcast at `live/cam0` under `instance`, starting with a keyframe carrying
 	/// `idr`, and return its importer for more tags.
 	fn publish_avc(
 		origin: &origin::Producer,
-		identity: moq_net::Identity,
+		instance: moq_net::Instance,
 		idr: &[u8],
 	) -> (FlvImport, moq_mux::catalog::Producer) {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
@@ -2299,7 +2299,7 @@ mod tests {
 
 		let broadcast = origin.create_broadcast("live/cam0").unwrap();
 		broadcast
-			.announce(origin::Route::default().with_identity(identity, 0))
+			.announce(origin::Route::default().with_instance(instance, 0))
 			.unwrap();
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
@@ -2319,7 +2319,7 @@ mod tests {
 		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let (mut old, old_catalog) = publish_avc(&origin, moq_net::Identity::random(), &[0x65, 0x88, 0x84, 0x21, 0x00]);
+		let (mut old, old_catalog) = publish_avc(&origin, moq_net::Instance::random(), &[0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
@@ -2342,9 +2342,9 @@ mod tests {
 		assert_eq!(next().await.1[..2], [0x17, 0x00]);
 		assert_eq!(next().await.1[..2], [0x17, 0x01]);
 
-		let identity = moq_net::Identity::random();
-		let mut instances = moq_mux::follow::Instances::new(&consumer, "live/cam0", Some(&identity)).unwrap();
-		let (_new, _new_catalog) = publish_avc(&origin, identity, &[0x65, 0x99, 0x99, 0x99, 0x99]);
+		let instance = moq_net::Instance::random();
+		let mut instances = moq_mux::follow::Instances::new(&consumer, "live/cam0", Some(&instance)).unwrap();
+		let (_new, _new_catalog) = publish_avc(&origin, instance, &[0x65, 0x99, 0x99, 0x99, 0x99]);
 		kio::clock::timeout(Duration::from_secs(5), instances.next())
 			.await
 			.expect("the new publisher takes over")
@@ -2780,7 +2780,7 @@ mod tests {
 	}
 
 	/// An encoder reconnecting under the same key while its stale connection is still
-	/// open restarts the broadcast at once: each connection is its own identity, so a
+	/// open restarts the broadcast at once: each connection is its own instance, so a
 	/// fresh request reaches the reconnect, while the stale viewer stays on the old one
 	/// until it leaves.
 	#[tokio::test]

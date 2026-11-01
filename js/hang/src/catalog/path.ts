@@ -30,17 +30,17 @@ export const RelativeBroadcastSchema: z.ZodMiniType<RelativeBroadcast, string> =
 export type RelativeBroadcast = string & { __brand: "Relative" };
 
 /**
- * Zod schema for the stream a catalog reference names: an entry's `identity` beside its
+ * Zod schema for the stream a catalog reference names: an entry's `instance` beside its
  * `broadcast`. Any non-empty text, the same text MoQ routes carry; an empty one refuses the
  * catalog.
  */
-export const IdentitySchema: z.ZodMiniType<ReferenceIdentity, string> = z.pipe(
-	z.string().check(z.minLength(1, "expected a non-empty identity")),
-	z.transform((text) => text as ReferenceIdentity),
+export const InstanceSchema: z.ZodMiniType<ReferenceInstance, string> = z.pipe(
+	z.string().check(z.minLength(1, "expected a non-empty instance")),
+	z.transform((text) => text as ReferenceInstance),
 );
 
 /**
- * A validated reference identity: the same brand as `Identity.Valid` from `@moq/net`, spelled
+ * A validated reference instance: the same brand as `Instance.Valid` from `@moq/net`, spelled
  * out here so the catalog schemas' inferred types stay nameable from this package.
  */
-export type ReferenceIdentity = string & { readonly _brand: "identity" };
+export type ReferenceInstance = string & { readonly _brand: "instance" };

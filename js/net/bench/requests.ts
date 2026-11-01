@@ -1,6 +1,5 @@
 /** Sweep request restart, cancellation, and discovery settlement over independent origin and waiter dimensions. */
 import { Producer as Broadcast } from "../src/broadcast";
-import * as Identity from "../src/identity.ts";
 import { Publisher as IetfPublisher } from "../src/ietf/publisher";
 import { RequestOk } from "../src/ietf/request";
 import { NativeSession } from "../src/ietf/session";
@@ -10,6 +9,7 @@ import {
 	SubscribeNamespaceEntryDone,
 } from "../src/ietf/subscribe_namespace";
 import { ALPN, Version } from "../src/ietf/version";
+import * as Instance from "../src/instance.ts";
 import { hooks } from "../src/internal";
 import { createMockTransportPair } from "../src/mock";
 import { Producer } from "../src/origin";
@@ -128,7 +128,7 @@ for (const pending of [128, 1024, 8192])
 		console.log(`${pending},${landed},${samples[2].toFixed(2)}`);
 	}
 
-// Keep old instances on distinct same-identity failovers, then cancel new demand.
+// Keep old instances on distinct same-instance failovers, then cancel new demand.
 // This exercises ownership checks inside one cleanup, independently of wire sharing.
 console.log("failovers,extra_routes,cancel_us");
 for (const failovers of [0, 1, 16, 128])
@@ -141,10 +141,10 @@ for (const failovers of [0, 1, 16, 128])
 			const entries = [];
 			const sources: Broadcast[] = [];
 			for (let i = 0; i < failovers; i++) {
-				const identity = Identity.random();
-				const primary = origin.requestsRoute(prefix, { identity, cost: 0n });
+				const instance = Instance.random();
+				const primary = origin.requestsRoute(prefix, { instance, cost: 0n });
 				const ar = primary.requested();
-				const br = origin.requestsRoute(prefix, { identity, cost: 1n }).requested();
+				const br = origin.requestsRoute(prefix, { instance, cost: 1n }).requested();
 				const held = origin.request(path);
 				const source = new Broadcast();
 				sources.push(source);
@@ -153,9 +153,9 @@ for (const failovers of [0, 1, 16, 128])
 				await settle();
 				entries.push({ primary, ar, br, held });
 			}
-			const identity = Identity.random();
-			origin.requestsRoute(prefix, { identity });
-			for (let i = 0; i < extraRoutes; i++) origin.requestsRoute(prefix, { identity, cost: BigInt(i + 1) });
+			const instance = Instance.random();
+			origin.requestsRoute(prefix, { instance });
+			for (let i = 0; i < extraRoutes; i++) origin.requestsRoute(prefix, { instance, cost: BigInt(i + 1) });
 			const pending = [];
 			for (const entry of entries) {
 				entry.primary.close();

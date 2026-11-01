@@ -207,7 +207,7 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 		const state: Sample = {
 			seq: seq++,
 			broadcastActive: el.broadcast.out.active.peek() !== undefined,
-			broadcastIdentity: el.broadcast.out.active.peek()?.identity,
+			broadcastInstance: el.broadcast.out.active.peek()?.instance,
 			broadcastStatus: el.broadcast.out.status.peek(),
 			userActivated: navigator.userActivation.hasBeenActive,
 			at: performance.now(),

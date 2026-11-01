@@ -8,7 +8,7 @@
 //! A [`Credential`] is what the application distributes out of band. Each publisher
 //! instance calls [`Credential::produce`] to mint a [`generation::Producer`] and wraps its
 //! `moq-net` broadcast in a [`broadcast::Producer`], announcing the generation's
-//! [`Epoch::identity`] on its route. Subscribers follow the path, read each instance's
+//! [`Epoch::instance`] on its route. Subscribers follow the path, read each instance's
 //! epoch with [`Epoch::of`] from the broadcast it resolved, bind a [`generation::Consumer`] with
 //! [`Credential::consume`], and wrap the broadcast in a [`broadcast::Consumer`]. Both sides name tracks by their semantic names; only
 //! the derived physical names reach `moq-net`.

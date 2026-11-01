@@ -20,7 +20,7 @@ import {
 } from "../error.ts";
 import type * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import * as Identity from "../identity.ts";
+import * as Instance from "../instance.ts";
 import {
 	finalSequence,
 	groupBounds,
@@ -304,7 +304,7 @@ export class Subscriber {
 	}
 
 	/**
-	 * The route an advertisement carries, before it is minted an identity; one without a path is anonymous and free.
+	 * The route an advertisement carries, before it is minted an instance; one without a path is anonymous and free.
 	 */
 	#route({ cluster }: AdvertParams): Route {
 		return cluster === undefined ? { hops: [UNKNOWN_HOP], cost: Cost.zero } : { ...cluster };
@@ -384,9 +384,9 @@ export class Subscriber {
 			this.#settleAnnounce(path, existing);
 			return id;
 		}
-		// moq-transport carries no identity, so each namespace the peer advertises anew is a
+		// moq-transport carries no instance, so each namespace the peer advertises anew is a
 		// stream of its own, even one it advertised before on this session.
-		route = this.#priced({ ...route, identity: Identity.minted(), epoch: 0n });
+		route = this.#priced({ ...route, instance: Instance.minted(), epoch: 0n });
 		const entry: Announced = { adverts: [{ id, route }], route };
 		this.#announced.set(path, entry);
 		this.#consumes.announce(path, entry, route);
@@ -419,8 +419,8 @@ export class Subscriber {
 		const newest = existing.adverts.at(-1);
 		if (newest === undefined) return;
 		// Every advertisement of a path the peer holds is the stream its first one named.
-		const { identity, epoch } = existing.route;
-		const route = this.#priced({ ...newest.route, identity, epoch });
+		const { instance, epoch } = existing.route;
+		const route = this.#priced({ ...newest.route, instance, epoch });
 		if (routesEqual(existing.route, route)) return;
 		existing.route = route;
 		this.#consumes.announce(path, existing, route, false);

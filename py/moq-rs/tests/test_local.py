@@ -403,32 +403,32 @@ async def test_announced_broadcast():
         break
 
 
-async def test_announced_identity_restarts():
+async def test_announced_instance_restarts():
     origin = moq.OriginProducer()
     consumer = origin.consume()
     announced = consumer.announced()
-    publication = origin.create_broadcast("identity")
+    publication = origin.create_broadcast("instance")
 
-    # The broadcast mints its own identity and keeps it across re-announcing.
+    # The broadcast mints its own instance and keeps it across re-announcing.
     publication.announce()
     start = await next_route(announced)
     assert isinstance(start, moq.AnnounceEventStart)
-    minted = start.announce.route.identity
+    minted = start.announce.route.instance
     assert minted
 
     publication.announce(moq.AnnounceRoute(cost=1))
     update = await next_route(announced)
     assert isinstance(update, moq.AnnounceEventUpdate)
-    assert update.announce.route.identity == minted
+    assert update.announce.route.instance == minted
 
-    # Another identity is another stream: consumers restart onto it.
-    publication.announce(moq.AnnounceRoute(identity="cam", epoch=1))
+    # Another instance is another stream: consumers restart onto it.
+    publication.announce(moq.AnnounceRoute(instance="cam", epoch=1))
     restart = await next_route(announced)
     assert isinstance(restart, moq.AnnounceEventRestart)
-    assert restart.announce.route.identity == "cam"
+    assert restart.announce.route.instance == "cam"
 
-    with pytest.raises(moq.Error.InvalidIdentity):
-        publication.announce(moq.AnnounceRoute(identity=""))
+    with pytest.raises(moq.Error.InvalidInstance):
+        publication.announce(moq.AnnounceRoute(instance=""))
     publication.broadcast.close()
 
 
@@ -1628,18 +1628,18 @@ async def test_broadcast_is_reachable_only_while_announced():
     publication.broadcast.close()
 
 
-async def test_an_identity_pins_request_and_follow():
+async def test_an_instance_pins_request_and_follow():
     origin = moq.OriginProducer()
     consumer = origin.consume()
     publication = origin.create_broadcast("live")
-    publication.announce(moq.AnnounceRoute(identity="cam"))
+    publication.announce(moq.AnnounceRoute(instance="cam"))
 
-    await asyncio.wait_for(consumer.request("live", identity="cam"), timeout=5.0)
+    await asyncio.wait_for(consumer.request("live", instance="cam"), timeout=5.0)
     with pytest.raises(moq.Error.Protocol):
-        await asyncio.wait_for(consumer.request("live", identity="other"), timeout=5.0)
-    with pytest.raises(moq.Error.InvalidIdentity):
-        consumer.follow("live", identity="")
-    async with consumer.follow("live", identity="cam") as following:
+        await asyncio.wait_for(consumer.request("live", instance="other"), timeout=5.0)
+    with pytest.raises(moq.Error.InvalidInstance):
+        consumer.follow("live", instance="")
+    async with consumer.follow("live", instance="cam") as following:
         await asyncio.wait_for(following.available(), timeout=5.0)
     publication.broadcast.close()
 

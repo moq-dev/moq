@@ -849,7 +849,7 @@ type SubscriberProps = {
 	trace?: boolean;
 	/** The player's `delay` attribute, when not its adaptive default. */
 	delay?: string;
-	/** Pin the reader independently of the identity-aware publishers. */
+	/** Pin the reader independently of the instance-aware publishers. */
 	versions?: string;
 };
 
@@ -1306,9 +1306,9 @@ try {
 					description: "the incumbent's marked pixels",
 					predicate: (s) => s.generation === 0 && !s.audioStalled,
 				});
-				// Every route carries an identity: lite-07 names the publisher's, and an older wire's
+				// Every route carries an instance: lite-07 names the publisher's, and an older wire's
 				// session mints one for the announcement.
-				check(first.broadcastIdentity !== undefined, "the route carries an identity", () =>
+				check(first.broadcastInstance !== undefined, "the route carries an instance", () =>
 					JSON.stringify(first),
 				);
 				const before = await readFixtureState(old);
@@ -1339,7 +1339,7 @@ try {
 					predicate: (s) => s.generation === 1 && !s.audioStalled && playsInSync(s),
 				});
 				const replacementMs = Date.now() - ready;
-				check(switched.broadcastIdentity !== first.broadcastIdentity, "replacement has a fresh identity", () =>
+				check(switched.broadcastInstance !== first.broadcastInstance, "replacement has a fresh instance", () =>
 					JSON.stringify(switched),
 				);
 				const during = await collect(watch, watchErrors, WINDOW_MS);
@@ -1360,15 +1360,15 @@ try {
 					predicate: (s) => s.generation === 0 && !s.audioStalled && playsInSync(s),
 				});
 				const fallbackMs = Date.now() - withdrawn;
-				// Only lite-07 carries the incumbent's identity back; an older wire's session mints a
+				// Only lite-07 carries the incumbent's instance back; an older wire's session mints a
 				// fresh one for the incumbent's new announcement.
 				if (version === "moq-lite-07-wip")
-					check(back.broadcastIdentity === first.broadcastIdentity, "fallback keeps incumbent identity", () =>
+					check(back.broadcastInstance === first.broadcastInstance, "fallback keeps incumbent instance", () =>
 						JSON.stringify(back),
 					);
 				else
 					check(
-						back.broadcastIdentity !== switched.broadcastIdentity,
+						back.broadcastInstance !== switched.broadcastInstance,
 						"fallback leaves the replacement",
 						() => JSON.stringify(back),
 					);

@@ -96,7 +96,7 @@ impl<O: Output> Media<O> {
 					};
 					tracing::info!(
 						broadcast = %self.broadcast,
-						identity = broadcast.info().identity.as_ref().map(tracing::field::display),
+						instance = broadcast.info().instance.as_ref().map(tracing::field::display),
 						"online"
 					);
 
@@ -256,7 +256,7 @@ impl<O: Output> Media<O> {
 					// rendition's problem, not the catalog's: fall through to the
 					// next one like an unsupported codec does.
 					let rendition = match source
-						.resolve(config.broadcast.as_ref(), config.identity.as_ref())
+						.resolve(config.broadcast.as_ref(), config.instance.as_ref())
 						.await
 					{
 						Ok(rendition) => rendition,
@@ -386,7 +386,7 @@ impl<O: Output> Media<O> {
 						continue;
 					}
 					let rendition = match source
-						.resolve(config.broadcast.as_ref(), config.identity.as_ref())
+						.resolve(config.broadcast.as_ref(), config.instance.as_ref())
 						.await
 					{
 						Ok(rendition) => rendition,
@@ -1749,7 +1749,7 @@ mod tests {
 		(broadcast, catalog, audio)
 	}
 
-	/// Answer the next request through `claim` with one `audio` rendition, under a fresh identity.
+	/// Answer the next request through `claim` with one `audio` rendition, under a fresh instance.
 	async fn answer(
 		claim: &moq_net::origin::Requests,
 	) -> (
@@ -1800,7 +1800,7 @@ mod tests {
 		player.abort();
 	}
 
-	/// A restarted publisher announces a fresh identity while its old run still
+	/// A restarted publisher announces a fresh instance while its old run still
 	/// stands. The restart drops the old broadcast and plays the new one, whose
 	/// timeline starts over, instead of waiting for it to catch up.
 	#[tokio::test]
@@ -1848,7 +1848,7 @@ mod tests {
 		assert!(recorder.events().iter().any(|event| matches!(event, Event::Failed(_))));
 	}
 
-	/// A restart that overlaps the old route still replaces it: it is a new identity, and
+	/// A restart that overlaps the old route still replaces it: it is a new instance, and
 	/// the newest announcement at the exact path wins it.
 	#[tokio::test]
 	async fn an_overlapping_republish_plays_the_new_broadcast() {
@@ -2014,7 +2014,7 @@ mod tests {
 	}
 
 	/// The exact route goes while the old run still holds its delay, and a covering
-	/// route takes over under another identity. Playback reaches the covering route as
+	/// route takes over under another instance. Playback reaches the covering route as
 	/// a restart.
 	#[tokio::test]
 	async fn a_handoff_to_a_covering_route_plays_on_while_draining() {

@@ -90,8 +90,8 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 	listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	listen.tcp.tls = Some(true);
 	listen.tls.generate = vec!["localhost".into()];
-	// Links speak lite-07, which carries each route's identity, so every edge ranks a path's
-	// routes alike: over an older version each edge mints identities of its own.
+	// Links speak lite-07, which carries each route's instance, so every edge ranks a path's
+	// routes alike: over an older version each edge mints instances of its own.
 	listen.version = vec![LITE_07.parse().expect("lite-07")];
 	let mut listener = listen
 		.init(Default::default())

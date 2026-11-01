@@ -2087,14 +2087,14 @@ mod tests {
 	}
 
 	#[test]
-	fn independent_importers_cannot_select_a_shared_identity() {
-		let identity = hang::moq_net::Identity::random().to_string();
+	fn independent_importers_cannot_select_a_shared_instance() {
+		let instance = hang::moq_net::Instance::random().to_string();
 		let refused = Invocation::try_parse_from([
 			"moq",
 			"--connect",
 			"http://relay/anon",
-			"--identity",
-			&identity,
+			"--instance",
+			&instance,
 			"import",
 			"ts",
 		]);

@@ -454,22 +454,22 @@ void main() {
     replacement.broadcast().close();
   });
 
-  test('a new identity restarts announce consumers', () async {
+  test('a new instance restarts announce consumers', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final announced = origin.consume().announced(config: MoqAnnounceConfig());
-    final publication = origin.createBroadcast(path: 'identity');
+    final publication = origin.createBroadcast(path: 'instance');
 
     publication.announce(route: AnnounceRoute());
     final start = await nextRoute(announced) as AnnounceEventStart;
-    expect(start.announce.route.identity, isNotEmpty);
+    expect(start.announce.route.instance, isNotEmpty);
 
-    publication.announce(route: AnnounceRoute(identity: 'camera', epoch: 1));
+    publication.announce(route: AnnounceRoute(instance: 'camera', epoch: 1));
     final restart = await nextRoute(announced) as AnnounceEventRestart;
-    expect(restart.announce.route.identity, 'camera');
+    expect(restart.announce.route.instance, 'camera');
 
     expect(
-      () => publication.announce(route: AnnounceRoute(identity: '')),
-      throwsA(isA<InvalidIdentityMoqException>()),
+      () => publication.announce(route: AnnounceRoute(instance: '')),
+      throwsA(isA<InvalidInstanceMoqException>()),
     );
     announced.cancel();
     announced.dispose();

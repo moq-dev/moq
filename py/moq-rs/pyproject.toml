@@ -30,7 +30,7 @@ classifiers = [
 ]
 # Compatible-release pin: floats to the latest 0.5.x moq-ffi patch without a
 # wrapper re-release. A moq-ffi minor bump (0.6) is the only thing that forces
-# bumping this constraint. Floor is 0.5.0: no 0.4.x has the identity, range, and
+# bumping this constraint. Floor is 0.5.0: no 0.4.x has the instance, range, and
 # demand API this wrapper calls.
 dependencies = ["moq-ffi ~= 0.5.0"]
 

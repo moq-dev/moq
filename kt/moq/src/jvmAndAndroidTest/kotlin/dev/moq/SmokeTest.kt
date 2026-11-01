@@ -675,20 +675,20 @@ class SmokeTest {
     }
 
     @Test
-    fun `a new identity restarts announce consumers`() = runTest {
+    fun `a new instance restarts announce consumers`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             val announced = origin.consume().announced(AnnounceConfig())
-            origin.createBroadcast("identity").use { publication ->
+            origin.createBroadcast("instance").use { publication ->
                 publication.announce(AnnounceRoute())
                 val start = assertIs<AnnounceEventStart>(announced.nextRoute())
-                assertTrue(start.announce.route.identity.isNotEmpty())
+                assertTrue(start.announce.route.instance.isNotEmpty())
 
-                publication.announce(AnnounceRoute(identity = "camera", epoch = 1uL))
+                publication.announce(AnnounceRoute(instance = "camera", epoch = 1uL))
                 val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
-                assertEquals("camera", restart.announce.route.identity)
+                assertEquals("camera", restart.announce.route.instance)
 
-                assertFailsWith<MoqException.InvalidIdentity> {
-                    publication.announce(AnnounceRoute(identity = ""))
+                assertFailsWith<MoqException.InvalidInstance> {
+                    publication.announce(AnnounceRoute(instance = ""))
                 }
             }
         }

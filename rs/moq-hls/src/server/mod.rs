@@ -12,7 +12,7 @@
 //! ```
 //!
 //! The master playlist and manifest list the stream serving the broadcast now, and every
-//! URL they list is under that `@{instance}`: its identity, which a session mints for a route
+//! URL they list is under that `@{instance}`: its instance, which a session mints for a route
 //! whose wire carries none. A publisher that restarts gets its own URLs, so a playlist URL
 //! never resets its media sequence. A replaced instance keeps serving its URLs while its
 //! broadcast stays open, but its playlists end at the segments listed before the replacement,
@@ -126,7 +126,7 @@ impl Followed {
 		self.instances.lock().unwrap().by_id.get(id).cloned()
 	}
 
-	/// List `broadcaster` from now on. An instance returning after a gap keeps its identity, and
+	/// List `broadcaster` from now on. An instance returning after a gap keeps its instance, and
 	/// so its id, which then names the new broadcaster.
 	///
 	/// One still open is being replaced: its playlists and recordings end at what it listed so
@@ -254,7 +254,7 @@ impl Server {
 				if !existing.current().is_closed() {
 					return Some(existing.clone());
 				}
-				// A player may still be on a replaced instance of another identity, which the
+				// A player may still be on a replaced instance of another instance, which the
 				// fresh resolution does not list.
 				followed.adopt(existing);
 			}
@@ -535,29 +535,29 @@ mod tests {
 	async fn a_replaced_instance_serves_until_it_closes() {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default()).unwrap();
-		let (old_identity, new_identity) = (moq_net::Identity::random(), moq_net::Identity::random());
-		let route = |identity: &moq_net::Identity| moq_net::origin::Route::default().with_identity(identity.clone(), 0);
+		let (old_instance, new_instance) = (moq_net::Instance::random(), moq_net::Instance::random());
+		let route = |instance: &moq_net::Instance| moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 
-		let old = origin.publish("live", route(&old_identity)).expect("publish allowed");
+		let old = origin.publish("live", route(&old_instance)).expect("publish allowed");
 		settle().await;
 		let first = server.broadcaster("live").await.expect("broadcast announced");
-		assert_eq!(first.instance().as_ref(), old_identity.as_str());
+		assert_eq!(first.instance().as_ref(), old_instance.as_str());
 
-		let new = origin.publish("live", route(&new_identity)).expect("publish allowed");
+		let new = origin.publish("live", route(&new_instance)).expect("publish allowed");
 		eventually(async || {
 			let current = server.broadcaster("live").await.expect("broadcast announced");
-			current.instance().as_ref() == new_identity.as_str()
+			current.instance().as_ref() == new_instance.as_str()
 		})
 		.await;
-		let kept = server.instance("live", old_identity.as_str()).await;
+		let kept = server.instance("live", old_instance.as_str()).await;
 		assert!(
 			kept.is_some_and(|kept| kept.is_clone(&first)),
 			"the old instance serves"
 		);
 
 		drop(old);
-		eventually(async || server.instance("live", old_identity.as_str()).await.is_none()).await;
-		assert!(server.instance("live", new_identity.as_str()).await.is_some());
+		eventually(async || server.instance("live", old_instance.as_str()).await.is_none()).await;
+		assert!(server.instance("live", new_instance.as_str()).await.is_some());
 
 		drop(new);
 		eventually(async || server.inner.broadcasts.lock().unwrap().is_empty()).await;
@@ -582,7 +582,7 @@ mod tests {
 	}
 
 	/// A request that finds the listed instance closed before the follower does resolves the path
-	/// afresh, yet a replaced instance still open keeps its URLs: its identity names them, so the
+	/// afresh, yet a replaced instance still open keeps its URLs: its instance names them, so the
 	/// fresh resolution of that same stream serves them on.
 	#[tokio::test]
 	async fn a_closed_current_instance_keeps_the_open_ones() {

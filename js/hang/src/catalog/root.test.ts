@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as z from "@zod/mini";
 import { u53 } from "./integers.ts";
-import type { ReferenceIdentity, RelativeBroadcast } from "./path.ts";
+import type { ReferenceInstance, RelativeBroadcast } from "./path.ts";
 import { checkRenditions, DuplicateRendition, encode, RootSchema, UnsupportedVersion, VERSION } from "./root.ts";
 import { track } from "./track.ts";
 
@@ -50,21 +50,21 @@ test("rendition broadcast reference is parsed and normalized", () => {
 	}
 });
 
-// Mirrors Rust's `reference_identities_roundtrip_in_every_section`.
-test("every reference-bearing section carries an optional identity", () => {
-	const IDENTITY = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceIdentity;
-	const catalog = (identity: string) => ({
-		contributions: { c: { broadcast: "./a", identity } },
+// Mirrors Rust's `reference_instances_roundtrip_in_every_section`.
+test("every reference-bearing section carries an optional instance", () => {
+	const INSTANCE = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceInstance;
+	const catalog = (instance: string) => ({
+		contributions: { c: { broadcast: "./a", instance } },
 		video: {
 			renditions: {
-				v: { broadcast: "./a", identity, codec: "avc1.64001f", container: { kind: "legacy" } },
+				v: { broadcast: "./a", instance, codec: "avc1.64001f", container: { kind: "legacy" } },
 			},
 		},
 		audio: {
 			renditions: {
 				a: {
 					broadcast: "./a",
-					identity,
+					instance,
 					codec: "opus",
 					sampleRate: 48000,
 					numberOfChannels: 2,
@@ -72,22 +72,22 @@ test("every reference-bearing section carries an optional identity", () => {
 				},
 			},
 		},
-		text: { renditions: { t: { broadcast: "./a", identity, format: "vtt" } } },
-		json: { tracks: { j: { broadcast: "./a", identity, mode: "snapshot" } } },
-		binary: { tracks: { b: { broadcast: "./a", identity, mode: "snapshot" } } },
+		text: { renditions: { t: { broadcast: "./a", instance, format: "vtt" } } },
+		json: { tracks: { j: { broadcast: "./a", instance, mode: "snapshot" } } },
+		binary: { tracks: { b: { broadcast: "./a", instance, mode: "snapshot" } } },
 	});
 
-	const parsed = RootSchema.parse(catalog(IDENTITY));
+	const parsed = RootSchema.parse(catalog(INSTANCE));
 	if (!parsed.video) throw new Error("missing video section");
 	if (!parsed.audio) throw new Error("missing audio section");
-	expect(parsed.video.renditions.v?.identity).toBe(IDENTITY);
-	expect(parsed.audio.renditions.a?.identity).toBe(IDENTITY);
-	expect(parsed.text?.renditions.t?.identity).toBe(IDENTITY);
-	expect(parsed.json?.tracks.j?.identity).toBe(IDENTITY);
-	expect(parsed.binary?.tracks.b?.identity).toBe(IDENTITY);
-	expect(parsed.contributions?.c?.identity).toBe(IDENTITY);
+	expect(parsed.video.renditions.v?.instance).toBe(INSTANCE);
+	expect(parsed.audio.renditions.a?.instance).toBe(INSTANCE);
+	expect(parsed.text?.renditions.t?.instance).toBe(INSTANCE);
+	expect(parsed.json?.tracks.j?.instance).toBe(INSTANCE);
+	expect(parsed.binary?.tracks.b?.instance).toBe(INSTANCE);
+	expect(parsed.contributions?.c?.instance).toBe(INSTANCE);
 
-	// An empty identity refuses the catalog, as in Rust.
+	// An empty instance refuses the catalog, as in Rust.
 	expect(RootSchema.safeParse(catalog("")).success).toBe(false);
 });
 
@@ -108,7 +108,7 @@ test("a contribution parses beside a same-ID rendition and a malformed one is re
 		{ alice: null },
 		{ alice: {} },
 		{ alice: { broadcast: 42 } },
-		{ alice: { broadcast: "./alice.hang", identity: "" } },
+		{ alice: { broadcast: "./alice.hang", instance: "" } },
 	]) {
 		expect(RootSchema.safeParse({ contributions }).success).toBe(false);
 	}

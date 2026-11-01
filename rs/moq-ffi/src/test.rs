@@ -262,7 +262,7 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 			preference: 0,
 			label: None,
 			broadcast: None,
-			identity: None,
+			instance: None,
 			track: None,
 			codec: "avc1.64001f".into(),
 			description: None,
@@ -276,14 +276,14 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 	}
 }
 
-/// A rendition whose catalog `broadcast` field names `reference`, served under `identity`.
-fn referencing(reference: Option<&str>, identity: Option<&str>) -> MoqRendition {
+/// A rendition whose catalog `broadcast` field names `reference`, served under `instance`.
+fn referencing(reference: Option<&str>, instance: Option<&str>) -> MoqRendition {
 	let mut rendition = rendition("video", MoqContainer::Legacy);
 	let MoqRendition::Video { config, .. } = &mut rendition else {
 		unreachable!()
 	};
 	config.broadcast = reference.map(Into::into);
-	config.identity = identity.map(Into::into);
+	config.instance = instance.map(Into::into);
 	rendition
 }
 
@@ -295,7 +295,7 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	MoqAudio {
 		label: None,
 		broadcast: Some(reference.to_string()),
-		identity: None,
+		instance: None,
 		track: None,
 		codec: "opus".to_string(),
 		description: None,
@@ -411,7 +411,7 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 	publication
 		.announce(MoqAnnounceRoute {
 			cost: route.cost,
-			identity: Some(route.identity.clone()),
+			instance: Some(route.instance.clone()),
 			..Default::default()
 		})
 		.unwrap();
@@ -421,56 +421,56 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 }
 
 #[test]
-fn identity_routes_parse_and_refuse() {
-	// A stable identity round-trips with its epoch, which only orders its runs.
+fn instance_routes_parse_and_refuse() {
+	// A stable instance round-trips with its epoch, which only orders its runs.
 	let route = MoqAnnounceRoute {
-		identity: Some("cam".into()),
+		instance: Some("cam".into()),
 		epoch: 3,
 		..Default::default()
 	};
 	let back = moq_net::origin::Route::try_from(route).unwrap();
-	assert_eq!(back.identity, Some("cam".parse().unwrap()));
-	assert_eq!(MoqRoute::from(back).identity, "cam");
+	assert_eq!(back.instance, Some("cam".parse().unwrap()));
+	assert_eq!(MoqRoute::from(back).instance, "cam");
 
 	let route = MoqAnnounceRoute {
-		identity: Some(String::new()),
+		instance: Some(String::new()),
 		..Default::default()
 	};
 	assert!(matches!(
 		moq_net::origin::Route::try_from(route),
-		Err(MoqError::InvalidIdentity { .. })
+		Err(MoqError::InvalidInstance { .. })
 	));
 }
 
 #[tokio::test]
-async fn announced_restarts_on_a_new_identity() {
+async fn announced_restarts_on_a_new_instance() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let publication = origin.create_broadcast("identity-route".into()).unwrap();
+	let publication = origin.create_broadcast("instance-route".into()).unwrap();
 
-	let first = moq_net::Identity::random().to_string();
+	let first = moq_net::Instance::random().to_string();
 	publication
 		.announce(MoqAnnounceRoute {
-			identity: Some(first.clone()),
+			instance: Some(first.clone()),
 			..Default::default()
 		})
 		.unwrap();
 	let announce = next_announced(&announced).await;
-	assert_eq!(announce.route.identity, first);
+	assert_eq!(announce.route.instance, first);
 
 	// A new run of the same publisher is another instance: consumers restart onto it.
-	let second = moq_net::Identity::random().to_string();
+	let second = moq_net::Instance::random().to_string();
 	publication
 		.announce(MoqAnnounceRoute {
-			identity: Some(second.clone()),
+			instance: Some(second.clone()),
 			..Default::default()
 		})
 		.unwrap();
 	match next_event(&announced).await {
 		MoqAnnounceEvent::Restart { announce } => {
-			assert_eq!(announce.prefix, "identity-route");
-			assert_eq!(announce.route.identity, second);
+			assert_eq!(announce.prefix, "instance-route");
+			assert_eq!(announce.route.instance, second);
 		}
 		other => panic!("expected a restart, got {other:?}"),
 	}
@@ -3440,27 +3440,27 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 	source.close().unwrap();
 }
 
-/// A reference's identity names the instance it expects: a broadcast proven to serve another fails
+/// A reference's instance names the instance it expects: a broadcast proven to serve another fails
 /// the rendition, while an unnamed reference, or a route that cannot prove its instance, reads
 /// whichever instance resolves.
 #[tokio::test]
-async fn resolve_honors_the_reference_identity() {
+async fn resolve_honors_the_reference_instance() {
 	async fn resolve(
 		broadcast: &MoqBroadcastConsumer,
 		reference: &str,
-		identity: Option<&str>,
+		instance: Option<&str>,
 	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		kio::clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some(reference), identity)))
+		kio::clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some(reference), instance)))
 			.await
 			.expect("timed out resolving the reference")
 	}
 
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let served = moq_net::Identity::random().to_string();
-	let other = moq_net::Identity::random().to_string();
+	let served = moq_net::Instance::random().to_string();
+	let other = moq_net::Instance::random().to_string();
 	let route = MoqAnnounceRoute {
-		identity: Some(served.clone()),
+		instance: Some(served.clone()),
 		..Default::default()
 	};
 
@@ -3480,28 +3480,28 @@ async fn resolve_honors_the_reference_identity() {
 	let matching = resolve(&broadcast, "./source", Some(&served)).await.unwrap();
 	assert_eq!(matching.inner().info().path.as_str(), "a/source");
 	resolve(&broadcast, "./source", None).await.unwrap();
-	// A broadcast that minted its own identity is another stream than the one named.
+	// A broadcast that minted its own instance is another stream than the one named.
 	assert!(matches!(
 		resolve(&broadcast, "./plain", Some(&other)).await,
-		Err(MoqError::Mux { reason }) if reason.contains("serves identity")
+		Err(MoqError::Mux { reason }) if reason.contains("serves instance")
 	));
 
 	assert!(matches!(
 		resolve(&broadcast, "./source", Some(&other)).await,
-		Err(MoqError::Mux { reason }) if reason.contains("serves identity")
+		Err(MoqError::Mux { reason }) if reason.contains("serves instance")
 	));
-	// Without a broadcast, the identity names the catalog's own stream.
+	// Without a broadcast, the instance names the catalog's own stream.
 	resolve(&broadcast, "", Some(&served)).await.unwrap();
 	assert!(matches!(
 		resolve(&broadcast, "", Some(&other)).await,
-		Err(MoqError::Mux { reason }) if reason.contains("serves identity")
+		Err(MoqError::Mux { reason }) if reason.contains("serves instance")
 	));
 	assert!(matches!(
 		resolve(&broadcast, "./source", Some("")).await,
-		Err(MoqError::InvalidIdentity { .. })
+		Err(MoqError::InvalidInstance { .. })
 	));
 
-	// The rendition-based consumers read the identity off the rendition.
+	// The rendition-based consumers read the instance off the rendition.
 	let config = MoqMediaTrackConfig {
 		rendition: referencing(Some("./source"), Some(&other)),
 		subscription: None,
@@ -3509,7 +3509,7 @@ async fn resolve_honors_the_reference_identity() {
 	let subscribed = kio::clock::timeout(TIMEOUT, MoqMediaTrackConsumer::subscribe(&broadcast, config))
 		.await
 		.expect("timed out subscribing to the rendition");
-	assert!(matches!(subscribed, Err(MoqError::Mux { reason }) if reason.contains("serves identity")));
+	assert!(matches!(subscribed, Err(MoqError::Mux { reason }) if reason.contains("serves instance")));
 
 	catalog.close().unwrap();
 	source.close().unwrap();
@@ -4780,11 +4780,11 @@ async fn dynamic_broadcast_request() {
 	let prepared = request.prepare().unwrap();
 	let served = prepared.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
-	// Only publish announces the answer, under a fresh identity and after admission, and it
+	// Only publish announces the answer, under a fresh instance and after admission, and it
 	// hands back the fill handle the answer was prepared with.
 	let publication = prepared.publish().unwrap();
 	assert!(Arc::ptr_eq(&publication.broadcast(), &served));
-	// A re-price that names no identity keeps the one the answer was published under.
+	// A re-price that names no instance keeps the one the answer was published under.
 	publication
 		.announce(MoqAnnounceRoute {
 			cost: 7,
@@ -5912,7 +5912,7 @@ async fn roundtrip(media: &MoqMediaTrackProducer, track: &MoqMediaTrackConsumer,
 }
 
 /// A replacement session from the same publisher re-announces every route while the old one
-/// is still open, as a GOAWAY drain does. Under another identity that is another instance: the
+/// is still open, as a GOAWAY drain does. Under another instance that is another instance: the
 /// next `available()` hands it out, and reading it carries on past the old session's close.
 #[tokio::test]
 async fn follow_follows_a_minted_replacement() {
@@ -6029,7 +6029,7 @@ async fn follow_hands_out_a_takeover_once(dynamic_at: &str) {
 
 	let waiting = followed.clone();
 	let first = tokio::spawn(async move { waiting.available().await });
-	// The wait is on the dynamic route's answer when the exact path takes over under another identity.
+	// The wait is on the dynamic route's answer when the exact path takes over under another instance.
 	let _unanswered = kio::clock::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the wait never asked for the broadcast")
@@ -6059,14 +6059,14 @@ async fn follow_hands_out_a_held_takeover_once() {
 }
 
 /// An end is a gap that ended every request on the old route, even when a claim above the path
-/// answers under the same identity. So the stream serving the path afterwards is handed out
-/// again, though its identity is the one the caller still holds.
+/// answers under the same instance. So the stream serving the path afterwards is handed out
+/// again, though its instance is the one the caller still holds.
 #[tokio::test]
 async fn follow_hands_out_the_instance_again_after_an_end() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let followed = origin.consume().follow("live".into(), None).unwrap();
 	let route = MoqAnnounceRoute {
-		identity: Some(moq_net::Identity::random().to_string()),
+		instance: Some(moq_net::Instance::random().to_string()),
 		..Default::default()
 	};
 	let publication = origin.create_broadcast("live".into()).unwrap();
@@ -6076,7 +6076,7 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		.expect("timed out waiting for the broadcast")
 		.unwrap();
 
-	// A covering claim answering under the same identity.
+	// A covering claim answering under the same instance.
 	let dynamic = origin.inner().inner.requests("").unwrap();
 	publication.unannounce().unwrap();
 	let again = tokio::spawn(async move { followed.available().await });
@@ -6095,40 +6095,40 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		.unwrap()
 		.unwrap();
 	assert_eq!(
-		again.inner().info().identity,
-		first.inner().info().identity,
+		again.inner().info().instance,
+		first.inner().info().instance,
 		"the claim above did not answer the same instance"
 	);
 	drop((served, dynamic));
 	publication.broadcast().close().unwrap();
 }
 
-/// An identity pins both resolutions to one publisher instance: a request for another one is
+/// An instance pins both resolutions to one publisher instance: a request for another one is
 /// unroutable, and a follower never hands out another one taking over.
 #[tokio::test]
-async fn an_identity_pins_request_and_follow() {
+async fn an_instance_pins_request_and_follow() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let identity = moq_net::Identity::random().to_string();
+	let instance = moq_net::Instance::random().to_string();
 	let first = origin.create_broadcast("live".into()).unwrap();
 	first
 		.announce(MoqAnnounceRoute {
-			identity: Some(identity.clone()),
+			instance: Some(instance.clone()),
 			..Default::default()
 		})
 		.unwrap();
 
-	let pinned = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), Some(identity.clone())))
+	let pinned = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), Some(instance.clone())))
 		.await
 		.expect("timed out requesting the pinned instance")
 		.unwrap();
 	assert_eq!(
-		pinned.inner().info().identity.as_ref().map(ToString::to_string),
-		Some(identity.clone())
+		pinned.inner().info().instance.as_ref().map(ToString::to_string),
+		Some(instance.clone())
 	);
 	let err = kio::clock::timeout(
 		TIMEOUT,
-		consumer.request("live".into(), Some(moq_net::Identity::random().to_string())),
+		consumer.request("live".into(), Some(moq_net::Instance::random().to_string())),
 	)
 	.await
 	.expect("timed out requesting another instance")
@@ -6141,10 +6141,10 @@ async fn an_identity_pins_request_and_follow() {
 	);
 	assert!(matches!(
 		consumer.follow("live".into(), Some(String::new())),
-		Err(MoqError::InvalidIdentity { .. })
+		Err(MoqError::InvalidInstance { .. })
 	));
 
-	let followed = consumer.follow("live".into(), Some(identity.clone())).unwrap();
+	let followed = consumer.follow("live".into(), Some(instance.clone())).unwrap();
 	kio::clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out following the pinned instance")
@@ -6152,7 +6152,7 @@ async fn an_identity_pins_request_and_follow() {
 	let second = origin.create_broadcast("live".into()).unwrap();
 	second
 		.announce(MoqAnnounceRoute {
-			identity: Some(moq_net::Identity::random().to_string()),
+			instance: Some(moq_net::Instance::random().to_string()),
 			..Default::default()
 		})
 		.unwrap();
@@ -6163,8 +6163,8 @@ async fn an_identity_pins_request_and_follow() {
 		.expect("timed out requesting the takeover")
 		.unwrap();
 	assert_ne!(
-		takeover.inner().info().identity.as_ref().map(ToString::to_string),
-		Some(identity)
+		takeover.inner().info().instance.as_ref().map(ToString::to_string),
+		Some(instance)
 	);
 	let next = std::pin::pin!(followed.available());
 	assert!(

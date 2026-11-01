@@ -51,7 +51,7 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Hop, Hops, Identity, Pattern, Patterns, Timestamp, announce, auth, broadcast, kio, origin, track};
+use moq_net::{Hop, Hops, Instance, Pattern, Patterns, Timestamp, announce, auth, broadcast, kio, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -249,15 +249,15 @@ fn bench_withdraw(c: &mut Criterion) {
 fn bench_withdraw_wave(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/withdraw_wave");
 	group.sample_size(10);
-	let identity: Identity = "01900000-0000-7000-8000-000000000001".parse().unwrap();
-	// One identity, so the winner moving between the peers is an update, which is held.
+	let instance: Instance = "01900000-0000-7000-8000-000000000001".parse().unwrap();
+	// One instance, so the winner moving between the peers is an update, which is held.
 	let route = |chain: &[u64]| {
 		let mut hops = Hops::new();
 		for &hop in chain {
 			hops.push(Hop::new(hop).unwrap()).unwrap();
 		}
 		origin::Route::default()
-			.with_identity(identity.clone(), 0)
+			.with_instance(instance.clone(), 0)
 			.with_hops(hops)
 	};
 	for broadcasts in [1_000, 10_000] {
@@ -906,7 +906,7 @@ fn pool_route(hop: u64) -> origin::Route {
 	peer_route(hop, 3)
 }
 
-/// Re-requesting fronts an identity change left stale, swept over the cache around them and the
+/// Re-requesting fronts an instance change left stale, swept over the cache around them and the
 /// number restarted. Setup, route updates, and teardown stay outside the measurement.
 fn bench_restart_fronts(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/restart_fronts");
@@ -919,7 +919,7 @@ fn bench_restart_fronts(c: &mut Criterion) {
 						let pool = pool(1, fronts, 0);
 						moq_net::fuzz::update_route(
 							&pool._members[0],
-							pool_route(POOL_HOP).with_identity(Identity::random(), 0),
+							pool_route(POOL_HOP).with_instance(Instance::random(), 0),
 						)
 						.unwrap();
 						let paths: Vec<_> = (0..restarting).map(|i| format!("pool/job-{i}")).collect();
@@ -1471,9 +1471,9 @@ impl Generation {
 	}
 
 	/// Route the front to this generation without waiting.
-	fn route(&self, identity: &Identity) {
+	fn route(&self, instance: &Instance) {
 		self.broadcast
-			.announce(origin::Route::default().with_identity(identity.clone(), 0))
+			.announce(origin::Route::default().with_instance(instance.clone(), 0))
 			.unwrap();
 	}
 
@@ -1483,8 +1483,8 @@ impl Generation {
 	/// copy, before its splice. That bounds the splice only on a current-thread
 	/// runtime, where every local query is ready within the front poll that
 	/// splices it.
-	async fn announce(&self, identity: &Identity) {
-		self.route(identity);
+	async fn announce(&self, instance: &Instance) {
+		self.route(instance);
 		for track in &self.tracks {
 			kio::clock::timeout(COPY_WAIT, support::wanted(track.demand()))
 				.await
@@ -1496,7 +1496,7 @@ impl Generation {
 
 /// A front serving [`COPY_PATH`], with `copies` route copies on each of its tracks.
 struct CopyWalk {
-	identity: Identity,
+	instance: Instance,
 	_producer: origin::Producer,
 	_subscribers: Vec<track::Subscriber>,
 	generations: Vec<Generation>,
@@ -1513,9 +1513,9 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 	assert!(copies >= 1, "a front holds at least the serving copy");
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
-	let identity = Identity::random();
+	let instance = Instance::random();
 	let first = Generation::build(&producer, tracks);
-	first.route(&identity);
+	first.route(&instance);
 	let resolved = kio::clock::timeout(COPY_WAIT, producer.consume().request(COPY_PATH, None))
 		.await
 		.expect("front did not resolve")
@@ -1533,12 +1533,12 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 	generations.push(first);
 	for _ in 1..copies {
 		let generation = Generation::build(&producer, tracks);
-		generation.announce(&identity).await;
+		generation.announce(&instance).await;
 		generations.push(generation);
 	}
 	CopyWalk {
 		next: Some(Generation::build(&producer, tracks)),
-		identity,
+		instance,
 		_producer: producer,
 		_subscribers: subscribers,
 		generations,
@@ -1546,13 +1546,13 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 }
 
 impl CopyWalk {
-	/// Swap in the prebuilt newer route at the same identity.
+	/// Swap in the prebuilt newer route at the same instance.
 	///
 	/// A local track's info is already known, so the front subscribes, walks
 	/// every track, and each reader walks its copies in one driver turn.
 	async fn swap(&mut self) {
 		let generation = self.next.take().expect("one swap per setup");
-		generation.announce(&self.identity).await;
+		generation.announce(&self.instance).await;
 		self.generations.push(generation);
 	}
 }
@@ -1658,7 +1658,7 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 	} = shape;
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
-	let identity = Identity::random();
+	let instance = Instance::random();
 	let generation = |order: &mut dyn Iterator<Item = usize>| {
 		let broadcast = producer.create_broadcast(COPY_PATH).unwrap();
 		let track = broadcast.create_track("0", timed()).unwrap();
@@ -1672,7 +1672,7 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 			group.finish().unwrap();
 		}
 		broadcast
-			.announce(origin::Route::default().with_identity(identity.clone(), 0))
+			.announce(origin::Route::default().with_instance(instance.clone(), 0))
 			.unwrap();
 		(broadcast, track)
 	};

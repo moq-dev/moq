@@ -15,7 +15,7 @@ const NEW: u8 = 2;
 #[derive(Clone, Copy, Debug)]
 enum Case {
 	/// A cached segment returned while the cursor's live SUBSCRIBE was still unanswered. On
-	/// lite-07 it names the old run's identity, so the old run answers it and the recording
+	/// lite-07 it names the old run's instance, so the old run answers it and the recording
 	/// completes. An older wire names none, so the takeover refuses it and the recording loses
 	/// the old run's last uncached GOP.
 	Unanswered,

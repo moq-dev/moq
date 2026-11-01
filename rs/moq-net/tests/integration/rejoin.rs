@@ -683,7 +683,7 @@ async fn rejoined_quiet_catalog_survives_cache_expiry() {
 /// A quiet track's latest group outlives the cache window across a publisher takeover.
 ///
 /// The publisher reconnects while a reader holds the catalog. A late reader through the
-/// new connection still needs the quiet catalog, even on a wire without identities where
+/// new connection still needs the quiet catalog, even on a wire without instances where
 /// the old reader ends with its route.
 #[kio::test]
 async fn taken_over_quiet_catalog_survives_cache_expiry() {
@@ -705,7 +705,7 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 		let broadcast = publisher.create_broadcast("bench").unwrap();
 		let track = broadcast.create_track("catalog", timed()).unwrap();
 		broadcast
-			.announce(moq_net::origin::Route::default().with_identity(moq_net::Identity::random(), 0))
+			.announce(moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0))
 			.unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"catalog".as_ref()).unwrap();

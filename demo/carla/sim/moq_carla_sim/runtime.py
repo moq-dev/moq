@@ -116,7 +116,7 @@ class TruckSession:
         # A broadcast starts unadvertised; the player discovers trucks by
         # announcement, so advertise once the status and video tracks exist.
         # The stream's are there already: opening it advertised them. The
-        # broadcast mints a fresh identity, so viewers see a restarted worker
+        # broadcast mints a fresh instance, so viewers see a restarted worker
         # as a restart rather than a stalled broadcast.
         publication.announce()
 

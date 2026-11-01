@@ -15,9 +15,9 @@ use crate::track::Order;
 pub struct Subscribe<'a> {
 	pub id: u64,
 	pub broadcast: Path,
-	/// The identity the subscriber expects; see [`crate::origin::Route::identity`].
+	/// The instance the subscriber expects; see [`crate::origin::Route::instance`].
 	/// Lite07+ only.
-	pub identity: Option<crate::Identity>,
+	pub instance: Option<crate::Instance>,
 	pub track: Cow<'a, str>,
 	pub priority: i8,
 	pub max_delay: std::time::Duration,
@@ -35,7 +35,7 @@ impl Subscribe<'_> {
 		Subscribe {
 			id: self.id,
 			broadcast: self.broadcast,
-			identity: self.identity,
+			instance: self.instance,
 			track: Cow::Owned(self.track.into_owned()),
 			priority: self.priority,
 			max_delay: self.max_delay,
@@ -123,7 +123,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
 		let broadcast = Path::decode(r, version)?;
-		let identity = super::identity::decode_pin(r, version)?;
+		let instance = super::instance::decode_pin(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 		let priority = super::priority::from_wire(r.u8()?);
 
@@ -139,7 +139,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		Ok(Self {
 			id,
 			broadcast,
-			identity,
+			instance,
 			track,
 			priority,
 			max_delay,
@@ -151,7 +151,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		w.varint(self.id)?;
 		self.broadcast.encode(w, version)?;
-		super::identity::encode_pin(w, version, self.identity.as_ref())?;
+		super::instance::encode_pin(w, version, self.instance.as_ref())?;
 		w.string(&self.track)?;
 		w.u8(super::priority::to_wire(self.priority));
 
@@ -1032,7 +1032,7 @@ mod test {
 	fn subscribe_sample() -> Subscribe<'static> {
 		Subscribe {
 			order: crate::track::Order::Descending,
-			identity: None,
+			instance: None,
 			id: 1,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),

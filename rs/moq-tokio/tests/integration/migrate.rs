@@ -172,7 +172,7 @@ async fn a_migrated_session_closes_once_nothing_flows() {
 		.expect("the client never connected")
 		.expect("the relay stopped");
 
-	// Each broadcast mints an identity the migration carries across sessions.
+	// Each broadcast mints an instance the migration carries across sessions.
 	publish(&local, "up", moq_net::origin::Route::default());
 	publish(&origin, "down", moq_net::origin::Route::default());
 	let mut upstream = view(&origin, "up");

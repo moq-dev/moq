@@ -2,14 +2,14 @@ import { expect, it } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Identity, Origin, Path, type Track } from "@moq/net";
+import { Instance, Origin, Path, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast";
 import { Source } from "./video/source";
 
-function publish(origin: Origin.Producer, path: string, identity?: Identity.Valid) {
+function publish(origin: Origin.Producer, path: string, instance?: Instance.Valid) {
 	const publication = origin.createBroadcast(Path.from(path));
-	publication.announce({ identity });
+	publication.announce({ instance });
 	return publication.broadcast;
 }
 
@@ -218,11 +218,11 @@ it("tracks the contribution entry without reopening it on unrelated catalog upda
 	}
 });
 
-it("follows a restarted contributor only for an entry that names no identity", async () => {
+it("follows a restarted contributor only for an entry that names no instance", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const [oldIdentity, newIdentity] = [Identity.random(), Identity.random()];
-	const old = publish(origin, "room/extra.hang", oldIdentity);
+	const [oldInstance, newInstance] = [Instance.random(), Instance.random()];
+	const old = publish(origin, "room/extra.hang", oldInstance);
 	const parent = new Broadcast({
 		origin,
 		name: Path.from("room/main.hang"),
@@ -230,7 +230,7 @@ it("follows a restarted contributor only for an entry that names no identity", a
 		catalog: Catalog.RootSchema.parse({
 			contributions: {
 				following: { broadcast: "./extra.hang" },
-				pinned: { broadcast: "./extra.hang", identity: oldIdentity },
+				pinned: { broadcast: "./extra.hang", instance: oldInstance },
 			},
 		}),
 	});
@@ -239,14 +239,14 @@ it("follows a restarted contributor only for an entry that names no identity", a
 		const following = parent.contribution(owner, "following");
 		const pinned = parent.contribution(owner, "pinned");
 		await settle();
-		expect(following.out.active.peek()?.identity).toBe(oldIdentity);
-		expect(pinned.out.active.peek()?.identity).toBe(oldIdentity);
+		expect(following.out.active.peek()?.instance).toBe(oldInstance);
+		expect(pinned.out.active.peek()?.instance).toBe(oldInstance);
 
 		// The announcement is the online signal: the plain entry follows the restart, while the
-		// one naming the old identity goes offline rather than reading the new one.
-		const replacement = publish(origin, "room/extra.hang", newIdentity);
+		// one naming the old instance goes offline rather than reading the new one.
+		const replacement = publish(origin, "room/extra.hang", newInstance);
 		await quietly(settle);
-		expect(following.out.active.peek()?.identity).toBe(newIdentity);
+		expect(following.out.active.peek()?.instance).toBe(newInstance);
 		expect(pinned.out.active.peek()).toBeUndefined();
 		expect(pinned.out.status.peek()).toBe("offline");
 		replacement.close();
@@ -261,7 +261,7 @@ it("follows a restarted contributor only for an entry that names no identity", a
 it("pins the first instance of a contribution when not following announcements", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const first = publish(origin, "room/extra.hang", Identity.random());
+	const first = publish(origin, "room/extra.hang", Instance.random());
 	const parent = new Broadcast({
 		origin,
 		name: Path.from("room/main.hang"),
@@ -277,7 +277,7 @@ it("pins the first instance of a contribution when not following announcements",
 		expect(pinned?.path).toBe(Path.from("room/extra.hang"));
 
 		// A restart ends the pinned instance without moving the child to the new one.
-		const second = publish(origin, "room/extra.hang", Identity.random());
+		const second = publish(origin, "room/extra.hang", Instance.random());
 		await settle();
 		expect(child.out.active.peek()).toBeUndefined();
 		expect(child.out.error.peek()).toBeUndefined();
@@ -290,20 +290,20 @@ it("pins the first instance of a contribution when not following announcements",
 	}
 });
 
-it("never reads a contribution of another identity, but reads a minted one", async () => {
+it("never reads a contribution of another instance, but reads a minted one", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const served = Identity.random();
+	const served = Instance.random();
 	const proven = publish(origin, "room/proven.hang", served);
 	const track = proven.createTrack(Catalog.TRACK);
-	// A route over a wire that carries no identity has one its session minted.
-	publish(origin, "room/plain.hang", Identity.minted());
-	const named = Identity.random();
-	const contributions = (identity: Identity.Valid) =>
+	// A route over a wire that carries no instance has one its session minted.
+	publish(origin, "room/plain.hang", Instance.minted());
+	const named = Instance.random();
+	const contributions = (instance: Instance.Valid) =>
 		Catalog.RootSchema.parse({
 			contributions: {
-				proven: { broadcast: "./proven.hang", identity },
-				plain: { broadcast: "./plain.hang", identity: named },
+				proven: { broadcast: "./proven.hang", instance },
+				plain: { broadcast: "./plain.hang", instance: named },
 			},
 		});
 	const catalog = new Signal(contributions(named));
@@ -323,13 +323,13 @@ it("never reads a contribution of another identity, but reads a minted one", asy
 		expect(refused.out.error.peek()).toBeUndefined();
 		expect(track.closed.peek()).toBeUndefined();
 		expect(track.demand().wanted.peek()).toBeUndefined();
-		// A minted identity cannot prove the stream, so the named identity cannot refuse it.
+		// A minted instance cannot prove the stream, so the named instance cannot refuse it.
 		expect(accepted.out.active.peek()?.path).toBe(Path.from("room/plain.hang"));
 
-		// A catalog update naming the served identity admits the stream the request already holds.
+		// A catalog update naming the served instance admits the stream the request already holds.
 		catalog.set(contributions(served));
 		await settle();
-		expect(refused.out.active.peek()?.identity).toBe(served);
+		expect(refused.out.active.peek()?.instance).toBe(served);
 	} finally {
 		owner.close();
 		parent.close();
@@ -337,17 +337,17 @@ it("never reads a contribution of another identity, but reads a minted one", asy
 	}
 });
 
-it("shares the parent's resolution, so a new identity checks the held handle", async () => {
+it("shares the parent's resolution, so a new instance checks the held handle", async () => {
 	const origin = new Origin.Producer();
-	const [served, other] = [Identity.random(), Identity.random()];
+	const [served, other] = [Instance.random(), Instance.random()];
 	publish(origin, "room/main.hang", served);
 	const extraCatalog = publish(origin, "room/extra.hang", served).createTrack(Catalog.TRACK);
-	const entries = (identity?: Identity.Valid) =>
+	const entries = (instance?: Instance.Valid) =>
 		Catalog.RootSchema.parse({
 			contributions: {
-				sibling: { broadcast: "./extra.hang", identity },
-				self: { broadcast: "./main.hang", identity },
-				empty: { broadcast: "", identity },
+				sibling: { broadcast: "./extra.hang", instance },
+				self: { broadcast: "./main.hang", instance },
+				empty: { broadcast: "", instance },
 			},
 		});
 	const catalog = new Signal(entries());
@@ -364,7 +364,7 @@ it("shares the parent's resolution, so a new identity checks the held handle", a
 		const self = parent.contribution(owner, "self");
 		await settle();
 		const held = sibling.out.active.peek();
-		expect(held?.identity).toBe(served);
+		expect(held?.instance).toBe(served);
 		// A self-reference is the parent's own handle, not a request of its own. An empty one is
 		// too, and is named like the parent, so its own references resolve against the same base.
 		expect(self.out.active.peek()).toBe(parent.out.active.peek());
@@ -381,14 +381,14 @@ it("shares the parent's resolution, so a new identity checks the held handle", a
 			}),
 		);
 
-		// Naming the held identity keeps the same handle rather than resolving the path again.
+		// Naming the held instance keeps the same handle rather than resolving the path again.
 		catalog.set(entries(served));
 		await settle();
 		expect(sibling.out.active.peek()).toBe(held);
 		expect(self.out.active.peek()).toBe(parent.out.active.peek());
 		expect(withdrawals).toBe(0);
 
-		// Naming another identity fails the held one.
+		// Naming another instance fails the held one.
 		catalog.set(entries(other));
 		await quietly(settle);
 		expect(sibling.out.active.peek()).toBeUndefined();

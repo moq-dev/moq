@@ -133,7 +133,7 @@ func (r *BroadcastRequest) Path() (string, error) {
 	return r.inner.Path()
 }
 
-// Prepare starts answering as a new stream under a fresh identity, hidden until published.
+// Prepare starts answering as a new stream under a fresh instance, hidden until published.
 func (r *BroadcastRequest) Prepare() (*BroadcastPrepared, error) {
 	inner, err := r.inner.Prepare()
 	if err != nil {
@@ -201,10 +201,10 @@ func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, 
 }
 
 // Follow follows an exact path, resolving each stream that serves it. A non-nil
-// identity follows only that stream: another one taking over is never handed out,
+// instance follows only that stream: another one taking over is never handed out,
 // and the stream is handed out again if it returns after an end.
-func (o *OriginConsumer) Follow(path string, identity *string) (*Following, error) {
-	inner, err := o.inner.Follow(path, identity)
+func (o *OriginConsumer) Follow(path string, instance *string) (*Following, error) {
+	inner, err := o.inner.Follow(path, instance)
 	if err != nil {
 		return nil, err
 	}
@@ -216,10 +216,10 @@ func (o *OriginConsumer) Follow(path string, identity *string) (*Following, erro
 // broadcast on this origin, a route a session announced (served on demand by
 // that session), or a dynamic handler on the origin; errors if nothing can
 // serve it, including a broadcast created but not announced. Unlike Follow, it
-// does not wait for a future announcement. A non-nil identity refuses any
+// does not wait for a future announcement. A non-nil instance refuses any
 // other stream. Blocks until resolved.
-func (o *OriginConsumer) Request(ctx context.Context, path string, identity *string) (*BroadcastConsumer, error) {
-	inner, err := o.inner.Request(ctx, path, identity)
+func (o *OriginConsumer) Request(ctx context.Context, path string, instance *string) (*BroadcastConsumer, error) {
+	inner, err := o.inner.Request(ctx, path, instance)
 	if err != nil {
 		return nil, err
 	}

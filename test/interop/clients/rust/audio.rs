@@ -87,7 +87,7 @@ async fn decode(
 	let mut pcm = create("pcm")?;
 
 	let rendition = source
-		.resolve(audio.broadcast.as_ref(), audio.identity.as_ref())
+		.resolve(audio.broadcast.as_ref(), audio.instance.as_ref())
 		.await?;
 	let mut options = moq_audio::decode::Options::new();
 	options.output.format = moq_audio::Format::F32;

@@ -94,15 +94,15 @@ class Command:
     `drive`, `estop`, `reset_estop`, and `respawn` arrive on the wire;
     `driver_left` and `watchdog_expired` are synthesized locally.
 
-    `driver_id` is the driver's path segment, which `status` echoes. `identity` is
-    the route identity its broadcast was announced under: the same id announced
-    under another identity is another run of the driver, so it is a different
+    `driver_id` is the driver's path segment, which `status` echoes. `instance` is
+    the route instance its broadcast was announced under: the same id announced
+    under another instance is another run of the driver, so it is a different
     driver for the lease.
     """
 
     kind: CommandKind
     driver_id: str = ""
-    identity: str | None = None
+    instance: str | None = None
     sequence: int = 0
     state: DriveState | None = None
     timestamps: tuple[TimestampEntry, ...] = ()
@@ -114,18 +114,18 @@ class Drive:
     The first driver to send a command owns the truck until it disconnects or
     its command lease expires. Other drivers cannot silently steal control.
 
-    The lease binds to the driver's broadcast path and the identity it was
+    The lease binds to the driver's broadcast path and the instance it was
     announced under, so a driver whose broadcast ends or restarts loses it.
     It is still cooperative, not enforced: the holder's id is echoed on the
     public `status` track, so anyone allowed to publish there can announce at
-    that path under another identity, which ends the holder's broadcast and frees
+    that path under another instance, which ends the holder's broadcast and frees
     the lease for the newcomer. This stops two honest drivers colliding; it
     does not stop a deliberate takeover.
     """
 
     def __init__(self) -> None:
         self._driver: str | None = None
-        self._identity: str | None = None
+        self._instance: str | None = None
         self._sequence: int | None = None
         self._state = DriveState.stopped()
         self._estopped = False
@@ -153,7 +153,7 @@ class Drive:
 
     def holds(self, command: Command) -> bool:
         """Whether `command` comes from the run of the driver holding the lease."""
-        return self._driver is not None and (self._driver, self._identity) == (command.driver_id, command.identity)
+        return self._driver is not None and (self._driver, self._instance) == (command.driver_id, command.instance)
 
     def accepted(self) -> Accepted:
         return Accepted(state=self._state, estopped=self._estopped)
@@ -172,7 +172,7 @@ class Drive:
                 return False
             claiming = self._driver is None
             self._driver = command.driver_id
-            self._identity = command.identity
+            self._instance = command.instance
             self._sequence = command.sequence
             state = (command.state or DriveState.stopped()).sanitized()
             if (
@@ -240,6 +240,6 @@ class Drive:
 
     def _clear_driver(self) -> None:
         self._driver = None
-        self._identity = None
+        self._instance = None
         self._sequence = None
         self._state = DriveState.stopped()
