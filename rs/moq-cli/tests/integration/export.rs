@@ -1160,10 +1160,12 @@ async fn a_killed_mp4_recording_is_repaired() {
 		unreachable!();
 	};
 	assert_eq!(moov.trak.len(), 2, "video and audio");
-	// Only the reserved box changed before the appended moov.
+	// Only the reserved box changed before the moov, which replaces any partial fragment.
 	let reserved = u32::from_be_bytes(killed[..4].try_into().unwrap()) as usize;
+	let media = reserved + u64::from_be_bytes(repaired[reserved + 8..reserved + 16].try_into().unwrap()) as usize;
+	assert!(media <= killed.len());
 	assert_eq!(repaired[..reserved], killed[..reserved]);
-	assert_eq!(repaired[reserved + 16..killed.len()], killed[reserved + 16..]);
+	assert_eq!(repaired[reserved + 16..media], killed[reserved + 16..media]);
 
 	assert_eq!(repair().await, repaired, "a finished recording is left alone");
 

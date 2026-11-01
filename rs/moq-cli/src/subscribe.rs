@@ -593,10 +593,11 @@ impl Subscribe {
 	}
 }
 
-/// Make the writes that turn a recording into a regular MP4: the moov at the end, then the
-/// mdat header over the reserved box.
+/// Make the writes that turn a recording into a regular MP4: the moov where the media ends,
+/// then the mdat header over the reserved box.
 pub async fn write_finish(file: &mut tokio::fs::File, finish: &moq_mux::container::mp4::Finish) -> std::io::Result<()> {
-	file.seek(std::io::SeekFrom::End(0)).await?;
+	file.set_len(finish.moov_offset).await?;
+	file.seek(std::io::SeekFrom::Start(finish.moov_offset)).await?;
 	file.write_all(&finish.moov).await?;
 	// The header points readers past the media at the moov, so the moov must be on disk first.
 	file.sync_data().await?;
