@@ -4279,17 +4279,15 @@ mod tests {
 			let mut received = producer.subscribe(None);
 			subscriber.subscribes.lock().insert(
 				1,
-				TrackEntry {
+				TrackEntry::accepted(
 					producer,
-					framing: lite::Framing {
+					lite::Framing {
 						timescale: Some(Timescale::MILLI),
 						ietf: None,
 						compressed: false,
 					},
-					tail: Default::default(),
-					start: None,
-					first: None,
-				},
+					Default::default(),
+				),
 			);
 
 			if version.has_padding() {
@@ -4297,7 +4295,7 @@ mod tests {
 				for body in [vec![1], vec![1; 1200], vec![1; 1201]] {
 					subscriber.route_datagram(body.into()).unwrap();
 					assert!(received.recv_datagram().now_or_never().is_none());
-					assert!(!subscriber.subscribes.lock().get(&1).unwrap().producer.is_live());
+					assert!(!subscriber.subscribes.lock().get(&1).unwrap().copy.as_ref().unwrap().producer.is_live());
 				}
 			}
 
@@ -8555,6 +8553,9 @@ enum ServeMode {
 		/// subscription, after which the copy stays for its readers.
 		track: bool,
 	},
+	/// The upstream subscription failed with this error. Group streams that beat the accept
+	/// arrived before it, so they are delivered first, then the track is given back.
+	Failed(Error),
 }
 
 /// Fills a pre-lite-05 upstream has no FETCH for, held while the live subscription may
@@ -8884,6 +8885,14 @@ impl ServeLoop {
 							return Poll::Ready(ServeEnd::GiveBack(err));
 						}
 					}
+				}
+				ServeMode::Failed(_) => {
+					self.unpark(serve);
+					ready!(poll_unparked(&self.sub, serve, waiter));
+					let ServeMode::Failed(err) = std::mem::replace(&mut self.mode, ServeMode::Select) else {
+						unreachable!()
+					};
+					return Poll::Ready(ServeEnd::GiveBack(err));
 				}
 				ServeMode::Tail { settle, owed, track } => {
 					// The tail waits for groups, parked ones included.
@@ -9243,7 +9252,8 @@ impl ServeLoop {
 							}
 							Err(err) => {
 								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
-								return Poll::Ready(ServeEnd::GiveBack(err));
+								self.mode = ServeMode::Failed(err);
+								continue;
 							}
 						}
 					}
