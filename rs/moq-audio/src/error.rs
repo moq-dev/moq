@@ -42,12 +42,12 @@ pub enum Error {
 	#[error("audio decode: {0}")]
 	Decode(String),
 
-	/// The input buffer was not aligned to the codec's frame size.
-	#[error("input buffer length {got} bytes does not match expected {expected}")]
+	/// The input buffer was not aligned to its sample or frame size.
+	#[error("input buffer length {got} does not match expected {expected}")]
 	Misaligned {
-		/// The buffer length received, in bytes.
+		/// The buffer length received, in the units the error's origin documents.
 		got: usize,
-		/// The buffer length required, in bytes.
+		/// The buffer length the call accepts, in the units the error's origin documents.
 		expected: usize,
 	},
 

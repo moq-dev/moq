@@ -61,14 +61,11 @@ export type BroadcastInput = {
 	maxAge: Getter<Milli | undefined>;
 
 	/**
-	 * Whether every rendition encodes only while a subscriber is attached. Defaults to false: an
-	 * enabled rendition encodes with or without a subscriber, so its recent groups sit in the
-	 * track's cache for a late subscription's `maxDelay` or a fetch to reach within `maxAge`.
-	 *
-	 * On demand saves the encode while nobody watches, but a subscriber then finds no past to reach
-	 * back into: each one starts at the keyframe its arrival forces. Capture stays open either way.
+	 * Override when renditions encode. Omitted: audio retains raw PCM until subscribed, while
+	 * video encodes continuously. False encodes both continuously; true gates video too, losing
+	 * its past. Unless false, audio keeps raw history up to `maxAge`. Capture stays open.
 	 */
-	onDemand: Getter<boolean>;
+	onDemand: Getter<boolean | undefined>;
 };
 
 /**
@@ -116,8 +113,8 @@ export class Broadcast {
 	readonly #renditions = new Signal<Record<string, Rendition<unknown>>>({});
 
 	// The writable track producer signals backing each Rendition's read-only `track`, keyed by name.
-	// A static network track is exposed here while it is open, and with `onDemand` only while at
-	// least one subscriber uses it.
+	// A static network track is exposed here while it is open. On-demand gates non-audio tracks
+	// on a subscriber; audio keeps its handle so it can buffer PCM across demand changes.
 	readonly #tracks = new Map<string, Signal<Moq.Track.Producer | undefined>>();
 
 	// The kind of each rendition track in the current network broadcast. A new one starts over.
@@ -153,7 +150,7 @@ export class Broadcast {
 			flip: getter(props?.flip ?? false),
 			rotation: getter(props?.rotation ?? 0),
 			maxAge: getter(props?.maxAge),
-			onDemand: getter(props?.onDemand ?? false),
+			onDemand: getter(props?.onDemand),
 		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
@@ -420,8 +417,7 @@ export class Broadcast {
 		});
 
 		// Static tracks fan out to every subscriber. The encoder-facing handle stays set while the
-		// track is open, so its groups wait in the cache for a late subscriber. On demand gates it on
-		// a subscriber too, so encoding stops when the final one leaves.
+		// track is open. Audio keeps it while buffering PCM; on-demand video gates it on a subscriber.
 		effect.run((inner) => {
 			const renditions = inner.get(this.#renditions);
 			const names = inner.get(this.#names);
@@ -469,7 +465,12 @@ export class Broadcast {
 				}
 				inner.run((gate) => {
 					if (gate.get(served.closed) !== undefined) return;
-					if (gate.get(this.in.onDemand) && gate.get(served.demand().wanted) === undefined) return;
+					if (
+						rendition.kind !== "audio" &&
+						gate.get(this.in.onDemand) &&
+						gate.get(served.demand().wanted) === undefined
+					)
+						return;
 					gate.set(signal, served);
 				});
 			}
