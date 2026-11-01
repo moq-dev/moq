@@ -91,3 +91,51 @@ for (const open of [true, false]) {
 		}
 	});
 }
+
+// The start waits on the next group's first frame, which may land within the budget, rather than
+// dropping that group. Here the fifth group (4 s) arrived with its frames still in flight, so the start
+// keeps the fourth and plays on into the fifth. Rust's
+// `a_backlog_start_waits_on_a_successor_without_frames` pairs this case.
+test("a backlog start waits on a successor without frames", async () => {
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const track = new Track.Producer("backlog");
+	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
+		format: new Format("data"),
+		delay: { max: Milli(1500) },
+	});
+	const frame = (micros: number) => ({ payload: Varint.encode(micros), timestamp: Time.Timestamp.now() });
+	const frames = (g: number) => Array.from({ length: 10 }, (_, f) => g * 1_000_000 + f * 100_000);
+	const read: number[] = [];
+	const readN = async (n: number) => {
+		for (let i = 0; i < n; i++) {
+			const next = await consumer.next();
+			if (next?.kind !== "frame") throw new Error(`unexpected read: ${JSON.stringify(next)}`);
+			read.push(next.frame.timestamp);
+		}
+	};
+	try {
+		for (let g = 0; g < 4; g++) {
+			const group = track.createGroup(g);
+			for (const micros of frames(g)) group.writeFrame(frame(micros));
+			group.finish();
+		}
+		const fifth = track.createGroup(4);
+		// The fifth group's frames left before the sixth's, though they land after it.
+		const sent = Time.Timestamp.now();
+		const last = track.createGroup(5);
+		last.writeFrame(frame(5_000_000));
+		last.finish();
+		while (consumer.buffered.peek().at(-1)?.end !== 5000) await consumer.buffered.changed();
+
+		await readN(10);
+		for (const micros of frames(4)) fifth.writeFrame({ payload: Varint.encode(micros), timestamp: sent });
+		fifth.finish();
+		await readN(11);
+		expect(read).toEqual([...frames(3), ...frames(4), 5_000_000]);
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+		warn.mockRestore();
+	}
+});

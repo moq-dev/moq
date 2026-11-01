@@ -801,8 +801,8 @@ impl<F: Container> Consumer<F> {
 	}
 
 	// Before the first item, move the cursor past its group when that group's first frame trails the
-	// newest content by more than the budget and the next group with data still starts at or before
-	// the live edge less the reach, so it is not what the start covers. Returns whether it moved.
+	// newest content by more than the budget and the next group still starts at or before the live
+	// edge less the reach, so it is not what the start covers. Returns whether it moved.
 	fn start_skip(&mut self, waiter: &kio::Waiter) -> Result<bool, F::Error> {
 		let Some(group) = self.pending.front_mut() else {
 			return Ok(false);
@@ -816,9 +816,17 @@ impl<F: Container> Consumer<F> {
 		};
 		let first = std::time::Duration::from(frame.timestamp);
 		let current_end = group.max_end;
-		let Some((idx, next_start)) = self.poll_next_group(waiter) else {
+		// The next group that arrived, even one whose first frame is still in flight: that frame may
+		// land within the budget, so skipping on to a later group could drop the one the start
+		// belongs on. Until it lands, nothing is skipped, as `@moq/hang`'s consumer waits on its
+		// successor's start.
+		let Some(idx) = self.pending.iter().position(|group| group.sequence > self.current) else {
 			return Ok(false);
 		};
+		let Poll::Ready(Some(next_start)) = self.pending[idx].poll_min_timestamp(waiter, &self.format, false) else {
+			return Ok(false);
+		};
+		let next_start = std::time::Duration::from(next_start);
 		let newest = self.poll_newest(waiter);
 		// Nothing has been read, so the reader still warms.
 		if newest.saturating_sub(first) <= self.max_delay.saturating_add(self.warmup) {
@@ -2491,6 +2499,52 @@ mod tests {
 				.collect();
 			assert_eq!(read, expected, "sixth group open: {open}");
 		}
+	}
+
+	/// A backlog join's start skip waits on the next group's first frame, which may land within the
+	/// budget, rather than skipping on to a later group with data and dropping it. Here the fifth
+	/// group (4.0 s) arrived with its frames still in flight, so the start keeps the fourth and
+	/// plays on into the fifth. `js/hang`'s `consumer.skips.test.ts` pairs this case.
+	#[test]
+	fn a_backlog_start_waits_on_a_successor_without_frames() {
+		let waiter = kio::Waiter::noop();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut consumer = container_max_delay_only(track.subscribe(None), Duration::from_millis(1500));
+		let frames = |g: u64| -> Vec<_> { (0..10).map(|f| ts(g * 1_000_000 + f * 100_000)).collect() };
+		for g in 0..4u64 {
+			write_group(&mut track, g, &frames(g));
+		}
+		let mut fifth = track.create_group(moq_net::group::Info { sequence: 4 }).unwrap();
+		write_group(&mut track, 5, &[ts(5_000_000)]);
+
+		let mut read = Vec::new();
+		let mut drain = |consumer: &mut Consumer<Container>| {
+			while let Poll::Ready(Ok(Some(item))) = consumer.poll_read(&waiter) {
+				match item {
+					Read::Frame { frame, .. } => read.push(frame.timestamp),
+					other => panic!("unexpected read: {other:?}"),
+				}
+			}
+		};
+		drain(&mut consumer);
+		for frame in frames(4) {
+			Container::Legacy(crate::container::Kind::Data)
+				.write(
+					&mut fifth,
+					&[Frame {
+						timestamp: frame,
+						payload: Bytes::from_static(&[0xDE, 0xAD]),
+						keyframe: false,
+						duration: None,
+					}],
+				)
+				.unwrap();
+		}
+		fifth.finish().unwrap();
+		drain(&mut consumer);
+
+		let expected: Vec<_> = frames(3).into_iter().chain(frames(4)).chain([ts(5_000_000)]).collect();
+		assert_eq!(read, expected);
 	}
 
 	// ---- Malformed rewind ----
