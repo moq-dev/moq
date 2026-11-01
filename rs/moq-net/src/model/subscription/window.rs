@@ -596,7 +596,12 @@ impl Window {
 			});
 		}
 		self.admission = Admission::new(&self.ranges, &self.spans);
-		self.named = self.spans.iter().filter(|span| span.floored).map(|span| span.start).min();
+		self.named = self
+			.spans
+			.iter()
+			.filter(|span| span.floored)
+			.map(|span| span.start)
+			.min();
 		self.all_named = self.spans.iter().all(|span| span.floored);
 		self.rebuild();
 		Ok(())

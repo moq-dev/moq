@@ -121,13 +121,11 @@ impl FillsOut {
 		let start = ranges * 2;
 		track.start_at(start).unwrap();
 		land(&track, start, start);
-		let subscription = track::Subscription::default()
-			.with_max_delay(BUDGET)
-			.with_ranges(
-				(0..ranges)
-					.map(|i| track::Range::groups(i * 2..i * 2 + 1))
-					.chain([track::Range::groups(start..)]),
-			);
+		let subscription = track::Subscription::default().with_max_delay(BUDGET).with_ranges(
+			(0..ranges)
+				.map(|i| track::Range::groups(i * 2..i * 2 + 1))
+				.chain([track::Range::groups(start..)]),
+		);
 		let mut reader = track.subscribe(subscription);
 		drain(&mut reader);
 		Self {
