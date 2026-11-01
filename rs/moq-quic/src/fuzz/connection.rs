@@ -427,6 +427,7 @@ impl Pair {
 					local_ip: None,
 					ecn: None,
 					data,
+					arrival: None,
 				},
 				&mut buf,
 			);

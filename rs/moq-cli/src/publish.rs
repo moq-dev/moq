@@ -44,7 +44,8 @@ impl From<VideoCodec> for moq_video::encode::Codec {
 pub enum Mode {
 	/// Capture and encode for the whole publish.
 	On,
-	/// Capture and encode only while subscribed.
+	/// Encode only while subscribed. Video captures only then too; audio keeps
+	/// capturing and retains raw PCM up to `--max-age`, encoding it once subscribed.
 	Demand,
 	/// Publish no track of this medium.
 	Off,
@@ -144,9 +145,10 @@ pub struct CaptureArgs {
 	#[usage(long, value_enum, default = "on")]
 	pub video: Mode,
 
-	/// Audio mode: on keeps the recent past; demand opens the source only while
-	/// subscribed; off publishes no audio.
-	#[usage(long, value_enum, default = "on")]
+	/// Audio mode: demand (the default) keeps the microphone open and retains raw
+	/// audio, encoding it with the recent past once subscribed; on encodes for the
+	/// whole publish; off publishes no audio.
+	#[usage(long, value_enum, default = "demand")]
 	pub audio: Mode,
 
 	/// The released spelling of `--video off`.
@@ -656,8 +658,8 @@ impl Publish {
 				// Each enabled medium publishes its own track onto the shared
 				// broadcast + catalog. Both stamp frames on the catalog's
 				// advertised clock, so HLS/DASH wall times match the mapping on
-				// the wire. Both capture for the whole run, or only while
-				// subscribed in demand mode. Both run on this task rather
+				// the wire. In demand mode, video captures only while
+				// subscribed and audio retains raw PCM until then. Both run on this task rather
 				// than a spawn: on macOS the audio future holds ObjC handles
 				// across an await, so it is `!Send`.
 				let video_fut = {
@@ -1179,9 +1181,9 @@ pub(crate) mod tests {
 
 		let args = capture_args(&[]);
 		assert!(!args.video_capture(Allocator::unlimited()).unwrap().on_demand);
-		assert!(!args.audio_capture(Allocator::unlimited()).on_demand);
+		assert!(args.audio_capture(Allocator::unlimited()).on_demand);
 
-		for (video, audio) in [("on", "demand"), ("demand", "on"), ("demand", "demand")] {
+		for (video, audio) in [("on", "on"), ("on", "demand"), ("demand", "on"), ("demand", "demand")] {
 			let args = capture_args(&["--video", video, "--audio", audio]);
 			args.validate().unwrap();
 			assert_eq!(
@@ -1769,9 +1771,8 @@ pub(crate) mod tests {
 			// Joining once every group is out, with a budget half the jump, reads every group
 			// after it past the marker, and none of the groups the jump left more than
 			// the budget behind. An IETF subscription starts at the newest group, so only lite
-			// has the groups behind it to read, and a lite-06 subscriber drops the timestamps
-			// that carry the jump.
-			if version == "moq-lite-07-wip" {
+			// has the groups behind it to read.
+			if version.starts_with("moq-lite") {
 				let late =
 					read(start(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10))).await)
 						.await

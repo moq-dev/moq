@@ -10,7 +10,7 @@ typealias Consumer = uniffi.moq.MoqVideoConsumer
 typealias EncoderInput = uniffi.moq.MoqVideoEncoderInput
 /** The codec, bitrate, group mode, and backend preference. */
 typealias EncoderOutput = uniffi.moq.MoqVideoEncoderOutput
-/** What a [Consumer] delivers: an optional resize, a max delay, and the decoder's surface (macOS only). */
+/** What a [Consumer] delivers: an optional resize, a delay, and the decoder's surface (macOS only). */
 typealias DecoderOutput = uniffi.moq.MoqVideoDecoderOutput
 /** One raw picture with its presentation timestamp. */
 typealias Frame = uniffi.moq.MoqVideoFrame

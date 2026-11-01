@@ -1904,7 +1904,7 @@ impl Request for TrackInfoServe {
 		crate::ietf::flate::egress(&info, shared.version.has_compression())?;
 
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise).
-		writer.buffer(&lite::TrackInfo::serve(&info, shared.version, ietf))?;
+		writer.buffer(&lite::TrackInfo::serve(&info, shared.version))?;
 		if ietf {
 			writer.buffer(&lite::ietf::TrackProperties(info.properties.clone()))?;
 		}
@@ -1964,9 +1964,7 @@ impl Request for TracksServe {
 		let event = match ready!(self.tracks.poll_next(waiter))? {
 			Some(crate::broadcast::TracksEvent::Added { name, info }) => lite::TracksEvent::Added {
 				name: name.to_string().into(),
-				// Untimed even to an extension peer: TRACKS_ADD has no TRACK_PROPERTIES to
-				// carry the unchecked provenance, so a relay would re-list it as native lite.
-				info: lite::TrackInfo::serve(&info, shared.version, false),
+				info: lite::TrackInfo::serve(&info, shared.version),
 			},
 			Some(crate::broadcast::TracksEvent::Removed { name }) => lite::TracksEvent::Removed {
 				name: name.to_string().into(),
@@ -2076,7 +2074,6 @@ impl Request for SubscribeServe {
 		loop {
 			match self {
 				Self::Query { querying, .. } => {
-					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
 					let info = ready!(querying.poll_ok(waiter))?;
 					let Self::Query {
 						msg,
@@ -2094,7 +2091,7 @@ impl Request for SubscribeServe {
 					else {
 						unreachable!()
 					};
-					let bounds = Bounds::new(&msg.ranges, info.lite_timescale(ietf))?;
+					let bounds = Bounds::new(&msg.ranges, info.timescale)?;
 					*self = Self::subscribe(shared, *msg, bounds, &track, latest, update);
 				}
 				Self::Confirm { subscribing, .. } => {
@@ -2121,7 +2118,7 @@ impl Request for SubscribeServe {
 					// `None` omits the per-frame timestamp prefix: an untimed track on
 					// Lite07+, or any track before Lite05 (whose frames still carry
 					// timestamps in the model, just not on this wire).
-					let stamp = Stamp::new(shared.version, track.info().lite_timescale(ietf));
+					let stamp = Stamp::new(shared.version, track.info().timescale);
 
 					// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties
 					// live in TRACK_INFO, and the resolved range arrives as
@@ -2335,7 +2332,7 @@ impl Request for FetchServe {
 					let mut group = group.with_end(msg.end_frame.and_then(|end| end.checked_add(1)));
 
 					// Matches the timescale TRACK_INFO declared for the track.
-					let stamp = Stamp::new(shared.version, group.lite_timescale(ietf));
+					let stamp = Stamp::new(shared.version, group.timescale());
 					// And its compression, which a lite-07 peer receives as stored.
 					if shared.version.has_compression() {
 						group = group.compressed();
@@ -3448,13 +3445,12 @@ struct Stamp {
 	/// The wire timescale TRACK_INFO declared (see [`Version::wire_timescale`]).
 	timescale: crate::Timescale,
 	/// Whether each frame's own timestamp goes out. Lite05/06 cannot encode an untimed
-	/// track, so one served untimed carries its send time instead, unchecked ones included.
+	/// track, so an untimed one carries its send time instead.
 	timed: bool,
 }
 
 impl Stamp {
-	/// How `version` stamps a track served at `timescale` (see
-	/// [`track::Info::lite_timescale`]), or `None` when it carries no timestamps.
+	/// How `version` stamps a track with `timescale`, or `None` when it carries no timestamps.
 	fn new(version: Version, timescale: Option<crate::Timescale>) -> Option<Self> {
 		Some(Self {
 			timescale: version.wire_timescale(timescale)?,
@@ -5177,29 +5173,25 @@ mod serve_group_test {
 		}
 	}
 
-	/// A track served untimed to lite-05/06 carries its send time, never its frames' own
-	/// timestamps: those of an unchecked track may be moq-transport arrival times.
+	/// Lite-05/06 cannot encode an untimed track, so one carries its send time there and
+	/// nothing on lite-07, while a timed track carries its own timestamps on every version.
 	#[kio::test]
-	async fn an_unchecked_track_goes_out_with_send_times() {
+	async fn only_an_untimed_track_goes_out_with_send_times() {
 		let runtime = crate::time::sim();
 		let stamped = Timestamp::from_millis(36_000_000).unwrap();
 		let sent = Timestamp::from(runtime.now()).value();
-		let checked = track::Info::timed();
-		let unchecked = track::Info {
-			properties: Some(std::sync::Arc::new(crate::model::object::TrackProperties {
-				version: crate::ietf::Version::Draft22,
-				values: Vec::new(),
-			})),
-			..track::Info::timed()
-		};
 
-		let stamp = Stamp::new(Version::Lite06, checked.lite_timescale(false)).unwrap();
-		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), stamped.value());
-		let stamp = Stamp::new(Version::Lite06, unchecked.lite_timescale(false)).unwrap();
-		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), sent);
-		assert!(Stamp::new(Version::Lite07, unchecked.lite_timescale(false)).is_none());
-		let stamp = Stamp::new(Version::Lite07, unchecked.lite_timescale(true)).unwrap();
-		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), stamped.value());
+		for version in [Version::Lite06, Version::Lite07] {
+			let stamp = Stamp::new(version, Some(crate::Timescale::MILLI)).unwrap();
+			assert_eq!(
+				stamp.wire(Some(stamped), &runtime).unwrap(),
+				stamped.value(),
+				"{version}"
+			);
+		}
+		let stamp = Stamp::new(Version::Lite06, None).unwrap();
+		assert_eq!(stamp.wire(None, &runtime).unwrap(), sent);
+		assert!(Stamp::new(Version::Lite07, None).is_none());
 	}
 
 	#[kio::test]

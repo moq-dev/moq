@@ -600,6 +600,10 @@ impl Track {
 	fn samples(&self, payload: &[u8]) -> Option<(u64, u32)> {
 		let parse = match &self.kind {
 			Kind::Aac { config, .. } => return (config.sample_rate > 0).then_some((1024, config.sample_rate)),
+			Kind::Adts { .. } => {
+				let header = adts::Header::parse(payload).ok()?;
+				return Some((1024 * u64::from(header.blocks), header.sample_rate));
+			}
 			Kind::Mp2 { .. } => crate::codec::mp2::parse_header,
 			Kind::Ac3 => crate::codec::ac3::parse_header,
 			Kind::Eac3 => crate::codec::eac3::parse_header,
@@ -938,6 +942,14 @@ enum Kind {
 	/// element, which leads the first raw data block after each PAT/PMT, so a receiver that tunes
 	/// in at the tables can decode from there. `repeat` marks that the next frame carries it.
 	Aac { config: aac::InBand, repeat: bool },
+	/// Description-less AAC carries its ADTS framing in each frame, so frames pass through as
+	/// they are. The catalog's profile, rate, and channels are kept only so [`Export::rebind`]
+	/// refuses a rendition announced differently, as it does for [`Kind::Aac`]'s config.
+	Adts {
+		profile: u8,
+		sample_rate: u32,
+		channels: u32,
+	},
 	/// Opus (private stream_type 0x06). Each frame is one Opus packet, prefixed with
 	/// the Opus-in-TS access-unit control header and announced with the 'Opus'
 	/// registration plus DVB extension descriptor. `channel_config_code` is a plain
@@ -963,7 +975,7 @@ impl Kind {
 	fn stream_type(&self) -> u8 {
 		match self {
 			Kind::Video(stream_type) => *stream_type as u8,
-			Kind::Aac { .. } => StreamType::AdtsAac as u8,
+			Kind::Aac { .. } | Kind::Adts { .. } => StreamType::AdtsAac as u8,
 			// Opus rides private-data PES; the registration + extension descriptors tell the
 			// demuxer it's Opus.
 			Kind::Opus { .. } => 0x06,
@@ -1001,7 +1013,7 @@ impl Kind {
 		match self {
 			Kind::Video(StreamType::H265) => ".hev1",
 			Kind::Video(_) => ".avc3",
-			Kind::Aac { .. } => ".aac",
+			Kind::Aac { .. } | Kind::Adts { .. } => ".aac",
 			Kind::Opus { .. } => ".opus",
 			Kind::Mp2 { .. } => ".mp2",
 			Kind::Ac3 => ".ac3",
@@ -1019,7 +1031,7 @@ impl Kind {
 			| Kind::PesPacket {
 				stream_type: 0x01 | 0x02,
 			} => super::stats::Class::Video,
-			Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => {
+			Kind::Aac { .. } | Kind::Adts { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => {
 				super::stats::Class::Audio
 			}
 			Kind::Verbatim { .. } | Kind::PesPacket { .. } => super::stats::Class::Data,
@@ -3056,7 +3068,10 @@ where
 				tracks.iter().find(|t| {
 					matches!(
 						t.kind,
-						Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3
+						Kind::Aac { .. }
+							| Kind::Adts { .. } | Kind::Opus { .. }
+							| Kind::Mp2 { .. } | Kind::Ac3
+							| Kind::Eac3
 					)
 				})
 			})
@@ -4404,7 +4419,7 @@ fn audio_buffer(config: &AudioConfig, kind: &Kind) -> Buffer {
 		_ => (33_177_600, 51_216),
 	};
 	let (rate, size) = match kind {
-		Kind::Aac { .. } | Kind::Opus { .. } => by_channels(),
+		Kind::Aac { .. } | Kind::Adts { .. } | Kind::Opus { .. } => by_channels(),
 		Kind::Mp2 { .. } => (2_000_000, 3_584),
 		// ATSC A/53 Part 5 5.7, and A/52 Annex G 3.6.1 for E-AC-3.
 		Kind::Ac3 => (2_000_000, 2_592),
@@ -4553,6 +4568,12 @@ fn es_payload(kind: &Kind, description: Option<&Bytes>, frame: &Frame, pce: bool
 			framed.extend_from_slice(&frame.payload);
 			Some(framed)
 		}
+		Kind::Adts { .. } => {
+			let header = adts::Header::parse(&frame.payload)?;
+			header.payload(&frame.payload)?;
+			// ADTS names the core; the catalog may name SBR's output rate and channels.
+			Some(frame.payload.to_vec())
+		}
 		// Each moq Opus frame is one packet; prefix the Opus-in-TS control header.
 		Kind::Opus { .. } => Some(opus_es_payload(&frame.payload)),
 		// Legacy audio frames were ingested whole (framing header included), so
@@ -4685,17 +4706,15 @@ fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 	ensure_raw(&config.container, "audio", name)?;
 	match &config.codec {
 		AudioCodec::AAC(codec) => {
-			// The description is exact, and names the LC core under explicit SBR or PS. Without
-			// one, the catalog is all there is.
-			let in_band = match &config.description {
-				Some(asc) => aac::in_band(asc)?,
-				None => aac::InBand {
-					object_type: codec.profile,
+			let Some(asc) = &config.description else {
+				return Ok(Kind::Adts {
+					profile: codec.profile,
 					sample_rate: config.sample_rate,
-					channel_config: adts::channel_config_from_count(config.channel_count)?,
-					program_config: None,
-				},
+					channels: config.channel_count,
+				});
 			};
+			// The description names the LC core under explicit SBR or PS.
+			let in_band = aac::in_band(asc)?;
 			// A rebuilt kind repeats the element too, so a catalog update between a PAT/PMT and
 			// this track's next frame cannot drop it.
 			Ok(Kind::Aac {
@@ -5069,6 +5088,21 @@ mod tests {
 
 	fn ms(value: u64) -> Timestamp {
 		Timestamp::from_millis(value).unwrap()
+	}
+
+	#[test]
+	fn aac_without_a_description_preserves_adts() {
+		let config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44_100, 1);
+		let kind = super::audio_kind(&config, "audio").unwrap();
+		let mut packet = super::adts::write_header(2, 44_100, 1, 3).unwrap().to_vec();
+		packet.extend_from_slice(&[0x01, 0x52, 0xf2]);
+		let frame = super::Frame {
+			timestamp: ms(0),
+			payload: packet.clone().into(),
+			keyframe: true,
+			duration: None,
+		};
+		assert_eq!(super::es_payload(&kind, None, &frame, true).unwrap().unwrap(), packet);
 	}
 
 	#[test]

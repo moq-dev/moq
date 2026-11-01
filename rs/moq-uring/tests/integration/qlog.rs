@@ -7,7 +7,7 @@
 //!
 //! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
-#![cfg(all(target_os = "linux", feature = "qlog", feature = "quic"))]
+#![cfg(all(feature = "qlog", feature = "quic"))]
 
 use crate::support;
 
