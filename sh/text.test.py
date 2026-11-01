@@ -2,12 +2,11 @@
 """Exercise the tracked-text gate in a real Git repository."""
 
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 EM_DASH = "\u2014"
@@ -30,8 +29,7 @@ class TextTests(unittest.TestCase):
         self.git("commit", "-qm", "base")
 
     def git(self, *args):
-        return subprocess.run(["git", *args], cwd=self.repo, env=self.env,
-                              text=True, capture_output=True, check=True)
+        return subprocess.run(["git", *args], cwd=self.repo, env=self.env, text=True, capture_output=True, check=True)
 
     def write(self, name, data):
         path = self.repo / name
@@ -39,8 +37,9 @@ class TextTests(unittest.TestCase):
         path.write_bytes(data if isinstance(data, bytes) else data.encode())
 
     def check(self, cwd=None):
-        return subprocess.run(["bash", str(self.repo / "sh/text.sh")], cwd=cwd or self.repo,
-                              env=self.env, text=True, capture_output=True)
+        return subprocess.run(
+            ["bash", str(self.repo / "sh/text.sh")], cwd=cwd or self.repo, env=self.env, text=True, capture_output=True
+        )
 
     def test_plain_punctuation_and_other_unicode_pass(self):
         self.write("text.md", "a - b, c: café (d).\n")
@@ -90,8 +89,7 @@ class TextTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("invalid", result.stderr)
 
-    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
-                     "needs POSIX file modes and a non-root user")
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "needs POSIX file modes and a non-root user")
     def test_unreadable_tracked_file_fails(self):
         self.write("unreadable.md", "plain text\n")
         self.git("add", ".")

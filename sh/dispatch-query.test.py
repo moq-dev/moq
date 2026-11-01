@@ -282,8 +282,13 @@ class QueryTests(unittest.TestCase):
         self.change("quest/m1/example.md")
         for action in ("check", "ci"):
             with self.subTest(action=action):
-                result = subprocess.run(["bash", "sh/dispatch.sh", action, "origin/main"], cwd=self.repo,
-                                        env=self.env, text=True, capture_output=True)
+                result = subprocess.run(
+                    ["bash", "sh/dispatch.sh", action, "origin/main"],
+                    cwd=self.repo,
+                    env=self.env,
+                    text=True,
+                    capture_output=True,
+                )
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("doc/unchanged.md:1:", result.stdout)
                 self.assertIn(f"{action}: check text failed", result.stderr)
