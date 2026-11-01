@@ -34,9 +34,11 @@ across the whole project.
   removed them without a recorded reason.)
   - version_group
   - Independent patches ✅ ("patch versions are not lockstep")
-- Exempt by name, keeping their own versions: `kio`, `kio-macros`, `qmux`,
-  and npm `@moq/qmux`, because they are not MoQ-specific. `@moq/signals`
-  joins. Renaming `@moq/qmux` to a non-`@moq` name is a separate follow-up.
+- Exempt by name, keeping their own versions: `kio`, `kio-macros`, and
+  `qmux`, because they are not MoQ-specific. `@moq/signals` joins. The JS
+  `@moq/qmux` is [renamed to npm `qmux`](/quest/m0/qmux-npm-rename.md),
+  whose minor follows the Rust `qmux` crate's; the check enforces that pair
+  too.
   - Join the group
   - Exempt by name ✅ (Rust); npm: exempt `@moq/qmux` only ✅
 - New packages start at `0.0.x`. A `0.0.x` package that a published `0.x.y`
@@ -85,4 +87,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Cut and publish](/quest/m2/release/cut.md) - runs the recipe right after the pre-cut merge of `release` into `main`
-- [Retire the web-transport JS qmux](/quest/m2/release/qmux-js-retire.md) - owns the `@moq/qmux` npm name this exempts
