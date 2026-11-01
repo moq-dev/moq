@@ -7,7 +7,8 @@ import { rotateVideoDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { Order } from "./order";
 import { type Identity, identity, type Listing, Publication, type Slot } from "./publication";
-import { type Kind, Rendition } from "./rendition";
+import type { Kind, Rendition } from "./rendition";
+import { makeRendition } from "./rendition-internal";
 
 // The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
 // outweigh twice its keyframe. Matches moq-video's capture `REFRESH`; see it for the measurements.
@@ -59,14 +60,11 @@ export type BroadcastInput = {
 	maxAge: Getter<Milli | undefined>;
 
 	/**
-	 * Whether every rendition encodes only while a subscriber is attached. Defaults to false: an
-	 * enabled rendition encodes with or without a subscriber, so its recent groups sit in the
-	 * track's cache for a late subscription's `maxDelay` or a fetch to reach within `maxAge`.
-	 *
-	 * On demand saves the encode while nobody watches, but a subscriber then finds no past to reach
-	 * back into: each one starts at the keyframe its arrival forces. Capture stays open either way.
+	 * Override when renditions encode. Omitted: audio retains raw PCM until subscribed, while
+	 * video encodes continuously. False encodes both continuously; true gates video too, losing
+	 * its past. Unless false, audio keeps raw history up to `maxAge`. Capture stays open.
 	 */
-	onDemand: Getter<boolean>;
+	onDemand: Getter<boolean | undefined>;
 };
 
 /**
@@ -114,8 +112,9 @@ export class Broadcast {
 	readonly #renditions = new Signal<Record<string, Rendition<unknown>>>({});
 
 	// The writable signals backing each Rendition's read-only `track` and `slot`, keyed by name.
-	// A static network track is exposed here while it is open, and with `onDemand` only while at
-	// least one subscriber uses it. The slot is the current publication's, while there is one.
+	// A static network track is exposed here while it is open. On-demand gates non-audio tracks
+	// on a subscriber; audio keeps its handle so it can buffer PCM across demand changes.
+	// The slot is the current publication's, while there is one.
 	readonly #handles = new Map<
 		string,
 		{ track: Signal<Moq.Track.Producer | undefined>; slot: Signal<Slot | undefined> }
@@ -139,7 +138,7 @@ export class Broadcast {
 			flip: getter(props?.flip ?? false),
 			rotation: getter(props?.rotation ?? 0),
 			maxAge: getter(props?.maxAge),
-			onDemand: getter(props?.onDemand ?? false),
+			onDemand: getter(props?.onDemand),
 		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
@@ -188,7 +187,7 @@ export class Broadcast {
 
 		// The slot is the one its producer fills, so it holds this rendition's config.
 		const slot = handle.slot as Getter<Slot<C> | undefined>;
-		const rendition = new Rendition<C>(name, kind, handle.track, slot, () => this.#unregister(name));
+		const rendition = makeRendition<C>(name, kind, handle.track, slot, () => this.#unregister(name));
 		this.#renditions.update((renditions) => ({ ...renditions, [name]: rendition as Rendition<unknown> }));
 
 		return rendition;
@@ -381,8 +380,7 @@ export class Broadcast {
 		});
 
 		// Static tracks fan out to every subscriber. The encoder-facing handle stays set while the
-		// track is open, so its groups wait in the cache for a late subscriber. On demand gates it on
-		// a subscriber too, so encoding stops when the final one leaves.
+		// track is open. Audio keeps it while buffering PCM; on-demand video gates it on a subscriber.
 		effect.run((inner) => {
 			const renditions = inner.get(this.#renditions);
 			inner.get(publication.renames);
@@ -426,7 +424,12 @@ export class Broadcast {
 						if (closed && !entry.slot.error.peek()) entry.slot.error.set(closed);
 						return;
 					}
-					if (gate.get(this.in.onDemand) && gate.get(served.demand().wanted) === undefined) return;
+					if (
+						rendition.kind !== "audio" &&
+						gate.get(this.in.onDemand) &&
+						gate.get(served.demand().wanted) === undefined
+					)
+						return;
 					gate.set(handle.track, served);
 				});
 			}
