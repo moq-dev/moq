@@ -12,7 +12,7 @@ use serde_with::{base64::Base64, serde_as};
 ///
 /// An unrecognized `kind` decodes to [`Container::Unknown`] instead of failing, so one
 /// rendition using a future container does not take down the rest of the catalog. Such a
-/// rendition must be ignored by consumers.
+/// rendition must be ignored by consumers. A `kind` that is absent or not a string is malformed.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Container {
 	/// A QUIC varint timestamp prefix followed by the raw codec payload.
@@ -42,9 +42,13 @@ pub enum Container {
 pub struct UnknownContainer(serde_json::Map<String, serde_json::Value>);
 
 impl UnknownContainer {
-	/// The `kind` as it appeared on the wire, or `None` if it was absent or not a string.
-	pub fn kind(&self) -> Option<&str> {
-		self.0.get("kind").and_then(serde_json::Value::as_str)
+	/// The `kind` as it appeared on the wire.
+	pub fn kind(&self) -> &str {
+		// Deserialize refuses a container without a string kind, so this is never empty.
+		self.0
+			.get("kind")
+			.and_then(serde_json::Value::as_str)
+			.unwrap_or_default()
 	}
 
 	/// The full JSON object, including `kind`.
@@ -99,7 +103,8 @@ impl<'de> Deserialize<'de> for Container {
 					Known::Loc => Self::Loc,
 				})
 			}
-			_ => Ok(Self::Unknown(UnknownContainer(object))),
+			Some(_) => Ok(Self::Unknown(UnknownContainer(object))),
+			None => Err(de::Error::custom("container `kind` must be a string")),
 		}
 	}
 }
@@ -146,7 +151,7 @@ mod tests {
 		let Container::Unknown(unknown) = &parsed else {
 			panic!("expected unknown: {parsed:?}");
 		};
-		assert_eq!(unknown.kind(), Some("future"));
+		assert_eq!(unknown.kind(), "future");
 		assert_eq!(unknown.fields().len(), 3);
 
 		assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
@@ -156,5 +161,12 @@ mod tests {
 	fn malformed_known_kind_errors() {
 		// cmaf without init is not a valid cmaf container and must not degrade to Unknown.
 		serde_json::from_str::<Container>(r#"{"kind":"cmaf"}"#).unwrap_err();
+	}
+
+	#[test]
+	fn kindless_container_errors() {
+		for json in [r#"{}"#, r#"{"kind":5}"#, r#"{"kind":null}"#] {
+			serde_json::from_str::<Container>(json).unwrap_err();
+		}
 	}
 }
