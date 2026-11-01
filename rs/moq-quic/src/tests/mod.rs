@@ -48,6 +48,7 @@ mod probe;
 mod rate;
 mod receive_ts;
 mod reset_stream_at;
+mod scream;
 mod sim;
 mod token;
 mod waits;

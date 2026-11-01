@@ -343,6 +343,11 @@ impl Bottleneck {
 		self.max_queue = self.buffer_size * self.time_per_byte;
 	}
 
+	/// The queueing delay a packet arriving at `now` would meet
+	pub(super) fn delay(&self, now: Instant) -> Duration {
+		self.busy_until.map_or(Duration::ZERO, |busy| busy.saturating_duration_since(now))
+	}
+
 	/// Queues `bytes` arriving at `now`, returning when they leave the link and whether they
 	/// were marked CE, or `None` if the full queue dropped them
 	fn enqueue(&mut self, now: Instant, bytes: usize) -> Option<(Instant, bool)> {
@@ -385,6 +390,9 @@ pub(super) struct Link {
 	pub(super) reorder: f64,
 	/// The most a reordered arrival is held back
 	pub(super) reorder_delay: Duration,
+	/// Holds each datagram leaving the bottleneck until the next multiple of this, as a cellular
+	/// uplink's scheduler grants it capacity in periodic slots, so datagrams arrive in bunches
+	pub(super) grant: Option<Duration>,
 	/// The latest in-order arrival, which jitter never moves another before
 	last_arrival: Option<Instant>,
 }
@@ -399,6 +407,14 @@ impl Link {
 				None => return (false, Vec::new()),
 			},
 			None => (now, false),
+		};
+		let sent = match self.grant {
+			Some(grant) => {
+				let since = sent.saturating_duration_since(Instant::ZERO).as_nanos();
+				let slot = since.div_ceil(grant.as_nanos()) * grant.as_nanos();
+				Instant::ZERO + Duration::from_nanos(slot as u64)
+			}
+			None => sent,
 		};
 		if rng.random_bool(self.loss) {
 			return (marked, Vec::new());
