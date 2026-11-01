@@ -29,7 +29,7 @@ the methods exactly as moq-net has them today.
   - Requests: a broadcast producer's `requests` returns its own
     `broadcast::Requests`, whose `requested_track` yields its own
     `track::Request`, so generic code serves undeclared names (as
-    [E2EE undeclared names](/quest/m2/e2ee/undeclared-names.md) needs). A
+    `moq_e2ee::broadcast::Requests` does). A
     `track::Requests`'s `requested_fill` yields its own `track::Fill`, whose
     `accept` returns its own group producer and whose `drop_groups` names
     the rest dropped.

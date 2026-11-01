@@ -54,7 +54,7 @@ async fn moq_import_cluster_lan_beside_a_relay() {
 		.with_connect(connect, Default::default())
 		.with_advertise(cluster::LanAdvertise::new(port).with_fingerprint(fingerprint));
 
-	match moq_clock::timeout(Duration::from_secs(10), cluster.start()).await {
+	match kio::clock::timeout(Duration::from_secs(10), cluster.start()).await {
 		Ok(Ok(_)) => {}
 		Ok(Err(err))
 			if format!("{err:#}").contains("no network interface") && std::env::var_os("CI_STRICT").is_none() =>

@@ -63,9 +63,6 @@ Extractor declaration checks, which analyze only published packages since
 
 ## Required
 
-- [Undeclared track names](/quest/m2/e2ee/undeclared-names.md) - an encrypted
-  broadcast's `requests()` serves names nobody created or reserved, under
-  semantic names, in Rust
 - [JS undeclared track names](/quest/m2/e2ee/js-undeclared-names.md) -
   `@moq/net` exposes a broadcast request handler and `@moq/e2ee` serves
   undeclared names through it

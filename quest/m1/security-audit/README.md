@@ -54,6 +54,5 @@ Dropped, with reasons:
 
 ## Required
 
-- [Relay HTTP surface](/quest/m1/security-audit/relay-http.md) - `/fetch` cannot be sniffed as active content, and no web page can reach the ops listener
 - [Browser input checks](/quest/m1/security-audit/js-input.md) - room metadata is schema-validated and the http:// fingerprint fetch is aborted and length-checked
 - [CI tool pins](/quest/m1/security-audit/ci-pins.md) - binding generators are pinned by commit in one place, and the remaining unpinned installs and broad token grants are fixed

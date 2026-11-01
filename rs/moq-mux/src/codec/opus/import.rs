@@ -197,7 +197,7 @@ mod tests {
 			subscriber,
 			crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 		);
-		let frame = moq_clock::timeout(Duration::from_secs(1), media.read_frame())
+		let frame = kio::clock::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
