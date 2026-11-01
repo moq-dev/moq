@@ -29,6 +29,19 @@ Per crate: moq-ffi spawns only its root at the binding boundary; moq-stats and m
 return work their owner polls. List any spawn that has to stay, with why, in
 the PR.
 
+Open PRs overlap (checked 2026-11-01), so wait for them or build on them
+rather than redo their changes:
+
+- [moq-dev/moq#7360](https://github.com/moq-dev/moq/pull/7360) removes the
+  auth decider loop and returns moq-stats' publisher from `Producer::new`.
+  The `Server` decider still spawns each admission, and `Cluster::with_stats`
+  spawns the publisher.
+- [moq-dev/moq#7497](https://github.com/moq-dev/moq/pull/7497) rewrites
+  moq-ffi's `Task` and `Background` plumbing.
+
+The draft [moq-dev/moq#7519](https://github.com/moq-dev/moq/pull/7519) lists
+every in-scope spawn and proposes a split for the maintainer.
+
 Public API: constructors that spawned return a handle to poll or await
 instead. The PR's Impact section describes migration for the published crates whose API changes. Wire:
 none.
@@ -37,3 +50,5 @@ none.
 
 - [The remaining spawns](/quest/m2/spawn-audit.md) - the same rule for every other library crate
 - [Generated async wrappers](/quest/m1/poll-first/async-feature.md) - the poll-first sibling that gates the async layer
+- [The remaining long-lived tasks are supervised](/quest/m2/task-supervision.md) - its PR removes the auth decider loop and splits out moq-stats' publisher
+- [Poll-native async in moq-ffi](/quest/m2/ffi-poll-migrate.md) - its PR reworks the moq-ffi task plumbing this quest touches
