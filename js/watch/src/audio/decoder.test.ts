@@ -157,6 +157,8 @@ let decodeThrows: Error | undefined;
 let deferAudioOutput = false;
 let pendingAudio: (() => void)[] = [];
 let audioInputs: number[] = [];
+let audioConfigs: AudioDecoderConfig[] = [];
+let audioChunks: EncodedAudioChunkInit[] = [];
 
 beforeEach(() => {
 	frameTimestamp = 0;
@@ -166,6 +168,8 @@ beforeEach(() => {
 	deferAudioOutput = false;
 	pendingAudio = [];
 	audioInputs = [];
+	audioConfigs = [];
+	audioChunks = [];
 	contexts = [];
 	worklets = [];
 	moduleLoaded = Promise.resolve();
@@ -180,7 +184,8 @@ beforeEach(() => {
 			codecErrors.push(init.error);
 			codecs++;
 		}
-		configure() {
+		configure(config: AudioDecoderConfig) {
+			audioConfigs.push(config);
 			this.needsKey = true;
 		}
 		reset() {
@@ -204,6 +209,7 @@ beforeEach(() => {
 		readonly timestamp: number;
 		readonly type: EncodedAudioChunkType;
 		constructor(init: EncodedAudioChunkInit) {
+			audioChunks.push(init);
 			this.timestamp = init.timestamp;
 			this.type = init.type;
 		}
@@ -390,6 +396,30 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 			producer.close();
 		},
 	};
+}
+
+for (const description of [undefined, "1190"]) {
+	it(`passes AAC to WebCodecs as ${description ? "raw" : "ADTS"}`, async () => {
+		const playback = await play(Milli(100));
+		try {
+			playback.restore({ codec: "mp4a.40.2", sampleRate: 48_000, numberOfChannels: 2, description });
+			await microtasks();
+			const config = audioConfigs.at(-1);
+			expect(config?.codec).toBe("mp4a.40.2");
+			expect(config?.description).toEqual(description ? new Uint8Array([0x11, 0x90]) : undefined);
+			const packet = new Uint8Array(
+				description ? [0x01, 0x52, 0xf2] : [0xff, 0xf1, 0x4c, 0x80, 0x01, 0x5f, 0xfc, 0x01, 0x52, 0xf2],
+			);
+			const read = frame();
+			read.frame.payload = packet;
+			playback.push(read);
+			await microtasks();
+			expect(audioChunks.at(-1)?.data).toEqual(packet);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
 }
 
 for (const cmaf of [false, true]) {
@@ -678,7 +708,7 @@ describe("Decoder across a rendition's absence", () => {
 		}
 	});
 
-	it("deselects a disabled rendition and keeps one graph across disable and enable", async () => {
+	it("holds a disabled rendition and keeps one subscription across mute and unmute", async () => {
 		const playback = await play(Milli(100));
 		try {
 			await playback.play(12);
@@ -686,16 +716,69 @@ describe("Decoder across a rendition's absence", () => {
 
 			playback.disable();
 			await microtasks();
-			expect(playback.track()).toBeUndefined();
+			expect(playback.track()).toBe("audio");
 			expect(contexts).toHaveLength(1);
 
 			playback.restore();
 			await microtasks();
 			expect(playback.track()).toBe("audio");
-			await playback.play(6);
+			const before = playback.inserted().length;
+			const timestamps = await playback.play(6);
 
 			expect(contexts).toHaveLength(1);
 			expect(contexts[0].calls.close).toBe(0);
+			expect(playback.subscriptions()).toBe(1);
+			expect(playback.inserted().slice(before)).toEqual(timestamps);
+		} finally {
+			playback.close();
+		}
+	});
+
+	it("suspends a held muted tile once drained, and resumes on unmute", async () => {
+		const playback = await play(Milli(100));
+		try {
+			await playback.play(12);
+			const [ring] = playback.rings();
+			expect(ring.read([new Float32Array(128), new Float32Array(128)])).toBe(128);
+			await microtasks();
+
+			playback.disable();
+			await microtasks();
+			const [context] = contexts;
+			expect(context.calls.suspend).toBe(0);
+
+			expect(drain(ring)).toBeGreaterThan(0);
+			await microtasks();
+			expect(context.calls.suspend).toBe(1);
+			expect(context.state).toBe("suspended");
+			expect(playback.track()).toBe("audio");
+
+			playback.restore();
+			await microtasks();
+			expect(context.state).toBe("running");
+			expect(playback.subscriptions()).toBe(1);
+		} finally {
+			playback.close();
+		}
+	});
+
+	it("drops a held rendition once it is removed", async () => {
+		const playback = await play(Milli(100));
+		try {
+			await playback.play(12);
+			playback.disable();
+			await microtasks();
+			expect(playback.track()).toBe("audio");
+
+			playback.remove();
+			await microtasks();
+			expect(playback.track()).toBeUndefined();
+
+			// Its return is a fresh selection, with a fresh subscription.
+			playback.restore();
+			await microtasks();
+			expect(playback.track()).toBe("audio");
+			await playback.play(6);
 			expect(playback.subscriptions()).toBe(2);
 		} finally {
 			playback.close();

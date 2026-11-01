@@ -28,6 +28,7 @@ from moq_ffi import (
     MoqSubscription,
     MoqTrackInfo,
     MoqWebSocketConfig,
+    moq_subscription_defaults,
 )
 
 _MICROSECOND = timedelta(microseconds=1)
@@ -111,16 +112,33 @@ class Subscription:
 
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
     ``max_delay`` is how far a non-latest group may fall behind before it is skipped;
-    zero skips at once, ``None`` leaves the publisher's max age alone to bound it, and it
-    caps every range. ``ranges`` are the spans of the track to
-    deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which pending
-    group the publisher sends first, ``None`` for newest first.
+    zero skips at once, ``None`` sets no subscriber limit and leaves the publisher's max
+    age alone to bound it, and it caps every range. ``ranges`` are the spans of the track
+    to deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which
+    pending group the publisher sends first, ``None`` for newest first.
+
+    A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
     """
 
     priority: int = 0
     max_delay: timedelta | None = timedelta(0)
     ranges: Sequence[MoqRange] | None = None
     order: MoqOrder | None = None
+
+    @classmethod
+    def default(cls) -> Subscription:
+        """moq-net's defaults, whose zero ``max_delay`` skips a superseded group at once.
+
+        A ``None`` subscription means the same; ``dataclasses.replace`` this one to change
+        a field.
+        """
+        defaults = moq_subscription_defaults()
+        return cls(
+            priority=defaults.priority,
+            max_delay=defaults.max_delay,
+            ranges=defaults.ranges,
+            order=defaults.order,
+        )
 
     def _ffi(self) -> MoqSubscription:
         return MoqSubscription(
@@ -243,7 +261,7 @@ class QuicConfig:
     ``max_streams`` caps the concurrent streams the peer may open toward this endpoint
     (0 is refused); MoQ opens one per group, so a subscriber to many tracks wants it
     raised. ``idle_timeout`` is how long an idle connection survives, and ``keep_alive``
-    the ping interval (zero disables it). ``gso``, ``mtu_discovery``, and
+    the ping interval (zero uses the default). ``gso``, ``mtu_discovery``, and
     ``congestion_control`` leave the choice to the backend when ``None``. ``qlog`` is a
     directory, which must exist, for qlog traces when :func:`qlog_supported`.
     ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for

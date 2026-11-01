@@ -22,13 +22,16 @@ Decided 2026-10-28 (maintainer):
 - **Hold, not DTX.** DTX is for silence the app can't predict. Push-to-talk
   knows when it is silent, and a held subscription costs no media bytes and no
   encoder CPU. DTX is off on main anyway ([#4919](https://github.com/moq-dev/moq/pull/4919)).
-- **Consumers hold a disabled rendition**, audio and video, by default, in
-  every first-party consumer. The hang spec weakens from "must not select" to
-  "should not select" a disabled rendition.
+- **Players hold a disabled rendition**, audio and video, by default, in
+  every first-party player. Exports keep dropping it, since a held track
+  sends nothing and an interleaving muxer or HLS player may wait on it. The
+  hang spec weakens from "must not select" to "should not select" a disabled
+  rendition.
 - **The publisher keeps its probe result across a disable**, and the
   element's `muted` and `invisible` leave capture open.
-- **Encoding no longer waits for demand**
-  ([always-on encoding](/quest/m1/eager-encode/README.md)). A listener who
+- **Encoding no longer waits for demand**, in every first-party publisher
+  (finished by [moq-dev/moq#7554](https://github.com/moq-dev/moq/pull/7554)).
+  A listener who
   subscribes after the unmute still gets the start within its `maxDelay`. This
   replaces a publisher head buffer, which was considered and dropped as the
   same idea special-cased.
@@ -43,16 +46,18 @@ only from queue overflow. Rerun the reporter's setup (100 ms RTT, 2% random
 loss) only as a reproduction of the original numbers, not as acceptance.
 Record both in the PR.
 
+Also check failure recovery (found 2026-10-28 by
+[moq-dev/moq#7157](https://github.com/moq-dev/moq/pull/7157)): unmuting used to
+reopen the microphone, which made a new source and so recovered a failed
+encoder. Capture now stays open, so only a device swap, a settings change or a
+new `source` recovers one. Decide whether re-enabling should retry a failed
+encoder, and record why.
+
 ## Required
 
-- [JS consumers hold a disabled rendition](/quest/m1/push-to-talk/hold-js.md) - watch keeps a disabled audio or video rendition subscribed, and the hang spec says "should not select"
-- [Rust consumers hold a disabled rendition](/quest/m1/push-to-talk/hold-rs.md) - moq-cli play, moq-ffi and moq-mux select follow the same rule
-- [`muted` and `invisible` keep capture open](/quest/m1/push-to-talk/mute.md) - the element disables only the encoder, so unmute skips getUserMedia and AudioContext setup
+- [Watch caches audio codec support](/quest/m1/push-to-talk/audio-support-cache.md) - an unmute resumes audio without waiting on a support check
+- [Hidden capture idles](/quest/m1/push-to-talk/capture-idle.md) - an unread capture stops producing frames but stays open for an instant unhide
 
 ## Closes
 
 - [#7101](https://github.com/moq-dev/moq/issues/7101) - a disabled audio rendition is deselected, so the start of the next utterance is lost
-
-## Related
-
-- [Always-on encoding](/quest/m1/eager-encode/README.md) - encoders run while enabled, so a late subscriber can fetch the start

@@ -1,5 +1,5 @@
-import { expect, spyOn, test } from "bun:test";
-import { Micro, Milli } from "@moq/clock";
+import { expect, test } from "bun:test";
+import { Manual, Micro, Milli, Nano, sleep } from "@moq/clock";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
@@ -41,10 +41,7 @@ function publish(track: Track.Producer, sequence: number, millis: number) {
 async function drain(consumer: Consumer): Promise<[number, number | undefined][]> {
 	const seen: [number, number | undefined][] = [];
 	for (;;) {
-		const next = await Promise.race([
-			consumer.next(),
-			new Promise<undefined>((resolve) => setTimeout(resolve, 50)),
-		]);
+		const next = await Promise.race([consumer.next(), sleep(Nano.fromMilli(Milli(50))).then(() => undefined)]);
 		if (!next) break;
 		if (next.kind === "frame") seen.push([next.group, next.frame.payload[0]]);
 	}
@@ -60,7 +57,7 @@ test("out-of-order groups are delivered rather than dropped", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(5000) }), {
 		format: new LegacyFormat("data"),
-		maxDelay: 5000 as Milli,
+		delay: { max: 5000 as Milli },
 	});
 
 	// The live edge lands first, and delivery starts there rather than waiting.
@@ -89,7 +86,7 @@ test("a below-cursor group still downloading is not truncated", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(5000) }), {
 		format: new LegacyFormat("data"),
-		maxDelay: 5000 as Milli,
+		delay: { max: 5000 as Milli },
 	});
 
 	// The live edge group arrives first and starts delivery (still open).
@@ -122,11 +119,13 @@ test("a below-cursor group still downloading is not truncated", async () => {
 
 // The floor belongs to the latest group, not to delayed history within max delay.
 test("delayed older groups survive a floor established by two newer groups", async () => {
-	const clock = spyOn(performance, "now").mockReturnValue(200);
+	const clock = new Manual();
+	clock.jump(Nano.fromMilli(Milli(200)));
+	const installed = clock.install();
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(5000) }), {
 		format: new LegacyFormat("data"),
-		maxDelay: Milli(5000),
+		delay: { max: Milli(5000) },
 	});
 	try {
 		publish(track, 3, 30);
@@ -149,6 +148,6 @@ test("delayed older groups survive a floor established by two newer groups", asy
 		consumer.close();
 		track.finish();
 		track.close();
-		clock.mockRestore();
+		installed.close();
 	}
 });

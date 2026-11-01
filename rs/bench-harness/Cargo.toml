@@ -1,0 +1,21 @@
+[package]
+name = "bench-harness"
+description = "Media over QUIC - Criterion, instrumented by CodSpeed under `cargo codspeed`"
+authors = ["Luke Curley <kixelated@gmail.com>"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+version = "0.0.1"
+edition = "2024"
+rust-version.workspace = true
+
+publish = false
+
+[target.'cfg(codspeed)'.dependencies]
+codspeed-criterion-compat = "6"
+
+[target.'cfg(not(codspeed))'.dependencies]
+criterion = "0.8"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(codspeed)"] }

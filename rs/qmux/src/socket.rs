@@ -42,7 +42,7 @@ pub type SharedSocketStats = Arc<dyn SocketStats>;
 #[cfg(any(target_os = "linux", test))]
 pub(crate) struct RateFilter {
 	/// Strictly decreasing rates from front to back; the front is the maximum.
-	samples: std::collections::VecDeque<(moq_clock::Instant, u64)>,
+	samples: std::collections::VecDeque<(kio::clock::Instant, u64)>,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -51,8 +51,8 @@ impl RateFilter {
 	pub(crate) const WINDOW: Duration = Duration::from_secs(10);
 
 	/// Fold in one sample and return the current estimate, if there is one yet.
-	pub(crate) fn update(&mut self, now: moq_clock::Instant, rate: u64, app_limited: bool) -> Option<u64> {
-		let expired = |at: &moq_clock::Instant| now.saturating_duration_since(*at) > Self::WINDOW;
+	pub(crate) fn update(&mut self, now: kio::clock::Instant, rate: u64, app_limited: bool) -> Option<u64> {
+		let expired = |at: &kio::clock::Instant| now.saturating_duration_since(*at) > Self::WINDOW;
 		let usable = rate > 0 && (!app_limited || self.samples.front().is_none_or(|(_, max)| rate >= *max));
 		// A rejected sample changes nothing, not even expiry: it is no evidence the
 		// path got slower, so only a usable sample may retire an old maximum.
@@ -307,7 +307,7 @@ mod unix {
 				// The kernel reports bytes per second; the trait wants bits.
 				let rate = info.delivery_rate.saturating_mul(8);
 				let mut filter = self.rate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-				filter.update(moq_clock::now(), rate, app_limited)
+				filter.update(kio::clock::now(), rate, app_limited)
 			}
 
 			#[cfg(not(target_os = "linux"))]
@@ -344,7 +344,7 @@ mod unix {
 #[cfg(test)]
 mod rate_filter_tests {
 	use super::*;
-	use moq_clock::Instant;
+	use kio::clock::Instant;
 
 	fn at(start: Instant, ms: u64) -> Instant {
 		start + Duration::from_millis(ms)
@@ -352,7 +352,7 @@ mod rate_filter_tests {
 
 	#[test]
 	fn app_limited_samples_do_not_lower_the_estimate() {
-		let t = moq_clock::now();
+		let t = kio::clock::now();
 		let mut f = RateFilter::default();
 		assert_eq!(f.update(t, 80_000_000, true), Some(80_000_000));
 		// A live stream mostly trickles: these samples measure the sender, not the path.
@@ -363,7 +363,7 @@ mod rate_filter_tests {
 
 	#[test]
 	fn app_limited_samples_can_raise_the_estimate() {
-		let t = moq_clock::now();
+		let t = kio::clock::now();
 		let mut f = RateFilter::default();
 		assert_eq!(f.update(t, 1_000_000, true), Some(1_000_000));
 		assert_eq!(f.update(at(t, 100), 50_000_000, true), Some(50_000_000));
@@ -371,7 +371,7 @@ mod rate_filter_tests {
 
 	#[test]
 	fn measured_samples_lower_it_after_the_window() {
-		let t = moq_clock::now();
+		let t = kio::clock::now();
 		let mut f = RateFilter::default();
 		assert_eq!(f.update(t, 80_000_000, false), Some(80_000_000));
 		// A real, lower measurement waits for the older maximum to expire.
@@ -381,7 +381,7 @@ mod rate_filter_tests {
 
 	#[test]
 	fn app_limited_samples_do_not_expire_the_maximum() {
-		let t = moq_clock::now();
+		let t = kio::clock::now();
 		let mut f = RateFilter::default();
 		f.update(t, 80_000_000, false);
 		f.update(at(t, 1_000), 5_000_000, false);
@@ -394,7 +394,7 @@ mod rate_filter_tests {
 
 	#[test]
 	fn the_window_keeps_the_largest_recent_measurement() {
-		let t = moq_clock::now();
+		let t = kio::clock::now();
 		let mut f = RateFilter::default();
 		f.update(t, 30_000_000, false);
 		f.update(at(t, 4_000), 20_000_000, false);
@@ -406,7 +406,7 @@ mod rate_filter_tests {
 
 	#[test]
 	fn zero_rate_keeps_the_estimate() {
-		let t = moq_clock::now();
+		let t = kio::clock::now();
 		let mut f = RateFilter::default();
 		// The kernel reports zero until it has a sample.
 		assert_eq!(f.update(t, 0, false), None);

@@ -118,6 +118,29 @@ async def test_fetch_of_a_dropped_group_is_not_found():
     await task
 
 
+async def test_insert_datagram_keeps_its_sequence_and_largest_follows():
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("events")
+    consumer = track.consume()
+    assert track.largest() is None
+
+    track.insert_datagram(7, b"seven")
+    datagram = await asyncio.wait_for(consumer.recv_datagram(), 5)
+    assert datagram is not None
+    assert (datagram.sequence, datagram.payload) == (7, b"seven")
+    assert track.largest() == moq.Position(group=7, frame=0)
+    assert track.append_datagram(b"next") == 8
+
+
+async def test_broadcast_consumer_closed_resolves_on_close():
+    broadcast = moq.BroadcastProducer()
+    closed = asyncio.create_task(broadcast.consume().closed())
+    await asyncio.sleep(0.01)
+    assert not closed.done()
+    broadcast.close()
+    await asyncio.wait_for(closed, 5)
+
+
 def test_protocol_error_helper_covers_known_app_and_unknown():
     cases = [
         (moq.ErrorScope.SESSION, 0x2, moq.ProtocolKind.UNAUTHORIZED, True),
@@ -213,7 +236,7 @@ async def test_local_publish_consume_audio():
     async for announcement in routes(consumer.announced()):
         assert announcement.prefix == "live"
 
-        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
+        broadcast_consumer = await consumer.request(announcement.prefix)
         catalog = await moq.media.catalog(broadcast_consumer)
 
         assert len(catalog.audio) == 1
@@ -249,7 +272,7 @@ async def test_video_publish_consume():
     consumer = origin.consume()
 
     async for announcement in routes(consumer.announced()):
-        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
+        broadcast_consumer = await consumer.request(announcement.prefix)
         catalog = await moq.media.catalog(broadcast_consumer)
 
         assert len(catalog.video) == 1
@@ -289,7 +312,7 @@ async def test_video_publish_named_track():
     consumer = origin.consume()
 
     async for announcement in routes(consumer.announced()):
-        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
+        broadcast_consumer = await consumer.request(announcement.prefix)
         catalog = await moq.media.catalog(broadcast_consumer)
         assert list(catalog.video.keys()) == ["hd"]
         break
@@ -305,7 +328,7 @@ async def test_multiple_frames_ordering():
     consumer = origin.consume()
 
     async for announcement in routes(consumer.announced()):
-        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
+        broadcast_consumer = await consumer.request(announcement.prefix)
         catalog = await moq.media.catalog(broadcast_consumer)
         track_name = list(catalog.audio.keys())[0]
         audio = catalog.audio[track_name]
@@ -335,7 +358,7 @@ async def test_catalog_update_on_new_track():
     consumer = origin.consume()
 
     async for announcement in routes(consumer.announced()):
-        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
+        broadcast_consumer = await consumer.request(announcement.prefix)
         cat_consumer = await moq.media.CatalogConsumer.subscribe(broadcast_consumer)
 
         # First catalog: 1 audio track.
@@ -375,7 +398,7 @@ async def test_announced_broadcast():
 
     async for announcement in routes(consumer.announced()):
         assert announcement.prefix == "test/broadcast"
-        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
+        broadcast_consumer = await consumer.request(announcement.prefix)
         _catalog = await moq.media.CatalogConsumer.subscribe(broadcast_consumer)
         break
 
@@ -418,7 +441,7 @@ async def test_finish_serves_until_closed():
     moq.media.CatalogProducer(broadcast).finish()
 
     # A late subscriber still drains the finished track while the broadcast is up.
-    late = await consumer.request_broadcast("finish")
+    late = await consumer.request("finish")
     reader = await late.subscribe_track("status")
     frame = await asyncio.wait_for(reader.read_frame(), timeout=5)
     assert frame is not None and frame.payload == b"tail"
@@ -458,6 +481,13 @@ def test_track_info_keeps_native_default_priority():
     assert moq.TrackInfo(timescale=90_000)._ffi().priority == native
 
 
+def test_default_subscription_skips_superseded_groups_at_once():
+    """A bare record carries moq-net's zero max delay too; only an explicit None sets no limit."""
+    assert moq.Subscription.default()._ffi().max_delay == timedelta(0)
+    assert moq.Subscription()._ffi().max_delay == timedelta(0)
+    assert moq.Subscription(max_delay=None)._ffi().max_delay is None
+
+
 def test_string_sequences_refuse_a_bare_string():
     """A bare str would split into characters, so the config refuses it up front."""
     with pytest.raises(TypeError, match="roots"):
@@ -485,8 +515,7 @@ async def test_fetch_group_and_serve_dynamic_miss():
     fill = await asyncio.wait_for(dynamic.requested_fill(), timeout=5.0)
     assert (fill.start_group, fill.start_frame, fill.end_group) == (7, 0, 8)
     assert fill.priority == 11
-    assert fill.next() == 7
-    assert fill.is_used()
+    assert fill.wanted() == 7
     assert fill.is_wanted(7)
     assert not fill.is_wanted(8)
 
@@ -742,7 +771,7 @@ async def test_dynamic_broadcast_request():
     dynamic = origin.requests("")
     consumer = origin.consume()
 
-    request_broadcast = asyncio.create_task(consumer.request_broadcast("dynamic/broadcast"))
+    requesting = asyncio.create_task(consumer.request("dynamic/broadcast"))
 
     request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
     assert request.path == "dynamic/broadcast"
@@ -754,7 +783,7 @@ async def test_dynamic_broadcast_request():
     with pytest.raises(Exception):
         _ = request.path
 
-    broadcast = await asyncio.wait_for(request_broadcast, timeout=5.0)
+    broadcast = await asyncio.wait_for(requesting, timeout=5.0)
     track_consumer = await broadcast.subscribe_track("status")
     payload = b"served dynamically"
     track.write_frame(payload, timedelta(microseconds=20_000))
@@ -772,7 +801,7 @@ async def test_dynamic_broadcast_request_can_reject():
     dynamic = origin.requests("")
     consumer = origin.consume()
 
-    request_broadcast = asyncio.create_task(consumer.request_broadcast("missing"))
+    requesting = asyncio.create_task(consumer.request("missing"))
     request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
     assert request.path == "missing"
 
@@ -781,7 +810,7 @@ async def test_dynamic_broadcast_request_can_reject():
         _ = request.path
 
     with pytest.raises(Exception):
-        await asyncio.wait_for(request_broadcast, timeout=5.0)
+        await asyncio.wait_for(requesting, timeout=5.0)
 
 
 def test_raw_append_group_sequence_increments():
@@ -925,7 +954,7 @@ async def test_container_consumer_default_latency_and_context_manager():
     consumer = origin.consume()
 
     async for announcement in routes(consumer.announced()):
-        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
+        broadcast_consumer = await consumer.request(announcement.prefix)
         catalog = await moq.media.catalog(broadcast_consumer)
         track_name, audio = next(iter(catalog.audio.items()))
 
@@ -952,7 +981,7 @@ async def test_raw_publish_consume():
     async for announcement in routes(consumer.announced()):
         assert announcement.prefix == "robot/arm"
 
-        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
+        broadcast_consumer = await consumer.request(announcement.prefix)
         raw_consumer = await broadcast_consumer.subscribe_track("events")
 
         payload = b'{"cmd": "button_changed", "arm": "left", "button": "THUMB", "state": "PRESSED"}'
@@ -975,7 +1004,7 @@ async def test_raw_multiple_frames():
     consumer = origin.consume()
 
     async for announcement in routes(consumer.announced()):
-        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
+        broadcast_consumer = await consumer.request(announcement.prefix)
         subscription = moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0)
         raw_consumer = await broadcast_consumer.subscribe_track("commands", subscription)
 
@@ -1082,7 +1111,7 @@ async def test_raw_group_sequence():
     consumer = origin.consume()
 
     async for announcement in routes(consumer.announced()):
-        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
+        broadcast_consumer = await consumer.request(announcement.prefix)
         raw_consumer = await broadcast_consumer.subscribe_track(
             "seq", moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0)
         )
@@ -1244,7 +1273,7 @@ async def test_raw_multi_frame_group():
     consumer = origin.consume()
 
     async for announcement in routes(consumer.announced()):
-        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
+        broadcast_consumer = await consumer.request(announcement.prefix)
         raw_consumer = await broadcast_consumer.subscribe_track("chunks")
 
         group_producer = raw.append_group()
@@ -1479,12 +1508,15 @@ async def test_audio_consumer_reports_its_playout_delay():
     )
 
     consumer = origin.consume()
-    broadcast_consumer = await asyncio.wait_for(consumer.request_broadcast("audio-delay"), timeout=5.0)
+    broadcast_consumer = await asyncio.wait_for(consumer.request("audio-delay"), timeout=5.0)
     catalog = await asyncio.wait_for(moq.media.catalog(broadcast_consumer), timeout=5.0)
     rendition = catalog.audio["mic"]
 
     def output(delay: timedelta | None) -> moq.audio.DecoderOutput:
-        return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32, delay=delay)
+        if delay is None:
+            return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32)
+        fixed = moq.media.Delay(min=delay, max=timedelta(0))
+        return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32, delay=fixed, estimate=False)
 
     fixed = await moq.audio.Consumer.subscribe(broadcast_consumer, "mic", rendition, output(timedelta(milliseconds=80)))
     estimated = await moq.audio.Consumer.subscribe(broadcast_consumer, "mic", rendition, output(None))
@@ -1535,7 +1567,7 @@ async def test_decode_video_frame():
         video.write(moq.video.Frame(timestamp=timedelta(microseconds=i * 33_333), data=rgba))
 
     consumer = origin.consume()
-    broadcast_consumer = await asyncio.wait_for(consumer.request_broadcast("video-decode-frame"), timeout=5.0)
+    broadcast_consumer = await asyncio.wait_for(consumer.request("video-decode-frame"), timeout=5.0)
     catalog = await asyncio.wait_for(moq.media.catalog(broadcast_consumer), timeout=5.0)
     track_name = next(iter(catalog.video))
     rendition = catalog.video[track_name]
@@ -1568,7 +1600,7 @@ async def test_broadcast_is_reachable_only_while_announced():
     track = publication.broadcast.publish_track("events")
     consumer = origin.consume()
     with pytest.raises(Exception):
-        await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+        await asyncio.wait_for(consumer.request("live"), timeout=5.0)
 
     publication.announce()
     announced = consumer.announced()
@@ -1581,14 +1613,31 @@ async def test_broadcast_is_reachable_only_while_announced():
     assert isinstance(retracted, moq.AnnounceEventEnd)
     assert retracted.announce.prefix == "live"
     with pytest.raises(Exception):
-        await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+        await asyncio.wait_for(consumer.request("live"), timeout=5.0)
 
     publication.announce()
     back = await next_route(announced)
     assert isinstance(back, moq.AnnounceEventStart)
-    await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+    await asyncio.wait_for(consumer.request("live"), timeout=5.0)
     announced.cancel()
     track.finish()
+    publication.broadcast.close()
+
+
+async def test_an_epoch_pins_request_and_follow():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    epoch = moq.mint_epoch()
+    publication = origin.create_broadcast("live")
+    publication.announce(moq.AnnounceRoute(epoch=epoch))
+
+    await asyncio.wait_for(consumer.request("live", epoch=epoch), timeout=5.0)
+    with pytest.raises(moq.Error.Protocol):
+        await asyncio.wait_for(consumer.request("live", epoch=moq.mint_epoch()), timeout=5.0)
+    with pytest.raises(moq.Error.InvalidEpoch):
+        consumer.follow("live", epoch="not-an-epoch")
+    async with consumer.follow("live", epoch=epoch) as following:
+        await asyncio.wait_for(following.available(), timeout=5.0)
     publication.broadcast.close()
 
 
@@ -1600,11 +1649,11 @@ async def test_dropping_a_publication_keeps_its_route():
     assert publication.broadcast is broadcast
     publication.announce()
     del publication
-    await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+    await asyncio.wait_for(consumer.request("live"), timeout=5.0)
 
     broadcast.close()
     with pytest.raises(moq.Error.Protocol):
-        await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+        await asyncio.wait_for(consumer.request("live"), timeout=5.0)
 
 
 async def test_a_stale_publication_leaves_its_replacement_alone():
@@ -1620,7 +1669,7 @@ async def test_a_stale_publication_leaves_its_replacement_alone():
         stale.announce()
     with pytest.raises(moq.Error.Closed):
         stale.unannounce()
-    await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
+    await asyncio.wait_for(consumer.request("live"), timeout=5.0)
     replacement.broadcast.close()
 
 
@@ -1629,11 +1678,8 @@ async def test_announced_pattern_captures():
     consumer = origin.consume()
     announced = consumer.announced("room", filter="*/chat")
 
+    # A claim at "room" could serve a match, but its own name is none, so it is not listed.
     dynamic = origin.requests("room")
-    overlap = await next_route(announced)
-    assert isinstance(overlap, moq.AnnounceEventStart)
-    assert overlap.announce.prefix == "room"
-    assert overlap.announce.captures is None
 
     audio = create_announced(origin, "room/alice/audio")
     chat = create_announced(origin, "room/alice/chat")
@@ -1653,7 +1699,7 @@ async def test_dynamic_serves_a_request_under_a_prefix():
     dynamic = origin.requests("live")
     consumer = origin.consume()
 
-    pending = asyncio.create_task(consumer.request_broadcast("live/cam"))
+    pending = asyncio.create_task(consumer.request("live/cam"))
     request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
     assert request.path == "live/cam"
     served = request.prepare(moq.mint_epoch()).publish()

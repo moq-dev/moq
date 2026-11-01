@@ -1,4 +1,4 @@
-//! Tests for [`SendStream::acked`], which reports whether the peer acknowledged a send stream's prefix
+//! Tests for [`send::Stream::acked`], which reports whether the peer acknowledged a send stream's prefix
 
 use super::*;
 
@@ -21,13 +21,13 @@ fn open(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: ConnectionHandl
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, s).write(b"header").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"header"[..]).unwrap();
 	pair.drive();
 	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
 	s
 }
 
-fn acked(pair: &mut Pair, ch: ConnectionHandle, s: StreamId, offset: u64) -> Result<bool, ClosedStream> {
+fn acked(pair: &mut Pair, ch: ConnectionHandle, s: StreamId, offset: send::Offset) -> Result<bool, send::Error> {
 	pair.client_send(ch, s).acked(offset)
 }
 
@@ -62,12 +62,12 @@ fn waits_for_contiguous_prefix() {
 	pair.drive();
 	reported(&mut pair, client_ch, s);
 
-	pair.client_send(client_ch, s).write(b"lost").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"lost"[..]).unwrap();
 	let lost = pair.client_send(client_ch, s).offset();
 	lose_client_packets(&mut pair);
 
 	// Acknowledged, but behind the lost packet: the middle of the stream, not its prefix
-	pair.client_send(client_ch, s).write(b"after").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"after"[..]).unwrap();
 	let after = pair.client_send(client_ch, s).offset();
 	let acks = pair.client_conn_mut(client_ch).stats().frame_rx.acks;
 	while pair.client_conn_mut(client_ch).stats().frame_rx.acks == acks {
@@ -95,11 +95,11 @@ fn later_waiter_registers_again() {
 	reported(&mut pair, client_ch, s);
 
 	// The first packet is held, and the second lost
-	pair.client_send(client_ch, s).write(b"first").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"first"[..]).unwrap();
 	let first = pair.client_send(client_ch, s).offset();
 	pair.client.drive(pair.time, pair.server.addr);
 	pair.client.delay_outbound();
-	pair.client_send(client_ch, s).write(b"second").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"second"[..]).unwrap();
 	let second = pair.client_send(client_ch, s).offset();
 	lose_client_packets(&mut pair);
 	assert_eq!(acked(&mut pair, client_ch, s, second), Ok(false));
@@ -110,12 +110,12 @@ fn later_waiter_registers_again() {
 	while acked(&mut pair, client_ch, s, first) != Ok(true) {
 		assert!(pair.step(), "never acknowledged");
 	}
-	assert_eq!(reported(&mut pair, client_ch, s), Some(first));
+	assert_eq!(reported(&mut pair, client_ch, s), Some(u64::from(first)));
 	assert_eq!(acked(&mut pair, client_ch, s, second), Ok(false));
 
 	// The retransmission reports the second
 	pair.drive();
-	assert_eq!(reported(&mut pair, client_ch, s), Some(second));
+	assert_eq!(reported(&mut pair, client_ch, s), Some(u64::from(second)));
 }
 
 /// Without a poll waiting on it, an acknowledgment is not reported.
@@ -126,7 +126,7 @@ fn unpolled_is_not_reported() {
 	let (client_ch, server_ch) = pair.connect();
 	let s = open(&mut pair, client_ch, server_ch);
 
-	pair.client_send(client_ch, s).write(b"payload").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"payload"[..]).unwrap();
 	let offset = pair.client_send(client_ch, s).offset();
 	pair.drive();
 	assert_eq!(reported(&mut pair, client_ch, s), None);
@@ -147,7 +147,7 @@ fn already_acked() {
 	let empty = pair.client_send(client_ch, s).offset();
 	assert_eq!(acked(&mut pair, client_ch, s, empty), Ok(true));
 
-	pair.client_send(client_ch, s).write(b"payload").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"payload"[..]).unwrap();
 	pair.drive();
 	let all = pair.client_send(client_ch, s).offset();
 	assert_eq!(acked(&mut pair, client_ch, s, all), Ok(true));
@@ -164,7 +164,7 @@ fn finished_stream_reports_before_freed() {
 	pair.drive();
 	reported(&mut pair, client_ch, s);
 
-	pair.client_send(client_ch, s).write(b"payload").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"payload"[..]).unwrap();
 	let offset = pair.client_send(client_ch, s).offset();
 	assert_eq!(acked(&mut pair, client_ch, s, offset), Ok(false));
 	pair.client_send(client_ch, s).finish().unwrap();
@@ -183,7 +183,12 @@ fn finished_stream_reports_before_freed() {
 			StreamEvent::Finished { id: s }
 		]
 	);
-	assert_eq!(acked(&mut pair, client_ch, s, offset), Err(ClosedStream::default()));
+	// The freed stream's end is kept until released, so the offset is still answered.
+	assert_eq!(acked(&mut pair, client_ch, s, offset), Ok(true));
+	assert_eq!(pair.client_send(client_ch, s).end(), Ok(Some(send::End::Finished)));
+	pair.client_send(client_ch, s).release();
+	assert_eq!(acked(&mut pair, client_ch, s, offset), Err(send::Error::Closed));
+	assert_eq!(pair.client_send(client_ch, s).end(), Err(send::Error::Closed));
 }
 
 /// A reset fails the offsets past its Reliable Size at once, while those before it are
@@ -195,16 +200,16 @@ fn reset_fails_past_reliable_size() {
 	let (client_ch, server_ch) = pair.connect();
 	let s = open(&mut pair, client_ch, server_ch);
 
-	pair.client_send(client_ch, s).write(b"kept").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"kept"[..]).unwrap();
 	let kept = pair.client_send(client_ch, s).offset();
 	let reset = pair.client_send(client_ch, s).offset();
-	pair.client_send(client_ch, s).write(b"dropped").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"dropped"[..]).unwrap();
 	let dropped = pair.client_send(client_ch, s).offset();
 	lose_client_packets(&mut pair);
 	reported(&mut pair, client_ch, s);
 
 	pair.client_send(client_ch, s).reset_at(reset, VarInt(42)).unwrap();
-	assert_eq!(acked(&mut pair, client_ch, s, dropped), Err(ClosedStream::default()));
+	assert_eq!(acked(&mut pair, client_ch, s, dropped), Err(send::Error::Closed));
 	assert_eq!(acked(&mut pair, client_ch, s, kept), Ok(false));
 	assert_eq!(reported(&mut pair, client_ch, s), None);
 
@@ -224,9 +229,9 @@ fn reset_reports_a_dropped_waiter() {
 	let s = open(&mut pair, client_ch, server_ch);
 
 	// A lower waiter the reset keeps doesn't hide the one it drops
-	pair.client_send(client_ch, s).write(b"kept").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"kept"[..]).unwrap();
 	let kept = pair.client_send(client_ch, s).offset();
-	pair.client_send(client_ch, s).write(b"dropped").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"dropped"[..]).unwrap();
 	let dropped = pair.client_send(client_ch, s).offset();
 	lose_client_packets(&mut pair);
 	reported(&mut pair, client_ch, s);
@@ -236,7 +241,7 @@ fn reset_reports_a_dropped_waiter() {
 	pair.client_send(client_ch, s).reset_at(kept, VarInt(42)).unwrap();
 	assert_eq!(pair.client_send(client_ch, s).offset(), kept);
 	assert!(reported(&mut pair, client_ch, s).is_some());
-	assert_eq!(acked(&mut pair, client_ch, s, dropped), Err(ClosedStream::default()));
+	assert_eq!(acked(&mut pair, client_ch, s, dropped), Err(send::Error::Closed));
 }
 
 /// A peer that stopped reading will not read what it acknowledges, before or after the
@@ -248,18 +253,21 @@ fn stop_sending_fails() {
 	let (client_ch, server_ch) = pair.connect();
 	let s = open(&mut pair, client_ch, server_ch);
 
-	pair.client_send(client_ch, s).write(b"unread").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"unread"[..]).unwrap();
 	let before = pair.client_send(client_ch, s).offset();
 	lose_client_packets(&mut pair);
 	assert_eq!(acked(&mut pair, client_ch, s, before), Ok(false));
 
 	pair.server_recv(server_ch, s).stop(VarInt(7)).unwrap();
 	pair.drive();
-	assert_eq!(pair.client_send(client_ch, s).stopped(), Ok(Some(VarInt(7))));
+	assert_eq!(
+		pair.client_send(client_ch, s).end(),
+		Ok(Some(send::End::Stopped(VarInt(7))))
+	);
 	let after = pair.client_send(client_ch, s).offset();
 	assert_eq!(reported(&mut pair, client_ch, s), Some(b"header".len() as u64));
 	for offset in [before, after] {
-		assert_eq!(acked(&mut pair, client_ch, s, offset), Err(ClosedStream::default()));
+		assert_eq!(acked(&mut pair, client_ch, s, offset), Err(send::Error::Closed));
 	}
 }
 
@@ -271,35 +279,24 @@ fn close_fails() {
 	let (client_ch, server_ch) = pair.connect();
 	let s = open(&mut pair, client_ch, server_ch);
 
-	pair.client_send(client_ch, s).write(b"unacked").unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"unacked"[..]).unwrap();
 	let offset = pair.client_send(client_ch, s).offset();
 	lose_client_packets(&mut pair);
 
 	let now = pair.time;
 	pair.client_conn_mut(client_ch).close(now, VarInt(0), String::new());
-	assert_eq!(acked(&mut pair, client_ch, s, offset), Err(ClosedStream::default()));
+	assert_eq!(acked(&mut pair, client_ch, s, offset), Err(send::Error::Closed));
 }
 
-/// Asking about data never written is a caller bug.
+/// An offset from another stream is a caller bug, the one misuse its type leaves possible.
 #[test]
-#[should_panic(expected = "acked past the data written")]
-fn acked_past_written_panics() {
+#[should_panic(expected = "offset used on another stream")]
+fn foreign_offset_panics() {
 	let _guard = subscribe();
 	let mut pair = pair(true);
 	let (client_ch, server_ch) = pair.connect();
 	let s = open(&mut pair, client_ch, server_ch);
-	let past = pair.client_send(client_ch, s).offset() + 1;
-	let _ = acked(&mut pair, client_ch, s, past);
-}
-
-/// Resetting past the data written is a caller bug.
-#[test]
-#[should_panic(expected = "reset past the data written")]
-fn reset_past_written_panics() {
-	let _guard = subscribe();
-	let mut pair = pair(true);
-	let (client_ch, server_ch) = pair.connect();
-	let s = open(&mut pair, client_ch, server_ch);
-	let past = pair.client_send(client_ch, s).offset() + 1;
-	let _ = pair.client_send(client_ch, s).reset_at(past, VarInt(42));
+	let other = open(&mut pair, client_ch, server_ch);
+	let foreign = pair.client_send(client_ch, other).offset();
+	let _ = pair.client_send(client_ch, s).reset_at(foreign, VarInt(42));
 }

@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 
 use crate::decode::Read;
 use crate::ffi::OnStatus;
-use crate::{moq_decode_gap, moq_decode_read_kind};
+use crate::{moq_decode_gap, moq_decode_read_kind, moq_decode_start};
 
 use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
@@ -118,13 +118,16 @@ pub struct moq_audio_decoder_output {
 	/// layout as `moq_audio_encoder_input.channels` describes, and the decoder
 	/// remixes to it.
 	pub channels: u32,
-	/// Upper bound on buffering before skipping a stalled group, in
-	/// microseconds. Same congestion-control knob as
-	/// `moq_consume_audio`'s `max_delay_us`. 0 = skip
-	/// aggressively (the moq-mux default); set to your playout
-	/// buffer (tens to a few hundred ms) for a softer skip. This bounds
-	/// group staleness rather than setting a minimum playout delay.
-	pub max_delay_us: u64,
+	/// How far behind the live edge to play. Same knob as `moq_consume_audio`'s
+	/// `delay`. `min_us` floors the playout delay, which is otherwise measured
+	/// from arrival timing, and sets where a cold join starts. `max_us` bounds
+	/// group staleness and adds no buffering. Zeroed: start at the newest group
+	/// and skip aggressively (the moq-mux default).
+	pub delay: crate::api::moq_delay,
+	/// `moq_decode_start` discriminant: where to start on a track that already
+	/// holds groups. 0 = the oldest, decoding everything cached; a live player
+	/// sets `MOQ_DECODE_START_LATEST`.
+	pub start: u32,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -429,9 +432,11 @@ pub extern "C" fn moq_encode_audio_reservation(producer: u32) -> i32 {
 	})
 }
 
-/// Watch whether the encoded audio track has subscribers, so the microphone and
-/// encoder run only while someone listens. See [`crate::moq_publish_media_demand`]
-/// for the callback contract.
+/// Watch whether the encoded audio track has subscribers. The encoder publishes every
+/// sample written, subscribed or not; opting in to run the microphone and encoder
+/// only while someone listens saves that work but leaves a late subscriber nothing
+/// to fetch from before it arrived. See [`crate::moq_publish_media_demand`] for the
+/// callback contract.
 ///
 /// Returns a non-zero watcher handle on success, or a negative code on failure.
 ///
@@ -538,7 +543,7 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 /// again, so release `user_data` there. The terminal callback fires even after
 /// [`moq_decode_audio_cancel`].
 ///
-/// Starts at the newest cached group so reopening live playback skips the backlog.
+/// `output->start` picks where it starts on a track that already holds groups.
 ///
 /// A packet the codec cannot decode is logged and skipped rather than ending
 /// the subscription, so a single bad frame costs that frame and not the stream.
@@ -559,13 +564,16 @@ pub unsafe extern "C" fn moq_decode_audio(
 		let raw = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 
 		let mut config = moq_audio::decode::Options::default();
-		config.start = moq_audio::decode::Start::Latest;
+		config.start = match moq_decode_start::from_u32(raw.start)? {
+			moq_decode_start::MOQ_DECODE_START_OLDEST => moq_audio::decode::Start::Oldest,
+			moq_decode_start::MOQ_DECODE_START_LATEST => moq_audio::decode::Start::Latest,
+		};
 		config.output.format = audio_format_from_u32(raw.format)?;
 		config.output.sample_rate = zeroable(raw.sample_rate);
 		config.output.layout = zeroable(raw.channels)
 			.map(moq_audio::Layout::from_channels)
 			.transpose()?;
-		config.max_delay = Duration::from_micros(raw.max_delay_us);
+		config.delay = raw.delay.into();
 
 		let on_read = unsafe { OnStatus::new(user_data, on_read)? };
 
