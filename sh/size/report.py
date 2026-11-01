@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Compare byte counts with the previous report and a thirty-day anchor."""
+
 import argparse
 import datetime as dt
 import json
@@ -8,6 +9,7 @@ from pathlib import Path
 
 def compare(current, history):
     """Return regressions; a new artifact starts its series, but a missing one is refused."""
+
     def validate(row):
         if row.get("version") != 1 or not row.get("bytes"):
             raise ValueError("expected a nonempty version 1 size report")
@@ -23,8 +25,9 @@ def compare(current, history):
             raise ValueError("history contains a future report")
     # A rename shows up as a missing key, so it is refused along with a removal.
     if missing := sorted(tracked(history) - current["bytes"].keys()):
-        raise ValueError(f"artifacts missing or renamed: {', '.join(missing)}; "
-                         "review and explicitly start a new history")
+        raise ValueError(
+            f"artifacts missing or renamed: {', '.join(missing)}; review and explicitly start a new history"
+        )
     prior = sorted(history, key=lambda row: row["date"])
     if not prior:
         return []
@@ -32,9 +35,12 @@ def compare(current, history):
     comparisons = [("previous", prior[-1], 0.05)]
     if anchors:
         comparisons.append(("30 days", anchors[-1], 0.10))
-    return [f"{name}: {size} > {row['bytes'][name]} bytes + {limit:.0%} ({label})"
-            for label, row, limit in comparisons for name, size in current["bytes"].items()
-            if name in row["bytes"] and size > row["bytes"][name] * (1 + limit)]
+    return [
+        f"{name}: {size} > {row['bytes'][name]} bytes + {limit:.0%} ({label})"
+        for label, row, limit in comparisons
+        for name, size in current["bytes"].items()
+        if name in row["bytes"] and size > row["bytes"][name] * (1 + limit)
+    ]
 
 
 def tracked(history):
@@ -46,8 +52,9 @@ def retain(current, history):
     """Keep the thirty-day anchor compare() would pick, every newer report, and the current one."""
     cutoff = dt.date.fromisoformat(current["date"]) - dt.timedelta(days=30)
     # A stable sort keeps the last of several same-date reports, matching compare().
-    anchors = sorted((row for row in history if dt.date.fromisoformat(row["date"]) <= cutoff),
-                     key=lambda row: row["date"])
+    anchors = sorted(
+        (row for row in history if dt.date.fromisoformat(row["date"]) <= cutoff), key=lambda row: row["date"]
+    )
     return anchors[-1:] + [row for row in history if dt.date.fromisoformat(row["date"]) > cutoff] + [current]
 
 

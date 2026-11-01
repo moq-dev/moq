@@ -892,7 +892,8 @@ export class Publisher {
 			},
 		});
 		serving(track);
-		const floor = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
+		const latest = hooks.latestSequence(track);
+		let floor = cursorFloor(this.version, msg.startGroup, latest);
 		track.withRange({
 			start: { included: floor },
 			end: endGroup === undefined ? undefined : { excluded: endGroup },
@@ -926,6 +927,18 @@ export class Publisher {
 			// priority.
 			const info = await untilAborted(track.info(), left.signal);
 			const publisher = info.priority;
+			// A SUBSCRIBE can arrive before its track resolves, such as one a relay serves from a
+			// copy still fetching upstream, or on lite-05 one sent alongside its TRACK, when no
+			// group is known yet: the newest once it resolves stands in, as it would for one
+			// sent after.
+			const resolved = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
+			if (latest === undefined && resolved !== floor) {
+				floor = resolved;
+				track.withRange({
+					start: { included: floor },
+					end: endGroup === undefined ? undefined : { excluded: endGroup },
+				});
+			}
 			// Older drafts carry no timestamps.
 			let stamp: Stamp | undefined;
 			let compress = false;
@@ -1522,8 +1535,11 @@ export class Publisher {
 		void stream.reader.done().then(
 			(fin) => {
 				hold.abort();
-				// TRACK is the requester's only message.
-				if (!fin) stream.abort(new ProtocolViolation("data after TRACK"));
+				if (fin) return;
+				// TRACK is the requester's only message, so more breaks the session, as in Rust.
+				const violation = new ProtocolViolation("data after TRACK");
+				closeViolation(this.#quic, violation);
+				stream.abort(violation);
 			},
 			() => hold.abort(),
 		);

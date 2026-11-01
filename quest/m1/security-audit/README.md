@@ -54,7 +54,6 @@ Dropped, with reasons:
 
 ## Required
 
-- [fMP4 import streams mdat](/quest/m1/security-audit/fmp4-stream-mdat.md) - a box header declaring a huge size cannot pin importer memory across segments
 - [fMP4 import streams samples through open and commit](/quest/m1/security-audit/fmp4-open-commit.md) - after the streaming PRs land, fMP4 samples share MKV's `open`/`commit`, a refused box stops dropping the rest of its call's input, and the import benchmark is re-measured
 - [MKV leaf element limits](/quest/m1/security-audit/mkv-leaf-limits.md) - `CodecID`, `DocType`, and `CodecPrivate` are refused past per-element size limits instead of read whole
 - [Browser input checks](/quest/m1/security-audit/js-input.md) - room metadata is schema-validated and the http:// fingerprint fetch is aborted and length-checked
