@@ -82,7 +82,7 @@ struct Run {
 struct Sample {
 	size: u32,
 	duration: u32,
-	cts: i32,
+	cts: i64,
 	sync: bool,
 }
 
@@ -283,16 +283,16 @@ impl<S: Stream> Export<S> {
 
 		let track = self.tracks.entry(id).or_default();
 		let mut decode_time = tfdt.base_media_decode_time;
-		for trun in traf.trun.iter().filter(|trun| !trun.entries.is_empty()) {
+		for trun in traf.trun.iter().filter(|trun| !trun.samples.is_empty()) {
 			let Some(offset) = trun.data_offset.and_then(|offset| u64::try_from(offset).ok()) else {
 				return Err(unindexable(id, "a run has no data offset").into());
 			};
 			track.chunks.push(Run {
 				offset: moof + offset,
 				decode_time,
-				count: trun.entries.len() as u32,
+				count: trun.samples.len() as u32,
 			});
-			for entry in &trun.entries {
+			for entry in trun.samples.iter() {
 				let sample = Sample {
 					size: entry.size.unwrap_or(size),
 					duration: entry.duration.unwrap_or(duration),
