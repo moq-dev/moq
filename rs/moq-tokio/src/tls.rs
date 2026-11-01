@@ -1627,23 +1627,9 @@ impl Serve {
 
 	/// Build a TLS policy with these ALPNs and the shared identity and client verifier.
 	pub fn config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
-		self.build(alpn, true)
-	}
-
-	#[cfg(feature = "_transport")]
-	pub(crate) fn client_auth(&self) -> bool {
-		self.0.verifier.is_some()
-	}
-
-	#[cfg(feature = "tcp")]
-	pub(crate) fn anonymous(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
-		self.build(alpn, false)
-	}
-
-	fn build(&self, alpn: Vec<Vec<u8>>, client_auth: bool) -> Result<Arc<rustls::ServerConfig>> {
 		let builder =
 			rustls::ServerConfig::builder_with_provider(crypto::provider()).with_safe_default_protocol_versions()?;
-		let verifier = client_auth.then_some(self.0.verifier.as_ref()).flatten();
+		let verifier = self.0.verifier.as_ref();
 		let mut config = match verifier {
 			Some(verifier) => builder
 				.with_client_cert_verifier(verifier.clone())
@@ -1656,6 +1642,11 @@ impl Serve {
 			config.send_tls13_tickets = 0;
 		}
 		Ok(Arc::new(config))
+	}
+
+	#[cfg(feature = "_transport")]
+	pub(crate) fn client_auth(&self) -> bool {
+		self.0.verifier.is_some()
 	}
 }
 

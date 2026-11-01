@@ -315,7 +315,7 @@ mod tests {
 
 	/// An overflowed sleep keeps the backend it was created on, so resetting it
 	/// outside its runtime re-arms that runtime's timer.
-	#[cfg(all(feature = "runtime", any(not(target_arch = "wasm32"), target_os = "wasi")))]
+	#[cfg(feature = "runtime")]
 	#[test]
 	fn an_overflowed_sleep_resets_on_its_own_clock() {
 		let runtime = tokio::runtime::Builder::new_current_thread()

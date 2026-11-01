@@ -433,13 +433,8 @@ impl Subscriber {
 				request_id,
 				prefix: prefix.clone(),
 				forward: false,
-				subscriber_priority: None,
 				group_order: None,
-				filter: None,
 				properties_wanted: true,
-				new_group: None,
-				range_filters: false,
-				track_filter: false,
 				authorization_token: None,
 			},
 		)?;
@@ -1520,6 +1515,35 @@ mod tests {
 			group_order: None,
 			filter: None,
 		}
+	}
+
+	/// One SUBSCRIBE_TRACKS covers each nesting chain, since the peer refuses an overlapping
+	/// prefix: a nested listing reuses the broader request, and a broader one cancels the
+	/// nested requests and goes out only once they have left the wire.
+	#[test]
+	fn overlapping_listings_share_one_request() {
+		let broadcasts: Vec<_> = (0..5).map(|_| crate::broadcast::Info::default().produce()).collect();
+		let lister = |i: usize| Arc::new(broadcasts[i].requests().lister().unwrap());
+		let live = |listings: &Listings| listings.requests.values().filter(|r| r.live.is_some()).count();
+
+		let mut listings = Listings::default();
+		let (_, _, outer) = listings.listen(Path::from_static("a"), lister(0));
+		assert!(
+			outer.is_some_and(|outer| outer.blockers.is_empty()),
+			"the first listing waits"
+		);
+		let (_, _, nested) = listings.listen(Path::from_static("a/b"), lister(1));
+		assert!(nested.is_none(), "a nested listing asked again");
+		assert_eq!(live(&listings), 1);
+
+		let mut listings = Listings::default();
+		for (i, path) in ["a/b", "a/c"].into_iter().enumerate() {
+			let (_, _, nested) = listings.listen(Path::new(path).unwrap(), lister(2 + i));
+			assert!(nested.is_some_and(|nested| nested.blockers.is_empty()), "{path}");
+		}
+		let (_, _, outer) = listings.listen(Path::from_static("a"), lister(4));
+		assert_eq!(outer.expect("the broader listing asks").blockers.len(), 2);
+		assert_eq!(live(&listings), 1, "the nested requests stand beside it");
 	}
 
 	/// The error code a refused PUBLISH answered with.

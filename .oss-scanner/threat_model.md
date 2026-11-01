@@ -39,7 +39,7 @@ Most important, in this order:
 
 `unsafe` is rare and worth reading closely where it appears: `rs/moq-quic`, `rs/moq-net/src/model`, `rs/moq-net/src/util/cell.rs`, `rs/moq-net/src/transport.rs`, and `rs/moq-relay/src/uring.rs`.
 
-Out of scope: `js/` and the other language bindings (`py/`, `swift/`, `kt/`, `go/`, `dart/`, `cpp/`, `rs/moq-ffi`, `rs/moq-c`, `rs/moq-wasm`), capture and encode crates that read local devices (`moq-video`, `moq-v4l`, `moq-nvenc`, `moq-audio`, `moq-transcode`, `moq-gst`, `moq-boy`), `demo/`, `bench/`, `test/`, `infra/`, `doc/`, `drafts/`, and CI configuration. A flaw that lies wholly inside a dependency (quinn, rustls, aws-lc, tokio, hyper, str0m) belongs upstream unless our use of it makes it reachable.
+Out of scope: `js/` and the other language bindings (`py/`, `swift/`, `kt/`, `go/`, `dart/`, `cpp/`, `rs/moq-ffi`, `rs/moq-c`), capture and encode crates that read local devices (`moq-video`, `moq-v4l`, `moq-nvenc`, `moq-audio`, `moq-transcode`, `moq-gst`, `moq-boy`), `demo/`, `bench/`, `test/`, `infra/`, `doc/`, `drafts/`, and CI configuration. A flaw that lies wholly inside a dependency (quinn, rustls, aws-lc, tokio, hyper, str0m) belongs upstream unless our use of it makes it reachable.
 
 ## How to exercise it
 

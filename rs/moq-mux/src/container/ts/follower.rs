@@ -11,10 +11,7 @@ use super::{Export, catalog};
 use crate::container::Frame;
 use crate::follow::{Event, Instances};
 
-#[cfg(not(target_family = "wasm"))]
 type Subscribing<E> = Pin<Box<dyn Future<Output = crate::Result<crate::catalog::Consumer<E>>> + Send>>;
-#[cfg(target_family = "wasm")]
-type Subscribing<E> = Pin<Box<dyn Future<Output = crate::Result<crate::catalog::Consumer<E>>>>>;
 
 /// What the instances say serves the exported path.
 enum Serving {

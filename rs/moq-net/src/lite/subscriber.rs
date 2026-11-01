@@ -1531,7 +1531,10 @@ impl RecvBandwidth {
 						}
 					}
 					// The stream ended (peer FIN'd or errored). Don't hammer an
-					// uncooperative peer; give up for the rest of the session.
+					// uncooperative peer; give up for the rest of the session, and
+					// clear the estimate so consumers don't keep reading its last rate.
+					let bandwidth = self.subscriber.recv_bandwidth.as_ref().expect("gated above");
+					let _ = bandwidth.set(None);
 					return Poll::Ready(Ok(()));
 				}
 			}
@@ -2147,6 +2150,7 @@ mod tests {
 			unanswered: None,
 			bounded: false,
 			updated: false,
+			_working: crate::session::Work::default().start(),
 		})
 	}
 
@@ -2322,6 +2326,7 @@ mod tests {
 				unanswered: None,
 				bounded: false,
 				updated: false,
+				_working: crate::session::Work::default().start(),
 			});
 			if update {
 				h.serve
@@ -2560,25 +2565,42 @@ mod tests {
 		);
 	}
 
+	/// A held fill costs one entry, shared by every reader that joins it, until the last leaves.
 	#[kio::test]
-	async fn the_feed_track_backstop_refuses_the_next_group() {
+	async fn held_feed_fills_follow_shared_demand() {
 		let start = crate::time::Instant::now();
 		let clock = crate::time::Deadlines::new(start);
 		let tail = kio::Producer::new(Tail::default());
 		let sub = feed_sub(&tail).await;
 		let (track, mut callers, requests) = feed_batch([1, 2, 3]);
+		let dynamic = track.requests();
 		let mut fetches = FeedFetches::new(&clock);
-		fetches.max = 2;
 		for req in requests {
 			fetches.push(req, &track.consume());
 		}
-		fetches.poll(&sub, start, &kio::Waiter::noop());
-		assert_eq!(fetches.held.len(), 2);
-		assert!(matches!(
-			callers.pop().unwrap().now_or_never(),
-			Some(Err(Error::TooManyRequests))
-		));
+		let waiter = kio::Waiter::noop();
+		fetches.poll(&sub, start, &waiter);
+		assert_eq!(fetches.held.len(), 3, "one entry per fill");
 		assert!(callers.iter_mut().all(|caller| caller.now_or_never().is_none()));
+
+		let mut joined: Vec<_> = (1..=3)
+			.map(|sequence| track.consume().fetch_group(sequence, None))
+			.collect();
+		assert!(
+			dynamic.requested_fill().now_or_never().is_none(),
+			"joins existing fills"
+		);
+		drop(callers);
+		fetches.poll(&sub, start, &waiter);
+		assert_eq!(fetches.held.len(), 3, "the joined readers still own the demand");
+		assert!(joined.iter_mut().all(|caller| caller.now_or_never().is_none()));
+
+		drop(joined);
+		fetches.poll(&sub, start, &waiter);
+		assert!(fetches.held.is_empty(), "the last reader leaving releases every fill");
+		assert!(fetches.ready.read().is_empty());
+		assert_eq!(fetches.fold.deadline(), None);
+		assert!(dynamic.requested_fill().now_or_never().is_none());
 	}
 
 	#[kio::test]
@@ -2602,37 +2624,6 @@ mod tests {
 		fetches.push(req, &track.consume());
 		fetches.poll(&sub, start, &kio::Waiter::noop());
 		assert_eq!(fetches.held.len(), 1);
-		arrive(&track, &tail, 1, start);
-		fetches.poll(&sub, start, &kio::Waiter::noop());
-		assert!(next.now_or_never().unwrap().is_ok());
-	}
-
-	/// A replacement takes the place of the attempt it replaces under the limit, before any
-	/// poll releases that one.
-	#[kio::test]
-	async fn a_feed_fetch_replaces_an_abandoned_attempt_at_the_limit() {
-		let start = crate::time::Instant::now();
-		let clock = crate::time::Deadlines::new(start);
-		let tail = kio::Producer::new(Tail::default());
-		let sub = feed_sub(&tail).await;
-		let (track, mut callers, requests) = feed_batch([1, 2]);
-		let dynamic = track.requests();
-		let mut fetches = FeedFetches::new(&clock);
-		fetches.max = 2;
-		for req in requests {
-			fetches.push(req, &track.consume());
-		}
-		fetches.poll(&sub, start, &kio::Waiter::noop());
-		drop(callers.remove(0));
-		let mut next = track.consume().fetch_group(1, None);
-		let req = dynamic
-			.requested_fill()
-			.now_or_never()
-			.expect("replacement queued")
-			.unwrap();
-		fetches.push(req, &track.consume());
-		assert!((&mut next).now_or_never().is_none(), "held, not refused");
-		assert_eq!(fetches.held.len(), 2);
 		arrive(&track, &tail, 1, start);
 		fetches.poll(&sub, start, &kio::Waiter::noop());
 		assert!(next.now_or_never().unwrap().is_ok());
@@ -2741,7 +2732,11 @@ mod tests {
 						}
 						let (track, _callers, tail, sub, scan, fetches) = &mut fixtures[0];
 						kio::clock::sim::yield_now().await;
-						#[expect(clippy::disallowed_methods, reason = "the scan cost is real elapsed time")]
+						#[expect(
+							clippy::disallowed_methods,
+							clippy::disallowed_types,
+							reason = "the scan cost is real elapsed time"
+						)]
 						let began = std::time::Instant::now();
 						for sequence in runs * 2..runs * 2 + EVENTS {
 							arrive(track, tail, sequence, start);
@@ -2751,6 +2746,7 @@ mod tests {
 								scan.poll(sub, start, &waiter);
 							}
 						}
+						#[expect(clippy::disallowed_methods, reason = "the scan cost is real elapsed time")]
 						samples.push(began.elapsed().as_nanos() / u128::from(EVENTS));
 					}
 					samples.sort_unstable();
@@ -2787,6 +2783,7 @@ mod tests {
 			unanswered: None,
 			bounded: false,
 			updated: false,
+			_working: crate::session::Work::default().start(),
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -4800,6 +4797,60 @@ mod tests {
 		}
 	}
 
+	/// A PROBE stream the peer ends, by FIN or reset, leaves no estimate behind: the
+	/// session gives up probing, so a held consumer must not keep its last rate.
+	#[kio::test]
+	async fn an_ended_probe_clears_the_estimate() {
+		use crate::transport::poll::{SendStream as _, Session as _};
+		for reset in [false, true] {
+			let version = Version::Lite04;
+			let (session, peer) = crate::transport::memory::pair(Default::default());
+			let producer = bandwidth::Producer::new();
+			let mut estimate = producer.consume();
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(session.clone()),
+				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				recv_bandwidth: Some(producer),
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+			let mut probe = RecvBandwidth::new(subscriber);
+			assert!(probe.poll(&kio::Waiter::noop()).is_pending());
+
+			// The peer reports once.
+			let (mut send, _recv) = kio::wait(|waiter| peer.poll_accept_bi(waiter)).await.unwrap();
+			let mut report = Vec::new();
+			lite::Probe {
+				bitrate: Some(1_000_000),
+				rtt: None,
+			}
+			.encode(&mut crate::coding::Encoder::new(&mut report, version.into()), version)
+			.unwrap();
+			kio::wait(|waiter| send.poll_write(waiter, &report)).await.unwrap();
+			let rate = kio::wait(|waiter| {
+				let _ = probe.poll(waiter);
+				estimate.poll_changed(waiter)
+			})
+			.await
+			.unwrap();
+			assert_eq!(rate, Some(bandwidth::Rate::from_bps(1_000_000)));
+
+			// Then ends the stream.
+			if reset {
+				send.reset(crate::StreamError::Cancel.to_code());
+			} else {
+				send.finish().unwrap();
+			}
+			kio::wait(|waiter| probe.poll(waiter)).await.unwrap();
+			assert_eq!(estimate.peek(), None, "reset: {reset}");
+		}
+	}
+
 	/// The model's groups map to wire ranges starting and ending at a group's first frame,
 	/// with empty ranges dropped. Off by one here would silently drop or duplicate a group
 	/// at every relay hop.
@@ -6538,6 +6589,8 @@ struct SubStream {
 	/// Whether an update changed the ranges since the SUBSCRIBE, which a publisher may
 	/// FIN before reading.
 	updated: bool,
+	/// Holds the session busy for as long as the subscription is open.
+	_working: crate::session::Working,
 }
 
 impl SubStream {
@@ -7106,6 +7159,7 @@ impl TrackServe {
 		Establish {
 			validity: self.validity.start(),
 			serve: self.clone(),
+			_working: session.work().start(),
 			closed: session.clone(),
 			session,
 			id,
@@ -7220,6 +7274,8 @@ struct Establish {
 	/// The ranges the SUBSCRIBE carries for `subscription`.
 	ranges: Vec<lite::Range>,
 	tail: kio::Producer<Tail>,
+	/// Holds the session busy while the SUBSCRIBE opens.
+	_working: crate::session::Working,
 	state: EstablishState,
 }
 
@@ -7297,6 +7353,7 @@ impl Establish {
 			wanted: None,
 			bounded: bounded(&self.ranges),
 			updated: false,
+			_working: self.session.work().start(),
 		}
 	}
 }
@@ -7321,10 +7378,16 @@ enum TrackRunState {
 	Info {
 		request: Option<track::Request>,
 		info: TrackInfoFetch,
+		/// Holds the session busy while the request waits on its TRACK_INFO.
+		_working: crate::session::Working,
 	},
 	Serve(ServeLoop),
 	/// Preserve the lite07 completion FIN until the publisher acknowledges it.
-	Finish(crate::coding::Writer<crate::transport::boxed::SendStream, Version>),
+	Finish {
+		writer: crate::coding::Writer<crate::transport::boxed::SendStream, Version>,
+		/// The subscription keeps the session busy until then.
+		_working: crate::session::Working,
+	},
 	Done,
 }
 
@@ -7334,6 +7397,7 @@ impl TrackServeRun {
 			TrackRunState::Info {
 				request: Some(request),
 				info: TrackInfoFetch::new(&serve),
+				_working: serve.subscriber.session.work().start(),
 			}
 		} else {
 			// Older wires declare no publisher retention limit, and no timeline: their
@@ -7368,7 +7432,7 @@ impl TrackServeRun {
 				}
 				// Each fetch in flight resets itself as it drops, seeing the same denial.
 			}
-			TrackRunState::Finish(_) | TrackRunState::Done => {}
+			TrackRunState::Finish { .. } | TrackRunState::Done => {}
 		}
 	}
 }
@@ -7407,7 +7471,7 @@ impl kio::Task for TrackServeRun {
 		// A finished track only waits for its FIN to be acknowledged: nothing is left to revoke.
 		// Nor on a closed session, whose grants end with it: the session's end decides how
 		// its tracks end.
-		if !matches!(self.state, TrackRunState::Finish(_))
+		if !matches!(self.state, TrackRunState::Finish { .. })
 			&& self.gate.poll_denied(waiter).is_ready()
 			&& self.serve.subscriber.session.clone().poll_closed(waiter).is_pending()
 		{
@@ -7416,7 +7480,7 @@ impl kio::Task for TrackServeRun {
 		}
 		loop {
 			match &mut self.state {
-				TrackRunState::Info { request, info } => {
+				TrackRunState::Info { request, info, .. } => {
 					// Abandonment was checked at the top of this poll, arming its wait.
 					let res = ready!(info.poll_fetch(&self.serve, waiter));
 					let request = request.take().expect("request pending");
@@ -7483,14 +7547,17 @@ impl kio::Task for TrackServeRun {
 						if active.stream.writer.finish().is_ok()
 							&& finished && self.serve.subscriber.version.waits_for_subscriber_fin()
 						{
-							self.state = TrackRunState::Finish(active.stream.writer);
+							self.state = TrackRunState::Finish {
+								writer: active.stream.writer,
+								_working: active._working,
+							};
 							continue;
 						}
 					}
 
 					return Poll::Ready(());
 				}
-				TrackRunState::Finish(writer) => {
+				TrackRunState::Finish { writer, .. } => {
 					let _ = ready!(writer.poll_close(waiter));
 					self.state = TrackRunState::Done;
 				}
@@ -7647,8 +7714,12 @@ struct ServeLoop {
 	/// demand still asks for just them: subscribing again would only resend them.
 	covered: Option<Vec<lite::Range>>,
 	/// Our side of the covered subscription, finished and held until the publisher reads
-	/// the FIN, since dropping it would reset it.
-	closing: Option<crate::coding::Writer<crate::transport::boxed::SendStream, Version>>,
+	/// the FIN, since dropping it would reset it. The subscription keeps the session busy
+	/// until then.
+	closing: Option<(
+		crate::coding::Writer<crate::transport::boxed::SendStream, Version>,
+		crate::session::Working,
+	)>,
 }
 
 #[expect(
@@ -7681,6 +7752,11 @@ enum ServeMode {
 /// A fill waits on one group at a time, the next it still owes. Each verdict on that group
 /// also settles, by run, every group of the fill the feed gave up on, so a fill a peer
 /// made wide costs what the cache and ledger hold rather than its width.
+///
+/// There is at most one held entry per model fill, shared by its readers. Network readers
+/// own request streams (bounded by their downstream transport's credit); local readers
+/// own their demand. The last reader leaving wakes `poll` to release the fill, so holding
+/// it adds state proportional to existing demand, not another allowance on this upstream.
 struct FeedFetches {
 	/// Each fill, by the group it waits on.
 	held: BTreeMap<u64, HeldFetch>,
@@ -7688,8 +7764,6 @@ struct FeedFetches {
 	arrivals: Option<track::Arrivals>,
 	/// Only gaps containing a held group arm the earliest fold.
 	fold: crate::time::Deadline,
-	/// An additional track backstop, above one peer's default FETCH allowance.
-	max: usize,
 	#[cfg(test)]
 	polled: usize,
 }
@@ -7722,7 +7796,6 @@ impl FeedFetches {
 			ready: Default::default(),
 			arrivals: None,
 			fold: crate::time::Deadline::new(clock),
-			max: crate::session::Limits::default().announces,
 			#[cfg(test)]
 			polled: 0,
 		}
@@ -7742,8 +7815,7 @@ impl FeedFetches {
 		self.hold(fill, true);
 	}
 
-	/// Wait on the next group `fill` still owes, if any. A fresh fill counts against the
-	/// limit, once what nobody waits on any more is released.
+	/// Wait on the next group `fill` still owes, if any.
 	fn hold(&mut self, fill: track::Fill, fresh: bool) {
 		let mut next = Some((fill, fresh));
 		while let Some((fill, fresh)) = next.take() {
@@ -7756,16 +7828,6 @@ impl FeedFetches {
 				&& previous.fill.wanted().is_some()
 			{
 				next = Some((previous.fill, false));
-			}
-			if fresh {
-				let moving = usize::from(next.is_some());
-				if self.held.len() + moving >= self.max {
-					self.held.retain(|_, held| held.fill.wanted().is_some());
-				}
-				if self.held.len() + moving >= self.max {
-					fill.refuse(Error::TooManyRequests);
-					continue;
-				}
 			}
 			let waiter = kio::Waiter::new(std::task::Waker::from(Arc::new(FetchWake {
 				sequence,
@@ -7997,7 +8059,7 @@ impl ServeLoop {
 							serve.subscriber.remove_subscribe(active.id);
 							let mut writer = active.stream.writer;
 							if writer.finish().is_ok() {
-								self.closing = Some(writer);
+								self.closing = Some((writer, active._working));
 							}
 							// Unchanged ranges are what the publisher covered, even if a datagram
 							// went missing. Changed ones settled by the grace instead may have
@@ -8025,7 +8087,7 @@ impl ServeLoop {
 					return Poll::Pending;
 				}
 				ServeMode::Select => {
-					if let Some(writer) = &mut self.closing
+					if let Some((writer, _)) = &mut self.closing
 						&& writer.poll_close(waiter).is_ready()
 					{
 						self.closing = None;
@@ -8397,6 +8459,8 @@ struct FetchServeRun {
 	info: track::Info,
 	group: u64,
 	state: FetchRunState,
+	/// Holds the session busy until the fetch ends.
+	_working: crate::session::Working,
 }
 
 enum FetchRunState {
@@ -8445,6 +8509,7 @@ impl FetchServeRun {
 			validity: serve.validity.start(),
 			gate: serve.gate(),
 			serve,
+			_working: session.work().start(),
 			session,
 			info,
 			group,

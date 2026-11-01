@@ -933,9 +933,4 @@ fn with_address(line: &str, ip: IpAddr) -> Result<str0m::Candidate, Error> {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests;

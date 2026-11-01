@@ -26,7 +26,7 @@ With the `macros` feature, `#[kio::machine]` writes a `poll_*` state machine fro
 straight-line code with explicit waits.
 
 `clock` is the time those waits run on: logical instants, wall time, deadlines, and
-timers on tokio or the browser (the `runtime` feature). The `sim` feature adds a
+timers on tokio (the `runtime` feature). The `sim` feature adds a
 deterministic executor and `#[kio::test]`, which runs an `async fn` test on it:
 
 ```rust

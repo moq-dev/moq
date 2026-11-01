@@ -40,9 +40,9 @@
 //! [`DEFAULT_EXPIRY`], while a relay creates one configured pool and shares it across
 //! every origin so the whole process caches into a single policy.
 
-use crate::sync::Mutex;
 use crate::util::SendCell;
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, Weak};
 use std::task::{Poll, ready};

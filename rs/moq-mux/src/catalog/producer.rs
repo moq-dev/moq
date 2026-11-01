@@ -1363,19 +1363,17 @@ fn video_sap_type(codec: &hang::catalog::VideoCodec) -> Option<u8> {
 	}
 }
 
-/// The MSF packaging that announces `container`, or `None` to leave the rendition out of the catalog.
+/// The MSF packaging that announces `container`.
 ///
 /// Exhaustive on purpose: a catch-all is what announced LOC as legacy, and it would do the same to the
 /// next container added. hang says an unrecognized one must be ignored, so it keeps its wire kind (no
-/// MSF consumer claims one it does not know) and is dropped when it does not even name one.
-fn packaging_of(container: &hang::catalog::Container) -> Option<moq_msf::Packaging> {
+/// MSF consumer claims one it does not know).
+fn packaging_of(container: &hang::catalog::Container) -> moq_msf::Packaging {
 	match container {
-		hang::catalog::Container::Cmaf { .. } => Some(moq_msf::Packaging::Cmaf),
-		hang::catalog::Container::Loc => Some(moq_msf::Packaging::Loc),
-		hang::catalog::Container::Legacy => Some(moq_msf::Packaging::Legacy),
-		hang::catalog::Container::Unknown(unknown) => {
-			unknown.kind().map(|kind| moq_msf::Packaging::Unknown(kind.to_string()))
-		}
+		hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
+		hang::catalog::Container::Loc => moq_msf::Packaging::Loc,
+		hang::catalog::Container::Legacy => moq_msf::Packaging::Legacy,
+		hang::catalog::Container::Unknown(unknown) => moq_msf::Packaging::Unknown(unknown.kind().to_string()),
 	}
 }
 
@@ -1423,9 +1421,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 
 	let has_multiple_video = catalog.video.renditions.len() > 1;
 	for (name, config) in &catalog.video.renditions {
-		let Some(packaging) = packaging_of(&config.container) else {
-			continue;
-		};
+		let packaging = packaging_of(&config.container);
 
 		let init_data = match &config.container {
 			hang::catalog::Container::Cmaf { init, .. } => Some(base64::engine::general_purpose::STANDARD.encode(init)),
@@ -1460,9 +1456,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 
 	let has_multiple_audio = catalog.audio.renditions.len() > 1;
 	for (name, config) in &catalog.audio.renditions {
-		let Some(packaging) = packaging_of(&config.container) else {
-			continue;
-		};
+		let packaging = packaging_of(&config.container);
 
 		let init_data = match &config.container {
 			hang::catalog::Container::Cmaf { init, .. } => Some(base64::engine::general_purpose::STANDARD.encode(init)),
@@ -1494,9 +1488,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 	}
 
 	for (name, config) in &catalog.text.renditions {
-		let Some(packaging) = packaging_of(&config.container) else {
-			continue;
-		};
+		let packaging = packaging_of(&config.container);
 		let Some((wire, namespace)) = reference(name, config) else {
 			continue;
 		};

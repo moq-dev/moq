@@ -9,8 +9,8 @@ description: Async primitives, and one clock for time, timers, and deterministic
 [![docs.rs](https://docs.rs/kio/badge.svg)](https://docs.rs/kio)
 
 The "easy async" primitives the other crates poll through, and `kio::clock`:
-one clock for reading time and arming timers, so the same code runs on tokio,
-in the browser, and in a simulator that tests drive.
+one clock for reading time and arming timers, so the same code runs on tokio
+and in a simulator that tests drive.
 
 ## The clock
 
@@ -21,9 +21,8 @@ forward or back without any time passing, so it never measures elapsed time.
 
 Async code reads the ambient clock: `now()`, `wall()`, `sleep()`,
 `sleep_until()`, `timeout()`, `interval()`, and `drive()` resolve to the
-current runtime's clock. That is tokio's on native, including paused tokio,
-and `performance.now()` with `setTimeout` in the browser. Nothing is plumbed
-through. On native, every unpaused runtime and every plain thread share one
+current runtime's clock. That is tokio's, including paused tokio. Nothing is
+plumbed through. Every unpaused runtime and every plain thread share one
 clock, so their instants compare. A paused tokio runtime has its own clock,
 and it pauses the instant but not wall time. The simulator is its own clock
 too. A runtime that reads the time itself, like a moq-uring worker, enters a

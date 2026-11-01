@@ -32,12 +32,10 @@
 use std::{
 	fmt,
 	ops::{Deref, DerefMut},
+	sync::atomic::AtomicUsize,
 };
 
-use crate::sync::AtomicUsize;
-
 mod lock;
-mod sync;
 mod waiter;
 
 pub mod clock;
@@ -49,14 +47,11 @@ mod consumer;
 mod pending;
 mod producer;
 mod queue;
-mod send;
 mod shared;
 mod task;
 mod weak;
 
-#[cfg(all(test, loom))]
-mod loom;
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests;
 
 #[cfg(feature = "macros")]
@@ -68,7 +63,6 @@ pub use lock::{Lock, LockGuard};
 pub use pending::Pending;
 pub use producer::{Mut, Producer, Ref, Unwanted};
 pub use queue::{PushError, Queue};
-pub use send::MaybeSend;
 pub use shared::Shared;
 pub use task::{Task, TaskKey, Tasks};
 pub use waiter::{Park, Waiter, WaiterList, wait};
@@ -103,7 +97,7 @@ mod heap {
 	use std::alloc::Layout;
 
 	// Not a glob: it would import `test`, kio's attribute, over the built-in one.
-	use super::{State, arc_heap, sync};
+	use super::{State, arc_heap};
 
 	/// [`arc_heap`] hand-rolls what `Layout` does, because `Layout` isn't `const`. Hold
 	/// it to the real thing, including a `T` aligned past the reference counts.
@@ -123,7 +117,10 @@ mod heap {
 
 		assert_eq!(arc_heap::<u8>(), layout::<u8>());
 		assert_eq!(arc_heap::<Overaligned>(), layout::<Overaligned>());
-		assert_eq!(arc_heap::<sync::Mutex<State<()>>>(), layout::<sync::Mutex<State<()>>>());
+		assert_eq!(
+			arc_heap::<std::sync::Mutex<State<()>>>(),
+			layout::<std::sync::Mutex<State<()>>>()
+		);
 	}
 }
 

@@ -9,15 +9,13 @@
 //!   [`Manual`] clock.
 //! - Async code reads the ambient clock: [`now`], [`wall`], [`sleep`],
 //!   [`sleep_until`], [`timeout`], [`interval`], and [`drive`] resolve to the
-//!   current runtime's clock. That is tokio's (paused tokio included) on native,
-//!   `performance.now()` and `setTimeout` in the browser, the simulator inside
-//!   `sim::run`, and a [`Deadlines`] queue on a thread that [entered](Deadlines::enter)
-//!   it, which is how a runtime that reads the host clock itself (an io_uring
-//!   worker) becomes a backend.
+//!   current runtime's clock. That is tokio's (paused tokio included), the
+//!   simulator inside `sim::run`, and a [`Deadlines`] queue on a thread that
+//!   [entered](Deadlines::enter) it, which is how a runtime that reads the host
+//!   clock itself (an io_uring worker) becomes a backend.
 //!
-//! The `runtime` feature arms timers on tokio's clock natively and `setTimeout` in
-//! the browser. Without it, reads fall back to std (the browser still reads
-//! `performance.now()`), and waiting on the host clock panics.
+//! The `runtime` feature arms timers on tokio's clock. Without it, reads fall back
+//! to std, and waiting on the host clock panics.
 //!
 //! The `manual` feature adds `Manual::install`, which makes a [`Manual`] clock
 //! the ambient clock of one tokio runtime. It moves only when told to, never on
@@ -34,8 +32,6 @@ mod deadline;
 #[cfg(feature = "manual")]
 mod installed;
 mod instant;
-#[cfg(all(feature = "manual", target_arch = "wasm32", not(target_os = "wasi")))]
-compile_error!("the `manual` feature installs on a tokio runtime, which the browser has none of");
 mod manual;
 mod runtime;
 #[cfg(feature = "serde")]

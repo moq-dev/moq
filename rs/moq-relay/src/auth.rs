@@ -1119,7 +1119,6 @@ pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1399,7 +1398,7 @@ mod tests {
 		let clone = auth.clone();
 		drop(auth);
 		assert!(
-			tokio::time::timeout(std::time::Duration::ZERO, admissions.next())
+			kio::clock::timeout(std::time::Duration::ZERO, admissions.next())
 				.await
 				.is_err()
 		);
@@ -1554,5 +1553,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod admission_tests;

@@ -753,7 +753,7 @@ enum Held {
 ///
 /// Anchored like [`Held`], on the first clock reading after the change.
 #[derive(Clone)]
-struct Release(Arc<crate::sync::Mutex<ReleaseState>>);
+struct Release(Arc<std::sync::Mutex<ReleaseState>>);
 
 struct ReleaseState {
 	held: Held,
@@ -771,7 +771,7 @@ impl Release {
 			return None;
 		}
 		let now = clock.now();
-		Some(Self(Arc::new(crate::sync::Mutex::new(ReleaseState {
+		Some(Self(Arc::new(std::sync::Mutex::new(ReleaseState {
 			held: Held::Anchoring(now),
 			hold,
 			clock: clock.clone(),
@@ -10361,7 +10361,7 @@ mod tests {
 			.unwrap();
 		// The replacement serves the whole group to a fetch, frames still to come included.
 		let fetches = request.requests();
-		let fetched = Arc::new(crate::sync::Mutex::new(Vec::<crate::group::Producer>::new()));
+		let fetched = Arc::new(std::sync::Mutex::new(Vec::<crate::group::Producer>::new()));
 		let serving = fetched.clone();
 		let _fetching = kio::clock::sim::spawn(async move {
 			while let Ok(request) = fetches.requested_fill_group().await {
@@ -12058,7 +12058,6 @@ mod tests {
 
 	/// An inline native executor can re-enter both tables from the rejection's wake.
 	#[test]
-	#[cfg(not(target_family = "wasm"))]
 	fn refusing_route_requests_wakes_after_unlocking() {
 		struct Reenter {
 			table: SendCell<kio::Shared<OriginState>>,

@@ -373,7 +373,7 @@ impl Leg {
 				kio::clock::sleep_until(deadline).await;
 				continue;
 			}
-			match tokio::time::timeout(Duration::from_millis(10), self.export.next()).await {
+			match kio::clock::timeout(Duration::from_millis(10), self.export.next()).await {
 				Ok(Ok(Some(frame))) => self.out.push((kio::clock::now(), frame)),
 				Ok(Ok(None)) => break,
 				Err(_) if self.export.next_due().is_none() => break,

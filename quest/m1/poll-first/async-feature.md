@@ -22,8 +22,9 @@ ergonomic layer, and the gating proceeds regardless of the build measurement.
   A wrapper's docs come from its `poll_*` method.
 - **Logic in `async fn` bodies:** an `async fn` that does more than call one
   `poll_*` becomes a `poll_*` first, or moves out of the library to the edges. List
-  each one in the PR. The straight-line ones are already
-  [`#[kio::machine]`s](/quest/m1/poll-first/machine-bodies.md) by then; the
+  each one in the PR. moq-net's straight-line ones became `#[kio::machine]`s in
+  [moq-dev/moq#7284](https://github.com/moq-dev/moq/pull/7284), except those
+  that await a looped body with no `poll_*` yet, such as `Server::accept`; the
   bodies with a loop or a branch around a wait (about 59 in moq-net) are
   converted by hand, since the macro stays straight-line only (decided
   2026-10-28).
@@ -38,7 +39,3 @@ ergonomic layer, and the gating proceeds regardless of the build measurement.
 Public API: every library crate gains an `async` feature, and its async wrappers
 move behind it. Add an Impact migration note for the published crates whenever
 a consumer must enable `async`, including with `default-features = false`.
-
-## Required
-
-- [Straight-line bodies become machines](/quest/m1/poll-first/machine-bodies.md) - the straight-line `async fn` bodies are `poll_*` machines before the wrappers are generated

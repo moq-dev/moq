@@ -1,6 +1,9 @@
-use std::{sync::atomic::Ordering, task::Poll};
+use std::{
+	sync::{Arc, atomic::Ordering},
+	task::Poll,
+};
 
-use crate::{Closed, Counts, State, lock::*, producer::Ref, sync::Arc, waiter::*, weak::ConsumerWeak};
+use crate::{Closed, Counts, State, lock::*, producer::Ref, waiter::*, weak::ConsumerWeak};
 
 /// The consuming side of a shared state channel.
 ///
@@ -191,7 +194,7 @@ impl<T> Clone for Consumer<T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use crate::{Closed, Producer};
 	use std::task::Poll;

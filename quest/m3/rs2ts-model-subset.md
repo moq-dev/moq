@@ -16,7 +16,7 @@ and trait objects, so the moq-specific changes are made here. Waits until rust2'
 reaches the model; none of these changes behavior.
 
 - Safe twins, under `cfg(rust2_ts)`, which rust2-ts's driver passes, for the internal
-  `unsafe` (not `target_arch = "wasm32"`, since moq's WASM build keeps the native ones):
+  `unsafe`:
   `model/group.rs`'s `MaybeUninit` frame ring, `NonNull` in `track.rs` and
   `track/demand/ranges.rs`, `cache.rs`'s pointer identity, `frame.rs`'s `Segment`, and
   kio's lock-free `log`. Differential tests cover the twins, and native builds keep the

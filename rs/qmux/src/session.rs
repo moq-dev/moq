@@ -432,6 +432,9 @@ pub struct Session {
 	_guard: Arc<Guard>,
 	/// The application protocol, cached at establishment so `protocol()` can borrow it.
 	protocol: Option<String>,
+	/// What the TLS handshake learned about the peer, on a session over TLS.
+	#[cfg(feature = "tls")]
+	pub(crate) tls: Option<Arc<crate::tls::Handshake>>,
 }
 
 impl Session {
@@ -490,6 +493,8 @@ impl Session {
 			_guard: Arc::new(Guard(inner.clone())),
 			inner,
 			protocol: config.negotiated_protocol(),
+			#[cfg(feature = "tls")]
+			tls: None,
 		})
 	}
 

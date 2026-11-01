@@ -169,9 +169,12 @@ impl Worker {
 				spawns: RefCell::new(Vec::new()),
 				unpark,
 				metrics,
-				next_bgid: std::cell::Cell::new(0),
+				bgids: RefCell::default(),
+				failed: std::cell::Cell::new(None),
 				stopped: std::cell::Cell::new(false),
 				spill: RefCell::new(std::collections::VecDeque::new()),
+				#[cfg(test)]
+				enter_faults: RefCell::default(),
 			}),
 			tasks: kio::Tasks::new(),
 			park: kio::Park::default(),
@@ -211,6 +214,11 @@ impl Worker {
 			for task in spawns {
 				self.tasks.push(task);
 			}
+			// A failure recorded between calls (or as the last call's future
+			// resolved) surfaces before a ready future can return past it.
+			if let Some(err) = self.shared.failed.take() {
+				return Err(err.into());
+			}
 
 			let cx = Context::from_waker(&waker);
 			let waiter = self.park.hold(&cx);
@@ -221,6 +229,9 @@ impl Worker {
 			// registered for the next push.
 			let _ = self.tasks.poll(waiter);
 
+			if let Some(err) = self.shared.failed.take() {
+				return Err(err.into());
+			}
 			self.pump()?;
 			self.maybe_park()?;
 		}

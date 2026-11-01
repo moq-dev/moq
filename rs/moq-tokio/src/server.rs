@@ -322,14 +322,19 @@ impl Server {
 			return Err(Error::NoBackend("--listen-reset-secret requires the quic feature"));
 		}
 
-		// Only the QUIC backend verifies client certificates; the qmux listeners
-		// (tcp/unix/websocket) never ask for one, even over `tls://`, so a
-		// stream-only server would ignore the CA or pinned peers. A caller opening
+		// The QUIC backend and a `tls://` listener verify client certificates; the
+		// other qmux listeners (plaintext tcp/unix/websocket) never ask for one, so a
+		// server with neither would ignore the CA or pinned peers. A caller opening
 		// only the streams owns QUIC elsewhere.
-		if parts.quic() && !build_quic && (!config.tls.root.is_empty() || config.tls.peers.is_some()) {
+		#[cfg(feature = "tcp")]
+		let tcp_tls = build_streams && config.tcp.bind.is_some() && config.tcp.tls == Some(true);
+		#[cfg(not(feature = "tcp"))]
+		let tcp_tls = false;
+		let client_auth = !config.tls.root.is_empty() || config.tls.peers.is_some();
+		if parts.quic() && !build_quic && !tcp_tls && client_auth {
 			return Err(Error::MtlsUnsupported);
 		}
-		if parts.quic() && !config.tls.root.is_empty() {
+		if parts.quic() && !tcp_tls && !config.tls.root.is_empty() {
 			#[cfg(not(feature = "quic"))]
 			return Err(Error::NoBackend("--listen-tls-root requires the quic feature"));
 		}
@@ -341,10 +346,7 @@ impl Server {
 			}
 			#[allow(unused_mut, reason = "only the stream listener features set it")]
 			let mut needed = cfg!(feature = "quic") && build_quic;
-			#[cfg(feature = "tcp")]
-			{
-				needed |= build_streams && config.tcp.bind.is_some() && config.tcp.tls == Some(true);
-			}
+			needed |= tcp_tls;
 			match (tls, needed) {
 				// Mirrors `validate_stream_only`: an identity no listener serves is refused.
 				// A streams-only caller owns QUIC elsewhere, which serves it.
@@ -359,7 +361,7 @@ impl Server {
 			}
 		};
 		#[cfg(feature = "_certs")]
-		if parts.quic() && !build_quic && tls.as_ref().is_some_and(crate::tls::Serve::client_auth) {
+		if parts.quic() && !build_quic && !tcp_tls && tls.as_ref().is_some_and(crate::tls::Serve::client_auth) {
 			return Err(Error::MtlsUnsupported);
 		}
 
@@ -1213,8 +1215,8 @@ struct TcpTls {
 
 #[cfg(all(feature = "tcp", feature = "_certs"))]
 impl TcpTls {
-	// qmux does not report peer certificates; keep token-only authentication while
-	// using the same certificate resolver as the QUIC listeners.
+	// The same certificate resolver and client-certificate policy as the QUIC
+	// listeners, so CA roots and pinned peers mean the same on `tls://`.
 	fn new(
 		_config: &crate::listen::Config,
 		versions: &moq_net::Versions,
@@ -1226,7 +1228,7 @@ impl TcpTls {
 			.map(|alpn| format!("{}{alpn}", qmux::Version::QMux01.prefix()).into_bytes())
 			.collect();
 		Ok(Self {
-			config: serve.anonymous(alpn)?,
+			config: serve.config(alpn)?,
 		})
 	}
 }
@@ -1473,9 +1475,16 @@ fn spawn_tcp_loop(
 			handshakes.spawn(crate::panic::isolate(async move {
 				match within(deadline, pending).await {
 					Ok((session, remote)) => {
+						// Set only on `tls://`: the SNI, and the client certificate its
+						// verifier already accepted.
+						let server_name = session.server_name().map(str::to_owned);
+						let identity = session
+							.peer_certificates()
+							.map(|chain| crate::tls::PeerIdentity::from_chain(chain.to_vec()));
 						let link = Link {
 							remote: Some(remote),
 							local,
+							server_name: server_name.clone(),
 							..Default::default()
 						};
 						stream_request(
@@ -1485,6 +1494,9 @@ fn spawn_tcp_loop(
 							Incoming {
 								transport: Transport::Tcp,
 								link,
+								// Like raw QUIC, the SNI is the only authority a `tls://` client offers.
+								authority: server_name,
+								identity,
 								deadline,
 								active,
 							},
@@ -1532,6 +1544,8 @@ fn spawn_unix_loop(
 							Incoming {
 								transport: Transport::Unix,
 								link: Link::default(),
+								authority: None,
+								identity: None,
 								deadline,
 								active,
 							},
@@ -1550,6 +1564,8 @@ fn spawn_unix_loop(
 struct Incoming {
 	transport: Transport,
 	link: Link,
+	authority: Option<String>,
+	identity: Option<crate::tls::PeerIdentity>,
 	deadline: Option<kio::clock::Instant>,
 	active: moq_net::server::Active,
 }
@@ -1565,6 +1581,8 @@ async fn stream_request(
 	let Incoming {
 		transport,
 		link,
+		authority,
+		identity,
 		deadline,
 		active,
 	} = incoming;
@@ -1573,8 +1591,8 @@ async fn stream_request(
 			let request = Request {
 				transport,
 				url: None,
-				authority: None,
-				identity: None,
+				authority,
+				identity,
 				link,
 				handshake: Box::new(request),
 				#[cfg(feature = "quic")]
@@ -1630,8 +1648,9 @@ pub struct Request {
 	transport: Transport,
 	/// The request URL for WebTransport/WebSocket. `None` for bindings whose path rides SETUP.
 	url: Option<Url>,
-	/// The authority the client dialed, when it offered one: the TLS SNI on raw QUIC, the CONNECT
-	/// authority on WebTransport. `None` on the URL-less stream bindings and on iroh.
+	/// The authority the client dialed, when it offered one: the TLS SNI on raw QUIC and
+	/// `tls://`, the CONNECT authority on WebTransport. `None` on the plaintext stream
+	/// bindings and on iroh.
 	authority: Option<String>,
 	/// The peer's validated mTLS identity, captured at the transport handshake (before
 	/// the MoQ SETUP), when the backend supports it.
@@ -1754,10 +1773,11 @@ impl Request {
 	}
 
 	/// The host authority the client dialed, or `None` when the client offered none or the
-	/// transport carries no host (iroh, stream bindings).
+	/// transport carries no host (iroh, plaintext stream bindings). On raw QUIC and
+	/// `tls://` it is the TLS SNI.
 	///
 	/// Reported as offered: rustls sends no SNI for an IP-literal dial (RFC 6066),
-	/// so the QUIC backend reports `None`.
+	/// so the QUIC and `tls://` listeners report `None`.
 	///
 	/// Not the moq-net IETF SETUP `Authority` parameter. Client-asserted and not authenticated,
 	/// so authorize on the token or [`Self::peer_identity`] rather than on this value.
@@ -1860,8 +1880,8 @@ impl Request {
 	/// The client certificate chain the peer presented, if any, validated
 	/// against a configured [`crate::tls::Listen::root`] during the handshake.
 	///
-	/// Captured at the transport handshake (before the SETUP). The QUIC backend supports mTLS;
-	/// other transports always return `None`. Use it to grant
+	/// Captured at the transport handshake (before the SETUP). The QUIC backend and the
+	/// `tls://` TCP listener support mTLS; other transports always return `None`. Use it to grant
 	/// elevated access or to close the session once the certificate expires (see
 	/// [`crate::tls::PeerIdentity::expiry`]).
 	pub fn peer_identity(&self) -> Option<crate::tls::PeerIdentity> {
@@ -1870,11 +1890,6 @@ impl Request {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 
@@ -2145,7 +2160,7 @@ mod tests {
 		tokio::time::pause();
 		task.abort();
 		let _ = task.await;
-		let closed = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+		let closed = kio::clock::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
 		assert!(matches!(closed, Ok(None)), "stalled handshake outlived its accept loop");
 	}
 
@@ -2175,7 +2190,7 @@ mod tests {
 		tokio::time::pause();
 		task.abort();
 		let _ = task.await;
-		let closed = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+		let closed = kio::clock::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
 		assert!(matches!(closed, Ok(None)), "stalled handshake outlived its accept loop");
 	}
 
@@ -2475,7 +2490,7 @@ mod tests {
 			server: moq_net::Server::new(),
 			timeout: Some(timeout),
 		};
-		let start = tokio::time::Instant::now();
+		let start = kio::clock::now();
 		let Err(err) = accept_request(
 			&setup.server,
 			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
@@ -2512,7 +2527,7 @@ mod tests {
 					.await;
 			}
 		});
-		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+		kio::clock::sleep(std::time::Duration::from_secs(1)).await;
 		client.abort();
 		let bytes = std::mem::take(&mut *recorder.written.lock().unwrap());
 		assert!(!bytes.is_empty(), "the client never wrote its SETUP");
@@ -2525,7 +2540,7 @@ mod tests {
 			server: moq_net::Server::new(),
 			timeout: Some(timeout),
 		};
-		let start = tokio::time::Instant::now();
+		let start = kio::clock::now();
 		let Ok((request, deadline)) = accept_request(
 			&setup.server,
 			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
@@ -2601,7 +2616,7 @@ mod tests {
 		tokio::spawn(moq_net::time::run(driver));
 		let _client = connect.await.unwrap();
 
-		tokio::time::sleep(timeout * 2).await;
+		kio::clock::sleep(timeout * 2).await;
 		assert!(
 			client.closed().now_or_never().is_none(),
 			"a completed handshake was closed at its deadline"
@@ -2637,7 +2652,7 @@ mod tests {
 			moq_net::time::run(driver).await
 		});
 
-		let request = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+		let request = kio::clock::timeout(std::time::Duration::from_secs(5), listener.accept())
 			.await
 			.expect("a stalled upgrade blocked the accept loop");
 		assert!(request.is_some());
@@ -2772,17 +2787,14 @@ mod tests {
 		// `serve` binds the socket; wait for it. Keep the last error, since a bind
 		// failure is the only clue to why it never showed up.
 		const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
-		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+		let deadline = kio::clock::now() + std::time::Duration::from_secs(5);
 		let mut delay = std::time::Duration::from_millis(1);
 		while let Err(err) = tokio::net::UnixStream::connect(&path).await {
-			assert!(
-				tokio::time::Instant::now() < deadline,
-				"unix listener never bound: {err}"
-			);
+			assert!(kio::clock::now() < deadline, "unix listener never bound: {err}");
 			// Bound to its own statement so the (non-Send) rng doesn't live across the
 			// await, which would make this future unspawnable.
 			let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
-			tokio::time::sleep(wait).await;
+			kio::clock::sleep(wait).await;
 			delay = (delay * 2).min(MAX_DELAY);
 		}
 
@@ -2796,14 +2808,14 @@ mod tests {
 			.init(Default::default())
 			.expect("client init")
 			.with_subscriber(subscriber);
-		let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
+		let session = kio::clock::timeout(TIMEOUT, client.connect(url).established())
 			.await
 			.expect("connect timeout")
 			.expect("connect");
 
 		// Without the server's publisher the session announces nothing, so this is
 		// where the regression shows up.
-		let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+		let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 			.await
 			.expect("announce timeout")
 			.expect("origin closed");
@@ -2817,12 +2829,12 @@ mod tests {
 			.subscribe(None)
 			.await
 			.expect("subscribe");
-		let mut group = tokio::time::timeout(TIMEOUT, track.recv_group())
+		let mut group = kio::clock::timeout(TIMEOUT, track.recv_group())
 			.await
 			.expect("recv group timeout")
 			.expect("recv group")
 			.expect("track closed early");
-		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.expect("read frame timeout")
 			.expect("read frame")
@@ -2918,15 +2930,21 @@ mod tests {
 		drop((session, connection));
 	}
 
-	/// A client CA or pinned peers on a stream-only server are refused: no QUIC
-	/// listener would verify them, and the stream listeners never ask for a client certificate.
+	/// A client CA or pinned peers on a stream-only server are refused unless a
+	/// `tls://` listener verifies them: the plaintext stream listeners never ask
+	/// for a client certificate.
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
-	async fn client_auth_without_a_quic_listener_is_rejected() {
-		type Set = fn(&mut crate::listen::Config);
+	async fn client_auth_without_a_tls_listener_is_rejected() {
+		let dir = tempfile::tempdir().unwrap();
+		let ca = dir.path().join("ca.pem");
+		let cert = rcgen::generate_simple_self_signed(["ca".to_string()]).unwrap().cert;
+		std::fs::write(&ca, cert.pem()).unwrap();
+
+		type Set = Box<dyn Fn(&mut crate::listen::Config)>;
 		let cases: [Set; 2] = [
-			|c| c.tls.root = vec!["ca.pem".into()],
-			|c| c.tls.peers = Some(crate::tls::Peers::new()),
+			Box::new(move |c| c.tls.root = vec![ca.clone()]),
+			Box::new(|c| c.tls.peers = Some(crate::tls::Peers::new())),
 		];
 		for set in cases {
 			let mut config = crate::listen::Config::default();
@@ -2938,7 +2956,17 @@ mod tests {
 				Err(Error::MtlsUnsupported)
 			));
 			// A worker group owning QUIC verifies it, so the streams alone accept it.
-			config.init_streams().expect("streams beside worker-owned QUIC");
+			config.clone().init_streams().expect("streams beside worker-owned QUIC");
+
+			// A `tls://` listener verifies it.
+			config.tcp.tls = Some(true);
+			config.tls.generate = vec!["localhost".into()];
+			#[cfg(feature = "_certs")]
+			config
+				.init(Default::default())
+				.expect("tls:// verifies client certificates");
+			#[cfg(not(feature = "_certs"))]
+			assert!(matches!(config.init(Default::default()), Err(Error::NoBackend(_))));
 		}
 	}
 
