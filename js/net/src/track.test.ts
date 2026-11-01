@@ -1997,10 +1997,10 @@ test("createGroup rejects a duplicate live sequence", async () => {
 // leaving is what releases it: widening after close() finds nothing.
 test("closing the subscriber releases a group retained across a clean close", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ maxDelay: Milli(5000) });
 
 	track.withRange({ end: { excluded: 1 } });
-	producer.createGroup(1);
+	producer.createGroup(1).finish();
 
 	const pending = track.recvGroup();
 	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
