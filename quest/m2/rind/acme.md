@@ -26,4 +26,5 @@ Public API: none; config unchanged. Wire: none.
 
 ## Required
 
+- [rind runs on a Pi 4's aarch64 CPU](/quest/m2/rind/aarch64.md) - the rind release this switches to
 - [rind-instant-acme is on crates.io](/quest/m2/rind/instant-acme.md) - the adapter this uses, waiting on instant-acme 0.9

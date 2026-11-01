@@ -19,4 +19,19 @@ Decided with the maintainer on 2026-10-26; see the
 - moq-hls's segment and rendition names hash SHA-256 through rind instead of
   RustCrypto `sha2`, with identical names.
 
-Public API: none. Wire: none.
+Decided 2026-10-31 (maintainer):
+
+- Like every area, this waits on rind's aarch64 path for CPUs without the
+  crypto extensions, so moq-cli never stops starting on a Pi 4, CM4, or
+  Zero 2 W running a 64-bit OS.
+- moq-hls returns an unsupported-CPU error from the constructors that first
+  need rind (such as `Broadcaster::new` and `Server::new`), rather than
+  panicking later or relying on a documented startup check. Like moq-e2ee,
+  the error carries rind's message, not rind's type, per `rs/AGENTS.md`.
+
+Public API: moq-hls constructors that need rind become fallible (breaking;
+handle the new error). Wire: none.
+
+## Required
+
+- [rind runs on a Pi 4's aarch64 CPU](/quest/m2/rind/aarch64.md) - the rind release this switches to
