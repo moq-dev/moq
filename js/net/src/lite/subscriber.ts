@@ -1813,6 +1813,7 @@ export class Subscriber {
 			timed: !!this.#subscribes.get(id)?.timescale,
 			compressed: this.#subscribes.get(id)?.compress ?? false,
 		}));
+		if (!dg) return;
 
 		const entry = this.#subscribes.get(dg.subscribe);
 		if (!entry) return; // Unknown or already-closed subscription.
