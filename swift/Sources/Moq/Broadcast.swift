@@ -9,6 +9,11 @@ public final class BroadcastConsumer: Sendable {
         self.ffi = ffi
     }
 
+    /// Wait until the broadcast ends: its publisher closed it, or every producer left.
+    public func closed() async throws {
+        try await ffi.closed()
+    }
+
     /// Subscribe to a track by name, delivering raw frame payloads with no codec
     /// or container parsing. `subscription` tunes delivery priority, group range, and
     /// staleness; omit for defaults.

@@ -480,7 +480,7 @@ export class Publisher {
 	async #runSubscribe(msg: Subscribe, request: RequestStream) {
 		this.#pinned(msg.epoch);
 		// Draft-22 replaced joining FETCH with fills.
-		const joinable = !Filter.isDraft22(this.#session.version);
+		const joinable = !Filter.isDraft20(this.#session.version);
 		if (joinable) this.#setJoin(msg.requestId, "pending");
 		const key = JSON.stringify([msg.trackNamespace, msg.trackName]);
 		const claimed = this.#session.version === Version.DRAFT_18;
@@ -757,7 +757,7 @@ export class Publisher {
 			// group with no gap and no overlap.
 			const edge = liveEdge(track);
 			const fill =
-				msg.fill && msg.forward && Filter.isDraft22(version)
+				msg.fill && msg.forward && Filter.isDraft20(version)
 					? fillRange(msg.fill, msg.filter, edge.largest)
 					: undefined;
 			const requested = subscribeRange(msg, edge, version);
@@ -798,7 +798,7 @@ export class Publisher {
 			// Draft-22 replaced joining FETCH with fills. Older drafts save the Largest Object the
 			// subscription starts after, again on every resume, so a joining FETCH ends exactly
 			// where the subscription begins. Saved before the answer names it.
-			if (!published && !Filter.isDraft22(version)) {
+			if (!published && !Filter.isDraft20(version)) {
 				this.#setJoin(
 					msg.requestId,
 					msg.filter.kind === "nextObject"
@@ -918,7 +918,7 @@ export class Publisher {
 					const snapshot = liveEdge(track);
 					this.#applyPublished(msg, params);
 					const selected =
-						msg.fill && Filter.isDraft22(version)
+						msg.fill && Filter.isDraft20(version)
 							? fillRange(msg.fill, msg.filter, snapshot.largest)
 							: undefined;
 					if (params.subscriptionFilter !== undefined || selected) {
@@ -2633,7 +2633,7 @@ export class Publisher {
 				propertiesWanted: defaults.includeProperties ?? true,
 			});
 			const parameters = new Parameters();
-			if (Filter.isDraft22(version)) {
+			if (Filter.isDraft20(version)) {
 				parameters.subscriberPriority = subscription.subscriberPriority;
 				parameters.groupOrder =
 					subscription.groupOrder === "ascending" ? GroupOrder.Ascending : GroupOrder.Descending;
@@ -2690,7 +2690,7 @@ export class Publisher {
 				return;
 			}
 			this.#applyPublished(subscription, params);
-			let forward = !Filter.isDraft22(version) && params.forward !== false;
+			let forward = !Filter.isDraft20(version) && params.forward !== false;
 			for (;;) {
 				if (!this.#gate.allows(namespace) || unlisted.peek() !== undefined) {
 					await Message.write(
@@ -3076,7 +3076,7 @@ export class Publisher {
 			const groupEnd = BigInt(last.end);
 			const until = fetchSlice(range, last.sequence).until;
 			let endLocation: Location;
-			if (Filter.isDraft22(version)) {
+			if (Filter.isDraft20(version)) {
 				// Draft-22's End Location is inclusive. An empty answer still covers its start.
 				const object =
 					until === undefined
@@ -3579,7 +3579,7 @@ function liveEdge(track: TrackSubscriber): LiveEdge {
  * receives.
  */
 function subscribeRange(msg: Subscribe, edge: LiveEdge, version: IetfVersion): ServeRange {
-	if (!Filter.isDraft22(version) && msg.filter.kind !== "nextObject") {
+	if (!Filter.isDraft20(version) && msg.filter.kind !== "nextObject") {
 		if (msg.filter.kind !== "unfiltered") {
 			console.warn(`filter not supported before draft-22, ignoring: ${msg.filter.kind}`);
 		}

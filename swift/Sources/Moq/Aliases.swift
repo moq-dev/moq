@@ -115,6 +115,9 @@ public typealias ProtocolKind = MoqFFI.MoqProtocolKind
 /// A protocol failure: scope, verbatim wire code, kind, and a diagnostic message.
 public typealias ProtocolError = MoqFFI.MoqProtocolError
 
+/// A location within a track: a group sequence and a frame index in it.
+public typealias Position = MoqFFI.MoqPosition
+
 // Nested rather than top-level: a module-level `Range` would shadow `Swift.Range`
 // in every file that imports Moq.
 extension Subscription {
@@ -127,7 +130,7 @@ extension Subscription {
     public typealias Order = MoqFFI.MoqOrder
 
     /// moq-net's defaults, whose `maxDelay` of 0 skips a superseded group at once. A `nil`
-    /// subscription means the same; copy this one to change a field. A `Subscription()`
-    /// leaves `maxDelay` `nil`, which sets no subscriber limit.
+    /// subscription means the same; copy this one to change a field. A `Subscription(...)`
+    /// must name `maxDelay`, where `nil` sets no subscriber limit.
     public static var `default`: Subscription { moqSubscriptionDefaults() }
 }
