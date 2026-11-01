@@ -51,7 +51,10 @@ lint *args:
     cargo fmt --all --check
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --no-deps "$@"
     cargo shear
-    cargo sort --workspace --check --no-format
+    # The workspace-hack's table order is `cargo hakari`'s, which `cargo sort` disagrees with.
+    cargo sort --check --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
+    cargo hakari generate --diff
+    python3 sh/rs/hakari.py
 
 # Auto-fix clippy/format/shear/sort.
 [positional-arguments]
@@ -59,7 +62,8 @@ fix *args:
     bash sh/local.sh cargo clippy --locked --fix --allow-staged --allow-dirty --all-targets "$@"
     cargo fmt --all
     cargo shear --fix
-    cargo sort --workspace --no-format
+    cargo hakari generate
+    cargo sort --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
 
 # Like `check`, but only the crates in a changed-file list plus their dependents.
 check-changed $LIST:
@@ -211,6 +215,10 @@ relay-minimal:
 # Compile and run moq-c's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
 c-tests:
     sh/rs/c-tests.sh
+
+# The workspace-hack would supply third-party features a crate forgets to
+# declare, so CI runs this after `cargo hakari disable && cargo update
+# --workspace`; do the same locally, then `git checkout Cargo.lock rs/workspace-hack`.
 
 # Compile the full feature matrix, including isolated combinations and their tests.
 features:

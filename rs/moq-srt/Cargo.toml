@@ -31,6 +31,7 @@ hang = { path = "../hang" }
 kio = { workspace = true, features = ["runtime"] }
 srt-protocol = "0.4"
 tracing-subscriber = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 [lints]
 workspace = true

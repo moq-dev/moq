@@ -139,6 +139,7 @@ criterion = { package = "bench-harness", path = "../bench-harness" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "bus"

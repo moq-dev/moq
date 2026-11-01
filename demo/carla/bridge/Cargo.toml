@@ -31,6 +31,9 @@ parking_lot = "0.12"
 pollster = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+workspace-hack = { path = "../../../rs/workspace-hack" }
+
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # The stand-in producer: a native Vulkan renderer that hands the bridge
 # exportable slots exactly the way the CARLA plugin does.

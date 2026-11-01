@@ -55,6 +55,7 @@ futures = "0.3"
 kio = { path = ".", features = ["manual", "sim", "serde"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util", "time"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "tasks"

@@ -158,6 +158,8 @@
             cargo-semver-checks
             cargo-deny
             cargo-bloat
+            # The workspace-hack that gives every build one feature set per dependency.
+            cargo-hakari
             cargo-nextest
             cargo-codspeed
             # Source-based test coverage (`just rs coverage`).

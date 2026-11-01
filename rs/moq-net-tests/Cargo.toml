@@ -19,6 +19,7 @@ moq-json = { path = "../moq-json" }
 moq-net = { path = "../moq-net", features = ["fuzz"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [lints]
 workspace = true
