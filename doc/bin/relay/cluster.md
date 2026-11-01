@@ -134,9 +134,11 @@ topology check; whatever generates the peer list applies the layout's rules.
 A link inside a region is rarely congested, so it can skip QUIC: a `tls://`
 peer URL dials qmux over TLS on TCP, verified with the same `connect.tls`
 settings as any other dial. The accepting relay serves it from its TCP
-listener with TLS on. That listener asks for no client certificate, so a peer
-on it authenticates with a token (`cluster.token`, `token`, or `?jwt=`), not
-mTLS.
+listener with TLS on, or from its HTTPS listener, which serves `tls://` with
+the listen certificate. Both apply the same client-certificate policy as the
+QUIC listener, so a peer on them authenticates with its `connect.tls`
+certificate against `listen.tls.root`, or with a token (`cluster.token`,
+`token`, or `?jwt=`).
 
 ```toml
 # core.toml

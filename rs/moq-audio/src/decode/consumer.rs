@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_mux::container::Read as Encoded;
 use std::time::Duration;
 

@@ -171,13 +171,13 @@ moq --connect https://relay.example.com/anon --broadcast camera.hang \
 ## Export
 
 The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports pick renditions with
-`--video-name`, `--audio-name`, `--video-codec`, `--audio-codec`, `--no-video`,
-and `--no-audio`. `ts`, `archive`, and the gateways export everything and
-refuse these flags.
+`--video-name`, `--audio-name`, `--video-codec`, `--audio-codec`, `--video <on|off>`,
+and `--audio <on|off>` (both default to `on`). `ts`, `archive`, and the gateways
+export everything and refuse these flags.
 
 ```bash
-moq ... export --no-video fmp4 > audio.mp4
-moq ... export --video-name hd --no-audio mkv > hd.mkv
+moq ... export --video off fmp4 > audio.mp4
+moq ... export --video-name hd --audio off mkv > hd.mkv
 ```
 
 Every export skips a disabled rendition (catalog `enabled: false`). `h264` and
@@ -210,8 +210,8 @@ error names the `--delay` it needs.
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
-moq ... play --no-video             # audio only, without a window
-moq ... play --no-video --metrics play.ndjson   # log what the speaker played
+moq ... play --video off            # audio only, without a window
+moq ... play --video off --metrics play.ndjson   # log what the speaker played
 ```
 
 Decodes H.264, H.265, and AV1 video with the platform hardware decoder where
@@ -226,7 +226,7 @@ default, `auto`, sizes the buffer to how unevenly audio arrives, with the same
 [algorithm](/concept/audio-jitter) as the browser player. A duration fixes the
 delay and is also how long a stalled group is waited on before it is skipped.
 Each role follows the catalog, switching rendition when the publisher retires
-the one playing. With `--no-video`, `--metrics <PATH>` writes a JSON line every
+the one playing. With `--video off`, `--metrics <PATH>` writes a JSON line every
 250 ms with the playhead, the delay, and every gap and stall the speaker hit, in
 the schema the
 [audio quality harness](https://github.com/moq-dev/moq/tree/main/test/audio-quality)
@@ -258,19 +258,21 @@ once.
 ```bash
 moq --connect https://relay.example.com/anon --broadcast cam.hang import capture
 moq ... import capture --display --system-audio          # share a screen with its sound (macOS)
-moq ... import capture --window 39193 --no-audio         # one window (macOS, Windows, X11)
-moq ... import capture --window --no-audio               # system window picker (Linux Portal)
+moq ... import capture --window 39193 --audio off        # one window (macOS, Windows, X11)
+moq ... import capture --window --audio off              # system window picker (Linux Portal)
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
-moq ... import capture --on-demand                       # capture only while someone watches
+moq ... import capture --video demand --audio demand     # capture only while someone watches
 ```
 
 Video goes through the platform hardware encoder, with an H.264 software
 fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
 backends. The camera and microphone stay open and encode while publishing,
-so a late subscriber can fetch the recent past. `--on-demand` captures and
-encodes each source only while its track has a subscriber, and leaves nothing
-to fetch from before the first viewer; video still opens its source once at
-startup to probe the mode it negotiates. `--bitrate` is a ceiling that
+so a late subscriber can fetch the recent past. Choose each medium with
+`--video <on|demand|off>` and `--audio <on|demand|off>`, both defaulting to `on`.
+`off` publishes no track of that medium. `demand` captures and encodes only
+while that track has a subscriber, and leaves nothing to fetch from before
+the first viewer; video still opens its source once at startup to probe the
+mode it negotiates. `--bitrate` is a ceiling that
 backends with live bitrate control lower to fit the connection.
 `moq devices` prints every source id. On Windows, `display:N` is an
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a

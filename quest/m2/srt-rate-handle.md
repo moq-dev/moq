@@ -6,8 +6,9 @@ An embedder can give each `moq-srt` connection a bitrate cap through a rate
 handle that stays valid across live rate updates. An SRT pull never sends
 more media payload than the cap plus a burst, retransmits included, and an
 SRT publish past the cap plus burst is closed with a reason the embedder can
-log. The cap counts payload, like the [QUIC caps](/quest/m2/rate-quic.md),
-but which payload depends on who muxes. On a pull, it is media payload: TS,
+log. The cap counts payload, as the [QUIC](/quest/m2/rate-quic.md) receive
+cap does (its send cap counts whole ack-eliciting packets, QUIC overhead
+included), but which payload depends on who muxes. On a pull, it is media payload: TS,
 SRT, and UDP overhead sits outside it, because moq-srt picks the muxing and
 packet sizes, so the overhead per payload byte is fixed and a viewer can't
 inflate it. On a publish, it is the MPEG-TS payload the SRT socket yields,
