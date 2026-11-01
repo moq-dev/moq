@@ -3791,7 +3791,10 @@ impl Connection {
 	fn set_peer_params(&mut self, params: TransportParameters) {
 		self.streams.set_params(&params);
 		self.idle_timeout = negotiate_max_idle_timeout(self.config.max_idle_timeout(), Some(params.max_idle_timeout));
-		self.keep_alive = transport::keep_alive_interval(self.config.keep_alive, self.idle_timeout);
+		self.keep_alive = Some(transport::keep_alive_interval(
+			self.config.keep_alive,
+			self.idle_timeout,
+		));
 		trace!(
 			"negotiated max idle timeout {:?}, keep-alive {:?}",
 			self.idle_timeout, self.keep_alive
