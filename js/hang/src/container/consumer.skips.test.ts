@@ -54,10 +54,10 @@ for (const count of [1, 16, 256]) {
 test("Consumer measures each skip's span over every group left, not just the new oldest", async () => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const track = new Track.Producer("tone");
-	const maxDelay = new Signal(Milli(30_000));
+	const delay = new Signal<Delay>({ max: Milli(30_000) });
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay,
+		delay,
 	});
 	const write = (sequence: number, timestamp: number) => {
 		const group = track.createGroup(sequence);
@@ -76,7 +76,9 @@ test("Consumer measures each skip's span over every group left, not just the new
 		])
 			write(sequence, timestamp);
 		await buffered(12);
-		maxDelay.set(Milli(5));
+		// Reading the first frame warms the reader, so the age skip runs on the max delay alone.
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0 });
+		delay.set({ max: Milli(5) });
 		write(4, 13_000);
 		await buffered(13);
 		expect(warn).toHaveBeenLastCalledWith("skipping slow groups: track=tone 0 -> 3 count=3");
@@ -84,6 +86,8 @@ test("Consumer measures each skip's span over every group left, not just the new
 			{ start: Milli(12), end: Milli(12) },
 			{ start: Milli(13), end: Milli(13) },
 		]);
+		// The skipped groups held media past the first frame, so their span reads as a gap first.
+		expect(await consumer.next()).toMatchObject({ kind: "gap", timestamp: 0, duration: 12_000 });
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 3 });
 	} finally {
 		consumer.close();
