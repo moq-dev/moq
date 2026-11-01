@@ -14,6 +14,9 @@ interface ConfigType {
 	 * 32 bytes from a cryptographically secure random generator, or a nonextractable HKDF
 	 * `CryptoKey` imported from them with `deriveBits` usage. Bytes are copied into a
 	 * nonextractable key at construction; the caller may wipe its buffer afterwards.
+	 * WebCrypto cannot report a nonextractable key's length, so a caller passing a
+	 * `CryptoKey` owns the 32-byte rule: any other length derives different keys and fails
+	 * to decrypt against other implementations.
 	 */
 	secret: Uint8Array | CryptoKey;
 }
@@ -54,7 +57,10 @@ export class Credential {
 		return Path.from(encode(material));
 	}
 
-	/** Mint a fresh epoch and a producing generation. */
+	/**
+	 * Mint a fresh epoch and a producing generation, owned by this publisher instance alone.
+	 * A cloned process image or a copied generation must mint its own.
+	 */
 	produce(): Generation.Producer {
 		return new Generation.Producer(this);
 	}

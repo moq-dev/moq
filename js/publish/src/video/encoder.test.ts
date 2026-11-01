@@ -32,6 +32,10 @@ class FakeVideoEncoder {
 	// like Chrome and Firefox.
 	static report: (codec: string) => string | undefined = (codec) => codec;
 
+	// Whether the encoder emits a configured codec's chunks out of presentation order, as Firefox's
+	// software H.264 does for High and Main.
+	static reorders: (codec: string) => boolean = () => false;
+
 	state: CodecState = "unconfigured";
 	#output: VideoEncoderInit["output"];
 	#codec?: string;
@@ -71,6 +75,10 @@ class FakeVideoEncoder {
 		const codec = this.#codec && FakeVideoEncoder.report(this.#codec);
 		const chunk = { type: "key", timestamp: 0, byteLength: 1, copyTo: () => {} };
 		this.#output(chunk as never, (codec ? { decoderConfig: { codec } } : {}) as never);
+		if (this.#codec && FakeVideoEncoder.reorders(this.#codec)) {
+			for (const timestamp of [66_666, 33_333])
+				this.#output({ ...chunk, type: "delta", timestamp } as never, {} as never);
+		}
 	}
 
 	close(): void {
@@ -97,6 +105,7 @@ function installFakeVideoEncoder() {
 	return {
 		[Symbol.dispose]() {
 			FakeVideoEncoder.report = (codec) => codec;
+			FakeVideoEncoder.reorders = () => false;
 			if (original) {
 				Object.defineProperty(globalThis, "VideoEncoder", original);
 			} else {
@@ -390,6 +399,25 @@ test("hardware encoding takes priority over software H.264", async () => {
 	} finally {
 		encoder.close();
 		probe.mockRestore();
+	}
+});
+
+test("an encoder that reorders frames is skipped for the next codec", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	FakeVideoEncoder.reorders = (codec) => codec === "avc1.640028" || codec === "avc1.4D401F";
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1280, height: 720 }) },
+	};
+	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
+	try {
+		await settle();
+		expect(encoder.out.resolved.peek()?.codec).toBe("avc1.42E01E");
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("avc1.640028"));
+	} finally {
+		encoder.close();
+		warn.mockRestore();
 	}
 });
 
@@ -1199,7 +1227,6 @@ test("an unwatched rendition reserves nothing and encodes at its configured bitr
 test("a failed video encoder disables only its rendition and recovers on a fresh track", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockResolvedValue({ supported: true });
-	using _now = spyOn(performance, "now").mockReturnValue(0);
 	const flush = async () => {
 		for (let i = 0; i < 10; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
 	};
@@ -1724,7 +1751,6 @@ test("a refused first ceiling recovers at a smaller size", async () => {
 test("ceiling growth updates the served track in place", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockResolvedValue({ supported: true });
-	using _now = spyOn(performance, "now").mockReturnValue(0);
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("ceiling.hang") });
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },

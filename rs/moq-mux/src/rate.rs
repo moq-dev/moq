@@ -12,7 +12,7 @@ use std::{
 	time::Duration,
 };
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use moq_net::bandwidth;
 
@@ -116,11 +116,11 @@ pub enum Target {
 /// ```
 /// # use moq_mux::rate::{Control, Policy, Target};
 /// # use moq_net::bandwidth;
-/// # use moq_clock::Instant;
+/// # use kio::clock::Instant;
 /// let mut control = Control::new(Policy::new(bandwidth::Rate::from_mbps(4)));
 /// // A 2 Mbps estimate takes the 4 Mbps target down to what the link will carry.
 /// assert_eq!(
-///     control.update(Some(bandwidth::Rate::from_mbps(2)), moq_clock::now()),
+///     control.update(Some(bandwidth::Rate::from_mbps(2)), kio::clock::now()),
 ///     Some(Target::Enabled(bandwidth::Rate::from_mbps(2)))
 /// );
 ///
@@ -131,7 +131,7 @@ pub enum Target {
 /// let mut control = Control::new(policy);
 /// control.set_probed(true);
 /// assert_eq!(
-///     control.update(Some(bandwidth::Rate::from_mbps(3)), moq_clock::now()),
+///     control.update(Some(bandwidth::Rate::from_mbps(3)), kio::clock::now()),
 ///     Some(Target::Disabled)
 /// );
 /// ```
@@ -428,7 +428,7 @@ pub struct Follower {
 	grant: bandwidth::Consumer,
 	control: Control,
 	/// Armed at the control's deadline, created on first use.
-	timer: Option<moq_clock::Sleep>,
+	timer: Option<kio::clock::Sleep>,
 	/// Feed the current grant on the next poll, after [`set_policy`](Self::set_policy)
 	/// changed it.
 	refeed: bool,
@@ -478,7 +478,7 @@ impl Follower {
 				self.grant.peek()
 			};
 			self.control.set_probed(self.grant.probed());
-			if let Some(target) = self.control.update(estimate, moq_clock::now()) {
+			if let Some(target) = self.control.update(estimate, kio::clock::now()) {
 				return Poll::Ready(Ok(target));
 			}
 		}
@@ -496,7 +496,7 @@ impl Follower {
 	/// step from now, so a quiet grant still retries and a sender that keeps failing
 	/// is not hammered. Does nothing once another poll has fed the grant.
 	pub fn failed(&mut self) {
-		self.control.failed(moq_clock::now());
+		self.control.failed(kio::clock::now());
 	}
 
 	fn poll_deadline(&mut self, waiter: &kio::Waiter) -> Poll<()> {
@@ -504,7 +504,7 @@ impl Follower {
 			self.timer = None;
 			return Poll::Pending;
 		};
-		let timer = self.timer.get_or_insert_with(|| moq_clock::sleep_until(at));
+		let timer = self.timer.get_or_insert_with(|| kio::clock::sleep_until(at));
 		if timer.deadline() != at {
 			timer.reset(at);
 		}
@@ -550,7 +550,7 @@ mod tests {
 		let mut control = control();
 		// A 2 Mbps pipe: take the target down to it at once, no ramp, no waiting.
 		assert_eq!(
-			control.update(Some(bps(2_000_000)), moq_clock::now()),
+			control.update(Some(bps(2_000_000)), kio::clock::now()),
 			Some(on(bps(2_000_000)))
 		);
 		assert_eq!(control.target(), on(bps(2_000_000)));
@@ -559,7 +559,7 @@ mod tests {
 	#[test]
 	fn missing_estimate_holds_the_target() {
 		let mut control = control();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		control.update(Some(bps(2_000_000)), now).unwrap();
 
 		// Losing the estimate (disconnected) is not evidence the uplink is
@@ -572,7 +572,7 @@ mod tests {
 	fn estimate_never_raises_above_max() {
 		let mut control = control();
 		// A wildly optimistic estimate is not licence to exceed what was configured.
-		assert_eq!(control.update(Some(bps(100_000_000)), moq_clock::now()), None);
+		assert_eq!(control.update(Some(bps(100_000_000)), kio::clock::now()), None);
 		assert_eq!(control.target(), on(bps(4_000_000)));
 	}
 
@@ -580,14 +580,14 @@ mod tests {
 	fn target_never_falls_below_min() {
 		let mut control = control();
 		// A near-dead uplink floors at min (max/10) rather than chasing to zero.
-		assert_eq!(control.update(Some(bps(1)), moq_clock::now()), Some(on(bps(400_000))));
+		assert_eq!(control.update(Some(bps(1)), kio::clock::now()), Some(on(bps(400_000))));
 		assert_eq!(control.target(), on(bps(400_000)));
 	}
 
 	#[test]
 	fn raise_is_ramp_limited() {
 		let mut control = control();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap(); // target 1M
 
 		// The pipe reopens to 4 Mbps. One second later the default 25%/s ramp
@@ -606,7 +606,7 @@ mod tests {
 	#[test]
 	fn suppressed_raises_do_not_starve_the_ramp() {
 		let mut control = control();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap(); // target 1M
 
 		// Tick at 100ms: each tick alone is under the 5% threshold.
@@ -632,7 +632,7 @@ mod tests {
 	#[test]
 	fn a_raise_reaching_the_ceiling_beats_hysteresis() {
 		let mut control = control();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap();
 
 		// Walk up until it settles, then confirm where it settled.
@@ -658,7 +658,7 @@ mod tests {
 	#[test]
 	fn upward_jitter_stays_inside_the_deadband() {
 		let mut control = control();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		control.update(Some(bps(2_000_000)), start).unwrap(); // target 2M, well under the 4M ceiling
 
 		// A 0.5% rise: inside the 5% deadband, and nowhere near the ceiling.
@@ -690,7 +690,7 @@ mod tests {
 	#[test]
 	fn small_moves_are_suppressed() {
 		let mut control = control();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		control.update(Some(bps(2_000_000)), now).unwrap(); // target 2M
 
 		// 2% under the current target: inside the 5% deadband, so no reconfigure.
@@ -712,7 +712,7 @@ mod tests {
 		let mut control = Control::new(policy);
 
 		assert_eq!(control.target(), on(bps(1_000_000)));
-		assert_eq!(control.update(Some(bps(2_000_000)), moq_clock::now()), None);
+		assert_eq!(control.update(Some(bps(2_000_000)), kio::clock::now()), None);
 		assert_eq!(control.target(), on(bps(1_000_000)));
 	}
 
@@ -739,7 +739,7 @@ mod tests {
 	#[test]
 	fn a_quiet_grant_recovers_on_deadlines() {
 		let mut control = control();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap();
 		assert_eq!(control.deadline(), None, "a drop lands at once");
 
@@ -764,7 +764,7 @@ mod tests {
 	/// band could leave a deadline that applies nothing and spins its caller.
 	#[test]
 	fn every_deadline_applies_a_change() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		for max in [15, 20, 21, 999, 1_000_003, 4_000_000, 1 << 50] {
 			for floor in [1, max / 10, max / 3, max - max / 25] {
 				let mut control = Control::new(Policy::new(bps(max)));
@@ -781,7 +781,7 @@ mod tests {
 	#[test]
 	fn reaching_the_estimate_clears_the_deadline() {
 		let mut control = control();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap();
 		assert_eq!(
 			control.update(Some(bps(1_100_000)), start + Duration::from_secs(1)),
@@ -795,7 +795,7 @@ mod tests {
 	#[test]
 	fn a_climb_below_the_ceiling_settles_in_the_deadband() {
 		let mut control = control();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap();
 		control
 			.update(Some(bps(2_000_000)), start + Duration::from_secs(1))
@@ -811,7 +811,7 @@ mod tests {
 	/// not scheduled, whether it is all of the raise or what one step leaves over.
 	#[test]
 	fn a_raise_inside_the_deadband_is_not_scheduled() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut whole = control();
 		whole.update(Some(bps(2_000_000)), start).unwrap();
 		assert_eq!(whole.update(Some(bps(2_050_000)), start + Duration::from_secs(1)), None);
@@ -830,7 +830,7 @@ mod tests {
 	/// Losing the estimate or a drop cancels a scheduled raise.
 	#[test]
 	fn a_missing_estimate_or_a_drop_clears_the_deadline() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let scheduled = || {
 			let mut control = control();
 			control.update(Some(bps(1_000_000)), start).unwrap();
@@ -858,7 +858,7 @@ mod tests {
 	#[test]
 	fn a_failed_raise_is_retried() {
 		let mut control = control();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap();
 		control
 			.update(Some(bps(4_000_000)), start + Duration::from_secs(1))
@@ -889,7 +889,7 @@ mod tests {
 	#[test]
 	fn a_failed_drop_is_retried() {
 		let mut control = control();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap();
 		control.failed(start);
 		assert_eq!(control.target(), on(bps(4_000_000)));
@@ -905,7 +905,7 @@ mod tests {
 	#[test]
 	fn a_failure_after_no_change_does_nothing() {
 		let mut control = control();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		control.update(Some(bps(2_000_000)), start).unwrap();
 		assert_eq!(
 			control.update(Some(bps(1_960_000)), start + Duration::from_secs(1)),
@@ -932,7 +932,7 @@ mod tests {
 		let mut applied = Vec::new();
 		let mut refused = false;
 		// A minute without a wake is far past anything the ramp still needs.
-		while let Ok(target) = moq_clock::timeout(Duration::from_secs(60), follower.next()).await {
+		while let Ok(target) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
 			let Target::Enabled(target) = target.unwrap() else {
 				panic!("a policy without a lower rendition disabled the sender")
 			};
@@ -962,7 +962,7 @@ mod tests {
 		// The 3 Mbps grant no longer fits under the new 2 Mbps ceiling, which is where a
 		// new policy starts, so nothing moves until the grant does.
 		assert!(
-			moq_clock::timeout(Duration::from_secs(60), follower.next())
+			kio::clock::timeout(Duration::from_secs(60), follower.next())
 				.await
 				.is_err()
 		);
@@ -971,7 +971,7 @@ mod tests {
 		assert_eq!(follower.next().await.unwrap(), on(bps(3_000_000)));
 		follower.set_policy(Policy::new(bps(4_000_000)));
 		assert!(
-			moq_clock::timeout(Duration::from_secs(60), follower.next())
+			kio::clock::timeout(Duration::from_secs(60), follower.next())
 				.await
 				.is_err()
 		);
@@ -986,7 +986,7 @@ mod tests {
 		let mut follower = Follower::new(grant.consume(), Policy::new(bps(2_000_000)));
 		grant.set(Some(bps(2_000_000))).unwrap();
 		assert!(
-			moq_clock::timeout(Duration::from_secs(60), follower.next())
+			kio::clock::timeout(Duration::from_secs(60), follower.next())
 				.await
 				.is_err(),
 			"settled at the 2 Mbps ceiling"
@@ -1012,7 +1012,7 @@ mod tests {
 		follower.set_policy(policy);
 
 		let mut applied = Vec::new();
-		while let Ok(target) = moq_clock::timeout(Duration::from_secs(60), follower.next()).await {
+		while let Ok(target) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
 			applied.push(target.unwrap());
 		}
 		assert_eq!(applied.last(), Some(&on(bps(4_000_000))), "{applied:?}");
@@ -1052,7 +1052,7 @@ mod tests {
 	#[test]
 	fn a_rung_disables_below_its_boundary() {
 		let mut rung = rung();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 
 		// Squeezed, but still inside its band: it adapts like any sender.
 		assert_eq!(rung.update(Some(bps(3_500_000)), start), Some(on(bps(3_500_000))));
@@ -1069,7 +1069,7 @@ mod tests {
 	fn the_lowest_rung_never_disables() {
 		let mut lowest = Control::new(Policy::new(bps(350_000)));
 		lowest.set_probed(true);
-		assert_eq!(lowest.update(Some(bps(1)), moq_clock::now()), Some(on(bps(35_000))));
+		assert_eq!(lowest.update(Some(bps(1)), kio::clock::now()), Some(on(bps(35_000))));
 	}
 
 	/// Without a session probing for it, a stopped rendition could never see the estimate
@@ -1079,7 +1079,7 @@ mod tests {
 		let mut rung = rung();
 		rung.set_probed(false);
 		assert_eq!(
-			rung.update(Some(bps(1_000_000)), moq_clock::now()),
+			rung.update(Some(bps(1_000_000)), kio::clock::now()),
 			Some(on(bps(1_000_000)))
 		);
 	}
@@ -1089,7 +1089,7 @@ mod tests {
 	#[test]
 	fn a_disabled_rung_resumes_when_probing_stops() {
 		let mut rung = rung();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		assert_eq!(rung.update(Some(bps(1_000_000)), start), Some(Target::Disabled));
 
 		rung.set_probed(false);
@@ -1102,7 +1102,7 @@ mod tests {
 	#[test]
 	fn a_rung_resumes_past_the_hysteresis_and_ramps() {
 		let mut rung = rung();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		assert_eq!(rung.update(Some(bps(3_000_000)), start), Some(Target::Disabled));
 
 		// Back over the boundary, but not by the 5% hysteresis: stay off.
@@ -1125,7 +1125,7 @@ mod tests {
 	#[test]
 	fn jitter_at_the_boundary_does_not_flap() {
 		let mut rung = rung();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		rung.update(Some(bps(3_400_000)), start).unwrap();
 
 		// About 3% either side of the boundary, every 100ms for 10s.
@@ -1149,7 +1149,7 @@ mod tests {
 	#[test]
 	fn a_missing_estimate_holds_a_disabled_rung() {
 		let mut rung = rung();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		rung.update(Some(bps(1_000_000)), now).unwrap();
 		assert_eq!(rung.update(None, now + Duration::from_secs(10)), None);
 		assert_eq!(rung.target(), Target::Disabled);
@@ -1163,7 +1163,7 @@ mod tests {
 		policy.lower = Some(bps(950_000));
 		let mut rung = Control::new(policy);
 		rung.set_probed(true);
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		assert_eq!(rung.update(Some(bps(500_000)), now), Some(Target::Disabled));
 		assert_eq!(
 			rung.update(Some(bps(10_000_000)), now + Duration::from_secs(1)),
@@ -1178,7 +1178,7 @@ mod tests {
 		policy.lower = Some(bps(1_000_000));
 		let mut rung = Control::new(policy);
 		rung.set_probed(true);
-		assert_eq!(rung.update(Some(bps(1)), moq_clock::now()), Some(on(bps(100_000))));
+		assert_eq!(rung.update(Some(bps(1)), kio::clock::now()), Some(on(bps(100_000))));
 	}
 
 	/// A disable or resume the sender failed to apply is taken back and retried, so the
@@ -1186,7 +1186,7 @@ mod tests {
 	#[test]
 	fn a_failed_toggle_is_retried() {
 		let mut rung = rung();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		assert_eq!(rung.update(Some(bps(3_000_000)), start), Some(Target::Disabled));
 		rung.failed(start);
 		assert_eq!(rung.target(), on(bps(5_000_000)));
@@ -1210,7 +1210,7 @@ mod tests {
 	#[test]
 	fn a_failed_resume_under_the_margin_stops_retrying() {
 		let mut rung = rung();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		assert_eq!(rung.update(Some(bps(3_000_000)), start), Some(Target::Disabled));
 		let resumed = start + Duration::from_secs(1);
 		assert_eq!(rung.update(Some(bps(5_000_000)), resumed), Some(on(bps(3_333_333))));
@@ -1228,7 +1228,7 @@ mod tests {
 	fn a_rung_under_its_boundary_disables_when_probing_starts() {
 		let mut rung = rung();
 		rung.set_probed(false);
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		assert_eq!(rung.update(Some(bps(3_000_000)), start), Some(on(bps(3_000_000))));
 
 		let mut funded = rung.clone();
@@ -1250,7 +1250,7 @@ mod tests {
 	#[test]
 	fn a_rung_under_a_raised_boundary_disables() {
 		let mut rung = rung();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		assert_eq!(rung.update(Some(bps(3_500_000)), start), Some(on(bps(3_500_000))));
 
 		// The boundary moves from 3.33 Mbps to 3.67 Mbps, over the applied target.
@@ -1299,7 +1299,7 @@ mod tests {
 			controls.push(control);
 			tracks.push(track);
 		}
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut update = |at: Instant| -> Vec<Target> {
 			controls
 				.iter_mut()
@@ -1527,7 +1527,7 @@ mod tests {
 					policy.lower = lower.map(bps);
 					let mut model = Model {
 						control: Control::new(policy),
-						now: moq_clock::now(),
+						now: kio::clock::now(),
 						grant: None,
 						probed: false,
 					};
