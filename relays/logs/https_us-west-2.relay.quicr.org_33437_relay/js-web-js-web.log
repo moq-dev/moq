@@ -1,13 +1,266 @@
 [page] negotiated protocol: moqt-18
 [page] subscribe_namespace written: requestId=0
+[page] announced: broadcast=smoke-js-web-4858-13605.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-js-web-4858-13605.hang track=catalog.json
 [page] announced: broadcast=metrics/us-west-2.relay.public active=true
-[page] announced: broadcast=smoke-js-web-4940-6908.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-js-web-4940-6908.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-js-web-4940-6908.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-js-web-4940-6908.hang track=catalog.json
-[page] received catalog hang smoke-js-web-4940-6908.hang {video: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-js-web-4940-6908.hang track=video
-[page] subscribe written: id=4 broadcast=smoke-js-web-4940-6908.hang track=video
-[page] subscribe ok: id=4 broadcast=smoke-js-web-4940-6908.hang track=video
-[page] received catalog hang smoke-js-web-4940-6908.hang {video: Object, clock: Object}
-decoded 6 frames from smoke-js-web-4940-6908.hang (vite)
+[page] subscribe written: id=2 broadcast=smoke-js-web-4858-13605.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-js-web-4858-13605.hang track=catalog.json
+[page] received catalog hang smoke-js-web-4858-13605.hang {video: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-js-web-4858-13605.hang track=video
+[page] subscribe written: id=4 broadcast=smoke-js-web-4858-13605.hang track=video
+[page] received catalog hang smoke-js-web-4858-13605.hang {video: Object, clock: Object}
+[page] subscribe ok: id=4 broadcast=smoke-js-web-4858-13605.hang track=video
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 5
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 6
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 7
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 8
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 9
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 10
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 11
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 12
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 13
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 14
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 15
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 16
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 17
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 18
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 19
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 20
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 21
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 22
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 23
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 24
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 25
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] received catalog hang smoke-js-web-4858-13605.hang {video: Object, clock: Object}
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 26
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 27
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 28
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 29
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 30
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 31
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 32
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 33
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 34
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 35
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 36
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 37
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 38
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 39
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 40
+    at e.decode (http://localhost:33727/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:33727/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:33727/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:33727/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:33727/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:33727/assets/index-QjPCWezJ.js:1:229903)
+decoded 6 frames from smoke-js-web-4858-13605.hang (vite)

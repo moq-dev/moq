@@ -1,19 +1,20 @@
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-js-web-4940-735.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-js-web-4940-735.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-js-web-4940-735.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-js-web-4940-735.hang track=catalog.json
-[page] received catalog hang smoke-js-web-4940-735.hang {video: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-js-web-4940-735.hang track=video
-[page] subscribe written: id=4 broadcast=smoke-js-web-4940-735.hang track=video
-[page] subscribe ok: id=4 broadcast=smoke-js-web-4940-735.hang track=video
-[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 6
-    at e.decode (http://localhost:44991/assets/index-QjPCWezJ.js:1:177134)
-    at a (http://localhost:44991/assets/index-QjPCWezJ.js:1:225354)
-    at #f (http://localhost:44991/assets/index-QjPCWezJ.js:1:99907)
-    at ys.tryDecode (http://localhost:44991/assets/index-QjPCWezJ.js:1:99438)
-    at vf.handleGroup (http://localhost:44991/assets/index-QjPCWezJ.js:1:225414)
-    at async #g (http://localhost:44991/assets/index-QjPCWezJ.js:1:229903)
-[page] received catalog hang smoke-js-web-4940-735.hang {video: Object, clock: Object}
-decoded 4 frames from smoke-js-web-4940-735.hang (vite)
+[page] announced: broadcast=smoke-js-web-4858-10199.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-js-web-4858-10199.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-js-web-4858-10199.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-js-web-4858-10199.hang track=catalog.json
+[page] received catalog hang smoke-js-web-4858-10199.hang {video: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-js-web-4858-10199.hang track=video
+[page] subscribe written: id=4 broadcast=smoke-js-web-4858-10199.hang track=video
+[page] subscribe ok: id=4 broadcast=smoke-js-web-4858-10199.hang track=video
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 7
+    at e.decode (http://localhost:44043/assets/index-QjPCWezJ.js:1:177134)
+    at a (http://localhost:44043/assets/index-QjPCWezJ.js:1:225354)
+    at #f (http://localhost:44043/assets/index-QjPCWezJ.js:1:99907)
+    at ys.tryDecode (http://localhost:44043/assets/index-QjPCWezJ.js:1:99438)
+    at vf.handleGroup (http://localhost:44043/assets/index-QjPCWezJ.js:1:225414)
+    at async #g (http://localhost:44043/assets/index-QjPCWezJ.js:1:229903)
+[page] received catalog hang smoke-js-web-4858-10199.hang {video: Object, clock: Object}
+[page] received catalog hang smoke-js-web-4858-10199.hang {video: Object, clock: Object}
+decoded 2 frames from smoke-js-web-4858-10199.hang (vite)

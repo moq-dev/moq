@@ -1,11 +1,11 @@
 [page] negotiated protocol: moq-lite-06
 [page] announced: prefix=
-[page] announce: prefix=
 [page] announced: broadcast=izumoe-clock-8633460322fd41adb789ed0bd4fc54d4.hang active=true
-[page] announced: broadcast=smoke-rust-4940-15314.hang active=true
-[page] subscribe start: id=0 broadcast=smoke-rust-4940-15314.hang track=catalog.json
-[page] subscribe ok: id=0 broadcast=smoke-rust-4940-15314.hang track=catalog.json
-[page] received catalog hang smoke-rust-4940-15314.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=1 broadcast=smoke-rust-4940-15314.hang track=0.avc3
-[page] subscribe ok: id=1 broadcast=smoke-rust-4940-15314.hang track=0.avc3
-decoded 8 frames from smoke-rust-4940-15314.hang (vite)
+[page] announced: broadcast=smoke-rust-4858-24213.hang active=true
+[page] subscribe start: id=0 broadcast=smoke-rust-4858-24213.hang track=catalog.json
+[page] announce: prefix=
+[page] subscribe ok: id=0 broadcast=smoke-rust-4858-24213.hang track=catalog.json
+[page] received catalog hang smoke-rust-4858-24213.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=1 broadcast=smoke-rust-4858-24213.hang track=0.avc3
+[page] subscribe ok: id=1 broadcast=smoke-rust-4858-24213.hang track=0.avc3
+decoded 9 frames from smoke-rust-4858-24213.hang (vite)
