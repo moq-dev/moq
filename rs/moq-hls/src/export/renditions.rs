@@ -253,15 +253,24 @@ impl Producer {
 
 	/// Record the catalog's end before closing its change stream. A failed catalog fails every
 	/// rendition, so none reads as finished.
+	///
+	/// The first end wins. The set stays locked while the windows fail, so a racing
+	/// [`cut`](Self::cut) lands wholly before (and the failure is dropped) or after (and the
+	/// failed windows keep their failure).
 	pub fn finish(&self, result: crate::Result<()>) {
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		if state.finished.is_some() {
+			return;
+		}
 		if let Err(err) = &result {
 			self.fanout.fail(crate::Error::CatalogFailed {
 				source: Box::new(err.clone()),
 			});
 		}
-		if let Ok(mut state) = self.state.write() {
-			state.finished = Some(result);
-		}
+		state.finished = Some(result);
+		drop(state);
 		self.close();
 	}
 
@@ -787,4 +796,22 @@ mod tests {
 		assert!(producer.failure().is_some());
 	}
 
+	// A cut ends the set before it cuts the windows. A catalog failure landing in that gap must
+	// not fail the windows the cut keeps, nor leave the set and its windows disagreeing.
+	#[tokio::test]
+	async fn a_failure_racing_a_cut_is_dropped() {
+		tokio::time::pause();
+		let producer = Producer::spawned(Duration::from_secs(30));
+		let mut cursor = producer.subscribe();
+		// The first half of `cut`: the set ends cleanly while its windows are not cut yet.
+		if let Ok(mut state) = producer.state.write() {
+			state.finished = Some(Ok(()));
+		}
+		producer.close();
+		producer.finish(Err(crate::Error::NoVariants));
+		assert!(producer.failure().is_none(), "the failure reached the windows");
+		producer.cut();
+		assert!(cursor.next().await.unwrap().is_none());
+		assert!(producer.failure().is_none());
+	}
 }
