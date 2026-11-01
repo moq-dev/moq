@@ -729,6 +729,23 @@ impl Resolved {
 		self.gso == Some(false)
 	}
 
+	/// Whether an application's own congestion controller is installed.
+	///
+	/// Compiled in every feature set, unlike the `controller` field, so a runtime
+	/// that cannot run one, such as the relay's io_uring workers, can refuse it
+	/// whichever features unify onto this crate.
+	#[cfg(feature = "driver")]
+	pub fn has_controller(&self) -> bool {
+		self.controller.is_some()
+	}
+
+	/// Whether an application's own congestion controller is installed: never,
+	/// since a build without the `driver` feature has no way to install one.
+	#[cfg(not(feature = "driver"))]
+	pub fn has_controller(&self) -> bool {
+		false
+	}
+
 	/// The keep-alive interval against a peer whose idle timeout is no shorter than
 	/// ours, or `None` when there is none.
 	#[cfg(feature = "_transport")]

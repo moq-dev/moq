@@ -480,7 +480,7 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 	);
 
 	anyhow::ensure!(
-		quic.controller.is_none(),
+		!quic.has_controller(),
 		"the io_uring runtime cannot run a custom congestion controller; drop quic.controller or use the tokio runtime"
 	);
 
