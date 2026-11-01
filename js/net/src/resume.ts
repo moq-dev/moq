@@ -143,14 +143,11 @@ class Source {
 	readonly wire: BroadcastWire;
 	/** The table's handle this was served from, so serving it again is a no-op. */
 	readonly from: broadcast.Consumer;
-	/** Whether a session delivered it, read from the handle served rather than the clone. */
-	readonly fromSession: boolean;
 	#consumer: broadcast.Consumer;
 	#holds = 0;
 
 	constructor(from: broadcast.Consumer) {
 		this.from = from;
-		this.fromSession = wireOf(from).fromSession === true;
 		this.#consumer = from.clone();
 		this.wire = wireOf(this.#consumer);
 	}
@@ -1525,8 +1522,6 @@ export class Front {
 	#concluded = false;
 	/** The tracks each source was checked against the recorded properties for; see #verify. */
 	#verified = new WeakMap<Source, Set<string>>();
-	/** Whether any source it served came from a session, kept between routes. */
-	#fromSession = false;
 
 	constructor() {
 		this.consumer = makeFrontConsumer(this);
@@ -1672,7 +1667,6 @@ export class Front {
 		if (this.#concluded || this.#source?.from === from) return;
 		const source = new Source(from);
 		source.retain();
-		this.#fromSession ||= source.fromSession;
 		const previous = this.#source;
 		this.#source = source;
 		this.#retired();
@@ -1705,14 +1699,6 @@ export class Front {
 		this.#changed.update((n) => n + 1);
 		this.#retire.abort();
 		this.#retire = new AbortController();
-	}
-
-	/**
-	 * Whether a broadcast it served came from a session; see {@link BroadcastWire.fromSession}.
-	 * Sticky, since the front can move back onto a session's route at any time.
-	 */
-	get fromSession(): boolean {
-		return this.#fromSession;
 	}
 
 	// Splice `source`'s copy of a track in, once it claims the same content as the copies before.
@@ -1995,9 +1981,6 @@ class FrontConsumer extends broadcast.Consumer {
 			resolveTrackInfo: (name, hold) => front.resolveTrackInfo(name, hold),
 			largest: (name) => front.largest(name),
 			fetchGroup: (name, sequence, options) => front.fetchGroup(name, sequence, options),
-			get fromSession() {
-				return front.fromSession;
-			},
 		});
 	}
 

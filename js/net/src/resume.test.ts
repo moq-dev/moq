@@ -1359,19 +1359,6 @@ test("a datagram reader lets go of the copies a swap replaced", async () => {
 	b.close();
 });
 
-test("a front remembers it served a session's broadcast between routes", () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const session = a.consume();
-	overrideBroadcastWire(session, {});
-	front.serve(session);
-	expect(front.fromSession).toBe(true);
-	front.park();
-	expect(front.fromSession).toBe(true);
-	front.consumer.close();
-	a.close();
-});
-
 test("a failed group on a route whose replacement was refused ends with the refusal", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
