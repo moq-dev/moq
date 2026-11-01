@@ -66,9 +66,9 @@ on 2026-11-01 found:
   `/var/cache/quest-land-moq-check` has project 42000 and inheritance enabled.
 - Agent storage extends beyond worktree outputs: home caches (MBX, a media
   build cache), rootless container storage, and user-owned `/var/tmp`
-  benchmark output. Sizes are under "Measured peaks" below; they are
-  allocated-file counts, not incident attribution or unique physical usage
-  with reflinks.
+  benchmark output. Sizes are under "Measured peaks" below; they are `du`
+  allocated block usage, not inode counts, incident attribution, or unique
+  physical usage with reflinks.
 - `/var/lib/quest-land` has project ID 0. The gate and its launcher use
   `PrivateTmp=true`; the host has their private directories under both
   `/tmp` and `/var/tmp`. Capping either shared temporary root indiscriminately
@@ -120,7 +120,7 @@ work above. Reuse its XFS policy and VM tests. Everything stays on the one
 shared XFS filesystem; the only new limit is a cap on agents.
 
 - Give agent-writable trees one enforced project with a 340 GiB block limit
-  and a 6M inode limit, in charged bytes. It covers home caches, rootless
+  in charged bytes and a 10M inode limit. It covers home caches, rootless
   container storage, agent temporary/benchmark outputs, and the agent Nix
   store below. Put CI private temporary files and daemon state in CI-owned
   trees before tagging the shared temporary roots. Check existing files and
@@ -150,24 +150,31 @@ The agent limit is sized from the measured peaks: 222 GiB of agent trees
 plus at most 102 GiB for an agent store sized like today's shared `/nix`,
 324 GiB together, leaving agents 16 GiB of headroom. The agent store's real
 size can only be measured after the separation deploys; resize the limit
-from that measurement. The 6M inode limit is above all of project 0 today
-(3.27M).
+from that measurement. The inode limit is sized the same way. All of
+project 0 holds 3.27M inodes today. `/nix`'s own count was not measured,
+but it is part of project 42000's 5.81M, so an agent store like it adds at
+most 5.81M, about 9.1M together. The 10M limit covers that bound. Before
+deployment, count `/nix` inodes read-only, and after the separation resize
+the limit from the agent project's measured inode use.
 
-The cap keeps the Goal with a 58 GiB margin. CI fails once free space
+The cap keeps the Goal with a 56 GiB margin. CI fails once free space
 falls under its 32 GiB reserve, so writers can use 920.4 GiB before CI
 fails. Agents at their cap hold 340 GiB plus uncharged inode metadata,
-under 3 GiB at 6M inodes of 512 bytes. That leaves about 577 GiB for CI and
+under 5 GiB at 10M inodes of 512 bytes. That leaves about 575 GiB for CI and
 other host state. Their measured peak together is 519 GiB (CI 476, other
-host state 43), so 58 GiB remains, more than the 45.9 GiB largest
+host state 43), so 56 GiB remains, more than the 45.9 GiB largest
 concurrent gate write. Charged bytes overstate physical use under reflinks,
 so the margin is conservative.
 
 The cap covers only agent writes inside the agent project. By design it
-does not stop CI or other host state growing past 577 GiB on its own: the
+does not stop CI or other host state growing past 575 GiB on its own: the
 842 GiB cache leak plus 43 GiB of host state would exceed that even with
 agents idle. The unattributed 2026-10-30 burst left 6 GiB free with CI
-under 250 GiB, so non-CI writers then held about 696 GiB. If agents wrote
-it in covered trees, the cap would have stopped them at 340 GiB. If a host
+charged under 250 GiB. CI's charged bytes bound its physical use from
+above, so the extents non-CI files referenced then covered at least
+696 GiB of the 946 GiB used, and their charged bytes were at least that.
+If agents wrote it in covered trees, the cap would have stopped them at
+340 GiB. If a host
 service or an agent path outside the project wrote it, the cap would not.
 Attribute it where evidence permits, and after migration verify that no
 agent-owned data remains outside the agent project.
