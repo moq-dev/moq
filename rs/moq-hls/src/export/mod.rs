@@ -465,7 +465,7 @@ async fn watch_catalog(source: moq_mux::Source, renditions: renditions::Producer
 			Ok(consumer) => break consumer,
 			Err(err) => {
 				tracing::warn!(%err, "failed to subscribe to broadcast catalog, retrying");
-				let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+				let wait = delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
 				delay = (delay * 2).min(CATALOG_RETRY_MAX);
 				tokio::select! {
 					_ = kio::clock::sleep(wait) => {}
