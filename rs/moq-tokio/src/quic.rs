@@ -69,6 +69,21 @@ pub(crate) struct LoadBalancer {
 	pub nonce: usize,
 }
 
+/// A congestion controller of the application's own, built fresh for each connection.
+///
+/// Implement [`crate::congestion::ControllerFactory`] and install it with [`Config::controller`].
+#[cfg(feature = "driver")]
+#[derive(Clone)]
+pub struct Controller(pub std::sync::Arc<dyn moq_congestion::ControllerFactory + Send + Sync>);
+
+#[cfg(feature = "driver")]
+impl std::fmt::Debug for Controller {
+	/// Opaque: a factory carries no description of its own.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("Controller(..)")
+	}
+}
+
 /// The congestion control family for a QUIC connection.
 ///
 /// CUBIC is used for loss-based control and BBRv3 for delay-based control.
@@ -222,6 +237,16 @@ pub struct Config {
 		setting = "quic.congestion_control"
 	)]
 	pub congestion_control: Option<CongestionControl>,
+
+	/// A congestion controller of your own for every connection, in place of
+	/// [`congestion_control`](Self::congestion_control)'s families.
+	///
+	/// Code-only, since a controller has no text form: no flag or setting reaches it.
+	/// The QUIC backend runs it, and the iroh and io_uring runtimes refuse it.
+	#[cfg(feature = "driver")]
+	#[serde(skip)]
+	#[usage(skip)]
+	pub controller: Option<Controller>,
 
 	/// Connection-wide receive window, in bytes: how much data the peer may have
 	/// in flight or in incomplete messages across every stream at once. Defaults to
@@ -604,6 +629,8 @@ impl Config {
 			keep_alive,
 			mtu_discovery: self.mtu_discovery.unwrap_or(false),
 			congestion_control: self.congestion_control,
+			#[cfg(feature = "driver")]
+			controller: self.controller.clone(),
 			receive_window: self.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW),
 			stream_receive_window: self.stream_receive_window.unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW),
 			send_window: self.send_window.unwrap_or(DEFAULT_SEND_WINDOW),
@@ -648,6 +675,9 @@ pub struct Resolved {
 	pub mtu_discovery: bool,
 	/// Congestion control override, or `None` for the default.
 	pub congestion_control: Option<CongestionControl>,
+	/// The application's own congestion controller, in place of the family.
+	#[cfg(feature = "driver")]
+	pub controller: Option<Controller>,
 	/// Connection-wide receive window in bytes, defaulting to [`DEFAULT_RECEIVE_WINDOW`].
 	///
 	/// The windows are resolved here rather than by each backend, whose own defaults
@@ -694,6 +724,23 @@ impl Resolved {
 	#[cfg_attr(not(feature = "iroh"), allow(dead_code, reason = "only the `iroh` feature uses it"))]
 	pub(crate) fn gso_disabled(&self) -> bool {
 		self.gso == Some(false)
+	}
+
+	/// Whether an application's own congestion controller is installed.
+	///
+	/// Compiled in every feature set, unlike the `controller` field, so a runtime
+	/// that cannot run one, such as the relay's io_uring workers, can refuse it
+	/// whichever features unify onto this crate.
+	#[cfg(feature = "driver")]
+	pub fn has_controller(&self) -> bool {
+		self.controller.is_some()
+	}
+
+	/// Whether an application's own congestion controller is installed: never,
+	/// since a build without the `driver` feature has no way to install one.
+	#[cfg(not(feature = "driver"))]
+	pub fn has_controller(&self) -> bool {
+		false
 	}
 
 	/// The keep-alive interval against a peer whose idle timeout is no shorter than

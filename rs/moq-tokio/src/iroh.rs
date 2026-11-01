@@ -161,6 +161,10 @@ pub enum Error {
 	/// GSO is always on for iroh, so `--quic-gso=false` cannot be honored.
 	#[error("the iroh backend cannot disable GSO; drop --quic-gso=false or use the quic backend")]
 	GsoUnsupported,
+
+	/// iroh runs its own congestion controllers, so an application's cannot be installed.
+	#[error("the iroh backend cannot run a custom congestion controller; drop quic.controller or use the quic backend")]
+	ControllerUnsupported,
 }
 
 crate::error::from_message! {
@@ -250,7 +254,8 @@ impl Config {
 	/// section (the per-connection knobs are symmetric). It honors the knobs its
 	/// transport-config builder exposes (stream limits, idle timeout, keep-alive,
 	/// MTU discovery, congestion control, flow-control windows), and key logging. It
-	/// cannot disable GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
+	/// cannot disable GSO, so `gso = false` fails with [`Error::GsoUnsupported`], nor run
+	/// an application's controller, so `controller` fails with [`Error::ControllerUnsupported`].
 	pub async fn bind(self, quic: &crate::quic::Config) -> Result<Option<Endpoint>> {
 		crate::runtime::scope(async move {
 			if !self.enabled.unwrap_or(false) {
@@ -275,6 +280,10 @@ impl Config {
 			}
 			if quic.gso_disabled() {
 				return Err(Error::GsoUnsupported);
+			}
+			#[cfg(feature = "driver")]
+			if quic.controller.is_some() {
+				return Err(Error::ControllerUnsupported);
 			}
 
 			// If the secret matches the expected format (hex encoded), use it directly.
@@ -541,6 +550,26 @@ mod tests {
 		};
 		assert!(matches!(err, Error::Deprecated(_)), "{err}");
 		assert!(err.to_string().contains("--quic-gso / MOQ_QUIC_GSO"), "{err}");
+	}
+
+	#[cfg(feature = "driver")]
+	#[tokio::test]
+	async fn bind_refuses_a_custom_controller() {
+		let quic = crate::quic::Config {
+			controller: Some(crate::quic::Controller(std::sync::Arc::new(
+				moq_congestion::Bbr3Config::default(),
+			))),
+			..Default::default()
+		};
+		let config = Config {
+			enabled: Some(true),
+			..Default::default()
+		};
+
+		let Err(err) = config.bind(&quic).await else {
+			panic!("binding must refuse a custom controller");
+		};
+		assert!(matches!(err, Error::ControllerUnsupported), "{err}");
 	}
 
 	#[tokio::test]
