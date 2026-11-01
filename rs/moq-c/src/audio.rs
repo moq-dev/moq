@@ -432,9 +432,11 @@ pub extern "C" fn moq_encode_audio_reservation(producer: u32) -> i32 {
 	})
 }
 
-/// Watch whether the encoded audio track has subscribers, so the microphone and
-/// encoder run only while someone listens. See [`crate::moq_publish_media_demand`]
-/// for the callback contract.
+/// Watch whether the encoded audio track has subscribers. The encoder publishes every
+/// sample written, subscribed or not; opting in to run the microphone and encoder
+/// only while someone listens saves that work but leaves a late subscriber nothing
+/// to fetch from before it arrived. See [`crate::moq_publish_media_demand`] for the
+/// callback contract.
 ///
 /// Returns a non-zero watcher handle on success, or a negative code on failure.
 ///

@@ -76,7 +76,7 @@ impl Demux {
 	/// dropped as [`Discard::Unclaimed`]. Feeds share one queue.
 	pub fn webrtc(&self) -> WebRtc {
 		// The first feed starts clean rather than reading what a previous one left.
-		if !self.live.is_used() {
+		if !self.live.wanted() {
 			self.shared.queue.lock().clear();
 		}
 		WebRtc {
@@ -302,7 +302,7 @@ impl Divert {
 	}
 
 	fn push(&self, meta: &RecvMeta, data: &[u8]) {
-		if !self.live.is_used() {
+		if !self.live.wanted() {
 			self.shared.counters.discard(Discard::Unclaimed);
 			return;
 		}
