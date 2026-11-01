@@ -163,7 +163,7 @@ impl Publisher {
 			let next = next.with_second(0).unwrap().with_nanosecond(0).unwrap();
 
 			let delay = (next - now).to_std().unwrap();
-			moq_clock::sleep(delay).await;
+			kio::clock::sleep(delay).await;
 
 			now = next; // just assume we didn't undersleep
 		}
@@ -183,7 +183,7 @@ impl Publisher {
 			let next = next.with_nanosecond(0).unwrap();
 
 			let delay = (next - now).to_std().unwrap();
-			moq_clock::sleep(delay).await;
+			kio::clock::sleep(delay).await;
 
 			// Get the current time again to check if we overslept
 			let actual = Utc::now();

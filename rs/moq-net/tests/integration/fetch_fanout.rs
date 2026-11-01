@@ -14,7 +14,7 @@ fn origin(hop: u64) -> origin::Producer {
 	origin
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn sequential_viewers_share_the_relays_fetched_groups() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		let version: Version = version.parse().unwrap();
@@ -75,7 +75,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 					.count();
 				assert_eq!(fetches, round as usize + 1, "{version}: viewer {i}, group {sequence}");
 			}
-			moq_clock::sleep(Duration::from_secs(1)).await;
+			kio::clock::sleep(Duration::from_secs(1)).await;
 		}
 		let types = upstream.client_transport.bidi_types();
 		assert_eq!(

@@ -165,8 +165,8 @@ pub struct Challenge {
 	#[serde_as(as = "serde_with::base64::Base64<serde_with::base64::UrlSafe, serde_with::formats::Unpadded>")]
 	pub challenge: Vec<u8>,
 	/// When the coordinator stops accepting a proof over it, unix seconds.
-	#[serde_as(as = "moq_clock::serde::UnixSeconds")]
-	pub expires: moq_clock::Wall,
+	#[serde_as(as = "kio::clock::serde::UnixSeconds")]
+	pub expires: kio::clock::Wall,
 }
 
 /// Proof that the caller holds `endpoint`'s secret key: its signature over
@@ -256,8 +256,8 @@ pub struct Enrollment {
 	/// A JWT granting publish on `mesh/<id>/**` and subscribe on `mesh/**`, rooted at `/`.
 	pub token: String,
 	/// When the token expires, unix seconds. Refresh before then.
-	#[serde_as(as = "moq_clock::serde::UnixSeconds")]
-	pub expires: moq_clock::Wall,
+	#[serde_as(as = "kio::clock::serde::UnixSeconds")]
+	pub expires: kio::clock::Wall,
 	/// The relays to dial, presenting the token.
 	pub relays: Vec<url::Url>,
 	/// The name the coordinator assigned this device.
