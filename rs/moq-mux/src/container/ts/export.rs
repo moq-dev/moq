@@ -523,7 +523,9 @@ impl Track {
 
 	/// Count a frame that steps the track's timeline back with no marker as a marker of its own:
 	/// presented further below the highest PTS read on the timeline than the export's `delay`,
-	/// and than any reordering a video rendition declares.
+	/// and than any reordering a video rendition declares or its decode clock has seen. A
+	/// rendition that declares its catalog `reorder` bounds it by frames rather than time, so
+	/// there the frame must also follow more frames than that in presentation order.
 	///
 	/// No reordering the export carries explains that, and the jitter buffer would not see it
 	/// as a step. A video decode clock that went on would hold the frame as reordered and clamp
@@ -541,8 +543,12 @@ impl Track {
 		let high = (self.high).and_then(|(restart, high)| (restart == pending.restart).then_some(high));
 		let (_, lookahead) = self.timing.inferred();
 		let delay = u64::try_from(delay.as_micros() * 90_000 / 1_000_000).unwrap_or(u64::MAX);
-		let bound = delay.max(lookahead).max(self.timing.jitter);
-		let stepped = delay > 0 && high.is_some_and(|high| to_ticks(pts).saturating_add(bound) < to_ticks(high));
+		let bound = delay.max(lookahead).max(self.timing.jitter).max(self.clock.reach());
+		let reordered = (self.declared)
+			.as_ref()
+			.is_none_or(|clock| clock.reorders_past(to_ticks(pts)));
+		let stepped =
+			delay > 0 && reordered && high.is_some_and(|high| to_ticks(pts).saturating_add(bound) < to_ticks(high));
 		if stepped {
 			tracing::debug!(track = %self.key.name, ?pts, ?high, "unmarked step back; restarting the timeline");
 			self.steps += 1;

@@ -173,6 +173,11 @@ impl<T> DecodeClock<T> {
 		self.held.len()
 	}
 
+	/// The furthest a frame was presented below the highest PTS read before it, plus a tick.
+	pub(crate) fn reach(&self) -> u64 {
+		self.reach
+	}
+
 	/// How far past a slot the highest PTS must be to settle it, under `lookahead`.
 	fn lookahead(&self, lookahead: u64) -> u64 {
 		lookahead.max(self.reach).min(MAX_REORDER)
