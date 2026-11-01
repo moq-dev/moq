@@ -177,9 +177,18 @@ pub enum Error {
 		/// The segment whose media cannot be recorded.
 		segment: u64,
 	},
+
+	/// This CPU lacks a feature the crate's cryptography requires, named in rind's message.
+	#[error("unsupported CPU: {0}")]
+	UnsupportedCpu(String),
 }
 
 impl Error {
+	/// Carries rind's message rather than its type, so rind stays out of this crate's API.
+	pub(crate) fn unsupported_cpu(err: rind::cpu::MissingFeature) -> Self {
+		Self::UnsupportedCpu(err.to_string())
+	}
+
 	/// The HTTP status the origin answered with, if it answered with one at all.
 	///
 	/// The import loop consults it: a `503` on a playlist fetch is worth another pass, a `404` is
@@ -250,6 +259,10 @@ mod tests {
 		let address = listener.local_addr().expect("local address");
 		drop(listener);
 
+		// reqwest reads rustls's process default, as the importer installs it.
+		let _ = rind_rustls::default_provider()
+			.expect("supported CPU")
+			.install_default();
 		let err: Error = reqwest::get(format!("http://user:pass@{address}/media.m3u8?jwt=secret"))
 			.await
 			.expect_err("dial a closed port")
