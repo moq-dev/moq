@@ -156,7 +156,8 @@ int main()
 		CHECK(settings.default_ints["failover_delay_ms"] == Ms(*library.race));
 		CHECK(settings.default_ints["quic_max_streams"] == (long long)*library.quic.max_streams);
 		CHECK(settings.default_ints["quic_idle_timeout_ms"] == Ms(*library.quic.idle_timeout));
-		CHECK(settings.default_ints["quic_keep_alive_ms"] == Ms(*library.quic.keep_alive));
+		CHECK(!library.quic.keep_alive);
+		CHECK(settings.default_ints["quic_keep_alive_ms"] == 0);
 		CHECK(settings.default_ints["backoff_timeout_ms"] == Ms(*library.backoff.timeout));
 		CHECK(settings.default_bools["websocket_enabled"] == *library.websocket.enabled);
 		CHECK(settings.default_strings["quic_gso"].empty());
@@ -202,6 +203,17 @@ int main()
 		CHECK(moq::Client::init(config).has_value());
 	}
 	printf("restored keys apply: ok\n");
+
+	// An explicit interval remains available when a NAT needs more frequent pings.
+	{
+		obs_data settings;
+		MoQSettings::Defaults(&settings);
+		settings.bools["advanced"] = true;
+		settings.ints["quic_keep_alive_ms"] = 500;
+		moq::ClientConfig config;
+		CHECK(MoQSettings::Configure(&settings, config).empty());
+		CHECK(config.quic.keep_alive == std::chrono::milliseconds(500));
+	}
 
 	// The TLS key log is off unless the toggle asks for it.
 	{
