@@ -28,9 +28,11 @@ The candidate is reclaimable slot chunks. Store slots, wakers and wake bits per
 prefer low free slots, so chunks can drain while one survivor stays behind,
 plus some hysteresis so a set oscillating across a chunk boundary does not
 reallocate 1,024 wakers each time. Today's LIFO free list and full reuse make
-a repeated burst cheap: the `burst` shape costs about 420 instructions per task,
-gate allocation included, and steady churn allocates nothing in the set. Do not
-trade that for reclaimed memory without measuring both, with an A/A control.
+a repeated burst cheap. In the harness from
+[moq-dev/moq#7513](https://github.com/moq-dev/moq/pull/7513), a repeated
+1,024-task burst through a drained set costs about 840 instructions per task,
+the task's own allocations included, and the set allocates nothing for it. Do
+not trade that for reclaimed memory without measuring both, with an A/A control.
 
 Any reclamation must preserve stale-waker safety. A waker that outlives its
 chunk must keep its chunk alive or point at nothing. It must also keep
