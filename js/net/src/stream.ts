@@ -25,6 +25,12 @@ import { Budget } from "./util/yield.ts";
 // Sharing the slice across writers bounds concurrent groups and subscriber fanout too.
 const writeBudget = new Budget();
 
+/** Stream credit alone lets a peer keep thousands of streams ready, each accepted in a
+ * microtask, so accept loops share a slice that lets the host's other tasks run.
+ * @internal
+ */
+export const acceptBudget = new Budget();
+
 // Decode raw transport errors before mapping so they cannot bypass the negotiated
 // registry. Ordinary errors already send 0 and retain their local identity.
 function withCode(reason: unknown, stream: StreamVersion): unknown {
@@ -225,6 +231,8 @@ export class Stream {
 
 	static async accept(quic: WebTransport, version: StreamVersion): Promise<Stream | undefined> {
 		for (;;) {
+			const pause = acceptBudget.poll();
+			if (pause !== undefined) await pause;
 			const reader =
 				quic.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
 			const next = await reader.read();
@@ -439,6 +447,26 @@ export class Reader {
 	async read(size: number): Promise<Uint8Array> {
 		if (size === 0) return new Uint8Array();
 		return this.decode((c) => c.read(size));
+	}
+
+	/**
+	 * Read between 1 and `max` bytes as they arrive, without joining them into one buffer, so
+	 * a payload of any size streams through. Throws {@link UnexpectedEnd} at a clean end.
+	 */
+	async readChunk(max: number): Promise<Uint8Array> {
+		if (this.#buffer.byteLength === 0 && this.#chunked === 0 && !(await this.#fill())) throw new UnexpectedEnd();
+		// What a decode ran short of is measured from bytes this consumes.
+		this.#short = undefined;
+		if (this.#buffer.byteLength > 0) return this.#slice(Math.min(max, this.#buffer.byteLength));
+		const chunk = this.#chunks[0];
+		if (chunk.byteLength <= max) {
+			this.#chunks.shift();
+			this.#chunked -= chunk.byteLength;
+			return chunk;
+		}
+		this.#chunks[0] = chunk.subarray(max);
+		this.#chunked -= max;
+		return chunk.subarray(0, max);
 	}
 
 	async readAll(): Promise<Uint8Array> {
@@ -911,6 +939,8 @@ export class Readers {
 	}
 
 	async next(): Promise<Reader | undefined> {
+		const pause = acceptBudget.poll();
+		if (pause !== undefined) await pause;
 		const next = await this.#reader.read();
 		if (next.done) return;
 		return new Reader(next.value, undefined, this.#version);

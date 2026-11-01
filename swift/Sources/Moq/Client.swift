@@ -45,22 +45,23 @@ public final class Client: Sendable {
         publish: OriginProducer? = nil,
         consume: OriginProducer? = nil
     ) throws {
-        ffi = try MoqClient(config: MoqClientConfig(
-            bind: bind,
-            versions: versions,
-            tokens: tokens,
-            timeout: timeout,
-            race: race,
-            resolutionDelay: resolutionDelay,
-            tls: tls,
-            quic: quic,
-            websocket: websocket,
-            once: once,
-            backoff: backoff,
-            implementation: implementation,
-            publish: publish?.ffi,
-            consume: consume?.ffi
-        ))
+        ffi = try MoqClient(
+            config: MoqClientConfig(
+                bind: bind,
+                versions: versions,
+                tokens: tokens,
+                timeout: timeout,
+                race: race,
+                resolutionDelay: resolutionDelay,
+                tls: tls,
+                quic: quic,
+                websocket: websocket,
+                once: once,
+                backoff: backoff,
+                implementation: implementation,
+                publish: publish?.ffi,
+                consume: consume?.ffi
+            ))
     }
 
     /// Start a connection and return its session without waiting for the native first dial to succeed.
@@ -72,7 +73,6 @@ public final class Client: Sendable {
     public func cancel() {
         ffi.cancel()
     }
-
 
 }
 

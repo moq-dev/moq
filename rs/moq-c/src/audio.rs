@@ -118,13 +118,12 @@ pub struct moq_audio_decoder_output {
 	/// layout as `moq_audio_encoder_input.channels` describes, and the decoder
 	/// remixes to it.
 	pub channels: u32,
-	/// Upper bound on buffering before skipping a stalled group, in
-	/// microseconds. Same congestion-control knob as
-	/// `moq_consume_audio`'s `max_delay_us`. 0 = skip
-	/// aggressively (the moq-mux default); set to your playout
-	/// buffer (tens to a few hundred ms) for a softer skip. This bounds
-	/// group staleness rather than setting a minimum playout delay.
-	pub max_delay_us: u64,
+	/// How far behind the live edge to play. Same knob as `moq_consume_audio`'s
+	/// `delay`. `min_us` floors the playout delay, which is otherwise measured
+	/// from arrival timing, and sets where a cold join starts. `max_us` bounds
+	/// group staleness and adds no buffering. Zeroed: start at the newest group
+	/// and skip aggressively (the moq-mux default).
+	pub delay: crate::api::moq_delay,
 	/// `moq_decode_start` discriminant: where to start on a track that already
 	/// holds groups. 0 = the oldest, decoding everything cached; a live player
 	/// sets `MOQ_DECODE_START_LATEST`.
@@ -433,9 +432,11 @@ pub extern "C" fn moq_encode_audio_reservation(producer: u32) -> i32 {
 	})
 }
 
-/// Watch whether the encoded audio track has subscribers, so the microphone and
-/// encoder run only while someone listens. See [`crate::moq_publish_media_demand`]
-/// for the callback contract.
+/// Watch whether the encoded audio track has subscribers. The encoder publishes every
+/// sample written, subscribed or not; opting in to run the microphone and encoder
+/// only while someone listens saves that work but leaves a late subscriber nothing
+/// to fetch from before it arrived. See [`crate::moq_publish_media_demand`] for the
+/// callback contract.
 ///
 /// Returns a non-zero watcher handle on success, or a negative code on failure.
 ///
@@ -572,7 +573,7 @@ pub unsafe extern "C" fn moq_decode_audio(
 		config.output.layout = zeroable(raw.channels)
 			.map(moq_audio::Layout::from_channels)
 			.transpose()?;
-		config.max_delay = Duration::from_micros(raw.max_delay_us);
+		config.delay = raw.delay.into();
 
 		let on_read = unsafe { OnStatus::new(user_data, on_read)? };
 
