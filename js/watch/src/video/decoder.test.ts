@@ -1414,9 +1414,10 @@ describe("Decoder with a warmup rendition", () => {
 	const at = (group: number, ms: number, key = false) => sample(group, ms * 1000, key);
 
 	// A warmup rendition whose two container consumers each read their own feed, presenting at once.
-	async function refresh(fields: Partial<Catalog.VideoConfig> = { warmup: WARMUP }) {
+	// `hold` keeps those timestamps in the codec until `release`.
+	async function refresh(fields: Partial<Catalog.VideoConfig> = { warmup: WARMUP }, hold: number[] = []) {
 		const feeds = new Feeds();
-		const playback = await guardedPlayback("legacy", [], [], false, 0, { fields, feeds });
+		const playback = await guardedPlayback("legacy", [], hold, false, 0, { fields, feeds });
 		// Every picture shown, as [ms, codec].
 		const shown: [number, number][] = [];
 		const watch = new Effect();
@@ -1574,6 +1575,43 @@ describe("Decoder with a warmup rendition", () => {
 		} finally {
 			received.mockRestore();
 			reset.mockRestore();
+			await run.close();
+		}
+	});
+
+	it("keeps a picture held from before a restart out of the new timeline", async () => {
+		const run = await refresh(undefined, [0]);
+		try {
+			for (const lane of [MIN, MAX]) await run.push(lane, at(10, 1000, true));
+			expect(run.current()).toEqual([1000, MAX]);
+
+			// The min-delay decoder reads a restart, but its first new picture is still in the codec.
+			// The picture it holds from the old timeline must not show, nor block the new one.
+			await run.push(MIN, marker(10, 1_066_000), at(11, 0, true));
+			expect(run.current()).toEqual([1000, MAX]);
+			run.playback.release();
+			await microtasks();
+			expect(run.current()).toEqual([0, MIN]);
+		} finally {
+			await run.close();
+		}
+	});
+
+	it("takes the max-delay picture when that decoder opens after a restart", async () => {
+		const run = await refresh({});
+		try {
+			expect(run.playback.codecs).toBe(1);
+			await run.push(MIN, at(10, 1000, true), marker(10, 1_066_000), at(11, 0, true), at(11, 33));
+			expect(run.current()).toEqual([33, MIN]);
+
+			// The catalog gains a warmup. The new decoder never saw the restart, yet reads the same timeline.
+			run.playback.switchRendition("video", { warmup: WARMUP });
+			await microtasks();
+			expect(run.playback.codecs).toBe(2);
+			await run.push(MAX, at(11, 0, true), at(11, 33), at(11, 66));
+			await run.push(MIN, at(11, 66));
+			expect(run.current()).toEqual([66, MAX]);
+		} finally {
 			await run.close();
 		}
 	});

@@ -451,9 +451,17 @@ class DecoderTrack {
 	timestamp = new Signal<Milli | undefined>(undefined);
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
+	// The group the current `frame` was read from. Group sequences are shared by every subscription to
+	// the track, so they place a picture on a timeline for either decoder.
+	group?: number;
+	// The first group of the timeline this decoder reads, undefined until a publisher restart.
+	readonly start = new Signal<number | undefined>(undefined);
+
 	// Counts the timeline restarts this decoder read. A picture decoded before one is from the old
 	// timeline and never presents after it, even when its clock wait already resolved.
-	readonly generation = new Signal(0);
+	#generation = 0;
+	// The group each frame in the codec was read from, by timestamp.
+	#groups = new Map<number, number>();
 
 	// How far past the shared clock's budgets this decoder reaches.
 	#warmup: Getter<Milli>;
@@ -542,7 +550,9 @@ class DecoderTrack {
 					// A cancelled codec must not recreate the poster its track already released. Firefox can
 					// still deliver output after close().
 					if (signal.aborted) return;
-					const generation = this.generation.peek();
+					const generation = this.#generation;
+					const group = this.#groups.get(frame.timestamp);
+					this.#groups.delete(frame.timestamp);
 					const timestamp = Milli.fromMicro(frame.timestamp as Micro);
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
@@ -555,6 +565,7 @@ class DecoderTrack {
 					// already off the timeline: WebCodecs can hold a picture past a reset or a skip.
 					// Only the min-delay decoder posts one: the max-delay picture shows on the clock.
 					if (this.#drives && this.frame.peek() === undefined && this.sync.presentable(timestamp)) {
+						this.group = group;
 						this.frame.set(frame.clone());
 					}
 
@@ -563,7 +574,7 @@ class DecoderTrack {
 					if (!(await this.sync.wait(timestamp, signal)) || signal.aborted) return;
 					// The max-delay decoder restarts its timeline after the clock did, so the clock's own
 					// epoch cannot tell its leftover pictures apart.
-					if (this.generation.peek() !== generation) return;
+					if (this.#generation !== generation) return;
 
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
@@ -576,6 +587,7 @@ class DecoderTrack {
 					// Trim the decode buffer as frames are rendered
 					this.#trimBuffered(timestamp);
 
+					this.group = group;
 					this.frame.update((prev) => {
 						prev?.close();
 						return frame.clone(); // avoid closing the frame here
@@ -686,6 +698,7 @@ class DecoderTrack {
 
 				latest = next.group;
 				this.#resetAtKeyframe(decoder, frame.keyframe);
+				this.#groups.set(chunk.timestamp, next.group);
 				decoder.decode(chunk);
 				if (!this.sync.playing.peek())
 					await this.#waitStartup(effect, Milli.fromMicro(frame.timestamp as Micro));
@@ -764,6 +777,7 @@ class DecoderTrack {
 				if (decoder.state === "closed") break;
 				latest = next.group;
 				this.#resetAtKeyframe(decoder, frame.keyframe);
+				this.#groups.set(frame.timestamp, next.group);
 				decoder.decode(
 					new EncodedVideoChunk({
 						type: frame.keyframe ? "key" : "delta",
@@ -817,17 +831,18 @@ class DecoderTrack {
 			if (latest === undefined || read.group >= latest) this.#endGroup = read.group;
 		} else if (this.#endGroup !== undefined && read.group > this.#endGroup) {
 			this.#endGroup = undefined;
-			this.#onBreak();
+			this.#onBreak(read.group);
 		}
 	}
 
 	// A fresh timeline invalidates parked pictures and its previous decoded span. The held picture
 	// stays until the new keyframe renders; the codec resets before that keyframe is decoded.
-	#onBreak(): void {
+	#onBreak(group: number): void {
 		this.first.set(undefined);
 		this.timestamp.set(undefined);
 		this.#buffered.set([]);
-		this.generation.update((generation) => generation + 1);
+		this.#generation++;
+		this.start.set(group);
 		// The min-delay decoder restarts the shared clock. The max-delay one reads the same end later.
 		if (this.#drives) this.sync.reset();
 		this.#resetPending = true;
@@ -843,6 +858,7 @@ class DecoderTrack {
 		// A closed decoder throws on reset.
 		if (!keyframe || decoder.state === "closed") return;
 		decoder.reset();
+		this.#groups.clear();
 		this.#configure(decoder);
 	}
 
@@ -936,11 +952,11 @@ class Rendition {
 	readonly min: DecoderTrack;
 	readonly max = new Signal<DecoderTrack | undefined>(undefined);
 
-	// The lane picture last shown, its timestamp, and the min-delay timeline it was shown on. Nothing
-	// below that timestamp shows again until the timeline restarts.
+	// The lane picture last shown, its timestamp, and the first group of the min-delay timeline it was
+	// shown on. Nothing below that timestamp shows again until the timeline restarts.
 	#shown?: VideoFrame;
 	#last?: Milli;
-	#generation = 0;
+	#start?: number;
 
 	#signals = new Effect();
 
@@ -985,8 +1001,9 @@ class Rendition {
 		this.#signals.run((effect) => {
 			const max = effect.get(this.max);
 			this.#select(
-				{ frame: effect.get(this.min.frame), generation: effect.get(this.min.generation), lane: this.min },
-				max && { frame: effect.get(max.frame), generation: effect.get(max.generation), lane: max },
+				{ frame: effect.get(this.min.frame), lane: this.min },
+				max && { frame: effect.get(max.frame), lane: max },
+				effect.get(this.min.start),
 			);
 		});
 	}
@@ -1010,21 +1027,22 @@ class Rendition {
 	}
 
 	// Show the max-delay picture when it is at or past the min-delay one, so it wins ties, else the
-	// min-delay picture. A max-delay picture still on the timeline before the min-delay decoder's last
-	// restart is never a candidate. Not `caughtUp`: its slack, applied per picture, would alternate
-	// backwards and forwards.
-	#select(min: Lane, max: Lane | undefined): void {
+	// min-delay picture. Only pictures read from `start` on, the min-delay decoder's timeline, are
+	// candidates: one held from before a restart neither shows nor sets the floor. Not `caughtUp`: its
+	// slack, applied per picture, would alternate backwards and forwards.
+	#select(min: Lane, max: Lane | undefined, start: number | undefined): void {
 		// A restarted timeline begins below the previous one's pictures.
-		if (min.generation !== this.#generation) {
-			this.#generation = min.generation;
+		if (start !== this.#start) {
+			this.#start = start;
 			this.#last = undefined;
 		}
-		if (!min.frame) return; // Even a clean max-delay picture is a sweep behind until then.
+		const current = (lane: Lane | undefined): lane is Lane & { frame: VideoFrame } =>
+			lane?.frame !== undefined && (start === undefined || (lane.lane.group ?? -1) >= start);
+		// Even a clean max-delay picture is a sweep behind until the min-delay decoder has one.
+		if (!current(min)) return;
 
-		let pick: Lane & { frame: VideoFrame } = { ...min, frame: min.frame };
-		if (max?.frame && max.generation >= min.generation && max.frame.timestamp >= min.frame.timestamp) {
-			pick = { ...max, frame: max.frame };
-		}
+		let pick = min;
+		if (current(max) && max.frame.timestamp >= min.frame.timestamp) pick = max;
 		if (pick.frame === this.#shown) return;
 
 		const timestamp = Milli.fromMicro(pick.frame.timestamp as Micro);
@@ -1052,7 +1070,6 @@ class Rendition {
 // One decoder's current picture, for the selector.
 interface Lane {
 	frame: VideoFrame | undefined;
-	generation: number;
 	lane: DecoderTrack;
 }
 
