@@ -15,8 +15,9 @@
 //! and every URL they list is under that `@{instance}`: its epoch, or an id the server mints
 //! for an epochless instance. A publisher that restarts gets its own URLs, so a playlist URL
 //! never resets its media sequence. A replaced instance keeps serving its URLs while its
-//! broadcast stays open, so a player already on it keeps playing until its publisher goes,
-//! then reloads the master to reach the replacement.
+//! broadcast stays open, but its playlists end at the segments listed before the replacement,
+//! even if its publisher keeps sending, so a player already on it plays those out and then
+//! reloads the master to reach the replacement. A recording cursor on it ends there too.
 //!
 //! `{kind}` is `video` or `audio`, so a video and an audio rendition that share a
 //! name address distinct resources. The two `seg/` forms name the same bytes: HLS
@@ -104,7 +105,7 @@ struct Instances {
 	/// The instance the master playlist and manifest list: the latest to take over.
 	current: Broadcaster,
 	/// Every instance a listed URL still names, the current one included. A replaced instance
-	/// stays until its broadcast closes, so a player already on it keeps playing.
+	/// stays until its broadcast closes, so a player already on it plays out what it listed.
 	by_id: HashMap<Arc<str>, Broadcaster>,
 }
 
@@ -127,8 +128,19 @@ impl Followed {
 
 	/// List `broadcaster` from now on. An instance returning after a gap keeps its epoch, and so
 	/// its id, which then names the new broadcaster.
+	///
+	/// One still open is being replaced: its playlists and recordings end at what it listed so
+	/// far, even while its publisher keeps sending. It is cut before the replacement is listed,
+	/// so no reader that sees the replacement finds the old playlists still growing. The
+	/// replacement never waits on that drain.
+	/// If that instance takes the path back, it is served afresh under the same id: it reads the
+	/// same records, so its segment URLs name the same bytes, and playlists are never cached, so
+	/// only a player that reloads its ended playlist sees it go on.
 	fn start(&self, broadcaster: Broadcaster) {
 		let mut instances = self.instances.lock().unwrap();
+		if !instances.current.is_clone(&broadcaster) && !instances.current.is_closed() {
+			instances.current.replaced();
+		}
 		instances
 			.by_id
 			.insert(broadcaster.instance().clone(), broadcaster.clone());
@@ -191,6 +203,11 @@ impl Server {
 	/// The [`Broadcaster`] for the publisher instance serving `name` now, following each
 	/// instance that takes over. Returns `None` if the broadcast is not announced once the
 	/// origin has synced with the relay.
+	///
+	/// Once another instance takes over, the one returned here ends: its playlists and its
+	/// [`renditions`](Broadcaster::renditions) and [`segments`](crate::export::Rendition::segments)
+	/// cursors finish cleanly after the segments it listed before the takeover, even if its
+	/// publisher keeps sending. Ask again for the replacement, which starts at once.
 	pub async fn broadcaster(&self, name: &str) -> Option<Broadcaster> {
 		Some(self.followed(name).await?.current())
 	}
