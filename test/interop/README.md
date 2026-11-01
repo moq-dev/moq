@@ -367,7 +367,7 @@ Use `just test media --media-engines chromium,firefox,webkit` to run each pinned
 Playwright player against a Chromium publisher, and `--media-publisher firefox` to
 publish from Firefox instead. Chromium comes from the root devShell;
 the dedicated Firefox CI job provides its other engines. The harness runs the same
-lifecycle cases, content tolerances, and five negative controls per engine. A missing runtime or required API fails that engine by name.
+lifecycle cases, content tolerances, and six negative controls per engine. A missing runtime or required API fails that engine by name.
 Firefox and WebKit pages explicitly use WebSocket; Chromium keeps normal
 transport selection. This does not measure Firefox's QUIC path.
 
@@ -443,6 +443,32 @@ Each run covers, against a real local relay:
   advancing and in sync through the change. A VP8 resize doubles the presented
   dimensions on the same track. The pixels carry a source generation, so old
   pictures cannot reappear after the new generation starts presenting.
+- **audio format changes** - the fixture moves its capture from 48 kHz to 24 kHz,
+  then from mono to stereo. Each change re-mints the audio rendition's track; the
+  player must follow onto it and stay there, with the window across the change
+  held to the cold start's tone and sync agreement. The longest stretch without
+  the tone is reported, not gated: today's player rebuffers for 200-300 ms across
+  a re-minted track.
+- **audio rendition switch** - the fixture adds a second Opus rendition of the
+  same tone, and the player is pinned to it and back by name. The same grading
+  and reported gap as a format change.
+- **mute and volume** - the probe's tone analyser hangs off the player's graph
+  root, upstream of its private volume gain, so `src/instrument.ts` also taps
+  everything connected to `AudioContext.destination`. At volume 1 and 0.25 the
+  speakers must carry that fraction of the root's level, within 10% (both
+  analysers read one context in one tick, so they differ by at most a render
+  quantum); muted, they must be silent while the picture keeps playing.
+- **AAC publish and codec change** - the fixture publishing AAC from its first
+  frame, and switching its rendition from Opus to AAC. Chromium encodes AAC only
+  through a platform encoder, which Linux builds lack, so this run reports a skip
+  naming the missing encoder wherever the capability probe finds none.
+- **native publisher** - the Rust CLI imports ffmpeg's rendering of the same
+  pattern (`src/native.ts`: `drawbox` filters for the counter strip, an
+  `aevalsrc` step table for the tone), so the player grades a native importer's
+  timestamps for sync. One run sends an Opus and an AAC rendition and switches
+  between them; another sends AAC alone, so AAC playback is graded on every host.
+  `src/native.test.ts` renders the filters and requires the fixture's own
+  decoder to read back every frame number and tone step.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
   `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
   session is visible rather than merely invisible.
@@ -489,6 +515,7 @@ assertion that has to catch it, and passes only by failing there:
 | tone muted at the source | `audio tone` |
 | picture frozen after the first frame | `video progress` |
 | tone table shifted 800ms ahead of the picture | `audio/video sync` |
+| the native publisher's audio delayed 800ms (`-itsoffset`) | `audio/video sync` |
 | the detached player's session never torn down | `resource baseline` |
 | the latecomer's player delayed 3s behind live | `late join reaches live` |
 
@@ -529,8 +556,9 @@ clients/
     src/contract.ts       what the page and its drivers agree on, free of browser imports
     src/fixture.ts        the deterministic publisher (frame counter + stepped tone)
     src/pattern.ts        how that fixture encodes itself into the picture and the audio
+    src/native.ts         the same pattern as ffmpeg filters, for the native publisher
     src/probe.ts          subscriber-side measurement, taken at the sinks
-    src/instrument.ts     live counts of the platform resources the page holds
+    src/instrument.ts     live counts of the platform resources the page holds, and the speaker tap
     src/close.ts          the refused session, read off `WebTransport.closed`
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
   js-native/catalog.ts    the compressed-catalog reader, pinned to one version

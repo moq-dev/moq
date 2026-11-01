@@ -171,9 +171,6 @@
             cargo-semver-checks
             cargo-deny
             cargo-bloat
-            # Per-crate feature matrices (`just rs features`), where workspace
-            # unification would otherwise hide a broken single-crate build.
-            cargo-hack
             cargo-nextest
             cargo-codspeed
             # Source-based test coverage (`just rs coverage`).
@@ -311,6 +308,7 @@
           shellcheck
           shfmt
           actionlint
+          zizmor
           taplo
           nixfmt
         ];
@@ -374,6 +372,8 @@
         goDeps = [
           pkgs.go
           uniffi-bindgen-go
+          # `just go audit`, nightly.
+          pkgs.govulncheck
         ];
 
         # uniffi-bindgen-dart renders rs/moq-ffi into dart/moq_ffi. The fork
@@ -603,6 +603,12 @@
           moxygen = pkgs.callPackage ./nix/moxygen.nix { };
 
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
+
+          # Nightly's `just rs send-depth` proves native Send futures on it.
+          # Pinned so a toolchain release alone never fails that job;
+          # bump it on purpose, like the stable toolchain above. Kept out of
+          # the dev shell, which every CI job downloads.
+          rust-nightly = pkgs.rust-bin.nightly."2026-10-18".minimal;
 
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
           # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out

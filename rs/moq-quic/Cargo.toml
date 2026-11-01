@@ -45,6 +45,8 @@ aws-lc-rs = { version = "1.9", default-features = false, optional = true }
 bytes = { workspace = true }
 fastbloom = { version = "0.17", default-features = false }
 indexmap = { workspace = true }
+# The waiter every `poll_*` wait registers, owned by the caller.
+kio = { workspace = true }
 lru-slab = "0.1.2"
 # Without the runtime, which is meant for dev-dependencies; a driver brings its own.
 moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }

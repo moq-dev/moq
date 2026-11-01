@@ -162,7 +162,6 @@ sdist grew 17% (7,733,152 to 9,016,318 bytes).
 
 ## Related
 
-- [The catalog publish path compiles once](/quest/m2/catalog-publish-once.md)
 - [FFI size profile](/quest/m2/ffi-size-profile.md)
 - [Native synchronous codecs](/quest/m2/native-compression-sync.md)
 - [Native browser codecs](/quest/m2/native-compression-adopt.md)

@@ -4,6 +4,8 @@
 # them in order and streams their output. CHECK_MODULES limits the selection to
 # the modules it names, or skips those named with a leading `-`, so a gate too
 # large for one job splits across several.
+# CHECK_FAIL_FAST=1 stops every lane at the first failed module, for the land
+# gate, which ejects a failing batch either way and gains nothing from the rest.
 # `--query` prints the selection before CI installs its toolchain and caches.
 # `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
@@ -114,9 +116,6 @@ declare -A scope=(
     [justfile]=''
     [gh]=''
 )
-# rs's crates again, each compiled alone at its feature extremes: its own
-# module because one clippy pass per package outgrows a hosted job beside rs.
-scope[rs_shapes]=${scope[rs]}
 
 # Report each native suite from the same impact map, before any toolchain is
 # installed. Rust dependencies can break external consumers too, so include
@@ -152,7 +151,6 @@ declare -A tools=(
     [workers]='bun'
     [moq_sh]='dash'
     [rs]='cargo jq'
-    [rs_shapes]='cargo cargo-hack jq'
     [bench]='cargo'
     [carla]='uv'
     [drafts]='bun kramdown-rfc xml2rfc'
@@ -175,7 +173,7 @@ declare -A tools=(
     [toml]='taplo'
     [nix]='nixfmt'
     [justfile]=''
-    [gh]='actionlint bun python3 cargo clippy-driver dpkg-deb nfpm rpm'
+    [gh]='actionlint zizmor bun python3 cargo clippy-driver dpkg-deb nfpm rpm'
 )
 
 # CI and the local check share one selection and one lint/test dispatch.
@@ -186,22 +184,20 @@ verb=$action
 # build cache only when one is selected. JS checks build @moq/wasm for its
 # consumers, and the bindings build moq-ffi.
 declare -A compiles=(
-    [check]='rs rs_shapes bench js py kt go dart c cpp obs_compile'
+    [check]='rs bench js py kt go dart c cpp obs_compile'
     [fix]='rs'
 )
 
 # Lanes start in this order, so the slowest come first. dart runs alone (see
 # below), so it waits for the rest.
 case "$action" in
-    check | ci) modules=(py rs rs_shapes c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
+    check | ci) modules=(py rs c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
     fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
 esac
 
 # Modules that share mutable state run in one lane, in module order; every
 # other module is a lane of its own, and lanes run concurrently.
 declare -A lane=(
-    # Both build the workspace in one target directory.
-    [rs_shapes]=rs
     # `bun install` relinks the root workspace's packages even when nothing
     # changed, so a concurrent install or import of them fails.
     [js]=bun
@@ -314,10 +310,9 @@ step() {
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
-        # The check keeps docs and target-specific lints; the test phase
-        # enforces default-feature clippy without a second compile.
+        # The check keeps docs; the test phase enforces default-feature clippy
+        # without a second compile.
         check:rs) just rs lint-changed "$rs_list" ;;
-        check:rs_shapes) just rs feature-shapes-changed "$rs_list" ;;
         check:bench)
             python3 bench/compare.test.py
             bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
@@ -448,6 +443,7 @@ run_lane() {
                 record failed
                 ((lane_status)) || lane_status=$status
                 current=
+                [[ -z "${CHECK_FAIL_FAST:-}" ]] || return "$lane_status"
                 break
             fi
             record
@@ -518,10 +514,12 @@ trap 'exit 143' TERM
 # run's stderr as it starts and ends, so a run cut off mid-phase, such as by a
 # job timeout that never reaches this script, names the phase it stopped in.
 # Every lane completes even when another fails, so one unavailable check cannot
-# hide unrelated failures.
+# hide unrelated failures; under CHECK_FAIL_FAST the first failure cancels the
+# running lanes and starts no more.
 set -m
+stopping=
 while true; do
-    while [[ -z "$lone" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
+    while [[ -z "$lone$stopping" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
         name=${lanes[next]}
         if [[ -v "alone[$name]" ]] && ((${#running[@]})); then
             break
@@ -543,9 +541,13 @@ while true; do
     name=${running[$pid]}
     unset "running[$pid]"
     [[ "$pid" != "$lone" ]] || lone=
-    if ((status)); then
+    if ((status)) && [[ -z "$stopping" ]]; then
         failed+=("$name")
         ((failed_status)) || failed_status=$status
+        if [[ -n "${CHECK_FAIL_FAST:-}" ]]; then
+            stopping=1
+            cancel
+        fi
     fi
     ((limit == 1)) || cat "$logs/$name.log"
 done
