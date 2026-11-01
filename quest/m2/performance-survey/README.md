@@ -173,7 +173,7 @@ No duplicate quest or workflow edit belongs here.
 
 ## Required
 
-- [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - polling and memory after peak task occupancy subsides
+- [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - memory a task set keeps after peak occupancy subsides
 - [QUIC receive-state reuse](/quest/m2/performance-survey/quic-receive-reuse.md) - reassembly metadata retained by recycled completed streams
 - [Cache metadata](/quest/m2/performance-survey/cache-metadata.md) - bookkeeping capacity after cached groups expire
 - [Cache backing amplification](/quest/m2/performance-survey/cache-backing.md) - small retained samples pinning large shared fragments

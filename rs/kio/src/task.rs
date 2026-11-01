@@ -29,15 +29,22 @@
 //! [unicycle](https://github.com/udoprog/unicycle) proved out against
 //! `FuturesUnordered`'s intrusive list): a wake is one `fetch_or`, lock-free,
 //! and inherently deduplicated since setting a set bit is a no-op. Each poll
-//! snapshots a word at a time with `swap(0)`, so a task woken mid-pass lands in
-//! the next pass instead of spinning this one. Because tasks are closures, not
-//! pinned futures, a slot's identity is stable and its [`Waker`] is minted once
-//! and reused across occupants: the per-task allocation `FuturesUnordered`
+//! snapshots the woken words with `swap(0)` before running anything, so a task
+//! woken mid-pass lands in the next pass instead of spinning this one. Because
+//! tasks are closures, not pinned futures, a slot's identity is stable and its
+//! [`Waker`] is minted once and reused across occupants: the per-task allocation `FuturesUnordered`
 //! pays per future (and futures-buffered removes with an unsafe arena) is a
 //! per-slot cost here, amortized to zero in a long-lived set. An owner that
 //! wakes its own tasks mid-poll (a driver advancing its clock) runs that poll in
 //! [`Waiter::batch`], so the set's wake of the owner is not a second poll. Safe Rust
 //! throughout.
+//!
+//! The bitset is indexed so a poll visits only woken words, not every word the
+//! set ever grew: a word's first bit also marks it in its chunk's summary, and a
+//! chunk's first marked word also marks bit `chunk % 64` of one word shared by
+//! the whole set. A poll with nothing woken is then one `swap`, however many
+//! slots a past burst left behind. Up to 64 chunks (65,536 slots) the top word
+//! is exact; past that a bit stands for every 64th chunk, one `swap` each.
 
 use std::{
 	cell::{Cell, RefCell},
@@ -57,11 +64,19 @@ const CHUNK_SLOTS: usize = WORD_BITS * CHUNK_WORDS;
 
 /// One fixed block of the wake bitset. Chunks never move or grow, so a waker
 /// can hold its chunk directly and set its bit without any lock.
-struct Chunk([AtomicU64; CHUNK_WORDS]);
+struct Chunk {
+	words: [AtomicU64; CHUNK_WORDS],
+	/// Bit `w` is set once word `w` went nonzero and stays set until a poll
+	/// takes the word, so a poll swaps only the words that hold wakes.
+	summary: AtomicU64,
+}
 
 impl Chunk {
 	fn new() -> Arc<Self> {
-		Arc::new(Self(std::array::from_fn(|_| AtomicU64::new(0))))
+		Arc::new(Self {
+			words: std::array::from_fn(|_| AtomicU64::new(0)),
+			summary: AtomicU64::new(0),
+		})
 	}
 }
 
@@ -83,10 +98,11 @@ pub struct Tasks<T> {
 	free: Vec<usize>,
 	len: usize,
 	shared: Arc<Shared>,
-	/// The readiness snapshot each poll dispatches from, taken before any task
-	/// runs so a mid-pass wake lands in the next pass wherever its slot sits.
+	/// The readiness snapshot each poll dispatches from: the woken words as
+	/// `(word index, bits)` in ascending word order, taken before any task runs
+	/// so a mid-pass wake lands in the next pass wherever its slot sits.
 	/// Retained so steady-state polls don't allocate.
-	scratch: Vec<u64>,
+	scratch: Vec<(usize, u64)>,
 	/// The slot that leads the next readiness snapshot, rotated after every
 	/// nonempty pass so wake-all resources cannot favor low-numbered tasks.
 	next: usize,
@@ -118,6 +134,9 @@ struct Shared {
 	/// Set by the first wake since the last poll began, so a burst of wakes
 	/// costs one parent wake, not one each.
 	pending: AtomicBool,
+	/// The chunks with a marked summary: bit `c % 64` for chunk `c`. The top
+	/// level of the wake index, so a poll skips the chunks nothing woke.
+	ready: AtomicU64,
 }
 
 impl Shared {
@@ -220,10 +239,12 @@ impl Polling {
 }
 
 /// The per-slot waker: sets the slot's wake bit and nudges the owner.
+///
+/// One lives per slot the set ever grew, so it keeps only the slot index and
+/// derives its bits from that.
 struct SlotWaker {
 	chunk: Arc<Chunk>,
-	word: usize,
-	bit: u64,
+	slot: usize,
 	shared: Arc<Shared>,
 }
 
@@ -235,9 +256,21 @@ impl Wake for SlotWaker {
 	fn wake_by_ref(self: &Arc<Self>) {
 		// An already-set bit means the slot is queued for the next pass and the
 		// owner was already nudged: a burst of wakes is one bit and one nudge.
-		if self.chunk.0[self.word].fetch_or(self.bit, Ordering::AcqRel) & self.bit == 0 {
-			self.shared.wake_parent();
+		let index = (self.slot % CHUNK_SLOTS) / WORD_BITS;
+		let bit = 1 << (self.slot % WORD_BITS);
+		let word = self.chunk.words[index].fetch_or(bit, Ordering::AcqRel);
+		if word & bit != 0 {
+			return;
 		}
+		// Only the wake that makes a level nonzero marks the level above. A poll
+		// clears each level before taking the one below it, so a later wake into a
+		// still-nonzero level is either taken by that poll or covered by the mark
+		// the level's first wake left (or is about to leave) for the next one.
+		if word == 0 && self.chunk.summary.fetch_or(1 << index, Ordering::AcqRel) == 0 {
+			let chunk = self.slot / CHUNK_SLOTS;
+			self.shared.ready.fetch_or(1 << (chunk % WORD_BITS), Ordering::AcqRel);
+		}
+		self.shared.wake_parent();
 	}
 }
 
@@ -253,6 +286,7 @@ impl<T> Tasks<T> {
 			shared: Arc::new(Shared {
 				parent: Mutex::new(None),
 				pending: AtomicBool::new(false),
+				ready: AtomicU64::new(0),
 			}),
 			scratch: Vec::new(),
 			next: 0,
@@ -291,8 +325,7 @@ impl<T> Tasks<T> {
 				self.children.push(None);
 				self.wakers.push(Waker::from(Arc::new(SlotWaker {
 					chunk: self.chunks[index / CHUNK_SLOTS].clone(),
-					word: (index % CHUNK_SLOTS) / WORD_BITS,
-					bit: 1 << (index % WORD_BITS),
+					slot: index,
 					shared: self.shared.clone(),
 				})));
 				index
@@ -402,13 +435,30 @@ impl<T: Task> Tasks<T> {
 		// during the pass (by another task or a self-wake) lands in the next
 		// pass wherever its slot sits, never this one. Dispatching straight off
 		// the words instead would run a forward wake chain in a single pass,
-		// starving the caller's other arms.
+		// starving the caller's other arms. Each level is cleared before the
+		// level below it is read, the order the wakers' marks rely on.
 		let mut scratch = std::mem::take(&mut self.scratch);
 		scratch.clear();
-		for chunk in &self.chunks {
-			for word in &chunk.0 {
-				scratch.push(word.swap(0, Ordering::AcqRel));
+		let mut ready = self.shared.ready.swap(0, Ordering::AcqRel);
+		while ready != 0 {
+			let first = ready.trailing_zeros() as usize;
+			ready &= ready - 1;
+			for (chunk_index, chunk) in self.chunks.iter().enumerate().skip(first).step_by(WORD_BITS) {
+				let mut words = chunk.summary.swap(0, Ordering::AcqRel);
+				while words != 0 {
+					let word = words.trailing_zeros() as usize;
+					words &= words - 1;
+					let bits = chunk.words[word].swap(0, Ordering::AcqRel);
+					if bits != 0 {
+						scratch.push((chunk_index * CHUNK_WORDS + word, bits));
+					}
+				}
 			}
+		}
+		// Up to 64 chunks the bits visit them in order; past that, a bit's chunks
+		// interleave with the next bit's.
+		if self.chunks.len() > WORD_BITS {
+			scratch.sort_unstable_by_key(|&(word, _)| word);
 		}
 
 		let slots = self.children.len();
@@ -421,8 +471,12 @@ impl<T: Task> Tasks<T> {
 			}
 			let first_word = from / WORD_BITS;
 			let last_word = (to - 1) / WORD_BITS;
-			for (word_index, word) in scratch.iter().enumerate().take(last_word + 1).skip(first_word) {
-				let mut bits = *word;
+			let start = scratch.partition_point(|&(word, _)| word < first_word);
+			for &(word_index, word) in &scratch[start..] {
+				if word_index > last_word {
+					break;
+				}
+				let mut bits = word;
 				if word_index == first_word {
 					bits &= u64::MAX << (from % WORD_BITS);
 				}
@@ -935,6 +989,127 @@ mod tests {
 			assert!(tasks.poll(&waiter).is_pending());
 		}
 		assert_eq!(*order.lock().unwrap(), [0, 1, 2, 1, 2, 0, 2, 0, 1]);
+	}
+
+	/// Past 64 chunks a bit of the top index word stands for every 64th chunk:
+	/// each woken task still runs exactly once, in rotated slot order, and a
+	/// chunk sharing a woken chunk's bit is not polled for it.
+	#[test]
+	#[cfg_attr(miri, ignore = "65 chunks of tasks take too long to interpret")]
+	fn wakes_past_64_chunks_run_in_slot_order() {
+		fn task(id: usize, order: Arc<Mutex<Vec<usize>>>) -> impl FnMut(&Waiter) -> Poll<()> {
+			move |_| {
+				order.lock().unwrap().push(id);
+				Poll::Pending
+			}
+		}
+
+		let order = Arc::new(Mutex::new(Vec::new()));
+		let mut tasks = Tasks::new();
+		let slots = 66 * CHUNK_SLOTS;
+		for id in 0..slots {
+			tasks.push(task(id, order.clone()));
+		}
+		let waiter = Waiter::noop();
+		assert!(tasks.poll(&waiter).is_pending());
+		assert_eq!(order.lock().unwrap().len(), slots, "every new task ran once");
+		order.lock().unwrap().clear();
+
+		// Chunks 1 and 65 share a top bit, as do 0 and 64; chunk 2 has its own.
+		let woken = [
+			65 * CHUNK_SLOTS + 3,
+			CHUNK_SLOTS + 7,
+			2 * CHUNK_SLOTS,
+			64 * CHUNK_SLOTS,
+			5,
+		];
+		for &slot in &woken {
+			tasks.wakers[slot].wake_by_ref();
+		}
+		assert!(tasks.poll(&waiter).is_pending());
+		let mut sorted = woken;
+		sorted.sort();
+		assert_eq!(
+			*order.lock().unwrap(),
+			sorted,
+			"ascending slot order from the rotation point"
+		);
+		order.lock().unwrap().clear();
+
+		// The rotation point moved past the first slot run, which now runs last.
+		for &slot in &woken {
+			tasks.wakers[slot].wake_by_ref();
+		}
+		assert!(tasks.poll(&waiter).is_pending());
+		let mut rotated = sorted[1..].to_vec();
+		rotated.push(sorted[0]);
+		assert_eq!(*order.lock().unwrap(), rotated);
+
+		order.lock().unwrap().clear();
+		assert!(tasks.poll(&waiter).is_pending());
+		assert!(order.lock().unwrap().is_empty(), "nothing was woken");
+	}
+
+	/// Wakes from other threads racing the owner's polls are never lost: every
+	/// task woken after its last poll runs again.
+	#[test]
+	fn concurrent_wakes_are_never_lost() {
+		const TASKS: usize = 3 * CHUNK_SLOTS;
+		const THREADS: usize = 4;
+		const ROUNDS: usize = if cfg!(miri) { 16 } else { 2_000 };
+
+		// Each task records the highest wake count it has observed.
+		let counts: Arc<Vec<AtomicUsize>> = Arc::new((0..TASKS).map(|_| AtomicUsize::new(0)).collect());
+		let seen: Arc<Vec<AtomicUsize>> = Arc::new((0..TASKS).map(|_| AtomicUsize::new(0)).collect());
+		let mut tasks = Tasks::new();
+		for id in 0..TASKS {
+			let (counts, seen) = (counts.clone(), seen.clone());
+			tasks.push(move |_: &Waiter| {
+				seen[id].store(counts[id].load(Ordering::SeqCst), Ordering::SeqCst);
+				Poll::Pending
+			});
+		}
+
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let waiter = Waiter::new(Waker::from(wakes.clone()));
+		assert!(tasks.poll(&waiter).is_pending());
+		let wakers: Arc<Vec<Waker>> = Arc::new(tasks.wakers.clone());
+
+		let threads: Vec<_> = (0..THREADS)
+			.map(|thread| {
+				let (counts, wakers) = (counts.clone(), wakers.clone());
+				std::thread::spawn(move || {
+					// Spread each thread's wakes over every word and chunk.
+					let mut slot = thread * 997;
+					for _ in 0..ROUNDS {
+						for _ in 0..8 {
+							slot = (slot + 4099) % TASKS;
+							counts[slot].fetch_add(1, Ordering::SeqCst);
+							wakers[slot].wake_by_ref();
+						}
+					}
+				})
+			})
+			.collect();
+		// Poll while the wakers run: a wake that marks a word or chunk the
+		// running poll already passed must stay indexed for a later one.
+		while !threads.iter().all(|thread| thread.is_finished()) {
+			assert!(tasks.poll(&waiter).is_pending());
+		}
+		for thread in threads {
+			thread.join().unwrap();
+		}
+		assert!(wakes.0.load(Ordering::SeqCst) > 0, "no wake reached the owner");
+
+		// Every wake is in; one more poll must run each task woken since its last.
+		assert!(tasks.poll(&waiter).is_pending());
+		for id in 0..TASKS {
+			assert_eq!(
+				seen[id].load(Ordering::SeqCst),
+				counts[id].load(Ordering::SeqCst),
+				"task {id} lost a wake"
+			);
+		}
 	}
 
 	/// Drive a set to completion as a future. Generic on purpose: the two tests

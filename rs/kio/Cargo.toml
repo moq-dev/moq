@@ -61,6 +61,10 @@ name = "tasks"
 harness = false
 
 [[bench]]
+name = "task_capacity"
+harness = false
+
+[[bench]]
 name = "waiter"
 harness = false
 
