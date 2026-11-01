@@ -19,7 +19,7 @@
 use std::{
 	collections::{BTreeMap, BTreeSet},
 	ops::{self, RangeInclusive},
-	sync::{Arc, PoisonError},
+	sync::{Arc, Mutex, PoisonError},
 	task::Poll,
 	time::Duration,
 };
@@ -31,7 +31,6 @@ pub(super) use super::fill::Asking;
 use super::fill::{Ask, FillState, Join};
 use super::{Drift, Order, Position, TrackState};
 use crate::Error;
-use crate::sync::Mutex;
 
 /// What a probe judges against: the span read, the feed's newest group, where the feed
 /// and readers start, and the drops revision.
