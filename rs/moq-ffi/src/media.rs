@@ -23,6 +23,40 @@ pub struct MoqDimensions {
 	pub height: u32,
 }
 
+/// How far behind the live edge a decoder plays, the counterpart of `moq_mux::container::Delay`.
+#[derive(Clone, Copy, Debug, uniffi::Record)]
+pub struct MoqDelay {
+	/// The target latency: the playout or jitter-buffer delay held behind the live edge, and
+	/// where a cold join starts. It stays on the consumer and never reaches the subscription. A
+	/// `min` past `max` starts at `max`, since the publisher serves nothing older.
+	pub min: std::time::Duration,
+	/// How far a group may fall behind the live edge before it is skipped, or null for no limit.
+	/// It bounds lateness only, never the start.
+	pub max: Option<std::time::Duration>,
+}
+
+impl From<MoqDelay> for moq_mux::container::Delay {
+	fn from(delay: MoqDelay) -> Self {
+		Self {
+			min: delay.min,
+			max: delay.max,
+		}
+	}
+}
+
+/// Where an audio or video decoder starts on a track that already holds groups.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqDecodeStart {
+	/// The oldest group the track still holds, decoding everything cached. What a recorder,
+	/// an export, or anything reading a finished track wants.
+	#[default]
+	Oldest,
+	/// The newest group, skipping the cached backlog. What a live player wants, so reopening
+	/// a decoder does not replay what it already played. Opening waits for the track's live
+	/// edge, or its end.
+	Latest,
+}
+
 /// Catalog properties shared by every video rendition.
 ///
 /// Passing an absent field clears it from the next catalog snapshot rather than preserving the previous value.
@@ -132,7 +166,9 @@ pub struct MoqVideo {
 	pub display_aspect: Option<MoqDimensions>,
 	/// The maximum encoded bitrate in bits per second.
 	pub bitrate: Option<u64>,
-	/// Whether this rendition may be selected; when false, no frames are coming.
+	/// Whether the publisher is serving this rendition; when false, no frames are coming until it
+	/// re-enables. Pick an enabled rendition, but keep one already playing while every rendition
+	/// of its kind is disabled, so a re-enable plays without a resubscribe.
 	#[uniffi(default = true)]
 	pub enabled: bool,
 	/// Higher values are preferred; compatibility transcodes use -1 and the default is 0.
@@ -173,7 +209,9 @@ pub struct MoqAudio {
 	pub channel_count: u32,
 	/// The maximum encoded bitrate in bits per second.
 	pub bitrate: Option<u64>,
-	/// Whether this rendition may be selected; when false, no frames are coming.
+	/// Whether the publisher is serving this rendition; when false, no frames are coming until it
+	/// re-enables. Pick an enabled rendition, but keep one already playing while every rendition
+	/// of its kind is disabled, so a re-enable plays without a resubscribe.
 	#[uniffi(default = true)]
 	pub enabled: bool,
 	/// The framing used to carry this rendition.
@@ -228,6 +266,7 @@ pub struct MoqDatagram {
 /// Caller-provided video catalog fields for [`MoqVideoInit`].
 ///
 /// Every field is optional and fills only a gap the stream leaves; a value the stream detects wins.
+/// The MSF catalog declares a bitrate or frame rate only when it is hinted here.
 /// Publishing the catalog before the first keyframe needs at least the codec, which comes from the
 /// [`MoqVideoInit`] format. Audio has no equivalent: it resolves entirely from its init bytes.
 #[derive(Clone, Default, uniffi::Record)]
@@ -699,7 +738,7 @@ pub struct MoqMediaCatalogProducer {
 }
 
 impl MoqMediaCatalogProducer {
-	#[cfg(all(any(feature = "audio", feature = "video"), not(target_arch = "wasm32")))]
+	#[cfg(any(feature = "audio", feature = "video"))]
 	pub(crate) fn broadcast(&self) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		self.broadcast.upgrade().ok_or(MoqError::Closed)
 	}
@@ -799,8 +838,6 @@ impl MoqMediaCatalogProducer {
 struct MediaProducer {
 	// Boxed because the codec splitters/imports make this much larger than the container one.
 	import: Box<moq_mux::import::Track>,
-	/// Subscriber demand (name/used/unused) for the one track this publishes.
-	demand: moq_net::track::Demand,
 }
 
 /// An importer for a container, which may publish several tracks.
@@ -1004,13 +1041,11 @@ impl MoqMediaTrackStreamProducer {
 }
 
 impl MoqMediaTrackProducer {
-	/// Wrap a single-codec importer, capturing the demand handle its track exposes.
+	/// Wrap a single-codec importer.
 	fn from_import(import: moq_mux::import::Track, children: &Children) -> Result<Arc<Self>, MoqError> {
-		let demand = import.demand();
 		children.adopt(Arc::new(Self {
 			inner: std::sync::Mutex::new(Some(MediaProducer {
 				import: Box::new(import),
-				demand,
 			})),
 			children: children.clone(),
 		}))
@@ -1020,10 +1055,13 @@ impl MoqMediaTrackProducer {
 #[uniffi::export]
 impl MoqMediaTrackProducer {
 	/// A watch-only handle to whether this track has subscribers.
+	///
+	/// A frame that changes the decoder identity publishes under a new track name, so read this
+	/// again after [`write_frame`](Self::write_frame) rather than holding the first handle.
 	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
 		let guard = self.inner.lock().unwrap();
 		Ok(MoqTrackDemand::new(
-			guard.as_ref().ok_or(MoqError::Closed)?.demand.clone(),
+			guard.as_ref().ok_or(MoqError::Closed)?.import.demand(),
 		))
 	}
 
@@ -1763,7 +1801,7 @@ mod catalog_tests {
 	}
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod timebase_tests {
 	use super::*;
 	use std::time::Duration;
@@ -2021,7 +2059,7 @@ mod timebase_tests {
 				reserve();
 			}
 			for touched in [1, 16, 256] {
-				let start = moq_clock::Instant::now();
+				let start = kio::clock::Instant::now();
 				for _ in 0..1000 {
 					for _ in 0..touched {
 						reserve();

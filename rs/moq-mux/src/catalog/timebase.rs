@@ -29,6 +29,12 @@ impl<E: CatalogExt> Timebase<E> {
 		}
 	}
 
+	/// Finish and forget the HLS records of a dropped `track` whose name is never published again.
+	/// See [`Producer::retire`].
+	pub(crate) fn retire(&self, track: &str) -> crate::Result<()> {
+		self.catalog.retire(track)
+	}
+
 	/// Begin reserving an importer's tracks, sharing this timebase's offset.
 	///
 	/// See [`Producer::reserve`] for how the reservation gates the catalog.
@@ -44,7 +50,7 @@ impl<E: CatalogExt> Timebase<E> {
 	/// A placement alone publishes nothing: the clock goes out with the catalog's first track.
 	/// Refused once this timebase has an offset, and when the host's wall clock was unset, leaving no
 	/// wall to place it on.
-	pub fn place(&self, pts: moq_net::Timestamp, wall: moq_clock::Wall) -> crate::Result<()> {
+	pub fn place(&self, pts: moq_net::Timestamp, wall: kio::clock::Wall) -> crate::Result<()> {
 		self.catalog.clone().anchor(&self.offset, pts, Some(wall))?;
 		Ok(())
 	}

@@ -21,8 +21,8 @@ Rules every child keeps:
   slow, fix that.
 - A paused clock auto-advances while the runtime idles, so it can fire a
   timer before a real socket delivers. Where real sockets fight the paused
-  clock, drive the timers with a `moq_clock::Manual` clock or the sim (every
-  crate's timers run on `moq-clock`), or move the test off real sockets.
+  clock, drive the timers with a `kio::clock::Manual` clock or the sim (every
+  crate's timers run on `kio::clock`), or move the test off real sockets.
 - A mocked clock still flakes when the code jitters its timers with `rand`
   (one cancel race was a retry sweep jittered past a fixed settle
   budget). Wait out the jitter's whole window, not a count of small steps.
@@ -44,12 +44,19 @@ sibling-restart tests, the moq-mux missing-sequence test,
 `js/common/worklet.test.ts`, and the IETF datagram range test in
 [moq-dev/moq#6593](https://github.com/moq-dev/moq/pull/6593)).
 
+The `rust-swapped -> js` and `rust -> js` browser audio timeouts were a lite-06
+catalog group dropped mid-read ending the player's catalog, fixed by
+[moq-dev/moq#6820](https://github.com/moq-dev/moq/pull/6820).
+
+moq-rtc's session-end test was never load-bound: on the paused clock, dimpl's
+randomly jittered DTLS handshake give-up raced ICE's establishment deadline,
+fixed by [moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379).
+
 Public API: none. Wire: none.
 
 ## Required
 
-- [FFI publisher audio gaps](/quest/m0/test-flakes-2/ffi-audio-gap.md) - interop tone checks stop finding gaps from FFI publishers
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
-- [Swapped Rust to JS Opus](/quest/m0/test-flakes-2/swapped-js-opus.md) - the `rust-swapped -> js` interop cell stops timing out under load
-- [JS host-task yields follow the clock](/quest/m0/test-flakes-2/js-host-yields.md) - `Budget` and `nextTask` yield through the injected clock, so `Manual` tests stop racing them
-- [Runner VM test under load](/quest/m0/test-flakes-2/runner-vm.md) - the runner VM check passes when it rebuilds in a merge group, and a failed flake check prints its full log
+- [moq-relay's auth-trust test survives load](/quest/m0/test-flakes-2/relay-auth-trust.md) - it stops timing out on a busy host
+- [Draft-22 interop with a native publisher](/quest/m0/test-flakes-2/draft22-interop.md) - no "invalid fetch range" or audio gap with a Rust or C++ publisher
+- [The relay fits a Windows stack under every feature set](/quest/m0/test-flakes-2/relay-stack-all-features.md) - the 1 MiB stack test passes under `--all-features` too

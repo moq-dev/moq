@@ -8,13 +8,16 @@
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::{Context, Poll};
+use std::task::Poll;
 use std::time::Duration;
 
 use bytes::{Buf, Bytes};
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::transport::{self as net, Address, poll};
-use moq_quic::{Dir, Side, StreamId, TransportError, TransportErrorCode, VarInt, mux};
+use moq_quic::stream::{Dir, Id as StreamId};
+use moq_quic::{
+	Side, TransportError, TransportErrorCode, VarInt, connection::Error as ConnectionError, mux, recv, send,
+};
 use rustc_hash::FxHashMap;
 
 use crate::transport::{Reader, Transport, Writer};
@@ -57,8 +60,6 @@ struct State {
 	writable: FxHashMap<StreamId, kio::WaiterList>,
 	/// Send streams waiting for their end: a FIN serialized, or a `STOP_SENDING`.
 	finishing: FxHashMap<StreamId, kio::WaiterList>,
-	/// Every send stream a handle still holds, and how it ended once that happened.
-	sends: FxHashMap<StreamId, Option<End>>,
 
 	datagram_waiters: kio::WaiterList,
 
@@ -72,15 +73,6 @@ struct State {
 
 	sent_bytes: u64,
 	received_bytes: u64,
-}
-
-/// How a send stream ended, once the session has seen it happen.
-#[derive(Clone, Copy, Debug)]
-enum End {
-	/// The FIN went to the transport, which on a reliable transport is delivery.
-	Delivered,
-	/// The peer sent `STOP_SENDING` with this code.
-	Stopped(u64),
 }
 
 impl State {
@@ -121,10 +113,12 @@ impl State {
 				mux::Event::DatagramReceived => self.datagram_waiters.wake(),
 				mux::Event::ConnectionLost { reason } => {
 					self.reader.wake();
-					// The writer publishes a local close once its frame is out.
-					if !matches!(reason, moq_quic::ConnectionError::LocallyClosed) {
-						let err = Error::lost(reason, self.established);
-						self.fail(err);
+					let local = matches!(reason, ConnectionError::LocallyClosed { .. });
+					let err = Error::lost(reason);
+					match local {
+						// The writer publishes a local close once its frame is out.
+						true => self.local_close = Some(err),
+						false => self.fail(err),
 					}
 				}
 			}
@@ -142,9 +136,9 @@ impl State {
 			StreamEvent::Available { .. } => self.open_waiters.wake(),
 			StreamEvent::Readable { id } => wake(&mut self.readable, id),
 			StreamEvent::Writable { id } => wake(&mut self.writable, id),
-			StreamEvent::Finished { id } => self.end(id, End::Delivered),
-			StreamEvent::Stopped { id, error_code } => {
-				self.end(id, End::Stopped(error_code.into_inner()));
+			StreamEvent::Finished { id } => wake(&mut self.finishing, id),
+			StreamEvent::Stopped { id, .. } => {
+				wake(&mut self.finishing, id);
 				// A writer blocked on capacity has to learn it will never come.
 				wake(&mut self.writable, id);
 			}
@@ -153,22 +147,11 @@ impl State {
 		}
 	}
 
-	/// Record how a send stream ended, and wake whoever is watching it.
-	///
-	/// A stream whose handle already dropped records nothing: nobody is left to read the
-	/// verdict, and the entry would outlive every use for it.
-	fn end(&mut self, id: StreamId, end: End) {
-		if let Some(slot) = self.sends.get_mut(&id) {
-			*slot = Some(end);
-		}
-		wake(&mut self.finishing, id);
-	}
-
-	/// Drop send stream `id`'s bookkeeping, parking included.
+	/// Drop send stream `id`'s bookkeeping, parking and its end included.
 	fn forget_send(&mut self, id: StreamId) {
-		self.sends.remove(&id);
 		self.finishing.remove(&id);
 		self.writable.remove(&id);
+		self.conn.send_stream(id).release();
 	}
 }
 
@@ -183,17 +166,15 @@ impl Inner {
 		self.state.lock().unwrap()
 	}
 
-	/// Close with an APPLICATION_CLOSE, reporting `err` once it is out.
-	fn close(&self, code: u64, reason: &str, err: Error) {
+	/// Close with an APPLICATION_CLOSE, reporting it once it is out.
+	fn close(&self, code: u64, reason: &str) {
 		let mut state = self.lock();
 		if state.closed.is_some() || state.conn.is_closed() {
 			return;
 		}
-		state.conn.close(
-			VarInt::from_u64(code).unwrap_or(VarInt::MAX),
-			Bytes::copy_from_slice(reason.as_bytes()),
-		);
-		state.local_close = Some(err);
+		state
+			.conn
+			.close(VarInt::from_u64(code).unwrap_or(VarInt::MAX), reason.to_string());
 		state.sweep();
 		state.driver.wake();
 		// A closing connection ignores whatever else the peer sends.
@@ -207,7 +188,7 @@ impl Inner {
 		// Register first: a handle mutating the connection after this sweep re-polls us.
 		waiter.register(&mut state.driver);
 		loop {
-			let now = moq_clock::now();
+			let now = kio::clock::now();
 			if state.conn.poll_timeout().is_some_and(|at| now >= at) {
 				state.conn.handle_timeout(now);
 			}
@@ -245,7 +226,7 @@ impl Inner {
 			state.conn.set_backpressured(true);
 		}
 		loop {
-			let now = moq_clock::now();
+			let now = kio::clock::now();
 			if state.conn.is_closed() && timer.closing.is_none() {
 				timer.closing = Some(now + CLOSE_TIMEOUT);
 			}
@@ -296,7 +277,7 @@ impl Inner {
 /// The writer's timers.
 #[derive(Default)]
 struct Timer {
-	sleep: Option<moq_clock::Sleep>,
+	sleep: Option<kio::clock::Sleep>,
 	/// When a closing session gives up on delivering its close frame.
 	closing: Option<Instant>,
 	/// The current write is stalled on the transport.
@@ -309,7 +290,7 @@ impl Timer {
 		let Some(deadline) = deadline else {
 			return false;
 		};
-		if moq_clock::now() >= deadline {
+		if kio::clock::now() >= deadline {
 			return true;
 		}
 		let sleep = match &mut self.sleep {
@@ -319,7 +300,7 @@ impl Timer {
 				}
 				sleep
 			}
-			None => self.sleep.insert(moq_clock::sleep_until(deadline)),
+			None => self.sleep.insert(kio::clock::sleep_until(deadline)),
 		};
 		waiter.poll_future(Pin::new(sleep)).is_ready()
 	}
@@ -377,12 +358,12 @@ async fn run_writer<W: Writer>(inner: Arc<Inner>, mut writer: W, reader: tokio::
 	if result.is_ok() {
 		let bound = timer
 			.closing
-			.map_or(CLOSE_TIMEOUT, |at| at.saturating_duration_since(moq_clock::now()));
+			.map_or(CLOSE_TIMEOUT, |at| at.saturating_duration_since(kio::clock::now()));
 		let close = async {
 			let _ = reader.await;
 			writer.close().await
 		};
-		let _ = moq_clock::timeout(bound, close).await;
+		let _ = kio::clock::timeout(bound, close).await;
 	}
 	inner.writer_done(result);
 }
@@ -402,7 +383,7 @@ async fn run_reader<R: Reader>(inner: Arc<Inner>, mut reader: R) {
 			Ok(record) => {
 				state.received_bytes += record.len() as u64;
 				inner.wire.set_received_bytes(state.received_bytes);
-				state.conn.handle_record(record, moq_clock::now());
+				state.conn.handle_record(record, kio::clock::now());
 			}
 			Err(Error::FrameTooLarge) => state.conn.handle_oversized(),
 			Err(Error::FlowControlError) => state.conn.handle_violation(violation(
@@ -435,21 +416,25 @@ struct Guard(Arc<Inner>);
 
 impl Drop for Guard {
 	fn drop(&mut self) {
-		self.0.close(0, "", Error::Closed);
+		self.0.close(0, "");
 	}
 }
 
 /// A multiplexed session over a reliable transport.
 ///
-/// Clones share the session; each carries its own parking so concurrent pending operations
-/// don't trample each other's wakeups. Dropping the last clone closes the session with an
-/// APPLICATION_CLOSE of code 0; streams outliving it fail.
+/// Clones share the session, and every operation parks the caller's own waiter. Dropping the
+/// last clone closes the session with an APPLICATION_CLOSE of code 0; streams outliving it
+/// fail.
+#[derive(Clone)]
 pub struct Session {
 	inner: Arc<Inner>,
-	guard: Arc<Guard>,
-	park: kio::Park,
+	// Held for its drop, which closes the session once the last clone goes.
+	_guard: Arc<Guard>,
 	/// The application protocol, cached at establishment so `protocol()` can borrow it.
 	protocol: Option<String>,
+	/// What the TLS handshake learned about the peer, on a session over TLS.
+	#[cfg(feature = "tls")]
+	pub(crate) tls: Option<Arc<crate::tls::Handshake>>,
 }
 
 impl Session {
@@ -474,7 +459,7 @@ impl Session {
 	/// Start a session over the transport without waiting for the handshake, for callers
 	/// that resolved the protocol out of band (the WebSocket subprotocol, say).
 	pub(crate) fn new<T: Transport>(transport: T, side: Side, config: Config) -> Result<Self, Error> {
-		let conn = mux::Connection::new(config.to_mux()?, side, moq_clock::now());
+		let conn = mux::Connection::new(config.to_mux()?, side, kio::clock::now());
 		let inner = Arc::new(Inner {
 			state: Mutex::new(State {
 				conn,
@@ -488,7 +473,6 @@ impl Session {
 				readable: FxHashMap::default(),
 				writable: FxHashMap::default(),
 				finishing: FxHashMap::default(),
-				sends: FxHashMap::default(),
 				datagram_waiters: kio::WaiterList::new(),
 				closed: None,
 				closed_waiters: kio::WaiterList::new(),
@@ -506,10 +490,11 @@ impl Session {
 		tokio::spawn(run_writer(inner.clone(), writer, reader));
 
 		Ok(Self {
-			guard: Arc::new(Guard(inner.clone())),
+			_guard: Arc::new(Guard(inner.clone())),
 			inner,
-			park: kio::Park::default(),
 			protocol: config.negotiated_protocol(),
+			#[cfg(feature = "tls")]
+			tls: None,
 		})
 	}
 
@@ -556,8 +541,7 @@ impl Session {
 		}))
 	}
 
-	fn poll_accept_dir(&mut self, cx: &Context<'_>, dir: Dir) -> Poll<Result<StreamId, Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_accept_dir(&self, waiter: &kio::Waiter, dir: Dir) -> Poll<Result<StreamId, Error>> {
 		let mut state = self.inner.lock();
 		if let Some(id) = state.conn.streams().accept(dir) {
 			return Poll::Ready(Ok(id));
@@ -573,12 +557,11 @@ impl Session {
 	}
 
 	fn poll_open_dir(
-		&mut self,
-		cx: &Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		dir: Dir,
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<StreamId, Error>> {
-		let waiter = self.park.hold(cx);
 		let mut state = self.inner.lock();
 		if let Some(err) = &state.closed {
 			return Poll::Ready(Err(err.clone()));
@@ -594,17 +577,6 @@ impl Session {
 	}
 }
 
-impl Clone for Session {
-	fn clone(&self) -> Self {
-		Self {
-			inner: self.inner.clone(),
-			guard: self.guard.clone(),
-			park: kio::Park::default(),
-			protocol: self.protocol.clone(),
-		}
-	}
-}
-
 impl std::fmt::Debug for Session {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("Session")
@@ -614,8 +586,8 @@ impl std::fmt::Debug for Session {
 }
 
 /// The options as the connection knows them.
-fn to_quic<'a>(options: poll::SendOptions<'a, SendGroup>) -> moq_quic::SendOptions<'a> {
-	moq_quic::SendOptions {
+fn to_quic<'a>(options: poll::SendOptions<'a, SendGroup>) -> send::Options<'a> {
+	send::Options {
 		group: options.group.map(SendGroup::id),
 		priority: options.priority,
 	}
@@ -626,13 +598,13 @@ impl poll::Session for Session {
 	type RecvStream = RecvStream;
 	type Error = Error;
 
-	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<RecvStream, Error>> {
-		self.poll_accept_dir(cx, Dir::Uni)
+	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<RecvStream, Error>> {
+		self.poll_accept_dir(waiter, Dir::Uni)
 			.map_ok(|id| RecvStream::new(self.inner.clone(), id))
 	}
 
-	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		self.poll_accept_dir(cx, Dir::Bi).map_ok(|id| {
+	fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(SendStream, RecvStream), Error>> {
+		self.poll_accept_dir(waiter, Dir::Bi).map_ok(|id| {
 			(
 				SendStream::new(self.inner.clone(), id),
 				RecvStream::new(self.inner.clone(), id),
@@ -641,20 +613,20 @@ impl poll::Session for Session {
 	}
 
 	fn poll_open_uni(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<SendStream, Error>> {
-		self.poll_open_dir(cx, Dir::Uni, options)
+		self.poll_open_dir(waiter, Dir::Uni, options)
 			.map_ok(|id| SendStream::new(self.inner.clone(), id))
 	}
 
 	fn poll_open_bi(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		self.poll_open_dir(cx, Dir::Bi, options).map_ok(|id| {
+		self.poll_open_dir(waiter, Dir::Bi, options).map_ok(|id| {
 			(
 				SendStream::new(self.inner.clone(), id),
 				RecvStream::new(self.inner.clone(), id),
@@ -663,11 +635,10 @@ impl poll::Session for Session {
 	}
 
 	fn poll_open_request(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: poll::SendOptions<'_, SendGroup>,
 	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
-		let waiter = self.park.hold(cx);
 		let mut state = self.inner.lock();
 		if let Some(err) = &state.closed {
 			return Poll::Ready(Err(err.clone()));
@@ -691,26 +662,25 @@ impl poll::Session for Session {
 		})))
 	}
 
-	fn send_group(&mut self, priority: i64) -> Option<SendGroup> {
+	fn send_group(&self, priority: i64) -> Option<SendGroup> {
 		Some(Session::send_group(self, priority))
 	}
 
-	fn send_datagram(&mut self, payload: Bytes, options: poll::SendOptions<'_, SendGroup>) -> Result<(), Error> {
+	fn send_datagram(&self, payload: Bytes, options: poll::SendOptions<'_, SendGroup>) -> Result<(), Error> {
 		let mut state = self.inner.lock();
 		if let Some(err) = &state.closed {
 			return Err(err.clone());
 		}
 		match state.conn.datagrams().send(payload, to_quic(options)) {
 			Ok(()) => {}
-			Err(moq_quic::SendDatagramError::TooLarge) => return Err(Error::DatagramTooLarge),
+			Err(send::Error::TooLarge) => return Err(Error::DatagramTooLarge),
 			Err(_) => return Err(Error::DatagramsUnsupported),
 		}
 		state.driver.wake();
 		Ok(())
 	}
 
-	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
 		let mut state = self.inner.lock();
 		if let Some(datagram) = state.conn.datagrams().recv() {
 			return Poll::Ready(Ok(datagram));
@@ -734,16 +704,11 @@ impl poll::Session for Session {
 		self.inner.address
 	}
 
-	fn close(&mut self, code: u32, reason: &str) {
-		let err = Error::ConnectionClosed {
-			code: code.into(),
-			reason: reason.to_string(),
-		};
-		self.inner.close(code.into(), reason, err);
+	fn close(&self, code: u32, reason: &str) {
+		self.inner.close(code.into(), reason);
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
-		let waiter = self.park.hold(cx);
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		let mut state = self.inner.lock();
 		if let Some(err) = &state.closed {
 			return Poll::Ready(err.clone());
@@ -796,11 +761,11 @@ pub struct SendGroup(Arc<GroupInner>);
 struct GroupInner {
 	inner: Arc<Inner>,
 	/// Taken only on drop.
-	id: Option<moq_quic::SendGroup>,
+	id: Option<send::Group>,
 }
 
 impl SendGroup {
-	fn id(&self) -> &moq_quic::SendGroup {
+	fn id(&self) -> &send::Group {
 		self.0.id.as_ref().expect("only taken on drop")
 	}
 }
@@ -831,7 +796,6 @@ impl std::fmt::Debug for SendGroup {
 pub struct SendStream {
 	inner: Arc<Inner>,
 	id: StreamId,
-	park: kio::Park,
 	/// The FIN was queued; further writes are refused and `poll_closed` waits for it to go
 	/// out.
 	fin: bool,
@@ -841,19 +805,9 @@ pub struct SendStream {
 
 impl SendStream {
 	fn new(inner: Arc<Inner>, id: StreamId) -> Self {
-		{
-			// Seeded from the connection rather than empty: a peer can stop a stream before
-			// the application accepts it, and that event had no handle to land on.
-			let mut state = inner.lock();
-			let stopped = state.conn.send_stream(id).stopped().ok().flatten();
-			state
-				.sends
-				.insert(id, stopped.map(|code| End::Stopped(code.into_inner())));
-		}
 		Self {
 			inner,
 			id,
-			park: kio::Park::default(),
 			fin: false,
 			reset: false,
 		}
@@ -876,12 +830,11 @@ impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = SendGroup;
 
-	fn poll_write(&mut self, cx: &mut Context<'_>, mut buf: &[u8]) -> Poll<Result<usize, Error>> {
-		self.poll_write_buf(cx, &mut buf)
+	fn poll_write(&mut self, waiter: &kio::Waiter, mut buf: &[u8]) -> Poll<Result<usize, Error>> {
+		self.poll_write_buf(waiter, &mut buf)
 	}
 
-	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Error>> {
 		if self.fin || self.reset {
 			return Poll::Ready(Err(Error::StreamClosed));
 		}
@@ -889,27 +842,18 @@ impl poll::SendStream for SendStream {
 		if let Some(err) = &state.closed {
 			return Poll::Ready(Err(err.clone()));
 		}
-		let mut stream = state.conn.send_stream(self.id);
-		// Bytes taken from `buf` cannot go back, so take only what the connection accepts.
-		// It keeps the chunk by reference, which for a `Bytes` source means no copy at all.
-		let result = match stream.write_limit().min(buf.chunk().len()) {
-			// Blocked, failing, or nothing to write; the empty write says which.
-			0 => stream.write(&[]),
-			take => stream
-				.write_chunks(&mut [buf.copy_to_bytes(take)])
-				.map(|written| written.bytes),
-		};
-		match result {
+		// Takes only what the connection accepts, which for a `Bytes` source is no copy at all.
+		match state.conn.send_stream(self.id).write(buf) {
 			Ok(n) => {
 				state.driver.wake();
 				Poll::Ready(Ok(n))
 			}
-			Err(moq_quic::WriteError::Blocked) => {
+			Err(send::Error::Blocked) => {
 				waiter.register(state.writable.entry(self.id).or_default());
 				Poll::Pending
 			}
-			Err(moq_quic::WriteError::Stopped(code)) => Poll::Ready(Err(Error::StreamStop(code.into_inner()))),
-			Err(moq_quic::WriteError::ClosedStream) => Poll::Ready(Err(Error::StreamClosed)),
+			Err(send::Error::Stopped(code)) => Poll::Ready(Err(Error::StreamStop(code.into_inner()))),
+			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
 		}
 	}
 
@@ -932,12 +876,12 @@ impl poll::SendStream for SendStream {
 			Ok(()) => {}
 			// A STOP_SENDING beat us here; carry its code like `poll_write` does. The stream is
 			// over without our reset, so `poll_closed` reports the stop the sweep recorded.
-			Err(moq_quic::FinishError::Stopped(code)) => {
+			Err(send::Error::Stopped(code)) => {
 				self.fin = true;
 				return Err(Error::StreamStop(code.into_inner()));
 			}
 			// Already finished or reset, so the FIN it wanted is out.
-			Err(moq_quic::FinishError::ClosedStream) => {}
+			Err(_) => {}
 		}
 		state.driver.wake();
 		self.fin = true;
@@ -948,18 +892,19 @@ impl poll::SendStream for SendStream {
 		self.reset_with(code);
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if self.reset {
 			return Poll::Ready(Ok(()));
 		}
 		let mut state = self.inner.lock();
-		match state.sends.get(&self.id).copied().flatten() {
-			Some(End::Stopped(code)) => Poll::Ready(Err(Error::StreamStop(code))),
-			Some(End::Delivered) => Poll::Ready(Ok(())),
+		// A finish is acknowledged once its FIN goes to the transport, which on a reliable
+		// transport is delivery.
+		match state.conn.send_stream(self.id).end() {
+			Ok(Some(send::End::Stopped(code))) => Poll::Ready(Err(Error::StreamStop(code.into_inner()))),
+			Ok(Some(_)) => Poll::Ready(Ok(())),
 			// The end never came. If the session died first, the caller cannot read success
 			// as "every byte arrived".
-			None => match &state.closed {
+			Ok(None) | Err(_) => match &state.closed {
 				Some(err) => Poll::Ready(Err(err.clone())),
 				None => {
 					waiter.register(state.finishing.entry(self.id).or_default());
@@ -973,11 +918,12 @@ impl poll::SendStream for SendStream {
 impl Drop for SendStream {
 	fn drop(&mut self) {
 		let mut state = self.inner.lock();
-		state.forget_send(self.id);
+		// Reset before giving up the ID, which refuses every later call on it.
 		if !self.fin && !self.reset {
 			let _ = state.conn.send_stream(self.id).reset(VarInt::from_u32(0));
 			state.driver.wake();
 		}
+		state.forget_send(self.id);
 	}
 }
 
@@ -1010,7 +956,6 @@ impl RecvStream {
 		Self(poll::Buffered::new(RecvChunks {
 			inner,
 			id,
-			park: kio::Park::default(),
 			finished: false,
 			reset: None,
 			stopped: false,
@@ -1022,8 +967,8 @@ impl poll::RecvStream for RecvStream {
 	type Error = Error;
 	type Lease<'a> = poll::BufferedLease<'a>;
 
-	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Self::Lease<'_>, Error>> {
-		self.0.poll_lease(cx, want)
+	fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Self::Lease<'_>, Error>> {
+		self.0.poll_lease(waiter, want)
 	}
 
 	fn set_priority(&mut self, priority: i64) {
@@ -1045,7 +990,6 @@ impl std::fmt::Debug for RecvStream {
 struct RecvChunks {
 	inner: Arc<Inner>,
 	id: StreamId,
-	park: kio::Park,
 	/// Every byte up to the FIN was read out of the connection.
 	finished: bool,
 	/// The peer reset the stream with this code. Reading it frees the connection's stream
@@ -1058,8 +1002,7 @@ struct RecvChunks {
 impl poll::Chunks for RecvChunks {
 	type Error = Error;
 
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
-		let waiter = self.park.hold(cx);
+	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		if max == 0 {
 			return Poll::Ready(Ok(Some(Bytes::new())));
 		}
@@ -1116,8 +1059,9 @@ fn read(state: &mut State, id: StreamId, max: usize) -> Read {
 	let read = match chunks.next(max) {
 		Ok(Some(chunk)) => Read::Chunk(chunk.bytes),
 		Ok(None) => Read::Finished,
-		Err(moq_quic::ReadError::Blocked) => Read::Blocked,
-		Err(moq_quic::ReadError::Reset(code)) => Read::Reset(code.into_inner()),
+		Err(recv::Error::Reset(code)) => Read::Reset(code.into_inner()),
+		// Blocked, or the connection closed, which the caller reports.
+		Err(_) => Read::Blocked,
 	};
 	if chunks.finalize().should_transmit() {
 		state.driver.wake();

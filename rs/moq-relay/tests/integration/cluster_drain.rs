@@ -31,6 +31,10 @@ const SETTLE: Duration = Duration::from_millis(10);
 /// Wall-clock bound on anything the test waits for.
 const WAIT: Duration = Duration::from_secs(10);
 
+#[expect(
+	clippy::disallowed_methods,
+	reason = "the watchdog runs on tokio's real clock, beside the installed manual clock"
+)]
 async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
 	tokio::time::timeout(WAIT, fut)
 		.await
@@ -132,11 +136,15 @@ async fn peer(name: &str, forwarder: &Forwarder) -> (cluster::Cluster, moq_net::
 }
 
 /// Advance the manual clock by `total`, one [`STEP`] at a time.
-async fn pass(clock: &moq_clock::Installed, total: Duration) {
+async fn pass(clock: &kio::clock::Installed, total: Duration) {
 	let mut passed = Duration::ZERO;
 	while passed < total {
 		clock.advance(STEP);
 		passed += STEP;
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "real sockets settle on tokio's clock, beside the installed manual clock"
+		)]
 		tokio::time::sleep(SETTLE).await;
 	}
 }
@@ -147,7 +155,7 @@ fn draining_relay_keeps_its_peers_until_it_restarts() {
 }
 
 async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
-	let clock = moq_clock::Manual::new().install(&tokio::runtime::Handle::current());
+	let clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
 
 	let (b, b_addr, _b_broadcast) = relay("b").await;
 	let b_origin = b.cluster().origin.clone();
@@ -162,10 +170,18 @@ async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
 	let (c, _c_broadcast) = peer("c", &forward_c).await;
 
 	// The mesh converges: each side learns the other's broadcasts.
-	within("A learns b", a.origin.consume().routed("b")).await;
-	within("C learns b", c.origin.consume().routed("b")).await;
-	within("B learns a", b_origin.consume().routed("a")).await;
-	within("B learns c", b_origin.consume().routed("c")).await;
+	within("A learns b", a.origin.consume().follow("b", None).unwrap().available())
+		.await
+		.expect("resolves");
+	within("C learns b", c.origin.consume().follow("b", None).unwrap().available())
+		.await
+		.expect("resolves");
+	within("B learns a", b_origin.consume().follow("a", None).unwrap().available())
+		.await
+		.expect("resolves");
+	within("B learns c", b_origin.consume().follow("c", None).unwrap().available())
+		.await
+		.expect("resolves");
 	assert_eq!(forward_a.sessions(b_addr), 1);
 	assert_eq!(forward_c.sessions(b_addr), 1);
 
@@ -199,8 +215,18 @@ async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
 		pass(&clock, STEP).await;
 		waited += STEP;
 	}
-	within("B' learns a", b2_origin.consume().routed("a")).await;
-	within("B' learns c", b2_origin.consume().routed("c")).await;
+	within(
+		"B' learns a",
+		b2_origin.consume().follow("a", None).unwrap().available(),
+	)
+	.await
+	.expect("resolves");
+	within(
+		"B' learns c",
+		b2_origin.consume().follow("c", None).unwrap().available(),
+	)
+	.await
+	.expect("resolves");
 
 	// And reconnects exactly once.
 	pass(&clock, Duration::from_secs(30)).await;

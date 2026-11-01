@@ -1,5 +1,6 @@
 import type { Time, Timed } from "@moq/net";
 import * as Moq from "@moq/net";
+import { MAX_FRAME_BYTES } from "../limits.ts";
 
 import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts";
 
@@ -14,6 +15,9 @@ import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts"
  * `refresh` ratio times the snapshot, a join asks for a group past the largest, and the producer
  * restates the value there at the newest timestamp written. Set the ratio when creating the
  * track, or joins never ask.
+ *
+ * Set `compress` on that track's info too: JSON is small and repetitive, and moq-net compresses each
+ * delta against the snapshot earlier in its group.
  */
 export class Producer<T> {
 	#track: Moq.Track.Producer;
@@ -106,7 +110,7 @@ export class Producer<T> {
 		// replacement before the frame is written, so discovering the limit inside `writeFrame` would
 		// leave an empty newest group behind: a snapshot consumer jumps to the newest, so the last
 		// good value would vanish even though this update reported an error.
-		if (encoded.payload.byteLength > Moq.Group.MAX_GROUP_CACHE_BYTES) throw new Moq.Error.FrameTooLarge();
+		if (encoded.payload.byteLength > MAX_FRAME_BYTES) throw new Moq.Error.FrameTooLarge();
 
 		if (encoded.keyframe) {
 			// The previous group is complete; no more frames will be appended to it. Drop the handle

@@ -2,16 +2,18 @@ use std::time::Duration;
 
 use anyhow::Context;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
-use hang::moq_net;
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use moq_mux::select;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 
-/// Container format written to stdout on the export (sink) side.
+/// Container format written on the export (sink) side.
 #[derive(Clone, Copy)]
 pub enum SubscribeFormat {
 	/// Fragmented MP4 (CMAF).
 	Fmp4,
+	/// Regular MP4, recorded to a file.
+	Mp4,
 	/// Matroska / WebM.
 	Mkv,
 	/// H.264 Annex-B elementary stream (no container).
@@ -29,8 +31,6 @@ pub enum SubscribeFormat {
 #[derive(usage_rs::ValueEnum, Clone, Copy)]
 pub enum CatalogFormatArg {
 	Hang,
-	#[usage(name = "hangz")]
-	HangZ,
 	Msf,
 }
 
@@ -38,7 +38,6 @@ impl From<CatalogFormatArg> for CatalogFormat {
 	fn from(format: CatalogFormatArg) -> Self {
 		match format {
 			CatalogFormatArg::Hang => Self::Hang,
-			CatalogFormatArg::HangZ => Self::HangZ,
 			CatalogFormatArg::Msf => Self::Msf,
 		}
 	}
@@ -84,6 +83,15 @@ impl From<AudioCodecArg> for AudioCodecKind {
 	}
 }
 
+/// Whether to select renditions of a medium.
+#[derive(usage_rs::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+	/// Keep renditions matching the name and codec filters.
+	On,
+	/// Select no rendition of this medium.
+	Off,
+}
+
 /// Rendition selection flags for the stdout container sinks that honor them and
 /// native playback. With no flags set, every rendition is kept.
 #[derive(usage_rs::Args, Clone, Default)]
@@ -97,9 +105,9 @@ pub struct SelectArgs {
 	#[usage(long, value_enum)]
 	pub video_codec: Option<VideoCodecArg>,
 
-	/// Leave video out (audio only); native playback opens no window.
-	#[usage(long, conflicts("--video-name", "--video-codec", "--no-audio"))]
-	pub no_video: bool,
+	/// Select video (on by default); off leaves audio only and opens no playback window.
+	#[usage(long, value_enum)]
+	pub video: Option<Mode>,
 
 	/// Pick the audio rendition with this exact name.
 	#[usage(long)]
@@ -109,12 +117,29 @@ pub struct SelectArgs {
 	#[usage(long, value_enum)]
 	pub audio_codec: Option<AudioCodecArg>,
 
-	/// Leave audio out (video only).
-	#[usage(long, conflicts("--audio-name", "--audio-codec"))]
-	pub no_audio: bool,
+	/// Select audio (on by default); off leaves video only.
+	#[usage(long, value_enum)]
+	pub audio: Option<Mode>,
 }
 
 impl SelectArgs {
+	/// Refuse contradictory filters and a selection with both media disabled.
+	pub(crate) fn validate(&self) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			self.video != Some(Mode::Off) || self.audio != Some(Mode::Off),
+			"--video off and --audio off select no renditions"
+		);
+		anyhow::ensure!(
+			self.video != Some(Mode::Off) || (self.video_name.is_none() && self.video_codec.is_none()),
+			"--video off conflicts with --video-name and --video-codec"
+		);
+		anyhow::ensure!(
+			self.audio != Some(Mode::Off) || (self.audio_name.is_none() && self.audio_codec.is_none()),
+			"--audio off conflicts with --audio-name and --audio-codec"
+		);
+		Ok(())
+	}
+
 	/// Build the rendition selection shared by stdout exports and native playback.
 	///
 	/// `force` takes the place of `--video-codec`, for a sink whose format implies
@@ -122,7 +147,7 @@ impl SelectArgs {
 	pub(crate) fn selection(&self, force: Option<VideoCodecKind>) -> select::Broadcast {
 		let mut selection = select::Broadcast::default();
 
-		if !self.no_video {
+		if self.video != Some(Mode::Off) {
 			let mut video = select::Video::default();
 			if let Some(name) = &self.video_name {
 				video = video.name(name);
@@ -133,7 +158,7 @@ impl SelectArgs {
 			selection = selection.video(video);
 		}
 
-		if !self.no_audio {
+		if self.audio != Some(Mode::Off) {
 			let mut audio = select::Audio::default();
 			if let Some(name) = &self.audio_name {
 				audio = audio.name(name);
@@ -152,8 +177,8 @@ impl SelectArgs {
 		[
 			(self.video_name.is_some(), "--video-name"),
 			(self.video_codec.is_some(), "--video-codec"),
-			(self.no_video, "--no-video"),
-			(self.no_audio, "--no-audio"),
+			(self.video.is_some(), "--video"),
+			(self.audio.is_some(), "--audio"),
 		]
 		.into_iter()
 		.find_map(|(given, flag)| given.then_some(flag))
@@ -163,6 +188,7 @@ impl SelectArgs {
 	/// The first flag passed that selects an audio rendition, for a sink with no audio.
 	pub(crate) fn audio_flag(&self) -> Option<&'static str> {
 		[
+			(self.audio == Some(Mode::On), "--audio"),
 			(self.audio_name.is_some(), "--audio-name"),
 			(self.audio_codec.is_some(), "--audio-codec"),
 		]
@@ -171,10 +197,10 @@ impl SelectArgs {
 	}
 }
 
-/// The resolved stdout export settings (built from the `export` flags + format).
+/// The resolved container export settings (built from the `export` flags + format).
 #[derive(Clone)]
 pub struct SubscribeArgs {
-	/// The format to write to stdout.
+	/// The format to write.
 	pub format: SubscribeFormat,
 
 	/// How far playback may drift from the live edge before skipping groups. TS also runs
@@ -197,6 +223,9 @@ pub struct SubscribeArgs {
 
 	/// Write the `m2ts` passthrough track back out instead of muxing the media (TS only).
 	pub passthrough: bool,
+
+	/// The file to record to (MP4 only); the other formats write to stdout.
+	pub output: Option<std::path::PathBuf>,
 
 	/// Catalog format for track discovery (default: detect from the broadcast suffix).
 	pub catalog: Option<CatalogFormatArg>,
@@ -221,7 +250,11 @@ impl SubscribeArgs {
 		match self.format {
 			SubscribeFormat::H264 => Some(VideoCodecKind::H264),
 			SubscribeFormat::H265 => Some(VideoCodecKind::H265),
-			SubscribeFormat::Fmp4 | SubscribeFormat::Mkv | SubscribeFormat::Ts | SubscribeFormat::Flv => None,
+			SubscribeFormat::Fmp4
+			| SubscribeFormat::Mp4
+			| SubscribeFormat::Mkv
+			| SubscribeFormat::Ts
+			| SubscribeFormat::Flv => None,
 		}
 	}
 
@@ -247,15 +280,15 @@ impl SubscribeArgs {
 	}
 }
 
-/// Exports one broadcast from the Origin to stdout in the requested format.
+/// Exports one broadcast from the Origin in the requested format, to stdout or a recording.
 pub struct Subscribe {
-	origin: moq_net::origin::Consumer,
-	path: moq_net::Path,
 	source: moq_mux::Source,
 	catalog: CatalogFormat,
 	args: SubscribeArgs,
 	/// Where a TS export sets its MPEG-TS sections, when it reports them.
 	sections: Option<crate::report::Sections>,
+	/// Cancelled to make a recording finish its file and return.
+	finish: CancellationToken,
 }
 
 /// Log how a TS export's release clock keeps up with the source.
@@ -273,28 +306,22 @@ fn log_release(release: &moq_mux::container::ts::stats::Release, message: &'stat
 }
 
 impl Subscribe {
-	/// Resolve the broadcast at `path` on `origin` to export it with the resolved settings;
-	/// [`run`](Self::run) drives it.
-	pub async fn new(
-		origin: moq_net::origin::Consumer,
-		path: &str,
-		catalog: CatalogFormat,
-		args: SubscribeArgs,
-	) -> anyhow::Result<Self> {
-		let path = moq_net::Path::new(path)?;
-		let broadcast = origin
-			.request_broadcast(&path, None)
-			.await
-			.with_context(|| format!("failed to resolve broadcast `{path}`"))?;
-		let source = moq_mux::Source::new(origin.clone(), broadcast);
-		Ok(Self {
-			origin,
-			path,
+	/// Export the resolved broadcast `source` with the resolved settings; [`run`](Self::run)
+	/// drives it.
+	pub fn new(source: moq_mux::Source, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
+		Self {
 			source,
 			catalog,
 			args,
 			sections: None,
-		})
+			finish: CancellationToken::new(),
+		}
+	}
+
+	/// Finish a recording's file and return once `finish` is cancelled.
+	pub fn with_finish(mut self, finish: CancellationToken) -> Self {
+		self.finish = finish;
+		self
 	}
 
 	/// The resolved broadcast, whose [`stats`](moq_mux::Source::stats) count what the export reads.
@@ -309,16 +336,17 @@ impl Subscribe {
 	}
 
 	/// Build the catalog stream, narrowed by the rendition selection flags. The
-	/// catalog source honors the requested format (e.g. compressed `HangZ` or `Msf`).
+	/// catalog source honors the requested format (e.g. `Msf`).
 	async fn stream(&self) -> anyhow::Result<catalog::Select<catalog::Consumer>> {
 		let consumer = self.source.catalog(self.catalog).await?;
 		Ok(consumer.select(self.args.selection()?))
 	}
 
-	/// Write the broadcast to stdout until it ends.
+	/// Write the broadcast until it ends.
 	pub async fn run(self) -> anyhow::Result<()> {
 		match self.args.format {
 			SubscribeFormat::Fmp4 => self.run_fmp4().await,
+			SubscribeFormat::Mp4 => self.run_mp4().await,
 			SubscribeFormat::Mkv => self.run_mkv().await,
 			SubscribeFormat::H264 => self.run_h264().await,
 			SubscribeFormat::H265 => self.run_h265().await,
@@ -343,6 +371,53 @@ impl Subscribe {
 		}
 
 		Ok(())
+	}
+
+	/// Record a regular MP4 until the broadcast ends or `finish` is cancelled, then finish it.
+	async fn run_mp4(self) -> anyhow::Result<()> {
+		let path = self.args.output.clone().context("an mp4 export records to --output")?;
+		let finish = self.finish.clone();
+		let stream = tokio::select! {
+			stream = self.stream() => stream?,
+			() = finish.cancelled() => return Ok(()),
+		};
+		let mut mp4 = moq_mux::container::mp4::Export::new(self.source, stream)
+			.with_max_delay(self.args.max_delay)
+			.with_fragment_duration(self.args.fragment_duration);
+		let mut file = tokio::fs::File::create_new(&path)
+			.await
+			.with_context(|| format!("failed to create {}", path.display()))?;
+
+		// A failed export still finishes what it recorded; a failed write leaves the file as is.
+		let ended = loop {
+			let next = tokio::select! {
+				next = mp4.next() => next,
+				() = finish.cancelled() => break Ok(()),
+			};
+			match next {
+				Ok(Some(data)) => file.write_all(&data).await?,
+				Ok(None) => break Ok(()),
+				Err(err) => break Err(err),
+			}
+		};
+
+		match mp4.finish()? {
+			Some(trailer) => {
+				file.write_all(&trailer.moov).await?;
+				// The header points readers past the media at the moov, so the moov must be on disk first.
+				file.sync_data().await?;
+				file.seek(std::io::SeekFrom::Start(trailer.mdat_offset)).await?;
+				file.write_all(&trailer.mdat).await?;
+				file.sync_all().await?;
+				tracing::info!(path = %path.display(), "recording finished");
+			}
+			// Nothing reached the file, so there is no recording to keep.
+			None => {
+				drop(file);
+				tokio::fs::remove_file(&path).await?;
+			}
+		}
+		Ok(ended?)
 	}
 
 	async fn run_mkv(self) -> anyhow::Result<()> {
@@ -393,12 +468,6 @@ impl Subscribe {
 	}
 
 	async fn run_ts(self) -> anyhow::Result<()> {
-		self.origin.routed(&self.path).await.with_context(|| {
-			format!(
-				"broadcast `{}` is outside the session's scope, or the origin closed before it was announced",
-				self.path
-			)
-		})?;
 		if self.args.passthrough {
 			return self.run_ts_passthrough().await;
 		}
@@ -430,7 +499,7 @@ impl Subscribe {
 		// Reports a track that stops reaching the output while the rest keeps flowing,
 		// the way `publish` reports one that stops arriving.
 		let mut log = moq_mux::container::ts::stats::Log::default();
-		let mut sampled = moq_clock::now();
+		let mut sampled = kio::clock::now();
 		// The export's drop, gap and out-of-tolerance counts, as last logged.
 		let mut reported = (0, 0, 0, 0);
 		let sections = self.sections;
@@ -452,7 +521,7 @@ impl Subscribe {
 			stdout.flush().await?;
 
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
-				sampled = moq_clock::now();
+				sampled = kio::clock::now();
 				let stats = ts.export().stats();
 				report(&stats);
 				let release = &stats.release;
@@ -487,14 +556,14 @@ impl Subscribe {
 				sections.set(|report| report.release = Some(stats.clone()));
 			}
 		};
-		let mut sampled = moq_clock::now();
+		let mut sampled = kio::clock::now();
 		let mut reported = (0, 0, 0, 0);
 		while let Some(object) = release.next().await? {
 			stdout.write_all(&object.payload).await?;
 			stdout.flush().await?;
 
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
-				sampled = moq_clock::now();
+				sampled = kio::clock::now();
 				let stats = release.stats();
 				report(&stats);
 				let counts = (stats.dropped, stats.trimmed, stats.gaps, stats.out_of_tolerance);

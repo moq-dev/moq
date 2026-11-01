@@ -32,7 +32,11 @@ from datetime import timedelta
 import moq
 
 READ_CHUNK = 64 * 1024
-MAX_DELAY = timedelta(seconds=1)  # container consumer congestion-control / lookahead window
+# How far a read may fall behind live before it skips. A gap fails the run, which a reader skipping
+# behind live would cause itself: the matrix starts every subscriber at once, and a runtime starved
+# by the others can fall a second behind. That is this reader's speed, not the delivery under test.
+# A track's max-age caps it, so interop.sh's Rust publisher keeps its media at least this long.
+MAX_DELAY = timedelta(seconds=5)
 LINGER = timedelta(seconds=10)  # how long a finished publisher stays up for the late readers
 
 # Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.
@@ -78,6 +82,7 @@ async def _print_grant(client: moq.Client, timeout: float) -> None:
     """Wait for the relay's grant and print it, in the Rust client's `auth granted` shape."""
     session = client.session
     assert session is not None
+
     async def first() -> moq.Grant:
         async with session.grants() as grants:
             async for grant in grants:
@@ -105,7 +110,8 @@ async def publish(
         if grant:
             await _print_grant(client, timeout)
         # Hold the producer for the lifetime of the publish loop.
-        producer = client.create_broadcast(broadcast)
+        publication = client.create_broadcast(broadcast)
+        producer = publication.broadcast
         catalog = moq.media.CatalogProducer(producer)
         media = moq.media.TrackStreamProducer.video(
             producer, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=b"")
@@ -119,7 +125,7 @@ async def publish(
             ),
             track=AUDIO_TRACK,
         )
-        producer.announce()
+        publication.announce()
         print(f"publishing {broadcast!r} (Annex-B H.264 from stdin + a {tones} Hz tone) to {url}")
 
         tone = asyncio.create_task(_publish_tone(audio, tones))
@@ -150,7 +156,7 @@ async def publish(
             await asyncio.sleep(LINGER.total_seconds())
             producer.close()
             health = client.create_broadcast(f"{broadcast}.health")
-            live = health.publish_track("live")
+            live = health.broadcast.publish_track("live")
             live.write_frame(b"session-alive")
             live.finish()
             health.announce()
@@ -180,7 +186,7 @@ async def _catalog_with_media(consumer: moq.BroadcastConsumer) -> moq.media.Cata
 async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> None:
     # Watch the exact path before resolving it, retaining END while media drains.
     async with client.announced(broadcast) as announcements:
-        async with client.announced_broadcast(broadcast) as announced:
+        async with client.follow(broadcast) as announced:
             consumer = await announced
             async with await moq.media.CatalogConsumer.subscribe(consumer) as catalogs:
                 async for catalog in catalogs:
@@ -223,15 +229,16 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
         else:
             raise RuntimeError("announcement stream ended before broadcast END")
 
-    async with client.announced_broadcast(f"{broadcast}.health") as announced_health:
+    async with client.follow(f"{broadcast}.health") as announced_health:
         health = await announced_health
         async with await health.subscribe_track("live") as live:
             seen = False
             async for group in live:
                 async with group:
                     async for frame in group:
-                        if seen or frame.payload != b"session-alive" or frame.timestamp is not None:
-                            raise RuntimeError("unexpected session health payload or timestamp")
+                        # Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+                        if seen or frame.payload != b"session-alive":
+                            raise RuntimeError("unexpected session health payload")
                         seen = True
             if not seen:
                 raise RuntimeError("missing session health payload")
@@ -250,7 +257,12 @@ async def _decode_audio(
     """
     out = f"{out}.{audio.codec.split('.')[0]}"
     decoder = await moq.audio.Consumer.subscribe(
-        consumer, id, audio, moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, max_delay=MAX_DELAY)
+        consumer,
+        id,
+        audio,
+        moq.audio.DecoderOutput(
+            format=moq.audio.SampleFormat.F32, delay=moq.media.Delay(min=timedelta(0), max=MAX_DELAY)
+        ),
     )
     frame_bytes = 4 * audio.channel_count
     decoded = 0
@@ -294,7 +306,7 @@ async def subscribe(
             await asyncio.wait_for(_finish_subscribe(client, broadcast, frames), timeout)
             return
         assert audio_out is not None and audio_ms is not None
-        consumer = await asyncio.wait_for(client.announced_broadcast(broadcast), timeout)
+        consumer = await asyncio.wait_for(client.follow(broadcast), timeout)
         catalog = await asyncio.wait_for(_catalog_with_media(consumer), timeout)
 
         id, video = next(iter(catalog.video.items()))

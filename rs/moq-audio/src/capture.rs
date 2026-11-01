@@ -8,7 +8,7 @@
 //! `unsafe-libopus`, so audio never touches ffmpeg.
 //!
 //! Both backends deliver buffers from a realtime callback through a bounded
-//! async channel that the on-demand capture loop awaits, so dropping the
+//! async channel that the capture loop awaits, so dropping the
 //! publish future (e.g. on Ctrl+C) cancels the read and releases the device. A
 //! reader that falls behind loses buffers rather than growing the queue, and
 //! each read reports whether that happened so the encoder can re-anchor.
@@ -464,7 +464,7 @@ impl Microphone {
 
 		// Await the first buffer to surface a permission failure (or dead device)
 		// as an error rather than a silent hang in the capture loop.
-		let pending = match moq_clock::timeout(FIRST_BUFFER_TIMEOUT, reader.read()).await {
+		let pending = match kio::clock::timeout(FIRST_BUFFER_TIMEOUT, reader.read()).await {
 			Ok(Ok(Some(samples))) => samples,
 			Ok(Ok(None)) => {
 				return Err(Failure::retry(Error::Capture(format!(

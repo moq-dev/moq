@@ -3,8 +3,8 @@ use crate::origin;
 use crate::time::{Deadlines, Instant};
 use crate::transport::poll::Session as _;
 use crate::{
-	ALPN_18, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume,
-	Error, NEGOTIATED, Session, Version, Versions,
+	ALPN_18, ALPN_20, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP,
+	Consume, Error, NEGOTIATED, Session, Version, Versions,
 	coding::{self, Encode, Stream},
 	ietf, lite, setup, stats,
 };
@@ -368,9 +368,10 @@ impl Client {
 		let (publish, subscribe) = self.origins(peer_hop);
 
 		let supported = match session.protocol() {
-			Some(alpn @ (ALPN_22 | ALPN_18)) => {
+			Some(alpn @ (ALPN_22 | ALPN_20 | ALPN_18)) => {
 				let draft = match alpn {
 					ALPN_22 => ietf::Version::Draft22,
+					ALPN_20 => ietf::Version::Draft20,
 					_ => ietf::Version::Draft18,
 				};
 
@@ -475,7 +476,7 @@ impl Client {
 		// The server ends the stream after its SETUP. Reading to the end first keeps the drop
 		// from stopping a reply the server is still waiting to have acknowledged.
 		if version.hands_off() {
-			std::future::poll_fn(|cx| stream.reader.poll_closed(cx)).await?;
+			kio::wait(|waiter| stream.reader.poll_closed(waiter)).await?;
 			drop(stream);
 			return self.start_lite(runtime, session, v, peer_hop);
 		}
@@ -527,7 +528,7 @@ mod tests {
 		sync::{Arc, Mutex},
 	};
 
-	use std::task::{Context, Poll};
+	use std::task::Poll;
 
 	use crate::SessionError;
 	use crate::coding::{Decode, Encode};
@@ -557,8 +558,6 @@ mod tests {
 	#[derive(Clone, Default)]
 	struct FakeSession {
 		state: Arc<FakeSessionState>,
-		// Per-clone, so each pending poll_closed keeps its own registration live.
-		park: kio::Park,
 		/// The sender, set by [`Self::with_probe`].
 		probe: Option<crate::transport::Probe>,
 	}
@@ -599,7 +598,6 @@ mod tests {
 			};
 			Self {
 				state: Arc::new(state),
-				park: kio::Park::default(),
 				probe: None,
 			}
 		}
@@ -638,57 +636,57 @@ mod tests {
 		type RecvStream = FakeRecvStream;
 		type Error = FakeError;
 
-		fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		fn poll_accept_uni(&self, _waiter: &kio::Waiter) -> Poll<Result<Self::RecvStream, Self::Error>> {
 			Poll::Pending
 		}
 
 		fn poll_accept_bi(
-			&mut self,
-			_cx: &mut Context<'_>,
+			&self,
+			_waiter: &kio::Waiter,
 		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			Poll::Pending
 		}
 
 		fn poll_open_bi(
-			&mut self,
-			_cx: &mut Context<'_>,
+			&self,
+			_waiter: &kio::Waiter,
 			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			Poll::Ready(self.state.control_stream.lock().unwrap().take().ok_or(FakeError))
 		}
 
 		fn poll_open_request(
-			&mut self,
-			cx: &mut std::task::Context<'_>,
+			&self,
+			waiter: &kio::Waiter,
 			options: crate::transport::poll::SendOptions<
 				'_,
 				<Self::SendStream as crate::transport::poll::SendStream>::Group,
 			>,
 		) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-			self.poll_open_bi(cx, options).map_ok(Some)
+			self.poll_open_bi(waiter, options).map_ok(Some)
 		}
 
 		fn poll_open_uni(
-			&mut self,
-			_cx: &mut Context<'_>,
+			&self,
+			_waiter: &kio::Waiter,
 			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Poll<Result<Self::SendStream, Self::Error>> {
 			Poll::Pending
 		}
 
-		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
+		fn send_group(&self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
 			None
 		}
 
 		fn send_datagram(
-			&mut self,
+			&self,
 			_: Bytes,
 			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Result<(), Self::Error> {
 			Ok(())
 		}
 
-		fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
+		fn poll_recv_datagram(&self, _waiter: &kio::Waiter) -> Poll<Result<Bytes, Self::Error>> {
 			Poll::Pending
 		}
 
@@ -703,11 +701,11 @@ mod tests {
 			self.state.protocol
 		}
 
-		fn close(&mut self, code: u32, reason: &str) {
+		fn close(&self, code: u32, reason: &str) {
 			self.state.close_events.lock().push((code, reason.to_string()));
 		}
 
-		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+		fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Self::Error> {
 			assert!(
 				!self
 					.state
@@ -715,7 +713,7 @@ mod tests {
 					.swap(false, std::sync::atomic::Ordering::Relaxed),
 				"injected driver poll panic"
 			);
-			let _ = std::task::ready!(self.state.close_events.poll(self.park.hold(cx), any_close));
+			let _ = std::task::ready!(self.state.close_events.poll(waiter, any_close));
 			Poll::Ready(FakeError)
 		}
 
@@ -753,7 +751,7 @@ mod tests {
 		type Error = FakeError;
 		type Group = crate::transport::poll::Ungrouped;
 
-		fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		fn poll_write(&mut self, _waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			self.writes.lock().unwrap().put_slice(buf);
 			Poll::Ready(Ok(buf.len()))
 		}
@@ -770,7 +768,7 @@ mod tests {
 
 		fn reset(&mut self, _code: u32) {}
 
-		fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		fn poll_closed(&self, _waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 			Poll::Ready(Ok(()))
 		}
 	}
@@ -784,7 +782,7 @@ mod tests {
 	impl crate::transport::poll::Chunks for FakeChunks {
 		type Error = FakeError;
 
-		fn poll_read_chunk(&mut self, _cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		fn poll_read_chunk(&mut self, _waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 			if self.data.is_empty() {
 				return Poll::Ready(Ok(None));
 			}
@@ -830,8 +828,8 @@ mod tests {
 		);
 
 		// Start the returned driver after the handshake completes.
-		let (_session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
-		moq_clock::sim::spawn(crate::time::run(driver));
+		let (_session, driver) = client.connect(kio::clock::now(), fake.clone()).await.unwrap();
+		kio::clock::sim::spawn(crate::time::run(driver));
 
 		// Verify the client offered every configured moq-lite version over the `moql` SETUP.
 		let mut setup_bytes = Bytes::from(fake.control_writes());
@@ -863,9 +861,9 @@ mod tests {
 	/// `connect` must not depend on the peer answering. A peer that opens the announce
 	/// stream and then says nothing (or promises a count it never delivers) used to hold
 	/// `connect` for the life of the session, since it waited for the initial announce
-	/// set. Resolving a path you need is `routed`'s job, which waits for
+	/// set. Resolving a path you need is `request`'s job, which waits for
 	/// that path rather than for the peer to finish talking.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn connect_does_not_wait_for_the_peer_to_announce() {
 		// Serves bidi streams, so the announce stream opens, and never answers on them.
 		let gate = kio::Producer::new(true);
@@ -880,9 +878,9 @@ mod tests {
 
 		// Paused time auto-advances while every task is idle, so a `connect` that waits
 		// on the silent peer trips this rather than hanging the suite.
-		let (_session, _driver) = moq_clock::timeout(
+		let (_session, _driver) = kio::clock::timeout(
 			std::time::Duration::from_secs(30),
-			client.connect(moq_clock::now(), transport),
+			client.connect(kio::clock::now(), transport),
 		)
 		.await
 		.expect("connect waited on a peer that never announced")
@@ -963,12 +961,12 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn alpn_lite_falls_back_to_moql_setup_and_switches_version_post_setup() {
 		run_alpn_lite_fallback_case(Some(ALPN_LITE)).await;
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn no_alpn_falls_back_to_moql_setup_and_switches_version_post_setup() {
 		run_alpn_lite_fallback_case(None).await;
 	}
@@ -1073,7 +1071,7 @@ mod tests {
 			.with_versions(Version::Lite(lite::Version::Lite04).into())
 			.with_stats(registry.tier(Tier::default()).session(crate::Path::from_static("root")));
 		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
-		let mut task = Transport::new(FakeSession::new(Some(ALPN_LITE_04), Vec::new()));
+		let task = Transport::new(FakeSession::new(Some(ALPN_LITE_04), Vec::new()));
 		let (session, mut driver) =
 			futures::executor::block_on(client.connect_boxed(runtime.now(), task.clone())).unwrap();
 		task.close(SessionError::ProtocolViolation.to_code(), "malformed");
@@ -1140,14 +1138,14 @@ mod tests {
 	// `stats()` reads the machine's latest sample and primes the sampler, so a
 	// periodic poller observes fresh counters without consuming the bandwidth
 	// channel.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn stats_reads_prime_the_sampler() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(Some(1_000_000));
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
-		moq_clock::sim::spawn(crate::time::run(driver));
+		let (session, driver) = client.connect(kio::clock::now(), fake.clone()).await.unwrap();
+		kio::clock::sim::spawn(crate::time::run(driver));
 
 		// The construction-time snapshot, before the machine sampled anything.
 		assert_eq!(
@@ -1159,7 +1157,7 @@ mod tests {
 		// so the new rate shows up within an interval (paused time auto-advances).
 		fake.set_send_rate(Some(2_000_000));
 		while session.stats().estimated_send_rate != Some(crate::bandwidth::Rate::from_bps(2_000_000)) {
-			moq_clock::sleep(std::time::Duration::from_millis(10)).await;
+			kio::clock::sleep(std::time::Duration::from_millis(10)).await;
 		}
 	}
 
@@ -1169,15 +1167,15 @@ mod tests {
 	// the construction-time snapshot: this backend reports no send rate, so
 	// there is no bandwidth consumer keeping the sampler ticking, and the test
 	// never reads stats while the session is live.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn stats_capture_the_final_counters() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(None);
 		fake.set_sent_bytes(0);
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
-		moq_clock::sim::spawn(crate::time::run(driver));
+		let (session, driver) = client.connect(kio::clock::now(), fake.clone()).await.unwrap();
+		kio::clock::sim::spawn(crate::time::run(driver));
 		assert!(
 			session.send_bandwidth().is_none(),
 			"no send-rate estimate, so nothing samples on its own"
@@ -1198,20 +1196,20 @@ mod tests {
 	// The send-bandwidth sampler lives inside the driver: it samples as soon as a
 	// consumer exists and keeps sampling on its interval. Simulated time makes
 	// the interval fire deterministically.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn send_bandwidth_samples_while_the_driver_runs() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(Some(1_000_000));
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
+		let (session, driver) = client.connect(kio::clock::now(), fake.clone()).await.unwrap();
 		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
 		assert_eq!(
 			bandwidth.peek(),
 			Some(crate::bandwidth::Rate::from_bps(1_000_000)),
 			"the estimate is readable before the sampler first runs"
 		);
-		moq_clock::sim::spawn(crate::time::run(driver));
+		kio::clock::sim::spawn(crate::time::run(driver));
 
 		assert_eq!(
 			bandwidth.changed().await.unwrap(),
@@ -1236,20 +1234,20 @@ mod tests {
 	/// Run the driver until the sender's target reads `bps`.
 	async fn probes_to(fake: &FakeSession, bps: u64) {
 		while fake.probe_target() != bps {
-			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+			kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 	}
 
 	// The session probes for every reservation on its allocator, demanded or not: a
 	// stopped rendition loses its viewers, and still has to be funded to resume.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn the_sender_probes_to_the_reservations() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
 		fake.set_send_rate(Some(1_000_000));
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
-		moq_clock::sim::spawn(crate::time::run(driver));
+		let (session, driver) = client.connect(kio::clock::now(), fake.clone()).await.unwrap();
+		kio::clock::sim::spawn(crate::time::run(driver));
 		let bandwidth = session.allocator();
 
 		let (_watched_broadcast, watched) = reservable();
@@ -1272,12 +1270,12 @@ mod tests {
 
 	// An override replaces the sum, zero turns probing off, and clearing it follows the
 	// reservations again.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_override_replaces_the_reservations() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
-		moq_clock::sim::spawn(crate::time::run(driver));
+		let (session, driver) = client.connect(kio::clock::now(), fake.clone()).await.unwrap();
+		kio::clock::sim::spawn(crate::time::run(driver));
 		let bandwidth = session.allocator();
 
 		let (_broadcast, track) = reservable();
@@ -1296,7 +1294,7 @@ mod tests {
 
 	// A reconnecting caller dials every session with one allocator, so a reservation
 	// taken before the reconnect still moves the next session's target.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_reconnect_keeps_following_the_reservations() {
 		let bandwidth = crate::bandwidth::Allocator::default();
 		let client = Client::new()
@@ -1307,16 +1305,16 @@ mod tests {
 		let reserved = bandwidth.reserve(&track.demand(), crate::bandwidth::Rate::from_bps(4_000_000));
 
 		let first = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
-		let (session, driver) = client.connect(moq_clock::now(), first.clone()).await.unwrap();
-		moq_clock::sim::spawn(crate::time::run(driver));
+		let (session, driver) = client.connect(kio::clock::now(), first.clone()).await.unwrap();
+		kio::clock::sim::spawn(crate::time::run(driver));
 		probes_to(&first, 4_000_000).await;
 		session.abort(Error::Cancel);
 		session.closed().await;
 		drop(session);
 
 		let second = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
-		let (_session, driver) = client.connect(moq_clock::now(), second.clone()).await.unwrap();
-		moq_clock::sim::spawn(crate::time::run(driver));
+		let (_session, driver) = client.connect(kio::clock::now(), second.clone()).await.unwrap();
+		kio::clock::sim::spawn(crate::time::run(driver));
 		probes_to(&second, 4_000_000).await;
 
 		reserved.update(crate::bandwidth::Rate::from_bps(3_000_000));

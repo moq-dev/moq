@@ -222,7 +222,6 @@ impl Drop for Transcoder {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 
 	use super::*;
@@ -480,7 +479,7 @@ mod tests {
 				// Paces the source: a real sleep, since the rungs encode off the
 				// executor and cannot be sequenced by paused-time idle detection.
 				// Also the window the subscribers attach in, before group 0.
-				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+				kio::clock::sleep(std::time::Duration::from_millis(100)).await;
 				let mut group = track.create_group(sequence.into()).unwrap();
 				for index in 0..frames {
 					let timestamp = (sequence * frames + index) * 33_333;
@@ -1029,8 +1028,6 @@ mod tests {
 
 	/// A source that resizes mid-stream takes the ladder with it.
 	///
-	/// `moq_video::encode::publish_capture` opens its source twice by design (once
-	/// to probe the mode, once when the first subscriber arrives), and a window
 	/// A source that changes aspect ratio keeps every rung height while moving
 	/// every rung width, so a rung retires and its replacement serves the same
 	/// height. That replacement must not reuse the retired track's name: it is a
@@ -1087,7 +1084,7 @@ mod tests {
 		assert_eq!(replacement.coded_height, Some(120));
 
 		// The retired name aborts rather than finishing: its source did not finish.
-		let ended = tokio::time::timeout(std::time::Duration::from_secs(5), retired.recv_group())
+		let ended = kio::clock::timeout(std::time::Duration::from_secs(5), retired.recv_group())
 			.await
 			.expect("the retired rung never ended its track");
 		assert!(
@@ -1182,7 +1179,7 @@ mod tests {
 
 		// The retired rung ends its track, so a subscriber reselects rather than
 		// stalling. It aborts, since its source did not finish.
-		let ended = tokio::time::timeout(std::time::Duration::from_secs(5), retired.recv_group())
+		let ended = kio::clock::timeout(std::time::Duration::from_secs(5), retired.recv_group())
 			.await
 			.expect("the retired rung never ended its track");
 		assert!(
@@ -1194,7 +1191,7 @@ mod tests {
 		// The rung the new picture still fits keeps serving: its subscriber sees
 		// nothing at all, since the source has no media.
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(100), kept.recv_group())
+			kio::clock::timeout(std::time::Duration::from_millis(100), kept.recv_group())
 				.await
 				.is_err(),
 			"a rung that still fits was retired anyway"
@@ -1256,7 +1253,7 @@ mod tests {
 		// Group 0 is still being written from a source group that is still open, so
 		// retiring now has to leave it running until that source group ends.
 		source.resize(160, 90);
-		tokio::time::timeout(
+		kio::clock::timeout(
 			std::time::Duration::from_secs(5),
 			await_catalog(&mut catalogs, |snapshot| {
 				!snapshot.video.renditions.contains_key("video/120p")
@@ -1266,7 +1263,7 @@ mod tests {
 		.expect("the ladder never retired the rung");
 		group.finish().unwrap();
 
-		let finished = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+		let finished = kio::clock::timeout(std::time::Duration::from_secs(5), async {
 			while fetched.read_frame().await?.is_some() {}
 			fetched.finished().await
 		})
@@ -1320,7 +1317,7 @@ mod tests {
 			while demand.wanted_changed().await?.is_none() {}
 			moq_net::Result::Ok(())
 		};
-		tokio::time::timeout(std::time::Duration::from_secs(5), wanted)
+		kio::clock::timeout(std::time::Duration::from_secs(5), wanted)
 			.await
 			.expect("the rung never asked for its source")
 			.unwrap();
@@ -1331,7 +1328,7 @@ mod tests {
 			while demand.wanted_changed().await?.is_some() {}
 			moq_net::Result::Ok(())
 		};
-		tokio::time::timeout(std::time::Duration::from_secs(5), unwanted)
+		kio::clock::timeout(std::time::Duration::from_secs(5), unwanted)
 			.await
 			.expect("the idle rung kept its source wanted")
 			.unwrap();
@@ -1472,7 +1469,7 @@ mod tests {
 		rung.info().await.unwrap();
 
 		let fetching = rung.fetch_group(7, None);
-		let abandoned = tokio::time::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
+		let mut abandoned = kio::clock::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
 			.await
 			.expect("the fetch never reached the source")
 			.expect("the source track closed");
@@ -1481,14 +1478,16 @@ mod tests {
 		// Leave before a single source frame exists. Encoding can only happen
 		// if the handler keeps this fetch.
 		drop(fetching);
-		tokio::time::timeout(std::time::Duration::from_secs(5), abandoned.unused())
-			.await
-			.expect("the abandoned fetch kept its source fetch");
+		kio::clock::timeout(std::time::Duration::from_secs(5), async {
+			while abandoned.wanted_changed().await.is_some() {}
+		})
+		.await
+		.expect("the abandoned fetch kept its source fetch");
 
 		// The handler dropped the output request with the caller, so this is a
 		// fresh request rather than a join of the one still encoding.
 		let retry = rung.fetch_group(7, None);
-		let fresh = tokio::time::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
+		let fresh = kio::clock::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
 			.await
 			.expect("the retry never fetched the source")
 			.expect("the source track closed");
@@ -1501,7 +1500,7 @@ mod tests {
 		write_keyframe(&mut group);
 		group.finish().unwrap();
 
-		let mut fetched = tokio::time::timeout(std::time::Duration::from_secs(5), retry)
+		let mut fetched = kio::clock::timeout(std::time::Duration::from_secs(5), retry)
 			.await
 			.expect("the retry stalled")
 			.expect("the retry was answered by the abandoned fetch");
@@ -1515,11 +1514,10 @@ mod tests {
 	}
 
 	/// A fetch is demand, so it starts the live path, which claims the group the
-	/// source has open. A reader that picked that group up from the cache is not
-	/// demand, so when the fetch ends the live path is left mid-group with
+	/// source has open. When the fetch ends, the live path is left mid-group with
 	/// nobody asking. It finishes the group before leaving its source: a group
-	/// name always means the same content, so the reader gets the whole group
-	/// rather than one aborted under it.
+	/// name always means the same content, so a later reader of that sequence
+	/// gets the whole group rather than one aborted under it.
 	///
 	/// Paused so the runtime settles before the source group ends: the live path
 	/// has seen the demand go away by then, which is the moment that used to
@@ -1585,12 +1583,9 @@ mod tests {
 		let mut edge = rung.clone();
 		while edge.largest().await.map(|position| (position.group, position.frame)) != Some((0, 1)) {}
 
-		// Read straight from the cache while the group is still being written.
-		let mut fetched = rung.fetch_group(0, None).await.unwrap();
-
 		// The only demand ends with output group 0 still open.
 		drop(fetching);
-		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+		kio::clock::sleep(std::time::Duration::from_secs(1)).await;
 		assert!(
 			source_demand.wanted().is_some(),
 			"the live path left its source mid-group"
@@ -1600,6 +1595,8 @@ mod tests {
 		group.finish().unwrap();
 		while source_demand.wanted_changed().await.unwrap().is_some() {}
 
+		// Read from the cache after the live path left.
+		let mut fetched = rung.fetch_group(0, None).await.unwrap();
 		let mut frames = 0;
 		while fetched.read_frame().await.expect("group 0 was aborted").is_some() {
 			frames += 1;
@@ -1692,7 +1689,7 @@ mod tests {
 				while source_demand.wanted_changed().await?.is_some() {}
 				moq_net::Result::Ok(())
 			};
-			tokio::time::timeout(std::time::Duration::from_secs(10), unwanted)
+			kio::clock::timeout(std::time::Duration::from_secs(10), unwanted)
 				.await
 				.expect("the live path opened a group nobody asked for")
 				.unwrap();
@@ -1798,7 +1795,7 @@ mod tests {
 		// 160x120, but their decoder is rebuilt so none of them survives.
 		source.describe(Some(bytes::Bytes::from_static(&[0x01, 0x42, 0x00, 0x1e])));
 
-		let derived = tokio::time::timeout(
+		let derived = kio::clock::timeout(
 			std::time::Duration::from_secs(5),
 			await_catalog(&mut catalogs, |snapshot| {
 				snapshot.video.renditions.contains_key("video/120p.2")
@@ -1816,7 +1813,7 @@ mod tests {
 			"the replacement should serve the same picture under a new name"
 		);
 
-		let ended = tokio::time::timeout(std::time::Duration::from_secs(5), retired.recv_group())
+		let ended = kio::clock::timeout(std::time::Duration::from_secs(5), retired.recv_group())
 			.await
 			.expect("the retired rung never ended its track");
 		assert!(
@@ -1936,7 +1933,7 @@ mod tests {
 		};
 
 		let output = moq_net::broadcast::Info::default().produce();
-		let result = tokio::time::timeout(
+		let result = kio::clock::timeout(
 			std::time::Duration::from_secs(5),
 			run(broadcast.consume(), output, config),
 		)
@@ -1987,7 +1984,7 @@ mod tests {
 		// `run` should observe the end and return rather than block in the drain.
 		drop(source);
 
-		let result = tokio::time::timeout(std::time::Duration::from_secs(5), transcoder).await;
+		let result = kio::clock::timeout(std::time::Duration::from_secs(5), transcoder).await;
 		result.expect("run did not shut down within 5s").unwrap().unwrap();
 	}
 

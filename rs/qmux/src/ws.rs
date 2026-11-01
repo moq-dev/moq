@@ -514,7 +514,7 @@ mod tests {
 			)
 			.await
 			.unwrap();
-		let mut session = accept.await.unwrap().unwrap();
+		let session = accept.await.unwrap().unwrap();
 
 		// A masked binary frame declaring 1 MiB, with none of its payload sent.
 		let mut frame = vec![0x82, 0x80 | 127];
@@ -522,7 +522,7 @@ mod tests {
 		frame.extend_from_slice(&[0; 4]);
 		client.write_all(&frame).await.unwrap();
 
-		moq_clock::timeout(Duration::from_secs(1), session.closed())
+		kio::clock::timeout(Duration::from_secs(1), session.closed())
 			.await
 			.expect("the socket waited to buffer a frame larger than a record");
 	}

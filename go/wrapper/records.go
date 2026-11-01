@@ -64,15 +64,29 @@ func datagramFromFFI(d *ffi.MoqDatagram) *Datagram {
 
 // Subscription holds subscriber-side delivery preferences: priority, the max delay
 // a non-latest group may fall behind before it is skipped (zero skips at once, nil
-// leaves the publisher's max age alone to bound it, and it caps every range), the
-// ranges of the track to deliver (nil for everything MaxDelay still allows, while an
-// empty non-nil slice asks for nothing), and the order the publisher sends pending
-// groups in (nil for newest first).
+// sets no subscriber limit and leaves the publisher's max age alone to bound it, and
+// it caps every range), the ranges of the track to deliver (nil for everything
+// MaxDelay still allows, while an empty non-nil slice asks for nothing), and the order
+// the publisher sends pending groups in (nil for newest first).
+//
+// Start from DefaultSubscription for moq-net's defaults; the zero Subscription sets no
+// max delay.
 type Subscription struct {
 	Priority int8
 	MaxDelay *time.Duration
 	Ranges   []Range
 	Order    *Order
+}
+
+// DefaultSubscription returns moq-net's defaults, whose zero MaxDelay skips a superseded
+// group at once. A nil *Subscription means the same; change a field of this one instead.
+func DefaultSubscription() Subscription {
+	d := ffi.MoqSubscriptionDefaults()
+	var ranges []Range
+	if d.Ranges != nil {
+		ranges = *d.Ranges
+	}
+	return Subscription{Priority: d.Priority, MaxDelay: d.MaxDelay, Ranges: ranges, Order: d.Order}
 }
 
 func (s Subscription) ffi() (ffi.MoqSubscription, error) {

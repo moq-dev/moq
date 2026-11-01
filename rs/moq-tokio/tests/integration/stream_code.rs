@@ -51,7 +51,7 @@ async fn serve() -> Server {
 	let port = listener.local_addr().expect("no quic addr").port();
 
 	tokio::spawn(async move {
-		while let Some(request) = listener.accept().await {
+		while let Ok(request) = listener.accept().await {
 			tokio::spawn(async move {
 				let _session = request.ok().await;
 				std::future::pending::<()>().await;
@@ -79,10 +79,12 @@ async fn refused_code(server: &Server, alpn: &str) -> Option<driver::VarInt> {
 	tls.alpn_protocols = vec![alpn.as_bytes().to_vec()];
 	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
 
-	let endpoint = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
+	let endpoint =
+		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+			.expect("endpoint");
 	let conn = endpoint
-		.connect_with(
-			driver::ClientConfig::new(Arc::new(quic)),
+		.connect(
+			&driver::client::Config::new(Arc::new(quic)),
 			([127, 0, 0, 1], server.port).into(),
 			"localhost",
 		)
@@ -92,14 +94,16 @@ async fn refused_code(server: &Server, alpn: &str) -> Option<driver::VarInt> {
 
 	// SETUP type, then a one-byte message holding zero parameters.
 	let mut setup = conn.open_uni(Default::default()).await.expect("open");
-	setup.write_all(&[0x01, 0x01, 0x00]).await.expect("write");
-	setup.finish().expect("finish");
+	setup.write_all(&[0x01, 0x01, 0x00][..]).await.expect("write");
+	setup.finish();
 
 	// GROUP type, then a three-byte header: subscribe 7, sequence 0, frame start 0.
 	let mut send = conn.open_uni(Default::default()).await.expect("open");
-	send.write_all(&[0x00, 0x03, 0x07, 0x00, 0x00]).await.expect("write");
+	send.write_all(&[0x00, 0x03, 0x07, 0x00, 0x00][..])
+		.await
+		.expect("write");
 
-	tokio::time::timeout(Duration::from_secs(10), send.stopped())
+	kio::clock::timeout(Duration::from_secs(10), send.stopped())
 		.await
 		.expect("the stream was not stopped")
 		.expect("stopped")

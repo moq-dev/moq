@@ -1,0 +1,17 @@
+error: #[kio::wrapper] cannot name the wrapper `self`, even as a raw identifier
+ --> tests/ui/wrapper_unnameable.rs:8:5
+  |
+8 |     fn poll_self(&self, _waiter: &kio::Waiter) -> Poll<()> {
+  |        ^^^^^^^^^
+
+error: #[kio::wrapper] cannot name the wrapper `_`, even as a raw identifier
+  --> tests/ui/wrapper_unnameable.rs:13:5
+   |
+13 |     fn poll__(&self, _waiter: &kio::Waiter) -> Poll<()> {
+   |        ^^^^^^
+
+error: #[kio::wrapper] cannot name the wrapper `1`, even as a raw identifier
+  --> tests/ui/wrapper_unnameable.rs:18:5
+   |
+18 |     fn poll_1(&self, _waiter: &kio::Waiter) -> Poll<()> {
+   |        ^^^^^^

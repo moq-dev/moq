@@ -15,7 +15,7 @@ fn origin(hop: u64) -> origin::Producer {
 }
 
 async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
-	moq_clock::timeout(Duration::from_secs(5), async {
+	kio::clock::timeout(Duration::from_secs(5), async {
 		loop {
 			if track
 				.subscription()
@@ -30,7 +30,7 @@ async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
 	.unwrap_or_else(|_| panic!("{version}: wanted {millis}ms, publisher has {:?}", track.subscription()));
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 	for draft in [18, 22] {
 		let version: Version = format!("moq-transport-{draft}").parse().unwrap();
@@ -51,8 +51,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 		group.finish().unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let consumer = viewer.consume();
-		consumer.routed("live").await.unwrap();
-		let remote = consumer.request_broadcast("live", None).await.unwrap();
+		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 		let cache = remote.track("catalog").unwrap();
 		let prefs = |millis| track::Subscription::default().with_max_delay(Duration::from_millis(millis));
 		let mut short = cache.subscribe(prefs(250)).await.unwrap();
@@ -66,7 +65,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 		drop(tolerant);
 		budget(&mut source, 10, version).await;
 		// A quiet catalog survives far longer than the budget because it has no successor.
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(snapshot.sequence, 0, "{version}");
 		assert_eq!(
 			snapshot.read_frame().await.unwrap().unwrap().payload,

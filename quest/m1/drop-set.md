@@ -15,8 +15,9 @@ narrower budget is served after a widening, as a cold relay would.
 ## Plan
 
 Decided 2026-10-27 (maintainer): this runs after
-[Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md), since both edit
-`given_up` in `rs/moq-net/src/model/track/miss.rs`, and before
+[Range count cost](/quest/m1/subscribe-ranges/fill-linear.md), since both edit
+`given_up` in `rs/moq-net/src/model/track/miss.rs` (made a `Required` entry
+2026-10-30, in [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995)), and before
 [Rust groups by start](/quest/m1/time-addressing/model.md), which requires it
 because runs keyed by group sequence convert mechanically to starts.
 
@@ -171,8 +172,8 @@ window as the groups they sit between, and expiry applies the same
 fold-or-`TooFarBehind` rule as a Rust eviction. A run sits between cached
 sequences, so there are at most about one per cached sequence (alternating
 drop and arrival), and JS run state grows no faster than the JS cache
-itself. The JS byte bound for both is
-[JS unbounded groups](/quest/m1/unbounded-groups/js.md).
+itself. The JS byte bound for both is the 32 MiB group tail that
+[moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) landed.
 
 Only a final run folds into a cursor's floor: a delivered run, a run
 skipped at the track's max age bound (no widening reaches past it), or a
@@ -248,6 +249,15 @@ Test on mock time through a relay:
   [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171), decided
   2026-10-23).
 
+- A group the publisher cut while a fetched copy still serves its end is
+  delivered and never also reported dropped. Today `DropCursor::cut`
+  (`rs/moq-net/src/model/track.rs`) reports any visible slot's
+  `cut_error()`, so the arrival walk can hand out the fetched copy and report
+  the group dropped too; `Slot::cut()` already returns nothing while a copy
+  serves the end. Found by
+  [moq-dev/moq#7053](https://github.com/moq-dev/moq/pull/7053) (added
+  2026-10-28).
+
 Mirror each case in `js/net`.
 
 Public API: none. Wire: lite-07 SUBSCRIBE_DROP (unpublished) gains `Max Age`
@@ -279,7 +289,25 @@ case needs an update to arrive between START and the first group. Cover it
 deterministically, through the track hooks rather than wire timing, when the
 drop runs are reworked here.
 
+### A covered cut is still reported
+
+`DropCursor::cut` reports a group as cut even when a fetched copy covers it,
+noted in [moq-dev/moq#7053](https://github.com/moq-dev/moq/pull/7053) and again
+by [moq-dev/moq#7149](https://github.com/moq-dev/moq/pull/7149), which made a
+fetched copy settle such a group. Decided 2026-10-29 (maintainer): settle it
+here, where a cut run gets a reason and a covering copy can clear it.
+
+### Cancelled fetches hold the end
+
+Found 2026-10-28 by [moq-dev/moq#7149](https://github.com/moq-dev/moq/pull/7149):
+a cancelled fetch below a track's end still holds the end open until the cache
+expiry scan removes it, so how fast a subscription ends depends on expiry
+timing. Settle it here, where cancelled and expired runs get a reason.
+
+## Required
+
+- [Range count cost](/quest/m1/subscribe-ranges/fill-linear.md) - the remaining range-count walks stop growing per poll; both edit `miss.rs`
+
 ## Related
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
-- [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - the JS byte bound for groups and the runs between them; not required, since JS runs never outgrow the JS cache

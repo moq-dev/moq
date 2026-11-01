@@ -60,10 +60,12 @@ async fn probe(port: u16, peer: bool) -> Seen {
 	let mut tls = connect.tls.build().expect("tls config");
 	tls.alpn_protocols = vec![b"moq-lite-06".to_vec()];
 	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic crypto");
-	let endpoint = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
+	let endpoint =
+		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+			.expect("endpoint");
 	let conn = endpoint
-		.connect_with(
-			driver::ClientConfig::new(std::sync::Arc::new(crypto)),
+		.connect(
+			&driver::client::Config::new(std::sync::Arc::new(crypto)),
 			([127, 0, 0, 1], port).into(),
 			"localhost",
 		)
@@ -73,12 +75,12 @@ async fn probe(port: u16, peer: bool) -> Seen {
 
 	// SETUP type, then a one-byte message holding zero parameters.
 	let mut setup = conn.open_uni(Default::default()).await.expect("open");
-	setup.write_all(&[0x01, 0x01, 0x00]).await.expect("write");
-	setup.finish().expect("finish");
+	setup.write_all(&[0x01, 0x01, 0x00][..]).await.expect("write");
+	setup.finish();
 
 	// The relay widens a peer before it answers SETUP, so its SETUP stream
 	// arrives behind the new credit.
-	let _setup = tokio::time::timeout(TIMEOUT, conn.accept_uni())
+	let _setup = kio::clock::timeout(TIMEOUT, conn.accept_uni())
 		.await
 		.expect("relay SETUP timeout")
 		.expect("relay SETUP");
@@ -87,7 +89,7 @@ async fn probe(port: u16, peer: bool) -> Seen {
 	while streams.len() < PROBE {
 		let open = conn.open_uni(Default::default());
 		let stream = match peer {
-			true => tokio::time::timeout(TIMEOUT, open)
+			true => kio::clock::timeout(TIMEOUT, open)
 				.await
 				.expect("peer stream credit timeout"),
 			false => match open.now_or_never() {
@@ -101,8 +103,8 @@ async fn probe(port: u16, peer: bool) -> Seen {
 		streams: streams.len(),
 		max_data: conn.stats().frame_rx.max_data,
 	};
-	conn.close(driver::VarInt::from_u32(0), b"done");
-	endpoint.wait_idle().await;
+	conn.close(driver::VarInt::from_u32(0), "done");
+	endpoint.close(driver::VarInt::from_u32(0), "done").await;
 	seen
 }
 
@@ -113,7 +115,7 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 	let deciding = tokio::spawn(async move {
 		let mut leases = Vec::new();
 		for peer in [true, false] {
-			let admission = tokio::time::timeout(TIMEOUT, admissions.next())
+			let admission = kio::clock::timeout(TIMEOUT, admissions.next())
 				.await
 				.expect("admission timeout")
 				.expect("admission");
@@ -215,7 +217,7 @@ async fn unadvertisable_quic_limits_are_refused_at_load() {
 /// A bare QUIC server speaking the dial template's ALPNs: the dialer's stream
 /// limit is a transport parameter, so the handshake alone shows it. Its idle
 /// timeout is far past any test's, so only a close ends a link in time.
-pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::Endpoint {
+pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::endpoint::Endpoint {
 	let key = rcgen::KeyPair::generate().expect("keypair");
 	let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 		.expect("cert params")
@@ -235,20 +237,27 @@ pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::Endpo
 		.map(|alpn| alpn.as_bytes().to_vec())
 		.collect();
 	let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
-	let mut transport = driver::TransportConfig::default();
-	transport.max_idle_timeout(Some(BARE_IDLE.try_into().expect("idle timeout")));
-	let mut config = driver::ServerConfig::with_crypto(std::sync::Arc::new(crypto));
-	config.transport_config(std::sync::Arc::new(transport));
-	driver::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).expect("server endpoint")
+	let mut transport = driver::transport::Config::default();
+	transport.idle_timeout = Some(BARE_IDLE);
+	let mut config = driver::server::Config::new(std::sync::Arc::new(crypto));
+	config.transport = transport;
+	driver::endpoint::Endpoint::new(
+		driver::endpoint::Config::default().with_server(config),
+		std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+	)
+	.expect("server endpoint")
 }
 
 /// Start a cluster whose one static peer is `server`, and accept its dial.
 async fn static_dial(
-	server: &driver::Endpoint,
+	server: &driver::endpoint::Endpoint,
 	connect: moq_tokio::connect::Config,
 	quic: moq_tokio::quic::Config,
-) -> (driver::Connection, tokio::task::JoinHandle<anyhow::Result<()>>) {
-	let port = server.local_addr().expect("server addr").port();
+) -> (
+	driver::connection::Connection,
+	tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+	let port = server.local_addr().port();
 	let mut options = moq_relay::cluster::Options::new(Default::default());
 	options.config.connect = vec![moq_relay::cluster::Peer::new(format!("moql://127.0.0.1:{port}/"))];
 	options.peer.quic.max_streams = std::num::NonZeroU64::new(4 * PROBE as u64).unwrap();
@@ -256,7 +265,7 @@ async fn static_dial(
 		.expect("cluster init")
 		.with_connect(connect, quic);
 	let running = tokio::spawn(cluster.start().await.expect("cluster start").run());
-	let conn = tokio::time::timeout(TIMEOUT, server.accept())
+	let conn = kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("dial timeout")
 		.expect("incoming")
@@ -290,7 +299,7 @@ async fn cluster_dials_widen_a_plain_client() {
 
 	running.abort();
 	let _ = running.await;
-	conn.close(driver::VarInt::from_u32(0), b"done");
+	conn.close(driver::VarInt::from_u32(0), "done");
 }
 
 /// A static peer dials from the `[connect]` bind port, so a deployment that
@@ -313,7 +322,7 @@ async fn static_peer_dials_from_the_configured_bind() {
 
 	running.abort();
 	let _ = running.await;
-	conn.close(driver::VarInt::from_u32(0), b"done");
+	conn.close(driver::VarInt::from_u32(0), "done");
 }
 
 /// The tokio worker shards accept through the same request path, so a peer

@@ -16,6 +16,10 @@ Decided 2026-10-24 (maintainer), from a triage of run
 child per distinct cause, each landing on its own. The PR gate keeps
 skipping benches and examples; a green Nightly catches them within a day.
 
+Decided 2026-10-27 (maintainer), from the coverage audit's triage of run
+[40506938673](https://github.com/moq-dev/moq/actions/runs/40506938673): more
+children for the causes nothing owned.
+
 This README's own work, after the children:
 
 - Nightly's multi-step jobs (Features first) keep going past a failed step
@@ -31,5 +35,5 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [moq-net compiles in Fuzz and send-depth](/quest/m0/nightly/send-overflow.md) - the ietf publisher future stops overflowing the Send check
-- [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget
+- [The paired bench baseline builds](/quest/m0/nightly/bench-baseline-build.md) - the next scheduled Nightly's paired bench jobs build their baseline and compare, or the baseline moves outside the checkout
+- [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - the WASM and UniFFI backend baseline completes every supported transport case without an internal error

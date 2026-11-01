@@ -1,7 +1,7 @@
 //! Adapts the async transport interface to the poll one moq-net requires.
 //!
 //! moq-net accepts its own `moq_net::transport::poll` traits.
-//! A backend that offers only the async interface (iroh, quic) is wrapped
+//! Native QUIC, which still offers only the async interface, is wrapped
 //! in [`Session`] here, at the edge where async already lives. The wrapping
 //! costs one allocation per operation and one copy per write, and its
 //! closed-watch emulation is weaker than a native implementation (see
@@ -64,15 +64,14 @@ impl std::fmt::Display for Transport {
 
 /// A stored in-flight operation future. Native transports are Send, so the
 /// plain boxed flavor suffices.
-type OpBox<T> = futures::future::BoxFuture<'static, T>;
+pub(crate) type OpBox<T> = futures::future::BoxFuture<'static, T>;
 
 /// A stream op that hands the stream back with its result, or `None` if interrupted.
 type StreamOp<S, T, E> = OpBox<(S, Option<Result<T, E>>)>;
 
-/// Adapts one of this crate's async backends (qmux, iroh, quic) to the poll interface
-/// moq-net requires.
+/// Adapts this crate's async QUIC backend to the poll interface moq-net requires.
 ///
-/// Only those backends fit: the bound goes through a sealed trait, so another
+/// Only that backend fits: the bound goes through a sealed trait, so another
 /// [`web_transport_trait::Session`] cannot be wrapped. A custom transport implements
 /// moq-net's `transport::poll` traits instead.
 ///
@@ -101,10 +100,10 @@ type StreamOp<S, T, E> = OpBox<(S, Option<Result<T, E>>)>;
 ///   `closed(&mut self)` cannot be stored as a `'static` watch without taking
 ///   the stream with it). A receive stream reports closed through its reads
 ///   (FIN drained, or a read error), buffering bounded read-ahead so a FIN
-///   behind undelivered payload still resolves the watch; past the cap the
-///   watch parks until the caller's reads drain the backlog, deliberately
-///   trading watch liveness on an undrained flooding stream for a memory
-///   bound (every driver in this crate drains its reads alongside the watch).
+///   behind undelivered payload still resolves the watch. At the cap it reads
+///   no further: it watches the underlying `closed()` for a reset or
+///   connection close, interruptibly so any read reclaims the stream, and
+///   resumes reading ahead once the caller's reads drain below the cap.
 ///   Send-side watches are interruptible, so an idle watch can observe peer
 ///   cancellation while later writes reclaim the stream.
 pub struct Session<S: web_transport_trait::Session> {
@@ -139,20 +138,19 @@ type RequestResult<S> = Result<
 	<S as web_transport_trait::Session>::Error,
 >;
 
-/// A stored in-flight operation: `None` when idle.
-///
-/// The Mutex is never locked: every access goes through `get_mut`, which is free
-/// on an exclusive borrow. It exists only to make the slot `Sync`, since a boxed
-/// future is not, and sessions are shared behind `&` between the driver's tasks.
-type OpSlot<T> = std::sync::Mutex<Option<OpBox<T>>>;
+/// A stored in-flight operation, `None` when idle, which every task polling it shares.
+pub(crate) type OpSlot<T> = moq_net::kio::Bridge<Option<OpBox<T>>>;
 
 /// Lazily start and poll the operation in `slot`, clearing it when it resolves.
-fn poll_op<T>(slot: &mut OpSlot<T>, cx: &mut Context<'_>, start: impl FnOnce() -> OpBox<T>) -> Poll<T> {
-	let slot = slot.get_mut().unwrap();
-	let fut = slot.get_or_insert_with(start);
-	let output = ready!(fut.as_mut().poll(cx));
-	*slot = None;
-	Poll::Ready(output)
+///
+/// Whichever caller polls it once it resolves takes the output; the rest start the next.
+pub(crate) fn poll_op<T>(slot: &OpSlot<T>, waiter: &moq_net::kio::Waiter, start: impl FnOnce() -> OpBox<T>) -> Poll<T> {
+	slot.poll(waiter, |slot, cx| {
+		let fut = slot.get_or_insert_with(start);
+		let output = ready!(fut.as_mut().poll(cx));
+		*slot = None;
+		Poll::Ready(output)
+	})
 }
 
 impl<S: web_transport_trait::Session> Session<S> {
@@ -181,94 +179,6 @@ impl<S: web_transport_trait::Session> Clone for Session<S> {
 			polled_wire: self.polled_wire.clone(),
 			..Self::new(self.session.clone(), self.address)
 		}
-	}
-}
-
-impl<S> wt_poll::Session for Session<S>
-where
-	S: Grouped,
-	S::SendStream: 'static,
-	S::RecvStream: 'static,
-{
-	type SendStream = SendStream<S::SendStream>;
-	type RecvStream = RecvStream<S::RecvStream>;
-	type Error = S::Error;
-
-	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
-		let session = &self.session;
-		poll_op(&mut self.accept_uni, cx, || {
-			let session = session.clone();
-			async move { session.accept_uni().await }.boxed()
-		})
-		.map(|res| res.map(RecvStream::new))
-	}
-
-	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<wt_poll::BiStreams<Self>, Self::Error>> {
-		let session = &self.session;
-		poll_op(&mut self.accept_bi, cx, || {
-			let session = session.clone();
-			async move { session.accept_bi().await }.boxed()
-		})
-		.map(|res| res.map(|(send, recv)| (SendStream::new(send), RecvStream::new(recv))))
-	}
-
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-		let session = &self.session;
-		poll_op(&mut self.open_uni, cx, || {
-			let session = session.clone();
-			async move { session.open_uni().await }.boxed()
-		})
-		.map(|res| res.map(SendStream::new))
-	}
-
-	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<wt_poll::BiStreams<Self>, Self::Error>> {
-		let session = &self.session;
-		poll_op(&mut self.open_bi, cx, || {
-			let session = session.clone();
-			async move { session.open_bi().await }.boxed()
-		})
-		.map(|res| res.map(|(send, recv)| (SendStream::new(send), RecvStream::new(recv))))
-	}
-
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		// The async interface's send is non-blocking (the transport queues or
-		// drops), so there is never a reason to return Pending.
-		Poll::Ready(web_transport_trait::Session::send_datagram(
-			&self.session,
-			Bytes::copy_from_slice(payload),
-		))
-	}
-
-	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
-		let session = &self.session;
-		poll_op(&mut self.recv_datagram, cx, || {
-			let session = session.clone();
-			async move { session.recv_datagram().await }.boxed()
-		})
-	}
-
-	fn max_datagram_size(&self) -> usize {
-		self.session.max_datagram_size()
-	}
-
-	fn protocol(&self) -> Option<&str> {
-		self.session.protocol()
-	}
-
-	fn close(&mut self, code: u32, reason: &str) {
-		self.session.close(code, reason);
-	}
-
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
-		let session = &self.session;
-		poll_op(&mut self.closed, cx, || {
-			let session = session.clone();
-			async move { session.closed().await }.boxed()
-		})
-	}
-
-	fn stats(&self) -> impl web_transport_trait::Stats {
-		self.session.stats()
 	}
 }
 
@@ -612,14 +522,12 @@ impl<S: GroupedSend + 'static> Drop for SendStream<S> {
 			// terminal action then. A deferred reset fired the interrupt when it
 			// was recorded, so the salvage task never waits on blocked I/O; a
 			// deferred finish lets the write complete first (the FIN follows the
-			// data). Without a runtime the default drop stands.
+			// data).
 			Some(SendState::Writing { fut, .. }) => {
 				let reset = self.reset.take();
 				let finish = std::mem::take(&mut self.finish);
-				if (reset.is_some() || finish)
-					&& let Ok(handle) = tokio::runtime::Handle::try_current()
-				{
-					handle.spawn(async move {
+				if reset.is_some() || finish {
+					crate::runtime::detach(crate::panic::isolate(async move {
 						let (mut stream, _) = fut.await;
 						match reset {
 							Some(code) => stream.reset(code),
@@ -627,7 +535,7 @@ impl<S: GroupedSend + 'static> Drop for SendStream<S> {
 								let _ = stream.finish();
 							}
 						}
-					});
+					}));
 				}
 			}
 			// Both deferred actions fired the watch's interrupt when recorded, so
@@ -635,10 +543,8 @@ impl<S: GroupedSend + 'static> Drop for SendStream<S> {
 			Some(SendState::Closing(fut)) => {
 				let reset = self.reset.take();
 				let finish = std::mem::take(&mut self.finish);
-				if (reset.is_some() || finish)
-					&& let Ok(handle) = tokio::runtime::Handle::try_current()
-				{
-					handle.spawn(async move {
+				if reset.is_some() || finish {
+					crate::runtime::detach(crate::panic::isolate(async move {
 						let (mut stream, _) = fut.await;
 						match reset {
 							Some(code) => stream.reset(code),
@@ -646,7 +552,7 @@ impl<S: GroupedSend + 'static> Drop for SendStream<S> {
 								let _ = stream.finish();
 							}
 						}
-					});
+					}));
 				}
 			}
 			None => {}
@@ -674,8 +580,14 @@ pub struct RecvStream<S: web_transport_trait::RecvStream + 'static> {
 	stop: Option<u32>,
 	/// Cancels the in-flight read so a stop applies immediately instead of
 	/// waiting behind blocked I/O. Fired by [`stop`](wt_poll::RecvStream::stop)
-	/// and by [`Drop`].
+	/// and by [`Drop`], and by a read that needs the stream back from the
+	/// closed-watch.
 	interrupt: Option<futures::channel::oneshot::Sender<()>>,
+	/// The in-flight operation is the closed-watch's `closed()` at the cap,
+	/// which any read interrupts rather than waits on.
+	watching: bool,
+	/// The closed-watch parked at the cap, woken once reads drain below it.
+	parked: Option<std::task::Waker>,
 }
 
 /// How much the closed-watch may read ahead of the caller before it parks and
@@ -685,8 +597,9 @@ const READ_AHEAD_CAP: usize = 64 * 1024;
 
 enum RecvState<S: web_transport_trait::RecvStream + 'static> {
 	Idle(S),
-	/// A read in flight; a `None` result means it was interrupted by a stop
-	/// (see [`RecvStream::interrupt`]).
+	/// A read in flight, or the closed-watch's `closed()` reporting its end
+	/// as `Ok(None)`; a `None` result means it was interrupted (see
+	/// [`RecvStream::interrupt`]).
 	Reading(StreamOp<S, Option<Bytes>, S::Error>),
 }
 
@@ -701,6 +614,8 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 			fin: false,
 			stop: None,
 			interrupt: None,
+			watching: false,
+			parked: None,
 		}
 	}
 
@@ -723,6 +638,51 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 		}
 	}
 
+	/// Wake a closed-watch parked at the cap once reads drain below it.
+	fn drained(&mut self) {
+		if self.buffer.len() + self.queued_len < READ_AHEAD_CAP
+			&& let Some(parked) = self.parked.take()
+		{
+			parked.wake();
+		}
+	}
+
+	/// Start an interruptible operation on the idle `stream`: a read of up to
+	/// `max` bytes, or with `None` the closed-watch's `closed()`, whose end
+	/// resolves as `Ok(None)`.
+	fn start(&mut self, mut stream: S, max: Option<usize>) {
+		let (tx, rx) = futures::channel::oneshot::channel::<()>();
+		self.interrupt = Some(tx);
+		self.watching = max.is_none();
+		let fut = async move {
+			let res = {
+				let op = async {
+					match max {
+						Some(max) => stream.read_chunk(max).await,
+						None => stream.closed().await.map(|()| None),
+					}
+				};
+				let mut op = std::pin::pin!(op.fuse());
+				let mut rx = rx.fuse();
+				loop {
+					futures::select_biased! {
+						res = op => break Some(res),
+						cancel = rx => match cancel {
+							Ok(()) => break None,
+							// A dropped (unfired) sender must not interrupt;
+							// only an explicit stop or a read does. The fused
+							// arm goes quiet and the operation keeps driving.
+							Err(_) => continue,
+						},
+					}
+				}
+			};
+			(stream, res)
+		}
+		.boxed();
+		*self.state.get_mut().unwrap() = Some(RecvState::Reading(fut));
+	}
+
 	/// Read the next chunk from the transport, setting `self.fin` on the FIN.
 	fn poll_fill(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, S::Error>> {
 		loop {
@@ -731,55 +691,52 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 					if let Some(code) = self.stop.take() {
 						stream.stop(code);
 					}
-					let (tx, rx) = futures::channel::oneshot::channel::<()>();
-					self.interrupt = Some(tx);
-					let fut = async move {
-						let res = {
-							let mut op = std::pin::pin!(stream.read_chunk(max).fuse());
-							let mut rx = rx.fuse();
-							loop {
-								futures::select_biased! {
-									res = op => break Some(res),
-									cancel = rx => match cancel {
-										Ok(()) => break None,
-										// A dropped (unfired) sender must not interrupt;
-										// only an explicit stop does. The fused arm goes
-										// quiet and the read keeps driving.
-										Err(_) => continue,
-									},
-								}
-							}
-						};
-						(stream, res)
-					}
-					.boxed();
-					*self.state.get_mut().unwrap() = Some(RecvState::Reading(fut));
+					self.start(stream, Some(max));
 				}
-				RecvState::Reading(mut fut) => match fut.as_mut().poll(cx) {
-					Poll::Pending => {
-						*self.state.get_mut().unwrap() = Some(RecvState::Reading(fut));
-						return Poll::Pending;
+				RecvState::Reading(fut) => {
+					// A read wants the stream back from the closed-watch, which
+					// would otherwise hold it until the stream ends.
+					let watching = self.watching;
+					if watching && let Some(tx) = self.interrupt.take() {
+						let _ = tx.send(());
 					}
-					Poll::Ready((mut stream, res)) => {
-						self.interrupt = None;
-						// Apply a stop requested while the read was in flight now, not on
-						// the next read: a caller that stops and never reads again must
-						// still send STOP_SENDING.
-						if let Some(code) = self.stop.take() {
-							stream.stop(code);
-						}
-						*self.state.get_mut().unwrap() = Some(RecvState::Idle(stream));
-						// An interrupted read was abandoned for the stop applied
-						// above; the next iteration's read reports the stream state.
-						let Some(res) = res else { continue };
-						if let Ok(None) = &res {
-							self.fin = true;
-						}
-						return Poll::Ready(res);
+					match ready!(self.poll_op(cx, fut)) {
+						// Interrupted, or the watch saw the stream end: the
+						// read that follows reports how.
+						None => continue,
+						Some(Ok(_)) if watching => continue,
+						Some(res) => return Poll::Ready(res),
 					}
-				},
+				}
 			}
 		}
+	}
+
+	/// Poll the in-flight operation, settling it once it resolves; `None` means
+	/// it was interrupted, and the next operation reports the stream state.
+	fn poll_op(
+		&mut self,
+		cx: &mut Context<'_>,
+		mut fut: StreamOp<S, Option<Bytes>, S::Error>,
+	) -> Poll<Option<Result<Option<Bytes>, S::Error>>> {
+		let Poll::Ready((mut stream, res)) = fut.as_mut().poll(cx) else {
+			*self.state.get_mut().unwrap() = Some(RecvState::Reading(fut));
+			return Poll::Pending;
+		};
+		self.interrupt = None;
+		let watched = std::mem::take(&mut self.watching);
+		// Apply a stop requested while the operation was in flight now, not on
+		// the next read: a caller that stops and never reads again must still
+		// send STOP_SENDING.
+		if let Some(code) = self.stop.take() {
+			stream.stop(code);
+		}
+		*self.state.get_mut().unwrap() = Some(RecvState::Idle(stream));
+		// Only a read's end is the FIN: closed() also ends at a reset.
+		if !watched && let Some(Ok(None)) = &res {
+			self.fin = true;
+		}
+		Poll::Ready(res)
 	}
 }
 
@@ -796,6 +753,7 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for RecvS
 			if !self.buffer.is_empty() {
 				let n = dst.len().min(self.buffer.len());
 				dst[..n].copy_from_slice(&self.buffer.split_to(n));
+				self.drained();
 				return Poll::Ready(Ok(Some(n)));
 			}
 			if self.fin {
@@ -816,7 +774,9 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for RecvS
 			self.unqueue();
 			if !self.buffer.is_empty() {
 				let n = max.min(self.buffer.len());
-				return Poll::Ready(Ok(Some(self.buffer.split_to(n))));
+				let chunk = self.buffer.split_to(n);
+				self.drained();
+				return Poll::Ready(Ok(Some(chunk)));
 			}
 			if self.fin {
 				return Poll::Ready(Ok(None));
@@ -842,20 +802,46 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for RecvS
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		// Emulated with reads rather than the underlying closed(): that future
-		// would own the stream, deadlocking any later read (the caller reclaims a
-		// dropped watch by simply reading again, which the bridge must preserve).
-		// A FIN or reset therefore surfaces through reads; payload arriving before
-		// it is queued as read-ahead (up to READ_AHEAD_CAP) so a FIN right behind
-		// undelivered data still resolves the watch without an external read.
+		// Emulated with reads rather than held on the underlying closed(): that
+		// future owns the stream, so it is only watched at the read-ahead cap, and
+		// interruptibly, so any read reclaims the stream. Below the cap a FIN or
+		// reset surfaces through reads; payload arriving before it is queued as
+		// read-ahead (up to READ_AHEAD_CAP) so a FIN right behind undelivered data
+		// still resolves the watch without an external read.
 		loop {
 			if self.fin {
 				return Poll::Ready(Ok(()));
 			}
 			if self.buffer.len() + self.queued_len >= READ_AHEAD_CAP {
-				// The caller's own reads are what drain the backlog, and their
-				// re-poll of this watch is what resumes it.
-				return Poll::Pending;
+				// Read no further, but still see a reset or connection close
+				// behind the backlog, and resume reading ahead once the caller's
+				// reads drain below the cap.
+				self.parked = Some(cx.waker().clone());
+				match self.state.get_mut().unwrap().take().expect("in-flight") {
+					RecvState::Idle(stream) => {
+						self.start(stream, None);
+						continue;
+					}
+					RecvState::Reading(fut) if self.watching => {
+						match ready!(self.poll_op(cx, fut)) {
+							Some(Err(err)) => return Poll::Ready(Err(err)),
+							// A reset ends closed() as well as the FIN, and after
+							// either no payload is left to wait on, so one read
+							// says which without growing the backlog.
+							Some(Ok(_)) => {
+								let Some(RecvState::Idle(stream)) = self.state.get_mut().unwrap().take() else {
+									unreachable!("a settled watch leaves the stream idle");
+								};
+								self.start(stream, Some(8 * 1024));
+							}
+							// Interrupted by a stop; watch again.
+							None => {}
+						}
+						continue;
+					}
+					// A read in flight, ours or the caller's: settle it below.
+					reading => *self.state.get_mut().unwrap() = Some(reading),
+				}
 			}
 			match ready!(self.poll_fill(cx, 8 * 1024)) {
 				Ok(Some(bytes)) => {
@@ -884,15 +870,13 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 			// the deferred code the peer classifies the abort by. Finish the
 			// read on the runtime and stop with the real code then; a deferred
 			// stop fired the interrupt when it was recorded, so the task never
-			// waits on blocked I/O. Without a runtime the default drop stands.
+			// waits on blocked I/O.
 			Some(RecvState::Reading(fut)) => {
-				if let Some(code) = self.stop.take()
-					&& let Ok(handle) = tokio::runtime::Handle::try_current()
-				{
-					handle.spawn(async move {
+				if let Some(code) = self.stop.take() {
+					crate::runtime::detach(crate::panic::isolate(async move {
 						let (mut stream, _) = fut.await;
 						stream.stop(code);
-					});
+					}));
 				}
 			}
 			None => {}
@@ -913,27 +897,27 @@ impl Grouped for crate::quic::web::Session {
 	}
 
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
-		Some(crate::quic::driver::Connection::wire(self))
+		Some(crate::quic::driver::connection::Connection::wire(self))
 	}
 
 	fn probe(&self) -> Option<moq_net::transport::Probe> {
-		crate::quic::driver::Connection::probe(self)
+		crate::quic::driver::connection::Connection::probe(self)
 	}
 
 	fn streams_evicted(&self) -> Option<u64> {
-		Some(crate::quic::driver::Connection::stats(self).credit.evicted)
+		Some(crate::quic::driver::connection::Connection::stats(self).credit.evicted)
 	}
 
-	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::SendGroup> {
+	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::send::Group> {
 		Some(Self::send_group(self, priority))
 	}
 
 	fn send_datagram(
 		&self,
 		payload: Bytes,
-		options: moq_net::transport::poll::SendOptions<'_, crate::quic::driver::SendGroup>,
+		options: moq_net::transport::poll::SendOptions<'_, crate::quic::driver::send::Group>,
 	) -> Result<(), Self::Error> {
-		let options = crate::quic::driver::SendOptions {
+		let options = crate::quic::driver::send::Options {
 			group: options.group,
 			priority: options.priority,
 		};
@@ -943,45 +927,25 @@ impl Grouped for crate::quic::web::Session {
 
 #[cfg(feature = "quic")]
 impl GroupedSend for crate::quic::web::SendStream {
-	type Group = crate::quic::driver::SendGroup;
+	type Group = crate::quic::driver::send::Group;
 
 	fn set_group(&mut self, group: &Self::Group) {
-		// A closed stream has nothing left to schedule.
-		Self::set_group(self, Some(group)).ok();
+		Self::set_group(self, Some(group));
 	}
 
 	fn set_priority(&mut self, priority: i64) {
-		crate::quic::web::SendStream::set_priority(self, priority).ok();
+		crate::quic::web::SendStream::set_priority(self, priority);
 	}
 }
 
 #[cfg(feature = "quic")]
-impl moq_net::transport::poll::SendGroup for crate::quic::driver::SendGroup {
+impl moq_net::transport::poll::SendGroup for crate::quic::driver::send::Group {
 	fn set_priority(&mut self, priority: i64) {
 		Self::set_priority(self, priority)
 	}
 }
 
-#[cfg(feature = "iroh")]
-impl Grouped for web_transport_iroh::Session {
-	type Recv = moq_net::transport::poll::Buffered<RecvStream<Self::RecvStream>>;
-
-	fn recv(stream: RecvStream<Self::RecvStream>) -> Self::Recv {
-		moq_net::transport::poll::Buffered::new(stream)
-	}
-}
-
-#[cfg(feature = "iroh")]
-impl GroupedSend for web_transport_iroh::SendStream {
-	type Group = moq_net::transport::poll::Ungrouped;
-
-	fn set_group(&mut self, group: &Self::Group) {
-		match *group {}
-	}
-}
-
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::sync::{
 		Arc, Mutex,
@@ -1083,11 +1047,14 @@ mod tests {
 	}
 
 	/// An async-interface receive stream replaying canned chunks, then EOF.
+	#[derive(Default)]
 	struct FakeRecv {
 		chunks: std::collections::VecDeque<Bytes>,
 		stops: Arc<Mutex<Vec<u32>>>,
 		/// Reads park while set, so a test can hold one in flight in the adapter.
 		blocked: Arc<AtomicBool>,
+		/// The peer reset the stream, discarding whatever was not yet read.
+		reset: Arc<AtomicBool>,
 	}
 
 	impl web_transport_trait::RecvStream for FakeRecv {
@@ -1102,6 +1069,9 @@ mod tests {
 				Poll::Ready(())
 			})
 			.await;
+			if self.reset.load(Ordering::SeqCst) {
+				return Err(FakeError);
+			}
 			let Some(chunk) = self.chunks.front_mut() else {
 				return Ok(None);
 			};
@@ -1117,8 +1087,14 @@ mod tests {
 			self.stops.lock().unwrap().push(code);
 		}
 
+		/// Ends at a reset or at the FIN once every chunk was read, and like
+		/// moq-tokio's own streams does not say which.
 		async fn closed(&mut self) -> Result<(), Self::Error> {
-			Ok(())
+			std::future::poll_fn(|_| match self.reset.load(Ordering::SeqCst) || self.chunks.is_empty() {
+				true => Poll::Ready(Ok(())),
+				false => Poll::Pending,
+			})
+			.await
 		}
 	}
 
@@ -1187,15 +1163,14 @@ mod tests {
 	// joined during the FIN watch reclaims the stream, which still retransmits.
 	#[test]
 	fn send_defers_a_group_across_an_inflight_write() {
-		use moq_net::transport::poll;
 		let fake = FakeSend::default();
 		fake.blocked.store(true, Ordering::SeqCst);
 		let mut send = SendStream::new(fake.clone());
 		let mut cx = cx();
 
 		assert!(send.poll_write(&mut cx, b"queued").is_pending());
-		poll::SendStream::set_group(&mut send, &FakeGroup(1));
-		poll::SendStream::set_priority(&mut send, i64::MAX);
+		send.join(&FakeGroup(1));
+		send.prioritize(i64::MAX);
 		assert!(fake.groups.lock().unwrap().is_empty(), "deferred while in flight");
 
 		fake.blocked.store(false, Ordering::SeqCst);
@@ -1206,7 +1181,7 @@ mod tests {
 		fake.never_ack.store(true, Ordering::SeqCst);
 		send.finish().unwrap();
 		assert!(send.poll_closed(&mut cx).is_pending());
-		poll::SendStream::set_group(&mut send, &FakeGroup(2));
+		send.join(&FakeGroup(2));
 		assert!(send.poll_closed(&mut cx).is_pending());
 		assert_eq!(fake.groups.lock().unwrap().as_slice(), &[1, 2]);
 	}
@@ -1325,7 +1300,7 @@ mod tests {
 		let fake = FakeRecv {
 			chunks: [Bytes::from_static(b"abcdef")].into_iter().collect(),
 			stops: stops.clone(),
-			blocked: Default::default(),
+			..Default::default()
 		};
 		let mut recv = RecvStream::new(fake);
 		let mut cx = cx();
@@ -1351,7 +1326,7 @@ mod tests {
 		let fake = FakeRecv {
 			chunks: Default::default(),
 			stops: stops.clone(),
-			blocked: Default::default(),
+			..Default::default()
 		};
 		let mut recv = RecvStream::new(fake);
 
@@ -1369,6 +1344,7 @@ mod tests {
 			chunks: [Bytes::from_static(b"data")].into_iter().collect(),
 			stops: stops.clone(),
 			blocked: blocked.clone(),
+			..Default::default()
 		};
 		let mut recv = RecvStream::new(fake);
 		let mut cx = cx();
@@ -1399,7 +1375,7 @@ mod tests {
 		drop(send);
 
 		// The write stays blocked forever: the reset must not wait behind it.
-		tokio::time::timeout(std::time::Duration::from_secs(1), async {
+		kio::clock::timeout(std::time::Duration::from_secs(1), async {
 			while fake.resets.lock().unwrap().is_empty() {
 				tokio::task::yield_now().await;
 			}
@@ -1438,6 +1414,7 @@ mod tests {
 			chunks: [Bytes::from_static(b"data")].into_iter().collect(),
 			stops: stops.clone(),
 			blocked: blocked.clone(),
+			..Default::default()
 		};
 		let mut recv = RecvStream::new(fake);
 		let mut cx = cx();
@@ -1448,7 +1425,7 @@ mod tests {
 		drop(recv);
 
 		// The read stays blocked forever: the stop must not wait behind it.
-		tokio::time::timeout(std::time::Duration::from_secs(1), async {
+		kio::clock::timeout(std::time::Duration::from_secs(1), async {
 			while stops.lock().unwrap().is_empty() {
 				tokio::task::yield_now().await;
 			}
@@ -1466,7 +1443,7 @@ mod tests {
 		let fake = FakeRecv {
 			chunks: [Bytes::from_static(b"tail")].into_iter().collect(),
 			stops: stops.clone(),
-			blocked: Default::default(),
+			..Default::default()
 		};
 		let mut recv = RecvStream::new(fake);
 		let mut cx = cx();
@@ -1479,6 +1456,88 @@ mod tests {
 		assert_eq!(recv.poll_read(&mut cx, &mut dst), Poll::Ready(Ok(Some(4))));
 		assert_eq!(&dst, b"tail");
 		assert_eq!(recv.poll_read(&mut cx, &mut dst), Poll::Ready(Ok(None)));
+	}
+
+	/// A waker counting its wakes, standing in for a task.
+	#[derive(Default)]
+	struct Wakes(std::sync::atomic::AtomicUsize);
+
+	impl std::task::Wake for Wakes {
+		fn wake(self: Arc<Self>) {
+			self.0.fetch_add(1, Ordering::SeqCst);
+		}
+	}
+
+	/// More payload than the read-ahead cap, in watch-sized chunks.
+	fn flood() -> std::collections::VecDeque<Bytes> {
+		(0..READ_AHEAD_CAP / (8 * 1024) + 1)
+			.map(|_| Bytes::from(vec![7u8; 8 * 1024]))
+			.collect()
+	}
+
+	// A reset behind a full read-ahead still closes the watch, and the payload
+	// read before it is still delivered.
+	#[test]
+	fn recv_closed_sees_a_reset_at_the_cap() {
+		let reset = Arc::new(AtomicBool::new(false));
+		let mut recv = RecvStream::new(FakeRecv {
+			chunks: flood(),
+			reset: reset.clone(),
+			..Default::default()
+		});
+		let mut cx = cx();
+
+		// The watch fills the read-ahead, then waits on the stream's end.
+		assert_eq!(recv.poll_closed(&mut cx), Poll::Pending);
+		reset.store(true, Ordering::SeqCst);
+		assert_eq!(recv.poll_closed(&mut cx), Poll::Ready(Err(FakeError)));
+
+		let mut read = 0;
+		while let Poll::Ready(Ok(Some(chunk))) = recv.poll_read_chunk(&mut cx, usize::MAX) {
+			read += chunk.len();
+		}
+		assert_eq!(read, READ_AHEAD_CAP);
+		assert_eq!(
+			recv.poll_read_chunk(&mut cx, 1),
+			Poll::Ready(Err(FakeError)),
+			"a reset, not the FIN"
+		);
+	}
+
+	// A watch parked at the cap is woken by a read in another task draining
+	// below it, and then reads ahead to the FIN.
+	#[test]
+	fn recv_closed_resumes_when_a_read_drains_the_cap() {
+		let mut recv = RecvStream::new(FakeRecv {
+			chunks: flood(),
+			..Default::default()
+		});
+		let wakes = Arc::new(Wakes::default());
+		let watcher = std::task::Waker::from(wakes.clone());
+		let mut watch = Context::from_waker(&watcher);
+		let mut cx = cx();
+
+		assert_eq!(recv.poll_closed(&mut watch), Poll::Pending);
+		let woken = wakes.0.load(Ordering::SeqCst);
+
+		// The reader drains one chunk, which wakes the watch.
+		let Poll::Ready(Ok(Some(chunk))) = recv.poll_read_chunk(&mut cx, 8 * 1024) else {
+			panic!("the read-ahead serves the reader");
+		};
+		assert_eq!(chunk.len(), 8 * 1024);
+		assert!(
+			wakes.0.load(Ordering::SeqCst) > woken,
+			"the draining read never woke the watch"
+		);
+
+		// The watch reclaims the stream and reads through to the FIN.
+		assert_eq!(recv.poll_closed(&mut watch), Poll::Ready(Ok(())));
+		let mut read = chunk.len();
+		while let Poll::Ready(Ok(Some(chunk))) = recv.poll_read_chunk(&mut cx, usize::MAX) {
+			read += chunk.len();
+		}
+		assert_eq!(read, READ_AHEAD_CAP + 8 * 1024);
+		assert_eq!(recv.poll_read_chunk(&mut cx, 1), Poll::Ready(Ok(None)));
 	}
 
 	/// An async-interface session that never accepts, opens, or closes.
@@ -1537,10 +1596,10 @@ mod tests {
 	fn owned_poll_adapter_forwards_writes_and_resets() {
 		use moq_net::transport::poll;
 		let fake = FakeSend::default();
-		let mut send = SendStream::new(fake.clone());
-		let mut cx = cx();
+		let mut send = owned::BridgedSend::new(fake.clone());
+		let waiter = &moq_net::kio::Waiter::noop();
 		assert!(matches!(
-			poll::SendStream::poll_write(&mut send, &mut cx, b"hello"),
+			poll::SendStream::poll_write(&mut send, waiter, b"hello"),
 			Poll::Ready(Ok(5))
 		));
 		poll::SendStream::set_priority(&mut send, 7);
@@ -1550,10 +1609,10 @@ mod tests {
 		assert_eq!(fake.resets.lock().unwrap().as_slice(), &[0x33]);
 		for address in [moq_net::transport::Address::Uri, moq_net::transport::Address::Setup] {
 			let session = Session::new(FakeSession, address);
-			let mut cloned = session.clone();
+			let cloned = session.clone();
 			assert_eq!(poll::Session::address(&session), address);
 			assert_eq!(poll::Session::address(&cloned), address);
-			assert!(poll::Session::poll_accept_uni(&mut cloned, &mut cx).is_pending());
+			assert!(poll::Session::poll_accept_uni(&cloned, waiter).is_pending());
 		}
 	}
 }

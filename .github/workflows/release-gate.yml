@@ -48,7 +48,6 @@ jobs:
       ts: ${{ steps.filter.outputs.ts }}
       uring: ${{ steps.filter.outputs.uring }}
       video: ${{ steps.filter.outputs.video }}
-      wasm: ${{ steps.filter.outputs.wasm }}
       x11: ${{ steps.filter.outputs.x11 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,7 +72,6 @@ jobs:
               - "rs/moq-loc/**"
               - "rs/moq-msf/**"
               - "rs/moq-json/**"
-              - "rs/moq-flate/**"
               - "rs/moq-pattern/**"
               - "rs/hang/**"
               - "rs/kio/**"
@@ -88,6 +86,7 @@ jobs:
             # since a bumped dependency can change a re-exported type.
             api-diff:
               - "rs/**"
+              - ".cargo/config.toml"
               - "js/**"
               - "Cargo.toml"
               - "Cargo.lock"
@@ -112,6 +111,7 @@ jobs:
             c:
               - "c/**"
               - "rs/moq-ffi/**"
+              - ".cargo/config.toml"
               - "sh/c/**"
               - "rs/moq-c/native-libs/**"
               - "cpp/moq/cmake/moq-ffi.cmake"
@@ -121,6 +121,7 @@ jobs:
               - "cpp/moq/**"
               - "cpp/justfile"
               - "rs/moq-ffi/**"
+              - ".cargo/config.toml"
               - "sh/cpp/**"
               - "rs/moq-c/native-libs/**"
               - "doc/lib/cpp/**"
@@ -146,6 +147,7 @@ jobs:
               # The Go client builds against the modules this script stages.
               - "sh/go/**"
               - "cpp/moq/**"
+              - ".cargo/config.toml"
               - ".github/workflows/interop.yml"
             moq-sh:
               - "infra/moq-sh/**"
@@ -155,6 +157,7 @@ jobs:
               - "cpp/moq/**"
               - "sh/obs/**"
               - "rs/moq-ffi/**"
+              - ".cargo/config.toml"
               - "rs/moq-c/**"
               - "doc/lib/c/**"
               - "doc/lib/samples.sh"
@@ -185,6 +188,7 @@ jobs:
               - "dart/moq_ffi/**"
               - "sh/dart/**"
               - "rs/moq-ffi/build.sh"
+              - ".cargo/config.toml"
             release-go-ffi:
               - ".github/workflows/release-go-ffi.yml"
               - ".github/workflows/release-ffi.yml"
@@ -195,6 +199,7 @@ jobs:
               - "sh/go/package-ffi.sh"
               - "sh/go/publish-ffi.sh"
               - "rs/moq-ffi/build.sh"
+              - ".cargo/config.toml"
             release-js:
               - "js/**"
               - ".github/workflows/release-js.yml"
@@ -206,6 +211,7 @@ jobs:
               - ".github/workflows/release-kt-lib.yml"
               - "sh/gh/release.sh"
               - "rs/moq-ffi/build.sh"
+              - ".cargo/config.toml"
             release-swift-lib:
               - "swift/VERSION"
               - "swift/Package.swift.template"
@@ -229,12 +235,11 @@ jobs:
               # Exactly the workspace crates run.sh builds; sh/gh/ts-paths.py fails Check on drift.
               - "rs/hang/**"
               - "rs/kio/**"
+              - "rs/kio/macros/**"
               - "rs/moq-archive/**"
               - "rs/moq-auth/**"
               - "rs/moq-cli/**"
-              - "rs/moq-clock/**"
               - "rs/moq-congestion/**"
-              - "rs/moq-flate/**"
               - "rs/moq-hls/**"
               - "rs/moq-ice/**"
               - "rs/moq-json/**"
@@ -292,27 +297,6 @@ jobs:
               - "flake.nix"
               - "flake.lock"
               - ".github/workflows/video.yml"
-            wasm:
-              - "rs/moq-wasm/**"
-              - "rs/moq-clock/**"
-              - "rs/moq-net/**"
-              - "rs/kio/**"
-              - "js/wasm/**"
-              - "test/wasm/**"
-              - "test/lib/**"
-              - "justfile"
-              - "js/justfile"
-              - "rs/justfile"
-              - "test/justfile"
-              - ".cargo/config.toml"
-              - "package.json"
-              - "bun.lock"
-              - "Cargo.toml"
-              - "Cargo.lock"
-              - "rust-toolchain.toml"
-              - "flake.nix"
-              - "flake.lock"
-              - ".github/workflows/wasm.yml"
             x11:
               - "rs/moq-video/**"
               - "rs/justfile"
@@ -425,13 +409,6 @@ jobs:
     if: needs.scope.outputs.video == 'true'
     uses: ./.github/workflows/video.yml
 
-  wasm:
-    name: WASM
-    needs: scope
-    if: needs.scope.outputs.wasm == 'true'
-    uses: ./.github/workflows/wasm.yml
-    secrets: inherit
-
   x11:
     name: X11 capture
     needs: scope
@@ -518,7 +495,6 @@ jobs:
       - ts
       - uring
       - video
-      - wasm
       - x11
       - release-dart
       - release-dart-ffi

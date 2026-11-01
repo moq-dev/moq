@@ -6,7 +6,7 @@ and exits 0 on a successful handshake.
 Usage:
 
     # Build the cdylib and generate the Python bindings.
-    cargo build --release --package moq-ffi
+    cargo build-ffi --release
     cargo run --package uniffi-bindgen --features cli -- generate \
         --library target/release/libmoq_ffi.so \
         --language python --out-dir target/py-bindings
@@ -26,9 +26,7 @@ import moq
 
 
 async def main() -> int:
-    server = moq.MoqServer(
-        moq.MoqServerConfig(bind="127.0.0.1:0", tls=moq.MoqServerTls(generate=["localhost"]))
-    )
+    server = moq.MoqServer(moq.MoqServerConfig(bind="127.0.0.1:0", tls=moq.MoqServerTls(generate=["localhost"])))
 
     addr = await server.listen()
     print(f"server bound on {addr}")

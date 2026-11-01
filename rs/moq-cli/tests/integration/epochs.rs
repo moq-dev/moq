@@ -1,6 +1,8 @@
 //! Real relay routing keeps held catalog/media identities while fresh readers follow replacements.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use kio::clock::Instant;
 
 use hang::moq_net::{self, Epoch, Timestamp, announce, origin, track};
 use moq_mux::catalog::Stream;
@@ -110,14 +112,14 @@ fn publish(origin: &origin::Producer, epoch: &Epoch, tag: &str) -> Published {
 
 /// Finish a route change within [`routing`] of `started`.
 async fn within<T>(started: Instant, change: impl Future<Output = T>) -> T {
-	let deadline = tokio::time::Instant::from_std(started + routing());
-	tokio::time::timeout_at(deadline, change)
+	let deadline = started + routing();
+	kio::clock::timeout_at(deadline, change)
 		.await
 		.unwrap_or_else(|_| panic!("route change took longer than {:?}", routing()))
 }
 
 /// Ignore same-instance metadata updates, but keep the actual replacement representation.
-async fn changed(follow: &mut announce::Follow) -> bool {
+async fn changed(follow: &mut announce::Consumer) -> bool {
 	loop {
 		match follow.next().await.unwrap() {
 			announce::Event::Restart(_) => return true,
@@ -146,8 +148,12 @@ async fn replacement(version: &str) {
 		.unwrap();
 	let viewer_origin = moq_tokio::origin::spawn();
 	let viewer = viewer_origin.consume();
-	let mut catalog_follow = viewer.follow("live/catalog.hang").unwrap();
-	let mut media_follow = viewer.follow("live/media").unwrap();
+	let watch = |path| {
+		let path = moq_net::Patterns::from(moq_net::Pattern::literal(path).unwrap());
+		viewer.scope("", &path).unwrap().announced()
+	};
+	let mut catalog_follow = watch("live/catalog.hang");
+	let mut media_follow = watch("live/media");
 	let viewer_client = client(version).with_subscriber(viewer_origin);
 	let _viewer_connection = viewer_client
 		.clone()
@@ -158,7 +164,7 @@ async fn replacement(version: &str) {
 	assert!(matches!(catalog_follow.next().await, Some(announce::Event::Start(_))));
 	assert!(matches!(media_follow.next().await, Some(announce::Event::Start(_))));
 
-	let held = viewer.request_broadcast("live/catalog.hang", None).await.unwrap();
+	let held = viewer.request("live/catalog.hang", None).await.unwrap();
 	let old = moq_mux::Source::new(viewer.clone(), held);
 	let mut catalog = old.catalog::<()>(moq_mux::catalog::CatalogFormat::Hang).await.unwrap();
 	let snapshot = catalog.next().await.unwrap().unwrap();
@@ -201,7 +207,8 @@ async fn replacement(version: &str) {
 		(changed(&mut catalog_follow).await, changed(&mut media_follow).await)
 	})
 	.await;
-	assert_eq!(catalog_restart, version != "moq-lite-06");
+	// Only lite-07 carries the epoch, so only it restarts in place.
+	assert_eq!(catalog_restart, version == LITE_07);
 	assert_eq!(media_restart, catalog_restart);
 	println!(
 		"{version}: relay replacement observed in {:?} of {:?} (publisher already connected)",
@@ -249,10 +256,7 @@ async fn replacement(version: &str) {
 	assert!(subscribed.is_err(), "retired handle subscribed to B's late track");
 
 	// Fresh catalog handles start fresh pins instead of sharing the old Source's cache.
-	let fresh = moq_mux::Source::new(
-		viewer.clone(),
-		viewer.request_broadcast("live/catalog.hang", None).await.unwrap(),
-	);
+	let fresh = moq_mux::Source::new(viewer.clone(), viewer.request("live/catalog.hang", None).await.unwrap());
 	let mut fresh_catalog = fresh
 		.catalog::<()>(moq_mux::catalog::CatalogFormat::Hang)
 		.await
@@ -279,7 +283,7 @@ async fn replacement(version: &str) {
 		changed(&mut media_follow).await;
 	})
 	.await;
-	let returned = viewer.request_broadcast("live/media", None).await.unwrap();
+	let returned = viewer.request("live/media", None).await.unwrap();
 	let mut returned = returned.track("audio").unwrap().subscribe(None).await.unwrap();
 	write(&first.media, "A:3");
 	let returned_frame = read(&mut returned).await;

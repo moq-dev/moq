@@ -4,7 +4,10 @@
 //! falling back to an iroh relay. Both WebTransport-over-H3 and raw QUIC are
 //! negotiated via ALPN.
 
-use std::{net, path::PathBuf, str::FromStr, sync::Arc};
+use std::{net, path::Path, str::FromStr, sync::Arc};
+
+mod session;
+pub(crate) use session::Session;
 
 use crate::quic::CongestionControl;
 use url::Url;
@@ -194,6 +197,8 @@ pub struct Config {
 
 	/// Secret key for the iroh endpoint, either a hex-encoded string or a path to a file.
 	/// If the file does not exist, a random key will be generated and written to the path.
+	/// Files must be regular, with no symlinks; on Unix, new files use mode 0600 and
+	/// existing files readable by group or others are refused without changing permissions.
 	#[usage(
 		name = "iroh-secret",
 		long = "iroh-secret",
@@ -247,85 +252,74 @@ impl Config {
 	/// MTU discovery, congestion control, flow-control windows), and key logging. It
 	/// cannot disable GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
 	pub async fn bind(self, quic: &crate::quic::Config) -> Result<Option<Endpoint>> {
-		if !self.enabled.unwrap_or(false) {
-			return Ok(None);
-		}
-
-		// Public, and takes a config this crate did not necessarily check, so it
-		// refuses rather than trusting the caller: `resolve` reads the canonical
-		// fields, and a released `--client-quic-gso=false` would arrive here as "GSO
-		// on" and bind an endpoint the caller asked not to have.
-		let deprecated = quic.deprecated();
-		if !deprecated.is_empty() {
-			return Err(Error::Deprecated(deprecated));
-		}
-		quic.validate().map_err(Error::Config)?;
-
-		let quic = quic.resolve();
-		if quic.keep_alive.is_none() {
-			return Err(Error::Config(crate::Error::NoBackend(
-				"Iroh cannot disable keep-alive; omit quic.keep_alive or set a positive interval",
-			)));
-		}
-		if quic.keylog.is_some() {
-			return Err(Error::Config(crate::Error::NoBackend(
-				"Iroh does not support an explicit quic.keylog path",
-			)));
-		}
-		if quic.gso_disabled() {
-			return Err(Error::GsoUnsupported);
-		}
-
-		// If the secret matches the expected format (hex encoded), use it directly.
-		let secret_key = if let Some(secret) = self.secret.as_ref().and_then(|s| SecretKey::from_str(s).ok()) {
-			secret
-		} else if let Some(path) = self.secret {
-			let path = PathBuf::from(path);
-			if !path.exists() {
-				// Generate a new random secret and write it to the file.
-				let secret = SecretKey::generate();
-				tokio::fs::write(path, hex::encode(secret.to_bytes())).await?;
-				secret
-			} else {
-				// Otherwise, read the secret from a file.
-				let key_str = tokio::fs::read_to_string(&path).await?;
-				SecretKey::from_str(&key_str).map_err(|err| Error::Secret(crate::error::message(err)))?
+		crate::runtime::scope(async move {
+			if !self.enabled.unwrap_or(false) {
+				return Ok(None);
 			}
-		} else {
-			// Otherwise, generate a new random secret.
-			SecretKey::generate()
-		};
 
-		let transport = transport_config(&quic);
+			// Public, and takes a config this crate did not necessarily check, so it
+			// refuses rather than trusting the caller: `resolve` reads the canonical
+			// fields, and a released `--client-quic-gso=false` would arrive here as "GSO
+			// on" and bind an endpoint the caller asked not to have.
+			let deprecated = quic.deprecated();
+			if !deprecated.is_empty() {
+				return Err(Error::Deprecated(deprecated));
+			}
+			quic.validate().map_err(Error::Config)?;
 
-		let mut builder = if self.disable_relay.unwrap_or(false) {
-			Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
-		} else {
-			Endpoint::builder(iroh::endpoint::presets::N0)
-		}
-		.secret_key(secret_key)
-		.transport_config(transport.build());
-		if let Some(addr) = self.bind_v4 {
-			builder = builder.bind_addr(addr)?;
-		}
-		if let Some(addr) = self.bind_v6 {
-			builder = builder.bind_addr(addr)?;
-		}
+			let quic = quic.resolve();
+			if quic.keylog.is_some() {
+				return Err(Error::Config(crate::Error::NoBackend(
+					"Iroh does not support an explicit quic.keylog path",
+				)));
+			}
+			if quic.gso_disabled() {
+				return Err(Error::GsoUnsupported);
+			}
 
-		let endpoint = builder.bind().await?;
-		tracing::info!(endpoint_id = %endpoint.id(), "iroh listening");
+			// If the secret matches the expected format (hex encoded), use it directly.
+			let secret_key = if let Some(secret) = self.secret.as_ref().and_then(|s| SecretKey::from_str(s).ok()) {
+				secret
+			} else if let Some(path) = self.secret {
+				let generated = hex::encode(SecretKey::generate().to_bytes());
+				let key_str = crate::secret::load_or_create(Path::new(&path), &generated).await?;
+				SecretKey::from_str(&key_str).map_err(|err| Error::Secret(crate::error::message(err)))?
+			} else {
+				// Otherwise, generate a new random secret.
+				SecretKey::generate()
+			};
 
-		Ok(Some(endpoint))
+			let transport = transport_config(&quic);
+
+			let mut builder = if self.disable_relay.unwrap_or(false) {
+				Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
+			} else {
+				Endpoint::builder(iroh::endpoint::presets::N0)
+			}
+			.secret_key(secret_key)
+			.transport_config(transport.build());
+			if let Some(addr) = self.bind_v4 {
+				builder = builder.bind_addr(addr)?;
+			}
+			if let Some(addr) = self.bind_v6 {
+				builder = builder.bind_addr(addr)?;
+			}
+
+			let endpoint = builder.bind().await?;
+			tracing::info!(endpoint_id = %endpoint.id(), "iroh listening");
+
+			Ok(Some(endpoint))
+		})
+		.await
 	}
 }
 
 /// The per-connection transport config, shared by both roles.
 ///
-/// `keep_alive` is the value [`crate::quic::Config::resolve`] already produced:
-/// `Some` is the interval, and `None` (`0s`) means disabled. iroh 1.4's setter
-/// only stores `Some`, and the builder starts at its own 5s heartbeat, so a
-/// disabled interval is refused at bind. A zero duration would rearm the timer
-/// for immediately and spin, so it is not passed. iroh's separate per-path
+/// The keep-alive is [`crate::quic::Resolved::keep_alive_interval`]: iroh does
+/// not expose the negotiated idle timeout, so an unset interval derives from our
+/// own. Zero resolves to the default before reaching iroh's builder, since a zero
+/// interval would rearm its timer immediately. iroh's separate per-path
 /// heartbeat stays at the 5s it ships with: that setter ignores anything longer
 /// and cannot clear it either.
 fn transport_config(quic: &crate::quic::Resolved) -> iroh::endpoint::QuicTransportConfigBuilder {
@@ -336,9 +330,7 @@ fn transport_config(quic: &crate::quic::Resolved) -> iroh::endpoint::QuicTranspo
 		.max_concurrent_bidi_streams(max_streams)
 		.max_concurrent_uni_streams(max_streams)
 		.max_idle_timeout(Some(quic.idle_timeout.try_into().expect("idle timeout out of range")));
-	if let Some(interval) = quic.keep_alive {
-		transport = transport.keep_alive_interval(interval);
-	}
+	transport = transport.keep_alive_interval(quic.keep_alive_interval());
 	if !quic.mtu_discovery {
 		transport = transport.mtu_discovery_config(None);
 	}
@@ -503,28 +495,8 @@ fn url_set_scheme(url: Url, scheme: &str) -> Result<Url> {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
-
-	#[tokio::test]
-	async fn zero_keep_alive_is_refused_only_when_iroh_is_enabled() {
-		let mut config = Config::default();
-		let quic = crate::quic::Config {
-			keep_alive: Some(std::time::Duration::ZERO.into()),
-			..Default::default()
-		};
-		assert!(config.clone().bind(&quic).await.unwrap().is_none());
-		config.enabled = Some(true);
-		let err = config.bind(&quic).await.unwrap_err();
-		assert!(
-			matches!(err, Error::Config(crate::Error::NoBackend(reason)) if reason.contains("cannot disable keep-alive"))
-		);
-	}
 
 	#[tokio::test]
 	async fn explicit_keylog_path_is_refused_only_when_iroh_is_enabled() {
@@ -609,7 +581,7 @@ mod tests {
 	/// same pairing as the quic backend.
 	#[test]
 	fn congestion_factory_maps_each_family() {
-		let now = std::time::Instant::now();
+		let now = kio::clock::now().into_std();
 		let mtu = 1200;
 
 		let loss = congestion_factory(CongestionControl::Loss).build(now, mtu);
@@ -622,14 +594,23 @@ mod tests {
 		assert!(none.into_any().downcast::<Unlimited>().is_ok());
 	}
 
-	/// The connection keep-alive is the resolved interval, not iroh's 5s heartbeat.
-	///
-	/// The setter cannot store `None`, so a disabled interval is not asserted here.
+	/// The connection keep-alive is the resolved interval, not iroh's 5s heartbeat,
+	/// and unset or zero derives from the idle timeout.
 	#[test]
 	fn keep_alive_interval_follows_resolved_config() {
-		for interval in [std::time::Duration::from_secs(3), std::time::Duration::from_millis(500)] {
+		use std::time::Duration;
+		let secs = Duration::from_secs;
+		for (idle, keep_alive, interval) in [
+			(secs(10), Some(secs(3)), secs(3)),
+			(secs(10), Some(Duration::from_millis(500)), Duration::from_millis(500)),
+			(secs(10), None, secs(3)),
+			(secs(10), Some(Duration::ZERO), secs(3)),
+			(secs(30), None, secs(9)),
+			(Duration::ZERO, None, secs(9)),
+		] {
 			let quic = crate::quic::Resolved {
-				keep_alive: Some(interval),
+				idle_timeout: idle,
+				keep_alive,
 				..Default::default()
 			};
 			let rendered = format!("{:?}", transport_config(&quic));

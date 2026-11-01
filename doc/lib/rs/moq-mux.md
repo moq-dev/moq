@@ -13,10 +13,10 @@ back. This is what `moq import` / `export` and the gateways are built on.
 
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
-| fMP4 / CMAF | yes | yes | Audio/video unwrapped to `legacy` by default, or passed through as `cmaf` with `with_passthrough`; `wvtt` subtitles import as timed WebVTT text and `stpp` TTML (IMSC timing profile) as `ttml` documents on the broadcast clock, preserving source language and label when present; other subtitle codecs are skipped. |
+| fMP4 / CMAF | yes | yes | Audio/video unwrapped to `legacy` by default, or passed through as `cmaf` with `with_passthrough`; `wvtt` subtitles import as timed WebVTT text and `stpp` TTML (IMSC timing profile) as `ttml` documents on the broadcast clock, preserving source language and label when present; other subtitle codecs are skipped. Import streams media samples as they arrive; each track's samples must be in forward byte order, and a `moov`, `moof`, or text sample over 32 MiB is refused. |
 | MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3, Opus up to 7.1; SCTE-35 sections and every other undecoded PES stream (KLV, subtitles, DVB AC-3) as tracks; service tables round-trip. |
 | FLV / RTMP | yes | yes | Legacy H.264 + AAC + MP3, plus enhanced-RTMP HEVC, AV1, VP9, Opus, AC-3, E-AC-3, and multitrack. |
-| Matroska / WebM | yes | yes | Timed SRT and WebVTT subtitles import as WebVTT text renditions, preserving source language and label when present; other subtitle codecs are skipped. |
+| Matroska / WebM | yes | yes | Import streams each block into its frame in one pass, retaining no declared size. It refuses subtitle tracks, CMAF output, and video `BlockGroup`s with fields after their `Block`: remux video as `SimpleBlock`s and extract subtitles separately. |
 | Annex-B (H.264, H.265) | yes | yes | Parameter sets extracted to the catalog or re-injected per keyframe. |
 
 Importers fill the catalog from the bitstream, split groups at keyframes, and
@@ -25,7 +25,13 @@ arrived. The catalog clock never moves once something uses it: an importer that
 starts after a data track, a capture, another importer, or a pinned clock
 shifts its timestamps onto that clock instead, landing its first frame at now.
 A `catalog::Timebase` gives renditions on one timestamp base one shared shift. A
-timeline that rewinds ends the import. fMP4 export fixes its track
+stream whose decoder identity changes, such as an SPS with a new profile or level
+or an audio header with a new sample rate, continues under a new track name
+(`<name>/<n>` for the codec importers) while the old track ends; everything else,
+such as the coded size, updates the rendition in place. A
+timeline that rewinds ends the import. The MPEG-TS import ends at a clock step
+onto another timeline with `ts::Restart`, which carries the input from the step
+for the caller to publish as a new broadcast. fMP4 export fixes its track
 set at the init segment, so a new rendition or a changed configuration ends the
 export. The [CLI page](/bin/cli#import) covers these and the MPEG-TS specifics:
 one program per broadcast, private PES, damaged packets, and feed checks.

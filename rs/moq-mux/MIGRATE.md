@@ -4,6 +4,29 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A `Delay` sets where a consumer starts ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`container::Consumer::set_max_delay(Duration)` is `set_delay(Delay)`, and `with_delay(Delay)` is its builder.
+`container::Delay { min, max }` defaults to zero for both: `max` (`None` for no limit) is the max delay that `set_max_delay` took, and the subscription still carries it.
+`min` is the playout delay. An unfloored consumer starts at the group covering the live edge less `min` plus any `with_warmup`, waiting for it when the newest group arrives first; the max delay never moves the start.
+Replace `consumer.set_max_delay(d)` with `consumer.set_delay(Delay { max: Some(d), ..Delay::default() })`, and set `min` to your playout delay. Call `with_warmup` before `with_delay`.
+
+### Compression moves to the track
+
+`catalog.json.z` is gone: `catalog::Producer` publishes one `catalog.json` with `compress: true` (the MSF `catalog` stays uncompressed), and HLS record tracks are compressed too.
+`CatalogFormat::HangZ` and `catalog::hang::Consumer::compressed` are removed; read `CatalogFormat::Hang` with `Consumer::new`, which reads a compressed track like a plain one.
+`json::Config::compression` and `with_compression` are removed: create the track with `moq_net::track::Info::default().with_compress(true)` instead. `Error::UnsupportedCompression` and `Error::Flate` are gone with them.
+The `binary` module and `catalog::Producer::binary_snapshot` and `binary_stream` are deleted, along with the moq-flate dependency: publish opaque bytes on a plain track, or JSON through `json_snapshot` and `json_stream`.
+
+### A decoder identity change publishes a new track ([#7110](https://github.com/moq-dev/moq/pull/7110))
+
+A rendition never changes its identity in place: `codec`, `description`, `container`, `display_aspect_width`/`display_aspect_height`, and `interlaced` for video, and `codec`, `description`, `container`, `sample_rate`, and `channel_count` for audio (see `hang::catalog::VideoConfig::same_identity`).
+`container::Producer::set`, `replace`, and `stage` refuse such a change with `Error::IdentityChanged`; every other field still updates in place.
+The codec importers (H.264, H.265, AV1, VP8, VP9) publish a stream whose identity changes, such as a new SPS profile or level, or a new avcC, under the next free `<name>/<n>` and finish the old track.
+TS AAC, MP2, AC-3, and E-AC-3, and FLV in-band audio start a new track when a frame header changes the format instead of ignoring it.
+Read `name()`, `demand()`, and `track()` from the importer after each write rather than caching them.
+An av1C without a sequence header in its `configOBUs` no longer publishes a rendition: the stream's first sequence header does.
+
 ### `moq_net::Path` has no lifetime
 
 `Source::resolve_reference` takes `Option<&Relative>` and returns `Option<Path>`, `ts::Programs::new` takes `impl Into<moq_net::Path>`, so pass a `Path`, and `follow::Instances::new` takes `impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>`. Replace `PathOwned` with `Path` and drop `to_owned()` and `into_owned()` on paths. See moq-net's migration for the rest.

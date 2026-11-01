@@ -14,7 +14,7 @@ fn origin(hop: u64) -> origin::Producer {
 	origin
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn sequential_viewers_share_the_relays_fetched_groups() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		let version: Version = version.parse().unwrap();
@@ -38,7 +38,13 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 			options.server_publish = Some(relay.consume());
 			options.client_subscribe = Some(viewer.clone());
 			let pair = connect_mock(options).await;
-			let remote = viewer.consume().routed_broadcast("room").await.unwrap();
+			let remote = viewer
+				.consume()
+				.follow("room", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap();
 			viewers.push((viewer, pair, remote));
 		}
 		for round in 0..3 {
@@ -69,7 +75,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 					.count();
 				assert_eq!(fetches, round as usize + 1, "{version}: viewer {i}, group {sequence}");
 			}
-			moq_clock::sleep(Duration::from_secs(1)).await;
+			kio::clock::sleep(Duration::from_secs(1)).await;
 		}
 		let types = upstream.client_transport.bidi_types();
 		assert_eq!(

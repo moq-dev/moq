@@ -26,4 +26,4 @@ Public API: none; config unchanged. Wire: none.
 
 ## Required
 
-- [rind covers MoQ](/quest/m2/rind/covered.md) - includes `rind-instant-acme`, which waits on instant-acme 0.9
+- [rind-instant-acme is on crates.io](/quest/m2/rind/instant-acme.md) - the adapter this uses, waiting on instant-acme 0.9

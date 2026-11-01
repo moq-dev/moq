@@ -338,28 +338,31 @@ impl Client {
 	/// the peer connection.
 	#[cfg(feature = "webrtc")]
 	pub async fn connect_webrtc(&self, peer: &crate::webrtc::Offerer) -> crate::Result<moq_net::Session> {
-		let protocol = peer.protocol();
-		if !self.versions.alpns().contains(&protocol) {
-			return Err(crate::webrtc::Error::Protocol(protocol.to_string()).into());
-		}
+		crate::runtime::scope(async move {
+			let protocol = peer.protocol();
+			if !self.versions.alpns().contains(&protocol) {
+				return Err(crate::webrtc::Error::Protocol(protocol.to_string()).into());
+			}
 
-		let attempt = async {
-			let opened = peer.channel().await?;
-			let config = opened.config;
-			let session = qmux::Session::connect(opened.channel, config)
-				.await
-				.map_err(crate::webrtc::Error::from)?;
-			Ok::<_, Error>(connect_session(&self.moq, session).await?)
-		};
+			let attempt = async {
+				let opened = peer.channel().await?;
+				let config = opened.config;
+				let session = qmux::Session::connect(opened.channel, config)
+					.await
+					.map_err(crate::webrtc::Error::from)?;
+				Ok::<_, Error>(connect_session(&self.moq, session).await?)
+			};
 
-		let session = match self.timeout.is_zero() {
-			true => attempt.await?,
-			false => moq_clock::timeout(self.timeout, attempt)
-				.await
-				.map_err(|_| Error::ConnectTimeout(self.timeout))??,
-		};
-		tracing::info!(version = %session.version(), transport = %crate::Transport::WebRtc, "connected");
-		Ok(session)
+			let session = match self.timeout.is_zero() {
+				true => attempt.await?,
+				false => kio::clock::timeout(self.timeout, attempt)
+					.await
+					.map_err(|_| Error::ConnectTimeout(self.timeout))??,
+			};
+			tracing::info!(version = %session.version(), transport = %crate::Transport::WebRtc, "connected");
+			Ok(session)
+		})
+		.await
 	}
 
 	/// What a dial to `url` presents of `tokens`, given the versions this client offers.
@@ -387,7 +390,7 @@ impl Client {
 	///
 	/// The scheme picks the transport, and `https://` races QUIC against the
 	/// WebSocket fallback so a blocked UDP path still connects. The session's
-	/// protocol driver is spawned on the current tokio runtime; the session
+	/// protocol driver is spawned on the current tokio runtime, else the fallback; the session
 	/// closes once the last returned handle drops.
 	#[cfg(any(
 		feature = "quic",
@@ -424,7 +427,7 @@ impl Client {
 		// arm was still pending.
 		let dialed = match self.timeout.is_zero() {
 			true => attempt.await?,
-			false => match moq_clock::timeout(self.timeout, attempt).await {
+			false => match kio::clock::timeout(self.timeout, attempt).await {
 				Ok(res) => res?,
 				Err(_) => return Err(Error::ConnectTimeout(self.timeout)),
 			},
@@ -496,7 +499,7 @@ impl Client {
 			let endpoint = self.iroh.as_ref().ok_or(Error::IrohDisabled)?;
 			let (session, address) =
 				crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied(), &self.versions).await?;
-			let session = connect_session(&moq, crate::transport::Session::new(session, address)).await?;
+			let session = connect_session(&moq, crate::iroh::Session::new(session, address)).await?;
 			return Ok(Dialed::new(session, crate::Transport::Iroh));
 		}
 
@@ -710,7 +713,6 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1102,7 +1104,7 @@ mod tests {
 				.map_err(Error::from)
 		});
 
-		let dialed = tokio::time::timeout(
+		let dialed = kio::clock::timeout(
 			std::time::Duration::from_secs(10),
 			client.race_moq_connect(&client.moq, ws_addr, quic),
 		)
@@ -1214,10 +1216,7 @@ mod tests {
 			event => panic!("expected announcement, got {event:?}"),
 		};
 		assert_eq!(update.prefix.as_str(), "test");
-		let broadcast = sub_consumer
-			.request_broadcast("test", None)
-			.await
-			.expect("broadcast resolves");
+		let broadcast = sub_consumer.request("test", None).await.expect("broadcast resolves");
 		let mut track = broadcast
 			.track("video")
 			.unwrap()
@@ -1358,7 +1357,7 @@ mod tests {
 		let quic = async { Ok("quic") };
 		let websocket = std::future::pending::<Option<crate::Result<&str>>>();
 
-		let value = tokio::time::timeout(
+		let value = kio::clock::timeout(
 			std::time::Duration::from_secs(1),
 			super::race_transport_connect(&race_url(), quic, websocket),
 		)

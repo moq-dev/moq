@@ -12,20 +12,20 @@ async fn release(unannounce: bool, settle: bool) {
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.publish("a/b", moq_net::origin::Route::default()).unwrap();
 	let track = broadcast.create_track("t", None).unwrap();
-	let consumer = origin.consume().request_broadcast("a/b", None).await.unwrap();
+	let consumer = origin.consume().request("a/b", None).await.unwrap();
 	let sub = consumer.track("t").unwrap().subscribe(None).await.unwrap();
 	crate::wanted(track.demand()).await.unwrap();
 
 	if unannounce {
 		broadcast.unannounce();
 		if settle {
-			tokio::time::sleep(Duration::from_secs(1)).await;
+			kio::clock::sleep(Duration::from_secs(1)).await;
 		}
 	}
 
 	drop(sub);
 	drop(consumer);
-	tokio::time::timeout(Duration::from_secs(600), crate::unwanted(track.demand()))
+	kio::clock::timeout(Duration::from_secs(600), crate::unwanted(track.demand()))
 		.await
 		.expect("demand released")
 		.unwrap();

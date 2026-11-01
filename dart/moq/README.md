@@ -10,10 +10,12 @@ final announced = connection.announced(
   options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
 );
 await for (final event in announced.updates()) {
-  // A restart is a new publisher run at the same path: request it again.
+  // A restart is a new publisher run at the same path: request it again. A takeover
+  // continues what an earlier route served, like a start.
   switch (event) {
     case AnnounceEventStart(:final announce) ||
-        AnnounceEventRestart(:final announce):
+        AnnounceEventRestart(:final announce) ||
+        AnnounceEventTakeover(:final announce):
       // Prefix stays origin-relative; captures reports wildcard matches.
       print(announce.prefix);
       print(announce.captures);
@@ -32,8 +34,8 @@ final server = await Server.listen(
     tlsGenerate: ['localhost'],
   ),
 );
-final broadcast = server.createBroadcast('live');
-broadcast.announce(route: AnnounceRoute()); // unannounced broadcasts are invisible
+final publication = server.createBroadcast('live');
+publication.announce(route: AnnounceRoute()); // unannounced broadcasts are invisible
 await for (final request in server.requests()) {
   final session = await request.accept();
   print(session.state().connects);

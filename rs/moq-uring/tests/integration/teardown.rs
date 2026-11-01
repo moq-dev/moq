@@ -10,7 +10,7 @@
 //!
 //! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
-#![cfg(all(target_os = "linux", feature = "quic"))]
+#![cfg(feature = "quic")]
 
 use crate::support;
 
@@ -18,7 +18,6 @@ use std::net::UdpSocket;
 use std::time::Duration;
 
 use moq_uring::{Config, Error, Worker, quic, udp};
-use web_transport_trait::poll::Session as _;
 
 const ALPN: &str = "moq-uring-teardown";
 const CLOSE_CODE: u32 = 42;
@@ -78,8 +77,8 @@ fn server_config(certs: &support::Certs) -> quic::server::Config {
 	)
 }
 
-fn dial_config(peer: std::net::SocketAddr) -> quic::client::Config {
-	let mut config = quic::client::Config::new(peer, "localhost");
+fn dial_config() -> quic::client::Config {
+	let mut config = quic::client::Config::default();
 	config.alpn = vec![ALPN.to_string()];
 	config.verify = false;
 	config
@@ -113,8 +112,8 @@ fn a_published_close_has_already_left_the_client() {
 		ready.send(()).expect("test alive");
 		worker
 			.block_on(async move {
-				let mut conn = endpoint.accept().await.expect("accept");
-				std::future::poll_fn(|cx| conn.poll_closed(cx)).await
+				let conn = endpoint.accept().await.expect("accept");
+				conn.closed().await
 			})
 			.expect("server worker")
 	});
@@ -131,9 +130,12 @@ fn a_published_close_has_already_left_the_client() {
 
 	client_worker
 		.block_on(async move {
-			let mut conn = endpoint.connect(&dial_config(server_addr)).await.expect("dial");
-			conn.close(CLOSE_CODE, CLOSE_REASON);
-			std::future::poll_fn(|cx| conn.poll_closed(cx)).await;
+			let conn = endpoint
+				.connect(&dial_config(), server_addr, "localhost")
+				.await
+				.expect("dial");
+			conn.close(CLOSE_CODE.into(), CLOSE_REASON.as_bytes());
+			conn.closed().await;
 		})
 		.expect("client worker");
 	drop(client_worker);
@@ -143,4 +145,85 @@ fn a_published_close_has_already_left_the_client() {
 		matches!(&err, quic::Error::App { code, reason } if *code == u64::from(CLOSE_CODE) && reason == CLOSE_REASON),
 		"the server saw {err} instead of the application close"
 	);
+}
+
+/// A waker counting its wakes, standing in for a task parked on a handle.
+#[derive(Default)]
+struct Wakes(std::sync::atomic::AtomicUsize);
+
+impl std::task::Wake for Wakes {
+	fn wake(self: std::sync::Arc<Self>) {
+		self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+	}
+}
+
+/// Poll `future` once, as a task that nothing will ever wake.
+fn once<F: std::future::Future>(future: F) -> std::task::Poll<F::Output> {
+	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+	std::pin::pin!(future).poll(&mut cx)
+}
+
+/// Handles taken out of `block_on` outlive the worker that drove them. They
+/// fail instead of pending, parked ones are woken, and data already received
+/// is still read.
+#[test]
+fn handles_outliving_the_worker_fail() {
+	use std::task::{Context, Poll, Waker};
+
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let socket = || {
+		handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket")
+	};
+	let server = quic::Endpoint::new(
+		socket(),
+		quic::endpoint::Config::default().with_server(server_config(&certs)),
+	)
+	.expect("server endpoint");
+	let client = quic::Endpoint::new(socket(), quic::endpoint::Config::default()).expect("client endpoint");
+
+	let (conn, mut send, mut recv) = worker
+		.block_on(async move {
+			let dialed = client
+				.connect(&dial_config(), server.local_addr(), "localhost")
+				.await
+				.expect("dial");
+			let conn = server.accept().await.expect("accept");
+			let mut send = dialed.open_uni(Default::default()).await.expect("open");
+			send.write_all(&b"hello"[..]).await.expect("write");
+			let mut recv = conn.accept_uni().await.expect("accept stream");
+			// Take part of it, so the rest is received but unread.
+			let mut head = [0; 2];
+			recv.read_exact(&mut head).await.expect("read");
+			(conn, send, recv)
+		})
+		.expect("worker");
+
+	// A task parked on the connection's end while the worker still exists.
+	let wakes = std::sync::Arc::new(Wakes::default());
+	let parked = Waker::from(wakes.clone());
+	let mut closed = std::pin::pin!(conn.closed());
+	assert!(closed.as_mut().poll(&mut Context::from_waker(&parked)).is_pending());
+	drop(worker);
+	assert!(
+		wakes.0.load(std::sync::atomic::Ordering::SeqCst) > 0,
+		"the parked close watch was never woken"
+	);
+	assert!(matches!(
+		closed.poll(&mut Context::from_waker(Waker::noop())),
+		Poll::Ready(quic::Error::Io(_))
+	));
+
+	assert!(matches!(once(conn.accept_uni()), Poll::Ready(Err(_))));
+	assert!(matches!(once(conn.open_bi(Default::default())), Poll::Ready(Err(_))));
+	assert!(conn.send_datagram(&b"late"[..], Default::default()).is_err());
+	assert!(matches!(once(send.write_all(&b"late"[..])), Poll::Ready(Err(_))));
+
+	let mut tail = Vec::new();
+	assert!(matches!(once(recv.read(&mut tail)), Poll::Ready(Ok(Some(3)))));
+	assert_eq!(tail, b"llo");
+	assert!(matches!(once(recv.read(&mut tail)), Poll::Ready(Err(_))));
 }

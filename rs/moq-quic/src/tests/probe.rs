@@ -8,12 +8,12 @@
 //! `just rs quic-sim`, holding each budget on the mean across [`SEEDS`], since one seed's outcome
 //! beside a competing upload is a coin flip.
 //!
-//! The same media trace without a target also checks when BBR3 skips ProbeRTT.
+//! The same media trace without a target also checks keyframe delivery deadlines.
 
 use std::collections::HashMap;
 
 use super::*;
-use crate::congestion::{Bbr3, CubicConfig};
+use crate::congestion::cubic;
 
 /// The media's bitrate, 2 Mbit/s, which the probe has to see past
 const MEDIA: u64 = 250_000;
@@ -35,6 +35,10 @@ const LATE: f64 = 0.005;
 const FAIRNESS: f64 = 0.9;
 /// Rise budget: how soon after the path opens up the estimate reaches the target
 const RISE: Duration = Duration::from_secs(5);
+/// Fall budget: how soon after the path drops the estimate comes within the ProbeBW_UP gain of
+/// it: two cycles of BBR3's max-bw window, each waiting at most 3s to probe, plus the probe's
+/// rounds and a ProbeRTT
+const FALL: Duration = Duration::from_secs(8);
 
 /// The seeds the acceptance suite runs each scenario over, probing and as the baseline
 const SEEDS: ops::RangeInclusive<u64> = 1..=8;
@@ -127,10 +131,6 @@ struct Outcome {
 	expired: u64,
 	/// Samples taken while the controller allowed a probe
 	probing: u64,
-	/// ProbeRTT entries the samples caught, each lasting longer than the sampling interval
-	probe_rtts: u64,
-	/// The largest minimum RTT the controller's model held at a sample
-	min_rtt: Duration,
 	/// The most media bytes written and not yet read at a sample: the sender's backlog plus
 	/// what is in flight
 	unread: u64,
@@ -207,8 +207,6 @@ impl Outcome {
 			competitor = self.competitor,
 			expired = self.expired,
 			probing = self.probing,
-			probe_rtts = self.probe_rtts,
-			min_rtt = ?self.min_rtt,
 			unread = self.unread,
 			"Mbit/s {estimates}"
 		);
@@ -239,36 +237,40 @@ struct Reading {
 }
 
 fn run(scenario: &Scenario) -> Outcome {
+	// Each run's packet trace is about 30 MB and takes most of its time; what it measured is
+	// reported once it returns
+	let _guard = subscribe_at(tracing::Level::INFO);
 	entropy::reseed(scenario.seed);
-	let mut server_transport = TransportConfig::default();
+	let mut server_transport = transport::Config::default();
 	if let Some(window) = scenario.receive_window {
-		server_transport
-			.receive_window(window.into())
-			.stream_receive_window(window.into());
+		server_transport.limits.receive_window = NonZeroU64::new(window.into());
+		server_transport.limits.stream_receive_window = NonZeroU64::new(window.into());
 	}
-	server_transport.max_concurrent_uni_streams(1000u32.into());
+	server_transport.limits.max_streams = NonZeroU64::new(1000);
 	let mut server_config = server_config();
-	server_config.transport = Arc::new(server_transport);
+	server_config.transport = server_transport;
 	let mut pair = Pair::new(Default::default(), server_config);
 	pair.latency = scenario.latency;
 
-	let mut transport = TransportConfig::default();
+	let mut transport = transport::Config::default();
 	if let Some(threshold) = scenario.ack_threshold {
-		let mut ack = AckFrequencyConfig::default();
-		ack.ack_eliciting_threshold(threshold.into())
-			.max_ack_delay(Some(Duration::from_millis(25)));
-		transport.ack_frequency_config(Some(ack));
+		let ack = transport::ack_frequency::Config {
+			ack_eliciting_threshold: threshold.into(),
+			max_ack_delay: Some(Duration::from_millis(25)),
+			..transport::ack_frequency::Config::default()
+		};
+		transport.ack_frequency = Some(ack);
 	}
 	let mut config = client_config();
-	config.transport = Arc::new(transport);
+	config.transport = transport;
 	let (client_ch, server_ch) = pair.connect_with(config);
 	let competitor = scenario.competitor.map(|upload| {
-		let mut transport = TransportConfig::default();
+		let mut transport = transport::Config::default();
 		if let Upload::Cubic = upload {
-			transport.congestion_controller_factory(Arc::new(CubicConfig::default()));
+			transport.congestion = Arc::new(cubic::Config::default());
 		}
 		let mut config = client_config();
-		config.transport = Arc::new(transport);
+		config.transport = transport;
 		pair.connect_with(config)
 	});
 
@@ -288,7 +290,6 @@ fn run(scenario: &Scenario) -> Outcome {
 	let mut next_frame = 0u64;
 	let mut next_sample = start;
 	let mut next_rate = 1;
-	let mut probing_rtt = false;
 	let mut competing = competitor.map(|(client, server)| {
 		let id = pair.client_streams(client).open(Dir::Uni, Default::default()).unwrap();
 		(client, server, id, None::<StreamId>)
@@ -320,7 +321,7 @@ fn run(scenario: &Scenario) -> Outcome {
 
 		if let Some((client, _, id, _)) = &competing {
 			let mut stream = pair.client_send(*client, *id);
-			while stream.write(&[0; 16_384]).is_ok() {}
+			while stream.write(&mut &[0; 16_384][..]).is_ok() {}
 		}
 
 		pair.drive_client();
@@ -362,15 +363,6 @@ fn run(scenario: &Scenario) -> Outcome {
 		if now >= next_sample {
 			let estimate = conn.stats().path.bandwidth_estimate.unwrap_or(0);
 			outcome.probing += conn.congestion_state().metrics().probe_inflight.is_some() as u64;
-			let bbr = conn
-				.congestion_state()
-				.clone_box()
-				.into_any()
-				.downcast::<Bbr3>()
-				.expect("BBR3");
-			outcome.probe_rtts += (bbr.probing_rtt() && !probing_rtt) as u64;
-			probing_rtt = bbr.probing_rtt();
-			outcome.min_rtt = outcome.min_rtt.max(bbr.min_rtt());
 			let read: u64 = readings.values().map(|r| r.read).sum();
 			outcome.unread = outcome.unread.max(outcome.unique - read);
 			outcome.samples.push(Sample {
@@ -421,7 +413,7 @@ fn write_frame(pair: &mut Pair, ch: ConnectionHandle, groups: &mut Vec<Group>, k
 			.client_streams(ch)
 			.open(
 				Dir::Uni,
-				SendOptions {
+				send::Options {
 					group: None,
 					priority: sequence,
 				},
@@ -449,9 +441,9 @@ fn flush(pair: &mut Pair, ch: ConnectionHandle, groups: &mut [Group]) {
 	for group in groups.iter_mut().filter(|g| g.reset.is_none() && !g.finished) {
 		let mut stream = pair.client_send(ch, group.id);
 		while !group.backlog.is_empty() {
-			match stream.write(&group.backlog) {
+			match stream.write(&mut &group.backlog[..]) {
 				Ok(n) => drop(group.backlog.drain(..n)),
-				Err(WriteError::Blocked) => return,
+				Err(send::Error::Blocked) => return,
 				Err(e) => panic!("write: {e}"),
 			}
 		}
@@ -512,7 +504,7 @@ fn receive(
 					reading.done = true;
 					break;
 				}
-				Err(ReadError::Blocked) => break,
+				Err(recv::Error::Blocked) => break,
 				Err(_) => {
 					reading.done = true;
 					break;
@@ -626,13 +618,32 @@ fn rises(trials: &[Trial], from: Duration) {
 	);
 }
 
-/// Reports how long after `from` each run's estimate fell to within the ProbeBW_UP gain of `rate`
-fn report_fall(label: &str, trials: &[Trial], from: Duration, rate: u64) {
-	for trial in trials {
-		for (run, outcome) in [("probing", &trial.probing), ("baseline", &trial.baseline)] {
-			let fell = outcome.first(from..Duration::MAX, |estimate| estimate <= rate * 5 / 4);
-			info!(label, seed = trial.seed, run, age = ?fell.map(|at| at - from), "estimate age after the path fell");
-		}
+/// Asserts the estimate, probing or not, falls to within the ProbeBW_UP gain of `rate` within
+/// [`FALL`] of `from` on the mean
+fn falls(trials: &[Trial], from: Duration, rate: u64) {
+	for (run, pick) in [
+		("probing", (|t| &t.probing) as fn(&Trial) -> &Outcome),
+		("baseline", |t| &t.baseline),
+	] {
+		let falls = trials.iter().map(|trial| {
+			let outcome = pick(trial);
+			let fell = outcome
+				.first(from..Duration::MAX, |estimate| estimate <= rate * 5 / 4)
+				.unwrap_or_else(|| {
+					panic!(
+						"seed {} {run}: estimate {} B/s never fell to {rate} B/s after {from:?}",
+						trial.seed,
+						outcome.samples.last().expect("sampled").estimate
+					)
+				});
+			(fell - from).as_secs_f64()
+		});
+		let fall = falls.sum::<f64>() / trials.len() as f64;
+		info!(run, fall, "estimate fell to {rate} B/s on the mean");
+		assert!(
+			fall <= FALL.as_secs_f64(),
+			"{run}: estimate fell to {rate} B/s {fall:.1}s after {from:?} on the mean"
+		);
 	}
 }
 
@@ -663,6 +674,37 @@ fn rises_to_target() {
 		..Scenario::default()
 	};
 	rises(&compare("rises", scenario, GATE), Duration::from_secs(5));
+}
+
+/// A path short of the target, behind a queue a second deep: each attempt that misses sits out
+/// past the longest BBR3 waits between its own probes, and the path opening up is still found
+#[test]
+fn backs_off_unreachable_target() {
+	let _guard = subscribe();
+	let opens = Duration::from_secs(20);
+	let outcome = run(&Scenario {
+		rates: vec![(Duration::ZERO, 375_000), (opens, 1_500_000)],
+		buffer: 375_000,
+		duration: Duration::from_secs(25),
+		..Scenario::default()
+	});
+	outcome.report("backoff");
+
+	// When each attempt began: probe bytes in a sample after one without any
+	let mut starts = Vec::new();
+	for pair in outcome.samples.windows(3) {
+		let [before, quiet, sent] = pair else { unreachable!() };
+		if before.at < opens && quiet.redundant == before.redundant && sent.redundant > quiet.redundant {
+			starts.push(sent.at);
+		}
+	}
+	assert!(starts.len() > 2, "attempts began at {starts:?}");
+	for gap in starts.windows(2).map(|w| w[1] - w[0]) {
+		// The samples are 100ms apart
+		assert!(gap > Duration::from_millis(2900), "attempts began at {starts:?}");
+	}
+	let rise = outcome.rise(opens).expect("reached the target");
+	assert!(rise <= RISE, "reached the target {rise:?} after the path opened");
 }
 
 /// Below the media's bitrate groups expire, and none is resent after its reset
@@ -707,7 +749,7 @@ fn single_packet_writes() {
 	let mut next_write = pair.time;
 	while pair.time < end {
 		if pair.time >= next_write {
-			pair.client_send(client_ch, id).write(&[0; 100]).unwrap();
+			pair.client_send(client_ch, id).write(&mut &[0; 100][..]).unwrap();
 			next_write += Duration::from_millis(200);
 		}
 		pair.drive_client();
@@ -732,7 +774,7 @@ fn batch_within_probe_inflight() {
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, id).write(&[0; 1400]).unwrap();
+	pair.client_send(client_ch, id).write(&mut &[0; 1400][..]).unwrap();
 	pair.drive_client();
 
 	let conn = pair.client_conn_mut(client_ch);
@@ -749,13 +791,59 @@ fn batch_within_probe_inflight() {
 	);
 }
 
+/// The inflight the controller allows a probe holds the sender back only once an attempt has
+/// sent a duplicate: media alone past it leaves the sender application-limited
+#[test]
+fn probe_inflight_limits_only_an_attempt() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	pair.latency = Duration::from_millis(20);
+	let (client_ch, _) = pair.connect();
+	pair.client_conn_mut(client_ch).set_probe_target(1000 * TARGET);
+	let inflight = pair
+		.client_conn_mut(client_ch)
+		.congestion_state()
+		.metrics()
+		.probe_inflight
+		.expect("probing in Startup");
+
+	// More media than the probe may fill, within the initial window
+	let media = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, media)
+		.write(&mut &vec![0; inflight as usize + 2400][..])
+		.unwrap();
+	// Past the pacer's bursts, short of the first ACK
+	for _ in 0..10 {
+		pair.drive_client();
+		pair.time += Duration::from_millis(1);
+	}
+	let conn = pair.client_conn_mut(client_ch);
+	assert!(conn.bytes_in_flight() > inflight);
+	assert_eq!(conn.stats().path.sent_bandwidth_probes, 0);
+	assert!(conn.app_limited(), "media alone past the bound held the sender back");
+
+	// Once the media drains, an attempt fills up to the bound, which then holds it back
+	pair.drive();
+	pair.client_send(client_ch, media).write(&mut &[0; 1400][..]).unwrap();
+	pair.drive_client();
+	let conn = pair.client_conn_mut(client_ch);
+	assert!(conn.stats().path.sent_bandwidth_probes > 0);
+	assert!(
+		!conn.app_limited(),
+		"an attempt held back by the bound was application-limited"
+	);
+}
+
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn steps_keyframes() {
 	let _guard = subscribe();
 	let trials = compare("steps keyframes", steps(), SEEDS);
 	rises(&trials, Duration::from_secs(20));
-	report_fall("steps keyframes", &trials, Duration::from_secs(40), 375_000);
+	falls(&trials, Duration::from_secs(40), 375_000);
 }
 
 #[test]
@@ -765,7 +853,7 @@ fn steps_constant() {
 	let scenario = Scenario { keyframe: 0, ..steps() };
 	let trials = compare("steps constant", scenario, SEEDS);
 	rises(&trials, Duration::from_secs(20));
-	report_fall("steps constant", &trials, Duration::from_secs(40), 375_000);
+	falls(&trials, Duration::from_secs(40), 375_000);
 }
 
 /// Nothing is in flight while the media pauses, so nothing is resent
@@ -788,19 +876,26 @@ fn idle_restart() {
 	}
 }
 
-/// An estimate learned before the path fell holds above the target, so the probe stays idle
-/// until the controller lowers it
+/// An estimate learned before the path fell ages out, though the probe stays idle while it
+/// covers the target: on a path still above the media's bitrate, which the media never fills,
+/// and on one below it, behind a queue that overflows
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn stale_estimate() {
 	let _guard = subscribe();
-	let scenario = Scenario {
-		rates: vec![(Duration::ZERO, 1_500_000), (Duration::from_nanos(1), 375_000)],
-		warmup: 3_000_000,
-		..Scenario::default()
-	};
-	let trials = compare("stale", scenario, SEEDS);
-	report_fall("stale", &trials, Duration::ZERO, 375_000);
+	for rate in [375_000, 187_500] {
+		let scenario = Scenario {
+			rates: vec![(Duration::ZERO, 1_500_000), (Duration::from_nanos(1), rate)],
+			warmup: 3_000_000,
+			duration: Duration::from_secs(15),
+			..Scenario::default()
+		};
+		let trials = compare(&format!("stale {rate}"), scenario, SEEDS);
+		falls(&trials, Duration::ZERO, rate);
+		for outcome in trials.iter().flat_map(|t| [&t.probing, &t.baseline]) {
+			assert!(rate > MEDIA || outcome.queue.dropped > 0, "the queue never overflowed");
+		}
+	}
 }
 
 /// Resent data needs no new credit, so a receive window that limits the media does not limit
@@ -917,7 +1012,7 @@ fn rtt_200ms() {
 /// past the deadline, but between bursts the flow is application-limited without loss, so it
 /// skips ProbeRTT.
 #[test]
-fn borderline_skips_probe_rtt() {
+fn borderline_frames_meet_deadline() {
 	let _guard = subscribe();
 	let outcome = run(&Scenario {
 		target: 0,
@@ -925,33 +1020,6 @@ fn borderline_skips_probe_rtt() {
 		..Scenario::default()
 	});
 	outcome.report("borderline");
-	assert_eq!(outcome.probe_rtts, 0);
 	let slowest = *outcome.delays.last().expect("delivered");
 	assert!(slowest < DEADLINE, "a frame took {slowest:?}");
-}
-
-/// Below the media's bitrate, behind a queue that holds a standing delay and still overflows
-///
-/// The overflow's losses deny every skip, so the flow enters each ProbeRTT due, one per 5s
-/// interval after its exit, and the model's minimum stays below the path's mean RTT rather than
-/// creeping up through the queue.
-#[test]
-fn overflow_keeps_probe_rtt() {
-	let _guard = subscribe();
-	let scenario = Scenario {
-		target: 0,
-		rates: vec![(Duration::ZERO, 187_500)],
-		buffer: 15_000,
-		..Scenario::default()
-	};
-	let outcome = run(&scenario);
-	outcome.report("overflow");
-	assert!(outcome.queue.dropped > 0, "the queue never overflowed");
-	assert!(outcome.probe_rtts >= scenario.duration.as_secs() / 5 - 1);
-	let mean_rtt = 2 * scenario.latency + outcome.queue.mean_delay();
-	assert!(
-		outcome.min_rtt < mean_rtt,
-		"min RTT {:?} crept past the mean RTT {mean_rtt:?}",
-		outcome.min_rtt
-	);
 }

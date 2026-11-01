@@ -1,53 +1,61 @@
 //! Acoustic echo cancellation: keep the speaker out of the microphone.
 //!
 //! Without this, anyone on a laptop without a headset sends the rest of the call
-//! back to itself. A [`Control`] comes from the [`playback::Engine`] doing the
-//! playing, because cancelling an echo means knowing what was played, and goes
-//! into [`capture::Config`](crate::capture::Config) so the microphone it hears
-//! is already clean:
+//! back to itself. [`Processor`] accepts interleaved playback and microphone PCM
+//! from any audio stack. The `aec` feature also provides `Control`, which wires
+//! a `playback::Engine` directly to `capture::Config`:
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), moq_audio::Error> {
-//! use moq_audio::{aec, capture, playback};
+//! use moq_audio::{aec, Layout};
 //!
-//! let engine = playback::Engine::open(playback::Config::default()).await?;
-//!
-//! let mut capture = capture::Config::default();
-//! let aec = engine.canceller(aec::Config::default())?;
-//! capture.aec = Some(aec.clone());
-//! // A UI thread can toggle the same canceller without owning the microphone.
-//! aec.set_enabled(false);
+//! let mut processor = aec::Processor::new(
+//!     aec::Config::default(),
+//!     aec::Stream::new(48_000, Layout::Stereo),
+//!     aec::Stream::new(48_000, Layout::Mono),
+//! )?;
+//! processor.process_render(&[0.0; 960])?;
+//! let mut microphone = [0.0; 480];
+//! processor.process_capture(&mut microphone)?;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! One control owns one adaptive filter and one playback reference. Its clones
+//! One device control owns one adaptive filter and one playback reference. Its clones
 //! can toggle that filter, but only one live microphone can attach to it. A
 //! second capture fails explicitly until the first releases its attachment.
 //!
-//! The work happens in the microphone callback, on 10 ms frames, which is what
-//! adds up to 10 ms of latency to the capture path. Both the echo reference and
-//! the microphone are processed there, in that order, which is the ordering the
-//! echo model needs and the reason none of this is split across the two audio
-//! callbacks.
+//! With the built-in devices, the work happens in the microphone callback, on
+//! 10 ms frames, which adds up to 10 ms of latency to the capture path. Both the
+//! echo reference and the microphone are processed there, in that order, which
+//! is the ordering the echo model needs.
 
+#[cfg(feature = "aec")]
 use std::fmt;
+#[cfg(feature = "aec")]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(feature = "aec")]
 use std::sync::{Arc, Mutex, Weak};
+#[cfg(feature = "aec")]
 use std::time::Duration;
 
-use sonora::config::{EchoCanceller, GainController2, NoiseSuppression, NoiseSuppressionLevel};
-use sonora::{AudioProcessing, StreamConfig};
-
+#[cfg(feature = "aec")]
 use crate::Error;
+#[cfg(feature = "aec")]
 use crate::playback::{self, REFERENCE_CHANNELS};
+#[cfg(feature = "aec")]
 use crate::ring;
+use sonora::config::{EchoCanceller, GainController2, NoiseSuppression, NoiseSuppressionLevel};
+
+mod processor;
+pub use processor::{Processor, Stats, Stream};
 
 /// Sample rate the echo reference is resampled to on its way out of the mixer.
 ///
 /// Fixed rather than the device's, so switching to a 44.1 kHz output doesn't
 /// invalidate an adaptive filter that spent seconds converging. Devices run at
 /// 48 kHz far more often than not, in which case this resamples nothing.
+#[cfg(feature = "aec")]
 const REFERENCE_RATE: u32 = 48_000;
 
 /// Slack between the output callback and the microphone callback, for the
@@ -60,17 +68,16 @@ const REFERENCE_RATE: u32 = 48_000;
 /// and a device that buffers less than the queue holds would see its echo
 /// arrive before the reference describing it, which is a reference the model
 /// cannot use at all.
+#[cfg(feature = "aec")]
 const REFERENCE_LATENCY: Duration = Duration::from_millis(10);
 
 /// Ceiling on that queue, bounding what a closed microphone can pin.
+#[cfg(feature = "aec")]
 const REFERENCE_CAPACITY: Duration = Duration::from_millis(200);
 
 /// Samples per channel in one 10 ms reference frame.
+#[cfg(feature = "aec")]
 const REFERENCE_FRAME: usize = REFERENCE_RATE as usize / 100;
-
-/// Callback size the scratch buffers are sized for, in frames. Bigger callbacks
-/// still work; they just grow the buffers once instead of never.
-const MAX_CALLBACK: usize = 4096;
 
 /// Echo cancellation settings.
 ///
@@ -90,6 +97,12 @@ pub struct Config {
 	/// On by default, again matching the browser. Turn it off when the input
 	/// level is already managed, e.g. by an audio interface.
 	pub auto_gain: bool,
+
+	/// Also estimate the likelihood that echo remains after processing.
+	///
+	/// Off by default because it adds work and is only needed when
+	/// [`Stats::residual_echo_likelihood`] is observed.
+	pub residual_echo_detection: bool,
 }
 
 impl Default for Config {
@@ -97,6 +110,7 @@ impl Default for Config {
 		Self {
 			noise_suppression: true,
 			auto_gain: true,
+			residual_echo_detection: false,
 		}
 	}
 }
@@ -126,11 +140,13 @@ impl Config {
 /// acquires an exclusive attachment before opening a microphone, so clones
 /// cannot run that state against two inputs. The playback reference goes away
 /// when the last control and attachment drop.
+#[cfg(feature = "aec")]
 #[derive(Clone)]
 pub struct Control {
 	inner: Arc<Inner>,
 }
 
+#[cfg(feature = "aec")]
 impl Control {
 	/// Register echo cancellation against a running engine.
 	///
@@ -176,32 +192,19 @@ impl Control {
 	/// Attach the adaptive state to a microphone with this format.
 	///
 	/// Called when `capture` opens a device, so the allocation lands there
-	/// rather than in the first callback. Capture is demand-gated, so this runs
-	/// again every time a listener comes back: the adaptive filter survives that
-	/// as long as the format hasn't changed, since it is still the same room.
+	/// rather than in the first callback. This runs again every time capture
+	/// reopens after a stop or device failure: the adaptive filter survives that as long as the format hasn't
+	/// changed, since it is still the same room.
 	pub(crate) fn attach(&self, sample_rate: u32, channels: u32) -> Result<Attachment, Error> {
-		// sonora reports a bad format per call, by which point we are on the
-		// audio thread and can only log it. Reject it while there is still a
-		// caller to hand an error to.
-		if !(8_000..=384_000).contains(&sample_rate) {
-			return Err(Error::Unsupported(format!(
-				"echo cancellation needs a microphone between 8 and 384 kHz (got {sample_rate})"
-			)));
-		}
-		if channels == 0 || channels > REFERENCE_CHANNELS as u32 {
-			return Err(Error::Unsupported(format!(
-				"echo cancellation accepts a mono or stereo microphone (got {channels} channels)"
-			)));
-		}
-
-		let capture = StreamConfig::new(sample_rate, channels as u16);
+		let capture = Stream::new(sample_rate, crate::Layout::from_channels(channels)?);
 		// Built outside the lock: this allocates, and the microphone callback
-		// takes the same lock.
-		let processor = AudioProcessing::builder()
-			.capture_config(capture)
-			.render_config(reference_config())
-			.config(self.inner.config.build())
-			.build();
+		// takes the same lock. Processor construction also rejects unsupported
+		// formats while there is still a caller to hand an error to.
+		let processor = Processor::new(
+			self.inner.config.clone(),
+			Stream::new(REFERENCE_RATE, crate::Layout::Stereo),
+			capture,
+		)?;
 
 		if self
 			.inner
@@ -213,10 +216,12 @@ impl Control {
 		}
 
 		let mut state = self.inner.state.lock().unwrap();
-		if state.processor.is_none() || state.capture != capture {
+		let same_capture = state
+			.processor
+			.as_ref()
+			.is_some_and(|processor| processor.capture() == capture);
+		if !same_capture {
 			state.processor = Some(processor);
-			state.capture = capture;
-			state.resize();
 		} else {
 			state.reset();
 		}
@@ -237,10 +242,17 @@ impl Control {
 	/// Number of microphone samples waiting for a complete AEC frame.
 	#[cfg(test)]
 	pub(crate) fn pending_samples(&self) -> usize {
-		self.inner.state.lock().unwrap().pending.len()
+		self.inner
+			.state
+			.lock()
+			.unwrap()
+			.processor
+			.as_ref()
+			.map_or(0, Processor::pending_samples)
 	}
 }
 
+#[cfg(feature = "aec")]
 impl fmt::Debug for Control {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("Control")
@@ -254,10 +266,12 @@ impl fmt::Debug for Control {
 /// Capture owns this for exactly one live stream. Dropping it releases the
 /// adaptive state for a later microphone while cloned [`Control`] handles stay
 /// valid for UI toggles.
+#[cfg(feature = "aec")]
 pub(crate) struct Attachment {
 	inner: Arc<Inner>,
 }
 
+#[cfg(feature = "aec")]
 impl Attachment {
 	/// Replace the microphone samples in `buf` with the same span, minus the
 	/// echo.
@@ -284,6 +298,7 @@ impl Attachment {
 	}
 }
 
+#[cfg(feature = "aec")]
 impl Drop for Attachment {
 	fn drop(&mut self) {
 		let mut state = self.inner.state.lock().unwrap();
@@ -298,6 +313,7 @@ impl Drop for Attachment {
 
 /// The shared half: what the microphone callback locks, and what the playback
 /// driver swaps a new reference into.
+#[cfg(feature = "aec")]
 struct Inner {
 	/// Distinguishes this canceller from a later one built on the same engine,
 	/// so dropping the first doesn't take the second's tap with it.
@@ -316,6 +332,7 @@ struct Inner {
 	shared: Arc<playback::Shared>,
 }
 
+#[cfg(feature = "aec")]
 impl Drop for Inner {
 	fn drop(&mut self) {
 		self.shared.clear_reference(self.id);
@@ -326,10 +343,10 @@ impl Drop for Inner {
 ///
 /// Only the playback driver on a reference switch contends, and the callback
 /// passes that buffer through rather than waiting.
+#[cfg(feature = "aec")]
 struct State {
 	/// `None` until a microphone opens and reports its format.
-	processor: Option<AudioProcessing>,
-	capture: StreamConfig,
+	processor: Option<Processor>,
 	/// Reference from the output mixer, replaced whenever the output stream is
 	/// rebuilt and `None` while none is running.
 	reference: Option<ring::Consumer>,
@@ -337,98 +354,50 @@ struct State {
 	/// Whether the last callback cancelled, so a toggle can drop the buffers
 	/// that no longer line up.
 	running: bool,
-	/// Microphone samples that didn't fill a 10 ms frame, interleaved.
-	pending: Vec<f32>,
-	/// Processed samples waiting to be handed back, interleaved.
-	processed: Vec<f32>,
-
 	/// One interleaved reference frame, read from [`State::reference`].
 	reference_frame: Vec<f32>,
-	/// Deinterleaved scratch, channel-major: the reference, and the output the
-	/// processor insists on writing even though we discard it.
-	render_in: Vec<f32>,
-	render_out: Vec<f32>,
-	/// Deinterleaved scratch for the microphone frame and its result.
-	capture_in: Vec<f32>,
-	capture_out: Vec<f32>,
 }
 
+#[cfg(feature = "aec")]
 impl Default for State {
 	fn default() -> Self {
 		Self {
 			processor: None,
-			// Replaced by `Control::attach`; nothing is processed before then.
-			capture: reference_config(),
 			reference: None,
 			running: false,
-			pending: Vec::new(),
-			processed: Vec::new(),
-			reference_frame: Vec::new(),
-			render_in: Vec::new(),
-			render_out: Vec::new(),
-			capture_in: Vec::new(),
-			capture_out: Vec::new(),
+			reference_frame: vec![0.0; REFERENCE_FRAME * REFERENCE_CHANNELS],
 		}
 	}
 }
 
+#[cfg(feature = "aec")]
 impl State {
-	/// Size every buffer for the microphone format in [`State::capture`].
-	fn resize(&mut self) {
-		let frame = self.capture.num_frames();
-		let channels = self.capture.num_channels() as usize;
-		let headroom = (frame + MAX_CALLBACK) * channels;
-
-		self.pending = Vec::with_capacity(headroom);
-		self.processed = Vec::with_capacity(headroom);
-
-		self.reference_frame = vec![0.0; REFERENCE_FRAME * REFERENCE_CHANNELS];
-		self.render_in = vec![0.0; REFERENCE_FRAME * REFERENCE_CHANNELS];
-		self.render_out = vec![0.0; REFERENCE_FRAME * REFERENCE_CHANNELS];
-		self.capture_in = vec![0.0; frame * channels];
-		self.capture_out = vec![0.0; frame * channels];
-
-		self.reset();
-	}
-
 	/// Forget the samples in flight, because the stream they belong to is gone.
 	fn reset(&mut self) {
-		self.pending.clear();
-		self.processed.clear();
+		if let Some(processor) = &mut self.processor {
+			processor.clear_buffers();
+		}
 		self.running = false;
 	}
 
 	fn process(&mut self, buf: &mut [f32], enabled: bool) {
 		let Self {
 			processor,
-			capture,
 			reference,
 			running,
-			pending,
-			processed,
 			reference_frame,
-			render_in,
-			render_out,
-			capture_in,
-			capture_out,
+			..
 		} = self;
 
 		// No microphone has been opened against this canceller, so there is
 		// nothing to line the reference up against.
 		let Some(processor) = processor else { return };
 
-		let channels = capture.num_channels() as usize;
-		let stride = capture.num_frames() * channels;
-		if !buf.len().is_multiple_of(channels) {
-			return;
-		}
-
 		if !enabled {
 			// Passthrough. Drop the partial frames that would otherwise
 			// resurface out of order when it is switched back on.
 			if *running {
-				pending.clear();
-				processed.clear();
+				processor.clear_buffers();
 				*running = false;
 			}
 			// Keep the tap empty anyway, so a toggle seconds from now starts on
@@ -459,90 +428,30 @@ impl State {
 			reference.start();
 			while reference.available() >= REFERENCE_FRAME {
 				reference.read(reference_frame);
-				deinterleave(reference_frame, render_in, REFERENCE_CHANNELS);
-				let _ = process_render(processor, render_in, render_out);
+				// Preserve the reference timeline even when the mix contains an
+				// invalid sample, just as the microphone path does below.
+				for sample in &mut *reference_frame {
+					if !sample.is_finite() {
+						*sample = 0.0;
+					}
+				}
+				processor
+					.process_render(reference_frame)
+					.expect("the reference contains whole frames of finite PCM");
 			}
 		}
 
-		pending.extend_from_slice(buf);
-
-		while pending.len() >= stride {
-			deinterleave(&pending[..stride], capture_in, channels);
-			match process_capture(processor, capture, capture_in, capture_out) {
-				Ok(()) => interleave(capture_out, channels, processed),
-				// sonora writes a fallback of its own choosing when it rejects a
-				// format, and it will keep rejecting it. Pass the microphone
-				// through rather than publish whatever that fallback was.
-				Err(_) => processed.extend_from_slice(&pending[..stride]),
+		// Replace individual invalid samples rather than drop a callback and
+		// shift the microphone timeline against the echo reference.
+		for sample in &mut *buf {
+			if !sample.is_finite() {
+				*sample = 0.0;
 			}
-
-			pending.drain(..stride);
 		}
 
-		// Hand back exactly what came in. Short only while the first frame is
-		// still accumulating, which is where the 10 ms of latency comes from.
-		let ready = processed.len().min(buf.len());
-		buf[..ready].copy_from_slice(&processed[..ready]);
-		buf[ready..].fill(0.0);
-		processed.drain(..ready);
-	}
-}
-
-/// The format the mixer's reference tap arrives in.
-fn reference_config() -> StreamConfig {
-	StreamConfig::new(REFERENCE_RATE, REFERENCE_CHANNELS as u16)
-}
-
-/// Feed one reference frame to the echo model.
-///
-/// sonora writes a processed copy we have no use for; the model is built from
-/// what goes in.
-fn process_render(processor: &mut AudioProcessing, input: &[f32], output: &mut [f32]) -> Result<(), sonora::Error> {
-	let config = reference_config();
-	let (left, right) = input.split_at(REFERENCE_FRAME);
-	let (left_out, right_out) = output.split_at_mut(REFERENCE_FRAME);
-	processor.process_render_f32_with_config(&[left, right], &config, &config, &mut [left_out, right_out])
-}
-
-/// Run one microphone frame through the processor, channel-major in and out.
-///
-/// Split by channel count rather than collected into a `Vec<&[f32]>` so the
-/// microphone callback doesn't allocate. Mono and stereo are the only counts
-/// [`Control::attach`] accepts, which is also all Opus encodes.
-fn process_capture(
-	processor: &mut AudioProcessing,
-	config: &StreamConfig,
-	input: &[f32],
-	output: &mut [f32],
-) -> Result<(), sonora::Error> {
-	let frame = config.num_frames();
-	match config.num_channels() {
-		1 => processor.process_capture_f32_with_config(&[input], config, config, &mut [output]),
-		_ => {
-			let (left, right) = input.split_at(frame);
-			let (left_out, right_out) = output.split_at_mut(frame);
-			processor.process_capture_f32_with_config(&[left, right], config, config, &mut [left_out, right_out])
-		}
-	}
-}
-
-/// Rewrite interleaved samples as channel-major.
-fn deinterleave(src: &[f32], dest: &mut [f32], channels: usize) {
-	let frames = src.len() / channels;
-	for (channel, samples) in dest.chunks_exact_mut(frames).enumerate() {
-		for (frame, sample) in samples.iter_mut().enumerate() {
-			*sample = src[frame * channels + channel];
-		}
-	}
-}
-
-/// Append channel-major samples to `dest`, interleaved.
-fn interleave(src: &[f32], channels: usize, dest: &mut Vec<f32>) {
-	let frames = src.len() / channels;
-	for frame in 0..frames {
-		for channel in 0..channels {
-			dest.push(src[channel * frames + frame]);
-		}
+		processor
+			.process_capture(buf)
+			.expect("the device supplies channel-aligned finite PCM");
 	}
 }
 
@@ -551,6 +460,7 @@ fn interleave(src: &[f32], channels: usize, dest: &mut Vec<f32>) {
 ///
 /// The mirror image of a sink's registration, rebuilt at the same points. The
 /// producer goes to the mixer and the consumer to the canceller.
+#[cfg(feature = "aec")]
 pub(crate) struct Reference {
 	/// The canceller this belongs to, matched on removal.
 	id: u64,
@@ -565,6 +475,7 @@ pub(crate) struct Reference {
 	pending: Option<ring::Producer>,
 }
 
+#[cfg(feature = "aec")]
 impl Reference {
 	/// Whether this tap belongs to the canceller with this id.
 	pub(crate) fn owned_by(&self, id: u64) -> bool {
@@ -606,6 +517,7 @@ impl Reference {
 
 /// The tap itself: the mixer pushes the device's mix in at `rate` and the
 /// canceller reads it back at [`REFERENCE_RATE`].
+#[cfg(feature = "aec")]
 fn channel(rate: u32) -> (ring::Producer, ring::Consumer) {
 	ring::channel(
 		REFERENCE_CHANNELS,
@@ -625,12 +537,7 @@ fn channel(rate: u32) -> (ring::Producer, ring::Consumer) {
 	)
 }
 
-#[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
+#[cfg(all(test, feature = "aec"))]
 mod tests {
 	use std::collections::VecDeque;
 
@@ -719,6 +626,34 @@ mod tests {
 		assert_ne!(second.last(), Some(&0.0), "the leftover was never made up");
 	}
 
+	#[test]
+	fn device_path_sanitizes_non_finite_samples_without_resetting() {
+		let canceller = opened(48_000, 1);
+		let mut prod = tap(&canceller);
+		let frame = frame(48_000);
+
+		let mut first = vec![0.5f32; frame + 32];
+		canceller.process(&mut first);
+		play(&mut prod, f32::NAN);
+		let mut invalid = vec![f32::NAN; frame - 32];
+		canceller.process(&mut invalid);
+
+		assert!(invalid.iter().all(|sample| sample.is_finite()));
+		assert_eq!(
+			canceller
+				.inner
+				.state
+				.lock()
+				.unwrap()
+				.processor
+				.as_ref()
+				.unwrap()
+				.pending_samples(),
+			0,
+			"the invalid callback reset a partial frame instead of completing it"
+		);
+	}
+
 	/// Callback sizes that don't divide evenly into 10 ms must not lose samples:
 	/// the residual carries into the next call rather than being dropped.
 	#[test]
@@ -783,7 +718,18 @@ mod tests {
 
 		let mut first = vec![0.5f32; frame + 32];
 		canceller.process(&mut first);
-		assert_eq!(canceller.inner.state.lock().unwrap().pending.len(), 32);
+		assert_eq!(
+			canceller
+				.inner
+				.state
+				.lock()
+				.unwrap()
+				.processor
+				.as_ref()
+				.unwrap()
+				.pending_samples(),
+			32
+		);
 
 		let locked = canceller.inner.state.lock().unwrap();
 		let mut bypassed = vec![0.25f32; frame + 32];
@@ -794,7 +740,15 @@ mod tests {
 		let mut resumed = vec![0.75f32; frame - 32];
 		canceller.process(&mut resumed);
 		assert_eq!(
-			canceller.inner.state.lock().unwrap().pending.len(),
+			canceller
+				.inner
+				.state
+				.lock()
+				.unwrap()
+				.processor
+				.as_ref()
+				.unwrap()
+				.pending_samples(),
 			frame - 32,
 			"samples buffered before contention leaked across the passthrough"
 		);
@@ -810,7 +764,18 @@ mod tests {
 
 		let mut buf = vec![0.5f32; frame * 3 / 2];
 		canceller.process(&mut buf);
-		assert!(!canceller.inner.state.lock().unwrap().pending.is_empty());
+		assert_ne!(
+			canceller
+				.inner
+				.state
+				.lock()
+				.unwrap()
+				.processor
+				.as_ref()
+				.unwrap()
+				.pending_samples(),
+			0
+		);
 
 		control.set_enabled(false);
 		let mut buf = vec![0.5f32; frame / 2];
@@ -818,8 +783,13 @@ mod tests {
 		assert!(buf.iter().all(|s| *s == 0.5), "passthrough altered the samples");
 
 		let state = canceller.inner.state.lock().unwrap();
-		assert!(state.pending.is_empty(), "a partial frame survived the toggle");
-		assert!(state.processed.is_empty(), "processed samples survived the toggle");
+		let processor = state.processor.as_ref().unwrap();
+		assert_eq!(processor.pending_samples(), 0, "a partial frame survived the toggle");
+		assert_eq!(
+			processor.processed_samples(),
+			0,
+			"processed samples survived the toggle"
+		);
 	}
 
 	#[test]
@@ -970,24 +940,16 @@ mod tests {
 		/// The echo canceller on its own. Noise suppression would also attenuate
 		/// noise, and gain control would move the level under the measurement.
 		fn new(delay: usize) -> Self {
-			let control = detached();
+			let control = Control::new(
+				Arc::new(playback::Shared::default()),
+				Config {
+					noise_suppression: false,
+					auto_gain: false,
+					..Default::default()
+				},
+			)
+			.unwrap();
 			let canceller = control.attach(48_000, 1).unwrap();
-			let capture = StreamConfig::new(48_000, 1);
-			{
-				let mut state = canceller.inner.state.lock().unwrap();
-				state.processor = Some(
-					AudioProcessing::builder()
-						.capture_config(capture)
-						.render_config(reference_config())
-						.config(sonora::Config {
-							echo_canceller: Some(EchoCanceller::default()),
-							..Default::default()
-						})
-						.build(),
-				);
-				state.capture = capture;
-				state.resize();
-			}
 
 			let prod = tap(&canceller);
 			Self {
@@ -1150,10 +1112,10 @@ mod tests {
 		// Until the tap hears it rather than for a fixed count: writes are dropped
 		// until the device first reads, and a device can take seconds to start
 		// (PulseAudio's idle null sink renders two seconds ahead).
-		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-		while energy <= 1.0 && tokio::time::Instant::now() < deadline {
+		let deadline = kio::clock::Instant::now() + std::time::Duration::from_secs(10);
+		while energy <= 1.0 && kio::clock::Instant::now() < deadline {
 			let _ = sink.write(&tone).expect("write");
-			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+			kio::clock::sleep(std::time::Duration::from_millis(100)).await;
 
 			// Drain the tap the way the microphone callback would, and add up
 			// what the speaker was given.
@@ -1169,17 +1131,5 @@ mod tests {
 		}
 
 		assert!(energy > 1.0, "the mix never reached the echo reference");
-	}
-
-	#[test]
-	fn interleaving_round_trips() {
-		let interleaved = [1.0, -1.0, 2.0, -2.0, 3.0, -3.0];
-		let mut planar = vec![0.0; 6];
-		deinterleave(&interleaved, &mut planar, 2);
-		assert_eq!(planar, vec![1.0, 2.0, 3.0, -1.0, -2.0, -3.0]);
-
-		let mut round = Vec::new();
-		interleave(&planar, 2, &mut round);
-		assert_eq!(round, interleaved);
 	}
 }

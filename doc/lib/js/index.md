@@ -25,14 +25,14 @@ small examples. The [API reference](/lib/js/api/) covers every package; source l
 | [@moq/watch](/lib/js/watch) | Subscribe, decode, and render. `<moq-watch>` plus an optional UI overlay. |
 | [@moq/video](/lib/js/video) | Draw video frames into a canvas through WebGPU or Canvas2D. Used by `@moq/watch` and `@moq/publish`. |
 | [@moq/publish](/lib/js/publish) | Capture, encode, and publish. `<moq-publish>` plus an optional UI overlay. |
-| [@moq/ui](/lib/js/api/ui) | Presentation components shared by the watch and publish overlays: control buttons, a stats graph, and the support banner. |
+| [@moq/ui](/lib/js/api/ui) | Presentation components shared by the watch and publish overlays: control buttons, fullscreen, stats cards and graphs, and the support banner. |
 | [@moq/room](/lib/js/room) | Headless rooms: announce-derived roster, local publish, remote watch, and a chat track. |
 | [@moq/auth](/lib/js/auth) | Validate a relay's request, build its grant, and mint and verify relay JWTs. |
 | [@moq/clock](/lib/js/clock) | Logical monotonic time, wall time, and deterministic timers. |
 | [@moq/signals](/lib/js/signals) | The reactive primitives every package exposes its state through. |
 | [@moq/json](/lib/js/json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
-| [@moq/flate](/lib/js/flate) | Opaque payloads over tracks, optionally compressed with group-scoped DEFLATE: snapshots or append logs. |
 | [@moq/e2ee](https://github.com/moq-dev/moq/tree/main/js/e2ee) | End-to-end encryption of groups, datagrams, and track names, scoped to a publisher epoch. Workspace-only until the browser components use it. |
+| [@moq/sign](https://github.com/moq-dev/moq/tree/main/js/sign) | Per-frame Ed25519 signatures, so relays forward content they cannot forge, retime, or relocate. Workspace-only until the mesh uses it. |
 | [@moq/loc](/lib/js/api/loc), [@moq/msf](/lib/js/api/msf) | The IETF LOC container and MSF catalog. |
 | [@moq/boy](/lib/js/api/boy) | The [MoQ Boy](/bin/demo) player element. |
 

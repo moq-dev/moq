@@ -17,6 +17,7 @@
 //! the handoff free.
 
 use std::net::SocketAddr;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
@@ -135,36 +136,54 @@ impl Workers {
 	pub fn bind(server: moq_tokio::server::Config, config: moq_tokio::worker::Config) -> anyhow::Result<Self> {
 		// Before any TLS loads or socket binds, so a bad `[quic]` has no side effects.
 		server.quic.validate()?;
-		let listen = &server.listen;
+		// Every setting by name, so one added to `listen` fails to compile here until
+		// these workers honor or refuse it.
+		let moq_tokio::listen::Resolved {
+			bind,
+			versions,
+			extensions,
+			implementation,
+			timeout,
+			tls: listen_tls,
+			preferred_v4,
+			preferred_v6,
+			lb: moq_tokio::listen::LoadBalancer { id: lb_id, nonce: _ },
+			reset_secret,
+		} = server.listen.resolve()?;
 		let quic = &server.quic;
-		let tls = match server.tls {
-			Some(tls) => {
-				// A second configured source must not be silently ignored.
-				anyhow::ensure!(
-					listen.tls.cert.is_empty()
-						&& listen.tls.key.is_empty()
-						&& listen.tls.generate.is_empty()
-						&& listen.tls.root.is_empty()
-						&& listen.tls.identity.is_none()
-						&& listen.tls.peers.is_none(),
-					"a shared TLS policy cannot be combined with listen.tls settings"
-				);
-				tls
-			}
-			None => listen.tls.load()?,
-		};
-		let certificates = tls.certificates();
-
-		// Everything below is a setting this listener cannot deliver. Refusing
-		// beats starting and quietly behaving differently from what the
-		// operator configured, which is the whole failure mode this mode is
-		// most likely to produce.
-		if listen.lb.id.is_some() {
+		for (configured, setting) in [
+			(preferred_v4.is_some(), "listen.preferred_v4"),
+			(preferred_v6.is_some(), "listen.preferred_v6"),
+		] {
+			anyhow::ensure!(
+				!configured,
+				"io_uring workers cannot advertise a QUIC preferred address ({setting}); use the tokio runtime"
+			);
+		}
+		if lb_id.is_some() {
 			anyhow::bail!(
 				"io_uring workers issue shard-steered connection ids and cannot also carry a \
 				 QUIC-LB server id (listen.lb.id)"
 			);
 		}
+		let tls = match server.tls {
+			Some(tls) => {
+				// A second configured source must not be silently ignored.
+				anyhow::ensure!(
+					listen_tls.cert.is_empty()
+						&& listen_tls.key.is_empty()
+						&& listen_tls.generate.is_empty()
+						&& listen_tls.root.is_empty()
+						&& listen_tls.identity.is_none()
+						&& listen_tls.peers.is_none(),
+					"a shared TLS policy cannot be combined with listen.tls settings"
+				);
+				tls
+			}
+			None => listen_tls.load()?,
+		};
+		let certificates = tls.certificates();
+
 		// One resolution for the whole group, so a DNS answer that rotates
 		// between queries cannot hand members different addresses.
 		//
@@ -173,10 +192,7 @@ impl Workers {
 		// address here would open a QUIC listener nobody asked for.
 		let requested: SocketAddr = {
 			use std::net::ToSocketAddrs;
-			let bind = listen
-				.bind
-				.as_ref()
-				.context("io_uring workers need an explicit listen.bind")?;
+			let bind = bind.as_ref().context("io_uring workers need an explicit listen.bind")?;
 			let bind = bind.to_string();
 			bind.to_socket_addrs()
 				.with_context(|| format!("failed to resolve {bind}"))?
@@ -201,7 +217,6 @@ impl Workers {
 		// Every configured version's ALPN, as the tokio listener advertises.
 		// `h3` rides along for browsers, which negotiate the moq version as a
 		// WebTransport subprotocol instead.
-		let versions = listen.versions();
 		let alpns: Vec<String> = versions.alpns().into_iter().map(str::to_owned).collect();
 
 		let alpn = alpns
@@ -223,9 +238,7 @@ impl Workers {
 		let mut udp = moq_uring::udp::Config::default();
 		udp.gso = quic.gso.unwrap_or(true);
 
-		let reset_secret = listen
-			.reset
-			.secret
+		let reset_secret = reset_secret
 			.as_deref()
 			.map(moq_tokio::secret::Secret::read)
 			.transpose()
@@ -247,13 +260,13 @@ impl Workers {
 			moq: {
 				let mut moq = moq_net::Server::new()
 					.with_versions(versions)
-					.with_extensions(listen.extensions);
-				if let Some(implementation) = &listen.implementation {
+					.with_extensions(extensions);
+				if let Some(implementation) = &implementation {
 					moq = moq.with_implementation(implementation);
 				}
 				moq
 			},
-			timeout: listen.resolved_timeout(),
+			timeout,
 			reset_secret,
 			threads: Vec::new(),
 			stops: Vec::new(),
@@ -448,7 +461,7 @@ impl std::fmt::Debug for Workers {
 ///
 /// One qlog sink is built for the whole group and cloned into every worker, so
 /// the traces share a single writer thread however many workers there are.
-fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic::Transport> {
+fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic::transport::Config> {
 	// The tokio path reports this through `moq_tokio::Error::QlogUnsupported`,
 	// which nothing builds here: this listener is the io_uring stack.
 	#[cfg(not(feature = "qlog"))]
@@ -466,7 +479,7 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		moq_net::transport::MIN_RECEIVE_WINDOW
 	);
 
-	let mut transport = moq_uring::quic::Transport::default();
+	let mut transport = moq_uring::quic::transport::Config::default();
 	#[cfg(feature = "qlog")]
 	if let Some(dir) = quic.qlog.as_deref() {
 		transport.qlog = Some(
@@ -476,14 +489,14 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		tracing::info!(dir = %dir.display(), "writing qlog");
 	}
 	transport.idle_timeout = quic.idle_timeout;
-	transport.max_streams = quic.max_streams;
 	transport.keep_alive = quic.keep_alive;
 	transport.mtu_discovery = quic.mtu_discovery;
-	// `[quic]` resolves every window, defaults included, so both runtimes run
+	// `[quic]` resolves every limit, defaults included, so both runtimes run
 	// the same ones rather than each backend's own.
-	transport.receive_window = Some(quic.receive_window);
-	transport.stream_receive_window = Some(quic.stream_receive_window);
-	transport.send_window = Some(quic.send_window);
+	transport.limits.max_streams = NonZeroU64::new(quic.max_streams);
+	transport.limits.receive_window = NonZeroU64::new(quic.receive_window);
+	transport.limits.stream_receive_window = NonZeroU64::new(quic.stream_receive_window);
+	transport.limits.send_window = NonZeroU64::new(quic.send_window);
 	transport.congestion = match quic.congestion_control {
 		Some(moq_tokio::quic::CongestionControl::Loss) => moq_uring::quic::Congestion::Loss,
 		// Unset means the backend's own default, and live media wants a steady
@@ -702,8 +715,6 @@ async fn serve_connection(
 	serve: Serve,
 	lifecycle: &Lifecycle,
 ) -> anyhow::Result<Supervision> {
-	use web_transport_trait::poll::Session as _;
-
 	// The endpoint started this deadline at the connection's first packet and
 	// enforced it through the QUIC handshake; it covers SETUP OK too.
 	let mut deadline = Deadline::new(&handle, &conn);
@@ -918,9 +929,49 @@ async fn serve_request(
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
+
+	/// Unsupported listen settings fail before loading TLS or binding a socket.
+	#[test]
+	fn bind_refuses_preferred_addresses() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		type Set = fn(&mut moq_tokio::listen::Config);
+		let cases: [(&str, Set); 2] = [
+			("listen.preferred_v4", |listen| {
+				listen.preferred_v4 = Some("192.0.2.1:443".parse().unwrap());
+			}),
+			("listen.preferred_v6", |listen| {
+				listen.preferred_v6 = Some("[2001:db8::1]:443".parse().unwrap());
+			}),
+		];
+		for (setting, set) in cases {
+			for configured in [false, true] {
+				let mut server = moq_tokio::server::Config::default();
+				if configured {
+					server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+					server.listen.tls.generate = vec!["localhost".into()];
+				}
+				set(&mut server.listen);
+				let err = Workers::bind(server, moq_tokio::worker::Config::new(1))
+					.expect_err("the workers cannot advertise a preferred address");
+				assert!(err.to_string().contains(setting), "{err:#}");
+			}
+		}
+	}
+
+	/// The workers refuse what the tokio listener refuses, before binding a socket.
+	#[test]
+	fn bind_refuses_an_invalid_listen() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let mut server = moq_tokio::server::Config::default();
+		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		server.listen.tls.generate = vec!["localhost".into()];
+		server.listen.lb.nonce = Some(8);
+		let err = Workers::bind(server, moq_tokio::worker::Config::new(1))
+			.expect_err("a QUIC-LB nonce without an id is refused");
+		assert!(err.to_string().contains("--listen-quic-lb-nonce"), "{err:#}");
+	}
 
 	/// A window the operator set has to reach the worker. Refusing it, or
 	/// accepting the config and leaving the field unset, would both hide it.
@@ -935,9 +986,9 @@ mod tests {
 		quic.send_window = Some(32 << 20);
 
 		let transport = transport(&quic.resolve()).expect("windows must be accepted");
-		assert_eq!(transport.receive_window, Some(128 << 20));
-		assert_eq!(transport.stream_receive_window, Some(8 << 20));
-		assert_eq!(transport.send_window, Some(32 << 20));
+		assert_eq!(transport.limits.receive_window, NonZeroU64::new(128 << 20));
+		assert_eq!(transport.limits.stream_receive_window, NonZeroU64::new(8 << 20));
+		assert_eq!(transport.limits.send_window, NonZeroU64::new(32 << 20));
 	}
 
 	/// `quic.mtu_discovery` reaches the workers as it does the tokio backends: off unless set.
@@ -960,8 +1011,8 @@ mod tests {
 
 		quic.receive_window = Some(min);
 		assert_eq!(
-			transport(&quic.resolve()).expect("the minimum").receive_window,
-			Some(min)
+			transport(&quic.resolve()).expect("the minimum").limits.receive_window,
+			NonZeroU64::new(min)
 		);
 	}
 
@@ -989,11 +1040,18 @@ mod tests {
 
 			let transport = transport(&resolved).expect("windows must be accepted");
 			let uring = (
-				transport.receive_window,
-				transport.stream_receive_window,
-				transport.send_window,
+				transport.limits.receive_window,
+				transport.limits.stream_receive_window,
+				transport.limits.send_window,
 			);
-			assert_eq!(uring, (Some(tokio.0), Some(tokio.1), Some(tokio.2)));
+			assert_eq!(
+				uring,
+				(
+					NonZeroU64::new(tokio.0),
+					NonZeroU64::new(tokio.1),
+					NonZeroU64::new(tokio.2)
+				)
+			);
 		}
 	}
 
@@ -1088,7 +1146,7 @@ mod tests {
 		// is well past the drain window.
 		tokio::time::pause();
 		trigger.start();
-		tokio::time::timeout(window + std::time::Duration::from_secs(1), admission.abandoned())
+		kio::clock::timeout(window + std::time::Duration::from_secs(1), admission.abandoned())
 			.await
 			.expect("the admission outlived the drain deadline");
 		running.await.unwrap().unwrap();
@@ -1144,7 +1202,7 @@ mod tests {
 
 		// The handshake deadline is an io_uring timer, which a paused tokio clock cannot
 		// advance, so this waits out the real second with nobody answering.
-		tokio::time::timeout(timeout * 5, admission.abandoned())
+		kio::clock::timeout(timeout * 5, admission.abandoned())
 			.await
 			.expect("the admission outlived the handshake deadline");
 		trigger.start();

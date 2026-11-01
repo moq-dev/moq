@@ -4,7 +4,7 @@
 
 Every CI workflow and job earns its place: its results reach someone (a gate,
 a Discord alert, or a published report) at a cost proportional to that signal.
-Each one that doesn't is fixed, moved, or deleted. Individual tests stay with
+Each one that doesn't is deleted by default, or else made cheaper or moved. Individual tests stay with
 the [test cost audit](/quest/m2/audit-test-cost.md), and runner and cache
 infrastructure with [CI cost and latency](/quest/m0/ci/README.md).
 
@@ -23,6 +23,12 @@ PR, one commit each, rather than as follow-ups. Only a change that needs a
 maintainer decision (dropping a release target, scope) or is independently
 landable and too large to review alongside the rest becomes a follow-up
 through `/quest-plan`.
+
+Default to removing (decided 2026-11-01, maintainer): whatever doesn't earn its
+cost is deleted inline, and the PR body lists each deletion with its measured
+cost and why it wasn't worth it. Only what earns its keep is refactored to be
+cheaper instead. Removing a public API or a user-facing feature stays a
+follow-up.
 
 This audit owns workflows and jobs, including job-level build cost; the test
 cost audit owns individual tests. Each run tables every workflow in
@@ -53,23 +59,14 @@ verdicts:
 - Nightly was red every night of the m1 run. The 2026-10-21 night failed 18
   jobs and the 2026-10-22 night 19 plus a cancelled Loom job. By the end of the
   run, merged fixes covered all but these, which had no owner:
-  - `just rs loom` on main `f42b336f0e`: `a_front_sees_a_reader_return`
-    exceeds Loom's branch limit, and the two
-    `a_*_reader_sees_the_front_end_a_refused_track` models run until the job's
-    60-minute timeout cancels it.
   - Windows only: `reconnect::a_protocol_violation_ends_reconnect`, added by
     [moq-dev/moq#6162](https://github.com/moq-dev/moq/pull/6162), redials
     after a protocol violation over TCP.
-  - WASM and the browser backend baseline: on the 2026-10-22 night, an
-    uncaught `createUnidirectionalStream` rejection on a closed WebTransport
-    session failed the harness although every case passed. Two local runs on
-    main `f42b336f0e` did not reproduce it.
-- `just test wasm` on main `f42b336f0e` fails `ietf: reads a published
-  broadcast` (`remote error: code=0`). Bisected to
+- The WASM browser harness (since removed) on main `f42b336f0e` failed `ietf:
+  reads a published broadcast` (`remote error: code=0`). Bisected to
   [moq-dev/moq#6348](https://github.com/moq-dev/moq/pull/6348): the harness
   finishes its track before the pre-draft-22 joining FETCH arrives, which
-  [join after a quick finish](/quest/m2/ietf-join-after-finish.md) owns. The
-  merge queue does not run the browser harness, so only Nightly sees it.
+  [join after a quick finish](/quest/m2/ietf-join-after-finish.md) owns.
   - Audio quality: two Chromium Opus `wide` rows exceed their `target_ms_p95`
     budget. The [audio jitter target](/quest/m1/audio-jitter-target/README.md)
     owns the budgets.
@@ -204,7 +201,6 @@ coverage evidence, not a regression caught.
 | [ts](/.github/workflows/ts.yml) | TS container compliance and round-trip media integrity | Scheduled failure alert and release gate | 1493 | Linux 34.9 | [2026-10-22](https://github.com/moq-dev/moq/actions/runs/39786183107) |
 | [uring](/.github/workflows/uring.yml) | io_uring compile and runtime/kernel contract | Caller gate and Nightly alert | 1711 | ARM 7.7 | [2026-10-19](https://github.com/moq-dev/moq/actions/runs/39344299025) |
 | [video](/.github/workflows/video.yml) | Browser video renderer behavior | Scheduled failure alert and release gate | 413 | Linux 1.9 | No retained standalone failure |
-| [wasm](/.github/workflows/wasm.yml) | Native/wasm cross-language bindings and browser behavior | Nightly and release-gate alert | at least 2,500 | ARM 23.8 | [2026-10-22](https://github.com/moq-dev/moq/actions/runs/39779729461) |
 | [x11](/.github/workflows/x11.yml) | SHM and GetImage native capture paths | Caller gate and Nightly alert | 680 | ARM 5.2 | [2026-10-17](https://github.com/moq-dev/moq/actions/runs/39002028489) |
 
 ## Required

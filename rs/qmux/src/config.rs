@@ -1,7 +1,6 @@
 use std::time::Duration;
 
-use moq_quic::VarInt;
-use moq_quic::mux;
+use moq_quic::{Limits, VarInt, mux};
 
 use crate::Version;
 
@@ -45,14 +44,10 @@ pub struct Config {
 	/// How the application protocol is determined. See [`Protocol`].
 	pub protocol: Protocol,
 
-	/// Max concurrent bidirectional streams the peer can open.
-	pub max_streams_bidi: u64,
-	/// Max concurrent unidirectional streams the peer can open.
-	pub max_streams_uni: u64,
-	/// Connection-level receive window in bytes.
-	pub receive_window: u64,
-	/// Per-stream receive window in bytes, for every stream.
-	pub stream_receive_window: u64,
+	/// Flow-control windows and stream counts. Each `None` takes its default: 100 streams of
+	/// each direction, a 1 MiB connection window, a 256 KiB stream window, and 8 MiB of
+	/// unacknowledged outgoing data.
+	pub limits: Limits,
 
 	/// Close the session after this long without hearing from the peer, keeping it alive with
 	/// `QX_PING` meanwhile, or `None` to never time out. Zero is refused. The smaller of the two peers' values
@@ -91,10 +86,7 @@ impl Default for Config {
 		Self {
 			version: Version::QMux02,
 			protocol: Protocol::None,
-			max_streams_bidi: 100,
-			max_streams_uni: 100,
-			receive_window: 1 << 20,
-			stream_receive_window: 256 << 10,
+			limits: Limits::default(),
 			idle_timeout: Some(Duration::from_secs(30)),
 			max_record_size: DEFAULT_MAX_RECORD_SIZE,
 			// Fill a full record by default; the record layer bounds the size.
@@ -153,19 +145,12 @@ impl Config {
 			return Err(crate::Error::InvalidConfig("zero rtt_interval"));
 		}
 
-		// QUIC's stream count ceiling (RFC 9000 §4.6), which peers enforce on the parameter
-		const MAX_STREAM_COUNT: u64 = 1 << 60;
-		if self.max_streams_bidi > MAX_STREAM_COUNT || self.max_streams_uni > MAX_STREAM_COUNT {
-			return Err(crate::Error::InvalidConfig("stream count above 2^60"));
-		}
+		self.limits.validate()?;
 
 		let mut config = mux::Config::default();
 		config.version = self.version;
-		config.max_concurrent_bidi_streams = varint(self.max_streams_bidi)?;
-		config.max_concurrent_uni_streams = varint(self.max_streams_uni)?;
-		config.receive_window = varint(self.receive_window)?;
-		config.stream_receive_window = varint(self.stream_receive_window)?;
-		config.max_idle_timeout = self.idle_timeout;
+		config.limits = self.limits;
+		config.idle_timeout = self.idle_timeout;
 		if self.version.uses_records() && self.max_record_size < DEFAULT_MAX_RECORD_SIZE {
 			return Err(crate::Error::InvalidConfig("max_record_size below 16382"));
 		}
@@ -227,20 +212,9 @@ mod tests {
 	}
 
 	#[test]
-	fn stream_counts_above_quics_ceiling_are_refused() {
-		let at = Config {
-			max_streams_bidi: 1 << 60,
-			max_streams_uni: 1 << 60,
-			..Config::default()
-		};
-		assert!(at.to_mux().is_ok());
-		for (bidi, uni) in [((1 << 60) + 1, 0), (0, (1 << 60) + 1)] {
-			let over = Config {
-				max_streams_bidi: bidi,
-				max_streams_uni: uni,
-				..Config::default()
-			};
-			assert!(matches!(over.to_mux(), Err(crate::Error::InvalidConfig(_))));
-		}
+	fn limits_a_peer_would_refuse_are_refused() {
+		let mut over = Config::default();
+		over.limits.max_streams = std::num::NonZeroU64::new((1 << 60) + 1);
+		assert!(matches!(over.to_mux(), Err(crate::Error::Limits(_))));
 	}
 }
