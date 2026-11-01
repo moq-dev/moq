@@ -53,6 +53,15 @@ The failing track closes its subscription and stops decoding. Select another
 source or rendition to clear the failure; the player does not resubscribe to
 broken media automatically.
 
+A video rendition encoded with intra refresh has no keyframes, and its catalog
+`warmup` says how long a decoder takes to clean up after joining. The player
+decodes such a rendition twice: one decoder holds your delay and may show
+refresh stripes after a join or a skip, while a second starts one group earlier
+and tolerates `warmup` more lateness, so its picture is clean. The clean
+picture shows whenever it has caught up. Each decoder costs its own CPU and
+decoder memory, and both share one subscription. A rendition without `warmup`
+uses one decoder.
+
 `el.broadcast.out.status` is `offline`, `loading`, `live`, `error`, or `unsupported`.
 On `unsupported`, update the player to read the broadcast's newer catalog; the overlay shows this notice.
 On `error` the origin refused the broadcast, `el.broadcast.out.error` says why,
