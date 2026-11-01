@@ -870,6 +870,7 @@ pub type ScriptedRecv = poll::Buffered<Script>;
 
 /// The plain reads of a [`ScriptedRecv`].
 pub struct Script {
+	wake: Option<kio::Shared<()>>,
 	script: Arc<Mutex<Vec<u8>>>,
 	/// How the peer's send side ends once the script runs out; `None` parks.
 	close: Arc<Mutex<Option<Close>>>,
@@ -890,6 +891,9 @@ impl poll::Chunks for Script {
 	type Error = SinkError;
 
 	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<bytes::Bytes>, Self::Error>> {
+		if let Some(wake) = &self.wake {
+			let _ = wake.poll(waiter, |_| Poll::Pending);
+		}
 		let chunk: bytes::Bytes = {
 			let mut script = self.script.lock().unwrap();
 			// A real transport hands over what each packet carried, so a body that is all
@@ -926,6 +930,8 @@ impl poll::Chunks for Script {
 #[derive(Clone)]
 pub struct ScriptedSession {
 	pub log: Log,
+	/// Optional notifications for tests that drive per-stream readiness queues.
+	wake: Option<kio::Shared<()>>,
 	stats: SinkStats,
 	/// Shared with every stream, like `script`. See [`Self::close`].
 	close: Arc<Mutex<Option<Close>>>,
@@ -977,6 +983,7 @@ impl ScriptedSession {
 	pub fn new(script: Vec<u8>) -> Self {
 		Self {
 			log: Log::default(),
+			wake: None,
 			stats: SinkStats::default(),
 			close: Default::default(),
 			script: Arc::new(Mutex::new(script)),
@@ -1080,16 +1087,28 @@ impl ScriptedSession {
 		session
 	}
 
-	/// Append to the shared script: the peer sending more on a stream it already opened.
-	/// Nothing is woken, so the test re-polls the reader itself.
-	pub fn push(&self, bytes: &[u8]) {
-		self.script.lock().unwrap().extend_from_slice(bytes);
+	/// Wake readers when the script changes or the peer ends its send side.
+	pub fn with_read_wakes(mut self) -> Self {
+		self.wake = Some(kio::Shared::new(()));
+		self
 	}
 
-	/// Close the peer's send side once the script runs out. Nothing is woken, so the
-	/// test re-polls the reader itself.
+	/// Append to the shared script: the peer sending more on a stream it already opened.
+	/// Wakes readers only with [`Self::with_read_wakes`]; otherwise re-poll them manually.
+	pub fn push(&self, bytes: &[u8]) {
+		self.script.lock().unwrap().extend_from_slice(bytes);
+		if let Some(wake) = &self.wake {
+			*wake.lock() = ();
+		}
+	}
+
+	/// Close the peer's send side once the script runs out.
+	/// Wakes readers only with [`Self::with_read_wakes`]; otherwise re-poll them manually.
 	pub fn close(&self, close: Close) {
 		*self.close.lock().unwrap() = Some(close);
+		if let Some(wake) = &self.wake {
+			*wake.lock() = ();
+		}
 	}
 
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
@@ -1112,6 +1131,7 @@ impl poll::Session for ScriptedSession {
 			return self.log.poll_closed(waiter).map(Err);
 		};
 		Poll::Ready(Ok(poll::Buffered::new(Script {
+			wake: self.wake.clone(),
 			script: Arc::new(Mutex::new(script)),
 			close: self.close.clone(),
 			log: self.log.clone(),
@@ -1125,6 +1145,7 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok((
 			SinkSend::new(self.log.clone()),
 			poll::Buffered::new(Script {
+				wake: self.wake.clone(),
 				script: Arc::new(Mutex::new(script)),
 				close: self.close.clone(),
 				log: self.log.clone(),
@@ -1173,6 +1194,7 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok((
 			send,
 			poll::Buffered::new(Script {
+				wake: self.wake.clone(),
 				script,
 				close: self.close.clone(),
 				log: self.log.clone(),

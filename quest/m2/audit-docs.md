@@ -31,11 +31,10 @@ freshest. Baselines:
 - Rust: 31 crates set `#![warn(missing_docs)]`, including `moq-mux`,
   `moq-ffi`, and `moq-c` since
   [#6088](https://github.com/moq-dev/moq/pull/6088) and
-  [#6091](https://github.com/moq-dev/moq/pull/6091); m1 added `moq-shaper` and
-  `moq-wasm`. Count the rest with
-  `cargo rustdoc -p <crate> --lib --all-features -- -W missing_docs`, and
-  `moq-wasm` with `--target wasm32-unknown-unknown`, since it is empty on
-  native. `moq-auth` is ambiguous with its crates.io copy, so pass its
+  [#6091](https://github.com/moq-dev/moq/pull/6091); m1 added `moq-shaper`.
+  Count the rest with
+  `cargo rustdoc -p <crate> --lib --all-features -- -W missing_docs`.
+  `moq-auth` is ambiguous with its crates.io copy, so pass its
   `path+file://` spec. Every linted crate was clean with all features.
   `moq-audio`, `moq-video`, and `moq-sock` were also clean on Linux but stay
   unlinted for their macOS, Windows, and Android items. `moq-gst` has 3 items

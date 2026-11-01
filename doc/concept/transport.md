@@ -85,5 +85,5 @@ peer connects as the MoQ client and the answering peer accepts.
 ## Custom Rust transports
 
 `moq-net` runs over its own poll traits, so a custom transport implements
-those directly. `moq-tokio`, `moq-wasm`, and `moq-uring` are the built-in
+those directly. `moq-tokio` and `moq-uring` are the built-in
 adapters. See the [moq-net API](/lib/rs/moq-net).

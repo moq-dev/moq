@@ -225,3 +225,29 @@ fn stores_typed_tuples() {
 		Poll::Ready(Ok("1-2-1".to_string()))
 	);
 }
+
+/// A run-once statement naming a type called `Pending`, which is not `Poll::Pending`.
+struct Named {
+	values: kio::Queue<u64>,
+	state: NamedState,
+}
+
+#[kio::machine(self.state: NamedState)]
+impl Named {
+	fn poll_named(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64, kio::Closed>> {
+		let held: kio::Pending<u64> = kio::Pending::new(1);
+		let next = wait!(Next => self.values.poll_pop(waiter))?;
+		Poll::Ready(Ok(*held + next))
+	}
+}
+
+#[test]
+fn names_a_pending_type() {
+	let values = kio::Queue::new();
+	let mut named = Named {
+		values: values.clone(),
+		state: NamedState::Start,
+	};
+	values.try_push(2).unwrap();
+	assert_eq!(named.poll_named(&kio::Waiter::noop()), Poll::Ready(Ok(3)));
+}

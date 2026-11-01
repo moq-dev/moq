@@ -846,7 +846,6 @@ impl driver::ConnectionIdGenerator for ServerIdGenerator {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use url::Url;
@@ -891,7 +890,7 @@ mod tests {
 		let client = Client::new(&config, &crate::quic::Config::default()).expect("client init");
 		let url: Url = format!("http://127.0.0.1:{port}/").parse().unwrap();
 		let versions = moq_net::Versions::default();
-		let result = tokio::time::timeout(Duration::from_secs(5), client.connect(&tls, url.into(), &versions))
+		let result = kio::clock::timeout(Duration::from_secs(5), client.connect(&tls, url.into(), &versions))
 			.await
 			.expect("dial timed out");
 		assert!(
@@ -937,7 +936,7 @@ mod tests {
 			let incoming = server.accept().await.expect("incoming connection");
 			super::accept(incoming, versions.alpns()).await
 		};
-		let result = tokio::time::timeout(Duration::from_secs(5), async { tokio::try_join!(dial, accept) })
+		let result = kio::clock::timeout(Duration::from_secs(5), async { tokio::try_join!(dial, accept) })
 			.await
 			.expect("handshake timed out");
 		let (_client, _server) = result.expect("pinned connection failed");
@@ -977,7 +976,7 @@ mod tests {
 	#[test]
 	fn congestion_factory_maps_each_family() {
 		let init = moq_congestion::Init {
-			now: moq_clock::Instant::now(),
+			now: kio::clock::Instant::now(),
 			mtu: 1200,
 			rtt: std::time::Duration::from_millis(333),
 			max_pacing_rate: None,
@@ -1042,7 +1041,7 @@ mod tests {
 
 		// Bound the whole connect + accept + assert flow so a handshake
 		// regression fails fast instead of stalling CI.
-		tokio::time::timeout(Duration::from_secs(5), async move {
+		kio::clock::timeout(Duration::from_secs(5), async move {
 			let session = client
 				.connect(&tls, url.into(), &moq_net::Versions::default())
 				.await

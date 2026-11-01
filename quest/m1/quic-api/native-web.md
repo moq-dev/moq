@@ -8,8 +8,7 @@ real send groups. Their `web_transport_trait` impls, the sealed
 `Grouped`/`GroupedSend` pair, and the generic adapters over
 `web_transport_trait` are gone: moq-tokio's async-to-poll
 `transport::Session<S>` and moq-uring's `transport::Session<S>`, which serve
-only native QUIC now that moq-wasm and moq-ffi implement moq-net's
-traits themselves. moq-tokio, moq-uring and moq-relay then no longer depend on
+only native QUIC. moq-tokio, moq-uring and moq-relay then no longer depend on
 `web-transport-trait`; qmux keeps it as a dev-dependency for its 0.6 interop
 tests.
 

@@ -54,8 +54,6 @@ type ControlMessage =
 	| "subscribe-update"
 	| "subscribe-namespace"
 	| "subscribe-tracks"
-	| "tracks-update"
-	| "publish-ok"
 	| "publish"
 	| "publish-namespace"
 	| "fetch"
@@ -101,13 +99,6 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 						trackRange ||
 						newGroup ||
 						include))
-			);
-		case "tracks-update":
-			return auth || id === 0x34n || forward || priority || filter || fill || range || trackRange || newGroup;
-		case "publish-ok":
-			return (
-				expires ||
-				(!from20 && (forward || priority || filter || order || objectTimeout || subgroupTimeout || newGroup))
 			);
 		case "subscribe":
 			return (
