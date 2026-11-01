@@ -2,9 +2,8 @@
 // SUBSCRIBE is answered, and the publisher keeps the track wanted until the subscriber closes it.
 
 import { describe, expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Elapsed, Milli, Nano, timeout } from "@moq/clock";
 import { randomHop } from "../hop.ts";
-import { Version as IetfVersion } from "../ietf/version.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -22,15 +21,13 @@ import { ALPN_05, Version } from "./version.ts";
 
 /** Whether `promise` settles within `ms`. */
 async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const pending = new Promise<false>((resolve) => {
-		timer = setTimeout(() => resolve(false), ms);
-	});
-	try {
-		return await Promise.race([promise.then(() => true), pending]);
-	} finally {
-		clearTimeout(timer);
-	}
+	return await timeout(Nano.fromMilli(Milli(ms)), promise).then(
+		() => true,
+		(error: unknown) => {
+			if (error instanceof Elapsed) return false;
+			throw error;
+		},
+	);
 }
 
 describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (version) => {
@@ -384,10 +381,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		origin.close();
 	});
 
-	// Timestamps received over moq-transport may be arrival times, so they never enter moq-lite,
-	// whose receivers check every timestamp: the track is served untimed (milliseconds of send
-	// time before lite-07).
-	test("an unchecked track is served untimed", async () => {
+	// An unchecked track's timestamps go out as received, so TRACK_INFO declares its own scale.
+	test("an unchecked track is served with its timescale", async () => {
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
@@ -398,7 +393,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			for (;;) {
 				const request = await wireOf(broadcast).requested();
 				if (!request) return;
-				request.accept({ timescale: Timescale.MICRO, ietf: IetfVersion.DRAFT_22 });
+				request.accept({ timescale: Timescale.MICRO, unchecked: true });
 			}
 		})();
 
@@ -408,7 +403,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		void publisher.runTrackInfo(new TrackMessage(Path.from("room"), "video"), server);
 
 		const info = await TrackInfo.decode(client.reader, version);
-		expect(info.timescale).toBe(version === Version.DRAFT_07 ? undefined : Timescale.MILLI);
+		expect(info.timescale).toBe(Timescale.MICRO);
 
 		client.writer.close();
 		publisher.close();

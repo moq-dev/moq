@@ -211,6 +211,14 @@ pub enum Error {
 	/// Fetching a remote JWKS failed.
 	#[error("{0}")]
 	Other(String),
+
+	/// A mesh coordinator refused the request.
+	#[error("mesh coordinator refused: {0}")]
+	Mesh(#[from] crate::mesh::ErrorReply),
+
+	/// The mesh coordinator's state file could not be read, parsed, or written.
+	#[error("mesh state: {0}")]
+	MeshState(String),
 }
 
 // Dependency errors are flattened to their message so their crates stay out of this crate's
