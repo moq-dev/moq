@@ -21,10 +21,7 @@ Decided 2026-10-30 (maintainer, follow-up planning): m1, because it breaks the p
 
 Public API: breaking in every binding. Wire: lite-07 SUBSCRIBE and SUBSCRIBE_UPDATE gain `min`.
 
-## Required
-
-- [A max-delay decoder joins an earlier group](/quest/m2/intra-refresh/join-earlier-group.md) - its PR, #7311, adds `Delay`
-
 ## Related
 
+- [A max-delay decoder joins an earlier group](https://github.com/moq-dev/moq/pull/7311) - its PR, #7311, adds `Delay`
 - [Ordered reads wait only on owed groups](https://github.com/moq-dev/moq/pull/7403) - the Rust rule; its PR, #7403, settles the max-delay defaults and touches the same fields

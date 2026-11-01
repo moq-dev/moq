@@ -10,10 +10,7 @@ Decided 2026-10-30 (maintainer, follow-up planning): m2. Use the same start reso
 
 Public API: none. Wire: none.
 
-## Required
-
-- [A max-delay decoder joins an earlier group](/quest/m2/intra-refresh/join-earlier-group.md) - its PR, #7311, adds the start rule
-
 ## Related
 
+- [A max-delay decoder joins an earlier group](https://github.com/moq-dev/moq/pull/7311) - its PR, #7311, adds the start rule
 - [Audio join budget](https://github.com/moq-dev/moq/pull/7342) - the other `Start::Latest` join fix in `rs/moq-audio/src/decode/consumer.rs`
