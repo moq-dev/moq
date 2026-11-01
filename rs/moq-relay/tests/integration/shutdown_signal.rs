@@ -148,12 +148,12 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 	// open for its whole window.
 	let _straggler = straggler(port).await;
 
-	let signalled = std::time::Instant::now();
+	let signalled = kio::clock::now();
 	// SAFETY: `raise` is async-signal-safe, and SIGINT's disposition is tokio's
 	// handler, registered above.
 	assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "failed to raise SIGINT");
 
-	let goaway = tokio::time::timeout(
+	let goaway = kio::clock::timeout(
 		Duration::from_secs(5),
 		moq_net::kio::wait(|waiter| draining.poll(waiter)),
 	)
@@ -168,7 +168,7 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 	// It exits on its own, cleanly, and not before the window has passed: the point
 	// of the drain is the time it buys, not the notice. This is what the old ctrl-C
 	// race broke.
-	tokio::time::timeout(Duration::from_secs(15), run)
+	kio::clock::timeout(Duration::from_secs(15), run)
 		.await
 		.expect("relay never exited after the drain window")
 		.expect("relay task panicked")
@@ -195,7 +195,7 @@ async fn a_signal_right_after_ready_drains_inner() {
 	// for SIGTERM, so in a process of its own (nextest) the relay's handler is all
 	// that keeps this from killing the test.
 	assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0, "failed to raise SIGTERM");
-	let goaway = tokio::time::timeout(
+	let goaway = kio::clock::timeout(
 		Duration::from_secs(5),
 		moq_net::kio::wait(|waiter| draining.poll(waiter)),
 	)
@@ -203,7 +203,7 @@ async fn a_signal_right_after_ready_drains_inner() {
 	.expect("no GOAWAY within 5s of SIGTERM")
 	.expect("session closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
-	tokio::time::timeout(Duration::from_secs(15), run)
+	kio::clock::timeout(Duration::from_secs(15), run)
 		.await
 		.expect("relay never exited after the drain")
 		.expect("relay task panicked")
@@ -256,13 +256,13 @@ async fn an_embedder_owns_the_signals_inner() {
 	// SAFETY: `raise` is async-signal-safe, and SIGINT's disposition is tokio's
 	// handler, registered above.
 	assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "failed to raise SIGINT");
-	tokio::time::timeout(Duration::from_secs(5), interrupt.recv())
+	kio::clock::timeout(Duration::from_secs(5), interrupt.recv())
 		.await
 		.expect("the embedder never saw SIGINT");
 
 	// The signal is the embedder's: the relay keeps serving without a GOAWAY.
 	assert!(
-		tokio::time::timeout(DRAIN_TIMEOUT / 2, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+		kio::clock::timeout(DRAIN_TIMEOUT / 2, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 			.await
 			.is_err(),
 		"the relay drained on a signal the embedder owns"
@@ -270,9 +270,9 @@ async fn an_embedder_owns_the_signals_inner() {
 	assert!(!run.is_finished(), "the relay exited on a signal the embedder owns");
 
 	// Until the embedder decides.
-	let started = std::time::Instant::now();
+	let started = kio::clock::now();
 	trigger.start();
-	let goaway = tokio::time::timeout(
+	let goaway = kio::clock::timeout(
 		Duration::from_secs(5),
 		moq_net::kio::wait(|waiter| draining.poll(waiter)),
 	)
@@ -281,7 +281,7 @@ async fn an_embedder_owns_the_signals_inner() {
 	.expect("session closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 
-	tokio::time::timeout(Duration::from_secs(15), run)
+	kio::clock::timeout(Duration::from_secs(15), run)
 		.await
 		.expect("relay never exited after the drain window")
 		.expect("relay task panicked")
@@ -312,8 +312,8 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	// Keeps the relay up for the arrival below once `established` leaves.
 	let _straggler = straggler(port).await;
 	trigger.start();
-	let deadline = std::time::Instant::now() + DRAIN_TIMEOUT;
-	let goaway = tokio::time::timeout(
+	let deadline = kio::clock::now() + DRAIN_TIMEOUT;
+	let goaway = kio::clock::timeout(
 		Duration::from_secs(5),
 		moq_net::kio::wait(|waiter| draining.poll(waiter)),
 	)
@@ -329,11 +329,11 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 
 	// A straggler dialing mid-drain (a cached DNS resolve) is still admitted,
 	// then told to leave at once.
-	tokio::time::sleep(DRAIN_TIMEOUT / 2).await;
-	let dialed = std::time::Instant::now();
+	kio::clock::sleep(DRAIN_TIMEOUT / 2).await;
+	let dialed = kio::clock::now();
 	let arrival = connect(&client, port).await;
 	let draining = arrival.draining().expect("connected");
-	let goaway = tokio::time::timeout(
+	let goaway = kio::clock::timeout(
 		Duration::from_secs(1),
 		moq_net::kio::wait(|waiter| draining.poll(waiter)),
 	)
@@ -351,7 +351,7 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 		"an arrival mid-drain got {timeout:?}, past the {left:?} left of the window"
 	);
 
-	tokio::time::timeout(Duration::from_secs(15), run)
+	kio::clock::timeout(Duration::from_secs(15), run)
 		.await
 		.expect("relay never exited after the drain window")
 		.expect("relay task panicked")
@@ -376,7 +376,7 @@ async fn a_drain_ends_once_every_session_leaves_inner() {
 	trigger.start();
 
 	// The one-shot client leaves on its GOAWAY; the straggler is still draining.
-	tokio::time::timeout(Duration::from_secs(5), left.closed())
+	kio::clock::timeout(Duration::from_secs(5), left.closed())
 		.await
 		.expect("the one-shot client did not leave on the GOAWAY")
 		.expect("the one-shot client failed");
@@ -384,7 +384,7 @@ async fn a_drain_ends_once_every_session_leaves_inner() {
 	assert!(!run.is_finished(), "the relay exited with a session still draining");
 
 	drop(straggler);
-	tokio::time::timeout(Duration::from_secs(5), run)
+	kio::clock::timeout(Duration::from_secs(5), run)
 		.await
 		.expect("relay kept running after every session left")
 		.expect("relay task panicked")
@@ -403,17 +403,17 @@ async fn a_trigger_before_run_keeps_the_deadline_inner() {
 	// Fired while `run` is still starting. The session deadline is this instant;
 	// `drain` must not open a fresh window when it finally observes the watch.
 	trigger.start();
-	let deadline = std::time::Instant::now() + DRAIN_TIMEOUT;
-	tokio::time::sleep(DRAIN_TIMEOUT / 2).await;
+	let deadline = kio::clock::now() + DRAIN_TIMEOUT;
+	kio::clock::sleep(DRAIN_TIMEOUT / 2).await;
 
 	let run = tokio::spawn(relay.run());
-	tokio::time::timeout(Duration::from_secs(15), run)
+	kio::clock::timeout(Duration::from_secs(15), run)
 		.await
 		.expect("relay never exited")
 		.expect("relay task panicked")
 		.expect("relay exited with an error");
 	// A fresh window opened by `run` would end half a window past the deadline.
-	let over = std::time::Instant::now().saturating_duration_since(deadline);
+	let over = kio::clock::now().saturating_duration_since(deadline);
 	assert!(
 		over < DRAIN_TIMEOUT / 2,
 		"run returned {over:?} past the recorded deadline, as if it opened a fresh window"
@@ -457,7 +457,7 @@ async fn a_reconnecting_client_rides_out_a_restart_inner() {
 	let straggler = straggler(addr.port()).await;
 
 	trigger.start();
-	tokio::time::timeout(Duration::from_secs(15), run)
+	kio::clock::timeout(Duration::from_secs(15), run)
 		.await
 		.expect("relay never exited after the drain window")
 		.expect("relay task panicked")
@@ -487,12 +487,12 @@ async fn a_reconnecting_client_rides_out_a_restart_inner() {
 			res.expect("the publisher's broadcast never resolved");
 		}
 		res = publisher.closed() => panic!("the publisher gave up during the restart: {res:?}"),
-		_ = tokio::time::sleep(Duration::from_secs(15)) => panic!("the publisher never reached the new relay"),
+		_ = kio::clock::sleep(Duration::from_secs(15)) => panic!("the publisher never reached the new relay"),
 	}
 
 	drop((publisher, observer));
 	trigger.start();
-	tokio::time::timeout(Duration::from_secs(15), run)
+	kio::clock::timeout(Duration::from_secs(15), run)
 		.await
 		.expect("relay never exited after its sessions left")
 		.expect("relay task panicked")
@@ -540,7 +540,7 @@ fn relay_config() -> Config {
 
 /// Wait until the internal listener on `port` reports `line` at `/metrics`.
 async fn wait_metric(port: u16, line: &str) {
-	let deadline = std::time::Instant::now() + Duration::from_secs(5);
+	let deadline = kio::clock::now() + Duration::from_secs(5);
 	loop {
 		let metrics = reqwest::get(format!("http://127.0.0.1:{port}/metrics"))
 			.await
@@ -551,7 +551,7 @@ async fn wait_metric(port: u16, line: &str) {
 		if metrics.lines().any(|l| l == line) {
 			break;
 		}
-		assert!(std::time::Instant::now() < deadline, "never saw {line} in:\n{metrics}");
-		tokio::time::sleep(Duration::from_millis(25)).await;
+		assert!(kio::clock::now() < deadline, "never saw {line} in:\n{metrics}");
+		kio::clock::sleep(Duration::from_millis(25)).await;
 	}
 }
