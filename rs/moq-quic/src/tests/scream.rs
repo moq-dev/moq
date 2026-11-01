@@ -2,9 +2,9 @@
 //! estimate sends up through a bottleneck shaped like each cellular moq-shaper preset, and the run
 //! reports the queue it built, what it carried, and how fast it answered each step.
 //!
-//! The sim models each preset's rates, steps, delay, in-order jitter and queue, and the bursty
-//! preset's scheduler grants as periodic slots. `rs/moq-tokio/tests/integration/scream.rs` runs the
-//! presets themselves over real sockets. The merge gate runs one preset and the probe's recovery
+//! The sim models each preset's rates, steps, delay, in-order jitter and timed queue, and the
+//! bursty preset's batches as scheduler grants, as moq-quic's `tests::realtime` replicas do.
+//! `rs/moq-tokio/tests/integration/scream.rs` runs the presets themselves over real sockets. The merge gate runs one preset and the probe's recovery
 //! on one seed; the `#[ignore]`d [`compare`] table runs nightly with `just rs quic-sim`, beside
 //! BBR3 on the same media for reference.
 
@@ -23,7 +23,7 @@ const MIN_RATE: u64 = 12_500;
 const MAX_RATE: u64 = 1_250_000;
 /// The most receive timestamps the sender asks for per ACK, past any ACK threshold here
 const TIMESTAMPS: u32 = 32;
-/// How often the run samples the estimate and the bottleneck's queue
+/// How often the run samples the estimate
 const SAMPLE: Duration = Duration::from_millis(10);
 /// Samples before this are the connection starting up, and count for nothing
 const WARMUP: Duration = Duration::from_secs(3);
@@ -41,7 +41,7 @@ struct Uplink {
 	jitter: Duration,
 	/// The uplink scheduler's grant period
 	grant: Option<Duration>,
-	/// The uplink's buffer, in time at its first rate
+	/// The longest a datagram waits in the uplink queue before it is dropped
 	queue: Duration,
 	/// The uplink's rate in bytes per second from each instant on, the first at the start
 	rates: Vec<(Duration, u64)>,
@@ -122,21 +122,21 @@ struct Scenario {
 	seed: u64,
 }
 
-/// One sample of the sender and the bottleneck
+/// One sample of the sender's estimate
 #[derive(Debug, Clone, Copy)]
 struct Snapshot {
 	/// Since the media's start
 	at: Duration,
 	/// The bandwidth estimate, in bytes per second
 	estimate: u64,
-	/// The queueing delay a packet entering the bottleneck would meet
-	queue: Duration,
 }
 
 /// What a run measured
 #[derive(Debug, Default)]
 struct Outcome {
 	samples: Vec<Snapshot>,
+	/// Each packet's arrival at the bottleneck, since the media's start, and its queueing delay
+	queue: Vec<(Duration, Duration)>,
 	/// Each delivered frame's delay from its write to its last byte read, sorted
 	frames: Vec<Duration>,
 	/// Frames written that never arrived
@@ -175,8 +175,9 @@ fn run(scenario: &Scenario) -> Outcome {
 	let (client_ch, server_ch) = pair.connect_with(config);
 
 	let (_, first) = path.rates[0];
-	let buffer = (first as f64 * path.queue.as_secs_f64()) as u32;
-	pair.to_server.bottleneck = Some(Bottleneck::new(first, buffer, false));
+	let mut bottleneck = Bottleneck::timed(first, path.queue);
+	bottleneck.trace = Some(Vec::new());
+	pair.to_server.bottleneck = Some(bottleneck);
 	pair.to_server.jitter = path.jitter;
 	pair.to_server.grant = path.grant;
 	pair.client_conn_mut(client_ch).set_probe_target(scenario.probe_target);
@@ -272,11 +273,9 @@ fn run(scenario: &Scenario) -> Outcome {
 
 		if now >= next_sample {
 			let estimate = pair.client_conn_mut(client_ch).stats().path.bandwidth_estimate;
-			let queue = pair.to_server.bottleneck.as_ref().unwrap().delay(now);
 			outcome.samples.push(Snapshot {
 				at: now - start,
 				estimate: estimate.unwrap_or(0),
-				queue,
 			});
 			outcome.read.push((now - start, read));
 			next_sample += SAMPLE;
@@ -299,7 +298,14 @@ fn run(scenario: &Scenario) -> Outcome {
 	outcome.missing = written - outcome.frames.len() as u64;
 	outcome.frames.sort();
 	outcome.redundant = pair.client_conn_mut(client_ch).stats().path.sent_bandwidth_probe_bytes;
-	outcome.dropped = pair.to_server.bottleneck.take().unwrap().stats.dropped;
+	let bottleneck = pair.to_server.bottleneck.take().unwrap();
+	outcome.dropped = bottleneck.stats.dropped;
+	let trace = bottleneck.trace.unwrap();
+	outcome.queue = trace
+		.into_iter()
+		.filter(|(at, _)| *at >= start)
+		.map(|(at, delay)| (at - start, delay))
+		.collect();
 	outcome
 }
 
@@ -343,10 +349,10 @@ struct Report {
 impl Outcome {
 	fn report(&self, path: &Uplink) -> Report {
 		let mut queue: Vec<Duration> = self
-			.samples
+			.queue
 			.iter()
-			.filter(|s| s.at >= WARMUP)
-			.map(|s| s.queue)
+			.filter(|(at, _)| *at >= WARMUP)
+			.map(|(_, delay)| *delay)
 			.collect();
 		queue.sort();
 		let mut report = Report {
@@ -365,19 +371,27 @@ impl Outcome {
 			let Some(&(_, before)) = i.checked_sub(1).map(|j| &path.rates[j]) else {
 				continue;
 			};
-			let phase: Vec<&Snapshot> = self.samples.iter().filter(|s| s.at >= from && s.at < until).collect();
+			let estimates: Vec<&Snapshot> = self.samples.iter().filter(|s| s.at >= from && s.at < until).collect();
 			if rate < before {
 				report
 					.fall
-					.push(phase.iter().find(|s| s.estimate <= rate).map(|s| s.at - from));
-				let built = phase.iter().position(|s| s.queue >= DRAINED).unwrap_or(0);
-				report
-					.drain
-					.push(phase[built..].iter().find(|s| s.queue < DRAINED).map(|s| s.at - from));
+					.push(estimates.iter().find(|s| s.estimate <= rate).map(|s| s.at - from));
+				let queue: Vec<&(Duration, Duration)> =
+					self.queue.iter().filter(|(at, _)| *at >= from && *at < until).collect();
+				let built = queue.iter().position(|(_, delay)| *delay >= DRAINED).unwrap_or(0);
+				report.drain.push(
+					queue[built..]
+						.iter()
+						.find(|(_, delay)| *delay < DRAINED)
+						.map(|(at, _)| *at - from),
+				);
 			} else {
-				report
-					.rise
-					.push(phase.iter().find(|s| s.estimate >= rate * 4 / 5).map(|s| s.at - from));
+				report.rise.push(
+					estimates
+						.iter()
+						.find(|s| s.estimate >= rate * 4 / 5)
+						.map(|s| s.at - from),
+				);
 			}
 		}
 		report
@@ -576,10 +590,10 @@ fn compare() {
 			});
 			let queue = |o: &Outcome, range: ops::Range<Duration>| {
 				let mut queue: Vec<Duration> = o
-					.samples
+					.queue
 					.iter()
-					.filter(|s| range.contains(&s.at))
-					.map(|s| s.queue)
+					.filter(|(at, _)| range.contains(at))
+					.map(|(_, delay)| *delay)
 					.collect();
 				queue.sort();
 				ms(percentile(&queue, 0.95))

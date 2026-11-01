@@ -40,13 +40,6 @@ spike assumed no consumer; teleoperation uplinks are one):
   `cellular-bursty` and `cellular-deep` decide it. The report states the
   shaper's timing jitter, measured over `near-zero`, as the noise floor of the
   delay signal.
-- SCReAMv2 landed as `moq_congestion::Scream`
-  ([moq-dev/moq#7547](https://github.com/moq-dev/moq/pull/7547)). moq-quic's
-  `tests::scream` measures it on the sim beside BBR3, and moq-tokio's
-  `scream` integration tests over the real presets. Its estimate is a window
-  over the RTT rather than a delivery rate: under application-limited media,
-  each keyframe's burst raises it past the path's capacity, which matters
-  for re-enabling a rung.
 - Native probing is required (decided 2026-10-25, maintainer). Every
   candidate implements `moq_congestion::Controller::probes` and reports
   `probe_inflight`, so moq-quic's native probing
@@ -63,6 +56,13 @@ spike assumed no consumer; teleoperation uplinks are one):
   upgrading `Delay`, so current users see no behavior change.
 - Docs: inline only. The congestion-control lines in `doc/bin/cli.md` and
   `doc/lib/*` gain the new variant; no new page.
+- SCReAMv2 landed as `moq_congestion::Scream`
+  ([moq-dev/moq#7547](https://github.com/moq-dev/moq/pull/7547)). moq-quic's
+  `tests::scream` measures it on the sim beside BBR3, and moq-tokio's
+  `scream` integration tests over the real presets. Its estimate is a window
+  over the RTT rather than a delivery rate: under application-limited media,
+  each keyframe's burst raises it past the path's capacity, which matters
+  for re-enabling a rung.
 
 Remaining work once the candidates finish (this README's own job):
 
