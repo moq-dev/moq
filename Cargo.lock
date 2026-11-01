@@ -4790,10 +4790,12 @@ dependencies = [
  "futures",
  "kio 0.6.2",
  "kio-macros",
+ "rand 0.10.3",
  "serde",
  "serde_json",
  "serde_with",
  "smallvec",
+ "test-env",
  "tokio",
 ]
 
@@ -5547,6 +5549,8 @@ dependencies = [
  "percent-encoding",
  "pollster",
  "reqwest",
+ "rind-object-store",
+ "rind-rustls",
  "rustls",
  "sd-notify",
  "serde",
@@ -5555,6 +5559,7 @@ dependencies = [
  "terminal_size",
  "test-env",
  "tokio",
+ "tokio-util",
  "tower-http 0.7.1",
  "tracing",
  "url",
@@ -5660,9 +5665,10 @@ dependencies = [
  "percent-encoding",
  "rand 0.10.3",
  "reqwest",
+ "rind",
+ "rind-rustls",
  "serde",
  "serde_json",
- "sha2 0.11.1",
  "thiserror 2.0.21",
  "tokio",
  "tower",
@@ -6198,6 +6204,7 @@ dependencies = [
  "moq-quic",
  "moq-shaper",
  "moq-sock",
+ "moq-tokio",
  "noq-proto",
  "notify",
  "pin-project-lite",
@@ -9029,9 +9036,9 @@ dependencies = [
 
 [[package]]
 name = "rind"
-version = "0.1.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdc0a91565c59d87e36dcb47a73b2c5fd252b3cd7017920aec393875f1c4c0df"
+checksum = "460a4041e5ae933ff4e2c11aad0d05a60ddf21a89eaea0806520b8c50f1d5727"
 dependencies = [
  "cfg-if",
  "curve25519-dalek",
@@ -9045,6 +9052,27 @@ dependencies = [
  "libcrux-p256",
  "libcrux-poly1305",
  "libcrux-traits",
+]
+
+[[package]]
+name = "rind-object-store"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd6733c2630ffae76432b1d1a9c4e43febf2a4959292e43c9a922978f11b550a"
+dependencies = [
+ "object_store",
+ "rind",
+ "rustls-pki-types",
+]
+
+[[package]]
+name = "rind-rustls"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10988f0bacd30c97c41510648647d97d68fdef593f737724dd05d5cdb72d948d"
+dependencies = [
+ "rind",
+ "rustls",
 ]
 
 [[package]]
