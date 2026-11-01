@@ -101,7 +101,7 @@ test("a lite GOAWAY keeps the session open, and a second one closes it", async (
 
 	try {
 		await sendGoaway(pair.server, "");
-		const drain = await wireOf(connection).goaway;
+		const drain = await connection.draining;
 		expect(drain.uri).toBe("");
 
 		await sleep(Nano.fromMilli(Milli(20)));
@@ -835,7 +835,7 @@ for (const [alpn, version] of [
 			await goaway.writer.u53(StreamId.Goaway);
 			await new Goaway("").encode(goaway.writer, version);
 			goaway.writer.close();
-			expect((await wireOf(connection).goaway).uri).toBe("");
+			expect((await connection.draining).uri).toBe("");
 		} finally {
 			connection.abort();
 		}
@@ -902,7 +902,7 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 					await goaway.writer.u53(StreamId.Goaway);
 					await new Goaway("").encode(goaway.writer, version);
 					goaway.writer.close();
-					expect((await wireOf(connection).goaway).uri).toBe("");
+					expect((await connection.draining).uri).toBe("");
 				} else {
 					expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
 				}
