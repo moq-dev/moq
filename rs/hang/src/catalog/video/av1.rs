@@ -84,14 +84,14 @@ static AV1_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|
 		&r"
 		^av01
 		\.(?<profile>[0-2])
-		\.(?<level>\d{2})(?<tier>\w)
-		\.(?<bitdepth>\d{2})
+		\.(?<level>[0-9]{2})(?<tier>[MH])
+		\.(?<bitdepth>[0-9]{2})
 		(?<extra>
-			\.(?<mono>\d)
+			\.(?<mono>[01])
 			\.(?<chroma_subsampling_x>[01])(?<chroma_subsampling_y>[01])(?<chroma_sample_position>[0-3])
-			\.(?<color>\d{2})
-			\.(?<transfer>\d{2})
-			\.(?<matrix>\d{2})
+			\.(?<color>[0-9]{2})
+			\.(?<transfer>[0-9]{2})
+			\.(?<matrix>[0-9]{2})
 			\.(?<full>[01])
 		)?
 		$"

@@ -108,10 +108,10 @@ bytes = { workspace = true }
 futures = { workspace = true }
 hang = { workspace = true }
 humantime = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-archive = { workspace = true }
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 moq-auth = { workspace = true, features = ["serve"] }
-moq-clock = { workspace = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
 # Writes and reads the stats and feedback snapshots.
@@ -140,6 +140,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 terminal_size = "0.4.4"
 tokio = { workspace = true, features = ["full"] }
+# Tells a recording to finish its file on the first shutdown signal.
+tokio-util = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }

@@ -102,14 +102,14 @@ struct Followed {
 
 struct Instances {
 	/// The instance the master playlist and manifest list: the latest to take over.
-	current: Arc<Broadcaster>,
+	current: Broadcaster,
 	/// Every instance a listed URL still names, the current one included. A replaced instance
 	/// stays until its broadcast closes, so a player already on it keeps playing.
-	by_id: HashMap<Arc<str>, Arc<Broadcaster>>,
+	by_id: HashMap<Arc<str>, Broadcaster>,
 }
 
 impl Followed {
-	fn new(current: Arc<Broadcaster>) -> Self {
+	fn new(current: Broadcaster) -> Self {
 		let by_id = HashMap::from([(current.instance().clone(), current.clone())]);
 		Self {
 			instances: Mutex::new(Instances { current, by_id }),
@@ -117,17 +117,17 @@ impl Followed {
 		}
 	}
 
-	fn current(&self) -> Arc<Broadcaster> {
+	fn current(&self) -> Broadcaster {
 		self.instances.lock().unwrap().current.clone()
 	}
 
-	fn instance(&self, id: &str) -> Option<Arc<Broadcaster>> {
+	fn instance(&self, id: &str) -> Option<Broadcaster> {
 		self.instances.lock().unwrap().by_id.get(id).cloned()
 	}
 
 	/// List `broadcaster` from now on. An instance returning after a gap keeps its epoch, and so
 	/// its id, which then names the new broadcaster.
-	fn start(&self, broadcaster: Arc<Broadcaster>) {
+	fn start(&self, broadcaster: Broadcaster) {
 		let mut instances = self.instances.lock().unwrap();
 		instances
 			.by_id
@@ -191,13 +191,13 @@ impl Server {
 	/// The [`Broadcaster`] for the publisher instance serving `name` now, following each
 	/// instance that takes over. Returns `None` if the broadcast is not announced once the
 	/// origin has synced with the relay.
-	pub async fn broadcaster(&self, name: &str) -> Option<Arc<Broadcaster>> {
+	pub async fn broadcaster(&self, name: &str) -> Option<Broadcaster> {
 		Some(self.followed(name).await?.current())
 	}
 
 	/// The [`Broadcaster`] for the publisher instance `id` of `name`, until its broadcast
 	/// closes.
-	pub(crate) async fn instance(&self, name: &str, id: &str) -> Option<Arc<Broadcaster>> {
+	pub(crate) async fn instance(&self, name: &str, id: &str) -> Option<Broadcaster> {
 		self.followed(name).await?.instance(id)
 	}
 
@@ -217,7 +217,7 @@ impl Server {
 		// A request answers once the origin has synced with the relay, so a path with no route
 		// fails now rather than waiting out a publisher that has gone. The source resolves a
 		// rendition's sibling `broadcast` reference through the same origin.
-		let broadcast = match moq_clock::timeout(RESOLVE_TIMEOUT, self.inner.origin.request(name, None)).await {
+		let broadcast = match kio::clock::timeout(RESOLVE_TIMEOUT, self.inner.origin.request(name, None)).await {
 			Ok(Ok(broadcast)) => broadcast,
 			Ok(Err(moq_net::Error::Unroutable)) => return None,
 			Ok(Err(err)) => {
@@ -258,9 +258,15 @@ impl Server {
 
 impl Inner {
 	/// A broadcaster serving the instance `broadcast`.
-	fn serve(&self, broadcast: moq_net::broadcast::Consumer) -> Arc<Broadcaster> {
+	///
+	/// Its driver runs on its own task rather than the path's follower: a replaced instance
+	/// keeps serving after the follower that started it moves on, and the driver ends with the
+	/// broadcaster.
+	fn serve(&self, broadcast: moq_net::broadcast::Consumer) -> Broadcaster {
 		let source = moq_mux::Source::new(self.origin.consume(), broadcast);
-		Broadcaster::start(source, self.config.clone())
+		let (broadcaster, driver) = Broadcaster::start(source, self.config.clone());
+		tokio::spawn(driver.run());
+		broadcaster
 	}
 }
 
@@ -426,17 +432,17 @@ mod tests {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default()).unwrap();
 
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		assert!(server.broadcaster("live").await.is_none());
 		assert_eq!(start.elapsed(), Duration::ZERO);
 	}
 
-	async fn closed_broadcaster() -> Arc<Broadcaster> {
+	async fn closed_broadcaster() -> Broadcaster {
 		let origin = produce_origin();
 		let producer = origin.create_broadcast("gone").expect("publish allowed");
 		producer.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "gone").await, Config::default()).unwrap();
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "gone").await, Config::default());
 		// Close the publisher so the resolved broadcast (and the broadcaster) reports closed.
 		producer.close();
 		settle().await;
@@ -461,7 +467,7 @@ mod tests {
 
 		let fresh = server.broadcaster("live").await.expect("broadcast announced");
 
-		assert!(!Arc::ptr_eq(&stale, &fresh));
+		assert!(!stale.is_clone(&fresh));
 		assert!(server.inner.broadcasts.lock().unwrap().contains_key("live"));
 	}
 
@@ -478,7 +484,7 @@ mod tests {
 		for _ in 0..4 {
 			let server = Server::new(origin.consume(), Config::default()).unwrap();
 			let broadcaster = server.broadcaster("live").await.expect("broadcast announced");
-			let released = Arc::downgrade(&broadcaster);
+			let released = broadcaster.downgrade();
 			drop(broadcaster);
 			drop(server);
 			settle().await;
@@ -489,7 +495,7 @@ mod tests {
 		let held = server.broadcaster("live").await.expect("broadcast announced");
 		drop(server);
 		settle().await;
-		assert_eq!(Arc::strong_count(&held), 1, "only the response holds it now");
+		assert_eq!(held.clones(), 1, "only the response holds it now");
 		assert!(!held.is_closed(), "a held broadcaster keeps serving");
 		producer.close();
 	}
@@ -500,7 +506,7 @@ mod tests {
 			if ready().await {
 				return;
 			}
-			moq_clock::sleep(Duration::from_millis(100)).await;
+			kio::clock::sleep(Duration::from_millis(100)).await;
 		}
 		panic!("never happened");
 	}
@@ -528,7 +534,7 @@ mod tests {
 		.await;
 		let kept = server.instance("live", old_epoch.as_str()).await;
 		assert!(
-			kept.is_some_and(|kept| Arc::ptr_eq(&kept, &first)),
+			kept.is_some_and(|kept| kept.is_clone(&first)),
 			"the old instance serves"
 		);
 
@@ -569,7 +575,7 @@ mod tests {
 			.publish("live", moq_net::origin::Route::default())
 			.expect("publish allowed");
 		settle().await;
-		let open = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
+		let open = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 
 		// The follower has not yet seen the takeover instance close.
 		let followed = Followed::new(open.clone());
@@ -585,7 +591,7 @@ mod tests {
 		assert!(!current.is_closed());
 		let kept = server.instance("live", open.instance()).await;
 		assert!(
-			kept.is_some_and(|kept| Arc::ptr_eq(&kept, &open)),
+			kept.is_some_and(|kept| kept.is_clone(&open)),
 			"the open instance lost its URLs"
 		);
 	}

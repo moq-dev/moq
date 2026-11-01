@@ -1601,16 +1601,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "console_error_panic_hook"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
-dependencies = [
- "cfg-if",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1965,7 +1955,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
 dependencies = [
  "crossbeam-utils",
- "loom",
 ]
 
 [[package]]
@@ -1973,9 +1962,6 @@ name = "crossbeam-utils"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
-dependencies = [
- "loom",
-]
 
 [[package]]
 name = "crunchy"
@@ -3676,7 +3662,6 @@ dependencies = [
  "derive_more 2.1.1",
  "hex",
  "kio 0.6.2",
- "moq-clock",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -4803,9 +4788,13 @@ dependencies = [
  "bench-harness",
  "crossbeam-epoch",
  "futures",
+ "kio 0.6.2",
  "kio-macros",
- "loom",
+ "serde",
+ "serde_json",
+ "serde_with",
  "smallvec",
+ "test-env",
  "tokio",
 ]
 
@@ -5273,16 +5262,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
-name = "minicov"
-version = "0.3.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4869b6a491569605d66d3952bcdf03df789e5b536e5f0cf7758a7f08a55ae24d"
-dependencies = [
- "cc",
- "walkdir",
-]
-
-[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5350,7 +5329,6 @@ dependencies = [
  "bytes",
  "futures",
  "kio 0.6.2",
- "moq-clock",
  "moq-net",
  "object_store",
  "percent-encoding",
@@ -5376,7 +5354,6 @@ dependencies = [
  "dispatch2",
  "hang",
  "kio 0.6.2",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "objc2 0.6.5",
@@ -5407,11 +5384,11 @@ dependencies = [
  "aws-lc-rs",
  "axum",
  "base64 0.23.1",
+ "data-encoding",
  "jsonwebtoken",
  "kio 0.6.2",
  "moq-auth 0.2.1",
  "moq-auth 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "moq-clock",
  "moq-pattern 0.1.2",
  "moq-token",
  "p256",
@@ -5460,7 +5437,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "humantime",
- "moq-clock",
+ "kio 0.6.2",
  "moq-net",
  "moq-tokio",
  "moq-uring",
@@ -5468,6 +5445,7 @@ dependencies = [
  "rand 0.10.3",
  "serde",
  "serde_json",
+ "tempfile",
  "test-env",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
@@ -5483,8 +5461,8 @@ dependencies = [
  "boytacean",
  "bytes",
  "hang",
+ "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -5506,7 +5484,6 @@ dependencies = [
  "hang",
  "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-json",
  "moq-loc",
  "moq-mux",
@@ -5549,11 +5526,11 @@ dependencies = [
  "futures",
  "hang",
  "humantime",
+ "kio 0.6.2",
  "libc",
  "moq-archive",
  "moq-audio",
  "moq-auth 0.2.1",
- "moq-clock",
  "moq-hls",
  "moq-json",
  "moq-mux",
@@ -5581,6 +5558,7 @@ dependencies = [
  "terminal_size",
  "test-env",
  "tokio",
+ "tokio-util",
  "tower-http 0.7.1",
  "tracing",
  "url",
@@ -5590,32 +5568,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-clock"
-version = "0.11.0"
-dependencies = [
- "futures",
- "kio 0.6.2",
- "moq-clock",
- "moq-clock-macros",
- "serde",
- "serde_json",
- "serde_with",
- "tokio",
- "wasm-bindgen",
- "wasm-bindgen-test",
- "web-async",
-]
-
-[[package]]
-name = "moq-clock-macros"
-version = "0.1.0"
-
-[[package]]
 name = "moq-congestion"
 version = "0.1.0"
 dependencies = [
  "cpu-time",
- "moq-clock",
+ "kio 0.6.2",
  "rand 0.10.3",
  "rand_pcg",
  "stats_alloc",
@@ -5625,13 +5582,13 @@ dependencies = [
 name = "moq-e2ee"
 version = "0.0.11"
 dependencies = [
- "aws-lc-rs",
  "base64 0.23.1",
  "bench-harness",
  "bytes",
  "hex",
  "kio 0.6.2",
  "moq-net",
+ "rind",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
@@ -5643,12 +5600,10 @@ name = "moq-ffi"
 version = "0.4.12"
 dependencies = [
  "bytes",
- "getrandom 0.4.3",
  "hang",
  "kio 0.6.2",
  "libc",
  "moq-audio",
- "moq-clock",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -5662,8 +5617,6 @@ dependencies = [
  "tracing",
  "uniffi 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "url",
- "web-async",
- "web-transport-wasm",
 ]
 
 [[package]]
@@ -5678,8 +5631,8 @@ dependencies = [
  "gstreamer",
  "gstreamer-audio",
  "hang",
+ "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -5703,7 +5656,6 @@ dependencies = [
  "kio 0.6.2",
  "m3u8-rs",
  "moq-archive",
- "moq-clock",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -5727,7 +5679,7 @@ dependencies = [
 name = "moq-ice"
 version = "0.1.0"
 dependencies = [
- "moq-clock",
+ "kio 0.6.2",
  "str0m",
  "stun-types",
  "thiserror 2.0.21",
@@ -5788,7 +5740,6 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "memchr",
- "moq-clock",
  "moq-json",
  "moq-loc",
  "moq-msf",
@@ -5825,13 +5776,10 @@ dependencies = [
  "bytes",
  "flate2",
  "futures",
- "getrandom 0.4.3",
  "hashbrown 0.17.1",
  "hashlink",
  "kio 0.6.2",
  "libc",
- "loom",
- "moq-clock",
  "moq-pattern 0.1.2",
  "num_enum",
  "proptest",
@@ -5846,7 +5794,6 @@ dependencies = [
  "tracing-test",
  "url",
  "uuid",
- "wasm-bindgen-test",
 ]
 
 [[package]]
@@ -5862,7 +5809,7 @@ name = "moq-net-tests"
 version = "0.0.0"
 dependencies = [
  "futures",
- "moq-clock",
+ "kio 0.6.2",
  "moq-json",
  "moq-net",
  "serde_json",
@@ -5908,11 +5855,10 @@ dependencies = [
  "bytes",
  "cpu-time",
  "fastbloom",
- "getrandom 0.4.3",
  "hex-literal",
  "indexmap 2.14.2",
+ "kio 0.6.2",
  "lru-slab",
- "moq-clock",
  "moq-congestion",
  "moq-quic",
  "proptest",
@@ -5923,13 +5869,11 @@ dependencies = [
  "ring",
  "rustc-hash 2.1.3",
  "rustls",
- "rustls-pki-types",
  "slab",
  "thiserror 2.0.21",
  "tinyvec",
  "tracing",
  "tracing-subscriber",
- "wasm-bindgen-test",
 ]
 
 [[package]]
@@ -5962,7 +5906,6 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "moq-auth 0.2.1",
- "moq-clock",
  "moq-congestion",
  "moq-net",
  "moq-quic",
@@ -6007,7 +5950,6 @@ version = "0.2.11"
 dependencies = [
  "kio 0.6.2",
  "moq-auth 0.2.1",
- "moq-clock",
  "moq-json",
  "moq-net",
  "moq-tokio",
@@ -6023,7 +5965,7 @@ dependencies = [
  "axum",
  "bytes",
  "hang",
- "moq-clock",
+ "kio 0.6.2",
  "moq-ice",
  "moq-mux",
  "moq-net",
@@ -6049,7 +5991,7 @@ dependencies = [
  "futures",
  "hang",
  "hmac 0.13.0",
- "moq-clock",
+ "kio 0.6.2",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -6071,7 +6013,7 @@ dependencies = [
  "base64 0.23.1",
  "futures",
  "hang",
- "moq-clock",
+ "kio 0.6.2",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -6094,7 +6036,6 @@ dependencies = [
  "image",
  "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-video",
@@ -6115,7 +6056,7 @@ dependencies = [
  "clap",
  "humantime",
  "humantime-serde",
- "moq-clock",
+ "kio 0.6.2",
  "rand 0.10.3",
  "serde",
  "serde_json",
@@ -6148,6 +6089,7 @@ dependencies = [
  "cfg_aliases",
  "core_affinity",
  "libc",
+ "nix",
  "rand 0.10.3",
  "socket2 0.6.5",
  "thiserror 2.0.21",
@@ -6163,6 +6105,7 @@ dependencies = [
  "bytes",
  "futures",
  "hang",
+ "kio 0.6.2",
  "moq-mux",
  "moq-net",
  "srt-protocol",
@@ -6179,7 +6122,7 @@ version = "0.2.12"
 dependencies = [
  "bench-harness",
  "futures",
- "moq-clock",
+ "kio 0.6.2",
  "moq-json",
  "moq-net",
  "serde",
@@ -6188,7 +6131,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "web-async",
 ]
 
 [[package]]
@@ -6200,8 +6142,8 @@ dependencies = [
  "eframe",
  "egui",
  "egui_dock",
+ "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-relay",
@@ -6254,7 +6196,6 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "mdns-sd",
- "moq-clock",
  "moq-congestion",
  "moq-ice",
  "moq-net",
@@ -6309,7 +6250,6 @@ dependencies = [
  "bytes",
  "hang",
  "kio 0.6.2",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -6332,7 +6272,6 @@ dependencies = [
  "io-uring",
  "kio 0.6.2",
  "libc",
- "moq-clock",
  "moq-congestion",
  "moq-net",
  "moq-quic",
@@ -6401,7 +6340,6 @@ dependencies = [
  "libloading 0.9.0",
  "libvpx-native-sys",
  "linux-raw-sys 0.12.1",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-nvenc",
@@ -6432,25 +6370,6 @@ dependencies = [
  "x11rb 0.14.0",
  "yuv",
  "zune-jpeg",
-]
-
-[[package]]
-name = "moq-wasm"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "console_error_panic_hook",
- "futures",
- "getrandom 0.4.3",
- "js-sys",
- "moq-net",
- "thiserror 2.0.21",
- "tracing-wasm",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-async",
- "web-transport-wasm",
 ]
 
 [[package]]
@@ -8599,7 +8518,6 @@ dependencies = [
  "futures",
  "kio 0.6.2",
  "libc",
- "moq-clock",
  "moq-net",
  "moq-quic",
  "qmux 0.6.5",
@@ -9115,9 +9033,9 @@ dependencies = [
 
 [[package]]
 name = "rind"
-version = "0.1.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdc0a91565c59d87e36dcb47a73b2c5fd252b3cd7017920aec393875f1c4c0df"
+checksum = "460a4041e5ae933ff4e2c11aad0d05a60ddf21a89eaea0806520b8c50f1d5727"
 dependencies = [
  "cfg-if",
  "curve25519-dalek",
@@ -9135,9 +9053,9 @@ dependencies = [
 
 [[package]]
 name = "rind-object-store"
-version = "0.1.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14c5776806d6b5a4eb03fa07b0c2e9ab2578ce12afc29a1163037b2b951a61ed"
+checksum = "dd6733c2630ffae76432b1d1a9c4e43febf2a4959292e43c9a922978f11b550a"
 dependencies = [
  "object_store",
  "rind",
@@ -9146,9 +9064,9 @@ dependencies = [
 
 [[package]]
 name = "rind-rustls"
-version = "0.1.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "146b5ba2940920d5c68f6ecc1cc9db58555ec89a8872f4dd8486c5ff64175e8b"
+checksum = "10988f0bacd30c97c41510648647d97d68fdef593f737724dd05d5cdb72d948d"
 dependencies = [
  "rind",
  "rustls",
@@ -11457,17 +11375,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-wasm"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4575c663a174420fa2d78f4108ff68f65bf2fbb7dd89f33749b6e826b3626e07"
-dependencies = [
- "tracing",
- "tracing-subscriber",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "transform-stream"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12138,45 +12045,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm-bindgen-test"
-version = "0.3.79"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae7499dfd45780a0a91d7ee6bb9ac51970a4479a41a89da443fdda5a39547d42"
-dependencies = [
- "async-trait",
- "cast",
- "js-sys",
- "libm",
- "minicov",
- "nu-ansi-term",
- "num-traits",
- "oorandom",
- "serde",
- "serde_json",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-bindgen-test-macro",
- "wasm-bindgen-test-shared",
-]
-
-[[package]]
-name = "wasm-bindgen-test-macro"
-version = "0.3.79"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b84b5ac638bfb168196a1a461fcc8f46a294a18b1b6be52133b4e0db122cc9f"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.6",
-]
-
-[[package]]
-name = "wasm-bindgen-test-shared"
-version = "0.2.129"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f692aa943ccd88363733b77063f32cfed5bc6cbea8e6e8b251b302f881606fe"
-
-[[package]]
 name = "wasm-streams"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12187,19 +12055,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
-]
-
-[[package]]
-name = "wasmtimer"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c598d6b99ea013e35844697fc4670d08339d5cda15588f193c6beedd12f644b"
-dependencies = [
- "futures",
- "js-sys",
- "parking_lot",
- "pin-utils",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -12338,18 +12193,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "web-async"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ba1426dcf56093a94d9415ba4c016e45c1323679501e7309f1919ab32f08206"
-dependencies = [
- "tokio",
- "tracing",
- "wasm-bindgen-futures",
- "wasmtimer",
-]
-
-[[package]]
 name = "web-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12409,22 +12252,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60221f03172c9e8e8d19d1c038c87ef2804d05f8a71264817f60a28bbd03edab"
 dependencies = [
  "bytes",
-]
-
-[[package]]
-name = "web-transport-wasm"
-version = "0.8.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05d0b90c2042f28eeb99ceb76625a141c4b6914e828168aeeeb38d22c8114f3b"
-dependencies = [
- "bytes",
- "js-sys",
- "thiserror 2.0.21",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "web-transport-trait",
 ]
 
 [[package]]

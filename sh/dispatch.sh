@@ -63,7 +63,7 @@ declare -A scope=(
     # fails a check that reads a cross-tree input this pattern misses.
     # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
     # Root Nix inputs own the browser version every npm Playwright pin matches.
-    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)'
+    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)'
     # Workers with lockfiles outside the Bun workspace.
     [workers]='^(infra/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
@@ -71,7 +71,7 @@ declare -A scope=(
     # moq-cli builds the Rust interop clients as examples from outside its
     # crate; sh/rs/select.test.py fails when a target's directory is missing.
     # moq-relay's tests read its NixOS module.
-    [rs]='^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
+    [rs]='^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
     # The CARLA demo's simulator worker and launchers. Its player is a JS
     # package and its GPU bridge a Rust crate, so those modules cover them.
@@ -91,10 +91,11 @@ declare -A scope=(
     [swift]='^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
     [go]='^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)'
     [dart]='^(\.cargo/config\.toml$|dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)'
-    # The C package links moq-c's native-libs lists, and the C++ package's FFI pin.
-    [c]='^(\.cargo/config\.toml$|c/|sh/c/|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)'
+    # The C package links moq-c's native-libs lists, and the C++ package's FFI
+    # pin. Both packages format with sh/clang-format.sh and OBS's style file.
+    [c]='^(\.cargo/config\.toml$|c/|sh/c/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)'
     # The package links moq-c's native-libs lists, and compiles its doc samples.
-    [cpp]='^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
+    [cpp]='^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
     # The plugin and its tests call through the bindings generated from cpp/moq
     # and moq-ffi and link through moq-c's native-libs lists, and flake.nix owns
     # the libobs headers it compiles against.
@@ -108,6 +109,8 @@ declare -A scope=(
     # ts.yml's crate filters against the closure test/ts/run.sh builds, which
     # moves only with a manifest, the lockfile, or the harness's packages.
     [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)'
+    # Ruff lints and formats every Python file under the nearest pyproject.toml.
+    [python]='(\.pyi?|(^|/)pyproject\.toml)$'
     [markdown]=''
     [shell]=''
     [large_files]=''
@@ -116,9 +119,6 @@ declare -A scope=(
     [justfile]=''
     [gh]=''
 )
-# rs's crates again, each compiled alone at its feature extremes: its own
-# module because one clippy pass per package outgrows a hosted job beside rs.
-scope[rs_shapes]=${scope[rs]}
 
 # Report each native suite from the same impact map, before any toolchain is
 # installed. Rust dependencies can break external consumers too, so include
@@ -148,30 +148,31 @@ fi
 # The tools each module needs. A module missing one is skipped locally, so an
 # incomplete toolchain checks less; under CI_STRICT (CI) it is an error, up
 # front, because there a skip is indistinguishable from a pass. swift needs
-# none: it skips off macOS by design, and platform.yml is its real gate.
+# none: it skips off macOS by design, and platform.yml is its real gate. Its
+# formatter is absent where nixpkgs cannot build it (see flake.nix).
 declare -A tools=(
     [js]='bun python3'
     [workers]='bun'
     [moq_sh]='dash'
     [rs]='cargo jq'
-    [rs_shapes]='cargo cargo-hack jq'
     [bench]='cargo'
     [carla]='uv'
     [drafts]='bun kramdown-rfc xml2rfc'
     [quest]='quest'
     [drill]=''
     [py]='uv'
-    [kt]='cargo gradle java'
+    [kt]='cargo gradle java ktfmt'
     [swift]=''
     [go]='cargo go uniffi-bindgen-go'
     [dart]='cargo dart uniffi_bindgen_dart'
-    [c]='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp'
-    [cpp]='cargo cmake c++ uniffi-bindgen-cpp'
+    [c]='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp clang-format'
+    [cpp]='cargo cmake c++ uniffi-bindgen-cpp clang-format'
     [obs_compile]='cargo cmake pkg-config uniffi-bindgen-cpp'
     [obs]='clang-format cmake gersemi jq'
     [flake]='nix'
     [ts_paths]='cargo python3'
     [markdown]='bun'
+    [python]='ruff'
     [shell]='shellcheck shfmt'
     [large_files]=''
     [toml]='taplo'
@@ -185,25 +186,22 @@ verb=$action
 [[ "$verb" != ci ]] || verb=check
 
 # The modules whose run compiles Rust through Cargo, so CI restores the Rust
-# build cache only when one is selected. JS checks build @moq/wasm for its
-# consumers, and the bindings build moq-ffi.
+# build cache only when one is selected. The bindings build moq-ffi.
 declare -A compiles=(
-    [check]='rs rs_shapes bench js py kt go dart c cpp obs_compile'
+    [check]='rs bench py kt go dart c cpp obs_compile'
     [fix]='rs'
 )
 
 # Lanes start in this order, so the slowest come first. dart runs alone (see
 # below), so it waits for the rest.
 case "$action" in
-    check | ci) modules=(py rs rs_shapes c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
-    fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
+    check | ci) modules=(py rs c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths python shell large_files toml nix justfile dart) ;;
+    fix) modules=(js rs dart go kt swift c cpp obs python markdown shell toml nix justfile) ;;
 esac
 
 # Modules that share mutable state run in one lane, in module order; every
 # other module is a lane of its own, and lanes run concurrently.
 declare -A lane=(
-    # Both build the workspace in one target directory.
-    [rs_shapes]=rs
     # `bun install` relinks the root workspace's packages even when nothing
     # changed, so a concurrent install or import of them fails.
     [js]=bun
@@ -291,8 +289,6 @@ fi
 # rs selects crates from the same list, or the whole workspace.
 rs_list=$changed
 [[ -z "$all" ]] || rs_list=--all
-rs_feature_scope=
-[[ "$action" != check ]] || rs_feature_scope=changed
 
 # large_files diffs against the same base, or checks every file.
 large_base=$base
@@ -306,9 +302,13 @@ if [[ -z "$all" ]]; then
     js_list=$js_changed
 fi
 
-# Tracked and new files, skipping whatever .gitignore does (node_modules, target).
+# Tracked and new files, skipping whatever .gitignore does (node_modules, target)
+# and tracked files deleted from the working tree, which no formatter can read.
 files() {
-    git ls-files -z --cached --others --exclude-standard -- "$@"
+    git ls-files -z --cached --others --exclude-standard -- "$@" |
+        while IFS= read -r -d '' file; do
+            [[ ! -e "$file" ]] || printf '%s\0' "$file"
+        done
 }
 
 # One phase of one module. The bindings run their tests in their check; rs,
@@ -318,12 +318,9 @@ step() {
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
-        # The check keeps docs and target-specific lints; the test phase
-        # enforces default-feature clippy without a second compile.
-        # Locally, the feature-contract checks skip the dependents of the
-        # changed crates; the landing worker keeps them (see sh/rs/select.sh).
-        check:rs) RS_FEATURE_SCOPE=$rs_feature_scope just rs lint-changed "$rs_list" ;;
-        check:rs_shapes) RS_FEATURE_SCOPE=$rs_feature_scope just rs feature-shapes-changed "$rs_list" ;;
+        # The check keeps docs; the test phase enforces default-feature clippy
+        # without a second compile.
+        check:rs) just rs lint-changed "$rs_list" ;;
         check:bench)
             python3 bench/compare.test.py
             bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
@@ -366,6 +363,10 @@ step() {
             sh/markdown.sh check
             ;;
         check:large_files) sh/large-files.sh "$large_base" ;;
+        check:python)
+            files '*.py' '*.pyi' | xargs -0 ruff check --force-exclude
+            files '*.py' '*.pyi' | xargs -0 ruff format --check --force-exclude
+            ;;
         check:toml) RUST_LOG=error taplo format --check ;;
         check:nix) files '*.nix' | xargs -0 nixfmt --check ;;
         check:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --check --justfile ;;
@@ -378,6 +379,10 @@ step() {
         fix:markdown)
             bun install
             sh/markdown.sh fix
+            ;;
+        fix:python)
+            files '*.py' '*.pyi' | xargs -0 ruff check --fix --force-exclude
+            files '*.py' '*.pyi' | xargs -0 ruff format --force-exclude
             ;;
         fix:toml) RUST_LOG=error taplo format ;;
         fix:nix) files '*.nix' | xargs -0 nixfmt ;;

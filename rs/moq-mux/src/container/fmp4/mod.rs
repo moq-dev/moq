@@ -320,6 +320,15 @@ pub enum Error {
 	/// A track's edit list does more than delay the track and start its media at one time.
 	#[error("unsupported edit list: {0}")]
 	UnsupportedEditList(&'static str),
+
+	/// A fragment written to a regular MP4 can't be indexed in its final `moov`.
+	#[error("track {track} can't be indexed: {reason}")]
+	Unindexable {
+		/// The fragment's track id.
+		track: u32,
+		/// What the sample tables can't express.
+		reason: &'static str,
+	},
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -993,6 +1002,36 @@ pub(crate) fn synthesize_video_trak(
 	))
 }
 
+/// The OpusHead mapping for a `dOps` channel mapping table, checked by [`crate::codec::opus::Mapping::new`].
+///
+/// Family 3 is refused: its OpusHead carries a demixing matrix (RFC 8486 §3.2) where
+/// `dOps` has a table, so neither side can describe the other.
+pub(crate) fn opus_mapping(mapping: &mp4_atom::OpusChannelMapping) -> Result<crate::codec::opus::Mapping> {
+	if mapping.family == 3 {
+		return Err(crate::codec::opus::Error::UnsupportedMappingFamily(3).into());
+	}
+	Ok(crate::codec::opus::Mapping::new(crate::codec::opus::mapping::Config {
+		family: mapping.family,
+		streams: mapping.stream_count,
+		coupled: mapping.coupled_count,
+		table: &mapping.channel_mapping,
+	})?)
+}
+
+/// The `dOps` channel mapping table for an OpusHead mapping, refusing family 3 as
+/// [`opus_mapping`] does.
+fn dops_mapping(mapping: &crate::codec::opus::Mapping) -> Result<mp4_atom::OpusChannelMapping> {
+	if mapping.family() == 3 {
+		return Err(crate::codec::opus::Error::UnsupportedMappingFamily(3).into());
+	}
+	Ok(mp4_atom::OpusChannelMapping {
+		family: mapping.family(),
+		stream_count: mapping.streams(),
+		coupled_count: mapping.coupled(),
+		channel_mapping: mapping.table().to_vec(),
+	})
+}
+
 /// Synthesize a CMAF `Trak` for an audio rendition that has no init segment.
 pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &AudioConfig) -> Result<mp4_atom::Trak> {
 	use mp4_atom::Decode;
@@ -1009,10 +1048,6 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 			let head = match &config.description {
 				Some(description) => {
 					let head = crate::codec::opus::Config::parse(&mut description.as_ref())?;
-					// dOps shares OpusHead's family 0 layout; a mapping table would need writing too.
-					if let Some(mapping) = head.mapping {
-						return Err(crate::codec::opus::Error::UnsupportedMappingFamily(mapping.family()).into());
-					}
 					if head.channel_count != config.channel_count {
 						return Err(Error::OpusChannelCount {
 							catalog: config.channel_count,
@@ -1030,7 +1065,7 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 					pre_skip: head.pre_skip,
 					input_sample_rate: head.sample_rate,
 					output_gain: head.output_gain,
-					channel_mapping: None,
+					channel_mapping: head.mapping.as_ref().map(dops_mapping).transpose()?,
 				},
 				btrt: None,
 			})
@@ -1185,9 +1220,9 @@ pub(crate) fn encode_init(
 	// dOps alone describes decoder priming; ISO BMFF needs an edit to express that
 	// presentation shift. Rebuild it after the output track timescales are settled.
 	for trak in &mut traks {
-		if let [mp4_atom::Codec::Opus(opus)] = trak.mdia.minf.stbl.stsd.codecs.as_slice() {
-			let skip = u64::from(opus.dops.pre_skip) * u64::from(trak.mdia.mdhd.timescale) / 48_000;
-			trak.edts = (skip != 0).then(|| mp4_atom::Edts {
+		let skip = priming(trak);
+		if skip != 0 {
+			trak.edts = Some(mp4_atom::Edts {
 				elst: Some(mp4_atom::Elst {
 					entries: vec![mp4_atom::ElstEntry {
 						// A live edit's duration is implicit in the fragments that follow.
@@ -1226,6 +1261,14 @@ pub(crate) fn encode_init(
 	ftyp.encode(&mut buf)?;
 	moov.encode(&mut buf)?;
 	Ok(Bytes::from(buf))
+}
+
+/// An Opus track's pre-skip in its media timescale, or zero for any other track.
+pub(crate) fn priming(trak: &mp4_atom::Trak) -> u64 {
+	match trak.mdia.minf.stbl.stsd.codecs.as_slice() {
+		[mp4_atom::Codec::Opus(opus)] => u64::from(opus.dops.pre_skip) * u64::from(trak.mdia.mdhd.timescale) / 48_000,
+		_ => 0,
+	}
 }
 
 /// Narrow a media timescale to the 32-bit `mdhd` field, rejecting what would truncate.

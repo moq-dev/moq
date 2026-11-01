@@ -15,3 +15,12 @@ cost is production code). Cache `OriginScope::relative`'s patterns first;
 benchmark before changing the rest.
 
 Public API: none expected.
+
+Decided 2026-11-01 (maintainer, `/quest-plan`): the per-reader cost of a
+delivered group belongs here, beside the rest of the per-session cost.
+Measured by [moq-dev/moq#7263](https://github.com/moq-dev/moq/pull/7263):
+a track read that does get a group still costs about 12k to 26k user-space
+instructions per reader per group (1 to 16 readers per track). Part of it is
+copying the large `group::Consumer` value, inside
+`Poll<Result<Option<group::Consumer>>>`, through each layer that returns it;
+consider boxing parts of `group::Consumer`, and measure it on the same read.

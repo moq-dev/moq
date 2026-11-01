@@ -12,9 +12,9 @@ it locally. On macOS or Linux, install it with
 Docker; see [Install](/setup/install).
 
 Its cryptography comes from [rind](https://github.com/moq-dev/rind), which
-needs an x86\_64 CPU from about 2014 onward, and on aarch64 the crypto
-extensions, so a Raspberry Pi 4 or earlier needs a 32-bit ARM build. On a CPU
-missing one, `moq` exits at startup naming it.
+runs on any x86\_64 CPU and on any aarch64 CPU with NEON, including a Raspberry
+Pi 4, CM4, or Zero 2 W on a 64-bit OS. On a CPU missing a feature rind needs,
+`moq` exits at startup naming it.
 
 ## What it does
 
@@ -27,6 +27,7 @@ missing one, `moq` exits at startup naming it.
 | `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
+| `export` | `mp4 --output <file>` | Record a regular MP4 that stays playable if the recording is cut short. |
 | `export` | `hls --listen`, `hls --output <dir>` | Serve the broadcast as HLS over HTTP, record it to a directory, or both. |
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `export` | `archive <url>` | Record every broadcast under the prefix into an object store. |
@@ -175,7 +176,7 @@ moq --connect https://relay.example.com/anon --broadcast camera.hang \
 
 ## Export
 
-The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports pick renditions with
+The `fmp4`, `mp4`, `mkv`, `flv`, `h264`, and `h265` exports pick renditions with
 `--video-name`, `--audio-name`, `--video-codec`, `--audio-codec`, `--video <on|off>`,
 and `--audio <on|off>` (both default to `on`). `ts`, `archive`, and the gateways
 export everything and refuse these flags.
@@ -200,6 +201,17 @@ entry are described at once as `avc3` or `hev1`, with SPS, PPS, and VPS kept in
 the samples, so an encoder restarting with a new SPS does not end the export.
 Each keyframe carries them, so a keyframe whose sets never appeared ends it.
 Other video waits for its first keyframe.
+
+`mp4 --output <file>` records to a new file the way OBS's hybrid MP4 does: it is
+fragmented MP4 while recording, so a crash leaves a playable file, and the
+broadcast's end or the first Ctrl-C (or SIGTERM) finishes it as a regular MP4 with
+its index at the end, without copying the media. A second signal exits at once
+and leaves it fragmented. Unlike `fmp4`, a rendition that joins mid-recording is
+kept, though only the finished file indexes it.
+
+```bash
+moq ... export mp4 --output recording.mp4
+```
 
 MPEG-TS export pads to the source's constant mux rate when the catalog
 recorded one, or to `--mux-rate`, on a constant-rate schedule an IRD or groomer
@@ -266,18 +278,22 @@ moq ... import capture --display --system-audio          # share a screen with i
 moq ... import capture --window 39193 --audio off        # one window (macOS, Windows, X11)
 moq ... import capture --window --audio off              # system window picker (Linux Portal)
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
-moq ... import capture --video demand --audio demand     # capture only while someone watches
+moq ... import capture --video demand                    # also gate video on demand
+moq ... import capture --audio on                        # encode audio continuously
 ```
 
 Video goes through the platform hardware encoder, with an H.264 software
 fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
-backends. The camera and microphone stay open and encode while publishing,
-so a late subscriber can fetch the recent past. Choose each medium with
-`--video <on|demand|off>` and `--audio <on|demand|off>`, both defaulting to `on`.
-`off` publishes no track of that medium. `demand` captures and encodes only
-while that track has a subscriber, and leaves nothing to fetch from before
-the first viewer; video still opens its source once at startup to probe the
-mode it negotiates. `--bitrate` is a ceiling that
+backends. The camera and microphone stay open while publishing, so a late
+subscriber can fetch the recent past. Choose each medium with
+`--video <on|demand|off>` (default `on`) and `--audio <on|demand|off>`
+(default `demand`). `on` encodes for the whole publish, and `off` publishes no
+track of that medium. Audio's `demand` keeps raw PCM, up to `--max-age` or 30
+seconds, while nobody listens, and encodes that retained history when a
+subscriber arrives. Video's `demand` captures and encodes only while the track
+has a subscriber, leaving nothing to fetch from before the first viewer; video
+still opens its source once at startup to probe the mode it negotiates.
+`--bitrate` is a ceiling that
 backends with live bitrate control lower to fit the connection.
 `moq devices` prints every source id. On Windows, `display:N` is an
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
@@ -405,8 +421,7 @@ rtsp` one per RTSP session, and `import ts --program all` one per program.
 A restarted process takes the name at once: viewers see the broadcast restart,
 and their next subscribe reaches the new run instead of waiting for its group
 numbers to catch up. Epochs cross a connection only on moq-lite 07, which is
-opt-in, and on moq-transport, and order by the host's clock
-there, so a host whose clock runs behind the old run's waits for it to close.
+opt-in, and order by the host's clock there, so a host whose clock runs behind the old run's waits for it to close.
 Other versions carry no epoch, so a restart from another session is the newest
 route at an equal cost, or a better one.
 
@@ -460,8 +475,8 @@ See [Authentication](/bin/relay/auth).
 ## Retention and latency
 
 `import --max-age` (default 30 s) tells relays how long to keep old groups
-fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export h264`,
-and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
+fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export mp4`,
+`export h264`, and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
 may fall behind the live edge before *this* consumer skips it. Raising
 `--max-age` never delays playback.
 At stdin EOF, `import` keeps the finished broadcast announced for
