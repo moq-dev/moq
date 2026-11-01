@@ -40,9 +40,9 @@
 //! [`DEFAULT_EXPIRY`], while a relay creates one configured pool and shares it across
 //! every origin so the whole process caches into a single policy.
 
-use crate::sync::Mutex;
 use crate::util::SendCell;
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, Weak};
 use std::task::{Poll, ready};
@@ -1155,6 +1155,15 @@ impl Charge {
 			self.bytes += n;
 		}
 		self.touch(WRITE_BOOST)
+	}
+
+	/// Release `n` charged bytes the group dropped while still cached, without an access.
+	pub(super) fn sub(&mut self, n: u64) {
+		if let Some(track) = &self.track {
+			let n = n.min(self.bytes);
+			track.pool.sub(n);
+			self.bytes -= n;
+		}
 	}
 
 	/// The group's full cached footprint: payload bytes plus overhead.

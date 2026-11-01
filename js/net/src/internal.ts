@@ -5,7 +5,7 @@
  *
  * @module
  */
-import type { Instant, Milli } from "@moq/clock";
+import { type Instant, Milli } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Datagram } from "./datagram.ts";
@@ -18,7 +18,17 @@ import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
+import * as Varint from "./varint.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
+
+/** What a null maxDelay goes out as: the largest value every peer can read, as Rust sends for `None`. */
+export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
+
+/** A subscription's budget as the wire carries it: null for no limit, omitted for zero. */
+export function maxDelayOf(subscription: Pick<Subscription, "maxDelay">): Milli {
+	if (subscription.maxDelay === null) return NO_MAX_DELAY;
+	return subscription.maxDelay ?? Milli.zero;
+}
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
 export function groupBounds(groups: Groups = {}): { start: number; end?: number } {
@@ -313,6 +323,8 @@ export interface ResumeSource {
 	start(): number | "pending" | undefined;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Position | undefined;
+	/** The error the logical track's end carries, if it does not end cleanly. */
+	endError(): Error | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
 	finished(): Promise<Position>;
 	/** The serving copy's newest buffered frame, which a wire answer names as its edge. */
@@ -372,7 +384,7 @@ export const hooks: {
 	 * past the grace, or the track closes, since QUIC may deliver a lower group's stream after
 	 * a higher one. Mirrors the Rust `finish_at` on a `received()` copy; assigned by `track.ts`.
 	 */
-	endTrack: (producer: Producer, end: Position) => void;
+	endTrack: (producer: Producer, end: Position, error?: Error) => void;
 	/**
 	 * End a wire subscription's copy cleanly without declaring an end, for a session closed
 	 * locally: a dead route, not finished content, so a resumed reader's replacement route
@@ -407,6 +419,8 @@ export const hooks: {
 	 * forwarding it. Readers await `finished()` instead. Assigned by `track.ts`.
 	 */
 	subscriberEnd: (subscriber: Subscriber) => Position | undefined;
+	/** The error that end carries, if the track does not end cleanly. Assigned by `track.ts`. */
+	subscriberEndError: (subscriber: Subscriber) => Error | undefined;
 	joinSubscriber: (subscriber: Subscriber) => void;
 	/** Re-evaluate a live-edge join at a producer. */
 	joinProducer: (producer: Producer) => void;
@@ -554,6 +568,8 @@ export const hooks: {
 	 * Assigned by `group.ts`.
 	 */
 	releaseGroupReader: (group: GroupConsumer, abort?: Error) => void;
+	/** Whether a group reader still reads the copy it was mirrored from, not one its recovery moved it to. */
+	readsMirrored: (group: GroupConsumer) => boolean;
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
 	/** Return when a group joined its track at this hop, on the installed clock. */
@@ -572,8 +588,11 @@ export const hooks: {
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
 	readGroupFrame: (group: GroupConsumer, compressed: boolean) => Promise<ReadGroupFrame | undefined>;
-	/** Make an evicted mirror terminal while its track timeline still contains it. */
-	evictGroup: (group: GroupConsumer) => void;
+	/**
+	 * Make an evicted mirror terminal while its track timeline still contains it. Whether the
+	 * mirror is released too: not when its group reads on, or may yet, from another copy.
+	 */
+	evictGroup: (group: GroupConsumer) => boolean;
 	/** Attach the origin advertisement of a created broadcast. */
 	attachAnnouncer: (
 		producer: BroadcastProducer,
@@ -619,6 +638,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	subscriberEnd: () => {
+		throw new Error("track.ts not loaded");
+	},
+	subscriberEndError: () => {
 		throw new Error("track.ts not loaded");
 	},
 	joinSubscriber: () => {
@@ -769,6 +791,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	releaseGroupReader: () => {
+		throw new Error("group.ts not loaded");
+	},
+	readsMirrored: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupTimestamp: () => {

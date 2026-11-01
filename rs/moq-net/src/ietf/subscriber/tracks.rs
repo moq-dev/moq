@@ -433,13 +433,8 @@ impl Subscriber {
 				request_id,
 				prefix: prefix.clone(),
 				forward: false,
-				subscriber_priority: None,
 				group_order: None,
-				filter: None,
 				properties_wanted: true,
-				new_group: None,
-				range_filters: false,
-				track_filter: false,
 				authorization_token: None,
 			},
 		)?;
@@ -452,7 +447,10 @@ impl Subscriber {
 			Cancelled,
 			Message(Option<Framed>),
 		}
+		// A peer streaming skips must not hold the session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			let event = kio::wait(|waiter| {
 				if session.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Ok(Event::Closed));
@@ -526,6 +524,7 @@ impl Subscriber {
 				return Poll::Ready(());
 			}
 			loop {
+				ready!(budget.poll_yield(waiter));
 				match ready!(messages.poll_next(&mut reader, waiter)) {
 					Ok(Some(_)) => continue,
 					Ok(None) | Err(_) => return Poll::Ready(()),
@@ -1471,7 +1470,7 @@ mod tests {
 	/// and a reader leaving meanwhile stops waiting for it.
 	#[moq_clock::test]
 	async fn churn_under_withheld_credit_buffers_one_resume_and_pause() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			// One message in flight per stream, so a peer that stops reading withholds credit.
 			let config = memory::Config {
 				stream_buffer: 0,
@@ -1516,6 +1515,35 @@ mod tests {
 			group_order: None,
 			filter: None,
 		}
+	}
+
+	/// One SUBSCRIBE_TRACKS covers each nesting chain, since the peer refuses an overlapping
+	/// prefix: a nested listing reuses the broader request, and a broader one cancels the
+	/// nested requests and goes out only once they have left the wire.
+	#[test]
+	fn overlapping_listings_share_one_request() {
+		let broadcasts: Vec<_> = (0..5).map(|_| crate::broadcast::Info::default().produce()).collect();
+		let lister = |i: usize| Arc::new(broadcasts[i].requests().lister().unwrap());
+		let live = |listings: &Listings| listings.requests.values().filter(|r| r.live.is_some()).count();
+
+		let mut listings = Listings::default();
+		let (_, _, outer) = listings.listen(Path::from_static("a"), lister(0));
+		assert!(
+			outer.is_some_and(|outer| outer.blockers.is_empty()),
+			"the first listing waits"
+		);
+		let (_, _, nested) = listings.listen(Path::from_static("a/b"), lister(1));
+		assert!(nested.is_none(), "a nested listing asked again");
+		assert_eq!(live(&listings), 1);
+
+		let mut listings = Listings::default();
+		for (i, path) in ["a/b", "a/c"].into_iter().enumerate() {
+			let (_, _, nested) = listings.listen(Path::new(path).unwrap(), lister(2 + i));
+			assert!(nested.is_some_and(|nested| nested.blockers.is_empty()), "{path}");
+		}
+		let (_, _, outer) = listings.listen(Path::from_static("a"), lister(4));
+		assert_eq!(outer.expect("the broader listing asks").blockers.len(), 2);
+		assert_eq!(live(&listings), 1, "the nested requests stand beside it");
 	}
 
 	/// The error code a refused PUBLISH answered with.
@@ -1614,7 +1642,7 @@ mod tests {
 	/// A skipped track is listed through a paused SUBSCRIBE of ours, once it answers.
 	#[moq_clock::test]
 	async fn a_skipped_track_lists_once_its_paused_subscribe_answers() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let mut listing = h.establish().await;
 			let skipped = ietf::PublishSkipped {
@@ -1713,7 +1741,7 @@ mod tests {
 	/// objects refused unseen. On draft-18 our PUBLISH_OK pauses it.
 	#[moq_clock::test]
 	async fn a_forwarding_publish_fails_the_listing_on_draft_22() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let _listing = h.establish().await;
 			let forwarding = ietf::Publish {

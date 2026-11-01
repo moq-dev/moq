@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Elapsed, Manual, Milli, Nano, timeout, yieldNow } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
@@ -11,6 +11,7 @@ import {
 	ProtocolViolation,
 	reason,
 	SessionCode,
+	SessionError,
 	StreamCode,
 	StreamError,
 	TimestampMismatch,
@@ -118,27 +119,21 @@ function announceHarness(version: Version, origin = 1n) {
 	// A peer that is not told about its own violation should fail the test visibly rather
 	// than hang it out to the suite timeout.
 	const abortReason = async () => {
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const timeout = new Promise<never>((_, reject) => {
-			timer = setTimeout(() => reject(new Error("stream was never aborted")), 250);
-		});
 		try {
-			return reason(error(await Promise.race([aborted, timeout])));
-		} finally {
-			clearTimeout(timer);
+			return reason(error(await timeout(Nano.fromMilli(Milli(250)), aborted)));
+		} catch (error) {
+			if (error instanceof Elapsed) throw new Error("stream was never aborted");
+			throw error;
 		}
 	};
 
 	// Rejects promptly if the session outlives the violation, rather than hanging the test.
 	const sessionEnded = async () => {
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const timeout = new Promise<never>((_, reject) => {
-			timer = setTimeout(() => reject(new Error("session was never closed")), 250);
-		});
 		try {
-			return await Promise.race([sessionClosed, timeout]);
-		} finally {
-			clearTimeout(timer);
+			return await timeout(Nano.fromMilli(Milli(250)), sessionClosed);
+		} catch (error) {
+			if (error instanceof Elapsed) throw new Error("session was never closed");
+			throw error;
 		}
 	};
 
@@ -149,7 +144,7 @@ function announceHarness(version: Version, origin = 1n) {
 		finish: () => inbound.close(),
 		abortReason,
 		sessionEnded,
-		settle: () => new Promise((resolve) => setTimeout(resolve, 0)),
+		settle: () => yieldNow(),
 	};
 }
 
@@ -182,7 +177,7 @@ test("an announce consumer closed while its stream opens sends nothing on it", a
 	announced.close();
 	// The slot frees up only after the consumer left.
 	opening.resolve();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	expect(written).toBe(0);
 	expect(closed).toBe(true);
 });
@@ -370,6 +365,80 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 
 	held.close();
 	announced.close();
+	subscriber.close();
+});
+
+test("a lite-07 takeover surfaces as a start beneath its predecessor, or a restart of it", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07);
+	const announced = subscriber.announced();
+	await settle();
+	const pool = Path.from("pool");
+	const job = Path.from("pool/job");
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
+	await send((w) =>
+		encodeAnnounceBroadcast(w, { status: "active", suffix: pool, hops: [PUBLISHER_A] }, Version.DRAFT_07),
+	);
+	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start" });
+
+	// Beneath the claim: a start with the next id (1), and the claim stays live.
+	const epoch = Epoch.mint();
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "takeover", predecessor: 0n, suffix: job, epoch, hops: [PUBLISHER_A] },
+			Version.DRAFT_07,
+		),
+	);
+	expect(await announced.next()).toMatchObject({ prefix: job, kind: "start", route: { epoch } });
+
+	// At the job's own path: a restart that retires id 1 and assigns id 2.
+	const next = Epoch.mint();
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "takeover", predecessor: 1n, suffix: job, epoch: next, hops: [PUBLISHER_A] },
+			Version.DRAFT_07,
+		),
+	);
+	expect(await announced.next()).toMatchObject({ prefix: job, kind: "restart", route: { epoch: next } });
+
+	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 2n }, Version.DRAFT_07));
+	expect(await announced.next()).toMatchObject({ prefix: job, kind: "end" });
+	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_07));
+	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "end" });
+
+	announced.close();
+	subscriber.close();
+});
+
+// A takeover must name a live predecessor whose path covers its own.
+test.each([
+	["a retired predecessor", 1n, "pool/job"],
+	["a predecessor not covering it", 0n, "other"],
+] as const)("a lite-07 takeover of %s ends the stream", async (_, predecessor, suffix) => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07);
+	const announced = subscriber.announced();
+	await settle();
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("pool"), hops: [PUBLISHER_A] },
+			Version.DRAFT_07,
+		),
+	);
+	expect(await announced.next()).toMatchObject({ kind: "start" });
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "takeover", predecessor, suffix: Path.from(suffix), hops: [PUBLISHER_A] },
+			Version.DRAFT_07,
+		),
+	);
+	await expect(announced.next()).rejects.toThrow();
+
 	subscriber.close();
 });
 
@@ -1038,8 +1107,9 @@ function expectCut(err: unknown, cause: Error | undefined) {
 	if (cause) {
 		expect(err).toBe(cause);
 	} else {
-		expect(err).toBeInstanceOf(StreamError);
-		expect((err as StreamError).code).toBe(StreamCode.SessionClosed);
+		// A deliberate close cuts it off as the peer's clean close would.
+		expect(err).toBeInstanceOf(SessionError);
+		expect((err as SessionError).code).toBe(SessionCode.Cancel);
 	}
 }
 
@@ -1740,7 +1810,7 @@ test("a listing whose readers leave as its token settles never reaches the wire"
 	await asked;
 	release();
 	tracks.close();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	expect(streams.length).toBe(0);
 	held.close();
 	subscriber.close();
@@ -2354,7 +2424,10 @@ test.each([
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ groups: { start: { included: 0 }, end: { excluded: 1 } } });
+	const track = broadcast.track("video").subscribe({
+		maxDelay: Milli.zero,
+		groups: { start: { included: 0 }, end: { excluded: 1 } },
+	});
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -2368,7 +2441,7 @@ test.each([
 					}),
 				)
 			: undefined;
-		track.update({ groups });
+		track.update({ maxDelay: Milli.zero, groups });
 		await refused;
 		await drainReactions();
 

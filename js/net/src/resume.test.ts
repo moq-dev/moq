@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import * as Epoch from "./epoch.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
@@ -22,7 +22,7 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 }
 
 /** Whether `promise` is still pending once queued work settles. */
@@ -145,7 +145,11 @@ test("returning to a route reuses its subscription and held group", async () => 
 	}
 });
 
-test("a returning route resumes where a fresh copy would", async () => {
+/**
+ * A returning route resumes where a fresh copy would, and what it buffered while replaced below
+ * what another route already handed out comes through the backfill: the late group once.
+ */
+test("a returning route backfills below the reader's newest", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const front = new Front();
@@ -169,13 +173,88 @@ test("a returning route resumes where a fresh copy would", async () => {
 		front.serve(handles[0]);
 		await clock.advance(Nano.zero);
 		expect(mirrored.mock.calls.length).toBe(1);
-		expect(drain(sub)).toEqual([]);
+		expect(drain(sub)).toEqual([15]);
 		ta.write(26);
 		expect(drain(sub)).toEqual([26]);
 		held.close();
 	} finally {
 		mirrored.mockRestore();
 		open.finish();
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+/**
+ * A group below the replacement's resume point that the reader never got is asked of the new
+ * route, as one cursor on the logical track would still get it late.
+ */
+/**
+ * A gap that stays open across route flaps keeps one backfill per distinct route: a later resume
+ * point widens the route's backfill rather than asking again.
+ */
+test("route flaps keep one backfill per distinct route", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const tracks = sources.map(copy);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
+	const subscribed = tracks.map((track) => spyOn(track.producer, "subscribe"));
+	try {
+		await clock.advance(Nano.zero);
+		for (let round = 1; round < 24; round++) {
+			front.serve(handles[round % 2]);
+			await clock.advance(Nano.zero);
+			// Every odd group never lands, so every resume point leaves a gap.
+			tracks[round % 2].write(round * 2);
+			await clock.advance(Nano.zero);
+			expect(drain(sub)).toEqual([round * 2]);
+		}
+		// Each route's own copy, returned to on every flap, and its one backfill.
+		for (const spy of subscribed) expect(spy.mock.calls.length).toBe(2);
+		tracks[1].write(1);
+		await clock.advance(Nano.zero);
+		expect(drain(sub)).toEqual([1]);
+	} finally {
+		for (const spy of subscribed) spy.mockRestore();
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+test("a group below the replacement's resume point is backfilled", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
+	try {
+		await clock.advance(Nano.zero);
+		ta.write(5);
+		expect(drain(sub)).toEqual([5]);
+		front.serve(handles[1]);
+		await clock.advance(Nano.zero);
+		expect(drain(sub)).toEqual([]);
+		tb.write(2);
+		tb.write(6);
+		await clock.advance(Nano.zero);
+		expect(drain(sub)).toEqual([2, 6]);
+		tb.write(4);
+		await clock.advance(Nano.zero);
+		expect(drain(sub)).toEqual([4]);
+	} finally {
 		sub.close();
 		front.consumer.close();
 		for (const handle of handles) handle.close();
@@ -1740,14 +1819,18 @@ test("a route superseded while its properties are checked stops being asked", as
 	const sub = front.consumer.track("seq").subscribe();
 	await sub.info();
 	// b never answers what the track is, so its splice waits on it.
-	void wireOf(b).requested();
+	const pulled = wireOf(b).requested();
 	front.serve(b.consume());
 	await settle();
-	expect(b.demand().used.peek()).toBe(true);
+	const request = await pulled;
+	if (!request) throw new Error("b was never asked");
 
 	front.serve(c.consume());
 	await settle();
-	expect(b.demand().used.peek()).toBe(false);
+	// Nobody asks b any more, so its late answer is let go.
+	const late = request.accept();
+	await settle();
+	expect(late.closed.peek()).toBeDefined();
 
 	sub.close();
 	front.consumer.close();
@@ -2302,6 +2385,27 @@ test("a group-only reader of a finite track settles closed and lets go of its co
 	a.close();
 });
 
+test("a routed track's errored end outlives the copy that declared it", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	const failed = new StreamError(StreamCode(71));
+	ta.producer.finishAt({ group: 1, frame: 0 }, failed);
+	const group = await sub.recvGroup();
+	expect(group?.sequence).toBe(0);
+	group?.close();
+	// Concluding releases the copy that declared the end.
+	await settle();
+	await expect(sub.recvGroup()).rejects.toBe(failed);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
 test("a group-only fork of a finite track settles closed and lets go of its copy", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -2404,7 +2508,7 @@ test("an end a replaced copy declared holds once the copy is let go in the same 
 	b.close();
 });
 
-test("a replaced copy whose session closed locally binds no end", async () => {
+test("a replaced copy whose session closed binds no end", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
@@ -2419,8 +2523,8 @@ test("a replaced copy whose session closed locally binds no end", async () => {
 
 	front.serve(b.consume());
 	await settle();
-	// A clean close would declare an end at group 1, refusing b's next group.
-	hooks.releaseTrack(ta.producer);
+	// A session close, local or remote, cancels the copy: a failed route, not an end at group 1.
+	ta.producer.abort(new SessionError(SessionCode.Cancel));
 	tb.write(1);
 	await settle();
 	expect(drain(sub)).toEqual([1]);
@@ -2951,7 +3055,7 @@ for (const fetched of [false, true]) {
 			if (!hostile) return undefined;
 			const copy = new GroupProducer(sequence);
 			copy.writeFrame({ payload: enc.encode(`${sequence}.0`) });
-			setTimeout(() => copy.abort(malformed), 0);
+			void yieldNow().then(() => copy.abort(malformed));
 			return copy.consume();
 		});
 		const sub = front.consumer.track("seq").subscribe();

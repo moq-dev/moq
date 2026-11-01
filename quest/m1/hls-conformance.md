@@ -16,8 +16,7 @@ From the 2026-10-24 moq-hls audit, which found no player-level HLS or DASH
 coverage. Decided with the maintainer on 2026-10-24:
 
 - ffprobe conformance lands in m1, so it validates the
-  Catalog HLS field redesign and the
-  [fixed target duration](/quest/m1/archive/hls-target.md) before the cut. A
+  Catalog HLS field redesign and the fixed target duration before the cut. A
   browser player test follows in m2
   ([HLS and DASH browser playback](/quest/m2/hls-player-test.md)).
 - Cover a sliding window that evicts segments, a GOP that overruns the
@@ -30,9 +29,14 @@ coverage. Decided with the maintainer on 2026-10-24:
 
 Public API: none. Wire: none.
 
+Decided 2026-10-30 (maintainer): fix first. The two bugs the test found
+are their own quests, required below, and the test lands once it passes
+with both checks intact.
+
 ## Required
 
-- [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - the run-wide target this asserts
+- [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - the conformance test's same-codec switch fails until it lands
+- [The last AAC segment advertises its full duration](/quest/m1/hls-final-aac-segment.md) - the conformance test's audio check fails until it lands
 
 ## Related
 

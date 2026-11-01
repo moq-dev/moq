@@ -359,7 +359,7 @@ async fn subscribe(
 					Some(
 						moq_net::announce::Event::Start(update)
 						| moq_net::announce::Event::Update(update)
-						| moq_net::announce::Event::Restart(update),
+						| moq_net::announce::Event::Restart(update) | moq_net::announce::Event::Takeover { announce: update, .. },
 					) => update,
 					Some(moq_net::announce::Event::End(_)) => continue,
 					None => break,
@@ -389,7 +389,8 @@ async fn subscribe(
 			Some(
 				moq_net::announce::Event::Start(update)
 				| moq_net::announce::Event::Update(update)
-				| moq_net::announce::Event::Restart(update),
+				| moq_net::announce::Event::Restart(update)
+				| moq_net::announce::Event::Takeover { announce: update, .. },
 			) => update,
 			Some(moq_net::announce::Event::End(_)) => continue,
 			None => break,
@@ -672,11 +673,6 @@ impl Drop for Gauge<'_> {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 
@@ -764,6 +760,11 @@ mod tests {
 	/// Sweep connection count and the broadcast fan-out touched by connection establishment.
 	#[test]
 	#[ignore = "benchmark, run nightly"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures real establishment time"
+	)]
 	fn benchmark_readiness_establishment() {
 		for connections in [1, 16, 128] {
 			for broadcasts in [1, 16, 128] {
