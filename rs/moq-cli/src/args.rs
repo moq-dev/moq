@@ -685,7 +685,7 @@ pub enum Command {
 	Announced(crate::announced::Args),
 	/// Write one group of a track to stdout.
 	Fetch(crate::fetch::Args),
-	/// Finish an `export mp4` recording that a crash or second signal left fragmented.
+	/// Finish a recording that a crash or second signal left unfinished.
 	Repair(crate::repair::Args),
 	/// Play a broadcast in a native window and speaker.
 	#[cfg(feature = "play")]
@@ -1393,7 +1393,7 @@ pub struct Recorded {
 
 	/// The file to record to, which must not exist yet. It plays as fragmented MP4 while
 	/// recording; the broadcast's end or the first SIGINT/SIGTERM finishes it as a regular
-	/// MP4, and a second signal exits at once, leaving it fragmented for `moq repair`.
+	/// MP4, and a second signal exits at once, leaving it fragmented for `moq repair mp4`.
 	#[usage(long, value_name = "FILE", value_hint = usage_rs::ValueHint::FilePath)]
 	pub output: PathBuf,
 }
@@ -2781,7 +2781,7 @@ mod tests {
 		for verb in [
 			&["auth", "generate"][..],
 			&["completion", "bash"],
-			&["repair", "recording.mp4"],
+			&["repair", "mp4", "recording.mp4"],
 		] {
 			for flag in accept.iter().chain(dial) {
 				let err = parse(flag, verb).reject(verb[0]).unwrap_err().to_string();

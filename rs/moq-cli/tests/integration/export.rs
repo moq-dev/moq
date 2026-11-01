@@ -1110,7 +1110,7 @@ async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	feeding.abort();
 }
 
-/// `repair` finishes a recording whose `export mp4` was killed as a regular MP4, and leaves
+/// `repair mp4` finishes a recording whose `export mp4` was killed as a regular MP4, and leaves
 /// it alone once finished.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
@@ -1142,7 +1142,7 @@ async fn a_killed_mp4_recording_is_repaired() {
 
 	let repair = || async {
 		let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"))
-			.arg("repair")
+			.args(["repair", "mp4"])
 			.arg(&path)
 			.output();
 		let output = kio::clock::timeout(TIMEOUT, output)

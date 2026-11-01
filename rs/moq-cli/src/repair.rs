@@ -1,21 +1,45 @@
-//! `moq repair`: finish a recording that `export mp4 --output` left fragmented.
+//! `moq repair <format>`: finish a recording that its recorder left unfinished.
 
 use std::path::PathBuf;
 
 use anyhow::Context;
 
-/// Finish an `export mp4` recording that a crash or second signal left fragmented.
+/// Finish a recording that a crash or second signal left unfinished.
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
-	/// The recording, finished in place as a regular MP4 that indexes every complete fragment.
-	#[usage(arg, value_name = "FILE", value_hint = usage_rs::ValueHint::FilePath)]
-	pub file: PathBuf,
+	#[usage(subcommand)]
+	format: Format,
 }
 
 impl Args {
-	/// Index the recording and write its `moov`, or report that it is already finished.
+	/// Repair the recording in the named format.
 	pub async fn run(self) -> anyhow::Result<()> {
+		match self.format {
+			Format::Mp4(mp4) => mp4.run().await,
+		}
+	}
+}
+
+/// The recorder that left the file, one per format that can be cut short.
+#[derive(usage_rs::Subcommands, Clone)]
+enum Format {
+	/// Finish an `export mp4` recording that a crash or second signal left fragmented.
+	Mp4(Mp4),
+}
+
+/// `moq repair mp4 <FILE>`.
+#[derive(usage_rs::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+struct Mp4 {
+	/// The recording, finished in place as a regular MP4 that indexes every complete fragment.
+	#[usage(arg, value_name = "FILE", value_hint = usage_rs::ValueHint::FilePath)]
+	file: PathBuf,
+}
+
+impl Mp4 {
+	/// Index the recording and write its `moov`, or report that it is already finished.
+	async fn run(self) -> anyhow::Result<()> {
 		let path = self.file;
 		let file = std::fs::OpenOptions::new()
 			.read(true)
