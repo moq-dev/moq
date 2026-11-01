@@ -17,10 +17,17 @@ found the gap; the behavior predates that PR and covers every unsupported
 scheme.
 
 `rs/moq-tokio/src/client.rs` (`connect_inner`) picks a transport by scheme
-under feature gates (`tcp`, `tls`, `unix`, `ws`/`wss`, QUIC for the rest),
-so which schemes dial depends on the build's features. Expose that set from
-moq-tokio (a function or method beside `Client`, derived from the same
-`cfg`s so it cannot drift), and check every peer in `Config::connect`
+under feature gates (`tcp`, `tls`, `unix`, `ws`/`wss`), and every other
+scheme falls through to QUIC when it is compiled (raced with WebSocket when
+that is too) or to WebSocket alone. Those reject what they can't carry
+only at dial time: QUIC takes `http`, `https`, `moqt` and `moql`
+(`rs/moq-tokio/src/quic/backend.rs`), WebSocket `http`, `https`, `ws` and
+`wss` (`rs/moq-tokio/src/websocket.rs`), so a peer like `ftp://` fails each
+attempt and is retried. So which schemes dial depends on the build's
+features and on that fallthrough. Expose a dialability check from moq-tokio
+(a function or method beside `Client`, derived from the same dispatch and
+`cfg`s so it cannot drift and never rejects a scheme that dials today), and
+check every peer in `Config::connect`
 (`rs/moq-relay/src/cluster.rs`) against it at startup. A peer returned later
 by an `api.url` endpoint can't fail startup; decide in the PR what it does
 (recommended: log once and skip it rather than retry). Test a config naming

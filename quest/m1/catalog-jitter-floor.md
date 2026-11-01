@@ -27,7 +27,7 @@ jitter resolves to the lower detected value and fails. Floor the unsupplied
 jitter and delay in `set` at the catalog's published values the same way, so
 `check_decrease` still refuses only a value the caller explicitly lowers.
 
-`published_text_jitter_never_decreases` (`:1077`) expects a `None` re-set
+`published_text_jitter_never_decreases` (`:1078`) expects a `None` re-set
 after a supplied 100 ms to fail; with the floor it publishes 100 ms. Keep
 the explicit-lower case failing and update the `None` case to the floor.
 

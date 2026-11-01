@@ -27,9 +27,12 @@ replay committed regressions in the merge gate.
 Measure parse amplification too (decided 2026-10-31, maintainer, from
 [moq-dev/moq#7232](https://github.com/moq-dev/moq/pull/7232)). That PR bounds
 a held `moov` or `moof` at 32 MiB (`fmp4::MAX_HELD_BYTES`) and a `moof` at
-2^21 samples, but a body at the bound decodes into roughly 2.5x larger
-structures: a `trun` entry costs 4 to 16 input bytes and about 40 parsed.
-Record the peak allocation for a maximal `moov` and `moof`, and fix it or
-accept it with the number.
+2^21 samples (`fmp4::MAX_FRAGMENT_SAMPLES`), but a body at the bound
+decodes into larger structures: an explicit `trun` entry costs 4 to 16
+input bytes and about 40 parsed, so 2.5x to 10x. A `trun` without
+per-sample fields parses to no entries, but planning still resolves every
+sample it declares, up to the 2^21 bound. Record the peak allocation for a
+maximal `moov`, a maximal `moof` of 4-byte entries, and a field-less `moof`
+at the sample bound, and fix each or accept it with the number.
 
 Public API: none. Wire: none.

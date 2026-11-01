@@ -119,8 +119,8 @@ Run `just check`, `just test interop --all` and `just drafts check`.
 ### Once identity replaces ANNOUNCE_TAKEOVER
 
 Decided 2026-10-31 (maintainer, the /quest-complete requeue session). Kept
-separate from the rest of this Plan so it survives the identity rewrite
-planned in [moq-dev/moq#7420](https://github.com/moq-dev/moq/pull/7420).
+separate from the identity rewrite of this Plan, which landed with
+[moq-dev/moq#7420](https://github.com/moq-dev/moq/pull/7420).
 "We're replacing EPOCH with IDENTITY soon" (maintainer, 2026-10-31).
 
 - Reword "takeover" as an event or operation, in terms of identity

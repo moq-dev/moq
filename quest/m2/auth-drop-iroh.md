@@ -13,11 +13,14 @@ follow-up of [moq-dev/moq#7345](https://github.com/moq-dev/moq/pull/7345).
 That PR kept both because the enum is the relay-to-auth-server JSON contract
 and its quest said "Wire: none"; the relay just never sends `iroh` now.
 
-Land it with the first moq-auth release that already breaks for another
-reason, rather than cutting a breaking release for this alone. An auth
-server built against the old contract is unaffected, since an unknown name
-deserializes to `Unknown`. Update the auth contract docs and any test or
-fixture naming `iroh`.
+Starts after #7345 lands; check with `gh pr view 7345`. Land it with the
+first moq-auth release that already breaks for another reason, rather than
+cutting a breaking release for this alone. The relay sends the transport
+name and the auth server reads it. An old auth server is unaffected, since
+a new relay never sends `iroh`. A new auth server still accepts `iroh` from
+an older relay: an unrecognized name deserializes to `Unknown`
+(`#[serde(other)]` in Rust, `z.catch` in JS). Update the auth contract docs
+and any test or fixture naming `iroh`.
 
 Public API: breaking in moq-auth and `@moq/auth` (one enum variant). Wire:
 the auth JSON contract loses the `iroh` transport value.

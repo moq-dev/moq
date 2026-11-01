@@ -10,19 +10,18 @@ aarch64-linux too, once nixpkgs builds `swiftc` there.
 
 Decided 2026-10-31 (maintainer, the /quest-complete requeue session), the
 follow-ups of [moq-dev/moq#7319](https://github.com/moq-dev/moq/pull/7319)
-(format gates).
+(format gates), which has landed.
 
 - **Ruff.** #7319 makes the repo-wide `python` check module run the dev
   shell's Ruff and keeps `ruff` in the uv dev group (`pyproject.toml:61`)
   only for editors, so two Ruff versions are pinned. Drop it from the dev
   group and `uv.lock`, and point editor setup at the dev shell's Ruff.
 - **Swift on aarch64-linux.** #7319 adds `swift-format` to the dev shell
-  only off aarch64-linux, because nixpkgs marks its `swiftc` broken there,
-  so release-PR Check (`ubuntu-24.04-arm`) skips Swift formatting. When
+  only off aarch64-linux (`flake.nix`, around line 306), because nixpkgs
+  marks its `swiftc` broken there, so `sh/swift/format.sh` skips and
+  release-PR Check (`ubuntu-24.04-arm`) checks no Swift formatting. When
   nixpkgs builds it, add `swift-format` there and drop the skip. Until then
   this half waits; check nixpkgs' `swift` package `meta.broken` for
   aarch64-linux.
-
-Starts after #7319 lands.
 
 Public API: none. Wire: none.

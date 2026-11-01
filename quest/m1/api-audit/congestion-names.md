@@ -18,16 +18,24 @@ option):
 
 - The crate is still 0.1.0 and unpublished, so the rename costs one change
   now and nothing later. (The noq adoption quest it once waited on was
-  dropped on 2026-10-31: with iroh gone, nothing in moq runs noq.)
+  dropped on 2026-10-31, maintainer: once
+  [moq-dev/moq#7345](https://github.com/moq-dev/moq/pull/7345) drops the iroh
+  backend, nothing in moq runs noq.)
 - **Namespace** (chosen over keeping the quinn-style names that noq's
   adapter would read more easily): make `bbr3` and `cubic` public modules
   exporting `Config`. Rename `ControllerMetrics` to `Metrics` and
   `ControllerFactory` to `Factory`. Keep `Bbr3`, `Cubic`, `Unlimited`,
   `Controller`, `Packet`, and the event structs at the root.
-- **Remove `into_any`**: its only callers are the moq-tokio tests in
-  `rs/moq-tokio/src/quic/backend.rs` that assert which controller a factory
-  built. Check the selection another way (such as observable behavior or
-  metrics) or drop an assertion that only restates the `match`.
+- **Remove `into_any`**: its callers are tests. The ones in
+  `rs/moq-tokio/src/quic/backend.rs` and `rs/moq-quic/src/tests/mod.rs`
+  assert which controller a factory built; check the selection another way
+  (such as observable behavior or metrics) or drop an assertion that only
+  restates the `match`. `rs/moq-quic/src/tests/probe.rs` downcasts to read
+  BBR3's `probing_rtt` and `min_rtt`; read them from `Metrics` or a
+  test-only hook instead. The iroh backend's controllers in
+  `rs/moq-tokio/src/iroh.rs` implement noq's own
+  `noq_proto::congestion::Controller::into_any`, a different trait this
+  leaves alone (and #7345 deletes).
 - moq-quic's `transport::Config` already nests the controller factory
   (`congestion: Arc<dyn congestion::ControllerFactory + ...>`, defaulting to
   `congestion::Bbr3Config`); rename its uses, its tests, and its bench to the

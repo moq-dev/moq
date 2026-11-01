@@ -26,7 +26,8 @@ before this starts, add it to moq-ffi instead so every binding gets it.
 Test a C origin forwarding a client session's routes with no announce
 watcher.
 
-Public API: additive in moq-c. Wire: none.
+Public API: additive in moq-c, or in moq-ffi if the generated C line has
+replaced it. Wire: none.
 
 ## Related
 

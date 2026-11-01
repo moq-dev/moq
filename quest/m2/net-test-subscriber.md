@@ -13,7 +13,7 @@ its events.
 Decided 2026-10-31 (maintainer, the /quest-complete requeue session).
 Nextest runs each test in its own process, which hides the clash.
 
-`credentials_stay_out_of_traces` (`rs/moq-net/src/setup.rs:311`) uses
+`credentials_stay_out_of_traces` (`rs/moq-net/src/setup.rs:306`) uses
 `#[tracing_test::traced_test]`, and `count_drop_warnings`
 (`rs/moq-net/src/model/test_tracing.rs:39`) calls
 `tracing::subscriber::set_global_default` and expects no other global
@@ -28,4 +28,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [moq-clock's tests pass under cargo test](/quest/m1/clock-test-process.md) - the same nextest-only pass in moq-clock
+- [moq-dev/moq#7243](https://github.com/moq-dev/moq/pull/7243) - fixed the same nextest-only pass in moq-clock (now `kio::clock`) by isolating its process state

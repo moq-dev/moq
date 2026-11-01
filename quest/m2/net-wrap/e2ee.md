@@ -65,8 +65,14 @@ the reverse (decided 2026-10-20, maintainer):
   varints) also counts the optional lite datagram fields: the relayed fields
   the lite `ietf` extension adds, and the Inflated Size a compressed track's
   datagram carries. Without them a maximum-size protected datagram can
-  encode past the 1200-byte body and be dropped. Update the e2ee draft's
-  plaintext bound and the `moq-e2ee-00` vectors with it.
+  encode past the 1200-byte body and be dropped. Sealing and opening share
+  `MAX_DATAGRAM_PAYLOAD` today (`rs/moq-e2ee/src/track.rs`,
+  `js/e2ee/src/track.ts`), so a wider allowance would also make `open`
+  refuse a datagram an older sender sealed under the narrower one. Split
+  the seal and open limits, or pick the limit by wire version, so a
+  receiver still opens anything that fits the body. Update the e2ee
+  draft's plaintext bound and the `moq-e2ee-00` vectors with it, covering
+  both limits.
 - Ranges: every moq-net range starts at a group's first frame
   ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)), so the wrapper reads each physical group whole
   and inflates from frame 0.

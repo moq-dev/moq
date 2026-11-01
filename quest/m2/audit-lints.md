@@ -84,8 +84,8 @@ Python wrapper. This run only reviews what those gates can't see.
   allowances (`expect(clippy::disallowed_methods)`) would also silence an
   environment write, and a specific `reason` does not narrow what an
   expectation silences. Move crate- and module-wide test expectations (such
-  as `rs/moq-mux/src/lib.rs`'s `cfg_attr(test, expect(...))`) onto the items
-  that read the clock, and drop the text check only once none remain, so the
+  as the one on `rs/moq-ffi/src/lib.rs`'s test-only `mod bench`) onto the
+  items that read the clock, and drop the text check only once none remain, so the
   clippy entry still catches a write in a test.
 
 ### Results (m1, 2026-10-24)

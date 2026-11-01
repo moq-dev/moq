@@ -11,16 +11,20 @@ declaring a huge one cannot pin importer memory.
 Decided 2026-10-31 (maintainer, the /quest-complete requeue session), a
 follow-up of [moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234),
 which streams blocks and discards ignored elements but still reads these
-three leaf elements whole. Starts after #7234 lands; it is a queued PR that
-finishes and deletes the `mkv-stream-blocks` quest, so it is named here
-rather than linked under Required.
+three leaf elements whole (`rs/moq-mux/src/container/mkv/import.rs`, where
+the track entry collects `CodecID` and `CodecPrivate`). #7234 has landed.
 
 The maintainer earlier ruled out a blanket tag-size cap (it would refuse
 large Segments and Clusters). These limits are per element
 and bound only what the importer must hold whole: a `CodecID` and `DocType`
-are short ASCII strings, and `CodecPrivate` is a decoder config (avcC, hvcC,
-an Opus or Vorbis header). Pick each limit from its spec and the largest
-real decoder config, check them against the MKV fixtures, and return the
+are short ASCII strings, and `CodecPrivate` is the decoder config of a
+codec the importer supports: avcC (`V_MPEG4/ISO/AVC`), hvcC
+(`V_MPEGH/ISO/HEVC`), av1C (`V_AV1`), an OpusHead (`A_OPUS`), an AAC
+AudioSpecificConfig (`A_AAC`), or a FLAC header (`A_FLAC`). The FLAC header
+carries every metadata block, so it can hold embedded cover art; size its
+limit for that or refuse such art explicitly. Pick each limit from its spec
+and the largest real decoder config, check them against the MKV fixtures
+for each codec, and return the
 importer's existing error for a refused element. Test each element declared
 past its limit, fed in small chunks.
 
@@ -28,4 +32,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [fMP4 import streams samples through open and commit](/quest/m1/security-audit/fmp4-open-commit.md) - the fMP4 leftover of the same streaming work
+- [fMP4 refusals keep framing](/quest/m1/security-audit/fmp4-refusal-framing.md) - the fMP4 leftover of the same streaming work
