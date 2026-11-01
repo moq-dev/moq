@@ -3,7 +3,7 @@
 This checkpoint compares generation on `kio::Queue::pop` and all four wrappers in
 `moq_net::broadcast`: `Requests::{requested_track, closed}`, `Consumer::closed`,
 and `Demand::wanted_changed`. It does not pick a generator or change production
-crates. The remaining work belongs to
+crates. See the [measured results and recommendation](RESULTS.md). The remaining work belongs to
 [async-feature](/quest/m1/poll-first/async-feature.md).
 
 Run in the repository's Nix shell:
@@ -29,7 +29,9 @@ and gives each variant its own target directory. It compares:
   names avoid an identifier-concatenation dependency. A direct stable 1.98.1
   probe rejects `${concat(poll_, $name)}` with E0658, so that spelling cannot
   remove the duplicated names on the supported toolchain. The bracketed attributes
-  apply only to the poll method, preserving `_sim`'s `track_caller`.
+  apply only to the poll method, preserving `_sim`'s `track_caller`. A separate
+  list of wrapper signatures cannot inspect existing poll docs, so the candidate
+  owns the poll declaration/body too; a duplicate signature/doc list was dropped.
 - **Attribute:** `attribute.rs` is appended to the existing kio-macros crate, and
   re-exported through kio only in the snapshots. A method attribute derives the
   wrapper name, return type, receiver, visibility, and docs from ordinary Rust.

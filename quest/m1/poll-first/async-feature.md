@@ -16,8 +16,13 @@ ergonomic layer, and the gating proceeds regardless of the build measurement.
 
 - **Generator checkpoint:** [the reproducible spike](/bench/async-wrappers/README.md)
   targets `kio::Queue::pop` and the four broadcast wrappers without changing
-  production crates. The generator choice remains the maintainer's; finish the
-  comparison and choose before broad rollout.
+  production crates. The [completed comparison](/bench/async-wrappers/RESULTS.md)
+  recommends a method attribute reusing kio-macros: ordinary Rust poll source,
+  automatic names, and targeted errors, at a measured standalone kio build cost.
+  This is not a maintainer decision. Choose the generator before broad rollout;
+  declarative generation remains viable and rust2 needs a new compiler spike.
+  Generalize the chosen prototype, add CI coverage for its contract, then complete
+  the coroutine conversion, feature wiring, and library-only verification below.
 - **Spike the generator first** on kio and one moq-net module, then pick one:
   - a `macro_rules!` over a list of signatures (no proc-macro cost);
   - a proc macro attribute on the `poll_*` method or its impl block;
