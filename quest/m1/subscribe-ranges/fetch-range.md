@@ -50,32 +50,48 @@ the cached-backfill rule; what remains is below.
   lite publishers before lite-07 keep parking on a bounded downstream
   SUBSCRIBE rather than FIN it, and a lite-07 publisher FINs a covered bounded
   subscription without SUBSCRIBE_END
-  ([moq-dev/moq#6807](https://github.com/moq-dev/moq/pull/6807)).
+  ([moq-dev/moq#6807](https://github.com/moq-dev/moq/pull/6807)) until the
+  explicit end below replaces that FIN.
 - **Route recovery keeps a frame start.** `resume::Recover` fetches the rest of
   a group from frame N on the new route (`group::Fetch::frame_start`), which a
   whole-group range cannot say, so a crate-private fetch stays for it.
-- **A miss with no feed frontier** (maintainer, 2026-10-25). A reader asks
-  fills only below the newest group the live feed produced (decision 2 on
-  [moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123)), so on a track
-  nothing feeds live, such as the moq-archive reader's or a relay copy no
-  subscription feeds, `Range::groups(5..6)` asks no fill and parks forever.
-  While the track has no live feed, holes in a bounded range are misses up to
-  its end. This asks nothing of a live feed; the rejected options were
-  treating every bounded range's holes as misses, which asks fills for groups
-  a live feed has yet to produce, and keeping a by-sequence read beside
-  subscriptions. The model has no signal for "no live feed" yet: no group
-  produced (`newest_produced` unset) also holds for a live subscription
-  before its first group, where it asks fills for groups the feed has yet to
-  produce (`subscribe_ranges::sparse_ranges_reach_the_publisher_on_lite07`
-  reads `[0]` on lite-06 when it does), and a moq-archive track is accepted
-  and live by every flag the model keeps. Open on
+- **Ends are signaled, not inferred** (maintainer, 2026-11-01, on
+  [moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545)): "we should
+  have a SUBSCRIBE_END message or something to signal the last group of a
+  track? we were using QUIC FIN to signal that but that prevents updates in the
+  future, so we should have a signal instead". Two FINs end a lite
+  subscription today: the one after SUBSCRIBE_END on lite-05 and later, and
+  lite-07's covered bounded FIN without SUBSCRIBE_END. Either way, a later
+  SUBSCRIBE_UPDATE can no longer widen the subscription. The direction is an
+  explicit signal that names the end and leaves the stream open. It does not
+  yet say which message carries a covered subscription's end, or whether
+  SUBSCRIBE_END stops closing the stream. Both are open on
+  [moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545), and the wire
+  half belongs to [lite-07 ranges](/quest/m1/subscribe-ranges/lite.md).
+- **A miss with no frontier** (maintainer, 2026-10-25). A reader asks fills
+  only below the newest group the live feed produced (decision 2 on
+  [moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123)), and
+  `Misses::judge` asks nothing while `newest_produced` is unset. So on a relay
+  copy that no subscription feeds, `Range::groups(5..6)` asks no fill and
+  parks forever. While the track has no live feed, holes in a bounded range
+  are misses up to its end. The rejected options were treating every bounded
+  range's holes as misses, which asks fills for groups a live feed has yet to
+  produce, and keeping a by-sequence read beside subscriptions. Treating "no
+  group produced" as "no feed" asks too early: on lite-06,
+  `subscribe_ranges::sparse_ranges_reach_the_publisher_on_lite07` then reads
+  `[0]`. moq-archive needs no new signal. Its consumer creates a track in the
+  same refresh that pushes the newest stored sequence and declares it with
+  `start_at`, so only an empty index has no frontier there. Which explicit
+  signal stands in for the frontier is open on
   [moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545).
-- **Holes below where the feed started.** The arrival ledger never folds the
-  gap below its first arrival (`Ledger::expire`), so on a live track with no
-  declared start a bounded read below the feed's first group parks forever
-  where `fetch_group` asks at once, and one with no budget waits out an
-  unbounded grace (the `rejoin` failures on
-  [moq-dev/moq#7487](https://github.com/moq-dev/moq/pull/7487)). Open on
+- **Holes below where the feed started.** On a live track with no declared
+  start, a hole below the feed's first arrival is waited for over the arrival
+  grace (`Ledger::folds_at`) before it is asked, where `fetch_group` asks at
+  once. With no budget and no publisher max age the grace is unbounded, so the
+  read parks for good (the `rejoin` failures on
+  [moq-dev/moq#7487](https://github.com/moq-dev/moq/pull/7487)). A hole under a
+  declared start is asked at once, but a refusal there is final only once the
+  ledger gives up on it. Open on
   [moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545).
 - **Cached backfill is owed** (maintainer, 2026-10-25; landed). A cached
   backfill group inside a reader's window is taken as filled, whether or not
