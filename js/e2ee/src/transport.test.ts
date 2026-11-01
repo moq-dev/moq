@@ -52,7 +52,7 @@ async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadc
 const transports = [
 	["moq-lite-07", "moq-lite-07-wip", true, true],
 	["moq-lite-05", "moq-lite-05", false, true],
-	["moq-transport-18", "moqt-18", true, true],
+	["moq-transport-18", "moqt-18", false, true],
 ] as const;
 
 for (const [name, protocol, routed, timed] of transports) {
@@ -74,8 +74,8 @@ for (const [name, protocol, routed, timed] of transports) {
 
 		const remote = await active(subscriber, path);
 		// The epoch rides the route where the wire carries it; elsewhere the application supplies it.
-		if (routed) expect(remote.epoch).toBe(generation.epoch);
-		const epoch = routed && remote.epoch ? remote.epoch : generation.epoch;
+		expect(remote.epoch).toBe(routed ? generation.epoch : undefined);
+		const epoch = remote.epoch ?? generation.epoch;
 		const consumer = await new Protected.Consumer(remote, cred.consume(epoch)).subscribe("video", {
 			maxDelay: Milli(60_000),
 		});

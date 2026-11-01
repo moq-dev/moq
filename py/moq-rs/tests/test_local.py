@@ -1513,7 +1513,10 @@ async def test_audio_consumer_reports_its_playout_delay():
     rendition = catalog.audio["mic"]
 
     def output(delay: timedelta | None) -> moq.audio.DecoderOutput:
-        return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32, delay=delay)
+        if delay is None:
+            return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32)
+        fixed = moq.media.Delay(min=delay, max=timedelta(0))
+        return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32, delay=fixed, estimate=False)
 
     fixed = await moq.audio.Consumer.subscribe(broadcast_consumer, "mic", rendition, output(timedelta(milliseconds=80)))
     estimated = await moq.audio.Consumer.subscribe(broadcast_consumer, "mic", rendition, output(None))
