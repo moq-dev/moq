@@ -6,8 +6,9 @@ use crate::{
 	coding::{Decode, DecodeError, Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
-	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, err_only},
+	util::{BoxFuture, TaskSet, err_only},
 };
+use futures::FutureExt as _;
 
 use super::{
 	Control, Message, Publisher, Subscriber, Version, active_count, auth, cluster, epoch, hidden, max_age, peer,
@@ -115,7 +116,7 @@ pub(crate) struct Driver {
 	pub(crate) withdrawal: crate::session::Withdrawal,
 	// Dispatched SUBSCRIBE and FETCH serves still owing the peer data.
 	owed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-	future: MaybeSendBox<'static, Result<(), Error>>,
+	future: BoxFuture<'static, Result<(), Error>>,
 }
 
 impl Driver {
@@ -439,7 +440,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<cr
 
 		res
 	}
-	.maybe_boxed();
+	.boxed();
 
 	Ok((
 		Driver {
