@@ -921,6 +921,11 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 		|snap| snap.turns,
 	);
 	counter(
+		"moq_relay_uring_passes_total",
+		"Worker passes over its woken tasks; over turns, the passes a turn takes to settle.",
+		|snap| snap.passes,
+	);
+	counter(
 		"moq_relay_uring_sq_full_enters_total",
 		"io_uring_enter calls forced by a full submission queue.",
 		|snap| snap.sq_full_enters,
@@ -1310,6 +1315,7 @@ mod tests {
 			"completions",
 			"enters",
 			"turns",
+			"passes",
 			"sq_full_enters",
 			"parks",
 			"wakes",
