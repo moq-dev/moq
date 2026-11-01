@@ -538,9 +538,18 @@ impl BaseDelay {
     }
 
     fn update(&mut self, now: Instant, delay: i64) {
-        if now.saturating_duration_since(self.since) >= BASE_INTERVAL {
-            self.history.rotate_left(1);
-            self.history[BASE_HISTORY - 1] = self.current;
+        // Every window that ended since the last sample, which a quiet spell leaves empty, so a
+        // minimum from before it ages out as it would have without the gap
+        let ended = now.saturating_duration_since(self.since).as_nanos() / BASE_INTERVAL.as_nanos();
+        if ended > 0 {
+            match usize::try_from(ended) {
+                Ok(ended) if ended <= BASE_HISTORY => {
+                    self.history.rotate_left(ended);
+                    self.history[BASE_HISTORY - ended..].fill(i64::MAX);
+                    self.history[BASE_HISTORY - ended] = self.current;
+                }
+                _ => self.history.fill(i64::MAX),
+            }
             self.current = i64::MAX;
             self.since = now;
         }
@@ -807,6 +816,23 @@ mod tests {
         assert!(
             scream.metrics().probe_inflight.is_some(),
             "not probing an idle path"
+        );
+    }
+
+    /// A quiet spell ages the base delay out as the time passing would have, so a minimum from
+    /// before it does not outlive the history; the minimum of windows still inside it holds
+    #[test]
+    fn base_delay_ages_across_a_quiet_spell() {
+        let now = Instant::now();
+        let mut base = BaseDelay::new(now);
+        base.update(now, 1_000);
+        base.update(now + BASE_INTERVAL * 3, 5_000);
+        assert_eq!(base.get(), 1_000, "a minimum inside the history expired");
+        base.update(now + BASE_INTERVAL * 3 + Duration::from_secs(600), 9_000);
+        assert_eq!(
+            base.get(),
+            9_000,
+            "a minimum from before the quiet spell outlived it"
         );
     }
 
