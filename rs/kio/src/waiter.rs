@@ -124,6 +124,7 @@ impl Waiter {
 
 	/// Whether a registration under `tag` is recorded, which proves the list carrying
 	/// `tag` still holds this waiter. Zero, a list never registered on, matches nothing.
+	#[inline]
 	pub(crate) fn holds(&self, tag: u64) -> bool {
 		tag != 0 && self.parked.iter().any(|slot| slot.load(Ordering::Relaxed) == tag)
 	}
@@ -284,6 +285,7 @@ impl WaiterList {
 
 	/// The tag a registration records right now. It changes on every drain, so a waiter
 	/// that [holds](Waiter::holds) it is still here.
+	#[inline]
 	pub(crate) fn tag(&self) -> u64 {
 		self.tag
 	}
