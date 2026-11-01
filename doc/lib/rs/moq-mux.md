@@ -26,9 +26,10 @@ starts after a data track, a capture, another importer, or a pinned clock
 shifts its timestamps onto that clock instead, landing its first frame at now.
 The media, the hang and MSF catalog groups, and the HLS records are all stamped
 on that one clock. It keeps reading the clock the broadcast was created under,
-even when a write comes from another runtime or thread. A `catalog::Timebase` gives renditions on one timestamp base one shared shift. A
-stream whose decoder identity changes, such as an SPS with a new profile or level
-or an audio header with a new sample rate, continues under a new track name
+even when a write comes from another runtime or thread. A `catalog::Timebase`
+gives renditions on one timestamp base one shared shift. A stream whose decoder
+identity changes, such as an SPS with a new profile or level or an audio header
+with a new sample rate, continues under a new track name
 (`<name>/<n>` for the codec importers) while the old track ends; everything else,
 such as the coded size, updates the rendition in place. A
 timeline that rewinds ends the import. The MPEG-TS import ends at a clock step
