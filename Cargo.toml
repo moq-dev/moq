@@ -1,15 +1,13 @@
 [workspace]
 # Keep source-only members discoverable in Maturin's dependency-pruned archive,
 # including the separately packaged UniFFI generator.
-members = ["demo/carla/bridge", "rs/*", "rs/kio/macros", "rs/moq-clock/macros", "rs/moq-net/fuzz", "rs/moq-quic/fuzz"]
+members = ["demo/carla/bridge", "rs/*", "rs/kio/macros", "rs/moq-net/fuzz", "rs/moq-quic/fuzz"]
 default-members = [
     "rs/bench-harness",
     "rs/kio",
     "rs/kio/macros",
     "rs/hang",
     # "rs/moq-c",     # requires C toolchain
-    "rs/moq-clock",
-    "rs/moq-clock/macros",
     "rs/moq-congestion",
     "rs/moq-archive",
     "rs/moq-auth",
@@ -39,6 +37,7 @@ default-members = [
     "rs/moq-rtsp",
     "rs/moq-scene",
     "rs/moq-shaper",
+    "rs/moq-sign",
     "rs/moq-sock",
     "rs/moq-srt",
     "rs/moq-stats",
@@ -48,7 +47,6 @@ default-members = [
     "rs/moq-uring",
     "rs/moq-v4l",
     "rs/moq-video",
-    # "rs/moq-wasm",  # wasm32-unknown-unknown target only
     "rs/qmux",
     "rs/test-env",
     # Maturin runs the workspace's `uniffi-bindgen` binary from the root to
@@ -57,10 +55,6 @@ default-members = [
     "rs/uniffi-bindgen",
 ]
 resolver = "2"
-
-[workspace.metadata.cargo-shear]
-# Feature-only dependency selecting the wasm_js backend for browser consumers.
-ignored = ["getrandom"]
 
 [workspace.package]
 # Floor for the library surface: iroh 1.0 (via moq-tokio) needs 1.91. This is
@@ -72,10 +66,6 @@ ignored = ["getrandom"]
 # latest stable, which keeps the relay's ceiling from creeping up unnoticed.
 # That pin sits above every MSRV here; rust-toolchain.toml says why.
 rust-version = "1.91"
-
-[workspace.lints.rust]
-# kio and moq-net model-check their primitives under `--cfg loom`.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [workspace.lints.clippy]
 # Every suppression says why, so the next lint audit can judge it.
@@ -106,11 +96,11 @@ clap = { version = "4", features = ["derive"] }
 # CUDA driver bindings for the NVENC/NVDEC path. dlopen'd at runtime
 # (`fallback-dynamic-loading`), so nothing links against libcuda at build time.
 cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
+data-encoding = "2.11"
 dispatch2 = "0.3.1"
 ebml-iterable = "0.7.1"
 flate2 = { version = "1.1", default-features = false }
 futures = "0.3"
-getrandom = { version = "0.4", features = ["wasm_js"] }
 h2 = "0.4"
 hang = { version = "0.21.11", path = "rs/hang" }
 hashbrown = { version = "0.17.1", default-features = false }
@@ -131,17 +121,12 @@ kio-macros = { version = "0.1.0", path = "rs/kio/macros" }
 libc = "0.2"
 libloading = "0.9"
 linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
-# Permutation testing for the kio primitives (and everything built on them).
-# Only compiled under `--cfg loom`; see `just rs loom`.
-loom = { version = "0.7.2", features = ["futures"] }
 # DNS-SD advertisement and browsing for LAN peer discovery (moq-tokio's `mdns` feature).
 # `async` awaits the event channel instead of blocking a thread on it.
 mdns-sd = { version = "0.21", features = ["async"] }
 moq-archive = { version = "0.0.11", path = "rs/moq-archive" }
 moq-audio = { version = "0.1.10", path = "rs/moq-audio", default-features = false }
 moq-auth = { version = "0.2.1", path = "rs/moq-auth" }
-moq-clock = { version = "0.11.0", path = "rs/moq-clock" }
-moq-clock-macros = { version = "0.1.0", path = "rs/moq-clock/macros" }
 moq-congestion = { version = "0.1.0", path = "rs/moq-congestion" }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
 moq-ice = { version = "0.1.0", path = "rs/moq-ice" }
@@ -217,6 +202,7 @@ rcgen = { version = "0.14", default-features = false }
 # default-features off so each consumer picks its own TLS backend and body
 # features; nothing here wants the default native-tls stack.
 reqwest = { version = "0.13", default-features = false }
+rind = "0.1"
 rustc-hash = "2.1.3"
 sd-notify = "0.5"
 send_wrapper = "0.6"
@@ -248,11 +234,9 @@ uniffi = "0.32"
 url = "2"
 usage-rs = "7.1.0"
 uuid = { version = "1.26", features = ["v7"] }
-web-async = { version = "0.1.5", features = ["tracing"] }
 web-transport-iroh = "0.8.3"
 web-transport-proto = "0.6"
 web-transport-trait = "0.5"
-web-transport-wasm = "0.8"
 x11rb = { version = "0.14.0", features = ["randr", "xfixes"] }
 x509-parser = "0.18"
 zeroize = { version = "1", features = ["derive"] }
@@ -347,10 +331,3 @@ strip = "none"
 
 [profile.release-with-debug.package.moq-ffi]
 strip = "none"
-
-# Size-optimized build for the browser/WASM bindings (rs/moq-wasm). Shipping over
-# the wire, so optimize for size, not speed (~579KB -> ~471KB gzipped vs the
-# default release profile). `just js wasm` builds with `--profile wasm-release`.
-[profile.wasm-release]
-inherits = "release"
-opt-level = "z"

@@ -54,8 +54,6 @@ type ControlMessage =
 	| "subscribe-update"
 	| "subscribe-namespace"
 	| "subscribe-tracks"
-	| "tracks-update"
-	| "publish-ok"
 	| "publish"
 	| "publish-namespace"
 	| "fetch"
@@ -67,7 +65,7 @@ type ControlMessage =
 
 /** True when this draft's definition of `message` includes `id`. */
 function allows(message: ControlMessage, version: IetfVersion, id: bigint): boolean {
-	const from22 = version >= Version.DRAFT_22;
+	const from20 = version >= Version.DRAFT_20;
 	const auth = id === MSG_PARAM_AUTHORIZATION_TOKEN;
 	const forward = id === MSG_PARAM_FORWARD;
 	const priority = id === MSG_PARAM_SUBSCRIBER_PRIORITY;
@@ -77,10 +75,10 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 	const largest = id === MSG_PARAM_LARGEST_OBJECT;
 	const objectTimeout = id === MSG_PARAM_DELIVERY_TIMEOUT;
 	const subgroupTimeout = id === MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT;
-	const range = id >= 0x25n && id <= 0x28n && from22;
-	const trackRange = id === MSG_PARAM_TRACK_PROPERTY_FILTER && from22;
-	const fill = id === MSG_PARAM_FILL_PARAMETERS && from22;
-	const include = id === MSG_PARAM_INCLUDE_PROPERTIES && from22;
+	const range = id >= 0x25n && id <= 0x28n && from20;
+	const trackRange = id === MSG_PARAM_TRACK_PROPERTY_FILTER && from20;
+	const fill = id === MSG_PARAM_FILL_PARAMETERS && from20;
+	const include = id === MSG_PARAM_INCLUDE_PROPERTIES && from20;
 	const newGroup = id === MSG_PARAM_NEW_GROUP_REQUEST;
 	const epoch = id === MSG_PARAM_EPOCH;
 
@@ -89,7 +87,7 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 			return (
 				auth ||
 				forward ||
-				(from22 &&
+				(from20 &&
 					(objectTimeout ||
 						id === MSG_PARAM_MAX_CACHE_DURATION ||
 						subgroupTimeout ||
@@ -101,13 +99,6 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 						trackRange ||
 						newGroup ||
 						include))
-			);
-		case "tracks-update":
-			return auth || id === 0x34n || forward || priority || filter || fill || range || trackRange || newGroup;
-		case "publish-ok":
-			return (
-				expires ||
-				(!from22 && (forward || priority || filter || order || objectTimeout || subgroupTimeout || newGroup))
 			);
 		case "subscribe":
 			return (
@@ -149,15 +140,15 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 			return auth || id === MSG_PARAM_HIDDEN;
 		case "publish":
 			return (
-				(objectTimeout && from22) ||
+				(objectTimeout && from20) ||
 				auth ||
-				(subgroupTimeout && from22) ||
+				(subgroupTimeout && from20) ||
 				expires ||
 				largest ||
 				forward ||
-				(priority && from22) ||
-				(filter && from22) ||
-				(order && from22)
+				(priority && from20) ||
+				(filter && from20) ||
+				(order && from20)
 			);
 		case "publish-namespace":
 			return auth || id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST || epoch;
@@ -166,7 +157,7 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				auth ||
 				id === MSG_PARAM_FILL_TIMEOUT ||
 				priority ||
-				(filter && from22) ||
+				(filter && from20) ||
 				order ||
 				range ||
 				include ||
