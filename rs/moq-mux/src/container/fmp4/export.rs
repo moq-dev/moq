@@ -90,7 +90,7 @@ pub struct Export<S: Stream> {
 	/// that declares it elsewhere. Its fragments carry a track id the init never declared.
 	late: bool,
 
-	/// Set by [`stop`](Self::stop): each track ends once it has read what it received.
+	/// Set by [`stop`](Self::stop), after which nothing more is read.
 	stopped: bool,
 
 	/// The `tkhd.track_id` the next new rendition gets.
@@ -542,12 +542,16 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	/// Stop reading the broadcast. The export still writes out the media its tracks
-	/// received, including the fragments they were buffering, then ends.
+	/// Stop reading the broadcast. The export still writes out the media it read, the
+	/// fragment each track was buffering included, then ends.
 	///
 	/// Stopping before the init segment could be written ends the export without writing.
 	pub(crate) fn stop(&mut self) {
 		self.catalog = None;
+		for track in self.tracks.values_mut() {
+			track.source = None;
+			track.finished = true;
+		}
 		self.stopped = true;
 	}
 
@@ -623,9 +627,6 @@ impl<S: Stream> Export<S> {
 			//
 			// A track that can't be described yet drops its frames, so the source keeps
 			// polling for the SPS/PPS-bearing keyframe instead of parking.
-			//
-			// Once stopped, a track ends when it has nothing more ready to read.
-			let stopped = self.stopped;
 			for (name, track) in &mut self.tracks {
 				if track.pending.is_some() || track.finished || track.group_finished {
 					continue;
@@ -665,11 +666,6 @@ impl<S: Stream> Export<S> {
 							break;
 						}
 						Poll::Ready(None) => {
-							track.finished = true;
-							break;
-						}
-						Poll::Pending if stopped => {
-							track.source = None;
 							track.finished = true;
 							break;
 						}
@@ -844,7 +840,8 @@ impl<S: Stream> Export<S> {
 			.iter()
 			.filter(|(_, track)| {
 				!track.buffer.is_empty()
-					&& (track.finished
+					// A stopped track's pending frame joins its buffer first.
+					&& ((track.finished && track.pending.is_none())
 						|| track.group_finished
 						|| (self.fragment_duration == Some(Duration::ZERO)
 							&& track.buffer.last().is_some_and(|frame| frame.duration.is_some())))

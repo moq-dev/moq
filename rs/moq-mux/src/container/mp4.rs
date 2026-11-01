@@ -144,7 +144,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	/// Stop recording before the broadcast ends. [`next`](Self::next) still returns the media
-	/// already received, the fragment each track was buffering included, then `None`.
+	/// already read, the fragment each track was buffering included, then `None`.
 	pub fn stop(&mut self) {
 		self.fmp4.stop();
 	}
@@ -858,7 +858,7 @@ mod tests {
 	}
 
 	/// Stopping writes out the fragment each track was still buffering, so the finished file
-	/// holds every frame received, and ends the export without waiting for more.
+	/// holds every frame read, and ends the export without waiting for more.
 	#[tokio::test(start_paused = true)]
 	async fn stopping_writes_the_buffered_fragments() {
 		let mut live = Live::avc3();
@@ -889,6 +889,29 @@ mod tests {
 		let expected: Vec<Vec<u8>> = video.iter().map(length_prefixed).collect();
 		assert_eq!(samples(&file, trak(&moov, b"vide")), expected);
 		assert_eq!(samples(&file, trak(&moov, b"soun")), vec![OPUS; 8]);
+	}
+
+	/// A frame read but not yet placed in a fragment, as each track's first is when the header
+	/// goes out, is written too.
+	#[tokio::test(start_paused = true)]
+	async fn stopping_writes_the_frames_read() {
+		let mut live = Live::avc3();
+		let mut audio = add_opus(&mut live, 0);
+		let frame = video_frame(0, true);
+		live.track.write(frame.clone()).unwrap();
+		audio.write(raw_frame(0, OPUS, true)).unwrap();
+
+		let mut export = export(&live).await;
+		let mut file = export.next().await.unwrap().expect("the header").to_vec();
+		export.stop();
+		while let Some(data) = export.next().await.expect("export failed") {
+			file.extend_from_slice(&data);
+		}
+
+		finish(export, &mut file);
+		let moov = moov(atoms(&file));
+		assert_eq!(samples(&file, trak(&moov, b"vide")), [length_prefixed(&frame)]);
+		assert_eq!(samples(&file, trak(&moov, b"soun")), [OPUS]);
 	}
 
 	/// Stopping before every track can be described ends the export without a header, rather
